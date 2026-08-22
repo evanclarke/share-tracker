@@ -571,3 +571,153 @@ Consequences found while implementing:
   notion of *overdue*, which is what `SCENARIOS T-11/T-02/T-12` is about; the row this leaves behind
   is the fact that section can build on. The health report deliberately does not treat an unfinished
   run as a failure — nothing failed — and a test pins that.
+
+## SCENARIOS T-11/T-02/T-12: nothing notices a job that has stopped running
+
+`reports::health`'s `failed_jobs` fires only when a job's **most recently recorded run failed**. A
+job that is not running at all records nothing, so it raises nothing — the last successful run stays
+in place and the Jobs screen keeps showing `ok`, indefinitely. Driven on 2026-08-22:
+
+- A schedule line with no future occurrence (`0 0 30 2 *   backup` — 30 February) is **accepted at
+  startup**. `run_entry` logs one `ERROR cannot compute next run, stopping` and the task exits. The
+  backup will never run again for the life of the process, and `GET /jobs` still answers
+  `backup: last_success = true`.
+- Same outcome, no ERROR line at all, for the ordinary operational cases: the server was down at
+  00:00 every Sunday, or a hand-edited `--schedule` file lost its `backup` line (that one logs a
+  single startup `WARN`; it was indistinguishable from the two deliberate ones until T-09/schedule
+  marked the manual-only jobs in the registry — closed in [`DONE/infra.md`](DONE/infra.md) — so it
+  now fires only for a line that has actually been lost).
+
+Prices and FX each have a *database-derived* freshness signal that catches their job going quiet —
+`prices_stale` (latest ok `closing_prices` date more than 3 business days old) and `fx_stale`
+(latest `rba_fx_rates` month older than last month). **The backup has none**, and it is the job where
+this matters most: nothing in the database changes when a backup does or does not happen, so a backup
+that silently stopped a year ago is indistinguishable from one that ran on Sunday. `mic-import` and
+`currency-import` have none either.
+
+The Jobs screen compounds it: it shows each job's **last** run and its history, but never the
+schedule or the next run — so the one surface an operator would check cannot answer "is this job
+still scheduled, and when is it due?". The scheduler already computes that instant every iteration
+and logs it (`next run scheduled`), but nothing persists it.
+
+**Live database: no false alarm.** `job_runs` in the 2026-08-16 backup shows every job last
+succeeding exactly when its schedule says it should (backup Sunday 00:01 local, rba-fx-import Monday
+02:00, mic/currency-import on the 1st, price-import and report-snapshot daily), so an overdue check
+would start quiet. Note the thresholds must be **per job** — weekly, monthly and daily jobs sit side
+by side.
+
+**Question for Evan — how should an overdue job be detected?**
+
+- **(a) Persist the next scheduled run.** `run_entry` writes the instant it already computes to a
+  new `job_schedule` table (job name, cron expression, timezone, `next_run_at`) on every iteration;
+  health gains `overdue_jobs` (now past `next_run_at` plus a grace margin) and the Jobs screen gains
+  a "next run" column. Catches all three causes — the dead task, the dropped schedule line, and the
+  server that was down — because a stopped task stops moving the stored instant. Most work; also the
+  only option that answers "when is this due?" in the UI.
+- **(b) A per-job maximum age.** Health alerts when a job's last *successful* run is older than a
+  constant declared beside the job in `registry()` (e.g. backup 10 days, rba-fx-import 10 days,
+  mic/currency-import 40 days). No new table; duplicates the schedule's knowledge in a second place,
+  and stays silent if the schedule is edited to something slower.
+- **(c) Backup only.** A `backup_stale` flag on the health report, mirroring `prices_stale`, derived
+  from `job_runs`. Smallest fix, covers the job with no other signal, leaves the rest as they are.
+- **(d) Documentation only** — a Known limitation saying job liveness is the operator's business.
+
+**Decision (Evan, 2026-08-22): (a), persist the next scheduled run.** Rejected: a per-job maximum
+age, a `backup_stale` flag alone, and documentation only.
+
+- [x] A `job_schedule` table (migration): job name, cron expression, timezone, `next_run_at`,
+      `updated_at`. Written by `run_entry` every iteration, from the instant it already computes for
+      its `next run scheduled` log line — so a task that has stopped stops moving its row
+- [x] `reports::health` gains `overdue_jobs`: jobs whose `next_run_at` is now in the past by more
+      than a grace margin. Per-job by construction (the stored instant carries the job's own cadence),
+      so weekly, monthly and daily jobs need no separate thresholds
+- [x] The health banner surfaces it, linking to Jobs, with wording that names the job and how long it
+      is overdue
+- [x] The Jobs screen gains a **next run** column from `GET /jobs`, so the one surface an operator
+      checks can answer "is this still scheduled, and when is it due?"
+- [x] A **manual-only** job (`GET /jobs`'s `trigger` — SCENARIOS T-09/schedule) is never reported
+      overdue and gets no `job_schedule` row: it has no schedule by design, so an overdue check must
+      leave it alone rather than treating "never ran" as "late"
+- [x] Classify `job_schedule` for snapshot staleness (exempt, with the reason in the migration) —
+      `every_table_is_classified_for_snapshot_staleness` fails otherwise
+- [x] `docs/SCHEMA.md` (new table + Relationships), `docs/API.md` (`GET /jobs` shape, health report's
+      new field, Response codes if any), README "Scheduled maintenance"
+- [x] Regression tests: a schedule with no future occurrence leaves a stored instant that goes stale
+      and health reports the job overdue; a job that ran on time is not overdue; the grace margin's
+      boundary
+
+Tests: `scheduler::tests::a_spawned_entry_stores_when_it_is_next_due` (one row per schedule entry,
+the cron expression as written and the entry's IANA zone beside a future instant; `GET /jobs` carries
+it, and a manual-only job — and a scheduled job with no line — carry `null`),
+`a_schedule_with_no_future_occurrence_is_reported_overdue` (the finding itself, end to end: spawn
+`0 0 30 2 *`, the task logs its ERROR and exits, health is silent within the margin and names the job
+past it — while `failed_jobs` stays empty, which is the whole point),
+`spawn_forgets_a_schedule_entry_that_has_been_removed` (a row left by a previous process for a
+deleted line is cleared at startup, not reported overdue for ever);
+`reports::health::tests::a_database_with_no_stored_schedule_reports_nothing_overdue` (the state every
+existing database is in the moment it is upgraded), `a_job_whose_schedule_is_still_moving_is_not_overdue`,
+`the_overdue_grace_margin_is_exclusive_at_its_boundary` (exactly the margin is on time, one second
+later is not), `an_overdue_job_names_its_schedule_and_how_late_it_is` (and only the dead one of a
+job's three entries), `a_run_open_longer_than_any_run_takes_is_reported_stalled`,
+`an_abandoned_run_stops_being_reported_once_the_job_runs_again`;
+`web::tests::jobs_ui_present` and `health_banner_ui_present` (extended);
+`doc_checks::overdue_jobs_and_the_stored_schedule_documented`;
+`reports::snapshot::tests::every_table_is_classified_for_snapshot_staleness` (extended by one exempt
+table, with the reason migration 0043 gives).
+
+Consequences found while implementing:
+
+- **The headline case would have stored nothing at all.** A cron pattern with no future occurrence
+  never reaches the loop body — `next_run` fails on the first computation, the task logs its ERROR and
+  returns — so a row written only from the computed instant would have left `0 0 30 2 *` with no row,
+  and the check that exists for that scenario silent on it. `run_entry` therefore claims its row
+  **before** computing anything, at the instant the task starts; for a healthy entry that value lives
+  for microseconds before the real instant overwrites it, and for the impossible one it is the frozen
+  instant the scheduler gave up at. Driven end to end: `backup` sat at its startup instant while the
+  two live entries held 2026-08-23/24.
+- **One row per schedule *entry*, not per job.** `price-import` has three lines (Sydney, New York,
+  UTC). Keyed by job name, all three would have written to one row, whichever wrote last winning, and
+  one of the three dying would have been invisible behind the other two refreshing it. Per entry, the
+  dead line is named with its own cron expression and zone — which is also what makes those two
+  columns load-bearing rather than decorative, the data-model rule that every field is used by a
+  calculation or endpoint. `GET /jobs` folds a job's entries to the earliest, since the column asks
+  "when is it next due".
+- **The table is the schedule the *running process* is executing.** Ordering forced the design: a
+  removed schedule line leaves a row from the previous process, and reporting it overdue for ever is
+  the permanent-alarm pattern this project has undone three times (`unpriced_from`, the duplicate
+  income key, T-09/schedule in this same pass). Clearing at startup and letting the entry tasks
+  rebuild answers it without a reconciliation query — and the clear has to *complete* before any task
+  claims a row, which is why `scheduler::spawn` is now `async` (its six test call sites and `main`
+  gained an `.await`). A surrogate id then falls out for free: the alternative, keying on
+  (name, cron, timezone), needs `timezone` NOT NULL, because SQLite treats NULLs as distinct in a
+  unique index and every restart would have added another row for every zone-less entry.
+- **The decision's own claim about "the server that was down" does not hold, and is documented
+  rather than repeated.** Persisting the next run catches a scheduler that has stopped *while the
+  process is up*; a server that was down at 00:00 on Sunday and started on Monday rebuilds the row at
+  the *next* Sunday, so the missed run is refreshed forward and nothing reports it. Two designs that
+  would catch it were considered and rejected: preserving a missed instant makes an alarm no manual
+  run can clear, and clearing it on any later run lets a manual trigger mask a dead task permanently.
+  `docs/API.md` says plainly what `overdue_jobs` is and is not.
+- **The long-`running` row T-11 left open is surfaced here, as its own list.** That section's write-up
+  said telling an interrupted run from one in flight "needs *overdue*, which is exactly this
+  section's business" — so `stalled_jobs` reports a job whose latest run has been open longer than
+  any run of these jobs takes. It is deliberately not a failure (nothing failed) and deliberately not
+  folded into `overdue_jobs`: a schedule can be perfectly alive and still due on time while a run of
+  it lies open for ever. Its threshold is its own constant at the same six hours — the two answer
+  different questions and either could move alone.
+- **Six hours, reasoned rather than picked.** The margin has to absorb the longest a run takes (the
+  stored instant only moves on *after* the run returns), the up-to-an-hour re-anchor the capped sleep
+  performs after a DST or NTP shift mid-wait, and a slow startup. Six clears all three by an order of
+  magnitude and still catches a dead weekly task on the morning of the day it should have run. The
+  boundary is pinned exclusive from both sides.
+- **Re-driven end to end, and the first attempt lied.** A server on a throwaway database with
+  `0 0 30 2 * backup` on its schedule showed the frozen row and `GET /jobs`' `next_run_at`; back-dating
+  that row seven hours produced the banner and the overdue entry. The first headless-Chrome check
+  showed no **Next run** column and no banner — the binary was the one built *before* the `app.js`
+  edits, since `include_str!` bakes the bundle in and `cargo test` had only rebuilt the test harness.
+  Rebuilt, the Jobs screen renders the column (localised from the stored UTC instant) and the banner
+  names both the overdue job and the stalled run.
+- **The deployed database starts quiet, and a test pins it.** Rows exist only once an upgraded server
+  has run the scheduler, so `overdue_jobs` on a freshly migrated database is empty — not loudly
+  overdue for every job at once, which is the one way this change could have gone wrong on the live
+  machine.

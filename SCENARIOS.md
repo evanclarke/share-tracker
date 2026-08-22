@@ -83,7 +83,7 @@ behind or became a recorded finding.
 | Q. Prices, valuation, and snapshots | 15 | 2026-08-20 (`3696ec1`) | 5 raised, all closed — see below |
 | R. Listing identity and renames | 10 | 2026-08-21 (`28a7c5f`) | 8 raised, all closed — see below |
 | S. Settlement, holidays, and dates | 10 | 2026-08-22 (`d501408`) | 4 raised, all closed — see below |
-| T. Jobs, backup, and operations | 12 | — | — |
+| T. Jobs, backup, and operations | 12 | 2026-08-22 (`db877cb`) | 6 raised, 5 closed, 1 open — see below |
 | U. Audit trail and history | 8 | — | — |
 | V. Back-dated and out-of-order entry | 10 | — | — |
 | W. Precision, rounding, and scale | 8 | — | — |
@@ -939,6 +939,51 @@ scenario id.
 | A trade may be dated on a day its exchange did not trade, and nothing refuses or flags it | S-08 | `30d0e96` |
 | A stored settlement date is never checked against the trading calendar, and the live database has one on a Saturday | S-05 | `4a7ef1a` |
 | Seeding the calendar the coverage report asks for silences it without correcting the settlement dates it flagged | S-04 | `e453f21` |
+
+### Section T findings
+
+All twelve scenarios were driven on 2026-08-22 against throwaway databases — a small one for the
+HTTP surface, and a 265 MB one built specifically so a backup would take long enough to kill
+mid-write. **The machinery each scenario was aimed at came back correct**: the per-job lock
+serialises an overlapping manual trigger behind the in-flight run rather than racing it (T-01); the
+run history bounds itself at 20 rows per job while keeping a fail-then-succeed sequence readable
+(T-02); a corrupt backup is quarantined as `.bad` and the run fails loudly (T-03); retention pruning
+over 20 backups spanning 18 months kept exactly the newest 8 plus the first of each of the 12 most
+recent months and touched nothing else in the directory (T-04); the DST-pinned price-import entries
+fired at 17:30 local on both sides of every transition in both hemispheres, handling the skipped and
+the repeated hour exactly as the README says (T-05); the manual CSV retry imports what an unreachable
+feed would have (T-06); an expiring MIC flips the validation report to `expired` without blocking
+anything (T-08); and a stale price date, a stale FX month and a failed job surfaced at once and
+independently on the health report and its banner (T-12).
+
+**What the findings had in common is that every one was about what the operator is *told*, not about
+what the jobs do.** Three were failures rendered unreadably or not at all — three jobs recording
+their failure as a Rust `Debug` string, so the message and its cause were replaced by Rust syntax
+(T-06); `POST /jobs/:name` answering bare status codes, leaving the Jobs screen to show "HTTP 500"
+with the reason nowhere in the response, and silently ignoring a misspelt `?suffix=` (T-10); and a
+currency import that skips the whole ISO 24165 half without credentials and still reports unqualified
+success (T-09, still open). Two were about a job's *absence* of evidence rather than its output: a
+run the process did not survive left no `job_runs` row at all, so `GET /jobs` went on showing the
+previous run's result while an unverified copy sat on disk wearing a backup's name (T-11); and a job
+that has stopped running records nothing, so nothing in the system noticed — the last successful run
+stayed in place indefinitely (T-11/T-02/T-12). The last one is the pattern in its purest form: the
+scheduler had computed the answer every iteration and only ever *logged* it. And one was an alarm
+that had lost its meaning through crying wolf — the startup "no schedule entry" `WARN` firing every
+boot for the two deliberately manual jobs, which is precisely what would have buried a genuinely lost
+line (T-09/schedule).
+
+Five are archived in [`DONE/infra.md`](DONE/infra.md) under headings naming their scenario ids; the
+sixth (T-09, the half-import) is still open in [TODO.md](TODO.md).
+
+| Finding | Scenarios | Fixed by |
+| --- | --- | --- |
+| Three jobs record their failure as a Rust `Debug` string, losing both the message and the cause | T-06 | `8dfb6a4` |
+| The startup "no schedule entry" warning cries wolf on the two deliberately-manual jobs | T-09 | `ed7f865` |
+| `POST /jobs/:name` answers bare status codes with no body | T-10 | `18b0a03` |
+| A run interrupted by a restart leaves no record, and an unverified file that looks like a good backup | T-11 | `7557e97` |
+| Nothing notices a job that has stopped running | T-11, T-02, T-12 | `6ac3ffe` |
+| A currency-import that skipped the whole ISO 24165 half reports unqualified success | T-09 | open |
+
 
 ## A. Deletion and mutation ripple effects
 
