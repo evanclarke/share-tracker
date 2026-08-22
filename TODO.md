@@ -191,10 +191,17 @@ A settlement date that is not a trading day on the listing's own calendar is wro
 whoever wrote it, and the check needs no bookkeeping about *when* it was computed —
 `closing_price::Market::is_trading_day` already answers it, as at the date, with Crypto exempt.
 
-- [ ] Flag every stored `settlement_date` that is not a trading day on the listing's calendar.
+- [x] Flag every stored `settlement_date` that is not a trading day on the listing's calendar.
       `GET /reports/settlement_holiday_coverage` is the natural home — a third `coverage_status`
       (or a sibling field) beside `outside_holiday_coverage` / `no_holiday_coverage` — so the one
       report that exists to answer "is this settlement date trustworthy" answers the whole question
+      — done as **both**, because the two questions are independent and one trade can answer both
+      badly: a sibling `settlement_non_trading_reason` (`weekend` / `holiday` / null, over
+      `closing_price::non_trading_day`, one `Market` load per listing on the report's own read
+      transaction) carries the new answer, and `coverage_status` gained a third value
+      `inside_holiday_coverage` for the rows now listed for the settlement question alone. The row
+      filter changed with it: a trade inside coverage is emitted when its settlement is not a
+      trading day, so the report no longer omits every in-coverage trade
 **Decision (Evan, 2026-08-22): flag it, do not refuse a supplied value.** An explicit
 `settlement_date` is a deliberate override the user is asserting, so trade 9071 stays editable and
 untouched; only the *auto-computed* path is guaranteed to land on a trading day. Rejected: refusing a
@@ -209,13 +216,28 @@ S-04, and a trade cannot be refused for the calendar being incomplete. So this s
 refusal. Add a test pinning that the auto path cannot produce a non-trading day under a complete
 calendar, so the guarantee is asserted rather than assumed.
 
-- [ ] A supplied `settlement_date` is **not** refused — the coverage-report status is what surfaces
+- [x] A supplied `settlement_date` is **not** refused — the coverage-report status is what surfaces
       it (trade 9071 stays editable; correct it separately if it turns out to be a typo, checking the
       deployed database at `bigbrain.lan:3000` as well, since the copy in the repo is the 2026-08-16
       backup rather than the live file)
-- [ ] `docs/API.md` — the settlement-holiday-coverage section's contract sentence
-- [ ] Regression tests: a supplied weekend settlement flagged, a supplied holiday settlement flagged,
-      a Crypto same-day settlement on a Saturday **not** flagged
+- [x] `docs/API.md` — the settlement-holiday-coverage section's contract sentence — rewritten as
+      the two questions the report answers, saying what an empty report does *and does not* mean
+      (it is not a claim that each stored date is what today's calendar would compute — that is
+      S-04's, still open); plus the Trades section (a supplied value is stored as given), the
+      `non_trading_day_trades` health entry's cross-reference, `docs/SCHEMA.md`'s
+      `trades.settlement_date` comment, the README feature line, and the report's `desc` /
+      third-status badge in the web UI. Pinned by
+      `doc_checks::settlement_coverage_documents_both_questions_it_answers`
+- [x] Regression tests: a supplied weekend settlement flagged, a supplied holiday settlement flagged,
+      a Crypto same-day settlement on a Saturday **not** flagged — plus a trade that is *both*
+      outside coverage and settling on a weekend, reported so both facts stay legible, and the
+      auto-path guarantee this section asks for:
+      `trade::tests::auto_settlement_never_lands_on_a_non_trading_day_under_a_complete_calendar`
+      walks every trading day of both seeded calendars (2019–2027, ~4,500 settlements) and asserts
+      each computed settlement is itself a trading day, skipping the windows that run past the end
+      of coverage (the incomplete-calendar case, which is S-04's). The weekend test reproduces
+      trade 9071 exactly; run against a copy of the 2026-08-16 backup, the report returns that one
+      row and nothing else
 
 ---
 

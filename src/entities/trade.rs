@@ -986,6 +986,60 @@ mod tests {
         );
     }
 
+    /// SCENARIOS S-05: the guarantee the *auto* path gives, asserted rather
+    /// than assumed. A supplied `settlement_date` is a deliberate override and
+    /// is never refused — the settlement-holiday-coverage report flags one
+    /// that lands on a closed day — but a settlement this code computes must
+    /// land on a trading day, because `add_business_days` skips weekends and
+    /// the exchange's seeded holidays by construction. Walked over every
+    /// trading day of both seeded calendars (XASX and XNYS, 2019–2027), each
+    /// settled through the real write path's helper and each result put back
+    /// to the very calendar the trading-day refusal reads.
+    ///
+    /// Windows running past the end of coverage are skipped, not asserted:
+    /// there the calendar is *incomplete*, which is the one way the auto path
+    /// can still produce a closed day (SCENARIOS S-04) and is exactly what the
+    /// coverage report exists to say.
+    #[tokio::test]
+    async fn auto_settlement_never_lands_on_a_non_trading_day_under_a_complete_calendar() {
+        use crate::entities::closing_price;
+        let pool = test_pool().await;
+        test_support::listing(1).mic("XASX").insert(&pool).await;
+        test_support::listing(2)
+            .mic("XNYS")
+            .ticker("LAC")
+            .currency("USD")
+            .insert(&pool)
+            .await;
+        // The seeded calendars run 2019–2027 on both exchanges.
+        let coverage_end = ymd(2027, 12, 31);
+        let mut checked = 0;
+        for listing_id in [1, 2] {
+            let market = closing_price::load_market(&pool, listing_id)
+                .await
+                .unwrap()
+                .unwrap();
+            let mut date = ymd(2019, 1, 1);
+            while date <= coverage_end {
+                if closing_price::non_trading_day(&market, date).is_none() {
+                    let settled = auto_settlement_date(&pool, 1, listing_id, date)
+                        .await
+                        .unwrap();
+                    if settled <= coverage_end {
+                        assert!(
+                            closing_price::non_trading_day(&market, settled).is_none(),
+                            "listing {listing_id}: {date} settled on {settled}, not a trading day"
+                        );
+                        checked += 1;
+                    }
+                }
+                date += chrono::Duration::days(1);
+            }
+        }
+        // Not a vacuous pass: two exchanges' worth of trading days.
+        assert!(checked > 4000, "only {checked} settlements were checked");
+    }
+
     #[tokio::test]
     async fn api_put_sell_trade_is_rejected() {
         // Sells must go through PUT /sells/{id}; the generic trade endpoint rejects them.

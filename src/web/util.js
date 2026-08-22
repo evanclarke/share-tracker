@@ -684,6 +684,10 @@ const COLUMN_LABELS = {
   amount_aud: 'Amount (AUD)',
   units_after: 'Units after',
   fx_provisional: 'Provisional FX',
+  // Why a trade's stored settlement date is not a trading day (weekend /
+  // holiday), blank when it is one. The default humaniser would render
+  // "Settlement non trading reason", which reads as three nouns in a row.
+  settlement_non_trading_reason: 'Settlement non-trading day',
   // The row was valued at an earlier day's close because the provider stopped
   // quoting the security (listings.unpriced_from). The default humaniser
   // would render "Price carried forward", which reads like a question.

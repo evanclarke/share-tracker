@@ -661,6 +661,50 @@ fn trading_day_rule_and_its_exemptions_are_documented() {
     assert!(README_MD.contains("**trade dated on a day its exchange was shut**"));
 }
 
+/// Doc pin (SCENARIOS S-05): the settlement-holiday-coverage report answers
+/// two questions now, not one, and its contract sentence had to be corrected
+/// — "trades fully inside coverage are omitted" stopped being the whole rule
+/// the moment a trade inside coverage could be listed for a settlement date
+/// that is not a trading day. The pin covers the corrected sentence, the
+/// third `coverage_status` value, the new field, and the two places a reader
+/// meets the rule instead: the Trades section (a supplied override is stored
+/// as given) and the `trades.settlement_date` column comment.
+#[test]
+fn settlement_coverage_documents_both_questions_it_answers() {
+    // The two questions, as the section poses them.
+    assert!(API_MD.contains("**Was the window computed against a complete calendar?**"));
+    assert!(API_MD.contains("**Is the settlement date itself a day the exchange traded?**"));
+    // The corrected contract sentence: what an empty report does and does not mean.
+    assert!(API_MD.contains(
+        "an empty report means every settlement window sits inside a seeded calendar and every stored settlement date falls on a day its exchange traded"
+    ));
+    assert!(
+        API_MD.contains(
+            "It does **not** mean each stored date is what today's calendar would compute"
+        )
+    );
+    // The payload: a third coverage_status value, and the sibling field that
+    // carries the second answer (a row can hold both at once).
+    assert!(API_MD.contains(
+        "`inside_holiday_coverage` = the window was computed against a complete calendar"
+    ));
+    assert!(API_MD.contains("`settlement_non_trading_reason`"));
+    // Not refused: the Trades section says a supplied value is stored as given.
+    assert!(
+        API_MD.contains("A `settlement_date` **supplied** in the body is stored exactly as given")
+    );
+    // The column comment carries the same rule.
+    assert!(SCHEMA_MD.contains(
+        "supplied, it is stored as given and need only not precede date (422 otherwise), because an explicit value is a deliberate override"
+    ));
+    // Surfaced in the README's feature line.
+    assert!(
+        README_MD.contains(
+            "every stored settlement **date** is put to the listing's own trading calendar"
+        )
+    );
+}
+
 /// Doc pin (SCENARIOS N-08): the 30-day rule turns on a **disposal**, so the
 /// health alert's documented scope must say which Sells are one. A
 /// holding-account transfer is not (the same owner holds the same interests),

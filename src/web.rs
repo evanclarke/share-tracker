@@ -1379,6 +1379,14 @@ mod tests {
         // GET /reports/settlement_holiday_coverage and badges its status field.
         assert!(js.contains("/reports/settlement_holiday_coverage"));
         assert!(js.contains("coverage_status"));
+        // SCENARIOS S-05: the report's second question — a stored settlement
+        // date that is not a trading day — is a column of its own, labelled
+        // rather than left to the humaniser.
+        assert!(js.contains("settlement_non_trading_reason"));
+        // The third coverage_status value badges neutrally: such a row is
+        // listed for the settlement-day question, not for its coverage.
+        let css = body_string(get("/static/style.css").await).await;
+        assert!(css.contains(".badge.inside_holiday_coverage"));
     }
 
     #[tokio::test]
