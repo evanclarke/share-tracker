@@ -30,6 +30,13 @@ use sqlx::SqlitePool;
 /// schedule ([`JobTrigger`]), so a job that has never run and never will run on
 /// a timer reads as *manual only* rather than as one that is somehow overdue.
 ///
+/// `last_note` qualifies a **successful** last run that did less than the whole
+/// of its work — the currency import without DTIF credentials, which skips the
+/// ISO 24165 half and used to report an unqualified `ok` (SCENARIOS T-09). It
+/// is `None` on a complete run, on a failed one (whose `last_error` says what
+/// happened) and on one still in flight, and it never changes `last_status`:
+/// the run succeeded, it was just not a complete one.
+///
 /// `next_run_at` is the instant the running scheduler says the job is next due
 /// (the earliest, for a job scheduled on several lines) — the stored twin of
 /// the `next run scheduled` log line, from `job_schedule`. It is what lets this
@@ -47,6 +54,7 @@ pub struct JobStatus {
     pub last_finished_at: Option<String>,
     pub last_status: Option<JobRunStatus>,
     pub last_error: Option<String>,
+    pub last_note: Option<String>,
     pub runs: Vec<JobRunRecord>,
 }
 
@@ -77,6 +85,7 @@ async fn list(
                 last_finished_at: last.and_then(|r| r.finished_at.clone()),
                 last_status: last.map(|r| r.status),
                 last_error: last.and_then(|r| r.error.clone()),
+                last_note: last.and_then(|r| r.note.clone()),
                 runs,
             }
         })

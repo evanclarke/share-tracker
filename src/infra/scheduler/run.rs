@@ -16,9 +16,16 @@ use std::{sync::Arc, time::Duration};
 /// INFO `job finished` line (the latter carries `ok` = whether it succeeded).
 /// Both the scheduled loop and the manual trigger go through here so every job
 /// logs start and finish uniformly, regardless of any per-job logging it does,
-/// and so every run persists its record (timestamps, status, error) to
+/// and so every run persists its record (timestamps, status, error, note) to
 /// `job_runs` for the Jobs UI. A failure to record the run is logged but does
 /// not change the job's own result.
+///
+/// A job that succeeded while doing **less** than the whole of its work returns
+/// its own note ([`super::registry::JobOutcome`]); it is recorded against the
+/// run and shown beside the status, so a half-import stops reading as a
+/// complete one (SCENARIOS T-09). It is deliberately not folded into the error
+/// column: the run succeeded, and this function's `Ok`/`Err` result — what
+/// `POST /jobs/{name}` answers on — is unchanged by it.
 ///
 /// The row is written **when the run starts** (`status = 'running'`,
 /// `finished_at` NULL) and updated when the work returns. A run the process
@@ -53,16 +60,31 @@ pub(super) async fn run_job(
     tracing::info!(job = %name, ok = result.is_ok(), "job finished");
 
     let error = result.as_ref().err().map(String::as_str);
+    let note = result.as_ref().ok().and_then(Option::as_deref);
+    if let Some(note) = note {
+        tracing::info!(job = %name, "job succeeded incompletely: {note}");
+    }
     let recorded = match run_id {
-        Some(id) => db_finish_run(pool, id, &finished_at, result.is_ok(), error).await,
+        Some(id) => db_finish_run(pool, id, &finished_at, result.is_ok(), error, note).await,
         // No opening row to complete, so record the whole run in one write
         // rather than losing it.
-        None => db_record_run(pool, name, &started_at, &finished_at, result.is_ok(), error).await,
+        None => {
+            db_record_run(
+                pool,
+                name,
+                &started_at,
+                &finished_at,
+                result.is_ok(),
+                error,
+                note,
+            )
+            .await
+        }
     };
     if let Err(e) = recorded {
         tracing::warn!(job = %name, "failed to record job run: {e}");
     }
-    result
+    result.map(|_| ())
 }
 
 /// Cap on any single timer sleep. Timer sleeps are monotonic, so a wall-clock

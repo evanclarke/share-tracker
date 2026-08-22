@@ -311,7 +311,7 @@ mod tests {
             let now = clock();
             async move {
                 fired.lock().unwrap().push(now);
-                Ok(())
+                Ok(None)
             }
         });
 
@@ -659,7 +659,7 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(30)).await;
                 a.fetch_sub(1, Ordering::SeqCst);
                 r.fetch_add(1, Ordering::SeqCst);
-                Ok(())
+                Ok(None)
             }
         });
 
@@ -1028,6 +1028,57 @@ mod tests {
         assert!(backup.last_error.is_none());
     }
 
+    /// SCENARIOS T-09: a run that succeeded while doing less than the whole of
+    /// its work stays a **success** — the currency import's ISO 24165 half is
+    /// credential-gated and optional by design — but the Jobs surface no longer
+    /// reads as complete: the run's own note rides out on `GET /jobs` beside an
+    /// `ok` status and an empty error, which is what the Jobs screen shows.
+    #[tokio::test]
+    async fn a_run_that_did_only_half_its_work_stays_ok_and_says_what_it_skipped() {
+        let (reg, pool, _dir, _path) = test_registry().await;
+        let note = "imported 178 ISO 4217 fiat currencies; ISO 24165 digital token feed skipped";
+        let half = RegisteredJob::from_fn(JobTrigger::Scheduled, move |_| async move {
+            Ok(Some(note.to_string()))
+        });
+        // The run itself succeeds: POST /jobs/{name} would answer 204.
+        run_job(&pool, "currency-import", &half, JobParams::default())
+            .await
+            .expect("a skipped optional feed is not a failure");
+
+        let app = ApiClient::over(router().with_state(pool).layer(Extension(reg)));
+        let statuses: Vec<JobStatus> = app.get("/jobs").await.json();
+        let job = statuses
+            .iter()
+            .find(|s| s.name == "currency-import")
+            .unwrap();
+        assert_eq!(job.last_status, Some(JobRunStatus::Ok), "still a success");
+        assert!(job.last_error.is_none(), "and not an error");
+        assert_eq!(
+            job.last_note.as_deref(),
+            Some(note),
+            "but no longer reading as a complete run"
+        );
+        // The note is on the stored run too, so the expanded history shows it.
+        assert_eq!(job.runs[0].note.as_deref(), Some(note));
+    }
+
+    /// The other side: an ordinary complete run carries no note at all, so the
+    /// column stays empty except where something really was passed over.
+    #[tokio::test]
+    async fn a_complete_run_records_no_note() {
+        let (reg, pool, _dir, _path) = test_registry().await;
+        let job = reg.get("backup").unwrap();
+        run_job(&pool, "backup", job, JobParams::default())
+            .await
+            .unwrap();
+
+        let app = ApiClient::over(router().with_state(pool).layer(Extension(reg)));
+        let statuses: Vec<JobStatus> = app.get("/jobs").await.json();
+        let backup = statuses.iter().find(|s| s.name == "backup").unwrap();
+        assert!(backup.last_note.is_none());
+        assert!(backup.runs[0].note.is_none());
+    }
+
     #[tokio::test]
     async fn record_run_keeps_history_latest_first() {
         // A failed run stores status 'failed' and the error text; a later success
@@ -1041,6 +1092,7 @@ mod tests {
             "2026-06-01T00:00:01Z",
             false,
             Some("boom"),
+            None,
         )
         .await
         .unwrap();
@@ -1050,6 +1102,7 @@ mod tests {
             "2026-06-02T00:00:00Z",
             "2026-06-02T00:00:01Z",
             true,
+            None,
             None,
         )
         .await
@@ -1078,6 +1131,7 @@ mod tests {
             "2026-05-01T00:00:01Z",
             true,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1085,7 +1139,7 @@ mod tests {
         for i in 0..(JOB_RUN_HISTORY_LIMIT + extra) {
             let started = format!("2026-06-01T00:{i:02}:00Z");
             let finished = format!("2026-06-01T00:{i:02}:01Z");
-            db_record_run(&pool, "backup", &started, &finished, true, None)
+            db_record_run(&pool, "backup", &started, &finished, true, None, None)
                 .await
                 .unwrap();
         }
@@ -1122,6 +1176,7 @@ mod tests {
             "2026-06-01T00:00:01Z",
             true,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1133,7 +1188,7 @@ mod tests {
             async move {
                 let rx = parked.lock().await.take().expect("the job runs once");
                 rx.await.expect("released");
-                Ok(())
+                Ok(None)
             }
         }));
 
@@ -1206,6 +1261,7 @@ mod tests {
             "2026-06-01T00:00:01Z",
             true,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1252,7 +1308,7 @@ mod tests {
         for i in 0..(JOB_RUN_HISTORY_LIMIT + 5) {
             let started = format!("2026-06-01T00:{i:02}:00Z");
             let finished = format!("2026-06-01T00:{i:02}:01Z");
-            db_record_run(&pool, "backup", &started, &finished, true, None)
+            db_record_run(&pool, "backup", &started, &finished, true, None, None)
                 .await
                 .unwrap();
         }
@@ -1288,6 +1344,7 @@ mod tests {
             "2026-06-01T00:00:01Z",
             false,
             Some("boom"),
+            None,
         )
         .await
         .unwrap();
@@ -1297,6 +1354,7 @@ mod tests {
             "2026-06-02T00:00:00Z",
             "2026-06-02T00:00:01Z",
             true,
+            None,
             None,
         )
         .await

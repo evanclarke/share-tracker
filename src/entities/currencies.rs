@@ -79,11 +79,87 @@ pub enum ImportError {
     Db(#[from] sqlx::Error),
 }
 
-/// Outcome of an import run: how many currency rows were written (inserted or
-/// updated). Every row in the feed is upserted on every run.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// Why the ISO 24165 half of a live import did not run. The DTIF download is
+/// credential-gated, so this is the ordinary state of a server that has not
+/// been given the credentials — not a failure — but it is *half* the reference
+/// data the job exists to import, so it is said rather than left to a WARN.
+pub const TOKEN_FEED_NOT_CONFIGURED: &str =
+    "ISO 24165 digital token feed skipped: DTI_REGISTRY_USER_ID / DTI_REGISTRY_PASSWORD not set";
+
+/// Outcome of an import run, **per feed** rather than as one total: how many
+/// currency rows each feed wrote (inserted or updated — every row in a feed is
+/// upserted on every run), each `None` when that feed was not part of this run.
+///
+/// A single total could not tell a complete import from one that fetched only
+/// half the reference data: without DTIF credentials the token feed is skipped
+/// and the run reported an unqualified `{ "imported": 178 }`, which reads as a
+/// clean success everywhere an operator looks, with the gap only in a WARN
+/// (SCENARIOS T-09).
+///
+/// `None` means *this run did not import that feed*, which the three paths
+/// reach differently, and `skipped` is what tells them apart:
+///
+/// * both feeds fetched — `fiat` and `tokens` both `Some`, no `skipped`;
+/// * a live fetch with no DTIF credentials — `tokens: None` **and** `skipped`
+///   naming the feed passed over and why;
+/// * a single pasted feed (`POST /currencies/import` with a body) — the count
+///   of whichever feed the body is, the other `None`, and no `skipped`: that
+///   call never intended the other feed, so nothing was passed over and it must
+///   not be reported as if something had been.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ImportSummary {
-    pub imported: usize,
+    /// Rows written from the ISO 4217 fiat list.
+    pub fiat: Option<usize>,
+    /// Rows written from the ISO 24165 digital token registry.
+    pub tokens: Option<usize>,
+    /// Set only when the run *would* have fetched a feed and did not, saying
+    /// which and why ([`TOKEN_FEED_NOT_CONFIGURED`]). Absent on a complete run
+    /// and on a single pasted feed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skipped: Option<String>,
+}
+
+impl ImportSummary {
+    /// The summary of one feed's import: the count recorded under the kind of
+    /// currency that feed carries, the other feed absent from the run. Nothing
+    /// else can set a count, so a feed's rows can never be attributed to the
+    /// other one.
+    fn one_feed(kind: CurrencyKind, imported: usize) -> Self {
+        match kind {
+            CurrencyKind::Fiat => Self {
+                fiat: Some(imported),
+                ..Self::default()
+            },
+            CurrencyKind::DigitalToken => Self {
+                tokens: Some(imported),
+                ..Self::default()
+            },
+        }
+    }
+
+    /// Fold another feed's summary into this one, per feed.
+    fn merge(&mut self, other: &ImportSummary) {
+        if let Some(n) = other.fiat {
+            self.fiat = Some(self.fiat.unwrap_or(0) + n);
+        }
+        if let Some(n) = other.tokens {
+            self.tokens = Some(self.tokens.unwrap_or(0) + n);
+        }
+    }
+
+    /// One line saying what ran and what did not, for a run that passed a feed
+    /// over — recorded against the job run itself (`job_runs.note`) so a
+    /// half-import stops reading as a complete one on the Jobs screen, and
+    /// logged with the job's completion. `None` when the run covered every feed
+    /// it set out to, which is every other path: a complete live import, and a
+    /// single pasted feed.
+    pub fn incomplete_note(&self) -> Option<String> {
+        let why = self.skipped.as_deref()?;
+        Some(format!(
+            "imported {} ISO 4217 fiat currencies; {why}",
+            self.fiat.unwrap_or(0)
+        ))
+    }
 }
 
 impl CrudEntity for Currency {
@@ -332,15 +408,19 @@ fn first_short_name(value: &Value) -> Option<String> {
 /// import either fully applies the feed or makes no change at all. The feed format
 /// is detected from its first non-space character: `<` → ISO 4217 XML, `{` →
 /// ISO 24165 JSON. Shared by the scheduled task and the manual-trigger endpoint.
+///
+/// One feed is one summary: the count lands under the kind of currency that feed
+/// carries and the other stays `None` — *this import did not cover that feed* —
+/// with no `skipped`, since a single supplied feed passed nothing over.
 pub async fn import_from_content(
     pool: &SqlitePool,
     content: &str,
 ) -> Result<ImportSummary, ImportError> {
     let trimmed = content.trim_start();
-    let currencies = if trimmed.starts_with('<') {
-        parse_iso4217(content)?
+    let (kind, currencies) = if trimmed.starts_with('<') {
+        (CurrencyKind::Fiat, parse_iso4217(content)?)
     } else if trimmed.starts_with('{') {
-        parse_iso24165(content)?
+        (CurrencyKind::DigitalToken, parse_iso24165(content)?)
     } else {
         return Err(ImportError::Parse(
             "unrecognised currency feed (expected ISO 4217 XML or ISO 24165 JSON)".into(),
@@ -352,34 +432,58 @@ pub async fn import_from_content(
         db_upsert(&mut *tx, currency).await?;
     }
     tx.commit().await?;
-    Ok(ImportSummary {
-        imported: currencies.len(),
-    })
+    Ok(ImportSummary::one_feed(kind, currencies.len()))
 }
 
-/// Fetch and import both feeds: the ISO 4217 fiat list (free) always, and the
-/// ISO 24165 digital token registry only when DTIF Basic-auth credentials are
-/// configured (it is skipped with a warning otherwise, so a missing credential
-/// never blocks the fiat import). Returns the combined number of rows written.
-pub async fn run_import(pool: &SqlitePool) -> Result<ImportSummary, ImportError> {
-    let fiat = fetch(ISO_4217_URL, None).await?;
-    let mut summary = import_from_content(pool, &fiat).await?;
+/// Import both halves of the reference data from content already in hand: the
+/// ISO 4217 fiat list, and the ISO 24165 token registry when there was one to
+/// fetch. `tokens: None` is the credential-less server — the fiat half still
+/// imports, and the summary says the other half was passed over rather than
+/// reporting the fiat count as the whole job (SCENARIOS T-09).
+///
+/// Split out from [`run_import`] so the reporting is exercised without a
+/// network: `run_import` fetches and delegates here, passing `None` for the
+/// tokens exactly when the credentials are absent.
+pub async fn import_feeds(
+    pool: &SqlitePool,
+    fiat: &str,
+    tokens: Option<&str>,
+) -> Result<ImportSummary, ImportError> {
+    let mut summary = import_from_content(pool, fiat).await?;
+    match tokens {
+        Some(content) => summary.merge(&import_from_content(pool, content).await?),
+        None => summary.skipped = Some(TOKEN_FEED_NOT_CONFIGURED.to_string()),
+    }
+    Ok(summary)
+}
 
+/// The DTIF Basic-auth credentials, or `None` when the server has not been given
+/// them (the ISO 24165 download is credential-gated; ISO 4217 is free).
+fn dtif_credentials() -> Option<(String, String)> {
     match (
         std::env::var("DTI_REGISTRY_USER_ID"),
         std::env::var("DTI_REGISTRY_PASSWORD"),
     ) {
-        (Ok(user), Ok(pass)) => {
-            let tokens = fetch(ISO_24165_URL, Some((&user, &pass))).await?;
-            let token_summary = import_from_content(pool, &tokens).await?;
-            summary.imported += token_summary.imported;
-        }
-        _ => tracing::warn!(
-            "DTI_REGISTRY_USER_ID / DTI_REGISTRY_PASSWORD not set; skipping ISO 24165 digital token import"
-        ),
+        (Ok(user), Ok(pass)) => Some((user, pass)),
+        _ => None,
     }
+}
 
-    Ok(summary)
+/// Fetch and import both feeds: the ISO 4217 fiat list (free) always, and the
+/// ISO 24165 digital token registry only when DTIF Basic-auth credentials are
+/// configured (it is skipped otherwise, so a missing credential never blocks the
+/// fiat import). Returns the per-feed summary — including, when the token feed
+/// was passed over, the fact that it was.
+pub async fn run_import(pool: &SqlitePool) -> Result<ImportSummary, ImportError> {
+    let fiat = fetch(ISO_4217_URL, None).await?;
+    let tokens = match dtif_credentials() {
+        Some((user, pass)) => Some(fetch(ISO_24165_URL, Some((&user, &pass))).await?),
+        None => {
+            tracing::warn!("{TOKEN_FEED_NOT_CONFIGURED}");
+            None
+        }
+    };
+    import_feeds(pool, &fiat, tokens.as_deref()).await
 }
 
 /// GET a feed URL, optionally with HTTP Basic auth (the DTIF download requires it).
@@ -402,7 +506,8 @@ async fn fetch(url: &str, basic_auth: Option<(&str, &str)>) -> Result<String, Im
 /// Manually trigger the import. With a non-empty request body, imports that body
 /// (a downloaded ISO 4217 XML or ISO 24165 JSON — useful for retries, or to load
 /// the DTIF snapshot without server credentials); with an empty body, fetches from
-/// the live sources. Both share `import_from_content`.
+/// the live sources. Both share `import_from_content`, and both answer the same
+/// per-feed [`ImportSummary`] — a pasted body reporting only the feed it is.
 async fn import(
     State(pool): State<SqlitePool>,
     body: String,
@@ -513,6 +618,24 @@ mod tests {
             short_name: None,
             minor_units: Some(2),
             source: CurrencySource::Iso4217,
+        }
+    }
+
+    /// The summary of a single pasted ISO 4217 feed.
+    fn fiat_only(n: usize) -> ImportSummary {
+        ImportSummary {
+            fiat: Some(n),
+            tokens: None,
+            skipped: None,
+        }
+    }
+
+    /// The summary of a single pasted ISO 24165 feed.
+    fn tokens_only(n: usize) -> ImportSummary {
+        ImportSummary {
+            fiat: None,
+            tokens: Some(n),
+            skipped: None,
         }
     }
 
@@ -666,7 +789,7 @@ mod tests {
         // The DB is seeded with a baseline of currencies, so assert against the
         // change in row count rather than an absolute total.
         let first = import_from_content(&pool, SAMPLE_XML).await.unwrap();
-        assert_eq!(first, ImportSummary { imported: 3 });
+        assert_eq!(first, fiat_only(3));
         let after_first = db_list(&pool).await.unwrap().len();
         assert!(
             db_get(&pool, "XAU").await.unwrap().is_some(),
@@ -675,7 +798,7 @@ mod tests {
 
         // Re-running upserts the same rows: no duplicates, count unchanged.
         let second = import_from_content(&pool, SAMPLE_XML).await.unwrap();
-        assert_eq!(second, ImportSummary { imported: 3 });
+        assert_eq!(second, fiat_only(3));
         assert_eq!(db_list(&pool).await.unwrap().len(), after_first);
     }
 
@@ -683,7 +806,7 @@ mod tests {
     async fn import_iso24165_inserts_tokens() {
         let pool = test_pool().await;
         let summary = import_from_content(&pool, SAMPLE_JSON).await.unwrap();
-        assert_eq!(summary, ImportSummary { imported: 2 });
+        assert_eq!(summary, tokens_only(2));
         let btc = db_get(&pool, "4H95J0R2X").await.unwrap().unwrap();
         assert_eq!(btc.kind, CurrencyKind::DigitalToken);
         assert_eq!(btc.name, "Bitcoin");
@@ -758,7 +881,10 @@ mod tests {
             .await;
         assert_eq!(resp.status, StatusCode::OK);
         let summary: ImportSummary = resp.json();
-        assert_eq!(summary, ImportSummary { imported: 3 });
+        // A pasted ISO 4217 body is one feed: the fiat count, no token count,
+        // and nothing reported as skipped — this call never intended the other
+        // feed (SCENARIOS T-09).
+        assert_eq!(summary, fiat_only(3));
         // Import ran against the seeded baseline: the new XAU row is now present.
         assert!(db_get(&pool, "XAU").await.unwrap().is_some());
     }
@@ -793,5 +919,82 @@ mod tests {
             !recorded.starts_with("Fetch("),
             "recorded as a Rust Debug string: {recorded}"
         );
+    }
+
+    /// SCENARIOS T-09: a live import without DTIF credentials imports the fiat
+    /// half and says the other half was passed over — the run is a success (the
+    /// credentials are optional by design), but it no longer reports as a
+    /// complete one. `run_import` passes `None` for the tokens in exactly this
+    /// case, so this is that path minus the network fetch.
+    #[tokio::test]
+    async fn an_import_without_dtif_credentials_reports_the_fiat_half_and_the_skipped_one() {
+        let pool = test_pool().await;
+        let summary = import_feeds(&pool, SAMPLE_XML, None).await.unwrap();
+
+        assert_eq!(summary.fiat, Some(3), "the fiat feed's own count");
+        assert_eq!(
+            summary.tokens, None,
+            "the token feed was not attempted, which is not the same as zero tokens"
+        );
+        assert_eq!(summary.skipped.as_deref(), Some(TOKEN_FEED_NOT_CONFIGURED));
+
+        // The note is what the job run records, so the Jobs screen shows a
+        // half-import as one rather than as a clean success.
+        let note = summary
+            .incomplete_note()
+            .expect("a half-import qualifies its success");
+        assert!(note.contains("3 ISO 4217 fiat currencies"), "{note}");
+        assert!(note.contains("DTI_REGISTRY_USER_ID"), "{note}");
+
+        // The fiat half really did land.
+        assert!(db_get(&pool, "XAU").await.unwrap().is_some());
+    }
+
+    /// SCENARIOS T-09, the other side: with both feeds fetched the summary
+    /// carries both counts and reports nothing skipped, so nothing qualifies the
+    /// run.
+    #[tokio::test]
+    async fn an_import_of_both_feeds_reports_both_counts_and_nothing_skipped() {
+        let pool = test_pool().await;
+        let summary = import_feeds(&pool, SAMPLE_XML, Some(SAMPLE_JSON))
+            .await
+            .unwrap();
+
+        assert_eq!(summary.fiat, Some(3));
+        assert_eq!(summary.tokens, Some(2));
+        assert_eq!(summary.skipped, None);
+        assert_eq!(
+            summary.incomplete_note(),
+            None,
+            "a complete run has nothing to qualify"
+        );
+
+        assert!(db_get(&pool, "AUD").await.unwrap().is_some());
+        assert!(db_get(&pool, "4H95J0R2X").await.unwrap().is_some());
+    }
+
+    /// The serialised response shape `docs/API.md` documents: a skipped feed is
+    /// named in the body, and an unattempted feed is `null` rather than `0`.
+    #[test]
+    fn the_summary_serialises_per_feed_with_the_skip_named() {
+        let half = ImportSummary {
+            fiat: Some(178),
+            tokens: None,
+            skipped: Some(TOKEN_FEED_NOT_CONFIGURED.to_string()),
+        };
+        let json = serde_json::to_value(&half).unwrap();
+        assert_eq!(json["fiat"], 178);
+        assert!(json["tokens"].is_null());
+        assert_eq!(json["skipped"], TOKEN_FEED_NOT_CONFIGURED);
+
+        // Nothing skipped → the key is absent, not an empty string.
+        let whole = ImportSummary {
+            fiat: Some(178),
+            tokens: Some(4000),
+            skipped: None,
+        };
+        let json = serde_json::to_value(&whole).unwrap();
+        assert_eq!(json["tokens"], 4000);
+        assert!(json.get("skipped").is_none());
     }
 }

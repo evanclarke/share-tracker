@@ -1,0 +1,28 @@
+-- A successful run that did less than the whole of its work says so
+-- (SCENARIOS T-09).
+--
+-- `job_runs` could record *why* a run went wrong and nothing else. The
+-- currency import, run on a server without DTIF credentials, fetches the
+-- ISO 4217 fiat list, skips the credential-gated ISO 24165 digital token
+-- registry, and succeeds — correctly, since the credentials are optional by
+-- design. But half the reference data the job exists to import was never
+-- fetched, and the only trace of that was a WARN in the server log: `GET /jobs`
+-- and the Jobs screen showed `ok` with an empty Error column, which is the
+-- operator's evidence that the reference data is complete.
+--
+-- `note` is that missing place: a qualification on a **successful** run, in the
+-- job's own words, written by `run_job` from what the job body returns. It is
+-- deliberately not the `error` column — the run did not fail, and overloading
+-- `error` would make the Jobs screen's own red/green reading a lie — and
+-- deliberately not a health alert, which would nag permanently about a
+-- configuration the operator has chosen.
+--
+-- NULL is the ordinary case: a complete run, a failed run (whose `error` says
+-- what happened), and a run still in flight all leave it NULL. A plain
+-- `ADD COLUMN` therefore carries every existing row forward untouched, with no
+-- rebuild: the column is nullable with no default, adds no constraint, and
+-- `job_runs` carries no triggers to re-create (it is out of scope for the
+-- `row_history` audit trail as derived operational state, and exempt from
+-- snapshot staleness because no snapshotted report reads it — the reasons 0012
+-- and 0042 gave, both still true).
+ALTER TABLE job_runs ADD COLUMN note TEXT;

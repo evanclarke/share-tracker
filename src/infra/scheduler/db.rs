@@ -45,12 +45,19 @@ impl JobRunStatus {
 /// One stored run of a job, as exposed in a `JobStatus`'s `runs` history.
 /// `finished_at` is `None` exactly when `status` is
 /// [`JobRunStatus::Running`] — the schema holds the two in step.
+///
+/// `note` qualifies a **successful** run that did less than the whole of its
+/// work — the currency import that skipped the credential-gated ISO 24165 half
+/// (SCENARIOS T-09). It is separate from `error` on purpose: the run did not
+/// fail, so its status stays `ok` and the Jobs screen's red/green reading stays
+/// honest; the note is what stops it also reading as *complete*.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobRunRecord {
     pub started_at: String,
     pub finished_at: Option<String>,
     pub status: JobRunStatus,
     pub error: Option<String>,
+    pub note: Option<String>,
 }
 
 /// One persisted run row from `job_runs`.
@@ -61,6 +68,7 @@ struct JobRun {
     finished_at: Option<String>,
     status: JobRunStatus,
     error: Option<String>,
+    note: Option<String>,
 }
 
 /// Bound on the stored run history per job: starting a run prunes that job's
@@ -109,14 +117,16 @@ pub(super) async fn db_finish_run(
     finished_at: &str,
     success: bool,
     error: Option<&str>,
+    note: Option<&str>,
 ) -> Result<(), sqlx::Error> {
     let updated = sqlx::query(
-        "UPDATE job_runs SET finished_at = ?, status = ?, error = ? \
+        "UPDATE job_runs SET finished_at = ?, status = ?, error = ?, note = ? \
          WHERE id = ? AND status = 'running'",
     )
     .bind(finished_at)
     .bind(JobRunStatus::finished(success))
     .bind(error)
+    .bind(note)
     .bind(id)
     .execute(pool)
     .await?
@@ -138,17 +148,19 @@ pub(super) async fn db_record_run(
     finished_at: &str,
     success: bool,
     error: Option<&str>,
+    note: Option<&str>,
 ) -> Result<(), sqlx::Error> {
     let mut tx = pool.begin().await?;
     sqlx::query(
-        "INSERT INTO job_runs (name, started_at, finished_at, status, error) \
-         VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO job_runs (name, started_at, finished_at, status, error, note) \
+         VALUES (?, ?, ?, ?, ?, ?)",
     )
     .bind(name)
     .bind(started_at)
     .bind(finished_at)
     .bind(JobRunStatus::finished(success))
     .bind(error)
+    .bind(note)
     .execute(&mut *tx)
     .await?;
     prune_history(&mut tx, name).await?;
@@ -179,7 +191,7 @@ pub(super) async fn db_run_histories(
     pool: &SqlitePool,
 ) -> Result<HashMap<String, Vec<JobRunRecord>>, sqlx::Error> {
     let rows = sqlx::query_as::<_, JobRun>(
-        "SELECT name, started_at, finished_at, status, error FROM job_runs ORDER BY id DESC",
+        "SELECT name, started_at, finished_at, status, error, note FROM job_runs ORDER BY id DESC",
     )
     .fetch_all(pool)
     .await?;
@@ -190,6 +202,7 @@ pub(super) async fn db_run_histories(
             finished_at: r.finished_at,
             status: r.status,
             error: r.error,
+            note: r.note,
         });
     }
     Ok(histories)

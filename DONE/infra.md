@@ -721,3 +721,84 @@ Consequences found while implementing:
   has run the scheduler, so `overdue_jobs` on a freshly migrated database is empty — not loudly
   overdue for every job at once, which is the one way this change could have gone wrong on the live
   machine.
+
+## SCENARIOS T-09: a currency-import that skipped the whole ISO 24165 half reports unqualified success
+
+Without `DTI_REGISTRY_USER_ID` / `DTI_REGISTRY_PASSWORD`, `currencies::run_import` fetches the ISO 4217
+fiat list, logs `WARN ... skipping ISO 24165 digital token import`, and returns
+`ImportSummary { imported: 178 }`. Driven on 2026-08-22: the job records **success**, `GET /jobs` shows
+a clean run, and the Jobs screen shows `ok` with no error — nothing in the operational surface says
+that half the reference data the job exists to import was never fetched.
+
+The consequence is already known to the project: `listing::UNRECOGNISED_DIGITAL_TOKEN` (closed as
+SCENARIOS L-10) exists precisely because "the seeded list is just BTC and ETH" is otherwise a dead end,
+and it names the credentials as the remedy. So the *point of use* is well handled; what is missing is
+that the job the user would check first reports the gap as a clean success. A green Jobs screen is
+evidence the reference data is complete, and here it is not.
+
+**Question for Evan — what should a half-import report?**
+
+- **(a) Say what ran.** `ImportSummary` gains a per-feed breakdown (`fiat`, `tokens: Option<usize>`)
+  and the job's INFO line and the `/currencies/import` response carry it; a skipped feed is named in
+  the summary rather than only in a WARN. Health/Jobs then have something to show.
+- **(b) Fail the job.** A run that could not do half its work is not a success — the operator either
+  configures the credentials or accepts a permanently red job.
+- **(c) A health alert** — a `reference_data_incomplete` entry while the token feed has never been
+  imported, cleared by a successful token import.
+- **(d) Documentation only** — the credentials are optional by design and L-10 already names them at
+  the point of use.
+
+**Decision (Evan, 2026-08-22): (a), say what ran.** Rejected: failing the job, a health alert, and
+documentation only.
+
+- [x] `currencies::ImportSummary` gains a per-feed breakdown (the fiat count, and the token count as
+      an `Option` — `None` meaning the feed was not attempted) rather than one total
+- [x] The job's INFO line and the `POST /currencies/import` response carry it, so a skipped feed is
+      named in the summary rather than only in a `WARN` nobody reads
+- [x] The Jobs surface shows a half-import as what it is (the run is still a success — the
+      credentials are optional by design; it just no longer *reads* as complete)
+- [x] `docs/API.md` (the currencies import response shape), README where the credentials are described
+- [x] Regression tests: an import with no credentials reports the fiat count and `None` tokens; one
+      with both feeds reports both
+
+**Consequences found while implementing (2026-08-22).**
+
+- **A per-feed count alone still could not say what happened.** `fiat`/`tokens` as two `Option`s
+  answers the scheduled path, but the *manual* path is a different shape: `POST /currencies/import`
+  with a body imports whichever single feed was pasted, so reporting `{fiat: 0, tokens: 2}` for a
+  pasted DTIF snapshot would have invented a fiat feed that returned nothing. `None` therefore means
+  **not part of this run**, and a third field, `skipped`, is what separates the two ways to reach it:
+  the credential-less live run carries it (a feed it would have fetched and did not), a pasted feed
+  never does (it intended one feed and imported one feed). The four paths are tabulated in
+  `docs/API.md`, and `import_from_content` can only ever set the count belonging to the format it
+  actually parsed, so one feed's rows cannot be attributed to the other.
+- **"The Jobs surface shows it" needed a place to put it, and there was none.** `job_runs` could
+  record why a run went *wrong* and nothing else; a successful run had no field an operator ever
+  sees. Migration 0044 adds `note` — a qualification on a **success**, written by `run_job` from what
+  the job body returns, deliberately not folded into `error` (the run did not fail, and overloading
+  `error` would make the screen's own red/green reading a lie) and deliberately not a health alert
+  (Evan rejected one: it would nag permanently about a configuration he has chosen). A plain
+  `ADD COLUMN`, no rebuild: `job_runs` carries no triggers, is out of scope for `row_history` as
+  derived state, and is snapshot-staleness exempt.
+- **That made the job body's return type the carrier, not the currency import's own summary.** A job
+  now returns `JobOutcome = Result<Option<String>, String>` — `Ok(None)` for a complete run,
+  `Ok(Some(note))` for one that did less and says so. Eight registered bodies and three synthetic
+  test jobs moved to it; `run_job`'s own `Ok`/`Err` result is unchanged, so `POST /jobs/{name}` still
+  answers `204` and no other caller cares. The alternative — a currency-specific field somewhere —
+  would have put the reporting rule in the one job instead of in the scheduler that displays it.
+- **Driven end to end against a throwaway database, not reasoned about.** A server on a temp DB with
+  a `note`-carrying `job_runs` row renders a **Note** column on the Jobs screen with the badge still
+  reading `ok` and the Error cell empty; the run-history expansion carries it too. The pasted-body
+  responses were checked live over HTTP: `{"fiat":1,"tokens":null}` for an XML body and
+  `{"fiat":null,"tokens":1}` for a JSON one — neither reporting a skip, which is the distinction the
+  shape exists to make.
+- **The credentials were nowhere in the README at all.** The checklist said "README where the
+  credentials are described"; they were described only in a source comment and in
+  `listing::UNRECOGNISED_DIGITAL_TOKEN`'s refusal text. `README.md` now has a *Digital token
+  reference data (ISO 24165)* subsection under Scheduled maintenance saying what the two feeds are,
+  that the skip is a supported configuration rather than a failure, the three places the run says so,
+  and that a DTIF snapshot can be loaded by pasting it without giving the server credentials at all.
+- **The regression tests needed an offline seam.** `run_import` fetches before it decides anything,
+  so the reporting was untestable without the network. `import_feeds(pool, fiat, tokens: Option<&str>)`
+  is that split — `run_import` fetches and delegates, passing `None` for the tokens in exactly the
+  case the credentials are absent — and the two tests drive it directly.

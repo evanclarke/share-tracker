@@ -1753,6 +1753,17 @@ mod tests {
         // (SCENARIOS T-11/T-02/T-12).
         assert!(js.contains("next_run: j.next_run_at || ''"));
         assert!(js.contains("'next_run'"));
+        // A successful run that did less than the whole of its work carries the
+        // server's own note, shown in its own column beside the (still `ok`)
+        // status and in the expanded run history — so the currency import that
+        // skipped the credential-gated ISO 24165 half stops reading as a
+        // complete run (SCENARIOS T-09).
+        assert!(js.contains("note: j.last_note || ''"));
+        assert!(js.contains("note: r.note || ''"));
+        assert!(
+            js.contains("'status', 'note', 'error'"),
+            "the note belongs on both the jobs table and its run-history expansion"
+        );
     }
 
     #[tokio::test]

@@ -1427,10 +1427,16 @@ async function viewJobs() {
       // failure, and 'never' still means the job has no recorded run at all.
       status: j.last_status == null ? 'never' : j.last_status,
       error: j.last_error || '',
+      // A successful run that did less than the whole of its work says so here
+      // — the currency import that skipped the credential-gated ISO 24165 half
+      // (its DTIF credentials are optional by design, so the run is still ok).
+      // Without it a half-import read exactly like a complete one: ok, no
+      // error, nothing to suggest half the reference data was never fetched.
+      note: j.last_note || '',
       _runs: j.runs || [],
     };
   });
-  const cols = ['job', 'description', 'trigger', 'next_run', 'last_run', 'status', 'error'];
+  const cols = ['job', 'description', 'trigger', 'next_run', 'last_run', 'status', 'note', 'error'];
   const table = filterableTable(rows, cols, {
     statusField: 'status',
     // Expand a job to its stored run history (the server keeps a bounded
@@ -1445,12 +1451,13 @@ async function viewJobs() {
           // beside it is what says so.
           finished_at: r.finished_at || '',
           status: r.status,
+          note: r.note || '',
           error: r.error || '',
         };
       });
       return {
         rows: runs,
-        cols: ['started_at', 'finished_at', 'status', 'error'],
+        cols: ['started_at', 'finished_at', 'status', 'note', 'error'],
         opts: { statusField: 'status' },
       };
     },
@@ -1474,7 +1481,7 @@ async function viewJobs() {
   });
   setMain(el('div', null, [
     el('h2', null, 'Jobs'),
-    el('p', { class: 'view-desc' }, 'Trigger maintenance jobs on demand, and see when each is next due and when it last ran (and any error). Expand a job to see its recent run history. A job marked scheduled also runs automatically on its cron schedule, so running it here is for retries or missed runs; one marked manual only is a one-off repair that has no schedule and runs only from here \u2014 it showing never is expected, not a missed run.'),
+    el('p', { class: 'view-desc' }, 'Trigger maintenance jobs on demand, and see when each is next due and when it last ran (and any error). A run that succeeded while doing less than the whole of its work \u2014 the currency import without DTIF credentials, which imports the ISO 4217 fiat list and skips the ISO 24165 digital tokens \u2014 stays ok and says so in the Note column, so a half-import does not read as a complete one. Expand a job to see its recent run history. A job marked scheduled also runs automatically on its cron schedule, so running it here is for retries or missed runs; one marked manual only is a one-off repair that has no schedule and runs only from here \u2014 it showing never is expected, not a missed run.'),
     table,
   ]));
 }

@@ -17,9 +17,23 @@ use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
 
-/// A unit of scheduled work. Each call runs the job once, returning `Ok(())` on
-/// success or a human-readable error. Jobs do their own detailed INFO logging.
-type JobFuture = Pin<Box<dyn Future<Output = Result<(), String>> + Send>>;
+/// What one run of a job returns: `Ok(None)` for a run that did the whole of
+/// its work, `Ok(Some(note))` for one that succeeded while doing **less** than
+/// that and says which part it passed over, or `Err(message)` for a failure.
+///
+/// The middle case exists because a green Jobs screen is the operator's
+/// evidence that a job's work is done, and one job's work is legitimately
+/// partial: the currency import skips the credential-gated ISO 24165 half when
+/// no DTIF credentials are configured, and reported that as an unqualified
+/// success with the gap only in a WARN (SCENARIOS T-09). The note is recorded
+/// against the run (`job_runs.note`) and shown beside its status — the run
+/// stays a success, it just stops reading as a complete one. Failing such a run
+/// instead was considered and rejected: the credentials are optional by design.
+pub type JobOutcome = Result<Option<String>, String>;
+
+/// A unit of scheduled work. Each call runs the job once, returning a
+/// [`JobOutcome`]. Jobs do their own detailed INFO logging.
+type JobFuture = Pin<Box<dyn Future<Output = JobOutcome> + Send>>;
 type Job = Arc<dyn Fn(JobParams) -> JobFuture + Send + Sync>;
 
 /// Caller-supplied parameters for a manual job trigger, taken from the
@@ -77,7 +91,7 @@ impl RegisteredJob {
     pub(super) fn from_fn<F, Fut>(trigger: JobTrigger, work: F) -> Arc<Self>
     where
         F: Fn(JobParams) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<(), String>> + Send + 'static,
+        Fut: Future<Output = JobOutcome> + Send + 'static,
     {
         Arc::new(Self {
             work: Arc::new(move |params| Box::pin(work(params))),
@@ -98,7 +112,7 @@ pub type JobRegistry = Arc<HashMap<String, Arc<RegisteredJob>>>;
 fn register<F, Fut>(jobs: &mut HashMap<String, Arc<RegisteredJob>>, name: &str, work: F)
 where
     F: Fn(JobParams) -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = Result<(), String>> + Send + 'static,
+    Fut: Future<Output = JobOutcome> + Send + 'static,
 {
     jobs.insert(
         name.to_string(),
@@ -113,7 +127,7 @@ where
 fn register_manual<F, Fut>(jobs: &mut HashMap<String, Arc<RegisteredJob>>, name: &str, work: F)
 where
     F: Fn(JobParams) -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = Result<(), String>> + Send + 'static,
+    Fut: Future<Output = JobOutcome> + Send + 'static,
 {
     jobs.insert(
         name.to_string(),
@@ -149,6 +163,7 @@ pub fn registry(
                     params.suffix.as_deref(),
                 )
                 .await
+                .map(|()| None)
                 .map_err(|e| e.to_string())
             }
         }
@@ -163,7 +178,7 @@ pub fn registry(
                     .await
                     .map_err(|e| e.to_string())?;
                 tracing::info!(imported = summary.imported, "MIC registry import complete");
-                Ok(())
+                Ok(None)
             }
         }
     });
@@ -176,8 +191,19 @@ pub fn registry(
                 let summary = crate::entities::currencies::run_import(&pool)
                     .await
                     .map_err(|e| e.to_string())?;
-                tracing::info!(imported = summary.imported, "currency import complete");
-                Ok(())
+                // Per feed, not one total: an import that fetched only the free
+                // ISO 4217 half is the ordinary state of a server without DTIF
+                // credentials, and used to log a bare `imported = 178` that read
+                // exactly like a complete run (SCENARIOS T-09).
+                tracing::info!(
+                    fiat = ?summary.fiat,
+                    tokens = ?summary.tokens,
+                    skipped = ?summary.skipped,
+                    "currency import complete"
+                );
+                // A skipped feed qualifies the run's success, so the Jobs screen
+                // shows a half-import as one instead of a clean `ok`.
+                Ok(summary.incomplete_note())
             }
         }
     });
@@ -193,6 +219,7 @@ pub fn registry(
                     chrono::Utc::now(),
                 )
                 .await
+                .map(|()| None)
             }
         }
     });
@@ -207,7 +234,11 @@ pub fn registry(
         let pool = pool.clone();
         move |_| {
             let pool = pool.clone();
-            async move { crate::entities::closing_price::run_rebase(&pool).await }
+            async move {
+                crate::entities::closing_price::run_rebase(&pool)
+                    .await
+                    .map(|()| None)
+            }
         }
     });
 
@@ -224,7 +255,11 @@ pub fn registry(
         let pool = pool.clone();
         move |_| {
             let pool = pool.clone();
-            async move { crate::entities::trade::run_recompute(&pool).await }
+            async move {
+                crate::entities::trade::run_recompute(&pool)
+                    .await
+                    .map(|()| None)
+            }
         }
     });
 
@@ -232,7 +267,11 @@ pub fn registry(
         let pool = pool.clone();
         move |_| {
             let pool = pool.clone();
-            async move { crate::reports::snapshot::run_snapshot_job(&pool, chrono::Utc::now()).await }
+            async move {
+                crate::reports::snapshot::run_snapshot_job(&pool, chrono::Utc::now())
+                    .await
+                    .map(|()| None)
+            }
         }
     });
 
@@ -252,8 +291,8 @@ pub fn registry(
             // import itself succeeded and is idempotent).
             match crate::entities::rba_fx_rate::true_up_provisional_snapshots(&pool, &summary).await
             {
-                Ok(None) => Ok(()),
-                Ok(Some(t)) if t.blocked.is_empty() => Ok(()),
+                Ok(None) => Ok(None),
+                Ok(Some(t)) if t.blocked.is_empty() => Ok(None),
                 Ok(Some(t)) => Err(format!(
                     "import ok ({} new rates); provisional snapshot true-up blocked: {}",
                     summary.inserted,
