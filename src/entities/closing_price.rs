@@ -2055,6 +2055,7 @@ pub async fn resolve_live_prices(
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ListParams {
     listing_id: Option<i64>,
     from: Option<NaiveDate>,
@@ -2062,12 +2063,14 @@ struct ListParams {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct FetchBody {
     listing_id: i64,
     price_date: NaiveDate,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct BackfillBody {
     listing_id: i64,
     from: NaiveDate,
@@ -2084,6 +2087,7 @@ struct BackfillBody {
 /// A price entered by hand for a day the provider cannot serve, with the
 /// provenance that makes the figure auditable later.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ManualPriceBody {
     /// Closing price in the listing's quote currency (never AUD).
     price: Decimal,
@@ -2097,6 +2101,7 @@ struct ManualPriceBody {
 /// Which listing's superseded price rows to clear. No date range: the span
 /// is the listing's own `unpriced_before` declaration and nothing else.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ClearBody {
     listing_id: i64,
 }

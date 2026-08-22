@@ -130,6 +130,7 @@ pub struct NewAttachment<'a> {
 /// `trade_id` filter) also returns the linked source record's attachments —
 /// see [`db_list_with_linked`].
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ListQuery {
     pub trade_id: Option<i64>,
     pub income_id: Option<i64>,
@@ -440,6 +441,7 @@ async fn read_owner_field(
 /// in place (used by the Attachments report's View link) — any other value
 /// is rejected rather than silently falling back.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ContentQuery {
     disposition: Option<String>,
 }

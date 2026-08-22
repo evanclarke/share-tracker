@@ -40,6 +40,7 @@ pub struct HoldingAccount {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HoldingAccountBody {
     pub name: String,
 }

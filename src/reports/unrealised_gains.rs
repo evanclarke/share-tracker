@@ -50,6 +50,7 @@ pub struct UnrealisedGain {
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UnrealisedGainsRequest {
     /// Current price per unit by listing id, expected in AUD so it lines up with
     /// the AUD-denominated cost base. An explicit price overrides a

@@ -81,6 +81,7 @@ pub struct InvestmentExpense {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct InvestmentExpenseBody {
     pub date_incurred: NaiveDate,
     pub expense_type: ExpenseType,

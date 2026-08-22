@@ -57,6 +57,7 @@ pub fn router() -> Router<SqlitePool> {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TaxReportRequest {
     pub tax_year: i32,
 }

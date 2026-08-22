@@ -96,6 +96,7 @@ pub struct Listing {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ListingBody {
     #[serde(default)]
     pub exchange_mic: Option<String>,

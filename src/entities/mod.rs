@@ -295,6 +295,11 @@ mod tests {
         /// parcel allocations). Null for the plain CRUD entities, which re-PUT
         /// what they read verbatim.
         graft: serde_json::Value,
+        /// Read fields the write body does not own, *beyond* the shared
+        /// [`test_support::NOT_CLIENT_WRITABLE`] set: the key columns an
+        /// entity spells other than `id`, and the trade columns `/sells`
+        /// does not share with `/trades`.
+        read_only: &'static [&'static str],
     }
 
     impl RoundTrip {
@@ -304,6 +309,7 @@ mod tests {
                 get_path: None,
                 create,
                 graft: serde_json::Value::Null,
+                read_only: &[],
             }
         }
 
@@ -314,6 +320,11 @@ mod tests {
 
         fn grafting(mut self, graft: serde_json::Value) -> Self {
             self.graft = graft;
+            self
+        }
+
+        fn read_only(mut self, fields: &'static [&'static str]) -> Self {
+            self.read_only = fields;
             self
         }
     }
@@ -374,11 +385,13 @@ mod tests {
                     "timezone": "Australia/Sydney", "settlement_days": 2,
                     "close_time": "16:00",
                 }),
-            ),
+            )
+            .read_only(&["mic"]),
             RoundTrip::new(
                 "/exchange_holidays/XASX/2024-12-27",
                 json!({ "name": "Test Holiday" }),
-            ),
+            )
+            .read_only(&["mic", "holiday_date"]),
             RoundTrip::new(
                 "/listings/2",
                 json!({
@@ -501,12 +514,20 @@ mod tests {
             .read_at("/trades/10")
             .grafting(json!({
                 "allocations": [{ "purchase_trade_id": 1, "quantity_allocated": "60" }],
-            })),
+            }))
+            // A trade read carries three columns `/sells` does not accept:
+            // the type (the route says Sell) and the DRP residual chain.
+            .read_only(&[
+                "trade_type",
+                "residual_brought_forward",
+                "residual_carried_forward",
+                "residual_paid_out",
+            ]),
         ]
     }
 
-    /// What a GET hands back must be exactly what a PUT accepts, and storing
-    /// it again must not move it.
+    /// What a GET hands back must be exactly what a PUT accepts — bar the
+    /// columns the write does not own — and storing it again must not move it.
     ///
     /// This is the one bug class the `db_*` tests structurally cannot reach:
     /// they build the body struct in Rust and never cross the JSON boundary,
@@ -535,7 +556,27 @@ mod tests {
             );
             let first: serde_json::Value = client.get_json(get_path).await;
 
-            let mut replay = first.clone();
+            // The read carries what the write does not own — the key in the
+            // URL, and the server-owned provenance/derived columns. Since
+            // every request body denies unknown fields (SCENARIOS V-a) those
+            // are refused, naming the first of them, rather than accepted and
+            // ignored: a client that thinks it is editing provenance is told
+            // otherwise.
+            let verbatim = client.put(case.put_path, &first).await;
+            let (status, body) = verbatim.status_and_body();
+            assert_eq!(
+                status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "PUT {} accepted a read body carrying columns it does not own",
+                case.put_path
+            );
+            assert!(
+                body.contains("unknown field"),
+                "PUT {} rejected the read body for another reason: {body}",
+                case.put_path
+            );
+
+            let mut replay = crate::test_support::writable_body(&first, case.read_only);
             if let Some(graft) = case.graft.as_object() {
                 let replay = replay.as_object_mut().expect("read body is a JSON object");
                 for (key, value) in graft {

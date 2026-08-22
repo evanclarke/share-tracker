@@ -441,6 +441,53 @@ pub fn unreachable_url(path: &str) -> String {
     format!("http://127.0.0.1:{port}/{path}")
 }
 
+/// The columns a `GET` hands back that no request body accepts: the row's own
+/// id, and the server-owned provenance and derived columns (which operation
+/// created the trade, how its settlement date was arrived at, which trade a
+/// distribution was reinvested into). Every request body denies unknown
+/// fields (SCENARIOS V-a), so a read body is now *refused* — naming the
+/// field — rather than silently accepted with these ignored.
+///
+/// Listed here once because three tests replay a read as a write
+/// (`entities::tests::what_a_get_returns_can_be_put_back_unchanged` and the
+/// two GST-inclusive round trips), and because the list is the answer to
+/// "what does the write not own": a new server-owned column belongs here, and
+/// a read field that is *not* server-owned must never be added — the round
+/// trip would then stop noticing that the write rejects it.
+pub const NOT_CLIENT_WRITABLE: &[&str] = &[
+    // The key: the URL carries it.
+    "id",
+    // Trade provenance — which operation created the parcel or closing Sell.
+    "inheritance_id",
+    "ess_statement_id",
+    "transfer_id",
+    "rights_action_id",
+    "buyback_action_id",
+    "scrip_action_id",
+    "demerger_action_id",
+    "worthless_action_id",
+    // Derived on the trade: how the settlement date was arrived at, and the
+    // pre-CGT-testing date an inherited parcel inherits from the deceased.
+    "settlement_date_source",
+    "deemed_acquisition_date",
+    // Links written by the operation that created them, never by a body.
+    "reinvestment_trade_id",
+    "buyback_trade_id",
+    "vest_trade_id",
+];
+
+/// A read body with [`NOT_CLIENT_WRITABLE`] (plus `also`, for the key columns
+/// an entity spells differently and the fields one route's body does not
+/// share with another's) removed — what a `PUT` of that read accepts.
+pub fn writable_body(read: &serde_json::Value, also: &[&str]) -> serde_json::Value {
+    let mut body = read.clone();
+    let object = body.as_object_mut().expect("a read body is a JSON object");
+    for field in NOT_CLIENT_WRITABLE.iter().chain(also.iter()) {
+        object.remove(*field);
+    }
+    body
+}
+
 /// Listing fixture: ASX-listed AUD ETF `T{id}` named `Test {id}`.
 pub fn listing(id: i64) -> ListingBuilder {
     ListingBuilder {

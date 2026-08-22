@@ -282,6 +282,7 @@ impl Trade {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TradeBody {
     pub trade_type: TradeType,
     pub date: NaiveDate,

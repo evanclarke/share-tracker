@@ -160,6 +160,7 @@ pub struct Inheritance {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct InheritanceBody {
     pub listing_id: i64,
     /// Defaults to the seeded default holding account when omitted.

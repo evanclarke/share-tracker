@@ -369,6 +369,7 @@ impl Income {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct IncomeBody {
     pub listing_id: i64,
     pub date_paid: NaiveDate,
@@ -1652,9 +1653,11 @@ mod tests {
 
     #[tokio::test]
     async fn api_reinvestment_link_is_not_client_writable() {
-        // The DRP link is provenance: a body value is ignored (not stored,
-        // not an error), and an edit of a reinvested row preserves the
-        // existing link even though the body never carries the field.
+        // The DRP link is provenance: `IncomeBody` does not carry the field,
+        // so a body that names it is *refused* naming it (the body struct
+        // denies unknown fields — SCENARIOS V-a) rather than silently
+        // ignored, and an edit of a reinvested row preserves the existing
+        // link even though the body never carries it.
         let pool = test_pool().await;
         insert_test_listing(&pool).await;
         let trade_id = insert_test_trade(&pool).await;
@@ -1671,12 +1674,32 @@ mod tests {
                 }),
             )
             .await;
+        let (status, body) = resp.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            body.contains("unknown field `reinvestment_trade_id`"),
+            "the refusal must name the field: {body}"
+        );
+        assert!(
+            db_get(&pool, 1).await.unwrap().is_none(),
+            "the refused write must have stored nothing"
+        );
+
+        // The same row without the provenance field is accepted, and the link
+        // stays unset: nothing about the refusal above blocks a legitimate write.
+        let resp = app
+            .put(
+                "/income/1",
+                &serde_json::json!({
+                    "listing_id": 1,
+                    "date_paid": "2024-03-15",
+                    "franked_amount": 70.0
+                }),
+            )
+            .await;
         assert_eq!(resp.status, StatusCode::NO_CONTENT);
         let got = db_get(&pool, 1).await.unwrap().unwrap();
-        assert_eq!(
-            got.reinvestment_trade_id, None,
-            "a client-supplied link must be ignored"
-        );
+        assert_eq!(got.reinvestment_trade_id, None);
 
         // Link it the way the reinvest operation does, then edit the row —
         // the link must survive (the old contract silently cleared it). The

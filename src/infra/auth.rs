@@ -335,6 +335,7 @@ fn unauthorized_response(state: &AuthState, headers: &HeaderMap) -> Response {
 // ---------------------------------------------------------------------------
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct LoginForm {
     username: String,
     password: String,

@@ -57,6 +57,7 @@ pub struct WashSaleAlert {
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WashSalesRequest {
     /// Days either side of the sale to scan; defaults to
     /// [`DEFAULT_WINDOW_DAYS`].

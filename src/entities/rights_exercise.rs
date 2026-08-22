@@ -48,6 +48,7 @@ use serde::Deserialize;
 use sqlx::{Row, SqlitePool};
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExerciseBody {
     /// Exercise date — the new parcel's acquisition date. Must not precede
     /// the issue's record date.

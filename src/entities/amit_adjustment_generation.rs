@@ -43,6 +43,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GenerateBody {
     /// Delete the statement's existing adjustments and regenerate them in the
     /// same transaction. Without it, a statement that already has adjustments

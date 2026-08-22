@@ -832,6 +832,7 @@ pub async fn regenerate_provisional(
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ListParams {
     report: Option<ReportKind>,
     from: Option<NaiveDate>,
@@ -839,6 +840,7 @@ struct ListParams {
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct GenerateBody {
     /// The snapshot date; defaults to the latest fully-valuable date.
     date: Option<NaiveDate>,
@@ -900,6 +902,7 @@ impl From<GenerateError> for ApiError {
 /// The optional `{ "from", "to" }` body for `regenerate_all` — either or both
 /// omitted default per [`default_regenerate_range`].
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RegenerateBody {
     from: Option<NaiveDate>,
     to: Option<NaiveDate>,

@@ -100,6 +100,7 @@ pub struct AmmaStatement {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AmmaStatementBody {
     pub listing_id: i64,
     pub tax_year_end_date: NaiveDate,

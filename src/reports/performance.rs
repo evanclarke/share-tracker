@@ -115,6 +115,7 @@ pub struct HoldingPerformance {
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PerformanceRequest {
     /// Current price per unit by listing id, expected in AUD so it lines up
     /// with the AUD-denominated flows. An explicit price overrides a

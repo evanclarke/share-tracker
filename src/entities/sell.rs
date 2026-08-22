@@ -26,12 +26,14 @@ use serde::Deserialize;
 use sqlx::{Row, SqlitePool};
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AllocationInput {
     pub purchase_trade_id: i64,
     pub quantity_allocated: Decimal,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SellBody {
     pub date: NaiveDate,
     #[serde(default)]
@@ -1625,15 +1627,28 @@ mod tests {
                 .get("/trades/2")
                 .await;
             assert_eq!(resp.status, StatusCode::OK);
-            let mut body: serde_json::Value = resp.json();
-            let read_brokerage: Decimal = body["brokerage"].as_str().unwrap().parse().unwrap();
+            let read: serde_json::Value = resp.json();
+            let read_brokerage: Decimal = read["brokerage"].as_str().unwrap().parse().unwrap();
             assert_eq!(
                 read_brokerage,
                 "0.99".parse::<Decimal>().unwrap(),
                 "read is inclusive (pass {pass})"
             );
 
-            // Re-PUT the body verbatim, plus the allocations PUT /sells needs.
+            // Re-PUT the body, minus what a trade read carries that a Sell
+            // write does not own (the id and provenance columns, the type the
+            // route already says, and the DRP residual chain — all denied
+            // rather than ignored, SCENARIOS V-a) and plus the allocations
+            // PUT /sells needs.
+            let mut body = crate::test_support::writable_body(
+                &read,
+                &[
+                    "trade_type",
+                    "residual_brought_forward",
+                    "residual_carried_forward",
+                    "residual_paid_out",
+                ],
+            );
             body["allocations"] =
                 serde_json::json!([{ "purchase_trade_id": 1, "quantity_allocated": "100" }]);
             let (status, detail) = put_sell_json(&pool, 2, body).await;

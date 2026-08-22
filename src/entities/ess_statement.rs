@@ -125,6 +125,7 @@ pub struct EssStatement {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EssStatementBody {
     pub listing_id: i64,
     #[serde(default = "crate::entities::holding_account::default_holding_account_id")]

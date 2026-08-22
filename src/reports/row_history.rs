@@ -187,6 +187,7 @@ pub const DEFAULT_BROWSE_LIMIT: i64 = 100;
 pub const MAX_BROWSE_LIMIT: i64 = 1000;
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RowHistoryRequest {
     /// One of [`AUDITED_TABLES`]; anything else is rejected 422. Required
     /// alongside `row_id` (a row id means nothing without the table it is an

@@ -95,12 +95,14 @@ fn sale_from_row(row: &SqliteRow) -> Result<RightsSale, sqlx::Error> {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AllocationInput {
     pub purchase_trade_id: i64,
     pub units: Decimal,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SellRightsBody {
     /// Sale (or lapse) date. Must not precede the issue's record date.
     pub date: NaiveDate,

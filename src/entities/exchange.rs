@@ -23,6 +23,7 @@ pub struct Exchange {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExchangeBody {
     pub name: String,
     pub country: String,

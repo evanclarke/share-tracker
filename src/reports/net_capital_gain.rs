@@ -1026,6 +1026,7 @@ async fn net_capital_gain_export_handler(
 /// either explicit `allocations` or a named optimiser `strategy` — exactly
 /// one of the two.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WhatIfRequest {
     pub listing_id: i64,
     /// Restricts strategy-derived (and validates explicit) allocations to
@@ -1043,6 +1044,7 @@ pub struct WhatIfRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WhatIfAllocation {
     pub purchase_trade_id: i64,
     pub units: Decimal,

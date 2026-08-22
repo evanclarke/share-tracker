@@ -299,6 +299,7 @@ enum ActionType {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CorporateActionBody {
     action_type: ActionType,
     pub listing_id: i64,

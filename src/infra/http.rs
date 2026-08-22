@@ -776,4 +776,331 @@ mod tests {
         let api: ApiError = sqlx::Error::Decode("invalid decimal in column quantity".into()).into();
         assert!(matches!(api, ApiError::Internal(_)));
     }
+
+    // -----------------------------------------------------------------------
+    // Request bodies deny unknown fields
+    // -----------------------------------------------------------------------
+
+    /// Request-shaped types that are deliberately **permissive**, each with
+    /// the reason it must stay that way. A type belongs here only if denying
+    /// unknown fields would break something real:
+    ///
+    /// - a struct deserialised from an **external feed** (a provider response,
+    ///   the ISO registries) — the publisher adding a field must not fail the
+    ///   import;
+    /// - a struct that only ever decodes a **response** (a report row read
+    ///   back out of `report_snapshots`, a summary a test decodes) — the
+    ///   producer is this server, and an older stored payload may carry a
+    ///   field the current struct has since dropped;
+    /// - a struct with a `#[serde(flatten)]` field — serde rejects the
+    ///   combination at compile time.
+    ///
+    /// It is empty, and that is the point: neither of the first two kinds is
+    /// reachable from a handler's extractor (feeds arrive as a `String` body
+    /// this server parses itself; response types are only ever serialised on
+    /// the way out), and no request body flattens. An entry here is a claim
+    /// that a *request* body may silently drop a misspelt field, which
+    /// SCENARIOS V-a is about not doing.
+    const UNKNOWN_FIELDS_ALLOWED: &[(&str, &str, &str)] = &[];
+
+    /// One `Deserialize`-deriving type, as the source scan sees it.
+    struct DeserializedType {
+        /// Path relative to `src`, with `/` separators.
+        file: String,
+        name: String,
+        line: usize,
+        /// Carries `#[serde(deny_unknown_fields)]`.
+        denies: bool,
+        /// Whether it has named fields at all: a field-less enum
+        /// (`TradeType`, `WorthlessEvent`) has nothing to deny, so the
+        /// attribute would be a no-op on it.
+        has_fields: bool,
+        /// The type names its fields name, for the walk into nested bodies
+        /// (a Sell body's `allocations`, a what-if request's rows).
+        field_types: Vec<String>,
+    }
+
+    /// Every `.rs` file under `src`, path relative to `src`.
+    fn source_files() -> Vec<(String, String)> {
+        let src = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut found = Vec::new();
+        let mut walk = vec![src.clone()];
+        while let Some(dir) = walk.pop() {
+            for entry in std::fs::read_dir(&dir)
+                .expect("src should be readable")
+                .flatten()
+            {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk.push(path);
+                } else if path.extension().is_some_and(|x| x == "rs") {
+                    let rel = path
+                        .strip_prefix(&src)
+                        .expect("under src")
+                        .components()
+                        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                        .collect::<Vec<_>>()
+                        .join("/");
+                    let body = std::fs::read_to_string(&path).expect("source should be readable");
+                    found.push((rel, body));
+                }
+            }
+        }
+        found.sort();
+        found
+    }
+
+    /// The `struct`/`enum` a definition line declares, if it declares one.
+    fn item_name(line: &str) -> Option<String> {
+        let mut tokens = line.split_whitespace();
+        while let Some(token) = tokens.next() {
+            if token == "struct" || token == "enum" {
+                let name: String = tokens
+                    .next()?
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                return (!name.is_empty()).then_some(name);
+            }
+            if !token.starts_with("pub") {
+                return None;
+            }
+        }
+        None
+    }
+
+    /// The capitalised identifiers in `text` — the type names a field names.
+    fn type_names_in(text: &str) -> Vec<String> {
+        let mut names = Vec::new();
+        let mut word = String::new();
+        for c in text.chars() {
+            if c.is_alphanumeric() || c == '_' {
+                word.push(c);
+            } else {
+                if word.starts_with(char::is_uppercase) {
+                    names.push(std::mem::take(&mut word));
+                } else {
+                    word.clear();
+                }
+            }
+        }
+        if word.starts_with(char::is_uppercase) {
+            names.push(word);
+        }
+        names
+    }
+
+    /// Every type in `src` that derives `Deserialize`.
+    fn deserialized_types() -> Vec<DeserializedType> {
+        let mut types = Vec::new();
+        for (file, body) in source_files() {
+            let lines: Vec<&str> = body.lines().collect();
+            for (n, line) in lines.iter().enumerate() {
+                if !line.contains("derive(") || !line.contains("Deserialize") {
+                    continue;
+                }
+                // The attributes between the derive and the item it decorates:
+                // `deny_unknown_fields` is one of them.
+                let Some(start) =
+                    (n..lines.len().min(n + 15)).find(|i| item_name(lines[*i]).is_some())
+                else {
+                    continue;
+                };
+                let name = item_name(lines[start]).expect("just matched");
+                let denies = lines[n..start]
+                    .iter()
+                    .any(|l| l.contains("deny_unknown_fields"));
+
+                // The item's own braces bound its fields.
+                let mut depth = 0i32;
+                let mut opened = false;
+                let mut fields = Vec::new();
+                let mut has_fields = false;
+                for line in &lines[start..] {
+                    let code = line.split("//").next().unwrap_or("");
+                    depth += code.matches('{').count() as i32;
+                    if code.contains('{') {
+                        opened = true;
+                    }
+                    depth -= code.matches('}').count() as i32;
+                    let trimmed = code.trim_start();
+                    // A named field: `name: Type`, not a `::` path segment.
+                    if let Some(colon) = trimmed.find(':')
+                        && !trimmed.starts_with('#')
+                        && trimmed[colon..].starts_with(": ")
+                    {
+                        has_fields = true;
+                        fields.extend(type_names_in(&trimmed[colon + 1..]));
+                    }
+                    if opened && depth <= 0 {
+                        break;
+                    }
+                    if !opened && code.trim_end().ends_with(';') {
+                        break;
+                    }
+                }
+                types.push(DeserializedType {
+                    file: file.clone(),
+                    name,
+                    line: start + 1,
+                    denies,
+                    has_fields,
+                    field_types: fields,
+                });
+            }
+        }
+        types
+    }
+
+    /// The types axum deserialises straight off an inbound request: whatever
+    /// a handler takes as `Json<T>`, `Query<T>` or `Form<T>` in *parameter*
+    /// position (the return side, after `->`, is the response).
+    fn extractor_types() -> Vec<String> {
+        let mut found = Vec::new();
+        for (_, body) in source_files() {
+            for line in body.lines() {
+                let code = line.trim_start();
+                if code.starts_with("//") {
+                    continue;
+                }
+                // Only the parameter list: `-> Result<Json<Report>>` is output.
+                let params = code.split("->").next().unwrap_or("");
+                for extractor in ["Json<", "Query<", "Form<"] {
+                    for (at, _) in params.match_indices(extractor) {
+                        let rest = &params[at + extractor.len()..];
+                        let name: String = rest
+                            .chars()
+                            .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == ':')
+                            .collect();
+                        if let Some(name) = name.rsplit("::").next()
+                            && !name.is_empty()
+                        {
+                            found.push(name.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        found
+    }
+
+    /// Every HTTP request body refuses a field it does not recognise, so a
+    /// misspelt name is a `422` naming it instead of a silently-ignored
+    /// default (SCENARIOS V-a: `frankingcredits` on an AMMA statement stored
+    /// A$0 of franking credits under a `204`).
+    ///
+    /// Nothing in the type system asks for `#[serde(deny_unknown_fields)]`, so
+    /// this enumerates the bodies **reachable from a handler** — every type a
+    /// `Json<T>`/`Query<T>`/`Form<T>` extractor names, and transitively every
+    /// type their fields name — and requires the attribute on each one that
+    /// has fields to deny. A new request body is therefore covered without its
+    /// author having to remember, and a body that must stay permissive says so
+    /// in [`UNKNOWN_FIELDS_ALLOWED`] with its reason.
+    ///
+    /// It lives here, in the module that owns the HTTP request/response
+    /// contract (`ApiError` and the wording every rejection reaches the user
+    /// with), because that is what the attribute is part of: the rejection an
+    /// unrecognised field earns.
+    #[test]
+    fn every_request_body_denies_unknown_fields() {
+        let types = deserialized_types();
+        assert!(
+            types.len() > 100,
+            "the Deserialize scan found only {} types — it has stopped parsing the tree",
+            types.len()
+        );
+
+        // Reachable from a handler: the extractor types, then whatever their
+        // fields name (a Sell body's allocation rows, a what-if request's).
+        let mut queue = extractor_types();
+        let mut reachable: Vec<String> = Vec::new();
+        while let Some(name) = queue.pop() {
+            if reachable.contains(&name) {
+                continue;
+            }
+            if !types.iter().any(|t| t.name == name) {
+                continue;
+            }
+            reachable.push(name.clone());
+            for found in types.iter().filter(|t| t.name == name) {
+                queue.extend(found.field_types.iter().cloned());
+            }
+        }
+
+        // A parse that quietly found nothing would pass every assertion below,
+        // so pin the shape of what it must have found.
+        for expected in [
+            "AmmaStatementBody",
+            "TradeBody",
+            "IncomeBody",
+            "SellBody",
+            "AllocationInput",
+            "RowHistoryRequest",
+            "ListQuery",
+        ] {
+            assert!(
+                reachable.iter().any(|n| n == expected),
+                "the handler scan did not reach {expected} — it has stopped finding extractors"
+            );
+        }
+        assert!(
+            reachable.len() >= 40,
+            "only {} request types reached from a handler; there are more than that",
+            reachable.len()
+        );
+
+        // Reachable from a handler, or named like a request body even if the
+        // scan cannot see the handler that takes it (a body parsed by hand out
+        // of a `String` payload, say).
+        let required: Vec<&DeserializedType> = types
+            .iter()
+            .filter(|t| {
+                t.has_fields
+                    && (reachable.contains(&t.name)
+                        || ["Body", "Request", "Params", "Query", "Form"]
+                            .iter()
+                            .any(|suffix| t.name.ends_with(suffix)))
+            })
+            .collect();
+
+        let mut offenders = Vec::new();
+        let mut excused: Vec<&str> = Vec::new();
+        for found in &required {
+            let allowed = UNKNOWN_FIELDS_ALLOWED
+                .iter()
+                .find(|(file, name, _)| *file == found.file && *name == found.name);
+            match (found.denies, allowed) {
+                (true, Some((file, name, _))) => offenders.push(format!(
+                    "{file}:{}: {name} denies unknown fields and is also excused — drop the \
+                     UNKNOWN_FIELDS_ALLOWED entry",
+                    found.line
+                )),
+                (false, None) => offenders.push(format!(
+                    "{}:{}: {} is deserialised from a request and does not deny unknown fields",
+                    found.file, found.line, found.name
+                )),
+                (false, Some((_, name, _))) => excused.push(name),
+                (true, None) => {}
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "add #[serde(deny_unknown_fields)] so a misspelt field is a 422 naming it rather \
+             than a silently-ignored default — or, if the type must stay permissive, name it in \
+             UNKNOWN_FIELDS_ALLOWED with the reason:\n{}",
+            offenders.join("\n")
+        );
+        // …and the excuse list may not rot: an entry naming a type that is no
+        // longer permissive, or no longer there, has to go.
+        let stale: Vec<&str> = UNKNOWN_FIELDS_ALLOWED
+            .iter()
+            .filter(|(_, name, _)| !excused.contains(name))
+            .map(|(_, name, _)| *name)
+            .collect();
+        assert!(
+            stale.is_empty(),
+            "UNKNOWN_FIELDS_ALLOWED names types that are no longer permissive request \
+             bodies — drop them: {stale:?}"
+        );
+    }
 }

@@ -79,6 +79,7 @@ pub struct DrpEnrolment {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DrpEnrolmentBody {
     pub listing_id: i64,
     /// Defaults to the seeded default holding account when omitted.

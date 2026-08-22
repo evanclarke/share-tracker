@@ -36,6 +36,7 @@ pub struct AmitAdjustment {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AmitAdjustmentBody {
     pub amma_statement_id: i64,
     pub trade_id: i64,

@@ -89,6 +89,7 @@ pub struct FrankingAtRiskAlert {
 /// A contemplated sale to test against every franked dividend of the listing:
 /// would selling `units` on `sale_date` disqualify credits?
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WhatIfRequest {
     pub listing_id: i64,
     pub sale_date: NaiveDate,

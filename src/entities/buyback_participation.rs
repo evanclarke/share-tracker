@@ -48,6 +48,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ParticipationBody {
     /// The date of the CGT event — when the company accepts the application
     /// (or the holder accepts a conditional offer). Must not precede the

@@ -48,6 +48,7 @@ use sqlx::SqlitePool;
 use std::collections::{BTreeMap, HashMap};
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PeriodRequest {
     pub from: NaiveDate,
     pub to: NaiveDate,

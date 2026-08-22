@@ -35,6 +35,7 @@ pub struct ExchangeHoliday {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExchangeHolidayBody {
     pub name: String,
 }

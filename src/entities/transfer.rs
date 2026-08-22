@@ -69,6 +69,7 @@ pub struct Transfer {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TransferBody {
     pub listing_id: i64,
     pub date: NaiveDate,

@@ -69,6 +69,7 @@ pub struct InterestIncome {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct InterestIncomeBody {
     pub date_paid: NaiveDate,
     #[serde(default)]

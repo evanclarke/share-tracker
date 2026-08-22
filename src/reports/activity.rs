@@ -70,6 +70,7 @@ pub struct ActivityEvent {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ActivityRequest {
     pub listing_id: i64,
     /// Current price per unit in AUD for the holding summary. Absent → the

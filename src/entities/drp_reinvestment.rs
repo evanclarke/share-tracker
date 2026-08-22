@@ -85,6 +85,7 @@ use serde::Deserialize;
 use sqlx::SqlitePool;
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReinvestBody {
     /// Per-share price the distribution is reinvested at.
     pub reinvestment_price: Decimal,

@@ -21,6 +21,31 @@ fn known_limitations() -> &'static str {
         .expect("split always yields at least one part")
 }
 
+/// Docs-sync pin for the strict decoding of request bodies (SCENARIOS V-a):
+/// the refusal has its own section, the `422` list points at it, and the one
+/// consequence a client has to know about — a read body is no longer PUT-able
+/// verbatim — is written down beside it. The behaviour itself is pinned by
+/// `infra::http::tests::every_request_body_denies_unknown_fields`; this is the
+/// documentation half.
+#[test]
+fn unrecognised_body_fields_documented() {
+    assert!(API_MD.contains("## Unrecognised body fields"));
+    assert!(API_MD.contains("Every request body is decoded strictly"));
+    assert!(API_MD.contains("refused `422` naming it"));
+    assert!(API_MD.contains("a misspelt name is a rejection, not a silently-ignored default"));
+    // The `422` row of the response-code table points at the section.
+    assert!(API_MD.contains(
+        "**any field a request body does not recognise** (see [Unrecognised body \
+         fields](#unrecognised-body-fields))"
+    ));
+    // A query string is refused the same way, at the status its extractor
+    // answers with.
+    assert!(API_MD.contains("or an unreadable query string on an endpoint that takes one"));
+    // The consequence for clients.
+    assert!(API_MD.contains("what a `GET` returns cannot be `PUT` back verbatim"));
+    assert!(API_MD.contains("`settlement_date_source`"));
+}
+
 /// Docs-sync pin for the append-only audit trail (2026-07-13 improvement
 /// review): the schema documents the table, its scope decision (which tables
 /// are audited and why the rest are not), and the keep-forever retention

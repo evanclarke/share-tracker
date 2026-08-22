@@ -293,6 +293,7 @@ pub fn disposal_figures(
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OptimiserRequest {
     pub listing_id: i64,
     /// The account the contemplated Sell would happen in — a real Sell's

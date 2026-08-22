@@ -116,6 +116,7 @@ impl CrudEntity for RbaFxRate {
 /// row's (currency, month) is its identity and is not editable, since changing
 /// it would silently re-point every conversion that used it.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CorrectionBody {
     pub rate: Decimal,
 }

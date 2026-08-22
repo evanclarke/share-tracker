@@ -94,6 +94,7 @@ pub struct ListingRename {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RenameBody {
     pub effective_date: NaiveDate,
     pub ticker: String,

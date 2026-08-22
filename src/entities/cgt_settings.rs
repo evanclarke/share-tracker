@@ -30,6 +30,7 @@ pub struct CgtSettings {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CgtSettingsBody {
     pub opening_capital_loss: Decimal,
 }

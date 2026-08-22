@@ -131,7 +131,7 @@ Options offered:
 bodies included, with a test enumerating the bodies reachable from a handler so a new one cannot
 be added without it.
 
-- [ ] Add `#[serde(deny_unknown_fields)]` to every HTTP request-body struct, with the enumerating
+- [x] Add `#[serde(deny_unknown_fields)]` to every HTTP request-body struct, with the enumerating
       test and a `docs/API.md` note that an unrecognised body field is refused.
 
 ## SCENARIOS V-b — reinvesting a DRP distribution out of order builds the residual chain backwards

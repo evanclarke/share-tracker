@@ -1994,7 +1994,11 @@ mod tests {
             );
             assert!(seen.brokerage_includes_gst);
 
-            let body: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+            // Minus the columns a read carries that no write body owns —
+            // the id and the trade's provenance/derived columns, which the
+            // body denies rather than ignores (SCENARIOS V-a).
+            let read: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+            let body = crate::test_support::writable_body(&read, &[]);
             let (status, detail) = put_trade_json(&pool, 1, body).await;
             assert_eq!(status, StatusCode::NO_CONTENT, "pass {pass}: {detail}");
             let t = db_get(&pool, 1).await.unwrap().unwrap();

@@ -42,6 +42,7 @@ pub struct TaxYearSettings {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TaxYearSettingsBody {
     /// Defaults to true so a PUT can state only the ineligible case, and an
     /// omitted field can never silently *remove* a reduction.
