@@ -4,7 +4,7 @@
 //! Lines are `<min> <hour> <dom> <mon> <dow> [timezone] <job-name>`; the
 //! optional timezone is an IANA name pinning the cron expression to that zone.
 
-use super::registry::JobRegistry;
+use super::registry::{JobRegistry, JobTrigger};
 use super::run::run_entry;
 use chrono::{Local, Utc};
 use chrono_tz::Tz;
@@ -108,9 +108,16 @@ pub fn spawn(registry: JobRegistry, pool: SqlitePool, schedule: &str) -> Result<
         }
     }
 
-    // A registered job with no schedule line never runs automatically (only via
-    // POST /jobs/{name}). That is usually an oversight, so warn rather than fail.
-    for name in registry.keys() {
+    // A *scheduled* job with no schedule line never runs automatically (only via
+    // POST /jobs/{name}). That is an oversight — a lost line — so warn rather
+    // than fail. A job registered as `ManualOnly` (a one-off repair, registered
+    // with `register_manual`) is deliberately schedule-less and says nothing:
+    // warning about it every startup would bury the line above, which is the
+    // only one that ever needs acting on (SCENARIOS T-09/schedule).
+    for (name, job) in registry.iter() {
+        if job.trigger == JobTrigger::ManualOnly {
+            continue;
+        }
         if !entries.iter().any(|entry| &entry.name == name) {
             tracing::warn!(
                 job = %name,

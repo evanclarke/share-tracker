@@ -1379,20 +1379,24 @@ const JOB_DESC = {
 
 async function viewJobs() {
   setActiveNav('jobs');
-  // GET /jobs returns each registered job with its last run (started/finished
+  // GET /jobs returns each registered job with how it is triggered
+  // ('scheduled' / 'manual_only') and its last run (started/finished
   // timestamps, success flag, error text), or nulls if it has never run.
   const jobs = await api('GET', '/jobs');
   const rows = jobs.map(function (j) {
     return {
       job: j.name,
       description: JOB_DESC[j.name] || '',
+      // A manual-only job is a one-off repair with no schedule line at all, so
+      // 'never' in the status column is expected rather than a missed run.
+      trigger: j.trigger === 'manual_only' ? 'manual only' : 'scheduled',
       last_run: j.last_finished_at || '',
       status: j.last_started_at == null ? 'never' : (j.last_success ? 'ok' : 'failed'),
       error: j.last_error || '',
       _runs: j.runs || [],
     };
   });
-  const cols = ['job', 'description', 'last_run', 'status', 'error'];
+  const cols = ['job', 'description', 'trigger', 'last_run', 'status', 'error'];
   const table = filterableTable(rows, cols, {
     statusField: 'status',
     // Expand a job to its stored run history (the server keeps a bounded
@@ -1434,7 +1438,7 @@ async function viewJobs() {
   });
   setMain(el('div', null, [
     el('h2', null, 'Jobs'),
-    el('p', { class: 'view-desc' }, 'Trigger scheduled maintenance jobs on demand, and see when each last ran (and any error). Expand a job to see its recent run history. Each also runs automatically on its cron schedule; running here is for retries or missed runs.'),
+    el('p', { class: 'view-desc' }, 'Trigger maintenance jobs on demand, and see when each last ran (and any error). Expand a job to see its recent run history. A job marked scheduled also runs automatically on its cron schedule, so running it here is for retries or missed runs; one marked manual only is a one-off repair that has no schedule and runs only from here \u2014 it showing never is expected, not a missed run.'),
     table,
   ]));
 }

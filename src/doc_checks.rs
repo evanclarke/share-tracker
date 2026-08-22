@@ -1653,7 +1653,9 @@ fn contemporaneous_price_basis_documented() {
     assert!(
         API_MD.contains("`price-rebase` (see [Closing prices](#closing-prices); **not scheduled**")
     );
-    assert!(README_MD.contains("`price-rebase` is deliberately one of those"));
+    // (Wording moved with SCENARIOS T-09/schedule, which made "deliberately
+    // unscheduled" a flag in the registry rather than only a README sentence.)
+    assert!(README_MD.contains("`price-rebase` is one of the two manual-only jobs"));
 }
 
 /// Docs-sync pin for the demerger price factor (2026-08-20, the finding that
@@ -2961,6 +2963,27 @@ fn listing_rename_ui_documented() {
     assert!(frontend.contains("the chain unwinds last-in-first-out"));
     // The hash-route list carries the new route.
     assert!(frontend.contains("`#/renames/<listing>`, `#/r/<report>`"));
+}
+
+/// Docs-sync pin for manual-only jobs (SCENARIOS T-09/schedule). The startup
+/// "no schedule entry" WARN now fires only for a job that expects a schedule,
+/// because the registry records the intent (`register_manual`); both documents
+/// have to say where that intent lives, and `GET /jobs`'s shape has to carry
+/// the new field, or the WARN's meaning is only knowable from the code.
+#[test]
+fn manual_only_jobs_documented() {
+    // API.md: the new field, both of its values, and where the intent is set.
+    assert!(API_MD.contains(r#"`{ "name", "trigger", "last_started_at""#));
+    assert!(API_MD.contains(r#"`"manual_only"`"#));
+    assert!(API_MD.contains("registered with `register_manual`"));
+    assert!(
+        API_MD.contains("The two manual-only jobs are `price-rebase` and `settlement-recompute`")
+    );
+    // README: the WARN means a lost line, and the registry is where a
+    // deliberately schedule-less job says so.
+    assert!(README_MD.contains("that warning now means one thing only, that a line has been lost"));
+    assert!(README_MD.contains("it is added with `register_manual` rather than `register`"));
+    assert!(README_MD.contains(r#"`"trigger": "manual_only"`"#));
 }
 
 /// Pins for the FreeBSD packaging + versioned-release pipeline (REQUIREMENTS

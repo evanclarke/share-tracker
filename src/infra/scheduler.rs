@@ -38,7 +38,7 @@ use db::{db_record_run, db_run_histories};
 #[cfg(test)]
 pub use http::JobStatus;
 #[cfg(test)]
-pub use registry::{JobParams, RegisteredJob};
+pub use registry::{JobParams, JobTrigger, RegisteredJob};
 #[cfg(test)]
 use run::{next_run, run_entry, run_job};
 #[cfg(test)]
@@ -289,7 +289,7 @@ mod tests {
 
         let fired_at = Arc::new(std::sync::Mutex::new(Vec::<DateTime<Utc>>::new()));
         let fired = fired_at.clone();
-        let job = RegisteredJob::from_fn(move |_| {
+        let job = RegisteredJob::from_fn(JobTrigger::Scheduled, move |_| {
             let fired = fired.clone();
             let now = clock();
             async move {
@@ -343,6 +343,110 @@ mod tests {
         spawn(reg, pool, "0 0 * * *   backup\n").unwrap();
         assert!(logs_contain("registered job has no schedule entry"));
         assert!(logs_contain("rba-fx-import"));
+        // …and only about the jobs that expect a schedule: the two one-off
+        // repairs registered with `register_manual` are deliberately
+        // schedule-less, so a lost line is the only thing this WARN can mean
+        // (SCENARIOS T-09/schedule).
+        assert!(
+            !logs_contain("price-rebase"),
+            "a manual-only job must not be warned about"
+        );
+        assert!(
+            !logs_contain("settlement-recompute"),
+            "a manual-only job must not be warned about"
+        );
+    }
+
+    #[tracing_test::traced_test]
+    #[tokio::test]
+    async fn committed_schedule_starts_without_a_single_missing_entry_warning() {
+        // Startup on the shipped schedule must log *no* "no schedule entry"
+        // WARN at all. Before the manual-only flag it logged two, every boot,
+        // that nobody could ever clear — so a genuinely dropped schedule line
+        // logged the identical line and was invisible (SCENARIOS T-09/schedule).
+        let (reg, pool, _dir, _path) = test_registry().await;
+        spawn(reg, pool, include_str!("../../schedule.cron")).unwrap();
+        assert!(!logs_contain("registered job has no schedule entry"));
+    }
+
+    #[tokio::test]
+    async fn every_registered_job_is_scheduled_or_deliberately_manual() {
+        // The registry's own record of intent must match the committed
+        // schedule, in both directions: a `Scheduled` job has at least one
+        // line, a `ManualOnly` job has none. This is what keeps the flag
+        // honest — a new job added without a schedule line has to say which it
+        // is rather than quietly reintroducing the permanent WARN.
+        let (reg, _pool, _dir, _path) = test_registry().await;
+        let entries = parse(include_str!("../../schedule.cron")).unwrap();
+        let mut manual: Vec<&str> = Vec::new();
+        for (name, job) in reg.iter() {
+            let scheduled = entries.iter().any(|e| &e.name == name);
+            match job.trigger {
+                JobTrigger::Scheduled => assert!(
+                    scheduled,
+                    "{name} is registered as scheduled but has no schedule.cron line"
+                ),
+                JobTrigger::ManualOnly => {
+                    assert!(
+                        !scheduled,
+                        "{name} is registered as manual-only but has a schedule.cron line"
+                    );
+                    manual.push(name);
+                }
+            }
+        }
+        manual.sort_unstable();
+        assert_eq!(manual, ["price-rebase", "settlement-recompute"]);
+    }
+
+    #[tokio::test]
+    async fn list_jobs_reports_how_each_job_is_triggered() {
+        // `GET /jobs` carries the registry's intent, so the Jobs screen can say
+        // "manual only" for a job that has no schedule at all — its `never`
+        // last-run status is expected, not a missed run, and a later overdue
+        // check has the one field it needs to leave such a job alone.
+        let (reg, pool, _dir, _path) = test_registry().await;
+        let app = ApiClient::over(router().with_state(pool).layer(Extension(reg)));
+
+        let statuses: Vec<JobStatus> = app.get("/jobs").await.json();
+
+        let trigger = |name: &str| {
+            statuses
+                .iter()
+                .find(|s| s.name == name)
+                .unwrap_or_else(|| panic!("{name} must be listed"))
+                .trigger
+        };
+        assert_eq!(trigger("price-rebase"), JobTrigger::ManualOnly);
+        assert_eq!(trigger("settlement-recompute"), JobTrigger::ManualOnly);
+        assert_eq!(trigger("backup"), JobTrigger::Scheduled);
+        assert_eq!(trigger("rba-fx-import"), JobTrigger::Scheduled);
+        // A manual-only job has never run and never will run on a timer: the
+        // flag is what says so, not an inference from the empty history.
+        let rebase = statuses.iter().find(|s| s.name == "price-rebase").unwrap();
+        assert!(rebase.last_started_at.is_none());
+        assert!(rebase.runs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn manual_only_flag_is_serialised_as_snake_case() {
+        // The wire value the Jobs screen matches on ('manual_only'), pinned so
+        // renaming the Rust variant cannot silently change the JSON.
+        let (reg, pool, _dir, _path) = test_registry().await;
+        let app = ApiClient::over(router().with_state(pool).layer(Extension(reg)));
+
+        let body: serde_json::Value = app.get("/jobs").await.json();
+
+        let job = |name: &str| {
+            body.as_array()
+                .unwrap()
+                .iter()
+                .find(|j| j["name"] == name)
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(job("price-rebase")["trigger"], "manual_only");
+        assert_eq!(job("backup")["trigger"], "scheduled");
     }
 
     #[tokio::test]
@@ -380,7 +484,7 @@ mod tests {
         let overlapped = Arc::new(AtomicBool::new(false));
         let runs = Arc::new(AtomicUsize::new(0));
         let (a, o, r) = (active.clone(), overlapped.clone(), runs.clone());
-        let job = RegisteredJob::from_fn(move |_| {
+        let job = RegisteredJob::from_fn(JobTrigger::Scheduled, move |_| {
             let (a, o, r) = (a.clone(), o.clone(), r.clone());
             async move {
                 if a.fetch_add(1, Ordering::SeqCst) > 0 {
@@ -880,7 +984,7 @@ mod tests {
             crate::infra::fetch::cause_chain(&transport),
         );
         let message = import_error.to_string();
-        let failing = RegisteredJob::from_fn(move |_| {
+        let failing = RegisteredJob::from_fn(JobTrigger::Scheduled, move |_| {
             let message = message.clone();
             async move { Err(message) }
         });

@@ -1731,6 +1731,11 @@ mod tests {
         // so a flapping job's intermittent failures are diagnosable in the UI.
         assert!(js.contains("j.runs"));
         assert!(js.contains("r.success ? 'ok' : 'failed'"));
+        // A deliberately schedule-less job is labelled from GET /jobs' own
+        // `trigger` flag, so its `never` status reads as expected rather than
+        // as an overdue run (SCENARIOS T-09/schedule).
+        assert!(js.contains("j.trigger === 'manual_only' ? 'manual only' : 'scheduled'"));
+        assert!(js.contains("'trigger'"));
     }
 
     #[tokio::test]

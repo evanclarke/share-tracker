@@ -22,8 +22,10 @@ its findings went; that table is the record of what has been looked at.
 
 Section **T. Jobs, backup, and operations** (12 scenarios) was driven on **2026-08-22** against
 throwaway databases (a small one for the HTTP surface, a 265 MB one to catch a backup mid-write) and
-raised **six findings**. One is closed — the three jobs that recorded their failure as a Rust
-`Debug` string (T-06), archived in [`DONE/infra.md`](DONE/infra.md); the other five are open below.
+raised **six findings**. Two are closed — the three jobs that recorded their failure as a Rust
+`Debug` string (T-06), and the startup "no schedule entry" warning that cried wolf on the two
+deliberately-manual jobs (T-09/schedule) — both archived in [`DONE/infra.md`](DONE/infra.md); the
+other four are open below.
 Everything else in the section came back correct: the
 per-job lock serialises overlapping triggers (T-01), the run history bounds itself at 20 while
 keeping a fail-then-succeed sequence readable (T-02), a corrupt backup is quarantined (T-03),
@@ -61,7 +63,9 @@ in place and the Jobs screen keeps showing `ok`, indefinitely. Driven on 2026-08
   `backup: last_success = true`.
 - Same outcome, no ERROR line at all, for the ordinary operational cases: the server was down at
   00:00 every Sunday, or a hand-edited `--schedule` file lost its `backup` line (that one logs a
-  single startup `WARN`, indistinguishable from the two deliberate ones — see T-09/schedule below).
+  single startup `WARN`; it was indistinguishable from the two deliberate ones until T-09/schedule
+  marked the manual-only jobs in the registry — closed in [`DONE/infra.md`](DONE/infra.md) — so it
+  now fires only for a line that has actually been lost).
 
 Prices and FX each have a *database-derived* freshness signal that catches their job going quiet —
 `prices_stale` (latest ok `closing_prices` date more than 3 business days old) and `fx_stale`
@@ -110,6 +114,9 @@ age, a `backup_stale` flag alone, and documentation only.
       is overdue
 - [ ] The Jobs screen gains a **next run** column from `GET /jobs`, so the one surface an operator
       checks can answer "is this still scheduled, and when is it due?"
+- [ ] A **manual-only** job (`GET /jobs`'s `trigger` — SCENARIOS T-09/schedule) is never reported
+      overdue and gets no `job_schedule` row: it has no schedule by design, so an overdue check must
+      leave it alone rather than treating "never ran" as "late"
 - [ ] Classify `job_schedule` for snapshot staleness (exempt, with the reason in the migration) —
       `every_table_is_classified_for_snapshot_staleness` fails otherwise
 - [ ] `docs/SCHEMA.md` (new table + Relationships), `docs/API.md` (`GET /jobs` shape, health report's
@@ -272,44 +279,3 @@ documentation only.
 - [ ] `docs/API.md` (the currencies import response shape), README where the credentials are described
 - [ ] Regression tests: an import with no credentials reports the fiat count and `None` tokens; one
       with both feeds reports both
-
----
-
-## SCENARIOS T-09/schedule: the startup "no schedule entry" warning cries wolf on the two deliberately-manual jobs
-
-`schedule::spawn` warns for every registered job with no schedule line, on the stated grounds that
-this is "usually an oversight". Two of the eight registered jobs — `price-rebase` and
-`settlement-recompute` — are *deliberately* unscheduled one-off repairs, documented as such in the
-README and `docs/API.md`, so every single startup logs two WARN lines that can never be cleared:
-
-```
-WARN registered job has no schedule entry; it will only run via POST /jobs/price-rebase
-WARN registered job has no schedule entry; it will only run via POST /jobs/settlement-recompute
-```
-
-That is the permanent-alarm-nobody-can-clear pattern the project has fixed elsewhere (`unpriced_from`
-so health stops reporting expected price holes, the duplicate-income key so the legitimate
-ordinary+special pair stays silent). Its cost here is precise: a genuinely dropped schedule line —
-the second cause in the overdue-job finding above — logs exactly the same line as the two expected
-ones, so the signal is already buried at the moment it matters.
-
-**Question for Evan — how to separate the two?**
-
-- **(a) Mark manual-only jobs in the registry.** `register_manual(&mut jobs, "price-rebase", …)`
-  beside `register`, and `spawn` warns only for a job that expects a schedule. The registry then
-  states the intent in the one place that knows it, and `GET /jobs` could carry the flag too.
-- **(b) Leave it** — the README names both, and two known lines per boot is cheap.
-
-**Decision (Evan, 2026-08-22): (a), mark manual-only jobs in the registry.** Rejected: leaving the
-two expected WARN lines in place.
-
-- [ ] A `register_manual` beside `register` in `registry.rs` marking a job as deliberately
-      schedule-less; `schedule::spawn` warns only for a job that expects a schedule, so the warning
-      fires exactly when a schedule line has actually been lost
-- [ ] `GET /jobs` carries the flag, so the Jobs screen can say "manual only" rather than leaving a
-      never-scheduled job looking overdue (this pairs with the overdue-jobs finding above — a
-      manual-only job must never be reported overdue)
-- [ ] README "Scheduled maintenance" and `docs/API.md` Jobs section reflect where the intent is now
-      recorded
-- [ ] Regression tests: a manual-only job produces no startup warning and is never overdue; a
-      scheduled job whose line is missing still warns

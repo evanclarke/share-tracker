@@ -258,3 +258,88 @@ Consequences found while implementing, all settled in the same commit:
   `ApiError::BadGateway`, which is logged rather than returned — so the richer text improves the
   server log, and the short user-facing body ("could not fetch the RBA FX rate feed from its
   source") stays as it was.
+
+---
+
+## SCENARIOS T-09/schedule: the startup "no schedule entry" warning cries wolf on the two deliberately-manual jobs
+
+`schedule::spawn` warns for every registered job with no schedule line, on the stated grounds that
+this is "usually an oversight". Two of the eight registered jobs — `price-rebase` and
+`settlement-recompute` — are *deliberately* unscheduled one-off repairs, documented as such in the
+README and `docs/API.md`, so every single startup logs two WARN lines that can never be cleared:
+
+```
+WARN registered job has no schedule entry; it will only run via POST /jobs/price-rebase
+WARN registered job has no schedule entry; it will only run via POST /jobs/settlement-recompute
+```
+
+That is the permanent-alarm-nobody-can-clear pattern the project has fixed elsewhere (`unpriced_from`
+so health stops reporting expected price holes, the duplicate-income key so the legitimate
+ordinary+special pair stays silent). Its cost here is precise: a genuinely dropped schedule line —
+the second cause in the overdue-job finding above — logs exactly the same line as the two expected
+ones, so the signal is already buried at the moment it matters.
+
+**Question for Evan — how to separate the two?**
+
+- **(a) Mark manual-only jobs in the registry.** `register_manual(&mut jobs, "price-rebase", …)`
+  beside `register`, and `spawn` warns only for a job that expects a schedule. The registry then
+  states the intent in the one place that knows it, and `GET /jobs` could carry the flag too.
+- **(b) Leave it** — the README names both, and two known lines per boot is cheap.
+
+**Decision (Evan, 2026-08-22): (a), mark manual-only jobs in the registry.** Rejected: leaving the
+two expected WARN lines in place.
+
+- [x] A `register_manual` beside `register` in `registry.rs` marking a job as deliberately
+      schedule-less; `schedule::spawn` warns only for a job that expects a schedule, so the warning
+      fires exactly when a schedule line has actually been lost
+- [x] `GET /jobs` carries the flag, so the Jobs screen can say "manual only" rather than leaving a
+      never-scheduled job looking overdue (this pairs with the overdue-jobs finding above — a
+      manual-only job must never be reported overdue)
+- [x] README "Scheduled maintenance" and `docs/API.md` Jobs section reflect where the intent is now
+      recorded
+- [x] Regression tests: a manual-only job produces no startup warning and is never overdue; a
+      scheduled job whose line is missing still warns
+
+Done 2026-08-22 (SCENARIOS T-09/schedule). `RegisteredJob` now carries a `JobTrigger`
+(`Scheduled` | `ManualOnly`) — an enum, not a bool, since it is a fixed set of values and it is what
+`GET /jobs` serialises (`"trigger": "scheduled" | "manual_only"`). `register_manual` sits beside
+`register` in `infra/scheduler/registry.rs`, both delegating to the same
+`RegisteredJob::from_fn(trigger, work)`, so a job is still added with one call and the `Arc`/`Box::pin`
+wrapping is still in one place; `price-rebase` and `settlement-recompute` are the two that use it.
+`schedule::spawn` skips `ManualOnly` jobs when checking for missing schedule lines, so the shipped
+schedule now starts with **zero** "no schedule entry" WARN lines and that WARN means one thing only:
+a line has been lost. Verified against the real binary — `--schedule` with the `backup` line removed
+logs exactly `WARN … registered job has no schedule entry; it will only run via POST /jobs/backup
+job=backup`, and the committed schedule logs no WARN at all. The Jobs screen gained a **Trigger**
+column (`scheduled` / `manual only`) from the new field, and its view description says a manual-only
+job showing `never` is expected rather than a missed run.
+
+Tests: `scheduler::tests::committed_schedule_starts_without_a_single_missing_entry_warning` (the
+shipped schedule warns about nothing), `spawn_warns_about_job_with_no_schedule_entry` (extended: the
+lost line still warns, and neither manual-only job is named in any warning),
+`every_registered_job_is_scheduled_or_deliberately_manual` (both directions against the committed
+`schedule.cron` — a `Scheduled` job has a line, a `ManualOnly` job has none, and the manual-only set
+is exactly the two), `list_jobs_reports_how_each_job_is_triggered`,
+`manual_only_flag_is_serialised_as_snake_case` (the wire value the UI matches on),
+`web::tests::jobs_ui_present` (the column and its label), and
+`doc_checks::manual_only_jobs_documented`.
+
+Consequences found while implementing:
+
+- **"Never overdue" cannot be tested yet, and deliberately is not.** There is no overdue concept in
+  the tree — it arrives with the still-open `## SCENARIOS T-11/T-02/T-12` section (the `job_schedule`
+  table, health's `overdue_jobs`, the Jobs "next run" column). What this section ships is the field
+  that work must read: a `manual_only` job has no schedule by construction, so it must get no
+  `job_schedule` row and must never appear in `overdue_jobs`. That constraint is now written into
+  T-11's checklist rather than asserted here against machinery that does not exist.
+- The invariant test is the real regression guard, not the log assertion. A future job added with
+  `register` but no schedule line — or with `register_manual` and a line — fails
+  `every_registered_job_is_scheduled_or_deliberately_manual`, so the flag cannot drift from the
+  schedule file the way a README sentence could. That also made a "manual-only job has a schedule
+  line" startup warning unnecessary: the contradiction is caught in CI, not at boot.
+- `RegisteredJob::from_fn` gained the trigger as a required argument rather than defaulting to
+  `Scheduled`. A default would have let a new job be silently scheduled-expecting; three test call
+  sites name it explicitly instead.
+- `doc_checks::contemporaneous_price_basis_documented` pinned the old README sentence
+  ("`price-rebase` is deliberately one of those"), which this rewrote — the assertion moved with the
+  wording, with a comment saying why.

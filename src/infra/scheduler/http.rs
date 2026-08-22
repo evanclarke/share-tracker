@@ -2,7 +2,7 @@
 //! (`POST /jobs/{name}`) maintenance jobs.
 
 use super::db::{JobRunRecord, db_run_histories};
-use super::registry::{JobParams, JobRegistry};
+use super::registry::{JobParams, JobRegistry, JobTrigger};
 use super::run::run_job;
 use axum::{
     Extension, Json, Router,
@@ -18,9 +18,14 @@ use sqlx::SqlitePool;
 /// until the job has run at least once. `runs` is the job's stored run history,
 /// most recent first, bounded to [`super::db::JOB_RUN_HISTORY_LIMIT`] entries —
 /// the `last_*` fields duplicate `runs[0]` for at-a-glance reading.
+///
+/// `trigger` is the registry's own record of whether the job belongs on the
+/// schedule ([`JobTrigger`]), so a job that has never run and never will run on
+/// a timer reads as *manual only* rather than as one that is somehow overdue.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct JobStatus {
     pub name: String,
+    pub trigger: JobTrigger,
     pub last_started_at: Option<String>,
     pub last_finished_at: Option<String>,
     pub last_success: Option<bool>,
@@ -44,8 +49,10 @@ async fn list(
         .map(|name| {
             let runs = histories.remove(&name).unwrap_or_default();
             let last = runs.first();
+            let trigger = registry[&name].trigger;
             JobStatus {
                 name,
+                trigger,
                 last_started_at: last.map(|r| r.started_at.clone()),
                 last_finished_at: last.map(|r| r.finished_at.clone()),
                 last_success: last.map(|r| r.success),

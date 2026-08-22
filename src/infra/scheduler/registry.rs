@@ -13,7 +13,7 @@
 //! Rust syntax (SCENARIOS T-06). `scheduler::tests::
 //! no_registered_job_records_its_failure_as_a_debug_string` pins it.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
 
@@ -33,12 +33,33 @@ pub struct JobParams {
     pub suffix: Option<String>,
 }
 
-/// A registered job: the work plus a per-job lock serialising its execution.
-/// `run_job` holds the lock for the whole run, so a manual trigger can never
-/// overlap the scheduled run (or a second trigger) of the same job — a
-/// concurrent caller waits and runs after.
+/// How a registered job is meant to be started — the registry's record of
+/// whether the job expects a line in `schedule.cron`.
+///
+/// This is what separates a *lost* schedule line from a deliberately absent
+/// one: [`super::schedule::spawn`] warns about a [`JobTrigger::Scheduled`] job
+/// with no entry (an oversight), and says nothing about a
+/// [`JobTrigger::ManualOnly`] one (SCENARIOS T-09/schedule — two permanent WARN
+/// lines every startup buried the one that would matter). It is carried on
+/// `GET /jobs` too, so the Jobs screen can label a never-scheduled job as what
+/// it is rather than leaving it looking overdue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JobTrigger {
+    /// Recurring work: it belongs on the schedule, so a missing line is a fault.
+    Scheduled,
+    /// Deliberately schedule-less — a one-off repair run via
+    /// `POST /jobs/{name}` when the operator needs it, never on a timer.
+    ManualOnly,
+}
+
+/// A registered job: the work, how it is meant to be triggered, and a per-job
+/// lock serialising its execution. `run_job` holds the lock for the whole run,
+/// so a manual trigger can never overlap the scheduled run (or a second
+/// trigger) of the same job — a concurrent caller waits and runs after.
 pub struct RegisteredJob {
     pub(super) work: Job,
+    pub(super) trigger: JobTrigger,
     pub(super) lock: tokio::sync::Mutex<()>,
 }
 
@@ -46,13 +67,14 @@ impl RegisteredJob {
     /// Build a job from an async closure: box its future into the stored [`Job`]
     /// shape and give it its own lock. Every job — registered below or synthetic
     /// in a test — is constructed here, so none can be created lockless.
-    pub(super) fn from_fn<F, Fut>(work: F) -> Arc<Self>
+    pub(super) fn from_fn<F, Fut>(trigger: JobTrigger, work: F) -> Arc<Self>
     where
         F: Fn(JobParams) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<(), String>> + Send + 'static,
     {
         Arc::new(Self {
             work: Arc::new(move |params| Box::pin(work(params))),
+            trigger,
             lock: tokio::sync::Mutex::new(()),
         })
     }
@@ -62,14 +84,34 @@ impl RegisteredJob {
 /// trigger handler (injected as an axum `Extension`).
 pub type JobRegistry = Arc<HashMap<String, Arc<RegisteredJob>>>;
 
-/// Add one job to the map under `name`. Keeps [`registry`] a flat list of
-/// name-plus-body pairs rather than repeating the wrapping at every entry.
+/// Add one **scheduled** job to the map under `name`. Keeps [`registry`] a flat
+/// list of name-plus-body pairs rather than repeating the wrapping at every
+/// entry. A job registered this way expects a line in `schedule.cron`; without
+/// one, startup warns.
 fn register<F, Fut>(jobs: &mut HashMap<String, Arc<RegisteredJob>>, name: &str, work: F)
 where
     F: Fn(JobParams) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<(), String>> + Send + 'static,
 {
-    jobs.insert(name.to_string(), RegisteredJob::from_fn(work));
+    jobs.insert(
+        name.to_string(),
+        RegisteredJob::from_fn(JobTrigger::Scheduled, work),
+    );
+}
+
+/// Add one **deliberately schedule-less** job: a one-off repair that only ever
+/// runs via `POST /jobs/{name}`. Identical to [`register`] except that startup
+/// stays silent about the missing schedule line and `GET /jobs` reports the job
+/// as manual-only, so the "no schedule entry" WARN means what it says.
+fn register_manual<F, Fut>(jobs: &mut HashMap<String, Arc<RegisteredJob>>, name: &str, work: F)
+where
+    F: Fn(JobParams) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Result<(), String>> + Send + 'static,
+{
+    jobs.insert(
+        name.to_string(),
+        RegisteredJob::from_fn(JobTrigger::ManualOnly, work),
+    );
 }
 
 /// Build the registry of maintenance jobs, wiring each name to existing work
@@ -154,7 +196,7 @@ pub fn registry(
     // prices were stored before the basis rule existed (migration 0034).
     // Idempotent — it re-derives each price from the figure as observed — so
     // running it again changes nothing.
-    register(&mut jobs, "price-rebase", {
+    register_manual(&mut jobs, "price-rebase", {
         let pool = pool.clone();
         move |_| {
             let pool = pool.clone();
@@ -171,7 +213,7 @@ pub fn registry(
     // Only the dates the server computed itself are rewritten — a supplied
     // `settlement_date` is the taxpayer's own assertion (S-05) — and it is
     // idempotent, so running it again changes nothing.
-    register(&mut jobs, "settlement-recompute", {
+    register_manual(&mut jobs, "settlement-recompute", {
         let pool = pool.clone();
         move |_| {
             let pool = pool.clone();
