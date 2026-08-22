@@ -86,7 +86,9 @@ async fn main() {
         settings.backup_command.clone(),
         fetcher.clone(),
     );
-    scheduler::spawn(registry.clone(), pool.clone(), &schedule).expect("invalid schedule");
+    scheduler::spawn(registry.clone(), pool.clone(), &schedule)
+        .await
+        .expect("invalid schedule");
 
     let app = app::router(
         &settings.base_path,

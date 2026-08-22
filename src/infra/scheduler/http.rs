@@ -1,7 +1,7 @@
 //! Routes for inspecting (`GET /jobs`) and manually triggering
 //! (`POST /jobs/{name}`) maintenance jobs.
 
-use super::db::{JobRunRecord, JobRunStatus, db_run_histories};
+use super::db::{JobRunRecord, JobRunStatus, db_next_runs, db_run_histories};
 use super::registry::{JobParams, JobRegistry, JobTrigger};
 use super::run::run_job;
 use axum::{
@@ -29,10 +29,20 @@ use sqlx::SqlitePool;
 /// `trigger` is the registry's own record of whether the job belongs on the
 /// schedule ([`JobTrigger`]), so a job that has never run and never will run on
 /// a timer reads as *manual only* rather than as one that is somehow overdue.
+///
+/// `next_run_at` is the instant the running scheduler says the job is next due
+/// (the earliest, for a job scheduled on several lines) — the stored twin of
+/// the `next run scheduled` log line, from `job_schedule`. It is what lets this
+/// endpoint, and the Jobs screen over it, answer "is this still scheduled, and
+/// when is it due?" — which they could not before, so a job whose timer had
+/// died went on reading `ok` for ever (SCENARIOS T-11/T-02/T-12). `None` for a
+/// manual-only job (it has no schedule by design) and for a scheduled job whose
+/// line has been lost — the case the startup WARN names.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct JobStatus {
     pub name: String,
     pub trigger: JobTrigger,
+    pub next_run_at: Option<String>,
     pub last_started_at: Option<String>,
     pub last_finished_at: Option<String>,
     pub last_status: Option<JobRunStatus>,
@@ -48,6 +58,7 @@ async fn list(
     Extension(registry): Extension<JobRegistry>,
 ) -> Result<Json<Vec<JobStatus>>, crate::infra::http::ApiError> {
     let mut histories = db_run_histories(&pool).await?;
+    let mut next_runs = db_next_runs(&pool).await?;
 
     let mut names: Vec<String> = registry.keys().cloned().collect();
     names.sort();
@@ -57,9 +68,11 @@ async fn list(
             let runs = histories.remove(&name).unwrap_or_default();
             let last = runs.first();
             let trigger = registry[&name].trigger;
+            let next_run_at = next_runs.remove(&name);
             JobStatus {
                 name,
                 trigger,
+                next_run_at,
                 last_started_at: last.map(|r| r.started_at.clone()),
                 last_finished_at: last.and_then(|r| r.finished_at.clone()),
                 last_status: last.map(|r| r.status),

@@ -2,9 +2,12 @@
 //! that both the scheduled loop and the manual trigger go through, plus the
 //! per-entry timer loop (`run_entry`) that decides when to call it.
 
-use super::db::{db_finish_run, db_record_run, db_start_run};
+use super::db::{
+    db_finish_run, db_insert_schedule, db_record_run, db_start_run, db_update_schedule,
+};
 use super::registry::{JobParams, RegisteredJob};
-use chrono::{DateTime, TimeZone};
+use super::schedule::ScheduleEntry;
+use chrono::{DateTime, TimeZone, Utc};
 use croner::Cron;
 use sqlx::SqlitePool;
 use std::{sync::Arc, time::Duration};
@@ -69,28 +72,98 @@ pub(super) async fn run_job(
 /// chunk re-anchors to the wall clock within an hour of any shift.
 const MAX_SLEEP: Duration = Duration::from_secs(60 * 60);
 
-/// The scheduled loop for one schedule entry: log the next run, sleep to it in
-/// capped chunks (recomputing the target after each chunk — see `MAX_SLEEP`),
-/// run the job, repeat. `now` supplies the current time in the entry's
-/// timezone — a per-entry IANA zone, or `Local` for entries without one.
+/// One entry's own row in `job_schedule` (migration 0043): the persisted twin
+/// of the `next run scheduled` log line, so the instant the scheduler already
+/// computes survives into a report that reads only the database.
+///
+/// The id is claimed lazily by the first successful write and reused after,
+/// because the table is rebuilt at every startup — `spawn` clears it before any
+/// task starts. A write that finds the row gone (a second `spawn` in the same
+/// process) claims a fresh one rather than quietly ceasing to report, and a
+/// write that fails is logged and retried on the next iteration: an entry that
+/// cannot store its schedule must not take the job's own scheduling down with
+/// it.
+struct StoredSchedule {
+    name: String,
+    cron: String,
+    timezone: Option<String>,
+    id: Option<i64>,
+}
+
+impl StoredSchedule {
+    fn new(entry: &ScheduleEntry) -> Self {
+        Self {
+            name: entry.name.clone(),
+            cron: entry.expr.clone(),
+            timezone: entry.tz.map(|tz| tz.name().to_string()),
+            id: None,
+        }
+    }
+
+    /// Store `next` as this entry's next scheduled run. Held as a UTC instant
+    /// whatever zone the entry is pinned to, so the overdue check compares it
+    /// with `now` without re-deriving anyone's offset; the zone name travels in
+    /// its own column, for display.
+    async fn record(&mut self, pool: &SqlitePool, next: DateTime<Utc>) {
+        let at = next.to_rfc3339();
+        if let Some(id) = self.id {
+            match db_update_schedule(pool, id, &at).await {
+                Ok(true) => return,
+                // The row is gone — fall through and claim another.
+                Ok(false) => self.id = None,
+                Err(e) => {
+                    tracing::warn!(job = %self.name, "could not store the next scheduled run: {e}");
+                    return;
+                }
+            }
+        }
+        match db_insert_schedule(pool, &self.name, &self.cron, self.timezone.as_deref(), &at).await
+        {
+            Ok(id) => self.id = Some(id),
+            Err(e) => {
+                tracing::warn!(job = %self.name, "could not store the next scheduled run: {e}")
+            }
+        }
+    }
+}
+
+/// The scheduled loop for one schedule entry: store and log the next run, sleep
+/// to it in capped chunks (recomputing the target after each chunk — see
+/// `MAX_SLEEP`), run the job, repeat. `now` supplies the current time in the
+/// entry's timezone — a per-entry IANA zone, or `Local` for entries without
+/// one.
+///
+/// The stored next run (`job_schedule`) is what makes a scheduler that has
+/// **stopped** visible: nothing else in the database changes when a job does
+/// not run, so `job_runs` goes on showing the last successful run for ever and
+/// `GET /jobs` keeps answering `ok` (SCENARIOS T-11/T-02/T-12). A row is
+/// claimed at the instant this task starts, *before* the first occurrence is
+/// computed, precisely so the one case that never reaches the loop body is
+/// covered too: a cron pattern with no future occurrence at all (`0 0 30 2 *`,
+/// 30 February) is accepted at startup, logs one ERROR here, and stops — and
+/// the row it leaves, frozen at the moment the scheduler gave up, is what the
+/// health report then reports overdue.
 pub(super) async fn run_entry<Z>(
     pool: SqlitePool,
-    name: String,
+    entry: ScheduleEntry,
     job: Arc<RegisteredJob>,
-    cron: Cron,
     now: impl Fn() -> DateTime<Z> + Send + 'static,
 ) where
     Z: TimeZone + Send + 'static,
     Z::Offset: std::fmt::Display + Send,
 {
+    let ScheduleEntry { cron, name, .. } = &entry;
+    let mut stored = StoredSchedule::new(&entry);
+    stored.record(&pool, now().with_timezone(&Utc)).await;
     loop {
-        let (next, mut delay) = match next_run(&cron, now()) {
+        let (next, mut delay) = match next_run(cron, now()) {
             Some(pair) => pair,
             None => {
                 tracing::error!(job = %name, "cannot compute next run, stopping");
                 return;
             }
         };
+        stored.record(&pool, next.with_timezone(&Utc)).await;
         tracing::info!(
             job = %name,
             next_run = %next.format("%Y-%m-%d %H:%M:%S %Z"),
@@ -98,8 +171,16 @@ pub(super) async fn run_entry<Z>(
         );
         while delay > MAX_SLEEP {
             tokio::time::sleep(MAX_SLEEP).await;
-            delay = match next_run(&cron, now()) {
-                Some((_, recomputed)) => recomputed,
+            delay = match next_run(cron, now()) {
+                // Re-stored as well as re-slept: a wall-clock shift mid-wait
+                // moves the target, and a stored instant left at the old one
+                // would read as overdue while the entry is waiting correctly.
+                Some((recomputed_next, recomputed)) => {
+                    stored
+                        .record(&pool, recomputed_next.with_timezone(&Utc))
+                        .await;
+                    recomputed
+                }
                 None => {
                     tracing::error!(job = %name, "cannot compute next run, stopping");
                     return;
@@ -109,7 +190,7 @@ pub(super) async fn run_entry<Z>(
         tokio::time::sleep(delay).await;
         // A scheduled run always uses the default (unsuffixed) params — a
         // suffix labels a deliberate one-off backup, not the weekly run.
-        if let Err(e) = run_job(&pool, &name, &job, JobParams::default()).await {
+        if let Err(e) = run_job(&pool, name, &job, JobParams::default()).await {
             tracing::warn!(job = %name, "job failed: {e}");
         }
     }

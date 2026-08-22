@@ -3035,7 +3035,7 @@ fn interrupted_runs_and_staged_backups_documented() {
 #[test]
 fn manual_only_jobs_documented() {
     // API.md: the new field, both of its values, and where the intent is set.
-    assert!(API_MD.contains(r#"`{ "name", "trigger", "last_started_at""#));
+    assert!(API_MD.contains(r#"`{ "name", "trigger", "next_run_at", "last_started_at""#));
     assert!(API_MD.contains(r#"`"manual_only"`"#));
     assert!(API_MD.contains("registered with `register_manual`"));
     assert!(
@@ -3046,6 +3046,38 @@ fn manual_only_jobs_documented() {
     assert!(README_MD.contains("that warning now means one thing only, that a line has been lost"));
     assert!(README_MD.contains("it is added with `register_manual` rather than `register`"));
     assert!(README_MD.contains(r#"`"trigger": "manual_only"`"#));
+}
+
+/// Docs-sync pin for the stored schedule and the overdue check
+/// (SCENARIOS T-11/T-02/T-12). A job that has stopped running records nothing,
+/// so no run history can show it: the signal is the scheduler's own next-run
+/// instant, persisted. All three documents have to carry that — the endpoint
+/// shape it reaches the UI through, the table it lives in, and what an operator
+/// is told the alert means — or the only place the rule exists is the code.
+#[test]
+fn overdue_jobs_and_the_stored_schedule_documented() {
+    // API.md: the two new health lists, the margin, and what each is *not*.
+    assert!(API_MD.contains(r#""failed_jobs", "overdue_jobs", "stalled_jobs""#));
+    assert!(API_MD.contains("- `overdue_jobs` — every scheduled entry whose stored next run"));
+    assert!(API_MD.contains("a job that is not running at all records nothing"));
+    assert!(API_MD.contains("a scheduler that has stopped **while the process is up**"));
+    assert!(API_MD.contains("A **manual-only** job never appears"));
+    assert!(API_MD.contains("- `stalled_jobs` — every job whose most recent run has been"));
+    // API.md: the field the Jobs screen's "next run" column reads.
+    assert!(
+        API_MD.contains("`next_run_at` is when the **running scheduler** says the job is next due")
+    );
+    // SCHEMA.md: the table and the two columns the check turns on.
+    assert!(SCHEMA_MD.contains("job_schedule "));
+    assert!(SCHEMA_MD.contains("RFC 3339 **UTC** instant of the next scheduled run"));
+    assert!(
+        SCHEMA_MD.contains("a job whose `schedule.cron` line has been removed simply has no row")
+    );
+    // README, Scheduled maintenance: the stored instant, the 30-February case
+    // that started it, and the two surfaces an operator reads.
+    assert!(README_MD.contains("**and stored**, in `job_schedule`, one row per schedule entry"));
+    assert!(README_MD.contains("`0 0 30 2 *`, 30 February"));
+    assert!(README_MD.contains("the Jobs screen carries a **next run** column"));
 }
 
 /// Pins for the FreeBSD packaging + versioned-release pipeline (REQUIREMENTS

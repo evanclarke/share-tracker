@@ -1072,7 +1072,7 @@ mod tests {
     /// an omission. The snapshotted reports are the price-dependent three
     /// ([`SnapshotReport`]); a table only the live-computed CGT reports or the
     /// (un-snapshotted) tax summary read is therefore exempt.
-    const STALENESS_EXEMPT_TABLES: [(&str, &str); 19] = [
+    const STALENESS_EXEMPT_TABLES: [(&str, &str); 20] = [
         (
             "attachments",
             "documents are provenance, not financial facts; no snapshotted report reads them \
@@ -1128,6 +1128,12 @@ mod tests {
         (
             "job_runs",
             "operational metadata, not a financial fact table (0012_job_run_history.sql)",
+        ),
+        (
+            "job_schedule",
+            "the running scheduler's own next-run instants: operational state, rebuilt at every \
+             startup and holding no financial fact any report computes with \
+             (0043_job_schedule.sql)",
         ),
         (
             "listing_renames",

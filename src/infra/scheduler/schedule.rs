@@ -4,6 +4,7 @@
 //! Lines are `<min> <hour> <dom> <mon> <dow> [timezone] <job-name>`; the
 //! optional timezone is an IANA name pinning the cron expression to that zone.
 
+use super::db::db_clear_schedule;
 use super::registry::{JobRegistry, JobTrigger};
 use super::run::run_entry;
 use chrono::{Local, Utc};
@@ -28,10 +29,16 @@ pub enum ScheduleError {
 /// server's local timezone), and which registered job to run. `line` is the
 /// 1-based line number in the schedule file (comments and blank lines count),
 /// so validation errors point at the real line.
+///
+/// `expr` is the cron expression as *written*, kept beside the parsed [`Cron`]
+/// because that is what the stored schedule (`job_schedule`, migration 0043)
+/// and the Jobs screen show an operator — `Cron` can compute the next
+/// occurrence but cannot say what the line said.
 #[derive(Debug)]
 pub(super) struct ScheduleEntry {
     pub(super) line: usize,
     pub(super) cron: Cron,
+    pub(super) expr: String,
     pub(super) tz: Option<Tz>,
     pub(super) name: String,
 }
@@ -83,6 +90,7 @@ pub(super) fn parse(schedule: &str) -> Result<Vec<ScheduleEntry>, ScheduleError>
         entries.push(ScheduleEntry {
             line,
             cron,
+            expr,
             tz,
             name: name.to_string(),
         });
@@ -94,7 +102,23 @@ pub(super) fn parse(schedule: &str) -> Result<Vec<ScheduleEntry>, ScheduleError>
 /// Parse the schedule, validate every entry against the registry, and spawn one
 /// background task per entry. Returns an error (without spawning anything) if
 /// the schedule is malformed or names an unregistered job.
-pub fn spawn(registry: JobRegistry, pool: SqlitePool, schedule: &str) -> Result<(), ScheduleError> {
+///
+/// The stored schedule (`job_schedule`, migration 0043) is **cleared here**,
+/// before any entry task is spawned, and rebuilt by the tasks themselves: the
+/// table describes the schedule *this* process is running, so an entry removed
+/// from `schedule.cron` — or a job removed from the registry — leaves no row
+/// behind to be reported overdue for ever after. That case is a lost line, and
+/// the startup WARN below is what reports it (SCENARIOS T-09/schedule); a
+/// permanent alarm nobody could clear is the failure mode this project has had
+/// to undo more than once. Async for that one write: clearing must complete
+/// before the tasks start claiming rows, or a task's row could be deleted the
+/// instant after it was written. A failure to clear is logged and startup
+/// continues — the schedule itself still runs; only its stored shadow is off.
+pub async fn spawn(
+    registry: JobRegistry,
+    pool: SqlitePool,
+    schedule: &str,
+) -> Result<(), ScheduleError> {
     let entries = parse(schedule)?;
 
     // Validate all names up front so a bad file fails fast at startup rather
@@ -126,6 +150,10 @@ pub fn spawn(registry: JobRegistry, pool: SqlitePool, schedule: &str) -> Result<
         }
     }
 
+    if let Err(e) = db_clear_schedule(&pool).await {
+        tracing::warn!("could not clear the stored job schedule: {e}");
+    }
+
     for entry in entries {
         let job = registry[&entry.name].clone();
         let pool = pool.clone();
@@ -134,12 +162,12 @@ pub fn spawn(registry: JobRegistry, pool: SqlitePool, schedule: &str) -> Result<
         // generic loop.
         match entry.tz {
             Some(tz) => {
-                tokio::spawn(run_entry(pool, entry.name, job, entry.cron, move || {
+                tokio::spawn(run_entry(pool, entry, job, move || {
                     Utc::now().with_timezone(&tz)
                 }));
             }
             None => {
-                tokio::spawn(run_entry(pool, entry.name, job, entry.cron, Local::now));
+                tokio::spawn(run_entry(pool, entry, job, Local::now));
             }
         }
     }

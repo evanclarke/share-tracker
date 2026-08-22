@@ -1746,6 +1746,13 @@ mod tests {
         // as an overdue run (SCENARIOS T-09/schedule).
         assert!(js.contains("j.trigger === 'manual_only' ? 'manual only' : 'scheduled'"));
         assert!(js.contains("'trigger'"));
+        // …and when the running scheduler says the job is next due, from
+        // GET /jobs' own `next_run_at`. Without it this screen could not say
+        // whether a job was still scheduled at all, so a timer that had died
+        // went on showing its last successful run for ever
+        // (SCENARIOS T-11/T-02/T-12).
+        assert!(js.contains("next_run: j.next_run_at || ''"));
+        assert!(js.contains("'next_run'"));
     }
 
     #[tokio::test]
@@ -1760,6 +1767,18 @@ mod tests {
         assert!(js.contains("fx_stale"));
         assert!(js.contains("failed_jobs"));
         assert!(js.contains("'#/jobs'"));
+        // …plus the two states no *recorded run* can show, both linking to the
+        // same Jobs page: a schedule whose timer has stopped moving its stored
+        // next run on, and a run that started and never finished
+        // (SCENARIOS T-11/T-02/T-12).
+        assert!(js.contains("overdue_jobs"));
+        assert!(js.contains("is overdue by"));
+        assert!(js.contains("j.overdue_hours"));
+        assert!(js.contains("j.next_run_at"));
+        assert!(js.contains("j.cron"));
+        assert!(js.contains("stalled_jobs"));
+        assert!(js.contains("has been running since"));
+        assert!(js.contains("j.running_hours"));
         // …plus two listings holding one price series between them — the same
         // close on a long run of consecutive trading days, the only signal a
         // series fetched under the wrong symbol leaves — linking to the screen

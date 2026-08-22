@@ -1,7 +1,13 @@
-//! Persistence for the per-job run history (`job_runs`), read by `GET /jobs`
-//! and the health report. Every run goes through `run_job`, which records it
-//! here — the row is inserted when the run *starts* and updated when it
-//! finishes, so an interrupted run leaves a record rather than nothing.
+//! Persistence for the per-job run history (`job_runs`) and the live schedule
+//! (`job_schedule`), both read by `GET /jobs` and the health report.
+//!
+//! Every run goes through `run_job`, which records it here — the row is
+//! inserted when the run *starts* and updated when it finishes, so an
+//! interrupted run leaves a record rather than nothing. That history says
+//! nothing at all about a job that has **stopped running**, which is what the
+//! schedule half is for: each spawned entry stores the next instant it is due
+//! and rewrites it every iteration, so a task that has died leaves a row that
+//! ages (SCENARIOS T-11/T-02/T-12).
 
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
@@ -187,4 +193,98 @@ pub(super) async fn db_run_histories(
         });
     }
     Ok(histories)
+}
+
+/// The next scheduled run of one schedule entry, as the entry's own timer
+/// computed it (`job_schedule`, migration 0043). Read by `GET /jobs` — which
+/// folds the rows of a job with several lines into its earliest — and, on its
+/// own read, by the health report's overdue check.
+///
+/// The table is **the schedule the running process is executing**: it is
+/// cleared by [`super::schedule::spawn`] and rebuilt by the entry tasks, so a
+/// job whose schedule line was removed leaves nothing behind to go stale. What
+/// makes it useful is the opposite case — a task that has *stopped* stops
+/// rewriting its row, which no `job_runs` record can show, because a job that
+/// is not running records nothing at all.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub(super) struct JobScheduleRow {
+    pub(super) name: String,
+    pub(super) next_run_at: String,
+}
+
+/// Drop every stored schedule row. Called once at startup, before the entry
+/// tasks are spawned, so the table only ever describes the schedule *this*
+/// process is running: a line deleted from `schedule.cron` leaves no row to be
+/// reported overdue for ever after (the lost-line case is what the startup
+/// WARN is for — SCENARIOS T-09/schedule).
+pub(super) async fn db_clear_schedule(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    sqlx::query("DELETE FROM job_schedule")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Claim a row for one schedule entry, returning the id its later iterations
+/// update. `next_run_at` is a UTC RFC 3339 instant.
+pub(super) async fn db_insert_schedule(
+    pool: &SqlitePool,
+    name: &str,
+    cron: &str,
+    timezone: Option<&str>,
+    next_run_at: &str,
+) -> Result<i64, sqlx::Error> {
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO job_schedule (name, cron, timezone, next_run_at, updated_at) \
+         VALUES (?, ?, ?, ?, ?) RETURNING id",
+    )
+    .bind(name)
+    .bind(cron)
+    .bind(timezone)
+    .bind(next_run_at)
+    .bind(chrono::Utc::now().to_rfc3339())
+    .fetch_one(pool)
+    .await?;
+    Ok(id)
+}
+
+/// Move one entry's stored next run forward. Answers whether the row was still
+/// there: a `false` means the table was cleared underneath the task (a second
+/// `spawn` in the same process), and the caller claims a fresh row rather than
+/// silently ceasing to report.
+pub(super) async fn db_update_schedule(
+    pool: &SqlitePool,
+    id: i64,
+    next_run_at: &str,
+) -> Result<bool, sqlx::Error> {
+    let updated =
+        sqlx::query("UPDATE job_schedule SET next_run_at = ?, updated_at = ? WHERE id = ?")
+            .bind(next_run_at)
+            .bind(chrono::Utc::now().to_rfc3339())
+            .bind(id)
+            .execute(pool)
+            .await?
+            .rows_affected();
+    Ok(updated > 0)
+}
+
+/// Each job's next scheduled run — the **earliest** of its entries', for a job
+/// scheduled on more than one line (`price-import` has three, one per market).
+/// Jobs with no schedule entry are absent, which is what a manual-only job is.
+pub(super) async fn db_next_runs(
+    pool: &SqlitePool,
+) -> Result<HashMap<String, String>, sqlx::Error> {
+    let rows = sqlx::query_as::<_, JobScheduleRow>("SELECT name, next_run_at FROM job_schedule")
+        .fetch_all(pool)
+        .await?;
+    let mut next: HashMap<String, String> = HashMap::new();
+    for row in rows {
+        next.entry(row.name)
+            .and_modify(|held| {
+                if row.next_run_at < *held {
+                    held.clone_from(&row.next_run_at);
+                }
+            })
+            .or_insert(row.next_run_at);
+    }
+    Ok(next)
 }

@@ -1178,6 +1178,27 @@ async function refreshHealthBanner() {
     (h.failed_jobs || []).forEach(function (j) {
       problems.push("Job '" + j.name + "' failed" + (j.error ? ': ' + j.error : '') + '.');
     });
+    // A job that has *stopped running* records nothing at all, so failed_jobs
+    // above can never see it: the last successful run stays in place and this
+    // screen keeps reading ok. The scheduler's own stored next-run instant is
+    // what ages instead.
+    (h.overdue_jobs || []).forEach(function (j) {
+      problems.push("Job '" + j.name + "' is overdue by " + j.overdue_hours + ' hour(s) — it was'
+        + ' due at ' + j.next_run_at + ' (schedule ' + j.cron + ', '
+        + (j.timezone || 'server local time') + ') and its scheduler has not moved on, so nothing'
+        + ' is going to run it. Check the schedule file and the server log, then restart the'
+        + ' server; run it from Jobs meanwhile.');
+    });
+    // The other half of the same question: a run that started and never
+    // finished is what a restart, a kill or a power cut mid-run leaves behind,
+    // and it is indistinguishable from one in flight until it has been open
+    // longer than any run takes.
+    (h.stalled_jobs || []).forEach(function (j) {
+      problems.push("Job '" + j.name + "' has been running since " + j.started_at + ' ('
+        + j.running_hours + ' hour(s)) — a run that started and never finished, which is what a'
+        + ' restart, a kill or a power cut mid-run leaves behind rather than a run still in'
+        + ' flight. Check the server log, then re-run it from Jobs.');
+    });
     const erroredPrices = h.errored_prices || [];
     if (erroredPrices.length > 0) {
       problems.push(erroredPrices.length + ' listing(s) have errored closing prices ('
@@ -1380,8 +1401,9 @@ const JOB_DESC = {
 async function viewJobs() {
   setActiveNav('jobs');
   // GET /jobs returns each registered job with how it is triggered
-  // ('scheduled' / 'manual_only') and its last run (started timestamp, finish
-  // timestamp once it has one, status, error text), or nulls if it has never run.
+  // ('scheduled' / 'manual_only'), when the running scheduler says it is next
+  // due, and its last run (started timestamp, finish timestamp once it has one,
+  // status, error text), or nulls if it has never run.
   const jobs = await api('GET', '/jobs');
   const rows = jobs.map(function (j) {
     return {
@@ -1390,6 +1412,13 @@ async function viewJobs() {
       // A manual-only job is a one-off repair with no schedule line at all, so
       // 'never' in the status column is expected rather than a missed run.
       trigger: j.trigger === 'manual_only' ? 'manual only' : 'scheduled',
+      // The instant the running scheduler says this job is next due (the
+      // earliest, for a job scheduled on several lines). Blank for a
+      // manual-only job, which has no schedule by design — and for a scheduled
+      // job whose line has been lost, which is what makes this column worth
+      // reading: until it existed, this screen could not say whether a job was
+      // still scheduled at all, so a dead timer went on showing ok for ever.
+      next_run: j.next_run_at || '',
       // Blank while the newest run is still open — it has no finish time yet.
       last_run: j.last_finished_at || '',
       // The server's own three-valued run status ('running' / 'ok' / 'failed'),
@@ -1401,7 +1430,7 @@ async function viewJobs() {
       _runs: j.runs || [],
     };
   });
-  const cols = ['job', 'description', 'trigger', 'last_run', 'status', 'error'];
+  const cols = ['job', 'description', 'trigger', 'next_run', 'last_run', 'status', 'error'];
   const table = filterableTable(rows, cols, {
     statusField: 'status',
     // Expand a job to its stored run history (the server keeps a bounded
@@ -1445,7 +1474,7 @@ async function viewJobs() {
   });
   setMain(el('div', null, [
     el('h2', null, 'Jobs'),
-    el('p', { class: 'view-desc' }, 'Trigger maintenance jobs on demand, and see when each last ran (and any error). Expand a job to see its recent run history. A job marked scheduled also runs automatically on its cron schedule, so running it here is for retries or missed runs; one marked manual only is a one-off repair that has no schedule and runs only from here \u2014 it showing never is expected, not a missed run.'),
+    el('p', { class: 'view-desc' }, 'Trigger maintenance jobs on demand, and see when each is next due and when it last ran (and any error). Expand a job to see its recent run history. A job marked scheduled also runs automatically on its cron schedule, so running it here is for retries or missed runs; one marked manual only is a one-off repair that has no schedule and runs only from here \u2014 it showing never is expected, not a missed run.'),
     table,
   ]));
 }

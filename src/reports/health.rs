@@ -11,6 +11,12 @@
 //!   than the previous calendar month means the weekly import has stopped
 //!   landing new months);
 //! - every job whose most recent recorded run failed;
+//! - every scheduled job that is **overdue**: the instant its own timer stored
+//!   as its next run came and went, and nothing moved it on (see
+//!   [`OverdueJob`]);
+//! - every job whose most recent run has been `running` far longer than any run
+//!   of it should take — a run the process did not survive rather than one in
+//!   flight (see [`StalledJob`]);
 //! - every listing with at least one errored closing-price row (a wrong,
 //!   renamed, or delisted provider symbol otherwise only shows up
 //!   indirectly, as a missing snapshot from the errored date onward —
@@ -104,6 +110,44 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 /// a long exchange-holiday weekend without a false alarm.
 pub const PRICE_STALE_BUSINESS_DAYS: i64 = 3;
 
+/// How far past its stored next run a scheduled job may go before it is
+/// reported overdue (see [`OverdueJob`]).
+///
+/// The margin has to absorb three legitimate delays. A job's stored instant is
+/// only moved on *after* its run returns, so the margin must exceed the longest
+/// a scheduled job takes — minutes, for the price import walking a fortnight of
+/// trading days per held listing, or the snapshot generation behind it. The
+/// timer re-anchors to the wall clock in hourly chunks (`scheduler`'s
+/// `MAX_SLEEP`), so a DST step or an NTP correction mid-wait can legitimately
+/// hold a fire up to an hour past the instant computed before the shift. And a
+/// server restarted moments before a due instant rewrites the row from the new
+/// process, which takes as long as startup takes.
+///
+/// Six hours clears all three by an order of magnitude and still catches a dead
+/// weekly task on the morning of the day it should have run — a quarter of a
+/// day against a cadence of a week. It is deliberately *not* tuned per job: the
+/// stored instant already carries each job's own cadence, which is the whole
+/// point of storing it rather than declaring a maximum age per job.
+pub const JOB_OVERDUE_GRACE_HOURS: i64 = 6;
+
+/// How long a run may stay `running` before it is reported as stalled (see
+/// [`StalledJob`]).
+///
+/// `job_runs` records a run from the moment it starts (SCENARIOS T-11), which
+/// made an *interrupted* run visible — but left it looking exactly like one
+/// genuinely in flight, since both are `running` with no finish time. That
+/// write-up said telling them apart needs a notion of overdue; this is it, on
+/// the other axis. No scheduled job here runs for hours: the longest is a price
+/// import or a snapshot generation, both minutes. A row still open after six of
+/// them is a dead process's debris — nothing ever finishes it, because the
+/// process that would have is gone — and it is worth saying so, since the Jobs
+/// screen would otherwise show `running` for ever.
+///
+/// Same figure as [`JOB_OVERDUE_GRACE_HOURS`] and deliberately its own
+/// constant: the two answer different questions (how late a schedule may be
+/// against how long a run may be open) and either could move without the other.
+pub const JOB_RUNNING_STALE_HOURS: i64 = 6;
+
 /// How many consecutive shared trading days of *identical* closes make two
 /// listings one series stored twice — see [`DuplicatePriceSeries`]. Thirty is
 /// about six weeks of trading. Two genuinely distinct securities do coincide
@@ -129,6 +173,71 @@ pub struct FailedJob {
     pub name: String,
     pub finished_at: String,
     pub error: Option<String>,
+}
+
+/// A scheduled job whose stored next run is in the past by more than
+/// [`JOB_OVERDUE_GRACE_HOURS`] — its timer has stopped moving the row on.
+///
+/// This is the database-derived liveness signal the jobs without one were
+/// missing. `failed_jobs` fires only when a job's most recent run *failed*; a
+/// job that is not running at all records nothing, so it raised nothing, and
+/// the last successful run stayed in place indefinitely. Prices and FX each
+/// have their own freshness signal (`prices_stale`, `fx_stale`); the backup —
+/// where it matters most, because nothing in the database changes when a backup
+/// does or does not happen — had none, nor did `mic-import` or
+/// `currency-import` (SCENARIOS T-11/T-02/T-12).
+///
+/// What it catches is a scheduler that has stopped **while the process is up**:
+/// a cron pattern with no future occurrence (accepted at startup — the entry's
+/// task logs one ERROR and exits), or a task that has otherwise gone. It is not
+/// a record of missed runs: `job_schedule` is rebuilt at every startup from the
+/// schedule the new process is running, so a run missed while the server was
+/// down is not reported here — the schedule resumes, and the stored instant
+/// moves forward with it.
+///
+/// A **manual-only** job never appears: it has no schedule line by design, so
+/// it has no row, and treating "never ran" as "late" is exactly what the
+/// `trigger` flag exists to prevent (SCENARIOS T-09/schedule). Neither does a
+/// job whose schedule line was *removed* — the startup WARN reports that, and a
+/// row kept for a job nobody schedules any more would be an alarm nobody could
+/// clear.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OverdueJob {
+    pub name: String,
+    /// The cron expression of the entry that is late, as written in the
+    /// schedule file (a job may be scheduled on several lines — the price
+    /// import has three, one per market — and each is its own row).
+    pub cron: String,
+    /// The entry's IANA timezone; `None` when the line carries none and the
+    /// expression is in server-local time.
+    pub timezone: Option<String>,
+    /// The instant the scheduler last said this entry was next due, RFC 3339
+    /// UTC.
+    pub next_run_at: String,
+    /// Whole hours between `next_run_at` and now — how long overdue it is.
+    pub overdue_hours: i64,
+}
+
+/// A job whose most recent run has been `running` for more than
+/// [`JOB_RUNNING_STALE_HOURS`]: a run that started and, on the evidence, will
+/// never finish.
+///
+/// The row is what a restart, a `SIGKILL` or a power cut mid-run leaves behind
+/// (SCENARIOS T-11) — nothing completes it, because the process that would have
+/// is gone. Reported separately from [`OverdueJob`] because the fault is a
+/// different one: the schedule may be perfectly alive and still due on time,
+/// while a run of it lies open for ever.
+///
+/// Only the *latest* run per job is considered, as with `failed_jobs`: once a
+/// later run has started, the job is running again and the abandoned row is
+/// history rather than a live fault.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct StalledJob {
+    pub name: String,
+    /// RFC 3339 timestamp the run began.
+    pub started_at: String,
+    /// Whole hours the run has been open.
+    pub running_hours: i64,
 }
 
 /// A listing with one or more errored closing-price rows: a stuck symbol
@@ -912,6 +1021,15 @@ pub struct HealthReport {
     pub latest_fx_month: Option<String>,
     pub fx_stale: bool,
     pub failed_jobs: Vec<FailedJob>,
+    /// Every scheduled job whose stored next run is more than
+    /// [`JOB_OVERDUE_GRACE_HOURS`] in the past, by name. Empty when every
+    /// spawned schedule entry is still moving its row on — and on a database
+    /// whose server has not yet run the scheduler at all, since the table is
+    /// then empty and nothing has been promised.
+    pub overdue_jobs: Vec<OverdueJob>,
+    /// Every job whose most recent run has been open for more than
+    /// [`JOB_RUNNING_STALE_HOURS`], by name. Empty when no run is stuck.
+    pub stalled_jobs: Vec<StalledJob>,
     /// Listings with at least one errored closing-price row, newest error
     /// first. Empty when every stored price is ok.
     pub errored_prices: Vec<ErroredPriceListing>,
@@ -2124,6 +2242,99 @@ async fn db_non_trading_day_trades(
     Ok(alerts)
 }
 
+/// One stored schedule row (`job_schedule`, migration 0043) — the next run of
+/// one spawned schedule entry, as that entry's own timer last computed it.
+#[derive(sqlx::FromRow)]
+struct JobScheduleRow {
+    name: String,
+    cron: String,
+    timezone: Option<String>,
+    next_run_at: String,
+}
+
+/// One `job_runs` row still open — a run that started and has not finished.
+#[derive(sqlx::FromRow)]
+struct RunningJobRow {
+    name: String,
+    started_at: String,
+}
+
+/// An RFC 3339 timestamp column as an instant. A stored timestamp that will not
+/// parse is a decode failure like any other, never a silently substituted
+/// "now": a job's liveness must not be asserted from a value nobody could read.
+fn parse_instant(value: &str, column: &str) -> Result<DateTime<Utc>, sqlx::Error> {
+    DateTime::parse_from_rfc3339(value)
+        .map(|t| t.with_timezone(&Utc))
+        .map_err(|e| {
+            sqlx::Error::Decode(
+                format!("{column} {value:?} is not an RFC 3339 timestamp: {e}").into(),
+            )
+        })
+}
+
+/// Scheduled entries whose stored next run is more than
+/// [`JOB_OVERDUE_GRACE_HOURS`] in the past (see [`OverdueJob`]).
+///
+/// An empty table is silent, which is the state every upgraded database starts
+/// in: the rows are written by the running scheduler, so until a server has
+/// started with this schema there is nothing to be late for. Filtered in Rust
+/// rather than SQL because the comparison is between instants, not strings —
+/// the stored value is RFC 3339 and must be parsed to be compared honestly.
+async fn db_overdue_jobs(
+    conn: &mut sqlx::SqliteConnection,
+    now: DateTime<Utc>,
+) -> Result<Vec<OverdueJob>, sqlx::Error> {
+    let rows = sqlx::query_as::<_, JobScheduleRow>(
+        "SELECT name, cron, timezone, next_run_at FROM job_schedule ORDER BY name, next_run_at",
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut overdue = Vec::new();
+    for row in rows {
+        let due = parse_instant(&row.next_run_at, "job_schedule.next_run_at")?;
+        let late = now - due;
+        if late > Duration::hours(JOB_OVERDUE_GRACE_HOURS) {
+            overdue.push(OverdueJob {
+                name: row.name,
+                cron: row.cron,
+                timezone: row.timezone,
+                next_run_at: row.next_run_at,
+                overdue_hours: late.num_hours(),
+            });
+        }
+    }
+    Ok(overdue)
+}
+
+/// Jobs whose most recent run has been open for more than
+/// [`JOB_RUNNING_STALE_HOURS`] (see [`StalledJob`]).
+async fn db_stalled_jobs(
+    conn: &mut sqlx::SqliteConnection,
+    now: DateTime<Utc>,
+) -> Result<Vec<StalledJob>, sqlx::Error> {
+    let rows = sqlx::query_as::<_, RunningJobRow>(
+        "SELECT name, started_at FROM job_runs r \
+         WHERE id = (SELECT MAX(id) FROM job_runs WHERE name = r.name) \
+           AND status = 'running' \
+         ORDER BY name",
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut stalled = Vec::new();
+    for row in rows {
+        let started = parse_instant(&row.started_at, "job_runs.started_at")?;
+        let open = now - started;
+        if open > Duration::hours(JOB_RUNNING_STALE_HOURS) {
+            stalled.push(StalledJob {
+                name: row.name,
+                started_at: row.started_at,
+                running_hours: open.num_hours(),
+            });
+        }
+    }
+    Ok(stalled)
+}
+
 /// Read the freshness facts on one snapshot. `today` and `now` are parameters
 /// so tests can pin the staleness thresholds and the "close is final yet"
 /// cut-off to fixed dates.
@@ -2172,6 +2383,8 @@ pub async fn db_health(
     )
     .fetch_all(&mut *tx)
     .await?;
+    let overdue_jobs = db_overdue_jobs(&mut tx, now).await?;
+    let stalled_jobs = db_stalled_jobs(&mut tx, now).await?;
     let demergers_missing_close = db_demergers_missing_close(&mut tx).await?;
     let demergers_head_not_continuing = db_demergers_head_not_continuing(&mut tx).await?;
     let duplicate_price_series = db_duplicate_price_series(&mut tx).await?;
@@ -2199,6 +2412,8 @@ pub async fn db_health(
         latest_fx_month,
         fx_stale,
         failed_jobs,
+        overdue_jobs,
+        stalled_jobs,
         errored_prices,
         unpriced_days,
         demergers_missing_close,
@@ -2477,6 +2692,183 @@ mod tests {
         let h = health(&pool, ymd(2026, 7, 13)).await;
         assert_eq!(h.failed_jobs.len(), 1);
         assert_eq!(h.failed_jobs[0].name, "backup");
+    }
+
+    /// Store one `job_schedule` row: what a spawned schedule entry writes
+    /// every iteration.
+    async fn insert_job_schedule(
+        pool: &SqlitePool,
+        name: &str,
+        cron: &str,
+        timezone: Option<&str>,
+        next_run_at: DateTime<Utc>,
+    ) {
+        sqlx::query(
+            "INSERT INTO job_schedule (name, cron, timezone, next_run_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(name)
+        .bind(cron)
+        .bind(timezone)
+        .bind(next_run_at.to_rfc3339())
+        .bind(next_run_at.to_rfc3339())
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// Store one run that started and has not finished — what a run in flight
+    /// looks like, and equally what a process that died mid-run left behind.
+    async fn insert_open_job_run(pool: &SqlitePool, name: &str, started_at: DateTime<Utc>) {
+        sqlx::query(
+            "INSERT INTO job_runs (name, started_at, finished_at, status, error) \
+             VALUES (?, ?, NULL, 'running', NULL)",
+        )
+        .bind(name)
+        .bind(started_at.to_rfc3339())
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// The state every existing database is in the moment it is upgraded: the
+    /// schedule rows are written by the *running* scheduler, so until a server
+    /// has started on this schema there are none — and nothing may be reported
+    /// overdue, because nothing has yet promised to run.
+    #[tokio::test]
+    async fn a_database_with_no_stored_schedule_reports_nothing_overdue() {
+        let pool = test_pool().await;
+        // A job that ran long ago and has no schedule row is not overdue
+        // either: the run history alone never says a job is late.
+        insert_job_run(&pool, "backup", "2020-01-01T00:00:00Z", None).await;
+        let h = health(&pool, ymd(2026, 7, 13)).await;
+        assert!(h.overdue_jobs.is_empty());
+        assert!(h.stalled_jobs.is_empty());
+    }
+
+    /// A job whose scheduler is alive holds an instant in the future, and is
+    /// not overdue however long ago it last ran.
+    #[tokio::test]
+    async fn a_job_whose_schedule_is_still_moving_is_not_overdue() {
+        let pool = test_pool().await;
+        let now = noon_utc(ymd(2026, 7, 13));
+        insert_job_schedule(&pool, "backup", "0 0 * * 0", None, now + Duration::days(4)).await;
+        let h = health(&pool, ymd(2026, 7, 13)).await;
+        assert!(h.overdue_jobs.is_empty());
+    }
+
+    /// The grace margin's boundary, from both sides. The stored instant is
+    /// only moved on *after* a run returns, so a job legitimately sits a
+    /// little past its own due time; exactly the margin is still on time, and
+    /// a second past it is not.
+    #[tokio::test]
+    async fn the_overdue_grace_margin_is_exclusive_at_its_boundary() {
+        let pool = test_pool().await;
+        let now = noon_utc(ymd(2026, 7, 13));
+        insert_job_schedule(
+            &pool,
+            "backup",
+            "0 0 * * 0",
+            None,
+            now - Duration::hours(JOB_OVERDUE_GRACE_HOURS),
+        )
+        .await;
+        let h = db_health(&pool, ymd(2026, 7, 13), now).await.unwrap();
+        assert!(
+            h.overdue_jobs.is_empty(),
+            "exactly the grace margin past due is still on time"
+        );
+
+        let h = db_health(&pool, ymd(2026, 7, 13), now + Duration::seconds(1))
+            .await
+            .unwrap();
+        assert_eq!(h.overdue_jobs.len(), 1, "one second later it is overdue");
+        assert_eq!(h.overdue_jobs[0].name, "backup");
+        assert_eq!(h.overdue_jobs[0].overdue_hours, JOB_OVERDUE_GRACE_HOURS);
+    }
+
+    /// An overdue row names the schedule it is late against — the cron
+    /// expression as written and the entry's own timezone — so the banner can
+    /// say which of a job's lines has stopped. `price-import` has three.
+    #[tokio::test]
+    async fn an_overdue_job_names_its_schedule_and_how_late_it_is() {
+        let pool = test_pool().await;
+        let now = noon_utc(ymd(2026, 7, 13));
+        insert_job_schedule(
+            &pool,
+            "price-import",
+            "30 17 * * 1-5",
+            Some("Australia/Sydney"),
+            now - Duration::hours(30),
+        )
+        .await;
+        // A second entry of the same job, still alive: only the dead one is
+        // reported.
+        insert_job_schedule(
+            &pool,
+            "price-import",
+            "30 17 * * 1-5",
+            Some("America/New_York"),
+            now + Duration::hours(4),
+        )
+        .await;
+        let h = db_health(&pool, ymd(2026, 7, 13), now).await.unwrap();
+        assert_eq!(h.overdue_jobs.len(), 1);
+        let row = &h.overdue_jobs[0];
+        assert_eq!(row.name, "price-import");
+        assert_eq!(row.cron, "30 17 * * 1-5");
+        assert_eq!(row.timezone.as_deref(), Some("Australia/Sydney"));
+        assert_eq!(row.overdue_hours, 30);
+        assert_eq!(
+            row.next_run_at,
+            (now - Duration::hours(30)).to_rfc3339(),
+            "the instant reported is the stored one, verbatim"
+        );
+    }
+
+    /// A run open longer than any run of these jobs takes is a process that
+    /// died mid-run, not a run in flight — the distinction migration 0042
+    /// deliberately left to this report (SCENARIOS T-11). The boundary is
+    /// exclusive, like the overdue margin's.
+    #[tokio::test]
+    async fn a_run_open_longer_than_any_run_takes_is_reported_stalled() {
+        let pool = test_pool().await;
+        let now = noon_utc(ymd(2026, 7, 13));
+        insert_open_job_run(
+            &pool,
+            "backup",
+            now - Duration::hours(JOB_RUNNING_STALE_HOURS),
+        )
+        .await;
+        let h = db_health(&pool, ymd(2026, 7, 13), now).await.unwrap();
+        assert!(
+            h.stalled_jobs.is_empty(),
+            "a run open exactly the margin is still in flight"
+        );
+
+        let h = db_health(&pool, ymd(2026, 7, 13), now + Duration::seconds(1))
+            .await
+            .unwrap();
+        assert_eq!(h.stalled_jobs.len(), 1);
+        assert_eq!(h.stalled_jobs[0].name, "backup");
+        assert_eq!(h.stalled_jobs[0].running_hours, JOB_RUNNING_STALE_HOURS);
+        // …and it is still not a *failure*: nothing failed.
+        assert!(h.failed_jobs.is_empty());
+    }
+
+    /// Once a later run has started, the abandoned row is history rather than
+    /// a live fault — the same latest-run-only rule `failed_jobs` follows.
+    #[tokio::test]
+    async fn an_abandoned_run_stops_being_reported_once_the_job_runs_again() {
+        let pool = test_pool().await;
+        let now = noon_utc(ymd(2026, 7, 13));
+        insert_open_job_run(&pool, "backup", now - Duration::days(30)).await;
+        let h = db_health(&pool, ymd(2026, 7, 13), now).await.unwrap();
+        assert_eq!(h.stalled_jobs.len(), 1);
+
+        insert_job_run(&pool, "backup", "2026-07-13T00:01:00Z", None).await;
+        let h = db_health(&pool, ymd(2026, 7, 13), now).await.unwrap();
+        assert!(h.stalled_jobs.is_empty());
     }
 
     /// The case the errored list cannot catch: a held day nobody ever
