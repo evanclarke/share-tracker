@@ -1178,11 +1178,11 @@ async fn what_if_handler(
     // exactly that allocation), and one sold since was still there to sell.
     // `units` and the implied per-unit price `proceeds ÷ units` are read in
     // that date's unit basis — the basis the candidates come back in.
-    let parcels = parcel_optimiser::db_candidate_parcels_on(
+    let candidates = parcel_optimiser::db_candidate_parcels_on(
         &mut tx,
         req.listing_id,
         req.holding_account_id,
-        Some(req.date),
+        req.date,
     )
     .await
     .map_err(ApiError::from)?;
@@ -1205,7 +1205,8 @@ async fn what_if_handler(
             ));
         }
         (Some(allocs), None) => {
-            let mut remaining: HashMap<i64, Decimal> = parcels
+            let mut remaining: HashMap<i64, Decimal> = candidates
+                .parcels()
                 .iter()
                 .map(|p| (p.trade_id, p.remaining_quantity))
                 .collect();
@@ -1247,7 +1248,11 @@ async fn what_if_handler(
             picks
         }
         (None, Some(strategy)) => {
-            let open: Decimal = parcels.iter().map(|p| p.remaining_quantity).sum();
+            let open: Decimal = candidates
+                .parcels()
+                .iter()
+                .map(|p| p.remaining_quantity)
+                .sum();
             if req.units > open {
                 // Name the account the request scoped the candidates to —
                 // otherwise the refusal reads as a claim about every unit
@@ -1265,12 +1270,19 @@ async fn what_if_handler(
             }
             // The per-unit price the strategy's gain orderings see.
             let price = req.proceeds / req.units;
-            parcel_optimiser::allocate_strategy(&parcels, req.units, price, req.date, strategy)
+            parcel_optimiser::allocate_strategy(
+                candidates.parcels(),
+                req.units,
+                price,
+                req.date,
+                strategy,
+            )
         }
     };
 
     let (allocations, totals) =
-        parcel_optimiser::disposal_figures(&parcels, &picks, req.proceeds, req.units, req.date);
+        parcel_optimiser::disposal_figures(&candidates, &picks, req.proceeds, req.units)
+            .map_err(ApiError::from)?;
 
     // Re-run the report's own computation with the hypothetical's buckets
     // injected into the disposal year — and the year ensured in both runs, so

@@ -686,12 +686,12 @@ mod tests {
         // The optimiser prices a contemplated sale off those parcels, so the
         // reduced $9.00/unit basis would have overstated every strategy's
         // gain.
-        let candidates = parcel_optimiser::db_candidate_parcels(&pool, 1, None, None)
+        let candidates = parcel_optimiser::db_candidate_parcels(&pool, 1, None, today)
             .await
             .unwrap();
-        assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].remaining_quantity, dec("100"));
-        assert_eq!(candidates[0].remaining_cost_base, dec("1000"));
+        assert_eq!(candidates.parcels().len(), 1);
+        assert_eq!(candidates.parcels()[0].remaining_quantity, dec("100"));
+        assert_eq!(candidates.parcels()[0].remaining_cost_base, dec("1000"));
 
         let unrealised = unrealised_gains::db_unrealised_gains(&pool, today)
             .await

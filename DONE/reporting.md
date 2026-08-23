@@ -1258,3 +1258,117 @@ exports and `infra::decimal::to_cents` now all share.
       W-c's promise, which W-f deliberately reverses), Tax summary (a new *a total column is the sum
       of the columns printed beside it* paragraph), and the annual tax report's `cgt_summary` and
       income bullets; pinned by `doc_checks::worksheet_derived_columns_documented`.
+
+## The parcel optimiser's candidates are costed as *held*, not as *disposed of*
+
+Raised while sweeping `reports::parcel_optimiser.rs`'s pro-rate onto `mul_div` (the section archived
+in [`DONE/tax-domain.md`](DONE/tax-domain.md) flagged the line as `domain::cost_base`'s pro-rate
+re-implemented locally and asked whether the local copy had drifted).
+
+The pro-rate itself has **not** drifted: `disposal_figures` starts from `remaining_cost_base`, which
+`reports::open_parcels` already obtained from the shared pipeline, and scaling it linearly by
+`units ÷ remaining_quantity` agrees with `domain::cost_base::adjusted_cost_base` to the digit —
+measured against `reports::realised_gains` for the same disposal actually recorded, across a plain
+partial sale, a return of capital, a whole-parcel pick, and an AMMA statement whose year end
+precedes the sale. (A consolidation into a non-terminating unit basis differs by 2e-27, which is the
+second pro-rate rounding once more at 28 digits, not a disagreement about the rule.)
+
+What **has** drifted is one step upstream of that line, and it is the same class of bug — two
+callers of one domain calculation disagreeing. `parcel_optimiser::db_candidate_parcels_on` reads its
+candidates through `domain::open_parcels::load`, which costs them `Held::AsAt(as_of)`; the recorded
+Sell is costed `Held::DisposedOn(sale_date)`. The two differ in exactly one respect —
+`Held::AsAt` reports no disposal date, so `AmitReductionEvent::reduction_for_units` always takes its
+*still-held* branch — and that changes the figure whenever an AMMA statement's tax year end falls
+**after** the contemplated sale date and its adjustment row covers more than the units still held at
+that year end. The optimiser then applies no reduction at all, while the same disposal, once
+recorded, spills the statement onto the disposed units per s 104-107B / LCR 2015/11 (the adjustment
+is made just before the CGT event).
+
+Measured: a 100-unit parcel at $13.3166…/unit, an AMMA for the year ended 2026-06-30 with a −$0.13
+per-unit cost-base adjustment covering the whole parcel, and 40 units disposed of on 2026-03-02.
+`POST /portfolio/parcel-optimiser` costs the 40 units at **A$532.67**; the same 40 units recorded as
+a Sell are costed **A$537.87** by `/portfolio/realised-gains` — A$5.20 apart, the statement's whole
+reduction on those units. `POST /reports/net-capital-gain/what-if` shares the same reader and so the
+same figure. Narrow (it needs a contemplated sale dated before a recorded statement's year end) but
+live, and silent: nothing marks the estimate as resting on a different rule from the report it is
+meant to predict.
+
+Reproduced independently on a second fixture before this was accepted: a 100-unit VDHG parcel at
+$60, an AMMA for the year ended 2026-06-30 carrying a **$1.30** per-unit adjustment over the whole
+parcel, 40 units contemplated on 2026-03-02. The optimiser costs them **A$2,400.00**; the same 40
+units recorded as a Sell are costed **A$2,348.00** — A$52.00, again exactly the statement's whole
+reduction on the disposed units (40 × $1.30). The gap therefore **scales with the per-unit
+adjustment and the units sold**, and is not inherently small: a Vanguard AMMA's per-unit cost-base
+adjustment is routinely in this range, so a four-figure holding puts it in the hundreds of dollars.
+
+Worth noting *which* way it errs. The optimiser reports the **higher** cost base, so it under-states
+the gain the sale will actually realise — and because it ranks its four strategies on those gains, a
+statement covering one candidate parcel and not another can reorder the ranking, not merely shift
+every row by a constant. The output is advice about which parcel to sell, so a wrong ordering is the
+failure that matters, not the wrong figure beside it.
+
+This is a fresh instance of the pattern SCENARIOS section O already named — *diff a decision-support
+endpoint against the write path it rehearses* — which is how it should be tested once fixed: not by
+asserting a figure, but by asserting the optimiser and the recorded Sell agree over a matrix of
+cost-base events.
+
+- [x] Decide whether the optimiser and the pre-sale what-if should cost their candidates as
+      *disposed of on the contemplated date* rather than as *held at it* — a `Held` the loader is
+      told rather than infers — and either make the two agree or say in `docs/API.md` where they
+      deliberately do not, with a test pinning whichever answer is chosen
+      — **made to agree**, and the fix is one step larger than the finding's own diagnosis. Two
+      corrections to the write-up above. First, the **mechanism**: the reproduction's A$52.00 gap
+      is not `Held::AsAt` taking `reduction_for_units`' still-held branch — it is
+      `open_parcels::load` passing its as-of date to
+      `amit_adjustment::db_cost_base_reduction_events`, whose `tax_year_end_date <= ?` filter drops
+      a statement for a year that has not ended, so the optimiser applied no AMIT event *at all*
+      (6000 → 2400 for 40 of 100 units). `realised_gains` reads its statements unbounded, which is
+      why the recorded Sell saw it. Second, and the reason the minimal shape the finding proposed
+      would not have worked: passing `Held::DisposedOn(sale_date)` while leaving
+      `AmitReductionEvent::disposed_by_year_end` as the *recorded* allocations read it takes the
+      spill branch with `sold = 0` and returns **zero** — the same wrong answer, arrived at
+      differently. The contemplated units have to join `disposed_by_year_end` themselves, and that
+      is what makes the pipeline **non-linear** in the disposed units (the finding's linearity
+      question, answered): with a partly-covering AMIT row the reduction reaching `u` units is
+      `per_unit × (covered − held)⁺ × u ÷ (D + u)`, whose denominator moves with `u`, so
+      `disposal_figures`' pro-rate off the whole parcel could not be kept. Measured: with the rest
+      of the fix in place but the pro-rate restored, a 100-unit parcel whose FY2026 row covers the
+      70 open at that year end estimates A$2,363.60 for a 40-unit pick against the A$2,370.2857…
+      the Sell realises.
+      Built: `domain/contemplated_disposal.rs` — the shared "cost a disposal that is not recorded
+      yet" calculation (`Costing::load` reads the AMIT/ROC/split events and `FxRates` on the
+      caller's own connection; `adjusted_cost_base_aud` re-bases the units to the as-acquired
+      basis, adds them to `disposed_by_year_end` for every statement whose year end the sale falls
+      on or before, and runs `domain::cost_base::adjusted_cost_base` under
+      `Held::DisposedOn(sale_date)`), carrying the s 104-107B / LCR 2015/11 citation for why a
+      statement for the year the sale falls inside reaches the sold units. `parcel_optimiser`'s
+      `db_candidate_parcels`/`db_candidate_parcels_on` now answer a `Candidates` — the candidate
+      set still from `domain::open_parcels::load` (unchanged, so no other caller's figures moved:
+      the loader, `reports::open_parcels`, portfolio, unrealised gains, rollover consistency and
+      AMIT-adjustment generation are untouched by the diff), the cost bases from `Costing`, and the
+      sale date held once so `disposal_figures` cannot be handed a different one. `disposal_figures`
+      costs each pick at its own unit count instead of pro-rating. The what-if follows through the
+      same reader, inside its own single read transaction.
+      Tests (`reports::parcel_optimiser::tests`) are the section-O pattern the finding asked for —
+      *diff a decision-support endpoint against the write path it rehearses* — a harness that asks
+      the optimiser, records **exactly** the Sell it described, and requires
+      `/portfolio/realised-gains` to agree per allocation and in total rather than asserting a
+      figure: `agreement_on_a_plain_partial_sale`, `agreement_on_a_whole_parcel_pick`,
+      `agreement_when_the_amma_year_end_falls_after_the_sale` (the finding),
+      `agreement_when_the_amma_year_end_falls_before_the_sale` (the control that already worked),
+      `agreement_when_the_amit_row_covers_less_than_the_parcel`,
+      `agreement_when_a_partly_covering_amit_row_is_taken_in_full`,
+      `agreement_on_a_return_of_capital`,
+      `agreement_across_a_split_between_acquisition_and_the_sale`,
+      `agreement_across_two_parcels_with_every_cost_base_event`; plus
+      `the_amma_reduction_reaches_the_estimate_of_a_sale_inside_its_year` (the reproduction's own
+      A$2,348.00), `an_amma_inside_the_sale_year_reorders_the_strategies` (the failure that
+      matters: min-gain now advises a *different parcel*), and
+      `the_what_if_costs_the_same_disposal_the_same_way`; and
+      `domain::contemplated_disposal::tests::{a_sale_inside_the_statement_year_joins_its_disposed_units,
+      a_sale_after_the_statement_year_leaves_it_alone}`. Confirmed failing with the fix reverted:
+      restoring the held-at-the-date costing fails 8 of the 12, and restoring the pro-rate alone
+      fails `agreement_when_the_amit_row_covers_less_than_the_parcel`. Docs: `docs/API.md`'s
+      Parcel-selection optimiser and Pre-sale what-if sections now say the candidates are costed
+      **as disposed of on the contemplated date**, each allocation at its own unit count, and why
+      that carries a statement whose year end falls after the sale onto the sold units.
