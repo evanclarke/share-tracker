@@ -380,7 +380,73 @@ Options offered:
 **Evan chose (a).** The document's job is to be checked by hand; a column that does not add up fails
 at exactly that.
 
-- [ ] Round each disposal-schedule parcel figure to the cent in `reports::tax_report` and sum the
+- [x] Round each disposal-schedule parcel figure to the cent in `reports::tax_report` and sum the
       rounded values into every subtotal and grand total, with a test asserting each column's rows
       sum exactly to the total it sits under; note the convention in `docs/API.md`'s Annual tax
       report section
+      — the rounding happens **once, at the row**: `DisposalParcelRow::round_money_to_cents` runs as
+      each row is built, so `DisposalTotals::add` can only ever sum figures that are already
+      rounded and a subtotal is the sum of the rows printed above it *by construction*, not by a
+      second pass someone could forget. The rule itself is now `infra::decimal::to_cents` (to the
+      cent, half away from zero, a figure that rounds to nil normalised to a positive zero) and
+      W-c's `reports::export::Cents` delegates to it: that type is a *serialisation* wrapper whose
+      `Display` renders `{:.2}`, and here the rounded value has to be **summed**, so the two now
+      share the rounding and differ only in the rendering — one rule provably, rather than two
+      that agree today. Money, and so rounded: `initial_cost_base_aud`, `adjusted_cost_base_aud`,
+      `proceeds_aud`, `gain_loss_aud`, `cgt_discount_amount_aud`, `gain_after_discount_aud`, and
+      each itemised adjustment's `amount` (the document prints those under the parcel too). Left
+      verbatim: the two `*_per_unit_aud` figures and an adjustment's `per_unit` — a derived
+      per-unit figure shows at 4+ dp by the documented display rule, never cent-rounded —
+      `buy_price`/`sale_price`, `units`, `days_held`, the two FX rates, and
+      `buy_brokerage`/`buy_gst_on_brokerage`, the contract note's own native-currency figures,
+      transcribed for hand-checking against it (99.5c of GST on $9.95 of brokerage is genuinely
+      sub-cent) and totalled nowhere. Nothing downstream reads these rows — the report computes
+      nothing new — so no tax figure moved: `realised_gains` and `net_capital_gain` still answer
+      the exact decimal, and the tax-report/realised-gains reconciliation test still passes.
+      Measured on the three-parcel BHP disposal: the discount and discounted-gain columns now
+      subtotal **1652.18** over rows of 63.55 + 527.90 + 1060.73 (printed 1652.17), and the
+      cost-base column **27453.44** over 4991.52 + 9227.54 + 13234.38 (printed 27453.43); proceeds
+      and gain/loss happened to reconcile already and are unchanged (30757.77, 3304.34).
+      Tests: `reports::tax_report::tests::{api_a_disposal_columns_rows_add_up_to_its_printed_subtotal,
+      api_every_disposal_money_column_totals_the_rounded_rows_beneath_it,
+      api_the_per_unit_and_as_entered_disposal_columns_are_not_cent_rounded}` — the middle one
+      finds the money columns *by name* (`*_aud` less the per-unit pair) across a three-group
+      document (an AUD disposal, an AMIT parcel carrying itemised adjustments, a USD parcel whose
+      every figure is an FX conversion), so a newly added money column is covered without being
+      listed, and asserts its total↔parcel column pairing covers the whole of `DisposalTotals`, so
+      a newly added *total* fails until it is reconciled too. Plus
+      `infra::decimal::tests::to_cents_rounds_half_away_from_zero_and_keeps_the_cent_scale` and
+      `doc_checks::cent_rounded_tax_report_disposals_documented`; all three W-d tests were
+      confirmed to fail with the rounding call removed. `taxreport.js` needed no change: it prints
+      the server's subtotals and re-derives nothing client-side, and `numericDisplay`'s money
+      rounding is idempotent on a figure already at the cent (its hover tooltip simply stops
+      appearing, having nothing left to show).
+
+Two corrections to this section's own write-up, found by re-deriving it. The cost-base rows are
+4991.52 + 9227.54 + **13234.38** (the third parcel is 333 units at 39.71, not 11726.38) — the total
+27453.44 was right. And the control is narrower than stated: at four decimal places the *cost base*
+column reconciles, but the discount column does not (63.5468 + 527.8979 + 1060.7254 = 1652.1701
+against a subtotal of 1652.1700), because halving three exact-arithmetic gains lands on figures no
+display precision reconciles. The true control is that the underlying arithmetic is exact and it is
+any *display* rounding of the rows that disagrees with the rounded exact total — which is why the
+fix has to be to total the rounded rows rather than to print more places.
+
+Three residues deliberately left, each a decision rather than an oversight, and each Evan's to take
+as its own section:
+
+1. **A row's own arithmetic can still be a cent out.** The schedule prints proceeds, cost base and
+   gain/loss on one line; rounded independently, the second BHP parcel prints 10283.33 − 9227.54
+   beside a gain of 1055.80. Deriving the gain from the rounded components would fix the row *and*
+   keep the columns adding up (Σ of derived gains = Σ proceeds − Σ cost base), at the price of a
+   printed gain that is not the rounded gain — a figure the chosen option (a) does not authorise.
+   This is unchanged by W-d: the printed page has shown those same three rounded numbers all along,
+   since the UI rounds every money cell.
+2. **`income` vs the overall tax summary is the same shape, one level up.** The income tables print
+   per-record AUD figures whose totals appear in the tax-summary section, and `docs/API.md`
+   currently promises "Every AUD figure here sums to exactly the matching tax summary line" —
+   which is true only at full precision. Rounding the income rows would break that documented
+   guarantee unless the summary line were rounded too, and that line is `tax_summary`'s, shared
+   with its own screen and CSV. Left alone deliberately.
+3. **`cgt_summary` likewise**: it is `net_capital_gain::CgtSummaryYear`, printed as a worksheet
+   whose lines subtract from one another, and rounding it here would fork the figure from the
+   report that owns it. See the note under W-c for the same fault in that report's CSV.

@@ -276,6 +276,36 @@ pub fn row_dec(row: &SqliteRow, column: &str) -> Result<Decimal, sqlx::Error> {
     Ok(row.try_get::<Money, _>(column)?.0)
 }
 
+/// *The* money-display rounding rule: to the cent (2 decimal places), half
+/// away from zero, with a figure that rounds to nil normalised to a positive
+/// zero (`-0.001` gives `0`, never `-0.00`).
+///
+/// It is stated once here because three surfaces have to agree on it to the
+/// cent: the web UI's `roundDecimalStr(value, 2)` (`src/web/util.js`, keyed
+/// off `COLUMN_KINDS`), the tax-return-ready CSV exports'
+/// [`Cents`](crate::reports::export::Cents) — which is this rule plus the
+/// fixed two-decimal-place *rendering* — and the [annual tax
+/// report](crate::reports::tax_report)'s disposal schedule, which rounds the
+/// stored figure itself so that its subtotals can be the sum of the rounded
+/// rows (SCENARIOS W-c, W-d). A second implementation of "round to the cent"
+/// anywhere in the tree would be a figure that disagrees with the page it is
+/// printed beside.
+///
+/// Only presentation rounds: nothing stored, and no figure a later
+/// calculation consumes, ever goes through here.
+pub fn to_cents(value: Decimal) -> Decimal {
+    let rounded =
+        value.round_dp_with_strategy(2, rust_decimal::RoundingStrategy::MidpointAwayFromZero);
+    // -0.001 rounds to a *negative* zero in rust_decimal, which prints and
+    // serializes as "-0.00"/"-0"; the screens drop the sign once the rounded
+    // units are nil, so match them.
+    if rounded.is_zero() {
+        Decimal::ZERO
+    } else {
+        rounded
+    }
+}
+
 /// Read a nullable TEXT decimal column via [`OptMoney`]: `NULL` maps to `None`, a
 /// present value is parsed (so a malformed value is a column-named error, never a
 /// silent `None`).
@@ -367,6 +397,39 @@ mod tests {
         assert!(err.contains("not a decimal number: \"ten\""), "{err}");
         // …and not with the JSON-number remedy, which would misdirect.
         assert!(!err.contains(JSON_NUMBER_REFUSED), "{err}");
+    }
+
+    // -----------------------------------------------------------------------
+    // The money-display rounding rule
+    // -----------------------------------------------------------------------
+
+    /// [`to_cents`] as a *value* — the half the CSV exports'
+    /// [`crate::reports::export::Cents`] tests cannot see, because they assert
+    /// a rendered `{:.2}` cell. The annual tax report serializes what this
+    /// returns and sums it, so the scale it carries is what its JSON and its
+    /// subtotals read as.
+    #[test]
+    fn to_cents_rounds_half_away_from_zero_and_keeps_the_cent_scale() {
+        let cents = |s: &str| to_cents(s.parse::<Decimal>().unwrap()).to_string();
+        // Half away from zero, in both directions — the direction that
+        // silently differs between implementations.
+        assert_eq!(cents("4991.515"), "4991.52");
+        assert_eq!(cents("-4991.515"), "-4991.52");
+        assert_eq!(cents("1055.795727136431784107946027"), "1055.80");
+        // A rounded figure keeps both decimal places rather than dropping a
+        // trailing zero, so a printed column lines up on the point.
+        assert!(cents("1055.795727136431784107946027").ends_with(".80"));
+        // A figure already at or inside the cent is returned as it stands: a
+        // whole amount is not padded here (the screens' own display rule owns
+        // that), and nothing is lost.
+        assert_eq!(cents("400"), "400");
+        assert_eq!(cents("30.5"), "30.5");
+        // Rounding to nil gives a plain zero — never "-0.00", which is what
+        // `-0.001` rounds to on its own (the screens drop the sign once the
+        // rounded units are nil, and `Cents` renders this back out as
+        // `0.00`).
+        assert_eq!(cents("-0.001"), "0");
+        assert_eq!(cents("0.004"), "0");
     }
 
     /// A row struct in the shape the entities use: a required and a nullable TEXT decimal,

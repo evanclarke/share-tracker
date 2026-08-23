@@ -17,9 +17,10 @@
 //! **type** rather than by a list of column names duplicated from the web
 //! UI's `COLUMN_KINDS`. The JSON reports keep the exact figure; a `Decimal`
 //! field left as a `Decimal` (a rate, a quantity) still exports verbatim.
+use crate::infra::decimal::to_cents;
 use axum::http::header;
 use axum::response::{IntoResponse, Response};
-use rust_decimal::{Decimal, RoundingStrategy};
+use rust_decimal::Decimal;
 use serde::{Serialize, Serializer};
 use std::fmt;
 
@@ -32,14 +33,17 @@ pub const ATO_LABELS_MARKER: &str = "ato_labels_2026";
 /// away from zero, and always written with both decimal places (a nil figure
 /// is `0.00`).
 ///
-/// This is the same rule and direction the web UI applies to a money column
-/// (`src/web/util.js`'s `roundDecimalStr(value, 2)`, keyed off `COLUMN_KINDS`),
-/// so a figure copied off the CSV reads identically to the screen it mirrors
-/// and to the ATO label it is transcribed onto — the exports carry ATO
-/// tax-return labels, and 18V arriving as twenty-four zeros after the point
-/// was what raised SCENARIOS W-c. Only the presentation rounds: the JSON
-/// reports and every stored figure keep full precision, so nothing downstream
-/// of a report is computed from a rounded number.
+/// The rounding itself is [`crate::infra::decimal::to_cents`], the one
+/// statement of the rule — shared with the web UI's money columns
+/// (`src/web/util.js`'s `roundDecimalStr(value, 2)`, keyed off
+/// `COLUMN_KINDS`) and with the [annual tax
+/// report](crate::reports::tax_report)'s disposal schedule. So a figure copied
+/// off the CSV reads identically to the screen it mirrors and to the ATO label
+/// it is transcribed onto: the exports carry ATO tax-return labels, and 18V
+/// arriving as twenty-four zeros after the point was what raised SCENARIOS
+/// W-c. Only the presentation rounds — the JSON reports and every stored
+/// figure keep full precision, so nothing downstream of a report is computed
+/// from a rounded number.
 ///
 /// Wrap a money field of a CSV projection struct in this; leave a rate or
 /// quantity field a plain `Decimal` to export it verbatim.
@@ -54,18 +58,13 @@ impl From<Decimal> for Cents {
 
 impl fmt::Display for Cents {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let rounded = self
-            .0
-            .round_dp_with_strategy(2, RoundingStrategy::MidpointAwayFromZero);
-        // -0.001 rounds to a *negative* zero in rust_decimal, which would
-        // print "-0.00"; the screens print "0.00" (roundDecimalStr drops the
-        // sign once the rounded units are nil), so match them.
-        let rounded = if rounded.is_zero() {
-            Decimal::ZERO
-        } else {
-            rounded
-        };
-        write!(f, "{rounded:.2}")
+        // The rounding itself is `infra::decimal::to_cents` — the one
+        // statement of the rule, shared with the annual tax report's disposal
+        // schedule (SCENARIOS W-d), which needs the rounded *value* to sum
+        // rather than a rendered cell. All this type adds is the rendering:
+        // always both decimal places, so a column of exported money lines up
+        // on the point (`0.00`, never `0`).
+        write!(f, "{:.2}", to_cents(self.0))
     }
 }
 

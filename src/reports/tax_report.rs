@@ -9,6 +9,13 @@
 //! feature. Distinct from the multi-year [`super::tax_summary`] screen, which
 //! is unchanged and stays as the all-years/spreadsheet path.
 //!
+//! The disposal schedule's money figures are **rounded to the cent** here,
+//! and every subtotal and grand total is the sum of those rounded figures
+//! (see [`DisposalParcelRow::round_money_to_cents`], SCENARIOS W-d) — this is
+//! a document that gets printed and hand-checked, so a column has to add up
+//! on the page. It is the one report that rounds its own figures; every other
+//! one answers the exact decimal and lets the screen round it for display.
+//!
 //! The core financial sections (the disposal schedule, the CGT summary, the
 //! year's [`super::tax_summary::TaxYearSummary`] line) read on one
 //! `pool.begin()` transaction, per the house rule for multi-query reports.
@@ -31,7 +38,7 @@ use crate::entities::income::{Income, IncomeType};
 use crate::entities::investment_expense::ExpenseType;
 use crate::entities::listing;
 use crate::entities::trade::{Trade, TradeType};
-use crate::infra::decimal::parse_dec;
+use crate::infra::decimal::{parse_dec, to_cents};
 use crate::infra::fx::FxRates;
 use crate::infra::http::ApiError;
 use crate::reports::realised_gains::DisposalSource;
@@ -296,6 +303,10 @@ pub struct DisposalTotals {
 }
 
 impl DisposalTotals {
+    /// Add one **already cent-rounded** parcel row (see
+    /// [`DisposalParcelRow::round_money_to_cents`]) — which is what makes every
+    /// subtotal and grand total the exact sum of the figures printed above it
+    /// (SCENARIOS W-d). Nothing else may add to a `DisposalTotals`.
     fn add(&mut self, r: &DisposalParcelRow) {
         self.proceeds_aud += r.proceeds_aud;
         self.cost_base_aud += r.adjusted_cost_base_aud;
@@ -350,6 +361,57 @@ pub struct DisposalParcelRow {
     pub currency: String,
     pub buy_month_fx_rate: Option<Decimal>,
     pub sell_month_fx_rate: Option<Decimal>,
+}
+
+impl DisposalParcelRow {
+    /// Round this row's money figures to the cent (SCENARIOS W-d).
+    ///
+    /// The disposal schedule is printed and hand-checked, so its columns have
+    /// to add up on the page: every figure here is rounded once, at source,
+    /// and [`DisposalTotals::add`] then sums the rounded figures — so the
+    /// subtotal under a column is exactly what a reader gets adding the column
+    /// up, and the JSON API says the same number the page prints. (Rounding
+    /// the rows and the exact totals *independently*, which is what the UI's
+    /// per-cell display rounding did on its own, is what left a three-parcel
+    /// BHP disposal's discount column printing 1652.17 over rows summing to
+    /// 1652.18.) This report computes nothing new and nothing downstream
+    /// consumes these rows, so rounding them cannot reach a tax figure: the
+    /// [realised gains](super::realised_gains) and [net capital
+    /// gain](super::net_capital_gain) reports the numbers come from are
+    /// untouched and stay exact.
+    ///
+    /// **Money, and so rounded:** the six AUD figures below plus each itemised
+    /// adjustment's `amount` — every figure the printed schedule shows as an
+    /// amount, and the five that are totalled.
+    ///
+    /// **Deliberately left verbatim**, because none is a derived AUD amount:
+    /// - `cost_base_per_unit_aud`, `proceeds_per_unit_aud` and an adjustment's
+    ///   `per_unit` — derived *per-unit* figures, which `docs/API.md`'s
+    ///   "Amounts round, rates don't" shows at 4+ decimal places precisely so
+    ///   they are not read as cent amounts;
+    /// - `buy_price`, `sale_price` — per-unit prices, the same rule;
+    /// - `buy_brokerage`, `buy_gst_on_brokerage` — the contract note's own
+    ///   figures in the trade's native currency, transcribed for hand-checking
+    ///   against it (GST of 99.5c on $9.95 of brokerage is genuinely
+    ///   sub-cent); neither is totalled, and rounding an entered fact would
+    ///   misreport the source document;
+    /// - `units`, `days_held`, the two FX rates and `currency` — quantities,
+    ///   counts and rates, never money.
+    fn round_money_to_cents(&mut self) {
+        for figure in [
+            &mut self.initial_cost_base_aud,
+            &mut self.adjusted_cost_base_aud,
+            &mut self.proceeds_aud,
+            &mut self.gain_loss_aud,
+            &mut self.cgt_discount_amount_aud,
+            &mut self.gain_after_discount_aud,
+        ] {
+            *figure = to_cents(*figure);
+        }
+        for adjustment in &mut self.adjustments {
+            adjustment.amount = to_cents(adjustment.amount);
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -602,7 +664,7 @@ fn disposal_parcel_rows(
                     .ok()
             });
 
-            DisposalParcelRow {
+            let mut row = DisposalParcelRow {
                 source: disposal.source,
                 sale_trade_id: disposal.sale_trade_id,
                 purchase_trade_id: p.purchase_trade_id,
@@ -640,7 +702,11 @@ fn disposal_parcel_rows(
                 currency: currency.clone(),
                 buy_month_fx_rate: if currency == "AUD" { None } else { buy_rate },
                 sell_month_fx_rate: if currency == "AUD" { None } else { sell_rate },
-            }
+            };
+            // Once, here, so every figure printed *and* every figure summed
+            // into a subtotal is the same rounded one (SCENARIOS W-d).
+            row.round_money_to_cents();
+            row
         })
         .collect()
 }
@@ -3100,9 +3166,12 @@ mod tests {
             assert_eq!(row.currency, "USD", "{label}");
             // Buy side: US$15,000 at the March 2023 rate.
             assert_eq!(row.buy_month_fx_rate, Some(dec("0.6600")), "{label}");
+            // To the cent, which is what the document prints (SCENARIOS
+            // W-d): the printed rate still reproduces the printed figure,
+            // which is the point of printing it.
             assert_eq!(
                 row.initial_cost_base_aud,
-                dec("15000") / row.buy_month_fx_rate.unwrap(),
+                to_cents(dec("15000") / row.buy_month_fx_rate.unwrap()),
                 "{label}"
             );
             // Sell side: US$20,000 at the rate the proceeds actually used.
@@ -3113,7 +3182,7 @@ mod tests {
             );
             assert_eq!(
                 row.proceeds_aud,
-                dec("20000") / row.sell_month_fx_rate.unwrap(),
+                to_cents(dec("20000") / row.sell_month_fx_rate.unwrap()),
                 "{label}"
             );
         }
@@ -3258,6 +3327,352 @@ mod tests {
                 .as_array()
                 .expect("a zeroed disposal schedule")
                 .is_empty()
+        );
+    }
+
+    // ---- SCENARIOS W-d: the printed columns add up -------------------------
+
+    /// Each [`DisposalTotals`] field beside the parcel-row field it totals —
+    /// the pairing [`DisposalTotals::add`] makes, which is only visible in
+    /// JSON as a name (the two differ once: `cost_base_aud` totals
+    /// `adjusted_cost_base_aud`). The test below asserts this covers the whole
+    /// struct, so a sixth total cannot be added without being reconciled here.
+    const TOTALLED_COLUMNS: [(&str, &str); 5] = [
+        ("proceeds_aud", "proceeds_aud"),
+        ("cost_base_aud", "adjusted_cost_base_aud"),
+        ("gain_loss_aud", "gain_loss_aud"),
+        ("cgt_discount_amount_aud", "cgt_discount_amount_aud"),
+        ("gain_after_discount_aud", "gain_after_discount_aud"),
+    ];
+
+    /// A JSON decimal as its `Decimal` value, failing loudly on a shape that
+    /// is not a decimal string (a silently skipped column would make the
+    /// reconciliation below vacuous).
+    fn json_dec(value: &serde_json::Value) -> Decimal {
+        value
+            .as_str()
+            .unwrap_or_else(|| panic!("expected a decimal string, got {value}"))
+            .parse()
+            .unwrap_or_else(|e| panic!("expected a decimal, got {value}: {e}"))
+    }
+
+    fn decimal_places(value: &serde_json::Value) -> usize {
+        let text = value.as_str().expect("a decimal string");
+        text.split_once('.').map_or(0, |(_, frac)| frac.len())
+    }
+
+    /// The money columns of a parcel row, found by name rather than listed:
+    /// an AUD figure that is an *amount*, so every `*_aud` field except the
+    /// derived per-unit pair (`docs/API.md`'s "Amounts round, rates don't"
+    /// shows those at 4+ places precisely so they are not read as cents).
+    /// A newly added money column is therefore covered without anyone
+    /// remembering to add it here.
+    fn money_columns(parcel: &serde_json::Value) -> Vec<(&str, &serde_json::Value)> {
+        parcel
+            .as_object()
+            .expect("a parcel row")
+            .iter()
+            .filter(|(name, _)| name.ends_with("_aud") && !name.ends_with("_per_unit_aud"))
+            .map(|(name, value)| (name.as_str(), value))
+            .collect()
+    }
+
+    /// The SCENARIOS W-d facts: three ordinary BHP buys — $9.95 brokerage plus
+    /// 99.5c GST on each, so every parcel's cost base lands on a half-cent —
+    /// all sold in one Sell more than twelve months later.
+    async fn bhp_three_parcel_disposal(pool: &SqlitePool) {
+        test_support::listing(1)
+            .ticker("BHP")
+            .name("BHP Group Limited")
+            .insert(pool)
+            .await;
+        for (id, qty, price, date) in [
+            (1, "111", "44.87", ymd(2022, 3, 15)),
+            (2, "223", "41.33", ymd(2022, 6, 15)),
+            (3, "333", "39.71", ymd(2022, 9, 15)),
+        ] {
+            test_support::buy(id, 1)
+                .date(date)
+                .qty(dec(qty))
+                .price(dec(price))
+                .brokerage(dec("9.95"))
+                .gst_on_brokerage(dec("0.995"))
+                .insert(pool)
+                .await;
+        }
+        test_support::sell(4, 1)
+            .date(ymd(2024, 2, 15))
+            .qty(dec("667"))
+            .price(dec("46.13"))
+            .brokerage(dec("9.95"))
+            .gst_on_brokerage(dec("0.995"))
+            .insert(pool)
+            .await;
+        test_support::allocate(pool, 1, 4, 1, dec("111")).await;
+        test_support::allocate(pool, 2, 4, 2, dec("223")).await;
+        test_support::allocate(pool, 3, 4, 3, dec("333")).await;
+    }
+
+    /// SCENARIOS W-d, the regression: the document is printed and archived, so
+    /// a reader must be able to add a column up. Three parcels whose cost
+    /// bases each land on a half-cent used to print rows summing to 1652.18
+    /// under a subtotal of 1652.17 (the exact sum, rounded) — and a cost-base
+    /// column of 27453.44 under 27453.43. Every figure here is pinned: the
+    /// rows are cent-rounded and the subtotal is their sum, not the rounded
+    /// exact total.
+    #[tokio::test]
+    async fn api_a_disposal_columns_rows_add_up_to_its_printed_subtotal() {
+        let pool = test_support::test_pool().await;
+        bhp_three_parcel_disposal(&pool).await;
+
+        let body: serde_json::Value = test_support::ApiClient::full(&pool)
+            .post_json(
+                "/reports/tax-report",
+                &serde_json::json!({"tax_year": 2024}),
+            )
+            .await;
+        let group = &body["disposals"]["listings"][0];
+        let parcels = group["parcels"].as_array().expect("three parcels");
+        assert_eq!(parcels.len(), 3);
+
+        // Row by row, as printed: cost base, proceeds, gain, discount.
+        let printed: Vec<Vec<&str>> = parcels
+            .iter()
+            .map(|p| {
+                [
+                    "adjusted_cost_base_aud",
+                    "proceeds_aud",
+                    "gain_loss_aud",
+                    "cgt_discount_amount_aud",
+                    "gain_after_discount_aud",
+                ]
+                .iter()
+                .map(|c| p[*c].as_str().expect("a decimal string"))
+                .collect()
+            })
+            .collect();
+        assert_eq!(
+            printed,
+            vec![
+                vec!["4991.52", "5118.61", "127.09", "63.55", "63.55"],
+                vec!["9227.54", "10283.33", "1055.80", "527.90", "527.90"],
+                vec!["13234.38", "15355.83", "2121.45", "1060.73", "1060.73"],
+            ]
+        );
+
+        // 63.55 + 527.90 + 1060.73 = 1652.18 — what the page adds up to, where
+        // the subtotal used to print the exact sum rounded (1652.17).
+        let subtotal = &group["subtotal"];
+        assert_eq!(subtotal["cost_base_aud"], serde_json::json!("27453.44"));
+        assert_eq!(subtotal["proceeds_aud"], serde_json::json!("30757.77"));
+        assert_eq!(subtotal["gain_loss_aud"], serde_json::json!("3304.34"));
+        assert_eq!(
+            subtotal["cgt_discount_amount_aud"],
+            serde_json::json!("1652.18")
+        );
+        assert_eq!(
+            subtotal["gain_after_discount_aud"],
+            serde_json::json!("1652.18")
+        );
+        // One listing, so the grand total is the same figure again — and the
+        // document's two levels of total have to agree with each other too.
+        assert_eq!(body["disposals"]["totals"], *subtotal);
+    }
+
+    /// The general rule behind that regression, over a document with three
+    /// listing groups — an ordinary AUD disposal, an AMIT parcel carrying
+    /// itemised cost-base adjustments, and a USD parcel whose every figure is
+    /// an FX conversion: **every** money column of the disposal schedule is
+    /// cent-rounded, each subtotal is the exact sum of the rows above it, and
+    /// the grand total the exact sum of the subtotals.
+    ///
+    /// Money columns are found by name (`*_aud`, excluding the derived
+    /// per-unit pair) rather than listed, so a newly added one is covered
+    /// here; and the pairing table is asserted to cover the whole
+    /// `DisposalTotals` struct, so a newly added *total* fails until it is.
+    #[tokio::test]
+    async fn api_every_disposal_money_column_totals_the_rounded_rows_beneath_it() {
+        let pool = test_support::test_pool().await;
+        bhp_three_parcel_disposal(&pool).await;
+
+        // An AMIT parcel: the AMMA statement's per-unit reduction is itemised
+        // under the cost base, so the adjustment rows are money columns too.
+        listing_amit(&pool, 2, "VDHG").await;
+        test_support::buy(11, 2)
+            .date(ymd(2022, 7, 4))
+            .qty(dec("137"))
+            .price(dec("58.115"))
+            .brokerage(dec("9.95"))
+            .gst_on_brokerage(dec("0.995"))
+            .insert(&pool)
+            .await;
+        test_support::amma(11, 2)
+            .units(dec("137"))
+            .cost_base_adjustment(dec("0.1234567"))
+            .with(|a| a.tax_year_end_date = ymd(2023, 6, 30))
+            .insert(&pool)
+            .await;
+        crate::entities::amit_adjustment_generation::db_generate(
+            &pool,
+            11,
+            &crate::entities::amit_adjustment_generation::GenerateBody::default(),
+        )
+        .await
+        .unwrap();
+        test_support::sell(12, 2)
+            .date(ymd(2024, 4, 3))
+            .qty(dec("137"))
+            .price(dec("61.037"))
+            .brokerage(dec("9.95"))
+            .gst_on_brokerage(dec("0.995"))
+            .insert(&pool)
+            .await;
+        test_support::allocate(&pool, 11, 12, 11, dec("137")).await;
+
+        // A USD parcel: both sides convert at a published rate, so every AUD
+        // figure on the row is a long decimal.
+        test_support::listing(3)
+            .ticker("MSFT")
+            .name("Microsoft Corporation")
+            .mic("XNYS")
+            .currency("USD")
+            .insert(&pool)
+            .await;
+        for (month, rate) in [("2022-11", "0.6714"), ("2024-05", "0.6623")] {
+            rba_fx_rate::db_import_rate(&pool, "USD", month, dec(rate))
+                .await
+                .unwrap();
+        }
+        test_support::buy(21, 3)
+            .date(ymd(2022, 11, 9))
+            .qty(dec("19"))
+            .price(dec("237.53"))
+            .currency("USD")
+            .brokerage(dec("11.95"))
+            .insert(&pool)
+            .await;
+        test_support::sell(22, 3)
+            .date(ymd(2024, 5, 21))
+            .qty(dec("19"))
+            .price(dec("429.04"))
+            .currency("USD")
+            .brokerage(dec("11.95"))
+            .insert(&pool)
+            .await;
+        test_support::allocate(&pool, 21, 22, 21, dec("19")).await;
+
+        let body: serde_json::Value = test_support::ApiClient::full(&pool)
+            .post_json(
+                "/reports/tax-report",
+                &serde_json::json!({"tax_year": 2024}),
+            )
+            .await;
+        let disposals = &body["disposals"];
+        let groups = disposals["listings"].as_array().expect("three groups");
+        assert_eq!(groups.len(), 3, "one group per listing disposed of");
+
+        // The pairing table is the whole of `DisposalTotals` — a sixth total
+        // added to the struct fails here until it is reconciled below.
+        let total_columns: HashSet<&str> = disposals["totals"]
+            .as_object()
+            .expect("the grand total")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            total_columns,
+            TOTALLED_COLUMNS.iter().map(|(t, _)| *t).collect(),
+            "every disposal total must be reconciled to the parcel column it sums"
+        );
+
+        let mut totals: HashMap<&str, Decimal> = HashMap::new();
+        let mut adjustment_rows = 0;
+        for group in groups {
+            let parcels = group["parcels"].as_array().expect("parcel rows");
+            assert!(!parcels.is_empty());
+
+            for parcel in parcels {
+                // Every money column of the row is a cent figure...
+                for (name, value) in money_columns(parcel) {
+                    assert!(
+                        decimal_places(value) <= 2,
+                        "{name} is a money column and must print to the cent, got {value}"
+                    );
+                }
+                // ...including each itemised cost-base adjustment's amount,
+                // which the document prints under the parcel it reduces.
+                for adjustment in parcel["adjustments"].as_array().expect("adjustments") {
+                    adjustment_rows += 1;
+                    assert!(
+                        decimal_places(&adjustment["amount"]) <= 2,
+                        "an adjustment amount must print to the cent, got {}",
+                        adjustment["amount"]
+                    );
+                }
+            }
+
+            // ...and each subtotal is exactly the sum of the rows above it.
+            for (total, column) in TOTALLED_COLUMNS {
+                let summed: Decimal = parcels.iter().map(|p| json_dec(&p[column])).sum();
+                assert_eq!(
+                    json_dec(&group["subtotal"][total]),
+                    summed,
+                    "{} subtotal must be the sum of its printed {column} rows",
+                    group["ticker"]
+                );
+                *totals.entry(total).or_default() += summed;
+            }
+        }
+        assert!(
+            adjustment_rows > 0,
+            "the AMIT parcel must contribute itemised adjustment rows"
+        );
+
+        // The grand total is in turn the exact sum of the subtotals.
+        for (total, _) in TOTALLED_COLUMNS {
+            assert_eq!(
+                json_dec(&disposals["totals"][total]),
+                totals[total],
+                "the {total} grand total must be the sum of the printed subtotals"
+            );
+        }
+    }
+
+    /// The control on the rule above: the columns that are *not* money keep
+    /// their full precision. A derived per-unit figure shows at 4+ decimal
+    /// places rather than cent-rounded (`docs/API.md`, "Amounts round, rates
+    /// don't"), and the contract note's own brokerage and GST are transcribed
+    /// exactly as entered — 99.5c of GST on $9.95 of brokerage is genuinely
+    /// sub-cent, and neither figure is totalled anywhere.
+    #[tokio::test]
+    async fn api_the_per_unit_and_as_entered_disposal_columns_are_not_cent_rounded() {
+        let pool = test_support::test_pool().await;
+        bhp_three_parcel_disposal(&pool).await;
+
+        let body: serde_json::Value = test_support::ApiClient::full(&pool)
+            .post_json(
+                "/reports/tax-report",
+                &serde_json::json!({"tax_year": 2024}),
+            )
+            .await;
+        let parcel = &body["disposals"]["listings"][0]["parcels"][0];
+        assert_eq!(
+            parcel["cost_base_per_unit_aud"],
+            serde_json::json!("44.968603603603603603603603604")
+        );
+        assert_eq!(
+            parcel["proceeds_per_unit_aud"],
+            serde_json::json!("46.11359070464767616191904048")
+        );
+        assert_eq!(parcel["buy_gst_on_brokerage"], serde_json::json!("0.995"));
+        assert_eq!(parcel["buy_brokerage"], serde_json::json!("9.95"));
+        assert_eq!(parcel["buy_price"], serde_json::json!("44.87"));
+        assert_eq!(parcel["sale_price"], serde_json::json!("46.13"));
+        // The money figure beside them is the rounded one, so the two rules
+        // are visibly different rather than a coincidence of these facts.
+        assert_eq!(
+            parcel["adjusted_cost_base_aud"],
+            serde_json::json!("4991.52")
         );
     }
 }

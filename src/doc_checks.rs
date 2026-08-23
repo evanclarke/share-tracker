@@ -82,6 +82,42 @@ fn cent_rounded_csv_exports_documented() {
     ));
 }
 
+/// Docs-sync pin for the annual tax report's cent-rounded disposal schedule
+/// (SCENARIOS W-d): the report section states the convention — the money
+/// figures round and every subtotal and total is the sum of the rounded rows,
+/// so a printed column adds up — and names both what rounds and what is
+/// deliberately left verbatim, since "which columns are money" is the half of
+/// the rule a reader cannot infer from a figure. The display-rules paragraph
+/// no longer says the CSV exports are the only place outside the browser that
+/// rounds, which stopped being true here. The behaviour itself is pinned by
+/// `reports::tax_report`'s three W-d tests; this is the documentation half.
+#[test]
+fn cent_rounded_tax_report_disposals_documented() {
+    assert!(API_MD.contains(
+        "**The money figures of this section are rounded to the cent, and every per-listing \
+         subtotal and grand total is the sum of those rounded rows**"
+    ));
+    // What rounds, and what does not — with the reason the per-unit and
+    // as-entered columns are exempt.
+    assert!(API_MD.contains(
+        "Rounded are the initial and adjusted cost base, each itemised adjustment's amount, \
+         the proceeds, the gain/loss, and the discount amount and discounted gain"
+    ));
+    assert!(API_MD.contains("Left verbatim, none of them a derived AUD amount"));
+    // Rounding here changes no calculation: the source reports stay exact.
+    assert!(API_MD.contains(
+        "the figures come from [realised gains](#realised-gains), which still answers the exact \
+         decimal"
+    ));
+    // The display-rules paragraph's old exclusivity claim is gone, replaced by
+    // one that names this report alongside the exports.
+    assert!(!API_MD.contains("they are the one place outside the browser that rounds"));
+    assert!(API_MD.contains(
+        "the [annual tax report](#annual-tax-report) applies it to the money figures of its \
+         disposal schedule"
+    ));
+}
+
 /// Docs-sync pin for the money/quantity encoding rule (SCENARIOS W-a): its own
 /// section beside [`unrecognised_body_fields_documented`]'s, the `422` list
 /// pointing at it, the reason a JSON number cannot be honoured, and the two
