@@ -911,3 +911,46 @@ closes the print surface, which was the only place the attribution was lost outr
 Tests: `reports::tax_report::tests::a_listing_attributed_deduction_prints_its_ticker_as_at_its_own_date`
 (a fee either side of a rename prints LAAC then LAR, and a portfolio-wide fee prints no ticker at
 all) and the extended `web::tests::annual_tax_report_ui_present`.
+
+## SCENARIOS V-c — a trade entered twice is the one duplication the health report does not look for
+
+Raised driving **V-09** (import a whole portfolio's history in one session and reconcile the final
+holdings against a registry statement).
+
+`GET /reports/health` carries a `duplicate_*` check for every other user-entered fact table —
+`duplicate_income`, `duplicate_interest`, `duplicate_expenses`, `duplicate_amma_statements`,
+`duplicate_ess_statements`, `duplicate_inheritances`, `duplicate_actions`, `duplicate_price_series`
+— and none for **trades**, which during a bulk back-entry is the row most likely to be keyed twice
+and the most expensive to get wrong.
+
+Measured: two identical Buys of one listing — same date, holding account, price, quantity **and the
+same `contract_note_ref: "CN-8891"`** — were both accepted, and health reported nothing. Two
+identical income rows entered in the same session were flagged immediately.
+
+A duplicated Buy inflates the holding and the cost base; a duplicated Sell inflates realised gains
+and its allocations quietly consume a second parcel. Either is invisible until the holdings are
+reconciled against a registry statement, which is the whole of V-09.
+
+Options offered:
+
+1. `duplicate_trades`, keyed the way `duplicate_income` is — listing, holding account, date,
+   `trade_type`, `average_price`, `quantity` — over all trade types.
+2. The same, but restricted to **user-entered** trades: exclude the rows a derived path creates
+   (rollover/transfer/buy-back/rights/ESS-vest/inheritance-linked and reinvest-created DRP), which
+   can legitimately repeat.
+3. Key on a repeated non-null `contract_note_ref` alone — no false positives at all, but it only
+   catches imports that record the broker reference.
+
+**Evan chose option 3** — key on a repeated non-null `contract_note_ref`. No false positives, and
+a broker reference repeated across two trades is unambiguous evidence of a double entry.
+
+- [x] Add the `duplicate_trades` health check keyed on `contract_note_ref`, with a test, the
+      `docs/API.md` health entry, and the UI health banner wording.
+      Keyed on **(listing, trimmed non-null `contract_note_ref`)**: a note can cover a multi-line
+      order, so two securities may share one reference legitimately and the listing is part of the
+      key; the holding account deliberately is *not*, since the same note re-keyed against the
+      wrong account is the worst version of the mistake. Blank/whitespace-only references never
+      group (nor NULL ones), and every derived path writes NULL, so those rows fall out by
+      construction. Eight tests in `reports::health`, a `doc_checks` pin, the `docs/API.md` entry
+      (with the limitation stated: it only catches trades whose entry recorded the reference), the
+      README feature line, and the banner row + Trades link.

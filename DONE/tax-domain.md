@@ -1401,3 +1401,69 @@ with its QC header and is indexed; API.md and SCHEMA.md state the convention, th
 the no-second-column decision) and `web::tests::interest_income_date_credited_hint_present` (the
 served bundle carries the relabelled field and its hint), over the existing
 `reports::tax_summary::tests::db_interest_is_assessed_in_the_year_it_is_credited`.
+
+## SCENARIOS V-d — a parcel dated before an already-run whole-holding operation is never consumed
+
+Raised driving **V-03 / V-06** (a corporate action, and a back-dated acquisition, entered after
+the facts they should have reached).
+
+Three operations consume **every** open parcel of their listing as a matter of law, not choice:
+the scrip-for-scrip **exchange**, the **demerge**, and the worthless-shares **recognise**. Each is
+refused if the listing traded on or after its date, and `docs/API.md`'s *Recording one of the three
+read-time events behind a rollover that has already run* refuses a `ReturnOfCapital`, `ShareSplit`
+or `BonusIssue` dated on or before one — on the stated grounds that otherwise *"the same facts
+entered in a different order would report a different cost base"*.
+
+A **parcel** dated before one is not guarded. Measured, each accepted `204`:
+
+| Operation (already executed) | Back-dated write | Result |
+| --- | --- | --- |
+| Exchange OLD → NEW 1-for-1, 2024-06-10 | Buy 50 OLD, 2024-02-05 | 50 units of a security that no longer exists; 50 NEW units missing |
+| Exchange OLD → NEW 1-for-1, 2024-06-10 | Inheritance of 25 OLD, died 2024-03-01 | same, via the inheritance parcel path |
+| Demerge HEAD 1-for-5, 2024-06-11 | Buy 50 HEAD, 2024-03-05 | no SPIN units issued; the parcel keeps 100% of its cost base instead of 90% |
+| Recognise DEAD worthless, 2024-06-13 | Buy 40 DEAD, 2024-03-05 | 40 units still open on a company already written off |
+
+Nothing surfaces any of them. `GET /reports/rollover_consistency` is blind by construction — it
+compares what the **consumed** units are worth now against the replacements' stored figures, and
+these units were never consumed — and the health report says nothing.
+
+Not affected, and correctly so: a **transfer** and a **buy-back participation** move a *chosen*
+quantity, so a parcel left behind is a legitimate outcome.
+
+Options offered:
+
+1. **Refuse at write time**: a parcel-creating write (Buy/DRP `PUT /trades`, inheritance, ESS
+   vest, rights exercise) dated on or before an executed exchange/demerge/recognise on that
+   listing answers `422` naming the operation and its date, with the recovery its sibling refusal
+   already gives — delete the operation, enter the parcel, run it again.
+2. **Report it**: extend `rollover_consistency` (and so the annual tax report's completeness
+   section) with an *unconsumed parcel* problem naming every parcel open on the listing at the
+   operation's date that the operation did not consume. Advisory; nothing is refused.
+3. **Both** — refuse the write, and report any state that predates the guard, which is the pattern
+   the AMIT-adjustment / rollover pair already follows.
+
+**Evan chose option 3** — refuse *and* report: `422` at write time naming the operation and its
+date, plus an *unconsumed parcel* problem on `rollover_consistency` for any state that predates
+the guard.
+
+- [x] Refuse a parcel-creating write dated on or before an executed exchange/demerge/recognise,
+      with a test per affected operation and per parcel-creating path.
+- [x] Add the unconsumed-parcel problem to `rollover_consistency` (and so the annual tax report's
+      completeness section), with a test and the `docs/API.md` entry.
+
+Done 2026-08-23. The shared rule lives in `domain::whole_holding`: the three operations' provenance
+columns are named once (`CLOSING_SELL_COLUMNS`), so the guard and the report can never disagree
+about what counts as a whole-holding operation, and the `422` body is built once
+(`BackDatedParcel::message`) for all eight refusals. The comparison is on the trade's own `date`,
+never `deemed_acquisition_date` — a rollover replacement and an inherited parcel both carry a deemed
+date decades earlier for the discount clock alone. Paths covered, enumerated from every non-test
+`INSERT INTO trades` in `src`: `PUT /trades/:id`, `PUT /inheritances/:id`, `POST
+/ess_statements/:id/vest`, `POST /corporate_actions/:id/exercise`, `POST /income/:id/reinvest`, and
+the replacement parcels of the scrip exchange (its *destination* listing), the demerger (its
+*demerged* listing) and the transfer — the two rollovers' source/head listings are already covered
+by their own "traded on or after" refusal. An **edit** of a parcel already sitting behind an
+operation is deliberately not refused: a consumed source parcel is behind one by definition, and
+that edit is the state the report exists to surface. `WorthlessShares` became a fourth
+`rollover_consistency` `kind` rather than a report of its own — it is one of the three operations,
+the row shape fits it exactly, and it reaches the annual tax report's completeness section for
+free; it stores no carried figures, so only the unconsumed-parcel check runs on it.

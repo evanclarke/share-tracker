@@ -85,7 +85,7 @@ behind or became a recorded finding.
 | S. Settlement, holidays, and dates | 10 | 2026-08-22 (`d501408`) | 4 raised, all closed — see below |
 | T. Jobs, backup, and operations | 12 | 2026-08-22 (`db877cb`) | 6 raised, 6 closed — see below |
 | U. Audit trail and history | 8 | 2026-08-22 (`1a0f821`) | 3 raised, all closed — see below |
-| V. Back-dated and out-of-order entry | 10 | — | — |
+| V. Back-dated and out-of-order entry | 10 | 2026-08-23 (`4b579c8`) | 5 raised, all closed — see below |
 | W. Precision, rounding, and scale | 8 | — | — |
 | X. Transactional integrity and concurrency | 8 | — | — |
 | Y. Web UI | 12 | — | — |
@@ -1038,6 +1038,74 @@ seeded past every id the trail has ever seen (`4a3a257`) — `parcel_allocations
 load-bearing, its live maximum being 63 while the trail had already recorded 65 — and every
 server-created id now comes from the database via `last_insert_rowid()`, which also retired a tenth
 site that numbered a demerger's replacement Buys `sell_id + 1 + i` (`1a0f821`).
+
+
+### Section V findings
+
+All ten scenarios were driven on 2026-08-23 against throwaway databases. **Six came back correct,
+and the correctness is structural rather than incidental**: every figure in the system is keyed on a
+*date*, never on the order rows were entered or the ids they were given. Entering a year of trades in
+reverse changes no figure — the parcel optimiser's `fifo` strategy picks the oldest *acquisition
+date* while the ids run the other way, the [listing activity](#listing-activity) ledger orders by
+date, and a Sell entered before its Buys is refused by the allocation-sum invariant rather than
+half-written (V-01). A Sell allocated to the wrong parcel is corrected by re-`PUT`ting it once the
+forgotten Buy arrives, the superseded allocation's `DELETE` landing in the trail and the
+wrongly-consumed parcel being freed (V-02). An AMMA statement entered before any trade exists for the
+fund is recordable, its income reaches the tax summary, and generation is refused with a message
+naming all three reasons no parcel was open — after which entering the missing trades and re-running
+with `replace` reconciles it (V-04). A rename recorded after prices were collected leaves every
+stored price untouched and records `old_price_symbol` correctly (V-05). A return of capital dated
+inside a snapshotted period stales exactly the snapshots on and after it, and *moving* its date
+afterwards stales both the span it left and the span it entered, in either direction (V-07). A
+back-dated fact re-chains every later year's carried-forward loss, the [CGT settings](#cgt-settings)
+opening balance included (V-10) — that the restatement is unmarked is the documented A-15
+limitation, not a new finding.
+
+**The five findings divide into two shapes, and only one shape is about back-dating.** Two are
+*ordering* faults in the DRP residual chain, where the arithmetic depends on which reinvestment is
+currently the chain's tail — a tail that the write being made is about to move. V-b read it forward
+in time: a March reinvestment entered after a September one brought forward the September trade's
+leftover, six months later, and both parcels ended a unit out. V-e read the column a closed period's
+own settlement had temporarily zeroed, so a reinvestment into a plan already left brought forward
+nothing at all. The two were one commit apart and V-e was found while fixing V-b, then re-derived
+independently before being logged — the control that bounds it (the same facts with the period open
+while reinvesting, closed afterwards) is correct throughout, which is what says the fault is the
+closure and not the chain.
+
+The other three are *silence*, and in each the project already held the rule in the next room.
+`#[serde(deny_unknown_fields)]` was already on the two bodies that are not HTTP — `infra/config.rs`
+and `scheduler::JobParams` — with the reasoning written out beside it, and T-10 had already made a
+misspelt **query** parameter a 422 naming it; meanwhile a misspelt **body** field was dropped and the
+record took its default, so an AMMA statement lost A$7,142 of franked distribution and credits under
+a `204` (V-a). Every user-entered fact table had a `duplicate_*` health check except `trades`, the
+row a bulk import is likeliest to key twice — two identical Buys carrying the same broker contract
+note reference were both accepted in silence while two identical income rows were flagged at once
+(V-c). And a `ReturnOfCapital`, `ShareSplit` or `BonusIssue` dated behind a rollover that had already
+run was refused with the reason spelt out in `docs/API.md` — *"the same facts entered in a different
+order would report a different cost base"* — while a **parcel** dated behind one was not, leaving
+units of a security that no longer exists, a demerged parcel that received none of its spin-off, and
+a holding still open on a company already written off (V-d).
+
+| Finding | Scenarios | Fixed by |
+| --- | --- | --- |
+| A misspelt request-body field is dropped and the record takes the default | V-01, V-09 | `5e6246b` |
+| A DRP reinvestment entered behind a later one reads its residual forward in time | V-08 | `b08f891` |
+| A trade entered twice is the one duplication the health report does not look for | V-09 | `2d9c3a8` |
+| A parcel dated behind an executed exchange, demerge or recognise is never consumed | V-03, V-06 | `fc1fd7b` |
+| A reinvestment into an already-closed period brings forward nothing | V-08 | `4b579c8` |
+
+Three of the five came from the standing probes rather than from the scenario they are filed under —
+V-a fell out of a typo made while *driving* V-04, V-c out of asking what a bulk import would get
+wrong that no report looks for, and V-e out of fixing V-b. V-d is the one the scenario list named
+directly, and building it moved its own boundary twice: the guard had to cover the **destination**
+listing of an exchange or demerger as well as the source (an OLD→NEW exchange can leave a NEW parcel
+behind a NEW recognise), and a first draft that refused *edits* as well as creations broke an
+existing test — a source parcel the operation consumed sits behind it by definition, and editing its
+price is precisely the state [rollover consistency](#rollover-consistency) exists to report. The
+guard therefore compares against the trade's **stored** `(listing_id, date)`, refusing only a write
+that *newly* strands units. `WorthlessShares` joined that report as a fourth `kind` in the same
+change, which widened what the report is for: it now flags two faults — stored figures that no longer
+reconcile, and parcels an operation never consumed.
 
 
 ## A. Deletion and mutation ripple effects

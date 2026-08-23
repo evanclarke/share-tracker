@@ -10,7 +10,7 @@ findings are all closed in DONE.md), except where a section's heading names anot
 (e.g. REQUIREMENTS, SCENARIOS). Each section records one finding; sections land in DONE.md as they
 are fixed or decided.
 
-**SCENARIOS.md sections A–S are driven and every finding they raised is closed** in the `DONE/*.md`
+**SCENARIOS.md sections A–V are driven and every finding they raised is closed** in the `DONE/*.md`
 archive. Section **S. Settlement, holidays, and dates** was driven 2026-08-22 (`d501408`) and its
 four findings closed by `67c3096` (a trade dated in the future), `30d0e96` (a trade dated on a day
 its exchange was shut), `4a7ef1a` (a stored settlement date that is not a trading day) and
@@ -67,301 +67,47 @@ the whole trail (`be64d3d`); and the trigger-column rule enforced only by hand-w
 assertions, now a generic guard derived from the live schema (`57502eb`) — all three archived in
 [`DONE/infra.md`](DONE/infra.md).
 
-**Section V's four findings are open below.**
+Section **V. Back-dated and out-of-order entry** (10 scenarios) was driven on **2026-08-23** against
+throwaway databases and raised **five findings, all of them now closed**. Six scenarios came back
+correct, and structurally so: every figure is keyed on a *date*, never on entry order or id order —
+a year of trades entered in reverse changes nothing (V-01), a Sell allocated to the wrong parcel is
+corrected once the forgotten Buy arrives (V-02), an AMMA statement entered before any trade is
+recordable and its generation refusal names all three reasons no parcel was open (V-04), a rename
+recorded after prices were collected leaves them untouched (V-05), a return of capital dated inside
+a snapshotted period stales exactly the snapshots on and after it — in both directions when the date
+is later moved (V-07), and a back-dated fact re-chains every later year's carried-forward loss
+(V-10), whose unmarked restatement is the documented A-15 limitation rather than a new finding.
 
-After U, the next SCENARIOS pass is section **V. Back-dated and out-of-order entry** (10 scenarios),
-driven the way S, T and U were: run every scenario against a throwaway database, apply the standing
-probes to each, and log what each raises as a `## SCENARIOS V-nn` section here with the option Evan
-chose. The lessons worth carrying forward are in the handover memory; U added three. First, **the
-standing probes find what the scenario list does not name** — id reuse is not one of U's eight
-scenarios; it fell out of asking "what else moved that shouldn't have" about U-01 and U-04, and it is
-the section's most serious finding. Second, and again: **check the live database read-only** — U-a
-would have read as a theoretical hazard about `INTEGER PRIMARY KEY` if the live DB had not shown it
-already firing twice, on a trade Evan actually entered. Third, sharper than either: **re-derive a
-fix's mechanism before building it, not just its arithmetic**. U-a's chosen option was
-`AUTOINCREMENT`, and `AUTOINCREMENT` governs only the ids SQLite picks — nine call sites bound their
-own `MAX(id) + 1` and would have sailed through the whole 17-table migration unchanged, leaving the
-headline case live. The same trap sprang twice more in one section: the finding's claim that `'now'`
-is constant across a transaction was false (it is per *statement*), and the migration's first draft
-justified its `sqlite_sequence` seeding with arithmetic that did not hold. Each was caught by
-measuring against the database instead of reasoning about it.
+The five findings were: a misspelt request-body field dropped so the record took its default — an
+AMMA statement losing A$7,142 under a `204` — now `deny_unknown_fields` on every HTTP body with a
+test that walks the extractors to keep it true (`5e6246b`, archived in
+[`DONE/infra.md`](DONE/infra.md)); a DRP reinvestment entered behind a later one reading its residual
+forward in time, now refused as undo already was (`b08f891`) and a reinvestment into an
+already-closed period bringing forward nothing, now asking the period for the split instead of a
+stored column (`4b579c8`) — both archived in [`DONE/trades-income.md`](DONE/trades-income.md); the
+trade entered twice that was the one duplication the health report did not look for, now a
+`duplicate_trades` check keyed on a repeated broker contract note reference within a listing
+(`2d9c3a8`, archived in [`DONE/reporting.md`](DONE/reporting.md)); and the parcel dated behind an
+executed scrip exchange, demerge or worthless recognise that was never consumed, now refused across
+all eight parcel-creating paths and reported by
+[rollover consistency](SCENARIOS.md#rollover-consistency) for any database already in that state
+(`fc1fd7b`, archived in [`DONE/tax-domain.md`](DONE/tax-domain.md)). All five are summarised under
+[Section V findings](SCENARIOS.md#section-v-findings).
 
----
+**Nothing is open in this file.**
 
-## SCENARIOS V-a — a misspelt field name in a request body is silently ignored
-
-Raised driving **V-01 / V-09** (a year of history entered in one session). Every HTTP request
-body in the tree deserialises with serde's default behaviour, so a key the struct does not
-recognise is **dropped**, and the field it was meant to set takes its `#[serde(default)]` value.
-A **required** field is already safe — omitting it is a `422` naming it — but almost every
-*money* field on the tax-bearing entities is optional-with-default, so a one-character typo
-writes a legitimate-looking row with a zero in it and answers `204`.
-
-Measured against a throwaway database:
-
-| Request | Sent | Stored | Response |
-| --- | --- | --- | --- |
-| `PUT /amma_statements/9` | `franked_dividend: "5000"`, `frankingcredits: "2142"` | `franked_dividends: 0`, `franking_credits: 0` | `204` |
-| `PUT /trades/7` | `settlment_date: "2025-04-09"` | `settlement_date: 2025-04-03` (`computed`) | `204` |
-| `PUT /trades/7` | `contract_note: "CN123"` | `contract_note_ref: null` | `204` |
-| `POST /reports/row_history` | `table_name: "parcel_allocations"` | filter ignored — whole trail returned | `200` |
-
-The AMMA row is the one that matters: A$7,142 of a lodgeable tax figure vanished with nothing
-anywhere saying so. `income` (every component `#[serde(default)]`), `interest_income` (`amount`
-itself defaults, as does `foreign_source`, which routes the row between 10L and 20E) and
-`investment_expense` have the same shape.
-
-**The project already holds the opposite convention, for the two bodies that are not HTTP.**
-`infra/config.rs` and `scheduler::JobParams` both carry `#[serde(deny_unknown_fields)]` with the
-reasoning written out beside it — *"`deny_unknown_fields` makes a misspelt parameter a rejection
-rather than a silently-ignored default"* — and **T-10** made an unrecognised *query* parameter on
-`POST /jobs/:name` a `422` naming it for exactly this reason (`` cannot read the query string:
-sufix: unknown field `sufix` ``). The HTTP request bodies are the gap. 233 `Deserialize` derives
-in `src`, none of them denying.
-
-Options offered:
-
-1. `#[serde(deny_unknown_fields)]` on every HTTP request-body struct, with a test that
-   enumerates the bodies reachable from a handler so a new one cannot be added without it.
-2. The same, but on the **write** bodies only (entity `PUT`/`POST`), leaving report request
-   bodies permissive.
-3. Leave it and document it as a known limitation.
-
-**Evan chose option 1** — `deny_unknown_fields` on *every* HTTP request-body struct, report
-bodies included, with a test enumerating the bodies reachable from a handler so a new one cannot
-be added without it.
-
-- [x] Add `#[serde(deny_unknown_fields)]` to every HTTP request-body struct, with the enumerating
-      test and a `docs/API.md` note that an unrecognised body field is refused.
-
-## SCENARIOS V-b — reinvesting a DRP distribution out of order builds the residual chain backwards
-
-Raised driving **V-08** (a DRP enrolment period entered retroactively over distributions already
-recorded as cash — after which the user reinvests them, and not necessarily in date order).
-
-`entities::drp_reinvestment::db_reinvest` reads the residual brought forward as
-
-```sql
-SELECT t.residual_carried_forward … ORDER BY t.date DESC, t.id DESC LIMIT 1
-```
-
-over the enrolment period's DRP trades, with **no bound requiring that trade to be dated before
-the one being created**. Its comment says *"'most recent' is the payment order the cash actually
-moved in"*, which holds only when reinvestments are entered in that order — and this is the
-section about the times they are not.
-
-Measured: one listing, one open `CarryForward` period, two distributions — 2024-03-28 paying
-A$105 and 2024-09-30 paying A$107. Reinvesting the **September** one first (at A$10) then the
-**March** one (at A$9):
-
-| DRP trade | date | quantity | brought fwd | carried fwd |
-| --- | --- | ---: | ---: | ---: |
-| 4 | 2024-03-28 | **12** | **7** | 4 |
-| 3 | 2024-09-30 | **10** | **0** | 7 |
-
-The March parcel brought forward A$7 from a reinvestment six months **later**, and the September
-one never picked up March's own leftover. The correct chain is March 105 → 11 units @ 9 (carry 6),
-September 107 + 6 = 113 → 11 units @ 10 (carry 3). Both parcels carry the wrong quantity, and A$7
-of cash is spent twice. Nothing surfaces it: the health report is silent and no cross-check reads
-the chain.
-
-Note the asymmetry with **undo**, which already enforces the ordering for this exact reason:
-`DELETE /income/:id/reinvest` refuses while a later DRP trade exists, because *"the residual chain
-reads each reinvestment's brought-forward cash back from the most recent prior DRP trade, so
-removing a mid-chain trade would falsify the later trade's residuals"*. Creating one mid-chain is
-the same falsification and is not refused.
-
-Options offered:
-
-1. **Refuse out-of-order creation**, mirroring undo: bound the lookup to trades dated strictly
-   before the new one, and reject a reinvestment that is not the period's latest — "reinvest in
-   payment order".
-2. **Re-derive the period's whole chain** on every reinvest write (walk its trades in date order,
-   recomputing brought-forward, carried-forward and quantity). Correct under any entry order, but
-   a new reinvestment then rewrites the *quantity* of DRP parcels already entered, which Sell
-   allocations and AMIT adjustments may already draw on.
-3. Bound the lookup to earlier trades only, and add a cross-check row for a period whose chain
-   does not reconcile in date order.
-
-**Evan chose option 1** — refuse out-of-order creation, mirroring the undo rule: bound the lookup
-to trades dated strictly before the new one, and reject a reinvestment that is not the period's
-latest.
-
-- [x] Bound the residual lookup and refuse a non-latest reinvestment, with a test entering two
-      reinvestments in reverse order and `docs/API.md` carrying the new `422`.
-
-## SCENARIOS V-c — a trade entered twice is the one duplication the health report does not look for
-
-Raised driving **V-09** (import a whole portfolio's history in one session and reconcile the final
-holdings against a registry statement).
-
-`GET /reports/health` carries a `duplicate_*` check for every other user-entered fact table —
-`duplicate_income`, `duplicate_interest`, `duplicate_expenses`, `duplicate_amma_statements`,
-`duplicate_ess_statements`, `duplicate_inheritances`, `duplicate_actions`, `duplicate_price_series`
-— and none for **trades**, which during a bulk back-entry is the row most likely to be keyed twice
-and the most expensive to get wrong.
-
-Measured: two identical Buys of one listing — same date, holding account, price, quantity **and the
-same `contract_note_ref: "CN-8891"`** — were both accepted, and health reported nothing. Two
-identical income rows entered in the same session were flagged immediately.
-
-A duplicated Buy inflates the holding and the cost base; a duplicated Sell inflates realised gains
-and its allocations quietly consume a second parcel. Either is invisible until the holdings are
-reconciled against a registry statement, which is the whole of V-09.
-
-Options offered:
-
-1. `duplicate_trades`, keyed the way `duplicate_income` is — listing, holding account, date,
-   `trade_type`, `average_price`, `quantity` — over all trade types.
-2. The same, but restricted to **user-entered** trades: exclude the rows a derived path creates
-   (rollover/transfer/buy-back/rights/ESS-vest/inheritance-linked and reinvest-created DRP), which
-   can legitimately repeat.
-3. Key on a repeated non-null `contract_note_ref` alone — no false positives at all, but it only
-   catches imports that record the broker reference.
-
-**Evan chose option 3** — key on a repeated non-null `contract_note_ref`. No false positives, and
-a broker reference repeated across two trades is unambiguous evidence of a double entry.
-
-- [x] Add the `duplicate_trades` health check keyed on `contract_note_ref`, with a test, the
-      `docs/API.md` health entry, and the UI health banner wording.
-      Keyed on **(listing, trimmed non-null `contract_note_ref`)**: a note can cover a multi-line
-      order, so two securities may share one reference legitimately and the listing is part of the
-      key; the holding account deliberately is *not*, since the same note re-keyed against the
-      wrong account is the worst version of the mistake. Blank/whitespace-only references never
-      group (nor NULL ones), and every derived path writes NULL, so those rows fall out by
-      construction. Eight tests in `reports::health`, a `doc_checks` pin, the `docs/API.md` entry
-      (with the limitation stated: it only catches trades whose entry recorded the reference), the
-      README feature line, and the banner row + Trades link.
-
-## SCENARIOS V-d — a parcel dated before an already-run whole-holding operation is never consumed
-
-Raised driving **V-03 / V-06** (a corporate action, and a back-dated acquisition, entered after
-the facts they should have reached).
-
-Three operations consume **every** open parcel of their listing as a matter of law, not choice:
-the scrip-for-scrip **exchange**, the **demerge**, and the worthless-shares **recognise**. Each is
-refused if the listing traded on or after its date, and `docs/API.md`'s *Recording one of the three
-read-time events behind a rollover that has already run* refuses a `ReturnOfCapital`, `ShareSplit`
-or `BonusIssue` dated on or before one — on the stated grounds that otherwise *"the same facts
-entered in a different order would report a different cost base"*.
-
-A **parcel** dated before one is not guarded. Measured, each accepted `204`:
-
-| Operation (already executed) | Back-dated write | Result |
-| --- | --- | --- |
-| Exchange OLD → NEW 1-for-1, 2024-06-10 | Buy 50 OLD, 2024-02-05 | 50 units of a security that no longer exists; 50 NEW units missing |
-| Exchange OLD → NEW 1-for-1, 2024-06-10 | Inheritance of 25 OLD, died 2024-03-01 | same, via the inheritance parcel path |
-| Demerge HEAD 1-for-5, 2024-06-11 | Buy 50 HEAD, 2024-03-05 | no SPIN units issued; the parcel keeps 100% of its cost base instead of 90% |
-| Recognise DEAD worthless, 2024-06-13 | Buy 40 DEAD, 2024-03-05 | 40 units still open on a company already written off |
-
-Nothing surfaces any of them. `GET /reports/rollover_consistency` is blind by construction — it
-compares what the **consumed** units are worth now against the replacements' stored figures, and
-these units were never consumed — and the health report says nothing.
-
-Not affected, and correctly so: a **transfer** and a **buy-back participation** move a *chosen*
-quantity, so a parcel left behind is a legitimate outcome.
-
-Options offered:
-
-1. **Refuse at write time**: a parcel-creating write (Buy/DRP `PUT /trades`, inheritance, ESS
-   vest, rights exercise) dated on or before an executed exchange/demerge/recognise on that
-   listing answers `422` naming the operation and its date, with the recovery its sibling refusal
-   already gives — delete the operation, enter the parcel, run it again.
-2. **Report it**: extend `rollover_consistency` (and so the annual tax report's completeness
-   section) with an *unconsumed parcel* problem naming every parcel open on the listing at the
-   operation's date that the operation did not consume. Advisory; nothing is refused.
-3. **Both** — refuse the write, and report any state that predates the guard, which is the pattern
-   the AMIT-adjustment / rollover pair already follows.
-
-**Evan chose option 3** — refuse *and* report: `422` at write time naming the operation and its
-date, plus an *unconsumed parcel* problem on `rollover_consistency` for any state that predates
-the guard.
-
-- [x] Refuse a parcel-creating write dated on or before an executed exchange/demerge/recognise,
-      with a test per affected operation and per parcel-creating path.
-- [x] Add the unconsumed-parcel problem to `rollover_consistency` (and so the annual tax report's
-      completeness section), with a test and the `docs/API.md` entry.
-
-Done 2026-08-23. The shared rule lives in `domain::whole_holding`: the three operations' provenance
-columns are named once (`CLOSING_SELL_COLUMNS`), so the guard and the report can never disagree
-about what counts as a whole-holding operation, and the `422` body is built once
-(`BackDatedParcel::message`) for all eight refusals. The comparison is on the trade's own `date`,
-never `deemed_acquisition_date` — a rollover replacement and an inherited parcel both carry a deemed
-date decades earlier for the discount clock alone. Paths covered, enumerated from every non-test
-`INSERT INTO trades` in `src`: `PUT /trades/:id`, `PUT /inheritances/:id`, `POST
-/ess_statements/:id/vest`, `POST /corporate_actions/:id/exercise`, `POST /income/:id/reinvest`, and
-the replacement parcels of the scrip exchange (its *destination* listing), the demerger (its
-*demerged* listing) and the transfer — the two rollovers' source/head listings are already covered
-by their own "traded on or after" refusal. An **edit** of a parcel already sitting behind an
-operation is deliberately not refused: a consumed source parcel is behind one by definition, and
-that edit is the state the report exists to surface. `WorthlessShares` became a fourth
-`rollover_consistency` `kind` rather than a report of its own — it is one of the three operations,
-the row shape fits it exactly, and it reaches the annual tax report's completeness section for
-free; it stores no carried figures, so only the unconsumed-parcel check runs on it.
-
-## SCENARIOS V-e — reinvesting into an already-closed DRP period brings forward nothing
-
-Raised driving **V-08**, the sibling of [V-b](#scenarios-v-b--reinvesting-a-drp-distribution-out-of-order-builds-the-residual-chain-backwards)
-and a different mechanism: V-b read the chain *forward in time*, this one reads a column the
-period's closure had temporarily zeroed. Noticed while fixing V-b, then re-derived independently
-against a throwaway database before being logged.
-
-A `CarryForward` period's trailing leftover is settled to `residual_paid_out` when the period
-closes, and `entities::drp_reinvestment::db_reinvest` reads the prior trade's
-`residual_carried_forward` — which for that trailing trade is therefore `0`. `recompute_residuals`
-restores it to `residual_carried_forward` a moment later, correctly, because the new trade has
-displaced it as the tail — but the new trade was already written with nothing brought forward.
-
-Measured, one listing, one **closed** `CarryForward` period (2024-01-01 → 2024-12-01), two
-distributions reinvested **in payment order** (so V-b's new refusal does not fire):
-
-| DRP trade | date | quantity | brought fwd | carried fwd | paid out |
-| --- | --- | ---: | ---: | ---: | ---: |
-| 2 | 2024-03-28 | 11 | 0 | **6** | 0 |
-| 3 | 2024-06-28 | **10** | **0** | 0 | 7 |
-
-March states A$6 carried forward and June received none of it: the money is carried to nobody, and
-the June parcel is a unit short (107 + 6 = 113 buys 11 units at A$10, not 10).
-
-The control bounds it — the same facts with the period **open** while reinvesting, closed
-afterwards, are correct throughout: 11 and 11 units, carries 6 then 3, and closing moves only the
-trailing 3 to `residual_paid_out`. So the fault is confined to reinvesting **into a period that is
-already closed**, which is the ordinary shape of V-08: a statement arrives months after the plan
-was left, and the period the user records retroactively is one they have since ended. `PayOut`
-periods are unaffected — every leftover is refunded as it arises, so nothing is ever brought
-forward by design.
-
-`docs/API.md` already states the principle this violates: *"What happened to each leftover is
-derived from the period, not stamped on when it closes"*, and *"Every write of the period
-re-derives the split for its trades"*. `db_reinvest` reading a stored column is the odd one out.
-
-Options offered:
-
-1. Have `db_reinvest` take the brought-forward figure from **`recompute_residuals`' own
-   derivation** rather than from a stored column whose value depends on a tail that is about to
-   move — one function decides the split, which is what the documented principle says.
-2. Read the prior trade's leftover as `residual_carried_forward + residual_paid_out` (the two
-   columns are one leftover, split only by which trade is currently the tail). One line, same
-   answer, but leaves two places deciding the split.
-3. Refuse a reinvestment into a period carrying an `unenrolment_date`, requiring it to be
-   re-opened, reinvested and re-closed.
-
-**Evan chose option 1** — ask the shared derivation, so the split is decided in one place.
-
-- [x] Have `db_reinvest` derive the brought-forward figure the way `recompute_residuals` does,
-      with a test reinvesting twice into an already-closed `CarryForward` period.
-
-Done 2026-08-23. The rule `recompute_residuals` applied inline is now
-`DrpEnrolment::residual_split(leftover, ChainPosition)` — the period plus the reinvestment's place
-in its chain decide where its leftover sits, and nothing else does. `recompute_residuals` is the
-walk that applies it in payment order; `db_reinvest` asks it twice per write, at the positions that
-hold *after* the insert: `Followed` for the trade before it (which the new row is displacing as the
-tail) over that trade's whole leftover — both residual columns summed, since which one holds it is
-exactly the tail-dependent fact that was being misread — and `Tail` for the new trade's own split,
-so a closed period's reinvestment is written already settled rather than corrected a moment later.
-V-b's two properties are untouched: the lookup keeps its `AND t.date <= ?` bound and the
-later-trade refusal still fires (verified live). `PayOut` is unchanged by construction — the rule
-refunds every leftover regardless of position, so nothing is ever brought forward. `docs/API.md`
-needed no correction, only sharpening: both sections already stated the derived-from-the-period
-principle this violated, and now say what it means for a reinvestment entered into a closed
-period.
+After V, the next SCENARIOS pass is section **W. Precision, rounding, and scale** (8 scenarios),
+driven the way S, T, U and V were: run every scenario against a throwaway database, apply the
+standing probes to each, and log what each raises as a `## SCENARIOS W-nn` section here with the
+option Evan chose. The lessons worth carrying forward are in the handover memory. V added three.
+First, and again — **the standing probes find what the scenario list does not name**: three of V's
+five findings came from the probes rather than the scenario they are filed under, and V-a was found
+by *making the typo myself* while driving V-04, which is the strongest argument yet for driving a
+scenario by hand rather than by script. Second, **a finding often has a sibling one room away**: the
+project already held the rule V-a, V-c and V-d each needed — `deny_unknown_fields` on the two
+non-HTTP bodies, a `duplicate_*` check on every fact table but one, a refusal for three of the four
+things that can sit behind an executed rollover — so the useful question after finding a gap is
+"where is this rule already applied, and what did it miss?". Third, **bound a finding with its
+control before logging it**: V-e reads as a general DRP fault until the same facts are driven with
+the period left open, which are correct throughout — that control is what identified the closure,
+not the chain, as the cause, and it is what kept the fix from being aimed at the wrong mechanism.

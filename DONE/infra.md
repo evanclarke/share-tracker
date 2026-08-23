@@ -1319,3 +1319,49 @@ on 517 (b), narrowing the scheduler's startup writes (c), and accepting it (d).
       `write_tx_holds_off_a_concurrent_writer_instead_of_failing_to_upgrade` pins the fix — the
       concurrent writer must still be blocked while the transaction holds the lock, which is
       exactly what a deferred `BEGIN` cannot do, so it fails 100% of the time on a regressed build.
+
+## SCENARIOS V-a — a misspelt field name in a request body is silently ignored
+
+Raised driving **V-01 / V-09** (a year of history entered in one session). Every HTTP request
+body in the tree deserialises with serde's default behaviour, so a key the struct does not
+recognise is **dropped**, and the field it was meant to set takes its `#[serde(default)]` value.
+A **required** field is already safe — omitting it is a `422` naming it — but almost every
+*money* field on the tax-bearing entities is optional-with-default, so a one-character typo
+writes a legitimate-looking row with a zero in it and answers `204`.
+
+Measured against a throwaway database:
+
+| Request | Sent | Stored | Response |
+| --- | --- | --- | --- |
+| `PUT /amma_statements/9` | `franked_dividend: "5000"`, `frankingcredits: "2142"` | `franked_dividends: 0`, `franking_credits: 0` | `204` |
+| `PUT /trades/7` | `settlment_date: "2025-04-09"` | `settlement_date: 2025-04-03` (`computed`) | `204` |
+| `PUT /trades/7` | `contract_note: "CN123"` | `contract_note_ref: null` | `204` |
+| `POST /reports/row_history` | `table_name: "parcel_allocations"` | filter ignored — whole trail returned | `200` |
+
+The AMMA row is the one that matters: A$7,142 of a lodgeable tax figure vanished with nothing
+anywhere saying so. `income` (every component `#[serde(default)]`), `interest_income` (`amount`
+itself defaults, as does `foreign_source`, which routes the row between 10L and 20E) and
+`investment_expense` have the same shape.
+
+**The project already holds the opposite convention, for the two bodies that are not HTTP.**
+`infra/config.rs` and `scheduler::JobParams` both carry `#[serde(deny_unknown_fields)]` with the
+reasoning written out beside it — *"`deny_unknown_fields` makes a misspelt parameter a rejection
+rather than a silently-ignored default"* — and **T-10** made an unrecognised *query* parameter on
+`POST /jobs/:name` a `422` naming it for exactly this reason (`` cannot read the query string:
+sufix: unknown field `sufix` ``). The HTTP request bodies are the gap. 233 `Deserialize` derives
+in `src`, none of them denying.
+
+Options offered:
+
+1. `#[serde(deny_unknown_fields)]` on every HTTP request-body struct, with a test that
+   enumerates the bodies reachable from a handler so a new one cannot be added without it.
+2. The same, but on the **write** bodies only (entity `PUT`/`POST`), leaving report request
+   bodies permissive.
+3. Leave it and document it as a known limitation.
+
+**Evan chose option 1** — `deny_unknown_fields` on *every* HTTP request-body struct, report
+bodies included, with a test enumerating the bodies reachable from a handler so a new one cannot
+be added without it.
+
+- [x] Add `#[serde(deny_unknown_fields)]` to every HTTP request-body struct, with the enumerating
+      test and a `docs/API.md` note that an unrecognised body field is refused.

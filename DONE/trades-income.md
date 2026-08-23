@@ -724,3 +724,126 @@ distinguish a deliberate override such as trade 9071 from a stale computation, a
 than repairs), and (c) documentation only. The report's contract sentence still has to be corrected
 either way, and the job needs to leave a hand-supplied `settlement_date` alone — see S-05, where the
 supplied value is the user's own assertion.
+
+## SCENARIOS V-b — reinvesting a DRP distribution out of order builds the residual chain backwards
+
+Raised driving **V-08** (a DRP enrolment period entered retroactively over distributions already
+recorded as cash — after which the user reinvests them, and not necessarily in date order).
+
+`entities::drp_reinvestment::db_reinvest` reads the residual brought forward as
+
+```sql
+SELECT t.residual_carried_forward … ORDER BY t.date DESC, t.id DESC LIMIT 1
+```
+
+over the enrolment period's DRP trades, with **no bound requiring that trade to be dated before
+the one being created**. Its comment says *"'most recent' is the payment order the cash actually
+moved in"*, which holds only when reinvestments are entered in that order — and this is the
+section about the times they are not.
+
+Measured: one listing, one open `CarryForward` period, two distributions — 2024-03-28 paying
+A$105 and 2024-09-30 paying A$107. Reinvesting the **September** one first (at A$10) then the
+**March** one (at A$9):
+
+| DRP trade | date | quantity | brought fwd | carried fwd |
+| --- | --- | ---: | ---: | ---: |
+| 4 | 2024-03-28 | **12** | **7** | 4 |
+| 3 | 2024-09-30 | **10** | **0** | 7 |
+
+The March parcel brought forward A$7 from a reinvestment six months **later**, and the September
+one never picked up March's own leftover. The correct chain is March 105 → 11 units @ 9 (carry 6),
+September 107 + 6 = 113 → 11 units @ 10 (carry 3). Both parcels carry the wrong quantity, and A$7
+of cash is spent twice. Nothing surfaces it: the health report is silent and no cross-check reads
+the chain.
+
+Note the asymmetry with **undo**, which already enforces the ordering for this exact reason:
+`DELETE /income/:id/reinvest` refuses while a later DRP trade exists, because *"the residual chain
+reads each reinvestment's brought-forward cash back from the most recent prior DRP trade, so
+removing a mid-chain trade would falsify the later trade's residuals"*. Creating one mid-chain is
+the same falsification and is not refused.
+
+Options offered:
+
+1. **Refuse out-of-order creation**, mirroring undo: bound the lookup to trades dated strictly
+   before the new one, and reject a reinvestment that is not the period's latest — "reinvest in
+   payment order".
+2. **Re-derive the period's whole chain** on every reinvest write (walk its trades in date order,
+   recomputing brought-forward, carried-forward and quantity). Correct under any entry order, but
+   a new reinvestment then rewrites the *quantity* of DRP parcels already entered, which Sell
+   allocations and AMIT adjustments may already draw on.
+3. Bound the lookup to earlier trades only, and add a cross-check row for a period whose chain
+   does not reconcile in date order.
+
+**Evan chose option 1** — refuse out-of-order creation, mirroring the undo rule: bound the lookup
+to trades dated strictly before the new one, and reject a reinvestment that is not the period's
+latest.
+
+- [x] Bound the residual lookup and refuse a non-latest reinvestment, with a test entering two
+      reinvestments in reverse order and `docs/API.md` carrying the new `422`.
+
+## SCENARIOS V-e — reinvesting into an already-closed DRP period brings forward nothing
+
+Raised driving **V-08**, the sibling of [V-b](#scenarios-v-b--reinvesting-a-drp-distribution-out-of-order-builds-the-residual-chain-backwards)
+and a different mechanism: V-b read the chain *forward in time*, this one reads a column the
+period's closure had temporarily zeroed. Noticed while fixing V-b, then re-derived independently
+against a throwaway database before being logged.
+
+A `CarryForward` period's trailing leftover is settled to `residual_paid_out` when the period
+closes, and `entities::drp_reinvestment::db_reinvest` reads the prior trade's
+`residual_carried_forward` — which for that trailing trade is therefore `0`. `recompute_residuals`
+restores it to `residual_carried_forward` a moment later, correctly, because the new trade has
+displaced it as the tail — but the new trade was already written with nothing brought forward.
+
+Measured, one listing, one **closed** `CarryForward` period (2024-01-01 → 2024-12-01), two
+distributions reinvested **in payment order** (so V-b's new refusal does not fire):
+
+| DRP trade | date | quantity | brought fwd | carried fwd | paid out |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 2 | 2024-03-28 | 11 | 0 | **6** | 0 |
+| 3 | 2024-06-28 | **10** | **0** | 0 | 7 |
+
+March states A$6 carried forward and June received none of it: the money is carried to nobody, and
+the June parcel is a unit short (107 + 6 = 113 buys 11 units at A$10, not 10).
+
+The control bounds it — the same facts with the period **open** while reinvesting, closed
+afterwards, are correct throughout: 11 and 11 units, carries 6 then 3, and closing moves only the
+trailing 3 to `residual_paid_out`. So the fault is confined to reinvesting **into a period that is
+already closed**, which is the ordinary shape of V-08: a statement arrives months after the plan
+was left, and the period the user records retroactively is one they have since ended. `PayOut`
+periods are unaffected — every leftover is refunded as it arises, so nothing is ever brought
+forward by design.
+
+`docs/API.md` already states the principle this violates: *"What happened to each leftover is
+derived from the period, not stamped on when it closes"*, and *"Every write of the period
+re-derives the split for its trades"*. `db_reinvest` reading a stored column is the odd one out.
+
+Options offered:
+
+1. Have `db_reinvest` take the brought-forward figure from **`recompute_residuals`' own
+   derivation** rather than from a stored column whose value depends on a tail that is about to
+   move — one function decides the split, which is what the documented principle says.
+2. Read the prior trade's leftover as `residual_carried_forward + residual_paid_out` (the two
+   columns are one leftover, split only by which trade is currently the tail). One line, same
+   answer, but leaves two places deciding the split.
+3. Refuse a reinvestment into a period carrying an `unenrolment_date`, requiring it to be
+   re-opened, reinvested and re-closed.
+
+**Evan chose option 1** — ask the shared derivation, so the split is decided in one place.
+
+- [x] Have `db_reinvest` derive the brought-forward figure the way `recompute_residuals` does,
+      with a test reinvesting twice into an already-closed `CarryForward` period.
+
+Done 2026-08-23. The rule `recompute_residuals` applied inline is now
+`DrpEnrolment::residual_split(leftover, ChainPosition)` — the period plus the reinvestment's place
+in its chain decide where its leftover sits, and nothing else does. `recompute_residuals` is the
+walk that applies it in payment order; `db_reinvest` asks it twice per write, at the positions that
+hold *after* the insert: `Followed` for the trade before it (which the new row is displacing as the
+tail) over that trade's whole leftover — both residual columns summed, since which one holds it is
+exactly the tail-dependent fact that was being misread — and `Tail` for the new trade's own split,
+so a closed period's reinvestment is written already settled rather than corrected a moment later.
+V-b's two properties are untouched: the lookup keeps its `AND t.date <= ?` bound and the
+later-trade refusal still fires (verified live). `PayOut` is unchanged by construction — the rule
+refunds every leftover regardless of position, so nothing is ever brought forward. `docs/API.md`
+needed no correction, only sharpening: both sections already stated the derived-from-the-period
+principle this violated, and now say what it means for a reinvestment entered into a closed
+period.
