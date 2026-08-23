@@ -348,6 +348,44 @@ figure the docs promise.
       rounded components need not add to a rounded total (here 39344.55 + 247.57 = 39592.12 does,
       but that is arithmetic, not a guarantee) — the same behaviour every table on screen has.
 
+## SCENARIOS W-f — The tax-return CSV's printed working does not reconcile to the figure it works to
+
+Surfaced by [W-c](#scenarios-w-c) and confirmed while building [W-d](#scenarios-w-d): now that each
+money column of `net-capital-gain.csv` rounds to the cent independently, the columns that are
+*arithmetically related to each other* need not agree. Reproduced at the export endpoint on an
+entirely ordinary single-parcel disposal — 100 units bought 2022-01-05 at $10, sold 2024-03-15 at
+$11.0001, no brokerage:
+
+```
+discount_eligible_gains  100.01   (label 18H component)
+cgt_discount              50.01   (label 18 working)
+net_capital_gain          50.01   (label 18A)
+```
+
+The printed working reads **100.01 − 50.01 = 50.00**, beside an 18A of **50.01**. The exact figures
+are 100.01, 50.005 and 50.005, and the 50% discount is the same halving mechanism that produced W-d.
+**Any year whose discount-eligible net gain is an odd number of cents does this.** Evan's own data
+reconciles (`39344.55 + 247.57 = 39592.12`) by luck rather than by construction.
+
+This is the CSV twin of W-d, one level up: W-d made a *column of rows* add to its total; this is a
+*row of columns* that form a worksheet. `tax-summary.csv` carries the same risk wherever one column
+is a sum of others. Note the divergence is **not** new breakage — the same figures rounded the same
+way on screen before W-c; what W-c changed is that the CSV now shows the rounded form too, which is
+what makes the inconsistency legible rather than hidden behind 28 digits.
+
+Two things bound it before any fix is aimed:
+
+- The **underlying tax figure is right** either way; this is a presentation inconsistency in a
+  document meant to be transcribed, not a wrong assessable amount.
+- It lives in `reports::net_capital_gain`'s year record, which the JSON report, the CSV export **and**
+  the Annual Tax Report's `cgt_summary` section all share — W-d deliberately left `cgt_summary`
+  alone for exactly this reason, so whatever is decided here should settle all three at once rather
+  than forking the figure.
+
+- [ ] Decide whether the net-capital-gain (and tax-summary) CSV worksheet columns should be derived
+      from each other after rounding so the printed working reconciles, and if so apply it to the
+      shared year record so the JSON, the CSV and the annual report's `cgt_summary` all agree
+
 ## SCENARIOS W-d — The Annual Tax Report's printed columns do not add up
 
 The Annual Tax Report is the one surface built to be printed and archived (`custom: 'tax-report'`,
