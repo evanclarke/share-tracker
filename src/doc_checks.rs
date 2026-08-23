@@ -64,13 +64,17 @@ fn cent_rounded_csv_exports_documented() {
         2,
         "both /export paragraphs state the cent rounding"
     );
-    // …and what does not: the JSON stays exact, and the two non-money columns
-    // come through untouched.
-    assert!(
-        API_MD.contains("The JSON report above is unaffected — it still answers the exact figure.")
-    );
+    // …and what does not: the two non-money columns come through untouched.
+    // (W-c's other half — "the JSON report above is unaffected" — was
+    // withdrawn by W-f, which moved the net-capital-gain rounding into the
+    // shared year record; `worksheet_derived_columns_documented` below pins
+    // what replaced it.)
     assert!(
         API_MD.contains("`tax_year` and `taxpayer_basis` are not money and are exported verbatim")
+    );
+    assert!(
+        !API_MD
+            .contains("The JSON report above is unaffected — it still answers the exact figure.")
     );
     // The display-rules paragraph no longer promises full-precision CSV.
     assert!(
@@ -116,6 +120,42 @@ fn cent_rounded_tax_report_disposals_documented() {
         "the [annual tax report](#annual-tax-report) applies it to the money figures of its \
          disposal schedule"
     ));
+}
+
+/// Docs-sync pin for the worksheet columns derived from cent-rounded inputs
+/// (SCENARIOS W-f): the two reports whose columns are arithmetically related
+/// to one another say so — the net-capital-gain worksheet rounds its *input*
+/// columns and derives the rest (so the printed working reaches its own
+/// result, and the JSON now carries the export's figures), and the tax
+/// summary's total columns are the sum of the cent-rounded lines printed
+/// beside them, with the reason its income lines are deliberately left exact.
+/// The display-rules paragraph names both. The behaviour itself is pinned by
+/// the two reports' W-f tests; this is the documentation half.
+#[test]
+fn worksheet_derived_columns_documented() {
+    // The net-capital-gain worksheet: what rounds, what is derived from it,
+    // and the identity a reader checks on the page.
+    assert!(API_MD.contains(
+        "**The worksheet is kept at the cent, and its derived columns are computed from the \
+         rounded inputs.**"
+    ));
+    assert!(API_MD.contains(
+        "`net_discount_eligible_gain − cgt_discount + net_other_gain == net_capital_gain`"
+    ));
+    // …and the consequence W-c's wording used to deny.
+    assert!(API_MD.contains(
+        "the **JSON report carries the same rounded figures as the export** — one worksheet, \
+         not two"
+    ));
+    // The tax summary's totals, and why its income lines are not rounded.
+    assert!(API_MD.contains("**A total column is the sum of the columns printed beside it.**"));
+    assert!(API_MD.contains("The **income lines themselves keep full precision**"));
+    // The display-rules paragraph carries the rule and the worked figure.
+    assert!(API_MD.contains(
+        "**Where columns are arithmetically related to one another, the report rounds too, and \
+         derives the rest.**"
+    ));
+    assert!(API_MD.contains("100.01 − 50.01 is 50.00"));
 }
 
 /// Docs-sync pin for the money/quantity encoding rule (SCENARIOS W-a): its own

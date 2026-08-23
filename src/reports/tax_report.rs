@@ -1418,7 +1418,19 @@ async fn push_deduction_rows(
             investment_expense_id: row.try_get("id")?,
             date_incurred,
             expense_type: row.try_get("expense_type")?,
-            amount_aud: tax_summary::aud_field(fx, row, "amount", &currency, date_incurred)?,
+            // To the cent, as the tax summary's own deduction lines are —
+            // that report rounds each expense at the row so its two cuts
+            // (by kind, by destination) agree, and this is the same row
+            // printed on the archived document. Rounding here too is what
+            // keeps the section a drilldown: these rows sum to the summary
+            // line exactly (SCENARIOS W-d/W-f).
+            amount_aud: crate::infra::decimal::to_cents(tax_summary::aud_field(
+                fx,
+                row,
+                "amount",
+                &currency,
+                date_incurred,
+            )?),
             listing_id,
             ticker: listing_id.map(|id| ctx.ticker_as_at(id, date_incurred)),
             destination,
@@ -1973,6 +1985,76 @@ mod tests {
             .map(|r| r.amount_aud)
             .sum();
         assert_eq!(interest_total, summary.interest_income);
+        let deductions_total: Decimal = report.income.deductions.iter().map(|r| r.amount_aud).sum();
+        assert_eq!(deductions_total, summary.deductions_total);
+    }
+
+    /// SCENARIOS W-f, the drilldown under the rounding. The tax summary's
+    /// three *total* columns are now sums of the cent-rounded lines, and its
+    /// deduction lines are sums of expenses rounded at their own row — so
+    /// this checks the promise above still holds exactly on facts that fall
+    /// on half cents: the income rows keep full precision and still sum to
+    /// their (unrounded) summary lines, and the deduction rows are rounded
+    /// here too, so they sum to the (rounded) deduction line rather than
+    /// half a cent away from it.
+    #[tokio::test]
+    async fn income_sections_still_sum_to_the_summary_line_on_half_cent_figures() {
+        let pool = test_support::test_pool().await;
+        test_support::listing(1)
+            .ticker("T1")
+            .name("Test One")
+            .insert(&pool)
+            .await;
+        test_support::income(1, 1, ymd(2024, 2, 1))
+            .with(|i| i.franked_amount = dec("10.005"))
+            .insert(&pool)
+            .await;
+        test_support::income(2, 1, ymd(2024, 3, 1))
+            .with(|i| i.franked_amount = dec("10.005"))
+            .insert(&pool)
+            .await;
+        for (id, amount) in [(1, "10.005"), (2, "10.005")] {
+            investment_expense::db_upsert(
+                &pool,
+                &investment_expense::InvestmentExpense {
+                    id,
+                    date_incurred: ymd(2024, 2, 1),
+                    expense_type: investment_expense::ExpenseType::ManagementFee,
+                    amount: dec(amount),
+                    gross_amount: None,
+                    deductible_percentage: None,
+                    currency: "AUD".to_string(),
+                    description: None,
+                    listing_id: None,
+                    holding_account_id: None,
+                },
+            )
+            .await
+            .unwrap();
+        }
+
+        let summary_rows = crate::reports::tax_summary::db_tax_summary(&pool)
+            .await
+            .unwrap();
+        let summary = summary_rows.iter().find(|s| s.tax_year == 2024).unwrap();
+        let report = db_tax_report(&pool, 2024).await.unwrap();
+
+        // The income line keeps the half cents, and its rows sum to it.
+        assert_eq!(summary.dividends_assessable, dec("20.01"));
+        let dividends_total: Decimal = report
+            .income
+            .dividends
+            .iter()
+            .map(|r| r.franked_amount_aud + r.unfranked_amount_aud)
+            .sum();
+        assert_eq!(dividends_total, summary.dividends_assessable);
+        assert_eq!(report.income.dividends[0].franked_amount_aud, dec("10.005"));
+
+        // The deduction rows are at the cent, and sum to the line — which is
+        // 20.02, the sum of the rounded rows, not the 20.01 the exact total
+        // would have rounded to.
+        assert_eq!(summary.deductions_total, dec("20.02"));
+        assert_eq!(report.income.deductions[0].amount_aud, dec("10.01"));
         let deductions_total: Decimal = report.income.deductions.iter().map(|r| r.amount_aud).sum();
         assert_eq!(deductions_total, summary.deductions_total);
     }

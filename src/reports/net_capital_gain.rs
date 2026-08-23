@@ -29,6 +29,13 @@
 //!     discount-eligible gain. Any unused loss is carried forward into the next
 //!     year in the series.
 //!
+//! **The year record is a worksheet, so it is kept at the cent.** Its input
+//! figures (the gross gains, the year's losses, the brought-forward balance)
+//! are rounded to the cent — [`crate::infra::decimal::to_cents`], the one
+//! rounding rule — and every dependent column is computed from those rounded
+//! values, so the working the CSV export and the annual tax report print
+//! reaches the figure printed beside it (SCENARIOS W-f). See [`net_years`].
+//!
 //! The series is one record per year with something to report: every year with
 //! recorded activity, plus every quiet year up to the current one that carries
 //! a capital loss forward (label 18V is reported until the loss is used, not
@@ -37,7 +44,7 @@
 use crate::domain::cost_base::{self, ParcelRow};
 use crate::domain::tax_year::tax_year_for;
 use crate::entities::corporate_action::{self, RocEvent};
-use crate::infra::decimal::parse_dec;
+use crate::infra::decimal::{parse_dec, to_cents};
 use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
 use crate::reports::export::{self, Cents};
@@ -81,9 +88,11 @@ pub struct NetCapitalGainYear {
     /// Non-discountable gain remaining after capital losses are applied.
     pub net_other_gain: Decimal,
     /// The 50% CGT discount amount removed from the remaining discount-eligible gain
-    /// (= net_discount_eligible_gain / 2).
+    /// (= net_discount_eligible_gain / 2, to the cent).
     pub cgt_discount: Decimal,
-    /// Assessable net capital gain = net_other_gain + net_discount_eligible_gain / 2.
+    /// Assessable net capital gain = net_other_gain + (net_discount_eligible_gain
+    /// − cgt_discount), i.e. what the worksheet leaves after the discount line
+    /// printed above it — not a second halving (see [`net_years`]).
     pub net_capital_gain: Decimal,
     /// Capital losses left unused after offsetting all gains (from both this
     /// year's losses and the brought-forward balance), carried forward into the
@@ -752,6 +761,24 @@ fn current_tax_year() -> i32 {
 /// indefinitely). The chain starts from `brought_forward`, the entered
 /// opening carried-forward loss (pre-system loss years) in `cgt_settings`.
 ///
+/// **Every column here is at the cent** (SCENARIOS W-f). The record's
+/// *inputs* — the two gross-gain buckets, the year's own losses, the
+/// brought-forward balance (which is the previous row's carried-forward
+/// output, so only the entered opening loss is rounded as an input), and the
+/// three informational CGT-event lines — are taken to the cent with
+/// [`crate::infra::decimal::to_cents`]. The rest are *derived* from those
+/// rounded inputs by exact arithmetic that cannot leave the cent
+/// (`+`, `−`, `min`), except the 50% discount, which halves and so rounds
+/// once itself. The row is what the CSV export, the JSON report and the
+/// annual tax report's `cgt_summary` all print, so a worksheet whose
+/// columns are rounded independently would print a working that does not
+/// reach its own result: `discount_eligible_gains` of 100.01 halves to
+/// 50.005, and 100.01 − 50.01 is 50.00, not the 50.01 an independently
+/// rounded 18A would show. Deriving instead of re-rounding is what settles
+/// all three surfaces on one set of figures; the cost is that a reported
+/// figure can move by up to a cent from the exact arithmetic, which is the
+/// accepted price of a document that adds up.
+///
 /// **A quiet year that carries a loss balance still gets a row.** Label 18V
 /// (*net capital losses carried forward to later income years*) is reported
 /// **every** year until the loss is used, not only in years with a CGT event
@@ -774,7 +801,7 @@ fn current_tax_year() -> i32 {
 /// all the only year that can carry it is the current one.
 fn net_years(
     mut buckets: HashMap<i32, GrossBuckets>,
-    mut brought_forward: Decimal,
+    brought_forward: Decimal,
     through: i32,
 ) -> Vec<NetCapitalGainYear> {
     let first = buckets.keys().copied().min().unwrap_or(through);
@@ -782,6 +809,15 @@ fn net_years(
     years.sort_unstable();
     years.dedup();
 
+    // The chain's **seed** — the entered `cgt_settings` opening loss — is the
+    // one brought-forward figure this walk does not produce itself, so it is
+    // taken to the cent here, once (SCENARIOS W-f). Every later value of
+    // `brought_forward` is a row's own `carried_forward`, already at the cent.
+    // Rounding it here rather than per row also keeps the quiet-year test
+    // below ("does this year still carry a balance?") asking about the figure
+    // that would be *reported*, so a sub-cent opening loss does not emit a
+    // row of zeros every year until it is used.
+    let mut brought_forward = to_cents(brought_forward);
     let two = Decimal::from(2);
     years
         .into_iter()
@@ -792,33 +828,55 @@ fn net_years(
                 None if brought_forward != Decimal::ZERO => GrossBuckets::default(),
                 None => return None,
             };
+            // The worksheet's **input** figures, taken to the cent here
+            // (SCENARIOS W-f): every dependent column below is then computed
+            // from these rounded values, so the working printed on the CSV
+            // export and the annual tax report reaches the figure printed
+            // beside it. (`brought_forward` is already at the cent — see the
+            // seed above.)
+            let discount_eligible_gains = to_cents(b.discount_eligible);
+            let other_gains = to_cents(b.other);
+            let capital_losses = to_cents(b.losses);
+
             // Apply losses (this year's + brought forward — both offset gains before
             // the discount) to non-discountable gains first, then to discount-eligible
             // gains (taxpayer-favourable: the discount falls on the largest remainder).
-            let available_losses = b.losses + brought_forward;
-            let loss_to_other = b.other.min(available_losses);
-            let net_other = b.other - loss_to_other;
+            // Addition, subtraction and `min` over cent figures stay at the
+            // cent, so none of these four needs rounding of its own.
+            let available_losses = capital_losses + brought_forward;
+            let loss_to_other = other_gains.min(available_losses);
+            let net_other = other_gains - loss_to_other;
             let remaining_loss = available_losses - loss_to_other;
 
-            let loss_to_discount = b.discount_eligible.min(remaining_loss);
-            let net_discount = b.discount_eligible - loss_to_discount;
+            let loss_to_discount = discount_eligible_gains.min(remaining_loss);
+            let net_discount = discount_eligible_gains - loss_to_discount;
             let carried_forward = remaining_loss - loss_to_discount;
 
-            let cgt_discount = net_discount / two;
+            // Halving is the one step that can leave the cent: an odd number
+            // of cents of net discount-eligible gain halves onto a half cent
+            // (the mechanism behind SCENARIOS W-d and W-f). The **discount**
+            // is the figure rounded — it is the worksheet's own "less CGT
+            // concession amount @ 50%" line — and the assessable gain is then
+            // what the worksheet says is left after it, rather than a second
+            // independent halving. So `net_discount − cgt_discount` is
+            // exactly the discounted part of `net_capital_gain`, and (the
+            // discount rounding half away from zero) the assessable figure
+            // lands the taxpayer-favourable way on a half cent.
+            let cgt_discount = to_cents(net_discount / two);
             let year = NetCapitalGainYear {
                 tax_year,
-                discount_eligible_gains: b.discount_eligible,
-                other_gains: b.other,
-                capital_losses: b.losses,
+                discount_eligible_gains,
+                other_gains,
+                capital_losses,
                 capital_loss_brought_forward: brought_forward,
                 net_discount_eligible_gain: net_discount,
                 net_other_gain: net_other,
                 cgt_discount,
-                net_capital_gain: net_other + cgt_discount,
+                net_capital_gain: net_other + (net_discount - cgt_discount),
                 capital_loss_carried_forward: carried_forward,
-                cgt_event_e10_gain: b.e10,
-                cgt_event_g1_gain: b.g1,
-                cgt_event_c2_gain: b.c2,
+                cgt_event_e10_gain: to_cents(b.e10),
+                cgt_event_g1_gain: to_cents(b.g1),
+                cgt_event_c2_gain: to_cents(b.c2),
                 taxpayer_basis: crate::reports::TAXPAYER_BASIS.to_string(),
                 // Attached by the caller (`db_net_capital_gain` groups the
                 // already-fetched realised rows by tax year); left empty here
@@ -837,7 +895,9 @@ fn net_years(
 /// [`NetCapitalGainYear`] itself — unlike that struct this is never exported
 /// as CSV — but every figure here is derived from the exact same
 /// `gross_buckets`/`net_years` pipeline that struct comes from, never a
-/// second implementation of the netting rule.
+/// second implementation of the netting rule. It is therefore at the cent
+/// and internally consistent for the same reason (SCENARIOS W-f): this is
+/// the layout that is *printed*, and its lines subtract from one another.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct CgtSummaryYear {
     pub tax_year: i32,
@@ -923,10 +983,18 @@ pub(crate) async fn db_cgt_summary_year(
     let opening = crate::entities::cgt_settings::db_opening_capital_loss(&mut *conn).await?;
     let years = net_years(buckets, opening, current_tax_year());
     Ok(years.into_iter().find(|y| y.tax_year == tax_year).map(|y| {
-        let amma = amma_grossed_up
-            .get(&tax_year)
-            .copied()
-            .unwrap_or(Decimal::ZERO);
+        // At the cent like every other figure on this worksheet, and for the
+        // same reason (SCENARIOS W-f): the printed page adds the two gain
+        // lines together, so `long_term_gains` is derived by *subtracting*
+        // the rounded distribution component from the rounded
+        // discount-eligible total. `to_cents` is monotonic and the component
+        // is part of that total, so the remainder can never go negative.
+        let amma = to_cents(
+            amma_grossed_up
+                .get(&tax_year)
+                .copied()
+                .unwrap_or(Decimal::ZERO),
+        );
         CgtSummaryYear {
             tax_year: y.tax_year,
             short_term_gains: y.other_gains,
@@ -3303,11 +3371,18 @@ mod tests {
         }
     }
 
-    /// The control for the test above: the JSON report over the same facts is
-    /// untouched — it still answers the exact figure, which is what the API
-    /// documents and what any other caller computes from.
+    /// The counterpart of the test above, and **the one W-c control W-f
+    /// reversed**: the JSON report now carries the very figures the export
+    /// does. W-c rounded only the CSV projection, on the reasoning that the
+    /// JSON should stay the exact figure; W-f moved the rounding into the
+    /// shared year record instead, because a worksheet whose columns round
+    /// independently prints a working that does not reach its own result —
+    /// and the record is what the JSON report, the CSV export and the annual
+    /// tax report's `cgt_summary` all read. The exact arithmetic is still
+    /// there to check against: the gain is 1500 − 3021.89 ÷ 3, and the
+    /// reported figure is that to the cent, no further away.
     #[tokio::test]
-    async fn api_the_json_report_keeps_the_precision_the_export_rounds() {
+    async fn api_the_json_report_carries_the_same_cent_figures_as_the_export() {
         let pool = long_decimal_disposal().await;
 
         let years: Vec<NetCapitalGainYear> =
@@ -3315,16 +3390,337 @@ mod tests {
         let y = row_for(&years, 2024);
         let cost_base: Decimal = "3021.89".parse::<Decimal>().unwrap() / Decimal::from(3);
         let gain = Decimal::from(1500) - cost_base;
-        assert_eq!(y.discount_eligible_gains, gain);
-        assert_eq!(y.net_capital_gain, gain / Decimal::from(2));
-        // …and that figure really does have more than two decimal places, so
-        // the CSV assertions above are testing the rounding, not a coincidence.
-        assert!(y.net_capital_gain.scale() > 2, "{}", y.net_capital_gain);
-        assert_ne!(
-            y.net_capital_gain,
-            "246.35".parse::<Decimal>().unwrap(),
-            "the JSON figure must not be the rounded one"
+        // The unrounded gain really does have more than two decimal places,
+        // so this is testing the rounding and not a coincidence.
+        assert!(gain.scale() > 2, "{gain}");
+        assert_eq!(y.discount_eligible_gains, "492.70".parse().unwrap());
+        assert_eq!(y.cgt_discount, "246.35".parse().unwrap());
+        assert_eq!(y.net_capital_gain, "246.35".parse().unwrap());
+        // Every reported figure is within half a cent of the exact one.
+        let half_cent: Decimal = "0.005".parse().unwrap();
+        assert!((y.discount_eligible_gains - gain).abs() <= half_cent);
+        assert!((y.net_capital_gain - gain / Decimal::from(2)).abs() <= half_cent);
+        // The worksheet reconciles: the printed discount comes off the
+        // printed net gain and reaches the printed 18A.
+        assert_eq!(
+            y.net_discount_eligible_gain - y.cgt_discount + y.net_other_gain,
+            y.net_capital_gain
         );
+    }
+
+    /// **SCENARIOS W-f, the finding itself.** An entirely ordinary
+    /// single-parcel disposal — 100 units bought at $10, sold at $11.0001,
+    /// no brokerage — whose discount-eligible gain is an odd number of cents
+    /// (100.01). Halved, that is 50.005: rounded independently, the export
+    /// printed a working of `100.01 − 50.01` beside an 18A of `50.01`, which
+    /// is 50.00 on the page. The discount is the figure that rounds (half
+    /// away from zero, so 50.01) and 18A is what the worksheet leaves after
+    /// it, so the working reads `100.01 − 50.01 = 50.00` and 18A **is**
+    /// 50.00 — the assessable gain landing the taxpayer-favourable way.
+    #[tokio::test]
+    async fn api_export_the_printed_working_reaches_the_figure_it_works_to() {
+        let pool = odd_cent_disposal().await;
+
+        let csv = client(&pool)
+            .get("/portfolio/net-capital-gain/export")
+            .await
+            .expect_status(StatusCode::OK)
+            .text()
+            .to_string();
+        let mut lines = csv.lines();
+        let header: Vec<&str> = lines.next().unwrap().split(',').collect();
+        lines.next(); // the ATO label row
+        let row: Vec<&str> = lines.next().expect("a record row").split(',').collect();
+        let at = |col: &str| row[header.iter().position(|c| *c == col).unwrap()];
+        let cell = |col: &str| at(col).parse::<Decimal>().unwrap();
+
+        assert_eq!(at("discount_eligible_gains"), "100.01"); // 18H component
+        assert_eq!(at("net_discount_eligible_gain"), "100.01"); // 18 working
+        assert_eq!(at("cgt_discount"), "50.01"); // 18 working
+        assert_eq!(at("net_capital_gain"), "50.00"); // 18A
+        // The working, as a reader adds it up off the page.
+        assert_eq!(
+            cell("net_discount_eligible_gain") - cell("cgt_discount") + cell("net_other_gain"),
+            cell("net_capital_gain"),
+        );
+
+        // The JSON report answers the same figures — one worksheet, not two.
+        let years: Vec<NetCapitalGainYear> =
+            client(&pool).get_json("/portfolio/net-capital-gain").await;
+        let y = row_for(&years, 2024);
+        assert_eq!(y.discount_eligible_gains, "100.01".parse().unwrap());
+        assert_eq!(y.cgt_discount, "50.01".parse().unwrap());
+        assert_eq!(y.net_capital_gain, "50.00".parse().unwrap());
+    }
+
+    /// SCENARIOS W-f: for **every** year row, every column is at the cent and
+    /// every derived column is exactly the arithmetic of the rounded inputs —
+    /// the netting order, the halving, and the loss chain from one year to the
+    /// next. Written to cover a *new* column without anyone listing it: the
+    /// record's whole field set must be classified as an input, a derived
+    /// column, or not money, so an unclassified addition fails here.
+    #[tokio::test]
+    async fn api_every_derived_column_is_the_arithmetic_of_the_cent_rounded_inputs() {
+        /// Figures the worksheet is computed *from*.
+        const INPUTS: &[&str] = &[
+            "discount_eligible_gains",
+            "other_gains",
+            "capital_losses",
+            "capital_loss_brought_forward",
+            // Informational, and part of no printed working — but money, and
+            // so at the cent like every other money column.
+            "cgt_event_e10_gain",
+            "cgt_event_g1_gain",
+            "cgt_event_c2_gain",
+        ];
+        /// Figures the worksheet computes, asserted below.
+        const DERIVED: &[&str] = &[
+            "net_discount_eligible_gain",
+            "net_other_gain",
+            "cgt_discount",
+            "net_capital_gain",
+            "capital_loss_carried_forward",
+        ];
+        /// Not money: the year, the taxpayer assumption, and the drilldown
+        /// (whose per-disposal rows keep the realised report's own precision).
+        const NOT_MONEY: &[&str] = &["tax_year", "taxpayer_basis", "disposals"];
+
+        let pool = odd_cent_years().await;
+        let years: Vec<NetCapitalGainYear> =
+            client(&pool).get_json("/portfolio/net-capital-gain").await;
+        assert!(
+            years.len() >= 2,
+            "the fixture spans a loss year and a gain year"
+        );
+
+        let mut previous_carried: Option<Decimal> = None;
+        for y in &years {
+            let value = serde_json::to_value(y).unwrap();
+            let obj = value.as_object().unwrap();
+            for column in obj.keys() {
+                let c = column.as_str();
+                assert!(
+                    INPUTS.contains(&c) || DERIVED.contains(&c) || NOT_MONEY.contains(&c),
+                    "{c} is a new column of the year record: classify it as an \
+                     input, as derived from the rounded inputs, or as not money",
+                );
+            }
+            for column in INPUTS.iter().chain(DERIVED) {
+                let cell = obj
+                    .get(*column)
+                    .unwrap_or_else(|| panic!("{column} missing from the record"));
+                let amount: Decimal = cell.as_str().unwrap().parse().unwrap();
+                assert!(
+                    amount.scale() <= 2,
+                    "FY{} {column} is {amount}, not a figure at the cent",
+                    y.tax_year,
+                );
+            }
+
+            // The derived columns, from the rounded inputs: losses (this
+            // year's plus the brought-forward balance) against the
+            // non-discountable gains first, then the discount-eligible ones,
+            // then the discount off what is left.
+            let available = y.capital_losses + y.capital_loss_brought_forward;
+            let to_other = y.other_gains.min(available);
+            assert_eq!(y.net_other_gain, y.other_gains - to_other);
+            let rest = available - to_other;
+            let to_discount = y.discount_eligible_gains.min(rest);
+            assert_eq!(
+                y.net_discount_eligible_gain,
+                y.discount_eligible_gains - to_discount
+            );
+            assert_eq!(y.capital_loss_carried_forward, rest - to_discount);
+            assert_eq!(
+                y.cgt_discount,
+                crate::infra::decimal::to_cents(y.net_discount_eligible_gain / Decimal::TWO)
+            );
+            assert_eq!(
+                y.net_capital_gain,
+                y.net_other_gain + (y.net_discount_eligible_gain - y.cgt_discount)
+            );
+
+            // …and the chain between years is the same rounded figure.
+            if let Some(carried) = previous_carried {
+                assert_eq!(y.capital_loss_brought_forward, carried);
+            }
+            previous_carried = Some(y.capital_loss_carried_forward);
+        }
+    }
+
+    /// SCENARIOS W-f: the annual tax report's printed CGT summary is the same
+    /// worksheet, so it must agree with both the JSON report and the CSV
+    /// export for the year — figure for figure, and adding up on the page.
+    #[tokio::test]
+    async fn api_the_annual_tax_reports_cgt_summary_agrees_with_the_json_and_the_csv() {
+        let pool = odd_cent_disposal().await;
+        let api = ApiClient::full(&pool);
+
+        let years: Vec<NetCapitalGainYear> = api.get_json("/portfolio/net-capital-gain").await;
+        let y = row_for(&years, 2024);
+
+        let csv = api
+            .get("/portfolio/net-capital-gain/export")
+            .await
+            .expect_status(StatusCode::OK)
+            .text()
+            .to_string();
+        let mut lines = csv.lines();
+        let header: Vec<&str> = lines.next().unwrap().split(',').collect();
+        lines.next();
+        let row: Vec<&str> = lines.next().expect("a record row").split(',').collect();
+        let cell = |col: &str| {
+            row[header.iter().position(|c| *c == col).unwrap()]
+                .parse::<Decimal>()
+                .unwrap()
+        };
+
+        let report: serde_json::Value = api
+            .post_json(
+                "/reports/tax-report",
+                &serde_json::json!({ "tax_year": 2024 }),
+            )
+            .await;
+        let summary = &report["cgt_summary"];
+        let line = |name: &str| summary[name].as_str().unwrap().parse::<Decimal>().unwrap();
+
+        assert_eq!(line("net_capital_gain"), y.net_capital_gain);
+        assert_eq!(line("net_capital_gain"), cell("net_capital_gain"));
+        assert_eq!(line("cgt_concession_amount"), y.cgt_discount);
+        assert_eq!(line("cgt_concession_amount"), cell("cgt_discount"));
+        assert_eq!(
+            line("net_discount_eligible_gain"),
+            cell("net_discount_eligible_gain")
+        );
+        assert_eq!(line("short_term_gains"), cell("other_gains"));
+        assert_eq!(
+            line("long_term_gains") + line("amma_discount_gains_grossed_up"),
+            cell("discount_eligible_gains")
+        );
+        // The printed worksheet's own working, line by line.
+        assert_eq!(
+            line("long_term_gains") + line("amma_discount_gains_grossed_up")
+                - line("losses_applied_discount"),
+            line("net_discount_eligible_gain")
+        );
+        assert_eq!(
+            line("short_term_gains") - line("losses_applied_other"),
+            line("net_other_gain")
+        );
+        assert_eq!(
+            line("net_discount_eligible_gain") - line("cgt_concession_amount")
+                + line("net_other_gain"),
+            line("net_capital_gain")
+        );
+    }
+
+    /// The control for the three tests above: a year whose figures are
+    /// already exact at the cent is untouched by any of the rounding — the
+    /// same round numbers before and after, on the JSON and in the export.
+    #[tokio::test]
+    async fn api_a_year_already_exact_at_the_cent_is_unchanged() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "VAS").await;
+        test_support::trade(1, 1, trade::TradeType::Buy)
+            .date(NaiveDate::from_ymd_opt(2022, 1, 5).unwrap())
+            .qty(Decimal::from(100))
+            .price(Decimal::from(10))
+            .insert(&pool)
+            .await;
+        test_support::trade(2, 1, trade::TradeType::Sell)
+            .date(NaiveDate::from_ymd_opt(2024, 3, 15).unwrap())
+            .qty(Decimal::from(100))
+            .price(Decimal::from(15))
+            .insert(&pool)
+            .await;
+        allocate(&pool, 1, 2, 1, Decimal::from(100)).await;
+
+        let years: Vec<NetCapitalGainYear> =
+            client(&pool).get_json("/portfolio/net-capital-gain").await;
+        let y = row_for(&years, 2024);
+        assert_eq!(y.discount_eligible_gains, Decimal::from(500));
+        assert_eq!(y.net_discount_eligible_gain, Decimal::from(500));
+        assert_eq!(y.cgt_discount, Decimal::from(250));
+        assert_eq!(y.net_capital_gain, Decimal::from(250));
+
+        let csv = client(&pool)
+            .get("/portfolio/net-capital-gain/export")
+            .await
+            .expect_status(StatusCode::OK)
+            .text()
+            .to_string();
+        let mut lines = csv.lines();
+        let header: Vec<&str> = lines.next().unwrap().split(',').collect();
+        lines.next();
+        let row: Vec<&str> = lines.next().expect("a record row").split(',').collect();
+        let at = |col: &str| row[header.iter().position(|c| *c == col).unwrap()];
+        assert_eq!(at("discount_eligible_gains"), "500.00");
+        assert_eq!(at("cgt_discount"), "250.00");
+        assert_eq!(at("net_capital_gain"), "250.00");
+    }
+
+    /// The finding's own facts: 100 units bought 2022-01-05 at $10, sold
+    /// 2024-03-15 at $11.0001, no brokerage — a gain of exactly 100.01, an
+    /// odd number of cents, which is all it takes.
+    async fn odd_cent_disposal() -> SqlitePool {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "VAS").await;
+        test_support::trade(1, 1, trade::TradeType::Buy)
+            .date(NaiveDate::from_ymd_opt(2022, 1, 5).unwrap())
+            .qty(Decimal::from(100))
+            .price(Decimal::from(10))
+            .insert(&pool)
+            .await;
+        test_support::trade(2, 1, trade::TradeType::Sell)
+            .date(NaiveDate::from_ymd_opt(2024, 3, 15).unwrap())
+            .qty(Decimal::from(100))
+            .price("11.0001".parse().unwrap())
+            .insert(&pool)
+            .await;
+        allocate(&pool, 1, 2, 1, Decimal::from(100)).await;
+        pool
+    }
+
+    /// Two years of long-decimal figures with a loss chaining between them:
+    /// one parcel bought with brokerage + GST (so every pro-rated cost base
+    /// is a non-terminating quotient), a third sold at a loss in FY2023 and a
+    /// third at a gain in FY2024, over an entered opening loss that is itself
+    /// a fraction of a cent.
+    async fn odd_cent_years() -> SqlitePool {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "VAS").await;
+        cgt_settings::db_upsert(
+            &pool,
+            &cgt_settings::CgtSettings {
+                id: 1,
+                opening_capital_loss: "10.0049".parse().unwrap(),
+            },
+        )
+        .await
+        .unwrap();
+        test_support::trade(1, 1, trade::TradeType::Buy)
+            .date(NaiveDate::from_ymd_opt(2021, 7, 1).unwrap())
+            .qty(Decimal::from(300))
+            .price(Decimal::from(10))
+            .brokerage("19.90".parse().unwrap())
+            .gst_on_brokerage("1.99".parse().unwrap())
+            .insert(&pool)
+            .await;
+        test_support::trade(2, 1, trade::TradeType::Sell)
+            .date(NaiveDate::from_ymd_opt(2023, 3, 15).unwrap())
+            .qty(Decimal::from(100))
+            .price("9.0003".parse().unwrap())
+            .insert(&pool)
+            .await;
+        allocate(&pool, 1, 2, 1, Decimal::from(100)).await;
+        test_support::trade(3, 1, trade::TradeType::Sell)
+            .date(NaiveDate::from_ymd_opt(2024, 3, 15).unwrap())
+            .qty(Decimal::from(100))
+            .price("15.0007".parse().unwrap())
+            .insert(&pool)
+            .await;
+        allocate(&pool, 2, 3, 1, Decimal::from(100)).await;
+        pool
     }
 
     /// One parcel bought with brokerage + GST, a third of it sold at a gain:

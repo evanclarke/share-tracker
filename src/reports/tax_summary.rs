@@ -4,7 +4,7 @@ use crate::entities::income::{Income, IncomeType};
 use crate::entities::investment_expense::ExpenseType;
 use crate::entities::listing;
 use crate::entities::tax_year_settings;
-use crate::infra::decimal::{parse_dec, row_opt_dec};
+use crate::infra::decimal::{parse_dec, row_opt_dec, to_cents};
 use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
 use crate::reports::export::{self, Cents};
@@ -159,6 +159,10 @@ pub struct TaxYearSummary {
     /// `unfranked_amount`), the ESS discount (employment income, Item 12), and capital gains
     /// (the net-capital-gain report). `net_assessable_investment_income`
     /// subtracts the investment-expense deductions from this.
+    ///
+    /// Summed **at the cent**: it is the sum of those eleven lines rounded to
+    /// the cent, so the column adds up wherever the lines are printed beside
+    /// it (SCENARIOS W-f). The lines themselves keep full precision.
     pub gross_assessable_investment_income: Decimal,
     /// Deductible investment-expense total for the year, by expense type (AUD;
     /// see `entities::investment_expense`, docs/ato/investment-income-deductions.md).
@@ -197,10 +201,13 @@ pub struct TaxYearSummary {
     pub deductions_dividend_and_interest: Decimal,
     /// Total deductible investment expenses for the year, in AUD. The per-type
     /// and per-destination lines are two cuts of this one total, so it is the
-    /// sum of either group — never of both.
+    /// sum of either group — never of both. Each expense is converted to AUD
+    /// and rounded to the cent at its own row, so both groups are sums of the
+    /// same rounded amounts and both add up to this figure exactly, printed
+    /// or not (SCENARIOS W-f).
     pub deductions_total: Decimal,
     /// Net assessable investment income: `gross_assessable_investment_income −
-    /// deductions_total` (AUD). The LIC capital gain deduction, franking-credit
+    /// deductions_total` (AUD) — both already at the cent, so this is too. The LIC capital gain deduction, franking-credit
     /// gross-up, and FITO are distinct and tracked on their own lines, so they
     /// are not folded in here.
     pub net_assessable_investment_income: Decimal,
@@ -815,7 +822,16 @@ pub(crate) async fn db_tax_summary_on(
         let date_incurred: NaiveDate = row.try_get("date_incurred")?;
         let tax_year = tax_year_for(date_incurred);
         let currency: String = row.try_get("currency")?;
-        let amount = aud_field(&fx, row, "amount", &currency, date_incurred)?;
+        // At the cent, at the row (SCENARIOS W-f). Each amount lands on one
+        // line of *each* of two cuts (by kind and by destination question),
+        // and both cuts are printed beside the one `deductions_total`: cent-
+        // rounding the two groups of lines independently would leave them
+        // summing to different figures, so the rounding has to happen once,
+        // here, before the split — exactly as the annual tax report's
+        // disposal schedule rounds at the parcel row (SCENARIOS W-d). Both
+        // cuts are then sums of the same rounded amounts, and `deductions_total`
+        // is the sum of either group by construction.
+        let amount = to_cents(aud_field(&fx, row, "amount", &currency, date_incurred)?);
         let expense_type: String = row.try_get("expense_type")?;
         let listing_id: Option<i64> = row.try_get("listing_id")?;
         let kind = match expense_type.as_str() {
@@ -896,18 +912,36 @@ pub(crate) async fn db_tax_summary_on(
     // Gross assessable investment income (the report's existing assessable income
     // lines) and the net position after the investment-expense deductions. Done
     // last so every income, AMMA and deduction line is already aggregated.
+    //
+    // **Summed at the cent** (SCENARIOS W-f): this column is printed beside
+    // the eleven it totals — on the tax-summary screen, in
+    // `tax-summary.csv`, and in the annual tax report's tax-summary section —
+    // and every one of those surfaces shows money to the cent, so the total
+    // has to be the sum of the figures *as shown* or the printed column does
+    // not add up. `to_cents` is the one rounding rule, shared with the
+    // exports' `Cents` rendering, so the total is exactly the sum of the
+    // cells beside it.
+    //
+    // The income lines themselves are deliberately **not** rounded: unlike
+    // the net-capital-gain worksheet's inputs, each is the total of the
+    // annual tax report's own per-record income rows, which
+    // `docs/API.md` promises sum to it exactly (that report's income section
+    // is a drilldown into this line, not a second computation of it). The
+    // deduction lines are the exception, and are already at the cent — their
+    // rounding happens at the expense row above, forced by the two cuts that
+    // must agree with one another.
     for s in map.values_mut() {
-        s.gross_assessable_investment_income = s.dividends_assessable
-            + s.interest_income
-            + s.foreign_interest_income
-            + s.foreign_source_income
-            + s.amma_australian_interest
-            + s.amma_dividends_unfranked
-            + s.amma_franked_dividends
-            + s.amma_net_rent
-            + s.amma_foreign_income
-            + s.amma_other_income
-            + s.other_income;
+        s.gross_assessable_investment_income = to_cents(s.dividends_assessable)
+            + to_cents(s.interest_income)
+            + to_cents(s.foreign_interest_income)
+            + to_cents(s.foreign_source_income)
+            + to_cents(s.amma_australian_interest)
+            + to_cents(s.amma_dividends_unfranked)
+            + to_cents(s.amma_franked_dividends)
+            + to_cents(s.amma_net_rent)
+            + to_cents(s.amma_foreign_income)
+            + to_cents(s.amma_other_income)
+            + to_cents(s.other_income);
         s.net_assessable_investment_income =
             s.gross_assessable_investment_income - s.deductions_total;
     }
@@ -2134,9 +2168,12 @@ mod tests {
         }
     }
 
-    /// The control for the test above: the JSON report over the same facts is
-    /// untouched — it still answers the exact figure, which is what the API
-    /// documents and what any other caller computes from.
+    /// The control for the test above: the JSON report's *income lines* are
+    /// untouched — each still answers the exact figure, which is what the API
+    /// documents, what the annual tax report's per-record income rows sum to,
+    /// and what any other caller computes from. Only the derived total is at
+    /// the cent (SCENARIOS W-f), because it is the one column printed as the
+    /// sum of the others.
     #[tokio::test]
     async fn api_the_json_report_keeps_the_precision_the_export_rounds() {
         let pool = long_decimal_income().await;
@@ -2144,7 +2181,6 @@ mod tests {
         let years: Vec<TaxYearSummary> = client(&pool).get_json("/portfolio/tax-summary").await;
         let converted = Decimal::from(100) / "0.65".parse::<Decimal>().unwrap();
         assert_eq!(years[0].dividends_assessable, converted);
-        assert_eq!(years[0].gross_assessable_investment_income, converted);
         // …and that figure really does have more than two decimal places, so
         // the CSV assertions above are testing the rounding, not a coincidence.
         assert!(converted.scale() > 2, "{converted}");
@@ -2152,6 +2188,13 @@ mod tests {
             years[0].dividends_assessable,
             "153.85".parse::<Decimal>().unwrap(),
             "the JSON figure must not be the rounded one"
+        );
+        // The total, by contrast, is the sum of its lines *as reported* — one
+        // line here, at the cent — so a reader adding the printed column up
+        // reaches the printed total.
+        assert_eq!(
+            years[0].gross_assessable_investment_income,
+            "153.85".parse::<Decimal>().unwrap()
         );
     }
 
@@ -2184,6 +2227,230 @@ mod tests {
             years[0].dividends_assessable,
             "10.005".parse::<Decimal>().unwrap()
         );
+    }
+
+    /// SCENARIOS W-f, the `tax-summary.csv` half. Three columns of this
+    /// export are sums of other columns — `gross_assessable_investment_income`
+    /// over the eleven income lines, `deductions_total` over *two* different
+    /// cuts of the deductions, and `net_assessable_investment_income` over
+    /// those two — and each of those columns used to be the cent-rounding of
+    /// an exact total, which need not equal the total of the cent-rounded
+    /// columns printed beside it. Measured before the fix on these very
+    /// facts: gross printed `70.01` over lines of `60.01 + 10.01`, and
+    /// `deductions_total` printed `20.01` over destination lines of
+    /// `10.01 + 10.01`.
+    #[tokio::test]
+    async fn api_export_a_total_column_is_the_sum_of_the_columns_it_totals() {
+        let pool = half_cent_income_and_deductions().await;
+
+        let csv = client(&pool)
+            .get("/portfolio/tax-summary/export")
+            .await
+            .expect_status(StatusCode::OK)
+            .text()
+            .to_string();
+        let mut lines = csv.lines();
+        let header: Vec<&str> = lines.next().unwrap().split(',').collect();
+        lines.next(); // the ATO label row
+        let row: Vec<&str> = lines.next().expect("a record row").split(',').collect();
+        let at = |col: &str| row[header.iter().position(|c| *c == col).unwrap()];
+        let cell = |col: &str| at(col).parse::<Decimal>().unwrap();
+        let total_of = |cols: &[&str]| cols.iter().map(|c| cell(c)).sum::<Decimal>();
+
+        // The two income lines the exact total falls half a cent between.
+        assert_eq!(at("dividends_assessable"), "60.01");
+        assert_eq!(at("interest_income"), "10.01");
+        assert_eq!(at("gross_assessable_investment_income"), "70.02");
+        assert_eq!(
+            cell("gross_assessable_investment_income"),
+            total_of(GROSS_INCOME_COLUMNS)
+        );
+
+        // The deductions, whose two cuts must both add up to one total.
+        assert_eq!(at("deductions_management_fee"), "20.02");
+        assert_eq!(at("deductions_trust_distributions"), "10.01");
+        assert_eq!(at("deductions_dividend_and_interest"), "10.01");
+        assert_eq!(at("deductions_total"), "20.02");
+        assert_eq!(cell("deductions_total"), total_of(DEDUCTION_KIND_COLUMNS));
+        assert_eq!(
+            cell("deductions_total"),
+            total_of(DEDUCTION_DESTINATION_COLUMNS)
+        );
+
+        assert_eq!(
+            cell("net_assessable_investment_income"),
+            cell("gross_assessable_investment_income") - cell("deductions_total")
+        );
+    }
+
+    /// The same three identities as a rule over the record rather than over
+    /// one row of one export: whatever facts a year holds, each total column
+    /// is the sum of the cent-rounded columns printed beside it. The column
+    /// lists are the export's own, so a new income or deduction line added to
+    /// one of the totals must be added to the matching list before this
+    /// passes.
+    #[tokio::test]
+    async fn db_each_total_column_totals_the_columns_beside_it() {
+        let pool = half_cent_income_and_deductions().await;
+        let years = db_tax_summary(&pool).await.unwrap();
+        assert!(!years.is_empty());
+        for s in &years {
+            let value = serde_json::to_value(s).unwrap();
+            let obj = value.as_object().unwrap();
+            let cents =
+                |col: &str| to_cents(obj[col].as_str().unwrap().parse::<Decimal>().unwrap());
+            let total_of = |cols: &[&str]| cols.iter().map(|c| cents(c)).sum::<Decimal>();
+            assert_eq!(
+                s.gross_assessable_investment_income,
+                total_of(GROSS_INCOME_COLUMNS),
+                "FY{} gross assessable income",
+                s.tax_year
+            );
+            assert_eq!(
+                s.deductions_total,
+                total_of(DEDUCTION_KIND_COLUMNS),
+                "FY{} deductions by kind",
+                s.tax_year
+            );
+            assert_eq!(
+                s.deductions_total,
+                total_of(DEDUCTION_DESTINATION_COLUMNS),
+                "FY{} deductions by destination",
+                s.tax_year
+            );
+            assert_eq!(
+                s.net_assessable_investment_income,
+                s.gross_assessable_investment_income - s.deductions_total,
+                "FY{} net",
+                s.tax_year
+            );
+            // A deduction line is a sum of expenses rounded at their own
+            // row, so it is at the cent in the record itself — which is what
+            // lets both cuts add up to one total. (The income lines above are
+            // deliberately *not* rounded: the annual tax report's per-record
+            // income rows sum to them exactly.)
+            for col in DEDUCTION_KIND_COLUMNS
+                .iter()
+                .chain(DEDUCTION_DESTINATION_COLUMNS)
+            {
+                let reported: Decimal = obj[*col].as_str().unwrap().parse().unwrap();
+                assert_eq!(reported, to_cents(reported), "FY{} {col}", s.tax_year);
+            }
+        }
+    }
+
+    /// The control: a year whose figures are already exact at the cent is
+    /// unchanged — the totals are the plain sums they always were.
+    #[tokio::test]
+    async fn db_a_year_already_exact_at_the_cent_is_unchanged() {
+        let pool = test_pool().await;
+        let march = NaiveDate::from_ymd_opt(2024, 3, 1).unwrap();
+        insert_listing(&pool, 1).await;
+        let mut div = make_income(1, 1, march);
+        div.franked_amount = Decimal::from(100);
+        div.unfranked_amount = Decimal::from(50);
+        income::db_upsert(&pool, &div).await.unwrap();
+        investment_expense::db_upsert(
+            &pool,
+            &make_expense(1, march, ExpenseType::ManagementFee, Decimal::from(20)),
+        )
+        .await
+        .unwrap();
+
+        let years = db_tax_summary(&pool).await.unwrap();
+        let s = &years[0];
+        assert_eq!(s.dividends_assessable, Decimal::from(150));
+        assert_eq!(s.gross_assessable_investment_income, Decimal::from(150));
+        assert_eq!(s.deductions_management_fee, Decimal::from(20));
+        assert_eq!(s.deductions_total, Decimal::from(20));
+        assert_eq!(s.net_assessable_investment_income, Decimal::from(130));
+    }
+
+    /// The eleven assessable income lines `gross_assessable_investment_income`
+    /// totals, and the two cuts `deductions_total` totals — the export's own
+    /// column names.
+    const GROSS_INCOME_COLUMNS: &[&str] = &[
+        "dividends_assessable",
+        "interest_income",
+        "foreign_interest_income",
+        "foreign_source_income",
+        "amma_australian_interest",
+        "amma_dividends_unfranked",
+        "amma_franked_dividends",
+        "amma_net_rent",
+        "amma_foreign_income",
+        "amma_other_income",
+        "other_income",
+    ];
+    const DEDUCTION_KIND_COLUMNS: &[&str] = &[
+        "deductions_loan_interest",
+        "deductions_management_fee",
+        "deductions_advice_fee",
+        "deductions_account_keeping_fee",
+        "deductions_subscription",
+        "deductions_other",
+    ];
+    const DEDUCTION_DESTINATION_COLUMNS: &[&str] = &[
+        "deductions_trust_distributions",
+        "deductions_foreign_income",
+        "deductions_foreign_debt",
+        "deductions_dividend_and_interest",
+    ];
+
+    /// A year whose income lines and whose deductions each land on a half
+    /// cent, and whose deductions fall in one *kind* but two *destinations* —
+    /// the shape that makes the two cuts of `deductions_total` disagree.
+    async fn half_cent_income_and_deductions() -> SqlitePool {
+        let pool = test_pool().await;
+        let march = NaiveDate::from_ymd_opt(2024, 3, 1).unwrap();
+        // 1: an ordinary Australian share → its fee reports at D7/D8.
+        insert_listing(&pool, 1).await;
+        let mut div = make_income(1, 1, march);
+        div.franked_amount = "10.005".parse().unwrap();
+        income::db_upsert(&pool, &div).await.unwrap();
+        // 3: an ordinary trust → its fee reports at 13Y.
+        insert_listing(&pool, 3).await;
+        let mut dist = make_income(3, 3, march);
+        dist.trust_income = true;
+        dist.unfranked_amount = Decimal::from(50);
+        income::db_upsert(&pool, &dist).await.unwrap();
+        interest_income::db_upsert(
+            &pool,
+            &interest_income::InterestIncome {
+                id: 1,
+                date_paid: march,
+                amount: "10.005".parse().unwrap(),
+                tfn_withholding_tax: Decimal::ZERO,
+                foreign_source: false,
+                foreign_tax_paid: Decimal::ZERO,
+                currency: "AUD".to_string(),
+                source: None,
+                holding_account_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        for expense in [
+            expense_on(
+                1,
+                march,
+                ExpenseType::ManagementFee,
+                "10.005".parse().unwrap(),
+                1,
+            ),
+            expense_on(
+                2,
+                march,
+                ExpenseType::ManagementFee,
+                "10.005".parse().unwrap(),
+                3,
+            ),
+        ] {
+            investment_expense::db_upsert(&pool, &expense)
+                .await
+                .unwrap();
+        }
+        pool
     }
 
     /// A USD dividend converted at the month's ATO rate: 100 ÷ 0.65 does not

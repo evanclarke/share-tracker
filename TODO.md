@@ -465,10 +465,91 @@ document has. (c) was rejected on its own terms: it lowers the frequency without
 divergence, and it would fork the rounding rule from the half-away-from-zero the screens, the CSV
 exports and `infra::decimal::to_cents` now all share.
 
-- [ ] Derive the dependent worksheet columns from the cent-rounded inputs in the shared
+- [x] Derive the dependent worksheet columns from the cent-rounded inputs in the shared
       net-capital-gain year record, so the JSON, the CSV export and the annual tax report's
       `cgt_summary` reconcile; carry the same treatment to `tax-summary.csv` wherever one column is a
       sum of others
+      — the rounding moved **into `net_years`**, the shared year record, so all three surfaces read
+      one worksheet. The dependency graph, derived from the code rather than assumed: four
+      **inputs** (`discount_eligible_gains`, `other_gains`, `capital_losses`, and
+      `capital_loss_brought_forward` — which is the *previous* row's `capital_loss_carried_forward`,
+      so rounding it only bites on the chain's seed, the entered `cgt_settings` opening loss) plus
+      three informational ones (`cgt_event_e10_gain`/`_g1_`/`_c2_`, in no printed working but money,
+      so rounded too), and five **derived** (`net_other_gain`, `net_discount_eligible_gain`,
+      `capital_loss_carried_forward`, `cgt_discount`, `net_capital_gain`). Every input goes through
+      `infra::decimal::to_cents`; the loss netting is `+`/`−`/`min` over cent figures and so cannot
+      leave the cent; **only the halving rounds again**, and it is the *discount* that rounds — the
+      worksheet's own "less CGT concession amount @ 50%" line — with
+      `net_capital_gain = net_other + (net_discount − cgt_discount)`, i.e. what the worksheet leaves
+      after the line printed above it rather than a second halving. That is the direction that makes
+      the printed working reconcile, and (the discount rounding half away from zero) lands the
+      assessable figure the taxpayer-favourable way: the finding's disposal now reads
+      **100.01 − 50.01 = 50.00** with an 18A of **50.00**. `CgtSummaryYear` follows for free bar one
+      figure — `amma_discount_gains_grossed_up` is rounded and `long_term_gains` **derived** from it
+      by subtraction (`to_cents` is monotonic, so the remainder can never go negative), so the
+      printed worksheet's two gain lines add to `discount_eligible_gains` exactly.
+      **What `docs/ato/` says about worksheet rounding: nothing.** Question 18's own step order
+      (`capital-gains-question-18.md`, and a fresh fetch of the live page today — 807 lines, zero
+      occurrences of "cents", "round" or "whole dollar") is silent, as are `cgt-how-to-calculate.md`
+      and `cgt-discount.md`. The only rounding rules anywhere in the mirror are somebody else's: the
+      trustee-level AMIT rounding adjustment surplus/deficit
+      (`amit-calculating-trust-components.md`, Div 276 — a trust's problem, not a member's), the
+      indexation factor's three decimals, and the per-label "show cents" notes
+      (`tax-return-labels-2026.md`, `amma-statement-guidance-notes.md`) — which cover 10M/11V/13P-S/
+      13A/13B/20O and **not** 18A/18H/18V, so a cent never reaches the lodged return at question 18
+      at all. The divergence was only ever visible to a human checking the worksheet, which is
+      exactly who this document is for. Silence means the direction was chosen on the project's own
+      rule (one `to_cents`, half away from zero, shared with the screens) rather than on an ATO
+      instruction.
+      **`tax-summary.csv` does diverge**, measured before the fix on two income lines and two
+      expenses landing on half cents: `gross_assessable_investment_income` printed `70.01` over
+      lines of `60.01 + 10.01`, and `deductions_total` printed `20.01` over destination lines of
+      `10.01 + 10.01`. Its three total columns are now the sum of the cent-rounded lines beside
+      them. Its **income lines are deliberately left exact**, which is the one place the treatment
+      differs from the net-capital-gain worksheet and the reason is a documented cross-report
+      contract: `docs/API.md` promises the annual tax report's per-record income rows "sum to
+      exactly the matching tax summary line", and those rows are W-d's residue 2, left for a section
+      of their own — rounding the line would have broken that promise silently (the existing test
+      uses whole dollars and would still pass). Nothing is derived from an income line but the
+      totals, so rounding one level up costs nothing. The **deductions** could not be handled that
+      way: they are cut two ways (by kind and by destination) and both cuts are printed beside one
+      `deductions_total`, so each expense is instead converted and rounded **at its own row**
+      (W-d's rule) and both cuts sum to the total by construction; `tax_report`'s deduction row
+      `amount_aud` is rounded with it, so that drilldown still sums exactly.
+      **Consumers, each confirmed:** the JSON report and CSV export (one record now, pinned by a
+      test each way); the annual tax report's `cgt_summary` (new test asserting it agrees with both
+      *and* that its own printed lines subtract to one another) and its `tax_summary` line section
+      (prints the record verbatim, so it inherits the fix); `db_cgt_years`, which reads only
+      `tax_year`; the pre-sale what-if, whose two scenario rows run through the same `net_years`
+      (its `hypothetical` totals stay the realised-gains figures, exact — it is a dry-run, not a
+      worksheet); `entities::worthless` and `ato_examples`, which assert whole-dollar figures and
+      are unmoved. **On Evan's real database** (a read-only copy of the 2026-08-22 backup, since
+      deleted) two years move by exactly one cent and both now reconcile: FY2026 18A
+      `39592.12` → `39592.11` (78689.09 − 39344.55 = 39344.54, + 247.57) and FY2025 `5076.87` →
+      `5076.86`; FY2021–FY2024 are unchanged, and every `tax-summary.csv` total already reconciled
+      (no investment expenses recorded). **A correction to this section's own write-up:** Evan's
+      FY2026 did *not* reconcile "by luck" — `39344.55 + 247.57 = 39592.12` checks the *addition*
+      form, which is the old code's own formula and so could never fail; read as the worksheet
+      prints it (18H net *less* the concession) it was a cent out, exactly like the reproduction.
+      Tests: `reports::net_capital_gain::tests::{api_export_the_printed_working_reaches_the_figure_it_works_to,
+      api_every_derived_column_is_the_arithmetic_of_the_cent_rounded_inputs,
+      api_the_annual_tax_reports_cgt_summary_agrees_with_the_json_and_the_csv,
+      api_a_year_already_exact_at_the_cent_is_unchanged (the control),
+      api_the_json_report_carries_the_same_cent_figures_as_the_export (W-c's control, rewritten:
+      W-f is what reversed it)}` — the generic one requires **every** field of the record to be
+      classified as an input, a derived column, or not money, so a newly added column fails until it
+      is placed, and re-derives the netting, the halving and the year-to-year loss chain from the
+      reported figures; `reports::tax_summary::tests::{api_export_a_total_column_is_the_sum_of_the_columns_it_totals,
+      db_each_total_column_totals_the_columns_beside_it,
+      db_a_year_already_exact_at_the_cent_is_unchanged (the control)}`;
+      `reports::tax_report::tests::income_sections_still_sum_to_the_summary_line_on_half_cent_figures`
+      (the drilldown promise, on the facts that would break it). All four W-f tests and all three
+      tax-summary ones were confirmed to fail with the rounding removed. Docs: `docs/API.md`'s
+      **Amounts round, rates don't**, Net capital gain (a new *worksheet is kept at the cent*
+      paragraph, and the export paragraph's "the JSON report above is unaffected" **withdrawn** —
+      W-c's promise, which W-f deliberately reverses), Tax summary (a new *a total column is the sum
+      of the columns printed beside it* paragraph), and the annual tax report's `cgt_summary` and
+      income bullets; pinned by `doc_checks::worksheet_derived_columns_documented`.
 
 ## SCENARIOS W-d — The Annual Tax Report's printed columns do not add up
 
