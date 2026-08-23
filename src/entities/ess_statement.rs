@@ -131,37 +131,55 @@ pub struct EssStatementBody {
     #[serde(default = "crate::entities::holding_account::default_holding_account_id")]
     pub holding_account_id: i64,
     pub taxing_point_date: NaiveDate,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub quantity: Decimal,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub market_value_per_share: Decimal,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub taxed_upfront_eligible: Decimal,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub taxed_upfront_not_eligible: Decimal,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub deferral_discount: Decimal,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub pre_2009_cessation_discount: Decimal,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub foreign_source_discount: Decimal,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub tfn_withholding: Decimal,
     #[serde(default = "default_currency")]
     pub currency: String,
     /// Absent/null means none stated (the AUD case, and the non-AUD case that
     /// relies on the imported ATO rate).
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::infra::decimal::strict_optional_decimal"
+    )]
     pub fx_rate: Option<Decimal>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::infra::decimal::strict_optional_decimal"
+    )]
     pub aud_taxed_upfront_eligible: Option<Decimal>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::infra::decimal::strict_optional_decimal"
+    )]
     pub aud_taxed_upfront_not_eligible: Option<Decimal>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::infra::decimal::strict_optional_decimal"
+    )]
     pub aud_deferral_discount: Option<Decimal>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::infra::decimal::strict_optional_decimal"
+    )]
     pub aud_pre_2009_cessation_discount: Option<Decimal>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::infra::decimal::strict_optional_decimal"
+    )]
     pub aud_foreign_source_discount: Option<Decimal>,
 }
 

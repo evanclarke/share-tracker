@@ -56,6 +56,7 @@ pub struct ParticipationBody {
     pub date: NaiveDate,
     /// Units sold into the buy-back (strictly positive; must equal the sum
     /// of the allocations).
+    #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub units: Decimal,
     /// The parcels the sold units come from — specific identification, the
     /// same shape and write-time invariants as `PUT /sells`.
@@ -63,7 +64,10 @@ pub struct ParticipationBody {
     pub allocations: Vec<AllocationInput>,
     /// Optional foreign-per-AUD override for the created trade (defaults to
     /// 1; reports prefer the ATO rate and fall back to this — see `infra::fx`).
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::infra::decimal::strict_optional_decimal"
+    )]
     pub fx_rate: Option<Decimal>,
     /// The holding account participating: the allocations may only consume
     /// parcels held in it, and the Sell and dividend-component income row

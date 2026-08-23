@@ -40,6 +40,7 @@ pub struct AmitAdjustment {
 pub struct AmitAdjustmentBody {
     pub amma_statement_id: i64,
     pub trade_id: i64,
+    #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub quantity: Decimal,
 }
 

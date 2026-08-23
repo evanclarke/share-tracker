@@ -93,6 +93,7 @@ pub struct FrankingAtRiskAlert {
 pub struct WhatIfRequest {
     pub listing_id: i64,
     pub sale_date: NaiveDate,
+    #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub units: Decimal,
 }
 

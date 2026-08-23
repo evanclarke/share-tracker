@@ -29,6 +29,7 @@ use sqlx::{Row, SqlitePool};
 #[serde(deny_unknown_fields)]
 pub struct AllocationInput {
     pub purchase_trade_id: i64,
+    #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub quantity_allocated: Decimal,
 }
 
@@ -39,7 +40,9 @@ pub struct SellBody {
     #[serde(default)]
     pub settlement_date: Option<NaiveDate>,
     pub listing_id: i64,
+    #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub average_price: Decimal,
+    #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub quantity: Decimal,
     pub currency: String,
     /// GST-inclusive when `brokerage_includes_gst` is set (the server splits
@@ -47,21 +50,29 @@ pub struct SellBody {
     /// same contract as `trade::TradeBody`. A flagged Sell also reads back
     /// (via `GET /trades/:id`) with `brokerage` as the inclusive amount, so
     /// the GET → PUT round-trip is lossless (see `trade::Trade::present`).
+    #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub brokerage: Decimal,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub gst_on_brokerage: Decimal,
     #[serde(default)]
     pub brokerage_includes_gst: bool,
     pub brokerage_currency: String,
+    #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub fx_rate: Decimal,
     /// Optional deliberate spot-rate override; see `trade::Trade::spot_fx_rate`.
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::infra::decimal::strict_optional_decimal"
+    )]
     pub spot_fx_rate: Option<Decimal>,
     #[serde(default)]
     pub contract_note_ref: Option<String>,
     /// Optional statement cross-check (net proceeds — quantity × price minus
     /// brokerage and GST); see `trade::Trade::statement_total`.
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::infra::decimal::strict_optional_decimal"
+    )]
     pub statement_total: Option<Decimal>,
     /// The holding account the Sell happens in: its allocations may only
     /// consume parcels held in the same account. Defaults to the seeded

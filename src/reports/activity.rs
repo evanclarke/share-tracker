@@ -75,7 +75,10 @@ pub struct ActivityRequest {
     pub listing_id: i64,
     /// Current price per unit in AUD for the holding summary. Absent → the
     /// live-valuation rules; an explicit price wins.
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::infra::decimal::strict_optional_decimal"
+    )]
     pub price: Option<Decimal>,
 }
 

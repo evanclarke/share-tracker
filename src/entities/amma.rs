@@ -104,42 +104,42 @@ pub struct AmmaStatement {
 pub struct AmmaStatementBody {
     pub listing_id: i64,
     pub tax_year_end_date: NaiveDate,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub units_held: Decimal,
     pub date_received: NaiveDate,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub australian_interest: Decimal,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub australian_dividends_unfranked: Decimal,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub franked_dividends: Decimal,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub franking_credits: Decimal,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub net_rent: Decimal,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub foreign_income: Decimal,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub foreign_tax_credits: Decimal,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub foreign_tax_credits_capital_gains: Decimal,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub other_income: Decimal,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub cgt_discount_gains: Decimal,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub cgt_indexation_gains: Decimal,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub cgt_other_gains: Decimal,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub capital_losses_applied: Decimal,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub tax_deferred_amount: Decimal,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub tax_free_amount: Decimal,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub cost_base_adjustment: Decimal,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub tfn_withholding_tax: Decimal,
     #[serde(default = "default_currency")]
     pub currency: String,

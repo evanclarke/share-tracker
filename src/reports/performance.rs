@@ -120,7 +120,10 @@ pub struct PerformanceRequest {
     /// Current price per unit by listing id, expected in AUD so it lines up
     /// with the AUD-denominated flows. An explicit price overrides a
     /// live-fetched one.
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::infra::decimal::strict_decimal_map"
+    )]
     pub prices: HashMap<i64, Decimal>,
     /// Valuation date for the supplied prices; flows after it are ignored.
     /// Defaults to today.

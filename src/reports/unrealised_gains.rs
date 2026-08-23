@@ -55,7 +55,10 @@ pub struct UnrealisedGainsRequest {
     /// Current price per unit by listing id, expected in AUD so it lines up with
     /// the AUD-denominated cost base. An explicit price overrides a
     /// live-fetched one.
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::infra::decimal::strict_decimal_map"
+    )]
     pub prices: HashMap<i64, Decimal>,
     #[serde(default)]
     pub as_of_date: Option<NaiveDate>,

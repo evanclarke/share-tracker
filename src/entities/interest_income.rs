@@ -72,13 +72,13 @@ pub struct InterestIncome {
 #[serde(deny_unknown_fields)]
 pub struct InterestIncomeBody {
     pub date_paid: NaiveDate,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub amount: Decimal,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub tfn_withholding_tax: Decimal,
     #[serde(default)]
     pub foreign_source: bool,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub foreign_tax_paid: Decimal,
     #[serde(default = "default_currency")]
     pub currency: String,

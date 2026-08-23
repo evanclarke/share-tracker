@@ -118,6 +118,7 @@ impl CrudEntity for RbaFxRate {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CorrectionBody {
+    #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub rate: Decimal,
 }
 

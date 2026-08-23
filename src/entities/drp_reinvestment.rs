@@ -117,17 +117,24 @@ use sqlx::SqlitePool;
 #[serde(deny_unknown_fields)]
 pub struct ReinvestBody {
     /// Per-share price the distribution is reinvested at.
+    #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub reinvestment_price: Decimal,
     /// Optional broker-stated fractional allotment. When present it is
     /// authoritative — the trade takes exactly this quantity — and
     /// `units × reinvestment_price` is cross-checked against the available
     /// cash to within one unit-step at the stated precision. Omitted: whole
     /// shares with residual carry (the registry default).
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::infra::decimal::strict_optional_decimal"
+    )]
     pub units: Option<Decimal>,
     /// Optional foreign-per-AUD override for the created DRP trade (defaults to
     /// 1; reports prefer the ATO rate and fall back to this — see `infra::fx`).
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::infra::decimal::strict_optional_decimal"
+    )]
     pub fx_rate: Option<Decimal>,
     /// Optional trade date; defaults to the distribution's `date_paid`.
     #[serde(default)]

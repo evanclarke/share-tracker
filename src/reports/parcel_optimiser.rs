@@ -299,13 +299,17 @@ pub struct OptimiserRequest {
     /// The account the contemplated Sell would happen in — a real Sell's
     /// allocations may only consume its own account's parcels.
     pub holding_account_id: i64,
+    #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub units: Decimal,
     /// Defaults to today.
     #[serde(default)]
     pub sale_date: Option<NaiveDate>,
     /// Per-unit price in AUD. Absent → live-fetched from the price source
     /// (the live-valuation rules); an explicit price wins.
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::infra::decimal::strict_optional_decimal"
+    )]
     pub price: Option<Decimal>,
 }
 

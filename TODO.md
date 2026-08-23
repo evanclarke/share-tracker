@@ -146,10 +146,43 @@ Options offered:
 
 **Evan chose (a).** Refuse loudly, as the two siblings already do.
 
-- [ ] Refuse a JSON number in every money/quantity request field with a `422` naming it, with a test
+- [x] Refuse a JSON number in every money/quantity request field with a `422` naming it, with a test
       that walks every handler-reachable request body's `Decimal`/`Option<Decimal>` fields so a new
       body is covered without anyone remembering; document the rule in `docs/API.md` beside
       [Unrecognised body fields](docs/API.md#unrecognised-body-fields)
+      — `infra::decimal` gained a **serde** half beside its sqlx one (`strict_decimal`,
+      `strict_optional_decimal`, `strict_decimal_map`), spelled as
+      `#[serde(deserialize_with = …)]` on **120 fields** across 25 files, so a body field stays a
+      plain `Decimal` and every reader of it is unchanged. The two halves are named apart
+      deliberately: `Money`/`OptMoney` remain the TEXT⇄`Decimal` **sqlx** codec, these three are the
+      JSON⇄`Decimal` **request** codec. Integers are refused too (`10` as much as `10.5`) — a rule
+      that only bit past some digit count would put the same silent boundary back one step along.
+      The message says the remedy, and axum's extractor prefixes the field path, so a nested one
+      names itself (`prices.1: send this money/quantity value as a decimal string …`); reaching the
+      visitor needed `deserialize_any` rather than `deserialize_str`, since with a scalar hint
+      `serde_json` answers the wrong type itself and the remedy never gets a chance to be said.
+      `infra::http::tests::every_money_request_field_refuses_a_json_number` is the guard, walking
+      the same handler-reachable set as `every_request_body_denies_unknown_fields` — the two now
+      share one `request_body_types` walk, so neither can drift — with an empty `JSON_NUMBER_ALLOWED`
+      alongside `UNKNOWN_FIELDS_ALLOWED`. Behaviour is pinned at the HTTP surface by
+      `entities::trade::tests::api_a_quantity_sent_as_a_json_number_is_refused_naming_the_field` and
+      its control `…::api_the_same_quantity_sent_as_a_string_is_stored_exactly`, and the codec by
+      four unit tests in `infra::decimal`; `docs/API.md` gained **Money as a JSON number** beside
+      Unrecognised body fields, a line in the `422` row, and `doc_checks::money_as_a_json_number_documented`
+
+Collateral damage was one decision and it went the harmless way: 15 existing tests in
+`entities/trade.rs` and `entities/income.rs` sent money as bare JSON numbers in their request
+bodies, and were fixed by quoting them (67 literals) rather than by widening the rule — none was
+asserting anything about the number form. `scripts/fixtures/demo.json` was already clean (its only
+bare numbers are ids), and the web UI reads every decimal field out of a text input as a string,
+the price-override maps included, so no UI path had to change.
+
+Verified independently at the HTTP surface, against a throwaway database: all four measured values
+— `quantity` `99999999.87654321`, `100000000.00000001` and `0.123456789012345678`, and
+`average_price` `1234567890123456789.12` — now answer `422` naming their field, where they
+previously answered `204` and stored `99999999.8765432`, `100000000`, `0.12345678901234568` and
+`1234567890123456800`; the same two quantities sent as strings still answer `204` and read back to
+the digit, the control.
 
 ## SCENARIOS W-b — A trade the write path accepts panics every portfolio read and drops the connection
 

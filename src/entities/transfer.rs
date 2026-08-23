@@ -88,11 +88,17 @@ pub struct TransferBody {
     /// The fee crypto's market value per unit at the transfer date, in the
     /// listing's currency (AUD for an AUD-priced crypto) — the disposal's
     /// capital proceeds per unit. Required when `fee_allocations` is non-empty.
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::infra::decimal::strict_optional_decimal"
+    )]
     pub fee_market_price: Option<Decimal>,
     /// The fee disposal's manual AUD fallback FX rate for a non-AUD-priced
     /// crypto listing (defaults to 1, the AUD case).
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::infra::decimal::strict_optional_decimal"
+    )]
     pub fee_fx_rate: Option<Decimal>,
 }
 

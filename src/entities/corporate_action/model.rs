@@ -304,57 +304,117 @@ pub struct CorporateActionBody {
     action_type: ActionType,
     pub listing_id: i64,
     pub date: NaiveDate,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::infra::decimal::strict_optional_decimal"
+    )]
     amount_per_unit: Option<Decimal>,
     #[serde(default)]
     currency: Option<String>,
     #[serde(default)]
     record_date: Option<NaiveDate>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::infra::decimal::strict_optional_decimal"
+    )]
     split_new_units: Option<Decimal>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::infra::decimal::strict_optional_decimal"
+    )]
     split_old_units: Option<Decimal>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::infra::decimal::strict_optional_decimal"
+    )]
     bonus_units: Option<Decimal>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::infra::decimal::strict_optional_decimal"
+    )]
     bonus_held_units: Option<Decimal>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::infra::decimal::strict_optional_decimal"
+    )]
     rights_units: Option<Decimal>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::infra::decimal::strict_optional_decimal"
+    )]
     rights_held_units: Option<Decimal>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::infra::decimal::strict_optional_decimal"
+    )]
     exercise_price: Option<Decimal>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::infra::decimal::strict_optional_decimal"
+    )]
     buyback_price: Option<Decimal>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::infra::decimal::strict_optional_decimal"
+    )]
     buyback_dividend: Option<Decimal>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::infra::decimal::strict_optional_decimal"
+    )]
     buyback_franking_credit: Option<Decimal>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::infra::decimal::strict_optional_decimal"
+    )]
     buyback_market_value: Option<Decimal>,
     #[serde(default)]
     scrip_listing_id: Option<i64>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::infra::decimal::strict_optional_decimal"
+    )]
     scrip_new_units: Option<Decimal>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::infra::decimal::strict_optional_decimal"
+    )]
     scrip_old_units: Option<Decimal>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::infra::decimal::strict_optional_decimal"
+    )]
     scrip_cash_per_unit: Option<Decimal>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::infra::decimal::strict_optional_decimal"
+    )]
     scrip_market_value: Option<Decimal>,
     #[serde(default)]
     scrip_cash_currency: Option<String>,
     #[serde(default)]
     demerger_listing_id: Option<i64>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::infra::decimal::strict_optional_decimal"
+    )]
     demerger_new_units: Option<Decimal>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::infra::decimal::strict_optional_decimal"
+    )]
     demerger_held_units: Option<Decimal>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::infra::decimal::strict_optional_decimal"
+    )]
     demerger_cost_base_pct: Option<Decimal>,
     #[serde(default)]
     demerger_close_date: Option<NaiveDate>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::infra::decimal::strict_optional_decimal"
+    )]
     demerger_close_price: Option<Decimal>,
     #[serde(default)]
     demerger_close_sourced_from: Option<String>,

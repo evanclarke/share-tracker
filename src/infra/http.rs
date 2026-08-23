@@ -845,6 +845,19 @@ mod tests {
         /// The type names its fields name, for the walk into nested bodies
         /// (a Sell body's `allocations`, a what-if request's rows).
         field_types: Vec<String>,
+        /// Its named fields, in declaration order, each with the serde
+        /// attributes written above it — what the money-field guard reads.
+        fields: Vec<ScannedField>,
+    }
+
+    /// One named field of a [`DeserializedType`].
+    struct ScannedField {
+        name: String,
+        /// The declared type, source order preserved and whitespace squeezed
+        /// (`Option<Decimal>`, `Vec<AllocationInput>`).
+        ty: String,
+        /// The `#[…]` attribute lines written directly above it, joined.
+        attrs: String,
     }
 
     /// Every `.rs` file under `src`, path relative to `src`.
@@ -942,7 +955,14 @@ mod tests {
                 let mut depth = 0i32;
                 let mut opened = false;
                 let mut fields = Vec::new();
+                let mut named = Vec::new();
                 let mut has_fields = false;
+                // The `#[…]` lines seen since the last field, which are the
+                // attributes of the next one. An attribute rustfmt has wrapped
+                // over several lines is one attribute, so the `[` / `]` depth
+                // says where it ends rather than the leading `#`.
+                let mut pending = String::new();
+                let mut in_attr = 0i32;
                 for line in &lines[start..] {
                     let code = line.split("//").next().unwrap_or("");
                     depth += code.matches('{').count() as i32;
@@ -951,13 +971,35 @@ mod tests {
                     }
                     depth -= code.matches('}').count() as i32;
                     let trimmed = code.trim_start();
+                    let attr_line = in_attr > 0 || trimmed.starts_with('#');
+                    if attr_line {
+                        pending.push_str(trimmed);
+                        in_attr += code.matches('[').count() as i32;
+                        in_attr -= code.matches(']').count() as i32;
+                    }
                     // A named field: `name: Type`, not a `::` path segment.
                     if let Some(colon) = trimmed.find(':')
-                        && !trimmed.starts_with('#')
+                        && !attr_line
                         && trimmed[colon..].starts_with(": ")
                     {
                         has_fields = true;
                         fields.extend(type_names_in(&trimmed[colon + 1..]));
+                        let name: String = trimmed[..colon]
+                            .rsplit(char::is_whitespace)
+                            .next()
+                            .unwrap_or("")
+                            .to_string();
+                        let ty: String = trimmed[colon + 1..]
+                            .trim()
+                            .trim_end_matches(',')
+                            .chars()
+                            .filter(|c| !c.is_whitespace())
+                            .collect();
+                        named.push(ScannedField {
+                            name,
+                            ty,
+                            attrs: std::mem::take(&mut pending),
+                        });
                     }
                     if opened && depth <= 0 {
                         break;
@@ -973,6 +1015,7 @@ mod tests {
                     denies,
                     has_fields,
                     field_types: fields,
+                    fields: named,
                 });
             }
         }
@@ -1011,26 +1054,15 @@ mod tests {
         found
     }
 
-    /// Every HTTP request body refuses a field it does not recognise, so a
-    /// misspelt name is a `422` naming it instead of a silently-ignored
-    /// default (SCENARIOS V-a: `frankingcredits` on an AMMA statement stored
-    /// A$0 of franking credits under a `204`).
+    /// Every type an HTTP request is deserialised into: reachable from a
+    /// handler's `Json`/`Query`/`Form` extractor (transitively, so a Sell
+    /// body's allocation rows count), or named like a request body even where
+    /// the scan cannot see the handler that takes it. Only the ones with named
+    /// fields — a field-less enum has nothing for either guard to police.
     ///
-    /// Nothing in the type system asks for `#[serde(deny_unknown_fields)]`, so
-    /// this enumerates the bodies **reachable from a handler** — every type a
-    /// `Json<T>`/`Query<T>`/`Form<T>` extractor names, and transitively every
-    /// type their fields name — and requires the attribute on each one that
-    /// has fields to deny. A new request body is therefore covered without its
-    /// author having to remember, and a body that must stay permissive says so
-    /// in [`UNKNOWN_FIELDS_ALLOWED`] with its reason.
-    ///
-    /// It lives here, in the module that owns the HTTP request/response
-    /// contract (`ApiError` and the wording every rejection reaches the user
-    /// with), because that is what the attribute is part of: the rejection an
-    /// unrecognised field earns.
-    #[test]
-    fn every_request_body_denies_unknown_fields() {
-        let types = deserialized_types();
+    /// Shared by the two guards below, so both police exactly the same set and
+    /// neither can drift: a new request body is covered by both at once.
+    fn request_body_types(types: &[DeserializedType]) -> Vec<&DeserializedType> {
         assert!(
             types.len() > 100,
             "the Deserialize scan found only {} types — it has stopped parsing the tree",
@@ -1054,8 +1086,8 @@ mod tests {
             }
         }
 
-        // A parse that quietly found nothing would pass every assertion below,
-        // so pin the shape of what it must have found.
+        // A parse that quietly found nothing would pass every assertion in the
+        // callers, so pin the shape of what it must have found.
         for expected in [
             "AmmaStatementBody",
             "TradeBody",
@@ -1076,10 +1108,7 @@ mod tests {
             reachable.len()
         );
 
-        // Reachable from a handler, or named like a request body even if the
-        // scan cannot see the handler that takes it (a body parsed by hand out
-        // of a `String` payload, say).
-        let required: Vec<&DeserializedType> = types
+        types
             .iter()
             .filter(|t| {
                 t.has_fields
@@ -1088,7 +1117,30 @@ mod tests {
                             .iter()
                             .any(|suffix| t.name.ends_with(suffix)))
             })
-            .collect();
+            .collect()
+    }
+
+    /// Every HTTP request body refuses a field it does not recognise, so a
+    /// misspelt name is a `422` naming it instead of a silently-ignored
+    /// default (SCENARIOS V-a: `frankingcredits` on an AMMA statement stored
+    /// A$0 of franking credits under a `204`).
+    ///
+    /// Nothing in the type system asks for `#[serde(deny_unknown_fields)]`, so
+    /// this enumerates the bodies **reachable from a handler** — every type a
+    /// `Json<T>`/`Query<T>`/`Form<T>` extractor names, and transitively every
+    /// type their fields name — and requires the attribute on each one that
+    /// has fields to deny. A new request body is therefore covered without its
+    /// author having to remember, and a body that must stay permissive says so
+    /// in [`UNKNOWN_FIELDS_ALLOWED`] with its reason.
+    ///
+    /// It lives here, in the module that owns the HTTP request/response
+    /// contract (`ApiError` and the wording every rejection reaches the user
+    /// with), because that is what the attribute is part of: the rejection an
+    /// unrecognised field earns.
+    #[test]
+    fn every_request_body_denies_unknown_fields() {
+        let types = deserialized_types();
+        let required = request_body_types(&types);
 
         let mut offenders = Vec::new();
         let mut excused: Vec<&str> = Vec::new();
@@ -1128,6 +1180,111 @@ mod tests {
             stale.is_empty(),
             "UNKNOWN_FIELDS_ALLOWED names types that are no longer permissive request \
              bodies — drop them: {stale:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Money request fields refuse a JSON number
+    // -----------------------------------------------------------------------
+
+    /// Request-body `Decimal` fields that may still be sent as a JSON number,
+    /// each with the reason. Same shape and same discipline as
+    /// [`UNKNOWN_FIELDS_ALLOWED`], and empty for the same reason: an entry here
+    /// is a claim that one money or quantity figure may silently lose digits
+    /// past the fifteenth significant one, which SCENARIOS W-a is about not
+    /// doing.
+    const JSON_NUMBER_ALLOWED: &[(&str, &str, &str)] = &[];
+
+    /// Every money/quantity field of every HTTP request body refuses a JSON
+    /// number, so `{"quantity": 100000000.00000001}` is a `422` naming
+    /// `quantity` instead of a `204` storing `100000000` (SCENARIOS W-a).
+    ///
+    /// `rust_decimal`'s own `Deserialize` accepts a JSON number, and
+    /// `serde_json` hands it over as an `f64` — ~15 significant digits — so the
+    /// project's *"money and quantities are always `Decimal`, never `f64`"*
+    /// rule, which holds everywhere else in the tree, had exactly one hole in
+    /// it: the request deserialiser. `infra::decimal::strict_decimal` /
+    /// `strict_optional_decimal` close it per field, and nothing in the type
+    /// system asks for the attribute, so this walks the same set as
+    /// [`every_request_body_denies_unknown_fields`] — every type reachable from
+    /// a handler's extractor — and requires it on each `Decimal` /
+    /// `Option<Decimal>` field. A new request body is therefore covered without
+    /// its author having to remember.
+    #[test]
+    fn every_money_request_field_refuses_a_json_number() {
+        /// The attribute a field of this type must carry.
+        fn required_for(ty: &str) -> Option<&'static str> {
+            match ty {
+                "Decimal" => Some("strict_decimal"),
+                "Option<Decimal>" => Some("strict_optional_decimal"),
+                // The three portfolio reports' price-override maps.
+                "HashMap<i64,Decimal>" => Some("strict_decimal_map"),
+                // Any other shape nesting a decimal would need its own
+                // `deserialize_with`, so fail rather than wave it through.
+                other if other.contains("Decimal") => Some("«a strict decimal deserialiser»"),
+                _ => None,
+            }
+        }
+
+        let types = deserialized_types();
+        let required = request_body_types(&types);
+
+        let mut money_fields = 0usize;
+        let mut offenders = Vec::new();
+        let mut excused: Vec<&str> = Vec::new();
+        for found in &required {
+            for field in &found.fields {
+                let Some(want) = required_for(&field.ty) else {
+                    continue;
+                };
+                money_fields += 1;
+                let allowed = JSON_NUMBER_ALLOWED.iter().find(|(file, type_name, _)| {
+                    *file == found.file && *type_name == format!("{}.{}", found.name, field.name)
+                });
+                // `strict_optional_decimal` contains `strict_decimal`, so the
+                // required-attribute check has to be the exact function name.
+                let has = field
+                    .attrs
+                    .contains(&format!("crate::infra::decimal::{want}\""));
+                match (has, allowed) {
+                    (true, Some((file, name, _))) => offenders.push(format!(
+                        "{file}: {name} both refuses a JSON number and is excused — drop the \
+                         JSON_NUMBER_ALLOWED entry"
+                    )),
+                    (false, None) => offenders.push(format!(
+                        "{}:{}: {}.{}: {} is deserialised from a request without \
+                         #[serde(deserialize_with = \"crate::infra::decimal::{want}\")]",
+                        found.file, found.line, found.name, field.name, field.ty
+                    )),
+                    (false, Some((_, name, _))) => excused.push(name),
+                    (true, None) => {}
+                }
+            }
+        }
+
+        // A scan that stopped finding fields would pass every assertion above.
+        assert!(
+            money_fields > 100,
+            "only {money_fields} money fields found across {} request bodies — the field scan \
+             has stopped parsing",
+            required.len()
+        );
+        assert!(
+            offenders.is_empty(),
+            "a JSON number is read as an f64 and silently loses digits past about the 15th \
+             significant one, so a money or quantity field must accept only a decimal string — \
+             add the attribute, or, if the field must keep taking a number, name it in \
+             JSON_NUMBER_ALLOWED with the reason:\n{}",
+            offenders.join("\n")
+        );
+        let stale: Vec<&str> = JSON_NUMBER_ALLOWED
+            .iter()
+            .filter(|(_, name, _)| !excused.contains(name))
+            .map(|(_, name, _)| *name)
+            .collect();
+        assert!(
+            stale.is_empty(),
+            "JSON_NUMBER_ALLOWED names fields that are no longer permissive — drop them: {stale:?}"
         );
     }
 }

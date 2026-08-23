@@ -2090,6 +2090,7 @@ struct BackfillBody {
 #[serde(deny_unknown_fields)]
 struct ManualPriceBody {
     /// Closing price in the listing's quote currency (never AUD).
+    #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]
     price: Decimal,
     /// Where the figure came from, e.g. "asx.com.au closing report".
     sourced_from: String,

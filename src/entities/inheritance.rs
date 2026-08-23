@@ -171,12 +171,17 @@ pub struct InheritanceBody {
     /// Defaults to the seeded default holding account when omitted.
     #[serde(default = "crate::entities::holding_account::default_holding_account_id")]
     pub holding_account_id: i64,
+    #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub quantity: Decimal,
     pub date_of_death: NaiveDate,
     pub cost_base_rule: CostBaseRule,
+    #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub cost_base: Decimal,
     /// Absent/null means no LPR expenditure.
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::infra::decimal::strict_optional_decimal"
+    )]
     pub lpr_expenditure: Option<Decimal>,
     #[serde(default)]
     pub lpr_expenditure_date: Option<NaiveDate>,
@@ -185,7 +190,10 @@ pub struct InheritanceBody {
     #[serde(default = "default_currency")]
     pub currency: String,
     /// Absent/null means 1 (the AUD case).
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::infra::decimal::strict_optional_decimal"
+    )]
     pub fx_rate: Option<Decimal>,
 }
 

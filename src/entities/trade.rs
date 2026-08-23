@@ -422,13 +422,13 @@ mod tests {
             "trade_type": "Buy",
             "date": "2024-01-15",
             "listing_id": 1,
-            "average_price": 100.0,
-            "quantity": 10.0,
+            "average_price": "100.0",
+            "quantity": "10.0",
             "currency": "AUD",
-            "brokerage": 9.95,
-            "gst_on_brokerage": 0.995,
+            "brokerage": "9.95",
+            "gst_on_brokerage": "0.995",
             "brokerage_currency": "AUD",
-            "fx_rate": 1.0
+            "fx_rate": "1.0"
         });
         let resp = client(&pool).put("/trades/1", &body).await;
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
@@ -722,13 +722,13 @@ mod tests {
                 "trade_type": "Buy",
                 "date": date,
                 "listing_id": 1,
-                "average_price": 100.0,
-                "quantity": 10.0,
+                "average_price": "100.0",
+                "quantity": "10.0",
                 "currency": "AUD",
-                "brokerage": 9.95,
-                "gst_on_brokerage": 0.995,
+                "brokerage": "9.95",
+                "gst_on_brokerage": "0.995",
                 "brokerage_currency": "AUD",
-                "fx_rate": 1.0,
+                "fx_rate": "1.0",
                 "holding_account_id": account
             })
         };
@@ -783,13 +783,13 @@ mod tests {
             "trade_type": "Buy",
             "date": "2024-01-15",
             "listing_id": 1,
-            "average_price": 100.0,
-            "quantity": 10.0,
+            "average_price": "100.0",
+            "quantity": "10.0",
             "currency": "AUD",
-            "brokerage": 9.95,
-            "gst_on_brokerage": 0.995,
+            "brokerage": "9.95",
+            "gst_on_brokerage": "0.995",
             "brokerage_currency": "AUD",
-            "fx_rate": 1.0
+            "fx_rate": "1.0"
         });
         let resp = client(&pool).put("/trades/1", &body).await;
         assert_eq!(resp.status, StatusCode::NO_CONTENT);
@@ -856,13 +856,13 @@ mod tests {
             "trade_type": "Buy",
             "date": "2018-06-04",
             "listing_id": 1,
-            "average_price": 100.0,
-            "quantity": 10.0,
+            "average_price": "100.0",
+            "quantity": "10.0",
             "currency": "AUD",
-            "brokerage": 0.0,
-            "gst_on_brokerage": 0.0,
+            "brokerage": "0.0",
+            "gst_on_brokerage": "0.0",
             "brokerage_currency": "AUD",
-            "fx_rate": 1.0
+            "fx_rate": "1.0"
         });
         let resp = client(&pool).put("/trades/1", &body).await;
         // Non-blocking: the write succeeds, the warning surfaces the gap.
@@ -881,13 +881,13 @@ mod tests {
             "trade_type": "Buy",
             "date": "2024-01-15",
             "listing_id": 1,
-            "average_price": 100.0,
-            "quantity": 10.0,
+            "average_price": "100.0",
+            "quantity": "10.0",
             "currency": "AUD",
-            "brokerage": 0.0,
-            "gst_on_brokerage": 0.0,
+            "brokerage": "0.0",
+            "gst_on_brokerage": "0.0",
             "brokerage_currency": "AUD",
-            "fx_rate": 1.0
+            "fx_rate": "1.0"
         });
         let resp = client(&pool).put("/trades/1", &body).await;
         assert_eq!(resp.status, StatusCode::NO_CONTENT);
@@ -957,13 +957,13 @@ mod tests {
             "trade_type": "Buy",
             "date": "2024-12-24",
             "listing_id": 1,
-            "average_price": 100.0,
-            "quantity": 10.0,
+            "average_price": "100.0",
+            "quantity": "10.0",
             "currency": "AUD",
-            "brokerage": 9.95,
-            "gst_on_brokerage": 0.995,
+            "brokerage": "9.95",
+            "gst_on_brokerage": "0.995",
             "brokerage_currency": "AUD",
-            "fx_rate": 1.0
+            "fx_rate": "1.0"
         });
         let resp = client(&pool).put("/trades/1", &body).await;
         assert_eq!(resp.status, StatusCode::NO_CONTENT);
@@ -983,13 +983,13 @@ mod tests {
             "trade_type": "Buy",
             "date": "2024-01-19",
             "listing_id": 1,
-            "average_price": 100.0,
-            "quantity": 10.0,
+            "average_price": "100.0",
+            "quantity": "10.0",
             "currency": "AUD",
-            "brokerage": 9.95,
-            "gst_on_brokerage": 0.995,
+            "brokerage": "9.95",
+            "gst_on_brokerage": "0.995",
             "brokerage_currency": "AUD",
-            "fx_rate": 1.0
+            "fx_rate": "1.0"
         });
         let resp = client(&pool).put("/trades/1", &body).await;
         assert_eq!(resp.status, StatusCode::NO_CONTENT);
@@ -1062,13 +1062,13 @@ mod tests {
             "trade_type": "Buy",
             "date": date,
             "listing_id": 1,
-            "average_price": 100.0,
-            "quantity": 10.0,
+            "average_price": "100.0",
+            "quantity": "10.0",
             "currency": "AUD",
-            "brokerage": 0,
-            "gst_on_brokerage": 0,
+            "brokerage": "0",
+            "gst_on_brokerage": "0",
             "brokerage_currency": "AUD",
-            "fx_rate": 1.0
+            "fx_rate": "1.0"
         })
     }
 
@@ -1325,13 +1325,13 @@ mod tests {
             "trade_type": "Sell",
             "date": "2024-01-15",
             "listing_id": 1,
-            "average_price": 100.0,
-            "quantity": 10.0,
+            "average_price": "100.0",
+            "quantity": "10.0",
             "currency": "AUD",
-            "brokerage": 9.95,
-            "gst_on_brokerage": 0.995,
+            "brokerage": "9.95",
+            "gst_on_brokerage": "0.995",
             "brokerage_currency": "AUD",
-            "fx_rate": 1.0
+            "fx_rate": "1.0"
         });
         let resp = client(&pool).put("/trades/1", &body).await;
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
@@ -1348,13 +1348,13 @@ mod tests {
             "trade_type": "DRP",
             "date": "2024-03-15",
             "listing_id": 1,
-            "average_price": 95.0,
-            "quantity": 2.0,
+            "average_price": "95.0",
+            "quantity": "2.0",
             "currency": "AUD",
-            "brokerage": 0.0,
-            "gst_on_brokerage": 0.0,
+            "brokerage": "0.0",
+            "gst_on_brokerage": "0.0",
             "brokerage_currency": "AUD",
-            "fx_rate": 1.0
+            "fx_rate": "1.0"
         });
         let resp = client(&pool).put("/trades/1", &body).await;
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
@@ -1374,13 +1374,13 @@ mod tests {
             "date": "2024-01-15",
             "settlement_date": "2024-01-20",
             "listing_id": 1,
-            "average_price": 100.0,
-            "quantity": 10.0,
+            "average_price": "100.0",
+            "quantity": "10.0",
             "currency": "AUD",
-            "brokerage": 9.95,
-            "gst_on_brokerage": 0.995,
+            "brokerage": "9.95",
+            "gst_on_brokerage": "0.995",
             "brokerage_currency": "AUD",
-            "fx_rate": 1.0
+            "fx_rate": "1.0"
         });
         let resp = client(&pool).put("/trades/1", &body).await;
         assert_eq!(resp.status, StatusCode::NO_CONTENT);
@@ -2588,13 +2588,13 @@ mod tests {
             "trade_type": "Buy",
             "date": "2024-02-05",
             "listing_id": 1,
-            "average_price": 10.0,
-            "quantity": 50.0,
+            "average_price": "10.0",
+            "quantity": "50.0",
             "currency": "AUD",
-            "brokerage": 0.0,
-            "gst_on_brokerage": 0.0,
+            "brokerage": "0.0",
+            "gst_on_brokerage": "0.0",
             "brokerage_currency": "AUD",
-            "fx_rate": 1.0
+            "fx_rate": "1.0"
         });
         let response = client(&pool).put("/trades/900", &body).await;
         let (status, detail) = response.status_and_body();
@@ -2640,5 +2640,85 @@ mod tests {
             db_get(&pool, 1).await.unwrap().unwrap().average_price,
             dec("12")
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // A money/quantity figure sent as a JSON number (SCENARIOS W-a)
+    // -----------------------------------------------------------------------
+
+    /// A trade body with `quantity` and `average_price` written out verbatim,
+    /// so a test can send an unquoted JSON number the way a bulk import would.
+    fn trade_body_raw(quantity: &str, average_price: &str) -> String {
+        format!(
+            r#"{{"trade_type":"Buy","date":"2024-01-15","listing_id":1,
+                 "average_price":{average_price},"quantity":{quantity},"currency":"AUD",
+                 "brokerage":"0","brokerage_currency":"AUD","fx_rate":"1"}}"#
+        )
+    }
+
+    /// `{"quantity": 100000000.00000001}` used to be accepted `204` and stored
+    /// as `100000000` — `serde_json` hands a JSON number over as an `f64`,
+    /// which keeps ~15 significant digits, so a satoshi went missing under a
+    /// success (SCENARIOS W-a). It is now refused, naming the field.
+    #[tokio::test]
+    async fn api_a_quantity_sent_as_a_json_number_is_refused_naming_the_field() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+
+        for quantity in ["100000000.00000001", "99999999.87654321", "10", "10.0"] {
+            let response = client(&pool)
+                .put_raw("/trades/1", &trade_body_raw(quantity, "\"1\""))
+                .await;
+            let (status, body) = response.status_and_body();
+            assert_eq!(
+                status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "quantity {quantity} as a JSON number: {body}"
+            );
+            assert!(body.contains("quantity"), "the field is not named: {body}");
+            assert!(
+                body.contains("as a decimal string"),
+                "the remedy is not stated: {body}"
+            );
+        }
+
+        // An unquoted `average_price` is refused the same way, naming itself.
+        let response = client(&pool)
+            .put_raw(
+                "/trades/1",
+                &trade_body_raw("\"1\"", "1234567890123456789.12"),
+            )
+            .await;
+        let (status, body) = response.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert!(body.contains("average_price"), "{body}");
+
+        // Nothing was written by any of the refusals.
+        assert!(db_get(&pool, 1).await.unwrap().is_none());
+    }
+
+    /// The control the finding was bounded with: the very same figures sent as
+    /// **strings** are accepted and stored to the digit. The refusal above is
+    /// therefore about the JSON encoding, not about the values.
+    #[tokio::test]
+    async fn api_the_same_quantity_sent_as_a_string_is_stored_exactly() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+
+        for (id, quantity) in [(1, "100000000.00000001"), (2, "99999999.87654321")] {
+            let path = format!("/trades/{id}");
+            let sent = trade_body_raw(&format!("\"{quantity}\""), "\"1\"");
+            let response = client(&pool).put_raw(&path, &sent).await;
+            let (status, body) = response.status_and_body();
+            assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+            // Straight off the column, so nothing on the read path can round it.
+            let stored: String = sqlx::query_scalar("SELECT quantity FROM trades WHERE id = ?")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(stored, quantity, "stored quantity lost a digit");
+        }
     }
 }

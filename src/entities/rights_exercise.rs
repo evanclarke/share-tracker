@@ -54,14 +54,21 @@ pub struct ExerciseBody {
     /// the issue's record date.
     pub date: NaiveDate,
     /// New units acquired (strictly positive).
+    #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub units: Decimal,
     /// Total amount paid to acquire the exercised rights, in the action's
     /// currency (defaults to 0 — rights issued free have a nil cost base).
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::infra::decimal::strict_optional_decimal"
+    )]
     pub rights_cost: Option<Decimal>,
     /// Optional foreign-per-AUD override for the created trade (defaults to
     /// 1; reports prefer the ATO rate and fall back to this — see `infra::fx`).
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::infra::decimal::strict_optional_decimal"
+    )]
     pub fx_rate: Option<Decimal>,
     /// The holding account the exercised parcel lands in. Defaults to the
     /// seeded default account when omitted.

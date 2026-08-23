@@ -98,6 +98,7 @@ fn sale_from_row(row: &SqliteRow) -> Result<RightsSale, sqlx::Error> {
 #[serde(deny_unknown_fields)]
 pub struct AllocationInput {
     pub purchase_trade_id: i64,
+    #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub units: Decimal,
 }
 
@@ -107,17 +108,27 @@ pub struct SellRightsBody {
     /// Sale (or lapse) date. Must not precede the issue's record date.
     pub date: NaiveDate,
     /// Rights disposed of (strictly positive, record-date rights units).
+    #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub units: Decimal,
     /// Per-right proceeds in the action's currency (defaults to 0 — a lapse).
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::infra::decimal::strict_optional_decimal"
+    )]
     pub proceeds_per_right: Option<Decimal>,
     /// Total amount paid to acquire the disposed rights, in the action's
     /// currency (defaults to 0 — rights issued free have a nil cost base).
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::infra::decimal::strict_optional_decimal"
+    )]
     pub rights_cost: Option<Decimal>,
     /// Optional foreign-per-AUD override (defaults to 1; reports prefer the
     /// ATO rate and fall back to this — see `infra::fx`).
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::infra::decimal::strict_optional_decimal"
+    )]
     pub fx_rate: Option<Decimal>,
     /// The holding account the disposal is reported under. Defaults to the
     /// seeded default account when omitted.

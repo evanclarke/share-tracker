@@ -46,6 +46,38 @@ fn unrecognised_body_fields_documented() {
     assert!(API_MD.contains("`settlement_date_source`"));
 }
 
+/// Docs-sync pin for the money/quantity encoding rule (SCENARIOS W-a): its own
+/// section beside [`unrecognised_body_fields_documented`]'s, the `422` list
+/// pointing at it, the reason a JSON number cannot be honoured, and the two
+/// things a client could otherwise get wrong (integers are refused too; a read
+/// already answers with strings, so the round trip needs no conversion). The
+/// behaviour itself is pinned by
+/// `infra::http::tests::every_money_request_field_refuses_a_json_number` and
+/// the `entities::trade` API tests; this is the documentation half.
+#[test]
+fn money_as_a_json_number_documented() {
+    assert!(API_MD.contains("## Money as a JSON number"));
+    assert!(API_MD.contains("Every money and quantity field takes its value as a **JSON string**"));
+    assert!(
+        API_MD.contains("A bare JSON number is refused `422`, naming the field and the remedy")
+    );
+    // The reason, with the two figures the finding was raised on.
+    assert!(API_MD.contains("A JSON number arrives as an `f64`"));
+    assert!(API_MD.contains("{\"quantity\": 100000000.00000001}"));
+    assert!(API_MD.contains("99999999.8765432"));
+    // Integers are in scope, and so are the price-override maps.
+    assert!(API_MD.contains("Integers are refused too"));
+    assert!(API_MD.contains("{\"prices\": {\"7\": \"58.12\"}}"));
+    // No conversion needed on the way back.
+    assert!(API_MD.contains("Reads already answer with strings"));
+    // The `422` row of the response-code table points at the section.
+    assert!(API_MD.contains(
+        "**any money or quantity field sent as a bare JSON number** rather than a decimal \
+         string, which would silently lose digits past about the fifteenth significant one \
+         (see [Money as a JSON number](#money-as-a-json-number))"
+    ));
+}
+
 /// Docs-sync pin for the append-only audit trail (2026-07-13 improvement
 /// review): the schema documents the table, its scope decision (which tables
 /// are audited and why the rest are not), and the keep-forever retention

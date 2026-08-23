@@ -1033,8 +1033,10 @@ pub struct WhatIfRequest {
     /// one account's parcels; absent = parcels from any account.
     #[serde(default)]
     pub holding_account_id: Option<i64>,
+    #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub units: Decimal,
     /// Total capital proceeds in AUD.
+    #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub proceeds: Decimal,
     pub date: NaiveDate,
     #[serde(default)]
@@ -1047,6 +1049,7 @@ pub struct WhatIfRequest {
 #[serde(deny_unknown_fields)]
 pub struct WhatIfAllocation {
     pub purchase_trade_id: i64,
+    #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub units: Decimal,
 }
 

@@ -375,21 +375,21 @@ pub struct IncomeBody {
     pub date_paid: NaiveDate,
     #[serde(default)]
     pub ex_date: Option<NaiveDate>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub franked_amount: Decimal,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub unfranked_amount: Decimal,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub foreign_source_income: Decimal,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub foreign_tax_paid: Decimal,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub tfn_withholding_tax: Decimal,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub franking_credits: Decimal,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub lic_capital_gain_amount: Decimal,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub conduit_foreign_income: Decimal,
     #[serde(default)]
     pub trust_income: bool,
@@ -405,12 +405,21 @@ pub struct IncomeBody {
     #[serde(default = "crate::entities::holding_account::default_holding_account_id")]
     pub holding_account_id: i64,
     /// Optional statement cross-check; see `Income::amount_per_security`.
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::infra::decimal::strict_optional_decimal"
+    )]
     pub amount_per_security: Option<Decimal>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::infra::decimal::strict_optional_decimal"
+    )]
     pub securities_held: Option<Decimal>,
     /// See `Income::tax_deferred_amount` — trust rows only, ≥ 0.
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::infra::decimal::strict_optional_decimal"
+    )]
     pub tax_deferred_amount: Option<Decimal>,
     /// See [`IncomeType`]. Omitted means `Dividend`, so every existing client
     /// keeps writing distributions.
@@ -1614,9 +1623,9 @@ mod tests {
             "listing_id": 1,
             "date_paid": "2024-03-15",
             "ex_date": "2024-03-01",
-            "franked_amount": 70.0,
-            "unfranked_amount": 30.0,
-            "franking_credits": 30.0
+            "franked_amount": "70.0",
+            "unfranked_amount": "30.0",
+            "franking_credits": "30.0"
         });
         let resp = client(&pool).put("/income/1", &body).await;
         assert_eq!(resp.status, StatusCode::NO_CONTENT);
@@ -1669,7 +1678,7 @@ mod tests {
                 &serde_json::json!({
                     "listing_id": 1,
                     "date_paid": "2024-03-15",
-                    "franked_amount": 70.0,
+                    "franked_amount": "70.0",
                     "reinvestment_trade_id": trade_id
                 }),
             )
@@ -1693,7 +1702,7 @@ mod tests {
                 &serde_json::json!({
                     "listing_id": 1,
                     "date_paid": "2024-03-15",
-                    "franked_amount": 70.0
+                    "franked_amount": "70.0"
                 }),
             )
             .await;
@@ -1717,8 +1726,8 @@ mod tests {
                 &serde_json::json!({
                     "listing_id": 1,
                     "date_paid": "2024-03-15",
-                    "franked_amount": 70.0,
-                    "lic_capital_gain_amount": 12.0
+                    "franked_amount": "70.0",
+                    "lic_capital_gain_amount": "12.0"
                 }),
             )
             .await;

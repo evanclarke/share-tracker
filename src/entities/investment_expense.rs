@@ -85,11 +85,17 @@ pub struct InvestmentExpense {
 pub struct InvestmentExpenseBody {
     pub date_incurred: NaiveDate,
     pub expense_type: ExpenseType,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub amount: Decimal,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::infra::decimal::strict_optional_decimal"
+    )]
     pub gross_amount: Option<Decimal>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::infra::decimal::strict_optional_decimal"
+    )]
     pub deductible_percentage: Option<Decimal>,
     #[serde(default = "default_currency")]
     pub currency: String,

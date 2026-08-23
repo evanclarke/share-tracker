@@ -53,7 +53,10 @@ pub struct OverviewRequest {
     /// Current price per unit by listing id, expected in AUD so it lines up with
     /// the AUD-denominated cost base. An explicit price always overrides a
     /// live-fetched one.
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::infra::decimal::strict_decimal_map"
+    )]
     pub prices: HashMap<i64, Decimal>,
     /// Fetch the current price live from the price source for every held
     /// listing without an explicit price above. Off by default so existing

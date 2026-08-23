@@ -32,6 +32,7 @@ pub struct CgtSettings {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CgtSettingsBody {
+    #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub opening_capital_loss: Decimal,
 }
 

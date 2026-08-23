@@ -12,6 +12,8 @@
 //! rather than through per-column hand-written code that review has to police.
 
 use rust_decimal::Decimal;
+use serde::Deserialize as _;
+use serde::de::{self, Deserializer, Visitor};
 use sqlx::encode::IsNull;
 use sqlx::error::BoxDynError;
 use sqlx::sqlite::{SqliteArgumentsBuffer, SqliteTypeInfo, SqliteValueRef};
@@ -108,6 +110,152 @@ impl sqlx::Encode<'_, Sqlite> for OptMoney {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The serde half: reading a decimal *out of an inbound HTTP request*.
+//
+// Distinct from `Money`/`OptMoney` above, which are the **sqlx** codec (TEXT
+// column ⇄ `Decimal`) and have nothing to do with JSON. These two functions are
+// the **request** codec (JSON/query-string value ⇄ `Decimal`), spelled as
+// `#[serde(deserialize_with = "…")]` field attributes rather than as a newtype
+// so the body struct's field stays a plain `Decimal` and every reader of it is
+// unchanged.
+// ---------------------------------------------------------------------------
+
+/// What a money/quantity field is refused with when it arrives as a JSON
+/// number. `serde_json` hands a JSON number over as an `f64`, which keeps only
+/// ~15 significant digits, so `{"quantity": 100000000.00000001}` used to be
+/// accepted `204` and stored as `100000000` — a silent loss, and silent
+/// precisely because every ordinary figure survives the round trip and only the
+/// long ones don't (SCENARIOS W-a).
+///
+/// Refusing every JSON number, integers included, is deliberate: a rule that
+/// held only past some digit count would reintroduce the same silent boundary
+/// in the error path that the `f64` conversion has in the value path.
+///
+/// The field name is not in this message because it does not need to be: axum's
+/// `Json`/`Query`/`Form` rejections prefix the failing field's path (`quantity:
+/// …`), exactly as they do for `deny_unknown_fields`.
+pub const JSON_NUMBER_REFUSED: &str = "send this money/quantity value as a decimal string (\"12.34\", not 12.34) — a JSON number \
+     is read as a 64-bit float and silently loses digits past about the 15th significant one";
+
+/// `Decimal` field of a request body: accepts a decimal **string**, refuses a
+/// JSON number with [`JSON_NUMBER_REFUSED`].
+///
+/// Spell it as `#[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]`.
+/// `infra::http::tests::every_money_request_field_refuses_a_json_number` walks
+/// every handler-reachable request body and fails on a `Decimal` field that
+/// lacks it, so a new body is covered without its author having to remember.
+pub fn strict_decimal<'de, D>(deserializer: D) -> Result<Decimal, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    // `deserialize_any`, not `deserialize_str`: with a scalar hint `serde_json`
+    // answers a wrong type itself, from the hint, and the visitor never sees
+    // the number — so the refusal would read "invalid type: floating point"
+    // with no remedy in it. Asking what is actually there routes the number to
+    // [`StrictDecimal::visit_f64`] and its message. Self-describing formats
+    // only, which JSON and the query string both are.
+    deserializer.deserialize_any(StrictDecimal)
+}
+
+/// The `Option<Decimal>` twin of [`strict_decimal`]: `null` and an absent field
+/// are `None`, a string is parsed, a JSON number is refused.
+///
+/// Spell it as
+/// `#[serde(default, deserialize_with = "crate::infra::decimal::strict_optional_decimal")]`.
+pub fn strict_optional_decimal<'de, D>(deserializer: D) -> Result<Option<Decimal>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserializer.deserialize_option(StrictOptionalDecimal)
+}
+
+/// The `HashMap<_, Decimal>` form: the price-override maps the three portfolio
+/// reports take (`{"prices": {"7": "58.12"}}`). Same rule for every value.
+///
+/// Spell it as
+/// `#[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal_map")]`.
+pub fn strict_decimal_map<'de, D, K>(
+    deserializer: D,
+) -> Result<std::collections::HashMap<K, Decimal>, D::Error>
+where
+    D: Deserializer<'de>,
+    K: serde::Deserialize<'de> + Eq + std::hash::Hash,
+{
+    let map = std::collections::HashMap::<K, StrictDecimalValue>::deserialize(deserializer)?;
+    Ok(map.into_iter().map(|(k, v)| (k, v.0)).collect())
+}
+
+/// [`strict_decimal`] as a `Deserialize` impl, so it composes into the
+/// container deserialisers serde already generates.
+struct StrictDecimalValue(Decimal);
+
+impl<'de> serde::Deserialize<'de> for StrictDecimalValue {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        strict_decimal(deserializer).map(StrictDecimalValue)
+    }
+}
+
+struct StrictDecimal;
+
+impl Visitor<'_> for StrictDecimal {
+    type Value = Decimal;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("a decimal amount as a string")
+    }
+
+    fn visit_str<E: de::Error>(self, v: &str) -> Result<Decimal, E> {
+        v.trim().parse().map_err(|e: rust_decimal::Error| {
+            E::custom(format!("not a decimal number: {v:?} ({e})"))
+        })
+    }
+
+    // Every width of JSON number lands on one of these. `serde_json` picks the
+    // visitor by the literal's shape, so all of them have to refuse.
+    fn visit_f64<E: de::Error>(self, _: f64) -> Result<Decimal, E> {
+        Err(E::custom(JSON_NUMBER_REFUSED))
+    }
+
+    fn visit_i64<E: de::Error>(self, _: i64) -> Result<Decimal, E> {
+        Err(E::custom(JSON_NUMBER_REFUSED))
+    }
+
+    fn visit_u64<E: de::Error>(self, _: u64) -> Result<Decimal, E> {
+        Err(E::custom(JSON_NUMBER_REFUSED))
+    }
+
+    fn visit_i128<E: de::Error>(self, _: i128) -> Result<Decimal, E> {
+        Err(E::custom(JSON_NUMBER_REFUSED))
+    }
+
+    fn visit_u128<E: de::Error>(self, _: u128) -> Result<Decimal, E> {
+        Err(E::custom(JSON_NUMBER_REFUSED))
+    }
+}
+
+struct StrictOptionalDecimal;
+
+impl<'de> Visitor<'de> for StrictOptionalDecimal {
+    type Value = Option<Decimal>;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("a decimal amount as a string, or null")
+    }
+
+    fn visit_none<E: de::Error>(self) -> Result<Option<Decimal>, E> {
+        Ok(None)
+    }
+
+    fn visit_unit<E: de::Error>(self) -> Result<Option<Decimal>, E> {
+        Ok(None)
+    }
+
+    fn visit_some<D: Deserializer<'de>>(self, d: D) -> Result<Option<Decimal>, D::Error> {
+        strict_decimal(d).map(Some)
+    }
+}
+
 /// Parse a TEXT decimal column value, mapping a malformed value to a decode error
 /// that names the offending column (so the failure is diagnosable in logs).
 ///
@@ -140,6 +288,86 @@ mod tests {
     use super::*;
     use crate::test_support::test_pool;
     use sqlx::SqlitePool;
+
+    // -----------------------------------------------------------------------
+    // The serde half: a request's decimal fields
+    // -----------------------------------------------------------------------
+
+    /// A stand-in for a request body — a required decimal, a nullable one and
+    /// a price-override map. Deliberately *not* named `…Body`/`…Request`, so
+    /// `infra::http::tests`' two request-body guards, which take those suffixes
+    /// as a request body even where no handler names the type, leave this test
+    /// fixture alone.
+    #[derive(Debug, serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct MoneyFields {
+        #[serde(deserialize_with = "strict_decimal")]
+        quantity: Decimal,
+        #[serde(default, deserialize_with = "strict_optional_decimal")]
+        statement_total: Option<Decimal>,
+        #[serde(default, deserialize_with = "strict_decimal_map")]
+        prices: std::collections::HashMap<i64, Decimal>,
+    }
+
+    fn parse(json: &str) -> Result<MoneyFields, serde_json::Error> {
+        serde_json::from_str(json)
+    }
+
+    #[test]
+    fn a_decimal_string_is_read_at_full_precision() {
+        // Both of the figures SCENARIOS W-a was found on, plus the sub-satoshi
+        // scale that motivated it.
+        for value in [
+            "99999999.87654321",
+            "100000000.00000001",
+            "0.123456789012345678",
+            "1234567890123456789.12",
+        ] {
+            let body = parse(&format!(r#"{{"quantity": "{value}"}}"#)).expect("a string is fine");
+            assert_eq!(body.quantity.to_string(), value);
+        }
+    }
+
+    #[test]
+    fn a_json_number_is_refused_with_the_remedy() {
+        // Integers too: a rule that only bit past some digit count would put
+        // the same silent boundary back, just in the error path.
+        for value in ["100000000.00000001", "58.1234", "10", "0"] {
+            let err = parse(&format!(r#"{{"quantity": {value}}}"#))
+                .expect_err("a JSON number must be refused")
+                .to_string();
+            assert!(err.contains(JSON_NUMBER_REFUSED), "{value}: {err}");
+        }
+        // …in the nullable and the map form as well.
+        let err = parse(r#"{"quantity": "1", "statement_total": 1.5}"#)
+            .expect_err("a nullable field is no different")
+            .to_string();
+        assert!(err.contains(JSON_NUMBER_REFUSED), "{err}");
+        let err = parse(r#"{"quantity": "1", "prices": {"7": 58.12}}"#)
+            .expect_err("a map value is no different")
+            .to_string();
+        assert!(err.contains(JSON_NUMBER_REFUSED), "{err}");
+    }
+
+    #[test]
+    fn null_and_absence_stay_none_and_a_map_reads_its_values() {
+        let body = parse(r#"{"quantity": "1", "statement_total": null}"#).unwrap();
+        assert_eq!(body.statement_total, None);
+        let body = parse(r#"{"quantity": "1"}"#).unwrap();
+        assert_eq!(body.statement_total, None);
+        assert!(body.prices.is_empty());
+
+        let body = parse(r#"{"quantity": "1", "prices": {"7": "58.1234"}}"#).unwrap();
+        assert_eq!(body.prices[&7], "58.1234".parse::<Decimal>().unwrap());
+    }
+
+    #[test]
+    fn a_string_that_is_not_a_number_is_refused_quoting_it() {
+        let err = parse(r#"{"quantity": "ten"}"#).unwrap_err().to_string();
+        assert!(err.contains("not a decimal number: \"ten\""), "{err}");
+        // …and not with the JSON-number remedy, which would misdirect.
+        assert!(!err.contains(JSON_NUMBER_REFUSED), "{err}");
+    }
 
     /// A row struct in the shape the entities use: a required and a nullable TEXT decimal,
     /// read by the derive rather than a hand-written `FromRow`.

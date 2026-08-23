@@ -289,33 +289,43 @@ pub struct TradeBody {
     #[serde(default)]
     pub settlement_date: Option<NaiveDate>,
     pub listing_id: i64,
+    #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub average_price: Decimal,
+    #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub quantity: Decimal,
     pub currency: String,
     /// GST-inclusive when `brokerage_includes_gst` is set (the server splits
     /// it; any supplied `gst_on_brokerage` is ignored), ex-GST otherwise.
     /// Reads present the same shape (see [`Trade::present`]), so a GET → PUT
     /// round-trip is lossless.
+    #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub brokerage: Decimal,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub gst_on_brokerage: Decimal,
     #[serde(default)]
     pub brokerage_includes_gst: bool,
     pub brokerage_currency: String,
+    #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub fx_rate: Decimal,
     /// Optional deliberate spot-rate override; see `Trade::spot_fx_rate`.
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::infra::decimal::strict_optional_decimal"
+    )]
     pub spot_fx_rate: Option<Decimal>,
     #[serde(default)]
     pub contract_note_ref: Option<String>,
     /// Optional statement cross-check; see `Trade::statement_total`.
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::infra::decimal::strict_optional_decimal"
+    )]
     pub statement_total: Option<Decimal>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub residual_brought_forward: Decimal,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub residual_carried_forward: Decimal,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub residual_paid_out: Decimal,
     /// Defaults to the seeded default holding account when omitted, so
     /// single-account clients never see the dimension.
