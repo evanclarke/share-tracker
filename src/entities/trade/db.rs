@@ -186,6 +186,16 @@ pub enum UpsertError {
     /// the trade date.
     #[error("a core trade figure was rejected: {0}")]
     Amounts(#[source] AmountsError),
+    /// The Buy/DRP is dated on or before a whole-holding operation of its
+    /// listing that has already run — a scrip-for-scrip exchange, a demerger,
+    /// or a worthless-shares recognise. Each of those consumed every parcel
+    /// open at its own date, so units entered behind one can never be consumed
+    /// and stay open forever (SCENARIOS V-d). The parcel side of the same
+    /// refuse-and-report pair `corporate_action::WriteError::BackDatedOverRollover`
+    /// forms for a read-time event; the wording and the recovery live in
+    /// `domain::whole_holding`. Mapped to 422.
+    #[error("this parcel is dated behind a whole-holding operation: {0}")]
+    BackDatedOverWholeHolding(#[source] crate::domain::whole_holding::BackDatedParcel),
     /// The trade is dated on a day its exchange did not trade — a weekend, or
     /// a seeded public holiday on the calendar that was in force then
     /// (SCENARIOS S-08). The trade date is the CGT event date, so it sets the
@@ -561,6 +571,30 @@ pub async fn db_upsert(pool: &SqlitePool, trade: &Trade) -> Result<(), UpsertErr
         return Err(UpsertError::NonTradingDay(shut.describe(trade.date)));
     }
 
+    // A scrip-for-scrip exchange, demerger, or worthless-shares recognise of
+    // this listing that has already run consumed every parcel open at its own
+    // date, and cannot reach back for one entered afterwards: a Buy/DRP dated
+    // on or before it would stay open forever (SCENARIOS V-d). Compared on the
+    // trade's own `date` — see `domain::whole_holding` for why, and for the
+    // shared rejection wording. A Sell creates no parcel, so only the parcel
+    // types can introduce the state.
+    // An *edit* of a parcel already sitting behind one is not refused: a source
+    // parcel the operation consumed sits behind it by definition, and editing
+    // its price or brokerage is the very state the rollover-consistency report
+    // documents and surfaces — so the stored position is passed in, and only a
+    // write that newly strands units is rejected.
+    if trade.trade_type != super::model::TradeType::Sell
+        && let Some(back_dated) = crate::domain::whole_holding::db_back_dated_parcel(
+            &mut tx,
+            trade.listing_id,
+            trade.date,
+            existing.as_ref().map(|e| (e.listing_id, e.date)),
+        )
+        .await?
+    {
+        return Err(UpsertError::BackDatedOverWholeHolding(back_dated));
+    }
+
     // A return of capital on this listing reduces the parcel's cost base in
     // the *parcel's* own currency, so a Buy/DRP recorded in another one is a
     // state the cost-base reports refuse to compute over. This is the parcel
@@ -711,6 +745,11 @@ impl From<UpsertError> for ApiError {
                  reduces each parcel's cost base in the parcel's own currency, and amounts are \
                  never netted across currencies, so the two must agree"
             )),
+            // Back-dated behind an operation that consumed the whole holding
+            // → 422 naming each operation, its date and the delete-enter-redo
+            // recovery, built once in `domain::whole_holding` so every
+            // parcel-creating path says it identically.
+            UpsertError::BackDatedOverWholeHolding(e) => ApiError::Unprocessable(e.message()),
             UpsertError::QuantityBelowAllocated => ApiError::unprocessable(
                 "the new quantity is below what Sell allocations already draw from this parcel",
             ),

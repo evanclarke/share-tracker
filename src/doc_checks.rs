@@ -910,6 +910,17 @@ fn rollover_consistency_cross_check_documented() {
     assert!(API_MD.contains("this year\'s disposals are costed on"));
     // README feature line.
     assert!(README_MD.contains("**Rollover consistency cross-check**"));
+    // The second fault it reports (SCENARIOS V-d): an operation that consumed
+    // the whole holding but left a parcel behind, the `kind` that exists only
+    // for it, and the write-time refusal that stops any new one appearing.
+    assert!(API_MD.contains("**unconsumed parcel**"));
+    assert!(API_MD.contains("`WorthlessShares`"));
+    assert!(
+        API_MD
+            .contains("**Entering a parcel behind an operation that consumed the whole holding.**")
+    );
+    assert!(API_MD.contains("delete that operation, enter the parcel, then run it again"));
+    assert!(README_MD.contains("**unconsumed**"));
 }
 
 /// Known-limitation pin (SCENARIOS M-12, decided 2026-08-19): the FITO line

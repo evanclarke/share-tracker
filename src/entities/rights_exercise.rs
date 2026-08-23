@@ -92,6 +92,15 @@ pub enum ExerciseError {
     /// units held at the record date.
     #[error("the units exercised exceed the entitlement earned at the record date")]
     ExceedsEntitlement,
+    /// The exercise Buy is dated on or before an executed whole-holding
+    /// operation of its listing — a scrip-for-scrip exchange, a demerger, or a
+    /// worthless-shares recognise. Each consumed every parcel open at its own
+    /// date, so an exercise behind one can never be consumed and stays open
+    /// forever (SCENARIOS V-d). The rights side of
+    /// `trade::UpsertError::BackDatedOverWholeHolding`; wording and recovery in
+    /// `domain::whole_holding`. Mapped to 422.
+    #[error("this parcel is dated behind a whole-holding operation: {0}")]
+    BackDatedOverWholeHolding(#[source] crate::domain::whole_holding::BackDatedParcel),
 }
 
 impl From<ExerciseError> for ApiError {
@@ -116,6 +125,8 @@ impl From<ExerciseError> for ApiError {
                 "the units exercised exceed the entitlement earned by the holding at the record \
                  date",
             ),
+            // The same body every parcel-creating path answers for this fact.
+            ExerciseError::BackDatedOverWholeHolding(e) => ApiError::Unprocessable(e.message()),
             ExerciseError::Db(err) => err.into(),
         }
     }
@@ -239,6 +250,22 @@ pub async fn db_exercise(
     let record_date = action.date;
     if body.date < record_date {
         return Err(ExerciseError::BeforeRecordDate);
+    }
+
+    // A whole-holding operation of this listing that has already run consumed
+    // every parcel open at its own date and cannot reach back for this one, so
+    // an exercise Buy dated on or before it would stay open forever
+    // (SCENARIOS V-d). Compared on the Buy's own date, the exercise date
+    // (`domain::whole_holding`).
+    if let Some(back_dated) = crate::domain::whole_holding::db_back_dated_parcel(
+        &mut tx,
+        action.listing_id,
+        body.date,
+        None,
+    )
+    .await?
+    {
+        return Err(ExerciseError::BackDatedOverWholeHolding(back_dated));
     }
 
     let splits = corporate_action::db_splits_for_listing(&mut *tx, action.listing_id).await?;
@@ -861,5 +888,69 @@ mod tests {
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
         let resp = app.delete("/corporate_actions/10").await;
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    /// SCENARIOS V-d: an exercise Buy is dated by the body, so it can land
+    /// behind a whole-holding operation of the listing that has already run —
+    /// units the operation could never consume. Refused with the same `422`
+    /// every parcel-creating path answers, and nothing is written.
+    #[tokio::test]
+    async fn exercise_dated_before_an_executed_recognise_is_refused() {
+        let pool = test_pool().await;
+        test_support::recognised_worthless_listing(
+            &pool,
+            1,
+            "DEAD",
+            d(2024, 1, 2),
+            90,
+            d(2024, 12, 2),
+        )
+        .await;
+        // A rights issue announced while the company was still alive.
+        corporate_action::db_upsert(
+            &pool,
+            &CorporateAction {
+                id: 91,
+                listing_id: 1,
+                date: d(2024, 2, 6),
+                kind: ActionKind::RightsIssue {
+                    rights_units: Decimal::ONE,
+                    rights_held_units: Decimal::ONE,
+                    exercise_price: Decimal::ONE,
+                    currency: "AUD".to_string(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+        let body = ExerciseBody {
+            date: d(2024, 3, 5),
+            units: Decimal::from(10),
+            rights_cost: None,
+            fx_rate: None,
+            holding_account_id: 1,
+        };
+        let err = db_exercise(&pool, 91, &body).await.unwrap_err();
+        assert!(
+            matches!(err, ExerciseError::BackDatedOverWholeHolding(_)),
+            "expected the whole-holding refusal, got: {err:?}"
+        );
+
+        let response = ApiClient::over(router().with_state(pool.clone()))
+            .post(
+                "/corporate_actions/91/exercise",
+                &serde_json::json!({"date": "2024-03-05", "units": "10"}),
+            )
+            .await;
+        let (status, detail) = response.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(detail.contains("worthless-shares recognise"), "{detail}");
+        let exercised: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM trades WHERE rights_action_id = 91)")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(!exercised);
     }
 }

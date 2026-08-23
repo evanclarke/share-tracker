@@ -277,10 +277,27 @@ Options offered:
 date, plus an *unconsumed parcel* problem on `rollover_consistency` for any state that predates
 the guard.
 
-- [ ] Refuse a parcel-creating write dated on or before an executed exchange/demerge/recognise,
+- [x] Refuse a parcel-creating write dated on or before an executed exchange/demerge/recognise,
       with a test per affected operation and per parcel-creating path.
-- [ ] Add the unconsumed-parcel problem to `rollover_consistency` (and so the annual tax report's
+- [x] Add the unconsumed-parcel problem to `rollover_consistency` (and so the annual tax report's
       completeness section), with a test and the `docs/API.md` entry.
+
+Done 2026-08-23. The shared rule lives in `domain::whole_holding`: the three operations' provenance
+columns are named once (`CLOSING_SELL_COLUMNS`), so the guard and the report can never disagree
+about what counts as a whole-holding operation, and the `422` body is built once
+(`BackDatedParcel::message`) for all eight refusals. The comparison is on the trade's own `date`,
+never `deemed_acquisition_date` — a rollover replacement and an inherited parcel both carry a deemed
+date decades earlier for the discount clock alone. Paths covered, enumerated from every non-test
+`INSERT INTO trades` in `src`: `PUT /trades/:id`, `PUT /inheritances/:id`, `POST
+/ess_statements/:id/vest`, `POST /corporate_actions/:id/exercise`, `POST /income/:id/reinvest`, and
+the replacement parcels of the scrip exchange (its *destination* listing), the demerger (its
+*demerged* listing) and the transfer — the two rollovers' source/head listings are already covered
+by their own "traded on or after" refusal. An **edit** of a parcel already sitting behind an
+operation is deliberately not refused: a consumed source parcel is behind one by definition, and
+that edit is the state the report exists to surface. `WorthlessShares` became a fourth
+`rollover_consistency` `kind` rather than a report of its own — it is one of the three operations,
+the row shape fits it exactly, and it reaches the annual tax report's completeness section for
+free; it stores no carried figures, so only the unconsumed-parcel check runs on it.
 
 ## SCENARIOS V-e — reinvesting into an already-closed DRP period brings forward nothing
 

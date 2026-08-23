@@ -75,7 +75,12 @@
 //! `trade::db_upsert` also cross-checks the written parcel against the
 //! return-of-capital payments on its listing, since a payment reduces a cost
 //! base in the parcel's own currency; that check runs here too, over this
-//! write's own transaction ([`UpsertError::PaymentCurrencyMismatch`]).
+//! write's own transaction ([`UpsertError::PaymentCurrencyMismatch`]). So does
+//! its whole-holding guard: a parcel dated on or before an executed
+//! scrip-for-scrip exchange, demerger, or worthless-shares recognise of the
+//! listing can never be consumed by it, and an inherited parcel is dated the
+//! date of death, which is as freely back-dated as any Buy
+//! ([`UpsertError::BackDatedOverWholeHolding`], `domain::whole_holding`).
 //!
 //! A new check added to `trade::check_amounts` therefore needs a line here, and
 //! either an argument that the inheritance satisfies it or a guard that makes
@@ -305,6 +310,15 @@ pub enum UpsertError {
         payment_currency: String,
         parcel_currency: String,
     },
+    /// The inherited parcel is dated (date of death) on or before an executed
+    /// whole-holding operation of its listing — a scrip-for-scrip exchange, a
+    /// demerger, or a worthless-shares recognise. Each consumed every parcel
+    /// open at its own date, so this one can never be consumed and stays open
+    /// forever (SCENARIOS V-d). The inheritance side of
+    /// `trade::UpsertError::BackDatedOverWholeHolding`; wording and recovery in
+    /// `domain::whole_holding`. Mapped to 422.
+    #[error("this parcel is dated behind a whole-holding operation: {0}")]
+    BackDatedOverWholeHolding(#[source] crate::domain::whole_holding::BackDatedParcel),
 }
 
 impl From<UpsertError> for ApiError {
@@ -385,6 +399,9 @@ impl From<UpsertError> for ApiError {
                  reduces each parcel's cost base in the parcel's own currency, and amounts are \
                  never netted across currencies, so the two must agree"
             )),
+            // The same body `PUT /trades` answers for the same fact, built in
+            // `domain::whole_holding` so the two cannot drift.
+            UpsertError::BackDatedOverWholeHolding(e) => ApiError::Unprocessable(e.message()),
             UpsertError::Db(err) => err.into(),
         }
     }
@@ -566,6 +583,14 @@ pub async fn db_upsert(pool: &SqlitePool, inh: &Inheritance) -> Result<(), Upser
     check_listing_currency(&mut tx, inh).await?;
     check_convertible(&mut tx, inh).await?;
 
+    // The inheritance's stored position, for the whole-holding guard below: an
+    // edit of a parcel already behind an operation must stay possible.
+    let stored_position: Option<(i64, NaiveDate)> =
+        sqlx::query_as("SELECT listing_id, date_of_death FROM inheritances WHERE id = ?")
+            .bind(inh.id)
+            .fetch_optional(&mut *tx)
+            .await?;
+
     let existing_buy = linked_buy_id(&mut tx, inh.id).await?;
     if let Some(buy_id) = existing_buy
         && buy_drawn_on(&mut tx, buy_id).await?
@@ -653,6 +678,29 @@ pub async fn db_upsert(pool: &SqlitePool, inh: &Inheritance) -> Result<(), Upser
     .bind(inh.deceased_acquisition_date)
     .execute(&mut *tx)
     .await?;
+
+    // A scrip-for-scrip exchange, demerger, or worthless-shares recognise of
+    // this listing that has already run consumed every parcel open at its own
+    // date and cannot reach back for this one: an inheritance dated on or
+    // before it would stay open forever (SCENARIOS V-d). `trade::db_upsert`
+    // runs this over an ordinary Buy; the inheritance's Buy does not go
+    // through it, so the same check runs here, on the Buy's own date — the
+    // date of death — and not on the deemed acquisition date, which is
+    // legitimately decades earlier (`domain::whole_holding`).
+    // As on the trade path, an *edit* of a parcel already behind one is left
+    // alone — refusing it would make the state the rollover-consistency report
+    // asks about unfixable — so the stored position is passed in and only a
+    // write that newly strands units is rejected.
+    if let Some(back_dated) = crate::domain::whole_holding::db_back_dated_parcel(
+        &mut tx,
+        inh.listing_id,
+        inh.date_of_death,
+        stored_position,
+    )
+    .await?
+    {
+        return Err(UpsertError::BackDatedOverWholeHolding(back_dated));
+    }
 
     // A return of capital on this listing reduces the parcel's cost base in
     // the *parcel's* own currency, so a parcel recorded in another one is a
@@ -1724,5 +1772,79 @@ mod tests {
         let detail = resp.text().to_string();
         assert!(detail.contains("after today"), "detail: {detail}");
         assert!(db_get(&pool, 1).await.unwrap().is_none());
+    }
+
+    /// SCENARIOS V-d: an inheritance is dated the date of death, which is as
+    /// freely back-dated as any Buy — and a worthless-shares recognise that has
+    /// already run consumed every parcel of the listing open at its date, so
+    /// the inherited units could never be consumed by it. Refused with the same
+    /// `422` every parcel-creating path answers.
+    #[tokio::test]
+    async fn db_an_inheritance_dated_before_an_executed_recognise_is_refused() {
+        let pool = test_pool().await;
+        test_support::recognised_worthless_listing(
+            &pool,
+            1,
+            "DEAD",
+            ymd(2024, 1, 2),
+            90,
+            ymd(2024, 6, 13),
+        )
+        .await;
+        let inherited = Inheritance {
+            date_of_death: ymd(2024, 3, 1),
+            lpr_expenditure: Decimal::ZERO,
+            lpr_expenditure_date: None,
+            ..post_cgt(1)
+        };
+        let err = db_upsert(&pool, &inherited).await.unwrap_err();
+        assert!(
+            matches!(err, UpsertError::BackDatedOverWholeHolding(_)),
+            "expected the whole-holding refusal, got: {err:?}"
+        );
+    }
+
+    /// The same fact through the endpoint: a `422` naming the operation, its
+    /// date and the recovery, with nothing written.
+    #[tokio::test]
+    async fn api_an_inheritance_dated_before_an_executed_recognise_is_422() {
+        let pool = test_pool().await;
+        test_support::recognised_worthless_listing(
+            &pool,
+            1,
+            "DEAD",
+            ymd(2024, 1, 2),
+            90,
+            ymd(2024, 6, 13),
+        )
+        .await;
+        let body = serde_json::json!({
+            "listing_id": 1,
+            "holding_account_id": 1,
+            "quantity": "25",
+            "date_of_death": "2024-03-01",
+            "cost_base_rule": "DeceasedCostBase",
+            "cost_base": "1000",
+            "lpr_expenditure": "0",
+            "lpr_expenditure_date": null,
+            "deceased_acquisition_date": "2020-02-01",
+            "currency": "AUD",
+            "fx_rate": "1"
+        });
+        let client = ApiClient::over(router().with_state(pool.clone()));
+        let response = client.put("/inheritances/1", &body).await;
+        let (status, detail) = response.status_and_body();
+        assert_eq!(status, axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(detail.contains("worthless-shares recognise"), "{detail}");
+        assert!(detail.contains("2024-06-13"), "{detail}");
+        assert!(
+            detail.contains("Delete that operation, enter this parcel, then run it again"),
+            "{detail}"
+        );
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM inheritances")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
     }
 }

@@ -190,6 +190,17 @@ pub enum ReinvestError {
     /// V-b). Carries both dates so the rejection can name them.
     #[error("a DRP reinvestment dated {later} already follows this one, dated {date}")]
     LaterReinvestmentExists { date: NaiveDate, later: NaiveDate },
+    /// Create refused: the DRP trade would be dated on or before an executed
+    /// whole-holding operation of its listing — a scrip-for-scrip exchange, a
+    /// demerger, or a worthless-shares recognise. Each consumed every parcel
+    /// open at its own date, so units reinvested behind one can never be
+    /// consumed and stay open forever (SCENARIOS V-d). The distribution's
+    /// `date_paid` is only the *default* trade date, and the body may state an
+    /// earlier one, so the check is on the date the trade will carry. The DRP
+    /// side of `trade::UpsertError::BackDatedOverWholeHolding`; wording and
+    /// recovery in `domain::whole_holding`. Mapped to 422.
+    #[error("this parcel is dated behind a whole-holding operation: {0}")]
+    BackDatedOverWholeHolding(#[source] crate::domain::whole_holding::BackDatedParcel),
 }
 
 impl From<ReinvestError> for ApiError {
@@ -256,6 +267,8 @@ impl From<ReinvestError> for ApiError {
                      (DELETE /income/:id/reinvest) and re-enter them in date order"
                 ))
             }
+            // The same body every parcel-creating path answers for this fact.
+            ReinvestError::BackDatedOverWholeHolding(e) => ApiError::Unprocessable(e.message()),
             ReinvestError::Db(err) => err.into(),
         }
     }
@@ -381,6 +394,18 @@ pub async fn db_reinvest(
     // DRP units are issued by the registry, not market-settled, so it is the
     // settlement date too.
     let date = body.date.unwrap_or(date_paid);
+
+    // A whole-holding operation of this listing that has already run consumed
+    // every parcel open at its own date and cannot reach back for this one, so
+    // a DRP dated on or before it would stay open forever (SCENARIOS V-d).
+    // Checked on `date` — the date the trade will carry, which the body may
+    // state ahead of the distribution's own `date_paid` default
+    // (`domain::whole_holding`).
+    if let Some(back_dated) =
+        crate::domain::whole_holding::db_back_dated_parcel(&mut tx, listing_id, date, None).await?
+    {
+        return Err(ReinvestError::BackDatedOverWholeHolding(back_dated));
+    }
 
     // Reinvestments are entered in payment order. Which trades are *in* the
     // period is the distribution's entitlement date
@@ -2449,5 +2474,61 @@ mod tests {
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
         let resp = app.delete("/income/99/reinvest").await;
         assert_eq!(resp.status, StatusCode::NOT_FOUND);
+    }
+
+    /// SCENARIOS V-d: a reinvestment's DRP trade is dated the distribution's
+    /// `date_paid` by default and by the body when one is supplied, so it can
+    /// land behind a whole-holding operation of the listing that has already
+    /// run — units that operation could never consume. Refused both ways with
+    /// the same `422` every parcel-creating path answers, and nothing written.
+    #[tokio::test]
+    async fn reinvest_dated_before_an_executed_recognise_is_refused() {
+        let pool = test_pool().await;
+        test_support::recognised_worthless_listing(
+            &pool,
+            1,
+            "DEAD",
+            "2024-01-02".parse().unwrap(),
+            90,
+            "2024-12-02".parse().unwrap(),
+        )
+        .await;
+        enrol(&pool, 1, ResidualHandling::CarryForward).await;
+        insert_distribution(&pool, 1, 1, Decimal::from(100), Decimal::ZERO).await;
+
+        // The default trade date — the distribution's own `date_paid`.
+        let err = db_reinvest(&pool, 1, &body("2")).await.unwrap_err();
+        assert!(
+            matches!(err, ReinvestError::BackDatedOverWholeHolding(_)),
+            "expected the whole-holding refusal, got: {err:?}"
+        );
+
+        // …and a date stated on the body, which is the other way in.
+        let stated = ReinvestBody {
+            date: Some("2024-02-06".parse().unwrap()),
+            ..body("2")
+        };
+        let err = db_reinvest(&pool, 1, &stated).await.unwrap_err();
+        assert!(
+            matches!(err, ReinvestError::BackDatedOverWholeHolding(_)),
+            "expected the whole-holding refusal, got: {err:?}"
+        );
+
+        let response = client(&pool)
+            .post(
+                "/income/1/reinvest",
+                &serde_json::json!({"reinvestment_price": "2"}),
+            )
+            .await;
+        let (status, detail) = response.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(detail.contains("worthless-shares recognise"), "{detail}");
+        let reinvested: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM income WHERE id = 1 AND reinvestment_trade_id IS NOT NULL)",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(!reinvested);
     }
 }

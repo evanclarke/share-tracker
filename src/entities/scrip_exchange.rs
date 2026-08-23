@@ -99,6 +99,17 @@ pub enum ExchangeError {
     /// fix the data before exchanging.
     #[error("the original listing has a trade dated on or after the exchange date")]
     TradedOnOrAfterExchangeDate,
+    /// The **replacement** listing already carries a whole-holding operation of
+    /// its own dated on or after this exchange's date — a scrip-for-scrip
+    /// exchange, a demerger, or a worthless-shares recognise. The replacement
+    /// parcels are dated the exchange date, so they would land behind it and
+    /// could never be consumed by it (SCENARIOS V-d). The original listing
+    /// needs no such check: [`TradedOnOrAfterExchangeDate`](ExchangeError::TradedOnOrAfterExchangeDate)
+    /// already refuses *any* trade of it dated on or after the exchange, an
+    /// operation's closing Sell included. Wording and recovery in
+    /// `domain::whole_holding`. Mapped to 422.
+    #[error("the replacement parcels are dated behind a whole-holding operation: {0}")]
+    BackDatedOverWholeHolding(#[source] crate::domain::whole_holding::BackDatedParcel),
     /// The Sell-side invariants failed — defensive as to the allocations,
     /// which the exchange constructs to satisfy them; the reachable case is an
     /// exchange dated after today (SCENARIOS S-10), which the 422 names.
@@ -131,6 +142,23 @@ pub async fn db_exchange(pool: &SqlitePool, action_id: i64) -> Result<Exchange, 
     };
     let terms = Terms::of(&action.kind)?;
     check_exchangeable(&mut tx, action_id, action.listing_id, action.date).await?;
+
+    // The replacement parcels are dated the exchange date on the *replacement*
+    // listing, so if that listing has itself been taken over, demerged or
+    // written off since — dated on or after this exchange — they would land
+    // behind an operation that consumed the whole holding and could never be
+    // consumed by it (SCENARIOS V-d). Checked before anything is written, so
+    // the exchange's own rows cannot be mistaken for the offender.
+    if let Some(back_dated) = crate::domain::whole_holding::db_back_dated_parcel(
+        &mut tx,
+        terms.scrip_listing_id,
+        action.date,
+        None,
+    )
+    .await?
+    {
+        return Err(ExchangeError::BackDatedOverWholeHolding(back_dated));
+    }
 
     // The original listing's open parcels, costed by the shared rollover
     // machinery (as-acquired units internally; allocations re-based across
@@ -394,6 +422,9 @@ impl From<ExchangeError> for ApiError {
                 "the original listing has a trade dated on or after the exchange date — \
                  fix that trade before exchanging",
             ),
+            // The same body every parcel-creating path answers for this fact —
+            // here the parcels are the exchange's own replacements.
+            ExchangeError::BackDatedOverWholeHolding(e) => ApiError::Unprocessable(e.message()),
             ExchangeError::Sell(err) => {
                 tracing::warn!(
                     error = ?err,
@@ -1222,5 +1253,69 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(exists, 0);
+    }
+
+    /// SCENARIOS V-d, the exchange's own output: the replacement parcels are
+    /// dated the exchange date on the **replacement** listing, so if that
+    /// listing has since been written off — or taken over, or demerged — dated
+    /// on or after this exchange, they would land behind an operation that
+    /// consumed the whole holding and could never be consumed by it. Refused
+    /// before anything is written; the original listing needs no such check,
+    /// since `TradedOnOrAfterExchangeDate` already refuses any trade of it
+    /// dated on or after the exchange.
+    #[tokio::test]
+    async fn exchange_into_a_listing_already_written_off_is_refused() {
+        let pool = test_pool().await;
+        // NEW has itself been recognised worthless, after the exchange date.
+        test_support::recognised_worthless_listing(
+            &pool,
+            2,
+            "NEW",
+            d(2024, 1, 2),
+            90,
+            d(2024, 9, 2),
+        )
+        .await;
+        insert_listing(&pool, 1, "OLD").await;
+        test_support::buy(1, 1)
+            .date(d(2024, 1, 2))
+            .insert(&pool)
+            .await;
+        corporate_action::db_upsert(
+            &pool,
+            &CorporateAction {
+                id: 10,
+                listing_id: 1,
+                date: d(2024, 6, 10),
+                kind: ActionKind::ScripForScrip {
+                    scrip_listing_id: 2,
+                    scrip_new_units: Decimal::ONE,
+                    scrip_old_units: Decimal::ONE,
+                    scrip_cash_per_unit: None,
+                    scrip_market_value: None,
+                    scrip_cash_currency: None,
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+        let err = db_exchange(&pool, 10).await.unwrap_err();
+        assert!(
+            matches!(err, ExchangeError::BackDatedOverWholeHolding(_)),
+            "expected the whole-holding refusal, got: {err:?}"
+        );
+        let response = client(&pool)
+            .post_empty("/corporate_actions/10/exchange")
+            .await;
+        let (status, detail) = response.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(detail.contains("worthless-shares recognise"), "{detail}");
+        let created: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM trades WHERE scrip_action_id = 10)")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(!created);
     }
 }

@@ -98,6 +98,15 @@ pub enum VestError {
     /// at parity. Mapped to 422.
     #[error("no ATO FX rate for {currency} in {month} and the ESS statement states none")]
     MissingFxRate { currency: String, month: String },
+    /// The vest Buy is dated (the taxing point) on or before an executed
+    /// whole-holding operation of its listing — a scrip-for-scrip exchange, a
+    /// demerger, or a worthless-shares recognise. Each consumed every parcel
+    /// open at its own date, so a vest behind one can never be consumed and
+    /// stays open forever (SCENARIOS V-d). The ESS side of
+    /// `trade::UpsertError::BackDatedOverWholeHolding`; wording and recovery in
+    /// `domain::whole_holding`. Mapped to 422.
+    #[error("this parcel is dated behind a whole-holding operation: {0}")]
+    BackDatedOverWholeHolding(#[source] crate::domain::whole_holding::BackDatedParcel),
 }
 
 pub fn router() -> Router<SqlitePool> {
@@ -143,6 +152,22 @@ pub async fn db_vest(pool: &SqlitePool, statement_id: i64) -> Result<Trade, Vest
 
     if quantity <= Decimal::ZERO || price <= Decimal::ZERO {
         return Err(VestError::NothingToVest);
+    }
+
+    // A whole-holding operation of this listing that has already run consumed
+    // every parcel open at its own date and cannot reach back for this one, so
+    // a vest dated on or before it would stay open forever (SCENARIOS V-d).
+    // The Buy is dated the taxing point, which is what is compared
+    // (`domain::whole_holding`).
+    if let Some(back_dated) = crate::domain::whole_holding::db_back_dated_parcel(
+        &mut tx,
+        listing_id,
+        taxing_point_date,
+        None,
+    )
+    .await?
+    {
+        return Err(VestError::BackDatedOverWholeHolding(back_dated));
     }
 
     // The rate the Buy carries. `trades.fx_rate` is not a constant — it is the
@@ -229,6 +254,8 @@ impl From<VestError> for ApiError {
                  that month's rates or record the rate the employer used on the statement; \
                  vesting without one would cost the parcel at parity (1 AUD per {currency})"
             )),
+            // The same body every parcel-creating path answers for this fact.
+            VestError::BackDatedOverWholeHolding(e) => ApiError::Unprocessable(e.message()),
             VestError::Db(err) => err.into(),
         }
     }
@@ -783,5 +810,45 @@ mod tests {
             .post_empty("/ess_statements/99/vest")
             .await;
         assert_eq!(resp.status, StatusCode::NOT_FOUND);
+    }
+
+    /// SCENARIOS V-d: the vest Buy is dated the taxing point, so a statement
+    /// whose taxing point predates an executed whole-holding operation of its
+    /// listing would create units that operation could never consume. Refused
+    /// with the same `422` every parcel-creating path answers, and nothing is
+    /// written.
+    #[tokio::test]
+    async fn vest_dated_before_an_executed_recognise_is_refused() {
+        let pool = test_pool().await;
+        test_support::recognised_worthless_listing(
+            &pool,
+            1,
+            "DEAD",
+            ymd(2024, 1, 2),
+            90,
+            ymd(2024, 12, 2),
+        )
+        .await;
+        insert_statement(&pool, 1, "100", "6", "AUD").await;
+
+        let err = db_vest(&pool, 1).await.unwrap_err();
+        assert!(
+            matches!(err, VestError::BackDatedOverWholeHolding(_)),
+            "expected the whole-holding refusal, got: {err:?}"
+        );
+
+        let response = ApiClient::over(router().with_state(pool.clone()))
+            .post_empty("/ess_statements/1/vest")
+            .await;
+        let (status, detail) = response.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(detail.contains("worthless-shares recognise"), "{detail}");
+        assert!(detail.contains("2024-12-02"), "{detail}");
+        let vested: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM trades WHERE ess_statement_id = 1)")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(!vested);
     }
 }

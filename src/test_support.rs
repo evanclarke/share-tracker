@@ -597,6 +597,89 @@ impl ListingBuilder {
     }
 }
 
+/// A listing whose **whole holding** has been closed by an executed
+/// worthless-shares recognise — the cheapest of the three whole-holding
+/// operations to stand up, and the fixture the parcel-creating write paths'
+/// back-dating guard tests hang off (`domain::whole_holding`, SCENARIOS V-d).
+///
+/// Creates listing `listing_id` (ticker `ticker`) with one 100-unit Buy dated
+/// `parcel_date`, a `WorthlessShares` corporate action `action_id` dated
+/// `event_date`, and runs `POST /corporate_actions/:id/recognise` over them, so
+/// afterwards every parcel of the listing is consumed as at `event_date` and a
+/// parcel dated on or before it can never be.
+pub async fn recognised_worthless_listing(
+    pool: &SqlitePool,
+    listing_id: i64,
+    ticker: &str,
+    parcel_date: NaiveDate,
+    action_id: i64,
+    event_date: NaiveDate,
+) {
+    listing(listing_id)
+        .ticker(ticker)
+        .security_type(crate::entities::listing::SecurityType::Share)
+        .insert(pool)
+        .await;
+    buy(listing_id * 1000, listing_id)
+        .date(parcel_date)
+        .settlement(parcel_date)
+        .insert(pool)
+        .await;
+    crate::entities::corporate_action::db_upsert(
+        pool,
+        &crate::entities::corporate_action::CorporateAction {
+            id: action_id,
+            listing_id,
+            date: event_date,
+            kind: crate::entities::corporate_action::ActionKind::WorthlessShares {
+                worthless_event: crate::entities::corporate_action::WorthlessEvent::C2Cancellation,
+            },
+        },
+    )
+    .await
+    .unwrap();
+    crate::entities::worthless::db_recognise(pool, action_id)
+        .await
+        .unwrap();
+}
+
+/// A Buy written **straight into `trades`**, bypassing `trade::db_upsert` and
+/// therefore its write-time checks.
+///
+/// The one thing it is for: standing up the pre-guard state
+/// `reports::rollover_consistency`'s *unconsumed parcel* problem exists to
+/// report (SCENARIOS V-d). Since the guard landed, a parcel dated on or before
+/// an executed whole-holding operation is unreachable through every write path,
+/// so a database already in that state — entered before the guard — can only be
+/// reproduced by writing the row the way that older build did. Use
+/// [`buy`] for everything else; a fixture that skips the invariants is a
+/// fixture that can lie.
+pub async fn insert_parcel_bypassing_checks(
+    pool: &SqlitePool,
+    id: i64,
+    listing_id: i64,
+    date: NaiveDate,
+    quantity: &str,
+    price: &str,
+) {
+    sqlx::query(
+        "INSERT INTO trades \
+         (id, trade_type, date, settlement_date, settlement_date_source, listing_id, \
+          average_price, quantity, currency, brokerage, gst_on_brokerage, \
+          brokerage_currency, fx_rate, holding_account_id) \
+         VALUES (?, 'Buy', ?, ?, 'stated', ?, ?, ?, 'AUD', '0', '0', 'AUD', '1', 1)",
+    )
+    .bind(id)
+    .bind(date)
+    .bind(date)
+    .bind(listing_id)
+    .bind(price)
+    .bind(quantity)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
 /// Closing-price fixture: a provider-fetched ok price of 10 in the listing's
 /// quote currency. `.errored(msg)` turns it into a recorded fetch failure and
 /// `.manual(sourced_from, reason)` into a hand-entered price — each keeps the

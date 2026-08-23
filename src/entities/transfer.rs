@@ -137,6 +137,23 @@ pub enum TransferError {
     /// dated after today (SCENARIOS S-10).
     #[error("the transfer-out Sell was rejected: {0}")]
     Sell(#[source] sell::SellError),
+    /// The listing already carries a whole-holding operation dated on or after
+    /// the transfer date — a scrip-for-scrip exchange, a demerger, or a
+    /// worthless-shares recognise. The transfer-in parcels are dated the
+    /// transfer's own date, so they would land behind an operation that
+    /// consumed every parcel open at its date and could never be consumed by it
+    /// (SCENARIOS V-d). A transfer *itself* is not one of the three — it moves
+    /// a quantity the taxpayer chose, so a parcel left behind is legitimate —
+    /// but the parcels it creates are subject to the same rule as any other,
+    /// compared on the trade's own `date` and never on the deemed acquisition
+    /// date the transfer-in carries forward. Defence in depth: the source
+    /// parcels an in-range transfer would draw on were consumed by that
+    /// operation, so `sell::SellError::PurchaseQuantityExceeded` normally
+    /// refuses first — this catches the case where the state already predates
+    /// the guard. Wording and recovery in `domain::whole_holding`. Mapped to
+    /// 422.
+    #[error("the transfer-in parcels are dated behind a whole-holding operation: {0}")]
+    BackDatedOverWholeHolding(#[source] crate::domain::whole_holding::BackDatedParcel),
 }
 
 impl From<sell::SellError> for TransferError {
@@ -164,6 +181,9 @@ impl From<TransferError> for ApiError {
             TransferError::ListingMismatch => ApiError::unprocessable(
                 "a selected parcel does not belong to the transfer's listing",
             ),
+            // The same body every parcel-creating path answers for this fact —
+            // here the parcels are the transfer's own transfer-ins.
+            TransferError::BackDatedOverWholeHolding(e) => ApiError::Unprocessable(e.message()),
             TransferError::FeeMarketPriceMissing => ApiError::unprocessable(
                 "a network fee was specified without a positive per-unit market value for the \
                  fee crypto — the disposal needs its capital proceeds",
@@ -275,6 +295,22 @@ pub async fn db_transfer(
         .await?;
     if exists {
         return Err(TransferError::AlreadyExists);
+    }
+
+    // The transfer-in parcels are dated the transfer date, so an executed
+    // scrip-for-scrip exchange, demerger, or worthless-shares recognise of this
+    // listing dated on or after it would leave them stranded — consumed by
+    // nothing, open forever (SCENARIOS V-d). Checked before anything is
+    // written, so this transfer's own rows cannot be mistaken for the offender.
+    if let Some(back_dated) = crate::domain::whole_holding::db_back_dated_parcel(
+        &mut tx,
+        body.listing_id,
+        body.date,
+        None,
+    )
+    .await?
+    {
+        return Err(TransferError::BackDatedOverWholeHolding(back_dated));
     }
 
     // A bad listing or account id fails the FK here (→ 422 via the shared map).
@@ -1717,5 +1753,64 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(transfers, 0);
+    }
+
+    /// SCENARIOS V-d, the transfer's own output: a transfer-in parcel takes the
+    /// **transfer's** date (its deemed acquisition date is the moved parcel's,
+    /// decades earlier, and is deliberately not what is compared), so it can
+    /// land behind a whole-holding operation of the listing that has already
+    /// run.
+    ///
+    /// Reaching that state needs a source parcel the operation left open, which
+    /// nothing can create any more — so it is built the way a pre-guard build
+    /// wrote it, straight into `trades`
+    /// (`test_support::insert_parcel_bypassing_checks`). Ordinarily the
+    /// operation has consumed everything the transfer could draw on and
+    /// `SellError::PurchaseQuantityExceeded` refuses first; this is the guard
+    /// behind that.
+    #[tokio::test]
+    async fn transfer_in_dated_before_an_executed_recognise_is_refused() {
+        let pool = test_pool().await;
+        test_support::recognised_worthless_listing(
+            &pool,
+            1,
+            "DEAD",
+            d(2024, 1, 2),
+            90,
+            d(2024, 6, 13),
+        )
+        .await;
+        // The stranded parcel a pre-guard build could write.
+        test_support::insert_parcel_bypassing_checks(&pool, 500, 1, d(2024, 3, 5), "40", "2").await;
+
+        let err = db_transfer(
+            &pool,
+            1,
+            &TransferBody {
+                listing_id: 1,
+                date: d(2024, 4, 2),
+                from_account_id: 1,
+                to_account_id: 2,
+                allocations: vec![AllocationInput {
+                    purchase_trade_id: 500,
+                    quantity_allocated: dec("40"),
+                }],
+                fee_allocations: Vec::new(),
+                fee_market_price: None,
+                fee_fx_rate: None,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, TransferError::BackDatedOverWholeHolding(_)),
+            "expected the whole-holding refusal, got: {err:?}"
+        );
+        let created: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM transfers WHERE id = 1)")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(!created);
     }
 }

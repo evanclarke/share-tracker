@@ -102,6 +102,17 @@ pub enum DemergeError {
     /// later-dated activity must be entered after demerging, not before.
     #[error("the head listing has a trade dated on or after the demerger date")]
     TradedOnOrAfterDemergerDate,
+    /// The **demerged** listing already carries a whole-holding operation of
+    /// its own dated on or after this demerger's date — a scrip-for-scrip
+    /// exchange, a demerger, or a worthless-shares recognise. The demerged
+    /// parcels are dated the demerger date, so they would land behind it and
+    /// could never be consumed by it (SCENARIOS V-d). The head listing needs no
+    /// such check: [`TradedOnOrAfterDemergerDate`](DemergeError::TradedOnOrAfterDemergerDate)
+    /// already refuses *any* trade of it dated on or after the demerger, an
+    /// operation's closing Sell included. Wording and recovery in
+    /// `domain::whole_holding`. Mapped to 422.
+    #[error("the demerged parcels are dated behind a whole-holding operation: {0}")]
+    BackDatedOverWholeHolding(#[source] crate::domain::whole_holding::BackDatedParcel),
     /// The Sell-side invariants failed — defensive as to the allocations,
     /// which the demerge constructs to satisfy them; the reachable case is a
     /// demerger dated after today (SCENARIOS S-10), which the 422 names.
@@ -147,6 +158,23 @@ pub async fn db_demerge(pool: &SqlitePool, action_id: i64) -> Result<Demerge, De
     };
 
     check_demergeable(&mut tx, action_id, action.listing_id, action.date).await?;
+
+    // The demerged parcels are dated the demerger date on the *demerged*
+    // listing, so if that listing has itself been taken over, demerged or
+    // written off since — dated on or after this demerger — they would land
+    // behind an operation that consumed the whole holding and could never be
+    // consumed by it (SCENARIOS V-d). Checked before anything is written, so
+    // this demerger's own rows cannot be mistaken for the offender.
+    if let Some(back_dated) = crate::domain::whole_holding::db_back_dated_parcel(
+        &mut tx,
+        demerger_listing_id,
+        action.date,
+        None,
+    )
+    .await?
+    {
+        return Err(DemergeError::BackDatedOverWholeHolding(back_dated));
+    }
 
     // The head listing's open parcels, costed by the shared rollover
     // machinery (as-acquired units internally; allocations re-based across
@@ -362,6 +390,9 @@ impl From<DemergeError> for ApiError {
                 "the head listing has a trade dated on or after the demerger date — \
                  enter later activity after demerging, not before",
             ),
+            // The same body every parcel-creating path answers for this fact —
+            // here the parcels are the demerger's own demerged Buys.
+            DemergeError::BackDatedOverWholeHolding(e) => ApiError::Unprocessable(e.message()),
             DemergeError::Sell(err) => {
                 tracing::warn!(error = ?err, "demerge rejected by a sell invariant");
                 // A future-dated demerger is the one Sell rejection a user can
@@ -1373,5 +1404,64 @@ mod tests {
             assert_eq!(t.fx_rate, dec("0.70"));
             assert_eq!(t.spot_fx_rate, Some(dec("0.6543")));
         }
+    }
+
+    /// SCENARIOS V-d, the demerger's own output: the demerged parcels are dated
+    /// the demerger date on the **demerged** listing, so if that listing has
+    /// since been written off — or taken over, or demerged — dated on or after
+    /// this demerger, they would land behind an operation that consumed the
+    /// whole holding and could never be consumed by it. Refused before anything
+    /// is written; the head listing needs no such check, since
+    /// `TradedOnOrAfterDemergerDate` already refuses any trade of it dated on
+    /// or after the demerger.
+    #[tokio::test]
+    async fn demerge_into_a_listing_already_written_off_is_refused() {
+        let pool = test_pool().await;
+        test_support::recognised_worthless_listing(
+            &pool,
+            2,
+            "SPIN",
+            d(2024, 1, 2),
+            90,
+            d(2024, 9, 2),
+        )
+        .await;
+        insert_listing(&pool, 1, "HEAD").await;
+        test_support::buy(1, 1)
+            .date(d(2024, 1, 2))
+            .insert(&pool)
+            .await;
+        corporate_action::db_upsert(
+            &pool,
+            &CorporateAction {
+                id: 10,
+                listing_id: 1,
+                date: d(2024, 6, 11),
+                kind: ActionKind::Demerger {
+                    demerger_listing_id: 2,
+                    demerger_new_units: Decimal::ONE,
+                    demerger_held_units: Decimal::from(5),
+                    demerger_cost_base_pct: Decimal::from(10),
+                    demerger_close_date: None,
+                    demerger_close_price: None,
+                    demerger_close_sourced_from: None,
+                    demerger_close_reason: None,
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+        let err = db_demerge(&pool, 10).await.unwrap_err();
+        assert!(
+            matches!(err, DemergeError::BackDatedOverWholeHolding(_)),
+            "expected the whole-holding refusal, got: {err:?}"
+        );
+        let created: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM trades WHERE demerger_action_id = 10)")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(!created);
     }
 }
