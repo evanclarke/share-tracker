@@ -52,6 +52,22 @@
 //! residual is paid out at unenrolment (see `drp_enrolment::db_upsert`), not
 //! picked up after re-enrolment.
 //!
+//! Because each reinvestment reads that chain backwards, **reinvestments are
+//! entered in payment order**: a reinvestment for which the period already
+//! holds a DRP trade dated *after* it is refused
+//! (`ReinvestError::LaterReinvestmentExists`). Entered mid-chain it would take
+//! its brought-forward cash from a trade that has already handed the same cash
+//! to a later one — spending it twice and leaving both parcels the wrong size
+//! (SCENARIOS V-b). That is the create-side half of the rule undo enforces
+//! from the other end (`ReinvestmentNotChainTail`, below): a reinvestment can
+//! only join the chain at its tail and can only leave it from its tail. The
+//! order is the **DRP trade's own date** (`trades.date` — the body's optional
+//! `date`, else the distribution's `date_paid`), tie-broken by trade id, which
+//! is the order this lookup and `drp_enrolment::recompute_residuals` both walk;
+//! a *same-dated* reinvestment is allowed, since a registry can pay two
+//! distributions on one day, and it joins the chain behind the trades already
+//! dated that day (its id is the higher).
+//!
 //! A distribution may be reinvested at most once — re-posting is rejected
 //! rather than creating a second trade.
 //!
@@ -166,6 +182,14 @@ pub enum ReinvestError {
     /// reinvestments first (LIFO).
     #[error("a later DRP reinvestment brought this trade's residual forward")]
     ReinvestmentNotChainTail,
+    /// Create refused: the enrolment period already holds a DRP trade dated
+    /// after the one this reinvestment would create, so it is not the chain's
+    /// latest. Reinvesting mid-chain would take brought-forward cash the later
+    /// trade has already spent — the sibling of `ReinvestmentNotChainTail`,
+    /// which refuses the same falsification from the undo side (SCENARIOS
+    /// V-b). Carries both dates so the rejection can name them.
+    #[error("a DRP reinvestment dated {later} already follows this one, dated {date}")]
+    LaterReinvestmentExists { date: NaiveDate, later: NaiveDate },
 }
 
 impl From<ReinvestError> for ApiError {
@@ -223,6 +247,15 @@ impl From<ReinvestError> for ApiError {
                 "a later DRP reinvestment for this listing and holding account brought this \
                  trade's residual forward — undo the later reinvestments first",
             ),
+            ReinvestError::LaterReinvestmentExists { date, later } => {
+                ApiError::unprocessable(format!(
+                    "this reinvestment would be dated {date}, but a DRP reinvestment dated \
+                     {later} already exists in the same enrolment period and holding account \
+                     — each reinvestment brings its cash forward from the one before it, so \
+                     they are entered in payment order; undo the later reinvestments \
+                     (DELETE /income/:id/reinvest) and re-enter them in date order"
+                ))
+            }
             ReinvestError::Db(err) => err.into(),
         }
     }
@@ -342,16 +375,32 @@ pub async fn db_reinvest(
         });
     }
 
-    // Residual brought forward = the most recent prior DRP trade's
-    // carried-forward, *within the same enrolment period and holding
-    // account*: an earlier period's trailing residual was paid out at its
-    // unenrolment, and another account runs its own chain, so the chain never
-    // crosses a period boundary or an account boundary. Membership is the
-    // period's own question (`drp_enrolment::PERIOD_TRADES_FROM_WHERE`,
-    // matched on each distribution's entitlement date); "most recent" is the
-    // payment order the cash actually moved in.
-    let prior_cf: Option<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-        "SELECT t.residual_carried_forward {} ORDER BY t.date DESC, t.id DESC LIMIT 1",
+    // The date the DRP trade will carry. Known here rather than at the INSERT
+    // because it is the axis the residual chain is ordered on, and the two
+    // checks below are both about where in that chain this reinvestment lands.
+    // DRP units are issued by the registry, not market-settled, so it is the
+    // settlement date too.
+    let date = body.date.unwrap_or(date_paid);
+
+    // Reinvestments are entered in payment order. Which trades are *in* the
+    // period is the distribution's entitlement date
+    // (`drp_enrolment::PERIOD_TRADES_FROM_WHERE`), but the residual chain runs
+    // in the order the cash moved — the DRP trade's own date, which is what
+    // the lookup below and `drp_enrolment::recompute_residuals` both walk. A
+    // reinvestment slipped in *behind* one already recorded would read its
+    // brought-forward cash from a trade that has already handed the same cash
+    // to that later one: the cash is spent twice and both parcels take the
+    // wrong quantity, with nothing to surface it afterwards (SCENARIOS V-b).
+    // So refuse, exactly as undo refuses a mid-chain delete
+    // (`ReinvestmentNotChainTail`) for the same reason: the chain is joined at
+    // its tail and left from its tail. Strictly later only — a registry can
+    // pay two distributions on one day, and a same-dated reinvestment joins
+    // the chain *behind* them, since the row about to be inserted takes an id
+    // above every existing one and the order is (date, id). The date named is
+    // the earliest offender: the reinvestment that would have picked this
+    // one's leftover up.
+    let later: Option<NaiveDate> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT t.date {} AND t.date > ? ORDER BY t.date, t.id LIMIT 1",
         *drp_enrolment::PERIOD_TRADES_FROM_WHERE
     )))
     .bind(listing_id)
@@ -359,6 +408,36 @@ pub async fn db_reinvest(
     .bind(period_start)
     .bind(period_end)
     .bind(period_end)
+    .bind(date)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some(later) = later {
+        return Err(ReinvestError::LaterReinvestmentExists { date, later });
+    }
+
+    // Residual brought forward = the most recent prior DRP trade's
+    // carried-forward, *within the same enrolment period and holding
+    // account*: an earlier period's trailing residual was paid out at its
+    // unenrolment, and another account runs its own chain, so the chain never
+    // crosses a period boundary or an account boundary. Membership is the
+    // period's own question (`drp_enrolment::PERIOD_TRADES_FROM_WHERE`,
+    // matched on each distribution's entitlement date); "most recent" is the
+    // payment order the cash actually moved in, bounded to trades dated at or
+    // before this one so the lookup can never read *forward* in time. "At or
+    // before" is strictly before on the chain's (date, id) order — the new
+    // row's id exceeds every existing one — and the refusal above is what
+    // makes the bound unreachable rather than merely defensive.
+    let prior_cf: Option<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT t.residual_carried_forward {} AND t.date <= ? \
+         ORDER BY t.date DESC, t.id DESC LIMIT 1",
+        *drp_enrolment::PERIOD_TRADES_FROM_WHERE
+    )))
+    .bind(listing_id)
+    .bind(holding_account_id)
+    .bind(period_start)
+    .bind(period_end)
+    .bind(period_end)
+    .bind(date)
     .fetch_optional(&mut *tx)
     .await?;
     let residual_bf = match prior_cf {
@@ -416,9 +495,6 @@ pub async fn db_reinvest(
         ResidualHandling::PayOut => (Decimal::ZERO, leftover),
     };
 
-    // DRP units are issued by the registry, not market-settled, so the
-    // settlement date is the trade date.
-    let date = body.date.unwrap_or(date_paid);
     let fx_rate = body.fx_rate.unwrap_or(Decimal::ONE);
 
     let result = sqlx::query(
@@ -457,8 +533,8 @@ pub async fn db_reinvest(
     // leftover is refunded, and under `CarryForward` it takes over as the
     // chain's tail — settling straight away when the period is already closed
     // (a distribution that went ex before an unenrolment but was paid after
-    // it), and handing the previous tail its carry back when the trade is
-    // back-dated into the middle of the chain.
+    // it), and handing the previous tail its carry back where that tail's own
+    // leftover had been settled.
     drp_enrolment::recompute_residuals(
         &mut tx,
         &drp_enrolment::DrpEnrolment {
@@ -2063,6 +2139,297 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(n, 0, "both DRP trades undone");
+    }
+
+    /// SCENARIOS V-b. The residual chain reads backwards, so it can only be
+    /// built forwards: reinvesting a distribution the period already has a
+    /// *later* DRP trade for is refused. Entered that way round it used to
+    /// bring cash forward from a reinvestment six months later — the March
+    /// parcel took the September one's $7 (which September had not left it),
+    /// September started from nothing, and both parcels came out the wrong
+    /// size with the same $7 spent twice.
+    #[tokio::test]
+    async fn reinvesting_behind_an_existing_reinvestment_is_refused() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        enrol(&pool, 1, ResidualHandling::CarryForward).await;
+        // March pays $105, September $107 — the measured case.
+        insert_distribution_dated(
+            &pool,
+            1,
+            1,
+            "2024-03-28",
+            None,
+            Decimal::from(105),
+            Decimal::ZERO,
+        )
+        .await;
+        insert_distribution_dated(
+            &pool,
+            2,
+            1,
+            "2024-09-30",
+            None,
+            Decimal::from(107),
+            Decimal::ZERO,
+        )
+        .await;
+
+        // September first, at $10 — legitimate on its own.
+        db_reinvest(&pool, 2, &body("10")).await.unwrap();
+
+        // March second is out of payment order and refused, naming both dates.
+        let err = db_reinvest(&pool, 1, &body("9")).await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ReinvestError::LaterReinvestmentExists { date, later }
+                    if date == "2024-03-28".parse().unwrap()
+                        && later == "2024-09-30".parse().unwrap()
+            ),
+            "expected LaterReinvestmentExists(2024-03-28, 2024-09-30), got: {err:?}"
+        );
+
+        // Nothing was written: no second DRP trade, and March stays unlinked.
+        let drps: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM trades WHERE trade_type = 'DRP'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(drps, 1);
+        let march = income::db_get(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(march.reinvestment_trade_id, None);
+    }
+
+    /// The same two distributions entered in payment order — the remedy the
+    /// refusal points at — chain correctly: March $105 at $9 buys 11 units and
+    /// carries $6, which September brings forward ($107 + $6 = $113) to buy 11
+    /// units at $10 and carry $3.
+    #[tokio::test]
+    async fn in_payment_order_the_two_distributions_chain_correctly() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        enrol(&pool, 1, ResidualHandling::CarryForward).await;
+        insert_distribution_dated(
+            &pool,
+            1,
+            1,
+            "2024-03-28",
+            None,
+            Decimal::from(105),
+            Decimal::ZERO,
+        )
+        .await;
+        insert_distribution_dated(
+            &pool,
+            2,
+            1,
+            "2024-09-30",
+            None,
+            Decimal::from(107),
+            Decimal::ZERO,
+        )
+        .await;
+
+        let march = db_reinvest(&pool, 1, &body("9")).await.unwrap();
+        assert_eq!(march.quantity, Decimal::from(11));
+        assert_eq!(march.residual_brought_forward, Decimal::ZERO);
+        assert_eq!(march.residual_carried_forward, Decimal::from(6));
+
+        let september = db_reinvest(&pool, 2, &body("10")).await.unwrap();
+        assert_eq!(september.residual_brought_forward, Decimal::from(6));
+        assert_eq!(september.quantity, Decimal::from(11));
+        assert_eq!(september.residual_carried_forward, Decimal::from(3));
+    }
+
+    /// The order the chain is judged on is the **trade's own date**, which the
+    /// body may state — so a reinvestment back-dated by `date` behind an
+    /// existing one is refused even though its distribution was paid later,
+    /// and one dated forward of it is accepted even though its distribution
+    /// was paid earlier. (Period membership is still the entitlement date;
+    /// both distributions sit in the same open period either way.)
+    #[tokio::test]
+    async fn the_chain_order_is_the_trades_date_not_the_distributions() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        enrol(&pool, 1, ResidualHandling::CarryForward).await;
+        insert_distribution_dated(
+            &pool,
+            1,
+            1,
+            "2024-03-28",
+            None,
+            Decimal::from(100),
+            Decimal::ZERO,
+        )
+        .await;
+        insert_distribution_dated(
+            &pool,
+            2,
+            1,
+            "2024-09-30",
+            None,
+            Decimal::from(100),
+            Decimal::ZERO,
+        )
+        .await;
+
+        // The March distribution's trade, dated forward of September's.
+        let dated_forward = ReinvestBody {
+            date: Some("2024-10-15".parse().unwrap()),
+            ..body("9")
+        };
+        db_reinvest(&pool, 1, &dated_forward).await.unwrap();
+
+        // September's own trade now lands behind it and is refused, though
+        // its distribution is the later of the two.
+        let err = db_reinvest(&pool, 2, &body("9")).await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ReinvestError::LaterReinvestmentExists { date, later }
+                    if date == "2024-09-30".parse().unwrap()
+                        && later == "2024-10-15".parse().unwrap()
+            ),
+            "expected the trade dates, not the distributions', got: {err:?}"
+        );
+    }
+
+    /// A registry can pay two distributions on one day, so a *same-dated*
+    /// reinvestment is allowed rather than refused: it joins the chain behind
+    /// the trades already dated that day (its id is the higher, and the chain
+    /// is ordered by (date, id)), bringing their residual forward.
+    #[tokio::test]
+    async fn a_same_dated_reinvestment_joins_the_chain_behind_it() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        enrol(&pool, 1, ResidualHandling::CarryForward).await;
+        insert_distribution_dated(
+            &pool,
+            1,
+            1,
+            "2024-03-28",
+            None,
+            Decimal::from(100),
+            Decimal::ZERO,
+        )
+        .await;
+        insert_distribution_dated(
+            &pool,
+            2,
+            1,
+            "2024-03-28",
+            None,
+            Decimal::from(8),
+            Decimal::ZERO,
+        )
+        .await;
+
+        let first = db_reinvest(&pool, 1, &body("9")).await.unwrap();
+        assert_eq!(first.residual_carried_forward, Decimal::ONE);
+        let second = db_reinvest(&pool, 2, &body("9")).await.unwrap();
+        assert_eq!(second.date, first.date);
+        assert_eq!(second.residual_brought_forward, Decimal::ONE);
+        assert_eq!(second.quantity, Decimal::ONE);
+        assert_eq!(second.residual_carried_forward, Decimal::ZERO);
+    }
+
+    /// The refusal is the period's question: a chain is per (period, listing,
+    /// holding account), so a reinvestment in an *earlier, closed* period is
+    /// still accepted while a later period holds trades — nothing in the later
+    /// period's chain reads across the boundary.
+    #[tokio::test]
+    async fn a_later_periods_reinvestment_does_not_block_an_earlier_periods() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        enrol_period(
+            &pool,
+            1,
+            1,
+            "2024-01-01",
+            Some("2024-07-01"),
+            ResidualHandling::CarryForward,
+        )
+        .await;
+        enrol_period(
+            &pool,
+            2,
+            1,
+            "2024-07-01",
+            None,
+            ResidualHandling::CarryForward,
+        )
+        .await;
+
+        insert_distribution_dated(
+            &pool,
+            1,
+            1,
+            "2024-03-31",
+            None,
+            Decimal::from(100),
+            Decimal::ZERO,
+        )
+        .await;
+        insert_distribution_dated(
+            &pool,
+            2,
+            1,
+            "2024-09-30",
+            None,
+            Decimal::from(100),
+            Decimal::ZERO,
+        )
+        .await;
+
+        // Period 2's reinvestment first...
+        db_reinvest(&pool, 2, &body("9")).await.unwrap();
+        // ...does not block period 1's, which runs its own chain.
+        let first = db_reinvest(&pool, 1, &body("9")).await.unwrap();
+        assert_eq!(first.quantity, Decimal::from(11));
+        assert_eq!(first.residual_brought_forward, Decimal::ZERO);
+    }
+
+    /// The rejection reaches the API as a `422` carrying the reason the web
+    /// UI shows — the same shape as undo's mid-chain refusal.
+    #[tokio::test]
+    async fn api_out_of_order_reinvestment_is_422_naming_the_remedy() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        enrol(&pool, 1, ResidualHandling::CarryForward).await;
+        insert_distribution_dated(
+            &pool,
+            1,
+            1,
+            "2024-03-28",
+            None,
+            Decimal::from(105),
+            Decimal::ZERO,
+        )
+        .await;
+        insert_distribution_dated(
+            &pool,
+            2,
+            1,
+            "2024-09-30",
+            None,
+            Decimal::from(107),
+            Decimal::ZERO,
+        )
+        .await;
+
+        let app = client(&pool);
+        app.post_raw("/income/2/reinvest", r#"{"reinvestment_price":"10"}"#)
+            .await
+            .expect_status(StatusCode::CREATED);
+        let resp = app
+            .post_raw("/income/1/reinvest", r#"{"reinvestment_price":"9"}"#)
+            .await;
+        let (status, body) = resp.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            body.contains("2024-09-30") && body.contains("payment order"),
+            "unexpected body: {body}"
+        );
     }
 
     #[tokio::test]

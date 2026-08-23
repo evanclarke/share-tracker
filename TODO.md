@@ -187,7 +187,7 @@ Options offered:
 to trades dated strictly before the new one, and reject a reinvestment that is not the period's
 latest.
 
-- [ ] Bound the residual lookup and refuse a non-latest reinvestment, with a test entering two
+- [x] Bound the residual lookup and refuse a non-latest reinvestment, with a test entering two
       reinvestments in reverse order and `docs/API.md` carrying the new `422`.
 
 ## SCENARIOS V-c — a trade entered twice is the one duplication the health report does not look for
