@@ -7,13 +7,86 @@ use std::{
     collections::HashSet,
     path::{Path, PathBuf},
     str::FromStr,
+    time::Duration,
 };
 
+/// How long a queued writer waits for SQLite's single write lock before it
+/// gives up and the request fails.
+///
+/// **Chosen, not inherited.** sqlx's default is 5 seconds
+/// (`SqliteConnectOptions::default()`, `sqlx-sqlite` 0.9), applied by
+/// `sqlite3_busy_timeout()` at connect — a number nobody here picked, and one
+/// the application can now outlast. [`write_tx`]'s whole argument is that a
+/// concurrent writer *waits its turn* rather than failing; a timeout shorter
+/// than the longest write transaction the application can produce silently
+/// takes that promise back and answers the waiter "database is locked"
+/// instead (SCENARIOS X-b).
+///
+/// **Sized above the longest single write transaction, measured.** The two
+/// longest are the whole-holding rollover operations (scrip exchange,
+/// demerger, transfer), which walk every open parcel and INSERT a replacement
+/// for each in one transaction, and report-snapshot generation — which since
+/// SCENARIOS X-a takes every one of its input reads *inside* the transaction
+/// that stores it, so the lock is held for the whole run. Both scale linearly
+/// with the number of open parcels. Measured at the HTTP surface on throwaway
+/// databases of one-unit Buy parcels (debug build, 2026-08-23):
+///
+/// | open parcels | scrip exchange | snapshot generation |
+/// |--------------|---------------:|--------------------:|
+/// | 30,000       |         4.80 s |     0.55 s – 6.53 s |
+/// | 60,000       |         9.42 s |              1.10 s |
+///
+/// The rollover is the steadier of the two: ~157 µs per parcel, measured on
+/// two separately built databases that agree to 2%. **Generation is the wilder
+/// one, and it is what binds this number.** Its per-parcel cost spans 18 µs
+/// (one database grown from 30,000 parcels to 60,000) to 77 µs (a differently
+/// built database of the same size) to **218 µs** — 6.53 s over 30,000
+/// parcels, reproduced three times on the database SCENARIOS X-b was found on,
+/// which carries a second listing's parcels, ten days of prices, and the
+/// income rows the performance half walks. A twelvefold spread at one parcel
+/// count is the fact to carry: parcels alone do not predict the cost, so the
+/// bound has to be taken from the worst rate seen, not the typical one. At
+/// 218 µs, **30 seconds covers a generation of roughly 138,000 open parcels**
+/// (and a rollover of roughly 190,000) — four times the largest database
+/// either was measured on, and three orders of magnitude past Evan's real one,
+/// which generates a snapshot in ~41 ms (SCENARIOS X-a). It is deliberately
+/// not larger: a genuinely stuck writer (another process holding the lock, a
+/// hung transaction) has to *report*, and a request that never returns is
+/// worse than one that returns 503.
+///
+/// **It bounds one transaction, not a loop of them.** A bulk regeneration
+/// (`POST /report_snapshots/regenerate_all`) opens a fresh write transaction
+/// for the next date the moment it commits the last, and SQLite's busy handler
+/// is not a queue: a waiter that has been waiting a while only re-tries every
+/// 100 ms, so it loses the microsecond-wide gap between dates to the loop's
+/// own already-awake thread, every time. Measured: a write stream beside a
+/// 15-date regeneration over 60,000 parcels (70 s) had **every** write in that
+/// window fail — 13 in a row, each after its full busy timeout, across 13
+/// lock releases it never won (SCENARIOS X-b). No timeout worth choosing
+/// survives that, so it is deliberately not chased here: the honest answer to
+/// a bulk repair holding the lock is the `503` below, and `docs/API.md` says
+/// so. The unattended bulk path (`regenerate_provisional`, inside the weekly
+/// `rba-fx-import` job) is bounded to the provisional window — at most a
+/// couple of months of dates — while the unbounded one is only ever started
+/// by an operator who is watching it.
+///
+/// **It does not rescue a deferred `BEGIN`.** `sqlite3_busy_timeout()` never
+/// retries a read-to-write upgrade — see [`write_tx`] — so no value here helps
+/// a transaction begun with `pool.begin()`; that is why every write path uses
+/// [`write_tx`]. [`tests::a_deferred_transaction_cannot_upgrade_after_a_concurrent_write`]
+/// pins it, and stays fast because the failure is immediate at any timeout.
+///
+/// When the wait *does* expire the request no longer dies as an empty `500`:
+/// `infra::http::ApiError`'s `From<sqlx::Error>` classifies the whole
+/// `SQLITE_BUSY` family as a `503` saying the write can be sent again.
+pub const BUSY_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// How every pool in this application connects: create-if-missing, foreign keys
-/// enforced, and WAL for a file database (an in-memory one has no journal to
-/// configure). Factored out of [`init`] only so the test harness's cached-schema
-/// pool (`test_support::test_pool`) can open a database on *exactly* these
-/// options and differ from production in nothing but how the schema gets there.
+/// enforced, an explicit [`BUSY_TIMEOUT`], and WAL for a file database (an
+/// in-memory one has no journal to configure). Factored out of [`init`] only so
+/// the test harness's cached-schema pool (`test_support::test_pool`) can open a
+/// database on *exactly* these options and differ from production in nothing but
+/// how the schema gets there.
 fn connect_options(db_path: &str) -> Result<SqliteConnectOptions, sqlx::Error> {
     let url = if db_path == ":memory:" {
         "sqlite::memory:".to_string()
@@ -23,7 +96,8 @@ fn connect_options(db_path: &str) -> Result<SqliteConnectOptions, sqlx::Error> {
 
     let mut opts = SqliteConnectOptions::from_str(&url)?
         .create_if_missing(true)
-        .foreign_keys(true);
+        .foreign_keys(true)
+        .busy_timeout(BUSY_TIMEOUT);
 
     if db_path != ":memory:" {
         opts = opts.journal_mode(SqliteJournalMode::Wal);
@@ -51,17 +125,22 @@ pub async fn unmigrated_pool(db_path: &str) -> Result<SqlitePool, sqlx::Error> {
 /// (5) against a held write lock, or `SQLITE_BUSY_SNAPSHOT` (517) when that
 /// other connection has already committed past our read snapshot — and
 /// `sqlite3_busy_timeout()` deliberately retries neither (waiting on an
-/// upgrade could deadlock two readers that both want to write). So sqlx's
-/// 5-second busy timeout does not cover it, and the request dies at once with
-/// "database is locked": a 500 with an empty body, which the web UI can only
-/// show as `HTTP 500`. That is what a `PUT` issued while the scheduler was
+/// upgrade could deadlock two readers that both want to write). So the busy
+/// timeout does not cover it — not sqlx's 5-second default, and not
+/// [`BUSY_TIMEOUT`] either — and the request dies at once with
+/// "database is locked". That is what a `PUT` issued while the scheduler was
 /// writing its startup `job_schedule` rows hit — 2 failures in 160 startups,
 /// measured, and how CI first found it (a `ui-smoke.sh` fixture seed).
 ///
 /// `BEGIN IMMEDIATE` puts the transaction in the writer queue from the start,
 /// where the busy timeout *does* apply, so a concurrent writer waits its turn
 /// rather than failing. The cost is that write transactions serialise against
-/// each other, which they already did — SQLite has one writer at a time.
+/// each other, which they already did — SQLite has one writer at a time. That
+/// promise is only as good as how long the waiter is allowed to wait, which is
+/// why [`BUSY_TIMEOUT`] is chosen against a measurement of the longest write
+/// transaction here rather than left at sqlx's 5-second default: past it, the
+/// waiter fails after all (SCENARIOS X-b), now as a `503` naming the reason
+/// rather than an empty `500`.
 ///
 /// Read-only transactions stay on `pool.begin()` deliberately: they never
 /// upgrade, so they cannot hit either error, and making them immediate would
@@ -739,10 +818,16 @@ mod tests {
 
     /// The premise `write_tx` rests on, as an executable fact rather than a
     /// citation: a **deferred** transaction that reads and then writes fails
-    /// outright when another connection has written in between. sqlx's default
-    /// 5-second `busy_timeout` does not cover it — SQLite will not retry an
-    /// upgrade (two readers both waiting to write would deadlock), so the error
-    /// comes back at once. This is the 500 the ui-smoke fixture seed hit.
+    /// outright when another connection has written in between. The
+    /// `busy_timeout` does not cover it at *any* value — SQLite will not retry
+    /// an upgrade (two readers both waiting to write would deadlock), so the
+    /// error comes back at once. This is the 500 the ui-smoke fixture seed hit.
+    ///
+    /// That is also why this test stayed fast when [`BUSY_TIMEOUT`] went from
+    /// sqlx's 5-second default to 30 seconds: the 2-second bound below is not
+    /// slack under the timeout, it is the assertion that the failure never
+    /// waits for one. Were SQLite ever to start waiting, this test would fail
+    /// loudly on that bound rather than quietly take 30 seconds.
     #[tokio::test]
     async fn a_deferred_transaction_cannot_upgrade_after_a_concurrent_write() {
         let dir = tempfile::tempdir().unwrap();
@@ -780,6 +865,16 @@ mod tests {
             "expected a busy/snapshot failure, got: {msg}"
         );
         assert!(msg.contains("database is locked"), "{msg}");
+
+        // Both codes are in the SQLITE_BUSY family, so even this one — which
+        // `write_tx` is meant to make unreachable on a write path — answers the
+        // bodied 503 rather than an empty 500 if it ever escapes that guard
+        // (`infra::http::is_busy`).
+        let api = crate::infra::http::ApiError::from(err);
+        assert!(
+            matches!(api, crate::infra::http::ApiError::Busy { .. }),
+            "a failed upgrade is still a busy database, not an internal fault: {api:?}"
+        );
     }
 
     /// The fix, from the other side: a transaction begun with [`write_tx`]
@@ -840,6 +935,44 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(name, "Elsewhere", "both writes landed, the queued one last");
+    }
+
+    /// [`BUSY_TIMEOUT`] is actually in force on the connections [`init`] hands
+    /// out — not merely written down in [`connect_options`].
+    ///
+    /// sqlx applies it with `sqlite3_busy_timeout()` at connect rather than as
+    /// a startup `PRAGMA`, and `PRAGMA busy_timeout` reads back exactly what
+    /// that call set, so this is the value a waiting writer really gets. The
+    /// test exists because the failure it guards is invisible: drop the
+    /// `.busy_timeout()` line and everything still passes, everything still
+    /// works, and the application silently goes back to failing a concurrent
+    /// write after 5 seconds (SCENARIOS X-b). Both pool kinds are checked —
+    /// a file database (what `main` opens) and `:memory:` (what
+    /// `test_support::test_pool` builds on), which take different branches of
+    /// [`connect_options`].
+    #[tokio::test]
+    async fn the_chosen_busy_timeout_is_in_force_on_every_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("busy.db").to_string_lossy().to_string();
+        let expected = i64::try_from(BUSY_TIMEOUT.as_millis()).unwrap();
+        assert_ne!(
+            expected, 5_000,
+            "5,000 ms is sqlx's default — BUSY_TIMEOUT must be a chosen value, \
+             and this test cannot tell the two apart at that number"
+        );
+
+        for path in [file.as_str(), ":memory:"] {
+            let pool = init(path).await.unwrap();
+            let ms: i64 = sqlx::query_scalar("PRAGMA busy_timeout")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(
+                ms, expected,
+                "{path}: the busy timeout is not the chosen one — a queued writer \
+                 gives up after {ms} ms instead of {expected} ms"
+            );
+        }
     }
 
     #[tokio::test]

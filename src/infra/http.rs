@@ -49,6 +49,20 @@ pub enum ApiError {
     /// 413 — an upload exceeds the size ceiling.
     #[error("{0}")]
     PayloadTooLarge(String),
+    /// 503 — SQLite's single write lock was held by another write for longer
+    /// than [`crate::infra::db::BUSY_TIMEOUT`], so this write gave up waiting.
+    ///
+    /// Not an internal fault: nothing is wrong with the request or the server,
+    /// the database was simply busy, and because a busy failure never commits
+    /// anything the *same* request can be sent again. So it carries a body
+    /// saying so, where it used to reach [`ApiError::Internal`] and answer the
+    /// web UI a bare `HTTP 500` (SCENARIOS X-b) — the failure shape T-10 and
+    /// the `write_tx` work each went out of their way to remove. The
+    /// underlying database error (whose text carries the SQLite result code)
+    /// is logged at warn when the response is built: contention is worth
+    /// noticing, but it is not a fault, so it is not logged at error.
+    #[error("{body}: {source}")]
+    Busy { body: String, source: BoxError },
     /// 500 whose body carries the failure text — the manual job trigger
     /// (`POST /jobs/{name}`) alone.
     ///
@@ -156,6 +170,10 @@ impl IntoResponse for ApiError {
             ApiError::BadRequest(body) => (StatusCode::BAD_REQUEST, body).into_response(),
             ApiError::PayloadTooLarge(body) => {
                 (StatusCode::PAYLOAD_TOO_LARGE, body).into_response()
+            }
+            ApiError::Busy { body, source } => {
+                tracing::warn!(error = %source, "write gave up waiting for the database lock");
+                (StatusCode::SERVICE_UNAVAILABLE, body).into_response()
             }
             ApiError::BadGateway { body, source } => {
                 tracing::error!(error = %source, "upstream feed fetch failed");
@@ -487,6 +505,49 @@ where
     Ok(dependants)
 }
 
+/// The `503`'s body: what happened, and that re-sending the identical request
+/// is the whole recovery. It is safe to say so — a busy failure either never
+/// started the write (an autocommit statement) or rolled its transaction back
+/// untouched, so nothing partial is on disk to be duplicated by a retry.
+const BUSY_BODY: &str = "the database was busy with another write and this one gave up waiting; \
+     nothing was changed, so the request can be sent again";
+
+/// Is this database error SQLite's "database is locked"?
+///
+/// Decided on the **result code**, never on the message text: sqlx exposes the
+/// extended code as a decimal string, and SQLite's own `SqliteError::Display`
+/// notes that the messages are ambiguous (`SQLITE_BUSY` says "database is
+/// locked", `SQLITE_LOCKED` says "database table is locked"). sqlx's
+/// `ErrorKind` cannot help — it maps only the four constraint codes and calls
+/// everything else `Other`.
+///
+/// The test is on the **primary** code, the low byte, so the whole
+/// `SQLITE_BUSY` family classifies together: plain `SQLITE_BUSY` (5, what a
+/// `busy_timeout` expiry gives), `SQLITE_BUSY_SNAPSHOT` (517, a deferred
+/// `BEGIN` that cannot upgrade — see `infra::db::write_tx`), `SQLITE_BUSY_RECOVERY`
+/// (261) and `SQLITE_BUSY_TIMEOUT` (773). 517 is included deliberately even
+/// though `write_tx` is supposed to make it unreachable on a write path: if
+/// one ever slips past that guard the caller is still better served by "the
+/// database was busy, try again" than by an empty 500 — the answer is a retry
+/// either way.
+///
+/// `SQLITE_LOCKED` (6) is deliberately *not* included: it is a shared-cache /
+/// same-connection table lock, which is a coding fault rather than contention
+/// between processes, and it must keep surfacing as the 500 it is.
+fn is_busy(db: &dyn sqlx::error::DatabaseError) -> bool {
+    db.code()
+        .and_then(|c| c.parse::<i32>().ok())
+        .is_some_and(is_busy_code)
+}
+
+/// [`is_busy`]'s rule on its own, so the family membership is testable without
+/// having to provoke each SQLite result code for real.
+fn is_busy_code(code: i32) -> bool {
+    /// SQLite's primary result code for a lock it could not take.
+    const SQLITE_BUSY: i32 = 5;
+    code & 0xff == SQLITE_BUSY
+}
+
 /// Classify a database error: a constraint violation (foreign key, check,
 /// unique, or not-null) means the request referenced or supplied data the
 /// data model rejects — e.g. an unrecognised currency code (FK to
@@ -503,9 +564,19 @@ where
 /// reason (the row is there and something depends on it) and must not reach
 /// this arm: deletes classify the violation themselves through
 /// [`fk_dependants_message`], which names the dependants.
+///
+/// A **busy** database is classified first, ahead of the constraint kinds:
+/// see [`is_busy`]. It is neither the client's fault nor the server's, so it
+/// is neither a 422 nor a 500 — it answers `503` with [`BUSY_BODY`].
 impl From<sqlx::Error> for ApiError {
     fn from(err: sqlx::Error) -> Self {
         if let Some(db) = err.as_database_error() {
+            if is_busy(db) {
+                return ApiError::Busy {
+                    body: BUSY_BODY.to_string(),
+                    source: err.into(),
+                };
+            }
             // SQLite's message, e.g. "UNIQUE constraint failed:
             // listings.ticker". It names columns/constraints, never a value
             // the client supplied, so it is safe to surface.
@@ -615,6 +686,96 @@ mod tests {
         let resp = ApiError::from(sqlx::Error::Decode("not a decimal".into())).into_response();
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(body_of(resp).await, "");
+    }
+
+    /// A write that gave up waiting for SQLite's write lock answers `503` with
+    /// a body saying so, not the empty `500` it used to (SCENARIOS X-b) — the
+    /// failure shape the web UI can only render as "HTTP 500".
+    ///
+    /// The error is a **real** `SQLITE_BUSY` rather than a hand-built one: a
+    /// connection holds `BEGIN IMMEDIATE` and another tries to write. The pool
+    /// is purpose-built with a **zero** busy timeout so the waiter gives up at
+    /// once — waiting out `infra::db::BUSY_TIMEOUT` would put 30 seconds in
+    /// this suite for no extra assurance, since what is under test is the
+    /// classification of the expiry, not the length of the wait.
+    #[tokio::test]
+    async fn a_write_that_gave_up_waiting_for_the_lock_is_503_with_a_retryable_body() {
+        use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode};
+
+        let dir = tempfile::tempdir().unwrap();
+        let opts = SqliteConnectOptions::new()
+            .filename(dir.path().join("busy.db"))
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .busy_timeout(std::time::Duration::ZERO);
+        let pool = SqlitePool::connect_with(opts).await.unwrap();
+        sqlx::query("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let mut holder = pool.acquire().await.unwrap();
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *holder)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO t (id) VALUES (1)")
+            .execute(&mut *holder)
+            .await
+            .unwrap();
+
+        let mut waiter = pool.acquire().await.unwrap();
+        let err = sqlx::query("INSERT INTO t (id) VALUES (2)")
+            .execute(&mut *waiter)
+            .await
+            .expect_err("the write lock is held, and this connection will not wait for it");
+        assert!(
+            err.to_string().contains("(code: 5)"),
+            "the test must provoke a real SQLITE_BUSY, got: {err}"
+        );
+
+        let api = ApiError::from(err);
+        assert!(
+            matches!(api, ApiError::Busy { .. }),
+            "a busy database must not be classified as an internal fault: {api:?}"
+        );
+        let resp = api.into_response();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = body_of(resp).await;
+        assert_eq!(body, BUSY_BODY);
+        assert!(
+            body.contains("can be sent again"),
+            "the body has to tell the user the recovery is a retry: {body}"
+        );
+    }
+
+    /// Which SQLite result codes count as "the database was busy". Decided on
+    /// the primary (low-byte) code, so every extended `SQLITE_BUSY_*` travels
+    /// with plain `SQLITE_BUSY` — and `SQLITE_LOCKED`, one code away and with
+    /// an almost identical message, does not.
+    #[test]
+    fn the_whole_busy_family_classifies_together_and_nothing_else_does() {
+        for (code, label) in [
+            (5, "SQLITE_BUSY"),
+            (261, "SQLITE_BUSY_RECOVERY"),
+            (517, "SQLITE_BUSY_SNAPSHOT"),
+            (773, "SQLITE_BUSY_TIMEOUT"),
+        ] {
+            assert!(is_busy_code(code), "{label} ({code}) is a busy failure");
+        }
+        for (code, label) in [
+            (6, "SQLITE_LOCKED"),
+            (262, "SQLITE_LOCKED_SHAREDCACHE"),
+            (1, "SQLITE_ERROR"),
+            (19, "SQLITE_CONSTRAINT"),
+            (787, "SQLITE_CONSTRAINT_FOREIGNKEY"),
+            (11, "SQLITE_CORRUPT"),
+        ] {
+            assert!(
+                !is_busy_code(code),
+                "{label} ({code}) is not a busy failure"
+            );
+        }
     }
 
     /// Table names reach the user, so the ones the schema spells in lower-case
