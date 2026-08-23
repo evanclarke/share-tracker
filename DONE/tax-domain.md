@@ -1727,3 +1727,106 @@ belongs somewhere this section did not say.** The enabling condition throughout 
       **Left open, as its own section**: a `ShareSplit`/`BonusIssue` whose ratio is fine when it is
       written can be made unrepresentable later by a parcel entered *behind* it, so the check here is
       necessary but not sufficient — see *A parcel entered behind a ratio that already fits*.
+
+## A parcel entered behind a ratio that already fits
+
+Raised while closing *A replacement quantity no `Decimal` can hold* (archived above), and measured
+rather than assumed: the refusal that section added at `PUT /corporate_actions/:id` is **necessary
+but not sufficient**.
+
+A `ShareSplit`/`BonusIssue` materialises nothing — its ratio is re-applied at read time — so the
+check there can only judge the parcels that exist *when the action is written*. Record a 1000-for-1
+split on a listing with no holdings (or small ones): `204`, correctly. Then enter a nil-priced Buy of
+1e27 units behind it: `204` as well, because the parcel-creating write bounds
+`average_price × quantity` (W-e) and nothing there asks what the listing's recorded ratios would do
+to the *quantity*. `GET /portfolio/open-parcels` is then a logged `500` again, and so is every other
+open-holdings read of the whole portfolio — exactly the state the action-write refusal exists to
+prevent, reached from the other side. Confirmed at the HTTP surface on 2026-08-23.
+
+**Corrected on 2026-08-23 by a second measurement the section did not have.** The headline above is
+about the listing the parcel is *entered on*, but a rollover writes its replacement parcels on
+another listing entirely, and that listing has ratios of its own. A **1-for-1** scrip-for-scrip
+exchange of 1e26 units onto a listing carrying a 1000-for-1 `ShareSplit` answered `201` and then
+killed every open-holdings read: `71a26d6`'s operation-level check asks about the *exchange* ratio
+and was satisfied, while the destination's ratio was applied at read time afterwards. The demerger
+does the same thing with its demerged listing (a 1-for-1 entitlement onto a split-carrying listing:
+`201`, then `500`). So the mirror check has to ask about the **destination** listing, not only the
+listing the operation is about — the second instance of SCENARIOS V-d's lesson, whose guard had to
+cover the destination listing of an exchange or demerger as well as the source.
+
+The mirror check belongs on the parcel-creating writes, asking the same question in the other
+direction: *do this listing's recorded re-basing actions leave this quantity representable?* The
+machinery is already there — `domain::cost_base::checked_rebased_quantity` and the boundary walk in
+`corporate_action::db::rebased_quantity_beyond_range`, which is per-listing and would only need the
+about-to-be-written parcel folded into it. The eight parcel-creating paths are the ones
+`fc1fd7b` enumerated for the back-dated-parcel rule, so that list is the shape to follow rather than
+a fresh grep.
+
+- [x] Refuse a parcel-creating write whose quantity the listing's recorded splits/bonus issues would
+      re-base beyond `Decimal`'s range, `422` naming the ratio and the quantity, across every
+      parcel-creating path — with the boundary test at the write and a control that the same parcel
+      under a representable ratio still lands
+
+**Built** (`docs/API.md`, *Quantities as well as money* → *The mirror: a parcel entered behind a
+ratio that already fits*). `corporate_action::db::rebased_quantity_beyond_range` — the very walk the
+action write already runs, made `pub` and re-exported — now runs on each parcel-creating write too,
+over the state the write leaves behind. Nothing about the walk changed: still both directions, still
+at **every** split boundary after the parcel rather than only the cumulative end, so a split then a
+consolidation that nets back to a ratio which fits is still refused for the basis in between. The
+two hooks together cover the cross product — the action write judges a new ratio against every
+recorded quantity, the parcel write judges a new quantity against every recorded ratio. The `422`
+body is `UnrepresentableQuantity::message` unchanged, so all nine refusals of the fact word it
+identically.
+
+**Seven of the eight paths are reachable, and each was measured at the HTTP surface before anything
+was changed.** `PUT /trades/:id` (the headline), `PUT /inheritances/:id` (its own bound is
+`cost_base + lpr_expenditure`, a *sum*, which says nothing about a unit count),
+`POST /ess_statements/:id/vest` and `POST /corporate_actions/:id/exercise` (their bounds are
+`quantity × market_value_per_share` and `exercise_price × units + rights_cost`, which a near-nil
+per-unit figure satisfies at any unit count at all), `POST /income/:id/reinvest` **both** ways the
+units are arrived at — stated, and derived as `available / reinvestment_price`, the path W-e
+deliberately left unbounded because its *product* can never exceed the recorded distribution — and
+the replacement parcels of the exchange and the demerge, checked on their **destination** listing.
+
+The eighth, a transfer's transfer-in Buy, is **not** reachable, and is deliberately left unchecked
+with the argument recorded beside its error enum. A transfer's destination listing *is* its source
+listing, and a transfer-in is dated the transfer date carrying at most the units the source parcel
+held then — so every ratio recorded after that date re-bases that parcel by the same factor and at
+least as far, while the ratios on or before it apply to the parcel alone. A transfer-in past the
+range therefore implies a source parcel past it, which is already refused twice over. Measured as
+well as argued: with a 1e26-unit parcel consolidated 1-for-1000 and its whole holding transferred,
+the later split that would take the transfer-in past the range is refused for taking the *parcel* it
+came from there — quoting the parcel's 1e26, which is what says the source is what bounds it
+(`db_a_transfer_in_is_bounded_by_the_parcel_it_moves_from`).
+
+The demerger's **head** replacements are excluded by the same argument and for the same reason, so
+only the demerged listing is walked.
+
+**Editability.** The walk runs *after* each write's own INSERT, over the resulting state, exactly as
+`71a26d6` and `fc1fd7b` do — so a parcel already stored beyond the range (only a build predating
+this rule could have written one) is corrected by the very write that would be refused if the walk
+ran first, and is still deletable. Verified the way `71a26d6` verified its own:
+`api_an_already_unrepresentable_parcel_can_still_be_corrected_and_deleted` fails when the check is
+moved ahead of the INSERT. Every refusal test was also confirmed to fail with the refusal
+neutralised, and every control to pass either way.
+
+Tests, each driven through `test_support::ApiClient`: `entities::trade`
+(`api_a_parcel_behind_a_ratio_that_already_fits_is_refused_naming_it`,
+`api_a_parcel_unrepresentable_only_between_two_ratios_is_refused`,
+`api_a_large_parcel_a_recorded_ratio_still_fits_lands_and_reports`,
+`api_an_already_unrepresentable_parcel_can_still_be_corrected_and_deleted`), `entities::inheritance`
+(`api_an_inherited_quantity_a_recorded_ratio_rebases_out_of_range_is_refused` + its control),
+`entities::ess_vest` (`vest_of_a_quantity_a_recorded_ratio_rebases_out_of_range_is_refused` + its
+control), `entities::rights_exercise`
+(`api_an_exercised_quantity_a_recorded_ratio_rebases_out_of_range_is_refused` + its control),
+`entities::drp_reinvestment`
+(`api_a_reinvested_quantity_a_recorded_ratio_rebases_out_of_range_is_refused`,
+`api_a_derived_reinvested_quantity_beyond_the_range_is_refused_too` + its control),
+`entities::scrip_exchange`
+(`api_a_replacement_parcel_the_destination_listings_own_ratio_rebases_out_of_range` + its control),
+`entities::demerger` (`api_a_demerged_parcel_the_demerged_listings_own_ratio_rebases_out_of_range` +
+its control), `entities::transfer` (`db_a_transfer_in_is_bounded_by_the_parcel_it_moves_from`), and
+`doc_checks::a_parcel_entered_behind_a_ratio_that_already_fits_documented`. Every control's figures
+were captured from the pre-change build and pinned unchanged: 7.9e25 units behind the same real
+1000-for-1 ratio re-base to 7.9e28, inside `Decimal`'s ~7.9228e28 ceiling, and every read reports
+them exactly as before.

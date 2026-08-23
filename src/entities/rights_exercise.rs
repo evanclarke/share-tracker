@@ -117,6 +117,16 @@ pub enum ExerciseError {
     /// `domain::whole_holding`. Mapped to 422.
     #[error("this parcel is dated behind a whole-holding operation: {0}")]
     BackDatedOverWholeHolding(#[source] crate::domain::whole_holding::BackDatedParcel),
+    /// The exercised quantity is one the listing's recorded splits and bonus
+    /// issues re-base past what a `Decimal` can hold. The rights side of
+    /// `trade::UpsertError::UnrepresentableRebasedQuantity`, and not the same
+    /// bound as [`UnrepresentableCostBase`](ExerciseError::UnrepresentableCostBase)
+    /// above it: that one bounds `exercise_price × units`, which a nil-ish
+    /// exercise price leaves free to be any unit count at all. Same walk, same
+    /// wording (`corporate_action::rebased_quantity_beyond_range`). Mapped to
+    /// 422.
+    #[error("this parcel's quantity re-bases beyond the representable range: {0}")]
+    UnrepresentableRebasedQuantity(#[source] crate::domain::cost_base::UnrepresentableQuantity),
 }
 
 impl From<ExerciseError> for ApiError {
@@ -144,6 +154,9 @@ impl From<ExerciseError> for ApiError {
             ),
             // The same body every parcel-creating path answers for this fact.
             ExerciseError::BackDatedOverWholeHolding(e) => ApiError::Unprocessable(e.message()),
+            ExerciseError::UnrepresentableRebasedQuantity(e) => {
+                ApiError::Unprocessable(e.message())
+            }
             ExerciseError::Db(err) => err.into(),
         }
     }
@@ -357,6 +370,19 @@ pub async fn db_exercise(
     .execute(&mut *tx)
     .await?;
     let new_id = result.last_insert_rowid();
+
+    // The listing's recorded splits and bonus issues are re-applied at *read*
+    // time, so an exercised quantity they push past `Decimal`'s range is
+    // accepted here and then answers a logged `500` from every open-holdings
+    // report of the whole portfolio. Checked over the state this write leaves
+    // behind, like every other parcel-creating path
+    // (`corporate_action::rebased_quantity_beyond_range`).
+    if let Some(beyond) =
+        crate::entities::corporate_action::rebased_quantity_beyond_range(&mut tx, action.listing_id)
+            .await?
+    {
+        return Err(ExerciseError::UnrepresentableRebasedQuantity(beyond));
+    }
 
     tx.commit().await?;
 
@@ -1225,6 +1251,118 @@ mod tests {
                 Decimal::from(1_000_000)
             ),
             Some("1000000000000000000000000".parse::<Decimal>().unwrap())
+        );
+    }
+
+    /// A near-nil exercise price and an unbounded entitlement, so the only
+    /// thing left bounding the exercised unit count is the listing's own
+    /// ratios — plus the 1000-for-1 split those ratios are.
+    async fn nil_priced_rights_issue_behind_a_split(pool: &SqlitePool) {
+        insert_listing(pool, 1).await;
+        insert_buy(pool, 1, d(2024, 1, 15), "100", "1").await;
+        corporate_action::db_upsert(
+            pool,
+            &CorporateAction {
+                id: 10,
+                listing_id: 1,
+                date: d(2024, 2, 1),
+                kind: ActionKind::RightsIssue {
+                    rights_units: "1e27".parse().unwrap(),
+                    rights_held_units: Decimal::ONE,
+                    exercise_price: "0.0000000000000000000000000001".parse().unwrap(),
+                    currency: "AUD".to_string(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+        corporate_action::db_upsert(
+            pool,
+            &CorporateAction {
+                id: 11,
+                listing_id: 1,
+                date: d(2024, 6, 1),
+                kind: ActionKind::ShareSplit {
+                    split_new_units: Decimal::from(1000),
+                    split_old_units: Decimal::ONE,
+                },
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    /// W-e's bound on this path is `exercise_price × units + rights_cost`,
+    /// which a near-nil exercise price satisfies at any unit count at all — so
+    /// nothing asked what the listing's recorded 1000-for-1 split does to 1e27
+    /// exercised units. The exercise answered `201` and then killed every
+    /// open-holdings read of the whole portfolio. Refused now, naming the
+    /// quantity and the ratio, with nothing written.
+    #[tokio::test]
+    async fn api_an_exercised_quantity_a_recorded_ratio_rebases_out_of_range_is_refused() {
+        let pool = test_pool().await;
+        nil_priced_rights_issue_behind_a_split(&pool).await;
+
+        let response = ApiClient::over(router().with_state(pool.clone()))
+            .post(
+                "/corporate_actions/10/exercise",
+                &serde_json::json!({"date": "2024-02-15",
+                                    "units": "1000000000000000000000000000"}),
+            )
+            .await;
+        let (status, detail) = response.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{detail}");
+        assert!(
+            detail.contains("quantity 1000000000000000000000000000 × new units 1000 / old units 1"),
+            "the quantity and the ratio are not named: {detail}"
+        );
+        let exercised: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM trades WHERE rights_action_id = 10)")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(!exercised);
+        // The read the state used to kill still answers.
+        ApiClient::full(&pool)
+            .get("/portfolio/open-parcels")
+            .await
+            .expect_status(StatusCode::OK);
+    }
+
+    /// The control, pinned at the figures this build answered before the
+    /// refusal existed: 7.9e25 exercised units behind the same real 1000-for-1
+    /// split re-base to 7.9e28, inside the range, so the exercise lands and the
+    /// parcel reports.
+    #[tokio::test]
+    async fn api_a_large_exercised_quantity_a_recorded_ratio_still_fits_lands_and_reports() {
+        let pool = test_pool().await;
+        nil_priced_rights_issue_behind_a_split(&pool).await;
+
+        let response = ApiClient::over(router().with_state(pool.clone()))
+            .post(
+                "/corporate_actions/10/exercise",
+                &serde_json::json!({"date": "2024-02-15",
+                                    "units": "79000000000000000000000000"}),
+            )
+            .await;
+        let (status, detail) = response.status_and_body();
+        assert_eq!(status, StatusCode::CREATED, "{detail}");
+
+        let rows: Vec<serde_json::Value> = ApiClient::full(&pool)
+            .get_json("/portfolio/open-parcels")
+            .await;
+        let exercised = rows
+            .iter()
+            .find(|r| r["acquisition_date"] == "2024-02-15")
+            .unwrap_or_else(|| panic!("{rows:?}"));
+        assert_eq!(exercised["original_quantity"], "79000000000000000000000000");
+        assert_eq!(
+            exercised["remaining_quantity"],
+            "79000000000000000000000000000"
+        );
+        assert_eq!(
+            exercised["original_cost_base"],
+            "0.0079000000000000000000000000"
         );
     }
 }

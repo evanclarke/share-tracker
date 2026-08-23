@@ -274,6 +274,67 @@ fn quantities_beyond_the_decimal_range_documented() {
     ));
 }
 
+/// Docs-sync pin for the mirror rule ("A parcel entered behind a ratio that
+/// already fits"): the section says why refusing the action is not sufficient,
+/// which parcel-creating paths carry the walk, that the two rollovers are
+/// judged on their **destination** listing, which single path is deliberately
+/// excluded and why, and that a parcel already stored beyond the range stays
+/// correctable.
+#[test]
+fn a_parcel_entered_behind_a_ratio_that_already_fits_documented() {
+    assert!(API_MD.contains("#### The mirror: a parcel entered behind a ratio that already fits"));
+    // Why the action-write refusal alone is not enough.
+    assert!(API_MD.contains("Refusing the action is necessary but not sufficient."));
+    // The two hooks, and what each judges.
+    assert!(API_MD.contains(
+        "the action write judges a new ratio against every recorded quantity, the parcel write \
+         judges a new quantity against every recorded ratio"
+    ));
+    // Each covered path names the bound it previously met, which is what says
+    // why that bound did not already catch this.
+    for path in [
+        "a `Buy` or `DRP` via [`PUT /trades/:id`](#trades)",
+        "an [inheritance](#inheritances) — its own magnitude bound is on `cost_base + \
+         lpr_expenditure`, a sum",
+        "an [ESS vest](#vesting-an-ess-statement) — the statement's bound is on `quantity × \
+         market_value_per_share`",
+        "a [rights exercise](#exercising-a-rights-issue) — likewise for `exercise_price × units \
+         + rights_cost`",
+        "a [DRP reinvestment](#drp-reinvestment), both ways the units are arrived at",
+    ] {
+        assert!(
+            API_MD.contains(path),
+            "the covered path is not documented: {path}"
+        );
+    }
+    // The finding the section exists for: the destination listing, not the
+    // listing the operation is about.
+    assert!(API_MD.contains(
+        "checked on the **destination** listing, the one the replacement parcels land on, which \
+         is *not* the listing the operation is about"
+    ));
+    assert!(API_MD.contains(
+        "A **1-for-1** exchange onto a listing carrying a 1000-for-1 split of its own answered \
+         `201`"
+    ));
+    // …and the one path deliberately left out, with the argument.
+    assert!(API_MD.contains(
+        "The eighth, a [transfer](#transfers)'s transfer-in Buy, is deliberately **not** checked"
+    ));
+    assert!(API_MD.contains(
+        "A transfer-in past the range implies a source parcel past it, which is already refused."
+    ));
+    // A parcel already in the refused state stays correctable.
+    assert!(API_MD.contains(
+        "An **edit** is judged over the state the write leaves behind, never over the stored row"
+    ));
+    // The cross-reference from the sibling rule over the same eight writes.
+    assert!(API_MD.contains(
+        "The same eight writes carry one other rule keyed on the listing's recorded corporate \
+         actions rather than its dates"
+    ));
+}
+
 /// Docs-sync pin for the append-only audit trail (2026-07-13 improvement
 /// review): the schema documents the table, its scope decision (which tables
 /// are audited and why the rest are not), and the keep-forever retention

@@ -121,6 +121,20 @@ pub enum ExchangeError {
     /// `500` with an empty body). Mapped to 422.
     #[error("the replacement quantity is beyond the representable range: {0}")]
     UnrepresentableReplacementQuantity(#[source] crate::domain::cost_base::UnrepresentableQuantity),
+    /// The **replacement listing's** own recorded splits and bonus issues
+    /// re-base a replacement parcel past what a `Decimal` can hold — and the
+    /// exchange ratio can be entirely ordinary while they do. A 1-for-1
+    /// exchange of 1e26 units onto a listing carrying a 1000-for-1 split
+    /// answered `201` and then killed every open-holdings read of the whole
+    /// portfolio: a `ShareSplit` materialises nothing, so
+    /// [`UnrepresentableReplacementQuantity`](ExchangeError::UnrepresentableReplacementQuantity)
+    /// above — which asks about the *exchange* ratio — is satisfied, and the
+    /// destination's ratio is applied at read time afterwards. So the walk runs
+    /// on the listing the replacement parcels land on, which is not the listing
+    /// the operation is about (SCENARIOS V-d's lesson, a second time). Mapped
+    /// to 422.
+    #[error("the replacement listing re-bases a quantity beyond the representable range: {0}")]
+    UnrepresentableRebasedQuantity(#[source] crate::domain::cost_base::UnrepresentableQuantity),
     /// The Sell-side invariants failed — defensive as to the allocations,
     /// which the exchange constructs to satisfy them; the reachable case is an
     /// exchange dated after today (SCENARIOS S-10), which the 422 names.
@@ -254,6 +268,20 @@ pub async fn db_exchange(pool: &SqlitePool, action_id: i64) -> Result<Exchange, 
         )
         .await?;
         replacement_ids.push(buy_id);
+    }
+
+    // The replacement listing's own `ShareSplit`/`BonusIssue` ratios are
+    // re-applied at *read* time, so one of them can push a replacement parcel
+    // past `Decimal`'s range while the exchange ratio checked above is
+    // perfectly ordinary — a 1-for-1 exchange onto a listing carrying a
+    // 1000-for-1 split did exactly that. Asked of the **destination** listing,
+    // over the parcels this operation has just written, so what is judged is
+    // the state the commit would leave behind
+    // (`corporate_action::rebased_quantity_beyond_range`).
+    if let Some(beyond) =
+        corporate_action::rebased_quantity_beyond_range(&mut tx, terms.scrip_listing_id).await?
+    {
+        return Err(ExchangeError::UnrepresentableRebasedQuantity(beyond));
     }
 
     tx.commit().await?;
@@ -448,6 +476,9 @@ impl From<ExchangeError> for ApiError {
             // 422 quoting the arithmetic, the same wording every
             // beyond-the-range refusal answers with.
             ExchangeError::UnrepresentableReplacementQuantity(e) => {
+                ApiError::Unprocessable(e.message())
+            }
+            ExchangeError::UnrepresentableRebasedQuantity(e) => {
                 ApiError::Unprocessable(e.message())
             }
             ExchangeError::Sell(err) => {
@@ -1480,5 +1511,113 @@ mod tests {
             v["replacements"][0]["quantity"],
             "1000000000000000000000000"
         );
+    }
+
+    /// A `ShareSplit` on the **replacement** listing, dated after the exchange,
+    /// so the replacement parcels are re-based at read time by 1000-for-1.
+    async fn split_the_replacement_listing(pool: &SqlitePool) {
+        corporate_action::db_upsert(
+            pool,
+            &CorporateAction {
+                id: 11,
+                listing_id: 2,
+                date: d(2024, 6, 1),
+                kind: ActionKind::ShareSplit {
+                    split_new_units: Decimal::from(1000),
+                    split_old_units: Decimal::ONE,
+                },
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    /// The case the mirror rule was raised for, and the one the section that
+    /// raised it did not have: the **exchange ratio is 1-for-1**, so the
+    /// `UnrepresentableReplacementQuantity` check that asks about it is
+    /// satisfied — and the replacement listing's own recorded 1000-for-1 split
+    /// re-bases the replacement parcel past the range at read time. The
+    /// exchange answered `201`, and `GET /portfolio/open-parcels` and
+    /// `POST /portfolio/overview` were both a logged `500` afterwards. The walk
+    /// therefore has to ask about the **destination** listing, not only the
+    /// listing the operation is about.
+    #[tokio::test]
+    async fn api_a_replacement_parcel_the_destination_listings_own_ratio_rebases_out_of_range() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "OLD").await;
+        insert_listing(&pool, 2, "NEW").await;
+        insert_buy(
+            &pool,
+            1,
+            1,
+            d(2024, 1, 15),
+            "100000000000000000000000000",
+            "0",
+        )
+        .await;
+        insert_scrip_terms(&pool, 10, 1, 2, d(2024, 3, 15), "1", "1").await;
+        split_the_replacement_listing(&pool).await;
+
+        let response = client(&pool)
+            .post_empty("/corporate_actions/10/exchange")
+            .await;
+        let (status, detail) = response.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{detail}");
+        assert!(
+            detail.contains("quantity 100000000000000000000000000 × new units 1000 / old units 1"),
+            "the quantity and the ratio are not named: {detail}"
+        );
+        // Nothing was written — the whole operation rolled back.
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM trades")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 1);
+        // And the reads the state used to kill still answer.
+        let rows: Vec<serde_json::Value> = ApiClient::full(&pool)
+            .get_json("/portfolio/open-parcels")
+            .await;
+        assert_eq!(rows.len(), 1, "{rows:?}");
+    }
+
+    /// The control, pinned at the figures this build answered before the
+    /// refusal existed: the same 1-for-1 exchange of 7.9e25 units onto the same
+    /// split-carrying listing re-bases to 7.9e28, inside the range, so it lands
+    /// and both reads report it.
+    #[tokio::test]
+    async fn api_a_replacement_parcel_the_destination_ratio_still_fits_lands_and_reports() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "OLD").await;
+        insert_listing(&pool, 2, "NEW").await;
+        insert_buy(
+            &pool,
+            1,
+            1,
+            d(2024, 1, 15),
+            "79000000000000000000000000",
+            "0",
+        )
+        .await;
+        insert_scrip_terms(&pool, 10, 1, 2, d(2024, 3, 15), "1", "1").await;
+        split_the_replacement_listing(&pool).await;
+
+        client(&pool)
+            .post_empty("/corporate_actions/10/exchange")
+            .await
+            .expect_status(StatusCode::CREATED);
+
+        let client = ApiClient::full(&pool);
+        let rows: Vec<serde_json::Value> = client.get_json("/portfolio/open-parcels").await;
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0]["ticker"], "NEW");
+        assert_eq!(rows[0]["original_quantity"], "79000000000000000000000000");
+        assert_eq!(
+            rows[0]["remaining_quantity"],
+            "79000000000000000000000000000"
+        );
+        let overview: Vec<serde_json::Value> = client
+            .post_json("/portfolio/overview", &serde_json::json!({}))
+            .await;
+        assert_eq!(overview[0]["quantity"], "79000000000000000000000000000");
     }
 }

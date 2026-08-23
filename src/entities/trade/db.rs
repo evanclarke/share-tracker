@@ -196,6 +196,18 @@ pub enum UpsertError {
     /// `domain::whole_holding`. Mapped to 422.
     #[error("this parcel is dated behind a whole-holding operation: {0}")]
     BackDatedOverWholeHolding(#[source] crate::domain::whole_holding::BackDatedParcel),
+    /// The Buy/DRP leaves this listing holding a quantity its recorded splits
+    /// and bonus issues re-base past what a `Decimal` can hold — a nil-priced
+    /// parcel of 1e27 units behind a 1000-for-1 split asks every report for
+    /// 1e30 units. The mirror of
+    /// `corporate_action::WriteError::UnrepresentableRebasedQuantity` and
+    /// answered by the same walk: a ratio is re-applied at *read* time, so one
+    /// that fitted every parcel when it was written is put beyond the range by
+    /// a parcel entered behind it, which the action write could not see coming.
+    /// Accepted, such a parcel answered `204` and then killed every
+    /// open-holdings read of the **whole** portfolio. Mapped to 422.
+    #[error("this parcel's quantity re-bases beyond the representable range: {0}")]
+    UnrepresentableRebasedQuantity(#[source] crate::domain::cost_base::UnrepresentableQuantity),
     /// The trade is dated on a day its exchange did not trade — a weekend, or
     /// a seeded public holiday on the calendar that was in force then
     /// (SCENARIOS S-08). The trade date is the CGT event date, so it sets the
@@ -595,6 +607,24 @@ pub async fn db_upsert(pool: &SqlitePool, trade: &Trade) -> Result<(), UpsertErr
         return Err(UpsertError::BackDatedOverWholeHolding(back_dated));
     }
 
+    // A `ShareSplit`/`BonusIssue` of this listing materialises nothing — its
+    // ratio is re-applied at *read* time — so a quantity it re-bases past
+    // `Decimal`'s range is accepted here and then answers a logged `500` from
+    // every open-holdings report of the whole portfolio. The mirror of the
+    // check `corporate_action::db_upsert` runs over a new ratio, and the same
+    // boundary walk: run over the state this write leaves behind, so the very
+    // edit that brings a stored quantity back inside the range still lands.
+    // Only the parcel types carry a quantity a ratio re-bases forward.
+    if trade.trade_type != super::model::TradeType::Sell
+        && let Some(beyond) = crate::entities::corporate_action::rebased_quantity_beyond_range(
+            &mut tx,
+            trade.listing_id,
+        )
+        .await?
+    {
+        return Err(UpsertError::UnrepresentableRebasedQuantity(beyond));
+    }
+
     // A return of capital on this listing reduces the parcel's cost base in
     // the *parcel's* own currency, so a Buy/DRP recorded in another one is a
     // state the cost-base reports refuse to compute over. This is the parcel
@@ -750,6 +780,10 @@ impl From<UpsertError> for ApiError {
             // recovery, built once in `domain::whole_holding` so every
             // parcel-creating path says it identically.
             UpsertError::BackDatedOverWholeHolding(e) => ApiError::Unprocessable(e.message()),
+            // A quantity the listing's own ratios re-base past what a decimal
+            // can hold → 422 quoting the arithmetic, the one wording every
+            // beyond-the-range refusal answers with.
+            UpsertError::UnrepresentableRebasedQuantity(e) => ApiError::Unprocessable(e.message()),
             UpsertError::QuantityBelowAllocated => ApiError::unprocessable(
                 "the new quantity is below what Sell allocations already draw from this parcel",
             ),

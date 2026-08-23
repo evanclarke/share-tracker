@@ -173,6 +173,21 @@ pub enum TransferError {
     /// arithmetic, which is what says the quantity asked for is impossible.
     #[error("the moved quantity is beyond the representable range: {0}")]
     UnrepresentableMovedQuantity(#[source] crate::domain::cost_base::UnrepresentableQuantity),
+    // There is deliberately no sibling of
+    // `trade::UpsertError::UnrepresentableRebasedQuantity` here, though a
+    // transfer-in Buy is one of the eight parcel-creating writes that rule
+    // covers. It is the one that cannot reach it, and the reason is that a
+    // transfer's destination listing *is* its source listing: the transfer-in
+    // is dated the transfer date and carries at most the units the source
+    // parcel held then, so every ratio recorded after the transfer date re-bases
+    // that parcel by the same factor and at least as far, while the ratios on or
+    // before it apply to the parcel alone. A transfer-in past the range
+    // therefore implies a source parcel past it, which
+    // `corporate_action::rebased_quantity_beyond_range` already refuses — at
+    // the parcel's own write, and again at any later action write that would
+    // put it there. Measured as well as argued: with a 1e26-unit parcel
+    // consolidated 1-for-1000 and transferred, the split that would overflow
+    // the transfer-in is refused for overflowing the parcel it came from.
 }
 
 impl From<sell::SellError> for TransferError {
@@ -1995,5 +2010,84 @@ mod tests {
             group.transfer_ins[0].quantity,
             dec("1000000000000000000000000")
         );
+    }
+
+    /// A `ShareSplit` of listing 1 — a consolidation where `new < old`.
+    async fn insert_split(pool: &SqlitePool, id: i64, date: NaiveDate, new: &str, old: &str) {
+        corporate_action::db_upsert(
+            pool,
+            &corporate_action::CorporateAction {
+                id,
+                listing_id: 1,
+                date,
+                kind: corporate_action::ActionKind::ShareSplit {
+                    split_new_units: dec(new),
+                    split_old_units: dec(old),
+                },
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    /// The eighth parcel-creating write, and the one the re-based-quantity rule
+    /// deliberately does **not** guard — because it cannot reach the bound.
+    ///
+    /// A transfer's destination listing is its source listing, and a
+    /// transfer-in carries at most the units the source parcel held at the
+    /// transfer date, so every ratio recorded *after* that date re-bases the
+    /// source parcel by the same factor and at least as far. A transfer-in past
+    /// the range therefore implies a source parcel past it — which is refused
+    /// at the parcel's own write, and again at the action write that would put
+    /// it there. This drives that: a 1e26-unit parcel consolidated 1-for-1000
+    /// transfers its whole 1e23-unit holding, and the later 1e6-for-1 split
+    /// that would take the transfer-in to 1e29 is refused for taking the parcel
+    /// it came from to the same place — quoting the *parcel's* 1e26, which is
+    /// what says the source is what bounds it.
+    #[tokio::test]
+    async fn db_a_transfer_in_is_bounded_by_the_parcel_it_moves_from() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BIG").await;
+        insert_vest(&pool, 1, d(2024, 1, 16), "100000000000000000000000000", "0").await;
+        // A 1-for-1000 consolidation: the holding is 1e23 units from here.
+        insert_split(&pool, 10, d(2024, 2, 1), "1", "1000").await;
+
+        db_transfer(
+            &pool,
+            1,
+            &body(d(2024, 3, 1), 2, 1, vec![(1, "100000000000000000000000")]),
+        )
+        .await
+        .unwrap();
+
+        // The split that would re-base the transfer-in to 1e29 is refused,
+        // naming the parcel it came from rather than the transfer-in.
+        let err = corporate_action::db_upsert(
+            &pool,
+            &corporate_action::CorporateAction {
+                id: 11,
+                listing_id: 1,
+                date: d(2024, 7, 1),
+                kind: corporate_action::ActionKind::ShareSplit {
+                    split_new_units: dec("1000000"),
+                    split_old_units: Decimal::ONE,
+                },
+            },
+        )
+        .await
+        .unwrap_err();
+        let detail = ApiError::from(err).to_string();
+        assert!(
+            detail.contains("quantity 100000000000000000000000000 × new units 1000000"),
+            "the source parcel is not what bounds it: {detail}"
+        );
+
+        // And the transfer itself stands, with both legs readable.
+        let rows: Vec<serde_json::Value> = ApiClient::full(&pool)
+            .get_json("/portfolio/open-parcels")
+            .await;
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0]["holding_account_id"], 1);
+        assert_eq!(rows[0]["remaining_quantity"], "100000000000000000000000");
     }
 }

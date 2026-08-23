@@ -231,6 +231,16 @@ pub enum ReinvestError {
     /// recovery in `domain::whole_holding`. Mapped to 422.
     #[error("this parcel is dated behind a whole-holding operation: {0}")]
     BackDatedOverWholeHolding(#[source] crate::domain::whole_holding::BackDatedParcel),
+    /// The reinvested quantity is one the listing's recorded splits and bonus
+    /// issues re-base past what a `Decimal` can hold. The DRP side of
+    /// `trade::UpsertError::UnrepresentableRebasedQuantity`, and reachable both
+    /// ways the quantity is arrived at: a stated allotment is the taxpayer's
+    /// own figure, and a derived one is `available / reinvestment_price`, which
+    /// a nil-ish price makes as large as you like out of ordinary cash. Same
+    /// walk, same wording (`corporate_action::rebased_quantity_beyond_range`).
+    /// Mapped to 422.
+    #[error("this parcel's quantity re-bases beyond the representable range: {0}")]
+    UnrepresentableRebasedQuantity(#[source] crate::domain::cost_base::UnrepresentableQuantity),
 }
 
 impl From<ReinvestError> for ApiError {
@@ -300,6 +310,9 @@ impl From<ReinvestError> for ApiError {
             }
             // The same body every parcel-creating path answers for this fact.
             ReinvestError::BackDatedOverWholeHolding(e) => ApiError::Unprocessable(e.message()),
+            ReinvestError::UnrepresentableRebasedQuantity(e) => {
+                ApiError::Unprocessable(e.message())
+            }
             ReinvestError::Db(err) => err.into(),
         }
     }
@@ -632,6 +645,19 @@ pub async fn db_reinvest(
     // now carried forward — into this trade, which brought exactly that figure
     // forward above. The two agree because they ask the same function.
     drp_enrolment::recompute_residuals(&mut tx, &period).await?;
+
+    // The listing's recorded splits and bonus issues are re-applied at *read*
+    // time, so a reinvested quantity they push past `Decimal`'s range is
+    // accepted here and then answers a logged `500` from every open-holdings
+    // report of the whole portfolio. Checked over the state this write leaves
+    // behind, like every other parcel-creating path
+    // (`corporate_action::rebased_quantity_beyond_range`).
+    if let Some(beyond) =
+        crate::entities::corporate_action::rebased_quantity_beyond_range(&mut tx, listing_id)
+            .await?
+    {
+        return Err(ReinvestError::UnrepresentableRebasedQuantity(beyond));
+    }
 
     tx.commit().await?;
 
@@ -2843,5 +2869,122 @@ mod tests {
         // still lands, so the bound touches only what the type cannot hold.
         let trade = db_reinvest(&pool, 1, &body("2")).await.unwrap();
         assert_eq!(trade.quantity, Decimal::from(34));
+    }
+
+    /// A listing enrolled in a DRP, carrying a 1000-for-1 split dated after the
+    /// distribution, so a reinvested parcel is re-based at read time by it.
+    /// The distribution pays exactly `0.0079`, which at a near-nil
+    /// reinvestment price buys 7.9e25 units.
+    async fn enrolled_listing_behind_a_split(pool: &SqlitePool, cash: &str) {
+        insert_listing(pool, 1, "AUD").await;
+        enrol(pool, 1, ResidualHandling::CarryForward).await;
+        insert_distribution(pool, 1, 1, cash.parse().unwrap(), Decimal::ZERO).await;
+        crate::entities::corporate_action::db_upsert(
+            pool,
+            &crate::entities::corporate_action::CorporateAction {
+                id: 10,
+                listing_id: 1,
+                date: "2024-06-01".parse().unwrap(),
+                kind: crate::entities::corporate_action::ActionKind::ShareSplit {
+                    split_new_units: Decimal::from(1000),
+                    split_old_units: Decimal::ONE,
+                },
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    /// W-e's bound on this path is `units × reinvestment_price`, which a
+    /// near-nil price satisfies at any unit count at all — so nothing asked
+    /// what the listing's recorded 1000-for-1 split does to 1e27 reinvested
+    /// units. The reinvestment answered `201` and then killed every
+    /// open-holdings read of the whole portfolio. Refused now, naming the
+    /// quantity and the ratio, with nothing written.
+    #[tokio::test]
+    async fn api_a_reinvested_quantity_a_recorded_ratio_rebases_out_of_range_is_refused() {
+        let pool = test_pool().await;
+        enrolled_listing_behind_a_split(&pool, "0.1").await;
+
+        let response = client(&pool)
+            .post(
+                "/income/1/reinvest",
+                &serde_json::json!({
+                    "reinvestment_price": "0.0000000000000000000000000001",
+                    "units": "1000000000000000000000000000"
+                }),
+            )
+            .await;
+        let (status, detail) = response.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{detail}");
+        assert!(
+            detail.contains("quantity 1000000000000000000000000000 × new units 1000 / old units 1"),
+            "the quantity and the ratio are not named: {detail}"
+        );
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM trades")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 0);
+    }
+
+    /// The same fact with the units **derived** rather than stated: the
+    /// registry default divides the cash by the price, so a near-nil price
+    /// makes an ordinary distribution buy 1e27 units. That is the path W-e
+    /// deliberately left unbounded — its product can never exceed the recorded
+    /// distribution — which is exactly why the unit count needs its own check.
+    #[tokio::test]
+    async fn api_a_derived_reinvested_quantity_beyond_the_range_is_refused_too() {
+        let pool = test_pool().await;
+        enrolled_listing_behind_a_split(&pool, "0.1").await;
+
+        let err = db_reinvest(&pool, 1, &body("0.0000000000000000000000000001"))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ReinvestError::UnrepresentableRebasedQuantity(_)),
+            "expected the re-based-quantity refusal, got: {err:?}"
+        );
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM trades")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 0);
+    }
+
+    /// The control, pinned at the figures this build answered before the
+    /// refusal existed: 7.9e25 reinvested units behind the same real
+    /// 1000-for-1 split re-base to 7.9e28, inside the range, so the
+    /// reinvestment lands and the parcel reports.
+    #[tokio::test]
+    async fn api_a_large_reinvested_quantity_a_recorded_ratio_still_fits_lands_and_reports() {
+        let pool = test_pool().await;
+        enrolled_listing_behind_a_split(&pool, "0.0079").await;
+
+        let trade = db_reinvest(
+            &pool,
+            1,
+            &body_units(
+                "0.0000000000000000000000000001",
+                "79000000000000000000000000",
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(trade.trade_type, TradeType::DRP);
+
+        let rows: Vec<serde_json::Value> = ApiClient::full(&pool)
+            .get_json("/portfolio/open-parcels")
+            .await;
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0]["original_quantity"], "79000000000000000000000000");
+        assert_eq!(
+            rows[0]["remaining_quantity"],
+            "79000000000000000000000000000"
+        );
+        assert_eq!(
+            rows[0]["original_cost_base"],
+            "0.0079000000000000000000000000"
+        );
     }
 }

@@ -65,6 +65,14 @@
 //! A new check added to `trade::check_amounts` therefore needs a line here, and
 //! either an argument that the vest satisfies it or a guard that makes it so.
 //!
+//! Two of `trade::db_upsert`'s checks that live *outside* `check_amounts` do
+//! reach the vest, and run here over this write's own transaction: the
+//! whole-holding guard ([`VestError::BackDatedOverWholeHolding`]) and the
+//! re-based-quantity guard ([`VestError::UnrepresentableRebasedQuantity`]) — a
+//! vested quantity the listing's recorded splits push past `Decimal`'s range
+//! is unrepresentable however small its market value, which is the one the
+//! statement's own bound is on.
+//!
 //! One write-time rule deliberately stops **outside** that list: the trading-day
 //! check `trade::db_upsert` and `sell::db_upsert_sell` apply to the date
 //! (`trade::UpsertError::NonTradingDay`, SCENARIOS S-08). It is not in
@@ -116,6 +124,14 @@ pub enum VestError {
     /// `domain::whole_holding`. Mapped to 422.
     #[error("this parcel is dated behind a whole-holding operation: {0}")]
     BackDatedOverWholeHolding(#[source] crate::domain::whole_holding::BackDatedParcel),
+    /// The vested quantity is one the listing's recorded splits and bonus
+    /// issues re-base past what a `Decimal` can hold. The ESS side of
+    /// `trade::UpsertError::UnrepresentableRebasedQuantity`: the statement's
+    /// own bound is on `quantity × market_value_per_share`, so a nil-ish price
+    /// leaves the unit count itself unguarded. Same walk, same wording
+    /// (`corporate_action::rebased_quantity_beyond_range`). Mapped to 422.
+    #[error("this parcel's quantity re-bases beyond the representable range: {0}")]
+    UnrepresentableRebasedQuantity(#[source] crate::domain::cost_base::UnrepresentableQuantity),
 }
 
 pub fn router() -> Router<SqlitePool> {
@@ -231,6 +247,19 @@ pub async fn db_vest(pool: &SqlitePool, statement_id: i64) -> Result<Trade, Vest
     .await?;
     let new_id = result.last_insert_rowid();
 
+    // The listing's recorded splits and bonus issues are re-applied at *read*
+    // time, so a vested quantity they push past `Decimal`'s range is accepted
+    // here and then answers a logged `500` from every open-holdings report of
+    // the whole portfolio. Checked over the state this write leaves behind,
+    // like every other parcel-creating path
+    // (`corporate_action::rebased_quantity_beyond_range`).
+    if let Some(beyond) =
+        crate::entities::corporate_action::rebased_quantity_beyond_range(&mut tx, listing_id)
+            .await?
+    {
+        return Err(VestError::UnrepresentableRebasedQuantity(beyond));
+    }
+
     tx.commit().await?;
 
     trade::db_get(pool, new_id)
@@ -265,6 +294,7 @@ impl From<VestError> for ApiError {
             )),
             // The same body every parcel-creating path answers for this fact.
             VestError::BackDatedOverWholeHolding(e) => ApiError::Unprocessable(e.message()),
+            VestError::UnrepresentableRebasedQuantity(e) => ApiError::Unprocessable(e.message()),
             VestError::Db(err) => err.into(),
         }
     }
@@ -859,5 +889,103 @@ mod tests {
                 .await
                 .unwrap();
         assert!(!vested);
+    }
+
+    /// A statement with a near-nil per-share market value, so its own
+    /// magnitude bound (`quantity × market_value_per_share`) is satisfied at
+    /// any unit count — and no assessable discount, which that market value
+    /// could not cover.
+    async fn insert_nil_priced_statement(pool: &SqlitePool, qty: &str) {
+        test_support::ess_statement(1, 1, ymd(2024, 9, 1))
+            .with(|s| {
+                s.quantity = qty.parse().unwrap();
+                s.market_value_per_share = "0.0000000000000000000000000001".parse().unwrap();
+                s.deferral_discount = Decimal::ZERO;
+            })
+            .insert(pool)
+            .await;
+    }
+
+    /// A `ShareSplit` on listing 1 dated after the taxing point, so the vest
+    /// parcel is re-based at read time by 1000-for-1.
+    async fn insert_thousand_for_one_split(pool: &SqlitePool) {
+        crate::entities::corporate_action::db_upsert(
+            pool,
+            &crate::entities::corporate_action::CorporateAction {
+                id: 10,
+                listing_id: 1,
+                date: ymd(2025, 6, 1),
+                kind: crate::entities::corporate_action::ActionKind::ShareSplit {
+                    split_new_units: Decimal::from(1000),
+                    split_old_units: Decimal::ONE,
+                },
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    /// The statement's own magnitude bound is on `quantity ×
+    /// market_value_per_share` (SCENARIOS W-e), which a near-nil per-share
+    /// value satisfies at any unit count at all — so nothing asked what the
+    /// listing's recorded 1000-for-1 split does to 1e27 vested units. The vest
+    /// answered `201` and then killed every open-holdings read of the whole
+    /// portfolio. Refused now, naming the quantity and the ratio, with nothing
+    /// written.
+    #[tokio::test]
+    async fn vest_of_a_quantity_a_recorded_ratio_rebases_out_of_range_is_refused() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        insert_nil_priced_statement(&pool, "1000000000000000000000000000").await;
+        insert_thousand_for_one_split(&pool).await;
+
+        let err = db_vest(&pool, 1).await.unwrap_err();
+        assert!(
+            matches!(err, VestError::UnrepresentableRebasedQuantity(_)),
+            "expected the re-based-quantity refusal, got: {err:?}"
+        );
+
+        let response = ApiClient::over(router().with_state(pool.clone()))
+            .post_empty("/ess_statements/1/vest")
+            .await;
+        let (status, detail) = response.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{detail}");
+        assert!(
+            detail.contains("quantity 1000000000000000000000000000 × new units 1000 / old units 1"),
+            "the quantity and the ratio are not named: {detail}"
+        );
+        let vested: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM trades WHERE ess_statement_id = 1)")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(!vested);
+    }
+
+    /// The control, pinned at the figures this build answered before the
+    /// refusal existed: 7.9e25 vested units behind the same real 1000-for-1
+    /// split re-base to 7.9e28, inside the range, so the vest lands and the
+    /// parcel reports.
+    #[tokio::test]
+    async fn vest_of_a_large_quantity_a_recorded_ratio_still_fits_lands_and_reports() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        insert_nil_priced_statement(&pool, "79000000000000000000000000").await;
+        insert_thousand_for_one_split(&pool).await;
+
+        db_vest(&pool, 1).await.unwrap();
+        let rows: Vec<serde_json::Value> = ApiClient::full(&pool)
+            .get_json("/portfolio/open-parcels")
+            .await;
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0]["original_quantity"], "79000000000000000000000000");
+        assert_eq!(
+            rows[0]["remaining_quantity"],
+            "79000000000000000000000000000"
+        );
+        assert_eq!(
+            rows[0]["original_cost_base"],
+            "0.0079000000000000000000000000"
+        );
     }
 }

@@ -85,7 +85,11 @@
 //! scrip-for-scrip exchange, demerger, or worthless-shares recognise of the
 //! listing can never be consumed by it, and an inherited parcel is dated the
 //! date of death, which is as freely back-dated as any Buy
-//! ([`UpsertError::BackDatedOverWholeHolding`], `domain::whole_holding`).
+//! ([`UpsertError::BackDatedOverWholeHolding`], `domain::whole_holding`). And so
+//! does its re-based-quantity guard: the listing's recorded splits and bonus
+//! issues are re-applied at read time to the inherited quantity, and one they
+//! push past `Decimal`'s range kills every open-holdings report
+//! ([`UpsertError::UnrepresentableRebasedQuantity`]).
 //!
 //! A new check added to `trade::check_amounts` therefore needs a line here, and
 //! either an argument that the inheritance satisfies it or a guard that makes
@@ -340,6 +344,13 @@ pub enum UpsertError {
     /// `domain::whole_holding`. Mapped to 422.
     #[error("this parcel is dated behind a whole-holding operation: {0}")]
     BackDatedOverWholeHolding(#[source] crate::domain::whole_holding::BackDatedParcel),
+    /// The inherited quantity is one the listing's recorded splits and bonus
+    /// issues re-base past what a `Decimal` can hold. The inheritance side of
+    /// `trade::UpsertError::UnrepresentableRebasedQuantity`, answered by the
+    /// same walk over the same wording
+    /// (`corporate_action::rebased_quantity_beyond_range`). Mapped to 422.
+    #[error("this parcel's quantity re-bases beyond the representable range: {0}")]
+    UnrepresentableRebasedQuantity(#[source] crate::domain::cost_base::UnrepresentableQuantity),
 }
 
 impl From<UpsertError> for ApiError {
@@ -424,6 +435,7 @@ impl From<UpsertError> for ApiError {
             // The same body `PUT /trades` answers for the same fact, built in
             // `domain::whole_holding` so the two cannot drift.
             UpsertError::BackDatedOverWholeHolding(e) => ApiError::Unprocessable(e.message()),
+            UpsertError::UnrepresentableRebasedQuantity(e) => ApiError::Unprocessable(e.message()),
             UpsertError::Db(err) => err.into(),
         }
     }
@@ -732,6 +744,20 @@ pub async fn db_upsert(pool: &SqlitePool, inh: &Inheritance) -> Result<(), Upser
     .await?
     {
         return Err(UpsertError::BackDatedOverWholeHolding(back_dated));
+    }
+
+    // The listing's recorded splits and bonus issues are re-applied at *read*
+    // time, so an inherited quantity they push past `Decimal`'s range is
+    // accepted here and then answers a logged `500` from every open-holdings
+    // report of the whole portfolio. `trade::db_upsert` runs this over an
+    // ordinary Buy; the inheritance's Buy does not go through it, so the same
+    // walk runs here — over the state this write leaves behind, so an edit that
+    // brings a stored quantity back inside the range still lands.
+    if let Some(beyond) =
+        crate::entities::corporate_action::rebased_quantity_beyond_range(&mut tx, inh.listing_id)
+            .await?
+    {
+        return Err(UpsertError::UnrepresentableRebasedQuantity(beyond));
     }
 
     // A return of capital on this listing reduces the parcel's cost base in
@@ -1939,5 +1965,96 @@ mod tests {
             "fx_rate": "1"
         });
         client.put_ok("/inheritances/1", &body).await;
+    }
+
+    /// A `ShareSplit` on listing 1, so a parcel behind it is re-based at read
+    /// time by 1000-for-1.
+    async fn insert_thousand_for_one_split(pool: &SqlitePool) {
+        crate::entities::corporate_action::db_upsert(
+            pool,
+            &crate::entities::corporate_action::CorporateAction {
+                id: 10,
+                listing_id: 1,
+                date: ymd(2025, 6, 1),
+                kind: crate::entities::corporate_action::ActionKind::ShareSplit {
+                    split_new_units: dec("1000"),
+                    split_old_units: Decimal::ONE,
+                },
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    /// An inherited quantity is as free as any Buy's, and its cost base is a
+    /// *sum* rather than a product — so W-e's bound on `cost_base +
+    /// lpr_expenditure` says nothing about the unit count, and a listing's
+    /// recorded 1000-for-1 split re-bases 1e27 inherited units to 1e30 at read
+    /// time. Accepted `204`, that killed every open-holdings read of the whole
+    /// portfolio; refused now, naming the quantity and the ratio.
+    #[tokio::test]
+    async fn api_an_inherited_quantity_a_recorded_ratio_rebases_out_of_range_is_refused() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        insert_thousand_for_one_split(&pool).await;
+
+        let body = serde_json::json!({
+            "listing_id": 1,
+            "quantity": "1000000000000000000000000000",
+            "date_of_death": "2025-01-10",
+            "cost_base_rule": "MarketValueAtDeath",
+            "cost_base": "0",
+            "currency": "AUD",
+            "fx_rate": "1"
+        });
+        let resp = ApiClient::over(router().with_state(pool.clone()))
+            .put("/inheritances/1", &body)
+            .await;
+        let (status, detail) = resp.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{detail}");
+        assert!(
+            detail.contains("quantity 1000000000000000000000000000 × new units 1000 / old units 1"),
+            "the quantity and the ratio are not named: {detail}"
+        );
+        assert!(db_get(&pool, 1).await.unwrap().is_none());
+        // The read the state used to kill still answers.
+        let rows: Vec<serde_json::Value> = ApiClient::full(&pool)
+            .get_json("/portfolio/open-parcels")
+            .await;
+        assert!(rows.is_empty(), "{rows:?}");
+    }
+
+    /// The control, pinned at the figures this build answered before the
+    /// refusal existed: 7.9e25 inherited units behind the same real
+    /// 1000-for-1 split re-base to 7.9e28, inside the range, so the
+    /// inheritance lands and the parcel reports.
+    #[tokio::test]
+    async fn api_a_large_inherited_quantity_a_recorded_ratio_still_fits_lands_and_reports() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        insert_thousand_for_one_split(&pool).await;
+
+        let body = serde_json::json!({
+            "listing_id": 1,
+            "quantity": "79000000000000000000000000",
+            "date_of_death": "2025-01-10",
+            "cost_base_rule": "MarketValueAtDeath",
+            "cost_base": "500",
+            "currency": "AUD",
+            "fx_rate": "1"
+        });
+        ApiClient::over(router().with_state(pool.clone()))
+            .put_ok("/inheritances/1", &body)
+            .await;
+        let rows: Vec<serde_json::Value> = ApiClient::full(&pool)
+            .get_json("/portfolio/open-parcels")
+            .await;
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0]["original_quantity"], "79000000000000000000000000");
+        assert_eq!(
+            rows[0]["remaining_quantity"],
+            "79000000000000000000000000000"
+        );
+        assert_eq!(rows[0]["original_cost_base"], "500");
     }
 }

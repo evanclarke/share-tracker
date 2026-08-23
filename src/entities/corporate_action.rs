@@ -139,7 +139,7 @@ pub use adjustments::{
     db_return_of_capital_events, db_share_split_events, db_splits_for_listing, per_unit_reduction,
     sold_in_acquired_units, split_adjusted_quantity,
 };
-pub use db::db_get_tx;
+pub use db::{db_get_tx, rebased_quantity_beyond_range};
 pub use http::router;
 pub use model::{ActionKind, CorporateAction, WorthlessEvent};
 
@@ -3551,11 +3551,11 @@ mod tests {
     }
 
     /// A database may already hold such an action — this rule postdates them,
-    /// and until the mirror check exists on the parcel-creating writes one can
-    /// still arrive behind an in-range ratio. The refusal is judged on the
-    /// terms being *written*, never on the stored ones, so the edit that
-    /// brings the ratio back inside the range still lands, and the row is
-    /// still deletable.
+    /// and the mirror rule that stops one arriving behind an in-range ratio
+    /// postdates it again (`trade::UpsertError::UnrepresentableRebasedQuantity`
+    /// and its seven siblings). The refusal is judged on the terms being
+    /// *written*, never on the stored ones, so the edit that brings the ratio
+    /// back inside the range still lands, and the row is still deletable.
     #[tokio::test]
     async fn api_an_already_unrepresentable_action_can_still_be_edited_back_into_range() {
         let pool = test_pool().await;

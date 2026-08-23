@@ -286,7 +286,23 @@ async fn allocations_fit_parcels(
 /// The parcel's gross quantity is what is bounded, not the units still open:
 /// the gross figure is what the rights issue's record-date holding and the
 /// activity report's running balance re-base.
-async fn rebased_quantity_beyond_range(
+///
+/// It is the **parcel-creating writes'** guard as well, and for the mirror of
+/// its own reason. A ratio that fits every parcel of the listing when it is
+/// written can be made unrepresentable afterwards by a parcel entered *behind*
+/// it, which the action write cannot see coming, so each of those writes runs
+/// this walk over the state it is about to commit (`domain::whole_holding`
+/// enumerates the paths; a rollover runs it on the listing its **replacement**
+/// parcels land on, which is not the listing the operation is about). The two
+/// hooks together cover the cross product: the action write judges a new ratio
+/// against every recorded quantity, and the parcel write judges a new quantity
+/// against every recorded ratio.
+///
+/// Run **after** the write's own INSERT, over the resulting state, for the same
+/// reason the action write does: a row already stored beyond the range — one a
+/// build predating this rule wrote — is corrected by the very write that would
+/// be refused if the walk ran first.
+pub async fn rebased_quantity_beyond_range(
     conn: &mut sqlx::SqliteConnection,
     listing_id: i64,
 ) -> Result<Option<crate::domain::cost_base::UnrepresentableQuantity>, sqlx::Error> {

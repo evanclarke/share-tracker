@@ -124,6 +124,23 @@ pub enum DemergeError {
     /// body). Mapped to 422.
     #[error("the demerged quantity is beyond the representable range: {0}")]
     UnrepresentableDemergedQuantity(#[source] crate::domain::cost_base::UnrepresentableQuantity),
+    /// The **demerged listing's** own recorded splits and bonus issues re-base
+    /// a demerged-entity parcel past what a `Decimal` can hold — and the
+    /// entitlement ratio can be entirely ordinary while they do. A 1-for-1
+    /// demerger of 1e26 units onto a listing carrying a 1000-for-1 split
+    /// answered `201` and then killed every open-holdings read of the whole
+    /// portfolio: a `ShareSplit` materialises nothing, so
+    /// [`UnrepresentableDemergedQuantity`](DemergeError::UnrepresentableDemergedQuantity)
+    /// above — which asks about the *entitlement* ratio — is satisfied, and the
+    /// destination's ratio is applied at read time afterwards. So the walk runs
+    /// on the listing the demerged parcels land on, which is not the listing
+    /// the operation is about (SCENARIOS V-d's lesson, a second time). The head
+    /// replacements need no walk of their own: each carries its parcel's own
+    /// units at the demerger date, so every later ratio re-bases the parcel it
+    /// came from at least as far, and that parcel is already bounded. Mapped
+    /// to 422.
+    #[error("the demerged listing re-bases a quantity beyond the representable range: {0}")]
+    UnrepresentableRebasedQuantity(#[source] crate::domain::cost_base::UnrepresentableQuantity),
     /// The Sell-side invariants failed — defensive as to the allocations,
     /// which the demerge constructs to satisfy them; the reachable case is a
     /// demerger dated after today (SCENARIOS S-10), which the 422 names.
@@ -323,6 +340,23 @@ pub async fn db_demerge(pool: &SqlitePool, action_id: i64) -> Result<Demerge, De
         }
     }
 
+    // The demerged listing's own `ShareSplit`/`BonusIssue` ratios are re-applied
+    // at *read* time, so one of them can push a demerged-entity parcel past
+    // `Decimal`'s range while the entitlement ratio checked above is perfectly
+    // ordinary — a 1-for-1 demerger onto a listing carrying a 1000-for-1 split
+    // did exactly that. Asked of the **demerged** listing, over the parcels
+    // this operation has just written, so what is judged is the state the
+    // commit would leave behind
+    // (`corporate_action::rebased_quantity_beyond_range`). The head listing is
+    // not asked: a head replacement carries its own parcel's units at the
+    // demerger date, so every later ratio re-bases that parcel at least as far,
+    // and the parcel is bounded by the write that created it.
+    if let Some(beyond) =
+        corporate_action::rebased_quantity_beyond_range(&mut tx, demerger_listing_id).await?
+    {
+        return Err(DemergeError::UnrepresentableRebasedQuantity(beyond));
+    }
+
     tx.commit().await?;
 
     // Read the freshly created rows back so the response is exactly what was
@@ -425,6 +459,9 @@ impl From<DemergeError> for ApiError {
             DemergeError::UnrepresentableDemergedQuantity(e) => {
                 ApiError::Unprocessable(e.message())
             }
+            // The demerged listing's own ratios re-base one of the parcels
+            // this would write past what a decimal can hold → the same body.
+            DemergeError::UnrepresentableRebasedQuantity(e) => ApiError::Unprocessable(e.message()),
             DemergeError::Sell(err) => {
                 tracing::warn!(error = ?err, "demerge rejected by a sell invariant");
                 // A future-dated demerger is the one Sell rejection a user can
@@ -1601,5 +1638,109 @@ mod tests {
                 .await
                 .unwrap();
         assert!(!created);
+    }
+
+    /// A `ShareSplit` on the **demerged** listing, dated after the demerger, so
+    /// the demerged-entity parcels are re-based at read time by 1000-for-1.
+    async fn split_the_demerged_listing(pool: &SqlitePool) {
+        corporate_action::db_upsert(
+            pool,
+            &CorporateAction {
+                id: 11,
+                listing_id: 2,
+                date: d(2024, 6, 1),
+                kind: ActionKind::ShareSplit {
+                    split_new_units: Decimal::from(1000),
+                    split_old_units: Decimal::ONE,
+                },
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    /// The demerger's version of the case the mirror rule was raised for: the
+    /// **entitlement ratio is 1-for-1**, so the `UnrepresentableDemergedQuantity`
+    /// check that asks about it is satisfied — and the demerged listing's own
+    /// recorded 1000-for-1 split re-bases the demerged parcel past the range at
+    /// read time. The demerge answered `201`, and `GET /portfolio/open-parcels`
+    /// and `POST /portfolio/overview` were both a logged `500` afterwards. So
+    /// the walk asks about the **destination** listing, not the head listing
+    /// the operation is about.
+    #[tokio::test]
+    async fn api_a_demerged_parcel_the_demerged_listings_own_ratio_rebases_out_of_range() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "HEAD").await;
+        insert_listing(&pool, 2, "SPIN").await;
+        insert_buy(
+            &pool,
+            1,
+            1,
+            d(2024, 1, 15),
+            "100000000000000000000000000",
+            "0",
+        )
+        .await;
+        insert_demerger_terms(&pool, 10, 1, 2, d(2024, 3, 15), "1", "1", "10").await;
+        split_the_demerged_listing(&pool).await;
+
+        let response = client(&pool)
+            .post_empty("/corporate_actions/10/demerge")
+            .await;
+        let (status, detail) = response.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{detail}");
+        assert!(
+            detail.contains("quantity 100000000000000000000000000 × new units 1000 / old units 1"),
+            "the quantity and the ratio are not named: {detail}"
+        );
+        // Nothing was written — the whole operation rolled back.
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM trades")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 1);
+        let rows: Vec<serde_json::Value> = ApiClient::full(&pool)
+            .get_json("/portfolio/open-parcels")
+            .await;
+        assert_eq!(rows.len(), 1, "{rows:?}");
+    }
+
+    /// The control, pinned at the figures this build answered before the
+    /// refusal existed: the same 1-for-1 demerger of 7.9e25 units onto the same
+    /// split-carrying listing re-bases to 7.9e28, inside the range, so it lands
+    /// — and the head replacement, which no ratio of its own touches, keeps its
+    /// 7.9e25 units and the other 90% of the cost base.
+    #[tokio::test]
+    async fn api_a_demerged_parcel_the_demerged_ratio_still_fits_lands_and_reports() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "HEAD").await;
+        insert_listing(&pool, 2, "SPIN").await;
+        test_support::buy(1, 1)
+            .date(d(2024, 1, 15))
+            .settlement(d(2024, 1, 15))
+            .qty(dec("79000000000000000000000000"))
+            .price(Decimal::ZERO)
+            .brokerage(dec("1000"))
+            .insert(&pool)
+            .await;
+        insert_demerger_terms(&pool, 10, 1, 2, d(2024, 3, 15), "1", "1", "10").await;
+        split_the_demerged_listing(&pool).await;
+
+        client(&pool)
+            .post_empty("/corporate_actions/10/demerge")
+            .await
+            .expect_status(StatusCode::CREATED);
+
+        let rows: Vec<serde_json::Value> = ApiClient::full(&pool)
+            .get_json("/portfolio/open-parcels")
+            .await;
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        let head = rows.iter().find(|r| r["ticker"] == "HEAD").unwrap();
+        assert_eq!(head["remaining_quantity"], "79000000000000000000000000");
+        assert_eq!(head["original_cost_base"], "900");
+        let spin = rows.iter().find(|r| r["ticker"] == "SPIN").unwrap();
+        assert_eq!(spin["original_quantity"], "79000000000000000000000000");
+        assert_eq!(spin["remaining_quantity"], "79000000000000000000000000000");
+        assert_eq!(spin["original_cost_base"], "100");
     }
 }
