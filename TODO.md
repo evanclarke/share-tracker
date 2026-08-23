@@ -279,8 +279,14 @@ apply to this half: the ceiling here is not a policy number but a representabili
 itself states, so the refusal has a principled bound to quote. That is a new fact, so the decision is
 worth re-taking rather than inheriting.
 
-- [ ] Decide whether to bound `average_price × quantity` at write time, and if so refuse it `422`
-      naming the product and the limit, across every parcel-creating write
+**Evan chose to refuse it at write time.** The objection recorded in W-b does not survive the
+re-derivation: the ceiling is `Decimal`'s own representability limit, so the refusal has a principled
+bound to quote rather than a policy number to defend. Deliberately *not* included: the same
+multiply-before-divide shape in `AmitReductionEvent::reduction_for_units` (noted under W-b), which
+stays open for a later section.
+
+- [ ] Refuse a parcel-creating write whose `average_price × quantity` cannot be represented, `422`
+      naming the product and the limit, across every parcel-creating path
 
 ## SCENARIOS W-c — The tax-return-ready CSV exports carry 28-digit figures under ATO labels
 
@@ -382,9 +388,25 @@ Two things bound it before any fix is aimed:
   alone for exactly this reason, so whatever is decided here should settle all three at once rather
   than forking the figure.
 
-- [ ] Decide whether the net-capital-gain (and tax-summary) CSV worksheet columns should be derived
-      from each other after rounding so the printed working reconciles, and if so apply it to the
-      shared year record so the JSON, the CSV and the annual report's `cgt_summary` all agree
+Options offered:
+
+- **(a) Derive the worksheet after rounding** — round the input columns to the cent, then compute the
+  dependent ones from the rounded values in the shared year record, so the JSON, the CSV and the
+  annual report's `cgt_summary` all reconcile and the printed working adds up. Moves the reported
+  figure by up to a cent.
+- (b) Leave the figures and document the possible cent of disagreement.
+- (c) Round half-to-even, which splits the `.005` cases evenly rather than always up.
+- (d) Defer to a later section.
+
+**Evan chose (a).** A worksheet whose working does not reach its own result fails at the one job the
+document has. (c) was rejected on its own terms: it lowers the frequency without removing the
+divergence, and it would fork the rounding rule from the half-away-from-zero the screens, the CSV
+exports and `infra::decimal::to_cents` now all share.
+
+- [ ] Derive the dependent worksheet columns from the cent-rounded inputs in the shared
+      net-capital-gain year record, so the JSON, the CSV export and the annual tax report's
+      `cgt_summary` reconcile; carry the same treatment to `tax-summary.csv` wherever one column is a
+      sum of others
 
 ## SCENARIOS W-d — The Annual Tax Report's printed columns do not add up
 
