@@ -1616,3 +1616,114 @@ give, so that is W-e's shape — a write-time refusal naming the arithmetic — 
       only the three that already were. The whole suite (2,073 tests) is green with no figure moved.
       The unrepresentable-*quantity* decision is **still open** and is now its own TODO section
       rather than being archived closed inside this one.
+
+## A replacement quantity no `Decimal` can hold
+
+Split out of the multiply-before-divide sweep (archived in
+[`DONE/tax-domain.md`](DONE/tax-domain.md)), which closed the arithmetic but deliberately left this
+decision open: `infra::decimal::mul_div` cannot help here, because the *result* is what is
+unrepresentable rather than the working.
+
+A demerger or scrip-for-scrip exchange whose ratio is **greater than one** computes a replacement
+quantity of `held × new / old`. On a 1000-for-1 ratio a holding of 1e27 units asks for 1e30
+replacement units, which is past `Decimal`'s ~7.9228e28 ceiling however the arithmetic is ordered —
+`mul_div` divides early, finds the product still overflows, and panics exactly as the plain
+expression did. That is W-e's shape, not the sweep's: there is no lesser answer to give, so the
+answer is a write-time refusal naming the arithmetic, in the wording
+`domain::cost_base::UnrepresentableCost::message` already uses for a cost base.
+
+**Corrected 2026-08-23 by driving every path against throwaway databases before fixing any of
+them. The heading above named three paths — scrip exchange, demerger, transfer — and there are
+six, in two shapes; one of the three named is not one of them; and the second shape's refusal
+belongs somewhere this section did not say.** The enabling condition throughout is that a parcel of
+1e27 units at a **nil** price is a perfectly legal write (`204`): W-e bounds
+`average_price × quantity`, which is zero there, so nothing refuses a huge *quantity*.
+
+- **The operation itself panics and nothing is written** — the shape this section described.
+  `POST /corporate_actions/:id/exchange` (`at_date_units × new / old`) and
+  `POST /corporate_actions/:id/demerge` (`at_date_units × new / held`) each answer a logged `500`
+  with an empty body and do not happen. So does the rights issue's **entitlement cap**
+  (`held × rights_units / rights_held_units`) — and there the user asked to exercise **100** units:
+  it is the cap computation that overflows, not anything they asked for.
+- **The write is accepted `204` and then every open-holdings read of the whole portfolio breaks** —
+  not mentioned here, and the more serious shape: a stored action bricks the screens until someone
+  works out which action did it, with several of the reports that would have found it among the ones
+  that are down. `PUT /corporate_actions/:id` with a `ShareSplit` or a `BonusIssue` over such a
+  holding, plus a third reproduction of the same hook — a **consolidation** recorded over an existing
+  sale allocation, which overflows *inside* the over-consumption re-check that would otherwise have
+  refused the write, so it answers a `500` instead of that check's own `422`. This half's refusal
+  therefore belongs at the **action write**, beside that re-check, and not in any operation.
+- **Transfer is not one of the six, and the section was wrong to name it.** A transfer moves units
+  1:1 and applies no ratio of its own: the whole of a 1e27-unit holding transfers `201` with a
+  1e27-unit replacement parcel. What it *does* re-base is the units **asked for**, backward into the
+  parcel's own basis, which a consolidation multiplies up — so `PUT /transfers/:id` can still reach
+  the overflow, but only on a request naming more units than the parcel could ever have held, which
+  the over-allocation check would have refused had the re-base not been computed first.
+
+- [x] Refuse a replacement quantity outside `Decimal`'s range at the write, W-e style, naming the
+      ratio and the holding that produced it, with a test at the boundary
+      — the bound is `domain::cost_base::checked_rebased_quantity`, `mul_div`'s own arithmetic in
+      checked form and in the same order (multiply first; where that product alone overflows, divide
+      first and multiply after — the headroom `mul_div` exists for), so what is refused is exactly
+      what `mul_div` would have panicked on and nothing narrower. Its refusal is
+      `UnrepresentableQuantity`, `UnrepresentableCost`'s sibling: both render through one private
+      `beyond_the_range(expression, total_is, correct)`, so the sentence and the `Decimal::MAX` quote
+      live once and the cost-base wording is unchanged to the byte — only *what the total is* differs
+      ("the number of units the holding becomes"). Each path passes its own field labels, so the one
+      message reads in the caller's vocabulary: `units held … × scrip_new_units 1000 /
+      scrip_old_units 1` on an exchange, `demerger_new_units`/`demerger_held_units` on a demerge,
+      `quantity × new units / old units` on a split, `quantity_allocated × old units / new units` on
+      the two backward re-bases.
+      **Where each refusal sits.** Group A in the operation, before it writes anything:
+      `ExchangeError::UnrepresentableReplacementQuantity` and
+      `DemergeError::UnrepresentableDemergedQuantity`. Group B at the **action write** —
+      `corporate_action::db::WriteError::UnrepresentableRebasedQuantity`, checked over the state the
+      write leaves behind by `rebased_quantity_beyond_range`, beside `allocations_fit_parcels` and
+      **before** it, since that check computes the very backward re-base that overflows. Both
+      directions are covered because both are used: a parcel's gross quantity forward at **every**
+      split boundary after it (a split then a consolidation nets back to a ratio that fits while the
+      basis in between does not, and a report as at that date still reads it), and each allocation
+      backward into its parcel's basis. The transfer's own reach is closed at
+      `TransferError::UnrepresentableMovedQuantity`, through
+      `corporate_action::checked_as_acquired_quantity` — the higher-level question the module already
+      answers, rather than un-gating the raw `split_ratio`.
+      **The rights-issue entitlement cap is deliberately *not* a refusal**, and that is the one
+      decision here that departs from W-e. That figure is never stored: it exists only to answer
+      *have more rights been used than were earned?*, and an unrepresentable cap answers that exactly
+      — nothing representable can reach it. There **is** a lesser answer, which is precisely what W-e
+      said distinguishes a refusal from a computation, and refusing would deny an ordinary 100-unit
+      exercise over arithmetic the user never asked for. So `entitled_units` returns
+      `Option<Decimal>`, `None` meaning *unbounded*, and its three call sites (exercise, and the
+      rights sale's total and per-parcel caps) read it as such; wherever the cap is representable it
+      bites unchanged.
+      An **edit** is judged on the terms being *written*, never the stored ones — the check runs
+      after the INSERT, on the resulting state — so a database already holding such an action stays
+      correctable in place and deletable (`fc1fd7b`'s sibling rule tripped on exactly this, and the
+      test fails if the check is moved before the INSERT). Tests:
+      `domain::cost_base::tests::{the_rebased_quantity_bound_is_exactly_what_a_decimal_can_hold,
+      a_rebased_quantity_is_mul_divs_answer_wherever_that_fits,
+      the_quantity_refusal_names_the_ratio_and_the_holding}`;
+      `entities::scrip_exchange::tests::api_an_unrepresentable_replacement_quantity_is_refused_naming_the_ratio`;
+      `entities::demerger::tests::api_an_unrepresentable_demerged_quantity_is_refused_naming_the_ratio`;
+      `entities::corporate_action::tests::{api_a_split_that_rebases_a_parcel_beyond_the_decimal_range_is_refused
+      (both the split and its bonus-issue equivalent),
+      api_a_consolidation_that_rebases_an_allocation_beyond_the_range_is_refused,
+      api_an_already_unrepresentable_action_can_still_be_edited_back_into_range}`;
+      `entities::transfer::tests::a_moved_quantity_no_decimal_can_hold_is_refused_naming_it` (its own
+      control first: the 1:1 move of the same holding still lands);
+      `entities::rights_exercise::tests::a_modest_exercise_against_an_unrepresentable_entitlement_cap_still_lands`
+      (which also pins that a representable cap still refuses); plus
+      `doc_checks::quantities_beyond_the_decimal_range_documented` over `docs/API.md`'s new
+      **Quantities as well as money** subsection, the corporate-action write rule *Writing terms that
+      re-base a quantity beyond the decimal range*, the four endpoints' `422` lists, and the
+      exception now stated on the **Fractional entitlements** promise. Every one of the eight was
+      confirmed to fail with the refusal removed. The pre-existing large-but-representable controls —
+      `api_exchange_past_the_old_replacement_quantity_ceiling_completes`,
+      `api_demerge_past_the_old_multiply_first_ceiling_completes`,
+      `api_exercise_past_the_old_entitlement_ceiling_completes`,
+      `api_open_parcels_past_the_old_split_rebasing_ceiling_reports`,
+      `api_sell_past_the_old_as_acquired_rebasing_ceiling_allocates` — pass unchanged, which is what
+      says the bound is the type's and nothing narrower.
+      **Left open, as its own section**: a `ShareSplit`/`BonusIssue` whose ratio is fine when it is
+      written can be made unrepresentable later by a parcel entered *behind* it, so the check here is
+      necessary but not sufficient — see *A parcel entered behind a ratio that already fits*.

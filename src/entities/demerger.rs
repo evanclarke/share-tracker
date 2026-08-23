@@ -114,6 +114,16 @@ pub enum DemergeError {
     /// `domain::whole_holding`. Mapped to 422.
     #[error("the demerged parcels are dated behind a whole-holding operation: {0}")]
     BackDatedOverWholeHolding(#[source] crate::domain::whole_holding::BackDatedParcel),
+    /// The entitlement ratio applied to the holding produces a demerged
+    /// quantity past `Decimal`'s range — a 1000-for-1 demerger of 1e27 units
+    /// asks for 1e30 demerged units. There is no lesser number of units to
+    /// write, and nothing downstream could recover one, so the demerge is
+    /// refused before it writes anything
+    /// (`domain::cost_base::checked_rebased_quantity`; the arithmetic used to
+    /// panic, which the panic layer answered as a logged `500` with an empty
+    /// body). Mapped to 422.
+    #[error("the demerged quantity is beyond the representable range: {0}")]
+    UnrepresentableDemergedQuantity(#[source] crate::domain::cost_base::UnrepresentableQuantity),
     /// The Sell-side invariants failed — defensive as to the allocations,
     /// which the demerge constructs to satisfy them; the reachable case is a
     /// demerger dated after today (SCENARIOS S-10), which the 422 names.
@@ -206,7 +216,15 @@ pub async fn db_demerge(pool: &SqlitePool, action_id: i64) -> Result<Demerge, De
             // date. `held_units` is the action's own ratio denominator,
             // validated positive when the corporate action is written
             // (`CorporateActionBody::kind`'s `positive`), so it is never nil.
-            demerged_quantity: mul_div(&[p.at_date_units, new_units], held_units),
+            // Checked rather than computed: an entitlement ratio greater than
+            // one over a very large holding produces a demerged quantity past
+            // `Decimal`'s ceiling, and there is no lesser count to write.
+            demerged_quantity: crate::domain::cost_base::checked_rebased_quantity(
+                ("units held", p.at_date_units),
+                ("demerger_new_units", new_units),
+                ("demerger_held_units", held_units),
+            )
+            .map_err(DemergeError::UnrepresentableDemergedQuantity)?,
             head_cost_base: carried_cost_base - demerged_cost_base,
             demerged_cost_base,
             currency: p.parcel.currency.clone(),
@@ -401,6 +419,12 @@ impl From<DemergeError> for ApiError {
             // The same body every parcel-creating path answers for this fact —
             // here the parcels are the demerger's own demerged Buys.
             DemergeError::BackDatedOverWholeHolding(e) => ApiError::Unprocessable(e.message()),
+            // The ratio times the holding is past what a decimal can hold →
+            // 422 quoting the arithmetic, the same wording every
+            // beyond-the-range refusal answers with.
+            DemergeError::UnrepresentableDemergedQuantity(e) => {
+                ApiError::Unprocessable(e.message())
+            }
             DemergeError::Sell(err) => {
                 tracing::warn!(error = ?err, "demerge rejected by a sell invariant");
                 // A future-dated demerger is the one Sell rejection a user can
@@ -1364,6 +1388,52 @@ mod tests {
             v["demerged_replacements"][0]["deemed_acquisition_date"],
             "2020-10-01"
         );
+    }
+
+    /// "A replacement quantity no `Decimal` can hold". A 1000-for-1 demerger
+    /// of 1e27 units asks for 1e30 demerged units — past `Decimal`'s ceiling
+    /// however the arithmetic is ordered, so `mul_div`'s divide-early headroom
+    /// cannot reach it and the write panicked, answering a logged `500` with
+    /// an empty body. Refused `422` before anything is written, quoting the
+    /// ratio and the holding that produced it.
+    #[tokio::test]
+    async fn api_an_unrepresentable_demerged_quantity_is_refused_naming_the_ratio() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "HEAD").await;
+        insert_listing(&pool, 2, "DEM").await;
+        // Nil-priced: the *cost base* is representable (W-e's bound accepts
+        // this parcel), so only the demerged quantity is at the ceiling.
+        insert_buy(&pool, 1, 1, d(2020, 10, 1), "1e27", "0").await;
+        insert_demerger_terms(&pool, 10, 1, 2, d(2024, 7, 1), "1000", "1", "20").await;
+
+        let err = db_demerge(&pool, 10).await.unwrap_err();
+        assert!(
+            matches!(err, DemergeError::UnrepresentableDemergedQuantity(_)),
+            "expected the unrepresentable-quantity refusal, got: {err:?}"
+        );
+        let resp = client(&pool)
+            .post_empty("/corporate_actions/10/demerge")
+            .await;
+        let (status, detail) = resp.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            detail.contains(
+                "units held 1000000000000000000000000000 × demerger_new_units 1000 \
+                 / demerger_held_units 1"
+            ),
+            "the ratio and the holding are not named: {detail}"
+        );
+        assert!(
+            detail.contains(&Decimal::MAX.to_string()),
+            "the limit is not named: {detail}"
+        );
+        // Nothing was written: the demerge is refused before its own rows.
+        let created: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM trades WHERE demerger_action_id = 10)")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(!created);
     }
 
     /// SCENARIOS W-b's residual in the demerger, closed in the same

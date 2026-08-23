@@ -50,6 +50,7 @@
 //! replacement share classes, pre-CGT originals, and exchanges that would
 //! crystallise a capital loss (the law does not allow rolling over a loss).
 
+use crate::domain::cost_base;
 use crate::domain::rollover;
 use crate::entities::corporate_action::{self, ActionKind};
 use crate::entities::sell::{self, AllocationInput};
@@ -111,6 +112,15 @@ pub enum ExchangeError {
     /// `domain::whole_holding`. Mapped to 422.
     #[error("the replacement parcels are dated behind a whole-holding operation: {0}")]
     BackDatedOverWholeHolding(#[source] crate::domain::whole_holding::BackDatedParcel),
+    /// The ratio applied to the holding produces a replacement quantity past
+    /// `Decimal`'s range — a 1000-for-1 exchange of 1e27 units asks for 1e30
+    /// replacement units. There is no lesser number of units to write, and
+    /// nothing downstream could recover one, so the exchange is refused before
+    /// it writes anything (`domain::cost_base::checked_rebased_quantity`; the
+    /// arithmetic used to panic, which the panic layer answered as a logged
+    /// `500` with an empty body). Mapped to 422.
+    #[error("the replacement quantity is beyond the representable range: {0}")]
+    UnrepresentableReplacementQuantity(#[source] crate::domain::cost_base::UnrepresentableQuantity),
     /// The Sell-side invariants failed — defensive as to the allocations,
     /// which the exchange constructs to satisfy them; the reachable case is an
     /// exchange dated after today (SCENARIOS S-10), which the 422 names.
@@ -316,7 +326,7 @@ impl Terms {
         p: &rollover::RolledParcel,
         inputs: &rollover::CostBaseInputs,
         exchange_date: NaiveDate,
-    ) -> Result<Replacement, sqlx::Error> {
+    ) -> Result<Replacement, ExchangeError> {
         let reduced_cost_base = inputs.carried_cost_base(&p.parcel, p.remaining, exchange_date)?;
 
         // With a cash component, only the scrip side's market-value share of
@@ -332,8 +342,16 @@ impl Terms {
         Ok(Replacement {
             parcel_id: p.parcel.id,
             at_date_units: p.at_date_units,
-            // The exchange ratio applies to units as held at the exchange date.
-            new_quantity: mul_div(&[p.at_date_units, self.new_units], self.old_units),
+            // The exchange ratio applies to units as held at the exchange
+            // date. Checked rather than computed: a ratio greater than one
+            // over a very large holding produces a replacement quantity past
+            // `Decimal`'s ceiling, and there is no lesser count to write.
+            new_quantity: cost_base::checked_rebased_quantity(
+                ("units held", p.at_date_units),
+                ("scrip_new_units", self.new_units),
+                ("scrip_old_units", self.old_units),
+            )
+            .map_err(ExchangeError::UnrepresentableReplacementQuantity)?,
             carried_cost_base,
             currency: p.parcel.currency.clone(),
             fx_rate: p.parcel.fx_rate,
@@ -426,6 +444,12 @@ impl From<ExchangeError> for ApiError {
             // The same body every parcel-creating path answers for this fact —
             // here the parcels are the exchange's own replacements.
             ExchangeError::BackDatedOverWholeHolding(e) => ApiError::Unprocessable(e.message()),
+            // The ratio times the holding is past what a decimal can hold →
+            // 422 quoting the arithmetic, the same wording every
+            // beyond-the-range refusal answers with.
+            ExchangeError::UnrepresentableReplacementQuantity(e) => {
+                ApiError::Unprocessable(e.message())
+            }
             ExchangeError::Sell(err) => {
                 tracing::warn!(
                     error = ?err,
@@ -1370,6 +1394,60 @@ mod tests {
             "50000000000000000000000000"
         );
         assert_eq!(v["replacements"][0]["quantity"], "100000000");
+    }
+
+    /// "A replacement quantity no `Decimal` can hold". A 1000-for-1 exchange
+    /// of 1e27 units asks for 1e30 replacement units — past `Decimal`'s
+    /// ceiling however the arithmetic is ordered, so `mul_div`'s divide-early
+    /// headroom cannot reach it and the write panicked, answering a logged
+    /// `500` with an empty body. Refused `422` before anything is written,
+    /// quoting the ratio and the holding that produced it.
+    #[tokio::test]
+    async fn api_an_unrepresentable_replacement_quantity_is_refused_naming_the_ratio() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "OLD").await;
+        insert_listing(&pool, 2, "NEW").await;
+        // Nil-priced: the *cost base* is representable (W-e's bound accepts
+        // this parcel), so only the replacement quantity is at the ceiling.
+        insert_buy(
+            &pool,
+            1,
+            1,
+            d(2020, 10, 1),
+            "1000000000000000000000000000",
+            "0",
+        )
+        .await;
+        insert_scrip_terms(&pool, 10, 1, 2, d(2024, 7, 1), "1000", "1").await;
+
+        let err = db_exchange(&pool, 10).await.unwrap_err();
+        assert!(
+            matches!(err, ExchangeError::UnrepresentableReplacementQuantity(_)),
+            "expected the unrepresentable-quantity refusal, got: {err:?}"
+        );
+        let response = client(&pool)
+            .post_empty("/corporate_actions/10/exchange")
+            .await;
+        let (status, detail) = response.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            detail.contains(
+                "units held 1000000000000000000000000000 × scrip_new_units 1000 \
+                 / scrip_old_units 1"
+            ),
+            "the ratio and the holding are not named: {detail}"
+        );
+        assert!(
+            detail.contains(&Decimal::MAX.to_string()),
+            "the limit is not named: {detail}"
+        );
+        // Nothing was written: the exchange is refused before its own rows.
+        let created: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM trades WHERE scrip_action_id = 10)")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(!created);
     }
 
     /// SCENARIOS W. The exchange ratio applied to a very large holding:

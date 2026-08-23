@@ -278,7 +278,9 @@ pub async fn db_sell_rights(
     let held = db_held_at_record_date(&mut tx, action.listing_id, record_date, &splits).await?;
     let entitled = entitled_units(held, rights_units, rights_held_units);
     let used = db_rights_used(&mut tx, action_id, record_date, &splits).await? + body.units;
-    if used > entitled {
+    // `None` means the entitlement is past `Decimal`'s range, so nothing the
+    // request can name reaches it (`entitled_units`).
+    if entitled.is_some_and(|entitled| used > entitled) {
         return Err(SellRightsError::ExceedsEntitlement);
     }
 
@@ -346,7 +348,7 @@ pub async fn db_sell_rights(
             anchored += parse_dec("units", units)?;
         }
         anchored += alloc.units;
-        if anchored > parcel_entitled {
+        if parcel_entitled.is_some_and(|parcel_entitled| anchored > parcel_entitled) {
             return Err(SellRightsError::ExceedsParcelEntitlement);
         }
         in_request.insert(alloc.purchase_trade_id, anchored);

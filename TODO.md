@@ -127,24 +127,33 @@ Archived in [`DONE/infra.md`](DONE/infra.md) (W-a, W-b),
 [`DONE/reporting.md`](DONE/reporting.md) (W-c, W-d, W-f), and summarised under
 [Section W findings](SCENARIOS.md#section-w-findings).
 
-## A replacement quantity no `Decimal` can hold
+## A parcel entered behind a ratio that already fits
 
-Split out of the multiply-before-divide sweep (archived in
-[`DONE/tax-domain.md`](DONE/tax-domain.md)), which closed the arithmetic but deliberately left this
-decision open: `infra::decimal::mul_div` cannot help here, because the *result* is what is
-unrepresentable rather than the working.
+Raised while closing *A replacement quantity no `Decimal` can hold* (archived in
+[`DONE/tax-domain.md`](DONE/tax-domain.md)), and measured rather than assumed: the refusal that
+section added at `PUT /corporate_actions/:id` is **necessary but not sufficient**.
 
-A demerger or scrip-for-scrip exchange whose ratio is **greater than one** computes a replacement
-quantity of `held × new / old`. On a 1000-for-1 ratio a holding of 1e27 units asks for 1e30
-replacement units, which is past `Decimal`'s ~7.9228e28 ceiling however the arithmetic is ordered —
-`mul_div` divides early, finds the product still overflows, and panics exactly as the plain
-expression did. That is W-e's shape, not the sweep's: there is no lesser answer to give, so the
-answer is a write-time refusal naming the arithmetic, in the wording
-`domain::cost_base::UnrepresentableCost::message` already uses for a cost base.
+A `ShareSplit`/`BonusIssue` materialises nothing — its ratio is re-applied at read time — so the
+check there can only judge the parcels that exist *when the action is written*. Record a 1000-for-1
+split on a listing with no holdings (or small ones): `204`, correctly. Then enter a nil-priced Buy of
+1e27 units behind it: `204` as well, because the parcel-creating write bounds
+`average_price × quantity` (W-e) and nothing there asks what the listing's recorded ratios would do
+to the *quantity*. `GET /portfolio/open-parcels` is then a logged `500` again, and so is every other
+open-holdings read of the whole portfolio — exactly the state the action-write refusal exists to
+prevent, reached from the other side. Confirmed at the HTTP surface on 2026-08-23.
 
-- [ ] Decide whether the parcel-substituting operations (scrip exchange, demerger, transfer) should
-      refuse a replacement quantity outside `Decimal`'s range at the write, W-e style, naming the
-      ratio and the holding that produced it — and implement it if so, with a test at the boundary
+The mirror check belongs on the parcel-creating writes, asking the same question in the other
+direction: *do this listing's recorded re-basing actions leave this quantity representable?* The
+machinery is already there — `domain::cost_base::checked_rebased_quantity` and the boundary walk in
+`corporate_action::db::rebased_quantity_beyond_range`, which is per-listing and would only need the
+about-to-be-written parcel folded into it. The eight parcel-creating paths are the ones
+`fc1fd7b` enumerated for the back-dated-parcel rule, so that list is the shape to follow rather than
+a fresh grep.
+
+- [ ] Refuse a parcel-creating write whose quantity the listing's recorded splits/bonus issues would
+      re-base beyond `Decimal`'s range, `422` naming the ratio and the quantity, across every
+      parcel-creating path — with the boundary test at the write and a control that the same parcel
+      under a representable ratio still lands
 
 After W, the next SCENARIOS pass is section **X. Transactional integrity and concurrency**
 (8 scenarios), driven the way S through W were: run every scenario against a throwaway database,

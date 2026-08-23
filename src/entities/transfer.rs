@@ -35,7 +35,7 @@
 
 use crate::domain::cost_base::ParcelRow;
 use crate::domain::rollover;
-use crate::entities::corporate_action::as_acquired_quantity;
+use crate::entities::corporate_action::checked_as_acquired_quantity;
 use crate::entities::sell::{self, AllocationInput};
 use crate::entities::trade::{self, Trade};
 use crate::infra::db::write_tx;
@@ -160,6 +160,19 @@ pub enum TransferError {
     /// 422.
     #[error("the transfer-in parcels are dated behind a whole-holding operation: {0}")]
     BackDatedOverWholeHolding(#[source] crate::domain::whole_holding::BackDatedParcel),
+    /// The requested units, re-based back into the parcel's as-acquired basis
+    /// across a **consolidation** of the listing, are past `Decimal`'s range.
+    ///
+    /// A transfer moves units one for one and applies no ratio of its own, so
+    /// this is *not* the ratio-driven overflow a scrip exchange or demerger
+    /// has: it can only arise from a request that names far more units than
+    /// the parcel could hold, which `sell::SellError::PurchaseQuantityExceeded`
+    /// would refuse — except that the re-base is computed first, so the
+    /// arithmetic used to panic (a logged `500` with an empty body) before the
+    /// allocation check could answer at all. Mapped to 422 naming the
+    /// arithmetic, which is what says the quantity asked for is impossible.
+    #[error("the moved quantity is beyond the representable range: {0}")]
+    UnrepresentableMovedQuantity(#[source] crate::domain::cost_base::UnrepresentableQuantity),
 }
 
 impl From<sell::SellError> for TransferError {
@@ -190,6 +203,10 @@ impl From<TransferError> for ApiError {
             // The same body every parcel-creating path answers for this fact —
             // here the parcels are the transfer's own transfer-ins.
             TransferError::BackDatedOverWholeHolding(e) => ApiError::Unprocessable(e.message()),
+            // The units asked for cannot be re-based into the parcel's own
+            // basis at all → 422 quoting the arithmetic, the same wording every
+            // beyond-the-range refusal answers with.
+            TransferError::UnrepresentableMovedQuantity(e) => ApiError::Unprocessable(e.message()),
             TransferError::FeeMarketPriceMissing => ApiError::unprocessable(
                 "a network fee was specified without a positive per-unit market value for the \
                  fee crypto — the disposal needs its capital proceeds",
@@ -479,12 +496,19 @@ async fn transfer_ins(
         // in the parcel's own currency: the shared pipeline, pro-rated over
         // the *as-acquired* moved units so a partial transfer carries exactly
         // its share.
-        let moved_as_acquired = as_acquired_quantity(
-            alloc.quantity_allocated,
+        //
+        // Checked rather than computed: where a consolidation sits between the
+        // parcel and the transfer date the re-base multiplies the requested
+        // units *up*, and a request naming more units than could ever have been
+        // held overflows here — before the allocation check that would have
+        // refused it (`TransferError::UnrepresentableMovedQuantity`).
+        let moved_as_acquired = checked_as_acquired_quantity(
+            ("quantity_allocated", alloc.quantity_allocated),
             &inputs.splits,
             parcel.date,
             body.date,
-        );
+        )
+        .map_err(TransferError::UnrepresentableMovedQuantity)?;
         let carried_cost_base = inputs.carried_cost_base(&parcel, moved_as_acquired, body.date)?;
 
         out.push(TransferIn {
@@ -1854,5 +1878,122 @@ mod tests {
         let t = &group.transfer_ins[0];
         assert_eq!(t.average_price, Decimal::ZERO);
         assert_eq!(t.brokerage, dec("70000000000000000000000000000"));
+    }
+
+    /// "A replacement quantity no `Decimal` can hold" — the transfer's answer
+    /// to the question the section's heading raised about it.
+    ///
+    /// A transfer moves units one for one and applies no ratio of its own, so
+    /// it cannot reach the overflow a scrip exchange or demerger does: the
+    /// whole of a 1e27-unit holding moves and its replacement is 1e27 units
+    /// (the control, first). What it *does* re-base is the units asked for,
+    /// back into the parcel's as-acquired basis, and a **consolidation**
+    /// between the two dates multiplies that up — so a request naming more
+    /// units than could ever have been held overflowed there, a logged `500`
+    /// with an empty body, before the over-allocation check that would have
+    /// refused it could answer. Refused `422` naming the arithmetic instead,
+    /// while a request for units the parcel actually holds still moves.
+    #[tokio::test]
+    async fn a_moved_quantity_no_decimal_can_hold_is_refused_naming_it() {
+        // The control: 1:1, no ratio anywhere, the whole enormous holding
+        // moves and the replacement carries every unit.
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "ICE").await;
+        insert_vest(&pool, 1, d(2023, 3, 1), "1000000000000000000000000000", "0").await;
+        let group = db_transfer(
+            &pool,
+            1,
+            &body(
+                d(2024, 6, 3),
+                2,
+                1,
+                vec![(1, "1000000000000000000000000000")],
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            group.transfer_ins[0].quantity,
+            dec("1000000000000000000000000000")
+        );
+
+        // A 1-for-1000 consolidation between the parcel and the transfer.
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "ICE").await;
+        insert_vest(&pool, 1, d(2023, 3, 1), "1000000000000000000000000000", "0").await;
+        crate::entities::corporate_action::db_upsert(
+            &pool,
+            &crate::entities::corporate_action::CorporateAction {
+                id: 10,
+                listing_id: 1,
+                date: d(2023, 6, 1),
+                kind: crate::entities::corporate_action::ActionKind::ShareSplit {
+                    split_new_units: Decimal::ONE,
+                    split_old_units: Decimal::from(1000),
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+        // The holding is 1e24 units after the consolidation; asking to move
+        // the pre-consolidation figure re-bases to 1e30 as-acquired units.
+        let err = db_transfer(
+            &pool,
+            1,
+            &body(
+                d(2024, 6, 3),
+                2,
+                1,
+                vec![(1, "1000000000000000000000000000")],
+            ),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, TransferError::UnrepresentableMovedQuantity(_)),
+            "expected the unrepresentable-quantity refusal, got: {err:?}"
+        );
+        let response = ApiClient::over(router().with_state(pool.clone()))
+            .put(
+                "/transfers/1",
+                &serde_json::json!({
+                    "listing_id": 1,
+                    "date": "2024-06-03",
+                    "from_account_id": 2,
+                    "to_account_id": 1,
+                    "allocations": [
+                        {"purchase_trade_id": 1,
+                         "quantity_allocated": "1000000000000000000000000000"}
+                    ]
+                }),
+            )
+            .await;
+        let (status, detail) = response.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            detail.contains(
+                "quantity_allocated 1000000000000000000000000000 × old units 1000 / new units 1"
+            ),
+            "the arithmetic is not named: {detail}"
+        );
+        assert!(
+            detail.contains(&Decimal::MAX.to_string()),
+            "the limit is not named: {detail}"
+        );
+
+        // The control on the same database: the units actually held move, and
+        // the re-base back across the consolidation is exact.
+        let group = db_transfer(
+            &pool,
+            1,
+            &body(d(2024, 6, 3), 2, 1, vec![(1, "1000000000000000000000000")]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            group.transfer_ins[0].quantity,
+            dec("1000000000000000000000000")
+        );
     }
 }

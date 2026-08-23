@@ -231,6 +231,49 @@ fn figures_beyond_the_decimal_range_documented() {
     ));
 }
 
+/// Docs-sync pin for the unit-count half of the same ceiling ("A replacement
+/// quantity no `Decimal` can hold"): the section says where each ratio-driven
+/// path's refusal sits, why the rights-issue entitlement cap is deliberately
+/// not one of them, and that an action already stored in the refused state
+/// stays editable — and the per-endpoint `422` lists and the fractional-
+/// entitlement promise carry the same exception.
+#[test]
+fn quantities_beyond_the_decimal_range_documented() {
+    assert!(API_MD.contains("### Quantities as well as money"));
+    // The result, not the working, is what cannot be represented — which is
+    // why re-ordering the arithmetic cannot answer it.
+    assert!(API_MD.contains("here it is the **result** that cannot be represented"));
+    // The enabling condition, stated rather than left implicit.
+    assert!(API_MD.contains("nil-priced parcel of any size is a legal holding"));
+    // Where each refusal sits.
+    for path in [
+        "`POST …/exchange` and `POST …/demerge` refuse before writing anything",
+        "so the refusal is at the **action write**, `PUT /corporate_actions/:id`",
+        "so `PUT /transfers/:id` refuses a request naming more units than could ever have \
+         been held",
+    ] {
+        assert!(
+            API_MD.contains(path),
+            "the 422 path is not documented: {path}"
+        );
+    }
+    // …and the one that is deliberately not a refusal, with the reason.
+    assert!(API_MD.contains("**entitlement cap** is deliberately *not* refused"));
+    assert!(API_MD.contains("the cap saturates to *unbounded* instead and the exercise lands"));
+    // An action already in the refused state stays correctable.
+    assert!(API_MD.contains(
+        "An **edit** is judged on the terms being written here too, so an action already \
+         stored in the refused state"
+    ));
+    // The corporate-action write rule, beside the over-consumption one.
+    assert!(API_MD.contains("**Writing terms that re-base a quantity beyond the decimal range.**"));
+    // The exception to the exact-fraction promise.
+    assert!(API_MD.contains(
+        "where the exact figure a ratio produces is past the largest decimal that can be \
+         stored, there is no lesser quantity to keep"
+    ));
+}
+
 /// Docs-sync pin for the append-only audit trail (2026-07-13 improvement
 /// review): the schema documents the table, its scope decision (which tables
 /// are audited and why the rest are not), and the keep-forever retention

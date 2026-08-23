@@ -34,7 +34,7 @@ use crate::entities::corporate_action::{
 };
 use crate::entities::trade::{self, Trade, TradeType};
 use crate::infra::db::write_tx;
-use crate::infra::decimal::{Money, mul_div, parse_dec};
+use crate::infra::decimal::{Money, parse_dec};
 use crate::infra::http::ApiError;
 use axum::{
     Json, Router,
@@ -189,12 +189,31 @@ pub(crate) async fn db_held_at_record_date(
 /// The entitlement a holding earns under the issue's terms. Fractional
 /// entitlements round up to a whole unit (registry practice), so the cap is
 /// never tighter than the offer's own rounding.
+///
+/// `None` where the entitlement itself is past `Decimal`'s range — a 1000-for-1
+/// issue over a holding of 1e27 units earns 1e30 rights. That is deliberately
+/// *not* a refusal, unlike the replacement quantity a scrip exchange or
+/// demerger would have to store: this figure is never written anywhere, and
+/// exists only to answer *has the holder used more rights than they were
+/// entitled to?* — to which an unrepresentable cap gives an exact answer, since
+/// every representable request is below it. Refusing here would deny a
+/// perfectly ordinary 100-unit exercise because of arithmetic the user never
+/// asked for. Callers therefore read `None` as *no representable request can
+/// exceed this*.
 pub(crate) fn entitled_units(
     held: Decimal,
     rights_units: Decimal,
     rights_held_units: Decimal,
-) -> Decimal {
-    mul_div(&[held.max(Decimal::ZERO), rights_units], rights_held_units).ceil()
+) -> Option<Decimal> {
+    Some(
+        crate::domain::cost_base::checked_rebased_quantity(
+            ("units held", held.max(Decimal::ZERO)),
+            ("rights_units", rights_units),
+            ("rights_held_units", rights_held_units),
+        )
+        .ok()?
+        .ceil(),
+    )
 }
 
 /// Rights already used against the action, in record-date units: exercised
@@ -293,7 +312,9 @@ pub async fn db_exercise(
     // sales) plus this exercise, re-based to record-date units.
     let mut used = db_rights_used(&mut tx, action_id, record_date, &splits).await?;
     used += as_acquired_quantity(body.units, &splits, record_date, body.date);
-    if used > entitled {
+    // `None` means the entitlement is past `Decimal`'s range, so nothing the
+    // request can name reaches it (`entitled_units`).
+    if entitled.is_some_and(|entitled| used > entitled) {
         return Err(ExerciseError::ExceedsEntitlement);
     }
 
@@ -1057,6 +1078,99 @@ mod tests {
         assert_eq!(status, StatusCode::CREATED, "{detail}");
     }
 
+    /// "A replacement quantity no `Decimal` can hold" — and the one path in
+    /// that section that is deliberately **not** a refusal.
+    ///
+    /// A 1000-for-1 issue over a holding of 1e27 units earns 1e30 rights,
+    /// which no `Decimal` can hold, and the cap arithmetic panicked: the user
+    /// asked to exercise **100** units and got a logged `500` with an empty
+    /// body, for a figure they never named and that nothing would have stored.
+    /// Unlike a scrip exchange's replacement quantity, this figure is never
+    /// written: it exists only to answer *have more rights been used than were
+    /// earned?*, and an unrepresentable cap answers that exactly — nothing
+    /// representable reaches it. So the cap saturates to "unbounded" and the
+    /// ordinary exercise lands.
+    #[tokio::test]
+    async fn a_modest_exercise_against_an_unrepresentable_entitlement_cap_still_lands() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        // Nil-priced, so the holding itself is representable (W-e).
+        insert_buy(
+            &pool,
+            1,
+            d(2024, 1, 15),
+            "1000000000000000000000000000",
+            "0",
+        )
+        .await;
+        // 1000-for-1 at $1: the entitlement is 1e30 rights.
+        corporate_action::db_upsert(
+            &pool,
+            &CorporateAction {
+                id: 10,
+                listing_id: 1,
+                date: d(2024, 7, 1),
+                kind: ActionKind::RightsIssue {
+                    rights_units: Decimal::from(1000),
+                    rights_held_units: Decimal::ONE,
+                    exercise_price: Decimal::ONE,
+                    currency: "AUD".to_string(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+        // The cap itself: past the range, so no representable request reaches
+        // it.
+        assert_eq!(
+            entitled_units(
+                "1000000000000000000000000000".parse().unwrap(),
+                Decimal::from(1000),
+                Decimal::ONE
+            ),
+            None
+        );
+
+        let response = ApiClient::over(router().with_state(pool.clone()))
+            .post(
+                "/corporate_actions/10/exercise",
+                &serde_json::json!({"date": "2024-08-01", "units": "100"}),
+            )
+            .await;
+        let (status, detail) = response.status_and_body();
+        assert_eq!(status, StatusCode::CREATED, "{detail}");
+        let v: serde_json::Value = serde_json::from_str(detail).unwrap();
+        assert_eq!(v["quantity"], "100");
+
+        // The cap still bites wherever it *is* representable: the same
+        // holding under a 1-for-1e27 issue earns exactly one right, and a
+        // second is refused.
+        corporate_action::db_upsert(
+            &pool,
+            &CorporateAction {
+                id: 11,
+                listing_id: 1,
+                date: d(2024, 7, 1),
+                kind: ActionKind::RightsIssue {
+                    rights_units: Decimal::ONE,
+                    rights_held_units: "1000000000000000000000000000".parse().unwrap(),
+                    exercise_price: Decimal::ONE,
+                    currency: "AUD".to_string(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+        let response = ApiClient::over(router().with_state(pool.clone()))
+            .post(
+                "/corporate_actions/11/exercise",
+                &serde_json::json!({"date": "2024-08-01", "units": "2"}),
+            )
+            .await;
+        assert_eq!(response.status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
     /// SCENARIOS W. The entitlement ratio applied to a very large holding:
     /// 1e27 units × 1000 is 1e30, past `Decimal`'s ~7.9228e28 ceiling, while
     /// the entitlement itself (1e27 × 1000 / 1e6 = 1e24 rights) is perfectly
@@ -1110,7 +1224,7 @@ mod tests {
                 Decimal::from(1000),
                 Decimal::from(1_000_000)
             ),
-            "1000000000000000000000000".parse::<Decimal>().unwrap()
+            Some("1000000000000000000000000".parse::<Decimal>().unwrap())
         );
     }
 }

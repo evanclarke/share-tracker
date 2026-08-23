@@ -134,10 +134,10 @@ mod http;
 mod model;
 
 pub use adjustments::{
-    PriceBasisEvent, RocEvent, SplitEvent, as_acquired_quantity, contemporaneous_price,
-    db_demerger_price_statements, db_payment_currency_conflict, db_return_of_capital_events,
-    db_share_split_events, db_splits_for_listing, per_unit_reduction, sold_in_acquired_units,
-    split_adjusted_quantity,
+    PriceBasisEvent, RocEvent, SplitEvent, as_acquired_quantity, checked_as_acquired_quantity,
+    contemporaneous_price, db_demerger_price_statements, db_payment_currency_conflict,
+    db_return_of_capital_events, db_share_split_events, db_splits_for_listing, per_unit_reduction,
+    sold_in_acquired_units, split_adjusted_quantity,
 };
 pub use db::db_get_tx;
 pub use http::router;
@@ -3397,6 +3397,210 @@ mod tests {
 
         let resp = client(&pool).delete("/corporate_actions/999").await;
         assert_eq!(resp.status, StatusCode::NOT_FOUND);
+    }
+
+    // -----------------------------------------------------------------------
+    // "A replacement quantity no `Decimal` can hold" — the re-basing actions
+    // -----------------------------------------------------------------------
+
+    /// A `ShareSplit` or `BonusIssue` materialises nothing: the re-base is
+    /// applied at *read* time, so terms that overflow were accepted `204` and
+    /// then killed every open-holdings report of the whole portfolio — a
+    /// logged `500` with an empty body — until someone worked out which action
+    /// did it, with several of the reports that would have found it among the
+    /// ones that were down. Refused at the write instead, `422` naming the
+    /// ratio and the holding, and nothing is persisted.
+    #[tokio::test]
+    async fn api_a_split_that_rebases_a_parcel_beyond_the_decimal_range_is_refused() {
+        for (action, body) in [
+            // 1000-for-1, and its bonus-issue equivalent (999 new units for
+            // every 1 held is the same 1000-for-1 re-base).
+            (
+                split(10, 1, d(2024, 7, 1), "1000", "1"),
+                serde_json::json!({"action_type": "ShareSplit", "listing_id": 1,
+                                   "date": "2024-07-01", "split_new_units": "1000",
+                                   "split_old_units": "1"}),
+            ),
+            (
+                bonus(10, 1, d(2024, 7, 1), "999", "1"),
+                serde_json::json!({"action_type": "BonusIssue", "listing_id": 1,
+                                   "date": "2024-07-01", "bonus_units": "999",
+                                   "bonus_held_units": "1"}),
+            ),
+        ] {
+            let pool = test_pool().await;
+            insert_listing(&pool, 1, "BIG").await;
+            // Nil-priced, so the parcel's own cost base is representable
+            // (W-e's bound accepts it) and only the re-base is at the ceiling.
+            test_support::buy(1, 1)
+                .date(d(2020, 10, 1))
+                .settlement(d(2020, 10, 1))
+                .qty("1000000000000000000000000000".parse().unwrap())
+                .price(Decimal::ZERO)
+                .insert(&pool)
+                .await;
+
+            let err = db_upsert(&pool, &action).await.unwrap_err();
+            assert!(
+                matches!(err, WriteError::UnrepresentableRebasedQuantity(_)),
+                "expected the unrepresentable-quantity refusal, got: {err:?}"
+            );
+
+            let response = client(&pool).put("/corporate_actions/10", &body).await;
+            let (status, detail) = response.status_and_body();
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+            assert!(
+                detail.contains(
+                    "quantity 1000000000000000000000000000 × new units 1000 / old units 1"
+                ),
+                "the ratio and the holding are not named: {detail}"
+            );
+            assert!(
+                detail.contains(&Decimal::MAX.to_string()),
+                "the limit is not named: {detail}"
+            );
+
+            // Nothing persisted, and the reports the row would have killed
+            // still read.
+            let stored: bool =
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM corporate_actions WHERE id = 10)")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert!(!stored);
+            let client = ApiClient::full(&pool);
+            let rows: Vec<serde_json::Value> = client.get_json("/portfolio/open-parcels").await;
+            assert_eq!(rows.len(), 1);
+            let overview = client
+                .post("/portfolio/overview", &serde_json::json!({}))
+                .await;
+            assert_eq!(overview.status, StatusCode::OK);
+        }
+    }
+
+    /// The other direction of the same re-base, and the reason it has to be
+    /// checked *before* `allocations_fit_parcels`: a **consolidation**
+    /// recorded over an existing sale multiplies that sale's allocated units
+    /// back up into the parcel's as-acquired basis, and the over-consumption
+    /// check computes exactly that figure — so it overflowed inside the check
+    /// that would otherwise have refused the write, answering a logged `500`
+    /// instead of its own `422`.
+    #[tokio::test]
+    async fn api_a_consolidation_that_rebases_an_allocation_beyond_the_range_is_refused() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BIG").await;
+        test_support::buy(1, 1)
+            .date(d(2020, 10, 1))
+            .settlement(d(2020, 10, 1))
+            .qty("1000000000000000000000000000".parse().unwrap())
+            .price(Decimal::ZERO)
+            .insert(&pool)
+            .await;
+        // The whole holding sold at nil, allocated 1:1 while no split exists.
+        sell::db_upsert_sell(
+            &pool,
+            2,
+            &SellBody {
+                brokerage_includes_gst: false,
+                statement_total: None,
+                holding_account_id: 1,
+                date: d(2024, 6, 3),
+                settlement_date: Some(d(2024, 6, 5)),
+                listing_id: 1,
+                average_price: Decimal::ZERO,
+                quantity: "1000000000000000000000000000".parse().unwrap(),
+                currency: "AUD".to_string(),
+                brokerage: Decimal::ZERO,
+                gst_on_brokerage: Decimal::ZERO,
+                brokerage_currency: "AUD".to_string(),
+                fx_rate: Decimal::ONE,
+                spot_fx_rate: None,
+                contract_note_ref: None,
+                allocations: vec![AllocationInput {
+                    purchase_trade_id: 1,
+                    quantity_allocated: "1000000000000000000000000000".parse().unwrap(),
+                }],
+            },
+        )
+        .await
+        .unwrap();
+
+        // A 1-for-1000 consolidation dated between the parcel and the sale.
+        let action = split(10, 1, d(2021, 1, 1), "1", "1000");
+        let err = db_upsert(&pool, &action).await.unwrap_err();
+        assert!(
+            matches!(err, WriteError::UnrepresentableRebasedQuantity(_)),
+            "expected the unrepresentable-quantity refusal, got: {err:?}"
+        );
+        let response = client(&pool)
+            .put(
+                "/corporate_actions/10",
+                &serde_json::json!({"action_type": "ShareSplit", "listing_id": 1,
+                                    "date": "2021-01-01", "split_new_units": "1",
+                                    "split_old_units": "1000"}),
+            )
+            .await;
+        let (status, detail) = response.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            detail.contains(
+                "quantity_allocated 1000000000000000000000000000 × old units 1000 / new units 1"
+            ),
+            "the ratio and the allocation are not named: {detail}"
+        );
+    }
+
+    /// A database may already hold such an action — this rule postdates them,
+    /// and until the mirror check exists on the parcel-creating writes one can
+    /// still arrive behind an in-range ratio. The refusal is judged on the
+    /// terms being *written*, never on the stored ones, so the edit that
+    /// brings the ratio back inside the range still lands, and the row is
+    /// still deletable.
+    #[tokio::test]
+    async fn api_an_already_unrepresentable_action_can_still_be_edited_back_into_range() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BIG").await;
+        test_support::buy(1, 1)
+            .date(d(2020, 10, 1))
+            .settlement(d(2020, 10, 1))
+            .qty("1000000000000000000000000000".parse().unwrap())
+            .price(Decimal::ZERO)
+            .insert(&pool)
+            .await;
+        // Straight into SQLite, behind the guard: only a pre-guard database
+        // can hold this, which is precisely what the test is about.
+        sqlx::query(
+            "INSERT INTO corporate_actions              (id, action_type, listing_id, date, split_new_units, split_old_units)              VALUES (10, 'ShareSplit', 1, '2024-07-01', '1000', '1')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        // The state the guard exists to prevent: the open-holdings reads are
+        // a logged 500 while it stands.
+        assert_eq!(
+            ApiClient::full(&pool)
+                .get("/portfolio/open-parcels")
+                .await
+                .status,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+
+        // The correction: the same action, re-termed 2-for-1, lands.
+        let corrected = split(10, 1, d(2024, 7, 1), "2", "1");
+        db_upsert(&pool, &corrected).await.unwrap();
+        let rows: Vec<serde_json::Value> = ApiClient::full(&pool)
+            .get_json("/portfolio/open-parcels")
+            .await;
+        assert_eq!(
+            rows[0]["remaining_quantity"],
+            "2000000000000000000000000000"
+        );
+
+        // And it is still deletable.
+        assert_eq!(
+            client(&pool).delete("/corporate_actions/10").await.status,
+            StatusCode::NO_CONTENT
+        );
     }
 
     /// SCENARIOS W. A consolidation re-basing a very large holding:

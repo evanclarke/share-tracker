@@ -136,15 +136,96 @@ impl UnrepresentableCost {
     /// from the one the arithmetic actually has. Lives here so the six
     /// refusals of the same fact cannot word it differently.
     pub fn message(&self) -> String {
-        format!(
-            "these figures multiply out beyond what can be recorded: {} exceeds {}, the largest \
-             amount that can be stored. That total is the parcel's cost base itself — a sale's \
-             proceeds — so no smaller figure could stand in for it: correct the entry, checking \
-             for a mistyped run of zeros",
-            self.expression,
-            Decimal::MAX
+        beyond_the_range(
+            &self.expression,
+            "the parcel's cost base itself — a sale's proceeds",
+            "the entry",
         )
     }
+}
+
+/// The one wording for *this arithmetic overflows what a decimal can hold*,
+/// shared by the cost-base ([`UnrepresentableCost`]) and unit-count
+/// ([`UnrepresentableQuantity`]) refusals so the paths that answer it cannot
+/// word it differently. `total_is` completes the sentence explaining why no
+/// lesser figure can stand in, and `correct` names what the user has to fix.
+///
+/// `Decimal::MAX` is read off the type rather than transcribed, so the bound
+/// quoted can never drift from the one the arithmetic actually has.
+fn beyond_the_range(expression: &str, total_is: &str, correct: &str) -> String {
+    format!(
+        "these figures multiply out beyond what can be recorded: {expression} exceeds {}, the \
+         largest amount that can be stored. That total is {total_is} — so no smaller figure could \
+         stand in for it: correct {correct}, checking for a mistyped run of zeros",
+        Decimal::MAX
+    )
+}
+
+/// The write-time refusal of a **unit count** that cannot be represented: the
+/// holding and the ratio applied to it, written out, so the `422` can name the
+/// arithmetic it could not compute.
+///
+/// [`UnrepresentableCost`]'s sibling, and the same shape of fact: a
+/// ratio-driven action (a scrip-for-scrip exchange, a demerger, a share split,
+/// a bonus issue) turns `held` units into `held × new / old`, and where that
+/// result is past `Decimal`'s range there is no lesser quantity to record
+/// instead. The two share [`beyond_the_range`], so the wording lives once.
+#[derive(thiserror::Error, Debug, Clone, PartialEq, Eq)]
+#[error("the quantity {expression} exceeds the representable range")]
+pub struct UnrepresentableQuantity {
+    /// The arithmetic as written, e.g.
+    /// `units held 1000000000000000000000000000 × scrip_new_units 1000 / scrip_old_units 1`.
+    pub expression: String,
+}
+
+impl UnrepresentableQuantity {
+    /// The user-facing `422` body (shown by the web UI).
+    pub fn message(&self) -> String {
+        beyond_the_range(
+            &self.expression,
+            "the number of units the holding becomes",
+            "the ratio, or the holding it applies to",
+        )
+    }
+}
+
+/// `units × new / old` — a holding re-based by a ratio — or the refusal when
+/// the **result** cannot be represented.
+///
+/// This is [`mul_div`]'s arithmetic in checked form, in the same order, so
+/// everything `mul_div` can answer is accepted here unchanged: multiply first
+/// (exact), and where that product alone overflows, divide first and multiply
+/// after — the headroom `mul_div` exists for. Only when *both* orders overflow
+/// is the result itself out of range, which is exactly where `mul_div` panics
+/// and this returns the refusal instead.
+///
+/// Unlike a cost base, a re-based quantity has no lesser answer either: it is
+/// the number of units the holding becomes, so a write that produces one has
+/// to be refused rather than approximated (the section this closes;
+/// `mul_div`'s own sweep deliberately left the decision open, since what is
+/// unrepresentable here is the result and not the working).
+///
+/// A nil `old` cannot arise — every ratio denominator is validated positive
+/// where the action is written — but it would report the same refusal rather
+/// than divide by zero.
+pub fn checked_rebased_quantity(
+    units: (&str, Decimal),
+    new: (&str, Decimal),
+    old: (&str, Decimal),
+) -> Result<Decimal, UnrepresentableQuantity> {
+    let scaled = match units.1.checked_mul(new.1) {
+        Some(product) => product.checked_div(old.1),
+        None => units
+            .1
+            .checked_div(old.1)
+            .and_then(|divided| divided.checked_mul(new.1)),
+    };
+    scaled.ok_or_else(|| UnrepresentableQuantity {
+        expression: format!(
+            "{} {} × {} {} / {} {}",
+            units.0, units.1, new.0, new.1, old.0, old.1
+        ),
+    })
 }
 
 /// The cost base of `terms`, or the refusal when it cannot be represented.
@@ -1655,5 +1736,81 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(checked, p.initial_cost());
+    }
+
+    // -----------------------------------------------------------------------
+    // checked_rebased_quantity ("A replacement quantity no `Decimal` can hold")
+    // -----------------------------------------------------------------------
+
+    /// The bound is the type's own here too: the last re-based quantity a
+    /// `Decimal` can hold is returned, the first one it cannot is refused.
+    #[test]
+    fn the_rebased_quantity_bound_is_exactly_what_a_decimal_can_hold() {
+        let rebased = |units: Decimal, new: &'static str, old: &'static str| {
+            checked_rebased_quantity(("units held", units), ("new", dec(new)), ("old", dec(old)))
+        };
+        assert_eq!(rebased(Decimal::MAX, "1", "1").unwrap(), Decimal::MAX);
+        assert!(rebased(Decimal::MAX, "2", "1").is_err());
+        // The finding's own figures: 1e27 units on a 1000-for-1 ratio wants
+        // 1e30 units, past the ceiling however the arithmetic is ordered.
+        assert!(rebased(dec("1e27"), "1000", "1").is_err());
+        // The control it is bounded with: the same holding and the same
+        // numerator over a wide enough denominator answers 1e24, and that is
+        // the *result* being representable rather than the working.
+        assert_eq!(
+            rebased(dec("1e27"), "1000", "1000000").unwrap(),
+            dec("1e24")
+        );
+    }
+
+    /// It is [`mul_div`]'s arithmetic, not a second one: wherever `mul_div`
+    /// can answer, the checked form answers the same thing — including the
+    /// divide-early cases `mul_div` exists for, where the plain
+    /// multiply-then-divide would overflow in the working.
+    #[test]
+    fn a_rebased_quantity_is_mul_divs_answer_wherever_that_fits() {
+        for (units, new, old) in [
+            ("100", "3", "7"),
+            ("1e27", "1000", "1000000"),
+            ("1e15", "1e15", "1e15"),
+            ("0", "1000", "1"),
+            ("123.456789", "7", "3"),
+        ] {
+            let (units, new, old) = (dec(units), dec(new), dec(old));
+            assert_eq!(
+                checked_rebased_quantity(("q", units), ("new", new), ("old", old)).unwrap(),
+                mul_div(&[units, new], old),
+                "{units} × {new} / {old}"
+            );
+        }
+    }
+
+    /// The refusal quotes the arithmetic back in the caller's own field names
+    /// — the ratio *and* the holding that produced it — and names the limit.
+    #[test]
+    fn the_quantity_refusal_names_the_ratio_and_the_holding() {
+        let err = checked_rebased_quantity(
+            ("units held", dec("1e27")),
+            ("scrip_new_units", dec("1000")),
+            ("scrip_old_units", Decimal::ONE),
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.expression,
+            "units held 1000000000000000000000000000 × scrip_new_units 1000 / scrip_old_units 1"
+        );
+        let message = err.message();
+        assert!(message.contains(&err.expression), "{message}");
+        assert!(message.contains(&Decimal::MAX.to_string()), "{message}");
+        // The same sentence the cost-base refusal uses, said once
+        // (`beyond_the_range`) — only what the total *is* differs.
+        assert!(
+            message.contains("these figures multiply out beyond what can be recorded"),
+            "{message}"
+        );
+        assert!(
+            message.contains("the number of units the holding becomes"),
+            "{message}"
+        );
     }
 }

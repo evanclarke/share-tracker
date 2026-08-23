@@ -92,6 +92,18 @@ pub enum WriteError {
     /// correction that breaks nothing still lands. Mapped to `422`.
     #[error("this action's terms leave a sale allocating more units than its parcel holds")]
     AllocationsExceedParcel,
+    /// The terms as written re-base a quantity of this listing past what a
+    /// `Decimal` can hold — a 1000-for-1 split over a holding of 1e27 units
+    /// asks for 1e30 units. Unlike the operations, a `ShareSplit`/`BonusIssue`
+    /// materialises nothing: the re-base is computed at *read* time, so such a
+    /// row was accepted `204` and then killed every open-holdings report of the
+    /// portfolio (a logged `500` with an empty body) until someone worked out
+    /// which action did it — with several of the reports that would have found
+    /// it among the ones that were down. Refused here instead, over the state
+    /// the write leaves behind, so the same edit that brings the ratio back
+    /// inside the range still lands. Mapped to `422`.
+    #[error("this action re-bases a quantity beyond the representable range: {0}")]
+    UnrepresentableRebasedQuantity(#[source] crate::domain::cost_base::UnrepresentableQuantity),
     /// A `ReturnOfCapital` recorded in one currency while a parcel it reduces
     /// is held in another. The payment reduces each parcel's cost base in the
     /// parcel's own currency and amounts are never netted across currencies,
@@ -153,6 +165,10 @@ impl From<WriteError> for ApiError {
                 "these terms re-base parcel quantities so that a sale allocates more units than \
                  the parcel it draws on holds — correct or remove those allocations first",
             ),
+            // The terms re-base a quantity past what a decimal can hold → 422
+            // quoting the arithmetic, the same wording every
+            // beyond-the-range refusal answers with.
+            WriteError::UnrepresentableRebasedQuantity(e) => ApiError::Unprocessable(e.message()),
             // The payment and the parcels it reduces disagree on currency → 422
             // naming both, so the typo is findable without opening the trades.
             WriteError::PaymentCurrencyMismatch {
@@ -243,6 +259,89 @@ async fn allocations_fit_parcels(
     Ok(consumed
         .values()
         .all(|&(quantity, total)| total <= quantity))
+}
+
+/// The first quantity of `listing_id` that the recorded split stream re-bases
+/// past `Decimal`'s range, if there is one — read on the caller's own
+/// connection so a write can check the state it is about to commit.
+///
+/// The sibling of [`allocations_fit_parcels`] and checked at the same hook, for
+/// the same reason: a `ShareSplit`/`BonusIssue` materialises nothing, so its
+/// ratio and date are re-applied at *read* time to every quantity of the
+/// listing, and terms that overflow there are accepted here and then kill the
+/// reports. Both directions of the re-base are covered, because both are used:
+///
+/// * forward — a parcel's as-acquired quantity into a later unit basis
+///   ([`split_adjusted_quantity`], the open-holdings reports, the rollovers'
+///   parcel walk, and the rights issue's holding at its record date). Checked
+///   at **every** split boundary after the parcel rather than only at the
+///   cumulative end, since a split followed by a consolidation nets back to a
+///   ratio that fits while the basis in between does not, and a report as at
+///   that date would still read it;
+/// * backward — a sale's allocated quantity into its parcel's as-acquired
+///   basis ([`as_acquired_quantity`]), which a *consolidation* multiplies up.
+///   That is the direction [`allocations_fit_parcels`] itself computes in, so
+///   this must be checked first or that check overflows before it can answer.
+///
+/// The parcel's gross quantity is what is bounded, not the units still open:
+/// the gross figure is what the rights issue's record-date holding and the
+/// activity report's running balance re-base.
+async fn rebased_quantity_beyond_range(
+    conn: &mut sqlx::SqliteConnection,
+    listing_id: i64,
+) -> Result<Option<crate::domain::cost_base::UnrepresentableQuantity>, sqlx::Error> {
+    let splits = db_splits_for_listing(&mut *conn, listing_id).await?;
+    // Nothing re-bases quantities on this listing, so nothing can overflow.
+    if splits.is_empty() {
+        return Ok(None);
+    }
+
+    let parcels = sqlx::query(
+        "SELECT date, quantity FROM trades          WHERE listing_id = ? AND trade_type IN ('Buy', 'DRP')",
+    )
+    .bind(listing_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    for row in &parcels {
+        let acquired: NaiveDate = row.try_get("date")?;
+        let quantity = parse_dec("quantity", row.try_get("quantity")?)?;
+        let (mut new, mut old) = (Decimal::ONE, Decimal::ONE);
+        for split in &splits {
+            if split.date <= acquired {
+                continue;
+            }
+            new *= split.new_units;
+            old *= split.old_units;
+            if let Err(e) = crate::domain::cost_base::checked_rebased_quantity(
+                ("quantity", quantity),
+                ("new units", new),
+                ("old units", old),
+            ) {
+                return Ok(Some(e));
+            }
+        }
+    }
+
+    let allocations = sqlx::query(
+        "SELECT pa.quantity_allocated, p.date AS acquired, s.date AS sale_date          FROM parcel_allocations pa          JOIN trades p ON p.id = pa.purchase_trade_id          JOIN trades s ON s.id = pa.sale_trade_id          WHERE p.listing_id = ?",
+    )
+    .bind(listing_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    for row in &allocations {
+        let acquired: NaiveDate = row.try_get("acquired")?;
+        let sale_date: NaiveDate = row.try_get("sale_date")?;
+        let allocated = parse_dec("quantity_allocated", row.try_get("quantity_allocated")?)?;
+        let (new, old) = super::adjustments::split_ratio(&splits, acquired, Some(sale_date));
+        if let Err(e) = crate::domain::cost_base::checked_rebased_quantity(
+            ("quantity_allocated", allocated),
+            ("old units", old),
+            ("new units", new),
+        ) {
+            return Ok(Some(e));
+        }
+    }
+    Ok(None)
 }
 
 /// The rollover closing Sells of `listing_id` dated on or after `date` — the
@@ -643,6 +742,12 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
         listings.push(previous);
     }
     for &listing_id in &listings {
+        // Representability first: `allocations_fit_parcels` re-bases each
+        // allocation itself, so an unrepresentable one overflows *inside* that
+        // check before it can answer (`rebased_quantity_beyond_range`).
+        if let Some(beyond) = rebased_quantity_beyond_range(&mut tx, listing_id).await? {
+            return Err(WriteError::UnrepresentableRebasedQuantity(beyond));
+        }
         if !allocations_fit_parcels(&mut tx, listing_id).await? {
             return Err(WriteError::AllocationsExceedParcel);
         }

@@ -364,6 +364,28 @@ pub fn as_acquired_quantity(
     }
 }
 
+/// [`as_acquired_quantity`] in checked form: the same conversion, refusing
+/// rather than panicking where the result is past `Decimal`'s range.
+///
+/// Only a **consolidation** between `acquired` and `at` can reach that — it
+/// multiplies the quantity up — and only for a quantity larger than the parcel
+/// could ever have held, so this is the write paths' guard rather than the
+/// reports' (`entities::transfer`, whose 1:1 move has no ratio of its own but
+/// still re-bases the units asked for). `label` names the caller's own field
+/// so the refusal quotes the request's vocabulary.
+pub fn checked_as_acquired_quantity(
+    qty: (&str, Decimal),
+    splits: &[SplitEvent],
+    acquired: NaiveDate,
+    at: NaiveDate,
+) -> Result<Decimal, crate::domain::cost_base::UnrepresentableQuantity> {
+    let (new, old) = split_ratio(splits, acquired, Some(at));
+    if new == old {
+        return Ok(qty.1);
+    }
+    crate::domain::cost_base::checked_rebased_quantity(qty, ("old units", old), ("new units", new))
+}
+
 /// Total units sold out of a parcel acquired at `acquired`, re-based to its
 /// as-acquired units. Each `(sale_date, quantity_allocated)` is expressed in
 /// the unit basis of its own sale date — a post-split sale allocates post-split
