@@ -224,17 +224,77 @@ pub async fn db_upsert(pool: &SqlitePool, period: &DrpEnrolment) -> Result<(), U
     Ok(())
 }
 
+/// Where one reinvestment sits in its period's residual chain — the only
+/// thing besides the period itself that decides where its leftover went.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChainPosition {
+    /// Nothing in the period follows this reinvestment, so there is nobody to
+    /// hand its leftover to.
+    Tail,
+    /// A later reinvestment of the same period picks its leftover up.
+    Followed,
+}
+
+/// Where one reinvestment's leftover cash sits: carried forward to the next
+/// reinvestment of the period, or paid out. Exactly one is non-zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ResidualSplit {
+    pub carried_forward: Decimal,
+    pub paid_out: Decimal,
+}
+
+impl DrpEnrolment {
+    /// **The** rule for what became of one reinvestment's leftover, decided by
+    /// the period and the reinvestment's position in its chain — the whole of
+    /// the derivation [`recompute_residuals`] applies, factored out so that
+    /// nothing decides the split on its own.
+    ///
+    /// Under `PayOut` the registry refunds every leftover as it arises. Under
+    /// `CarryForward` each is picked up by the next reinvestment, except the
+    /// [`ChainPosition::Tail`], which has no successor — refunded once the
+    /// period ends, still carried while it is open.
+    ///
+    /// `drp_reinvestment::db_reinvest` asks it twice per reinvestment, which
+    /// is what keeps a *stored* column from being taken as the answer: what
+    /// the prior trade brings forward is this rule at
+    /// [`ChainPosition::Followed`] over that trade's leftover (the new
+    /// reinvestment is about to displace it as the tail, so its stored columns
+    /// describe a chain that no longer exists — SCENARIOS V-e), and the new
+    /// trade's own split is this rule at [`ChainPosition::Tail`].
+    pub(crate) fn residual_split(
+        &self,
+        leftover: Decimal,
+        position: ChainPosition,
+    ) -> ResidualSplit {
+        let refunded = match self.residual_handling {
+            ResidualHandling::PayOut => true,
+            ResidualHandling::CarryForward => {
+                position == ChainPosition::Tail && self.unenrolment_date.is_some()
+            }
+        };
+        match refunded {
+            true => ResidualSplit {
+                carried_forward: Decimal::ZERO,
+                paid_out: leftover,
+            },
+            false => ResidualSplit {
+                carried_forward: leftover,
+                paid_out: Decimal::ZERO,
+            },
+        }
+    }
+}
+
 /// Recompute the split of every leftover in the period between *carried
 /// forward* and *paid out*, from the period as it now stands.
 ///
 /// Each of the period's reinvestments left some cash over (its
 /// `residual_carried_forward + residual_paid_out`, one of which is always
 /// zero — the total is what the plan did not spend, and no edit here changes
-/// it). Where that cash went is entirely a function of the period: under
-/// `PayOut` the registry refunds every leftover as it arises; under
-/// `CarryForward` each is picked up by the next reinvestment, except the last,
-/// which has no successor — so it is refunded once the period ends, and is
-/// still carried while the period is open.
+/// it). Where that cash went is entirely a function of the period and the
+/// reinvestment's place in its chain — [`DrpEnrolment::residual_split`], which
+/// is the rule itself; this is the walk that applies it to every trade in
+/// payment order.
 ///
 /// Deriving it rather than recording it at the moment of unenrolment is what
 /// makes an edit reversible (SCENARIOS I-01, I-03): clearing a mistaken
@@ -275,20 +335,17 @@ pub(crate) async fn recompute_residuals(
         let carried = parse_dec("residual_carried_forward", carried.clone())?;
         let paid = parse_dec("residual_paid_out", paid.clone())?;
         let leftover = carried + paid;
-        let refunded = match period.residual_handling {
-            ResidualHandling::PayOut => true,
-            ResidualHandling::CarryForward => index == last && period.unenrolment_date.is_some(),
+        let position = match index == last {
+            true => ChainPosition::Tail,
+            false => ChainPosition::Followed,
         };
-        let (want_carried, want_paid) = match refunded {
-            true => (Decimal::ZERO, leftover),
-            false => (leftover, Decimal::ZERO),
-        };
-        if want_carried != carried || want_paid != paid {
+        let want = period.residual_split(leftover, position);
+        if want.carried_forward != carried || want.paid_out != paid {
             sqlx::query(
                 "UPDATE trades SET residual_carried_forward = ?, residual_paid_out = ? WHERE id = ?",
             )
-            .bind(Money(want_carried))
-            .bind(Money(want_paid))
+            .bind(Money(want.carried_forward))
+            .bind(Money(want.paid_out))
             .bind(trade_id)
             .execute(&mut *conn)
             .await?;

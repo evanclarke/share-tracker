@@ -45,12 +45,25 @@
 //! distribution's holding account.
 //!
 //! The carried-forward residual is *not* stored as a separate running balance:
-//! it lives on each DRP trade (`residual_carried_forward`), and "brought
-//! forward" for the next reinvestment is read back from the most recent prior
-//! DRP trade *within the same enrolment period*. That single source of truth
-//! can't drift, and the chain never crosses periods — a period's trailing
-//! residual is paid out at unenrolment (see `drp_enrolment::db_upsert`), not
-//! picked up after re-enrolment.
+//! it lives on each DRP trade (`residual_carried_forward` +
+//! `residual_paid_out`, which together are simply what that reinvestment left
+//! over), and "brought forward" for the next reinvestment is the most recent
+//! prior DRP trade's leftover *within the same enrolment period*. That single
+//! source of truth can't drift, and the chain never crosses periods — a
+//! period's trailing residual is paid out at unenrolment (see
+//! `drp_enrolment::db_upsert`), not picked up after re-enrolment.
+//!
+//! Which of the two columns holds that leftover is never read as the answer,
+//! because it depends on which trade is currently the chain's tail — and the
+//! reinvestment being written is what takes the tail from it. The split is put
+//! back to the period instead (`DrpEnrolment::residual_split`, the same rule
+//! `drp_enrolment::recompute_residuals` walks the chain with), at the position
+//! each trade occupies *after* this write: `Followed` for the prior trade,
+//! `Tail` for the new one. Reading `residual_carried_forward` alone missed a
+//! closed period's trailing trade, whose leftover the closure had settled to
+//! `residual_paid_out` — a reinvestment entered into an already-closed period
+//! brought forward nothing and came out a unit short, with the cash carried to
+//! nobody (SCENARIOS V-e).
 //!
 //! Because each reinvestment reads that chain backwards, **reinvestments are
 //! entered in payment order**: a reinvestment for which the period already
@@ -366,6 +379,19 @@ pub async fn db_reinvest(
         }
     };
 
+    // The period as it now stands. It is the only thing that decides where any
+    // of its leftovers sits, and it is asked three times below: for what the
+    // trade before this one hands forward, for this one's own split, and
+    // finally to re-derive the whole chain once this one has joined it.
+    let period = drp_enrolment::DrpEnrolment {
+        id: 0, // not read: every walk is keyed on the period's own shape
+        listing_id,
+        holding_account_id,
+        enrolment_date: period_start,
+        unenrolment_date: period_end,
+        residual_handling: handling,
+    };
+
     // The DRP trade is denominated in the holding's currency.
     let currency: String = sqlx::query_scalar("SELECT currency FROM listings WHERE id = ?")
         .bind(listing_id)
@@ -440,20 +466,30 @@ pub async fn db_reinvest(
         return Err(ReinvestError::LaterReinvestmentExists { date, later });
     }
 
-    // Residual brought forward = the most recent prior DRP trade's
-    // carried-forward, *within the same enrolment period and holding
-    // account*: an earlier period's trailing residual was paid out at its
-    // unenrolment, and another account runs its own chain, so the chain never
-    // crosses a period boundary or an account boundary. Membership is the
-    // period's own question (`drp_enrolment::PERIOD_TRADES_FROM_WHERE`,
-    // matched on each distribution's entitlement date); "most recent" is the
-    // payment order the cash actually moved in, bounded to trades dated at or
-    // before this one so the lookup can never read *forward* in time. "At or
-    // before" is strictly before on the chain's (date, id) order — the new
-    // row's id exceeds every existing one — and the refusal above is what
-    // makes the bound unreachable rather than merely defensive.
-    let prior_cf: Option<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-        "SELECT t.residual_carried_forward {} AND t.date <= ? \
+    // Residual brought forward = what the most recent prior DRP trade leaves
+    // over, *within the same enrolment period and holding account*: an earlier
+    // period's trailing residual was paid out at its unenrolment, and another
+    // account runs its own chain, so the chain never crosses a period boundary
+    // or an account boundary. Membership is the period's own question
+    // (`drp_enrolment::PERIOD_TRADES_FROM_WHERE`, matched on each
+    // distribution's entitlement date); "most recent" is the payment order the
+    // cash actually moved in, bounded to trades dated at or before this one so
+    // the lookup can never read *forward* in time. "At or before" is strictly
+    // before on the chain's (date, id) order — the new row's id exceeds every
+    // existing one — and the refusal above is what makes the bound unreachable
+    // rather than merely defensive.
+    //
+    // What that trade *leaves over* is both its residual columns summed: which
+    // of the two currently holds it depends on whether it is the chain's tail,
+    // and the row about to be inserted is what takes the tail from it. Reading
+    // `residual_carried_forward` alone got a closed period's trailing trade
+    // wrong — its leftover had been settled to `residual_paid_out` when the
+    // period closed, so a reinvestment entered afterwards brought forward
+    // nothing and came out a unit short, with the cash carried to nobody
+    // (SCENARIOS V-e). So the split is not read off the row: it is put back to
+    // the period, at the position the prior trade is about to occupy.
+    let prior: Option<(String, String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT t.residual_carried_forward, t.residual_paid_out {} AND t.date <= ? \
          ORDER BY t.date DESC, t.id DESC LIMIT 1",
         *drp_enrolment::PERIOD_TRADES_FROM_WHERE
     )))
@@ -465,8 +501,14 @@ pub async fn db_reinvest(
     .bind(date)
     .fetch_optional(&mut *tx)
     .await?;
-    let residual_bf = match prior_cf {
-        Some(s) => parse_dec("residual_carried_forward", s)?,
+    let residual_bf = match prior {
+        Some((carried, paid)) => {
+            let leftover = parse_dec("residual_carried_forward", carried)?
+                + parse_dec("residual_paid_out", paid)?;
+            period
+                .residual_split(leftover, drp_enrolment::ChainPosition::Followed)
+                .carried_forward
+        }
         None => Decimal::ZERO,
     };
 
@@ -512,13 +554,14 @@ pub async fn db_reinvest(
         }
     };
     // Whichever way the units were arrived at, the leftover is cash the plan
-    // did not spend, so it is carried or paid out per the period's handling
+    // did not spend, so where it sits is the period's decision — asked for at
+    // the position this reinvestment takes, which is the chain's tail (the
+    // refusal above is what guarantees that). Under `PayOut`, and under
+    // `CarryForward` in a period that has already ended, that means it is
+    // refunded here rather than a moment later by the recompute below
     // (SCENARIOS I-06: a whole-number stated allotment used to discard it —
     // up to a share's worth of cash, neither carried nor refunded).
-    let (carried, paid_out) = match handling {
-        ResidualHandling::CarryForward => (leftover, Decimal::ZERO),
-        ResidualHandling::PayOut => (Decimal::ZERO, leftover),
-    };
+    let split = period.residual_split(leftover, drp_enrolment::ChainPosition::Tail);
 
     let fx_rate = body.fx_rate.unwrap_or(Decimal::ONE);
 
@@ -540,8 +583,8 @@ pub async fn db_reinvest(
     .bind(&currency)
     .bind(Money(fx_rate))
     .bind(Money(residual_bf))
-    .bind(Money(carried))
-    .bind(Money(paid_out))
+    .bind(Money(split.carried_forward))
+    .bind(Money(split.paid_out))
     .bind(holding_account_id)
     .execute(&mut *tx)
     .await?;
@@ -553,25 +596,13 @@ pub async fn db_reinvest(
         .execute(&mut *tx)
         .await?;
 
-    // The period decides where each of its leftovers sits, so re-derive them
-    // now the new reinvestment has joined it: under `PayOut` this one's
-    // leftover is refunded, and under `CarryForward` it takes over as the
-    // chain's tail — settling straight away when the period is already closed
-    // (a distribution that went ex before an unenrolment but was paid after
-    // it), and handing the previous tail its carry back where that tail's own
-    // leftover had been settled.
-    drp_enrolment::recompute_residuals(
-        &mut tx,
-        &drp_enrolment::DrpEnrolment {
-            id: 0, // not read: the walk is keyed on the period's own shape
-            listing_id,
-            holding_account_id,
-            enrolment_date: period_start,
-            unenrolment_date: period_end,
-            residual_handling: handling,
-        },
-    )
-    .await?;
+    // The new reinvestment has taken over as the chain's tail, so re-derive
+    // the period's whole split: this one's own columns were already written
+    // from the same rule, and what this fixes is the trade *behind* it, whose
+    // leftover a closed period had settled to `residual_paid_out` and which is
+    // now carried forward — into this trade, which brought exactly that figure
+    // forward above. The two agree because they ask the same function.
+    drp_enrolment::recompute_residuals(&mut tx, &period).await?;
 
     tx.commit().await?;
 
@@ -2264,6 +2295,209 @@ mod tests {
         assert_eq!(september.residual_brought_forward, Decimal::from(6));
         assert_eq!(september.quantity, Decimal::from(11));
         assert_eq!(september.residual_carried_forward, Decimal::from(3));
+    }
+
+    /// The measured facts of the closed-period pair below, entered while the
+    /// period is still **open** and closed afterwards — the control that
+    /// bounds SCENARIOS V-e to reinvesting into an already-closed period.
+    /// March buys 11 units carrying $6, June brings that forward ($107 + $6 =
+    /// $113) for 11 units carrying $3, and closing the period settles only the
+    /// trailing $3.
+    #[tokio::test]
+    async fn reinvesting_twice_into_an_open_period_then_closing_it_settles_only_the_tail() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        enrol_period(
+            &pool,
+            1,
+            1,
+            "2024-01-01",
+            None,
+            ResidualHandling::CarryForward,
+        )
+        .await;
+        insert_march_and_june_distributions(&pool).await;
+
+        let march = db_reinvest(&pool, 1, &body("9")).await.unwrap();
+        assert_eq!(march.quantity, Decimal::from(11));
+        assert_eq!(march.residual_carried_forward, Decimal::from(6));
+
+        let june = db_reinvest(&pool, 2, &body("10")).await.unwrap();
+        assert_eq!(june.residual_brought_forward, Decimal::from(6));
+        assert_eq!(june.quantity, Decimal::from(11));
+        assert_eq!(june.residual_carried_forward, Decimal::from(3));
+
+        // Close the period: only the trailing $3 is refunded.
+        enrol_period(
+            &pool,
+            1,
+            1,
+            "2024-01-01",
+            Some("2024-12-01"),
+            ResidualHandling::CarryForward,
+        )
+        .await;
+        assert_eq!(
+            residuals(&pool, march.id).await,
+            (Decimal::from(6), Decimal::ZERO)
+        );
+        assert_eq!(
+            residuals(&pool, june.id).await,
+            (Decimal::ZERO, Decimal::from(3))
+        );
+    }
+
+    /// SCENARIOS V-e. The same facts reinvested into a period that is
+    /// **already closed** — the ordinary shape of a statement arriving after
+    /// the plan was left — must chain identically. `db_reinvest` used to read
+    /// the prior trade's `residual_carried_forward`, which for a closed
+    /// period's trailing trade is `0`: its leftover had been settled to
+    /// `residual_paid_out` when the period closed, and `recompute_residuals`
+    /// only moved it back *after* the new trade had already been written with
+    /// nothing brought forward. June came out at 10 units instead of 11 and
+    /// March's $6 was carried to nobody. Both halves of the leftover are now
+    /// put back to the period, which is what decides the split.
+    #[tokio::test]
+    async fn reinvesting_twice_into_an_already_closed_period_brings_the_leftover_forward() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        enrol_period(
+            &pool,
+            1,
+            1,
+            "2024-01-01",
+            Some("2024-12-01"),
+            ResidualHandling::CarryForward,
+        )
+        .await;
+        insert_march_and_june_distributions(&pool).await;
+
+        // March is the closed period's tail as it is entered, so its $6 is
+        // refunded straight away — that is the row June must still read.
+        let march = db_reinvest(&pool, 1, &body("9")).await.unwrap();
+        assert_eq!(march.quantity, Decimal::from(11));
+        assert_eq!(march.residual_brought_forward, Decimal::ZERO);
+        assert_eq!(march.residual_carried_forward, Decimal::ZERO);
+        assert_eq!(march.residual_paid_out, Decimal::from(6));
+
+        // June takes the tail from it: $107 + $6 = $113 buys 11 units at $10.
+        let june = db_reinvest(&pool, 2, &body("10")).await.unwrap();
+        assert_eq!(june.residual_brought_forward, Decimal::from(6));
+        assert_eq!(june.quantity, Decimal::from(11));
+        assert_eq!(june.residual_carried_forward, Decimal::ZERO);
+        assert_eq!(june.residual_paid_out, Decimal::from(3));
+
+        // …and March is no longer the tail, so its $6 is carried again — the
+        // figure June brought forward, from the one rule that decides both.
+        assert_eq!(
+            residuals(&pool, march.id).await,
+            (Decimal::from(6), Decimal::ZERO)
+        );
+    }
+
+    /// A `PayOut` period is unaffected either way: the registry refunds every
+    /// leftover as it arises, so nothing is ever brought forward and closing
+    /// the period settles nothing further. Pinning the asymmetry keeps the
+    /// V-e fix from turning a refund into a carry.
+    #[tokio::test]
+    async fn a_closed_pay_out_period_still_brings_nothing_forward() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        enrol_period(
+            &pool,
+            1,
+            1,
+            "2024-01-01",
+            Some("2024-12-01"),
+            ResidualHandling::PayOut,
+        )
+        .await;
+        insert_march_and_june_distributions(&pool).await;
+
+        let march = db_reinvest(&pool, 1, &body("9")).await.unwrap();
+        assert_eq!(march.quantity, Decimal::from(11));
+        assert_eq!(march.residual_paid_out, Decimal::from(6));
+
+        // $107 alone — March's $6 was refunded, not held for June.
+        let june = db_reinvest(&pool, 2, &body("10")).await.unwrap();
+        assert_eq!(june.residual_brought_forward, Decimal::ZERO);
+        assert_eq!(june.quantity, Decimal::from(10));
+        assert_eq!(june.residual_paid_out, Decimal::from(7));
+
+        // March keeps its refund: it is not the tail any more, but under
+        // `PayOut` the tail was never what decided this.
+        assert_eq!(
+            residuals(&pool, march.id).await,
+            (Decimal::ZERO, Decimal::from(6))
+        );
+    }
+
+    /// SCENARIOS V-e over the HTTP surface: two reinvestments posted into an
+    /// already-closed period, the second returning the 11 units its $6
+    /// brought-forward buys.
+    #[tokio::test]
+    async fn api_reinvesting_into_a_closed_period_brings_the_leftover_forward() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        enrol_period(
+            &pool,
+            1,
+            1,
+            "2024-01-01",
+            Some("2024-12-01"),
+            ResidualHandling::CarryForward,
+        )
+        .await;
+        insert_march_and_june_distributions(&pool).await;
+
+        let app = client(&pool);
+        app.post_raw("/income/1/reinvest", r#"{"reinvestment_price":"9"}"#)
+            .await
+            .expect_status(StatusCode::CREATED);
+        let june: Trade = app
+            .post_raw("/income/2/reinvest", r#"{"reinvestment_price":"10"}"#)
+            .await
+            .expect_status(StatusCode::CREATED)
+            .json();
+        assert_eq!(june.residual_brought_forward, Decimal::from(6));
+        assert_eq!(june.quantity, Decimal::from(11));
+        assert_eq!(june.residual_paid_out, Decimal::from(3));
+    }
+
+    /// The measured V-e facts: $105 paid 28 March (ex 1 March) and $107 paid
+    /// 28 June (ex 1 June), both entitled inside a 2024-01-01 → 2024-12-01
+    /// period, reinvested in payment order so V-b's refusal never fires.
+    async fn insert_march_and_june_distributions(pool: &SqlitePool) {
+        insert_distribution_dated(
+            pool,
+            1,
+            1,
+            "2024-03-28",
+            Some("2024-03-01"),
+            Decimal::from(105),
+            Decimal::ZERO,
+        )
+        .await;
+        insert_distribution_dated(
+            pool,
+            2,
+            1,
+            "2024-06-28",
+            Some("2024-06-01"),
+            Decimal::from(107),
+            Decimal::ZERO,
+        )
+        .await;
+    }
+
+    /// One trade's `(residual_carried_forward, residual_paid_out)` as stored,
+    /// for reading a trade back after a later write re-derived the chain.
+    async fn residuals(pool: &SqlitePool, trade_id: i64) -> (Decimal, Decimal) {
+        let t = crate::entities::trade::db_get(pool, trade_id)
+            .await
+            .unwrap()
+            .unwrap();
+        (t.residual_carried_forward, t.residual_paid_out)
     }
 
     /// The order the chain is judged on is the **trade's own date**, which the

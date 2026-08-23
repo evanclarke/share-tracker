@@ -348,5 +348,20 @@ Options offered:
 
 **Evan chose option 1** — ask the shared derivation, so the split is decided in one place.
 
-- [ ] Have `db_reinvest` derive the brought-forward figure the way `recompute_residuals` does,
+- [x] Have `db_reinvest` derive the brought-forward figure the way `recompute_residuals` does,
       with a test reinvesting twice into an already-closed `CarryForward` period.
+
+Done 2026-08-23. The rule `recompute_residuals` applied inline is now
+`DrpEnrolment::residual_split(leftover, ChainPosition)` — the period plus the reinvestment's place
+in its chain decide where its leftover sits, and nothing else does. `recompute_residuals` is the
+walk that applies it in payment order; `db_reinvest` asks it twice per write, at the positions that
+hold *after* the insert: `Followed` for the trade before it (which the new row is displacing as the
+tail) over that trade's whole leftover — both residual columns summed, since which one holds it is
+exactly the tail-dependent fact that was being misread — and `Tail` for the new trade's own split,
+so a closed period's reinvestment is written already settled rather than corrected a moment later.
+V-b's two properties are untouched: the lookup keeps its `AND t.date <= ?` bound and the
+later-trade refusal still fires (verified live). `PayOut` is unchanged by construction — the rule
+refunds every leftover regardless of position, so nothing is ever brought forward. `docs/API.md`
+needed no correction, only sharpening: both sections already stated the derived-from-the-period
+principle this violated, and now say what it means for a reinvestment entered into a closed
+period.
