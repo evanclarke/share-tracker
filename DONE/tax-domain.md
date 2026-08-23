@@ -1467,3 +1467,57 @@ that edit is the state the report exists to surface. `WorthlessShares` became a 
 `rollover_consistency` `kind` rather than a report of its own — it is one of the three operations,
 the row shape fits it exactly, and it reaches the annual tax report's completeness section for
 free; it stores no carried figures, so only the unconsumed-parcel check runs on it.
+
+## Multiply-before-divide in the three sites W-b and W-e left standing
+
+Held open deliberately rather than archived with section W: all three are the *same* shape W-b fixed
+in `domain::cost_base`, and none is reachable by the magnitude bound W-e added — because in each case
+there **is** a lesser answer to give, which is exactly what separates them from an unrepresentable
+cost base. Two were found while fixing section W; the third was found by grepping the shape rather
+than trusting the two the section named, and was measured at the HTTP surface before being fixed.
+
+- `AmitReductionEvent::reduction_for_units` — `per_unit * covered.min(held) * units / held`. Probed
+  at 1e15 units with a `0.05` per-unit adjustment it survives (`1.5e28`); a larger per-unit figure at
+  that scale overflows. **Two** multiplications precede the divide, and either can overflow: a
+  per-unit figure of 1e15 overflows on the first one alone.
+- `entities::demerger::db_demerge` — `carried_cost_base * cost_base_pct / Decimal::ONE_HUNDRED`, and
+  `at_date_units * new_units / held_units`. A parcel costed at ~1e27 demerged at any percentage
+  overflows the intermediate even though the result is representable. This one is in a **write**
+  path, so it is the more serious of the two.
+- `entities::investment_expense::check_apportionment` — `to_cents(gross * pct / Decimal::ONE_HUNDRED)`.
+  A **write-time validation**, so the panic aborts a legitimate write: `gross_amount` is checked for
+  sign but has no magnitude bound (W-e bounded parcel-creating writes and Sells, not this), so a
+  gross of 1e27 at 100% answered a logged `500` while the same gross at 50% (`5e28`, under the
+  ceiling) was accepted `204`. Both the gross and the answer are representable; only the working was
+  not.
+
+All three now answer a logged `500` rather than resetting the connection (W-b's panic layer), so they
+fail safely; none answers correctly. The fix is `domain::cost_base::prorated_initial_cost`'s treatment —
+`checked_mul` first so no figure that fits today moves by a digit, divide-first only on the overflow —
+not a refusal.
+
+- [x] Apply the `prorated_initial_cost` treatment to `AmitReductionEvent::reduction_for_units`, to
+      `entities::demerger::db_demerge`'s two pro-rating expressions, and to
+      `entities::investment_expense::check_apportionment`, with a test at each old ceiling
+      — the treatment is now one shared helper, `infra::decimal::mul_div(&[factors], divisor)`:
+      multiply left to right then divide (byte-identical to the expression it replaces, since `*`
+      and `/` associate left to right), taking the division early only at the first product that
+      overflows, and panicking as before where the *result* itself is unrepresentable. It lives in
+      `infra::decimal` beside `to_cents` because it is an arithmetic primitive over `Decimal` with
+      no domain meaning of its own — it knows nothing about cost bases — and because `entities/`,
+      `domain/` and `reports/` all need to reach it. The slice of factors is what lets one helper
+      serve both the four-term AMIT shape (`a × b × c / d`) and the three-term one everywhere else.
+      `prorated_initial_cost` keeps only its `units == quantity` identity short-circuit and
+      delegates the rest, so there is one implementation of the idea. The demerger's `held_units`
+      divisor is validated positive at the corporate-action write path
+      (`CorporateActionBody::kind`'s `positive`), confirmed rather than assumed. Tests:
+      `infra::decimal::tests::{mul_div_is_the_plain_expression_wherever_that_fits,
+      mul_div_multiplies_before_it_divides,
+      mul_div_answers_where_the_product_overflows_but_the_result_does_not}`,
+      `domain::cost_base::tests::{an_amit_row_past_the_old_multiply_first_ceiling_still_reduces,
+      a_reduction_that_fits_keeps_its_multiply_first_figure}`,
+      `entities::demerger::tests::api_demerge_past_the_old_multiply_first_ceiling_completes`,
+      `entities::investment_expense::tests::api_apportionment_past_the_old_multiply_first_ceiling_reconciles`.
+      Each fails with the fix removed; a divide-first implementation additionally fails eight
+      pre-existing tests, which is what says the multiply-first order is load-bearing rather than
+      incidental.

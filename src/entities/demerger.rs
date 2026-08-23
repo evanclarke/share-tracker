@@ -57,6 +57,7 @@ use crate::entities::corporate_action::{self, ActionKind};
 use crate::entities::sell::{self, AllocationInput};
 use crate::entities::trade::{self, Trade};
 use crate::infra::db::write_tx;
+use crate::infra::decimal::mul_div;
 use crate::infra::http::ApiError;
 use axum::{
     Json, Router,
@@ -190,15 +191,22 @@ pub async fn db_demerge(pool: &SqlitePool, action_id: i64) -> Result<Demerge, De
         let carried_cost_base = inputs.carried_cost_base(&p.parcel, p.remaining, action.date)?;
 
         // Step 2: apportion by the advised percentage. demerged + head sum
-        // exactly to the carried cost base by construction.
-        let demerged_cost_base = carried_cost_base * cost_base_pct / Decimal::ONE_HUNDRED;
+        // exactly to the carried cost base by construction. Both pro-rates go
+        // through `mul_div`, which keeps the multiply-then-divide order for
+        // every figure that fits and still answers where the intermediate
+        // product would overflow `rust_decimal` — a parcel costed at 1e27 at
+        // 99% is `9.9e28` in the working and `9.9e26` in the answer, and this
+        // is a write path, so the panic aborted the whole demerge.
+        let demerged_cost_base = mul_div(&[carried_cost_base, cost_base_pct], Decimal::ONE_HUNDRED);
 
         replacements.push(Replacement {
             parcel_id: p.parcel.id,
             at_date_units: p.at_date_units,
             // The entitlement ratio applies to units as held at the demerger
-            // date.
-            demerged_quantity: p.at_date_units * new_units / held_units,
+            // date. `held_units` is the action's own ratio denominator,
+            // validated positive when the corporate action is written
+            // (`CorporateActionBody::kind`'s `positive`), so it is never nil.
+            demerged_quantity: mul_div(&[p.at_date_units, new_units], held_units),
             head_cost_base: carried_cost_base - demerged_cost_base,
             demerged_cost_base,
             currency: p.parcel.currency.clone(),
@@ -1355,6 +1363,66 @@ mod tests {
         assert_eq!(
             v["demerged_replacements"][0]["deemed_acquisition_date"],
             "2020-10-01"
+        );
+    }
+
+    /// SCENARIOS W-b's residual in the demerger, closed in the same
+    /// treatment — and this one is a **write** path, so the panic aborted the
+    /// whole operation rather than one report's read. Both of the operation's
+    /// pro-rates multiplied before they divided, and each could pass
+    /// `rust_decimal`'s ~7.9228e28 ceiling with a perfectly representable
+    /// answer on the other side:
+    ///
+    /// * parcel 1 is costed at 1e27 (`average_price 1e27 × quantity 1`, which
+    ///   the write path accepts — `checked_cost_base` bounds the cost base,
+    ///   and 1e27 is well inside it): apportioning it at 99% overflows at
+    ///   `1e27 × 99 = 9.9e28`, though the answer is 9.9e26;
+    /// * parcel 2 holds 1e27 units: the entitlement ratio, written unreduced
+    ///   as 100-for-1000, overflows at `1e27 × 100 = 1e29`, though the answer
+    ///   is 1e26 units.
+    ///
+    /// Before the fix `POST /corporate_actions/{id}/demerge` answered a
+    /// logged `500` with an empty body and wrote nothing.
+    #[tokio::test]
+    async fn api_demerge_past_the_old_multiply_first_ceiling_completes() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "HEAD").await;
+        insert_listing(&pool, 2, "DEM").await;
+        // Cost base 1e27 on one unit.
+        insert_buy(&pool, 1, 1, d(2020, 10, 1), "1", "1e27").await;
+        // 1e27 units at a cost base of 1e21 — the quantity, not the money, is
+        // what overflows here.
+        insert_buy(&pool, 2, 1, d(2021, 10, 1), "1e27", "0.000001").await;
+        insert_demerger_terms(&pool, 10, 1, 2, d(2024, 7, 1), "100", "1000", "99").await;
+
+        let resp = client(&pool)
+            .post_empty("/corporate_actions/10/demerge")
+            .await;
+        assert_eq!(resp.status, StatusCode::CREATED);
+        let v: serde_json::Value = resp.json();
+        // The cost base rides on the replacement Buys' brokerage (price 0),
+        // and the two legs still sum exactly to the parcel's own.
+        assert_eq!(
+            v["demerged_replacements"][0]["brokerage"],
+            "990000000000000000000000000"
+        );
+        assert_eq!(
+            v["head_replacements"][0]["brokerage"],
+            "10000000000000000000000000"
+        );
+        assert_eq!(v["demerged_replacements"][0]["quantity"], "0.10");
+        // Parcel 2: the entitlement ratio applied to 1e27 units.
+        assert_eq!(
+            v["demerged_replacements"][1]["quantity"],
+            "100000000000000000000000000"
+        );
+        assert_eq!(
+            v["demerged_replacements"][1]["brokerage"],
+            "990000000000000000000.00000"
+        );
+        assert_eq!(
+            v["head_replacements"][1]["brokerage"],
+            "10000000000000000000.000000"
         );
     }
 

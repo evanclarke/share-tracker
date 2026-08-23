@@ -127,28 +127,52 @@ Archived in [`DONE/infra.md`](DONE/infra.md) (W-a, W-b),
 [`DONE/reporting.md`](DONE/reporting.md) (W-c, W-d, W-f), and summarised under
 [Section W findings](SCENARIOS.md#section-w-findings).
 
-## Multiply-before-divide in the two sites W-b and W-e left standing
+## Multiply-before-divide across the rest of the tree — sixteen more sites
 
-Held open deliberately rather than archived with section W: both were found while fixing that
-section, both are the *same* shape W-b fixed in `domain::cost_base`, and neither is reachable by the
-magnitude bound W-e added — because in each case there **is** a lesser answer to give, which is
-exactly what separates them from an unrepresentable cost base.
+Found by grepping the `a * b / c` shape while closing the three sites above (that grep is also what
+turned up `investment_expense`, which the section above had not named and which was reachable). The
+sixteen below are what the shape match returns; it is a *textual* match, so a near-variant it does
+not spell (a dereferenced operand, a constant multiplier) can hide from it — two of these sixteen
+were found only by reading around the hits. Every
+one of these is the same shape and the same failure mode: an intermediate product past
+`rust_decimal`'s ~7.9228e28 ceiling panics, which the panic layer turns into a logged `500` with an
+empty body, even where the answer itself is perfectly representable. The helper the three fixed sites
+now share, `infra::decimal::mul_div`, makes each a one-line substitution — the work is a test per
+site and confirming each divisor is non-zero, not the edit.
 
-- `AmitReductionEvent::reduction_for_units` — `per_unit * covered.min(held) * units / held`. Probed
-  at 1e15 units with a `0.05` per-unit adjustment it survives (`1.5e28`); a larger per-unit figure at
-  that scale overflows.
-- `entities::demerger::db_demerge` — `carried_cost_base * cost_base_pct / Decimal::ONE_HUNDRED`, and
-  `at_date_units * new_units / held_units`. A parcel costed at ~1e27 demerged at any percentage
-  overflows the intermediate even though the result is representable. This one is in a **write**
-  path, so it is the more serious of the two.
+Not fixed here deliberately: this is a separate decision, and a sweep is worth taking as one pass
+with its own reproductions rather than trailing the three sites that were measured.
 
-Both now answer a logged `500` rather than resetting the connection (W-b's panic layer), so they fail
-safely; neither answers correctly. The fix is `domain::cost_base::prorated_initial_cost`'s treatment —
-`checked_mul` first so no figure that fits today moves by a digit, divide-first only on the overflow —
-not a refusal.
+The ones a user-entered figure can actually drive — no magnitude bound stands between an entry and
+the product, and W-e bounds a *cost base*, never a quantity:
 
-- [ ] Apply the `prorated_initial_cost` treatment to `AmitReductionEvent::reduction_for_units` and to
-      `entities::demerger::db_demerge`'s two pro-rating expressions, with a test at each old ceiling
+- `entities::scrip_exchange.rs:327,335` — `reduced_cost_base * num / den` and
+  `at_date_units * new_units / old_units`. Both are the demerger's two expressions exactly; a
+  **write** path, so a panic aborts the exchange.
+- `entities::corporate_action::adjustments.rs:343,356` — `qty * new / old` (and its inverse), the
+  split re-basing every allocation and report walks through. A parcel of 1e27 units is writable (the
+  bound is on `price × quantity`, not quantity), so a four-digit split ratio overflows it.
+- `reports::parcel_optimiser.rs:260,262` — `total_proceeds * units_so_far / total_units` and
+  `remaining_cost_base * units / remaining_quantity`. The second is `domain::cost_base`'s pro-rate
+  re-implemented locally, which is its own finding: it should be calling the shared pipeline.
+- `reports::realised_gains.rs:397,450,555` — the sale-cost spread, the scrip-cash apportionment (the
+  read-side twin of `scrip_exchange.rs:327`), and the rights-cost spread.
+- `reports::activity.rs:647` — `balance * new / old`, the running balance re-based across a split.
+
+The ones that need a figure absurd on its face but not refused anywhere —
+`entities::rights_exercise.rs:197`, `entities::corporate_action::adjustments.rs:125,575`,
+`reports::tax_summary.rs:425`, `reports::franking.rs:54` and `domain::franking_credit.rs:66` (whose
+multiplier is the literal 30, so it needs a franked amount above 2.64e27) — are the same shape and
+the same one-line fix, but nothing but scale separates them from the list above.
+
+One related gap the helper cannot close, recorded here so it is not mistaken for part of the sweep:
+a demerger or scrip exchange whose ratio is **greater than one** can compute a replacement *quantity*
+that is genuinely unrepresentable (1e27 units on a 1000-for-1 ratio). There is no lesser answer to
+give, so that is W-e's shape — a write-time refusal naming the arithmetic — not this one.
+
+- [ ] Sweep the remaining `a * b / c` sites onto `infra::decimal::mul_div`, with a test at each
+      site's ceiling, and decide separately whether the unrepresentable-*quantity* case above wants
+      a W-e-style refusal
 
 After W, the next SCENARIOS pass is section **X. Transactional integrity and concurrency**
 (8 scenarios), driven the way S through W were: run every scenario against a throwaway database,

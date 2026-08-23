@@ -306,6 +306,61 @@ pub fn to_cents(value: Decimal) -> Decimal {
     }
 }
 
+/// *The* pro-rating multiply-then-divide: the product of `factors` over
+/// `divisor`, computed so that an intermediate product too large for
+/// `rust_decimal` still gives an answer where the result itself fits.
+///
+/// The shape `a × b / c` is everywhere in this tree — a parcel's share of a
+/// cost base, a percentage of a gross amount, an entitlement ratio applied to
+/// a holding — and it is written multiply-first *deliberately*: `a × b / c`
+/// rounds once, at the end, where `a / c × b` rounds a non-terminating
+/// quotient to 28 significant digits first and then scales that error up by
+/// `b` (`39.95 × 2 / 3` and `39.95 / 3 × 2` differ in the last place). The
+/// order is therefore preserved here for every figure that fits:
+///
+/// 1. **Multiply left to right, then divide** — byte-identical to the
+///    expression it replaces, since `*` and `/` associate left to right, so
+///    nothing that computes today moves by a digit.
+/// 2. **Only where one of those products overflows** `rust_decimal`'s
+///    ~7.9228e28 ceiling — which panics rather than saturating — take the
+///    division at that point and carry on. That is lossier in the last-digit
+///    sense of (1), but it is an answer where the expression used to panic
+///    (SCENARIOS W-b): a parcel costed at 1e27 apportioned at 99% overflows at
+///    `1e27 × 99 = 9.9e28` even though the answer, `9.9e26`, is perfectly
+///    representable.
+///
+/// A product that still overflows after the division genuinely has no lesser
+/// answer to give — the *result* is unrepresentable, not just the working —
+/// so it panics as it always did, and `app::router`'s panic layer turns that
+/// into a logged `500` rather than a dropped connection.
+///
+/// `divisor` must be non-zero; every caller guards it (a parcel quantity, a
+/// held-units ratio denominator validated positive at write time, the
+/// literal 100).
+pub fn mul_div(factors: &[Decimal], divisor: Decimal) -> Decimal {
+    let Some((first, rest)) = factors.split_first() else {
+        // The empty product is one; no caller does this.
+        return Decimal::ONE / divisor;
+    };
+    let mut acc = *first;
+    let mut divided = false;
+    for f in rest {
+        match acc.checked_mul(*f) {
+            Some(product) => acc = product,
+            // First overflow: divide now rather than at the end, which is
+            // what buys the extra headroom.
+            None if !divided => {
+                divided = true;
+                acc = acc / divisor * f;
+            }
+            // Already divided and it still overflows: the result itself is
+            // out of range, so let the multiplication panic as before.
+            None => acc *= *f,
+        }
+    }
+    if divided { acc } else { acc / divisor }
+}
+
 /// Read a nullable TEXT decimal column via [`OptMoney`]: `NULL` maps to `None`, a
 /// present value is parsed (so a malformed value is a column-named error, never a
 /// silent `None`).
@@ -576,6 +631,83 @@ mod tests {
             "bind a decimal as Money(x) / OptMoney(x), not as a string — and bind a \
              non-decimal value directly (it has its own sqlx::Type impl):\n{}",
             offenders.join("\n")
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // The pro-rating helper
+    // -----------------------------------------------------------------------
+
+    fn dec(s: &str) -> Decimal {
+        s.parse().unwrap()
+    }
+
+    /// Wherever the plain expression computes at all, [`mul_div`] is that
+    /// expression — the same operations in the same order, so not a digit
+    /// moves. The last two rows are the ones that would move if it divided
+    /// first: their quotients do not terminate, so `a / c × b` rounds and
+    /// then scales the rounding error up.
+    #[test]
+    fn mul_div_is_the_plain_expression_wherever_that_fits() {
+        for (a, b, c) in [
+            ("100", "3", "4"),
+            ("0", "5", "7"),
+            ("-39.95", "2", "3"),
+            ("8.9285714285714285714285714286", "5.063", "100"),
+            ("39.95", "2", "3"),
+            ("1", "2", "3"),
+        ] {
+            let (a, b, c) = (dec(a), dec(b), dec(c));
+            assert_eq!(mul_div(&[a, b], c), a * b / c, "{a} × {b} / {c}");
+        }
+        // …and the four-term shape the AMIT reduction uses.
+        for (a, b, c, d) in [
+            ("0.50", "80", "40", "100"),
+            ("39.95", "2", "1", "3"),
+            ("0.1234567", "7", "11", "13"),
+        ] {
+            let (a, b, c, d) = (dec(a), dec(b), dec(c), dec(d));
+            assert_eq!(
+                mul_div(&[a, b, c], d),
+                a * b * c / d,
+                "{a} × {b} × {c} / {d}"
+            );
+        }
+    }
+
+    /// The order is the point, not an accident: multiplying first and
+    /// dividing first genuinely differ in the last place, and [`mul_div`]
+    /// gives the multiply-first figure.
+    #[test]
+    fn mul_div_multiplies_before_it_divides() {
+        let (a, b, c) = (dec("39.95"), dec("2"), dec("3"));
+        assert_eq!(mul_div(&[a, b], c), dec("26.633333333333333333333333333"));
+        assert_eq!(a / c * b, dec("26.633333333333333333333333334"));
+    }
+
+    /// SCENARIOS W-b's treatment: where an intermediate product passes
+    /// `rust_decimal`'s ~7.9228e28 ceiling but the answer itself is
+    /// representable, the division is taken early and an answer comes back —
+    /// where the plain expression panicked. Each row is one of the three
+    /// measured sites: a demerged cost base, an AMIT reduction over a huge
+    /// holding, and one where the *first* of the two multiplications is
+    /// already too large.
+    #[test]
+    fn mul_div_answers_where_the_product_overflows_but_the_result_does_not() {
+        // A parcel costed at 1e27 apportioned at 99%: 9.9e28 in the working.
+        assert_eq!(
+            mul_div(&[dec("1e27"), dec("99")], Decimal::ONE_HUNDRED),
+            dec("9.9e26")
+        );
+        // A 1e15-unit holding, 50c per unit, the whole parcel: 5e29.
+        assert_eq!(
+            mul_div(&[dec("0.5"), dec("1e15"), dec("1e15")], dec("1e15")),
+            dec("5e14")
+        );
+        // The first multiplication overflows on its own: 1e15 × 1e15 = 1e30.
+        assert_eq!(
+            mul_div(&[dec("1e15"), dec("1e15"), Decimal::ONE], dec("1e15")),
+            dec("1e15")
         );
     }
 }

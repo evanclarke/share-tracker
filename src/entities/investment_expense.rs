@@ -16,7 +16,7 @@
 //! investment income, converting a non-AUD amount to AUD via the ATO rate for the
 //! month of `date_incurred` (failing loudly when no rate exists).
 
-use crate::infra::decimal::{Money, OptMoney};
+use crate::infra::decimal::{Money, OptMoney, mul_div};
 use crate::infra::http::{self, ApiError, CrudEntity};
 use axum::{
     Json, Router,
@@ -196,11 +196,19 @@ fn to_cents(v: Decimal) -> Decimal {
 /// than a determination (there is nothing to reconcile), and neither means the
 /// apportionment simply wasn't recorded. The same shape as `income`'s
 /// `amount_per_security × securities_held` reconciliation.
+///
+/// The percentage is applied through [`mul_div`], which keeps the
+/// multiply-then-divide order for every figure that fits and still answers
+/// where `gross × pct` would overflow `rust_decimal` — nothing bounds
+/// `gross_amount`'s magnitude, and a gross of 1e27 at 100% is representable
+/// (1e27) while the working (1e29) is not, so the panic used to abort a
+/// legitimate write. The rounding still happens on the same value: `to_cents`
+/// wraps the quotient exactly as before.
 fn check_apportionment(e: &InvestmentExpense) -> Result<(), UpsertError> {
     let (Some(gross), Some(pct)) = (e.gross_amount, e.deductible_percentage) else {
         return Ok(());
     };
-    let product = to_cents(gross * pct / Decimal::ONE_HUNDRED);
+    let product = to_cents(mul_div(&[gross, pct], Decimal::ONE_HUNDRED));
     if product != to_cents(e.amount) {
         return Err(UpsertError::ApportionmentMismatch { product });
     }
@@ -576,6 +584,64 @@ mod tests {
             let status = put(&pool, 2, body).await;
             assert_eq!(status, StatusCode::NO_CONTENT, "{label} must be accepted");
         }
+    }
+
+    /// SCENARIOS W-b's treatment, applied to the third site of the same
+    /// shape. The apportionment cross-check multiplies before it divides
+    /// (`gross × pct / 100`), and nothing bounds `gross_amount`'s magnitude —
+    /// only its sign — so a gross of 1e27 at 100% overflowed `rust_decimal`'s
+    /// ~7.9228e28 ceiling in the working (1e29) while both the gross and the
+    /// answer are perfectly representable. Being a **write-time** validation,
+    /// the panic aborted a legitimate write: measured before the fix, the
+    /// 100% row answered a logged `500` with an empty body, while the same
+    /// gross at 50% (5e28, under the ceiling) was accepted `204`.
+    #[tokio::test]
+    async fn api_apportionment_past_the_old_multiply_first_ceiling_reconciles() {
+        let pool = test_pool().await;
+        let e27 = "1000000000000000000000000000";
+        for (label, id, gross, pct, amount) in [
+            // The control: an ordinary apportionment, unaffected.
+            ("1000 at 50%", 1, "1000", "50", "500"),
+            // 5e28 — under the ceiling, so this always worked.
+            ("1e27 at 50%", 2, e27, "50", "500000000000000000000000000"),
+            // 1e29 in the working; the answer is the gross itself.
+            ("1e27 at 100%", 3, e27, "100", e27),
+        ] {
+            let status = put(
+                &pool,
+                id,
+                serde_json::json!({
+                    "date_incurred": "2024-03-15",
+                    "expense_type": "AdviceFee",
+                    "amount": amount,
+                    "gross_amount": gross,
+                    "deductible_percentage": pct
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::NO_CONTENT, "{label} must be accepted");
+        }
+        // And the cross-check still refuses a figure that does not reconcile
+        // at that scale — the answer it computes is the right one, not a
+        // saturated stand-in.
+        let resp = client(&pool)
+            .put(
+                "/investment_expenses/4",
+                &serde_json::json!({
+                    "date_incurred": "2024-03-15",
+                    "expense_type": "AdviceFee",
+                    "amount": "1",
+                    "gross_amount": e27,
+                    "deductible_percentage": "100"
+                }),
+            )
+            .await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            resp.text().contains(&format!("computes to {e27},")),
+            "the refusal must carry the computed figure, got: {}",
+            resp.text()
+        );
     }
 
     #[tokio::test]

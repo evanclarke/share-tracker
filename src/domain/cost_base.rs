@@ -43,7 +43,7 @@ use rust_decimal::Decimal;
 use serde::Serialize;
 
 use crate::entities::corporate_action::{RocEvent, SplitEvent, per_unit_reduction};
-use crate::infra::decimal::{Money, OptMoney};
+use crate::infra::decimal::{Money, OptMoney, mul_div};
 use crate::infra::fx;
 
 /// The facts of a Buy/DRP parcel as transacted, in its native currency and
@@ -386,7 +386,10 @@ impl AmitReductionEvent {
     /// [`Self::amount`] exactly, so which units a row reaches never changes
     /// how much it takes off in total. The single division comes last so that
     /// identity holds to the last decimal place even where the covered units
-    /// don't divide evenly into the group.
+    /// don't divide evenly into the group — which is exactly what [`mul_div`]
+    /// preserves, while giving an answer rather than a panic where one of the
+    /// two products is too large for `rust_decimal` (a per-unit adjustment
+    /// against a holding of 1e15 units).
     pub fn reduction_for_units(
         &self,
         parcel_quantity: Decimal,
@@ -403,13 +406,13 @@ impl AmitReductionEvent {
             if held <= Decimal::ZERO {
                 return Decimal::ZERO;
             }
-            self.per_unit * self.covered.min(held) * units / held
+            mul_div(&[self.per_unit, self.covered.min(held), units], held)
         } else {
             let spill = (self.covered - held).max(Decimal::ZERO);
             if sold <= Decimal::ZERO {
                 return Decimal::ZERO;
             }
-            self.per_unit * spill * units / sold
+            mul_div(&[self.per_unit, spill, units], sold)
         }
     }
 
@@ -468,28 +471,24 @@ pub struct CostBase {
 /// [`adjusted_cost_base`] and [`adjustment_detail`] start their walks from,
 /// so the totals and the itemised rows can never disagree about it.
 ///
-/// `quantity` is non-zero — both callers guard — and the three cases are
+/// `quantity` is non-zero — both callers guard — and the two cases are
 /// tried in this order:
 ///
 /// 1. **`units == quantity`** — the overwhelmingly common one (a parcel still
 ///    held in full, a sale that takes the lot, a rollover consuming a whole
 ///    parcel) — is the identity, so the figure comes back untouched rather
 ///    than being scaled up by the quantity and divided straight back down.
-/// 2. **Otherwise multiply, then divide**, which is what this has always done
-///    and is the more faithful order: `c × u / q` rounds once, at the end,
-///    where `c / q × u` rounds a non-terminating quotient to 28 significant
-///    digits first and then scales that error up by `u` (a $39.95 cost base
-///    over 3 units, costing 2 of them, is …33333333333333333333333 one way
-///    and …33333333333333333333334 the other). Keeping the order means this
-///    cannot move a figure that does not overflow today.
-/// 3. **Only where that product overflows** `rust_decimal`'s ~7.9228e28
-///    ceiling — which panics rather than saturating — divide first. That is
-///    lossier in the last-digit sense of (2), but it is an answer where a
-///    mistyped parcel used to take down every portfolio read with it
-///    (SCENARIOS W-b): `price 1 / quantity 1e15` overflowed at `c × u = 1e30`.
-///    Dividing first raises the partial-parcel ceiling to where `c / q` (not
-///    `c`) times `u` overflows — for a fat-fingered run of zeros, by roughly
-///    fourteen orders of magnitude.
+/// 2. **Otherwise [`mul_div`]**, which multiplies before it divides (the
+///    order this has always used, and the more faithful one: `c × u / q`
+///    rounds once, at the end, where `c / q × u` rounds a non-terminating
+///    quotient to 28 significant digits first and then scales that error up
+///    by `u` — a $39.95 cost base over 3 units, costing 2 of them, is
+///    …33333333333333333333333 one way and …33333333333333333333334 the
+///    other), and falls back to dividing first only where the product
+///    overflows. That is what stopped a mistyped parcel taking down every
+///    portfolio read with it (SCENARIOS W-b): `price 1 / quantity 1e15`
+///    overflowed at `c × u = 1e30`, and dividing first raises the
+///    partial-parcel ceiling by roughly fourteen orders of magnitude.
 ///
 /// The whole-parcel product `price × quantity` inside
 /// [`Parcel::initial_cost`] is a separate ceiling this cannot raise: that
@@ -500,10 +499,7 @@ fn prorated_initial_cost(initial_cost: Decimal, units: Decimal, quantity: Decima
     if units == quantity {
         return initial_cost;
     }
-    match initial_cost.checked_mul(units) {
-        Some(scaled) => scaled / quantity,
-        None => initial_cost / quantity * units,
-    }
+    mul_div(&[initial_cost, units], quantity)
 }
 
 /// Runs steps 1–4 of the pipeline (see the module doc) for `units`
@@ -1051,6 +1047,85 @@ mod tests {
             );
             assert_eq!(held + sold, e.amount(), "covered {covered}");
         }
+    }
+
+    /// SCENARIOS W-b's residual, closed in the same treatment. The AMIT
+    /// reduction pro-rates with **two** multiplications before its divide
+    /// (`per_unit × covered × units / held`), so either of them could pass
+    /// `rust_decimal`'s ~7.9228e28 ceiling and panic — measured before the
+    /// fix: 1e15 units at 5c per unit survives (1.5e28), the same holding at
+    /// 50c does not (5e29), and a per-unit figure of 1e15 overflows on the
+    /// first multiplication alone (1e30). Every one of those answers is
+    /// representable; only the working was not.
+    #[test]
+    fn an_amit_row_past_the_old_multiply_first_ceiling_still_reduces() {
+        let units: Decimal = "1000000000000000".parse().unwrap();
+        // The measured survivor, unchanged: 5c over the whole 1e15-unit parcel.
+        let small = AmitReductionEvent {
+            per_unit: "0.05".parse().unwrap(),
+            covered: units,
+            ..amit(1, 2024, "0.05", 0, 0)
+        };
+        assert_eq!(
+            small.reduction_for_units(units, units, None),
+            "50000000000000".parse::<Decimal>().unwrap()
+        );
+        // The second multiplication overflows (5e14 × 1e15 = 5e29).
+        let big = AmitReductionEvent {
+            per_unit: "0.5".parse().unwrap(),
+            covered: units,
+            ..amit(1, 2024, "0.5", 0, 0)
+        };
+        assert_eq!(
+            big.reduction_for_units(units, units, None),
+            "500000000000000".parse::<Decimal>().unwrap()
+        );
+        // The first one overflows on its own (1e15 × 1e15 = 1e30) — a
+        // per-unit adjustment with a mistyped run of zeros.
+        let huge = AmitReductionEvent {
+            per_unit: units,
+            covered: units,
+            ..amit(1, 2024, "1", 0, 0)
+        };
+        assert_eq!(huge.per_unit_for(units, None), units);
+        // The sold branch divides by its own denominator and overflows the
+        // same way: the whole 1e15-unit parcel was sold during the year, so
+        // all of the coverage spills onto it.
+        let sold = AmitReductionEvent {
+            per_unit: "0.5".parse().unwrap(),
+            covered: units,
+            disposed_by_year_end: units,
+            ..amit(1, 2024, "0.5", 0, 0)
+        };
+        assert_eq!(
+            sold.reduction_for_units(units, units, Some(date(2024, 3, 1))),
+            "500000000000000".parse::<Decimal>().unwrap()
+        );
+    }
+
+    /// The other half of that treatment: a reduction that fits today must not
+    /// move by a digit. Both branches divide 39.95 × 2 by 3, whose quotient
+    /// does not terminate — so the multiply-first figure and the divide-first
+    /// one differ in the last place, and only the multiply-first one is this.
+    #[test]
+    fn a_reduction_that_fits_keeps_its_multiply_first_figure() {
+        let held = amit(1, 2024, "39.95", 2, 0);
+        assert_eq!(
+            held.reduction_for_units(Decimal::from(3), Decimal::ONE, None),
+            "26.633333333333333333333333333".parse::<Decimal>().unwrap()
+        );
+        // 5 units, 3 sold by the year end, 4 covered: 2 units of coverage
+        // spill onto the 3 sold ones.
+        let sold = amit(1, 2024, "39.95", 4, 3);
+        assert_eq!(
+            sold.reduction_for_units(Decimal::from(5), Decimal::ONE, Some(date(2024, 3, 1))),
+            "26.633333333333333333333333333".parse::<Decimal>().unwrap()
+        );
+        // Divide-first would have given …334 in both.
+        assert_ne!(
+            "26.633333333333333333333333333".parse::<Decimal>().unwrap(),
+            "39.95".parse::<Decimal>().unwrap() / Decimal::from(3) * Decimal::from(2)
+        );
     }
 
     /// A row covering more units than are still held spills the excess evenly
