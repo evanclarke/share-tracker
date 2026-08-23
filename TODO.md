@@ -10,7 +10,7 @@ findings are all closed in DONE.md), except where a section's heading names anot
 (e.g. REQUIREMENTS, SCENARIOS). Each section records one finding; sections land in DONE.md as they
 are fixed or decided.
 
-**One finding is open in this file** — SCENARIOS X-a, from the section X pass of 2026-08-23, now fixed and awaiting archive.
+**One finding is open in this file** — SCENARIOS X-b, raised while verifying X-a's fix. X-a itself is fixed (`9e221f3`) and awaiting archive.
 
 **SCENARIOS.md sections A–V are driven and every finding they raised is closed** in the `DONE/*.md`
 archive. Section **S. Settlement, holidays, and dates** was driven 2026-08-22 (`d501408`) and its
@@ -277,3 +277,49 @@ the `_on` split it needs is a pattern the reports already have.
       lock, and the cost — a concurrent write waits tens of ms per date), and README's snapshot
       feature bullet gains the same clause. No schema change, so `docs/SCHEMA.md` is untouched; the
       requirement is code-tested, so no `doc_checks.rs` entry.
+
+## SCENARIOS X-b — a write concurrent with a long write transaction dies as an empty-bodied 500 once it outlasts the busy timeout
+
+Found while verifying X-a's fix at the HTTP surface, by pushing the same reproduction past the scale
+it was measured at. Snapshot generation now holds SQLite's write lock for its whole duration (that is
+what makes its `stale` flag trustworthy), and a concurrent write waits for it — sqlx's **default
+5-second `busy_timeout`**, which nothing in this tree sets explicitly. Past that, the waiter does not
+queue any longer: it fails.
+
+**Reproduction** (throwaway database, one listing grown to **30,000 parcels**):
+
+- `POST /report_snapshots/generate {"date":"2025-06-30"}` → `200` in **6.46 s**.
+- `PUT /closing_prices/6/2025-06-30` fired 500 ms into that run → **`500` with an empty body** after
+  **5.45 s**, logged as `error returned from database: (code: 5) database is locked`.
+
+**Bounded by the scale either side.** At 10,000 parcels the same generation takes 1.63 s and the same
+write waits 1.16 s and lands `204`; on Evan's real database a generation is ~41 ms and the wait is
+imperceptible (all 2,182 stored dates regenerate in 89 s). So nothing he holds today can reach it —
+this is a ceiling, not a live fault.
+
+**It is not really the snapshot path's fault, which is what decides the fix.** *Any* write
+transaction longer than the busy timeout does this to a concurrent writer: the 6,000-parcel scrip
+exchange already takes 0.96 s, and the same operation over 30,000 parcels would take the same 6 s and
+produce the same empty 500. X-a's fix added a long write path; it did not create the failure mode.
+The timeout is a parameter nobody has ever chosen — and `infra::db::write_tx`'s own reasoning is that
+a queued writer *waits its turn* rather than failing, which is exactly what a too-small timeout
+takes away.
+
+**Options:**
+
+(a) **Set the timeout explicitly, sized above the longest write transaction the application can
+    produce**, with the measurement recorded beside it. Keeps `write_tx`'s promise true at every
+    scale; costs a genuinely stuck writer a longer wait before it reports.
+(b) **Give the expiry a body.** A lock timeout is not an internal error — it is "the database was
+    busy; try again" — and today it reaches the web UI as a bare `HTTP 500`, the exact failure shape
+    T-10 and the `write_tx` work were about.
+(c) Leave it: unreachable at Evan's scale. Rejected — it is unreachable *today*, the symptom is the
+    one this project has twice gone out of its way to eliminate, and both halves above are small.
+
+**Chosen: (a) and (b) together.** (a) is the fix; (b) is what makes the residual honest, since no
+timeout can be proof against every pathological case.
+
+- [ ] Choose the `busy_timeout` explicitly rather than inheriting sqlx's default, sized above the
+      longest write transaction the application can produce, with the measurement in the comment
+- [ ] Answer a busy-timeout expiry with a bodied reply saying the database was busy and the write can
+      be retried, never an empty `500`
