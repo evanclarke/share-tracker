@@ -317,6 +317,41 @@ fn duplicate_price_series_check_documented() {
     assert!(README_MD.contains("**one price series between them**"));
 }
 
+/// Docs-sync pin for the duplicate-trade health check (SCENARIOS V-c): the
+/// API documents the field list, what the check keys on and why that key was
+/// chosen over the figure-based one the rest of the family uses, the scope of
+/// the key (per listing, not per holding account), the blank/whitespace rule,
+/// that derived trades fall out of it, and — stated rather than glossed — the
+/// one thing it cannot catch; the README surfaces the feature and the same
+/// limitation. The banner sentence names it too, since the strip is where a
+/// user meets it.
+#[test]
+fn duplicate_trades_check_documented() {
+    assert!(API_MD.contains("`duplicate_trades`"));
+    assert!(API_MD.contains(
+        "\"listing_id\", \"ticker\", \"contract_note_ref\", \"date\", \"trade_count\", \"trade_ids\""
+    ));
+    // The key, and why it is not the one `duplicate_income` uses.
+    assert!(API_MD.contains("**The key is the reference, not the figures**"));
+    assert!(API_MD.contains("identifies **one confirmation document**"));
+    assert!(API_MD.contains("**this list has no false positives**"));
+    // The limitation, stated rather than oversold.
+    assert!(API_MD.contains("**only catches trades whose entry recorded the reference**"));
+    assert!(API_MD.contains("It is a check on what was typed in, not on the portfolio"));
+    // The scope of the key, both halves of it.
+    assert!(API_MD.contains("one note can cover a multi-line order"));
+    assert!(API_MD.contains("The **holding account is not**"));
+    // Blank vs null, and the derived rows that carry neither.
+    assert!(API_MD.contains("**trimmed and case-sensitively**"));
+    assert!(API_MD.contains("is no reference at all and never groups"));
+    assert!(API_MD.contains("fall out of this check by construction"));
+    assert!(API_MD.contains("**Non-blocking, and there is no way to silence it**"));
+    // The banner sentence, and the README feature line.
+    assert!(API_MD.contains("two trades sharing one broker contract note reference"));
+    assert!(README_MD.contains("**duplicated trade**"));
+    assert!(README_MD.contains("**no false positives**"));
+}
+
 /// Docs-sync pin for date-ranged bulk regeneration (REQUIREMENTS 2026-07-25):
 /// the API documents the new default-range endpoint, `regenerate_all`'s
 /// range/backfill semantics and its 422, and the README surfaces that

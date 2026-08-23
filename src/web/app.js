@@ -1162,7 +1162,11 @@ async function viewAttachments(ownerField, ownerId) {
 // and any listing whose own currency is not the one its exchange quotes in —
 // a holding whose prices can no longer be collected and whose currency the
 // freeze on PUT /listings/:id will not let you change (linking to Listings,
-// where the exchange is corrected if that is what is wrong).
+// where the exchange is corrected if that is what is wrong), and any two
+// trades of one listing quoting the same broker contract note reference — one
+// confirmation entered twice, which doubles the parcel and its cost base and
+// which nothing else here can see, since both rows are individually valid
+// (linking to Trades, where the surplus row is deleted).
 // Refreshed on every
 // route render, so fixing the cause clears it on the next navigation. A
 // failing health fetch hides the banner rather than breaking the app.
@@ -1257,6 +1261,18 @@ async function refreshHealthBanner() {
         + d.other_manual_days + ' hand-entered. A hand-entered row states where it came from;'
         + ' a fetched one may not. Work out which listing the run belongs to and clear the'
         + ' borrowed rows.');
+    });
+    // One broker confirmation entered twice — the duplication a bulk
+    // back-entry of history produces most easily. Keyed on the contract note
+    // reference the two rows share, so there is nothing to judge: a doubled
+    // Buy inflates the holding and its cost base, a doubled Sell inflates the
+    // realised gain and consumes a second parcel.
+    const duplicateTrades = h.duplicate_trades || [];
+    duplicateTrades.forEach(function (d) {
+      problems.push(d.trade_count + ' trades on ' + d.ticker + ' share contract note '
+        + d.contract_note_ref + ' (ids ' + d.trade_ids.join(', ') + ', latest dated ' + d.date
+        + ') — one confirmation entered twice doubles the parcel and its cost base;'
+        + ' delete the surplus trade unless the note really covers both.');
     });
     const duplicateActions = h.duplicate_actions || [];
     duplicateActions.forEach(function (d) {
@@ -1381,7 +1397,7 @@ async function refreshHealthBanner() {
     if (currencyMismatches.length > 0) {
       banner.appendChild(el('a', { href: '#/e/listings' }, 'Open Listings →'));
     }
-    if (nonTradingDays.length > 0) {
+    if (nonTradingDays.length > 0 || duplicateTrades.length > 0) {
       banner.appendChild(el('a', { href: '#/e/trades' }, 'Open Trades →'));
     }
     banner.hidden = false;

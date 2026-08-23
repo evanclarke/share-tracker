@@ -1823,6 +1823,15 @@ mod tests {
         assert!(js.contains("d.other_fetched_days"));
         assert!(js.contains("'#/prices'"));
         assert!(js.contains("Open Closing Prices"));
+        // …plus one broker confirmation entered twice (SCENARIOS V-09: the
+        // shared contract note reference is the evidence, so the strip names
+        // it with both trade ids), linking to the screen the surplus row is
+        // deleted from…
+        assert!(js.contains("duplicate_trades"));
+        assert!(js.contains("share contract note"));
+        assert!(js.contains("one confirmation entered twice doubles the parcel and its cost base"));
+        assert!(js.contains("'#/e/trades'"));
+        assert!(js.contains("Open Trades"));
         // …plus duplicated corporate actions (silently compounded, so the
         // strip names the type, ticker, date and ids), linking to the screen
         // the surplus row is deleted from…

@@ -222,8 +222,16 @@ Options offered:
 **Evan chose option 3** — key on a repeated non-null `contract_note_ref`. No false positives, and
 a broker reference repeated across two trades is unambiguous evidence of a double entry.
 
-- [ ] Add the `duplicate_trades` health check keyed on `contract_note_ref`, with a test, the
+- [x] Add the `duplicate_trades` health check keyed on `contract_note_ref`, with a test, the
       `docs/API.md` health entry, and the UI health banner wording.
+      Keyed on **(listing, trimmed non-null `contract_note_ref`)**: a note can cover a multi-line
+      order, so two securities may share one reference legitimately and the listing is part of the
+      key; the holding account deliberately is *not*, since the same note re-keyed against the
+      wrong account is the worst version of the mistake. Blank/whitespace-only references never
+      group (nor NULL ones), and every derived path writes NULL, so those rows fall out by
+      construction. Eight tests in `reports::health`, a `doc_checks` pin, the `docs/API.md` entry
+      (with the limitation stated: it only catches trades whose entry recorded the reference), the
+      README feature line, and the banner row + Trades link.
 
 ## SCENARIOS V-d — a parcel dated before an already-run whole-holding operation is never consumed
 

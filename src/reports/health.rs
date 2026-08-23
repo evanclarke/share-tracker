@@ -536,6 +536,82 @@ pub struct DuplicatePriceSeries {
     pub other_manual_days: i64,
 }
 
+/// More than one trade on one listing carrying the **same contract note
+/// reference**. A broker's contract note reference identifies one confirmation
+/// document, so two trades of a listing quoting the same one are the same
+/// confirmation entered twice — the duplication a bulk back-entry of history
+/// produces most easily and pays for most dearly (SCENARIOS V-09): a doubled
+/// Buy inflates both the holding and its cost base in every open-parcels,
+/// valuation and unrealised-gains figure, and a doubled Sell inflates realised
+/// gains while its allocations quietly consume a second parcel. Nothing else
+/// sees it — the two rows are individually valid, and a reconciliation against
+/// a registry statement is the only other thing that would ever catch it.
+///
+/// **The key is the reference, not the figures**, which is the whole reason
+/// this list can exist at all. Keyed the way [`DuplicateIncome`] is — listing,
+/// account, date, price, quantity — a trade check would flag the legitimate
+/// repeats that trading actually produces (an order filled in equal clips
+/// across one day, a regular fixed-dollar purchase) and the derived rows a
+/// rollover or reinvestment writes. A repeated document id has no such
+/// innocent reading, so this reports **no false positives** — at the price of
+/// only seeing trades whose entry recorded the reference. It is a check on
+/// what was typed in, not a check on the portfolio: a re-keyed trade that
+/// left `contract_note_ref` empty is invisible here, and deliberately so.
+///
+/// **Scoped per listing.** One contract note can cover a multi-line order —
+/// two securities bought under one confirmation — and those two trades share a
+/// reference legitimately, so the listing is part of the key. Within one
+/// listing the same reference twice has no such reading: a broker issues one
+/// note per confirmation, and an order filled over two days is two notes with
+/// two references. The holding account is deliberately **not** part of the
+/// key: the same note re-keyed against the wrong account is exactly the double
+/// entry this exists for, and it would escape a per-account key.
+///
+/// The reference is compared **trimmed and case-sensitively**: surrounding
+/// whitespace is how the same reference pasted twice usually differs, while a
+/// reference that is empty or only whitespace is no reference at all and never
+/// groups (nor does a NULL one). Derived trades — the rollover, transfer,
+/// buy-back, rights-exercise, ESS-vest and inheritance-linked trades, and the
+/// DRPs a reinvestment writes — record no reference at any path, so they fall
+/// out of this check entirely rather than being excluded by name.
+///
+/// **Reported, never rejected, and with no way to silence it**, exactly like
+/// the rest of the `duplicate_*` family: it clears when the surplus trade goes
+/// (`DELETE /trades/:id`, `DELETE /sells/:id`) or when the reference on it is
+/// corrected to the one the second note actually carries.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DuplicateTrade {
+    pub listing_id: i64,
+    pub ticker: String,
+    /// The shared reference, trimmed — the second half of the key, and what
+    /// the note itself is found by in the broker's records.
+    pub contract_note_ref: String,
+    /// The latest `date` among the trades sharing it. The rows normally share
+    /// one date (they are one confirmation); two dates under one reference is
+    /// itself part of the evidence, and this is what the list is sorted by,
+    /// newest first.
+    pub date: NaiveDate,
+    /// How many trades share this (listing, reference) — always ≥ 2.
+    pub trade_count: i64,
+    /// The ids sharing it, ascending, so both rows can be opened and the
+    /// surplus one deleted without a search.
+    pub trade_ids: Vec<i64>,
+}
+
+/// The grouped row behind [`DuplicateTrade`], shaped like
+/// [`DuplicateActionRow`]: SQLite returns the ids as one `GROUP_CONCAT`
+/// string, split into the public struct's `Vec<i64>` by
+/// [`db_duplicate_trades`].
+#[derive(sqlx::FromRow)]
+struct DuplicateTradeRow {
+    listing_id: i64,
+    ticker: String,
+    contract_note_ref: String,
+    date: NaiveDate,
+    trade_count: i64,
+    trade_ids: String,
+}
+
 /// More than one corporate action of the same type, on the same listing and
 /// date. Two such rows are two independent events to every reader — the
 /// cost-base pipeline sums both `ReturnOfCapital` reductions and multiplies
@@ -1056,6 +1132,12 @@ pub struct HealthReport {
     /// under two listings. Empty when no two listings track each other that
     /// closely.
     pub duplicate_price_series: Vec<DuplicatePriceSeries>,
+    /// Every (listing, contract note reference) carrying more than one trade,
+    /// newest first — one broker confirmation entered twice. Empty when no two
+    /// trades of a listing quote the same reference; trades that record no
+    /// reference (every derived one, and any hand entry that left it blank)
+    /// are never in it.
+    pub duplicate_trades: Vec<DuplicateTrade>,
     /// Every (listing, action type, date) carrying more than one corporate
     /// action, newest first. Empty when no two actions of a type share a
     /// listing and date.
@@ -1454,6 +1536,56 @@ async fn db_duplicate_price_series(
             .then_with(|| a.other_listing_id.cmp(&b.other_listing_id))
     });
     Ok(duplicates)
+}
+
+/// Trades of one listing sharing a contract note reference — see
+/// [`DuplicateTrade`].
+///
+/// Grouped in SQL on the caller's transaction, like [`db_duplicate_actions`]:
+/// the key is a TEXT reference rather than a decimal, so SQLite's own string
+/// comparison is the right one (the reason the money-keyed lists have to group
+/// in Rust does not arise). `TRIM` normalises the padding a pasted reference
+/// picks up, and the `<> ''` guard drops a reference that is blank or only
+/// whitespace — no reference at all — as the `IS NOT NULL` guard drops the
+/// derived trades, which record none.
+async fn db_duplicate_trades(
+    conn: &mut sqlx::SqliteConnection,
+) -> Result<Vec<DuplicateTrade>, sqlx::Error> {
+    let rows = sqlx::query_as::<_, DuplicateTradeRow>(
+        "SELECT t.listing_id AS listing_id, l.ticker AS ticker, \
+                TRIM(t.contract_note_ref) AS contract_note_ref, \
+                MAX(t.date) AS date, \
+                COUNT(*) AS trade_count, GROUP_CONCAT(t.id) AS trade_ids \
+         FROM trades t JOIN listings l ON l.id = t.listing_id \
+         WHERE t.contract_note_ref IS NOT NULL AND TRIM(t.contract_note_ref) <> '' \
+         GROUP BY t.listing_id, TRIM(t.contract_note_ref) \
+         HAVING COUNT(*) > 1 \
+         ORDER BY MAX(t.date) DESC, l.ticker, TRIM(t.contract_note_ref)",
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    rows.into_iter()
+        .map(|row| {
+            // GROUP_CONCAT's order is unspecified, so sort rather than trust it.
+            let mut trade_ids = row
+                .trade_ids
+                .split(',')
+                .map(|id| {
+                    id.parse::<i64>()
+                        .map_err(|e| sqlx::Error::Decode(format!("trade id {id}: {e}").into()))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            trade_ids.sort_unstable();
+            Ok(DuplicateTrade {
+                listing_id: row.listing_id,
+                ticker: row.ticker,
+                contract_note_ref: row.contract_note_ref,
+                date: row.date,
+                trade_count: row.trade_count,
+                trade_ids,
+            })
+        })
+        .collect()
 }
 
 async fn db_duplicate_actions(
@@ -2388,6 +2520,7 @@ pub async fn db_health(
     let demergers_missing_close = db_demergers_missing_close(&mut tx).await?;
     let demergers_head_not_continuing = db_demergers_head_not_continuing(&mut tx).await?;
     let duplicate_price_series = db_duplicate_price_series(&mut tx).await?;
+    let duplicate_trades = db_duplicate_trades(&mut tx).await?;
     let duplicate_actions = db_duplicate_actions(&mut tx).await?;
     let duplicate_amma_statements = db_duplicate_amma_statements(&mut tx).await?;
     let duplicate_income = db_duplicate_income(&mut tx).await?;
@@ -2419,6 +2552,7 @@ pub async fn db_health(
         demergers_missing_close,
         demergers_head_not_continuing,
         duplicate_price_series,
+        duplicate_trades,
         duplicate_actions,
         duplicate_amma_statements,
         duplicate_income,
@@ -2536,6 +2670,7 @@ mod tests {
         assert!(h.errored_prices.is_empty());
         assert!(h.unpriced_days.is_empty());
         assert!(h.duplicate_price_series.is_empty());
+        assert!(h.duplicate_trades.is_empty());
         assert!(h.duplicate_actions.is_empty());
         assert!(h.duplicate_amma_statements.is_empty());
         assert!(h.duplicate_income.is_empty());
@@ -4009,6 +4144,205 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    /// A Buy of `listing_id` on `date` carrying `note` as its contract note
+    /// reference — the shape a re-keyed broker confirmation takes. `None` is
+    /// what every derived path, and a hand entry that skipped the field,
+    /// leaves behind.
+    async fn insert_trade_with_note(
+        pool: &SqlitePool,
+        id: i64,
+        listing_id: i64,
+        date: NaiveDate,
+        note: Option<&str>,
+    ) {
+        test_support::buy(id, listing_id)
+            .date(date)
+            .with(|t| t.contract_note_ref = note.map(str::to_string))
+            .insert(pool)
+            .await;
+    }
+
+    /// SCENARIOS V-09: a whole portfolio's history back-entered in one
+    /// session, with one contract note keyed twice. Both rows are individually
+    /// valid — nothing rejects them — and the doubled Buy inflates the holding
+    /// and its cost base everywhere until the holdings are reconciled against
+    /// a registry statement. The shared reference is the evidence, so health
+    /// names it with both ids.
+    #[tokio::test]
+    async fn trades_sharing_a_contract_note_reference_are_reported_with_their_ids() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("BHP").insert(&pool).await;
+        test_support::listing(2).ticker("CBA").insert(&pool).await;
+        // The measured case: the same confirmation entered twice.
+        insert_trade_with_note(&pool, 1, 1, ymd(2026, 3, 10), Some("CN-8891")).await;
+        insert_trade_with_note(&pool, 2, 1, ymd(2026, 3, 10), Some("CN-8891")).await;
+        // The same mistake later, on another holding.
+        insert_trade_with_note(&pool, 3, 2, ymd(2026, 6, 1), Some("CN-9002")).await;
+        insert_trade_with_note(&pool, 4, 2, ymd(2026, 6, 1), Some("CN-9002")).await;
+
+        let h = health(&pool, ymd(2026, 7, 13)).await;
+        // Newest first, as on the rest of the family.
+        assert_eq!(h.duplicate_trades.len(), 2);
+        let june = &h.duplicate_trades[0];
+        assert_eq!(june.ticker, "CBA");
+        assert_eq!(june.listing_id, 2);
+        assert_eq!(june.contract_note_ref, "CN-9002");
+        assert_eq!(june.date, ymd(2026, 6, 1));
+        assert_eq!(june.trade_count, 2);
+        assert_eq!(june.trade_ids, vec![3, 4]);
+        let march = &h.duplicate_trades[1];
+        assert_eq!(march.ticker, "BHP");
+        assert_eq!(march.contract_note_ref, "CN-8891");
+        assert_eq!(march.date, ymd(2026, 3, 10));
+        assert_eq!(march.trade_ids, vec![1, 2]);
+    }
+
+    /// The check is on the reference, never on the figures: trades that record
+    /// none are invisible to it however identical they are. That is the honest
+    /// cost of a list with no false positives — and it is why the same-day,
+    /// same-price repeats real trading produces (an order filled in equal
+    /// clips) are not flagged either.
+    #[tokio::test]
+    async fn trades_recording_no_contract_note_are_never_duplicates() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("BHP").insert(&pool).await;
+        // Identical in every other respect — listing, date, account, price and
+        // quantity all match, which is the key `duplicate_income` uses.
+        for id in 1..=3 {
+            insert_trade_with_note(&pool, id, 1, ymd(2026, 3, 10), None).await;
+        }
+
+        let h = health(&pool, ymd(2026, 7, 13)).await;
+        assert!(h.duplicate_trades.is_empty());
+    }
+
+    /// A reference that is empty or only whitespace is no reference at all: it
+    /// is what a form submitted with the field untouched can leave, and
+    /// grouping on it would flag every such row against every other.
+    #[tokio::test]
+    async fn a_blank_or_whitespace_only_reference_never_groups() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("BHP").insert(&pool).await;
+        insert_trade_with_note(&pool, 1, 1, ymd(2026, 3, 10), Some("")).await;
+        insert_trade_with_note(&pool, 2, 1, ymd(2026, 3, 10), Some("")).await;
+        insert_trade_with_note(&pool, 3, 1, ymd(2026, 3, 10), Some("   ")).await;
+        insert_trade_with_note(&pool, 4, 1, ymd(2026, 3, 10), Some("\t")).await;
+        // …and a blank one does not group with a null one either.
+        insert_trade_with_note(&pool, 5, 1, ymd(2026, 3, 10), None).await;
+
+        let h = health(&pool, ymd(2026, 7, 13)).await;
+        assert!(h.duplicate_trades.is_empty());
+    }
+
+    /// Padding is how the same reference pasted twice usually differs, so the
+    /// comparison is on the trimmed text — and the reported reference is the
+    /// trimmed one, which is what the broker's records are searched by.
+    #[tokio::test]
+    async fn a_reference_pasted_with_surrounding_whitespace_still_groups() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("BHP").insert(&pool).await;
+        insert_trade_with_note(&pool, 1, 1, ymd(2026, 3, 10), Some("CN-8891")).await;
+        insert_trade_with_note(&pool, 2, 1, ymd(2026, 3, 10), Some("  CN-8891 ")).await;
+
+        let h = health(&pool, ymd(2026, 7, 13)).await;
+        assert_eq!(h.duplicate_trades.len(), 1);
+        assert_eq!(h.duplicate_trades[0].contract_note_ref, "CN-8891");
+        assert_eq!(h.duplicate_trades[0].trade_ids, vec![1, 2]);
+    }
+
+    /// The listing is part of the key, because one contract note can cover a
+    /// multi-line order: two securities bought under one confirmation share a
+    /// reference legitimately. Different references on one listing, and
+    /// references differing only in case, are likewise two documents.
+    #[tokio::test]
+    async fn one_reference_across_two_listings_is_a_multi_line_note_not_a_duplicate() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("BHP").insert(&pool).await;
+        test_support::listing(2).ticker("CBA").insert(&pool).await;
+        // One note, two lines.
+        insert_trade_with_note(&pool, 1, 1, ymd(2026, 3, 10), Some("CN-8891")).await;
+        insert_trade_with_note(&pool, 2, 2, ymd(2026, 3, 10), Some("CN-8891")).await;
+        // Two notes on one listing, same day: an order filled in two clips.
+        insert_trade_with_note(&pool, 3, 1, ymd(2026, 3, 11), Some("CN-8892")).await;
+        insert_trade_with_note(&pool, 4, 1, ymd(2026, 3, 11), Some("CN-8893")).await;
+        // Case is part of the reference, not noise to normalise away.
+        insert_trade_with_note(&pool, 5, 1, ymd(2026, 3, 12), Some("cn-8891")).await;
+
+        let h = health(&pool, ymd(2026, 7, 13)).await;
+        assert!(h.duplicate_trades.is_empty(), "{:?}", h.duplicate_trades);
+    }
+
+    /// The same note re-keyed against the wrong holding account is exactly the
+    /// double entry this exists for, so the account is **not** part of the
+    /// key — a per-account key would let the worst version of the mistake
+    /// through.
+    #[tokio::test]
+    async fn one_reference_keyed_into_two_accounts_is_still_a_duplicate() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("BHP").insert(&pool).await;
+        crate::entities::holding_account::db_upsert(
+            &pool,
+            &crate::entities::holding_account::HoldingAccount {
+                id: 2,
+                name: "Second".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        insert_trade_with_note(&pool, 1, 1, ymd(2026, 3, 10), Some("CN-8891")).await;
+        test_support::buy(2, 1)
+            .date(ymd(2026, 3, 10))
+            .account(2)
+            .with(|t| t.contract_note_ref = Some("CN-8891".to_string()))
+            .insert(&pool)
+            .await;
+
+        let h = health(&pool, ymd(2026, 7, 13)).await;
+        assert_eq!(h.duplicate_trades.len(), 1);
+        assert_eq!(h.duplicate_trades[0].trade_ids, vec![1, 2]);
+    }
+
+    /// Three of a kind is one row counting three, as on the rest of the
+    /// family.
+    #[tokio::test]
+    async fn three_trades_sharing_a_reference_are_one_row_counting_three() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("TRIP").insert(&pool).await;
+        for id in 7..=9 {
+            insert_trade_with_note(&pool, id, 1, ymd(2026, 3, 10), Some("CN-8891")).await;
+        }
+
+        let h = health(&pool, ymd(2026, 7, 13)).await;
+        assert_eq!(h.duplicate_trades.len(), 1);
+        assert_eq!(h.duplicate_trades[0].trade_count, 3);
+        assert_eq!(h.duplicate_trades[0].trade_ids, vec![7, 8, 9]);
+    }
+
+    /// Trades a derived path writes carry no contract note reference at any
+    /// path — there is no broker confirmation behind a vest, an inherited
+    /// parcel, a DRP or a corporate action — so they fall out of this check by
+    /// construction rather than by being excluded by name. Two identical
+    /// inheritances create two identical parcel Buys: a real duplicate, named
+    /// by `duplicate_inheritances`, which is where it is fixed.
+    #[tokio::test]
+    async fn derived_trades_carry_no_reference_and_are_never_reported_here() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("BHP").insert(&pool).await;
+        insert_inheritance(&pool, 1, 1, 1, "100", "3000").await;
+        insert_inheritance(&pool, 2, 1, 1, "100", "3000").await;
+        let derived: Vec<Option<String>> =
+            sqlx::query_scalar("SELECT contract_note_ref FROM trades ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(derived, vec![None, None]);
+
+        let h = health(&pool, ymd(2026, 7, 13)).await;
+        assert!(h.duplicate_trades.is_empty());
+        // The duplication is real; it is the inheritance list that owns it.
+        assert_eq!(h.duplicate_inheritances.len(), 1);
     }
 
     /// SCENARIOS E-03 / E-15: a re-submitted form or a re-imported statement
