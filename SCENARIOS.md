@@ -86,7 +86,7 @@ behind or became a recorded finding.
 | T. Jobs, backup, and operations | 12 | 2026-08-22 (`db877cb`) | 6 raised, 6 closed — see below |
 | U. Audit trail and history | 8 | 2026-08-22 (`1a0f821`) | 3 raised, all closed — see below |
 | V. Back-dated and out-of-order entry | 10 | 2026-08-23 (`4b579c8`) | 5 raised, all closed — see below |
-| W. Precision, rounding, and scale | 8 | — | — |
+| W. Precision, rounding, and scale | 8 | 2026-08-23 (`d02cdc2`) | 6 raised, all closed — see below |
 | X. Transactional integrity and concurrency | 8 | — | — |
 | Y. Web UI | 12 | — | — |
 | Z. Composite lifecycle scenarios | 12 | — | — |
@@ -1106,6 +1106,94 @@ guard therefore compares against the trade's **stored** `(listing_id, date)`, re
 that *newly* strands units. `WorthlessShares` joined that report as a fourth `kind` in the same
 change, which widened what the report is for: it now flags two faults — stored figures that no longer
 reconcile, and parcels an operation never consumed.
+
+
+### Section W findings
+
+All eight scenarios were driven on 2026-08-23 against throwaway databases, with the two CSV exports
+and the CGT worksheet additionally checked against a read-only copy of the live backup. **Four came
+back correct, and the correctness is in the arithmetic rather than in luck.** A per-unit AMMA
+cost-base adjustment quoted to 10 decimal places survives every step — stored verbatim, applied to
+5,555 units as `685.8024634505`, and still exact when the reduction is pushed past the parcel's cost
+base and the remainder becomes a CGT event E10 gain of `11100.0500004871735` (W-01). An 8-decimal
+crypto quantity allocated across five parcels reconciles to the digit: the per-parcel proceeds, cost
+bases and gains sum to the disposal's own totals with a zero remainder at full precision (W-02). The
+residual chain across 200 DRP reinvestments drifts by nothing — every trade's brought-forward,
+quantity and carried-forward matched an independent Decimal replay, and the 200 parcels' cost bases
+plus the trailing residual come to exactly the cash paid in (W-03). And a consolidation whose ratio
+produces a repeating decimal still sells out cleanly: a 1-for-3 and a 1-for-7 consolidation of 1,000
+units each report a 28-digit remaining quantity that, sold back in full, closes the parcel and
+recognises the whole original cost base — `Decimal`'s 28-digit saturation absorbs the remainder in
+both directions, so neither dust nor an over-allocation is left behind (W-06).
+
+**Scale is not this application's problem.** At 4,600 trades every report answers in 0.02–0.1 s, and
+the largest payload (`/trades`, 3.6 MiB) never reaches the DOM — `filterableTable` puts only the
+current 50-row page there. The one 3 s outlier was a live price fetch inside the listing-activity
+handler, not a report. On the real database the numbers are smaller again: 113 trades, and the
+largest table is `closing_prices` at 12,525 rows, served in 0.12 s (W-08).
+
+**The six findings divide into two shapes, and neither is the scenario list's own.** Three are
+*silent precision loss at a boundary the project's own rules already cover elsewhere*. CLAUDE.md's
+"money and quantities are always `Decimal`, never `f64`" holds everywhere in the tree — no `f64` in
+`src` outside a comment, `TEXT` columns, the `infra::decimal` codec, decimal strings preserved
+verbatim in `row_history` — except at the request deserialiser, where a JSON **number** went through
+`f64` and kept only ~15 significant digits: `100000000.00000001` units stored as `100000000` under a
+`204`, while ordinary figures round-tripped exactly, which is what made it silent (W-a). A cost base
+too large for `Decimal` was accepted the same way and then panicked every portfolio read, returning
+**no HTTP response at all** — a reset connection, no status, no body, on the application's home
+screen (W-b). And the write path that accepted it had no magnitude bound at all; that half stayed
+live after W-b was fixed and was split out and closed on its own (W-e).
+
+The other three are *rounding reaching the user inconsistently*, and the web UI is the control for
+all three: `COLUMN_KINDS` already classifies every money column and renders it at the cent, half away
+from zero, with the full value on hover. What did not inherit that rule were the surfaces built for
+transcription. The two CSV exports `docs/API.md` calls "tax-return-ready" carried 28-digit figures
+under ATO labels — on Evan's real data label 18A read `39592.120176274130543388699381` and 18V read
+as twenty-four zeros after the point (W-c). The Annual Tax Report — the one document meant to be
+printed and archived — rounded its parcel rows and its subtotals independently, so an ordinary
+three-parcel disposal printed a discount column of `63.55 + 527.90 + 1060.73` above a subtotal of
+`1652.17` (W-d). And once the CSV rounded, the columns that are arithmetically related to one another
+stopped agreeing: the printed working read `100.01 − 50.01 = 50.00` beside an 18A of `50.01`, because
+both exact figures were `50.005` (W-f).
+
+| Finding | Scenarios | Fixed by |
+| --- | --- | --- |
+| A money or quantity sent as a JSON number is rounded through `f64` | W-04 | `331a183` |
+| An unrepresentable cost base panics every portfolio read and drops the connection | W-05, W-08 | `b77fe38` |
+| The write path accepts a cost base `Decimal` cannot hold | W-05 | `1badc54` |
+| The tax-return-ready CSV exports carry 28-digit figures under ATO labels | W-07 | `a2c9c81` |
+| The Annual Tax Report's printed columns do not add up | W-07 | `aece007` |
+| The CSV worksheet's printed working does not reach the figure it works to | W-07 | `d02cdc2` |
+
+**Only one of the six is the scenario the list names.** W-07 raised three, but W-a fell out of
+probing W-04's `REAL` round-trip and finding the migrations already guarded (`migrations_store_
+decimals_as_text`) — so the round-trip that loses precision is on the way *in*, not in a column —
+while W-b and W-e fell out of asking what a `$10M` holding beside a `$0.01` one (W-05) does at the
+top of the range rather than the bottom. Two of the six were split out of the other four *while they
+were being fixed*, which is the section's own lesson: W-e because fixing W-b established that its
+headline trade overflowed somewhere else entirely, and W-f because fixing W-c made a pre-existing
+inconsistency legible for the first time.
+
+**Three of the fixes moved a rule to a place the compiler or the type system can see it.** W-c
+declined to transcribe `COLUMN_KINDS` into Rust — a second source of truth that would drift from the
+screens the CSV mirrors — and made money a *type* (`reports::export::Cents`) so the classification
+lives in the field's declaration; it also established that no writer-level sniffing could have
+avoided the list, since `rust_decimal` serialises through `serialize_str` and a money cell is by then
+indistinguishable from `taxpayer_basis`. W-d found `Cents` did not fit where the rounded value has to
+be *summed* rather than printed, and moved the rule down to `infra::decimal::to_cents`, which
+`Cents` now delegates to — one definition shared by the exports, the tax report and the worksheet.
+W-a's guard reuses the walk behind `every_request_body_denies_unknown_fields`, so the two rules
+police exactly the same set of request bodies and cannot drift apart.
+
+**What the ATO says about rounding in the CGT worksheet: nothing.** Question 18's step order is
+silent on cents, in the mirror and in a fresh fetch of the live page; the only rounding rules in
+`docs/ato/` belong to someone else (the trustee-level AMIT rounding adjustment, the indexation
+factor's three decimals, and the per-label "show cents" notes — which cover 10M/11V/13P–S/13A/13B/20O
+and **not** 18A/18H/18V). A cent never reaches the lodged return at question 18 at all, so the
+divergence W-f fixed was only ever visible to a human checking the worksheet. The direction was
+therefore chosen on the project's own rule, and lands taxpayer-favourably: rounding the concession
+half away from zero gives the larger half to the concession, so FY2026's 18A moved from `39592.12` to
+`39592.11` and FY2025's from `5076.87` to `5076.86`.
 
 
 ## A. Deletion and mutation ripple effects

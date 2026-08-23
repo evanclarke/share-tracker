@@ -1365,3 +1365,154 @@ be added without it.
 
 - [x] Add `#[serde(deny_unknown_fields)]` to every HTTP request-body struct, with the enumerating
       test and a `docs/API.md` note that an unrecognised body field is refused.
+
+## SCENARIOS W-a — A money or quantity sent as a JSON number is rounded through f64
+
+`PUT /trades/:id` with `{"quantity": 99999999.87654321}` stores `99999999.8765432`, and
+`{"quantity": 100000000.00000001}` stores `100000000` — a satoshi gone, under a `204`. The same two
+values sent as **strings** are stored exactly, which is the control: the loss is entirely in the
+request deserialiser. `rust_decimal`'s `Deserialize` accepts a JSON number, `serde_json` hands it
+over as an `f64`, and the conversion keeps ~15 significant digits — so every ordinary figure
+(`58.1234`, `19.995`, `0.00000001`) survives and only the long ones don't, which is what makes it
+silent. 100,000,000 units of a sub-cent token held to 8 decimals is an ordinary crypto position, and
+`quantity` is exactly where a bulk import puts one.
+
+CLAUDE.md's rule — *"Money and quantities are always `Decimal`, never `f64`"* — holds everywhere else
+in the tree: there is no `f64` in `src` outside a comment, the columns are `TEXT`, the sqlx codec is
+`infra::decimal`'s, and `row_history` keeps the decimal strings verbatim. The HTTP boundary is the
+one place the rule is not enforced. This is the same shape as V-a (a body field silently dropped,
+now `deny_unknown_fields`) and T-10 (a query parameter silently ignored, now a `422` naming it): the
+project's answer to *"the request said something we cannot honour"* is already to refuse and name it.
+
+Found by the standing probes while driving **W-04** (the `REAL` round-trip scenario) — the migrations
+are clean (`migrations_store_decimals_as_text` guards them), so the round-trip that loses precision
+is on the way *in*, not in a column.
+
+Options offered:
+
+- **(a) Refuse a JSON number** in any money/quantity field — `422` naming the field, "enter
+  `quantity` as a decimal string" — the way `deny_unknown_fields` refuses a misspelt one, pinned by a
+  test that walks every request body's `Decimal` fields the way
+  `every_request_body_denies_unknown_fields` walks the extractors.
+- (b) Accept it exactly by enabling `serde_json/arbitrary_precision` +
+  `rust_decimal/serde-arbitrary-precision`.
+- (c) Accept the number only when its `f64` round-trip reproduces the literal exactly.
+- (d) Document as a known limitation.
+
+**Evan chose (a).** Refuse loudly, as the two siblings already do.
+
+- [x] Refuse a JSON number in every money/quantity request field with a `422` naming it, with a test
+      that walks every handler-reachable request body's `Decimal`/`Option<Decimal>` fields so a new
+      body is covered without anyone remembering; document the rule in `docs/API.md` beside
+      [Unrecognised body fields](docs/API.md#unrecognised-body-fields)
+      — `infra::decimal` gained a **serde** half beside its sqlx one (`strict_decimal`,
+      `strict_optional_decimal`, `strict_decimal_map`), spelled as
+      `#[serde(deserialize_with = …)]` on **120 fields** across 25 files, so a body field stays a
+      plain `Decimal` and every reader of it is unchanged. The two halves are named apart
+      deliberately: `Money`/`OptMoney` remain the TEXT⇄`Decimal` **sqlx** codec, these three are the
+      JSON⇄`Decimal` **request** codec. Integers are refused too (`10` as much as `10.5`) — a rule
+      that only bit past some digit count would put the same silent boundary back one step along.
+      The message says the remedy, and axum's extractor prefixes the field path, so a nested one
+      names itself (`prices.1: send this money/quantity value as a decimal string …`); reaching the
+      visitor needed `deserialize_any` rather than `deserialize_str`, since with a scalar hint
+      `serde_json` answers the wrong type itself and the remedy never gets a chance to be said.
+      `infra::http::tests::every_money_request_field_refuses_a_json_number` is the guard, walking
+      the same handler-reachable set as `every_request_body_denies_unknown_fields` — the two now
+      share one `request_body_types` walk, so neither can drift — with an empty `JSON_NUMBER_ALLOWED`
+      alongside `UNKNOWN_FIELDS_ALLOWED`. Behaviour is pinned at the HTTP surface by
+      `entities::trade::tests::api_a_quantity_sent_as_a_json_number_is_refused_naming_the_field` and
+      its control `…::api_the_same_quantity_sent_as_a_string_is_stored_exactly`, and the codec by
+      four unit tests in `infra::decimal`; `docs/API.md` gained **Money as a JSON number** beside
+      Unrecognised body fields, a line in the `422` row, and `doc_checks::money_as_a_json_number_documented`
+
+Collateral damage was one decision and it went the harmless way: 15 existing tests in
+`entities/trade.rs` and `entities/income.rs` sent money as bare JSON numbers in their request
+bodies, and were fixed by quoting them (67 literals) rather than by widening the rule — none was
+asserting anything about the number form. `scripts/fixtures/demo.json` was already clean (its only
+bare numbers are ids), and the web UI reads every decimal field out of a text input as a string,
+the price-override maps included, so no UI path had to change.
+
+Verified independently at the HTTP surface, against a throwaway database: all four measured values
+— `quantity` `99999999.87654321`, `100000000.00000001` and `0.123456789012345678`, and
+`average_price` `1234567890123456789.12` — now answer `422` naming their field, where they
+previously answered `204` and stored `99999999.8765432`, `100000000`, `0.12345678901234568` and
+`1234567890123456800`; the same two quantities sent as strings still answer `204` and read back to
+the digit, the control.
+
+## SCENARIOS W-b — A trade the write path accepts panics every portfolio read and drops the connection
+
+`PUT /trades/9600` with `{"average_price":"1000000000000000","quantity":"1000000000000000"}` is
+accepted `204`. Afterwards `GET /portfolio/open-parcels`, `POST /portfolio/overview` and
+`POST /portfolio/unrealised-gains` return **no HTTP response at all** — the connection is reset
+(curl reports `000`), the server logs `thread 'tokio-rt-worker' panicked … Multiplication overflowed`,
+and the web UI's home screen shows a bare network error naming nothing. The row is invisible in every
+report that could have found it, because those are the reports that die.
+
+Two separate causes, and the finding needs both:
+
+1. **The arithmetic multiplies before it divides.** `domain::cost_base` pro-rates with
+   `initial_cost * units / parcel.quantity` (`src/domain/cost_base.rs:400`, and again at `:480` in
+   `adjustment_detail`). The product overflows `rust_decimal` whenever
+   `(price × qty + brokerage) × qty > 7.9228e28`, which the probe confirmed exactly at the boundary:
+   `price 1 / qty 1e14` (product `1e28`) reads fine, `price 1 / qty 1e15` (`1e30`) and
+   `price 0.5 / qty 4e14` (`8e28`) both kill the connection. In the overwhelmingly common case
+   `units == parcel.quantity` and the multiply-then-divide is pure waste.
+2. **Nothing catches the panic.** `app::router` layers no `CatchPanicLayer`, so a panicking handler
+   drops the connection rather than answering the `500` with a logged cause that
+   `infra::http::ApiError::Internal` exists to produce.
+
+Bounded by its controls. The write path checks `quantity > 0` and `average_price >= 0` and imposes
+**no** upper bound, so this is reachable by a fat-fingered run of zeros in either field. It is *not*
+reachable from the paths that look most dangerous: a 1,000,000,000,000-for-1 `ShareSplit` on a live
+parcel reads fine (the re-base multiplies the reported quantity, not the cost-base term, which stays
+in as-acquired units), and a trillion units of a sub-cent token with `$1.95` brokerage reads fine
+(`price × qty²` is what matters, not the holding's value). So the trigger is a mistyped trade,
+not a large portfolio — which is precisely why it should answer with a message.
+
+Found by the standing probes while driving **W-05** ($10M beside $0.01) and **W-08** (scale) — neither
+scenario names an overflow.
+
+Options offered:
+
+- **(a) Fix the arithmetic and catch panics** — short-circuit `units == parcel.quantity` and divide
+  before multiplying in `domain::cost_base`, plus a `CatchPanicLayer` so any remaining panic is a
+  logged `500` with a body rather than a dropped connection.
+- (b) Bound `price × quantity` at write time with a `422` naming it.
+- (c) All three.
+- (d) The panic layer only.
+
+**Evan chose (a).** Fix the cause and make the class of failure legible; a magnitude ceiling would be
+an arbitrary number to defend, and the arithmetic fix removes the whole-parcel case outright and
+raises the partial-parcel ceiling by roughly fourteen orders of magnitude.
+
+- [x] Divide before multiplying (and short-circuit `units == parcel.quantity`) in
+      `domain::cost_base`'s two pro-rating sites, with a test at the old boundary
+      — both sites now go through one `prorated_initial_cost` helper: identity where
+      `units == quantity`, otherwise `checked_mul` first (so no figure that fits today moves by a
+      digit — `39.95 × 2 / 3` and `39.95 / 3 × 2` differ in the last place) and divide-first only
+      on the overflow the product used to panic on
+- [x] Layer `CatchPanicLayer` in `app::router` so a panicking handler answers a logged `500` with a
+      body instead of resetting the connection, with a test driving a deliberately panicking route
+      — the body is *empty*, matching `ApiError::Internal`'s convention rather than inventing a new
+      one (a panic payload can carry anything); the message goes to `tracing::error!`
+
+Re-derived while fixing: the finding's own headline trade (`average_price` **and** `quantity` both
+1e15) does not overflow at the pro-rate at all — `price × quantity` = 1e30 overflows inside
+`Parcel::initial_cost` first, before any pro-rating. The boundary table is right (`price 1 /
+quantity 1e15` *is* the pro-rate site), but the two are different overflows, and no reordering can
+fix the first: that product is the cost base, so an unrepresentable one has no lesser answer. Which
+is exactly why (a) needed both halves — the panic layer is what turns the headline trade's read from
+a dropped connection into a `500`.
+
+Verified independently at the HTTP surface after the fix, against a throwaway database: the three
+pro-rate cases (`price 1 / qty 1e15`, `price 0.5 / qty 4e14`, `price 1 / qty 1e14`) now answer `200`
+on `/portfolio/open-parcels`, `POST /portfolio/overview` and `POST /portfolio/unrealised-gains`; the
+headline `1e15 × 1e15` trade answers **`500` with an empty body** and logs
+`request handler panicked panic=Multiplication overflowed`, where it previously reset the connection;
+`/reports/health` stays `200` throughout, the control.
+
+One further residual, out of this section's scope and noted while fixing it:
+`AmitReductionEvent::reduction_for_units` carries the same multiply-before-divide shape
+(`per_unit * covered.min(held) * units / held`). Probed at 1e15 units with a `0.05` per-unit
+adjustment it survives (`1.5e28`), but a larger per-unit figure at that scale would overflow — now a
+logged `500` rather than a dropped connection, so it fails safe. Worth closing properly later.

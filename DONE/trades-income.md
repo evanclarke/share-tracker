@@ -847,3 +847,91 @@ refunds every leftover regardless of position, so nothing is ever brought forwar
 needed no correction, only sharpening: both sections already stated the derived-from-the-period
 principle this violated, and now say what it means for a reinvestment entered into a closed
 period.
+
+## SCENARIOS W-e — A trade whose price × quantity is unrepresentable is still accepted with 204
+
+Split out of W-b once fixing it established that the headline trade overflows at
+`Parcel::initial_cost`, not at the pro-rate. `PUT /trades/:id` with an `average_price` and `quantity`
+whose product exceeds `Decimal`'s range (≈ `7.9228e28`) is still accepted `204`. It now fails
+*safely* — the three portfolio reads answer a logged `500` with an empty body instead of resetting
+the connection — but three screens are still dead, the reply still names nothing, and the offending
+row is still invisible in exactly the reports that would have found it, because those are the reports
+that fail.
+
+The write path checks `quantity > 0` and `average_price >= 0` and imposes no upper bound. W-b's
+option (b) — refuse the write, naming the figure — is what closes this, and the objection recorded
+against it there (*"a magnitude ceiling would be an arbitrary number to defend"*) turns out **not** to
+apply to this half: the ceiling here is not a policy number but a representability limit the type
+itself states, so the refusal has a principled bound to quote. That is a new fact, so the decision is
+worth re-taking rather than inheriting.
+
+**Evan chose to refuse it at write time.** The objection recorded in W-b does not survive the
+re-derivation: the ceiling is `Decimal`'s own representability limit, so the refusal has a principled
+bound to quote rather than a policy number to defend. Deliberately *not* included: the same
+multiply-before-divide shape in `AmitReductionEvent::reduction_for_units` (noted under W-b), which
+stays open for a later section.
+
+- [x] Refuse a parcel-creating write whose `average_price × quantity` cannot be represented, `422`
+      naming the product and the limit, across every parcel-creating path
+      — the bound is `domain::cost_base::checked_cost_base`, `Parcel::initial_cost`'s formula in
+      `checked_mul`/`checked_add` form, so what is refused is exactly what could not have been
+      stored: no transcribed constant, and `Decimal::MAX` itself is quoted in the body. Its `Term`
+      enum lets each path name its own fields (`Product`/`Amount`), so the one message reads in the
+      caller's vocabulary — `average_price 1e15 × quantity 1e15 + brokerage 0 + gst_on_brokerage 0`
+      on a trade, `cost_base … + lpr_expenditure …` on an inheritance — and the wording lives once,
+      beside the limit, as `whole_holding::BackDatedParcel::message` does.
+      **Five reachable paths, from grepping `INSERT INTO trades` rather than trusting the list of
+      eight in docs/API.md:** the trade/Sell pair (one call in the shared `trade::check_amounts`, so
+      the two cannot drift, and it reaches every rollover's closing Sell), the inheritance
+      (`cost_base + lpr_expenditure`, a *sum* — and the one that overflowed at the **write**, a bare
+      `500` from a plain `+`), the ESS statement (`quantity × market_value_per_share` — guarded on
+      the *statement*, where the multiply already lived and already panicked; that is what makes the
+      **vest** unreachable, since a vestable statement is exactly one with both figures positive),
+      the rights exercise (`exercise_price × units + rights_cost`), and a DRP reinvestment with
+      stated `units`. **Three provably unreachable, so deliberately unguarded:** the scrip-exchange,
+      demerger and transfer replacement parcels write a zero price with the carried cost base on
+      `brokerage`, so nothing multiplies and the figure carried forward is one the source parcel
+      could already hold (pinned from the far end by
+      `entities::transfer::tests::a_maximal_cost_base_still_transfers_because_the_replacement_multiplies_nothing`);
+      and a DRP reinvestment *without* stated units derives its quantity from the cash.
+      **The Sell side was in scope after measuring it:** a nil-priced 1e15-unit parcel is a
+      legitimate holding, and selling it at 1e15 was accepted `204` and then killed
+      `/portfolio/realised-gains`, `/portfolio/net-capital-gain` and `/reports/tax-report/years`
+      with a logged `500` — three more dead screens, closed by the same shared check.
+      An **edit** reads the figures being written, never the stored ones, so a database already
+      holding such a row stays correctable (W-d's sibling rule tripped on exactly this); W-b's panic
+      layer still covers reading one until it is. Tests:
+      `domain::cost_base::tests::{the_bound_is_exactly_what_a_decimal_can_hold,
+      the_additive_terms_are_bounded_as_well_as_the_product, the_refusal_names_the_terms_and_the_limit,
+      it_is_the_same_formula_parcel_initial_cost_uses}`;
+      `entities::trade::tests::{api_a_trade_whose_cost_base_cannot_be_represented_is_refused_naming_it,
+      api_a_large_but_representable_cost_base_still_writes_and_reads_back (the control),
+      api_an_already_unrepresentable_parcel_can_still_be_corrected}`;
+      `entities::sell::tests::api_a_sell_whose_proceeds_cannot_be_represented_is_refused_naming_them`;
+      `entities::inheritance::tests::api_an_unrepresentable_inherited_cost_base_is_refused_naming_it`;
+      `entities::ess_statement::tests::api_an_unrepresentable_vesting_market_value_is_refused_naming_it`;
+      `entities::rights_exercise::tests::an_unrepresentable_exercised_cost_base_is_refused_naming_it`;
+      `entities::drp_reinvestment::tests::an_unrepresentable_reinvested_cost_base_is_refused_naming_it`;
+      plus `doc_checks::figures_beyond_the_decimal_range_documented` over `docs/API.md`'s new
+      **Figures beyond the decimal range** section (beside Money as a JSON number), the six
+      endpoints' `422` lists, and the `422`/`500` response-code rows.
+      `app::tests::an_unrepresentable_parcel_cost_base_is_a_500_not_a_dead_connection` (W-b's) now
+      builds its row through `test_support::insert_parcel_bypassing_checks` — the write path refuses
+      it, so only a pre-guard database can hold one, which is precisely what that test is about.
+      Verified independently at the HTTP surface against a throwaway database: the reproduction and
+      all five paths answer `422` quoting their own arithmetic and `79228162514264337593543950335`,
+      where they previously answered `204`/`201` (trade, Sell, rights exercise) or a bare `500`
+      (inheritance, ESS statement, DRP); the control — `price 1 / quantity 1e14`, cost base
+      `100000000000000` — still writes `204` and reads back unchanged through
+      `/portfolio/open-parcels`, `POST /portfolio/overview` and `POST /portfolio/unrealised-gains`;
+      and a row inserted straight into SQLite behind the guard still `500`s the reports, is
+      corrected by a `PUT` that brings it inside the range, and is deletable.
+
+Two residuals of the same *arithmetic-ordering* class, out of this section's scope and noted while
+fixing it. `demerger::db_demerge` computes `carried_cost_base * cost_base_pct / Decimal::ONE_HUNDRED`
+(and `at_date_units * new_units / held_units`) — multiply before divide, W-b's shape, in a *write*
+path this time: a parcel costed at 1e27 demerged at any percentage overflows the intermediate and
+answers a logged `500`, though the result would be representable. The other is W-b's own
+`AmitReductionEvent::reduction_for_units`, still open. Both want the `prorated_initial_cost`
+treatment rather than a magnitude bound — there *is* a lesser answer in each case, which is exactly
+what distinguishes them from this section.

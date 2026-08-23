@@ -954,3 +954,307 @@ a broker reference repeated across two trades is unambiguous evidence of a doubl
       construction. Eight tests in `reports::health`, a `doc_checks` pin, the `docs/API.md` entry
       (with the limitation stated: it only catches trades whose entry recorded the reference), the
       README feature line, and the banner row + Trades link.
+
+## SCENARIOS W-c — The tax-return-ready CSV exports carry 28-digit figures under ATO labels
+
+`docs/API.md` calls the two `/export` endpoints "tax-return-ready" and gives each a second header row
+mapping its columns to ATO tax-return labels. On **Evan's real database** (a read-only copy of the
+2026-08-22 backup) they read:
+
+```
+net-capital-gain.csv  FY2026  18A  39592.120176274130543388699381
+net-capital-gain.csv  FY2026  18V  0.000000000000000000000000
+tax-summary.csv       FY2026       20243.630345624323612748757063
+```
+
+18V — the capital loss carried forward, a figure transcribed onto the return — prints as
+twenty-four zeros after the point. Every year with a brokerage-bearing disposal in it is affected;
+FY2021, FY2023 and FY2024 happen to come out clean, which is why this has gone unnoticed.
+
+The control is the web UI, which is correct: `util.js`'s `COLUMN_KINDS` classifies every one of these
+columns as money and `filterableTable` renders them at two decimal places, half away from zero, with
+the full value on hover. The rule exists, it is documented at `docs/API.md`'s **Amounts round, rates
+don't**, and the CSV export is the one money surface that does not inherit it.
+
+Found by the standing probes while driving **W-07** (sum-of-parts vs total).
+
+Options offered:
+
+- **(a) Round every money column in the two exports to the cent**, half away from zero — the same
+  rule and direction the screens use — leaving the JSON API full-precision as documented.
+- (b) Whole dollars for the ATO-labelled columns, cents for the rest.
+- (c) Round in the report itself so JSON, CSV and screens carry one figure.
+- (d) Document as a known limitation.
+
+**Evan chose (a).** The CSV mirrors a screen, so it should read like it; the JSON stays the exact
+figure the docs promise.
+
+- [x] Round every money column of `net-capital-gain.csv` and `tax-summary.csv` to the cent (half away
+      from zero, the `roundDecimalStr` rule) in `reports::export`'s `csv_response` path, leaving rate
+      and quantity columns verbatim and the JSON responses untouched; update `docs/API.md`'s two
+      export paragraphs to say so
+      — the rounding is a **type**, not a column-name list: `reports::export::Cents(Decimal)`
+      serializes to 2 dp, half away from zero, always both places (`0.00`, never `-0.00`, no
+      thousands grouping — the separator is the delimiter). A CSV row is a *projection* of the
+      report record whose money fields are `Cents`, so which columns round is decided by the
+      field's type and nothing duplicates `util.js`'s `COLUMN_KINDS` in Rust — a name list in
+      `csv_response` was the alternative and was rejected for exactly that reason (serde hands the
+      writer a `Decimal` as a string, indistinguishable from `taxpayer_basis`, so a writer-level
+      pass has no way to tell money from text without such a list).
+      `NetCapitalGainYearCsv` already existed and gained `Cents` fields; `tax_summary` grew the
+      matching `TaxYearSummaryCsv` (39 money columns) rather than exporting the JSON struct
+      directly. `tax_year` and `taxpayer_basis` are not money and pass through untouched; the JSON
+      responses are unchanged, pinned by a control test on each report over the same facts.
+      Verified against the read-only copy of the 2026-08-22 backup: 18A `39592.120176274130543388699381`
+      → `39592.12`, 18V `0.000000000000000000000000` → `0.00`, FY2022 18A → `3151.90`, tax-summary
+      FY2026 assessable income `20243.630345624323612748757063` → `20243.63`, with both JSON reports
+      still answering the full-precision figure. Tests: `reports::export::tests::{a_money_column_rounds_to_the_cent_and_a_plain_decimal_does_not,
+      a_half_cent_rounds_away_from_zero_in_both_directions, a_nil_money_figure_is_two_zero_decimals,
+      a_whole_or_short_money_figure_is_padded_to_the_cent}`, and on each export
+      `api_export_rounds_money_columns_to_the_cent` + its control
+      `api_the_json_report_keeps_the_precision_the_export_rounds`
+      (`reports::net_capital_gain`, `reports::tax_summary`) plus
+      `reports::tax_summary::tests::api_export_rounds_a_half_cent_away_from_zero`;
+      `doc_checks::cent_rounded_csv_exports_documented` pins the two export paragraphs and the
+      display-rules sentence that had promised full-precision CSV.
+      One consequence, deliberate and matching the screens: each column rounds independently, so
+      rounded components need not add to a rounded total (here 39344.55 + 247.57 = 39592.12 does,
+      but that is arithmetic, not a guarantee) — the same behaviour every table on screen has.
+
+## SCENARIOS W-d — The Annual Tax Report's printed columns do not add up
+
+The Annual Tax Report is the one surface built to be printed and archived (`custom: 'tax-report'`,
+its own `@media print` stylesheet, A4 landscape). Its parcel rows and its subtotals are each rounded
+to the cent independently, so the column does not add up on the page. An entirely ordinary
+three-parcel BHP disposal — `$9.95` brokerage plus `99.5c` GST on each buy, so each parcel's cost base
+lands on a half-cent — prints:
+
+```
+parcel discount amounts   63.55 + 527.90 + 1060.73 = 1652.18
+printed group subtotal                               1652.17
+```
+
+The subtotal is the exact sum rounded; the rows are each rounded, three of them upward. The same
+disposal's `cost_base` column is a cent out for the same reason. At four decimal places every column
+reconciles, which is the control — the arithmetic is right and the presentation is what disagrees.
+
+Found by driving **W-07** directly, and confirmed against the printed document rather than only the
+JSON.
+
+Options offered:
+
+- **(a) Total the rounded rows, in the report** — round each parcel figure to the cent in
+  `reports::tax_report` and make each subtotal and grand total the sum of those rounded figures, so
+  the API and the printed page agree and a reader can add the column up.
+- (b) Do the same in `taxreport.js` only, leaving the API exact (so the two then differ).
+- (c) Print rows at four decimal places.
+- (d) Document as a known limitation.
+
+**Evan chose (a).** The document's job is to be checked by hand; a column that does not add up fails
+at exactly that.
+
+- [x] Round each disposal-schedule parcel figure to the cent in `reports::tax_report` and sum the
+      rounded values into every subtotal and grand total, with a test asserting each column's rows
+      sum exactly to the total it sits under; note the convention in `docs/API.md`'s Annual tax
+      report section
+      — the rounding happens **once, at the row**: `DisposalParcelRow::round_money_to_cents` runs as
+      each row is built, so `DisposalTotals::add` can only ever sum figures that are already
+      rounded and a subtotal is the sum of the rows printed above it *by construction*, not by a
+      second pass someone could forget. The rule itself is now `infra::decimal::to_cents` (to the
+      cent, half away from zero, a figure that rounds to nil normalised to a positive zero) and
+      W-c's `reports::export::Cents` delegates to it: that type is a *serialisation* wrapper whose
+      `Display` renders `{:.2}`, and here the rounded value has to be **summed**, so the two now
+      share the rounding and differ only in the rendering — one rule provably, rather than two
+      that agree today. Money, and so rounded: `initial_cost_base_aud`, `adjusted_cost_base_aud`,
+      `proceeds_aud`, `gain_loss_aud`, `cgt_discount_amount_aud`, `gain_after_discount_aud`, and
+      each itemised adjustment's `amount` (the document prints those under the parcel too). Left
+      verbatim: the two `*_per_unit_aud` figures and an adjustment's `per_unit` — a derived
+      per-unit figure shows at 4+ dp by the documented display rule, never cent-rounded —
+      `buy_price`/`sale_price`, `units`, `days_held`, the two FX rates, and
+      `buy_brokerage`/`buy_gst_on_brokerage`, the contract note's own native-currency figures,
+      transcribed for hand-checking against it (99.5c of GST on $9.95 of brokerage is genuinely
+      sub-cent) and totalled nowhere. Nothing downstream reads these rows — the report computes
+      nothing new — so no tax figure moved: `realised_gains` and `net_capital_gain` still answer
+      the exact decimal, and the tax-report/realised-gains reconciliation test still passes.
+      Measured on the three-parcel BHP disposal: the discount and discounted-gain columns now
+      subtotal **1652.18** over rows of 63.55 + 527.90 + 1060.73 (printed 1652.17), and the
+      cost-base column **27453.44** over 4991.52 + 9227.54 + 13234.38 (printed 27453.43); proceeds
+      and gain/loss happened to reconcile already and are unchanged (30757.77, 3304.34).
+      Tests: `reports::tax_report::tests::{api_a_disposal_columns_rows_add_up_to_its_printed_subtotal,
+      api_every_disposal_money_column_totals_the_rounded_rows_beneath_it,
+      api_the_per_unit_and_as_entered_disposal_columns_are_not_cent_rounded}` — the middle one
+      finds the money columns *by name* (`*_aud` less the per-unit pair) across a three-group
+      document (an AUD disposal, an AMIT parcel carrying itemised adjustments, a USD parcel whose
+      every figure is an FX conversion), so a newly added money column is covered without being
+      listed, and asserts its total↔parcel column pairing covers the whole of `DisposalTotals`, so
+      a newly added *total* fails until it is reconciled too. Plus
+      `infra::decimal::tests::to_cents_rounds_half_away_from_zero_and_keeps_the_cent_scale` and
+      `doc_checks::cent_rounded_tax_report_disposals_documented`; all three W-d tests were
+      confirmed to fail with the rounding call removed. `taxreport.js` needed no change: it prints
+      the server's subtotals and re-derives nothing client-side, and `numericDisplay`'s money
+      rounding is idempotent on a figure already at the cent (its hover tooltip simply stops
+      appearing, having nothing left to show).
+
+Two corrections to this section's own write-up, found by re-deriving it. The cost-base rows are
+4991.52 + 9227.54 + **13234.38** (the third parcel is 333 units at 39.71, not 11726.38) — the total
+27453.44 was right. And the control is narrower than stated: at four decimal places the *cost base*
+column reconciles, but the discount column does not (63.5468 + 527.8979 + 1060.7254 = 1652.1701
+against a subtotal of 1652.1700), because halving three exact-arithmetic gains lands on figures no
+display precision reconciles. The true control is that the underlying arithmetic is exact and it is
+any *display* rounding of the rows that disagrees with the rounded exact total — which is why the
+fix has to be to total the rounded rows rather than to print more places.
+
+Three residues deliberately left, each a decision rather than an oversight, and each Evan's to take
+as its own section:
+
+1. **A row's own arithmetic can still be a cent out.** The schedule prints proceeds, cost base and
+   gain/loss on one line; rounded independently, the second BHP parcel prints 10283.33 − 9227.54
+   beside a gain of 1055.80. Deriving the gain from the rounded components would fix the row *and*
+   keep the columns adding up (Σ of derived gains = Σ proceeds − Σ cost base), at the price of a
+   printed gain that is not the rounded gain — a figure the chosen option (a) does not authorise.
+   This is unchanged by W-d: the printed page has shown those same three rounded numbers all along,
+   since the UI rounds every money cell.
+2. **`income` vs the overall tax summary is the same shape, one level up.** The income tables print
+   per-record AUD figures whose totals appear in the tax-summary section, and `docs/API.md`
+   currently promises "Every AUD figure here sums to exactly the matching tax summary line" —
+   which is true only at full precision. Rounding the income rows would break that documented
+   guarantee unless the summary line were rounded too, and that line is `tax_summary`'s, shared
+   with its own screen and CSV. Left alone deliberately.
+3. **`cgt_summary` likewise**: it is `net_capital_gain::CgtSummaryYear`, printed as a worksheet
+   whose lines subtract from one another, and rounding it here would fork the figure from the
+   report that owns it. See the note under W-c for the same fault in that report's CSV.
+
+## SCENARIOS W-f — The tax-return CSV's printed working does not reconcile to the figure it works to
+
+Surfaced by [W-c](#scenarios-w-c) and confirmed while building [W-d](#scenarios-w-d): now that each
+money column of `net-capital-gain.csv` rounds to the cent independently, the columns that are
+*arithmetically related to each other* need not agree. Reproduced at the export endpoint on an
+entirely ordinary single-parcel disposal — 100 units bought 2022-01-05 at $10, sold 2024-03-15 at
+$11.0001, no brokerage:
+
+```
+discount_eligible_gains  100.01   (label 18H component)
+cgt_discount              50.01   (label 18 working)
+net_capital_gain          50.01   (label 18A)
+```
+
+The printed working reads **100.01 − 50.01 = 50.00**, beside an 18A of **50.01**. The exact figures
+are 100.01, 50.005 and 50.005, and the 50% discount is the same halving mechanism that produced W-d.
+**Any year whose discount-eligible net gain is an odd number of cents does this.** Evan's own data
+reconciles (`39344.55 + 247.57 = 39592.12`) by luck rather than by construction.
+
+This is the CSV twin of W-d, one level up: W-d made a *column of rows* add to its total; this is a
+*row of columns* that form a worksheet. `tax-summary.csv` carries the same risk wherever one column
+is a sum of others. Note the divergence is **not** new breakage — the same figures rounded the same
+way on screen before W-c; what W-c changed is that the CSV now shows the rounded form too, which is
+what makes the inconsistency legible rather than hidden behind 28 digits.
+
+Two things bound it before any fix is aimed:
+
+- The **underlying tax figure is right** either way; this is a presentation inconsistency in a
+  document meant to be transcribed, not a wrong assessable amount.
+- It lives in `reports::net_capital_gain`'s year record, which the JSON report, the CSV export **and**
+  the Annual Tax Report's `cgt_summary` section all share — W-d deliberately left `cgt_summary`
+  alone for exactly this reason, so whatever is decided here should settle all three at once rather
+  than forking the figure.
+
+Options offered:
+
+- **(a) Derive the worksheet after rounding** — round the input columns to the cent, then compute the
+  dependent ones from the rounded values in the shared year record, so the JSON, the CSV and the
+  annual report's `cgt_summary` all reconcile and the printed working adds up. Moves the reported
+  figure by up to a cent.
+- (b) Leave the figures and document the possible cent of disagreement.
+- (c) Round half-to-even, which splits the `.005` cases evenly rather than always up.
+- (d) Defer to a later section.
+
+**Evan chose (a).** A worksheet whose working does not reach its own result fails at the one job the
+document has. (c) was rejected on its own terms: it lowers the frequency without removing the
+divergence, and it would fork the rounding rule from the half-away-from-zero the screens, the CSV
+exports and `infra::decimal::to_cents` now all share.
+
+- [x] Derive the dependent worksheet columns from the cent-rounded inputs in the shared
+      net-capital-gain year record, so the JSON, the CSV export and the annual tax report's
+      `cgt_summary` reconcile; carry the same treatment to `tax-summary.csv` wherever one column is a
+      sum of others
+      — the rounding moved **into `net_years`**, the shared year record, so all three surfaces read
+      one worksheet. The dependency graph, derived from the code rather than assumed: four
+      **inputs** (`discount_eligible_gains`, `other_gains`, `capital_losses`, and
+      `capital_loss_brought_forward` — which is the *previous* row's `capital_loss_carried_forward`,
+      so rounding it only bites on the chain's seed, the entered `cgt_settings` opening loss) plus
+      three informational ones (`cgt_event_e10_gain`/`_g1_`/`_c2_`, in no printed working but money,
+      so rounded too), and five **derived** (`net_other_gain`, `net_discount_eligible_gain`,
+      `capital_loss_carried_forward`, `cgt_discount`, `net_capital_gain`). Every input goes through
+      `infra::decimal::to_cents`; the loss netting is `+`/`−`/`min` over cent figures and so cannot
+      leave the cent; **only the halving rounds again**, and it is the *discount* that rounds — the
+      worksheet's own "less CGT concession amount @ 50%" line — with
+      `net_capital_gain = net_other + (net_discount − cgt_discount)`, i.e. what the worksheet leaves
+      after the line printed above it rather than a second halving. That is the direction that makes
+      the printed working reconcile, and (the discount rounding half away from zero) lands the
+      assessable figure the taxpayer-favourable way: the finding's disposal now reads
+      **100.01 − 50.01 = 50.00** with an 18A of **50.00**. `CgtSummaryYear` follows for free bar one
+      figure — `amma_discount_gains_grossed_up` is rounded and `long_term_gains` **derived** from it
+      by subtraction (`to_cents` is monotonic, so the remainder can never go negative), so the
+      printed worksheet's two gain lines add to `discount_eligible_gains` exactly.
+      **What `docs/ato/` says about worksheet rounding: nothing.** Question 18's own step order
+      (`capital-gains-question-18.md`, and a fresh fetch of the live page today — 807 lines, zero
+      occurrences of "cents", "round" or "whole dollar") is silent, as are `cgt-how-to-calculate.md`
+      and `cgt-discount.md`. The only rounding rules anywhere in the mirror are somebody else's: the
+      trustee-level AMIT rounding adjustment surplus/deficit
+      (`amit-calculating-trust-components.md`, Div 276 — a trust's problem, not a member's), the
+      indexation factor's three decimals, and the per-label "show cents" notes
+      (`tax-return-labels-2026.md`, `amma-statement-guidance-notes.md`) — which cover 10M/11V/13P-S/
+      13A/13B/20O and **not** 18A/18H/18V, so a cent never reaches the lodged return at question 18
+      at all. The divergence was only ever visible to a human checking the worksheet, which is
+      exactly who this document is for. Silence means the direction was chosen on the project's own
+      rule (one `to_cents`, half away from zero, shared with the screens) rather than on an ATO
+      instruction.
+      **`tax-summary.csv` does diverge**, measured before the fix on two income lines and two
+      expenses landing on half cents: `gross_assessable_investment_income` printed `70.01` over
+      lines of `60.01 + 10.01`, and `deductions_total` printed `20.01` over destination lines of
+      `10.01 + 10.01`. Its three total columns are now the sum of the cent-rounded lines beside
+      them. Its **income lines are deliberately left exact**, which is the one place the treatment
+      differs from the net-capital-gain worksheet and the reason is a documented cross-report
+      contract: `docs/API.md` promises the annual tax report's per-record income rows "sum to
+      exactly the matching tax summary line", and those rows are W-d's residue 2, left for a section
+      of their own — rounding the line would have broken that promise silently (the existing test
+      uses whole dollars and would still pass). Nothing is derived from an income line but the
+      totals, so rounding one level up costs nothing. The **deductions** could not be handled that
+      way: they are cut two ways (by kind and by destination) and both cuts are printed beside one
+      `deductions_total`, so each expense is instead converted and rounded **at its own row**
+      (W-d's rule) and both cuts sum to the total by construction; `tax_report`'s deduction row
+      `amount_aud` is rounded with it, so that drilldown still sums exactly.
+      **Consumers, each confirmed:** the JSON report and CSV export (one record now, pinned by a
+      test each way); the annual tax report's `cgt_summary` (new test asserting it agrees with both
+      *and* that its own printed lines subtract to one another) and its `tax_summary` line section
+      (prints the record verbatim, so it inherits the fix); `db_cgt_years`, which reads only
+      `tax_year`; the pre-sale what-if, whose two scenario rows run through the same `net_years`
+      (its `hypothetical` totals stay the realised-gains figures, exact — it is a dry-run, not a
+      worksheet); `entities::worthless` and `ato_examples`, which assert whole-dollar figures and
+      are unmoved. **On Evan's real database** (a read-only copy of the 2026-08-22 backup, since
+      deleted) two years move by exactly one cent and both now reconcile: FY2026 18A
+      `39592.12` → `39592.11` (78689.09 − 39344.55 = 39344.54, + 247.57) and FY2025 `5076.87` →
+      `5076.86`; FY2021–FY2024 are unchanged, and every `tax-summary.csv` total already reconciled
+      (no investment expenses recorded). **A correction to this section's own write-up:** Evan's
+      FY2026 did *not* reconcile "by luck" — `39344.55 + 247.57 = 39592.12` checks the *addition*
+      form, which is the old code's own formula and so could never fail; read as the worksheet
+      prints it (18H net *less* the concession) it was a cent out, exactly like the reproduction.
+      Tests: `reports::net_capital_gain::tests::{api_export_the_printed_working_reaches_the_figure_it_works_to,
+      api_every_derived_column_is_the_arithmetic_of_the_cent_rounded_inputs,
+      api_the_annual_tax_reports_cgt_summary_agrees_with_the_json_and_the_csv,
+      api_a_year_already_exact_at_the_cent_is_unchanged (the control),
+      api_the_json_report_carries_the_same_cent_figures_as_the_export (W-c's control, rewritten:
+      W-f is what reversed it)}` — the generic one requires **every** field of the record to be
+      classified as an input, a derived column, or not money, so a newly added column fails until it
+      is placed, and re-derives the netting, the halving and the year-to-year loss chain from the
+      reported figures; `reports::tax_summary::tests::{api_export_a_total_column_is_the_sum_of_the_columns_it_totals,
+      db_each_total_column_totals_the_columns_beside_it,
+      db_a_year_already_exact_at_the_cent_is_unchanged (the control)}`;
+      `reports::tax_report::tests::income_sections_still_sum_to_the_summary_line_on_half_cent_figures`
+      (the drilldown promise, on the facts that would break it). All four W-f tests and all three
+      tax-summary ones were confirmed to fail with the rounding removed. Docs: `docs/API.md`'s
+      **Amounts round, rates don't**, Net capital gain (a new *worksheet is kept at the cent*
+      paragraph, and the export paragraph's "the JSON report above is unaffected" **withdrawn** —
+      W-c's promise, which W-f deliberately reverses), Tax summary (a new *a total column is the sum
+      of the columns printed beside it* paragraph), and the annual tax report's `cgt_summary` and
+      income bullets; pinned by `doc_checks::worksheet_derived_columns_documented`.
