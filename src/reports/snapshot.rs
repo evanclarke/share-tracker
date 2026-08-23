@@ -438,11 +438,11 @@ struct PricedListings {
 }
 
 async fn aud_prices_for(
-    pool: &SqlitePool,
+    conn: &mut sqlx::SqliteConnection,
     date: NaiveDate,
     now: DateTime<Utc>,
 ) -> Result<PricedListings, GenerateError> {
-    let resolved_valuations = valuation::stored_valuations(pool, date, now).await?;
+    let resolved_valuations = valuation::stored_valuations_on(conn, date, now).await?;
     let mut resolved = PricedListings {
         prices: HashMap::new(),
         fx_provisional: HashSet::new(),
@@ -461,8 +461,22 @@ async fn aud_prices_for(
     Ok(resolved)
 }
 
-/// Generate (or regenerate) the three snapshots for `date` and store them in
-/// one transaction, replacing any stored result and clearing its stale flag.
+/// Generate (or regenerate) the three snapshots for `date` and store them,
+/// replacing any stored result and clearing its stale flag.
+///
+/// The inputs are read **inside the write transaction that stores them**
+/// (`infra::db::write_tx`, so the write lock is held from the first read):
+/// the figures and the `stale = 0` they are stored with therefore come from
+/// one serialised point in time. Read outside it, a fact committed between
+/// the reads and the insert was neither in the stored figures nor reflected
+/// in the stored flag — the staleness triggers fired against a row the insert
+/// then overwrote with `stale = 0`, archiving a valuation of a state that no
+/// longer existed with nothing left to ask for a regeneration (SCENARIOS
+/// X-a). A concurrent fact write now waits for the run (the busy timeout
+/// covers it) and stales the snapshot it finds afterwards. Nothing in here
+/// touches the price provider — generation values from *stored* closing
+/// prices only — so the lock is never held across network I/O.
+///
 /// The stored `provisional` flag is set iff any price conversion in this run
 /// used a fallback-month FX rate — so regenerating once the real rate is
 /// imported clears it. The stored `price_carried_forward` flag is set iff any
@@ -478,7 +492,10 @@ pub async fn generate(
     date: NaiveDate,
     now: DateTime<Utc>,
 ) -> Result<Vec<SnapshotMeta>, GenerateError> {
-    let resolved = aud_prices_for(pool, date, now).await?;
+    // The write lock is taken here, before the first input read: everything
+    // below sees one serialised state of the database (SCENARIOS X-a).
+    let mut tx = write_tx(pool).await?;
+    let resolved = aud_prices_for(&mut tx, date, now).await?;
     let prices = resolved.prices;
     let provisional = !resolved.fx_provisional.is_empty();
     let price_carried_forward = !resolved.carried_forward.is_empty();
@@ -494,7 +511,7 @@ pub async fn generate(
         .map(|x| (x.listing_id, x.reason.as_str()))
         .collect();
 
-    let mut overview = portfolio::db_holdings(pool, Some(date)).await?;
+    let mut overview = portfolio::db_holdings_on(&mut tx, Some(date)).await?;
     for h in &mut overview {
         if let Some(&price) = prices.get(&h.listing_id) {
             h.current_price = Some(price);
@@ -505,7 +522,7 @@ pub async fn generate(
             h.price_unavailable = Some((*reason).to_string());
         }
     }
-    let mut gains = unrealised_gains::db_unrealised_gains(pool, date).await?;
+    let mut gains = unrealised_gains::db_unrealised_gains_on(&mut tx, date).await?;
     for g in &mut gains {
         if let Some(&price) = prices.get(&g.listing_id) {
             g.current_price = Some(price);
@@ -517,7 +534,7 @@ pub async fn generate(
             g.price_unavailable = Some((*reason).to_string());
         }
     }
-    let mut perf = performance::db_performance(pool, &prices, date).await?;
+    let mut perf = performance::db_performance_on(&mut tx, &prices, date).await?;
     for row in &mut perf {
         if let Some(listing_id) = row.listing_id {
             row.fx_provisional = resolved.fx_provisional.contains(&listing_id);
@@ -545,7 +562,6 @@ pub async fn generate(
     let generated_at = Utc::now().to_rfc3339();
     let excluded_json =
         serde_json::to_string(&excluded_holdings).map_err(|e| GenerateError::Db(e.to_string()))?;
-    let mut tx = write_tx(pool).await?;
     for (kind, rows_json) in &payloads {
         sqlx::query(
             "INSERT INTO report_snapshots \
@@ -972,6 +988,8 @@ mod tests {
     use crate::entities::{corporate_action, listing};
     use crate::test_support::{self, ApiClient, ApiResponse, test_pool, ymd};
     use axum::http::StatusCode;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     // -----------------------------------------------------------------------
     // The staleness-trigger set, pinned against the live schema
@@ -2846,5 +2864,185 @@ mod tests {
             .unwrap();
         assert_eq!(overview.rows[0]["total_cost_base"], "11500");
         assert_eq!(overview.rows[0]["market_value"], "12088.800");
+    }
+
+    // -----------------------------------------------------------------------
+    // SCENARIOS X-a: generation reads inside the transaction that stores it
+    // -----------------------------------------------------------------------
+
+    /// Poll `condition` until it holds, failing on a deadline rather than
+    /// spinning forever — the shape a concurrent test waits in, so a slow
+    /// machine waits longer instead of failing.
+    async fn await_condition(mut condition: impl FnMut() -> bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !condition() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the condition never held within the deadline"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+    }
+
+    /// A file-backed pool (WAL, migrations run) — what `main` opens, and the
+    /// one thing the two SCENARIOS X-a tests below cannot take from
+    /// [`test_pool`]. A `:memory:` database is shared-cache: a reader on a
+    /// second connection *blocks* on an open writer there, so the read/write
+    /// interleave those tests are about cannot arise at all and they would
+    /// pass against the very code they exist to refuse. Under WAL a reader
+    /// sees the snapshot it began with while another connection commits past
+    /// it, which is the real behaviour.
+    async fn race_pool(dir: &tempfile::TempDir) -> SqlitePool {
+        let path = dir.path().join("snapshot-race.db");
+        crate::infra::db::init(&path.to_string_lossy())
+            .await
+            .expect("a file-backed pool")
+    }
+
+    /// The invariant a stored snapshot must satisfy however a concurrent fact
+    /// write interleaves with a generation run: the result is **either**
+    /// current with that write **or** flagged `stale`. Fresh-but-superseded is
+    /// the state that has no repair — the stale flag is the only thing that
+    /// ever asks for a regeneration, so a figure stored fresh over a fact it
+    /// missed stays wrong forever (SCENARIOS X-a).
+    ///
+    /// Deliberately an invariant rather than a timing pin: whichever side takes
+    /// the write lock first, the assertion holds once generation reads inside
+    /// the transaction that stores it — the run either reads the corrected
+    /// price and stores it, or commits first and is staled by the write that
+    /// follows. The third state, stored fresh at the superseded price, is what
+    /// the reads-outside-the-transaction version produced.
+    ///
+    /// Several rounds, because the first is a first generation (no row for the
+    /// staleness triggers to mark) and the rest are regenerations (the trigger
+    /// marks the stored row and the insert used to clear it).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_price_written_during_generation_never_leaves_a_fresh_superseded_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = race_pool(&dir).await;
+        insert_listing(&pool, 1, "BHP", Some("XASX"), "AUD").await;
+        // Enough parcels that a run does real work: the point is that the write
+        // has a window to land in, not that it lands at a chosen instant.
+        for id in 1..=200 {
+            insert_buy(&pool, id, 1, ymd(2024, 1, 16), "100", "10", "AUD").await;
+        }
+        let date = ymd(2026, 6, 5); // Friday
+        store_price(&pool, 1, date, "62.48").await;
+        let now = friday_evening_sydney();
+
+        for round in 0..6 {
+            let corrected = Decimal::from(60 + round);
+            let running = Arc::new(AtomicBool::new(false));
+            let generating = {
+                let pool = pool.clone();
+                let running = running.clone();
+                tokio::spawn(async move {
+                    running.store(true, Ordering::SeqCst);
+                    generate(&pool, date, now).await
+                })
+            };
+            // Wait on a condition, not a duration: the run is under way. What
+            // the two connections then do to each other is up to them — the
+            // assertion below holds for every ordering, which is the point.
+            await_condition(|| running.load(Ordering::SeqCst)).await;
+            test_support::closing_price(1, date)
+                .price(&corrected.to_string())
+                .manual("asx.com.au closing report", "corrected close")
+                .insert(&pool)
+                .await;
+            generating
+                .await
+                .expect("the generation task does not panic")
+                .expect("the date is valuable");
+
+            let stale = stale_flags(&pool, date).await;
+            let snap = db_get(&pool, ReportKind::UnrealisedGains, date)
+                .await
+                .unwrap()
+                .unwrap();
+            let gains: Vec<unrealised_gains::UnrealisedGain> =
+                serde_json::from_value(snap.rows).unwrap();
+            let stored_price = gains[0].current_price.expect("the holding is priced");
+            assert!(
+                stored_price == corrected || stale.iter().all(|s| *s),
+                "round {round}: the snapshot is stored fresh at {stored_price} while the \
+                 stored closing price is {corrected} — a fact write was lost between the \
+                 run's reads and its `stale = 0` (SCENARIOS X-a); stale flags {stale:?}"
+            );
+            // Whichever way it went, the stored figures agree with each other:
+            // the market value is the stored price times the stored units.
+            assert_eq!(
+                gains[0].market_value,
+                Some(stored_price * gains[0].quantity),
+                "round {round}: the stored market value matches the stored price"
+            );
+        }
+    }
+
+    /// The same guarantee with the race taken out: while another connection
+    /// holds SQLite's write lock, generation cannot read at all — so nothing it
+    /// reads can already have been superseded when it stores. Held open, the
+    /// run makes no progress; released, the run carries the value that
+    /// connection committed. Reading before the lock, it carried the old one
+    /// and still stored `stale = 0` (SCENARIOS X-a).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn generation_reads_only_after_it_holds_the_write_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = race_pool(&dir).await;
+        insert_listing(&pool, 1, "BHP", Some("XASX"), "AUD").await;
+        insert_buy(&pool, 1, 1, ymd(2024, 1, 16), "100", "10", "AUD").await;
+        let date = ymd(2026, 6, 5);
+        store_price(&pool, 1, date, "62.48").await;
+        let now = friday_evening_sydney();
+
+        // A fact write in flight on another connection: `BEGIN IMMEDIATE` has
+        // the write lock, and the corrected price is not visible yet.
+        let mut tx = write_tx(&pool).await.unwrap();
+        sqlx::query("UPDATE closing_prices SET price = '60.00' WHERE listing_id = 1")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+
+        let running = Arc::new(AtomicBool::new(false));
+        let generating = {
+            let pool = pool.clone();
+            let running = running.clone();
+            tokio::spawn(async move {
+                running.store(true, Ordering::SeqCst);
+                generate(&pool, date, now).await
+            })
+        };
+        // The run is under way (a condition, not a duration), and then given
+        // room to do whatever it can: holding the write lock, that is nothing.
+        // A slower machine only makes the grace period more generous — it can
+        // never turn a blocked run into a finished one.
+        await_condition(|| running.load(Ordering::SeqCst)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(
+            !generating.is_finished(),
+            "generation cannot complete while another connection holds the write lock"
+        );
+
+        tx.commit().await.unwrap();
+        let metas = generating
+            .await
+            .expect("the generation task does not panic")
+            .expect("the date is valuable");
+        assert!(
+            metas.iter().all(|m| !m.stale),
+            "the run read everything after that commit, so its result is fresh"
+        );
+        let snap = db_get(&pool, ReportKind::UnrealisedGains, date)
+            .await
+            .unwrap()
+            .unwrap();
+        let gains: Vec<unrealised_gains::UnrealisedGain> =
+            serde_json::from_value(snap.rows).unwrap();
+        assert_eq!(
+            gains[0].current_price,
+            Some("60.00".parse().unwrap()),
+            "the run values at the price committed while it waited, not the one it could \
+             have read before the lock"
+        );
     }
 }

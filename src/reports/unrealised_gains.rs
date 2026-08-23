@@ -88,12 +88,25 @@ pub async fn db_unrealised_gains(
     // so an interleaved write can't yield e.g. an allocation whose parcel is
     // missing from the same read.
     let mut tx = pool.begin().await?;
+    let gains = db_unrealised_gains_on(&mut tx, as_of_date).await?;
+    tx.commit().await?;
+    Ok(gains)
+}
+
+/// The same report read on the caller's own connection, for a caller that
+/// folds it into a wider single-snapshot transaction — snapshot generation
+/// reads it inside the write transaction that stores the result, so a fact
+/// committed elsewhere cannot land between the figures and their `stale = 0`
+/// (SCENARIOS X-a).
+pub async fn db_unrealised_gains_on(
+    conn: &mut sqlx::SqliteConnection,
+    as_of_date: NaiveDate,
+) -> Result<Vec<UnrealisedGain>, sqlx::Error> {
     // The open parcels and their AUD cost bases come from the shared loader
     // (`domain::open_parcels`), bounded at the report's as-of date: trades,
     // sales, AMIT statements and return-of-capital payments after it are
     // excluded and quantities come back in that date's unit basis.
-    let open = open_parcels::load(&mut tx, Some(as_of_date)).await?;
-    tx.commit().await?;
+    let open = open_parcels::load(conn, Some(as_of_date)).await?;
 
     let mut holding_qty: HashMap<(i64, i64), Decimal> = HashMap::new();
     let mut holding_cost_base: HashMap<(i64, i64), Decimal> = HashMap::new();

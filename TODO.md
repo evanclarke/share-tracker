@@ -10,7 +10,7 @@ findings are all closed in DONE.md), except where a section's heading names anot
 (e.g. REQUIREMENTS, SCENARIOS). Each section records one finding; sections land in DONE.md as they
 are fixed or decided.
 
-**One finding is open in this file** — [SCENARIOS X-a](#scenarios-x-a--a-fact-write-that-lands-while-a-snapshot-is-being-generated-is-lost-and-the-snapshot-is-stored-as-fresh), from the section X pass of 2026-08-23.
+**One finding is open in this file** — SCENARIOS X-a, from the section X pass of 2026-08-23, now fixed and awaiting archive.
 
 **SCENARIOS.md sections A–V are driven and every finding they raised is closed** in the `DONE/*.md`
 archive. Section **S. Settlement, holidays, and dates** was driven 2026-08-22 (`d501408`) and its
@@ -212,5 +212,68 @@ so the race has not yet corrupted anything live. The window there is ~41 ms per 
 the tree already states (`infra::db::write_tx`'s doc comment, and every entity's `db_upsert`), and
 the `_on` split it needs is a pattern the reports already have.
 
-- [ ] Generate a report snapshot inside the write transaction that stores it, so a fact write cannot
+- [x] Generate a report snapshot inside the write transaction that stores it, so a fact write cannot
       land between its inputs and its `stale = 0`
+      — `reports::snapshot::generate` now opens `infra::db::write_tx` as its **first** statement and
+      takes every input read on that transaction: `aud_prices_for` → `valuation::stored_valuations_on`,
+      `portfolio::db_holdings_on` (already existed), `unrealised_gains::db_unrealised_gains_on`,
+      `performance::db_performance_on`. The figures and the `stale = 0` they are stored with now come
+      from one serialised state, so the write lock is what closes the window rather than a marker
+      that detects it. **The mechanism was re-derived before the fix, and the write-up held up in
+      full**: the reads each opened and closed their own transaction against the pool, the
+      `INSERT … ON CONFLICT … DO UPDATE` sets `stale = 0` on both arms, and both trigger cases behave
+      as described (a first generation has no row for the staleness triggers to mark; a regeneration
+      has one, marked and then cleared by the same insert).
+      **The `_on` split, following `portfolio::db_holdings_on`** — each pool-taking function is kept
+      and delegates to its `_on` twin, so the two can never diverge: `reports/valuation.rs`
+      (`held_markets_on`, `stored_valuations_on`), `reports/unrealised_gains.rs`
+      (`db_unrealised_gains_on`), `reports/performance.rs` (`accumulate_on`, `db_performance_on` —
+      `db_performance` now owns the read transaction `accumulate` used to open),
+      `entities/closing_price.rs` (`HeldTimeline::load_on`, `db_held_listing_ids_on`, and `db_get_one`
+      / `db_latest_ok_price_on_or_before` made executor-generic in the shape `listing::db_get` and
+      `FxRates::load` already use, rather than grown a second copy). `load_market_on` was already
+      there. **Nothing inside the transaction touches the network**, checked call by call down
+      `stored_valuations_on`: it reads `closing_prices`, `listings`, the rename chain, the holiday
+      calendar and `rba_fx_rates`, and `Market::latest_complete_trading_day` is pure arithmetic over
+      the `now` passed in — snapshot generation values from **stored** prices only, so the lock is
+      never held across I/O. `DEFERRED_BEGIN_ALLOWED` is unchanged and still true: the `_on` variants
+      begin nothing, and `valuation.rs` reaches for `pool.acquire()` rather than a transaction, so it
+      stays off the list.
+      **Verified at the HTTP surface, throwaway database, 6,000 parcels (generation ≈ 0.6–1.4 s), the
+      finding's own reproduction**: `POST /report_snapshots/generate {"date":"2025-06-30"}` with a
+      `PUT /closing_prices/1/2025-06-30 {"price":"25"}` fired 500 ms in. *Before*: the correction
+      returned `204` in **1 ms** and the snapshot landed `stale: false` holding `current_price: "10"`
+      / `market_value: "6000000"` against a stored price of `25` — A$9,000,000 of archived valuation
+      with nothing left to ask for a regeneration. *After*: the same correction returns `204` in
+      **81 ms** (it waits for the run) and all three snapshots land **`stale: true`** — the run's own
+      figures, correctly flagged, and a following `generate` stores `current_price: "25"` /
+      `market_value: "15000000"` fresh. The non-price half of the finding behaves the same way: a
+      `PUT /trades/9001` (a Buy dated before the snapshot date) fired 500 ms into a run returns `204`
+      in 740 ms and leaves the snapshot `stale: true`, where it used to leave it fresh at the
+      pre-trade quantity. **Both controls still hold, unchanged by the fix**: the correction applied
+      *entirely before* a run gives `current_price: "25"` / `15000000` fresh; applied *entirely
+      after*, all three come back `stale: true`.
+      **Tests** (`src/reports/snapshot.rs`):
+      `reports::snapshot::tests::a_price_written_during_generation_never_leaves_a_fresh_superseded_snapshot`
+      is the invariant — six rounds (the first a first generation, the rest regenerations) each fire
+      a corrected price at a run started on another task, and assert the stored snapshot is **either**
+      valued at that price **or** flagged stale, plus that its market value still equals its own
+      stored price × units. It holds for every ordering, so it cannot flake on the fixed code; it
+      fails on round 0 of the old code (3/3 runs).
+      `reports::snapshot::tests::generation_reads_only_after_it_holds_the_write_lock` is the same
+      guarantee with the race removed: another connection holds `BEGIN IMMEDIATE` with a corrected
+      price uncommitted, the run must make no progress, and after the commit it must value at the new
+      price — deterministic, and it fails on the old code (which reads before it blocks and stores
+      the superseded figure). Both wait on conditions with deadlines, never on yield counts.
+      **Both tests build a file-backed pool (`race_pool`, `tempfile` + `infra::db::init`) rather than
+      `test_support::test_pool`**, and this is load-bearing rather than incidental: the in-memory pool
+      *does* hand out several connections that share one database, but it is **shared-cache**, where a
+      reader on a second connection blocks on an open writer — the read/write interleave cannot arise
+      at all there, and both tests passed against the *unfixed* code on it. Under WAL (what `main`
+      opens) a reader sees the snapshot it began with while another connection commits past it, which
+      is the real behaviour. The helper says so, so the next reader does not "simplify" it back.
+      **Docs**: `docs/API.md`'s Report snapshots section states the guarantee (reads inside the
+      storing transaction, a concurrent fact write waits and then stales, no network call under the
+      lock, and the cost — a concurrent write waits tens of ms per date), and README's snapshot
+      feature bullet gains the same clause. No schema change, so `docs/SCHEMA.md` is untouched; the
+      requirement is code-tested, so no `doc_checks.rs` entry.

@@ -359,22 +359,34 @@ async fn accumulate(
 ) -> Result<Option<Accumulated>, sqlx::Error> {
     // One read transaction: every input below comes from the same snapshot.
     let mut tx = pool.begin().await?;
+    let accumulated = accumulate_on(&mut tx, as_of).await?;
+    tx.commit().await?;
+    Ok(accumulated)
+}
+
+/// [`accumulate`] on the caller's own connection, for a caller that already
+/// holds a transaction — snapshot generation accumulates inside the write
+/// transaction that stores the result (SCENARIOS X-a).
+async fn accumulate_on(
+    conn: &mut sqlx::SqliteConnection,
+    as_of: NaiveDate,
+) -> Result<Option<Accumulated>, sqlx::Error> {
     let trades: Vec<TradeFlow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {}, trade_type, transfer_id, scrip_action_id, demerger_action_id \
          FROM trades WHERE date <= ?",
         ParcelRow::COLUMNS
     )))
     .bind(as_of)
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut *conn)
     .await?;
 
     let income_rows: Vec<Income> = sqlx::query_as("SELECT * FROM income WHERE date_paid <= ?")
         .bind(as_of)
-        .fetch_all(&mut *tx)
+        .fetch_all(&mut *conn)
         .await?;
 
     if trades.is_empty() && income_rows.is_empty() {
-        // Nothing to report; the dropped transaction was read-only.
+        // Nothing to report.
         return Ok(None);
     }
 
@@ -384,11 +396,11 @@ async fn accumulate(
     // every trade including the Sells, and values acquisitions at their
     // initial cost rather than the adjusted cost base — but the allocations
     // read is the same one, so it comes from there.
-    let qty_sold = open_parcels::db_units_sold(&mut tx, Some(as_of)).await?;
+    let qty_sold = open_parcels::db_units_sold(&mut *conn, Some(as_of)).await?;
 
-    let split_events = crate::entities::corporate_action::db_share_split_events(&mut *tx).await?;
+    let split_events = crate::entities::corporate_action::db_share_split_events(&mut *conn).await?;
     let ticker_rows = sqlx::query("SELECT id, ticker FROM listings")
-        .fetch_all(&mut *tx)
+        .fetch_all(&mut *conn)
         .await?;
     let mut tickers: HashMap<i64, String> = HashMap::new();
     for row in &ticker_rows {
@@ -396,8 +408,7 @@ async fn accumulate(
     }
     // every imported ATO FX rate — per-row conversions below are map lookups,
     // not one DB round-trip each
-    let fx = FxRates::load(&mut *tx).await?;
-    tx.commit().await?;
+    let fx = FxRates::load(&mut *conn).await?;
 
     let mut holdings: BTreeMap<(i64, i64), Acc> = BTreeMap::new();
     let mut overall = Acc::default();
@@ -551,11 +562,27 @@ pub async fn db_performance(
     prices: &HashMap<i64, Decimal>,
     as_of: NaiveDate,
 ) -> Result<Vec<HoldingPerformance>, sqlx::Error> {
+    // One read transaction: every input comes from the same snapshot.
+    let mut tx = pool.begin().await?;
+    let rows = db_performance_on(&mut tx, prices, as_of).await?;
+    tx.commit().await?;
+    Ok(rows)
+}
+
+/// [`db_performance`] on the caller's own connection — snapshot generation
+/// runs it inside the write transaction that stores the result, so a trade or
+/// income row committed elsewhere cannot land between the figures and their
+/// `stale = 0` (SCENARIOS X-a).
+pub async fn db_performance_on(
+    conn: &mut sqlx::SqliteConnection,
+    prices: &HashMap<i64, Decimal>,
+    as_of: NaiveDate,
+) -> Result<Vec<HoldingPerformance>, sqlx::Error> {
     let Some(Accumulated {
         holdings,
         overall,
         tickers,
-    }) = accumulate(pool, as_of).await?
+    }) = accumulate_on(conn, as_of).await?
     else {
         return Ok(vec![]);
     };

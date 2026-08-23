@@ -908,11 +908,17 @@ fn local_midnight_utc(date: NaiveDate, tz: Tz) -> Result<DateTime<Utc>, String> 
 // DB access
 // ---------------------------------------------------------------------------
 
-pub async fn db_get_one(
-    pool: &SqlitePool,
+/// Executor-generic so it can run on a caller's own connection (snapshot
+/// generation reads every price **inside** the transaction that stores the
+/// result) as well as on the pool.
+pub async fn db_get_one<'e, E>(
+    executor: E,
     listing_id: i64,
     price_date: NaiveDate,
-) -> Result<Option<ClosingPrice>, sqlx::Error> {
+) -> Result<Option<ClosingPrice>, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
     sqlx::query_as(
         "SELECT id, listing_id, price_date, price, price_as_observed, source, fetched_at, \
                 fetched_symbol, status, error, origin, sourced_from, reason \
@@ -920,7 +926,7 @@ pub async fn db_get_one(
     )
     .bind(listing_id)
     .bind(price_date)
-    .fetch_optional(pool)
+    .fetch_optional(executor)
     .await
 }
 
@@ -938,12 +944,16 @@ pub async fn db_get_one(
 /// has one: a row dated before the provider's series begins is not a price
 /// for this security by the listing's own record, so it cannot be the figure
 /// carried forward either. `None` means no floor.
-pub async fn db_latest_ok_price_on_or_before(
-    pool: &SqlitePool,
+/// Executor-generic for the same reason [`db_get_one`] is.
+pub async fn db_latest_ok_price_on_or_before<'e, E>(
+    executor: E,
     listing_id: i64,
     on_or_before: NaiveDate,
     not_before: Option<NaiveDate>,
-) -> Result<Option<(NaiveDate, Decimal)>, sqlx::Error> {
+) -> Result<Option<(NaiveDate, Decimal)>, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
     let row: Option<(NaiveDate, Money)> = sqlx::query_as(
         "SELECT price_date, price FROM closing_prices \
          WHERE listing_id = ?1 AND status = 'ok' AND price_date <= ?2 \
@@ -953,7 +963,7 @@ pub async fn db_latest_ok_price_on_or_before(
     .bind(listing_id)
     .bind(on_or_before)
     .bind(not_before)
-    .fetch_optional(pool)
+    .fetch_optional(executor)
     .await?;
     Ok(row.map(|(date, Money(price))| (date, price)))
 }
@@ -1454,11 +1464,20 @@ pub struct HeldTimeline {
 
 impl HeldTimeline {
     pub async fn load(pool: &SqlitePool) -> Result<Self, sqlx::Error> {
+        let mut conn = pool.acquire().await?;
+        HeldTimeline::load_on(&mut conn).await
+    }
+
+    /// [`HeldTimeline::load`] on the caller's own connection, so a write path
+    /// can read the timeline **inside its own transaction** — snapshot
+    /// generation does, so a trade committed between its reads and its store
+    /// cannot be missed (SCENARIOS X-a).
+    pub async fn load_on(conn: &mut sqlx::SqliteConnection) -> Result<Self, sqlx::Error> {
         let buys = sqlx::query(
             "SELECT id, listing_id, date, quantity FROM trades \
              WHERE trade_type IN ('Buy', 'DRP')",
         )
-        .fetch_all(pool)
+        .fetch_all(&mut *conn)
         .await?;
 
         // sale-date-basis units allocated out of each purchase parcel
@@ -1466,7 +1485,7 @@ impl HeldTimeline {
             "SELECT pa.purchase_trade_id, pa.quantity_allocated, s.date AS sale_date \
              FROM parcel_allocations pa JOIN trades s ON s.id = pa.sale_trade_id",
         )
-        .fetch_all(pool)
+        .fetch_all(&mut *conn)
         .await?;
         let mut qty_sold: HashMap<i64, Vec<(NaiveDate, Decimal)>> = HashMap::new();
         for row in &allocs {
@@ -1477,7 +1496,8 @@ impl HeldTimeline {
             ));
         }
 
-        let split_events = crate::entities::corporate_action::db_share_split_events(pool).await?;
+        let split_events =
+            crate::entities::corporate_action::db_share_split_events(&mut *conn).await?;
 
         let mut parcels: HashMap<i64, Vec<ParcelHolding>> = HashMap::new();
         for row in &buys {
@@ -1585,7 +1605,18 @@ pub async fn db_held_listing_ids(
     pool: &SqlitePool,
     as_of: Option<NaiveDate>,
 ) -> Result<Vec<i64>, sqlx::Error> {
-    Ok(HeldTimeline::load(pool).await?.held_listing_ids(as_of))
+    let mut conn = pool.acquire().await?;
+    db_held_listing_ids_on(&mut conn, as_of).await
+}
+
+/// [`db_held_listing_ids`] on the caller's own connection — the read half of
+/// snapshot generation runs inside the transaction that stores the result
+/// (SCENARIOS X-a).
+pub async fn db_held_listing_ids_on(
+    conn: &mut sqlx::SqliteConnection,
+    as_of: Option<NaiveDate>,
+) -> Result<Vec<i64>, sqlx::Error> {
+    Ok(HeldTimeline::load_on(conn).await?.held_listing_ids(as_of))
 }
 
 // ---------------------------------------------------------------------------

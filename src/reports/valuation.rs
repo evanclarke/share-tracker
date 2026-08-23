@@ -130,11 +130,21 @@ pub async fn held_markets(
     pool: &SqlitePool,
     as_of: Option<NaiveDate>,
 ) -> Result<Vec<Market>, ValuationError> {
-    let ids = closing_price::db_held_listing_ids(pool, as_of).await?;
+    let mut conn = pool.acquire().await.map_err(ValuationError::from)?;
+    held_markets_on(&mut conn, as_of).await
+}
+
+/// [`held_markets`] on the caller's own connection, so snapshot generation
+/// can read it inside the transaction that stores the result (SCENARIOS X-a).
+pub async fn held_markets_on(
+    conn: &mut sqlx::SqliteConnection,
+    as_of: Option<NaiveDate>,
+) -> Result<Vec<Market>, ValuationError> {
+    let ids = closing_price::db_held_listing_ids_on(&mut *conn, as_of).await?;
     let mut markets = Vec::with_capacity(ids.len());
     for id in ids {
         markets.push(
-            closing_price::load_market(pool, id)
+            closing_price::load_market_on(&mut *conn, id)
                 .await?
                 .ok_or_else(|| ValuationError::Db(format!("listing {id} disappeared")))?,
         );
@@ -170,7 +180,23 @@ pub async fn stored_valuations(
     date: NaiveDate,
     now: DateTime<Utc>,
 ) -> Result<StoredValuations, ValuationError> {
-    let markets = held_markets(pool, Some(date)).await?;
+    let mut conn = pool.acquire().await.map_err(ValuationError::from)?;
+    stored_valuations_on(&mut conn, date, now).await
+}
+
+/// [`stored_valuations`] on the caller's own connection. Snapshot generation
+/// resolves its prices this way — inside the write transaction that stores
+/// the result — so a closing price (or a trade) committed by another
+/// connection cannot land between the valuation and the `stale = 0` it is
+/// stored with (SCENARIOS X-a). Every read below is a database read; nothing
+/// here touches the price provider, so the write lock is never held on
+/// network I/O.
+pub async fn stored_valuations_on(
+    conn: &mut sqlx::SqliteConnection,
+    date: NaiveDate,
+    now: DateTime<Utc>,
+) -> Result<StoredValuations, ValuationError> {
+    let markets = held_markets_on(&mut *conn, Some(date)).await?;
     if markets.is_empty() {
         return Err(ValuationError::Unprocessable(format!(
             "nothing was held on {date}"
@@ -182,7 +208,7 @@ pub async fn stored_valuations(
     let mut blockers: Vec<String> = Vec::new();
     // every imported ATO FX rate — per-listing conversions below are map
     // lookups, not one DB round-trip each
-    let fx = FxRates::load(pool).await?;
+    let fx = FxRates::load(&mut *conn).await?;
     for market in &markets {
         let ticker = &market.listing.ticker;
         let Some(valuation_day) = market.latest_trading_day_on_or_before(date) else {
@@ -219,7 +245,8 @@ pub async fn stored_valuations(
         // The day's own close, if there is a usable one; otherwise the
         // carry-forward branch for a listing the provider has stopped
         // quoting, and otherwise a blocker.
-        let stored = closing_price::db_get_one(pool, market.listing.id, valuation_day).await?;
+        let stored =
+            closing_price::db_get_one(&mut *conn, market.listing.id, valuation_day).await?;
         let unpriced = market
             .listing
             .unpriced_from
@@ -236,7 +263,7 @@ pub async fn stored_valuations(
             // exists, so the `None` arm is a safety net, not a live path.
             _ if unpriced => {
                 match closing_price::db_latest_ok_price_on_or_before(
-                    pool,
+                    &mut *conn,
                     market.listing.id,
                     valuation_day,
                     market.listing.unpriced_before,
