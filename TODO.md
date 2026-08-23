@@ -180,6 +180,25 @@ same figure. Narrow (it needs a contemplated sale dated before a recorded statem
 live, and silent: nothing marks the estimate as resting on a different rule from the report it is
 meant to predict.
 
+Reproduced independently on a second fixture before this was accepted: a 100-unit VDHG parcel at
+$60, an AMMA for the year ended 2026-06-30 carrying a **$1.30** per-unit adjustment over the whole
+parcel, 40 units contemplated on 2026-03-02. The optimiser costs them **A$2,400.00**; the same 40
+units recorded as a Sell are costed **A$2,348.00** — A$52.00, again exactly the statement's whole
+reduction on the disposed units (40 × $1.30). The gap therefore **scales with the per-unit
+adjustment and the units sold**, and is not inherently small: a Vanguard AMMA's per-unit cost-base
+adjustment is routinely in this range, so a four-figure holding puts it in the hundreds of dollars.
+
+Worth noting *which* way it errs. The optimiser reports the **higher** cost base, so it under-states
+the gain the sale will actually realise — and because it ranks its four strategies on those gains, a
+statement covering one candidate parcel and not another can reorder the ranking, not merely shift
+every row by a constant. The output is advice about which parcel to sell, so a wrong ordering is the
+failure that matters, not the wrong figure beside it.
+
+This is a fresh instance of the pattern SCENARIOS section O already named — *diff a decision-support
+endpoint against the write path it rehearses* — which is how it should be tested once fixed: not by
+asserting a figure, but by asserting the optimiser and the recorded Sell agree over a matrix of
+cost-base events.
+
 - [ ] Decide whether the optimiser and the pre-sale what-if should cost their candidates as
       *disposed of on the contemplated date* rather than as *held at it* — a `Held` the loader is
       told rather than infers — and either make the two agree or say in `docs/API.md` where they
