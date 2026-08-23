@@ -94,7 +94,6 @@ all eight parcel-creating paths and reported by
 (`fc1fd7b`, archived in [`DONE/tax-domain.md`](DONE/tax-domain.md)). All five are summarised under
 [Section V findings](SCENARIOS.md#section-v-findings).
 
-**Nothing is open in this file.**
 
 After V, the next SCENARIOS pass is section **W. Precision, rounding, and scale** (8 scenarios),
 driven the way S, T, U and V were: run every scenario against a throwaway database, apply the
@@ -111,3 +110,170 @@ things that can sit behind an executed rollover — so the useful question after
 control before logging it**: V-e reads as a general DRP fault until the same facts are driven with
 the period left open, which are correct throughout — that control is what identified the closure,
 not the chain, as the cause, and it is what kept the fix from being aimed at the wrong mechanism.
+
+## SCENARIOS W-a — A money or quantity sent as a JSON number is rounded through f64
+
+`PUT /trades/:id` with `{"quantity": 99999999.87654321}` stores `99999999.8765432`, and
+`{"quantity": 100000000.00000001}` stores `100000000` — a satoshi gone, under a `204`. The same two
+values sent as **strings** are stored exactly, which is the control: the loss is entirely in the
+request deserialiser. `rust_decimal`'s `Deserialize` accepts a JSON number, `serde_json` hands it
+over as an `f64`, and the conversion keeps ~15 significant digits — so every ordinary figure
+(`58.1234`, `19.995`, `0.00000001`) survives and only the long ones don't, which is what makes it
+silent. 100,000,000 units of a sub-cent token held to 8 decimals is an ordinary crypto position, and
+`quantity` is exactly where a bulk import puts one.
+
+CLAUDE.md's rule — *"Money and quantities are always `Decimal`, never `f64`"* — holds everywhere else
+in the tree: there is no `f64` in `src` outside a comment, the columns are `TEXT`, the sqlx codec is
+`infra::decimal`'s, and `row_history` keeps the decimal strings verbatim. The HTTP boundary is the
+one place the rule is not enforced. This is the same shape as V-a (a body field silently dropped,
+now `deny_unknown_fields`) and T-10 (a query parameter silently ignored, now a `422` naming it): the
+project's answer to *"the request said something we cannot honour"* is already to refuse and name it.
+
+Found by the standing probes while driving **W-04** (the `REAL` round-trip scenario) — the migrations
+are clean (`migrations_store_decimals_as_text` guards them), so the round-trip that loses precision
+is on the way *in*, not in a column.
+
+Options offered:
+
+- **(a) Refuse a JSON number** in any money/quantity field — `422` naming the field, "enter
+  `quantity` as a decimal string" — the way `deny_unknown_fields` refuses a misspelt one, pinned by a
+  test that walks every request body's `Decimal` fields the way
+  `every_request_body_denies_unknown_fields` walks the extractors.
+- (b) Accept it exactly by enabling `serde_json/arbitrary_precision` +
+  `rust_decimal/serde-arbitrary-precision`.
+- (c) Accept the number only when its `f64` round-trip reproduces the literal exactly.
+- (d) Document as a known limitation.
+
+**Evan chose (a).** Refuse loudly, as the two siblings already do.
+
+- [ ] Refuse a JSON number in every money/quantity request field with a `422` naming it, with a test
+      that walks every handler-reachable request body's `Decimal`/`Option<Decimal>` fields so a new
+      body is covered without anyone remembering; document the rule in `docs/API.md` beside
+      [Unrecognised body fields](docs/API.md#unrecognised-body-fields)
+
+## SCENARIOS W-b — A trade the write path accepts panics every portfolio read and drops the connection
+
+`PUT /trades/9600` with `{"average_price":"1000000000000000","quantity":"1000000000000000"}` is
+accepted `204`. Afterwards `GET /portfolio/open-parcels`, `POST /portfolio/overview` and
+`POST /portfolio/unrealised-gains` return **no HTTP response at all** — the connection is reset
+(curl reports `000`), the server logs `thread 'tokio-rt-worker' panicked … Multiplication overflowed`,
+and the web UI's home screen shows a bare network error naming nothing. The row is invisible in every
+report that could have found it, because those are the reports that die.
+
+Two separate causes, and the finding needs both:
+
+1. **The arithmetic multiplies before it divides.** `domain::cost_base` pro-rates with
+   `initial_cost * units / parcel.quantity` (`src/domain/cost_base.rs:400`, and again at `:480` in
+   `adjustment_detail`). The product overflows `rust_decimal` whenever
+   `(price × qty + brokerage) × qty > 7.9228e28`, which the probe confirmed exactly at the boundary:
+   `price 1 / qty 1e14` (product `1e28`) reads fine, `price 1 / qty 1e15` (`1e30`) and
+   `price 0.5 / qty 4e14` (`8e28`) both kill the connection. In the overwhelmingly common case
+   `units == parcel.quantity` and the multiply-then-divide is pure waste.
+2. **Nothing catches the panic.** `app::router` layers no `CatchPanicLayer`, so a panicking handler
+   drops the connection rather than answering the `500` with a logged cause that
+   `infra::http::ApiError::Internal` exists to produce.
+
+Bounded by its controls. The write path checks `quantity > 0` and `average_price >= 0` and imposes
+**no** upper bound, so this is reachable by a fat-fingered run of zeros in either field. It is *not*
+reachable from the paths that look most dangerous: a 1,000,000,000,000-for-1 `ShareSplit` on a live
+parcel reads fine (the re-base multiplies the reported quantity, not the cost-base term, which stays
+in as-acquired units), and a trillion units of a sub-cent token with `$1.95` brokerage reads fine
+(`price × qty²` is what matters, not the holding's value). So the trigger is a mistyped trade,
+not a large portfolio — which is precisely why it should answer with a message.
+
+Found by the standing probes while driving **W-05** ($10M beside $0.01) and **W-08** (scale) — neither
+scenario names an overflow.
+
+Options offered:
+
+- **(a) Fix the arithmetic and catch panics** — short-circuit `units == parcel.quantity` and divide
+  before multiplying in `domain::cost_base`, plus a `CatchPanicLayer` so any remaining panic is a
+  logged `500` with a body rather than a dropped connection.
+- (b) Bound `price × quantity` at write time with a `422` naming it.
+- (c) All three.
+- (d) The panic layer only.
+
+**Evan chose (a).** Fix the cause and make the class of failure legible; a magnitude ceiling would be
+an arbitrary number to defend, and the arithmetic fix removes the whole-parcel case outright and
+raises the partial-parcel ceiling by roughly fourteen orders of magnitude.
+
+- [ ] Divide before multiplying (and short-circuit `units == parcel.quantity`) in
+      `domain::cost_base`'s two pro-rating sites, with a test at the old boundary
+- [ ] Layer `CatchPanicLayer` in `app::router` so a panicking handler answers a logged `500` with a
+      body instead of resetting the connection, with a test driving a deliberately panicking route
+
+## SCENARIOS W-c — The tax-return-ready CSV exports carry 28-digit figures under ATO labels
+
+`docs/API.md` calls the two `/export` endpoints "tax-return-ready" and gives each a second header row
+mapping its columns to ATO tax-return labels. On **Evan's real database** (a read-only copy of the
+2026-08-22 backup) they read:
+
+```
+net-capital-gain.csv  FY2026  18A  39592.120176274130543388699381
+net-capital-gain.csv  FY2026  18V  0.000000000000000000000000
+tax-summary.csv       FY2026       20243.630345624323612748757063
+```
+
+18V — the capital loss carried forward, a figure transcribed onto the return — prints as
+twenty-four zeros after the point. Every year with a brokerage-bearing disposal in it is affected;
+FY2021, FY2023 and FY2024 happen to come out clean, which is why this has gone unnoticed.
+
+The control is the web UI, which is correct: `util.js`'s `COLUMN_KINDS` classifies every one of these
+columns as money and `filterableTable` renders them at two decimal places, half away from zero, with
+the full value on hover. The rule exists, it is documented at `docs/API.md`'s **Amounts round, rates
+don't**, and the CSV export is the one money surface that does not inherit it.
+
+Found by the standing probes while driving **W-07** (sum-of-parts vs total).
+
+Options offered:
+
+- **(a) Round every money column in the two exports to the cent**, half away from zero — the same
+  rule and direction the screens use — leaving the JSON API full-precision as documented.
+- (b) Whole dollars for the ATO-labelled columns, cents for the rest.
+- (c) Round in the report itself so JSON, CSV and screens carry one figure.
+- (d) Document as a known limitation.
+
+**Evan chose (a).** The CSV mirrors a screen, so it should read like it; the JSON stays the exact
+figure the docs promise.
+
+- [ ] Round every money column of `net-capital-gain.csv` and `tax-summary.csv` to the cent (half away
+      from zero, the `roundDecimalStr` rule) in `reports::export`'s `csv_response` path, leaving rate
+      and quantity columns verbatim and the JSON responses untouched; update `docs/API.md`'s two
+      export paragraphs to say so
+
+## SCENARIOS W-d — The Annual Tax Report's printed columns do not add up
+
+The Annual Tax Report is the one surface built to be printed and archived (`custom: 'tax-report'`,
+its own `@media print` stylesheet, A4 landscape). Its parcel rows and its subtotals are each rounded
+to the cent independently, so the column does not add up on the page. An entirely ordinary
+three-parcel BHP disposal — `$9.95` brokerage plus `99.5c` GST on each buy, so each parcel's cost base
+lands on a half-cent — prints:
+
+```
+parcel discount amounts   63.55 + 527.90 + 1060.73 = 1652.18
+printed group subtotal                               1652.17
+```
+
+The subtotal is the exact sum rounded; the rows are each rounded, three of them upward. The same
+disposal's `cost_base` column is a cent out for the same reason. At four decimal places every column
+reconciles, which is the control — the arithmetic is right and the presentation is what disagrees.
+
+Found by driving **W-07** directly, and confirmed against the printed document rather than only the
+JSON.
+
+Options offered:
+
+- **(a) Total the rounded rows, in the report** — round each parcel figure to the cent in
+  `reports::tax_report` and make each subtotal and grand total the sum of those rounded figures, so
+  the API and the printed page agree and a reader can add the column up.
+- (b) Do the same in `taxreport.js` only, leaving the API exact (so the two then differ).
+- (c) Print rows at four decimal places.
+- (d) Document as a known limitation.
+
+**Evan chose (a).** The document's job is to be checked by hand; a column that does not add up fails
+at exactly that.
+
+- [ ] Round each disposal-schedule parcel figure to the cent in `reports::tax_report` and sum the
+      rounded values into every subtotal and grand total, with a test asserting each column's rows
+      sum exactly to the total it sits under; note the convention in `docs/API.md`'s Annual tax
+      report section
