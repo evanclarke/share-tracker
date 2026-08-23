@@ -216,6 +216,39 @@ fix the first: that product is the cost base, so an unrepresentable one has no l
 is exactly why (a) needed both halves — the panic layer is what turns the headline trade's read from
 a dropped connection into a `500`.
 
+Verified independently at the HTTP surface after the fix, against a throwaway database: the three
+pro-rate cases (`price 1 / qty 1e15`, `price 0.5 / qty 4e14`, `price 1 / qty 1e14`) now answer `200`
+on `/portfolio/open-parcels`, `POST /portfolio/overview` and `POST /portfolio/unrealised-gains`; the
+headline `1e15 × 1e15` trade answers **`500` with an empty body** and logs
+`request handler panicked panic=Multiplication overflowed`, where it previously reset the connection;
+`/reports/health` stays `200` throughout, the control.
+
+One further residual, out of this section's scope and noted while fixing it:
+`AmitReductionEvent::reduction_for_units` carries the same multiply-before-divide shape
+(`per_unit * covered.min(held) * units / held`). Probed at 1e15 units with a `0.05` per-unit
+adjustment it survives (`1.5e28`), but a larger per-unit figure at that scale would overflow — now a
+logged `500` rather than a dropped connection, so it fails safe. Worth closing properly later.
+
+## SCENARIOS W-e — A trade whose price × quantity is unrepresentable is still accepted with 204
+
+Split out of W-b once fixing it established that the headline trade overflows at
+`Parcel::initial_cost`, not at the pro-rate. `PUT /trades/:id` with an `average_price` and `quantity`
+whose product exceeds `Decimal`'s range (≈ `7.9228e28`) is still accepted `204`. It now fails
+*safely* — the three portfolio reads answer a logged `500` with an empty body instead of resetting
+the connection — but three screens are still dead, the reply still names nothing, and the offending
+row is still invisible in exactly the reports that would have found it, because those are the reports
+that fail.
+
+The write path checks `quantity > 0` and `average_price >= 0` and imposes no upper bound. W-b's
+option (b) — refuse the write, naming the figure — is what closes this, and the objection recorded
+against it there (*"a magnitude ceiling would be an arbitrary number to defend"*) turns out **not** to
+apply to this half: the ceiling here is not a policy number but a representability limit the type
+itself states, so the refusal has a principled bound to quote. That is a new fact, so the decision is
+worth re-taking rather than inheriting.
+
+- [ ] Decide whether to bound `average_price × quantity` at write time, and if so refuse it `422`
+      naming the product and the limit, across every parcel-creating write
+
 ## SCENARIOS W-c — The tax-return-ready CSV exports carry 28-digit figures under ATO labels
 
 `docs/API.md` calls the two `/export` endpoints "tax-return-ready" and gives each a second header row
