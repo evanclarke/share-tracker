@@ -26,7 +26,7 @@
 //! type, its own ratio walk ([`price_basis_ratio`]) and its own loader
 //! (`entities::closing_price::db_price_basis_events`).
 
-use crate::infra::decimal::parse_dec;
+use crate::infra::decimal::{mul_div, parse_dec};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use sqlx::Row;
@@ -122,7 +122,7 @@ impl RocEvent {
         Ok(Some(if new == old {
             self.amount_per_unit
         } else {
-            self.amount_per_unit * new / old
+            mul_div(&[self.amount_per_unit, new], old)
         }))
     }
 }
@@ -340,7 +340,11 @@ pub fn split_adjusted_quantity(
     up_to: Option<NaiveDate>,
 ) -> Decimal {
     let (new, old) = split_ratio(splits, acquired, up_to);
-    if new == old { qty } else { qty * new / old }
+    if new == old {
+        qty
+    } else {
+        mul_div(&[qty, new], old)
+    }
 }
 
 /// The inverse of [`split_adjusted_quantity`]: a quantity expressed in the
@@ -353,7 +357,11 @@ pub fn as_acquired_quantity(
     at: NaiveDate,
 ) -> Decimal {
     let (new, old) = split_ratio(splits, acquired, Some(at));
-    if new == old { qty } else { qty * old / new }
+    if new == old {
+        qty
+    } else {
+        mul_div(&[qty, old], new)
+    }
 }
 
 /// Total units sold out of a parcel acquired at `acquired`, re-based to its
@@ -572,5 +580,9 @@ pub fn contemporaneous_price(
     observed: NaiveDate,
 ) -> Decimal {
     let (new, old) = price_basis_ratio(events, price_date, observed);
-    if new == old { price } else { price * new / old }
+    if new == old {
+        price
+    } else {
+        mul_div(&[price, new], old)
+    }
 }

@@ -127,52 +127,63 @@ Archived in [`DONE/infra.md`](DONE/infra.md) (W-a, W-b),
 [`DONE/reporting.md`](DONE/reporting.md) (W-c, W-d, W-f), and summarised under
 [Section W findings](SCENARIOS.md#section-w-findings).
 
-## Multiply-before-divide across the rest of the tree — sixteen more sites
+## A replacement quantity no `Decimal` can hold
 
-Found by grepping the `a * b / c` shape while closing the three sites above (that grep is also what
-turned up `investment_expense`, which the section above had not named and which was reachable). The
-sixteen below are what the shape match returns; it is a *textual* match, so a near-variant it does
-not spell (a dereferenced operand, a constant multiplier) can hide from it — two of these sixteen
-were found only by reading around the hits. Every
-one of these is the same shape and the same failure mode: an intermediate product past
-`rust_decimal`'s ~7.9228e28 ceiling panics, which the panic layer turns into a logged `500` with an
-empty body, even where the answer itself is perfectly representable. The helper the three fixed sites
-now share, `infra::decimal::mul_div`, makes each a one-line substitution — the work is a test per
-site and confirming each divisor is non-zero, not the edit.
+Split out of the multiply-before-divide sweep (archived in
+[`DONE/tax-domain.md`](DONE/tax-domain.md)), which closed the arithmetic but deliberately left this
+decision open: `infra::decimal::mul_div` cannot help here, because the *result* is what is
+unrepresentable rather than the working.
 
-Not fixed here deliberately: this is a separate decision, and a sweep is worth taking as one pass
-with its own reproductions rather than trailing the three sites that were measured.
+A demerger or scrip-for-scrip exchange whose ratio is **greater than one** computes a replacement
+quantity of `held × new / old`. On a 1000-for-1 ratio a holding of 1e27 units asks for 1e30
+replacement units, which is past `Decimal`'s ~7.9228e28 ceiling however the arithmetic is ordered —
+`mul_div` divides early, finds the product still overflows, and panics exactly as the plain
+expression did. That is W-e's shape, not the sweep's: there is no lesser answer to give, so the
+answer is a write-time refusal naming the arithmetic, in the wording
+`domain::cost_base::UnrepresentableCost::message` already uses for a cost base.
 
-The ones a user-entered figure can actually drive — no magnitude bound stands between an entry and
-the product, and W-e bounds a *cost base*, never a quantity:
+- [ ] Decide whether the parcel-substituting operations (scrip exchange, demerger, transfer) should
+      refuse a replacement quantity outside `Decimal`'s range at the write, W-e style, naming the
+      ratio and the holding that produced it — and implement it if so, with a test at the boundary
 
-- `entities::scrip_exchange.rs:327,335` — `reduced_cost_base * num / den` and
-  `at_date_units * new_units / old_units`. Both are the demerger's two expressions exactly; a
-  **write** path, so a panic aborts the exchange.
-- `entities::corporate_action::adjustments.rs:343,356` — `qty * new / old` (and its inverse), the
-  split re-basing every allocation and report walks through. A parcel of 1e27 units is writable (the
-  bound is on `price × quantity`, not quantity), so a four-digit split ratio overflows it.
-- `reports::parcel_optimiser.rs:260,262` — `total_proceeds * units_so_far / total_units` and
-  `remaining_cost_base * units / remaining_quantity`. The second is `domain::cost_base`'s pro-rate
-  re-implemented locally, which is its own finding: it should be calling the shared pipeline.
-- `reports::realised_gains.rs:397,450,555` — the sale-cost spread, the scrip-cash apportionment (the
-  read-side twin of `scrip_exchange.rs:327`), and the rights-cost spread.
-- `reports::activity.rs:647` — `balance * new / old`, the running balance re-based across a split.
+## The parcel optimiser's candidates are costed as *held*, not as *disposed of*
 
-The ones that need a figure absurd on its face but not refused anywhere —
-`entities::rights_exercise.rs:197`, `entities::corporate_action::adjustments.rs:125,575`,
-`reports::tax_summary.rs:425`, `reports::franking.rs:54` and `domain::franking_credit.rs:66` (whose
-multiplier is the literal 30, so it needs a franked amount above 2.64e27) — are the same shape and
-the same one-line fix, but nothing but scale separates them from the list above.
+Raised while sweeping `reports::parcel_optimiser.rs`'s pro-rate onto `mul_div` (the section archived
+in [`DONE/tax-domain.md`](DONE/tax-domain.md) flagged the line as `domain::cost_base`'s pro-rate
+re-implemented locally and asked whether the local copy had drifted).
 
-One related gap the helper cannot close, recorded here so it is not mistaken for part of the sweep:
-a demerger or scrip exchange whose ratio is **greater than one** can compute a replacement *quantity*
-that is genuinely unrepresentable (1e27 units on a 1000-for-1 ratio). There is no lesser answer to
-give, so that is W-e's shape — a write-time refusal naming the arithmetic — not this one.
+The pro-rate itself has **not** drifted: `disposal_figures` starts from `remaining_cost_base`, which
+`reports::open_parcels` already obtained from the shared pipeline, and scaling it linearly by
+`units ÷ remaining_quantity` agrees with `domain::cost_base::adjusted_cost_base` to the digit —
+measured against `reports::realised_gains` for the same disposal actually recorded, across a plain
+partial sale, a return of capital, a whole-parcel pick, and an AMMA statement whose year end
+precedes the sale. (A consolidation into a non-terminating unit basis differs by 2e-27, which is the
+second pro-rate rounding once more at 28 digits, not a disagreement about the rule.)
 
-- [ ] Sweep the remaining `a * b / c` sites onto `infra::decimal::mul_div`, with a test at each
-      site's ceiling, and decide separately whether the unrepresentable-*quantity* case above wants
-      a W-e-style refusal
+What **has** drifted is one step upstream of that line, and it is the same class of bug — two
+callers of one domain calculation disagreeing. `parcel_optimiser::db_candidate_parcels_on` reads its
+candidates through `domain::open_parcels::load`, which costs them `Held::AsAt(as_of)`; the recorded
+Sell is costed `Held::DisposedOn(sale_date)`. The two differ in exactly one respect —
+`Held::AsAt` reports no disposal date, so `AmitReductionEvent::reduction_for_units` always takes its
+*still-held* branch — and that changes the figure whenever an AMMA statement's tax year end falls
+**after** the contemplated sale date and its adjustment row covers more than the units still held at
+that year end. The optimiser then applies no reduction at all, while the same disposal, once
+recorded, spills the statement onto the disposed units per s 104-107B / LCR 2015/11 (the adjustment
+is made just before the CGT event).
+
+Measured: a 100-unit parcel at $13.3166…/unit, an AMMA for the year ended 2026-06-30 with a −$0.13
+per-unit cost-base adjustment covering the whole parcel, and 40 units disposed of on 2026-03-02.
+`POST /portfolio/parcel-optimiser` costs the 40 units at **A$532.67**; the same 40 units recorded as
+a Sell are costed **A$537.87** by `/portfolio/realised-gains` — A$5.20 apart, the statement's whole
+reduction on those units. `POST /reports/net-capital-gain/what-if` shares the same reader and so the
+same figure. Narrow (it needs a contemplated sale dated before a recorded statement's year end) but
+live, and silent: nothing marks the estimate as resting on a different rule from the report it is
+meant to predict.
+
+- [ ] Decide whether the optimiser and the pre-sale what-if should cost their candidates as
+      *disposed of on the contemplated date* rather than as *held at it* — a `Held` the loader is
+      told rather than infers — and either make the two agree or say in `docs/API.md` where they
+      deliberately do not, with a test pinning whichever answer is chosen
 
 After W, the next SCENARIOS pass is section **X. Transactional integrity and concurrency**
 (8 scenarios), driven the way S through W were: run every scenario against a throwaway database,

@@ -1521,3 +1521,98 @@ not a refusal.
       Each fails with the fix removed; a divide-first implementation additionally fails eight
       pre-existing tests, which is what says the multiply-first order is load-bearing rather than
       incidental.
+
+## Multiply-before-divide across the rest of the tree — sixteen more sites
+
+Found by grepping the `a * b / c` shape while closing the three sites above (that grep is also what
+turned up `investment_expense`, which the section above had not named and which was reachable). The
+sixteen below are what the shape match returns; it is a *textual* match, so a near-variant it does
+not spell (a dereferenced operand, a constant multiplier) can hide from it — two of these sixteen
+were found only by reading around the hits. Every
+one of these is the same shape and the same failure mode: an intermediate product past
+`rust_decimal`'s ~7.9228e28 ceiling panics, which the panic layer turns into a logged `500` with an
+empty body, even where the answer itself is perfectly representable. The helper the three fixed sites
+now share, `infra::decimal::mul_div`, makes each a one-line substitution — the work is a test per
+site and confirming each divisor is non-zero, not the edit.
+
+Not fixed here deliberately: this is a separate decision, and a sweep is worth taking as one pass
+with its own reproductions rather than trailing the three sites that were measured.
+
+The ones a user-entered figure can actually drive — no magnitude bound stands between an entry and
+the product, and W-e bounds a *cost base*, never a quantity:
+
+- `entities::scrip_exchange.rs:327,335` — `reduced_cost_base * num / den` and
+  `at_date_units * new_units / old_units`. Both are the demerger's two expressions exactly; a
+  **write** path, so a panic aborts the exchange.
+- `entities::corporate_action::adjustments.rs:343,356` — `qty * new / old` (and its inverse), the
+  split re-basing every allocation and report walks through. A parcel of 1e27 units is writable (the
+  bound is on `price × quantity`, not quantity), so a four-digit split ratio overflows it.
+- `reports::parcel_optimiser.rs:260,262` — `total_proceeds * units_so_far / total_units` and
+  `remaining_cost_base * units / remaining_quantity`. The second is `domain::cost_base`'s pro-rate
+  re-implemented locally, which is its own finding: it should be calling the shared pipeline.
+- `reports::realised_gains.rs:397,450,555` — the sale-cost spread, the scrip-cash apportionment (the
+  read-side twin of `scrip_exchange.rs:327`), and the rights-cost spread.
+- `reports::activity.rs:647` — `balance * new / old`, the running balance re-based across a split.
+
+The ones that need a figure absurd on its face but not refused anywhere —
+`entities::rights_exercise.rs:197`, `entities::corporate_action::adjustments.rs:125,575`,
+`reports::tax_summary.rs:425`, `reports::franking.rs:54` and `domain::franking_credit.rs:66` (whose
+multiplier is the literal 30, so it needs a franked amount above 2.64e27) — are the same shape and
+the same one-line fix, but nothing but scale separates them from the list above.
+
+One related gap the helper cannot close, recorded here so it is not mistaken for part of the sweep:
+a demerger or scrip exchange whose ratio is **greater than one** can compute a replacement *quantity*
+that is genuinely unrepresentable (1e27 units on a 1000-for-1 ratio). There is no lesser answer to
+give, so that is W-e's shape — a write-time refusal naming the arithmetic — not this one.
+
+- [x] Sweep the remaining `a * b / c` sites onto `infra::decimal::mul_div`, with a test at each
+      site's ceiling, and decide separately whether the unrepresentable-*quantity* case above wants
+      a W-e-style refusal
+      — all sixteen substituted, and every one of them was reachable: none turned out to be bounded
+      upstream. Fifteen carry an **API-level** test driven through `ApiClient` at the site's own old
+      ceiling; one (`contemporaneous_price`) is a unit test, because its only production caller is
+      the provider-price re-basing pass, which needs a stubbed fetch and a stored
+      `price_as_observed` row before it reaches a single multiplication. The tests:
+      `entities::scrip_exchange::tests::{api_exchange_past_the_old_cash_apportionment_ceiling_completes,
+      api_exchange_past_the_old_replacement_quantity_ceiling_completes}`,
+      `entities::rights_exercise::tests::api_exercise_past_the_old_entitlement_ceiling_completes`,
+      `entities::corporate_action::tests::{api_open_parcels_past_the_old_payment_rebasing_ceiling_reports,
+      api_open_parcels_past_the_old_split_rebasing_ceiling_reports,
+      api_sell_past_the_old_as_acquired_rebasing_ceiling_allocates,
+      contemporaneous_price_past_the_old_ceiling_still_recovers_the_day}`,
+      `entities::income::tests::api_franking_ceiling_past_the_old_multiply_first_ceiling_is_applied`,
+      `reports::activity::tests::api_activity_past_the_old_rebasing_ceiling_carries_the_balance`,
+      `reports::franking_at_risk::tests::api_franking_at_risk_past_the_old_apportionment_ceiling_reports`,
+      `reports::tax_summary::tests::api_tax_summary_past_the_old_fito_apportionment_ceiling_reports`,
+      `reports::parcel_optimiser::tests::{api_optimiser_past_the_old_proceeds_spread_ceiling_reports,
+      api_optimiser_past_the_old_cost_base_prorate_ceiling_reports}` and
+      `reports::realised_gains::tests::{api_realised_gains_past_the_old_sale_cost_spread_ceiling_reports,
+      api_realised_gains_past_the_old_scrip_apportionment_ceiling_reports,
+      api_realised_gains_past_the_old_rights_cost_spread_ceiling_reports}`.
+      Each was checked by reverting **its own site alone** back to `a * b / c` — not the helper — and
+      confirming that test alone dies with `Multiplication overflowed`; every fixture is shaped so
+      only the named expression is at the ceiling (nil-priced parcels where the site is a quantity
+      re-basing, a $1 sale price where the site is a cost-base pro-rate, and so on), which is what
+      makes the per-site revert conclusive rather than merely suggestive.
+      Every divisor was traced to a guard rather than assumed: the four corporate-action ratios and
+      the scrip cash apportionment's denominator to `CorporateActionBody::kind`'s `positive`
+      (`entities/corporate_action/model.rs:492`, applied at 522/523, 539, 554, 583/584, 591/592 —
+      and `db.rs`'s `db_upsert` is the only production `INSERT INTO corporate_actions`); the split
+      and price-basis ratios to those same figures accumulated as products (`split_ratio`,
+      `price_basis_ratio`, whose demerger term is additionally guarded `partly > 0` at
+      `entities/closing_price.rs:1175`); `entitled_units` / `parcel_optimiser`'s
+      `remaining_quantity` to `domain::open_parcels::load`'s `remaining_as_acquired <= 0` drop
+      (`domain/open_parcels.rs:161`); `total_units` to both callers' `units <= 0` refusal
+      (`reports/parcel_optimiser.rs:369`, `reports/net_capital_gain.rs:1160`); `sale.quantity`,
+      `sale.units`, `entitled_units` and `grossed_up` to the `is_zero`/`> 0` guards standing
+      immediately over each expression; and `franking_credit`'s divisor is the literal 70. **No site
+      can reach a zero divisor**, so the separate finding that would have been is not raised.
+      The multiply-first order stays load-bearing and is still pinned by the tree: swapping `mul_div`
+      for a divide-first body fails **thirteen** pre-existing tests (the write-up's twelve, plus one
+      the suite has grown since), two of which — `entities::corporate_action::tests::
+      db_a_consolidation_that_does_not_divide_still_sells_out_exactly` and
+      `reports::realised_gains::tests::db_a_partial_amit_row_leaves_the_units_it_does_not_cover_alone`
+      — sit on sites this sweep touched, so the newly swept expressions are order-pinned too and not
+      only the three that already were. The whole suite (2,073 tests) is green with no figure moved.
+      The unrepresentable-*quantity* decision is **still open** and is now its own TODO section
+      rather than being archived closed inside this one.

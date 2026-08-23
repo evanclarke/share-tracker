@@ -881,4 +881,47 @@ mod tests {
         let resp = post(r#"{"listing_id": 1}"#.to_string()).await;
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
     }
+
+    /// SCENARIOS W. `HoldingPeriodTest::denied` apportions the attached
+    /// credits by disqualified ÷ entitled units, multiplying first: at 1e27
+    /// units the product is 1e37, far past `Decimal`'s ~7.9228e28 ceiling,
+    /// though the denial itself is simply the whole A$1e10 of credits. The
+    /// report died on it rather than reporting the denial.
+    #[tokio::test]
+    async fn api_franking_at_risk_past_the_old_apportionment_ceiling_reports() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BIG").await;
+        // Nil-priced 1e27 units, bought and sold inside the 45-day window.
+        test_support::buy(1, 1)
+            .date(ymd(2025, 3, 3))
+            .qty("1000000000000000000000000000".parse().unwrap())
+            .price(Decimal::ZERO)
+            .insert(&pool)
+            .await;
+        test_support::sell(2, 1)
+            .date(ymd(2025, 4, 10))
+            .qty("1000000000000000000000000000".parse().unwrap())
+            .price(Decimal::ZERO)
+            .insert(&pool)
+            .await;
+        test_support::income(1, 1, ymd(2025, 3, 28))
+            .fully_franked_credits("10000000000".parse().unwrap())
+            .with(|i| i.ex_date = Some(ymd(2025, 3, 14)))
+            .insert(&pool)
+            .await;
+
+        let alerts: Vec<FrankingAtRiskAlert> = ApiClient::over(router().with_state(pool.clone()))
+            .get_json("/reports/franking_at_risk")
+            .await;
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(
+            alerts[0].disqualified_units,
+            "1000000000000000000000000000".parse::<Decimal>().unwrap()
+        );
+        // Every unit disqualified, so every credit is at risk.
+        assert_eq!(
+            alerts[0].credits_at_risk,
+            "10000000000".parse::<Decimal>().unwrap()
+        );
+    }
 }

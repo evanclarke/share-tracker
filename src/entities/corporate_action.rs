@@ -3398,4 +3398,157 @@ mod tests {
         let resp = client(&pool).delete("/corporate_actions/999").await;
         assert_eq!(resp.status, StatusCode::NOT_FOUND);
     }
+
+    /// SCENARIOS W. A consolidation re-basing a very large holding:
+    /// `split_adjusted_quantity` multiplies 1e27 units by the ratio's
+    /// numerator (1000) before dividing by its denominator (1e6), and 1e30 is
+    /// past `Decimal`'s ~7.9228e28 ceiling even though the answer — 1e24
+    /// post-consolidation units — is representable. Driven through the
+    /// open-parcels report, the shortest read that re-bases a parcel.
+    #[tokio::test]
+    async fn api_open_parcels_past_the_old_split_rebasing_ceiling_reports() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BIG").await;
+        // Nil-priced, so the parcel's own cost base is not what is at the
+        // limit (that bound is W-e's); only the unit re-basing is.
+        test_support::buy(1, 1)
+            .date(d(2024, 1, 15))
+            .settlement(d(2024, 1, 15))
+            .qty("1000000000000000000000000000".parse().unwrap())
+            .price(Decimal::ZERO)
+            .insert(&pool)
+            .await;
+        db_upsert(&pool, &split(10, 1, d(2024, 6, 1), "1000", "1000000"))
+            .await
+            .unwrap();
+
+        let rows: Vec<serde_json::Value> = ApiClient::full(&pool)
+            .get_json("/portfolio/open-parcels")
+            .await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0]["remaining_quantity"], "1000000000000000000000000",
+            "{rows:?}"
+        );
+    }
+
+    /// SCENARIOS W. The inverse re-basing, `as_acquired_quantity`, on the Sell
+    /// path: 1e24 post-consolidation units allocated back against the parcel
+    /// multiply by the denominator (1e6) first — 1e30 — before dividing by the
+    /// numerator, though the as-acquired figure (1e27) is exactly the parcel's
+    /// own quantity. A **write**, so the panic aborted the Sell.
+    #[tokio::test]
+    async fn api_sell_past_the_old_as_acquired_rebasing_ceiling_allocates() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BIG").await;
+        test_support::buy(1, 1)
+            .date(d(2024, 1, 15))
+            .settlement(d(2024, 1, 15))
+            .qty("1000000000000000000000000000".parse().unwrap())
+            .price(Decimal::ZERO)
+            .insert(&pool)
+            .await;
+        db_upsert(&pool, &split(10, 1, d(2024, 6, 1), "1000", "1000000"))
+            .await
+            .unwrap();
+
+        // The whole holding, in post-consolidation units, sold at nil.
+        sell::db_upsert_sell(
+            &pool,
+            2,
+            &SellBody {
+                brokerage_includes_gst: false,
+                statement_total: None,
+                holding_account_id: 1,
+                date: d(2024, 9, 2),
+                settlement_date: Some(d(2024, 9, 2)),
+                listing_id: 1,
+                average_price: Decimal::ZERO,
+                quantity: "1000000000000000000000000".parse().unwrap(),
+                currency: "AUD".to_string(),
+                brokerage: Decimal::ZERO,
+                gst_on_brokerage: Decimal::ZERO,
+                brokerage_currency: "AUD".to_string(),
+                fx_rate: Decimal::ONE,
+                spot_fx_rate: None,
+                contract_note_ref: None,
+                allocations: vec![AllocationInput {
+                    purchase_trade_id: 1,
+                    quantity_allocated: "1000000000000000000000000".parse().unwrap(),
+                }],
+            },
+        )
+        .await
+        .unwrap();
+
+        // The parcel is fully consumed, which is what says the allocation was
+        // converted back to the parcel's own 1e27 as-acquired units.
+        let rows: Vec<serde_json::Value> = ApiClient::full(&pool)
+            .get_json("/portfolio/open-parcels")
+            .await;
+        assert!(rows.is_empty(), "{rows:?}");
+    }
+
+    /// SCENARIOS W. A return-of-capital payment re-based across a split it was
+    /// quoted after: `RocEvent::per_unit_for` multiplies the per-unit amount
+    /// (1e24) by the split's numerator (1e6) before dividing by its
+    /// denominator, and 1e30 is past `Decimal`'s ~7.9228e28 ceiling even
+    /// though the per-as-acquired-unit figure, 1e27, is representable.
+    #[tokio::test]
+    async fn api_open_parcels_past_the_old_payment_rebasing_ceiling_reports() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BIG").await;
+        // One nil-priced unit, so only the payment's re-basing is at the
+        // ceiling — the parcel's own cost base is nil.
+        test_support::buy(1, 1)
+            .date(d(2024, 1, 15))
+            .settlement(d(2024, 1, 15))
+            .qty(Decimal::ONE)
+            .price(Decimal::ZERO)
+            .insert(&pool)
+            .await;
+        // A 1,000,000-for-1,000 split, i.e. 1000 new units for each old one.
+        db_upsert(&pool, &split(10, 1, d(2024, 6, 3), "1000000", "1000"))
+            .await
+            .unwrap();
+        // …and a payment quoted per *post*-split unit.
+        db_upsert(
+            &pool,
+            &roc(11, 1, d(2024, 7, 1), "1000000000000000000000000"),
+        )
+        .await
+        .unwrap();
+
+        let rows: Vec<serde_json::Value> = ApiClient::full(&pool)
+            .get_json("/portfolio/open-parcels")
+            .await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0]["return_of_capital_reduction"], "1000000000000000000000000000",
+            "{rows:?}"
+        );
+    }
+
+    /// SCENARIOS W. The price dual of the same re-basing: a figure observed
+    /// after a 1000-for-1 split, restated into its own trading day's basis,
+    /// multiplies by the numerator (1e6) first. A unit test rather than an
+    /// API one because the only production caller is the provider-price
+    /// re-basing pass, which would need a stubbed fetch and a stored
+    /// `price_as_observed` row to reach one multiplication.
+    #[test]
+    fn contemporaneous_price_past_the_old_ceiling_still_recovers_the_day() {
+        let splits = [split_event(d(2024, 6, 3), "1000000", "1000")];
+        let events: Vec<PriceBasisEvent> = splits.iter().map(PriceBasisEvent::from).collect();
+        // 1e24 × 1e6 is 1e30 — past the ceiling — while the recovered
+        // pre-split price, 1e27, is representable.
+        assert_eq!(
+            contemporaneous_price(
+                "1000000000000000000000000".parse().unwrap(),
+                &events,
+                d(2024, 5, 1),
+                d(2024, 7, 1),
+            ),
+            "1000000000000000000000000000".parse::<Decimal>().unwrap()
+        );
+    }
 }

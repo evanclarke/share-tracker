@@ -1,7 +1,7 @@
 use crate::domain::cgt_discount;
 use crate::domain::cost_base::{self, ParcelRow};
 use crate::entities::corporate_action::{RocEvent, SplitEvent};
-use crate::infra::decimal::{Money, OptMoney};
+use crate::infra::decimal::{Money, OptMoney, mul_div};
 use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
 use axum::{Json, Router, extract::State, routing::get};
@@ -394,7 +394,7 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
                 .entry(sale_id)
                 .or_insert((Decimal::ZERO, Decimal::ZERO));
             *qty_so_far += qty_alloc;
-            let alloc_costs = sale_costs * *qty_so_far / sale.quantity - *costs_so_far;
+            let alloc_costs = mul_div(&[sale_costs, *qty_so_far], sale.quantity) - *costs_so_far;
             *costs_so_far += alloc_costs;
             sale.average_price * qty_alloc - alloc_costs
         } else {
@@ -447,7 +447,7 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
         // exchange carried exactly the complement, so the two sum to the
         // full reduced cost base).
         let alloc_cost = match sale.scrip_cash_apportionment()? {
-            Some((num, den)) => alloc_cost * num / den,
+            Some((num, den)) => mul_div(&[alloc_cost, num], den),
             None => alloc_cost,
         };
 
@@ -552,7 +552,7 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
             };
             units_so_far += alloc.units;
             let alloc_cost = if sale.units > Decimal::ZERO {
-                sale.rights_cost * units_so_far / sale.units - cost_so_far
+                mul_div(&[sale.rights_cost, units_so_far], sale.units) - cost_so_far
             } else {
                 Decimal::ZERO
             };
@@ -3053,5 +3053,157 @@ mod tests {
         assert_eq!(result[0].capital_loss, Decimal::from(1000));
         assert_eq!(result[1].proceeds, Decimal::from(-20));
         assert_eq!(result[1].capital_loss, Decimal::from(1020));
+    }
+
+    /// SCENARIOS W. The sale-cost spread — `sale_costs × qty_so_far ÷
+    /// sale.quantity` — multiplied A$1e10 of brokerage by 1e19 units before
+    /// dividing: 1e29, past `Decimal`'s ~7.9228e28 ceiling, though the
+    /// allocation's share is simply the whole A$1e10. Nil-priced on both legs
+    /// so nothing else in the walk is at the limit.
+    #[tokio::test]
+    async fn api_realised_gains_past_the_old_sale_cost_spread_ceiling_reports() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BIG").await;
+        insert_buy(
+            &pool,
+            1,
+            1,
+            NaiveDate::from_ymd_opt(2023, 1, 17).unwrap(),
+            "10000000000000000000".parse().unwrap(),
+            Decimal::ZERO,
+        )
+        .await;
+        test_support::sell(2, 1)
+            .date(NaiveDate::from_ymd_opt(2024, 8, 1).unwrap())
+            .qty("10000000000000000000".parse().unwrap())
+            .price(Decimal::ZERO)
+            .brokerage("10000000000".parse().unwrap())
+            .insert(&pool)
+            .await;
+        allocate(&pool, 1, 2, 1, "10000000000000000000".parse().unwrap()).await;
+
+        let rows: Vec<RealisedGainLoss> = ApiClient::over(router().with_state(pool.clone()))
+            .get_json("/portfolio/realised-gains")
+            .await;
+        assert_eq!(rows.len(), 1);
+        // Nil proceeds less the whole brokerage: a capital loss of A$1e10.
+        assert_eq!(rows[0].proceeds, "-10000000000".parse::<Decimal>().unwrap());
+        assert_eq!(rows[0].capital_loss, "10000000000".parse().unwrap());
+    }
+
+    /// SCENARIOS W. The read-side twin of `scrip_exchange`'s apportionment:
+    /// the allocation's AUD cost base (1e26) times the cash numerator (1e12)
+    /// is 1e38, past the ceiling, while the cash side's share (5e25) is
+    /// representable. The whole realised-gains report died on it.
+    #[tokio::test]
+    async fn api_realised_gains_past_the_old_scrip_apportionment_ceiling_reports() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "OLD").await;
+        insert_listing(&pool, 2, "NEW").await;
+        insert_buy(
+            &pool,
+            1,
+            1,
+            NaiveDate::from_ymd_opt(2020, 10, 1).unwrap(),
+            "10000000000".parse().unwrap(),
+            "10000000000000000".parse().unwrap(),
+        )
+        .await;
+        corporate_action::db_upsert(
+            &pool,
+            &corporate_action::CorporateAction {
+                id: 10,
+                listing_id: 1,
+                date: NaiveDate::from_ymd_opt(2024, 7, 1).unwrap(),
+                kind: corporate_action::ActionKind::ScripForScrip {
+                    scrip_listing_id: 2,
+                    scrip_new_units: Decimal::ONE,
+                    scrip_old_units: Decimal::from(100),
+                    scrip_cash_per_unit: Some("10000000000".parse().unwrap()),
+                    scrip_market_value: Some("1000000000000".parse().unwrap()),
+                    scrip_cash_currency: Some("AUD".to_string()),
+                },
+            },
+        )
+        .await
+        .unwrap();
+        crate::entities::scrip_exchange::db_exchange(&pool, 10)
+            .await
+            .unwrap();
+
+        let rows: Vec<RealisedGainLoss> = ApiClient::over(router().with_state(pool.clone()))
+            .get_json("/portfolio/realised-gains")
+            .await;
+        assert_eq!(rows.len(), 1);
+        // Exactly half of the 1e26 reduced cost base is on the cash side.
+        assert_eq!(
+            rows[0].cost_base,
+            "50000000000000000000000000".parse::<Decimal>().unwrap()
+        );
+        assert_eq!(
+            rows[0].proceeds,
+            "100000000000000000000".parse::<Decimal>().unwrap()
+        );
+    }
+
+    /// SCENARIOS W. The rights-cost spread — `rights_cost × units_so_far ÷
+    /// sale.units` — on 1e19 lapsed rights carrying A$1e10 of cost: 1e29,
+    /// past the ceiling, while the allocation's share is the whole A$1e10.
+    #[tokio::test]
+    async fn api_realised_gains_past_the_old_rights_cost_spread_ceiling_reports() {
+        use crate::entities::rights_sale;
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "RTS").await;
+        insert_buy(
+            &pool,
+            1,
+            1,
+            NaiveDate::from_ymd_opt(2023, 1, 17).unwrap(),
+            "40000000000000000000".parse().unwrap(),
+            Decimal::ZERO,
+        )
+        .await;
+        corporate_action::db_upsert(
+            &pool,
+            &corporate_action::CorporateAction {
+                id: 10,
+                listing_id: 1,
+                date: NaiveDate::from_ymd_opt(2024, 7, 1).unwrap(),
+                kind: corporate_action::ActionKind::RightsIssue {
+                    rights_units: Decimal::ONE,
+                    rights_held_units: Decimal::from(4),
+                    exercise_price: "1.80".parse().unwrap(),
+                    currency: "AUD".to_string(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+        // The whole entitlement lapses, carrying A$1e10 of cost.
+        rights_sale::db_sell_rights(
+            &pool,
+            10,
+            &rights_sale::SellRightsBody {
+                date: NaiveDate::from_ymd_opt(2024, 7, 20).unwrap(),
+                units: "10000000000000000000".parse().unwrap(),
+                proceeds_per_right: Some(Decimal::ZERO),
+                rights_cost: Some("10000000000".parse().unwrap()),
+                fx_rate: None,
+                holding_account_id: 1,
+                allocations: vec![rights_sale::AllocationInput {
+                    purchase_trade_id: 1,
+                    units: "10000000000000000000".parse().unwrap(),
+                }],
+            },
+        )
+        .await
+        .unwrap();
+
+        let rows: Vec<RealisedGainLoss> = ApiClient::over(router().with_state(pool.clone()))
+            .get_json("/portfolio/realised-gains")
+            .await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].cost_base, "10000000000".parse().unwrap());
+        assert_eq!(rows[0].capital_loss, "10000000000".parse().unwrap());
     }
 }

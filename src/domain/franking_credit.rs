@@ -23,6 +23,7 @@
 //! (`entities::corporate_action`, whose participation multiplies them into an
 //! income row). They must not diverge on what is possible.
 
+use crate::infra::decimal::mul_div;
 use chrono::NaiveDate;
 use rust_decimal::{Decimal, RoundingStrategy};
 
@@ -63,7 +64,7 @@ fn tolerance(maximum: Decimal) -> Decimal {
 /// rounded to the cent the way a statement prints it (half away from zero,
 /// matching `entities::income`'s per-share cross-check).
 pub fn maximum_franking_credit(franked_amount: Decimal) -> Decimal {
-    (franked_amount * Decimal::from(30) / Decimal::from(70))
+    mul_div(&[franked_amount, Decimal::from(30)], Decimal::from(70))
         .round_dp_with_strategy(2, RoundingStrategy::MidpointAwayFromZero)
 }
 

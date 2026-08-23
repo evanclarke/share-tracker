@@ -34,7 +34,7 @@ use crate::entities::corporate_action::{
 };
 use crate::entities::trade::{self, Trade, TradeType};
 use crate::infra::db::write_tx;
-use crate::infra::decimal::{Money, parse_dec};
+use crate::infra::decimal::{Money, mul_div, parse_dec};
 use crate::infra::http::ApiError;
 use axum::{
     Json, Router,
@@ -194,7 +194,7 @@ pub(crate) fn entitled_units(
     rights_units: Decimal,
     rights_held_units: Decimal,
 ) -> Decimal {
-    (held.max(Decimal::ZERO) * rights_units / rights_held_units).ceil()
+    mul_div(&[held.max(Decimal::ZERO), rights_units], rights_held_units).ceil()
 }
 
 /// Rights already used against the action, in record-date units: exercised
@@ -1055,5 +1055,62 @@ mod tests {
             .await;
         let (status, detail) = response.status_and_body();
         assert_eq!(status, StatusCode::CREATED, "{detail}");
+    }
+
+    /// SCENARIOS W. The entitlement ratio applied to a very large holding:
+    /// 1e27 units × 1000 is 1e30, past `Decimal`'s ~7.9228e28 ceiling, while
+    /// the entitlement itself (1e27 × 1000 / 1e6 = 1e24 rights) is perfectly
+    /// representable. Before `mul_div` the exercise panicked in
+    /// `entitled_units` before it could get anywhere near its own cost-base
+    /// bound.
+    #[tokio::test]
+    async fn api_exercise_past_the_old_entitlement_ceiling_completes() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        // Nil-priced, so the holding itself is representable (W-e) and only
+        // the entitlement arithmetic is at the ceiling.
+        insert_buy(
+            &pool,
+            1,
+            d(2024, 1, 15),
+            "1000000000000000000000000000",
+            "0",
+        )
+        .await;
+        // 1000-for-1,000,000 at $1.
+        corporate_action::db_upsert(
+            &pool,
+            &CorporateAction {
+                id: 10,
+                listing_id: 1,
+                date: d(2024, 7, 1),
+                kind: ActionKind::RightsIssue {
+                    rights_units: Decimal::from(1000),
+                    rights_held_units: Decimal::from(1_000_000),
+                    exercise_price: Decimal::ONE,
+                    currency: "AUD".to_string(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+        let response = ApiClient::over(router().with_state(pool.clone()))
+            .post(
+                "/corporate_actions/10/exercise",
+                &serde_json::json!({"date": "2024-08-01", "units": "250"}),
+            )
+            .await;
+        let (status, detail) = response.status_and_body();
+        assert_eq!(status, StatusCode::CREATED, "{detail}");
+        // The entitlement it was checked against.
+        assert_eq!(
+            entitled_units(
+                "1000000000000000000000000000".parse().unwrap(),
+                Decimal::from(1000),
+                Decimal::from(1_000_000)
+            ),
+            "1000000000000000000000000".parse::<Decimal>().unwrap()
+        );
     }
 }

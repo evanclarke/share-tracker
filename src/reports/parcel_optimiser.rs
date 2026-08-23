@@ -25,6 +25,7 @@
 
 use crate::domain::cgt_discount::discount_eligible;
 use crate::entities::closing_price::{self, SharedFetcher};
+use crate::infra::decimal::mul_div;
 use crate::infra::http::ApiError;
 use crate::reports::open_parcels::{self, OpenParcel};
 use axum::{Extension, Json, Router, extract::State, routing::post};
@@ -257,9 +258,9 @@ pub fn disposal_figures(
     for &(trade_id, units) in picks {
         let p = by_id[&trade_id];
         units_so_far += units;
-        let proceeds = total_proceeds * units_so_far / total_units - proceeds_so_far;
+        let proceeds = mul_div(&[total_proceeds, units_so_far], total_units) - proceeds_so_far;
         proceeds_so_far += proceeds;
-        let cost_base = p.remaining_cost_base * units / p.remaining_quantity;
+        let cost_base = mul_div(&[p.remaining_cost_base, units], p.remaining_quantity);
         let gain = proceeds - cost_base;
         let eligible = discount_eligible(p.acquisition_date, sale_date);
         if gain > Decimal::ZERO {
@@ -1194,5 +1195,79 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    /// SCENARIOS W. The proceeds spread — `total_proceeds × units_so_far ÷
+    /// total_units` — multiplied A$1e24 of proceeds by 1e14 units before
+    /// dividing: 1e38, far past `Decimal`'s ~7.9228e28 ceiling, though the
+    /// allocation's share is simply the whole A$1e24. The parcel is nil-priced
+    /// so the cost-base pro-rate beside it stays under the ceiling and this
+    /// test names one expression.
+    #[tokio::test]
+    async fn api_optimiser_past_the_old_proceeds_spread_ceiling_reports() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "OPT").await;
+        insert_buy(
+            &pool,
+            1,
+            1,
+            ymd(2023, 1, 3),
+            dec("100000000000000"),
+            Decimal::ZERO,
+        )
+        .await;
+
+        let (status, body) = post_optimiser(
+            pool,
+            None,
+            serde_json::json!({
+                "listing_id": 1, "holding_account_id": 1,
+                "units": "100000000000000", "sale_date": "2026-06-15",
+                "price": "10000000000"
+            }),
+        )
+        .await;
+        let text = String::from_utf8(body).unwrap();
+        assert_eq!(status, StatusCode::OK, "{text}");
+        let r: OptimiserResponse = serde_json::from_str(&text).unwrap();
+        for s in &r.strategies {
+            assert_eq!(s.totals.proceeds, dec("1000000000000000000000000"));
+        }
+    }
+
+    /// SCENARIOS W. The cost-base pro-rate beside it — `remaining_cost_base ×
+    /// units ÷ remaining_quantity` — on a parcel costed at A$1e24 across 1e14
+    /// units: 1e38 again. Here the sale price is $1, so the proceeds spread
+    /// above stays well under the ceiling.
+    #[tokio::test]
+    async fn api_optimiser_past_the_old_cost_base_prorate_ceiling_reports() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "OPT").await;
+        insert_buy(
+            &pool,
+            1,
+            1,
+            ymd(2023, 1, 3),
+            dec("100000000000000"),
+            dec("10000000000"),
+        )
+        .await;
+
+        let (status, body) = post_optimiser(
+            pool,
+            None,
+            serde_json::json!({
+                "listing_id": 1, "holding_account_id": 1,
+                "units": "100000000000000", "sale_date": "2026-06-15",
+                "price": "1"
+            }),
+        )
+        .await;
+        let text = String::from_utf8(body).unwrap();
+        assert_eq!(status, StatusCode::OK, "{text}");
+        let r: OptimiserResponse = serde_json::from_str(&text).unwrap();
+        for s in &r.strategies {
+            assert_eq!(s.totals.cost_base, dec("1000000000000000000000000"));
+        }
     }
 }

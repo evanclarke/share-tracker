@@ -2735,4 +2735,44 @@ mod tests {
         );
         assert!(inc.trust_income);
     }
+
+    /// SCENARIOS W. The franking-credit ceiling is `franked × 30 / 70`, and
+    /// the multiply-first order put the intermediate past `Decimal`'s
+    /// ~7.9228e28 ceiling for any franked amount above ~2.64e27 — a figure
+    /// absurd on its face but refused nowhere, so the write answered a logged
+    /// `500` instead of either storing the row or naming what was wrong with
+    /// it. The ceiling itself (~1.2857e27) is perfectly representable.
+    #[tokio::test]
+    async fn api_franking_ceiling_past_the_old_multiply_first_ceiling_is_applied() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        let body = |credits: &str| {
+            serde_json::json!({
+                "listing_id": 1,
+                "date_paid": "2024-03-15",
+                "franked_amount": "3000000000000000000000000000",
+                "franking_credits": credits,
+            })
+        };
+        // Under the 30/70 maximum: accepted.
+        let resp = client(&pool)
+            .put("/income/1", &body("1000000000000000000000000000"))
+            .await;
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
+
+        // Over it: refused 422 naming the ceiling, which is the figure the
+        // arithmetic used to die computing.
+        let resp = client(&pool)
+            .put("/income/2", &body("2000000000000000000000000000"))
+            .await;
+        let (status, detail) = resp.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{detail}");
+        assert_eq!(
+            crate::domain::franking_credit::credit_ceiling(
+                "3000000000000000000000000000".parse().unwrap(),
+                ymd(2024, 3, 15)
+            ),
+            Some("1292142857142857142857142857.1".parse().unwrap())
+        );
+    }
 }

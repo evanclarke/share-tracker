@@ -4,7 +4,7 @@ use crate::entities::income::{Income, IncomeType};
 use crate::entities::investment_expense::ExpenseType;
 use crate::entities::listing;
 use crate::entities::tax_year_settings;
-use crate::infra::decimal::{parse_dec, row_opt_dec, to_cents};
+use crate::infra::decimal::{mul_div, parse_dec, row_opt_dec, to_cents};
 use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
 use crate::reports::export::{self, Cents};
@@ -422,7 +422,7 @@ fn apportion_capital_gains_foreign_tax(
     if foreign_tax.is_zero() || grossed_up.is_zero() {
         return (foreign_tax, Decimal::ZERO);
     }
-    let claimable = foreign_tax * assessable / grossed_up;
+    let claimable = mul_div(&[foreign_tax, assessable], grossed_up);
     (claimable, foreign_tax - claimable)
 }
 
@@ -3927,5 +3927,32 @@ mod tests {
         c.get("/portfolio/tax-summary")
             .await
             .expect_status(StatusCode::OK);
+    }
+
+    /// SCENARIOS W. The FITO apportionment of an AMMA's capital-gains foreign
+    /// tax multiplies the tax by the assessable gains before dividing by the
+    /// grossed-up ones: at A$1e15 of tax against A$1e15 of discount gains the
+    /// product is 1e30, past `Decimal`'s ~7.9228e28 ceiling, while the
+    /// claimable half (5e14) is representable. The whole tax summary died on
+    /// it.
+    #[tokio::test]
+    async fn api_tax_summary_past_the_old_fito_apportionment_ceiling_reports() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        let mut a = make_amma(1, 1, NaiveDate::from_ymd_opt(2024, 6, 30).unwrap());
+        a.cgt_discount_gains = "1000000000000000".parse().unwrap();
+        a.foreign_tax_credits_capital_gains = "1000000000000000".parse().unwrap();
+        amma::db_upsert(&pool, &a).await.unwrap();
+
+        let years: Vec<TaxYearSummary> = client(&pool).get_json("/portfolio/tax-summary").await;
+        assert_eq!(years.len(), 1);
+        // Discount gains only, so exactly half the tax is claimable and half
+        // is the discount reduction. (What is finally *offsettable* is then
+        // capped by the FITO limit, which is a separate rule; the
+        // apportionment is what this test is about.)
+        assert_eq!(
+            years[0].foreign_tax_offsets_cgt_discount_reduction,
+            "500000000000000".parse::<Decimal>().unwrap()
+        );
     }
 }

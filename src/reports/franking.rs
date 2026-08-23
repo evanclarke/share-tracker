@@ -21,7 +21,7 @@ use crate::entities::corporate_action::{self, SplitEvent};
 use crate::entities::income::Income;
 use crate::entities::listing;
 use crate::entities::trade::TradeType;
-use crate::infra::decimal::parse_dec;
+use crate::infra::decimal::{mul_div, parse_dec};
 use crate::infra::fx::{FxOverride, FxRates};
 use chrono::{Datelike, Duration, NaiveDate};
 use rust_decimal::Decimal;
@@ -51,7 +51,7 @@ impl HoldingPeriodTest {
         if self.entitled_units.is_zero() || self.disqualified_units.is_zero() {
             return Decimal::ZERO;
         }
-        credits * self.disqualified_units / self.entitled_units
+        mul_div(&[credits, self.disqualified_units], self.entitled_units)
     }
 }
 

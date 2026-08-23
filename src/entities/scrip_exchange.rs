@@ -55,6 +55,7 @@ use crate::entities::corporate_action::{self, ActionKind};
 use crate::entities::sell::{self, AllocationInput};
 use crate::entities::trade::{self, Trade};
 use crate::infra::db::write_tx;
+use crate::infra::decimal::mul_div;
 use crate::infra::http::ApiError;
 use axum::{
     Json, Router,
@@ -324,7 +325,7 @@ impl Terms {
         // way by the realised-gains report). The two sides sum exactly to
         // the reduced cost base by construction.
         let carried_cost_base = match self.cash_apportionment {
-            Some((num, den)) => reduced_cost_base - reduced_cost_base * num / den,
+            Some((num, den)) => reduced_cost_base - mul_div(&[reduced_cost_base, num], den),
             None => reduced_cost_base,
         };
 
@@ -332,7 +333,7 @@ impl Terms {
             parcel_id: p.parcel.id,
             at_date_units: p.at_date_units,
             // The exchange ratio applies to units as held at the exchange date.
-            new_quantity: p.at_date_units * self.new_units / self.old_units,
+            new_quantity: mul_div(&[p.at_date_units, self.new_units], self.old_units),
             carried_cost_base,
             currency: p.parcel.currency.clone(),
             fx_rate: p.parcel.fx_rate,
@@ -1317,5 +1318,89 @@ mod tests {
                 .await
                 .unwrap();
         assert!(!created);
+    }
+
+    /// SCENARIOS W. A partial-rollover exchange whose cash apportionment
+    /// overflowed the intermediate product: the parcel's reduced cost base
+    /// (1e26) times the apportionment numerator (1e12) is 1e38, far past
+    /// `Decimal`'s ~7.9228e28 ceiling, even though the share itself (5e25) is
+    /// perfectly representable. Before `mul_div` the write panicked, which the
+    /// panic layer answered as a logged `500` with the exchange aborted.
+    #[tokio::test]
+    async fn api_exchange_past_the_old_cash_apportionment_ceiling_completes() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "OLD").await;
+        insert_listing(&pool, 2, "NEW").await;
+        // 1e10 units costed at 1e16 each: a cost base of 1e26, which the
+        // write-time bound (W-e) accepts because it is representable.
+        insert_buy(
+            &pool,
+            1,
+            1,
+            d(2020, 10, 1),
+            "10000000000",
+            "10000000000000000",
+        )
+        .await;
+        // 1-for-100 with $1e10 cash per old unit against a $1e12 replacement
+        // market value: the cash side's share is 1e12 / 2e12, i.e. exactly
+        // half. The closing Sell's own proceeds (1e10 × 1e10 = 1e20) stay
+        // representable, so nothing but the apportionment is at the ceiling.
+        insert_scrip_cash_terms(
+            &pool,
+            10,
+            1,
+            2,
+            d(2024, 7, 1),
+            "1",
+            "100",
+            Some(("10000000000", "1000000000000")),
+        )
+        .await;
+
+        let resp = client(&pool)
+            .post_empty("/corporate_actions/10/exchange")
+            .await;
+        let (status, body) = resp.status_and_body();
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        // Half of 1e26 rolls over; the other half stays behind for the Sell.
+        assert_eq!(
+            v["replacements"][0]["brokerage"],
+            "50000000000000000000000000"
+        );
+        assert_eq!(v["replacements"][0]["quantity"], "100000000");
+    }
+
+    /// SCENARIOS W. The exchange ratio applied to a very large holding:
+    /// 1e27 units × 1000 is 1e30, past the ceiling, while the answer
+    /// (1e27 × 1000 / 1e6 = 1e24 replacement units) is representable. The
+    /// parcel is nil-priced so its cost base is not what is at the limit.
+    #[tokio::test]
+    async fn api_exchange_past_the_old_replacement_quantity_ceiling_completes() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "OLD").await;
+        insert_listing(&pool, 2, "NEW").await;
+        insert_buy(
+            &pool,
+            1,
+            1,
+            d(2020, 10, 1),
+            "1000000000000000000000000000",
+            "0",
+        )
+        .await;
+        insert_scrip_terms(&pool, 10, 1, 2, d(2024, 7, 1), "1000", "1000000").await;
+
+        let resp = client(&pool)
+            .post_empty("/corporate_actions/10/exchange")
+            .await;
+        let (status, body) = resp.status_and_body();
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(
+            v["replacements"][0]["quantity"],
+            "1000000000000000000000000"
+        );
     }
 }

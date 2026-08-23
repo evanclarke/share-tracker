@@ -34,7 +34,7 @@ use crate::entities::income::{Income, IncomeType};
 use crate::entities::investment_expense::InvestmentExpense;
 use crate::entities::trade::{Trade, TradeType};
 use crate::entities::transfer::Transfer;
-use crate::infra::decimal::parse_dec;
+use crate::infra::decimal::{mul_div, parse_dec};
 use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
 use crate::reports::portfolio::{self, HoldingOverview};
@@ -644,7 +644,7 @@ fn ledger(mut rows: Vec<Proto>) -> Vec<ActivityEvent> {
     rows.into_iter()
         .map(|r| {
             if let Some((new, old)) = r.rebase {
-                balance = balance * new / old;
+                balance = mul_div(&[balance, new], old);
             }
             if let Some(q) = r.quantity {
                 balance += q;
@@ -1658,5 +1658,45 @@ mod tests {
                 .detail,
             "1 unit(s) of SPUN per 1 held; 30% of cost base"
         );
+    }
+
+    /// SCENARIOS W. The ledger's running balance re-based across a
+    /// consolidation: `balance × new / old` multiplied 1e27 units by the
+    /// ratio's numerator (1000) first — 1e30, past `Decimal`'s ~7.9228e28
+    /// ceiling — even though the post-consolidation balance (1e24) is
+    /// representable. The whole report died on it, not just the one row.
+    #[tokio::test]
+    async fn api_activity_past_the_old_rebasing_ceiling_carries_the_balance() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BIG").await;
+        // Nil-priced, so only the unit re-basing is at the ceiling.
+        test_support::buy(1, 1)
+            .qty(dec("1000000000000000000000000000"))
+            .price(Decimal::ZERO)
+            .insert(&pool)
+            .await; // 2024-01-01
+        corporate_action::db_upsert(
+            &pool,
+            &corporate_action::CorporateAction {
+                id: 1,
+                listing_id: 1,
+                date: ymd(2024, 3, 1),
+                kind: ActionKind::ShareSplit {
+                    split_new_units: dec("1000"),
+                    split_old_units: dec("1000000"),
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+        let resp = post_activity(pool, serde_json::json!({ "listing_id": 1 })).await;
+        let (status, body) = resp.status_and_body();
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let r: ActivityResponse = serde_json::from_str(body).unwrap();
+        // Buy, then the consolidation that re-bases the balance under it.
+        assert_eq!(r.events.len(), 2);
+        assert_eq!(r.events[0].units_after, dec("1000000000000000000000000000"));
+        assert_eq!(r.events[1].units_after, dec("1000000000000000000000000"));
     }
 }
