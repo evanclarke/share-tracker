@@ -1207,6 +1207,78 @@ mod tests {
         );
     }
 
+    /// SCENARIOS X-08: a backup taken while another connection has a write
+    /// transaction **open** is a *committed* state of the database — it
+    /// verifies, and it does not contain that transaction's rows. `VACUUM
+    /// INTO` reads the last committed snapshot, so a weekly backup that
+    /// happens to fire in the middle of a long rollover or snapshot run
+    /// copies the database as it was before it, never half of it. A backup
+    /// holding half a write would be the worst kind: it verifies (integrity
+    /// and the migration list are both fine) and is only discovered to be
+    /// inconsistent when it is restored from.
+    ///
+    /// The second half is the control, and without it the test is vacuous —
+    /// a backup of an empty database would satisfy "does not contain the
+    /// uncommitted row" just as well. Once the transaction commits, a fresh
+    /// backup does contain it.
+    #[tokio::test]
+    async fn a_backup_taken_mid_transaction_holds_a_committed_state() {
+        /// The holding-account names in a backup file, read the way a restore
+        /// would read it: as its own database.
+        async fn names_in(path: &str) -> Vec<String> {
+            let opts = SqliteConnectOptions::from_str(&format!("sqlite:{path}"))
+                .unwrap()
+                .read_only(true);
+            let mut conn = SqliteConnection::connect_with(&opts).await.unwrap();
+            sqlx::query_scalar(
+                "SELECT name FROM holding_accounts WHERE id IN (100, 101) ORDER BY id",
+            )
+            .fetch_all(&mut conn)
+            .await
+            .unwrap()
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db").to_string_lossy().to_string();
+        let pool = init(&db_path).await.unwrap();
+        sqlx::query("INSERT INTO holding_accounts (id, name) VALUES (100, 'committed')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // A write transaction under way on another connection: its row is
+        // written, its COMMIT has not happened.
+        let mut tx = write_tx(&pool).await.unwrap();
+        sqlx::query("INSERT INTO holding_accounts (id, name) VALUES (101, 'in flight')")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+
+        // `backup_to` verifies (integrity check + migration list) and
+        // quarantines a bad file, so reaching `unwrap` is itself the
+        // verification assertion.
+        let mid = dir.path().join("mid.db").to_string_lossy().to_string();
+        backup_to(&pool, &mid)
+            .await
+            .expect("a backup taken mid-transaction verifies");
+        assert_eq!(
+            names_in(&mid).await,
+            vec!["committed".to_string()],
+            "a backup must hold a committed state, never an open transaction's rows"
+        );
+
+        tx.commit().await.unwrap();
+
+        let after = dir.path().join("after.db").to_string_lossy().to_string();
+        backup_to(&pool, &after).await.unwrap();
+        assert_eq!(
+            names_in(&after).await,
+            vec!["committed".to_string(), "in flight".to_string()],
+            "the control: once committed, the row is in the next backup — so its \
+             absence above was the open transaction, not an empty database"
+        );
+    }
+
     #[tokio::test]
     async fn migrations_apply_on_fresh_db() {
         let pool = init(":memory:").await.unwrap();

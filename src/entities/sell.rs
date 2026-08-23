@@ -2373,4 +2373,92 @@ mod tests {
         assert!(!trade_exists(&pool, 2).await);
         assert_eq!(count_allocations(&pool, 2).await, 0);
     }
+
+    /// SCENARIOS X-06: concurrent Sells cannot both take a parcel's last
+    /// units. Four Sells of the same 100-unit parcel are launched at once,
+    /// each allocating all 100: exactly one is written and the rest are
+    /// refused. The check that a parcel is not over-allocated and the INSERT
+    /// that would over-allocate it sit in one `write_tx` transaction, so a
+    /// second Sell reads the parcel only after the first has committed — were
+    /// the two split, both would read 100 units free and both would write,
+    /// leaving a parcel that has sold 200 of its 100 units and a capital gain
+    /// costed against units that never existed.
+    ///
+    /// An invariant over every interleaving, not a pinned ordering: whichever
+    /// Sell wins, the count of winners is one and Σ allocated is the parcel's
+    /// own quantity. It needs [`test_support::race_pool`] — a `:memory:`
+    /// database is shared-cache, where the losers would simply queue behind
+    /// the winner's connection rather than race it.
+    ///
+    /// A handful of rounds rather than the driven scenario's 40: enough that
+    /// the four genuinely overlap, cheap enough that the suite stays seconds
+    /// long.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_sells_cannot_both_take_a_parcels_last_units() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = test_support::race_pool(&dir).await;
+        insert_listing(&pool, 1).await;
+        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+
+        for round in 0..5 {
+            let racers: Vec<_> = (0..4)
+                .map(|n| {
+                    let pool = pool.clone();
+                    tokio::spawn(async move {
+                        let body = sell_body(
+                            Decimal::from(100),
+                            vec![AllocationInput {
+                                purchase_trade_id: 1,
+                                quantity_allocated: Decimal::from(100),
+                            }],
+                        );
+                        (10 + n, db_upsert_sell(&pool, 10 + n, &body).await)
+                    })
+                })
+                .collect();
+
+            let mut winner = None;
+            for racer in racers {
+                let (id, outcome) = racer.await.expect("no racer panics");
+                match outcome {
+                    Ok(()) => {
+                        assert!(
+                            winner.replace(id).is_none(),
+                            "round {round}: two Sells both took the parcel's last units"
+                        );
+                    }
+                    Err(e) => assert!(
+                        matches!(e, SellError::PurchaseQuantityExceeded),
+                        "round {round}: a losing Sell must be refused for over-allocating \
+                         the parcel, got {e:?}"
+                    ),
+                }
+            }
+            let winner = winner.expect("one Sell must succeed");
+
+            // The invariant behind the count: the parcel is never allocated
+            // beyond its own quantity, whichever Sell got there first.
+            // Summed exactly, from the stored decimal text: a REAL cast would
+            // be a rounded answer to a question about exactness.
+            let quantities: Vec<String> = sqlx::query_scalar(
+                "SELECT quantity_allocated FROM parcel_allocations WHERE purchase_trade_id = 1",
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            let allocated: Decimal = quantities
+                .iter()
+                .map(|q| q.parse::<Decimal>().expect("a stored decimal"))
+                .sum();
+            assert_eq!(
+                allocated,
+                Decimal::from(100),
+                "round {round}: the parcel's allocations must sum to its 100 units, \
+                 not {allocated}"
+            );
+
+            // Free the parcel for the next round.
+            db_delete_sell(&pool, winner).await.unwrap();
+        }
+    }
 }

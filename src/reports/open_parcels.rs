@@ -1080,4 +1080,134 @@ mod tests {
             "202.189".parse::<Decimal>().unwrap()
         );
     }
+
+    /// SCENARIOS X-05: a report read never sees **half** of a multi-parcel
+    /// Sell. A Sell that allocates 50 units from each of two parcels must be
+    /// visible in both parcels or in neither, never in one — half of it would
+    /// print a holding 50 units light against a broker statement, and (through
+    /// the same loader) a cost base pro-rated to units the report itself says
+    /// are still held.
+    ///
+    /// Two things hold that jointly, and the test is written against both: the
+    /// Sell's trade row and its whole allocation set are written — and deleted
+    /// — in **one** transaction, so no committed state ever has one allocation
+    /// without the other; and the report takes every one of its inputs on one
+    /// read transaction (`db_open_parcels`), so no read straddles two
+    /// snapshots. Splitting either apart is what this fails on: with the
+    /// delete's allocations removed in two transactions instead of one, the
+    /// assertion below caught `(100, 50)` within a few hundred reads.
+    ///
+    /// Written as an invariant over *every* interleaving rather than a pinned
+    /// ordering: a reader and a writer run at once and each read is checked,
+    /// so whichever side wins the lock at whichever point, the assertion is
+    /// the same one. It needs [`test_support::race_pool`] for that — a
+    /// `:memory:` database is shared-cache, where a reader simply blocks on
+    /// the open writer and the interleave under test cannot arise at all.
+    ///
+    /// Bounded by a small iteration count, not by the driven scenario's 8,685
+    /// reads: the point is that the two overlap, and a suite that runs in
+    /// seconds is worth more than a longer soak here.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_read_never_sees_half_of_a_multi_parcel_sell() {
+        use crate::entities::sell::{self, AllocationInput, SellBody};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let dir = tempfile::tempdir().unwrap();
+        let pool = test_support::race_pool(&dir).await;
+        insert_listing(&pool, 1, "BHP").await;
+        insert_buy(&pool, 1, 1, ymd(2024, 1, 2), dec("100"), dec("10")).await;
+        insert_buy(&pool, 2, 1, ymd(2024, 1, 3), dec("100"), dec("10")).await;
+
+        fn half_of_each() -> SellBody {
+            SellBody {
+                date: ymd(2025, 6, 2),
+                settlement_date: None,
+                listing_id: 1,
+                average_price: dec("20"),
+                quantity: dec("100"),
+                currency: "AUD".to_string(),
+                brokerage: Decimal::ZERO,
+                gst_on_brokerage: Decimal::ZERO,
+                brokerage_includes_gst: false,
+                brokerage_currency: "AUD".to_string(),
+                fx_rate: Decimal::ONE,
+                spot_fx_rate: None,
+                contract_note_ref: None,
+                statement_total: None,
+                holding_account_id: 1,
+                allocations: vec![
+                    AllocationInput {
+                        purchase_trade_id: 1,
+                        quantity_allocated: dec("50"),
+                    },
+                    AllocationInput {
+                        purchase_trade_id: 2,
+                        quantity_allocated: dec("50"),
+                    },
+                ],
+            }
+        }
+
+        let done = Arc::new(AtomicBool::new(false));
+        let writing = {
+            let pool = pool.clone();
+            let done = done.clone();
+            tokio::spawn(async move {
+                for _ in 0..30 {
+                    sell::db_upsert_sell(&pool, 3, &half_of_each())
+                        .await
+                        .expect("the Sell writes");
+                    sell::db_delete_sell(&pool, 3)
+                        .await
+                        .expect("and deletes again");
+                }
+                done.store(true, Ordering::SeqCst);
+            })
+        };
+
+        let reading = {
+            let pool = pool.clone();
+            let done = done.clone();
+            tokio::spawn(async move {
+                // A deadline as well as the flag: if the writer panics the
+                // flag is never set, and this must end so the join below can
+                // surface that panic rather than hang the suite.
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                let mut reads = 0u32;
+                while !done.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+                    let parcels = db_open_parcels(&pool).await.expect("the report reads");
+                    let remaining = |trade_id: i64| {
+                        parcels
+                            .iter()
+                            .find(|p| p.trade_id == trade_id)
+                            .map(|p| p.remaining_quantity)
+                    };
+                    // Each parcel is half-consumed or untouched, and always
+                    // both the same way: one at 50 while the other is at 100
+                    // is exactly half a Sell.
+                    assert_eq!(
+                        (remaining(1), remaining(2)),
+                        (remaining(1), remaining(1)),
+                        "a read saw one parcel of a two-parcel Sell consumed \
+                         without the other (SCENARIOS X-05)"
+                    );
+                    assert!(
+                        matches!(remaining(1), Some(q) if q == dec("100") || q == dec("50")),
+                        "unexpected remaining quantity {:?}",
+                        remaining(1)
+                    );
+                    reads += 1;
+                }
+                reads
+            })
+        };
+
+        writing.await.expect("the writer runs to completion");
+        let reads = reading.await.expect("the reader runs to completion");
+        assert!(
+            reads > 0,
+            "the reader must have read while the writer wrote"
+        );
+    }
 }

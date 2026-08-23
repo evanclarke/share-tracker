@@ -736,6 +736,131 @@ mod tests {
         assert_eq!(stored, 3);
     }
 
+    /// SCENARIOS X-04: a `replace` regeneration that fails **after** its
+    /// DELETE leaves the original adjustment set standing, unchanged. The
+    /// delete and the rewrite share one transaction precisely so that a
+    /// half-regenerated statement can never persist — and the half that has
+    /// no repair is the empty one: a statement whose adjustments were deleted
+    /// and never rewritten silently stops reducing any cost base, which no
+    /// report flags, whereas a refused regeneration is visible at once.
+    ///
+    /// The failure used is the reachable one: a holding moved twice. The
+    /// parcel was open at the year end, so generation follows the first
+    /// transfer to its replacement parcel (N-06) — but a *second* transfer has
+    /// since carried that replacement's units on again, so the row against it
+    /// is refused by F-17's `UnitsCarriedIntoReplacement`, well past the
+    /// DELETE.
+    #[tokio::test]
+    async fn db_a_failed_replace_leaves_the_original_adjustments_standing() {
+        use crate::entities::holding_account::{self, HoldingAccount};
+        use crate::entities::sell::AllocationInput;
+        use crate::entities::transfer::{self, TransferBody};
+
+        async fn stored_rows(pool: &SqlitePool) -> Vec<(i64, i64, i64, String)> {
+            sqlx::query_as(
+                "SELECT id, amma_statement_id, trade_id, quantity FROM amit_adjustments \
+                 ORDER BY id",
+            )
+            .fetch_all(pool)
+            .await
+            .unwrap()
+        }
+
+        let pool = test_pool().await;
+        amit_listing(&pool, 1, "HNDQ").await;
+        test_support::buy(1, 1)
+            .date(ymd(2023, 8, 1))
+            .qty(dec("100"))
+            .price(dec("10"))
+            .insert(&pool)
+            .await;
+        amma(&pool, 6, 1, ymd(2024, 6, 30), "100").await;
+        for (id, name) in [(2, "Second"), (3, "Third")] {
+            holding_account::db_upsert(
+                &pool,
+                &HoldingAccount {
+                    id,
+                    name: name.to_string(),
+                },
+            )
+            .await
+            .unwrap();
+        }
+
+        // The original set, generated while the holding was still where the
+        // statement found it.
+        let first = db_generate(&pool, 6, &GenerateBody::default())
+            .await
+            .unwrap();
+        assert_eq!(first.created.len(), 1);
+        let original = stored_rows(&pool).await;
+        assert_eq!(original.len(), 1);
+
+        // Moved out, then moved on again — both after the year end, so the
+        // parcel is still open at it and generation still covers it.
+        let mut moved_from = 1;
+        for (transfer_id, date, from, to) in
+            [(1, ymd(2024, 8, 15), 1, 2), (2, ymd(2024, 9, 16), 2, 3)]
+        {
+            transfer::db_transfer(
+                &pool,
+                transfer_id,
+                &TransferBody {
+                    listing_id: 1,
+                    date,
+                    from_account_id: from,
+                    to_account_id: to,
+                    allocations: vec![AllocationInput {
+                        purchase_trade_id: moved_from,
+                        quantity_allocated: dec("100"),
+                    }],
+                    fee_allocations: Vec::new(),
+                    fee_market_price: None,
+                    fee_fx_rate: None,
+                },
+            )
+            .await
+            .unwrap();
+            moved_from = sqlx::query_scalar(
+                "SELECT id FROM trades WHERE transfer_id = ? AND trade_type = 'Buy'",
+            )
+            .bind(transfer_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        }
+
+        // Regenerating now reaches the first transfer's replacement parcel,
+        // whose units the second transfer has already carried away.
+        let err = db_generate(
+            &pool,
+            6,
+            &GenerateBody {
+                replace: true,
+                preview: false,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                GenerateError::Upsert(
+                    amit_adjustment::UpsertError::UnitsCarriedIntoReplacement { .. }
+                )
+            ),
+            "expected the refusal to come from the per-parcel loop, after the \
+             DELETE — got {err:?}"
+        );
+
+        // The whole point: the DELETE went with it.
+        assert_eq!(
+            stored_rows(&pool).await,
+            original,
+            "a failed replace must leave the original adjustment set standing"
+        );
+    }
+
     /// A statement for a position the system doesn't have is itself the
     /// error — an empty set would hide it.
     #[tokio::test]

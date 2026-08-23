@@ -2884,21 +2884,6 @@ mod tests {
         }
     }
 
-    /// A file-backed pool (WAL, migrations run) — what `main` opens, and the
-    /// one thing the two SCENARIOS X-a tests below cannot take from
-    /// [`test_pool`]. A `:memory:` database is shared-cache: a reader on a
-    /// second connection *blocks* on an open writer there, so the read/write
-    /// interleave those tests are about cannot arise at all and they would
-    /// pass against the very code they exist to refuse. Under WAL a reader
-    /// sees the snapshot it began with while another connection commits past
-    /// it, which is the real behaviour.
-    async fn race_pool(dir: &tempfile::TempDir) -> SqlitePool {
-        let path = dir.path().join("snapshot-race.db");
-        crate::infra::db::init(&path.to_string_lossy())
-            .await
-            .expect("a file-backed pool")
-    }
-
     /// The invariant a stored snapshot must satisfy however a concurrent fact
     /// write interleaves with a generation run: the result is **either**
     /// current with that write **or** flagged `stale`. Fresh-but-superseded is
@@ -2919,7 +2904,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_price_written_during_generation_never_leaves_a_fresh_superseded_snapshot() {
         let dir = tempfile::tempdir().unwrap();
-        let pool = race_pool(&dir).await;
+        let pool = test_support::race_pool(&dir).await;
         insert_listing(&pool, 1, "BHP", Some("XASX"), "AUD").await;
         // Enough parcels that a run does real work: the point is that the write
         // has a window to land in, not that it lands at a chosen instant.
@@ -2988,7 +2973,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn generation_reads_only_after_it_holds_the_write_lock() {
         let dir = tempfile::tempdir().unwrap();
-        let pool = race_pool(&dir).await;
+        let pool = test_support::race_pool(&dir).await;
         insert_listing(&pool, 1, "BHP", Some("XASX"), "AUD").await;
         insert_buy(&pool, 1, 1, ymd(2024, 1, 16), "100", "10", "AUD").await;
         let date = ymd(2026, 6, 5);

@@ -47,6 +47,26 @@ pub async fn test_pool() -> SqlitePool {
     pool
 }
 
+/// A file-backed pool (WAL, migrations run) — what `main` opens, and the one
+/// thing a **concurrency** test cannot take from [`test_pool`]. A `:memory:`
+/// database is shared-cache (sqlx configures it so): several connections share
+/// one database, but a reader on a second connection *blocks* on an open
+/// writer there, so the read/write interleave such a test is about cannot arise
+/// at all and it would pass against the very code it exists to refuse. Under
+/// WAL a reader sees the snapshot it began with while another connection
+/// commits past it, which is the real behaviour.
+///
+/// The caller owns the `TempDir` — hold it for the length of the test, since
+/// dropping it deletes the database out from under the pool. Migrations are
+/// run rather than replayed from the cached script: this is one pool per test,
+/// not the ~1500 [`test_pool`] builds the cache exists for.
+pub async fn race_pool(dir: &tempfile::TempDir) -> SqlitePool {
+    let path = dir.path().join("race.db");
+    db::init(&path.to_string_lossy())
+        .await
+        .expect("a file-backed pool")
+}
+
 /// The captured schema script, built on first use and shared by every later
 /// [`test_pool`] call in this process.
 ///
