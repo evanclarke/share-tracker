@@ -360,6 +360,49 @@ pub struct CostBase {
     pub adjusted: Decimal,
 }
 
+/// Step 1's pro-rate: the `units`-unit share of a `quantity`-unit parcel's
+/// whole-parcel initial cost base. The one implementation both
+/// [`adjusted_cost_base`] and [`adjustment_detail`] start their walks from,
+/// so the totals and the itemised rows can never disagree about it.
+///
+/// `quantity` is non-zero — both callers guard — and the three cases are
+/// tried in this order:
+///
+/// 1. **`units == quantity`** — the overwhelmingly common one (a parcel still
+///    held in full, a sale that takes the lot, a rollover consuming a whole
+///    parcel) — is the identity, so the figure comes back untouched rather
+///    than being scaled up by the quantity and divided straight back down.
+/// 2. **Otherwise multiply, then divide**, which is what this has always done
+///    and is the more faithful order: `c × u / q` rounds once, at the end,
+///    where `c / q × u` rounds a non-terminating quotient to 28 significant
+///    digits first and then scales that error up by `u` (a $39.95 cost base
+///    over 3 units, costing 2 of them, is …33333333333333333333333 one way
+///    and …33333333333333333333334 the other). Keeping the order means this
+///    cannot move a figure that does not overflow today.
+/// 3. **Only where that product overflows** `rust_decimal`'s ~7.9228e28
+///    ceiling — which panics rather than saturating — divide first. That is
+///    lossier in the last-digit sense of (2), but it is an answer where a
+///    mistyped parcel used to take down every portfolio read with it
+///    (SCENARIOS W-b): `price 1 / quantity 1e15` overflowed at `c × u = 1e30`.
+///    Dividing first raises the partial-parcel ceiling to where `c / q` (not
+///    `c`) times `u` overflows — for a fat-fingered run of zeros, by roughly
+///    fourteen orders of magnitude.
+///
+/// The whole-parcel product `price × quantity` inside
+/// [`Parcel::initial_cost`] is a separate ceiling this cannot raise: that
+/// figure is the cost base, so an unrepresentable one has no lesser answer to
+/// give. It panics, and `app::router`'s panic layer turns that into a logged
+/// `500` rather than a dropped connection.
+fn prorated_initial_cost(initial_cost: Decimal, units: Decimal, quantity: Decimal) -> Decimal {
+    if units == quantity {
+        return initial_cost;
+    }
+    match initial_cost.checked_mul(units) {
+        Some(scaled) => scaled / quantity,
+        None => initial_cost / quantity * units,
+    }
+}
+
 /// Runs steps 1–4 of the pipeline (see the module doc) for `units`
 /// as-acquired units of `parcel`.
 ///
@@ -397,7 +440,10 @@ pub fn adjusted_cost_base(
         // come off that share of the initial cost base directly — no second
         // pro-rating, and one floor covers both (each subtraction only ever
         // moves the balance the same way an earlier floor would have).
-        (initial_cost * units / parcel.quantity - amit_reduction - roc_reduction).max(Decimal::ZERO)
+        (prorated_initial_cost(initial_cost, units, parcel.quantity)
+            - amit_reduction
+            - roc_reduction)
+            .max(Decimal::ZERO)
     } else {
         Decimal::ZERO
     };
@@ -474,10 +520,10 @@ pub fn adjustment_detail(
     let mut rows = Vec::new();
 
     // The costed units' share of the initial cost base: the pool both
-    // reduction kinds draw down, mirroring adjusted_cost_base's
-    // `initial_cost * units / parcel.quantity` term.
+    // reduction kinds draw down, the same [`prorated_initial_cost`] term
+    // adjusted_cost_base starts from.
     let mut running = if parcel.quantity > Decimal::ZERO {
-        parcel.initial_cost() * units / parcel.quantity
+        prorated_initial_cost(parcel.initial_cost(), units, parcel.quantity)
     } else {
         Decimal::ZERO
     };
@@ -682,6 +728,106 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cb.adjusted, Decimal::from(400));
+    }
+
+    /// SCENARIOS W-b. The pro-rate used to multiply before it divided, so a
+    /// parcel whose `initial_cost × units` passed `rust_decimal`'s ~7.9228e28
+    /// ceiling panicked — and, caught by nothing, dropped the connection of
+    /// every portfolio read that touched it. The boundary measured before the
+    /// fix: `price 1 / quantity 1e14` (product 1e28) costed fine, `price 1 /
+    /// quantity 1e15` (1e30) did not, nor did `price 0.5 / quantity 4e14`
+    /// (8e28).
+    #[test]
+    fn a_parcel_past_the_old_multiply_first_ceiling_still_costs() {
+        let p = Parcel {
+            quantity: "1000000000000000".parse().unwrap(),
+            ..parcel(1, 1)
+        };
+        // The whole parcel: the pro-rate is the identity and never multiplies.
+        let whole = adjusted_cost_base(&p, p.quantity, &[], &[], &[], Held::AsAt(None)).unwrap();
+        assert_eq!(
+            whole.adjusted,
+            "1000000000000000".parse::<Decimal>().unwrap()
+        );
+        // A partial slice, where the identity does not apply: the product
+        // 1e15 × 3e14 = 3e29 overflows, so it divides first instead.
+        let part = adjusted_cost_base(
+            &p,
+            "300000000000000".parse().unwrap(),
+            &[],
+            &[],
+            &[],
+            Held::AsAt(None),
+        )
+        .unwrap();
+        assert_eq!(part.adjusted, "300000000000000".parse::<Decimal>().unwrap());
+        // The other measured overflow, price 0.5 / quantity 4e14.
+        let half = Parcel {
+            quantity: "400000000000000".parse().unwrap(),
+            average_price: "0.5".parse().unwrap(),
+            ..parcel(1, 1)
+        };
+        let part = adjusted_cost_base(
+            &half,
+            "100000000000000".parse().unwrap(),
+            &[],
+            &[],
+            &[],
+            Held::AsAt(None),
+        )
+        .unwrap();
+        assert_eq!(part.adjusted, "50000000000000".parse::<Decimal>().unwrap());
+        // The itemised detail walks the same term, so it survives too.
+        let rows = adjustment_detail(
+            &p,
+            "300000000000000".parse().unwrap(),
+            &[],
+            &[],
+            &[],
+            Held::AsAt(None),
+        )
+        .unwrap();
+        assert!(rows.is_empty());
+    }
+
+    /// The figures below the old ceiling are untouched by the reordering:
+    /// where the product fits, it is still formed first and divided once, so
+    /// nothing that worked before moves by a digit. `39.95` over 3 units,
+    /// costing 2 of them, is the case that tells the two orders apart —
+    /// `39.95 × 2 / 3` ends `…333`, `39.95 / 3 × 2` ends `…334`.
+    #[test]
+    fn pro_rating_keeps_the_multiply_first_figure_wherever_it_fits() {
+        let p = Parcel {
+            brokerage: "9.95".parse().unwrap(),
+            ..parcel(3, 10)
+        };
+        let cb = adjusted_cost_base(&p, Decimal::from(2), &[], &[], &[], Held::AsAt(None)).unwrap();
+        assert_eq!(
+            cb.adjusted,
+            "26.633333333333333333333333333".parse::<Decimal>().unwrap()
+        );
+        // …and the largest parcel that costed before the fix still gives what
+        // it gave then, whole and pro-rated.
+        let big = Parcel {
+            quantity: "100000000000000".parse().unwrap(),
+            ..parcel(1, 1)
+        };
+        let whole =
+            adjusted_cost_base(&big, big.quantity, &[], &[], &[], Held::AsAt(None)).unwrap();
+        assert_eq!(
+            whole.adjusted,
+            "100000000000000".parse::<Decimal>().unwrap()
+        );
+        let part = adjusted_cost_base(
+            &big,
+            "33333333333333".parse().unwrap(),
+            &[],
+            &[],
+            &[],
+            Held::AsAt(None),
+        )
+        .unwrap();
+        assert_eq!(part.adjusted, "33333333333333".parse::<Decimal>().unwrap());
     }
 
     #[test]

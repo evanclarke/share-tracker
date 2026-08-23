@@ -920,6 +920,36 @@ mod tests {
         );
     }
 
+    /// SCENARIOS W-b. A parcel of 1e15 units used to overflow the cost-base
+    /// pro-rate (`initial_cost × units` = 1e30, past `rust_decimal`'s
+    /// ~7.9228e28 ceiling) and, uncaught, reset the connection of this very
+    /// endpoint. The boundary measured then: 1e14 units read fine, 1e15 did
+    /// not. Both read now, whole and partly sold.
+    #[tokio::test]
+    async fn api_a_parcel_past_the_old_pro_rate_ceiling_reads() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "HUGE").await;
+        test_support::buy(1, 1)
+            .date(ymd(2024, 1, 2))
+            .qty(dec("1000000000000000"))
+            .price(Decimal::ONE)
+            .insert(&pool)
+            .await;
+        // Part of it sold, so the remainder is a genuine pro-rate rather than
+        // the whole-parcel identity.
+        insert_sell(&pool, 2, 1, dec("400000000000000")).await;
+        allocate(&pool, 1, 2, 1, dec("400000000000000")).await;
+
+        let resp = ApiClient::over(router().with_state(pool))
+            .get("/portfolio/open-parcels")
+            .await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let parcels: Vec<OpenParcel> = resp.json();
+        assert_eq!(parcels.len(), 1);
+        assert_eq!(parcels[0].remaining_quantity, dec("600000000000000"));
+        assert_eq!(parcels[0].remaining_cost_base, dec("600000000000000"));
+    }
+
     /// A scrip-for-scrip replacement parcel is an ordinary open parcel, but
     /// reports the consumed parcel's acquisition date (the rollover's
     /// combined holding period) and its carried cost base — and a non-AUD

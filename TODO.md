@@ -197,10 +197,24 @@ Options offered:
 an arbitrary number to defend, and the arithmetic fix removes the whole-parcel case outright and
 raises the partial-parcel ceiling by roughly fourteen orders of magnitude.
 
-- [ ] Divide before multiplying (and short-circuit `units == parcel.quantity`) in
+- [x] Divide before multiplying (and short-circuit `units == parcel.quantity`) in
       `domain::cost_base`'s two pro-rating sites, with a test at the old boundary
-- [ ] Layer `CatchPanicLayer` in `app::router` so a panicking handler answers a logged `500` with a
+      — both sites now go through one `prorated_initial_cost` helper: identity where
+      `units == quantity`, otherwise `checked_mul` first (so no figure that fits today moves by a
+      digit — `39.95 × 2 / 3` and `39.95 / 3 × 2` differ in the last place) and divide-first only
+      on the overflow the product used to panic on
+- [x] Layer `CatchPanicLayer` in `app::router` so a panicking handler answers a logged `500` with a
       body instead of resetting the connection, with a test driving a deliberately panicking route
+      — the body is *empty*, matching `ApiError::Internal`'s convention rather than inventing a new
+      one (a panic payload can carry anything); the message goes to `tracing::error!`
+
+Re-derived while fixing: the finding's own headline trade (`average_price` **and** `quantity` both
+1e15) does not overflow at the pro-rate at all — `price × quantity` = 1e30 overflows inside
+`Parcel::initial_cost` first, before any pro-rating. The boundary table is right (`price 1 /
+quantity 1e15` *is* the pro-rate site), but the two are different overflows, and no reordering can
+fix the first: that product is the cost base, so an unrepresentable one has no lesser answer. Which
+is exactly why (a) needed both halves — the panic layer is what turns the headline trade's read from
+a dropped connection into a `500`.
 
 ## SCENARIOS W-c — The tax-return-ready CSV exports carry 28-digit figures under ATO labels
 

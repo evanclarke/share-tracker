@@ -174,6 +174,33 @@ impl IntoResponse for ApiError {
     }
 }
 
+/// The panic twin of [`ApiError::Internal`], for
+/// `tower_http::catch_panic::CatchPanicLayer` in [`crate::app::router`].
+///
+/// A handler that panics unwinds past every `Result<_, ApiError>` in the
+/// tree, so without this the connection is simply dropped: the client sees no
+/// status at all (curl reports `000`), and the web UI shows a bare network
+/// error naming nothing — which is how a parcel whose cost-base arithmetic
+/// overflowed took down every portfolio read invisibly (SCENARIOS W-b).
+///
+/// The response is deliberately identical to [`ApiError::Internal`]'s: `500`
+/// with an **empty body**, the detail logged via `tracing::error!` and never
+/// returned. A panic message can carry anything (a file path, a row's
+/// contents), so it is exactly the kind of internal detail that convention
+/// exists to keep out of a response.
+pub fn panic_response(err: Box<dyn std::any::Any + Send + 'static>) -> Response {
+    // The payload of `panic!("…")` / `unwrap()` on a `&str` or `String`; any
+    // other payload type has no readable form, so it is named as such rather
+    // than lost.
+    let message = err
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| err.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "panic with a non-string payload".to_string());
+    tracing::error!(panic = %message, "request handler panicked");
+    StatusCode::INTERNAL_SERVER_ERROR.into_response()
+}
+
 /// An entity whose list / get-one / delete are plain single-table operations
 /// over one primary key, implemented once here instead of copied per module.
 ///

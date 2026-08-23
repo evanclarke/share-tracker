@@ -59,7 +59,7 @@ pub fn router(
         None => app,
     };
     if base_path.is_empty() {
-        return app;
+        return catching_panics(app);
     }
     // `nest` matches the prefix itself (`/share_tracker`) and everything below
     // it (`/share_tracker/listings`), but *not* the bare prefix with a trailing
@@ -69,7 +69,7 @@ pub fn router(
     // — redirect it onto the prefix the nested router does serve. Temporary,
     // not permanent: `base_path` is configuration, and a browser must not cache
     // a redirect derived from it past a change.
-    Router::new()
+    let app = Router::new()
         .route(
             &format!("{base_path}/"),
             axum::routing::any({
@@ -80,7 +80,29 @@ pub fn router(
                 }
             }),
         )
-        .nest(base_path, app)
+        .nest(base_path, app);
+    catching_panics(app)
+}
+
+/// The outermost layer of both shapes [`router`] returns: a panicking handler
+/// answers a logged, empty-bodied `500` instead of dropping the connection
+/// with no status at all (SCENARIOS W-b — a mistyped parcel whose cost-base
+/// arithmetic overflowed `rust_decimal` killed every portfolio read, and the
+/// web UI could only show a bare network error naming nothing).
+///
+/// Outermost deliberately: applied here rather than to the inner `app`, it
+/// also covers `require_auth` and the base-path redirect route, so no part of
+/// the served surface can panic its way past it. The response itself is
+/// [`crate::infra::http::panic_response`], which matches
+/// `ApiError::Internal`'s convention exactly — `tracing::error!` naming the
+/// panic, nothing of it in the body.
+///
+/// A panic is still a bug, not a supported outcome: this is the net under the
+/// arithmetic fixes, not a substitute for them.
+fn catching_panics(app: Router) -> Router {
+    app.layer(tower_http::catch_panic::CatchPanicLayer::custom(
+        crate::infra::http::panic_response,
+    ))
 }
 
 #[cfg(test)]
@@ -110,6 +132,60 @@ mod tests {
             fetcher,
             auth,
         ))
+    }
+
+    /// SCENARIOS W-b, the layer on its own: a handler that panics answers the
+    /// same logged, empty-bodied `500` an `ApiError::Internal` does, instead
+    /// of unwinding out of the connection with no status at all.
+    ///
+    /// The panicking route is built here rather than wired into the
+    /// production router — nothing serving real data should be able to panic
+    /// on purpose — but the layer under test is [`super::catching_panics`]
+    /// itself, the one call `router` makes, so the two can't drift.
+    ///
+    /// Expect one `deliberate panic in a test route` line on stderr while
+    /// this runs: that is Rust's default panic hook, which still fires before
+    /// the unwind is caught. The test passing is the point, not the line.
+    #[tokio::test]
+    async fn a_panicking_handler_answers_500_rather_than_dropping_the_connection() {
+        async fn boom() -> StatusCode {
+            panic!("deliberate panic in a test route")
+        }
+        let app =
+            super::catching_panics(axum::Router::new().route("/boom", axum::routing::get(boom)));
+
+        let resp = ApiClient::over(app).get("/boom").await;
+        assert_eq!(resp.status, StatusCode::INTERNAL_SERVER_ERROR);
+        // Empty, like every other `500`: a panic payload can carry anything.
+        assert_eq!(resp.text(), "");
+    }
+
+    /// SCENARIOS W-b end to end, through the application `main` serves. The
+    /// finding's own trade — a fat-fingered run of zeros in both
+    /// `average_price` and `quantity` — is accepted by the write path (no
+    /// magnitude ceiling was added; a number to defend would be arbitrary),
+    /// and its `price × quantity` is 1e30, past `rust_decimal`'s ~7.9228e28
+    /// ceiling. That product *is* the parcel's cost base, so no reordering
+    /// can produce it and `Parcel::initial_cost` still panics — but the read
+    /// now answers a `500` the UI can show a message for, where before the
+    /// connection was reset and curl reported `000`.
+    #[tokio::test]
+    async fn an_unrepresentable_parcel_cost_base_is_a_500_not_a_dead_connection() {
+        let pool = test_pool().await;
+        crate::test_support::listing(9).insert(&pool).await;
+        crate::test_support::buy(9600, 9)
+            .qty("1000000000000000".parse().unwrap())
+            .price("1000000000000000".parse().unwrap())
+            .insert(&pool)
+            .await;
+
+        let client = ApiClient::full(&pool);
+        let resp = client.get("/portfolio/open-parcels").await;
+        assert_eq!(resp.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(resp.text(), "");
+        // The control the finding measured: the reports that never form the
+        // product were answering all along, and still do.
+        assert_eq!(client.get("/reports/health").await.status, StatusCode::OK);
     }
 
     #[tokio::test]

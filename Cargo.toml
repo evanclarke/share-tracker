@@ -48,6 +48,12 @@ hmac = "0.13"
 # infra::auth: constant-time bearer-token comparison, so a wrong token isn't
 # distinguishable by timing.
 subtle = "2"
+# app::router's outermost layer: catch-panic only. A handler that panics
+# would otherwise unwind past every `Result<_, ApiError>` and drop the
+# connection with no status at all (SCENARIOS W-b); CatchPanicLayer turns it
+# into the logged, empty-bodied 500 `ApiError::Internal` already answers with.
+# Already in the tree as a transitive dependency of reqwest.
+tower-http = { version = "0.6", default-features = false, features = ["catch-panic"] }
 
 [dev-dependencies]
 http-body-util = "0.1"
