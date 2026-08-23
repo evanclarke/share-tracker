@@ -40,7 +40,7 @@ use crate::entities::corporate_action::{self, RocEvent};
 use crate::infra::decimal::parse_dec;
 use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
-use crate::reports::export;
+use crate::reports::export::{self, Cents};
 use crate::reports::parcel_optimiser::{self, DisposalTotals, HypotheticalAllocation, Strategy};
 use axum::{
     Json, Router,
@@ -959,25 +959,27 @@ async fn net_capital_gain_handler(
 }
 
 /// Flat CSV projection of [`NetCapitalGainYear`] — every field except
-/// `disposals`. The `csv` crate rejects a struct with a nested sequence field
+/// `disposals`, with every money field typed [`Cents`] so the export reads to
+/// the cent like the screen it mirrors (the JSON report above keeps the exact
+/// figure). The `csv` crate rejects a struct with a nested sequence field
 /// (`Vec<RealisedGainLoss>`), so the JSON report's nested drilldown is dropped
 /// here; the export stays exactly the flat per-year record it was before the
 /// drilldown was added — same `CSV_HEADER`/`CSV_ATO_LABELS`, unchanged.
 #[derive(Serialize)]
 struct NetCapitalGainYearCsv {
     tax_year: i32,
-    discount_eligible_gains: Decimal,
-    other_gains: Decimal,
-    capital_losses: Decimal,
-    capital_loss_brought_forward: Decimal,
-    net_discount_eligible_gain: Decimal,
-    net_other_gain: Decimal,
-    cgt_discount: Decimal,
-    net_capital_gain: Decimal,
-    capital_loss_carried_forward: Decimal,
-    cgt_event_e10_gain: Decimal,
-    cgt_event_g1_gain: Decimal,
-    cgt_event_c2_gain: Decimal,
+    discount_eligible_gains: Cents,
+    other_gains: Cents,
+    capital_losses: Cents,
+    capital_loss_brought_forward: Cents,
+    net_discount_eligible_gain: Cents,
+    net_other_gain: Cents,
+    cgt_discount: Cents,
+    net_capital_gain: Cents,
+    capital_loss_carried_forward: Cents,
+    cgt_event_e10_gain: Cents,
+    cgt_event_g1_gain: Cents,
+    cgt_event_c2_gain: Cents,
     taxpayer_basis: String,
 }
 
@@ -985,18 +987,18 @@ impl From<&NetCapitalGainYear> for NetCapitalGainYearCsv {
     fn from(y: &NetCapitalGainYear) -> Self {
         NetCapitalGainYearCsv {
             tax_year: y.tax_year,
-            discount_eligible_gains: y.discount_eligible_gains,
-            other_gains: y.other_gains,
-            capital_losses: y.capital_losses,
-            capital_loss_brought_forward: y.capital_loss_brought_forward,
-            net_discount_eligible_gain: y.net_discount_eligible_gain,
-            net_other_gain: y.net_other_gain,
-            cgt_discount: y.cgt_discount,
-            net_capital_gain: y.net_capital_gain,
-            capital_loss_carried_forward: y.capital_loss_carried_forward,
-            cgt_event_e10_gain: y.cgt_event_e10_gain,
-            cgt_event_g1_gain: y.cgt_event_g1_gain,
-            cgt_event_c2_gain: y.cgt_event_c2_gain,
+            discount_eligible_gains: y.discount_eligible_gains.into(),
+            other_gains: y.other_gains.into(),
+            capital_losses: y.capital_losses.into(),
+            capital_loss_brought_forward: y.capital_loss_brought_forward.into(),
+            net_discount_eligible_gain: y.net_discount_eligible_gain.into(),
+            net_other_gain: y.net_other_gain.into(),
+            cgt_discount: y.cgt_discount.into(),
+            net_capital_gain: y.net_capital_gain.into(),
+            capital_loss_carried_forward: y.capital_loss_carried_forward.into(),
+            cgt_event_e10_gain: y.cgt_event_e10_gain.into(),
+            cgt_event_g1_gain: y.cgt_event_g1_gain.into(),
+            cgt_event_c2_gain: y.cgt_event_c2_gain.into(),
             taxpayer_basis: y.taxpayer_basis.clone(),
         }
     }
@@ -3258,6 +3260,95 @@ mod tests {
         assert_eq!(fields[7].parse::<Decimal>().unwrap(), Decimal::from(250)); // cgt_discount
         assert_eq!(fields[8].parse::<Decimal>().unwrap(), Decimal::from(250)); // net_capital_gain
         assert_eq!(lines.next(), None);
+    }
+
+    /// SCENARIOS W-c: brokerage and GST pro-rated across part of a parcel give
+    /// a non-terminating quotient, and the CSV — a tax-return-ready document
+    /// whose columns carry ATO labels (18A, 18V) — carries it at the cent, the
+    /// way the screen it mirrors renders a money column.
+    #[tokio::test]
+    async fn api_export_rounds_money_columns_to_the_cent() {
+        let pool = long_decimal_disposal().await;
+
+        let csv = client(&pool)
+            .get("/portfolio/net-capital-gain/export")
+            .await
+            .expect_status(StatusCode::OK)
+            .text()
+            .to_string();
+        let mut lines = csv.lines();
+        let header: Vec<&str> = lines.next().unwrap().split(',').collect();
+        lines.next(); // the ATO label row
+        let row: Vec<&str> = lines.next().expect("a record row").split(',').collect();
+        let at = |col: &str| row[header.iter().position(|c| *c == col).unwrap()];
+
+        // 3021.89 × 100/300 = 1007.296666… cost base against 1500 proceeds.
+        assert_eq!(at("discount_eligible_gains"), "492.70");
+        assert_eq!(at("net_discount_eligible_gain"), "492.70");
+        assert_eq!(at("cgt_discount"), "246.35");
+        assert_eq!(at("net_capital_gain"), "246.35"); // label 18A
+        // A nil figure reads as a nil figure, not as twenty-four zeros.
+        assert_eq!(at("capital_loss_carried_forward"), "0.00"); // label 18V
+        assert_eq!(at("other_gains"), "0.00");
+        // Not money, and untouched: the year and the taxpayer assumption.
+        assert_eq!(at("tax_year"), "2024");
+        assert_eq!(at("taxpayer_basis"), crate::reports::TAXPAYER_BASIS);
+        // Every money cell is at the cent — none escaped the projection.
+        for (i, cell) in row.iter().enumerate() {
+            if header[i] == "tax_year" || header[i] == "taxpayer_basis" {
+                continue;
+            }
+            let dp = cell.split_once('.').map(|(_, f)| f.len()).unwrap_or(0);
+            assert_eq!(dp, 2, "{} exported as {cell}", header[i]);
+        }
+    }
+
+    /// The control for the test above: the JSON report over the same facts is
+    /// untouched — it still answers the exact figure, which is what the API
+    /// documents and what any other caller computes from.
+    #[tokio::test]
+    async fn api_the_json_report_keeps_the_precision_the_export_rounds() {
+        let pool = long_decimal_disposal().await;
+
+        let years: Vec<NetCapitalGainYear> =
+            client(&pool).get_json("/portfolio/net-capital-gain").await;
+        let y = row_for(&years, 2024);
+        let cost_base: Decimal = "3021.89".parse::<Decimal>().unwrap() / Decimal::from(3);
+        let gain = Decimal::from(1500) - cost_base;
+        assert_eq!(y.discount_eligible_gains, gain);
+        assert_eq!(y.net_capital_gain, gain / Decimal::from(2));
+        // …and that figure really does have more than two decimal places, so
+        // the CSV assertions above are testing the rounding, not a coincidence.
+        assert!(y.net_capital_gain.scale() > 2, "{}", y.net_capital_gain);
+        assert_ne!(
+            y.net_capital_gain,
+            "246.35".parse::<Decimal>().unwrap(),
+            "the JSON figure must not be the rounded one"
+        );
+    }
+
+    /// One parcel bought with brokerage + GST, a third of it sold at a gain:
+    /// the pro-rate (`cost × units ÷ quantity`) is 3021.89 ÷ 3, which does not
+    /// terminate. The ordinary shape behind the finding.
+    async fn long_decimal_disposal() -> SqlitePool {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "VAS").await;
+        test_support::trade(1, 1, trade::TradeType::Buy)
+            .date(NaiveDate::from_ymd_opt(2022, 1, 5).unwrap())
+            .qty(Decimal::from(300))
+            .price(Decimal::from(10))
+            .brokerage("19.90".parse().unwrap())
+            .gst_on_brokerage("1.99".parse().unwrap())
+            .insert(&pool)
+            .await;
+        test_support::trade(2, 1, trade::TradeType::Sell)
+            .date(NaiveDate::from_ymd_opt(2024, 3, 15).unwrap())
+            .qty(Decimal::from(100))
+            .price(Decimal::from(15))
+            .insert(&pool)
+            .await;
+        allocate(&pool, 1, 2, 1, Decimal::from(100)).await;
+        pool
     }
 
     #[tokio::test]

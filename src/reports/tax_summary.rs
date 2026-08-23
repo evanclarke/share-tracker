@@ -7,7 +7,8 @@ use crate::entities::tax_year_settings;
 use crate::infra::decimal::{parse_dec, row_opt_dec};
 use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
-use crate::reports::{export, franking};
+use crate::reports::export::{self, Cents};
+use crate::reports::franking;
 use axum::{Json, Router, extract::State, response::Response, routing::get};
 use chrono::{Datelike, NaiveDate};
 use rust_decimal::Decimal;
@@ -925,10 +926,113 @@ async fn tax_summary_handler(
         .map_err(ApiError::from)
 }
 
+/// Flat CSV projection of [`TaxYearSummary`] — the same columns in the same
+/// order (`CSV_HEADER`), with every money field typed [`Cents`] so the export
+/// reads to the cent like the screen it mirrors, while the JSON report above
+/// keeps the exact figure. The money/not-money split is carried by the field's
+/// *type* here, so no list of column names is duplicated from the web UI's
+/// `COLUMN_KINDS`; the csv writer's header-length check catches a field this
+/// projection forgot.
+#[derive(Serialize)]
+struct TaxYearSummaryCsv {
+    tax_year: i32,
+    dividends_assessable: Cents,
+    interest_income: Cents,
+    foreign_interest_income: Cents,
+    foreign_source_income: Cents,
+    lic_capital_gain_deduction: Cents,
+    amma_australian_interest: Cents,
+    amma_dividends_unfranked: Cents,
+    amma_franked_dividends: Cents,
+    amma_net_rent: Cents,
+    amma_foreign_income: Cents,
+    amma_other_income: Cents,
+    amma_cgt_discount_gains: Cents,
+    amma_cgt_indexation_gains: Cents,
+    amma_cgt_other_gains: Cents,
+    amma_capital_losses_applied: Cents,
+    franking_credits: Cents,
+    franking_credits_denied: Cents,
+    foreign_tax_offsets: Cents,
+    foreign_tax_offset_excess: Cents,
+    foreign_tax_offsets_cgt_discount_reduction: Cents,
+    tfn_withholding_tax: Cents,
+    ess_discount_assessable: Cents,
+    ess_taxed_upfront_reduction: Cents,
+    ess_foreign_source_discount: Cents,
+    employment_income: Cents,
+    other_income: Cents,
+    gross_assessable_investment_income: Cents,
+    deductions_loan_interest: Cents,
+    deductions_management_fee: Cents,
+    deductions_advice_fee: Cents,
+    deductions_account_keeping_fee: Cents,
+    deductions_subscription: Cents,
+    deductions_other: Cents,
+    deductions_trust_distributions: Cents,
+    deductions_foreign_income: Cents,
+    deductions_foreign_debt: Cents,
+    deductions_dividend_and_interest: Cents,
+    deductions_total: Cents,
+    net_assessable_investment_income: Cents,
+    taxpayer_basis: String,
+}
+
+impl From<&TaxYearSummary> for TaxYearSummaryCsv {
+    fn from(s: &TaxYearSummary) -> Self {
+        TaxYearSummaryCsv {
+            tax_year: s.tax_year,
+            dividends_assessable: s.dividends_assessable.into(),
+            interest_income: s.interest_income.into(),
+            foreign_interest_income: s.foreign_interest_income.into(),
+            foreign_source_income: s.foreign_source_income.into(),
+            lic_capital_gain_deduction: s.lic_capital_gain_deduction.into(),
+            amma_australian_interest: s.amma_australian_interest.into(),
+            amma_dividends_unfranked: s.amma_dividends_unfranked.into(),
+            amma_franked_dividends: s.amma_franked_dividends.into(),
+            amma_net_rent: s.amma_net_rent.into(),
+            amma_foreign_income: s.amma_foreign_income.into(),
+            amma_other_income: s.amma_other_income.into(),
+            amma_cgt_discount_gains: s.amma_cgt_discount_gains.into(),
+            amma_cgt_indexation_gains: s.amma_cgt_indexation_gains.into(),
+            amma_cgt_other_gains: s.amma_cgt_other_gains.into(),
+            amma_capital_losses_applied: s.amma_capital_losses_applied.into(),
+            franking_credits: s.franking_credits.into(),
+            franking_credits_denied: s.franking_credits_denied.into(),
+            foreign_tax_offsets: s.foreign_tax_offsets.into(),
+            foreign_tax_offset_excess: s.foreign_tax_offset_excess.into(),
+            foreign_tax_offsets_cgt_discount_reduction: s
+                .foreign_tax_offsets_cgt_discount_reduction
+                .into(),
+            tfn_withholding_tax: s.tfn_withholding_tax.into(),
+            ess_discount_assessable: s.ess_discount_assessable.into(),
+            ess_taxed_upfront_reduction: s.ess_taxed_upfront_reduction.into(),
+            ess_foreign_source_discount: s.ess_foreign_source_discount.into(),
+            employment_income: s.employment_income.into(),
+            other_income: s.other_income.into(),
+            gross_assessable_investment_income: s.gross_assessable_investment_income.into(),
+            deductions_loan_interest: s.deductions_loan_interest.into(),
+            deductions_management_fee: s.deductions_management_fee.into(),
+            deductions_advice_fee: s.deductions_advice_fee.into(),
+            deductions_account_keeping_fee: s.deductions_account_keeping_fee.into(),
+            deductions_subscription: s.deductions_subscription.into(),
+            deductions_other: s.deductions_other.into(),
+            deductions_trust_distributions: s.deductions_trust_distributions.into(),
+            deductions_foreign_income: s.deductions_foreign_income.into(),
+            deductions_foreign_debt: s.deductions_foreign_debt.into(),
+            deductions_dividend_and_interest: s.deductions_dividend_and_interest.into(),
+            deductions_total: s.deductions_total.into(),
+            net_assessable_investment_income: s.net_assessable_investment_income.into(),
+            taxpayer_basis: s.taxpayer_basis.clone(),
+        }
+    }
+}
+
 /// The same per-year rows as the JSON report, as a downloadable tax-return-ready CSV.
 async fn tax_summary_export_handler(State(pool): State<SqlitePool>) -> Result<Response, ApiError> {
     let rows = db_tax_summary(&pool).await.map_err(ApiError::from)?;
-    export::csv_response("tax-summary.csv", CSV_HEADER, CSV_ATO_LABELS, &rows)
+    let csv_rows: Vec<TaxYearSummaryCsv> = rows.iter().map(Into::into).collect();
+    export::csv_response("tax-summary.csv", CSV_HEADER, CSV_ATO_LABELS, &csv_rows)
         .map_err(ApiError::from)
 }
 
@@ -1983,11 +2087,118 @@ mod tests {
         let labels = lines.next().unwrap();
         assert_eq!(labels, CSV_ATO_LABELS.join(","));
         assert!(labels.starts_with(&format!("{},", export::ATO_LABELS_MARKER)));
-        // One record per tax year, decimal figures rendered exactly.
+        // One record per tax year, money figures rendered to the cent.
         let row = lines.next().unwrap();
-        assert!(row.starts_with("2024,100,"));
-        assert!(row.contains(",30.50,")); // franking_credits keeps its precision
+        assert!(row.starts_with("2024,100.00,"));
+        assert!(row.contains(",30.50,")); // franking_credits, already at the cent
         assert_eq!(lines.next(), None);
+    }
+
+    /// SCENARIOS W-c: an FX conversion (÷ the month's rate) gives a
+    /// non-terminating quotient, and the CSV — a tax-return-ready document
+    /// whose columns carry ATO labels — carries it at the cent, the way the
+    /// screen it mirrors renders a money column.
+    #[tokio::test]
+    async fn api_export_rounds_money_columns_to_the_cent() {
+        let pool = long_decimal_income().await;
+
+        let csv = client(&pool)
+            .get("/portfolio/tax-summary/export")
+            .await
+            .expect_status(StatusCode::OK)
+            .text()
+            .to_string();
+        let mut lines = csv.lines();
+        let header: Vec<&str> = lines.next().unwrap().split(',').collect();
+        lines.next(); // the ATO label row
+        let row: Vec<&str> = lines.next().expect("a record row").split(',').collect();
+        let at = |col: &str| row[header.iter().position(|c| *c == col).unwrap()];
+
+        // 100 USD ÷ 0.65 = 153.846153…
+        assert_eq!(at("dividends_assessable"), "153.85");
+        assert_eq!(at("gross_assessable_investment_income"), "153.85");
+        assert_eq!(at("net_assessable_investment_income"), "153.85");
+        // A nil figure reads as a nil figure, not as a run of zeros.
+        assert_eq!(at("franking_credits"), "0.00");
+        assert_eq!(at("deductions_total"), "0.00");
+        // Not money, and untouched: the year and the taxpayer assumption.
+        assert_eq!(at("tax_year"), "2024");
+        assert_eq!(at("taxpayer_basis"), crate::reports::TAXPAYER_BASIS);
+        // Every money cell is at the cent — none escaped the projection.
+        for (i, cell) in row.iter().enumerate() {
+            if header[i] == "tax_year" || header[i] == "taxpayer_basis" {
+                continue;
+            }
+            let dp = cell.split_once('.').map(|(_, f)| f.len()).unwrap_or(0);
+            assert_eq!(dp, 2, "{} exported as {cell}", header[i]);
+        }
+    }
+
+    /// The control for the test above: the JSON report over the same facts is
+    /// untouched — it still answers the exact figure, which is what the API
+    /// documents and what any other caller computes from.
+    #[tokio::test]
+    async fn api_the_json_report_keeps_the_precision_the_export_rounds() {
+        let pool = long_decimal_income().await;
+
+        let years: Vec<TaxYearSummary> = client(&pool).get_json("/portfolio/tax-summary").await;
+        let converted = Decimal::from(100) / "0.65".parse::<Decimal>().unwrap();
+        assert_eq!(years[0].dividends_assessable, converted);
+        assert_eq!(years[0].gross_assessable_investment_income, converted);
+        // …and that figure really does have more than two decimal places, so
+        // the CSV assertions above are testing the rounding, not a coincidence.
+        assert!(converted.scale() > 2, "{converted}");
+        assert_ne!(
+            years[0].dividends_assessable,
+            "153.85".parse::<Decimal>().unwrap(),
+            "the JSON figure must not be the rounded one"
+        );
+    }
+
+    /// The direction at the boundary: a figure exactly on the half-cent goes
+    /// *away from zero* in the export, matching `roundDecimalStr` on the
+    /// screens (the half is where two implementations silently differ).
+    #[tokio::test]
+    async fn api_export_rounds_a_half_cent_away_from_zero() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        let mut inc = make_income(1, 1, NaiveDate::from_ymd_opt(2024, 3, 15).unwrap());
+        inc.unfranked_amount = "10.005".parse().unwrap();
+        income::db_upsert(&pool, &inc).await.unwrap();
+
+        let csv = client(&pool)
+            .get("/portfolio/tax-summary/export")
+            .await
+            .text()
+            .to_string();
+        let mut lines = csv.lines();
+        let header: Vec<&str> = lines.next().unwrap().split(',').collect();
+        lines.next();
+        let row: Vec<&str> = lines.next().expect("a record row").split(',').collect();
+        let at = |col: &str| row[header.iter().position(|c| *c == col).unwrap()];
+        assert_eq!(at("dividends_assessable"), "10.01"); // not 10.00
+
+        // The control: the JSON still answers the half-cent itself.
+        let years: Vec<TaxYearSummary> = client(&pool).get_json("/portfolio/tax-summary").await;
+        assert_eq!(
+            years[0].dividends_assessable,
+            "10.005".parse::<Decimal>().unwrap()
+        );
+    }
+
+    /// A USD dividend converted at the month's ATO rate: 100 ÷ 0.65 does not
+    /// terminate, the ordinary shape behind the finding.
+    async fn long_decimal_income() -> SqlitePool {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        rba_fx_rate::db_import_rate(&pool, "USD", "2024-03", "0.65".parse().unwrap())
+            .await
+            .unwrap();
+        let mut inc = make_income(1, 1, NaiveDate::from_ymd_opt(2024, 3, 15).unwrap());
+        inc.currency = "USD".to_string();
+        inc.unfranked_amount = Decimal::from(100);
+        income::db_upsert(&pool, &inc).await.unwrap();
+        pool
     }
 
     /// Each exported column's tax-return label sits under its column (same
@@ -2806,16 +3017,16 @@ mod tests {
         let at = |col: &str| header.iter().position(|c| *c == col).unwrap();
         // The label sits under its column, and the figure under both.
         assert_eq!(labels[at("deductions_trust_distributions")], "13Y");
-        assert_eq!(row[at("deductions_trust_distributions")], "35");
+        assert_eq!(row[at("deductions_trust_distributions")], "35.00");
         assert_eq!(labels[at("deductions_foreign_income")], "20M");
-        assert_eq!(row[at("deductions_foreign_income")], "0");
+        assert_eq!(row[at("deductions_foreign_income")], "0.00");
         assert_eq!(labels[at("deductions_foreign_debt")], "D15");
         assert_eq!(labels[at("deductions_dividend_and_interest")], "D7 / D8");
-        assert_eq!(row[at("deductions_dividend_and_interest")], "0");
+        assert_eq!(row[at("deductions_dividend_and_interest")], "0.00");
         // The by-kind line still carries the figure, with no label of its own.
-        assert_eq!(row[at("deductions_management_fee")], "35");
+        assert_eq!(row[at("deductions_management_fee")], "35.00");
         assert_eq!(labels[at("deductions_management_fee")], "");
-        assert_eq!(row[at("deductions_total")], "35");
+        assert_eq!(row[at("deductions_total")], "35.00");
     }
 
     /// Expenses are attributed to the financial year of the date incurred (a July

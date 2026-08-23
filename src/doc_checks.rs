@@ -46,6 +46,42 @@ fn unrecognised_body_fields_documented() {
     assert!(API_MD.contains("`settlement_date_source`"));
 }
 
+/// Docs-sync pin for the cent-rounded CSV exports (SCENARIOS W-c): both
+/// export paragraphs state the rounding, and the display-rules paragraph no
+/// longer claims the CSV exports return full-precision decimals — the sentence
+/// that became wrong when the exports started rounding. The behaviour itself is
+/// pinned by `reports::export`'s unit tests and the two reports' export tests;
+/// this is the documentation half.
+#[test]
+fn cent_rounded_csv_exports_documented() {
+    // Both export paragraphs say what rounds, in the same words.
+    assert_eq!(
+        API_MD
+            .matches(
+                "**Money columns are exported to the cent** (2 decimal places, half away from zero"
+            )
+            .count(),
+        2,
+        "both /export paragraphs state the cent rounding"
+    );
+    // …and what does not: the JSON stays exact, and the two non-money columns
+    // come through untouched.
+    assert!(
+        API_MD.contains("The JSON report above is unaffected — it still answers the exact figure.")
+    );
+    assert!(
+        API_MD.contains("`tax_year` and `taxpayer_basis` are not money and are exported verbatim")
+    );
+    // The display-rules paragraph no longer promises full-precision CSV.
+    assert!(
+        !API_MD.contains("the JSON API and the CSV exports still return full-precision decimals")
+    );
+    assert!(API_MD.contains(
+        "The two [tax-return-ready CSV exports](#net-capital-gain) apply the same cent rounding \
+         to their money columns"
+    ));
+}
+
 /// Docs-sync pin for the money/quantity encoding rule (SCENARIOS W-a): its own
 /// section beside [`unrecognised_body_fields_documented`]'s, the `422` list
 /// pointing at it, the reason a JSON number cannot be honoured, and the two

@@ -316,10 +316,37 @@ Options offered:
 **Evan chose (a).** The CSV mirrors a screen, so it should read like it; the JSON stays the exact
 figure the docs promise.
 
-- [ ] Round every money column of `net-capital-gain.csv` and `tax-summary.csv` to the cent (half away
+- [x] Round every money column of `net-capital-gain.csv` and `tax-summary.csv` to the cent (half away
       from zero, the `roundDecimalStr` rule) in `reports::export`'s `csv_response` path, leaving rate
       and quantity columns verbatim and the JSON responses untouched; update `docs/API.md`'s two
       export paragraphs to say so
+      — the rounding is a **type**, not a column-name list: `reports::export::Cents(Decimal)`
+      serializes to 2 dp, half away from zero, always both places (`0.00`, never `-0.00`, no
+      thousands grouping — the separator is the delimiter). A CSV row is a *projection* of the
+      report record whose money fields are `Cents`, so which columns round is decided by the
+      field's type and nothing duplicates `util.js`'s `COLUMN_KINDS` in Rust — a name list in
+      `csv_response` was the alternative and was rejected for exactly that reason (serde hands the
+      writer a `Decimal` as a string, indistinguishable from `taxpayer_basis`, so a writer-level
+      pass has no way to tell money from text without such a list).
+      `NetCapitalGainYearCsv` already existed and gained `Cents` fields; `tax_summary` grew the
+      matching `TaxYearSummaryCsv` (39 money columns) rather than exporting the JSON struct
+      directly. `tax_year` and `taxpayer_basis` are not money and pass through untouched; the JSON
+      responses are unchanged, pinned by a control test on each report over the same facts.
+      Verified against the read-only copy of the 2026-08-22 backup: 18A `39592.120176274130543388699381`
+      → `39592.12`, 18V `0.000000000000000000000000` → `0.00`, FY2022 18A → `3151.90`, tax-summary
+      FY2026 assessable income `20243.630345624323612748757063` → `20243.63`, with both JSON reports
+      still answering the full-precision figure. Tests: `reports::export::tests::{a_money_column_rounds_to_the_cent_and_a_plain_decimal_does_not,
+      a_half_cent_rounds_away_from_zero_in_both_directions, a_nil_money_figure_is_two_zero_decimals,
+      a_whole_or_short_money_figure_is_padded_to_the_cent}`, and on each export
+      `api_export_rounds_money_columns_to_the_cent` + its control
+      `api_the_json_report_keeps_the_precision_the_export_rounds`
+      (`reports::net_capital_gain`, `reports::tax_summary`) plus
+      `reports::tax_summary::tests::api_export_rounds_a_half_cent_away_from_zero`;
+      `doc_checks::cent_rounded_csv_exports_documented` pins the two export paragraphs and the
+      display-rules sentence that had promised full-precision CSV.
+      One consequence, deliberate and matching the screens: each column rounds independently, so
+      rounded components need not add to a rounded total (here 39344.55 + 247.57 = 39592.12 does,
+      but that is arithmetic, not a guarantee) — the same behaviour every table on screen has.
 
 ## SCENARIOS W-d — The Annual Tax Report's printed columns do not add up
 
