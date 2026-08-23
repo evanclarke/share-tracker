@@ -10,6 +10,8 @@ findings are all closed in DONE.md), except where a section's heading names anot
 (e.g. REQUIREMENTS, SCENARIOS). Each section records one finding; sections land in DONE.md as they
 are fixed or decided.
 
+**Nothing is open in this file.**
+
 **SCENARIOS.md sections A–V are driven and every finding they raised is closed** in the `DONE/*.md`
 archive. Section **S. Settlement, holidays, and dates** was driven 2026-08-22 (`d501408`) and its
 four findings closed by `67c3096` (a trade dated in the future), `30d0e96` (a trade dated on a day
