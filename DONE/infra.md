@@ -1516,3 +1516,172 @@ One further residual, out of this section's scope and noted while fixing it:
 (`per_unit * covered.min(held) * units / held`). Probed at 1e15 units with a `0.05` per-unit
 adjustment it survives (`1.5e28`), but a larger per-unit figure at that scale would overflow — now a
 logged `500` rather than a dropped connection, so it fails safe. Worth closing properly later.
+
+
+## SCENARIOS X-b — a write concurrent with a long write transaction dies as an empty-bodied 500 once it outlasts the busy timeout
+
+Found while verifying X-a's fix at the HTTP surface, by pushing the same reproduction past the scale
+it was measured at. Snapshot generation now holds SQLite's write lock for its whole duration (that is
+what makes its `stale` flag trustworthy), and a concurrent write waits for it — sqlx's **default
+5-second `busy_timeout`**, which nothing in this tree sets explicitly. Past that, the waiter does not
+queue any longer: it fails.
+
+**Reproduction** (throwaway database, one listing grown to **30,000 parcels**):
+
+- `POST /report_snapshots/generate {"date":"2025-06-30"}` → `200` in **6.46 s**.
+- `PUT /closing_prices/6/2025-06-30` fired 500 ms into that run → **`500` with an empty body** after
+  **5.45 s**, logged as `error returned from database: (code: 5) database is locked`.
+
+**Bounded by the scale either side.** At 10,000 parcels the same generation takes 1.63 s and the same
+write waits 1.16 s and lands `204`; on Evan's real database a generation is ~41 ms and the wait is
+imperceptible (all 2,182 stored dates regenerate in 89 s). So nothing he holds today can reach it —
+this is a ceiling, not a live fault.
+
+**It is not really the snapshot path's fault, which is what decides the fix.** *Any* write
+transaction longer than the busy timeout does this to a concurrent writer: the 6,000-parcel scrip
+exchange already takes 0.96 s, and the same operation over 30,000 parcels would take the same 6 s and
+produce the same empty 500. X-a's fix added a long write path; it did not create the failure mode.
+The timeout is a parameter nobody has ever chosen — and `infra::db::write_tx`'s own reasoning is that
+a queued writer *waits its turn* rather than failing, which is exactly what a too-small timeout
+takes away.
+
+**Options:**
+
+(a) **Set the timeout explicitly, sized above the longest write transaction the application can
+    produce**, with the measurement recorded beside it. Keeps `write_tx`'s promise true at every
+    scale; costs a genuinely stuck writer a longer wait before it reports.
+(b) **Give the expiry a body.** A lock timeout is not an internal error — it is "the database was
+    busy; try again" — and today it reaches the web UI as a bare `HTTP 500`, the exact failure shape
+    T-10 and the `write_tx` work were about.
+(c) Leave it: unreachable at Evan's scale. Rejected — it is unreachable *today*, the symptom is the
+    one this project has twice gone out of its way to eliminate, and both halves above are small.
+
+**Chosen: (a) and (b) together.** (a) is the fix; (b) is what makes the residual honest, since no
+timeout can be proof against every pathological case.
+
+- [x] Choose the `busy_timeout` explicitly rather than inheriting sqlx's default, sized above the
+      longest write transaction the application can produce, with the measurement in the comment
+      — `infra::db::BUSY_TIMEOUT` is **30 seconds**, applied in `connect_options`, so every pool in
+      the application gets it (and `test_support::test_pool`, which deliberately shares those
+      options). **Every premise was re-derived before the fix, and the write-up held up on all
+      three.** Nothing set `busy_timeout` anywhere in the tree (`connect_options` set only
+      `create_if_missing`, `foreign_keys` and WAL). sqlx's default really is 5 s, read out of the
+      vendored source rather than from memory —
+      `sqlx-sqlite-0.9.0/src/options/mod.rs:203` (`busy_timeout: Duration::from_secs(5)`), applied
+      by `sqlite3_busy_timeout()` at connect (`connection/establish.rs:181`), not as a startup
+      `PRAGMA`. And the failure really is the timeout expiring, not a deferred-`BEGIN` upgrade: the
+      write that failed is `closing_price::db_store`, a bare `.execute(pool)` autocommit statement
+      with no transaction of any kind, and every failure logged `(code: 5)` — plain `SQLITE_BUSY`,
+      never `517`/`SQLITE_BUSY_SNAPSHOT`, which is what an upgrade failure gives.
+      **The measurement behind 30 s.** Both of the application's long write transactions scale with
+      the number of open parcels, and were timed at the HTTP surface on throwaway databases of
+      one-unit Buy parcels (debug build): a whole-holding scrip exchange takes **4.80 s at 30,000
+      parcels and 9.42 s at 60,000** (~157 µs/parcel, agreeing to 2% across two separately built
+      databases), and a report-snapshot generation **0.55 s at 30,000 and 1.10 s at 60,000** on one
+      database as it grew — but **2.30 s at 30,000** on a differently built one, and **6.53 s at
+      30,000** on the database this finding was raised against. Generation's cost therefore depends
+      on much more than the parcel count, and it — not the rollover — is what binds the number.
+      **The disagreement over that figure is worth recording, because both measurements are right.**
+      The fixing pass could not reproduce 6.46 s and concluded the headline reproduction did not
+      fail on this machine; re-run afterwards against the database it was originally found on, it
+      reproduced immediately and repeatedly — 6.54 / 6.52 / 6.53 s over three consecutive runs — so
+      what differs is the database, not the machine. That one carries a second listing's 4,000
+      parcels, ten days of prices across eight listings, and the income rows the performance half of
+      the run walks; the fixing pass's carried one listing's parcels and nothing else. A twelvefold
+      spread in per-parcel cost (18 µs → 218 µs) at one parcel count is the fact to carry forward:
+      a bound taken from the typical rate would have been three times too generous, so the constant
+      is sized on the worst rate seen. At 218 µs, **30 s covers a generation of roughly 138,000 open
+      parcels** and a rollover of roughly 190,000 — four times the largest database either was
+      measured on; Evan's real database generates a snapshot in ~41 ms (X-a). It is deliberately not
+      larger: a genuinely stuck writer has to report, and a request that never returns is worse than
+      one that returns 503. The re-based reproduction (a whole-holding scrip exchange over 60,000
+      parcels, 9.4–11.0 s) stands on its own as the equally-shaped case, and is the one this fix was
+      verified against; the original one was re-verified separately (see below).
+      **A bigger timeout does not close the bulk case, and the comment says so.** `regenerate_dates`
+      opens a fresh write transaction for the next date the instant it commits the last, and
+      SQLite's busy handling is not a queue: its handler backs off to a 100 ms poll, so a waiter
+      loses the microsecond-wide gap between dates to the loop's already-awake thread every time.
+      Measured on 60,000 parcels, a 15-date `regenerate_all` (70 s) against a write stream: **13
+      consecutive writes failed, one after another, across 13 lock releases the waiter never won** —
+      100% of the writes attempted in that window, with zero successes between the first failure and
+      the end of the run. (The parent session's own measurement of this — 3 failures in 384 — is the
+      same mechanism seen through a faster write stream; it is not "3 unlucky writes", it is *every*
+      write that was in flight long enough to reach the timeout.) So the value is justified against a
+      single long transaction, which it does bound, and explicitly not against a loop of them, which
+      nothing can. **No mitigation was added to the loop, deliberately**: the only thing that would
+      work is a cooperative pause longer than the busy handler's 100 ms poll, which on Evan's real
+      database (2,182 dates, ~89 s) would add ~218 s — tripling a repair to make a probabilistic
+      improvement to a case that is already visible and operator-initiated. `regenerate_all` is
+      started by a person who is watching it; the one *unattended* bulk path,
+      `regenerate_provisional` inside the weekly `rba-fx-import` job, is bounded to the provisional
+      dates (at most a couple of months). Documented as a known limitation instead.
+      **`busy_timeout` still does not rescue a deferred `BEGIN`**, and the raised value did not slow
+      the test that pins this: `infra::db::tests::a_deferred_transaction_cannot_upgrade_after_a_concurrent_write`
+      bounds the failed upgrade with a 2-second `tokio::time::timeout` that asserts it is
+      *immediate*, so a SQLite that started waiting would fail the test rather than quietly take 30
+      seconds. It still passes, still in milliseconds — which is itself the evidence that the
+      upgrade path never consults the timeout. Its doc comment now says that is what the bound is
+      for.
+- [x] Answer a busy-timeout expiry with a bodied reply saying the database was busy and the write can
+      be retried, never an empty `500`
+      — new `infra::http::ApiError::Busy { body, source }` → **`503 Service Unavailable`** with the
+      plain-text body *"the database was busy with another write and this one gave up waiting;
+      nothing was changed, so the request can be sent again"*, logged at **warn** (not error) with
+      the underlying database error, whose text carries the SQLite result code. The wording lives in
+      the `From<sqlx::Error> for ApiError` arm, per the house rule, classified **ahead of** the
+      constraint kinds — busy is `ErrorKind::Other`, so it used to fall straight through to
+      `Internal` and an empty 500. Every entity error enum's `Db(sqlx::Error)` arm converts through
+      that one impl (`err.into()`), so all of them are covered by the single arm.
+      **Detected on the result code, never the message.** `is_busy` reads sqlx's extended code
+      (`DatabaseError::code()`, a decimal string) and tests the **primary** code — the low byte — so
+      the whole family classifies together: `SQLITE_BUSY` (5), `SQLITE_BUSY_RECOVERY` (261),
+      `SQLITE_BUSY_SNAPSHOT` (517) and `SQLITE_BUSY_TIMEOUT` (773). 517 is included deliberately:
+      `write_tx` is meant to make it unreachable on a write path, but if one ever escapes that guard
+      the caller's answer is still a retry, and a bodied 503 beats an empty 500. `SQLITE_LOCKED` (6)
+      is deliberately excluded — one code away, an almost identical message ("database table is
+      locked"), but a coding fault rather than contention, so it stays a 500. This is exactly why
+      the test is on the code and not the text.
+      **The web UI needed nothing**: `util.js`'s `api()` already reads any non-2xx body and throws
+      `HTTP <status>: <body>`, which every call site toasts — so the 503 surfaces as the full
+      sentence, not as "HTTP 503". Confirmed by reading the path rather than assumed.
+      **Files**: `src/infra/db.rs` (`BUSY_TIMEOUT` + its measurement comment, `connect_options`,
+      `write_tx`'s doc, the deferred-upgrade test's doc + one new assertion), `src/infra/http.rs`
+      (`ApiError::Busy`, its `IntoResponse` arm, `BUSY_BODY`, `is_busy`/`is_busy_code`, the new arm
+      in `From<sqlx::Error>`), `docs/API.md`, `README.md`.
+      **Verified at the HTTP surface**, throwaway database, 60,000 one-unit parcels, the same race
+      re-based onto a whole-holding scrip exchange (10.7–11.0 s), a `PUT /closing_prices/1/2025-06-30`
+      fired 500 ms in. *Before*: the write died **`500` with an empty body after 5.29 s**, logged
+      `error returned from database: (code: 5) database is locked`. *After*: the same write **waits
+      7.47 s and returns `204`**, and the corrected price is stored (`price: "25"`, `origin:
+      "manual"`) — the wait now does what `write_tx`'s doc comment always claimed it did.
+      **And what a wait that still expires answers**: the 15-date bulk regeneration against a write
+      stream went from **13 empty-bodied 500s after ~5.19 s each** to **2 `503`s after ~32.5 s each,
+      both carrying the full body**, with the other 76 writes landing `204` in ~1 ms. Fewer
+      refusals, and each one now says what happened and that it can be sent again.
+      **The original reproduction was re-verified too**, against the 30,000-parcel database it was
+      raised on: generation there still takes 6.53 s, and the closing-price write fired 500 ms into
+      it now **waits 6.11 s and returns `204`**, where it previously died at 5.45 s with an empty
+      body. So both shapes of the finding — X-b's own and the re-based one — are closed on the
+      databases they were each measured on.
+      **Tests**: `infra::db::tests::the_chosen_busy_timeout_is_in_force_on_every_connection` reads
+      `PRAGMA busy_timeout` back off a connection from `infra::db::init` — for a file database and
+      for `:memory:`, the two branches of `connect_options` — and refuses to be satisfied by 5,000 ms
+      (it asserts the constant is not sqlx's default, since at that value the test could not tell
+      "chosen" from "inherited"). `infra::http::tests::a_write_that_gave_up_waiting_for_the_lock_is_503_with_a_retryable_body`
+      provokes a **real** `SQLITE_BUSY` — one connection holds `BEGIN IMMEDIATE`, another writes —
+      on a purpose-built pool with a **zero** busy timeout, so the classification is asserted without
+      waiting out 30 seconds in the suite, and checks the status, the exact body, and that the body
+      tells the user to retry.
+      `infra::http::tests::the_whole_busy_family_classifies_together_and_nothing_else_does` pins the
+      four busy codes in and `SQLITE_LOCKED`/`SQLITE_LOCKED_SHAREDCACHE`/constraint/corrupt codes
+      out. `infra::db::tests::a_deferred_transaction_cannot_upgrade_after_a_concurrent_write` gains
+      one assertion that its 517/5 failure classifies as `Busy` too.
+      **Docs**: `docs/API.md` gains a `503` row in **Response codes**, a new **Concurrent writes**
+      section (the one-writer rule, the chosen timeout and the measurement behind it, and why a bulk
+      loop is not bounded by it), and a **Known limitations** entry for the bulk-regeneration
+      lockout; its **Error bodies** paragraph no longer says "`5xx` responses stay generic"; and
+      X-a's sentence in **Report snapshots** — which said only "tens of milliseconds per date on a
+      real database" — now gives the range (~40 ms per date real, 0.5–2.3 s per date at 30,000
+      parcels), says what happens when a write waits past the timeout, and states the bulk-loop
+      lockout with its measurement. README's snapshot bullet gains the same clause. No schema change,
+      so `docs/SCHEMA.md` is untouched.

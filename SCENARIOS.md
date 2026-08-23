@@ -87,7 +87,7 @@ behind or became a recorded finding.
 | U. Audit trail and history | 8 | 2026-08-22 (`1a0f821`) | 3 raised, all closed — see below |
 | V. Back-dated and out-of-order entry | 10 | 2026-08-23 (`4b579c8`) | 5 raised, all closed — see below |
 | W. Precision, rounding, and scale | 8 | 2026-08-23 (`d02cdc2`) | 6 raised, all closed — see below |
-| X. Transactional integrity and concurrency | 8 | — | — |
+| X. Transactional integrity and concurrency | 8 | 2026-08-23 (`f01d814`) | 2 raised, both closed — see below |
 | Y. Web UI | 12 | — | — |
 | Z. Composite lifecycle scenarios | 12 | — | — |
 | AA. Boundary and out-of-scope scenarios | 20 | — | — |
@@ -1194,6 +1194,117 @@ divergence W-f fixed was only ever visible to a human checking the worksheet. Th
 therefore chosen on the project's own rule, and lands taxpayer-favourably: rounding the concession
 half away from zero gives the larger half to the concession, so FY2026's 18A moved from `39592.12` to
 `39592.11` and FY2025's from `5076.87` to `5076.86`.
+
+
+### Section X findings
+
+All eight scenarios were driven on 2026-08-23 against throwaway databases, with the interruptions
+**driven rather than reasoned about**: the server was `SIGKILL`ed at four points inside a
+6,000-parcel scrip exchange and four inside a 4,000-parcel AMIT generation, each set preceded by a
+control run establishing that a *completed* operation is plainly visible (6,001 trades; 4,000
+adjustments) — so a kill that leaves nothing behind is evidence rather than an absence. Every race
+was fired as simultaneous HTTP requests released off a thread barrier.
+
+**Seven came back correct, and the atomicity is real rather than incidental.** A Sell whose last
+allocation violates an invariant persists nothing — and a failing *edit* of a stored Sell leaves its
+allocations and quantity exactly as they were, which is the harder half, since the write deletes the
+old allocation set before inserting the new one (X-01). A transfer whose network-fee Sell fails
+leaves no trace of the transfer row, the transfer-out Sell or any transfer-in Buy: the fee Sell is
+the **last** thing `db_transfer` writes, so all four ways it can fail (an over-capacity fee, a
+missing or zero market price, a fee parcel of another listing) exercise exactly the "fails after the
+earlier legs succeeded" shape the scenario names (X-02). Killing the process mid-exchange and
+mid-generation left `integrity_check` clean, no foreign-key violations, and not one row of either
+operation; the AMIT `replace` path — which deletes the existing set before regenerating it — still
+held all 4,000 prior adjustments after each kill (X-03, X-04). Reports never see half a write:
+8,685 reads of the open-parcels report against 3,923 create/delete cycles of a Sell spanning two
+parcels never once saw one parcel consumed without the other (X-05) — and the regression test written
+for it established *which* mechanism holds that, which is not the one the scenario is named after.
+Splitting the **write** (deleting the Sell's two allocations in two transactions instead of one)
+trips the invariant within a few hundred reads; taking the report's single read transaction away does
+not trip it at all, because SQLite gives statement-level atomicity and the remaining-quantity figure
+comes from one `SELECT`. The read transaction is still load-bearing for the case
+`domain::open_parcels` names — an allocation whose parcel is missing from the same read, which spans
+two queries — but this invariant is the write's atomicity, not the reader's. Forty rounds of four
+simultaneous Sells racing for a parcel's last 100 units answered `204`/`422`/`422`/`422` every time,
+and no parcel was ever over-allocated (X-06). And a backup taken mid-write waits for the writer,
+lands verified, and contains a committed state, while writes fired during a 250 MB backup all
+answered `204` in ~3 ms (X-08). The probes beyond the list found the same: two simultaneous scrip
+exchanges of one action gave one `201` and one `422`; two simultaneous DRP reinvestments of one
+distribution gave one trade and one refusal (and two simultaneous undos, one `204` and one `422`);
+a `DELETE` of a parcel racing a Sell that allocates from it is refused on whichever side loses,
+naming what depends on the row, in both interleavings and with no orphan allocation ever left; two
+concurrent edits of one trade both landed and both were audited; and 60 concurrent reports beside a
+write stream produced no `SQLITE_BUSY`, no `500`, and no queueing failure.
+
+**The first finding is X-07's, and it was the only place in the tree where a write's inputs and its
+output did not come from one serialised point in time.** `reports::snapshot::generate` read its four
+inputs on the pool — each opening and closing its own transaction — and only then opened `write_tx`
+to store them with `stale = 0`. A fact write committing in that window was in neither: the schema's
+staleness triggers fired against a row that did not exist yet, and the insert then cleared the flag
+they set. The snapshot kept a valuation of a state that no longer existed, and because nothing but
+the `stale` flag ever asks for a regeneration, it kept it forever. Both controls are correct — the
+same correction entirely before a generation produces the new figure, entirely after it marks all
+three snapshots stale — which is what identifies the read/write split as the mechanism rather than
+the trigger set; and it is not price-specific, since an ordinary `PUT /trades/:id` in the same window
+is lost identically. Evan's real data is clean: regenerating all 2,182 stored snapshot dates
+reproduced every stored `rows_json` byte for byte.
+
+**The second was found by verifying the first at a scale it had not been measured at, and it is
+older than the fix that exposed it.** With generation now holding the write lock for its whole
+duration, a concurrent write waits — on sqlx's **default** 5-second busy timeout, which nothing in
+this tree had ever chosen. At 30,000 parcels a generation runs 6.5 s and the waiting write dies
+after 5.45 s as a `500` with an empty body (`(code: 5) database is locked`), the exact failure shape
+the `write_tx` convention and T-10 both went out of their way to eliminate. A bulk regeneration is
+worse than a single long transaction, and differently: over 10 dates on a 10,000-parcel database
+(17.34 s in total, each date only ~1.7 s) three of 384 concurrent writes still died — at ~5.2 s
+each, far longer than any one date's run, which is starvation across *consecutive* write
+transactions rather than one that outlasts the timeout. So the timeout is a ceiling that can be
+raised and the bulk loop is a case no timeout bounds, which is what makes the bodied, retryable
+reply the half that matters — a `503` saying the database was busy and the request can be sent
+again, which a write during a 52 s bulk regeneration was measured receiving after waiting 32.4 s.
+Neither is reachable at Evan's scale: a generation on the real database is ~41 ms.
+
+**Two lessons, and the first is the section's own.** *Verify a fix at a scale it was not measured
+at.* X-b exists only because X-a's fix was re-run against a database four times larger than the one
+that found it; at the original scale the concurrent write waits and succeeds, and nothing looks
+wrong. *And two contradictory measurements can both be right.* The pass that fixed X-b could not
+reproduce its headline 6.46 s — it measured 0.55–2.30 s at the same 30,000 parcels and recorded that
+the reproduction "did not fail on this machine". Re-run afterwards against the database the finding
+was raised on, it reproduced immediately and three times over (6.54 / 6.52 / 6.53 s): what differed
+was the database, not the machine, because generation's cost tracks everything the three reports
+walk and not the parcel count. The spread is twelvefold at one parcel count (18 µs to 218 µs per
+parcel), so the timeout was sized on the worst rate seen rather than the typical one — a bound taken
+from the typical rate would have been three times too generous. Before dismissing a reproduction,
+re-run it on the artefact it was produced from.
+
+| Finding | Scenarios | Fixed by |
+| --- | --- | --- |
+| A fact write landing during a snapshot generation is lost, and the snapshot is stored as fresh | X-07 | `9e221f3` |
+| A write concurrent with a long write transaction dies as an empty-bodied `500` | X-07 (found verifying X-a) | `d4b083a` |
+
+**Every scenario left a test behind**, four of them written for this pass and three already covered:
+`entities::amit_adjustment_generation::tests::db_a_failed_replace_leaves_the_original_adjustments_standing`
+(X-04), `reports::open_parcels::tests::a_read_never_sees_half_of_a_multi_parcel_sell` (X-05),
+`entities::sell::tests::concurrent_sells_cannot_both_take_a_parcels_last_units` (X-06) and
+`infra::db::tests::a_backup_taken_mid_transaction_holds_a_committed_state` (X-08), beside the
+existing `sell::tests::{a_sell_naming_a_parcel_that_does_not_exist_persists_nothing,
+amending_an_earlier_sell_is_capped_by_what_a_later_one_consumed}` (X-01),
+`transfer::tests::network_fee_requires_a_positive_market_price` (X-02) and
+`scrip_exchange::tests::invalid_exchanges_are_rejected_and_nothing_persisted` (X-03). The three new
+concurrency tests need a **file-backed** pool (`test_support::race_pool`, promoted out of the
+snapshot fix so the reasoning lives in one place): `test_pool`'s `:memory:` database is shared-cache,
+where a reader blocks on an open writer, so a race test there passes against the very code it exists
+to refuse — measured, not assumed. Each was mutation-tested: splitting the Sell delete's allocations
+across two transactions, moving the AMIT `replace` DELETE out of the regeneration transaction,
+turning `write_tx` back into `pool.begin()` in the Sell path, and disabling the over-allocation check
+each kill their test.
+
+**One residual, noted and not chased.** `amit_adjustment_generation::Movement::matching_replacement`
+matches a rollover's replacement parcel by `(quantity, deemed_acquisition_date)` and takes the first
+match, so a transfer that moved two source parcels of identical size *and* identical acquisition date
+would attribute both to one replacement and refuse the second with `DuplicateParcel`. It fails
+closed — a refusal, not a wrong figure — and constructing it is awkward enough that no reproduction
+was built; recorded here rather than chased.
 
 
 ## A. Deletion and mutation ripple effects
