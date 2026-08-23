@@ -281,3 +281,55 @@ the guard.
       with a test per affected operation and per parcel-creating path.
 - [ ] Add the unconsumed-parcel problem to `rollover_consistency` (and so the annual tax report's
       completeness section), with a test and the `docs/API.md` entry.
+
+## SCENARIOS V-e — reinvesting into an already-closed DRP period brings forward nothing
+
+Raised driving **V-08**, the sibling of [V-b](#scenarios-v-b--reinvesting-a-drp-distribution-out-of-order-builds-the-residual-chain-backwards)
+and a different mechanism: V-b read the chain *forward in time*, this one reads a column the
+period's closure had temporarily zeroed. Noticed while fixing V-b, then re-derived independently
+against a throwaway database before being logged.
+
+A `CarryForward` period's trailing leftover is settled to `residual_paid_out` when the period
+closes, and `entities::drp_reinvestment::db_reinvest` reads the prior trade's
+`residual_carried_forward` — which for that trailing trade is therefore `0`. `recompute_residuals`
+restores it to `residual_carried_forward` a moment later, correctly, because the new trade has
+displaced it as the tail — but the new trade was already written with nothing brought forward.
+
+Measured, one listing, one **closed** `CarryForward` period (2024-01-01 → 2024-12-01), two
+distributions reinvested **in payment order** (so V-b's new refusal does not fire):
+
+| DRP trade | date | quantity | brought fwd | carried fwd | paid out |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 2 | 2024-03-28 | 11 | 0 | **6** | 0 |
+| 3 | 2024-06-28 | **10** | **0** | 0 | 7 |
+
+March states A$6 carried forward and June received none of it: the money is carried to nobody, and
+the June parcel is a unit short (107 + 6 = 113 buys 11 units at A$10, not 10).
+
+The control bounds it — the same facts with the period **open** while reinvesting, closed
+afterwards, are correct throughout: 11 and 11 units, carries 6 then 3, and closing moves only the
+trailing 3 to `residual_paid_out`. So the fault is confined to reinvesting **into a period that is
+already closed**, which is the ordinary shape of V-08: a statement arrives months after the plan
+was left, and the period the user records retroactively is one they have since ended. `PayOut`
+periods are unaffected — every leftover is refunded as it arises, so nothing is ever brought
+forward by design.
+
+`docs/API.md` already states the principle this violates: *"What happened to each leftover is
+derived from the period, not stamped on when it closes"*, and *"Every write of the period
+re-derives the split for its trades"*. `db_reinvest` reading a stored column is the odd one out.
+
+Options offered:
+
+1. Have `db_reinvest` take the brought-forward figure from **`recompute_residuals`' own
+   derivation** rather than from a stored column whose value depends on a tail that is about to
+   move — one function decides the split, which is what the documented principle says.
+2. Read the prior trade's leftover as `residual_carried_forward + residual_paid_out` (the two
+   columns are one leftover, split only by which trade is currently the tail). One line, same
+   answer, but leaves two places deciding the split.
+3. Refuse a reinvestment into a period carrying an `unenrolment_date`, requiring it to be
+   re-opened, reinvested and re-closed.
+
+**Evan chose option 1** — ask the shared derivation, so the split is decided in one place.
+
+- [ ] Have `db_reinvest` derive the brought-forward figure the way `recompute_residuals` does,
+      with a test reinvesting twice into an already-closed `CarryForward` period.
