@@ -2721,4 +2721,163 @@ mod tests {
             assert_eq!(stored, quantity, "stored quantity lost a digit");
         }
     }
+
+    // -----------------------------------------------------------------------
+    // A cost base that cannot be represented (SCENARIOS W-e)
+    // -----------------------------------------------------------------------
+
+    /// The finding's own trade: `1e15 × 1e15` is `1e30`, past
+    /// `rust_decimal`'s ~7.9228e28 ceiling. It used to be accepted `204` and
+    /// then killed `GET /portfolio/open-parcels`, `POST /portfolio/overview`
+    /// and `POST /portfolio/unrealised-gains` — a logged `500` with an empty
+    /// body since W-b's panic layer, a dropped connection before it — leaving
+    /// the offending row invisible in exactly the reports that would have
+    /// found it. Now refused at the write, naming the product **and** the
+    /// limit, which is what makes the ceiling defensible: it is `Decimal::MAX`
+    /// read off the type, not a policy number.
+    #[tokio::test]
+    async fn api_a_trade_whose_cost_base_cannot_be_represented_is_refused_naming_it() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+
+        let response = client(&pool)
+            .put(
+                "/trades/9600",
+                &serde_json::json!({
+                    "trade_type": "Buy",
+                    "date": "2023-03-15",
+                    "listing_id": 1,
+                    "average_price": "1000000000000000",
+                    "quantity": "1000000000000000",
+                    "currency": "AUD",
+                    "brokerage": "0",
+                    "gst_on_brokerage": "0",
+                    "brokerage_includes_gst": false,
+                    "brokerage_currency": "AUD",
+                    "fx_rate": "1",
+                    "holding_account_id": 1,
+                }),
+            )
+            .await;
+        let (status, body) = response.status_and_body();
+
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        // The product, both of its factors, and the limit itself.
+        assert!(
+            body.contains("average_price 1000000000000000 × quantity 1000000000000000"),
+            "the product is not named: {body}"
+        );
+        assert!(
+            body.contains(&rust_decimal::Decimal::MAX.to_string()),
+            "the limit is not named: {body}"
+        );
+        // Nothing was written, so the reports stay readable.
+        assert!(db_get(&pool, 9600).await.unwrap().is_none());
+    }
+
+    /// The control, measured before the refusal existed and unchanged by it: a
+    /// large-but-representable parcel (`price 1 × quantity 1e14`, a cost base
+    /// of 1e14) still writes `204` and still reads back through
+    /// `GET /portfolio/open-parcels` at that exact figure. The bound is the
+    /// type's, so everything the type can hold is still accepted.
+    #[tokio::test]
+    async fn api_a_large_but_representable_cost_base_still_writes_and_reads_back() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+
+        client(&pool)
+            .put_ok(
+                "/trades/9601",
+                &serde_json::json!({
+                    "trade_type": "Buy",
+                    "date": "2023-03-15",
+                    "listing_id": 1,
+                    "average_price": "1",
+                    "quantity": "100000000000000",
+                    "currency": "AUD",
+                    "brokerage": "0",
+                    "gst_on_brokerage": "0",
+                    "brokerage_includes_gst": false,
+                    "brokerage_currency": "AUD",
+                    "fx_rate": "1",
+                    "holding_account_id": 1,
+                }),
+            )
+            .await;
+
+        let rows: serde_json::Value = ApiClient::full(&pool)
+            .get_json("/portfolio/open-parcels")
+            .await;
+        assert_eq!(rows[0]["trade_id"], 9601);
+        assert_eq!(rows[0]["original_cost_base"], "100000000000000");
+        assert_eq!(rows[0]["remaining_cost_base"], "100000000000000");
+    }
+
+    /// A database that already holds such a row — entered by a build that
+    /// predates the guard — must stay correctable, which is the trap W-d's
+    /// sibling rule fell into (its first draft refused edits as well as
+    /// creations). The refusal reads the figures *being written*, never the
+    /// stored ones, so an edit that brings the parcel back inside the range
+    /// lands; only an edit that leaves it outside is refused.
+    #[tokio::test]
+    async fn api_an_already_unrepresentable_parcel_can_still_be_corrected() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        test_support::insert_parcel_bypassing_checks(
+            &pool,
+            9600,
+            1,
+            ymd(2023, 3, 15),
+            "1000000000000000",
+            "1000000000000000",
+        )
+        .await;
+
+        let correction = |price: &str, quantity: &str| {
+            serde_json::json!({
+                "trade_type": "Buy",
+                "date": "2023-03-15",
+                "listing_id": 1,
+                "average_price": price,
+                "quantity": quantity,
+                "currency": "AUD",
+                "brokerage": "0",
+                "gst_on_brokerage": "0",
+                "brokerage_includes_gst": false,
+                "brokerage_currency": "AUD",
+                "fx_rate": "1",
+                "holding_account_id": 1,
+            })
+        };
+
+        // The typo corrected: accepted, and the parcel is readable again.
+        client(&pool)
+            .put_ok("/trades/9600", &correction("10", "100"))
+            .await;
+        let rows: serde_json::Value = ApiClient::full(&pool)
+            .get_json("/portfolio/open-parcels")
+            .await;
+        assert_eq!(rows[0]["original_cost_base"], "1000");
+
+        // A "correction" whose own product is still unrepresentable is not a
+        // correction — each field is representable on its own here, so it is
+        // the product this refuses and not the decimal decoder.
+        let response = client(&pool)
+            .put(
+                "/trades/9600",
+                &correction("1000000000000000", "1000000000000000"),
+            )
+            .await;
+        let (status, body) = response.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert!(
+            body.contains("multiply out beyond what can be recorded"),
+            "{body}"
+        );
+        // …and the accepted correction is what is still stored.
+        assert_eq!(
+            db_get(&pool, 9600).await.unwrap().unwrap().average_price,
+            Decimal::from(10)
+        );
+    }
 }

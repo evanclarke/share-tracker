@@ -53,6 +53,15 @@
 //!   reports a taxing point that has already happened, so a future one is a
 //!   typo, and refusing it there names the field the user typed.
 //!
+//! - `Unrepresentable` — the Buy's `average_price × quantity` is the
+//!   statement's `market_value_per_share × quantity`, which the statement write
+//!   already computes (to check the discount labels against it) and now bounds
+//!   (`ess_statement::UpsertError::UnrepresentableMarketValue`, SCENARIOS W-e).
+//!   That check runs on exactly the statements a vest is possible for — the
+//!   ones with both figures positive — so no vestable statement can reach here
+//!   with an unrepresentable product, and refusing it there names the figures
+//!   the user typed rather than a derived parcel's.
+//!
 //! A new check added to `trade::check_amounts` therefore needs a line here, and
 //! either an argument that the vest satisfies it or a guard that makes it so.
 //!

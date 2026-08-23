@@ -63,6 +63,11 @@
 //!   let either component be negative.
 //! - `BrokerageCurrencyMismatch` — `brokerage_currency` is bound from the same
 //!   `currency` value as the trade's own, in one statement.
+//! - `Unrepresentable` — [`UpsertError::UnrepresentableCostBase`], the same
+//!   `domain::cost_base::checked_cost_base` bound over the terms an
+//!   inheritance states (`cost_base + lpr_expenditure`, which is what the
+//!   `brokerage` column carries) rather than over a price × quantity product
+//!   it does not have (SCENARIOS W-e).
 //! - `FxRateNotPositive` — [`UpsertError::FxRateNotPositive`], the same rule.
 //! - `SettlementBeforeTrade` — `settlement_date` is bound to the trade date
 //!   itself (an estate transmission is not market-settled).
@@ -228,6 +233,14 @@ pub enum UpsertError {
     /// are data-entry errors.
     #[error("the cost base and LPR expenditure must not be negative")]
     NegativeAmount,
+    /// `cost_base + lpr_expenditure` — the whole cost base the parcel Buy
+    /// carries on its `brokerage` column — cannot be represented (SCENARIOS
+    /// W-e). This one overflowed at the *write*, not at the read: the sum was
+    /// a plain `+`, so the pair answered a bare `500` with an empty body
+    /// naming nothing. The wording and the limit live in `domain::cost_base`,
+    /// shared with `trade::checks`' bound on `average_price × quantity`.
+    #[error("the inherited cost base is not representable: {0}")]
+    UnrepresentableCostBase(#[source] crate::domain::cost_base::UnrepresentableCost),
     /// `deceased_acquisition_date` must be present exactly when the rule is
     /// `DeceasedCostBase` (it starts the discount clock); a pre-CGT asset's
     /// clock runs from the date of death and the date is not recorded.
@@ -338,6 +351,7 @@ impl From<UpsertError> for ApiError {
             UpsertError::NegativeAmount => {
                 ApiError::unprocessable("the cost base and LPR expenditure must not be negative")
             }
+            UpsertError::UnrepresentableCostBase(e) => ApiError::unprocessable(e.message()),
             UpsertError::RuleAcquisitionDateMismatch => ApiError::unprocessable(
                 "the deceased's acquisition date is required with the DeceasedCostBase rule \
                  (it starts the 12-month discount clock) and must be omitted with \
@@ -646,7 +660,17 @@ pub async fn db_upsert(pool: &SqlitePool, inh: &Inheritance) -> Result<(), Upser
     // deemed date equals the rule pairing validated above: the deceased's
     // acquisition under DeceasedCostBase, none (the death date itself) under
     // MarketValueAtDeath.
-    let total_cost_base = inh.cost_base + inh.lpr_expenditure;
+    // The two elements sum to the whole cost base, so an unrepresentable sum
+    // has no lesser answer to record — refused with the figures named rather
+    // than left to panic inside the `+` (SCENARIOS W-e). The trade path bounds
+    // its own product in `trade::check_amounts`; this parcel does not go
+    // through it (see the module comment), so the same bound is applied here,
+    // over the terms an inheritance actually states.
+    let total_cost_base = crate::domain::cost_base::checked_cost_base(&[
+        crate::domain::cost_base::Term::Amount("cost_base", inh.cost_base),
+        crate::domain::cost_base::Term::Amount("lpr_expenditure", inh.lpr_expenditure),
+    ])
+    .map_err(UpsertError::UnrepresentableCostBase)?;
     // An edit keeps the linked Buy's id (the ON CONFLICT arm below rewrites
     // that row); a first entry binds NULL, which for an INTEGER PRIMARY KEY
     // AUTOINCREMENT column is exactly omitting it — the database assigns an id
@@ -1854,5 +1878,66 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count, 0);
+    }
+
+    /// An inherited parcel carries `cost_base + lpr_expenditure` on the Buy's
+    /// `brokerage` column with a nil price, so its unrepresentable case is a
+    /// *sum*, not a product — and it overflowed at the write itself, inside a
+    /// plain `+`, answering a bare `500` with an empty body naming nothing.
+    /// Now the same `domain::cost_base` bound, over the terms an inheritance
+    /// actually states (SCENARIOS W-e).
+    #[tokio::test]
+    async fn api_an_unrepresentable_inherited_cost_base_is_refused_naming_it() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        let body = serde_json::json!({
+            "listing_id": 1,
+            "quantity": "100",
+            "date_of_death": "2025-01-10",
+            "cost_base_rule": "MarketValueAtDeath",
+            "cost_base": "70000000000000000000000000000",
+            "lpr_expenditure": "70000000000000000000000000000",
+            "lpr_expenditure_date": "2025-03-01",
+            "currency": "AUD",
+            "fx_rate": "1"
+        });
+        let client = ApiClient::over(router().with_state(pool.clone()));
+        let response = client.put("/inheritances/1", &body).await;
+        let (status, detail) = response.status_and_body();
+        assert_eq!(
+            status,
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+            "{detail}"
+        );
+        assert!(
+            detail.contains(concat!(
+                "cost_base 70000000000000000000000000000",
+                " + lpr_expenditure 70000000000000000000000000000"
+            )),
+            "the terms are not named: {detail}"
+        );
+        assert!(
+            detail.contains(&Decimal::MAX.to_string()),
+            "the limit is not named: {detail}"
+        );
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM inheritances")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+
+        // The control: the same figures halved are representable and land.
+        let body = serde_json::json!({
+            "listing_id": 1,
+            "quantity": "100",
+            "date_of_death": "2025-01-10",
+            "cost_base_rule": "MarketValueAtDeath",
+            "cost_base": "30000000000000000000000000000",
+            "lpr_expenditure": "40000000000000000000000000000",
+            "lpr_expenditure_date": "2025-03-01",
+            "currency": "AUD",
+            "fx_rate": "1"
+        });
+        client.put_ok("/inheritances/1", &body).await;
     }
 }

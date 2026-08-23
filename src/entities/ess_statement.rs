@@ -305,6 +305,15 @@ pub enum UpsertError {
     /// column or a foreign-currency discount against an AUD market value makes.
     /// Only checked when both figures are positive (an income-only statement
     /// leaves them zero, which is legitimate). Mapped to 422.
+    /// `quantity × market_value_per_share` cannot be represented. That product
+    /// is the market value the discount labels are checked against *and* the
+    /// cost base of the Buy [`ess_vest`](crate::entities::ess_vest) will write
+    /// from this statement, so an unrepresentable one has no lesser answer —
+    /// refused here rather than left to panic in the multiply, which answered
+    /// a bare `500` with an empty body (SCENARIOS W-e). Wording and limit in
+    /// `domain::cost_base`. Mapped to 422.
+    #[error("the vesting market value is not representable: {0}")]
+    UnrepresentableMarketValue(#[source] crate::domain::cost_base::UnrepresentableCost),
     #[error("the discount labels total {discount}, above the {market_value} that vests")]
     DiscountExceedsMarketValue {
         discount: Decimal,
@@ -441,7 +450,21 @@ fn validate(s: &EssStatement) -> Result<(), UpsertError> {
     // when both figures are positive: an income-only statement (no vest
     // recorded) leaves them zero and is legitimate.
     if s.quantity > Decimal::ZERO && s.market_value_per_share > Decimal::ZERO {
-        let market_value = s.quantity * s.market_value_per_share;
+        // The product is also the cost base of the Buy the vest will write, so
+        // an unrepresentable one is refused here rather than left to panic in
+        // this very multiply — a bare `500` naming nothing, and the one door a
+        // parcel whose cost base cannot be represented could enter by, since
+        // `ess_vest` writes its Buy directly (SCENARIOS W-e). Guarding the
+        // statement is what makes the vest unreachable: a vestable statement
+        // is exactly one with both figures positive, so this multiply always
+        // runs before any vest can.
+        let market_value = crate::domain::cost_base::checked_cost_base(&[
+            crate::domain::cost_base::Term::Product {
+                price: ("market_value_per_share", s.market_value_per_share),
+                units: ("quantity", s.quantity),
+            },
+        ])
+        .map_err(UpsertError::UnrepresentableMarketValue)?;
         if to_cents(discounts) > to_cents(market_value) {
             return Err(UpsertError::DiscountExceedsMarketValue {
                 discount: discounts,
@@ -741,6 +764,7 @@ impl From<UpsertError> for ApiError {
                  offset, never adds it on top); enter the discount labels in full, the \
                  foreign-source part included"
             )),
+            UpsertError::UnrepresentableMarketValue(e) => ApiError::unprocessable(e.message()),
             UpsertError::DiscountExceedsMarketValue {
                 discount,
                 market_value,
@@ -1386,5 +1410,51 @@ mod tests {
         let pool = test_pool().await;
         let resp = client(&pool).delete("/ess_statements/99").await;
         assert_eq!(resp.status, StatusCode::NOT_FOUND);
+    }
+
+    /// `quantity × market_value_per_share` is the market value the discount
+    /// labels are checked against **and** the cost base of the Buy a vest will
+    /// write, so an unrepresentable one is refused here — where it used to
+    /// panic inside that very multiply and answer a bare `500` naming nothing
+    /// (SCENARIOS W-e). Guarding the statement is what makes
+    /// `ess_vest`'s own parcel unreachable: a vestable statement is exactly
+    /// one with both figures positive, which is when this check runs.
+    #[tokio::test]
+    async fn api_an_unrepresentable_vesting_market_value_is_refused_naming_it() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        let body = serde_json::json!({
+            "listing_id": 1,
+            "taxing_point_date": "2024-09-01",
+            "quantity": "1000000000000000",
+            "market_value_per_share": "1000000000000000",
+            "currency": "AUD"
+        });
+        let response = client(&pool).put("/ess_statements/1", &body).await;
+        let (status, detail) = response.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{detail}");
+        assert!(
+            detail.contains(concat!(
+                "market_value_per_share 1000000000000000",
+                " × quantity 1000000000000000"
+            )),
+            "the product is not named: {detail}"
+        );
+        assert!(
+            detail.contains(&Decimal::MAX.to_string()),
+            "the limit is not named: {detail}"
+        );
+        assert!(db_get(&pool, 1).await.unwrap().is_none());
+
+        // The control: 1e14 units at 1 is the same order of magnitude and
+        // representable, so it still lands — and so does the vest built on it.
+        let body = serde_json::json!({
+            "listing_id": 1,
+            "taxing_point_date": "2024-09-01",
+            "quantity": "100000000000000",
+            "market_value_per_share": "1",
+            "currency": "AUD"
+        });
+        client(&pool).put_ok("/ess_statements/1", &body).await;
     }
 }

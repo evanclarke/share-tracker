@@ -2322,4 +2322,55 @@ mod tests {
             vec![(1, Decimal::from(10))]
         );
     }
+
+    /// A Sell's `average_price × quantity` is its **proceeds**, and it can
+    /// overflow the same way a parcel's cost base can — reachable over a
+    /// parcel of 1e15 units, which a nil-priced Buy legitimately writes. It
+    /// used to be accepted `204` and then killed `GET
+    /// /portfolio/realised-gains`, `GET /portfolio/net-capital-gain` and the
+    /// annual tax report's year picker with a logged `500`. Refused by the
+    /// same `trade::check_amounts` bound the Buy path uses — shared, so the
+    /// two sides cannot drift (SCENARIOS W-e).
+    #[tokio::test]
+    async fn api_a_sell_whose_proceeds_cannot_be_represented_is_refused_naming_them() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        let units: Decimal = "1000000000000000".parse().unwrap();
+        // Nil-priced, so the parcel itself is representable — it is the sale
+        // that overflows, which is what makes this its own reachable path.
+        test_support::buy(1, 1)
+            .qty(units)
+            .price(Decimal::ZERO)
+            .insert(&pool)
+            .await;
+
+        let body = serde_json::json!({
+            "date": "2024-06-03",
+            "listing_id": 1,
+            "average_price": "1000000000000000",
+            "quantity": "1000000000000000",
+            "currency": "AUD",
+            "brokerage": "0",
+            "gst_on_brokerage": "0",
+            "brokerage_currency": "AUD",
+            "fx_rate": "1",
+            "allocations": [
+                { "purchase_trade_id": 1, "quantity_allocated": "1000000000000000" }
+            ]
+        });
+
+        let response = client(&pool).put("/sells/2", &body).await;
+        let (status, text) = response.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{text}");
+        assert!(
+            text.contains("average_price 1000000000000000 × quantity 1000000000000000"),
+            "the product is not named: {text}"
+        );
+        assert!(
+            text.contains(&Decimal::MAX.to_string()),
+            "the limit is not named: {text}"
+        );
+        assert!(!trade_exists(&pool, 2).await);
+        assert_eq!(count_allocations(&pool, 2).await, 0);
+    }
 }

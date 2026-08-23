@@ -85,6 +85,109 @@ impl Parcel<'_> {
     }
 }
 
+/// One term of an initial cost base, labelled as the write path that supplies
+/// it names its own request field — so [`checked_cost_base`]'s refusal can
+/// quote the arithmetic back in the user's own vocabulary rather than in the
+/// `trades` columns it happens to be stored in (an inheritance states a
+/// `cost_base` and an `lpr_expenditure`; they land on the `brokerage` column
+/// with a zero price).
+#[derive(Debug, Clone, Copy)]
+pub enum Term<'a> {
+    /// A per-unit figure times a unit count — the acquisition cost.
+    Product {
+        price: (&'a str, Decimal),
+        units: (&'a str, Decimal),
+    },
+    /// A flat amount added to it — an incidental cost of acquiring.
+    Amount(&'a str, Decimal),
+}
+
+impl Term<'_> {
+    /// How the term reads inside [`UnrepresentableCost::expression`].
+    fn written(&self) -> String {
+        match self {
+            Term::Product { price, units } => {
+                format!("{} {} × {} {}", price.0, price.1, units.0, units.1)
+            }
+            Term::Amount(label, amount) => format!("{label} {amount}"),
+        }
+    }
+}
+
+/// The write-time refusal of a cost base that cannot be represented: the terms
+/// [`checked_cost_base`] was given, written out, so the `422` can name the
+/// product it could not compute (SCENARIOS W-e).
+///
+/// Carries the arithmetic rather than a code: every path that can reach it
+/// names its figures differently, and the one thing they share is that the
+/// product itself is the answer, so there is no lesser figure to record.
+#[derive(thiserror::Error, Debug, Clone, PartialEq, Eq)]
+#[error("the cost base {expression} exceeds the representable range")]
+pub struct UnrepresentableCost {
+    /// The terms as written, e.g.
+    /// `average_price 1000 × quantity 2 + brokerage 19.95 + gst_on_brokerage 0`.
+    pub expression: String,
+}
+
+impl UnrepresentableCost {
+    /// The user-facing `422` body (shown by the web UI): the arithmetic that
+    /// overflowed and the limit it overflowed — `Decimal::MAX` itself, read
+    /// off the type rather than transcribed, so the bound can never drift
+    /// from the one the arithmetic actually has. Lives here so the six
+    /// refusals of the same fact cannot word it differently.
+    pub fn message(&self) -> String {
+        format!(
+            "these figures multiply out beyond what can be recorded: {} exceeds {}, the largest \
+             amount that can be stored. That total is the parcel's cost base itself — a sale's \
+             proceeds — so no smaller figure could stand in for it: correct the entry, checking \
+             for a mistyped run of zeros",
+            self.expression,
+            Decimal::MAX
+        )
+    }
+}
+
+/// The cost base of `terms`, or the refusal when it cannot be represented.
+///
+/// The bound is `rust_decimal`'s own: [`Decimal::checked_mul`] and
+/// [`Decimal::checked_add`] answer `None` at exactly the point the plain
+/// operators panic, so what is refused is what could not have been stored —
+/// not a policy ceiling anyone has to defend (SCENARIOS W-e, re-taking the
+/// decision W-b recorded against a magnitude ceiling).
+///
+/// This is [`Parcel::initial_cost`]'s formula in checked form, and it is the
+/// write-time half of it: with every parcel-creating path calling this first,
+/// no row `initial_cost` later reads can overflow it. The read side stays
+/// unchecked deliberately — a row that predates the guard must still fail
+/// loudly (a logged `500`, via the panic layer) rather than quietly produce a
+/// different number.
+///
+/// A Sell nets its costs out of the product rather than adding them, so
+/// bounding it by the same sum is very slightly tighter than that trade needs.
+/// Deliberate: the reports *sum* proceeds across sales, so a figure within a
+/// brokerage of the limit is unusable either way, and one rule over both
+/// directions is worth more than the last brokerage of range.
+pub fn checked_cost_base(terms: &[Term<'_>]) -> Result<Decimal, UnrepresentableCost> {
+    let overflowed = || UnrepresentableCost {
+        expression: terms
+            .iter()
+            .map(Term::written)
+            .collect::<Vec<_>>()
+            .join(" + "),
+    };
+    let mut total = Decimal::ZERO;
+    for term in terms {
+        let value = match term {
+            Term::Product { price, units } => {
+                price.1.checked_mul(units.1).ok_or_else(overflowed)?
+            }
+            Term::Amount(_, amount) => *amount,
+        };
+        total = total.checked_add(value).ok_or_else(overflowed)?;
+    }
+    Ok(total)
+}
+
 /// A Buy/DRP trade row as every cost-base report reads it — one `FromRow`
 /// mapping (TEXT decimal columns via `infra::decimal`'s [`Money`]/[`OptMoney`])
 /// instead of a per-report field-by-field copy. Select [`ParcelRow::COLUMNS`]
@@ -1366,5 +1469,116 @@ mod tests {
             aud.initial_cost - aud.amit_reduction - aud.roc_reduction
         );
         assert_eq!(aud.adjusted, Decimal::from(1890));
+    }
+
+    // -----------------------------------------------------------------------
+    // checked_cost_base (SCENARIOS W-e)
+    // -----------------------------------------------------------------------
+
+    fn dec(s: &str) -> Decimal {
+        s.parse().unwrap()
+    }
+
+    /// The bound is the type's own: a product `Decimal` can hold is returned,
+    /// the first one it cannot is refused, and the two are one step apart.
+    #[test]
+    fn the_bound_is_exactly_what_a_decimal_can_hold() {
+        let terms = |price: &'static str, units: Decimal| {
+            checked_cost_base(&[Term::Product {
+                price: ("average_price", dec(price)),
+                units: ("quantity", units),
+            }])
+        };
+        // Decimal::MAX itself, reached as 1 × MAX.
+        assert_eq!(terms("1", Decimal::MAX).unwrap(), Decimal::MAX);
+        // One unit past it.
+        assert!(terms("2", Decimal::MAX).is_err());
+        // The finding's own figures.
+        assert!(terms("1000000000000000", dec("1000000000000000")).is_err());
+        // The control the finding was bounded with: 1e14 units at 1 is fine.
+        assert_eq!(
+            terms("1", dec("100000000000000")).unwrap(),
+            dec("100000000000000")
+        );
+    }
+
+    /// The additive terms are checked too — an inheritance has no product at
+    /// all, just `cost_base + lpr_expenditure`, and the pair can overflow on
+    /// its own.
+    #[test]
+    fn the_additive_terms_are_bounded_as_well_as_the_product() {
+        // 3e28 + 4e28 fits; 4e28 + 4e28 does not.
+        assert_eq!(
+            checked_cost_base(&[
+                Term::Amount("cost_base", dec("30000000000000000000000000000")),
+                Term::Amount("lpr_expenditure", dec("40000000000000000000000000000")),
+            ])
+            .unwrap(),
+            dec("70000000000000000000000000000")
+        );
+        assert!(
+            checked_cost_base(&[
+                Term::Amount("cost_base", dec("40000000000000000000000000000")),
+                Term::Amount("lpr_expenditure", dec("40000000000000000000000000000")),
+            ])
+            .is_err()
+        );
+        // And a representable product with an unrepresentable cost on top.
+        assert!(
+            checked_cost_base(&[
+                Term::Product {
+                    price: ("exercise_price", Decimal::ONE),
+                    units: ("units", Decimal::MAX),
+                },
+                Term::Amount("rights_cost", Decimal::ONE),
+            ])
+            .is_err()
+        );
+    }
+
+    /// The refusal quotes the arithmetic back in the caller's own field names,
+    /// and names the limit — the two things the `422` body has to carry.
+    #[test]
+    fn the_refusal_names_the_terms_and_the_limit() {
+        let err = checked_cost_base(&[
+            Term::Product {
+                price: ("average_price", dec("1000000000000000")),
+                units: ("quantity", dec("1000000000000000")),
+            },
+            Term::Amount("brokerage", dec("19.95")),
+            Term::Amount("gst_on_brokerage", Decimal::ZERO),
+        ])
+        .unwrap_err();
+        assert_eq!(
+            err.expression,
+            concat!(
+                "average_price 1000000000000000 × quantity 1000000000000000",
+                " + brokerage 19.95 + gst_on_brokerage 0"
+            )
+        );
+        let message = err.message();
+        assert!(message.contains(&err.expression), "{message}");
+        assert!(message.contains(&Decimal::MAX.to_string()), "{message}");
+    }
+
+    /// It is [`Parcel::initial_cost`]'s formula, not a second one: wherever the
+    /// parcel can answer, the two agree to the digit.
+    #[test]
+    fn it_is_the_same_formula_parcel_initial_cost_uses() {
+        let p = Parcel {
+            brokerage: dec("19.95"),
+            gst_on_brokerage: dec("1.99"),
+            ..parcel(300, 7)
+        };
+        let checked = checked_cost_base(&[
+            Term::Product {
+                price: ("average_price", p.average_price),
+                units: ("quantity", p.quantity),
+            },
+            Term::Amount("brokerage", p.brokerage),
+            Term::Amount("gst_on_brokerage", p.gst_on_brokerage),
+        ])
+        .unwrap();
+        assert_eq!(checked, p.initial_cost());
     }
 }

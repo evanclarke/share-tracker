@@ -92,6 +92,15 @@ pub enum ExerciseError {
     /// `rights_cost` is negative.
     #[error("the rights cost cannot be negative")]
     NegativeRightsCost,
+    /// `exercise_price × units + rights_cost` — the exercised parcel's whole
+    /// cost base, which the Buy carries as `average_price × quantity +
+    /// brokerage` — cannot be represented (SCENARIOS W-e). Nothing multiplies
+    /// these two at write time, so the row was accepted `201` and it was the
+    /// portfolio and gains reports that died on it. The bound and its wording
+    /// are `domain::cost_base`'s, shared with `trade::check_amounts` — which
+    /// this path does not go through, since the Buy is written directly.
+    #[error("the exercised parcel's cost base is not representable: {0}")]
+    UnrepresentableCostBase(#[source] crate::domain::cost_base::UnrepresentableCost),
     /// The exercise date precedes the issue's record date.
     #[error("the exercise date is before the issue's record date")]
     BeforeRecordDate,
@@ -125,6 +134,7 @@ impl From<ExerciseError> for ApiError {
             ExerciseError::NegativeRightsCost => {
                 ApiError::unprocessable("the rights cost cannot be negative")
             }
+            ExerciseError::UnrepresentableCostBase(e) => ApiError::unprocessable(e.message()),
             ExerciseError::BeforeRecordDate => {
                 ApiError::unprocessable("the exercise date is before the issue's record date")
             }
@@ -286,6 +296,21 @@ pub async fn db_exercise(
     if used > entitled {
         return Err(ExerciseError::ExceedsEntitlement);
     }
+
+    // What the exercise costs — the parcel's cost base, stored as the Buy's
+    // price × quantity plus the rights cost on its `brokerage` column. Nothing
+    // multiplies the pair on the way in, so without this an unrepresentable
+    // one is stored happily and every report that costs the parcel answers a
+    // logged `500` (SCENARIOS W-e). Same bound as `trade::check_amounts`,
+    // which this path does not go through.
+    crate::domain::cost_base::checked_cost_base(&[
+        crate::domain::cost_base::Term::Product {
+            price: ("exercise_price", exercise_price),
+            units: ("units", body.units),
+        },
+        crate::domain::cost_base::Term::Amount("rights_cost", rights_cost),
+    ])
+    .map_err(ExerciseError::UnrepresentableCostBase)?;
 
     let fx_rate = body.fx_rate.unwrap_or(Decimal::ONE);
     let result = sqlx::query(
@@ -959,5 +984,76 @@ mod tests {
                 .await
                 .unwrap();
         assert!(!exercised);
+    }
+
+    /// The exercised parcel's cost base is `exercise_price × units +
+    /// rights_cost`, and nothing multiplies the pair at write time — so an
+    /// unrepresentable one was stored under a `201` and killed every report
+    /// that costs the parcel. Reachable at any scale the entitlement allows:
+    /// a nil-priced parcel of 1e15 units is a legitimate holding, and a 1-for-1
+    /// issue entitles all of it. Refused now, naming the product and the limit
+    /// (SCENARIOS W-e).
+    #[tokio::test]
+    async fn an_unrepresentable_exercised_cost_base_is_refused_naming_it() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        // A nil-priced parcel: representable itself, so it is the exercise
+        // that overflows and not the holding behind it.
+        insert_buy(&pool, 1, d(2024, 1, 10), "1000000000000000", "0").await;
+        // 1-for-1 at a fat-fingered $1e15 exercise price.
+        corporate_action::db_upsert(
+            &pool,
+            &CorporateAction {
+                id: 10,
+                listing_id: 1,
+                date: d(2024, 7, 1),
+                kind: ActionKind::RightsIssue {
+                    rights_units: Decimal::ONE,
+                    rights_held_units: Decimal::ONE,
+                    exercise_price: "1000000000000000".parse().unwrap(),
+                    currency: "AUD".to_string(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+        let response = ApiClient::over(router().with_state(pool.clone()))
+            .post(
+                "/corporate_actions/10/exercise",
+                &serde_json::json!({"date": "2024-08-01", "units": "1000000000000000"}),
+            )
+            .await;
+        let (status, detail) = response.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{detail}");
+        assert!(
+            detail.contains(concat!(
+                "exercise_price 1000000000000000 × units 1000000000000000",
+                " + rights_cost 0"
+            )),
+            "the product is not named: {detail}"
+        );
+        assert!(
+            detail.contains(&Decimal::MAX.to_string()),
+            "the limit is not named: {detail}"
+        );
+        let exercised: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM trades WHERE rights_action_id = 10)")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(!exercised);
+
+        // The control: a slice of the same entitlement whose cost base *is*
+        // representable (1e13 × 1e15 = 1e28) still lands, so the bound is the
+        // type's and nothing narrower.
+        let response = ApiClient::over(router().with_state(pool.clone()))
+            .post(
+                "/corporate_actions/10/exercise",
+                &serde_json::json!({"date": "2024-08-01", "units": "10000000000000"}),
+            )
+            .await;
+        let (status, detail) = response.status_and_body();
+        assert_eq!(status, StatusCode::CREATED, "{detail}");
     }
 }

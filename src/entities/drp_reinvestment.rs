@@ -188,6 +188,16 @@ pub enum ReinvestError {
     /// stated precision) or more. Carries both figures for the rejection.
     #[error("the stated units spend {cost}, but the reinvestable cash is {available}")]
     UnitsCashMismatch { cost: Decimal, available: Decimal },
+    /// `units × reinvestment_price` — the DRP parcel's cost base — cannot be
+    /// represented (SCENARIOS W-e). Reachable only on the stated-units branch:
+    /// the registry-default branch derives the quantity *from* the cash
+    /// (`available / price`), so its product can never exceed the recorded
+    /// distribution. Without the bound the multiply below panicked, answering
+    /// a bare `500` with an empty body. Wording and limit in
+    /// `domain::cost_base`, shared with `trade::check_amounts` — which this
+    /// path does not go through, since the DRP trade is written directly.
+    #[error("the reinvested parcel's cost base is not representable: {0}")]
+    UnrepresentableCostBase(#[source] crate::domain::cost_base::UnrepresentableCost),
     /// Undo requested on a distribution with no reinvestment trade.
     #[error("this distribution has no reinvestment trade to undo")]
     NotReinvested,
@@ -260,6 +270,7 @@ impl From<ReinvestError> for ApiError {
             ReinvestError::NonPositiveUnits => {
                 ApiError::unprocessable("the stated units must be greater than zero")
             }
+            ReinvestError::UnrepresentableCostBase(e) => ApiError::unprocessable(e.message()),
             ReinvestError::UnitsCashMismatch { cost, available } => {
                 ApiError::unprocessable(format!(
                     "the stated units at the reinvestment price spend {cost}, but the \
@@ -529,7 +540,18 @@ pub async fn db_reinvest(
         // over. Beyond it the two figures disagree about something that is
         // neither rounding nor a leftover.
         Some(units) => {
-            let cost = units * body.reinvestment_price;
+            // The stated allotment's cost — and the parcel's cost base. Both
+            // figures are the taxpayer's, so the product is bounded by nothing
+            // but the type: computed checked, so an unrepresentable pair is a
+            // 422 naming it rather than a panic inside this multiply
+            // (SCENARIOS W-e).
+            let cost = crate::domain::cost_base::checked_cost_base(&[
+                crate::domain::cost_base::Term::Product {
+                    price: ("reinvestment_price", body.reinvestment_price),
+                    units: ("units", units),
+                },
+            ])
+            .map_err(ReinvestError::UnrepresentableCostBase)?;
             let step = Decimal::new(1, units.scale());
             if (available - cost).abs() >= step * body.reinvestment_price {
                 return Err(ReinvestError::UnitsCashMismatch { cost, available });
@@ -2771,5 +2793,55 @@ mod tests {
         .await
         .unwrap();
         assert!(!reinvested);
+    }
+
+    /// A stated allotment's `units × reinvestment_price` is the DRP parcel's
+    /// cost base, and both figures are the taxpayer's — so the product is
+    /// bounded by nothing but the type. It used to panic inside that multiply,
+    /// answering a bare `500` with an empty body; now it is a `422` naming the
+    /// product and the limit (SCENARIOS W-e).
+    ///
+    /// The registry-default branch is deliberately not guarded: it derives the
+    /// quantity *from* the cash (`available / price`), so its product can
+    /// never exceed the recorded distribution — the control below.
+    #[tokio::test]
+    async fn an_unrepresentable_reinvested_cost_base_is_refused_naming_it() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "USD").await;
+        enrol(&pool, 1, ResidualHandling::CarryForward).await;
+        insert_distribution(&pool, 1, 1, "68.66".parse().unwrap(), Decimal::ZERO).await;
+
+        let response = client(&pool)
+            .post(
+                "/income/1/reinvest",
+                &serde_json::json!({
+                    "reinvestment_price": "1000000000000000",
+                    "units": "1000000000000000"
+                }),
+            )
+            .await;
+        let (status, detail) = response.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{detail}");
+        assert!(
+            detail.contains(concat!(
+                "reinvestment_price 1000000000000000",
+                " × units 1000000000000000"
+            )),
+            "the product is not named: {detail}"
+        );
+        assert!(
+            detail.contains(&Decimal::MAX.to_string()),
+            "the limit is not named: {detail}"
+        );
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM trades")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 0);
+
+        // The control: the ordinary reinvestment of the same distribution
+        // still lands, so the bound touches only what the type cannot hold.
+        let trade = db_reinvest(&pool, 1, &body("2")).await.unwrap();
+        assert_eq!(trade.quantity, Decimal::from(34));
     }
 }

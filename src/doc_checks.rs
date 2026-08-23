@@ -150,6 +150,47 @@ fn money_as_a_json_number_documented() {
     ));
 }
 
+/// Docs-sync pin for the decimal-range refusal (SCENARIOS W-e): its own
+/// section beside [`money_as_a_json_number_documented`]'s, the limit quoted,
+/// the reason it has to be refused at the write, the list of paths that can
+/// reach it, the three that provably cannot, and the edit escape hatch. The
+/// behaviour itself is pinned by `domain::cost_base`'s unit tests and one API
+/// test per reachable path; this is the documentation half.
+#[test]
+fn figures_beyond_the_decimal_range_documented() {
+    assert!(API_MD.contains("## Figures beyond the decimal range"));
+    // The limit itself, quoted rather than described.
+    assert!(API_MD.contains("79228162514264337593543950335"));
+    // Why the write is the only place it can be refused.
+    assert!(API_MD.contains("the product **is** the answer"));
+    // Every reachable path is named.
+    for path in [
+        "`average_price × quantity + brokerage + GST`, one shared check",
+        "`cost_base + lpr_expenditure`, a *sum* rather than a product",
+        "`quantity × market_value_per_share`, which is both the market value",
+        "`exercise_price × units + rights_cost`",
+        "`units × reinvestment_price`",
+    ] {
+        assert!(
+            API_MD.contains(path),
+            "the 422 path is not documented: {path}"
+        );
+    }
+    // …and so is the reasoning for the ones deliberately left out.
+    assert!(API_MD.contains("Three parcel-creating paths are deliberately **not** checked"));
+    // An existing offending row stays correctable.
+    assert!(
+        API_MD.contains(
+            "An **edit** is judged on the figures being written, never on the stored ones"
+        )
+    );
+    // The `422` row of the response-code table points at the section.
+    assert!(API_MD.contains(
+        "**any write whose money figures multiply out beyond the largest decimal that can be \
+         stored**"
+    ));
+}
+
 /// Docs-sync pin for the append-only audit trail (2026-07-13 improvement
 /// review): the schema documents the table, its scope decision (which tables
 /// are audited and why the rest are not), and the keep-forever retention

@@ -5,6 +5,7 @@
 //! cross-check — each with its 422 detail text.
 
 use super::model::TradeType;
+use crate::domain::cost_base;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 
@@ -147,6 +148,18 @@ pub(crate) enum AmountsError {
     /// a trade dated today is legitimately in the future.
     #[error("the trade date is after today")]
     FutureDate,
+    /// `average_price × quantity` (plus the incidental costs) cannot be
+    /// represented: the product overflows `rust_decimal`'s range, and that
+    /// product **is** the parcel's cost base — a Sell's proceeds — so there is
+    /// no lesser figure to record in its place (SCENARIOS W-e). Accepted, the
+    /// row was invisible in exactly the reports that would have found it,
+    /// because those are the reports it killed: the three portfolio reads, the
+    /// realised-gains and net-capital-gain reports and the tax-report year
+    /// picker all answered a logged `500` with an empty body. The wording and
+    /// the limit live in `domain::cost_base` so the six paths that can reach
+    /// this refusal cannot word it differently.
+    #[error("the trade's figures are not representable: {0}")]
+    Unrepresentable(#[source] crate::domain::cost_base::UnrepresentableCost),
 }
 
 /// The core figures every trade/Sell write must satisfy, gathered for
@@ -169,8 +182,10 @@ pub(crate) struct AmountsCheck<'a> {
 
 /// Validate a trade's core figures: quantity > 0, price ≥ 0, brokerage and
 /// GST ≥ 0, brokerage billed in the trade's own currency, fx_rate > 0,
-/// settlement on or after the trade date, and the trade date itself inside
-/// [`CGT_START`]..=today. Brokerage is checked post-GST-split (see
+/// settlement on or after the trade date, the trade date itself inside
+/// [`CGT_START`]..=today, and `average_price × quantity` plus the incidental
+/// costs representable as a `Decimal`
+/// ([`cost_base::checked_cost_base`](crate::domain::cost_base::checked_cost_base)). Brokerage is checked post-GST-split (see
 /// [`resolve_brokerage`]), so a negative GST-inclusive entry is caught
 /// through its negative parts.
 ///
@@ -207,34 +222,52 @@ pub(crate) fn check_amounts(c: &AmountsCheck<'_>) -> Result<(), AmountsError> {
     if c.date > crate::infra::date::today() {
         return Err(AmountsError::FutureDate);
     }
+    // Last, because it is the only one of these figures that is a *product*:
+    // the sign checks above name a single field, so they answer first, and
+    // this one answers once the fields it multiplies are known to be sane.
+    cost_base::checked_cost_base(&[
+        cost_base::Term::Product {
+            price: ("average_price", c.average_price),
+            units: ("quantity", c.quantity),
+        },
+        cost_base::Term::Amount("brokerage", c.brokerage),
+        cost_base::Term::Amount("gst_on_brokerage", c.gst_on_brokerage),
+    ])
+    .map_err(AmountsError::Unrepresentable)?;
     Ok(())
 }
 
 /// Human-readable body for an amounts 422 (shown by the web UI).
-pub(crate) fn amounts_detail(e: &AmountsError) -> &'static str {
+pub(crate) fn amounts_detail(e: &AmountsError) -> String {
     match e {
-        AmountsError::QuantityNotPositive => "quantity must be positive",
-        AmountsError::PriceNegative => "average_price cannot be negative",
-        AmountsError::BrokerageNegative => "brokerage cannot be negative",
-        AmountsError::GstNegative => "gst_on_brokerage cannot be negative",
+        AmountsError::QuantityNotPositive => "quantity must be positive".to_string(),
+        AmountsError::PriceNegative => "average_price cannot be negative".to_string(),
+        AmountsError::BrokerageNegative => "brokerage cannot be negative".to_string(),
+        AmountsError::GstNegative => "gst_on_brokerage cannot be negative".to_string(),
         AmountsError::BrokerageCurrencyMismatch => {
             "brokerage_currency must equal the trade's currency — a fee billed in another \
              currency has to be entered converted into the trade's currency, since the cost \
              base, net proceeds and transaction total are all single-currency sums"
+                .to_string()
         }
         AmountsError::FxRateNotPositive => {
-            "fx_rate must be a positive foreign-per-AUD rate (1 for an AUD trade)"
+            "fx_rate must be a positive foreign-per-AUD rate (1 for an AUD trade)".to_string()
         }
-        AmountsError::SettlementBeforeTrade => "settlement_date cannot be before the trade date",
+        AmountsError::SettlementBeforeTrade => {
+            "settlement_date cannot be before the trade date".to_string()
+        }
         AmountsError::PreCgtDate => {
             "the trade is dated before 20 September 1985 — a pre-CGT holding is outside CGT \
              and not modelled, so recording it would wrongly compute a capital gain or loss"
+                .to_string()
         }
         AmountsError::FutureDate => {
             "the trade is dated after today — a trade records a transaction that has already \
              happened, and a future date would offer a financial year that has not begun on \
              the annual tax report; the settlement date may still be in the future"
+                .to_string()
         }
+        AmountsError::Unrepresentable(e) => e.message(),
     }
 }
 

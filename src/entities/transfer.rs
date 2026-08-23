@@ -1819,4 +1819,40 @@ mod tests {
                 .unwrap();
         assert!(!created);
     }
+
+    /// Why the three parcel-substituting operations got no cost-base bound of
+    /// their own (SCENARIOS W-e): a replacement Buy is written with a **zero**
+    /// price and the carried cost base on its `brokerage` column, so its
+    /// initial cost is that carried figure and nothing is multiplied. The
+    /// source parcel's own cost base is already bounded by
+    /// `trade::check_amounts`, so the replacement cannot exceed what the
+    /// database could already hold — which this pins from the far end: a
+    /// parcel costed at very nearly `Decimal::MAX` transfers, and its
+    /// replacement carries the whole figure.
+    #[tokio::test]
+    async fn a_maximal_cost_base_still_transfers_because_the_replacement_multiplies_nothing() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "ICE").await;
+        // 1e14 units at 7e14 — a cost base of 7e28, just inside the ceiling.
+        insert_vest(
+            &pool,
+            1,
+            d(2023, 3, 1),
+            "100000000000000",
+            "700000000000000",
+        )
+        .await;
+
+        let group = db_transfer(
+            &pool,
+            1,
+            &body(d(2024, 6, 1), 2, 1, vec![(1, "100000000000000")]),
+        )
+        .await
+        .unwrap();
+
+        let t = &group.transfer_ins[0];
+        assert_eq!(t.average_price, Decimal::ZERO);
+        assert_eq!(t.brokerage, dec("70000000000000000000000000000"));
+    }
 }

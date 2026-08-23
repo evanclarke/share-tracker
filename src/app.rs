@@ -162,22 +162,30 @@ mod tests {
 
     /// SCENARIOS W-b end to end, through the application `main` serves. The
     /// finding's own trade — a fat-fingered run of zeros in both
-    /// `average_price` and `quantity` — is accepted by the write path (no
-    /// magnitude ceiling was added; a number to defend would be arbitrary),
-    /// and its `price × quantity` is 1e30, past `rust_decimal`'s ~7.9228e28
-    /// ceiling. That product *is* the parcel's cost base, so no reordering
-    /// can produce it and `Parcel::initial_cost` still panics — but the read
-    /// now answers a `500` the UI can show a message for, where before the
-    /// connection was reset and curl reported `000`.
+    /// `average_price` and `quantity` — has a `price × quantity` of 1e30, past
+    /// `rust_decimal`'s ~7.9228e28 ceiling. That product *is* the parcel's
+    /// cost base, so no reordering can produce it and `Parcel::initial_cost`
+    /// still panics — but the read answers a `500` the UI can show a message
+    /// for, where before the connection was reset and curl reported `000`.
+    ///
+    /// W-e has since closed the *write* half: `trade::check_amounts` refuses
+    /// such a trade `422`, so the row can only reach the database from a build
+    /// that predates the guard — which is what
+    /// `insert_parcel_bypassing_checks` reproduces here. The panic layer is
+    /// what such a database still relies on, so this stays the test of it.
     #[tokio::test]
     async fn an_unrepresentable_parcel_cost_base_is_a_500_not_a_dead_connection() {
         let pool = test_pool().await;
         crate::test_support::listing(9).insert(&pool).await;
-        crate::test_support::buy(9600, 9)
-            .qty("1000000000000000".parse().unwrap())
-            .price("1000000000000000".parse().unwrap())
-            .insert(&pool)
-            .await;
+        crate::test_support::insert_parcel_bypassing_checks(
+            &pool,
+            9600,
+            9,
+            crate::test_support::ymd(2024, 3, 15),
+            "1000000000000000",
+            "1000000000000000",
+        )
+        .await;
 
         let client = ApiClient::full(&pool);
         let resp = client.get("/portfolio/open-parcels").await;

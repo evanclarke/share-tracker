@@ -646,14 +646,18 @@ pub async fn recognised_worthless_listing(
 /// A Buy written **straight into `trades`**, bypassing `trade::db_upsert` and
 /// therefore its write-time checks.
 ///
-/// The one thing it is for: standing up the pre-guard state
-/// `reports::rollover_consistency`'s *unconsumed parcel* problem exists to
-/// report (SCENARIOS V-d). Since the guard landed, a parcel dated on or before
-/// an executed whole-holding operation is unreachable through every write path,
-/// so a database already in that state — entered before the guard — can only be
-/// reproduced by writing the row the way that older build did. Use
-/// [`buy`] for everything else; a fixture that skips the invariants is a
-/// fixture that can lie.
+/// The one thing it is for: standing up a state a *write-time guard* has since
+/// made unreachable, so the report or the panic layer that exists to cope with
+/// a database already in it can still be tested. Two such states so far — the
+/// parcel dated on or before an executed whole-holding operation that
+/// `reports::rollover_consistency`'s *unconsumed parcel* problem reports
+/// (SCENARIOS V-d), and the parcel whose `average_price × quantity` cannot be
+/// represented, which `trade::check_amounts` now refuses and the panic layer
+/// answers a logged `500` for where it survives from an older build
+/// (SCENARIOS W-e). Neither is reachable through any write path any more, so
+/// the only way to reproduce one is to write the row the way that older build
+/// did. Use [`buy`] for everything else; a fixture that skips the invariants
+/// is a fixture that can lie.
 pub async fn insert_parcel_bypassing_checks(
     pool: &SqlitePool,
     id: i64,
