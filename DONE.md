@@ -16,7 +16,7 @@ Split into topical files (mirrors the `docs/ato/` pattern of many small files
 | --- | --- | --- |
 | [`DONE/infra.md`](DONE/infra.md) | Infrastructure setup, FX/MIC/currency reference-data imports, backups, scheduler, the append-only audit trail, packaging/CI, authentication | 35 |
 | [`DONE/reference-data.md`](DONE/reference-data.md) | Exchanges, listings, accounts, holding accounts, ticker/exchange-code renames, price-collection gaps, deployed-database cleanups | 16 |
-| [`DONE/trades-income.md`](DONE/trades-income.md) | Trade/income entry, AMMA, DRP, parcel allocations, attachments, cost-base adjustments, trade/settlement dates | 30 |
+| [`DONE/trades-income.md`](DONE/trades-income.md) | Trade/income entry, AMMA, DRP, parcel allocations, attachments, cost-base adjustments, trade/settlement dates | 31 |
 | [`DONE/reporting.md`](DONE/reporting.md) | Portfolio/gains/tax reports, snapshots, performance metrics, tax-return export | 35 |
 | [`DONE/tax-domain.md`](DONE/tax-domain.md) | ATO-cited CGT/tax calculation rules — discount, cost base, corporate actions, FITO, franking | 44 |
 | [`DONE/crypto.md`](DONE/crypto.md) | Crypto-asset holdings and wallet-to-wallet transfers | 2 |

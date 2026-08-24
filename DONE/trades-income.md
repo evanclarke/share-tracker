@@ -999,3 +999,58 @@ A$9,000 to FY2025 — 11,757.30 / 14,000, identical to the API-only control. One
 write-up above: the "control" row was **not** reachable through the UI before this fix — merely
 opening the edit form pinned the date, so a UI-driven control reproduced the bug rather than the
 control. It was necessarily measured through the API, and now the UI matches it.
+
+## SCENARIOS Z-b — `PUT /sells/:id` rewrites an existing Buy or DRP trade as a Sell
+
+- [x] Refuse a `PUT /sells/:id` whose id already holds a trade that is not a plain Sell.
+
+Found by the standing probes while driving **Z-01**: the pass's own scripted sale collided with an
+auto-assigned DRP trade id, and the collision was accepted rather than refused.
+
+`entities::sell`'s upsert guard reads five provenance columns — `buyback_action_id`,
+`scrip_action_id`, `demerger_action_id`, `transfer_id`, `worthless_action_id` — plus the
+`transfers.fee_sale_trade_id` link. Every one of them names a **Sell**. Nothing checks the row's
+`trade_type`, so an id holding a Buy or a DRP trade is overwritten in place, and the four
+purpose-built parcels that `PUT`/`DELETE /trades/:id` explicitly refuse to touch are all reachable
+this way:
+
+| existing trade | `PUT /trades/:id` | `DELETE /trades/:id` | `PUT /sells/:id` |
+| --- | --- | --- | --- |
+| reinvest-created DRP trade | `422` | `422` | **`204` — becomes a Sell** |
+| rights-exercise Buy (`rights_action_id`) | `422` | `422` | **`204`** |
+| ESS vest Buy (`ess_statement_id`) | `422` | `422` | **`204`** |
+| inheritance parcel Buy (`inheritance_id`) | `422` | `422` | **`204`** |
+| transfer-in Buy (`transfer_id`) | `422` | `422` | `422` |
+| scrip replacement Buy (`scrip_action_id`) | `422` | `422` | `422` |
+
+The last two rows are the control: they are refused only because their provenance column happens to
+be one of the five the Sell guard reads — and the refusal then calls a **Buy** "this Sell is a
+holding-account transfer-out", which is the same missing `trade_type` check seen from the other side.
+
+**What it leaves behind.** The parcel is gone and its owner still points at it:
+`income.reinvestment_trade_id` names a Sell (so the distribution reads as reinvested into a
+disposal), and `rights_action_id` / `ess_statement_id` / `inheritance_id` survive on a row whose kind
+contradicts them. `docs/API.md` states that the reinvestment link is cleared only by
+`DELETE /income/:id/reinvest`, "so an orphaned DRP trade can never exist" — this is the same
+invariant broken from the other end.
+
+**Direction.** The guard is a hand-maintained list of columns, which is the hazard Y-d and Y-g named
+in the UI. The rule that does not need maintaining is that `PUT /sells/:id` writes Sells: an existing
+row must already be a plain Sell, and a new id must be free.
+
+**Done.** `sell::SellProvenance` now selects `trade_type` alongside the five provenance columns, and
+`db_upsert_sell` checks it **first**: an existing row that is not a `Sell` is refused with the new
+`SellError::NotASell { id, existing }` — `trade 12 is a Buy, not a Sell — this endpoint only writes
+Sells, so the upsert would rewrite that parcel as a disposal in place. Edit it with PUT /trades/12,
+or use an id no trade holds for the new Sell`. That is the rule with no list to maintain; the five
+provenance refusals stay, unchanged, for the Sells they actually describe. Running the `trade_type`
+check first also fixes the second half: the transfer-in Buy and the scrip replacement Buy are no
+longer called "this Sell is a holding-account transfer-out …".
+Tests (`src/entities/sell.rs`): `api_put_sell_over_a_reinvest_created_drp_is_refused` (also asserts
+`income.reinvestment_trade_id` still names a DRP), `..._over_a_rights_exercise_buy_...`,
+`..._over_an_ess_vest_buy_...`, `..._over_an_inherited_parcel_buy_...`, `..._over_a_plain_buy_...`
+(asserts the id, the endpoint pointer, and that the parcel's quantity is untouched),
+`api_put_sell_over_a_transfer_in_buy_is_refused_as_a_buy` (asserts the "transfer-out" wording is
+gone), plus the two controls `api_put_sell_over_an_existing_plain_sell_still_edits_it` and
+`api_put_sell_at_a_free_id_still_creates_the_sell`. `docs/API.md`: the Sells `422` list and the
+Response-codes `422` row.

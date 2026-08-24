@@ -247,44 +247,6 @@ landed on a half-cent, which is what made it visible.
 converted once); computing it there and letting the last allocation absorb the difference keeps both
 properties W-d established — the total is exact, and the per-parcel rows still sum to it.
 
-## SCENARIOS Z-b — `PUT /sells/:id` rewrites an existing Buy or DRP trade as a Sell
-
-- [ ] Refuse a `PUT /sells/:id` whose id already holds a trade that is not a plain Sell.
-
-Found by the standing probes while driving **Z-01**: the pass's own scripted sale collided with an
-auto-assigned DRP trade id, and the collision was accepted rather than refused.
-
-`entities::sell`'s upsert guard reads five provenance columns — `buyback_action_id`,
-`scrip_action_id`, `demerger_action_id`, `transfer_id`, `worthless_action_id` — plus the
-`transfers.fee_sale_trade_id` link. Every one of them names a **Sell**. Nothing checks the row's
-`trade_type`, so an id holding a Buy or a DRP trade is overwritten in place, and the four
-purpose-built parcels that `PUT`/`DELETE /trades/:id` explicitly refuse to touch are all reachable
-this way:
-
-| existing trade | `PUT /trades/:id` | `DELETE /trades/:id` | `PUT /sells/:id` |
-| --- | --- | --- | --- |
-| reinvest-created DRP trade | `422` | `422` | **`204` — becomes a Sell** |
-| rights-exercise Buy (`rights_action_id`) | `422` | `422` | **`204`** |
-| ESS vest Buy (`ess_statement_id`) | `422` | `422` | **`204`** |
-| inheritance parcel Buy (`inheritance_id`) | `422` | `422` | **`204`** |
-| transfer-in Buy (`transfer_id`) | `422` | `422` | `422` |
-| scrip replacement Buy (`scrip_action_id`) | `422` | `422` | `422` |
-
-The last two rows are the control: they are refused only because their provenance column happens to
-be one of the five the Sell guard reads — and the refusal then calls a **Buy** "this Sell is a
-holding-account transfer-out", which is the same missing `trade_type` check seen from the other side.
-
-**What it leaves behind.** The parcel is gone and its owner still points at it:
-`income.reinvestment_trade_id` names a Sell (so the distribution reads as reinvested into a
-disposal), and `rights_action_id` / `ess_statement_id` / `inheritance_id` survive on a row whose kind
-contradicts them. `docs/API.md` states that the reinvestment link is cleared only by
-`DELETE /income/:id/reinvest`, "so an orphaned DRP trade can never exist" — this is the same
-invariant broken from the other end.
-
-**Direction.** The guard is a hand-maintained list of columns, which is the hazard Y-d and Y-g named
-in the UI. The rule that does not need maintaining is that `PUT /sells/:id` writes Sells: an existing
-row must already be a plain Sell, and a new id must be free.
-
 ## SCENARIOS Z-c — a trade can change kind under the allocations that depend on it
 
 - [ ] Refuse an upsert that changes an existing trade's `trade_type`.

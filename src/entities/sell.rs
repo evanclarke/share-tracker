@@ -8,7 +8,9 @@
 //! after the fact.
 //!
 //! `PUT /sells/{id}` is an upsert: it replaces the Sell trade row and *all* of
-//! its parcel allocations with the submitted set.
+//! its parcel allocations with the submitted set. It writes **Sells**, so the
+//! id must either be free or already hold a plain Sell — a Buy or DRP parcel
+//! is refused rather than rewritten as a disposal in place (SCENARIOS Z-b).
 
 use crate::entities::trade::{self, TradeType};
 use crate::infra::db::write_tx;
@@ -163,6 +165,16 @@ pub enum SellError {
     /// and re-recognise instead (see `entities::worthless`).
     #[error("this Sell is a worthless-shares recognise closing Sell and cannot be edited")]
     WorthlessSell,
+    /// The id already holds a trade that is not a plain Sell — a Buy or a
+    /// DRP parcel. `PUT /sells/:id` is an upsert, so without this the parcel
+    /// would be *rewritten* as a Sell in place, leaving whatever created it
+    /// (a reinvested distribution, a rights exercise, an ESS vest, an
+    /// inheritance) pointing at a disposal (SCENARIOS Z-b). Checked before
+    /// the provenance guards below so a Buy carrying one of their columns —
+    /// a transfer-in Buy, a scrip replacement Buy — is refused for what it
+    /// actually is rather than being called a Sell.
+    #[error("trade {id} is a {existing:?}, not a Sell")]
+    NotASell { id: i64, existing: TradeType },
     /// A supplied statement total failed the cross-check (see
     /// `trade::check_statement_total`): for a Sell it must equal the net
     /// proceeds, quantity × price − brokerage − GST.
@@ -256,6 +268,11 @@ impl From<SellError> for ApiError {
             ),
             // The cross-check rejection says what the Sell nets to, so a typo
             // is findable without re-deriving the figure by hand.
+            SellError::NotASell { id, existing } => ApiError::unprocessable(format!(
+                "trade {id} is a {existing:?}, not a Sell — this endpoint only writes Sells, so \
+                 the upsert would rewrite that parcel as a disposal in place. Edit it with \
+                 PUT /trades/{id}, or use an id no trade holds for the new Sell"
+            )),
             SellError::StatementTotal(detail) => {
                 ApiError::unprocessable(trade::statement_total_detail(&detail))
             }
@@ -321,6 +338,11 @@ struct SellDeleteRow {
 /// via `FromRow`.
 #[derive(sqlx::FromRow)]
 struct SellProvenance {
+    /// What the id actually holds. `PUT /sells/:id` writes Sells, so anything
+    /// else is refused outright — the rule that needs no maintaining, as
+    /// against the provenance column list below, which only ever names the
+    /// Sells one operation or another created (SCENARIOS Z-b).
+    trade_type: TradeType,
     buyback_action_id: Option<i64>,
     scrip_action_id: Option<i64>,
     demerger_action_id: Option<i64>,
@@ -450,7 +472,7 @@ pub async fn db_upsert_sell(pool: &SqlitePool, id: i64, body: &SellBody) -> Resu
     // Buys). The upsert below never sets any provenance column, so a normal
     // Sell can't become one either.
     let existing: Option<SellProvenance> = sqlx::query_as(
-        "SELECT buyback_action_id, scrip_action_id, demerger_action_id, transfer_id, \
+        "SELECT trade_type, buyback_action_id, scrip_action_id, demerger_action_id, transfer_id, \
                 worthless_action_id \
          FROM trades WHERE id = ?",
     )
@@ -458,6 +480,18 @@ pub async fn db_upsert_sell(pool: &SqlitePool, id: i64, body: &SellBody) -> Resu
     .fetch_optional(&mut *tx)
     .await?;
     if let Some(p) = existing {
+        // First, and independently of any provenance column: this endpoint
+        // writes Sells. An id holding a Buy or a DRP parcel is refused rather
+        // than overwritten, so the purpose-built parcels `PUT /trades/:id`
+        // guards (a reinvested DRP, a rights exercise, an ESS vest, an
+        // inherited parcel) cannot be turned into disposals through here
+        // either (SCENARIOS Z-b).
+        if p.trade_type != TradeType::Sell {
+            return Err(SellError::NotASell {
+                id,
+                existing: p.trade_type,
+            });
+        }
         if p.buyback_action_id.is_some() {
             return Err(SellError::BuyBackSell);
         }
@@ -2474,5 +2508,344 @@ mod tests {
             // Free the parcel for the next round.
             db_delete_sell(&pool, winner).await.unwrap();
         }
+    }
+
+    // ---- SCENARIOS Z-b: `PUT /sells/:id` writes Sells, and nothing else ----
+    //
+    // The upsert guard above read five provenance columns, every one of which
+    // names a **Sell**. Nothing looked at the stored row's `trade_type`, so an
+    // id holding a Buy or a DRP parcel was overwritten in place and re-typed
+    // as a disposal — including the four purpose-built parcels
+    // `PUT`/`DELETE /trades/:id` explicitly refuse to touch, whose owners were
+    // left pointing at a sale. The rule these tests pin needs no column list:
+    // an existing row must already be a plain Sell.
+
+    /// A body that sells 100 units of listing 1 out of parcel 1 — valid in
+    /// every respect except the id it is aimed at, so a refusal can only be
+    /// the target-row check.
+    fn sell_over_parcel_json() -> serde_json::Value {
+        serde_json::json!({
+            "date": "2024-06-03",
+            "listing_id": 1,
+            "average_price": "15",
+            "quantity": "100",
+            "currency": "AUD",
+            "brokerage": "0",
+            "gst_on_brokerage": "0",
+            "brokerage_currency": "AUD",
+            "fx_rate": "1",
+            "allocations": [ { "purchase_trade_id": 1, "quantity_allocated": "100" } ]
+        })
+    }
+
+    async fn stored_trade_type(pool: &SqlitePool, id: i64) -> TradeType {
+        sqlx::query_scalar("SELECT trade_type FROM trades WHERE id = ?")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    /// SCENARIOS Z-b. The reinvest-created DRP: `PUT /trades/:id` and
+    /// `DELETE /trades/:id` both refuse it because `income.reinvestment_trade_id`
+    /// names it, and `docs/API.md` says that link is cleared only by
+    /// `DELETE /income/:id/reinvest` "so an orphaned DRP trade can never
+    /// exist". This endpoint broke the same invariant from the other end.
+    #[tokio::test]
+    async fn api_put_sell_over_a_reinvest_created_drp_is_refused() {
+        use crate::entities::{drp_enrolment, drp_reinvestment};
+
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+        drp_enrolment::db_upsert(
+            &pool,
+            &drp_enrolment::DrpEnrolment {
+                id: 1,
+                listing_id: 1,
+                holding_account_id: 1,
+                enrolment_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                unenrolment_date: None,
+                residual_handling: drp_enrolment::ResidualHandling::CarryForward,
+            },
+        )
+        .await
+        .unwrap();
+        test_support::income(2, 1, NaiveDate::from_ymd_opt(2024, 3, 31).unwrap())
+            .with(|i| {
+                i.unfranked_amount = Decimal::from(100);
+                i.trust_income = true;
+            })
+            .insert(&pool)
+            .await;
+        let drp = drp_reinvestment::db_reinvest(
+            &pool,
+            2,
+            &drp_reinvestment::ReinvestBody {
+                reinvestment_price: Decimal::from(9),
+                units: None,
+                fx_rate: None,
+                date: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let (status, detail) = put_sell_json(&pool, drp.id, sell_over_parcel_json()).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            detail.contains("is a DRP, not a Sell"),
+            "the refusal must name what the id holds: {detail}"
+        );
+        assert_eq!(stored_trade_type(&pool, drp.id).await, TradeType::DRP);
+        // The distribution still points at a DRP trade, not at a disposal.
+        let linked: Option<i64> =
+            sqlx::query_scalar("SELECT reinvestment_trade_id FROM income WHERE id = 2")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(linked, Some(drp.id));
+    }
+
+    /// SCENARIOS Z-b: the rights-exercise Buy (`rights_action_id`), whose
+    /// figures derive from the issue's entitlement cap and exercise price.
+    #[tokio::test]
+    async fn api_put_sell_over_a_rights_exercise_buy_is_refused() {
+        use crate::entities::corporate_action::{ActionKind, CorporateAction};
+        use crate::entities::{corporate_action, rights_exercise};
+
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+        corporate_action::db_upsert(
+            &pool,
+            &CorporateAction {
+                id: 10,
+                listing_id: 1,
+                date: NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
+                kind: ActionKind::RightsIssue {
+                    rights_units: Decimal::ONE,
+                    rights_held_units: Decimal::from(4),
+                    exercise_price: "1.80".parse().unwrap(),
+                    currency: "AUD".to_string(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+        let buy = rights_exercise::db_exercise(
+            &pool,
+            10,
+            &rights_exercise::ExerciseBody {
+                date: NaiveDate::from_ymd_opt(2024, 4, 1).unwrap(),
+                units: Decimal::from(25),
+                rights_cost: None,
+                fx_rate: None,
+                holding_account_id: 1,
+            },
+        )
+        .await
+        .unwrap();
+
+        let (status, detail) = put_sell_json(&pool, buy.id, sell_over_parcel_json()).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            detail.contains("is a Buy, not a Sell"),
+            "the refusal must name what the id holds: {detail}"
+        );
+        assert_eq!(stored_trade_type(&pool, buy.id).await, TradeType::Buy);
+    }
+
+    /// SCENARIOS Z-b: the ESS vest Buy (`ess_statement_id`), whose cost base
+    /// is the statement's taxing-point market value.
+    #[tokio::test]
+    async fn api_put_sell_over_an_ess_vest_buy_is_refused() {
+        use crate::entities::ess_vest;
+
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+        test_support::ess_statement(1, 1, NaiveDate::from_ymd_opt(2024, 9, 1).unwrap())
+            .with(|s| {
+                s.quantity = Decimal::from(30);
+                s.market_value_per_share = Decimal::from(12);
+            })
+            .insert(&pool)
+            .await;
+        let buy = ess_vest::db_vest(&pool, 1).await.unwrap();
+
+        let (status, detail) = put_sell_json(&pool, buy.id, sell_over_parcel_json()).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            detail.contains("is a Buy, not a Sell"),
+            "the refusal must name what the id holds: {detail}"
+        );
+        assert_eq!(stored_trade_type(&pool, buy.id).await, TradeType::Buy);
+    }
+
+    /// SCENARIOS Z-b: the inherited-parcel Buy (`inheritance_id`), which
+    /// carries the deceased's cost base and the s 115-30 discount clock.
+    #[tokio::test]
+    async fn api_put_sell_over_an_inherited_parcel_buy_is_refused() {
+        use crate::entities::inheritance::{self, CostBaseRule, Inheritance};
+
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+        inheritance::db_upsert(
+            &pool,
+            &Inheritance {
+                id: 1,
+                listing_id: 1,
+                holding_account_id: 1,
+                quantity: Decimal::from(50),
+                date_of_death: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+                cost_base_rule: CostBaseRule::MarketValueAtDeath,
+                cost_base: Decimal::from(500),
+                lpr_expenditure: Decimal::ZERO,
+                lpr_expenditure_date: None,
+                deceased_acquisition_date: None,
+                currency: "AUD".to_string(),
+                fx_rate: Decimal::ONE,
+            },
+        )
+        .await
+        .unwrap();
+        let buy_id: i64 = sqlx::query_scalar("SELECT id FROM trades WHERE inheritance_id = 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+        let (status, detail) = put_sell_json(&pool, buy_id, sell_over_parcel_json()).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            detail.contains("is a Buy, not a Sell"),
+            "the refusal must name what the id holds: {detail}"
+        );
+        assert_eq!(stored_trade_type(&pool, buy_id).await, TradeType::Buy);
+    }
+
+    /// SCENARIOS Z-b: an ordinary Buy carries no provenance at all, so the
+    /// old column list could not see it either — the id collision that found
+    /// this (a scripted sale aimed at an auto-assigned trade id) is exactly
+    /// this case.
+    #[tokio::test]
+    async fn api_put_sell_over_a_plain_buy_is_refused() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+        insert_buy(&pool, 2, 1, Decimal::from(40)).await;
+
+        let (status, detail) = put_sell_json(&pool, 2, sell_over_parcel_json()).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            detail.contains("trade 2 is a Buy, not a Sell"),
+            "the refusal must name the id and what it holds: {detail}"
+        );
+        assert!(
+            detail.contains("PUT /trades/2"),
+            "the refusal must point at the endpoint that does edit a Buy: {detail}"
+        );
+        assert_eq!(stored_trade_type(&pool, 2).await, TradeType::Buy);
+        // The parcel's own figures are untouched.
+        let qty: String = sqlx::query_scalar("SELECT quantity FROM trades WHERE id = 2")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(qty.parse::<Decimal>().unwrap(), Decimal::from(40));
+    }
+
+    /// SCENARIOS Z-b, the other direction: a transfer-in **Buy** carries
+    /// `transfer_id`, which happens to be one of the five provenance columns —
+    /// so it was refused, but with wording that called a Buy "this Sell is a
+    /// holding-account transfer-out". The `trade_type` check runs first, so it
+    /// is now refused for what it actually is.
+    #[tokio::test]
+    async fn api_put_sell_over_a_transfer_in_buy_is_refused_as_a_buy() {
+        use crate::entities::holding_account::{self, HoldingAccount};
+        use crate::entities::transfer::{self, TransferBody};
+
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+        holding_account::db_upsert(
+            &pool,
+            &HoldingAccount {
+                id: 2,
+                name: "ICE Employee Plan".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let group = transfer::db_transfer(
+            &pool,
+            1,
+            &TransferBody {
+                listing_id: 1,
+                date: NaiveDate::from_ymd_opt(2024, 5, 1).unwrap(),
+                from_account_id: 1,
+                to_account_id: 2,
+                allocations: vec![AllocationInput {
+                    purchase_trade_id: 1,
+                    quantity_allocated: Decimal::from(100),
+                }],
+                fee_allocations: vec![],
+                fee_market_price: None,
+                fee_fx_rate: None,
+            },
+        )
+        .await
+        .unwrap();
+        let transfer_in = group.transfer_ins.first().expect("a transfer-in Buy").id;
+
+        let (status, detail) = put_sell_json(&pool, transfer_in, sell_over_parcel_json()).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            detail.contains("is a Buy, not a Sell"),
+            "a Buy must not be described as a Sell: {detail}"
+        );
+        assert!(
+            !detail.contains("transfer-out"),
+            "the transfer-out wording is for the Sell side only: {detail}"
+        );
+    }
+
+    /// SCENARIOS Z-b control: the ordinary edit path. An id already holding a
+    /// plain Sell is still upserted in place — the fix refuses everything that
+    /// is *not* a Sell, and nothing that is.
+    #[tokio::test]
+    async fn api_put_sell_over_an_existing_plain_sell_still_edits_it() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+        let (status, _) = put_sell_json(&pool, 2, sell_over_parcel_json()).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        // Same id again, at a different price: the edit lands.
+        let mut edited = sell_over_parcel_json();
+        edited["average_price"] = serde_json::json!("16.50");
+        let (status, detail) = put_sell_json(&pool, 2, edited).await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{detail}");
+        assert_eq!(stored_trade_type(&pool, 2).await, TradeType::Sell);
+        let price: String = sqlx::query_scalar("SELECT average_price FROM trades WHERE id = 2")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(price.parse::<Decimal>().unwrap(), "16.50".parse().unwrap());
+        assert_eq!(count_allocations(&pool, 2).await, 1);
+    }
+
+    /// SCENARIOS Z-b control: an id no trade holds still creates the Sell —
+    /// the check is against the *stored* row, not against the id existing.
+    #[tokio::test]
+    async fn api_put_sell_at_a_free_id_still_creates_the_sell() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+
+        let (status, detail) = put_sell_json(&pool, 77, sell_over_parcel_json()).await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{detail}");
+        assert_eq!(stored_trade_type(&pool, 77).await, TradeType::Sell);
+        assert_eq!(count_allocations(&pool, 77).await, 1);
     }
 }
