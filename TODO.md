@@ -10,8 +10,8 @@ findings are all closed in DONE.md), except where a section's heading names anot
 (e.g. REQUIREMENTS, SCENARIOS). Each section records one finding; sections land in DONE.md as they
 are fixed or decided.
 
-**Open: the SCENARIOS Z pass's findings** — see the `## SCENARIOS Z-*` sections at the end of this
-file. Everything else is closed.
+**Open: one SCENARIOS Z finding** — see the `## SCENARIOS Z-g` section at the end of this file.
+Everything else is closed.
 
 **SCENARIOS.md sections A–X are driven and every finding they raised is closed** in the `DONE/*.md`
 archive. Section **S. Settlement, holidays, and dates** was driven 2026-08-22 (`d501408`) and its
@@ -201,3 +201,54 @@ graph preset appeared stuck (my own script left stale `id` attributes on earlier
 click hit `1M`), and `tax_year_settings` appeared to save a blank form (the "Saved." toast was the
 previous entity's, still on screen inside its 6-second window — which is Y-a seen from the other
 side). Both would have been logged as findings by a pass that trusted its first reading.
+
+## SCENARIOS Z-g — an AMIT taken over mid-year has its final cost-base reduction recordable nowhere
+
+- [ ] Accept an AMIT adjustment against a cross-listing rollover replacement parcel, as the refusals already promise.
+
+Found while fixing [Z-d](DONE/reporting.md), and confirmed independently against a throwaway database.
+`docs/API.md`'s [AMIT adjustments](docs/API.md#amit-adjustments) section states the rule plainly:
+
+> a **rollover replacement parcel** whose units trace back to the statement's own account through a
+> [transfer], [scrip-for-scrip exchange] or [demerger] *is* accepted, wherever the operation moved
+> them … the chain is followed
+
+It is not followed across a change of listing. `entities::amit_adjustment`'s write-time check refuses
+any row whose trade's `listing_id` differs from the statement's, before the account-tracing reach-through
+is consulted — so the promise holds for exactly the replacements that happen to stay on the same listing:
+
+| replacement parcel | same listing? | row accepted? |
+| --- | --- | --- |
+| a [transfer](docs/API.md#transfers)'s transfer-in parcel | yes | `204` ✔ |
+| a [demerger](docs/API.md#demerging)'s **head** replacement | yes | `204` ✔ |
+| a [scrip-for-scrip](docs/API.md#exchanging-a-scrip-for-scrip-takeover) replacement | **no** | `422` *the trade's listing differs from the AMMA statement's listing* |
+| a demerger's **demerged-entity** parcel | **no** | `422` *(same)* |
+
+**The two refusals point at each other, so there is no way through.** An AMIT fund taken over part-way
+through a financial year, whose final AMMA statement arrives months later stating nil units held:
+
+1. `POST /amma_statements/:id/generate_adjustments` → `422` — *"…if it was transferred, exchanged or
+   demerged away during the year, enter them against the replacement parcels that now hold those units,
+   **which is accepted** because the units trace back to this account"*
+2. the row against the **replacement** parcel → `422` — *"the trade's listing differs from the AMMA
+   statement's listing"*
+3. the row against the **original** parcel → `422` — *"…Enter the rest against the replacement parcel
+   instead, where those units now are: **that is accepted** for a statement of the account they came
+   from, and generating the statement's set does it for you"*
+
+Each refusal names the other as the way out. The statement's `cost_base_adjustment` — the fund's whole
+final-year AMIT cost base net amount, CGT event E10 — can be recorded **nowhere**, so the replacement
+parcel's cost base stays overstated by it and every later disposal of those units understates the gain.
+In the reproduction that is 10,000 units × A$0.20 = **A$2,000** of cost base that should have come off.
+`generate_adjustments`'s `unattributed` list exists precisely to hand these rows to the user for manual
+entry, and manual entry is what is refused.
+
+**It fails loudly rather than silently**, which is the good half — nothing computes a wrong figure — and
+the [AMIT adjustment cross-check](docs/API.md#amit-adjustment-cross-check) then flags the statement as
+having no adjustments, forever. But the documented recovery does not exist.
+
+**Direction.** The account-tracing reach-through is already written and already used; the listing check
+simply runs first and unconditionally. Consult it before refusing: a parcel the rollover chain shows
+holds this statement's account's units is acceptable *whatever* listing it now sits on — that is the
+whole point of a scrip-for-scrip exchange. Keep refusing a parcel that never held the account's units,
+which is what the check is really for.
