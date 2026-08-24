@@ -1207,6 +1207,43 @@ pub async fn allocate(pool: &SqlitePool, id: i64, sale_id: i64, buy_id: i64, qty
     .unwrap();
 }
 
+/// Every `.rs` file under `src`, with its path relative to `src` using `/`
+/// separators (`reports/tax_summary.rs`) — the form the source-scanning tests
+/// write their allowlists in.
+///
+/// The tree has several tests that pin a convention nothing in the type system
+/// can (`infra::db`'s deferred-`BEGIN` scan, `infra::decimal`'s
+/// stringified-bind scan, `web`'s display-kind scan); they share this walk
+/// rather than each carrying its own copy of it.
+pub fn rust_sources() -> Vec<(String, String)> {
+    let src = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut found = Vec::new();
+    let mut walk = vec![src.clone()];
+    while let Some(dir) = walk.pop() {
+        for entry in std::fs::read_dir(&dir)
+            .expect("src should be readable")
+            .flatten()
+        {
+            let path = entry.path();
+            if path.is_dir() {
+                walk.push(path);
+            } else if path.extension().is_some_and(|x| x == "rs") {
+                let rel = path
+                    .strip_prefix(&src)
+                    .expect("under src")
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                let body = std::fs::read_to_string(&path).expect("source should be readable");
+                found.push((rel, body));
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
 /// Tests of the fixtures themselves — specifically [`ApiClient`], whose whole
 /// job is to say what a hand-rolled `Request::builder()` block used to say.
 /// Every verb is driven against the real application router, so a change that

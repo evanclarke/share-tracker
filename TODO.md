@@ -304,7 +304,7 @@ match the AMIT Adjustments screen afterwards; the stored quantity must stay visi
 
 ## SCENARIOS Y-d — two Tax Summary money columns are rendered at four decimal places, ungrouped
 
-- [ ] Classify both in `COLUMN_KINDS`, and pin the list with a test so the next one cannot drift.
+- [x] Classify both in `COLUMN_KINDS`, and pin the list with a test so the next one cannot drift.
 
 Y-10 driven by sweeping every numeric column actually rendered on every entity list and every report
 against `util.js`'s `columnKinds()`. The entity lists came back clean — every unclassified numeric
@@ -336,6 +336,36 @@ name list can always grow one.
 
 **Chosen: option 1** — W's "when a rule needs a list, move the list somewhere the compiler sees it",
 applied to the UI's copy of it.
+
+**Done.** Both are classified `money` in `util.js` (the screen now reads `1,234,567.89` with
+`1234567.8912` on hover, matching its own CSV export), and
+`web::tests::every_money_column_on_the_wire_has_a_display_kind` pins the map: it walks every
+`Decimal` / `Option<Decimal>` field of every `Serialize` struct **and enum** under `src` — the
+server's whole wire surface — and requires each to be classified in `COLUMN_KINDS` or listed with
+its reason in one of two verbatim allowlists: `UNCLASSIFIED_WIRE_DECIMALS` (server-rounded
+percentages, the FX-import conflict rows, the chart's series point, the tax report's per-unit
+adjustment detail) or `NOT_RENDERED_THROUGH_COLUMN_KINDS` (the Annual Tax Report and its
+`CgtSummaryYear`, which `taxreport.js` formats itself). A stale or now-classified allowlist entry
+fails too. It keys off the Rust *type*, which is why ids, foreign keys and `numeric_code` (`036`)
+never enter the walk at all. Proven with three mutations (drop `employment_income`; add a money
+field to a report payload; classify an allowlisted column) — each fails, each restore passes. The
+`src` walk itself moved to `test_support::rust_sources`, shared with `infra::db`'s deferred-`BEGIN`
+scan rather than copied.
+
+Two corrections to the write-up above. The Y-10 sweep's "entity lists came back clean" holds only
+for the columns a *populated* fixture row happened to render — which is exactly the hole a
+type-driven walk closes. Two more unclassified `Decimal`s were sitting on the Corporate Actions
+list's own column list (`scrip_cash_per_unit`, `scrip_market_value`; both per-unit figures, so
+classifying them `rate` changes no pixel — but they were unclassified all the same), and eight more
+on payloads no fixture row put on screen: the trade DRP residual trio, `difference`, and the health
+report's four figures. All classified now. And the health report's `cost_base_total`,
+`discount_total`, `statement_discount`, `units_sold` are classified now but still print raw, because
+the health banner (`app.js`) concatenates them into prose without consulting `COLUMN_KINDS` — as
+does the AMIT generate-adjustments confirm dialog for `difference`. Money in prose is a second,
+separate hole in the same rule (`taxreport.js` solved it with a `moneyText` helper); worth its own
+finding. Also noticed: `buy_brokerage`, `buy_gst_on_brokerage`, `cost_base_per_unit_aud`,
+`proceeds_per_unit_aud` and `tfn_withholding_aud` are on the Annual Tax Report's wire but named
+nowhere in `taxreport.js`.
 
 ## SCENARIOS Y-e — a no-op edit writes an entitlement date that then stops tracking the pay date
 

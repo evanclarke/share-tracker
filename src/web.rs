@@ -2190,4 +2190,346 @@ mod tests {
         assert!(js.contains("holding_account_id: 'Account'"));
         assert!(js.contains("'Market value (AUD)'"));
     }
+
+    // ---- display kinds ------------------------------------------------------
+
+    /// Payloads that deliberately never reach the shared `filterableTable`
+    /// path, and so are classified whole rather than column by column — keyed
+    /// either by file (`reports/tax_report.rs`) or by one type within one
+    /// (`reports/net_capital_gain.rs::CgtSummaryYear`). The coarse half of
+    /// [`every_money_column_on_the_wire_has_a_display_kind`]'s classification,
+    /// in the shape `reports::snapshot`'s staleness test uses: everything is
+    /// either walked, or exempt here with the reason.
+    const NOT_RENDERED_THROUGH_COLUMN_KINDS: &[(&str, &str)] = &[
+        (
+            "reports/tax_report.rs",
+            "the Annual Tax Report is the one screen that deliberately does not render \
+             through filterableTable (CLAUDE.md; `custom: 'tax-report'` in config.js). \
+             taxreport.js is its own print-document renderer and formats every figure \
+             itself — moneyTd/moneyText over the same numericDisplay(v, 'money') — so \
+             its row structs are classified by that renderer, not by this map",
+        ),
+        (
+            "reports/net_capital_gain.rs::CgtSummaryYear",
+            "the ATO CGT-worksheet layout the Annual Tax Report prints (pub(crate), \
+             reached only through reports::tax_report, and deliberately never CSV \
+             exported). taxreport.js's cgtSummarySection renders every line through \
+             its own moneyEl, like the rest of that document",
+        ),
+    ];
+
+    /// Wire `Decimal` fields that carry no `COLUMN_KINDS` entry on purpose,
+    /// keyed `<file under src>::<field>` with the reason the column must (or
+    /// may) render verbatim. Anything not listed here has to be classified in
+    /// `util.js`, which is what stops the map growing another hole.
+    ///
+    /// Note what is *not* here: ids, foreign keys, `currencies.numeric_code`
+    /// (`036`, which cent-rounding would destroy), `settlement_days`,
+    /// `minor_units` and `tax_year` never enter the walk at all, because it
+    /// keys off the Rust type `Decimal` rather than off "the JSON value looks
+    /// numeric". Only money, prices, rates and quantities are `Decimal` here.
+    const UNCLASSIFIED_WIRE_DECIMALS: &[(&str, &str)] = &[
+        (
+            "domain/cost_base.rs::per_unit",
+            "CostBaseAdjustment reaches the wire only inside the Annual Tax Report's \
+             DisposalParcelRow.adjustments (its only other reader is the cost-base \
+             pipeline itself), and that renderer prints the row's `amount`, never its \
+             per-unit figure",
+        ),
+        (
+            "entities/corporate_action/model.rs::demerger_cost_base_pct",
+            "the head-entity-advised cost-base apportionment percentage (5.063 for BHP \
+             Steel): a percentage, and one whose entered precision is load-bearing — \
+             cent-rounding it to 5.06 would misstate every parcel it re-bases",
+        ),
+        (
+            "entities/rba_fx_rate.rs::feed",
+            "RateConflict is the FX-rate import summary's disagreement row (POST \
+             /rba_fx_rates/import and the job log) — an API/log shape no screen \
+             tabulates; both figures are rates, which render verbatim anyway",
+        ),
+        (
+            "entities/rba_fx_rate.rs::stored",
+            "the stored half of the same RateConflict row — see `feed` above",
+        ),
+        (
+            "reports/performance.rs::income_yield_pct",
+            "a percentage, which is none of the four display kinds: the server already \
+             round_dp(4)s it, so verbatim is stable and correct (cent-rounding would \
+             report a 0.0125% yield as 0.01%)",
+        ),
+        (
+            "reports/performance.rs::money_weighted_return_pct",
+            "a percentage, server-rounded like income_yield_pct above",
+        ),
+        (
+            "reports/performance.rs::total_return_pct",
+            "a percentage, server-rounded like income_yield_pct above",
+        ),
+        (
+            "reports/period_performance.rs::money_weighted_return_pct",
+            "the period report's own annualised percentage — as above",
+        ),
+        (
+            "reports/period_performance.rs::total_return_pct",
+            "the period report's own percentage — as above",
+        ),
+        (
+            "reports/snapshot.rs::unrealised_gain",
+            "SeriesPoint is the market-value graph's series: chart.js plots the number \
+             (Number(p.unrealised_gain)) on an axis it labels itself, and no table cell \
+             carries it. Its market_value/total_cost_base twins are classified only \
+             because those two names are report table columns as well",
+        ),
+    ];
+
+    /// One `Decimal` field of a type the server serializes: the file it is
+    /// declared in, the type, and the field name — which is the JSON key, and
+    /// so the `COLUMN_KINDS` key the UI would look it up by.
+    struct WireDecimal {
+        file: String,
+        ty: String,
+        field: String,
+    }
+
+    /// The `Decimal`/`Option<Decimal>` fields of every `Serialize` struct and
+    /// enum under `src`, i.e. every money, price, rate or quantity the server
+    /// can put on the wire. Inline `#[cfg(test)]` modules and the
+    /// `#[cfg(test)]`-only top-level modules (`test_support`, `doc_checks`,
+    /// `ato_examples`) are skipped: their fixtures reach no browser.
+    fn wire_decimals() -> Vec<WireDecimal> {
+        let sources = crate::test_support::rust_sources();
+        let main_rs = sources
+            .iter()
+            .find(|(rel, _)| rel == "main.rs")
+            .map(|(_, body)| body.clone())
+            .expect("main.rs is under src");
+        let test_only: Vec<String> = main_rs
+            .lines()
+            .zip(main_rs.lines().skip(1))
+            .filter(|(attr, item)| attr.trim() == "#[cfg(test)]" && item.trim().ends_with(';'))
+            .filter_map(|(_, item)| item.trim().trim_end_matches(';').strip_prefix("mod "))
+            .map(str::to_string)
+            .collect();
+
+        let mut found = Vec::new();
+        for (file, body) in &sources {
+            if test_only
+                .iter()
+                .any(|m| *file == format!("{m}.rs") || file.starts_with(&format!("{m}/")))
+            {
+                continue;
+            }
+            let lines: Vec<&str> = body.lines().collect();
+            let mut attrs = String::new();
+            let mut i = 0;
+            while i < lines.len() {
+                let line = lines[i].trim();
+                if line.starts_with('#') {
+                    attrs.push_str(line);
+                    i += 1;
+                    continue;
+                }
+                if line.is_empty() || line.starts_with("//") {
+                    i += 1;
+                    continue;
+                }
+                let is_mod = line.starts_with("mod ") || line.starts_with("pub mod ");
+                if attrs.contains("#[cfg(test)]") && is_mod {
+                    i = block_end(&lines, i) + 1;
+                    attrs.clear();
+                    continue;
+                }
+                let declares = |kw: &str| {
+                    line.split_whitespace()
+                        .take_while(|w| *w != "{")
+                        .any(|w| w == kw)
+                };
+                if attrs.contains("Serialize") && (declares("struct") || declares("enum")) {
+                    let ty = line
+                        .split_whitespace()
+                        .skip_while(|w| *w != "struct" && *w != "enum")
+                        .nth(1)
+                        .unwrap_or("")
+                        .split(['<', '{', '(', ';'])
+                        .next()
+                        .unwrap_or("")
+                        .to_string();
+                    let end = block_end(&lines, i);
+                    for field_line in &lines[i..=end] {
+                        if let Some(field) = decimal_field(field_line) {
+                            found.push(WireDecimal {
+                                file: file.clone(),
+                                ty: ty.clone(),
+                                field: field.to_string(),
+                            });
+                        }
+                    }
+                    i = end + 1;
+                    attrs.clear();
+                    continue;
+                }
+                attrs.clear();
+                i += 1;
+            }
+        }
+        found
+    }
+
+    /// The line index closing the braced block opened on `start` (`start`
+    /// itself for a one-line item, e.g. a `mod x;` declaration). Comment lines
+    /// don't count towards the depth, so a `{` inside a doc comment can't
+    /// truncate a struct.
+    fn block_end(lines: &[&str], start: usize) -> usize {
+        let mut depth = 0i32;
+        for (n, line) in lines.iter().enumerate().skip(start) {
+            if line.trim().starts_with("//") {
+                continue;
+            }
+            depth += line.matches('{').count() as i32;
+            depth -= line.matches('}').count() as i32;
+            if depth <= 0 {
+                return n;
+            }
+        }
+        lines.len() - 1
+    }
+
+    /// The field name of a `Decimal`/`Option<Decimal>` struct or enum-variant
+    /// field line, if that is what the line is.
+    fn decimal_field(line: &str) -> Option<&str> {
+        let line = line.trim();
+        let name = line
+            .strip_suffix(": Decimal,")
+            .or_else(|| line.strip_suffix(": Option<Decimal>,"))?;
+        let name = name.rsplit(' ').next().unwrap_or(name);
+        (!name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+            .then_some(name)
+    }
+
+    /// `COLUMN_KINDS` as the browser builds it: every name in every `set(kind,
+    /// [...])` list in `util.js`, mapped to its kind. Comment lines are
+    /// dropped first — they contain apostrophes, which would otherwise pair
+    /// off with the name literals around them.
+    fn column_kinds() -> std::collections::BTreeMap<String, String> {
+        let util = JS_MODULES
+            .iter()
+            .find(|(path, _)| *path == "/static/util.js")
+            .expect("util.js is served")
+            .1;
+        let block = util
+            .split_once("const COLUMN_KINDS")
+            .expect("util.js declares COLUMN_KINDS")
+            .1;
+        let block = block
+            .split_once("\n})();")
+            .expect("the COLUMN_KINDS IIFE closes")
+            .0;
+        let code: String = block
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let mut kinds = std::collections::BTreeMap::new();
+        let mut rest = code.as_str();
+        while let Some((_, after)) = rest.split_once("set('") {
+            let (kind, after) = after.split_once('\'').expect("the kind literal closes");
+            let (_, after) = after.split_once('[').expect("the name list opens");
+            let (names, after) = after.split_once(']').expect("the name list closes");
+            for (n, literal) in names.split('\'').enumerate() {
+                if n % 2 == 1 {
+                    kinds.insert(literal.to_string(), kind.to_string());
+                }
+            }
+            rest = after;
+        }
+        kinds
+    }
+
+    /// The rule `COLUMN_KINDS` is: **every** money figure the server can put
+    /// on the wire is display-formatted by name, wherever it is tabulated —
+    /// cents, thousands-grouped, full value on hover. Nothing in the type
+    /// system connects a new `Decimal` field to that hand-maintained name
+    /// list, so a column added to a report or entity payload and not
+    /// classified silently renders raw: `1234567.8912` in the cell beside a
+    /// neighbouring `2,757.30`, and against the screen's own CSV export, which
+    /// is already cent-rounded (SCENARIOS Y-d, which is exactly how the tax
+    /// summary's `employment_income` and
+    /// `foreign_tax_offsets_cgt_discount_reduction` were found).
+    ///
+    /// So this walks the server's whole wire surface — every `Decimal` field
+    /// of every `Serialize` type — and requires each to be classified in
+    /// `util.js`, or listed above with the reason it renders verbatim. It sees
+    /// the Rust *type*, which is what no JS-side test could: `numeric_code`
+    /// (`036`) is a `String` and never enters the walk, while a `Decimal`
+    /// named `difference` does.
+    #[test]
+    fn every_money_column_on_the_wire_has_a_display_kind() {
+        let kinds = column_kinds();
+        let wire = wire_decimals();
+        // A parser that silently stopped matching would make this test pass
+        // vacuously; the tree carries ~200 of these fields.
+        assert!(
+            wire.len() > 150 && kinds.len() > 100,
+            "the scan found {} wire decimals against {} classified columns — it has \
+             stopped parsing the tree",
+            wire.len(),
+            kinds.len()
+        );
+
+        let mut offenders = Vec::new();
+        let mut files_hit: Vec<&str> = Vec::new();
+        let mut allowed_hit: Vec<&str> = Vec::new();
+        for w in &wire {
+            if let Some((key, _)) = NOT_RENDERED_THROUGH_COLUMN_KINDS
+                .iter()
+                .find(|(k, _)| *k == w.file || *k == format!("{}::{}", w.file, w.ty))
+            {
+                files_hit.push(key);
+                continue;
+            }
+            let key = format!("{}::{}", w.file, w.field);
+            let allowed = UNCLASSIFIED_WIRE_DECIMALS.iter().find(|(k, _)| *k == key);
+            match (kinds.get(&w.field), allowed) {
+                (Some(_), None) => {}
+                (None, Some((k, _))) => allowed_hit.push(k),
+                (Some(kind), Some((k, _))) => {
+                    allowed_hit.push(k);
+                    offenders.push(format!(
+                        "{key} ({}) is classified as '{kind}' *and* listed in \
+                         UNCLASSIFIED_WIRE_DECIMALS — drop the allowlist entry",
+                        w.ty
+                    ));
+                }
+                (None, None) => {
+                    offenders.push(format!("{key} ({}) has no COLUMN_KINDS entry", w.ty))
+                }
+            }
+        }
+        for (key, _) in UNCLASSIFIED_WIRE_DECIMALS {
+            if !allowed_hit.contains(key) {
+                offenders.push(format!(
+                    "{key} is in UNCLASSIFIED_WIRE_DECIMALS but is no longer a Decimal \
+                     field on a Serialize type — drop the entry"
+                ));
+            }
+        }
+        for (key, _) in NOT_RENDERED_THROUGH_COLUMN_KINDS {
+            if !files_hit.contains(key) {
+                offenders.push(format!(
+                    "{key} is exempt in NOT_RENDERED_THROUGH_COLUMN_KINDS but carries no \
+                     Decimal field on a Serialize type — drop the entry"
+                ));
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "every Decimal the server can put on the wire needs a display kind: classify \
+             it in COLUMN_KINDS (src/web/util.js — money / rate / rate4 / quantity), or \
+             add it to UNCLASSIFIED_WIRE_DECIMALS with the reason it renders \
+             verbatim:\n{}",
+            offenders.join("\n")
+        );
+    }
 }

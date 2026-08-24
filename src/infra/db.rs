@@ -732,37 +732,6 @@ mod tests {
         "reports/unrealised_gains.rs",
     ];
 
-    /// Every `.rs` file under `src`, with its path relative to `src` using `/`
-    /// separators — the form [`DEFERRED_BEGIN_ALLOWED`] is written in.
-    fn source_files() -> Vec<(String, String)> {
-        let src = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut found = Vec::new();
-        let mut walk = vec![src.clone()];
-        while let Some(dir) = walk.pop() {
-            for entry in std::fs::read_dir(&dir)
-                .expect("src should be readable")
-                .flatten()
-            {
-                let path = entry.path();
-                if path.is_dir() {
-                    walk.push(path);
-                } else if path.extension().is_some_and(|x| x == "rs") {
-                    let rel = path
-                        .strip_prefix(&src)
-                        .expect("under src")
-                        .components()
-                        .map(|c| c.as_os_str().to_string_lossy().into_owned())
-                        .collect::<Vec<_>>()
-                        .join("/");
-                    let body = std::fs::read_to_string(&path).expect("source should be readable");
-                    found.push((rel, body));
-                }
-            }
-        }
-        found.sort();
-        found
-    }
-
     /// The convention `write_tx` exists to hold: no write path may begin a
     /// deferred transaction, because a deferred `BEGIN` that upgrades to a
     /// write after another connection has written fails immediately with
@@ -776,7 +745,7 @@ mod tests {
         let deferred = format!(".{}()", "begin");
         let mut offenders = Vec::new();
         let mut seen_in_allowed: Vec<&str> = Vec::new();
-        for (rel, body) in source_files() {
+        for (rel, body) in crate::test_support::rust_sources() {
             let allowed = DEFERRED_BEGIN_ALLOWED.contains(&rel.as_str());
             for (n, line) in body.lines().enumerate() {
                 let code = line.trim_start();

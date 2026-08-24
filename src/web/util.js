@@ -545,6 +545,11 @@ const COLUMN_KINDS = (function () {
     'cgt_event_c2_gain', 'dividends_assessable', 'interest_income',
     'foreign_interest_income', 'franking_credits_denied',
     'foreign_tax_offsets', 'foreign_tax_offset_excess',
+    // The FITO capital-gains apportionment memo and the dividend-equivalent
+    // (item 1/2) cash line: both AUD money on the tax summary, and both read
+    // as raw four-decimal figures beside their cent-rounded neighbours until
+    // they were classified here (SCENARIOS Y-d).
+    'foreign_tax_offsets_cgt_discount_reduction', 'employment_income',
     'amma_australian_interest', 'amma_dividends_unfranked', 'amma_franked_dividends',
     'amma_net_rent', 'amma_foreign_income', 'amma_other_income', 'amma_cgt_discount_gains',
     'amma_cgt_indexation_gains', 'amma_cgt_other_gains', 'amma_capital_losses_applied',
@@ -564,6 +569,13 @@ const COLUMN_KINDS = (function () {
     'cash_total_aud',
     // Listing activity ledger: the row's own money figure in AUD.
     'amount_aud',
+    // DRP residual cash carried on a reinvestment trade (the row's own
+    // currency), and the health report's duplicate/30-day-sale figures.
+    // Classified against the day they are tabulated: the trade columns are
+    // not on the Trades list today, and the health figures currently reach
+    // the screen only through the banner's prose, which formats nothing.
+    'residual_brought_forward', 'residual_carried_forward', 'residual_paid_out',
+    'cost_base_total', 'discount_total', 'statement_discount',
     // Investment-expense line items + the tax-summary deduction aggregates.
     'amount', 'gross_amount', 'gross_assessable_investment_income',
     'deductions_loan_interest', 'deductions_management_fee', 'deductions_advice_fee',
@@ -588,6 +600,10 @@ const COLUMN_KINDS = (function () {
     // The close a demerger states the security actually traded at on the last
     // pre-demerger day — a price entered by hand, kept verbatim like `price`.
     'demerger_close_price',
+    // A scrip-for-scrip exchange's cash-per-old-unit and the market value of
+    // one new unit — the two sides of its apportionment, both entered per
+    // unit from the offer document.
+    'scrip_cash_per_unit', 'scrip_market_value',
     'market_value_per_share', 'deductible_percentage', 'proceeds_per_right',
     // Period-performance report: the ATO/RBA rates used at each endpoint.
     'rate_from', 'rate_to',
@@ -612,6 +628,11 @@ const COLUMN_KINDS = (function () {
     'disqualified_units_now', 'disqualified_units_after_sale',
     // Listing activity ledger: running units-held balance.
     'units_after',
+    // Health report: units of an ESS parcel sold inside 30 days.
+    'units_sold',
+    // AMIT adjustment generation: the generated units against the
+    // statement's (shown in the confirm dialog's own prose today).
+    'difference',
   ]);
   return k;
 })();
