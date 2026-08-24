@@ -367,7 +367,7 @@ export const ENTITIES = [
       dec('rights_units', 'Rights: new units', { optional: true, default: '' }),
       dec('rights_held_units', 'Rights: per units held', { optional: true, default: '' }),
       dec('exercise_price', 'Rights: exercise price per unit', { optional: true, default: '' }),
-      bool('renounceable', 'Rights: renounceable offer', { default: true, hint: 'Tick if the rights can be sold, transferred or renounced. Untick for a non-renounceable entitlement offer — its rights cannot be sold, and a retail premium paid for not taking it up is an unfranked dividend (TR 2012/1), entered under Income, not as a rights sale (which the server then refuses). Exercising is the same either way.' }),
+      bool('renounceable', 'Rights: renounceable offer', { default: true, hint: 'Tick if the rights can be sold, transferred or renounced. Untick for a non-renounceable entitlement offer — its rights cannot be sold, and a retail premium paid for not taking it up is an unfranked dividend (TR 2012/1), entered under Income, not as a rights sale (which the server then refuses). Exercising is the same either way — but since such rights cannot have been bought either, both actions refuse an amount paid for them.' }),
       dec('buyback_price', 'Buy-back: price per unit', { optional: true, default: '' }),
       dec('buyback_dividend', 'Buy-back: dividend per unit', { optional: true, default: '', hint: '0 (or blank) when the price has no dividend component.' }),
       dec('buyback_franking_credit', 'Buy-back: franking credit per unit', { optional: true, default: '', hint: 'Needs a dividend.' }),
@@ -807,12 +807,21 @@ export const ACTIONS = [
     slug: 'exercise', nav: 'corporate_actions', ownerApi: '/corporate_actions', cancel: '#/e/corporate_actions', submit: 'Exercise',
     post: function (id) { return '/corporate_actions/' + id + '/exercise'; },
     title: function (id, owner, listing) { return 'Exercise ' + listing(owner.listing_id) + ' rights issue #' + id; },
-    desc: function (a, listing) { return 'Creates a Buy trade for ' + listing(a.listing_id) + ' at the exercise price (' + a.exercise_price + ' ' + a.currency + ' per unit): ' + a.rights_units + ' new unit(s) per ' + a.rights_held_units + ' held at the record date.'; },
+    desc: function (a, listing) {
+      const common = 'Creates a Buy trade for ' + listing(a.listing_id) + ' at the exercise price (' + a.exercise_price + ' ' + a.currency + ' per unit): ' + a.rights_units + ' new unit(s) per ' + a.rights_held_units + ' held at the record date.';
+      // Exercising is identical under both offers, which is why a
+      // non-renounceable issue is recorded at all — the only thing the flag
+      // decides here is that nothing can have been paid for the rights.
+      if (a.renounceable === false) {
+        return common + ' This is a non-renounceable offer: its rights cannot be traded, transferred or assigned, so nothing can have been paid to acquire them — leave the rights cost at 0 (the server refuses any other amount). The exercise itself is the same as under a renounceable offer.';
+      }
+      return common;
+    },
     fields: function (a) {
       return [
         dt('date', 'Exercise date', { required: true, hint: 'The new parcel’s acquisition date; on or after the record date (' + a.date + ').' }),
         dec('units', 'Units acquired', { required: true, default: '' }),
-        dec('rights_cost', 'Amount paid for the rights', { default: '0', hint: 'Total, in ' + a.currency + '. 0 for rights issued free.' }),
+        dec('rights_cost', 'Amount paid for the rights', { default: '0', hint: 'Total, in ' + a.currency + '. 0 for rights issued free' + (a.renounceable === false ? ' — a non-renounceable entitlement cannot have been bought, so only 0 is accepted.' : '.') }),
         dec('fx_rate', 'FX rate', { default: '1', hint: 'Optional; defaults to 1.' }),
         fk('holding_account_id', 'Holding account', 'holdingAccounts', { required: true, default: '1', hint: 'Where the exercised parcel lands.' }),
       ];

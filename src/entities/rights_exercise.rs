@@ -6,12 +6,15 @@
 //! from exercise, not from the rights or the original shares — with a cost
 //! base of the amount paid to exercise (`units × exercise_price`) plus any
 //! amount paid to acquire the exercised rights (`rights_cost`, nil for rights
-//! issued free). The created trade carries the exercise payment as
-//! `quantity × average_price` and the rights cost in `brokerage` (both are
-//! first-element/incidental components of the single cost base every report
-//! computes, so the parcel's cost base is exact). Shares from a rights issue
-//! are allotted by the company, not market-settled, so the settlement date is
-//! the exercise date.
+//! issued free — and nil is the only amount a **non-renounceable** offer can
+//! carry, since its entitlements cannot be traded, transferred or assigned and
+//! so cannot have been bought: TR 2012/1 para 2, the same refusal
+//! `entities::rights_sale` makes on the disposal side). The created trade
+//! carries the exercise payment as `quantity × average_price` and the rights
+//! cost in `brokerage` (both are first-element/incidental components of the
+//! single cost base every report computes, so the parcel's cost base is
+//! exact). Shares from a rights issue are allotted by the company, not
+//! market-settled, so the settlement date is the exercise date.
 //!
 //! The entitlement is capped at write time: units held when the issue's
 //! record date arrives (trades dated before `date`, in record-date units
@@ -30,7 +33,8 @@
 //! dividend — entered as income, see `docs/ato/retail-premiums.md`).
 
 use crate::entities::corporate_action::{
-    self, ActionKind, SplitEvent, as_acquired_quantity, split_adjusted_quantity,
+    self, ActionKind, NOTHING_PAID_FOR_NON_RENOUNCEABLE_RIGHTS, SplitEvent, as_acquired_quantity,
+    split_adjusted_quantity,
 };
 use crate::entities::trade::{self, Trade, TradeType};
 use crate::infra::db::write_tx;
@@ -57,7 +61,8 @@ pub struct ExerciseBody {
     #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub units: Decimal,
     /// Total amount paid to acquire the exercised rights, in the action's
-    /// currency (defaults to 0 — rights issued free have a nil cost base).
+    /// currency (defaults to 0 — rights issued free have a nil cost base, and
+    /// a non-renounceable offer's can only be nil).
     #[serde(
         default,
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"
@@ -92,6 +97,14 @@ pub enum ExerciseError {
     /// `rights_cost` is negative.
     #[error("the rights cost cannot be negative")]
     NegativeRightsCost,
+    /// A positive `rights_cost` against a **non-renounceable** offer, whose
+    /// entitlements cannot have been bought — see the shared
+    /// [`NOTHING_PAID_FOR_NON_RENOUNCEABLE_RIGHTS`] clause both rights
+    /// operations refuse it with. Unchecked here it inflates the exercised
+    /// parcel's cost base out of an amount that was never paid, understating
+    /// every later gain on the parcel (SCENARIOS AA-b). Mapped to `422`.
+    #[error("this rights issue is a non-renounceable offer, whose rights cannot be bought")]
+    RightsCostOnNonRenounceableOffer,
     /// `exercise_price × units + rights_cost` — the exercised parcel's whole
     /// cost base, which the Buy carries as `average_price × quantity +
     /// brokerage` — cannot be represented (SCENARIOS W-e). Nothing multiplies
@@ -144,6 +157,15 @@ impl From<ExerciseError> for ApiError {
             ExerciseError::NegativeRightsCost => {
                 ApiError::unprocessable("the rights cost cannot be negative")
             }
+            // The same impossible amount `sell_rights` refuses, off the one
+            // shared clause, each naming what it would have done to its own
+            // figures.
+            ExerciseError::RightsCostOnNonRenounceableOffer => ApiError::unprocessable(format!(
+                "{NOTHING_PAID_FOR_NON_RENOUNCEABLE_RIGHTS}, and a cost recorded here would \
+                     inflate the exercised parcel's cost base and understate every later gain on \
+                     it: leave the rights cost at 0, so the parcel costs the exercise payment \
+                     alone"
+            )),
             ExerciseError::UnrepresentableCostBase(e) => ApiError::unprocessable(e.message()),
             ExerciseError::BeforeRecordDate => {
                 ApiError::unprocessable("the exercise date is before the issue's record date")
@@ -282,28 +304,35 @@ pub async fn db_exercise(
         Some(a) => a,
         None => return Err(ExerciseError::ActionNotFound),
     };
-    let (rights_units, rights_held_units, exercise_price, currency) = match &action.kind {
-        // The offer's renounceability is deliberately not read here:
-        // exercising is identical under both (`docs/ato/rights-issues.md` —
-        // the exercise rules turn on how the rights were acquired and on the
-        // original shares' pre/post-CGT status, never on renounceability), so
-        // a non-renounceable entitlement offer is exercised exactly like any
-        // other. It is the *disposal* path that turns on it
-        // (`entities::rights_sale`).
-        ActionKind::RightsIssue {
-            rights_units,
-            rights_held_units,
-            exercise_price,
-            currency,
-            ..
-        } => (
-            *rights_units,
-            *rights_held_units,
-            *exercise_price,
-            currency.clone(),
-        ),
-        _ => return Err(ExerciseError::NotARightsIssue),
-    };
+    let (rights_units, rights_held_units, exercise_price, currency, renounceable) =
+        match &action.kind {
+            ActionKind::RightsIssue {
+                rights_units,
+                rights_held_units,
+                exercise_price,
+                currency,
+                renounceable,
+            } => (
+                *rights_units,
+                *rights_held_units,
+                *exercise_price,
+                currency.clone(),
+                *renounceable,
+            ),
+            _ => return Err(ExerciseError::NotARightsIssue),
+        };
+    // The *exercise* itself is identical under both offers
+    // (`docs/ato/rights-issues.md` — the cost-base rules turn on how the
+    // rights were acquired and on the original shares' pre/post-CGT status,
+    // never on renounceability), which is why a non-renounceable entitlement
+    // offer is recorded here at all. The one thing the flag decides on this
+    // path is whether the rights could have been *bought*: under a
+    // non-renounceable offer they could not (TR 2012/1 para 2), so the only
+    // acquisition cost such an exercise can carry is nil — the same refusal
+    // `entities::rights_sale` makes on the disposal side (SCENARIOS AA-b).
+    if !renounceable && rights_cost > Decimal::ZERO {
+        return Err(ExerciseError::RightsCostOnNonRenounceableOffer);
+    }
     let record_date = action.date;
     if body.date < record_date {
         return Err(ExerciseError::BeforeRecordDate);
@@ -474,6 +503,30 @@ mod tests {
         .unwrap();
     }
 
+    /// The same 1-for-4 issue at $1.80, offered **non-renounceably**: the
+    /// entitlements cannot be traded, transferred or assigned (TR 2012/1 para
+    /// 2), so no one can have paid anything to acquire them. Exercising is
+    /// otherwise identical, which is why the action is recorded at all.
+    async fn insert_non_renounceable_issue(pool: &SqlitePool, id: i64, date: NaiveDate) {
+        corporate_action::db_upsert(
+            pool,
+            &CorporateAction {
+                id,
+                listing_id: 1,
+                date,
+                kind: ActionKind::RightsIssue {
+                    rights_units: Decimal::ONE,
+                    rights_held_units: Decimal::from(4),
+                    exercise_price: "1.80".parse().unwrap(),
+                    currency: "AUD".to_string(),
+                    renounceable: false,
+                },
+            },
+        )
+        .await
+        .unwrap();
+    }
+
     /// A 1-for-4 rights issue at $1.80, record date `date`.
     async fn insert_rights_issue(pool: &SqlitePool, id: i64, date: NaiveDate) {
         corporate_action::db_upsert(
@@ -568,6 +621,67 @@ mod tests {
             parcel.original_cost_base,
             "500.05".parse::<Decimal>().unwrap()
         );
+    }
+
+    /// SCENARIOS AA-b. That same amount is impossible under a
+    /// **non-renounceable** offer: its entitlements cannot be traded,
+    /// transferred or assigned (TR 2012/1 para 2), so nothing can have been
+    /// paid for them — and accepted here it would inflate the exercised
+    /// parcel's cost base and understate every later gain on it. Refused, the
+    /// same fact `sell_rights` refuses a cost on.
+    #[tokio::test]
+    async fn a_purchase_cost_against_a_non_renounceable_offer_is_refused() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        insert_buy(&pool, 1, d(2024, 1, 15), "1000", "2.00").await;
+        insert_non_renounceable_issue(&pool, 10, d(2024, 7, 1)).await;
+
+        let mut exercise = body(d(2024, 8, 1), "250");
+        exercise.rights_cost = Some("50.05".parse().unwrap());
+        assert!(matches!(
+            db_exercise(&pool, 10, &exercise).await,
+            Err(ExerciseError::RightsCostOnNonRenounceableOffer)
+        ));
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM trades WHERE rights_action_id = 10")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 0, "nothing is written");
+    }
+
+    /// And the exercise itself is untouched by the flag — the cost-base rules
+    /// turn on how the rights were acquired and on the original shares'
+    /// pre/post-CGT status, never on renounceability
+    /// (`docs/ato/rights-issues.md`). At the nil cost a free entitlement
+    /// carries, a non-renounceable offer exercises exactly like any other,
+    /// which is the reason the action is enterable at all.
+    #[tokio::test]
+    async fn a_non_renounceable_offer_exercises_normally_at_a_nil_rights_cost() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        insert_buy(&pool, 1, d(2024, 1, 15), "1000", "2.00").await;
+        insert_non_renounceable_issue(&pool, 10, d(2024, 7, 1)).await;
+
+        // Both spellings of nil: omitted, and stated as 0.
+        let trade = db_exercise(&pool, 10, &body(d(2024, 8, 1), "150"))
+            .await
+            .unwrap();
+        assert_eq!(trade.quantity, Decimal::from(150));
+        assert_eq!(trade.brokerage, Decimal::ZERO);
+        assert_eq!(trade.rights_action_id, Some(10));
+
+        let mut stated = body(d(2024, 8, 2), "100");
+        stated.rights_cost = Some(Decimal::ZERO);
+        let trade = db_exercise(&pool, 10, &stated).await.unwrap();
+        assert_eq!(trade.brokerage, Decimal::ZERO);
+
+        // The parcels cost the exercise payment alone.
+        let parcels = crate::reports::open_parcels::db_open_parcels(&pool)
+            .await
+            .unwrap();
+        let parcel = parcels.iter().find(|p| p.trade_id == trade.id).unwrap();
+        assert_eq!(parcel.acquisition_date, d(2024, 8, 2));
+        assert_eq!(parcel.original_cost_base, Decimal::from(180)); // 100 × 1.80
     }
 
     #[tokio::test]
@@ -902,6 +1016,88 @@ mod tests {
         assert_eq!(trade.brokerage, "10.50".parse::<Decimal>().unwrap());
         assert_eq!(trade.rights_action_id, Some(10));
         assert!(trade::db_get(&pool, trade.id).await.unwrap().is_some());
+    }
+
+    /// SCENARIOS AA-b at the HTTP surface. The refusal has to say what is
+    /// impossible and what to enter instead, and it is the same rule the
+    /// sell-rights screen answers with — the shared clause is the first half
+    /// of both bodies. The nil-cost exercise of the same offer still answers
+    /// `201`.
+    #[tokio::test]
+    async fn api_a_rights_cost_on_a_non_renounceable_offer_is_refused_naming_the_impossibility() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        insert_buy(&pool, 1, d(2024, 1, 15), "1000", "2.00").await;
+        insert_non_renounceable_issue(&pool, 10, d(2024, 7, 1)).await;
+        let app = ApiClient::over(router().with_state(pool.clone()));
+
+        let resp = app
+            .post(
+                "/corporate_actions/10/exercise",
+                &serde_json::json!({
+                    "date": "2024-08-01",
+                    "units": "250",
+                    "rights_cost": "50.05",
+                }),
+            )
+            .await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+        let body = resp.text();
+        assert!(body.contains("non-renounceable"), "{body}");
+        assert!(body.contains("nothing can have been paid"), "{body}");
+        assert!(body.contains("cost base"), "{body}");
+
+        // The exercise itself is unaffected: at nil cost it lands.
+        let resp = app
+            .post(
+                "/corporate_actions/10/exercise",
+                &serde_json::json!({ "date": "2024-08-01", "units": "250" }),
+            )
+            .await;
+        assert_eq!(resp.status, StatusCode::CREATED);
+        let trade: Trade = resp.json();
+        assert_eq!(trade.brokerage, Decimal::ZERO);
+
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM trades WHERE rights_action_id = 10")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 1, "only the nil-cost exercise was written");
+    }
+
+    /// The same request against a **renounceable** offer is untouched: rights
+    /// bought on-market are exactly what `rights_cost` is for, and they cost
+    /// the new parcel.
+    #[tokio::test]
+    async fn api_a_rights_cost_on_a_renounceable_offer_still_costs_the_parcel() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        insert_buy(&pool, 1, d(2024, 1, 15), "1000", "2.00").await;
+        insert_rights_issue(&pool, 10, d(2024, 7, 1)).await;
+
+        let resp = ApiClient::over(router().with_state(pool.clone()))
+            .post(
+                "/corporate_actions/10/exercise",
+                &serde_json::json!({
+                    "date": "2024-08-01",
+                    "units": "250",
+                    "rights_cost": "50.05",
+                }),
+            )
+            .await;
+        assert_eq!(resp.status, StatusCode::CREATED);
+        let trade: Trade = resp.json();
+        assert_eq!(trade.brokerage, "50.05".parse::<Decimal>().unwrap());
+
+        let parcels = crate::reports::open_parcels::db_open_parcels(&pool)
+            .await
+            .unwrap();
+        let parcel = parcels.iter().find(|p| p.trade_id == trade.id).unwrap();
+        // 250 × 1.80 + 50.05
+        assert_eq!(
+            parcel.original_cost_base,
+            "500.05".parse::<Decimal>().unwrap()
+        );
     }
 
     async fn api_exercise_expecting(

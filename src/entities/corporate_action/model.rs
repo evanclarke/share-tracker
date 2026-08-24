@@ -196,6 +196,22 @@ pub enum ActionKind {
     },
 }
 
+/// The one fact behind both rights operations' refusal of an amount paid to
+/// acquire the rights, stated once so the two read as one rule: a
+/// non-renounceable offer's entitlements "cannot be traded, transferred,
+/// assigned or otherwise dealt with" (TR 2012/1 para 2 —
+/// `docs/ato/retail-premiums.md`), and the company grants them, so no one can
+/// have bought one. The amount is impossible in fact, not merely unusual, and
+/// it stays impossible for the offers TR 2012/1's para 3 puts outside itself
+/// (entitlements over trust or stapled-group equity): the Ruling declines to
+/// characterise the *payment* there, but a non-renounceable entitlement is
+/// non-tradeable either way.
+///
+/// `sell_rights` and `exercise` each answer `422` with this clause followed by
+/// what the amount would have done to their own figures (SCENARIOS AA-b).
+pub const NOTHING_PAID_FOR_NON_RENOUNCEABLE_RIGHTS: &str = "this rights issue is a non-renounceable offer, whose entitlements cannot be traded, \
+     transferred or assigned — so nothing can have been paid to acquire the rights it issued";
+
 impl ActionKind {
     /// The `action_type` column value (the serde tag).
     pub(crate) fn type_str(&self) -> &'static str {

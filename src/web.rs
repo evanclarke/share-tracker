@@ -2205,6 +2205,15 @@ mod tests {
         assert!(js.contains("a.renounceable === false"));
         assert!(js.contains("TR 2012/1"));
         assert!(js.contains("unfranked dividend income against the listing"));
+        // The exercise screen carries the cost half of the same rule: the
+        // exercise is unchanged by the flag, but a non-renounceable
+        // entitlement cannot have been bought, so only 0 is accepted there
+        // too (the second AA-b item).
+        assert!(js.contains(
+            "a non-renounceable entitlement cannot have been bought, so only 0 is \
+             accepted."
+        ));
+        assert!(js.contains("The exercise itself is the same as under a renounceable offer."));
         // A RightsIssue row's Exercise action drives the exercise endpoint
         // (a config-driven ACTIONS entry rendered by viewAction).
         assert!(js.contains("#/exercise/"));

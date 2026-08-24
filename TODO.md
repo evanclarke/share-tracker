@@ -490,7 +490,7 @@ row reads back as renounceable through the model.
 
 ### AA-b, second item — the exercise path still accepts a cost on a non-renounceable offer
 
-- [ ] Refuse `rights_cost` on `POST /corporate_actions/:id/exercise` for a non-renounceable offer.
+- [x] Refuse `rights_cost` on `POST /corporate_actions/:id/exercise` for a non-renounceable offer.
 
 Flagged by the agent that fixed AA-b and deliberately left unenforced there; **decided 2026-08-25 to
 refuse it now.** `sell_rights` refuses a positive `rights_cost` on a non-renounceable offer because
@@ -500,6 +500,33 @@ impossible on the **exercise** path, which still accepts it. The consequence is 
 visible than `sell_rights`' was (a stray cost inflates the new parcel's cost base rather than
 fabricating a capital loss out of money never paid), but it is the same impossible amount, and the
 guard should not hold on one path and not the other.
+
+**Fixed.** `db_exercise` now reads the offer's `renounceable` flag and returns `422` on a positive
+`rights_cost` against a non-renounceable one, before anything is written. The premise was re-derived
+first and held: `docs/ato/rights-issues.md`'s exercise rules give `rights_cost` the *same* meaning on
+both paths — the cost base of the rights at exercise, "including any amount you paid for them" —
+and `docs/API.md` says it covers rights **bought on-market**, which TR 2012/1 para 2's entitlements
+(not tradeable, transferable or assignable) cannot be. The para 3 caveat does not open a legitimate
+case: the Ruling declines to characterise the *payment* on trust/stapled-group offers, but a
+non-renounceable entitlement is non-tradeable there too, so the cost stays impossible; and nothing
+legitimate is blocked, since the exercise itself is unaffected — at the nil cost a free entitlement
+carries it lands exactly as before.
+
+The predicate is shared as far as it should be: the *fact* both refusals rest on now lives once, as
+`corporate_action::NOTHING_PAID_FOR_NON_RENOUNCEABLE_RIGHTS`, and each `From<EntityError> for
+ApiError` arm follows that clause with what the amount would have done to *its* figures (a capital
+loss on a lapse for `sell_rights`; an inflated parcel cost base here) — so the two read as one rule
+in two places without either call site being contorted into the other's shape. The check itself is
+two tokens against a flag each path already has in hand and was not worth a helper.
+
+`docs/API.md` (the exercise section's new `422` and its `rights_cost` description, the `RightsIssue`
+description, the *Selling or lapsing rights* cross-reference that used to say the exercise path was
+deliberately untouched, the Known-limitations rights bullet, and the response-codes catalogue),
+`README.md`'s rights-issue line, and `src/web/config.js` (the exercise screen's description and
+rights-cost hint, mirroring the sell-rights screen) carry it. No migration: the fact was already
+recorded by 0047. Tests: the refusal and a nil-cost exercise of the same offer (DB and API level, the
+API one pinning the wording and that only the nil-cost exercise was written), plus a renounceable
+offer with a positive cost still costing the parcel `500.05`.
 
 ## SCENARIOS AA-c — the investor-not-share-trader assumption is stated nowhere
 

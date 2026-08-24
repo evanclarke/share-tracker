@@ -48,7 +48,8 @@
 //! against `PUT`/`DELETE /trades` while referenced (`entities::trade`).
 
 use crate::entities::corporate_action::{
-    self, ActionKind, sold_in_acquired_units, split_adjusted_quantity,
+    self, ActionKind, NOTHING_PAID_FOR_NON_RENOUNCEABLE_RIGHTS, sold_in_acquired_units,
+    split_adjusted_quantity,
 };
 use crate::entities::rights_exercise::{db_held_at_record_date, db_rights_used, entitled_units};
 use crate::entities::trade::TradeType;
@@ -178,7 +179,10 @@ pub enum SellRightsError {
     /// transferred or assigned cannot have been bought, so the cost has no
     /// source — and left unchecked it would realise a capital loss on a lapse
     /// (proceeds nil against a positive cost base) out of an amount that could
-    /// never have been paid. Mapped to `422`.
+    /// never have been paid. Mapped to `422` off the shared
+    /// [`NOTHING_PAID_FOR_NON_RENOUNCEABLE_RIGHTS`] clause, the same one the
+    /// exercise path answers with
+    /// (`entities::rights_exercise::ExerciseError::RightsCostOnNonRenounceableOffer`).
     #[error("this rights issue is a non-renounceable offer, whose rights cannot be bought")]
     RightsCostOnNonRenounceableOffer,
     /// `units` is not strictly positive.
@@ -240,12 +244,14 @@ impl From<SellRightsError> for ApiError {
                  dividend (TR 2012/1), not a capital gain: enter it as unfranked dividend income \
                  against the listing instead. Only a lapse — nil proceeds — is recorded here",
             ),
-            SellRightsError::RightsCostOnNonRenounceableOffer => ApiError::unprocessable(
-                "this rights issue is a non-renounceable offer, whose entitlements cannot be \
-                 traded, transferred or assigned — so nothing can have been paid to acquire the \
-                 rights it issued, and a cost recorded here would realise a capital loss on a \
-                 lapse out of an amount that was never paid",
-            ),
+            // The same impossible amount the exercise path refuses, off the
+            // one shared clause, each naming what it would have done to its
+            // own figures.
+            SellRightsError::RightsCostOnNonRenounceableOffer => ApiError::unprocessable(format!(
+                "{NOTHING_PAID_FOR_NON_RENOUNCEABLE_RIGHTS}, and a cost recorded here would \
+                 realise a capital loss on a lapse out of an amount that was never paid: leave \
+                 the rights cost at 0"
+            )),
             SellRightsError::NonPositiveUnits => {
                 ApiError::unprocessable("the number of rights sold must be greater than zero")
             }
