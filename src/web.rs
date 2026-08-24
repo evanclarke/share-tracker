@@ -2695,4 +2695,208 @@ mod tests {
             offenders.join("\n")
         );
     }
+
+    /// One `x.<money column>` read that a JS module concatenates straight into
+    /// a string: the served module, the 1-based line, and that line's source.
+    struct ProseMoney {
+        module: &'static str,
+        line: usize,
+        name: String,
+        source_line: String,
+    }
+
+    /// Every place `source` writes a `COLUMN_KINDS` money column into a
+    /// string rather than into a table cell — the shape
+    /// [`money_in_prose_goes_through_the_shared_formatter`] forbids.
+    ///
+    /// A money read is flagged when it is an operand of `+` with a **string
+    /// literal on the other side** (`'… of ' + d.amount`, or
+    /// `d.amount + ' AUD'`, either side of a line break), or when it sits
+    /// inside a `${…}` template interpolation. Requiring the adjacent literal
+    /// is what separates concatenation from arithmetic: `total + row.amount`
+    /// is a sum, not a sentence, and is not flagged.
+    ///
+    /// Deliberately *not* flagged, because the money name is not the value
+    /// being written: a longer property path (`r.income.id` — the health
+    /// banner's sibling in `config.js`, and the only false positive the first
+    /// draft of this scan produced), an index (`d.amount[0]`), a call
+    /// (`d.amount(…)`), and any read already wrapped in a call, which is what
+    /// `moneyText(d.amount) + ' AUD'` is.
+    fn concatenated_money_reads(
+        module: &'static str,
+        source: &str,
+        money: &[&str],
+    ) -> Vec<ProseMoney> {
+        // Whole-line comments first: several of them quote the very shape
+        // being scanned for (this one nearly does), and prose about the rule
+        // must not read as a breach of it.
+        let code: String = source
+            .lines()
+            .map(|l| {
+                if l.trim_start().starts_with("//") {
+                    ""
+                } else {
+                    l
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let mut hits = Vec::new();
+        for name in money {
+            let needle = format!(".{name}");
+            for (i, _) in code.match_indices(&needle) {
+                let after = code[i + needle.len()..].chars().next().unwrap_or(' ');
+                // The name continues (`.amount_aud`), or the read is not the
+                // leaf value: a call, an index, or a longer property path.
+                if after.is_ascii_alphanumeric() || matches!(after, '_' | '$' | '(' | '[' | '.') {
+                    continue;
+                }
+                // The dot must end an expression, not a number or a spread.
+                let before = code[..i].chars().next_back().unwrap_or(' ');
+                if !(before.is_ascii_alphanumeric() || matches!(before, '_' | '$' | ')' | ']')) {
+                    continue;
+                }
+                // Walk back over the object expression (`d`, `h.rows[0]`, …).
+                let mut expr_start = i;
+                for (p, c) in code[..i].char_indices().rev() {
+                    if c.is_ascii_alphanumeric() || matches!(c, '_' | '$' | '.' | '[' | ']') {
+                        expr_start = p;
+                    } else {
+                        break;
+                    }
+                }
+                let head = code[..expr_start].trim_end();
+                let literal_before = head.ends_with("${")
+                    || head
+                        .strip_suffix('+')
+                        .is_some_and(|h| h.trim_end().ends_with(['\'', '"', '`']));
+                let tail = code[i + needle.len()..].trim_start();
+                let literal_after = tail
+                    .strip_prefix('+')
+                    .is_some_and(|t| t.trim_start().starts_with(['\'', '"', '`']));
+                if !(literal_before || literal_after) {
+                    continue;
+                }
+                let line = code[..i].matches('\n').count() + 1;
+                hits.push(ProseMoney {
+                    module,
+                    line,
+                    name: (*name).to_string(),
+                    source_line: source
+                        .lines()
+                        .nth(line - 1)
+                        .unwrap_or("")
+                        .trim()
+                        .to_string(),
+                });
+            }
+        }
+        hits
+    }
+
+    /// Call sites where a `COLUMN_KINDS` money name is concatenated into a
+    /// string on purpose and must *not* be routed through `moneyText`, keyed
+    /// `<module>::<line's own text>`… except that there are none: the matcher
+    /// above is narrow enough (leaf reads only, adjacent string literal
+    /// required) that every hit it produces today is a real one.
+    ///
+    /// It is kept, empty, as the place an exception goes — with the reason,
+    /// in the shape of `UNCLASSIFIED_WIRE_DECIMALS` above — so that the answer
+    /// to a future false positive is one documented entry here rather than a
+    /// loosened matcher that stops seeing the real thing.
+    const MONEY_PROSE_ALLOWED: &[(&str, &str)] = &[];
+
+    /// The other half of the `COLUMN_KINDS` rule, and the hole
+    /// [`every_money_column_on_the_wire_has_a_display_kind`] cannot see:
+    /// `COLUMN_KINDS` governs how `filterableTable` formats a *cell*, so money
+    /// written into a **sentence** escapes it entirely. The health banner
+    /// builds sentences — `problems.push(d.statement_count + ' identical ESS
+    /// statements … with a ' + d.discount_total + …)` — and printed a
+    /// four-decimal `12340.1234` beside the `12,340.12` every table shows for
+    /// the same figure (SCENARIOS Y-g; SCENARIOS Y-d was the same rule leaking
+    /// through the cell path). `util.js`'s `moneyText` is the prose form of
+    /// the rule, and this requires every module to use it.
+    ///
+    /// What it catches: a leaf read of a `COLUMN_KINDS` money column that is
+    /// an operand of `+` next to a string literal, or interpolated into a
+    /// template string — the six banner sites, and each of them individually
+    /// (re-verified by re-introducing one raw concatenation at a time).
+    ///
+    /// What it cannot catch, and what still needs review: money reached
+    /// through a local variable or a destructure (`const { amount } = d;` then
+    /// `'…' + amount`) rather than a property read; a figure whose column is
+    /// not in `COLUMN_KINDS` at all (that is the *other* test's job, and the
+    /// two together are what close the rule); money passed to a helper that
+    /// concatenates it out of sight; and a `.money_name` that happens to occur
+    /// inside a string literal. It is a regex-grade scan of source text, not a
+    /// parse, so it is the floor under the convention rather than a proof of it.
+    #[test]
+    fn money_in_prose_goes_through_the_shared_formatter() {
+        let kinds = column_kinds();
+        let money: Vec<&str> = kinds
+            .iter()
+            .filter(|(_, kind)| *kind == "money")
+            .map(|(name, _)| name.as_str())
+            .collect();
+        assert!(
+            money.len() > 50,
+            "the COLUMN_KINDS parser found only {} money columns — it has stopped parsing",
+            money.len()
+        );
+
+        let mut offenders = Vec::new();
+        let mut allowed_hit: Vec<&str> = Vec::new();
+        for (path, source) in JS_MODULES {
+            for hit in concatenated_money_reads(path, source, &money) {
+                let key = format!("{}::{}", hit.module, hit.source_line);
+                match MONEY_PROSE_ALLOWED.iter().find(|(k, _)| *k == key) {
+                    Some((k, _)) => allowed_hit.push(k),
+                    None => offenders.push(format!(
+                        "{} line {}: `{}` is written straight into a string — {}",
+                        hit.module, hit.line, hit.name, hit.source_line
+                    )),
+                }
+            }
+        }
+        for (key, _) in MONEY_PROSE_ALLOWED {
+            if !allowed_hit.contains(key) {
+                offenders.push(format!(
+                    "{key} is in MONEY_PROSE_ALLOWED but no longer matches — drop the entry"
+                ));
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "money written into prose is display-formatted like money in a cell: wrap it \
+             in `moneyText(…)` from util.js (cents, thousands-grouped), or add it to \
+             MONEY_PROSE_ALLOWED with the reason it must be written raw:\n{}",
+            offenders.join("\n")
+        );
+    }
+
+    /// The scan above is only worth having if it fires on the shape it is
+    /// there for and stays quiet on the shapes it is not, so both are pinned
+    /// here rather than resting on the tree happening to be clean.
+    #[test]
+    fn the_prose_money_scan_separates_sentences_from_sums() {
+        let money = ["amount", "gross_amount", "income"];
+        let flagged =
+            |src: &str| !concatenated_money_reads("/static/probe.js", src, &money).is_empty();
+
+        // Sentences — every shape the health banner writes.
+        assert!(flagged("push('rows of ' + d.amount + ' AUD');"));
+        assert!(flagged("push(d.amount + ' AUD of it');"));
+        assert!(flagged(
+            "push('rows of ' + d.gross_amount\n  + ' ' + d.currency);"
+        ));
+        assert!(flagged("push(`rows of ${d.amount} AUD`);"));
+
+        // Not sentences.
+        assert!(!flagged("push('rows of ' + moneyText(d.amount) + ' AUD');"));
+        assert!(!flagged("push(' (income #' + r.income.id + ')');")); // a path, not the figure
+        assert!(!flagged("const total = carried + d.amount;")); // arithmetic
+        assert!(!flagged("push('paid ' + d.amount_aud + ' AUD');")); // a different column
+        assert!(!flagged("// push('rows of ' + d.amount + ' AUD');")); // prose about the rule
+    }
 }

@@ -13,20 +13,18 @@
 // plain semantic HTML, formatted through the same numericDisplay/columnLabel
 // helpers every other screen uses, so figures read identically to the rest
 // of the app.
-import { el, toast, setMain, api, numericDisplay, cellText, fmtLocalTimestamp, columnLabel } from './util.js';
+import {
+  el, toast, setMain, api, numericDisplay, moneyText, cellText, fmtLocalTimestamp, columnLabel,
+} from './util.js';
 import { setActiveNav } from './nav.js';
 
-// Cent-rounded + thousands-grouped display text for a money figure — the
-// same rounding `moneyEl`/`moneyTd` apply, but as a plain string for prose
-// (subtotal/total lines, alert messages) that can't carry a per-figure hover
-// tooltip. Never use cellText directly on a money amount: the underlying
-// Decimal is exact-arithmetic, so a subtotal or a halved discount routinely
-// carries three or more decimal places (e.g. "592.33850") that read as noise
-// once printed.
-function moneyText(value) {
-  const nd = numericDisplay(value, 'money');
-  return nd ? nd.text : cellText(value);
-}
+// `moneyText` (util.js) is the prose form of the rounding `moneyEl`/`moneyTd`
+// apply below — a plain string for the subtotal/total lines and the alert
+// messages, which have no cell to hang a per-figure tooltip on. Never use
+// cellText directly on a money amount: the underlying Decimal is
+// exact-arithmetic, so a subtotal or a halved discount routinely carries
+// three or more decimal places (e.g. "592.33850") that read as noise once
+// printed.
 function moneyEl(value) {
   const nd = numericDisplay(value, 'money');
   return el('span', { title: nd ? nd.tip : null }, nd ? nd.text : cellText(value));

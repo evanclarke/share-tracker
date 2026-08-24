@@ -13,7 +13,7 @@
 //
 import {
   el, toast, setMain, looksNumeric, isTimestamp, fmtLocalTimestamp, utcTooltip,
-  cellText, numericDisplay, columnKinds, columnLabel, columnLabelMaps,
+  cellText, numericDisplay, moneyText, columnKinds, columnLabel, columnLabelMaps,
   fkLabelMaps, api, apiUrl, pathSeg, nextId, loadOptions, listingNamer, describeTrade, tradeOrigin,
   periodReturnPct, holdingHasActivity, loadPref, savePref,
 } from './util.js';
@@ -1306,21 +1306,21 @@ async function refreshHealthBanner() {
     });
     const duplicateIncome = h.duplicate_income || [];
     duplicateIncome.forEach(function (d) {
-      problems.push(d.income_count + ' identical income rows of ' + d.gross_amount + ' '
+      problems.push(d.income_count + ' identical income rows of ' + moneyText(d.gross_amount) + ' '
         + d.currency + ' for ' + d.ticker + ' paid ' + d.date_paid + ' into one holding account (ids '
         + d.income_ids.join(', ')
         + ') — the dividend and its franking credits are counted once per row; delete the duplicate unless both are real.');
     });
     const duplicateInterest = h.duplicate_interest || [];
     duplicateInterest.forEach(function (d) {
-      problems.push(d.interest_count + ' identical interest rows of ' + d.amount + ' ' + d.currency
+      problems.push(d.interest_count + ' identical interest rows of ' + moneyText(d.amount) + ' ' + d.currency
         + (d.source ? ' from ' + d.source : '') + ' credited ' + d.date_paid + ' (ids '
         + d.interest_ids.join(', ')
         + ') — the year’s gross interest counts each row; delete the duplicate unless both are real.');
     });
     const duplicateExpenses = h.duplicate_expenses || [];
     duplicateExpenses.forEach(function (d) {
-      problems.push(d.expense_count + ' identical ' + d.expense_type + ' expenses of ' + d.amount
+      problems.push(d.expense_count + ' identical ' + d.expense_type + ' expenses of ' + moneyText(d.amount)
         + ' ' + d.currency + (d.ticker ? ' for ' + d.ticker : '') + ' incurred ' + d.date_incurred
         + ' (ids ' + d.expense_ids.join(', ')
         + ') — the deduction is claimed once per row; delete the duplicate unless both are real.');
@@ -1328,7 +1328,7 @@ async function refreshHealthBanner() {
     const duplicateEss = h.duplicate_ess_statements || [];
     duplicateEss.forEach(function (d) {
       problems.push(d.statement_count + ' identical ESS statements for ' + d.ticker + ' vesting '
-        + d.quantity + ' shares at ' + d.taxing_point_date + ' with a ' + d.discount_total + ' '
+        + d.quantity + ' shares at ' + d.taxing_point_date + ' with a ' + moneyText(d.discount_total) + ' '
         + d.currency + ' discount (ids ' + d.statement_ids.join(', ')
         + ') — the discount is assessed and the parcel vested once per statement;'
         + ' delete the superseded one unless both are real.');
@@ -1337,7 +1337,7 @@ async function refreshHealthBanner() {
     duplicateInheritances.forEach(function (d) {
       problems.push(d.inheritance_count + ' identical inheritances of ' + d.quantity + ' '
         + d.ticker + ' from the death on ' + d.date_of_death + ', each carrying a '
-        + d.cost_base_total + ' ' + d.currency + ' cost base (ids '
+        + moneyText(d.cost_base_total) + ' ' + d.currency + ' cost base (ids '
         + d.inheritance_ids.join(', ')
         + ') — each creates its own parcel, so the holding and its cost base are doubled until'
         + ' the surplus row is deleted.');
@@ -1359,7 +1359,7 @@ async function refreshHealthBanner() {
       problems.push('Sale of ' + d.units_sold + ' ' + d.ticker + ' ESS shares on ' + d.sale_date
         + ' is ' + d.days_after + ' day(s) after the taxing point of statement ' + d.ess_statement_id
         + ' (' + d.taxing_point_date + ') — the 30-day rule moves the taxing point to the sale date,'
-        + ' so the ' + d.statement_discount + ' ' + d.currency + ' discount is re-measured at the'
+        + ' so the ' + moneyText(d.statement_discount) + ' ' + d.currency + ' discount is re-measured at the'
         + ' sale proceeds'
         + (d.disposal_tax_year === d.statement_tax_year
           ? '' : ' and moves from FY' + d.statement_tax_year + ' to FY' + d.disposal_tax_year)

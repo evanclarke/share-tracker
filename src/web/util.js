@@ -322,6 +322,21 @@ export function numericDisplay(value, kind) {
   return { text: String(value), tip: null }; // rate / quantity: entered precision, verbatim
 }
 
+// A money figure written into *prose* rather than into a table cell: the
+// same rounding every money cell gets ('money' above — cents, thousands
+// grouped), returned as a plain string, because a sentence has no element to
+// hang the full-value tooltip on. Use this — never cellText, and never the
+// raw value — wherever money is concatenated into a message: the health
+// banner's alerts (app.js) and the Annual Tax Report's subtotal and alert
+// lines (taxreport.js). The underlying Decimal is exact-arithmetic, so a
+// discount, subtotal or halved figure routinely carries four or more decimal
+// places ("12340.1234") that read as noise in a sentence and disagree with
+// the same figure tabulated two clicks away (SCENARIOS Y-g).
+export function moneyText(value) {
+  const nd = numericDisplay(value, 'money');
+  return nd ? nd.text : cellText(value);
+}
+
 // ---- API client -------------------------------------------------------
 
 // A hash-route segment about to be interpolated into an API path. Route
@@ -680,8 +695,9 @@ const COLUMN_KINDS = (function () {
     // DRP residual cash carried on a reinvestment trade (the row's own
     // currency), and the health report's duplicate/30-day-sale figures.
     // Classified against the day they are tabulated: the trade columns are
-    // not on the Trades list today, and the health figures currently reach
-    // the screen only through the banner's prose, which formats nothing.
+    // not on the Trades list today, and the health figures reach the screen
+    // only through the banner's prose — which now formats them through
+    // moneyText, by this same 'money' kind (SCENARIOS Y-g).
     'residual_brought_forward', 'residual_carried_forward', 'residual_paid_out',
     'cost_base_total', 'discount_total', 'statement_discount',
     // Investment-expense line items + the tax-summary deduction aggregates.

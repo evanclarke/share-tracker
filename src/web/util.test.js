@@ -18,7 +18,7 @@ import {
   addDecimalStrings, decParts, mulToCents, frankingCreditFor, decEq,
   looksNumeric, columnKinds, columnLabel, tradeOrigin, periodReturnPct,
   holdingHasActivity, loadPref, savePref, pathSeg, basePath, apiUrl, authEnabled,
-  cellText, adjustmentPreviewText, allocationSummary, toastLifetime,
+  cellText, adjustmentPreviewText, allocationSummary, toastLifetime, moneyText,
 } from './util.js';
 
 // ---- roundDecimalStr ----------------------------------------------------
@@ -107,6 +107,18 @@ test('numericDisplay rate4: rounded to 4 dp, full value on hover when lost', () 
     numericDisplay('3.3333333333', 'rate4'),
     { text: '3.3333', tip: '3.3333333333' },
   );
+});
+
+// The prose form of the 'money' kind: same rounding, plain string, no hover
+// (a sentence has no cell to hang a tooltip on) — the health banner's alerts
+// and the tax report's subtotal lines. SCENARIOS Y-g: the banner printed the
+// raw "12340.1234" a table shows as "12,340.12".
+test('moneyText: cent-rounded and grouped, falling back to cellText', () => {
+  assert.equal(moneyText('12340.1234'), '12,340.12');
+  assert.equal(moneyText('1234.5'), '1,234.50');
+  assert.equal(moneyText('-0.005'), '-0.01');
+  assert.equal(moneyText(null), ''); // not numeric — cellText's rendering, not "null"
+  assert.equal(moneyText('n/a'), 'n/a');
 });
 
 test('numericDisplay declines non-numeric values and kindless columns', () => {

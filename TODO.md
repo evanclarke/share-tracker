@@ -539,7 +539,32 @@ on what reads as a crash.
 
 ## SCENARIOS Y-g — the health banner prints money as prose, unformatted
 
-- [ ] Format the six banner figures through the shared money formatter, and pin the convention.
+- [x] Format the six banner figures through the shared money formatter, and pin the convention.
+  `moneyText` — the wrapper `taxreport.js` already had for exactly this — moved into `util.js` as
+  the one shared prose-money formatter (`numericDisplay(v, 'money')`, falling back to `cellText`);
+  `taxreport.js` now imports it instead of declaring its own, and `app.js`'s six `problems.push`
+  sentences wrap their figure in it. Quantities beside them (`quantity`, `units_sold`) stay
+  verbatim. **No hover**: the whole banner is one `<span>` holding `problems.join(' ')`, so there
+  is no element per figure to hang a `title` on — and the alert names the row ids, whose own screen
+  shows the full value on hover. Line numbers in the write-up above had all shifted by ~17 (Y-f);
+  the six sites are now 1309 / 1316 / 1323 / 1331 / 1340 / 1362.
+  Pinned by `web::tests::money_in_prose_goes_through_the_shared_formatter`: it reuses
+  `column_kinds()` (the same `util.js` parser `every_money_column_on_the_wire_has_a_display_kind`
+  uses) and scans every served module for a leaf read of a money column that is an operand of `+`
+  beside a string literal, or interpolated into a `${…}`. `MONEY_PROSE_ALLOWED` exists but is
+  **empty**: requiring the adjacent literal excludes arithmetic, and requiring a leaf read excludes
+  `config.js`'s `r.income.id` — the write-up's one false positive needed no entry after all.
+  A sibling test (`the_prose_money_scan_separates_sentences_from_sums`) pins the matcher itself
+  against both, and each of the six was individually re-broken and re-run: all six fail the scan
+  raw, none when wrapped. Driven end to end (`scripts/ui-drive.js`, throwaway DB seeded so all six
+  fire at once): `12340.1234` → `12,340.12`, `1234567.8912` → `1,234,567.89`, `9876.5432` →
+  `9,876.54`, `4321.9876` → `4,321.99`, `8765.4321` → `8,765.43`, with `1000 shares` / `400 …
+  shares` / `5 MEGA` unchanged. `docs/API.md`'s health-banner paragraph states the rule.
+  Two corrections to the write-up above: the `cost_base_total` row is the **duplicate
+  inheritances** alert (`d.inheritance_count + ' identical inheritances of …'`), not
+  "duplicate ESS parcels" — inheritances are where that column lives; and `config.js`'s
+  match is on `r.income.id`, the id *inside* the row object, not on `r.income` itself,
+  which is what made a sharper matcher able to exclude it structurally.
 
 Found while fixing Y-d, and deliberately kept separate from it: `COLUMN_KINDS` governs table *cells*,
 and the health banner does not build cells — it builds sentences, concatenating the figure straight
