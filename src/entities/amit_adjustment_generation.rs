@@ -89,8 +89,10 @@ pub struct GeneratedAdjustments {
     /// (SCENARIOS N-06). A **transfer** is attributed — its replacement carries
     /// exactly the units moved, under the source parcel's own acquisition date —
     /// so these entries are the residue. Enter one adjustment by hand against
-    /// each named replacement parcel: that is accepted now, because the units
-    /// are traceable back to this statement's account.
+    /// each named replacement parcel: that is accepted, because the units are
+    /// traceable back to this statement's holding — including the replacements
+    /// of *another listing* an exchange or a demerger creates, which is where
+    /// those units actually went (SCENARIOS Z-g).
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub unattributed: Vec<UnattributedUnits>,
 }
@@ -166,11 +168,20 @@ struct Movement {
     /// Whether the operation was a holding-account transfer, whose replacement
     /// carries exactly the units moved.
     is_transfer: bool,
-    /// The group's replacement parcels of the **same listing** (a demerger's
-    /// demerged parcel is another listing and never adjustable by this
-    /// statement), each with its quantity and carried acquisition date.
+    /// The listing the moved units were on — the source parcel's, and the
+    /// listing a *transfer's* replacement stays on.
+    listing_id: i64,
+    /// **Every** replacement parcel the group created, whatever listing the
+    /// operation put it on: a scrip-for-scrip exchange's replacement and a
+    /// demerger's demerged parcel are of another listing, and since SCENARIOS
+    /// Z-g those are adjustable by this statement too (the write path traces
+    /// their units back to it), so naming only the same-listing ones would hand
+    /// the user an empty list for exactly the case the list exists for.
     replacements: Vec<i64>,
-    replacement_facts: Vec<(i64, Decimal, Option<NaiveDate>)>,
+    /// The same parcels as `(id, listing_id, quantity, deemed acquisition
+    /// date)` — what [`Movement::matching_replacement`] identifies a transfer's
+    /// replacement by.
+    replacement_facts: Vec<(i64, i64, Decimal, Option<NaiveDate>)>,
 }
 
 impl Movement {
@@ -185,8 +196,10 @@ impl Movement {
         }
         self.replacement_facts
             .iter()
-            .find(|(_, quantity, deemed)| *quantity == units && *deemed == Some(acquired))
-            .map(|(id, _, _)| *id)
+            .find(|(_, listing_id, quantity, deemed)| {
+                *listing_id == self.listing_id && *quantity == units && *deemed == Some(acquired)
+            })
+            .map(|(id, ..)| *id)
     }
 }
 
@@ -220,18 +233,24 @@ async fn db_rollovers_of(
                 ("demerger_action_id", id.unwrap_or_default(), false)
             };
         // The column name is one of the three literals above, never user input.
+        // Every replacement of the group, on whatever listing: the listing is
+        // carried on each fact rather than filtered out here, so a
+        // scrip-for-scrip exchange's or demerger's cross-listing replacement is
+        // named in `unattributed` (SCENARIOS Z-g) while
+        // `Movement::matching_replacement` still only ever identifies a
+        // transfer's own same-listing replacement.
         let replacement_rows = sqlx::query(sqlx::AssertSqlSafe(format!(
-            "SELECT id, quantity, deemed_acquisition_date FROM trades \
-             WHERE {column} = ? AND trade_type IN ('Buy', 'DRP') AND listing_id = ? ORDER BY id"
+            "SELECT id, listing_id, quantity, deemed_acquisition_date FROM trades \
+             WHERE {column} = ? AND trade_type IN ('Buy', 'DRP') ORDER BY id"
         )))
         .bind(group_id)
-        .bind(listing_id)
         .fetch_all(&mut *conn)
         .await?;
         let mut replacement_facts = Vec::with_capacity(replacement_rows.len());
         for r in &replacement_rows {
             replacement_facts.push((
                 r.try_get("id")?,
+                r.try_get("listing_id")?,
                 row_dec(r, "quantity")?,
                 r.try_get("deemed_acquisition_date")?,
             ));
@@ -240,7 +259,8 @@ async fn db_rollovers_of(
             date: row.try_get("date")?,
             units: row_dec(row, "quantity_allocated")?,
             is_transfer,
-            replacements: replacement_facts.iter().map(|(id, _, _)| *id).collect(),
+            listing_id,
+            replacements: replacement_facts.iter().map(|(id, ..)| *id).collect(),
             replacement_facts,
         });
     }
@@ -1349,6 +1369,101 @@ mod tests {
             .expect("the replacement parcel is open");
         assert_eq!(moved.cost_base.amit_reduction, dec("-202.5729007600"));
         assert_eq!(moved.cost_base.adjusted, dec("1202.5729007600"));
+    }
+
+    /// SCENARIOS Z-g, end to end: the residue generation deliberately does
+    /// **not** attribute — a scrip-for-scrip exchange's ratio-scaled
+    /// replacement — is named in `unattributed`, and the row the user is told
+    /// to enter against it is accepted. Both halves had to change: the
+    /// replacement is of another listing, so it used to be left out of the
+    /// list entirely (leaving `replacements` empty for exactly the case the
+    /// list exists for) and refused by the write path if found by hand anyway.
+    #[tokio::test]
+    async fn api_generation_names_a_cross_listing_replacement_and_that_row_is_accepted() {
+        let pool = test_pool().await;
+        amit_listing(&pool, 1, "HNDQ").await;
+        test_support::listing(2).ticker("NEWCO").insert(&pool).await;
+        test_support::buy(1, 1)
+            .date(ymd(2024, 8, 1))
+            .qty(dec("1000"))
+            .price(dec("10"))
+            .insert(&pool)
+            .await;
+        test_support::amma(6, 1)
+            .units(dec("1000"))
+            .cost_base_adjustment(dec("0.20"))
+            .with(|a| {
+                a.tax_year_end_date = ymd(2025, 6, 30);
+                a.date_received = ymd(2025, 9, 10);
+            })
+            .insert(&pool)
+            .await;
+        // The takeover lands in August, after the year end and before the
+        // statement is entered — the ordinary order of events.
+        corporate_action::db_upsert(
+            &pool,
+            &CorporateAction {
+                id: 10,
+                listing_id: 1,
+                date: ymd(2025, 8, 1),
+                kind: ActionKind::ScripForScrip {
+                    scrip_listing_id: 2,
+                    scrip_new_units: Decimal::ONE,
+                    scrip_old_units: Decimal::ONE,
+                    scrip_cash_per_unit: None,
+                    scrip_market_value: None,
+                    scrip_cash_currency: None,
+                },
+            },
+        )
+        .await
+        .unwrap();
+        let replacement = crate::entities::scrip_exchange::db_exchange(&pool, 10)
+            .await
+            .unwrap()
+            .replacements[0]
+            .id;
+
+        let api = ApiClient::full(&pool);
+        let generated: serde_json::Value = api
+            .post(
+                "/amma_statements/6/generate_adjustments",
+                &serde_json::json!({}),
+            )
+            .await
+            .expect_status(StatusCode::CREATED)
+            .json();
+        assert_eq!(generated["created"].as_array().map(Vec::len), Some(0));
+        let unattributed: Vec<UnattributedUnits> =
+            serde_json::from_value(generated["unattributed"].clone()).unwrap();
+        assert_eq!(
+            unattributed,
+            vec![UnattributedUnits {
+                source_trade_id: 1,
+                units: dec("1000"),
+                replacements: vec![replacement],
+            }]
+        );
+
+        // The row generation handed over is accepted, and takes the statement's
+        // whole reduction off the parcel the units are now in.
+        api.put_ok(
+            "/amit_adjustments/1",
+            &serde_json::json!({
+                "amma_statement_id": 6,
+                "trade_id": unattributed[0].replacements[0],
+                "quantity": unattributed[0].units.to_string(),
+            }),
+        )
+        .await;
+        let parcels = crate::domain::open_parcels::load(&mut pool.acquire().await.unwrap(), None)
+            .await
+            .unwrap();
+        let moved = parcels
+            .iter()
+            .find(|p| p.parcel.id == replacement)
+            .expect("the replacement parcel is open");
+        assert_eq!(moved.cost_base.amit_reduction, dec("200.00"));
     }
 
     /// SCENARIOS F-16: a parcel bought on 30 June itself was held at the

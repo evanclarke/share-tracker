@@ -3,8 +3,9 @@
 //!
 //! [`crate::entities::amit_adjustment`]'s write-time checks validate each row
 //! in isolation — the parcel is a Buy/DRP, on the statement's listing and
-//! holding account, and the quantity is within the parcel — and (since
-//! migration 0022) that no parcel appears twice. Nothing at write time can
+//! holding account (or a rollover replacement parcel holding units carried out
+//! of it), and the quantity is within the parcel — and (since migration 0022)
+//! that no parcel appears twice. Nothing at write time can
 //! see the *set*: a missed parcel silently overstates the cost base of every
 //! unit it covers, and an unnecessary one over-reduces it. Because CGT event
 //! E10 floors the reduced cost base at nil and treats the excess as a capital
@@ -31,6 +32,7 @@
 //! cost base, which is that report's central figure.
 
 use crate::domain::open_parcels;
+use crate::domain::rollover;
 use crate::domain::tax_year::tax_year_for;
 use crate::entities::corporate_action::{self, SplitEvent};
 use crate::infra::decimal::row_dec;
@@ -92,6 +94,17 @@ struct AdjustmentRow {
     /// accepts (SCENARIOS N-06) — so the acquired-after-the-year-end check must
     /// not fire on it.
     rollover_replacement: bool,
+    /// The parcels a rollover carried this one's units out of, through as many
+    /// hops as it takes (`domain::rollover::source_ancestors` — the same walk
+    /// the write path traces the row's acceptability by). Empty unless
+    /// `rollover_replacement`.
+    ///
+    /// They are what the coverage band's disposal allowance is measured on for
+    /// such a row: the units it covers left the statement's own account through
+    /// the operation's closing Sell, which is recorded against the *source*
+    /// parcel, so a replacement looked at on its own shows no disposal at all
+    /// (SCENARIOS Z-g).
+    rollover_sources: Vec<i64>,
 }
 
 /// The statement's own figures the checks compare against.
@@ -130,6 +143,18 @@ pub async fn db_amit_adjustment_alerts(
     )
     .fetch_all(&mut *tx)
     .await?;
+    // The rollover chain behind each adjusted replacement parcel, on the same
+    // read transaction as everything else.
+    let mut rollover_sources: HashMap<i64, Vec<i64>> = HashMap::new();
+    for row in &adjustment_rows {
+        let trade_id: i64 = row.try_get("trade_id")?;
+        if row.try_get("rollover_replacement")?
+            && let std::collections::hash_map::Entry::Vacant(slot) =
+                rollover_sources.entry(trade_id)
+        {
+            slot.insert(rollover::source_ancestors(&mut tx, trade_id).await?);
+        }
+    }
     let splits = corporate_action::db_share_split_events(&mut *tx).await?;
     // Every sale allocation with its sale date — the "was this parcel already
     // gone before the year began?" input.
@@ -170,6 +195,10 @@ pub async fn db_amit_adjustment_alerts(
                 trade_date: row.try_get("trade_date")?,
                 trade_quantity: row_dec(row, "trade_quantity")?,
                 rollover_replacement: row.try_get("rollover_replacement")?,
+                rollover_sources: rollover_sources
+                    .get(&row.try_get::<i64, _>("trade_id")?)
+                    .cloned()
+                    .unwrap_or_default(),
             });
     }
 
@@ -231,9 +260,18 @@ pub async fn db_amit_adjustment_alerts(
     Ok(alerts)
 }
 
-/// Units of the adjusted parcels disposed of between `from` and `to`
-/// inclusive, in `to`'s unit basis — the same basis `units_adjusted` is
-/// re-based into, so the two are comparable.
+/// Units of the adjusted parcels — **and of the parcels a rollover carried
+/// their units out of** — disposed of between `from` and `to` inclusive, in
+/// `to`'s unit basis, the same basis `units_adjusted` is re-based into, so the
+/// two are comparable.
+///
+/// The sources count because a row against a rollover **replacement** parcel
+/// covers units that were held during the statement's year and then left the
+/// statement's account through the operation's own closing Sell — recorded
+/// against the source parcel, never against the replacement. Measured on the
+/// replacement alone, a fund taken over mid-year (whose final statement states
+/// nil units held) showed every honest row as excess coverage, flagging the one
+/// entry the write path accepts for those units, forever (SCENARIOS Z-g).
 ///
 /// Both bounds are inclusive, matching
 /// [`crate::domain::cost_base::AmitReductionEvent`]'s own boundary: a sale on
@@ -249,7 +287,10 @@ fn disposed_between(
     // By parcel, not by row: a parcel adjusted twice (pre-0022 data, flagged
     // separately below) must not have its disposals counted twice into the
     // allowance, which would mask the very over-coverage it is.
-    let parcels: std::collections::BTreeSet<i64> = adjustments.iter().map(|a| a.trade_id).collect();
+    let parcels: std::collections::BTreeSet<i64> = adjustments
+        .iter()
+        .flat_map(|a| std::iter::once(a.trade_id).chain(a.rollover_sources.iter().copied()))
+        .collect();
     parcels
         .iter()
         .flat_map(|trade_id| sold.get(trade_id).map_or(&[][..], |v| v))
@@ -1117,11 +1158,12 @@ mod tests {
 
     /// A **transfer during the year**: the units left the statement's account
     /// before 30 June, so it states nil units held and nil is what is open —
-    /// the units-held comparison agrees and stays quiet. (The row against the
-    /// replacement parcel does trip the *coverage* check, whose disposal
-    /// allowance is measured on the adjusted parcels and finds none on a
-    /// replacement — behaviour that predates this comparison and is not what
-    /// this test pins.)
+    /// the units-held comparison agrees and stays quiet. The row against the
+    /// replacement parcel reconciles too: its units were disposed of during the
+    /// year by the transfer's own closing Sell, which the coverage band now
+    /// follows the rollover chain to find (SCENARIOS Z-g — before that it was
+    /// measured on the replacement alone, which shows no disposal at all, and
+    /// the honest row read as excess coverage).
     #[tokio::test]
     async fn db_a_transfer_during_the_year_is_not_flagged() {
         let pool = test_pool().await;
@@ -1144,19 +1186,18 @@ mod tests {
         test_support::amit_adjustment(&pool, 1, 1, replacement, dec("1000")).await;
 
         let alerts = db_amit_adjustment_alerts(&pool).await.unwrap();
-        assert_eq!(alerts[0].units_held, Decimal::ZERO);
-        assert_eq!(alerts[0].units_open_at_year_end, Decimal::ZERO);
-        assert_eq!(units_held_problem_for(&alerts, 1), None);
+        assert!(alerts.is_empty(), "{alerts:?}");
     }
 
     /// A **scrip-for-scrip exchange during the year** takes the whole holding
     /// of the statement's listing, so nothing of it is open at the year end
     /// and the statement states nil — the same shape as a sold-out holding,
-    /// and the units-held comparison agrees. (Its replacement parcels are of
-    /// *another* listing, which `amit_adjustment`'s write-time check refuses
-    /// outright, so such a statement carries no rows at all and the
-    /// pre-existing "no adjustments entered" problem is what flags it. That
-    /// is not this comparison's business either way.)
+    /// and the units-held comparison agrees. (This statement carries no
+    /// adjustment rows at all, so the "no adjustments entered" problem is what
+    /// flags it — the entry that clears *that* is a row against the
+    /// cross-listing replacement parcel, which the write path accepts and
+    /// `db_a_mid_year_takeovers_replacement_row_is_not_flagged` pins. Either
+    /// way it is not this comparison's business.)
     #[tokio::test]
     async fn db_a_scrip_exchange_during_the_year_is_not_flagged() {
         let pool = test_pool().await;
@@ -1195,6 +1236,59 @@ mod tests {
         assert_eq!(alerts[0].units_held, Decimal::ZERO);
         assert_eq!(alerts[0].units_open_at_year_end, Decimal::ZERO);
         assert_eq!(units_held_problem_for(&alerts, 1), None);
+    }
+
+    /// SCENARIOS Z-g: an AMIT **taken over mid-year**, its final statement's
+    /// reduction entered against the cross-listing replacement parcel — the
+    /// entry the write path now accepts, and the one the refusals used to point
+    /// at each other over. It must not then be flagged forever: the units the
+    /// row covers *were* held during the statement's year, and left the
+    /// statement's account through the exchange's own closing Sell, so the
+    /// coverage band's disposal allowance has to follow the rollover chain back
+    /// to the parcel that held them.
+    #[tokio::test]
+    async fn db_a_mid_year_takeovers_replacement_row_is_not_flagged() {
+        let pool = test_pool().await;
+        amit_listing(&pool, 1, "HNDQ").await;
+        test_support::listing(2).ticker("NEWCO").insert(&pool).await;
+        test_support::buy(1, 1)
+            .date(ymd(2023, 8, 1))
+            .qty(dec("1000"))
+            .price(dec("10"))
+            .insert(&pool)
+            .await;
+        corporate_action::db_upsert(
+            &pool,
+            &CorporateAction {
+                id: 10,
+                listing_id: 1,
+                date: ymd(2024, 3, 15),
+                kind: ActionKind::ScripForScrip {
+                    scrip_listing_id: 2,
+                    scrip_new_units: Decimal::ONE,
+                    scrip_old_units: Decimal::ONE,
+                    scrip_cash_per_unit: None,
+                    scrip_market_value: None,
+                    scrip_cash_currency: None,
+                },
+            },
+        )
+        .await
+        .unwrap();
+        let replacement = crate::entities::scrip_exchange::db_exchange(&pool, 10)
+            .await
+            .unwrap()
+            .replacements[0]
+            .id;
+        // The final statement: nil units held at 30 June, arriving in spring.
+        amma(&pool, 1, 1, ymd(2024, 6, 30), "0").await;
+        test_support::amit_adjustment(&pool, 1, 1, replacement, dec("1000")).await;
+
+        assert!(
+            db_amit_adjustment_alerts(&pool).await.unwrap().is_empty(),
+            "{:?}",
+            db_amit_adjustment_alerts(&pool).await.unwrap()
+        );
     }
 
     /// A **demerger during the year** substitutes the head parcel with a

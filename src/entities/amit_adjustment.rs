@@ -76,12 +76,25 @@ pub enum UpsertError {
     Db(#[from] sqlx::Error),
     #[error("the adjusted trade is not a Buy or DRP parcel")]
     TradeNotBuyOrDrp,
-    #[error("the trade's listing differs from the AMMA statement's listing")]
+    /// The trade is a parcel of another listing, and no rollover chain traces
+    /// its units back to the statement's own (listing, account) — see
+    /// [`HoldingAccountMismatch`](Self::HoldingAccountMismatch) for the
+    /// reach-through both share.
+    #[error(
+        "the trade's listing differs from the AMMA statement's listing, and no rollover traces \
+         its units back to the statement's holding"
+    )]
     ListingMismatch,
     /// The trade sits in a different holding account from the AMMA
     /// statement's: a registry issues one statement per holder account, so a
-    /// statement only ever adjusts its own account's parcels.
-    #[error("the trade sits in a different holding account from the AMMA statement")]
+    /// statement only ever adjusts its own account's parcels — unless a
+    /// rollover carried those parcels' units elsewhere, in which case the
+    /// **replacement parcel** holding them is accepted wherever it sits
+    /// (see [`traces_back_to`]).
+    #[error(
+        "the trade sits in a different holding account from the AMMA statement, and no rollover \
+         traces its units back to that account"
+    )]
     HoldingAccountMismatch,
     #[error("the adjusted quantity exceeds the trade's quantity")]
     QuantityExceedsTrade,
@@ -149,6 +162,39 @@ pub async fn db_insert_on(
     db_write_on(conn, None, body).await
 }
 
+/// Does `parcel_id` hold units a rollover carried out of
+/// `(listing_id, account_id)` — the AMMA statement's own holding?
+///
+/// The chain walk is `domain::rollover`'s (`source_ancestors`), the same one
+/// `reports::health` and the operations use, followed through as many hops as
+/// it takes: a parcel exchanged and then transferred traces back through both.
+/// Reachability is all that is asked — where one operation moved several
+/// parcels at once, every replacement of the group descends from all of its
+/// sources, and the data records nothing finer (see `source_ancestors`).
+///
+/// Both halves of the statement's identity are required of an ancestor, not
+/// just the account: a parcel of another listing in the right account is only
+/// this statement's business if the chain passes through a parcel that was
+/// *both*.
+async fn traces_back_to(
+    conn: &mut sqlx::SqliteConnection,
+    parcel_id: i64,
+    listing_id: i64,
+    account_id: i64,
+) -> Result<bool, sqlx::Error> {
+    for ancestor in rollover::source_ancestors(&mut *conn, parcel_id).await? {
+        let holding: Option<(i64, i64)> =
+            sqlx::query_as("SELECT listing_id, holding_account_id FROM trades WHERE id = ?")
+                .bind(ancestor)
+                .fetch_optional(&mut *conn)
+                .await?;
+        if holding == Some((listing_id, account_id)) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// The shared write core of both: `id` is `Some` on the client-supplied-id
 /// upsert path (`PUT /amit_adjustments/{id}`) and `None` where the database
 /// assigns it. Answers the id written.
@@ -177,41 +223,38 @@ async fn db_write_on(
             .bind(adj.amma_statement_id)
             .fetch_one(&mut *conn)
             .await?;
-    if trade_listing_id != amma_listing_id {
-        return Err(UpsertError::ListingMismatch);
-    }
-    // A statement only ever adjusts parcels in its own holding account (the
-    // registry issues one AMMA statement per holder account) — with one
-    // exception, which is the whole answer to SCENARIOS N-06: where a rollover
-    // has since carried the statement's units into a **replacement parcel**,
-    // that parcel is where the reduction has to land, and it sits in whatever
-    // account the operation moved them to. An AMMA statement for a year ended
-    // 30 June arrives in August or September, so a transfer between the year end
-    // and data entry is the ordinary case; refusing it here (while F-17's
-    // `UnitsCarriedIntoReplacement` refuses the source parcel, correctly)
-    // left the statement's reduction with nowhere to go at all.
+    // A statement only ever adjusts parcels of its own listing, held in its own
+    // holding account (the registry issues one AMMA statement per holder
+    // account) — with one exception, which is the whole answer to SCENARIOS
+    // N-06 and Z-g: where a rollover has since carried the statement's units
+    // into a **replacement parcel**, that parcel is where the reduction has to
+    // land, and it sits wherever the operation put them. A transfer puts them
+    // in another *account*; a scrip-for-scrip exchange, and a demerger's
+    // demerged leg, put them on another *listing* — which is the whole point of
+    // a takeover. An AMMA statement for a year ended 30 June arrives in August
+    // or September, so an operation between the year end and data entry is the
+    // ordinary case, and one *during* the year (a fund taken over mid-year,
+    // whose final statement then states nil units held) is the case that has
+    // nowhere else to go at all: F-17's `UnitsCarriedIntoReplacement` refuses
+    // the source parcel, correctly, because the replacement froze its cost base
+    // when it ran.
     //
-    // The chain is followed, not just one step, so a holding moved twice is
-    // still reachable. The parcel's listing is already pinned to the
-    // statement's above, which is what keeps a demerger's *demerged* parcel —
-    // another listing, another trust — out of it.
-    if trade_account_id != amma_account_id {
-        let ancestors = rollover::source_ancestors(&mut *conn, adj.trade_id).await?;
-        let mut reachable = false;
-        for ancestor in ancestors {
-            let account: Option<i64> =
-                sqlx::query_scalar("SELECT holding_account_id FROM trades WHERE id = ?")
-                    .bind(ancestor)
-                    .fetch_optional(&mut *conn)
-                    .await?;
-            if account == Some(amma_account_id) {
-                reachable = true;
-                break;
-            }
-        }
-        if !reachable {
-            return Err(UpsertError::HoldingAccountMismatch);
-        }
+    // So both pins are reached through by one rule, rather than the listing
+    // being refused first and unconditionally (which is what left a mid-year
+    // takeover's final reduction recordable nowhere — Z-g): the parcel is
+    // accepted when `domain::rollover`'s chain shows a source parcel of the
+    // statement's own (listing, account). The chain is followed as many hops as
+    // it takes, so a holding exchanged and then transferred is still reachable.
+    // A parcel with no such path is refused exactly as before — that a parcel
+    // never held this statement's units is what the check is really for.
+    if (trade_listing_id, trade_account_id) != (amma_listing_id, amma_account_id)
+        && !traces_back_to(&mut *conn, adj.trade_id, amma_listing_id, amma_account_id).await?
+    {
+        return Err(if trade_listing_id != amma_listing_id {
+            UpsertError::ListingMismatch
+        } else {
+            UpsertError::HoldingAccountMismatch
+        });
     }
 
     let trade_qty: String = sqlx::query_scalar("SELECT quantity FROM trades WHERE id = ?")
@@ -221,6 +264,31 @@ async fn db_write_on(
     let trade_qty: Decimal = trade_qty
         .parse()
         .map_err(|_| UpsertError::Db(sqlx::Error::Decode("invalid trade quantity".into())))?;
+    // The cap is the adjusted parcel's own units, on a rollover replacement
+    // parcel exactly as on any other — `quantity` has one meaning everywhere:
+    // units *of the parcel this row is against*, in its as-acquired basis.
+    // It is deliberately not re-expressed in the statement's own units for a
+    // replacement whose quantity a scrip-for-scrip or demerger ratio has
+    // scaled, because the whole downstream pipeline is built on
+    // `covered <= parcel quantity`: `AmitReductionEvent::reduction_for_units`
+    // splits the row's total between the units still held at the statement's
+    // year end and the units sold before it, and a `covered` larger than the
+    // parcel would spill onto units that do not exist — silently delivering
+    // less than the row states wherever nothing was disposed of by the year
+    // end, which is precisely the mid-year-takeover case. A cap that cannot be
+    // enforced end to end is worse than one that is merely tight.
+    //
+    // The consequence is that the reduction a row applies is always
+    // `quantity × the statement's per-unit figure` (`reduction_for`). Where the
+    // replacement's unit count differs from the units the statement covered —
+    // any ratio other than 1:1 — the statement's figure is per unit of the
+    // *fund's* units and has to be re-expressed per replacement unit, the same
+    // way `docs/API.md` already has a statement that gives a total rather than
+    // a per-unit amount entered by dividing it over the units the rows cover.
+    // Which apportionment is right across a demerger's two legs is the member's
+    // own working, not a figure the fund states (`docs/ato/amit-cost-base-
+    // adjustments.md` states the AMIT cost base net amount as one annual,
+    // member-level amount and prescribes no spread), so nothing here guesses it.
     if adj.quantity > trade_qty {
         return Err(UpsertError::QuantityExceedsTrade);
     }
@@ -493,11 +561,16 @@ impl From<UpsertError> for ApiError {
                 ApiError::unprocessable("the adjusted trade is not a Buy or DRP parcel")
             }
             UpsertError::ListingMismatch => ApiError::unprocessable(
-                "the trade's listing differs from the AMMA statement's listing",
+                "the trade's listing differs from the AMMA statement's listing, and no transfer, \
+                 scrip-for-scrip exchange or demerger traces its units back to the statement's \
+                 own holding — a statement adjusts its own parcels, or the replacement parcels \
+                 its units were carried into",
             ),
             UpsertError::HoldingAccountMismatch => ApiError::unprocessable(
-                "the trade sits in a different holding account from the AMMA statement — \
-                 a statement only adjusts its own account's parcels",
+                "the trade sits in a different holding account from the AMMA statement, and no \
+                 transfer, scrip-for-scrip exchange or demerger traces its units back to that \
+                 account — a statement adjusts its own account's parcels, or the replacement \
+                 parcels its units were carried into",
             ),
             UpsertError::QuantityExceedsTrade => {
                 ApiError::unprocessable("the adjusted quantity exceeds the trade's quantity")
@@ -1253,6 +1326,347 @@ mod tests {
             matches!(err, UpsertError::HoldingAccountMismatch),
             "{err:?}"
         );
+    }
+
+    /// The scrip-for-scrip machinery used by the takeover tests below: the
+    /// whole of listing 1 is exchanged for listing 2 on `date`, one new unit
+    /// per old one, and the replacement parcel's id is answered.
+    async fn exchange_out(pool: &SqlitePool, action_id: i64, date: chrono::NaiveDate) -> i64 {
+        use crate::entities::corporate_action::{ActionKind, CorporateAction};
+        test_support::listing(2).ticker("NEWCO").insert(pool).await;
+        corporate_action::db_upsert(
+            pool,
+            &CorporateAction {
+                id: action_id,
+                listing_id: 1,
+                date,
+                kind: ActionKind::ScripForScrip {
+                    scrip_listing_id: 2,
+                    scrip_new_units: Decimal::ONE,
+                    scrip_old_units: Decimal::ONE,
+                    scrip_cash_per_unit: None,
+                    scrip_market_value: None,
+                    scrip_cash_currency: None,
+                },
+            },
+        )
+        .await
+        .unwrap();
+        let exchange = crate::entities::scrip_exchange::db_exchange(pool, action_id)
+            .await
+            .unwrap();
+        exchange.replacements[0].id
+    }
+
+    /// The AMIT cost-base reduction the shared pipeline reports against one
+    /// open parcel — what the open-parcels and unrealised-gains screens show.
+    async fn open_parcel_amit_reduction(pool: &SqlitePool, trade_id: i64) -> Decimal {
+        crate::domain::open_parcels::load(&mut pool.acquire().await.unwrap(), None)
+            .await
+            .unwrap()
+            .iter()
+            .find(|p| p.parcel.id == trade_id)
+            .expect("the parcel is open")
+            .cost_base
+            .amit_reduction
+    }
+
+    /// SCENARIOS Z-g, the finding's own reproduction: an AMIT **taken over
+    /// mid-year**. The fund's units were exchanged for the acquirer's scrip in
+    /// March, so the final AMMA statement — arriving months after 30 June —
+    /// states nil units held, and its whole `cost_base_adjustment` has to land
+    /// on the replacement parcel, which is of *another listing*. Refusing it
+    /// there (while F-17 refuses the source parcel, whose cost base the
+    /// exchange froze) left the statement's reduction recordable **nowhere**,
+    /// and every later disposal of those units understating the gain by it.
+    #[tokio::test]
+    async fn db_an_amit_taken_over_mid_year_adjusts_its_cross_listing_replacement() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool, 1, "XASX", "VDHG").await;
+        test_support::buy(1, 1)
+            .date(ymd(2024, 8, 1))
+            .qty(Decimal::from(10_000))
+            .price(Decimal::TWO)
+            .insert(&pool)
+            .await;
+        let replacement = exchange_out(&pool, 10, ymd(2025, 3, 1)).await;
+        // The final statement: nil units held at 30 June, 20c a unit off.
+        test_support::amma(1, 1)
+            .units(Decimal::ZERO)
+            .cost_base_adjustment(dec("0.20"))
+            .with(|a| {
+                a.tax_year_end_date = ymd(2025, 6, 30);
+                a.date_received = ymd(2025, 9, 10);
+            })
+            .insert(&pool)
+            .await;
+
+        db_upsert(
+            &pool,
+            &AmitAdjustment {
+                id: 1,
+                amma_statement_id: 1,
+                trade_id: replacement,
+                quantity: Decimal::from(10_000),
+            },
+        )
+        .await
+        .expect("the replacement parcel holds this statement's units");
+
+        // A$2,000 of the A$20,000 carried cost base, reaching the parcel the
+        // units are now in — the figure that was recordable nowhere.
+        assert_eq!(
+            open_parcel_amit_reduction(&pool, replacement).await,
+            Decimal::from(2000)
+        );
+    }
+
+    /// The same reproduction over the HTTP surface, and its negative control:
+    /// a parcel of another listing that no rollover connects to the statement
+    /// is still refused, with the `422` saying what would have made it
+    /// acceptable.
+    #[tokio::test]
+    async fn api_a_cross_listing_replacement_is_accepted_and_an_unrelated_parcel_is_not() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool, 1, "XASX", "VDHG").await;
+        test_support::buy(1, 1)
+            .date(ymd(2024, 8, 1))
+            .qty(Decimal::from(10_000))
+            .price(Decimal::TWO)
+            .insert(&pool)
+            .await;
+        let replacement = exchange_out(&pool, 10, ymd(2025, 3, 1)).await;
+        test_support::amma(1, 1)
+            .units(Decimal::ZERO)
+            .cost_base_adjustment(dec("0.20"))
+            .with(|a| {
+                a.tax_year_end_date = ymd(2025, 6, 30);
+                a.date_received = ymd(2025, 9, 10);
+            })
+            .insert(&pool)
+            .await;
+
+        client(&pool)
+            .put_ok(
+                "/amit_adjustments/1",
+                &serde_json::json!({
+                    "amma_statement_id": 1,
+                    "trade_id": replacement,
+                    "quantity": "10000"
+                }),
+            )
+            .await;
+
+        // A parcel of the acquirer bought on market — same listing as the
+        // replacement, no rollover path back to the statement's holding.
+        test_support::buy(90, 2)
+            .date(ymd(2025, 4, 1))
+            .qty(Decimal::from(10))
+            .price(Decimal::TWO)
+            .insert(&pool)
+            .await;
+        let resp = client(&pool)
+            .put(
+                "/amit_adjustments/2",
+                &serde_json::json!({
+                    "amma_statement_id": 1,
+                    "trade_id": 90,
+                    "quantity": "10"
+                }),
+            )
+            .await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+        let detail = resp.text().to_string();
+        assert!(detail.contains("listing differs"), "{detail}");
+        assert!(
+            detail.contains("no transfer, scrip-for-scrip exchange or demerger traces its units"),
+            "{detail}"
+        );
+    }
+
+    /// The other half of the table in the finding: a **demerger's demerged
+    /// parcel** is of the spun-off entity's listing, and it holds units of the
+    /// statement's holding just as the head replacement (same listing, already
+    /// accepted) does. Both are adjustable; the demerged one used to be refused
+    /// on its listing alone.
+    #[tokio::test]
+    async fn db_a_demerged_entity_parcel_is_adjustable() {
+        use crate::entities::corporate_action::{ActionKind, CorporateAction};
+        let pool = test_pool().await;
+        insert_test_listing(&pool, 1, "XASX", "HEAD").await;
+        test_support::listing(2).ticker("SPUN").insert(&pool).await;
+        test_support::buy(1, 1)
+            .date(ymd(2024, 8, 1))
+            .qty(Decimal::from(1000))
+            .price(Decimal::TEN)
+            .insert(&pool)
+            .await;
+        corporate_action::db_upsert(
+            &pool,
+            &CorporateAction {
+                id: 10,
+                listing_id: 1,
+                date: ymd(2025, 3, 15),
+                kind: ActionKind::Demerger {
+                    demerger_listing_id: 2,
+                    demerger_new_units: Decimal::ONE,
+                    demerger_held_units: Decimal::ONE,
+                    demerger_cost_base_pct: dec("30"),
+                    demerger_close_date: None,
+                    demerger_close_price: None,
+                    demerger_close_sourced_from: None,
+                    demerger_close_reason: None,
+                },
+            },
+        )
+        .await
+        .unwrap();
+        crate::entities::demerger::db_demerge(&pool, 10)
+            .await
+            .unwrap();
+        let demerged: i64 = sqlx::query_scalar(
+            "SELECT id FROM trades WHERE demerger_action_id = 10 AND trade_type = 'Buy' \
+             AND listing_id = 2",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        test_support::amma(1, 1)
+            .units(Decimal::from(1000))
+            .cost_base_adjustment(dec("0.10"))
+            .with(|a| {
+                a.tax_year_end_date = ymd(2025, 6, 30);
+                a.date_received = ymd(2025, 9, 10);
+            })
+            .insert(&pool)
+            .await;
+
+        db_upsert(
+            &pool,
+            &AmitAdjustment {
+                id: 1,
+                amma_statement_id: 1,
+                trade_id: demerged,
+                quantity: Decimal::from(1000),
+            },
+        )
+        .await
+        .expect("the demerged parcel holds this statement's units");
+        assert_eq!(
+            open_parcel_amit_reduction(&pool, demerged).await,
+            Decimal::from(100)
+        );
+    }
+
+    /// `docs/API.md`: "a holding moved twice is still reachable". The units
+    /// are exchanged into another listing and then transferred into another
+    /// account, so neither half of the statement's (listing, account) matches
+    /// the parcel the reduction has to land on — and the chain walk is what
+    /// connects them.
+    #[tokio::test]
+    async fn db_a_two_hop_chain_across_a_listing_and_an_account_is_followed() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool, 1, "XASX", "VDHG").await;
+        test_support::buy(1, 1)
+            .date(ymd(2024, 8, 1))
+            .qty(Decimal::from(10_000))
+            .price(Decimal::TWO)
+            .insert(&pool)
+            .await;
+        let exchanged = exchange_out(&pool, 10, ymd(2025, 3, 1)).await;
+        // Second hop: the replacement parcel moves to holding account 2.
+        use crate::entities::holding_account::{self, HoldingAccount};
+        use crate::entities::sell::AllocationInput;
+        use crate::entities::transfer::{self, TransferBody};
+        holding_account::db_upsert(
+            &pool,
+            &HoldingAccount {
+                id: 2,
+                name: "Second".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let moved = transfer::db_transfer(
+            &pool,
+            1,
+            &TransferBody {
+                listing_id: 2,
+                date: ymd(2025, 8, 1),
+                from_account_id: 1,
+                to_account_id: 2,
+                allocations: vec![AllocationInput {
+                    purchase_trade_id: exchanged,
+                    quantity_allocated: Decimal::from(10_000),
+                }],
+                fee_allocations: Vec::new(),
+                fee_market_price: None,
+                fee_fx_rate: None,
+            },
+        )
+        .await
+        .unwrap()
+        .transfer_ins[0]
+            .id;
+        test_support::amma(1, 1)
+            .units(Decimal::ZERO)
+            .cost_base_adjustment(dec("0.20"))
+            .with(|a| {
+                a.tax_year_end_date = ymd(2025, 6, 30);
+                a.date_received = ymd(2025, 9, 10);
+            })
+            .insert(&pool)
+            .await;
+
+        db_upsert(
+            &pool,
+            &AmitAdjustment {
+                id: 1,
+                amma_statement_id: 1,
+                trade_id: moved,
+                quantity: Decimal::from(10_000),
+            },
+        )
+        .await
+        .expect("two hops back to the statement's own listing and account");
+        assert_eq!(
+            open_parcel_amit_reduction(&pool, moved).await,
+            Decimal::from(2000)
+        );
+    }
+
+    /// The check still refuses what it is really for: a parcel of another
+    /// listing with no rollover path back to the statement's holding — even
+    /// one of a listing this statement's units *were* exchanged into, and even
+    /// one in the statement's own account.
+    #[tokio::test]
+    async fn db_a_parcel_that_never_held_the_statements_units_is_still_refused() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool, 1, "XASX", "VDHG").await;
+        insert_buy_trade(&pool, 1, 1, Decimal::from(100)).await;
+        exchange_out(&pool, 10, ymd(2024, 5, 1)).await;
+        insert_amma(&pool, 1, 1, dec("0.05")).await;
+
+        // Bought on market on the acquirer's own listing, in the statement's
+        // account: nothing connects it to the statement.
+        test_support::buy(90, 2)
+            .date(ymd(2024, 6, 3))
+            .qty(Decimal::from(10))
+            .price(Decimal::TWO)
+            .insert(&pool)
+            .await;
+        let err = db_upsert(
+            &pool,
+            &AmitAdjustment {
+                id: 1,
+                amma_statement_id: 1,
+                trade_id: 90,
+                quantity: Decimal::from(10),
+            },
+        )
+        .await
+        .expect_err("a parcel that never held this statement's units");
+        assert!(matches!(err, UpsertError::ListingMismatch), "{err:?}");
     }
 
     #[tokio::test]

@@ -1830,3 +1830,105 @@ its control), `entities::transfer` (`db_a_transfer_in_is_bounded_by_the_parcel_i
 were captured from the pre-change build and pinned unchanged: 7.9e25 units behind the same real
 1000-for-1 ratio re-base to 7.9e28, inside `Decimal`'s ~7.9228e28 ceiling, and every read reports
 them exactly as before.
+
+
+## SCENARIOS Z-g — an AMIT taken over mid-year has its final cost-base reduction recordable nowhere
+
+- [x] Accept an AMIT adjustment against a cross-listing rollover replacement parcel, as the refusals already promise.
+
+Found while fixing [Z-d](DONE/reporting.md), and confirmed independently against a throwaway database.
+`docs/API.md`'s [AMIT adjustments](docs/API.md#amit-adjustments) section states the rule plainly:
+
+> a **rollover replacement parcel** whose units trace back to the statement's own account through a
+> [transfer], [scrip-for-scrip exchange] or [demerger] *is* accepted, wherever the operation moved
+> them … the chain is followed
+
+It is not followed across a change of listing. `entities::amit_adjustment`'s write-time check refuses
+any row whose trade's `listing_id` differs from the statement's, before the account-tracing reach-through
+is consulted — so the promise holds for exactly the replacements that happen to stay on the same listing:
+
+| replacement parcel | same listing? | row accepted? |
+| --- | --- | --- |
+| a [transfer](docs/API.md#transfers)'s transfer-in parcel | yes | `204` ✔ |
+| a [demerger](docs/API.md#demerging)'s **head** replacement | yes | `204` ✔ |
+| a [scrip-for-scrip](docs/API.md#exchanging-a-scrip-for-scrip-takeover) replacement | **no** | `422` *the trade's listing differs from the AMMA statement's listing* |
+| a demerger's **demerged-entity** parcel | **no** | `422` *(same)* |
+
+**The two refusals point at each other, so there is no way through.** An AMIT fund taken over part-way
+through a financial year, whose final AMMA statement arrives months later stating nil units held:
+
+1. `POST /amma_statements/:id/generate_adjustments` → `422` — *"…if it was transferred, exchanged or
+   demerged away during the year, enter them against the replacement parcels that now hold those units,
+   **which is accepted** because the units trace back to this account"*
+2. the row against the **replacement** parcel → `422` — *"the trade's listing differs from the AMMA
+   statement's listing"*
+3. the row against the **original** parcel → `422` — *"…Enter the rest against the replacement parcel
+   instead, where those units now are: **that is accepted** for a statement of the account they came
+   from, and generating the statement's set does it for you"*
+
+Each refusal names the other as the way out. The statement's `cost_base_adjustment` — the fund's whole
+final-year AMIT cost base net amount, CGT event E10 — can be recorded **nowhere**, so the replacement
+parcel's cost base stays overstated by it and every later disposal of those units understates the gain.
+In the reproduction that is 10,000 units × A$0.20 = **A$2,000** of cost base that should have come off.
+`generate_adjustments`'s `unattributed` list exists precisely to hand these rows to the user for manual
+entry, and manual entry is what is refused.
+
+**It fails loudly rather than silently**, which is the good half — nothing computes a wrong figure — and
+the [AMIT adjustment cross-check](docs/API.md#amit-adjustment-cross-check) then flags the statement as
+having no adjustments, forever. But the documented recovery does not exist.
+
+**Direction.** The account-tracing reach-through is already written and already used; the listing check
+simply runs first and unconditionally. Consult it before refusing: a parcel the rollover chain shows
+holds this statement's account's units is acceptable *whatever* listing it now sits on — that is the
+whole point of a scrip-for-scrip exchange. Keep refusing a parcel that never held the account's units,
+which is what the check is really for.
+
+**Fixed.** The listing check no longer runs first and unconditionally: both pins — the statement's
+listing *and* its holding account — are now reached through by one rule in
+`entities::amit_adjustment`'s `db_write_on`, which accepts a parcel when `domain::rollover`'s
+existing chain walk (`source_ancestors`, the same one the per-account reach-through already used)
+shows a source parcel of the statement's own (listing, account). No second walk was written; the
+one that was there is asked for both halves of the identity instead of the account alone, so a
+holding exchanged and then transferred is reachable through both hops. A parcel with no such path
+is refused exactly as before, and both refusals now name what would have made it acceptable.
+
+Two things had to move with it. Generation's `db_rollovers_of` filtered a rollover group's
+replacement parcels to the **source listing**, so the `unattributed` list — the very list that
+hands these rows to the user — named nothing at all for a scrip-for-scrip exchange; it now carries
+every replacement of the group with its listing, while `Movement::matching_replacement` still only
+ever identifies a transfer's own same-listing replacement. And the cross-check's coverage band
+measured its disposal allowance on the adjusted parcels alone, which on a replacement finds no
+disposal: the units left the statement's account through the *operation's* closing Sell, recorded
+against the source parcel. It now follows the same `source_ancestors` chain, so the accepted entry
+is not flagged for the rest of time (this also silences a pre-existing false flag on the
+transfer-during-the-year case, whose test said so in a comment).
+
+**The quantity cap is deliberately unchanged: the parcel's own units.** `quantity` keeps one
+meaning everywhere — units of the parcel the row is against, in its as-acquired basis — because
+the whole cost-base pipeline is built on `covered <= parcel quantity`:
+`AmitReductionEvent::reduction_for_units` splits a row's total between the units still held at the
+statement's year end and the units sold before it, and coverage beyond the parcel would spill onto
+units that do not exist, silently delivering less than the row states wherever nothing was disposed
+of by the year end — which is precisely the mid-year-takeover case. The consequence, documented in
+`docs/API.md` and commented at the check: the reduction a row applies is always `quantity` × the
+statement's per-unit figure, so on a replacement whose unit count an exchange or demerger ratio has
+scaled, the statement's figure has to be re-expressed per replacement unit — the same entry the
+docs already prescribe for a statement stating a total rather than a per-unit amount. The ATO
+states the AMIT cost base net amount as one annual, member-level amount and prescribes no spread
+across parcels (`docs/ato/amit-cost-base-adjustments.md`), so apportioning it across a demerger's
+two legs is the member's own working and nothing here infers it.
+
+Tests — accepted: `entities::amit_adjustment::db_an_amit_taken_over_mid_year_adjusts_its_cross_listing_replacement`
+(the finding's own reproduction: statement stating nil units, row against the cross-listing
+replacement, A$2,000 reaching that parcel's cost base in the open-parcels figures),
+`api_a_cross_listing_replacement_is_accepted_and_an_unrelated_parcel_is_not`,
+`db_a_demerged_entity_parcel_is_adjustable`,
+`db_a_two_hop_chain_across_a_listing_and_an_account_is_followed`,
+`entities::amit_adjustment_generation::api_generation_names_a_cross_listing_replacement_and_that_row_is_accepted`
+(generation names the replacement and the named row is accepted, end to end), and
+`reports::amit_adjustment_cross_check::db_a_mid_year_takeovers_replacement_row_is_not_flagged`.
+Still refused: `db_a_parcel_that_never_held_the_statements_units_is_still_refused` (a parcel of the
+acquirer's listing bought on market, in the statement's own account), the negative control inside
+the API test above, and the pre-existing `db_listing_mismatch_rejected` /
+`db_holding_account_mismatch_rejected` / `db_a_replacement_parcel_in_another_account_is_adjustable`
+unchanged.
