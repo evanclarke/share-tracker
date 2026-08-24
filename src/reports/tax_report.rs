@@ -2219,13 +2219,25 @@ mod tests {
             report.income.trust_income[0].conduit_foreign_income_aud,
             dec("20")
         );
-        // Counted once, through the unfranked amounts — not 210.
-        let assessable = report
-            .tax_summary
-            .iter()
-            .find(|l| l.field == "dividends_assessable")
-            .expect("the year has a dividends_assessable line");
-        assert_eq!(assessable.value, serde_json::json!("150"));
+        // Counted once, through the unfranked amounts — not 210 — on each
+        // row's own summary line: the company dividend at 11S/11T, the trust
+        // distribution at 13U (SCENARIOS Z-f).
+        let line = |field: &str| {
+            report
+                .tax_summary
+                .iter()
+                .find(|l| l.field == field)
+                .unwrap_or_else(|| panic!("the year has a {field} line"))
+        };
+        assert_eq!(line("dividends_assessable").value, serde_json::json!("100"));
+        assert_eq!(
+            line("trust_income_unfranked").value,
+            serde_json::json!("50")
+        );
+        assert_eq!(
+            line("gross_assessable_investment_income").value,
+            serde_json::json!("150")
+        );
     }
 
     /// The holdings-based completeness check must fire for an AMIT fund held
@@ -2501,11 +2513,17 @@ mod tests {
         assert_eq!(row.unfranked_amount_aud, dec("400"));
         assert_eq!(row.franking_credits_aud, dec("257.14"));
         // The document's stated invariant: every income figure sums to its
-        // tax-summary line.
+        // tax-summary line — and for a trust row that line is the question-13
+        // pair, never the company-dividend one (SCENARIOS Z-f).
         assert_eq!(
-            row.franked_amount_aud + row.unfranked_amount_aud,
-            summary(&before, "dividends_assessable")
+            row.franked_amount_aud,
+            summary(&before, "trust_franked_distributions")
         );
+        assert_eq!(
+            row.unfranked_amount_aud,
+            summary(&before, "trust_income_unfranked")
+        );
+        assert_eq!(summary(&before, "dividends_assessable"), Decimal::ZERO);
         assert_eq!(
             row.franking_credits_aud,
             summary(&before, "franking_credits")

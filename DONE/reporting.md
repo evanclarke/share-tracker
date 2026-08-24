@@ -1504,3 +1504,74 @@ the `_on` split it needs is a pattern the reports already have.
       lock, and the cost — a concurrent write waits tens of ms per date), and README's snapshot
       feature bullet gains the same clause. No schema change, so `docs/SCHEMA.md` is untouched; the
       requirement is code-tested, so no `doc_checks.rs` entry.
+
+## SCENARIOS Z-f — a trust distribution is reported under the dividends-from-companies label
+
+- [x] Report a non-AMIT trust distribution's components at question 13, not inside `dividends_assessable`.
+
+Found driving **Z-11** (the full financial year, reconciled), whose whole job is to tie every figure
+in the [annual tax report](docs/API.md#annual-tax-report) back to a hand-computed return. Thirteen of
+the fourteen labels reconciled exactly — 11U/13Q, 10L, 10M, 20E (both lines), 20O, Item 12, D7, D8,
+18H, 18V and 18A (the one-cent difference on 18A is W-f's deliberate rounding of the concession
+half away from zero, not an error). One did not:
+
+| | franked | unfranked | credits |
+| --- | ---: | ---: | ---: |
+| a **company** dividend row | 11T | 11S | 11U |
+| an **AMMA** statement's components | `amma_franked_dividends` → **13C** | `amma_dividends_unfranked` → **13U** | 13Q |
+| a **non-AMIT trust** income row (a managed fund, an ordinary unit trust) | rolled into `dividends_assessable` → **11S + 11T** | same | 13Q ✔ |
+
+A managed-fund distribution of A$900 franked + A$600 unfranked was reported inside
+`dividends_assessable` = 7,550.00 under the label **`11S + 11T`**. Those amounts belong at question
+13 (*Partnerships and trusts*), not question 11 (*Dividends*). A taxpayer transcribing the summary
+puts A$1,500 of trust income under dividends from companies, and the year's question-13 income is
+understated by the same amount — there is no line for it at all.
+
+**The credits line already knows better.** `franking_credits` is labelled **`11U / 13Q`**, explicitly
+covering both routes; and the AMMA path carries proper `13C`/`13U` lines. So the two correct
+destinations are already in the report — the ordinary trust row is the one case that falls through
+to the dividends line. The [Annual Tax Report](docs/API.md#annual-tax-report) is not confused about
+what the row *is*: it prints a separate `income.trust_income` drilldown table beside `income.dividends`.
+Only the labelled summary line collapses them.
+
+**The documentation states the property that does not hold.** `docs/API.md`'s tax-summary label table
+says of `dividends_assessable`: *"The single column is unfranked (11S) + franked (11T) dividends
+summed; split per the underlying income records"* — but the column also contains trust amounts, which
+cannot be split into 11S/11T at all.
+
+**Direction.** Trust rows are already identified (`income.trust_income`, and the annual report
+separates them). Give them their own summary lines — franked → `13C`, unfranked → `13U` — mirroring the
+`amma_*` lines already there, and leave `dividends_assessable` to company dividends so its documented
+11S/11T split becomes true. `gross_assessable_investment_income` is unchanged: the same dollars move
+between lines.
+
+**Done.** `TaxYearSummary` gained two lines beside the `amma_*` pair they mirror —
+`trust_income_unfranked` (**13U**, *share of net income from trusts less capital gains, foreign income
+and franked distributions*) and `trust_franked_distributions` (**13C**, *franked distributions from
+trusts*), both cited to `docs/ato/tax-return-labels-2026.md` and `docs/ato/amma-statement-guidance-notes.md`
+Part B items 13U/13C. The income loop now routes a `trust_income` row's `unfranked_amount`/`franked_amount`
+to those two instead of `dividends_assessable`, which is company dividends only — so its documented
+`11S + 11T` split is finally true. Nothing else moved: the credits stay on `franking_credits`
+(`11U / 13Q`, already correct for both routes), a trust row's CFI stays a memo *inside* the unfranked
+amount (now inside the 13U line), attribution still follows `entitlement_date` over `date_paid`, AMIT-listing
+rows are still excluded whole for their AMIT years (never re-routed here) while a converted fund's
+pre-`amit_from` years report on the new lines, and `gross_assessable_investment_income` is unchanged —
+the same dollars, a different line. Surfaces moved together: the field list, `CSV_HEADER`/`CSV_ATO_LABELS`,
+`TaxYearSummaryCsv`'s `Cents` projection, the annual tax report's `tax_summary` block (which reads that
+same label mapping), `COLUMN_KINDS` + `COLUMN_LABELS` in `src/web/util.js` (the headings carry the labels:
+"Trust income, unfranked 13U (AUD)" / "Franked distributions from trusts 13C (AUD)"), the tax-summary
+`REPORTS` description in `config.js`, and `docs/API.md` (a new *A trust distribution is question 13, not
+question 11* paragraph, two new label-table rows, the corrected `dividends_assessable` row, and the
+gross/CFI prose in both the Tax summary and Income sections). Tests:
+`reports::tax_summary::tests::{db_a_trust_distribution_reports_at_question_13_not_with_company_dividends,
+db_the_question_13_split_leaves_the_gross_assessable_total_unchanged,
+db_a_trust_rows_conduit_foreign_income_stays_inside_its_13u_amount,
+api_trust_and_company_income_report_on_separately_labelled_lines}`, the two new `label_of` assertions in
+`db_ato_labels_align_with_their_columns`, and the existing trust/AMIT tests re-pointed at the new fields
+(`db_trust_distribution_assessed_by_entitlement_date_not_payment`, `db_trust_entitlement_date_drives_fx_month`,
+`db_full_year_mixed_income_types`, `db_a_converted_funds_pre_amit_years_are_still_reported`,
+`db_amit_cash_rows_excluded_from_every_income_line`, `db_each_total_column_totals_the_columns_beside_it`,
+`api_export_a_total_column_is_the_sum_of_the_columns_it_totals`,
+`reports::tax_report::tests::{a_converted_funds_pre_amit_income_prints_behind_its_tax_summary_line,
+conduit_foreign_income_prints_as_a_memo_column_and_is_not_double_counted}`,
+`entities::drp_reinvestment::tests::the_partial_participation_workaround_costs_the_parcel_at_the_cash_reinvested`).

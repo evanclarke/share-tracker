@@ -673,6 +673,9 @@ const COLUMN_KINDS = (function () {
     // as raw four-decimal figures beside their cent-rounded neighbours until
     // they were classified here (SCENARIOS Y-d).
     'foreign_tax_offsets_cgt_discount_reduction', 'employment_income',
+    // The tax summary's two non-AMIT trust distribution lines (13U / 13C),
+    // which the company-dividend line used to swallow (SCENARIOS Z-f).
+    'trust_income_unfranked', 'trust_franked_distributions',
     'amma_australian_interest', 'amma_dividends_unfranked', 'amma_franked_dividends',
     'amma_net_rent', 'amma_foreign_income', 'amma_other_income', 'amma_cgt_discount_gains',
     'amma_cgt_indexation_gains', 'amma_cgt_other_gains', 'amma_capital_losses_applied',
@@ -877,6 +880,12 @@ const COLUMN_LABELS = {
   // A memo column: the CFI figure sits *inside* the unfranked amount printed
   // beside it, so the heading says so — a reader must not add the two.
   conduit_foreign_income_aud: 'CFI, within unfranked (AUD)',
+  // The tax summary's two non-AMIT trust distribution lines: a trust
+  // distribution reports at question 13, not at 11S/11T with dividends from
+  // companies, and the label is the whole point of the distinction
+  // (docs/ato/tax-return-labels-2026.md, SCENARIOS Z-f).
+  trust_income_unfranked: 'Trust income, unfranked 13U (AUD)',
+  trust_franked_distributions: 'Franked distributions from trusts 13C (AUD)',
   // The tax summary's deductions cut by destination question rather than by
   // kind of expense: the label is the whole point of the column, so it is in
   // the heading (docs/ato/tax-return-labels-2026.md).

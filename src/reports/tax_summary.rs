@@ -20,10 +20,20 @@ use std::collections::HashMap;
 pub struct TaxYearSummary {
     /// Australian tax year: the calendar year in which June 30 falls (e.g. 2024 = FY2023/24).
     pub tax_year: i32,
-    /// Assessable dividend income: franked_amount + unfranked_amount from
-    /// income records. Rows on an AMIT listing are excluded entirely (every
-    /// component): an AMIT's cash advice only funds the DRP chain — the AMMA
-    /// statement is the assessable record, reported on the `amma_*` lines.
+    /// Assessable dividend income **from companies** (question 11): the
+    /// franked_amount + unfranked_amount of income records that are *not*
+    /// `trust_income` — so the single column really is 11S + 11T and splits
+    /// per the underlying records.
+    ///
+    /// Two kinds of row are elsewhere. A **trust** row (a managed fund, an
+    /// ordinary unit trust) is a distribution, not a dividend from a company:
+    /// its components report at question 13 on
+    /// [`Self::trust_income_unfranked`] (13U) and
+    /// [`Self::trust_franked_distributions`] (13C) — the same destinations the
+    /// `amma_*` lines already use (SCENARIOS Z-f). And rows on an AMIT listing
+    /// are excluded entirely (every component): an AMIT's cash advice only
+    /// funds the DRP chain — the AMMA statement is the assessable record,
+    /// reported on the `amma_*` lines.
     pub dividends_assessable: Decimal,
     /// Gross Australian-source interest from interest-income records
     /// (question 10 label L — includes any TFN amount withheld; the withheld
@@ -38,13 +48,36 @@ pub struct TaxYearSummary {
     /// Assessable foreign source income. Conduit foreign income is not part of
     /// it: despite the name, an Australian company's dividend declared to be
     /// CFI is Australian-sourced unfranked income, counted in
-    /// `dividends_assessable` through `unfranked_amount` (see
+    /// `dividends_assessable` — or, on a trust row, in
+    /// `trust_income_unfranked` — through `unfranked_amount` (see
     /// [`crate::entities::income::Income::conduit_foreign_income`]).
     pub foreign_source_income: Decimal,
     /// LIC capital gain deduction from income records (question D8): **50%**
     /// of each dividend's advised `lic_capital_gain_amount`, per
     /// [`Income::lic_capital_gain_deduction`](crate::entities::income::Income::lic_capital_gain_deduction).
     pub lic_capital_gain_deduction: Decimal,
+    /// Non-primary production income of a **non-AMIT trust** distribution
+    /// (question 13 label **U**, *share of net income from trusts less capital
+    /// gains, foreign income and franked distributions*): the
+    /// `unfranked_amount` of income records marked `trust_income`, on a
+    /// listing that is not an AMIT for that year. A trust distribution is not
+    /// a dividend from a company, so it never reports at 11S — the same
+    /// destination `amma_dividends_unfranked` already carries
+    /// (`docs/ato/amma-statement-guidance-notes.md` Part B item 13U,
+    /// `docs/ato/tax-return-labels-2026.md`; SCENARIOS Z-f).
+    ///
+    /// Conduit foreign income declared on such a row sits **inside** this
+    /// amount, exactly as it sits inside `dividends_assessable` on a company
+    /// dividend — the guidance notes put "unfranked amount declared to be CFI"
+    /// in the non-primary production income at 13U — and is counted once.
+    pub trust_income_unfranked: Decimal,
+    /// Franked distributions from a **non-AMIT trust** (question 13 label
+    /// **C**): the `franked_amount` of income records marked `trust_income`,
+    /// on a listing that is not an AMIT for that year. The same destination
+    /// `amma_franked_dividends` already carries; the attached credits stay on
+    /// `franking_credits`, which is labelled `11U / 13Q` for both routes
+    /// (`docs/ato/tax-return-labels-2026.md`; SCENARIOS Z-f).
+    pub trust_franked_distributions: Decimal,
     /// AMMA attributed Australian interest.
     pub amma_australian_interest: Decimal,
     /// AMMA attributed Australian dividends (unfranked).
@@ -149,18 +182,20 @@ pub struct TaxYearSummary {
     /// Gross assessable investment income for the year (AUD): the sum of the
     /// report's existing assessable income lines — `dividends_assessable`
     /// (franked + unfranked) + `interest_income` + `foreign_interest_income` +
-    /// `foreign_source_income` + the six AMMA income components
-    /// (`amma_australian_interest`, `amma_dividends_unfranked`,
-    /// `amma_franked_dividends`, `amma_net_rent`, `amma_foreign_income`,
-    /// `amma_other_income`) + `other_income` (item 24, which nothing
-    /// prefills). It deliberately excludes the franking-credit
+    /// `foreign_source_income` + the two non-AMIT trust lines
+    /// (`trust_income_unfranked`, `trust_franked_distributions`) + the six
+    /// AMMA income components (`amma_australian_interest`,
+    /// `amma_dividends_unfranked`, `amma_franked_dividends`, `amma_net_rent`,
+    /// `amma_foreign_income`, `amma_other_income`) + `other_income` (item 24,
+    /// which nothing prefills). It deliberately excludes the franking-credit
     /// gross-up and FITO (carried as offset lines), the recorded conduit
-    /// foreign income memo (already inside `dividends_assessable`, as part of
-    /// `unfranked_amount`), the ESS discount (employment income, Item 12), and capital gains
+    /// foreign income memo (already inside `dividends_assessable`, or inside
+    /// `trust_income_unfranked`, as part of `unfranked_amount`), the ESS
+    /// discount (employment income, Item 12), and capital gains
     /// (the net-capital-gain report). `net_assessable_investment_income`
     /// subtracts the investment-expense deductions from this.
     ///
-    /// Summed **at the cent**: it is the sum of those eleven lines rounded to
+    /// Summed **at the cent**: it is the sum of those thirteen lines rounded to
     /// the cent, so the column adds up wherever the lines are printed beside
     /// it (SCENARIOS W-f). The lines themselves keep full precision.
     pub gross_assessable_investment_income: Decimal,
@@ -237,6 +272,8 @@ pub(crate) const CSV_HEADER: &[&str] = &[
     "foreign_interest_income",
     "foreign_source_income",
     "lic_capital_gain_deduction",
+    "trust_income_unfranked",
+    "trust_franked_distributions",
     "amma_australian_interest",
     "amma_dividends_unfranked",
     "amma_franked_dividends",
@@ -289,6 +326,8 @@ pub(crate) const CSV_ATO_LABELS: &[&str] = &[
     "20E + 20M",               // foreign_interest_income
     "20E + 20M",               // foreign_source_income
     "D8",                      // lic_capital_gain_deduction (claimed at D8)
+    "13U",                     // trust_income_unfranked (non-AMIT trust distribution)
+    "13C",                     // trust_franked_distributions (non-AMIT trust distribution)
     "13U",                     // amma_australian_interest
     "13U",                     // amma_dividends_unfranked
     "13C",                     // amma_franked_dividends
@@ -334,6 +373,8 @@ fn zero_summary(tax_year: i32) -> TaxYearSummary {
         foreign_interest_income: Decimal::ZERO,
         foreign_source_income: Decimal::ZERO,
         lic_capital_gain_deduction: Decimal::ZERO,
+        trust_income_unfranked: Decimal::ZERO,
+        trust_franked_distributions: Decimal::ZERO,
         amma_australian_interest: Decimal::ZERO,
         amma_dividends_unfranked: Decimal::ZERO,
         amma_franked_dividends: Decimal::ZERO,
@@ -662,7 +703,24 @@ pub(crate) async fn db_tax_summary_on(
             s.other_income += unfranked;
             continue;
         }
-        s.dividends_assessable += franked + unfranked;
+        // A trust distribution is not a dividend from a company: its
+        // components are declared at question 13 (*Partnerships and trusts*),
+        // the unfranked/other income at 13U and the franked distribution at
+        // 13C — the destinations the AMMA lines below already use, and the
+        // two the `11U / 13Q` credits line has always covered
+        // (`docs/ato/amma-statement-guidance-notes.md` Part B items 13U/13C,
+        // `docs/ato/tax-return-labels-2026.md`; SCENARIOS Z-f). Rows on an
+        // AMIT listing never reach here — the query above drops them for the
+        // years the listing was an AMIT — so this is the ordinary
+        // (pre-`amit_from`, or never-AMIT) trust case. The dollars only move
+        // line to line: `gross_assessable_investment_income` below adds the
+        // same amounts either way.
+        if income.trust_income {
+            s.trust_income_unfranked += unfranked;
+            s.trust_franked_distributions += franked;
+        } else {
+            s.dividends_assessable += franked + unfranked;
+        }
         s.foreign_source_income += foreign_income;
         s.lic_capital_gain_deduction += lic;
         s.franking_credits += fc;
@@ -935,6 +993,8 @@ pub(crate) async fn db_tax_summary_on(
             + to_cents(s.interest_income)
             + to_cents(s.foreign_interest_income)
             + to_cents(s.foreign_source_income)
+            + to_cents(s.trust_income_unfranked)
+            + to_cents(s.trust_franked_distributions)
             + to_cents(s.amma_australian_interest)
             + to_cents(s.amma_dividends_unfranked)
             + to_cents(s.amma_franked_dividends)
@@ -975,6 +1035,8 @@ struct TaxYearSummaryCsv {
     foreign_interest_income: Cents,
     foreign_source_income: Cents,
     lic_capital_gain_deduction: Cents,
+    trust_income_unfranked: Cents,
+    trust_franked_distributions: Cents,
     amma_australian_interest: Cents,
     amma_dividends_unfranked: Cents,
     amma_franked_dividends: Cents,
@@ -1021,6 +1083,8 @@ impl From<&TaxYearSummary> for TaxYearSummaryCsv {
             foreign_interest_income: s.foreign_interest_income.into(),
             foreign_source_income: s.foreign_source_income.into(),
             lic_capital_gain_deduction: s.lic_capital_gain_deduction.into(),
+            trust_income_unfranked: s.trust_income_unfranked.into(),
+            trust_franked_distributions: s.trust_franked_distributions.into(),
             amma_australian_interest: s.amma_australian_interest.into(),
             amma_dividends_unfranked: s.amma_dividends_unfranked.into(),
             amma_franked_dividends: s.amma_franked_dividends.into(),
@@ -1243,11 +1307,15 @@ mod tests {
         let result = db_tax_summary(&pool).await.unwrap();
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].tax_year, 2026);
-        // Every component follows the entitlement date, not just the income line.
-        assert_eq!(result[0].dividends_assessable, Decimal::from(100));
+        // Every component follows the entitlement date, not just the income
+        // line — which for a trust row is the question-13 line, never the
+        // company-dividend one (SCENARIOS Z-f).
+        assert_eq!(result[0].trust_income_unfranked, Decimal::from(100));
+        assert_eq!(result[0].dividends_assessable, Decimal::ZERO);
         assert_eq!(result[0].tfn_withholding_tax, Decimal::from(10));
         assert_eq!(result[1].tax_year, 2027);
         assert_eq!(result[1].dividends_assessable, Decimal::from(50));
+        assert_eq!(result[1].trust_income_unfranked, Decimal::ZERO);
     }
 
     /// Without an entitlement date a trust row keeps the date_paid attribution
@@ -1287,7 +1355,161 @@ mod tests {
         let result = db_tax_summary(&pool).await.unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].tax_year, 2026);
-        assert_eq!(result[0].dividends_assessable, Decimal::from(200)); // 100 / 0.50
+        assert_eq!(result[0].trust_income_unfranked, Decimal::from(200)); // 100 / 0.50
+    }
+
+    // Question 13 vs question 11 (SCENARIOS Z-f). A distribution from a trust
+    // — a managed fund, an ordinary unit trust — is not a dividend from a
+    // company: its unfranked/other income is declared at **13U** and its
+    // franked component at **13C** (docs/ato/tax-return-labels-2026.md;
+    // docs/ato/amma-statement-guidance-notes.md Part B items 13U/13C), which
+    // is where the `amma_*` lines already report and what the `11U / 13Q`
+    // credits line has always covered on both routes. Rolling them into
+    // `dividends_assessable` put them at 11S + 11T, understating the year's
+    // question-13 income by the same amount.
+
+    /// The reproduction: A$900 franked + A$600 unfranked of managed-fund
+    /// distribution beside a company dividend, in one year. Each row reports
+    /// on its own question's lines, and `dividends_assessable` is company
+    /// dividends only — which is what makes its documented 11S/11T split
+    /// true.
+    #[tokio::test]
+    async fn db_a_trust_distribution_reports_at_question_13_not_with_company_dividends() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await; // the company
+        insert_listing(&pool, 2).await; // the managed fund
+        let march = NaiveDate::from_ymd_opt(2024, 3, 15).unwrap();
+
+        let mut div = make_income(1, 1, march);
+        div.franked_amount = Decimal::from(700);
+        div.unfranked_amount = Decimal::from(100);
+        income::db_upsert(&pool, &div).await.unwrap();
+
+        let mut dist = make_income(2, 2, march);
+        dist.trust_income = true;
+        dist.franked_amount = Decimal::from(900);
+        dist.unfranked_amount = Decimal::from(600);
+        income::db_upsert(&pool, &dist).await.unwrap();
+
+        let result = db_tax_summary(&pool).await.unwrap();
+        assert_eq!(result.len(), 1);
+        let s = &result[0];
+        // 11S + 11T: the company dividend, and nothing else.
+        assert_eq!(s.dividends_assessable, Decimal::from(800));
+        // 13U / 13C: the trust distribution's two components.
+        assert_eq!(s.trust_income_unfranked, Decimal::from(600));
+        assert_eq!(s.trust_franked_distributions, Decimal::from(900));
+        // The year's assessable total is untouched by the split.
+        assert_eq!(
+            s.gross_assessable_investment_income,
+            Decimal::from(800 + 1500)
+        );
+    }
+
+    /// The invariant behind the move: the same dollars change line, they are
+    /// not added or removed. The identical distribution entered as a trust
+    /// row and as a company dividend gives two different sets of lines and
+    /// one identical `gross_assessable_investment_income`.
+    #[tokio::test]
+    async fn db_the_question_13_split_leaves_the_gross_assessable_total_unchanged() {
+        let march = NaiveDate::from_ymd_opt(2024, 3, 15).unwrap();
+        let year_with = |trust: bool| async move {
+            let pool = test_pool().await;
+            insert_listing(&pool, 1).await;
+            let mut inc = make_income(1, 1, march);
+            inc.trust_income = trust;
+            inc.franked_amount = Decimal::from(900);
+            inc.unfranked_amount = Decimal::from(600);
+            income::db_upsert(&pool, &inc).await.unwrap();
+            db_tax_summary(&pool).await.unwrap().remove(0)
+        };
+
+        let as_trust = year_with(true).await;
+        let as_company = year_with(false).await;
+
+        assert_eq!(as_trust.dividends_assessable, Decimal::ZERO);
+        assert_eq!(as_trust.trust_income_unfranked, Decimal::from(600));
+        assert_eq!(as_trust.trust_franked_distributions, Decimal::from(900));
+        assert_eq!(as_company.dividends_assessable, Decimal::from(1500));
+        assert_eq!(as_company.trust_income_unfranked, Decimal::ZERO);
+        assert_eq!(as_company.trust_franked_distributions, Decimal::ZERO);
+        assert_eq!(
+            as_trust.gross_assessable_investment_income,
+            as_company.gross_assessable_investment_income
+        );
+        assert_eq!(
+            as_trust.gross_assessable_investment_income,
+            Decimal::from(1500)
+        );
+    }
+
+    /// Conduit foreign income on a **trust** row behaves as it does on a
+    /// company dividend: a memo *inside* the unfranked amount, counted once
+    /// on the row's own assessable line and never added again — the guidance
+    /// notes put "unfranked amount declared to be CFI" in the non-primary
+    /// production income at 13U
+    /// (docs/ato/amma-statement-guidance-notes.md).
+    #[tokio::test]
+    async fn db_a_trust_rows_conduit_foreign_income_stays_inside_its_13u_amount() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        let mut dist = make_income(1, 1, NaiveDate::from_ymd_opt(2024, 3, 15).unwrap());
+        dist.trust_income = true;
+        dist.unfranked_amount = Decimal::from(100);
+        dist.conduit_foreign_income = Decimal::from(40); // 40 of the 100 above
+        income::db_upsert(&pool, &dist).await.unwrap();
+
+        let s = &db_tax_summary(&pool).await.unwrap()[0];
+        assert_eq!(s.trust_income_unfranked, Decimal::from(100));
+        // Despite the name, CFI is Australian-sourced: not foreign income,
+        // and not a line beside the amount it sits within.
+        assert_eq!(s.foreign_source_income, Decimal::ZERO);
+        assert_eq!(s.gross_assessable_investment_income, Decimal::from(100));
+    }
+
+    /// Over HTTP: both the JSON report and the tax-return CSV carry the two
+    /// new columns, the CSV under their question-13 labels — the surfaces a
+    /// taxpayer actually transcribes from.
+    #[tokio::test]
+    async fn api_trust_and_company_income_report_on_separately_labelled_lines() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        insert_listing(&pool, 2).await;
+        let march = NaiveDate::from_ymd_opt(2024, 3, 15).unwrap();
+        let mut div = make_income(1, 1, march);
+        div.franked_amount = Decimal::from(700);
+        div.unfranked_amount = Decimal::from(100);
+        income::db_upsert(&pool, &div).await.unwrap();
+        let mut dist = make_income(2, 2, march);
+        dist.trust_income = true;
+        dist.franked_amount = Decimal::from(900);
+        dist.unfranked_amount = Decimal::from(600);
+        income::db_upsert(&pool, &dist).await.unwrap();
+
+        let years: Vec<TaxYearSummary> = client(&pool).get_json("/portfolio/tax-summary").await;
+        assert_eq!(years[0].dividends_assessable, Decimal::from(800));
+        assert_eq!(years[0].trust_income_unfranked, Decimal::from(600));
+        assert_eq!(years[0].trust_franked_distributions, Decimal::from(900));
+
+        let csv = client(&pool)
+            .get("/portfolio/tax-summary/export")
+            .await
+            .expect_status(StatusCode::OK)
+            .text()
+            .to_string();
+        let mut lines = csv.lines();
+        let header: Vec<&str> = lines.next().unwrap().split(',').collect();
+        let labels: Vec<&str> = lines.next().unwrap().split(',').collect();
+        let row: Vec<&str> = lines.next().expect("a record row").split(',').collect();
+        let at = |cells: &[&str], col: &str| {
+            cells[header.iter().position(|c| *c == col).unwrap()].to_string()
+        };
+        assert_eq!(at(&row, "dividends_assessable"), "800.00");
+        assert_eq!(at(&labels, "dividends_assessable"), "11S + 11T");
+        assert_eq!(at(&row, "trust_income_unfranked"), "600.00");
+        assert_eq!(at(&labels, "trust_income_unfranked"), "13U");
+        assert_eq!(at(&row, "trust_franked_distributions"), "900.00");
+        assert_eq!(at(&labels, "trust_franked_distributions"), "13C");
     }
 
     /// The A$5,000 small-shareholder threshold groups attached credits by the
@@ -1487,9 +1709,13 @@ mod tests {
         assert_eq!(result.len(), 1);
         let s = &result[0];
         assert_eq!(s.tax_year, 2024);
-        // 140 + 60 dividend, + the trust's 40 unfranked (its 10 of CFI is
-        // inside that 40, counted once — never added again, never netted off).
-        assert_eq!(s.dividends_assessable, Decimal::from(240));
+        // 140 + 60 dividend — the company line, and only the company row.
+        assert_eq!(s.dividends_assessable, Decimal::from(200));
+        // The trust's 40 unfranked reports at question 13, not with dividends
+        // from companies (SCENARIOS Z-f); its 10 of CFI is inside that 40,
+        // counted once — never added again, never netted off.
+        assert_eq!(s.trust_income_unfranked, Decimal::from(40));
+        assert_eq!(s.trust_franked_distributions, Decimal::ZERO);
         // Despite the name, CFI is Australian-sourced: it stays out of this.
         assert_eq!(s.foreign_source_income, Decimal::from(30));
         assert_eq!(s.lic_capital_gain_deduction, Decimal::new(25, 1)); // 50% of the advised 5
@@ -1541,10 +1767,18 @@ mod tests {
 
         let result = db_tax_summary(&pool).await.unwrap();
         let fy24 = result.iter().find(|s| s.tax_year == 2024).expect("FY2024");
-        assert_eq!(fy24.dividends_assessable, Decimal::from(500));
+        // Ordinary trust income of the pre-conversion year: question 13, on
+        // the same two lines the AMIT years' AMMA components report at, never
+        // the company-dividend line (SCENARIOS Z-f).
+        assert_eq!(fy24.trust_franked_distributions, Decimal::from(200));
+        assert_eq!(fy24.trust_income_unfranked, Decimal::from(300));
+        assert_eq!(fy24.dividends_assessable, Decimal::ZERO);
+        assert_eq!(fy24.gross_assessable_investment_income, Decimal::from(500));
         assert_eq!(fy24.franking_credits, Decimal::from(85));
         let fy25 = result.iter().find(|s| s.tax_year == 2025).expect("FY2025");
         assert_eq!(fy25.dividends_assessable, Decimal::ZERO);
+        assert_eq!(fy25.trust_income_unfranked, Decimal::ZERO);
+        assert_eq!(fy25.trust_franked_distributions, Decimal::ZERO);
         assert_eq!(fy25.amma_other_income, Decimal::from(450));
     }
 
@@ -1585,8 +1819,12 @@ mod tests {
         assert_eq!(result.len(), 1);
         let s = &result[0];
         assert_eq!(s.tax_year, 2024);
-        // Only the PLS-style ordinary dividend; the $1,010 AMIT cash is gone.
+        // Only the PLS-style ordinary dividend; the $1,010 AMIT cash is gone
+        // — from the question-13 lines too: an AMIT's cash row is excluded
+        // whole, never re-routed there (SCENARIOS Z-f).
         assert_eq!(s.dividends_assessable, Decimal::from(70));
+        assert_eq!(s.trust_income_unfranked, Decimal::ZERO);
+        assert_eq!(s.trust_franked_distributions, Decimal::ZERO);
         assert_eq!(s.foreign_source_income, Decimal::ZERO);
         // Credits/offsets/withholding come from the dividend and the AMMA only.
         assert_eq!(s.franking_credits, Decimal::from(150)); // 30 + 120
@@ -2231,14 +2469,15 @@ mod tests {
 
     /// SCENARIOS W-f, the `tax-summary.csv` half. Three columns of this
     /// export are sums of other columns — `gross_assessable_investment_income`
-    /// over the eleven income lines, `deductions_total` over *two* different
+    /// over the thirteen income lines, `deductions_total` over *two* different
     /// cuts of the deductions, and `net_assessable_investment_income` over
     /// those two — and each of those columns used to be the cent-rounding of
     /// an exact total, which need not equal the total of the cent-rounded
     /// columns printed beside it. Measured before the fix on these very
-    /// facts: gross printed `70.01` over lines of `60.01 + 10.01`, and
-    /// `deductions_total` printed `20.01` over destination lines of
-    /// `10.01 + 10.01`.
+    /// facts: gross printed `70.01` over its income lines (then `60.01 +
+    /// 10.01`; the trust half of that first line has since moved to its own
+    /// question-13 column, SCENARIOS Z-f), and `deductions_total` printed
+    /// `20.01` over destination lines of `10.01 + 10.01`.
     #[tokio::test]
     async fn api_export_a_total_column_is_the_sum_of_the_columns_it_totals() {
         let pool = half_cent_income_and_deductions().await;
@@ -2257,8 +2496,11 @@ mod tests {
         let cell = |col: &str| at(col).parse::<Decimal>().unwrap();
         let total_of = |cols: &[&str]| cols.iter().map(|c| cell(c)).sum::<Decimal>();
 
-        // The two income lines the exact total falls half a cent between.
-        assert_eq!(at("dividends_assessable"), "60.01");
+        // The income lines the exact total falls half a cent between — the
+        // trust distribution on its own question-13 line, the company
+        // dividend's half cent on the dividends line (SCENARIOS Z-f).
+        assert_eq!(at("dividends_assessable"), "10.01");
+        assert_eq!(at("trust_income_unfranked"), "50.00");
         assert_eq!(at("interest_income"), "10.01");
         assert_eq!(at("gross_assessable_investment_income"), "70.02");
         assert_eq!(
@@ -2366,14 +2608,16 @@ mod tests {
         assert_eq!(s.net_assessable_investment_income, Decimal::from(130));
     }
 
-    /// The eleven assessable income lines `gross_assessable_investment_income`
-    /// totals, and the two cuts `deductions_total` totals — the export's own
-    /// column names.
+    /// The thirteen assessable income lines
+    /// `gross_assessable_investment_income` totals, and the two cuts
+    /// `deductions_total` totals — the export's own column names.
     const GROSS_INCOME_COLUMNS: &[&str] = &[
         "dividends_assessable",
         "interest_income",
         "foreign_interest_income",
         "foreign_source_income",
+        "trust_income_unfranked",
+        "trust_franked_distributions",
         "amma_australian_interest",
         "amma_dividends_unfranked",
         "amma_franked_dividends",
@@ -2480,6 +2724,13 @@ mod tests {
         };
         assert_eq!(label_of("dividends_assessable"), "11S + 11T");
         assert_eq!(label_of("franking_credits"), "11U / 13Q");
+        // A non-AMIT trust distribution is question 13, not question 11: the
+        // same two destinations the AMMA components already report at, and
+        // the two the `11U / 13Q` credits line has always covered
+        // (docs/ato/amma-statement-guidance-notes.md Part B items 13U/13C;
+        // SCENARIOS Z-f).
+        assert_eq!(label_of("trust_income_unfranked"), "13U");
+        assert_eq!(label_of("trust_franked_distributions"), "13C");
         assert_eq!(label_of("amma_franked_dividends"), "13C");
         assert_eq!(label_of("amma_australian_interest"), "13U");
         assert_eq!(label_of("foreign_source_income"), "20E + 20M");

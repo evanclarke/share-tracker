@@ -1337,7 +1337,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            years[0].dividends_assessable,
+            years[0].trust_income_unfranked,
             Decimal::from(100),
             "both halves are still declared"
         );
