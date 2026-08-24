@@ -1840,3 +1840,139 @@ longer has to warn that a larger price would mask it.
 Docs: `docs/API.md`'s "Where a Sell's brokerage and GST land" paragraph now states that a disposal's
 `proceeds` is exactly `price × quantity − brokerage − GST` however many parcels it was allocated
 across, and that the `parcels` rows still sum to it exactly.
+
+## SCENARIOS AA-d — a disposal recorded at nil proceeds raises a capital loss that nothing questions
+
+- [x] Decide and implement (options below).
+
+Scenario AA-03. A gift of shares is a CGT disposal at **market value** under the market-value
+substitution rule, and `docs/API.md` documents the entry convention: "enter a gift out as a manual
+Sell at market-value proceeds". The failure mode the convention exists to prevent is entering what
+was actually *received* — nothing — and that entry is accepted in full:
+
+```
+PUT /sells/71  {"average_price":"0","quantity":"1000", ...}   → 204
+```
+
+`GET /portfolio/realised-gains` then reports `proceeds: 0`, `cost_base: 20000.00`,
+`capital_loss: 20000.00`. **A$20,000 of capital loss that does not exist**, feeding the net-capital-
+gain netting and the 18V carry-forward. The health report is silent — its only non-empty lists after
+the write were `unpriced_days` and an unrelated `duplicate_income`.
+
+The system cannot know a nil-proceeds Sell is a gift, so this is a flag rather than a refusal — and
+a nil-proceeds disposal is a genuinely unusual shape worth naming, in the way `duplicate_trades` and
+`non_trading_day_trades` already are. (The one legitimate nil-proceeds disposal — worthless shares —
+has its own operation and writes a Sell carrying `worthless_action_id`, so it is distinguishable; a
+crypto burn is the residual honest case.)
+
+**Options.**
+
+1. **A health check** — `nil_proceeds_disposals`, listing every ordinary Sell and rights sale
+   recorded at nil proceeds (excluding the operation-written closing Sells), with the
+   market-value-substitution rule as its reason. Advisory, blocks nothing.
+2. **Documentation only** — extend the *Gifts / off-market related-party transfers* bullet to warn
+   that entering the nil consideration actually received fabricates a capital loss, and say so on
+   the Sells screen.
+3. **Out of scope** — a nil-proceeds disposal is legitimate often enough (a crypto burn, an
+   abandonment) that naming it would be noise.
+
+**Chosen: option 1 — a `nil_proceeds_disposals` health check.**
+
+**Fixed.** `reports::health` now carries `nil_proceeds_disposals`: every ordinary Sell at a zero
+`average_price`, plus every rights disposal at a zero `proceeds_per_right` whose rights were **paid
+for** (`rights_cost > 0`) — a *free* right lapsing is nil against nil, the non-event `docs/API.md`
+describes, and flagging it would fire on every ordinary lapse. The test is the *price*, not the
+netted proceeds: a real price a brokerage happens to cancel is arithmetic, not a nil-consideration
+disposal, and the market-value substitution rule has nothing to say about it. Advisory, blocking
+nothing, with the rule (`docs/ato/capital-proceeds-market-value-substitution.md`, QC 66021) as its
+reason, a cross-view banner sentence linking to Sells / Rights Sales, and the Gifts limitation,
+the Health field list and the README feature line all updated (pinned by
+`doc_checks::nil_proceeds_disposals_are_documented_with_the_market_value_rule`).
+
+The exclusion of the operation-written closing Sells is the part that needed the rule rather than a
+list. There were already **three** transcriptions of the provenance columns (the two guards in
+`entities::sell`, and the write-path `CASE` in `non_trading_day_trades`), so the exclusion became
+`entities::trade::provenance` — one list of (column, plain-English write path) with two SQL
+builders over it, `operation_written_sql` and `source_case_sql`, and a test that reads the live
+schema's foreign keys on `trades` and fails on one that is neither classified as a provenance link
+nor named as ordinary trade data with the reason. A future operation's column is picked up by both
+callers with no edit. `non_trading_day_trades` now builds its label from the same list, which also
+fixed a mislabel it carried: a crypto transfer's network-fee Sell (linked from
+`transfers.fee_sale_trade_id`, not `trades.transfer_id`) read as `entered directly`.
+
+## SCENARIOS AA-f — the archived CGT worksheet prints a whole parcel's initial cost against a part of it
+
+- [x] Decide and implement (options below).
+
+Reported in passing by the agent fixing [AA-a](#scenarios-aa-a), and **re-driven from scratch against a
+throwaway database before being logged** (per the standing lesson: a fixing agent's incidental report is
+re-derived, not taken on trust). The reproduction is real and the mechanism is as reported.
+
+`reports::tax_report` takes `CostBase::initial_cost` — the **whole parcel's** figure — for a disposal
+row's `initial_cost_base_aud`. Sell 500 units of a 1,000-unit A$10 parcel and the Annual Tax Report's
+disposal schedule prints:
+
+| Units | Buy price | Initial cost base (AUD) | *(adjustment rows)* | Adjusted cost base (AUD) |
+| ---: | ---: | ---: | --- | ---: |
+| 500 | 10.00 | **10,000.00** | *(none)* | **5,000.00** |
+
+with `cost_base_per_unit_aud` of `10.00` beside it. A hand-checker multiplies 500 × $10, gets $5,000,
+and finds an "Initial cost base" of $10,000 with **nothing between the two columns explaining the
+difference** — which is precisely the contract `docs/API.md` states for this section:
+
+> the initial cost base and, **itemised underneath it, one row per cost-base adjustment** … with its
+> own date, reference, and per-unit figure
+
+**Bounded with its control**: a disposal of the *whole* parcel prints correctly (1,000 units → initial
+`10,000.00`, adjusted `10,000.00`). The fault appears only on a **partial** disposal, which is the
+ordinary case for any holding sold down in tranches.
+
+**No tax figure is wrong.** `initial_cost_base_aud` is a display column, not one of the five the
+section totals — the subtotal, the gain and the discount all take the adjusted figure. But this is the
+print document meant to be saved to PDF and archived, and a column that does not reconcile against the
+units beside it is exactly the class of fault [W-c](DONE/reporting.md) and [W-d](DONE/reporting.md)
+were about: *a column has to add up on the page*.
+
+The AA-a commit (`369e040`) added `CostBase::costed_initial_cost`, which is precisely the figure this
+row wants, so option 1 is a small change — but it changes a **printed number**, which is why it was not
+folded into that commit.
+
+**Options.**
+
+1. **Print the costed units' initial cost.** `initial_cost_base_aud` becomes `costed_initial_cost`, so
+   the row reads 500 units / initial `5,000.00` / adjusted `5,000.00`, and where adjustments exist they
+   account for the whole of the gap — restoring the documented contract. A previously archived PDF will
+   disagree with a freshly generated one for the same year in this one column.
+2. **Keep the figure, fix the label.** Rename the column to say it is the parcel's, not the disposal's
+   (and say so in `docs/API.md`), leaving archived documents reconcilable against new ones.
+3. **Out of scope** — a display column that no total depends on.
+
+**Chosen: option 1 — print the costed units' initial cost.**
+
+**Fixed.** `reports::tax_report`'s disposal row now takes `CostBase::costed_initial_cost` — the costed
+units' pro-rated share of the parcel's initial cost base, the same pool `cost_base::adjustment_detail`
+starts its itemised walk from — instead of the whole parcel's `initial_cost`. The reproduction row now
+prints 500 units / initial `5,000.00` / adjusted `5,000.00`, and the whole-parcel control is unmoved at
+1,000 / `10,000.00` / `10,000.00`. With real adjustments present the documented contract holds as an
+arithmetic identity: a 400-of-1,000-unit disposal of an A$10 parcel carrying a 50c/unit AMIT reduction
+prints initial `4,000.00` − `200.00` = adjusted `3,800.00`, and the same parcel carrying a 25c/unit
+return of capital prints `4,000.00` − `100.00` = `3,900.00` (the identity holds except where a row is
+flagged `capped` and CGT event E10/G1 has floored the balance at nil — the excess is a capital gain in
+the net-capital-gain report, not a cost-base movement). The rest of the row was swept for the same
+fault and is correct: `adjusted_cost_base_aud`, `proceeds_aud`, `gain_loss_aud` and the two per-unit
+figures all come from the allocation (`realised_gains::ParcelDetail`), the itemised adjustment amounts
+and per-unit figures are already stated for the costed units, and `indexed_cost_base_aud` was built on
+`costed_initial_cost` from the start (`domain::indexation::indexed_cost_base`). The one other
+whole-parcel figure is `buy_brokerage`/`buy_gst_on_brokerage` — deliberately the buy contract note's
+own figures for the whole trade, transcribed for checking against the note, carried in the JSON and
+printed in no column; that is now said in the field's doc comment and in `docs/API.md` rather than left
+to be inferred. Rounding is untouched (the column was already in `round_money_to_cents`'s list), and
+nothing totalled moved: driven end to end at the HTTP surface against a throwaway database, the whole
+document — every subtotal and grand total included — is byte-identical to the pre-fix binary's apart
+from this one column. Because it changes a printed number, `docs/API.md` says so where the column is
+described, so a reader comparing an archived PDF against a freshly generated one is not left guessing.
+Regression tests:
+`reports::tax_report::tests::api_a_partial_disposal_prints_the_disposed_units_initial_cost_base` (the
+partial disposal and the whole-parcel control in one document) and
+`api_the_itemised_adjustments_span_the_whole_gap_on_a_partial_disposal` (the identity, over both
+reduction kinds).

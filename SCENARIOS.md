@@ -60,7 +60,8 @@ are not repeated in the individual entries.
 
 453 scenarios in 27 sections. A section counts as **verified** only when every
 scenario in it has been driven and each result either left a regression test
-behind or became a recorded finding.
+behind or became a recorded finding. **Every section is now verified** — the
+last, AA, was driven on 2026-08-25.
 
 | Section | Scenarios | Verified | Findings |
 | --- | ---: | --- | --- |
@@ -90,7 +91,7 @@ behind or became a recorded finding.
 | X. Transactional integrity and concurrency | 8 | 2026-08-23 (`f01d814`) | 2 raised, both closed — see below |
 | Y. Web UI | 12 | 2026-08-24 (`8f86b94`) | 7 raised, all closed — see below |
 | Z. Composite lifecycle scenarios | 12 | 2026-08-24 (`c800fb2`) | 7 raised, all closed — see below |
-| AA. Boundary and out-of-scope scenarios | 20 | — | — |
+| AA. Boundary and out-of-scope scenarios | 20 | 2026-08-25 (`69981ba`) | 6 raised, all closed — see below |
 
 ### Section A findings
 
@@ -1439,6 +1440,88 @@ and got sensible-looking holdings for five different dates before noticing the e
 string at all and documents itself as "as at today". The reading that exposed it was a date on which
 the answer *had* to differ. Every figure in this write-up was re-derived by hand before it was
 believed.
+
+### Section AA findings
+
+Driven 2026-08-24/25 (`69981ba`) against throwaway databases through the HTTP
+API. AA is a different shape from every other section: each of its 20 entries
+is a *documented limitation*, so the verification is that the system **fails
+safe** — refuses, or flags, or documents — rather than silently producing a
+wrong number, and that the documented workaround actually works.
+
+**Fifteen came back correct, and several structurally rather than merely
+documentedly.** A pre-CGT parcel cannot be entered by any path, and the
+boundary is exact — 1985-09-19 refused, 1985-09-20 accepted — with the same
+guard on trades, Sells, ESS taxing points and inheritances, while the one
+legitimate pre-CGT interaction (an inherited parcel under
+`MarketValueAtDeath`) stays open and `DeceasedCostBase` with a pre-CGT
+acquisition is refused (AA-01). Rights over pre-CGT originals are therefore
+unreachable by construction: every anchoring parcel must be a post-CGT Buy or
+DRP (AA-14). A collectable, a personal-use asset, a main residence or any
+non-listed asset has **no `security_type` to arrive under** — the enum is five
+listed kinds plus `Crypto`, and a non-`Crypto` listing must carry an
+`exchange_mic` (AA-04, AA-18). The individual-resident basis is stated on every
+report that applies the rate — realised gains, net capital gain, tax summary,
+the parcel optimiser, the pre-sale what-if's year rows and the archived Annual
+Tax Report's `meta` (AA-05). Partial DRP participation is refused naming both
+figures, and its documented workaround works exactly as written **including
+both stated caveats**: the per-share cross-check left on a split half is itself
+a `422`, and an exactly half-and-half split does trip `duplicate_income`
+(AA-10). K10/K11's omission is reported on the data, not only in a paragraph —
+a USD trade contracted 2025-01-30 and settling 2025-02-03 raises FX coverage's
+`settlement_crosses_rate_month` (AA-11). The reduced cost base is identical to
+the cost base by construction, element 3 being the only excluded element and
+not recordable (AA-09). And the estate/LPR side (AA-15), unvested ESS grants
+with their dividend equivalents (AA-16), crypto chain splits and wrapping
+(AA-17) and the related-payments rule (AA-20) are each documented in unusual
+detail, with their recordable halves working — a dividend equivalent entered as
+`EmploymentIncome` reports on its own line and in no dividend total.
+
+**Six findings, all closed** — five from the pass and a sixth found while
+fixing the first:
+
+| Finding | Scenarios | Fixed by |
+| --- | --- | --- |
+| An indexation-eligible parcel is silently costed on the discount, and the reason given for not modelling it is false for a wide, enterable range | AA-02 | `369e040` |
+| A non-renounceable rights issue is indistinguishable from a renounceable one, and its retail premium is recorded as a capital gain | AA-13 | `a86a074`, `73cd193` |
+| The investor-not-share-trader assumption is stated nowhere | AA-07 | `8c84079` |
+| A disposal recorded at nil proceeds raises a capital loss that nothing questions | AA-03 | `28a0942` |
+| Four limitations are documented without the workaround that exists and works | AA-06, AA-08, AA-12, AA-19 | `a9506a7` |
+| The archived CGT worksheet prints a whole parcel's initial cost against a part of it | AA-02 (found while fixing) | `69981ba` |
+
+**Only two of the six came from the scenario list as written.** AA-b came from
+asking what `sell_rights` does when the offer it assumes is not the one
+recorded — the `RightsIssue` action records no renounceability, so TR 2017/4
+capital treatment and TR 2012/1 unfranked-dividend treatment turn on a fact the
+system never collected. AA-c came from noticing that AA-07 was the only
+scenario in the section with **no documented limitation behind it at all**.
+AA-f came from a fixing agent's incidental report, re-driven from scratch and
+bounded with its control (a whole-parcel disposal prints correctly; only a
+partial one is wrong) before being logged.
+
+**Two figures in the findings' own write-ups were wrong, and both were caught
+by re-deriving rather than by reading.** AA-a's indexation factor for a
+September 1985 quarter cost is **1.730**, not the 1.731 the finding claimed —
+1.731 comes from the superseded 1989-90-base CPI series the ATO marks as no
+longer usable for tax purposes — so the reproduction's advantage is A$2,700,
+not A$2,690. (The 2.46× crossover held exactly.) And AA-e's write-up said a
+joint holding's `amount_per_security` *and* `securities_held` are keyed to your
+own half; only `securities_held` is, because the check multiplies the two, so
+documenting the write-up's version would have told users to halve the rate and
+collect a `422`.
+
+**Three of the fixes replaced a hand-maintained list or a silent assumption
+with a rule**, which is the lesson Y and Z each taught twice. AA-d's fix found
+**three** existing transcriptions of the trades provenance columns — and one of
+them already wrong, reporting a crypto network-fee Sell as `entered directly`
+because that Sell carries its link on the *transfer* rather than the trade row
+— and replaced all three with one classification plus a
+`PRAGMA foreign_key_list` guard that fails on any unclassified foreign key.
+AA-b made `renounceable` a **required** body field rather than a defaulted one,
+on the reasoning that a default leaves the same silent assumption for every new
+entry, which is the finding itself. And AA-b's second item pulled the shared
+TR 2012/1 clause out so the exercise and sell-rights refusals read as one rule
+applied in two places.
 
 ## A. Deletion and mutation ripple effects
 
