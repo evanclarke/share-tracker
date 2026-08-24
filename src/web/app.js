@@ -22,7 +22,7 @@ import {
   buildFieldInput, readFieldValue, wireGstBrokerage, allocationEditor,
 } from './forms.js';
 import { ENTITIES, REPORTS, ACTIONS } from './config.js';
-import { seriesChart, presetRange, sliceSeries } from './chart.js';
+import { seriesChart, presetRange, sliceSeries, SERIES_FIELDS, seriesField } from './chart.js';
 import { buildNav, setActiveNav } from './nav.js';
 import { viewTaxReport } from './taxreport.js';
 
@@ -2065,6 +2065,9 @@ const RANGE_PRESETS = [
 ];
 const RANGE_PREF_KEY = 'share-tracker.overview.range';
 const HIDE_INACTIVE_PREF_KEY = 'share-tracker.overview.hideInactive';
+// Which of chart.js's SERIES_FIELDS the graph plots, remembered the same way
+// (one series at a time — see chart.js for why they can't share an axis).
+const SERIES_PREF_KEY = 'share-tracker.overview.series';
 
 // A period figure formatted through the shared money display rules
 // (COLUMN_KINDS 'money': round to 2 dp + thousands grouping, full value on
@@ -2185,11 +2188,26 @@ async function renderPeriodSummary(r) {
 async function performancePanel() {
   const series = await api('GET', '/report_snapshots/series');
   if (!series || series.length < 2) {
-    return el('div', { class: 'card perf-panel' }, [el('h3', null, 'Performance'), seriesChart(series)]);
+    return el('div', { class: 'card perf-panel' }, [
+      el('h3', null, 'Performance'),
+      seriesChart(series, loadPref(SERIES_PREF_KEY, SERIES_FIELDS[0].key)),
+    ]);
   }
 
   const statsHolder = el('div');
   const chartHolder = el('div');
+  // The series selector: market value and unrealised gain are an order of
+  // magnitude apart, so the graph draws one at a time and scales its y axis
+  // to that one (chart.js `yBounds`). The choice is remembered across
+  // reloads, like the range preset.
+  const seriesSel = el('select', { id: 'series-field' }, SERIES_FIELDS.map(function (s) {
+    return el('option', { value: s.key }, s.label);
+  }));
+  seriesSel.value = seriesField(loadPref(SERIES_PREF_KEY, SERIES_FIELDS[0].key)).key;
+  seriesSel.addEventListener('change', function () {
+    savePref(SERIES_PREF_KEY, seriesSel.value);
+    drawChart();
+  });
   const detailHolder = el('div');
   const fromInp = el('input', { type: 'date' });
   const toInp = el('input', { type: 'date' });
@@ -2203,12 +2221,21 @@ async function performancePanel() {
     return { from: rFrom, to: rTo };
   }
 
+  // The range currently drawn, so switching series redraws the same window
+  // without re-running the period-performance request below it.
+  let shownFrom = null, shownTo = null;
+  function drawChart() {
+    chartHolder.innerHTML = '';
+    chartHolder.appendChild(seriesChart(sliceSeries(series, shownFrom, shownTo), seriesSel.value));
+  }
+
   async function applyRange(from, to) {
     syncPresetButtons();
     fromInp.value = from;
     toInp.value = to;
-    chartHolder.innerHTML = '';
-    chartHolder.appendChild(seriesChart(sliceSeries(series, from, to)));
+    shownFrom = from;
+    shownTo = to;
+    drawChart();
     statsHolder.innerHTML = '';
     detailHolder.innerHTML = '';
     const resolved = nearestSeriesDates(from, to);
@@ -2272,6 +2299,7 @@ async function performancePanel() {
   const panel = el('div', { class: 'card perf-panel' }, [
     el('h3', null, 'Market value and unrealised gain over time'),
     statsHolder,
+    el('div', { class: 'series-control' }, [el('label', { for: 'series-field' }, 'Series'), seriesSel]),
     chartHolder,
     rangeForm,
     detailHolder,

@@ -503,13 +503,26 @@ mod tests {
         assert!(js.contains("rangeToInp"));
         // The time-series graph is built as inline SVG (no build step, no
         // chart library) from the series endpoint: market value and
-        // unrealised gain over the stored snapshot dates.
+        // unrealised gain over the stored snapshot dates, one series at a
+        // time (the two are an order of magnitude apart, so on one axis the
+        // smaller read as a flat line) chosen by a remembered selector, with
+        // the y axis scaled to the chosen series rather than anchored at zero.
         assert!(js.contains("/report_snapshots/series"));
         assert!(js.contains("seriesChart"));
         assert!(js.contains("createElementNS"));
         assert!(js.contains("polyline"));
         assert!(js.contains("market_value"));
         assert!(js.contains("unrealised_gain"));
+        assert!(js.contains("SERIES_FIELDS"));
+        assert!(js.contains("share-tracker.overview.series"));
+        assert!(js.contains("seriesSel.value"));
+        assert!(js.contains("function yBounds("));
+        // Hovering a point shows its value, money-formatted like every other
+        // figure in the app, with the point's own qualifications beneath it.
+        assert!(js.contains("chart-tip"));
+        assert!(js.contains("mouseenter"));
+        assert!(js.contains("moneyText(p[series.key])"));
+        assert!(js.contains("function pointNotes("));
         // The report-snapshot job is described in the Jobs view.
         assert!(js.contains("report-snapshot"));
         // The graph marks provisional points distinctly from stale ones, and
@@ -518,7 +531,7 @@ mod tests {
         // the total is missing.
         assert!(js.contains("p.provisional ? ' provisional' : ''"));
         assert!(js.contains("p.holding_excluded ? ' excluded' : ''"));
-        assert!(js.contains("' (omits '"));
+        assert!(js.contains("'omits '"));
         assert!(js.contains("a total that omits a holding"));
         // The chart styles ship in the bundle too.
         let css = body_string(get("/static/style.css").await).await;
@@ -528,6 +541,10 @@ mod tests {
         assert!(css.contains(".badge.excluded"));
         assert!(css.contains("circle.provisional"));
         assert!(css.contains("circle.excluded"));
+        assert!(css.contains(".chart-plot"));
+        assert!(css.contains(".chart-tip"));
+        assert!(css.contains("circle.hit"));
+        assert!(css.contains(".series-control"));
     }
 
     #[tokio::test]
@@ -2493,9 +2510,11 @@ mod tests {
         (
             "reports/snapshot.rs::unrealised_gain",
             "SeriesPoint is the market-value graph's series: chart.js plots the number \
-             (Number(p.unrealised_gain)) on an axis it labels itself, and no table cell \
-             carries it. Its market_value/total_cost_base twins are classified only \
-             because those two names are report table columns as well",
+             (Number(p[series.key])) on an axis it labels itself and formats it for the \
+             point tooltip through the prose formatter (moneyText, which takes the kind \
+             rather than looking the column up), and no table cell carries it. Its \
+             market_value/total_cost_base twins are classified only because those two \
+             names are report table columns as well",
         ),
     ];
 

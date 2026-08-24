@@ -326,6 +326,44 @@ input[type=checkbox] { width: auto; }
    series began): the strongest of the three point markers, because the value
    is not comparable with its neighbours — the graph steps here. */
 .series-chart circle.excluded { stroke: var(--danger); stroke-width: 2; }
+/* The zero baseline, drawn only when the plotted series crosses it: with the
+   axis scaled to the series (not anchored at zero) the sign change would
+   otherwise be invisible. */
+.series-chart .zero { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 4 3; }
+/* Over-sized invisible hover targets, one per point (a 3px dot is hard to
+   hit); `pointer-events: all` so the transparent fill still receives them. */
+.series-chart circle.hit { fill: transparent; stroke: none; pointer-events: all; cursor: pointer; }
+
+/* Point tooltip: an HTML box positioned over the plot in percentages of the
+   SVG viewBox (which map linearly to the rendered box, since the SVG scales
+   uniformly). Centred above the point, anchored to one side near an edge. */
+.chart-plot { position: relative; }
+.chart-tip {
+  position: absolute;
+  z-index: 5;
+  transform: translate(-50%, -100%);
+  margin-top: -10px;
+  padding: 6px 9px;
+  background: var(--ink);
+  color: #fff;
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: nowrap;
+  pointer-events: none;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, .25);
+}
+.chart-tip[hidden] { display: none; }
+.chart-tip.tip-right { transform: translate(0, -100%); }
+.chart-tip.tip-left { transform: translate(-100%, -100%); }
+.chart-tip-date { color: #aab3c0; }
+.chart-tip-value { font-weight: 600; }
+.chart-tip-note { color: #ffd9a0; }
+
+/* The market-value / unrealised-gain selector above the graph. */
+.series-control { display: flex; align-items: center; gap: 8px; margin: 4px 0 8px; }
+.series-control label { color: var(--muted); font-size: 12px; }
+
 .legend-mv { color: var(--accent); }
 .legend-ug { color: var(--ok); }
 .badge.stale { background: #fdf3e0; color: var(--warn); }

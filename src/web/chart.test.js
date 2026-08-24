@@ -7,7 +7,7 @@
 //
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { presetRange, sliceSeries } from './chart.js';
+import { presetRange, sliceSeries, yBounds, seriesField, pointNotes, SERIES_FIELDS } from './chart.js';
 
 function series(dates) {
   return dates.map(function (d) { return { snapshot_date: d, market_value: '100', unrealised_gain: '10' }; });
@@ -81,4 +81,75 @@ test('sliceSeries: empty result when the range matches nothing', () => {
 
 test('sliceSeries: tolerates a missing series', () => {
   assert.deepEqual(sliceSeries(null, '2026-01-01', '2026-02-01'), []);
+});
+
+// ---- yBounds ----------------------------------------------------------------
+
+test('yBounds: pads the plotted extremes by 10% of their span, not by 10% of the values', () => {
+  // A market-value series that moves 20k on a 500k base: padding by 10% of
+  // the *value* (450k..550k) would leave the line in the middle 20% of the
+  // plot — the flat graph this replaced. 10% of the span keeps it filling it.
+  const s = [{ market_value: '500000' }, { market_value: '510000' }, { market_value: '520000' }];
+  assert.deepEqual(yBounds(s, 'market_value'), { min: 498000, max: 522000 });
+});
+
+test('yBounds: the axis is not anchored at zero', () => {
+  const s = [{ market_value: '100' }, { market_value: '200' }];
+  const b = yBounds(s, 'market_value');
+  assert.equal(b.min, 90);
+  assert.equal(b.max, 210);
+});
+
+test('yBounds: spans a series that crosses zero', () => {
+  const s = [{ unrealised_gain: '-500' }, { unrealised_gain: '1500' }];
+  assert.deepEqual(yBounds(s, 'unrealised_gain'), { min: -700, max: 1700 });
+});
+
+test('yBounds: a flat series falls back to 10% of its own magnitude, never a zero-height axis', () => {
+  const flat = yBounds([{ market_value: '400' }, { market_value: '400' }], 'market_value');
+  assert.deepEqual(flat, { min: 360, max: 440 });
+  // …and a flat series *at* zero still gets a usable range.
+  assert.deepEqual(
+    yBounds([{ unrealised_gain: '0' }, { unrealised_gain: '0' }], 'unrealised_gain'),
+    { min: -1, max: 1 },
+  );
+});
+
+test('yBounds: ignores non-numeric points, and falls back to 0..1 when none are numeric', () => {
+  const s = [{ market_value: '100' }, { market_value: null }, { market_value: '300' }];
+  assert.deepEqual(yBounds(s, 'market_value'), { min: 80, max: 320 });
+  assert.deepEqual(yBounds([{ market_value: null }], 'market_value'), { min: 0, max: 1 });
+  assert.deepEqual(yBounds([], 'market_value'), { min: 0, max: 1 });
+  assert.deepEqual(yBounds(null, 'market_value'), { min: 0, max: 1 });
+});
+
+// ---- seriesField ------------------------------------------------------------
+
+test('seriesField: resolves each configured series, and falls back to market value', () => {
+  assert.equal(seriesField('market_value').key, 'market_value');
+  assert.equal(seriesField('unrealised_gain').key, 'unrealised_gain');
+  // A preference remembered from an older build, or nothing stored at all.
+  assert.equal(seriesField('total_cost_base').key, SERIES_FIELDS[0].key);
+  assert.equal(seriesField(null).key, 'market_value');
+  assert.equal(seriesField(undefined).key, 'market_value');
+});
+
+// ---- pointNotes -------------------------------------------------------------
+
+test('pointNotes: an unqualified point carries no note', () => {
+  assert.equal(pointNotes({ snapshot_date: '2026-07-01', market_value: '100' }), '');
+});
+
+test('pointNotes: names every qualification the point carries, and what a total omits', () => {
+  assert.equal(pointNotes({ stale: true }), 'stale snapshot');
+  assert.equal(pointNotes({ provisional: true }), 'provisional FX');
+  assert.equal(pointNotes({ price_carried_forward: true }), 'carried-forward price');
+  assert.equal(
+    pointNotes({ holding_excluded: true, excluded_holdings: [{ ticker: 'LAC' }, { ticker: 'LAAC' }] }),
+    'omits LAC, LAAC',
+  );
+  assert.equal(
+    pointNotes({ stale: true, provisional: true }),
+    'stale snapshot; provisional FX',
+  );
 });
