@@ -488,6 +488,19 @@ opens by saying only a lapse can be recorded there. Tests: the two refusals and 
 round-trips through `PUT`, the flag required/forbidden, and `migration_0047_…` proving an existing
 row reads back as renounceable through the model.
 
+### AA-b, second item — the exercise path still accepts a cost on a non-renounceable offer
+
+- [ ] Refuse `rights_cost` on `POST /corporate_actions/:id/exercise` for a non-renounceable offer.
+
+Flagged by the agent that fixed AA-b and deliberately left unenforced there; **decided 2026-08-25 to
+refuse it now.** `sell_rights` refuses a positive `rights_cost` on a non-renounceable offer because
+TR 2012/1 para 2 defines the scheme by entitlements that "cannot be traded, transferred, assigned or
+otherwise dealt with" — so nothing can have been paid to acquire them. The same fact makes the amount
+impossible on the **exercise** path, which still accepts it. The consequence is smaller and more
+visible than `sell_rights`' was (a stray cost inflates the new parcel's cost base rather than
+fabricating a capital loss out of money never paid), but it is the same impossible amount, and the
+guard should not hold on one path and not the other.
+
 ## SCENARIOS AA-c — the investor-not-share-trader assumption is stated nowhere
 
 - [x] Decide and implement (options below).
