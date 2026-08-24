@@ -1520,6 +1520,50 @@ mod tests {
         assert!(!js.contains("location.hash = '#/r/overview'"));
     }
 
+    /// An entity with a `custom` view is reached at its own hash route
+    /// (`#/jobs`, `#/prices`, `#/sells`, `#/transfers`) — the generic
+    /// `#/e/<slug>` cannot render it and used to print the raw TypeError the
+    /// generic list view threw as the whole page body (SCENARIOS Y-f).
+    /// Nothing in the app emits such a URL, so it is only ever hand-typed or
+    /// a stale bookmark; the router now sends it on to the real route.
+    #[tokio::test]
+    async fn custom_view_entities_redirect_off_the_generic_entity_route() {
+        let js = app_js_body().await;
+        // `location.replace`, deliberately not an assignment to
+        // location.hash: the redirect must not leave the dead URL in history
+        // for the Back button to return to.
+        assert!(js.contains("if (entity.custom) return location.replace('#/' + entity.custom);"));
+        // …and every custom view config.js's ENTITIES names has a router
+        // branch to land on, so the redirect can never point at nothing.
+        let config = body_string(get("/static/config.js").await).await;
+        let entities = config
+            .split("export const ENTITIES")
+            .nth(1)
+            .expect("config.js declares ENTITIES")
+            .split("export const REPORTS")
+            .next()
+            .expect("ENTITIES is followed by REPORTS");
+        let customs: Vec<&str> = entities
+            .match_indices("custom: '")
+            .map(|(i, m)| {
+                let rest = &entities[i + m.len()..];
+                &rest[..rest.find('\'').expect("a closing quote")]
+            })
+            .collect();
+        assert_eq!(
+            customs,
+            ["jobs", "prices", "sells", "transfers"],
+            "the custom-view entities changed — the redirect covers whichever they are, \
+             but each one still needs its own router branch below"
+        );
+        for slug in customs {
+            assert!(
+                js.contains(&format!("parts[0] === '{slug}'")),
+                "the router has no `#/{slug}` branch for the custom view to redirect to"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn open_parcels_report_ui_present() {
         let js = app_js_body().await;

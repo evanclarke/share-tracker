@@ -516,7 +516,7 @@ control. It was necessarily measured through the API, and now the UI matches it.
 
 ## SCENARIOS Y-f — `#/e/<custom-slug>` renders a raw JavaScript TypeError as the whole page
 
-- [ ] Send `#/e/jobs`, `#/e/closing_prices`, `#/e/sells` and `#/e/transfers` to their real routes.
+- [x] Send `#/e/jobs`, `#/e/closing_prices`, `#/e/sells` and `#/e/transfers` to their real routes. One line in the `parts[0] === 'e'` branch: an entity with a `custom` view is sent on with `location.replace('#/' + entity.custom)` — `replace`, not an assignment to `location.hash`, so the dead URL is not left in history for Back; the hashchange it fires re-enters `render()`, which resolves the custom route and stops. Placed before the `/new` and `/edit` checks, which were broken for these four too (`#/e/sells/new` → `entity.keyFields is not iterable`, `#/e/sells/edit/1` → `HTTP 405`) and now land on the real list screen. Driven in headless Chrome: all four (and a cold load straight onto `#/e/jobs`) land on `#/jobs` / `#/prices` / `#/sells` / `#/transfers` with the right `h2` and no console error, Back from a redirect returns to the route before it, all 21 non-custom entities still render at `#/e/<slug>`, and `#/e/nonsense` still renders "Unknown view". Pinned by `web::tests::custom_view_entities_redirect_off_the_generic_entity_route`, which asserts the `location.replace` form and that every `custom:` slug in config.js's ENTITIES has a router branch to land on; `docs/API.md`'s hash-route sentence notes the redirect.
 
 Four entities are rendered by custom views reached at their own routes (`#/jobs`, `#/prices`,
 `#/sells`, `#/transfers`). `app.js`'s router still resolves `#/e/<slug>` for them through the generic

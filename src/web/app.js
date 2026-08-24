@@ -2533,6 +2533,17 @@ async function render() {
     if (parts[0] === 'e') {
       const entity = entityBySlug[parts[1]];
       if (!entity) throw new Error('Unknown view');
+      // An entity with a `custom` view is reached at its own route (#/jobs,
+      // #/prices, #/sells, #/transfers) and that is what nav.js links; the
+      // generic views below cannot render it. Nothing in the app emits an
+      // #/e/<slug> for one, so this is only ever a hand-typed or stale
+      // bookmarked URL — send it on to the real route rather than let the
+      // generic view fail and print its raw TypeError as the page body.
+      // `location.replace` (not assigning location.hash) keeps the dead URL
+      // out of history, so Back doesn't return straight to it. The hashchange
+      // it fires re-enters render(), which resolves the custom route and
+      // stops — this branch is not reached a second time.
+      if (entity.custom) return location.replace('#/' + entity.custom);
       if (parts[2] === 'new') return await viewEntityForm(entity, null);
       if (parts[2] === 'edit') return await viewEntityForm(entity, parts.slice(3));
       return await viewEntityList(entity);
