@@ -88,7 +88,7 @@ behind or became a recorded finding.
 | V. Back-dated and out-of-order entry | 10 | 2026-08-23 (`4b579c8`) | 5 raised, all closed — see below |
 | W. Precision, rounding, and scale | 8 | 2026-08-23 (`d02cdc2`) | 6 raised, all closed — see below |
 | X. Transactional integrity and concurrency | 8 | 2026-08-23 (`f01d814`) | 2 raised, both closed — see below |
-| Y. Web UI | 12 | — | — |
+| Y. Web UI | 12 | 2026-08-24 (`8f86b94`) | 7 raised, all closed — see below |
 | Z. Composite lifecycle scenarios | 12 | — | — |
 | AA. Boundary and out-of-scope scenarios | 20 | — | — |
 
@@ -1306,6 +1306,50 @@ would attribute both to one replacement and refuse the second with `DuplicatePar
 closed — a refusal, not a wrong figure — and constructing it is awkward enough that no reproduction
 was built; recorded here rather than chased.
 
+
+### Section Y findings
+
+Driven 2026-08-24 (`8f86b94`) against a throwaway database in a **real browser** — `scripts/ui-drive.js`,
+a zero-dependency Chrome DevTools Protocol driver written for this pass, clicking, typing, hovering,
+answering native `confirm()` dialogs, emulating print media and capturing every console error. That
+mattered: four of the seven findings are invisible to a `--dump-dom` render.
+
+**Six scenarios came back correct.** All 8 corporate-action types render their own field group,
+per-type date label and description, and a value typed into one survives flipping the type away and
+back (Y-04). The Annual Tax Report prints as a document — 7 tables, 124 rows, no filter row, no sort
+indicators, no pager, chrome hidden, headers repeated across page breaks, no table overflowing A4 in
+either orientation, 9 pages of PDF (Y-06). The overview graph's presets resolve against the stored
+series and **FY** clamps to 2024-07-01 across the 30 June boundary (Y-07). A 504-row table pages at
+50, sorts the whole set rather than the visible page, re-pages on a filter change, and distinguishes
+"No matching records." from "No records." (Y-08). Every one of **98 hash routes** the app can
+generate rendered a view with no console error (Y-09). Row History renders for all 22 audited tables,
+with its multi-occupant split, notice and deep-link drill-in working; `tax_year_settings` stays one
+occupant across a delete-and-re-enter by design, because a natural key names one fact forever (Y-11).
+The nav carries all 25 entities and 24 reports with none dropped, and `nav.test.js` already fails a
+new report whose `menu` is missing or typo'd (Y-12).
+
+**Seven findings, all closed.** Two came from the scenario list: the error toast that held a
+nine-table refusal for six seconds, undismissable and unrecoverable (Y-a, `52c4b90`), and the 50-row
+allocation refused without saying what it summed to, beside an editor with no running total (Y-b,
+`1b4cd6f`). Four came from the **standing probes** rather than any scenario — the AMIT confirm gate
+listing per-parcel quantities in one unit basis under a total in another (Y-c, `0c4fe26`), two Tax
+Summary money columns missing from `COLUMN_KINDS` so the screen printed `1234567.8912` where its own
+CSV printed `1234567.89` (Y-d, `c3e288a`), the `#/e/<custom-slug>` routes rendering a raw JavaScript
+TypeError (Y-f, `464f83d`), and — the most serious — a **no-op edit** of an income row silently
+writing an `entitlement_date` that then stopped tracking the pay date, leaving A$9,000 in the wrong
+financial year (Y-e, `673d194`). The seventh was found while fixing the fourth: the health banner
+writes money into sentences, which `COLUMN_KINDS` does not govern (Y-g, `a5d24d4`).
+
+Y-d and Y-g between them turned one hand-maintained list into two enforced rules: every `Decimal` on
+the server's wire must carry a display kind, and money written into prose must go through the shared
+formatter. Archived in [`DONE/web-frontend.md`](DONE/web-frontend.md), except Y-e in
+[`DONE/trades-income.md`](DONE/trades-income.md).
+
+**One thing this pass could not settle**, recorded as an observation rather than a finding: the AMIT
+confirm text grows with parcel count — 2,710 characters at 50 parcels — against Chromium's 3,000-char
+elide limit on macOS and its 32-*row* limit on Linux/GTK, which 50 parcels already exceeds. Headless
+Chrome does not render the dialog (CDP reports the string passed in, not what is drawn — checked at
+500, 2,000, 4,000 and 9,000 characters), so there is no reproduction to reason from.
 
 ## A. Deletion and mutation ripple effects
 

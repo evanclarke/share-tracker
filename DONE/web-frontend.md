@@ -270,3 +270,346 @@ generic machinery:
   (VAS→VASX→VASY) with the right headings and **Undo on the newest row only**, `#/renames/2` (no
   chain) renders the empty-state line, and `#/rename/1` renders the form with all six inputs, the
   exchange picker populated, and the hints quoting the listing's current ticker, name and exchange.
+
+## SCENARIOS Y-a — an error toast holds a refusal for six seconds and then it is gone
+
+- [x] Make an error toast persist until it is dismissed, and announce it. Option 1, as chosen.
+      `util.js`'s `toast()` is now two tiers that differ in *kind*: a success toast keeps its 3 s
+      auto-hide (measured 3,043 ms after, 3,051 ms before — unchanged), an error toast is given no
+      timeout at all and stays until dismissed (measured still on screen, text intact, at 15,042 ms;
+      before it hid at 6,595 ms from the click). Dismissal is a real `<button class="toast-close">`
+      (click, Enter and Space all measured), click anywhere on the toast, and Escape while the close
+      button has focus. The item carries `role="alert"` (error) / `role="status"` (success) — on the
+      inserted item rather than on `#toast`, which is `hidden` whenever the stack is empty and so is
+      not a live region anything is already watching. Signature unchanged, so none of the ~25 call
+      sites moved.
+      **Replacement:** toasts now *stack* instead of overwriting. Silently replacing an undismissed
+      error loses exactly what the auto-hide lost, so a new message is appended below; the newest is
+      the bottom item, where the single toast used to sit. A repeat of a message already showing
+      re-inserts that one (so it is announced again) rather than stacking a duplicate — driven:
+      four toasts, one a repeat, leave three items with the first error still readable. The stack is
+      capped at the viewport and scrolls, so nothing is ever dropped to make room (five undismissed
+      251-character errors fit inside 820×700).
+      **Navigation:** clears nothing. An error naming the records to go and remove is read *while*
+      navigating to remove them, so clearing on the hash change would destroy it at the moment it is
+      being acted on — and several save paths set `location.hash` immediately after toasting, so
+      clearing on navigation would mean a "Saved." was never seen at all. Driven: the refusal
+      survives two hash changes. `web::tests` pins this the strong way, by asserting the `#toast`
+      element is reached from exactly one place in the whole served bundle — `toast()` itself — so
+      no view and no route change *can* take a refusal away.
+      One thing the write-up did not raise, found while measuring: last in the document, the close
+      button took **113 Tab presses** to reach on the listings screen. `#toast` is now first in
+      `<body>` (`position: fixed`, so the layout is identical) — **1 Tab press**.
+      Rendering is unchanged at all three viewports the finding measured (2/2/3 lines at 1280×900,
+      1024×768, 820×700, nothing clipped, no horizontal body scroll), a 1,059-character refusal
+      wraps to 7/10/12 lines and still fits, and `@media print` still hides it.
+      Tests: `toastLifetime` unit-tested in `src/web/util.test.js` (an error's lifetime is
+      *absent*, not merely longer); `web::tests`'s
+      `error_toasts_persist_until_dismissed_and_announce_themselves` and
+      `toast_stack_markup_and_styling` pin the wiring, the single-owner negative assertion above,
+      the tab-order position and the print/hidden CSS rules. `docs/API.md`'s "Error bodies"
+      paragraph now says the error toast stays until dismissed and that toasts stack.
+
+Driven through `scripts/ui-drive.js` against a throwaway database. Deleting a listing that nine other
+tables draw on answers `422 this listing is still referenced by AMMA statements (1), closing prices
+(1), corporate actions (1), DRP enrolment periods (1), ESS statements (1), income (1), inheritances
+(1), investment expenses (1), trades (2) — remove those records first`. The toast **does** show it in
+full — measured at 1280×900, 1024×768 and 820×700, wrapping to 2–3 lines, never clipped, never
+overflowing the viewport, `scrollHeight == clientHeight` — so the rendering half of Y-02 is correct.
+
+What is not correct is how long it is there for. Measured: **6,045 ms** from click to `hidden`, fixed
+(`util.js`'s `toast()` uses `isError ? 6000 : 3000`). It has no close button, no click handler
+(clicking it does nothing), no `role` and no `aria-live`, and once it hides the text exists **nowhere
+else in the document** — checked. So the user has six seconds to read and memorise nine table names
+before the only statement of why their delete failed is destroyed, with no way to bring it back. The
+longest 422 the API can produce is a serde unknown-field rejection at **638 characters**; it renders
+in three lines and is equally unrecoverable.
+
+The same six-second window produced a false finding inside this very pass: a "Saved." toast still on
+screen from the *previous* entity was read as `tax_year_settings` having saved a blank form. A toast
+that outlives the action it belongs to is ambiguous in both directions.
+
+**Options offered:**
+1. **Error toasts persist until dismissed** — an error toast stays up with a close button (and
+   click-to-dismiss); success toasts keep the 3 s auto-hide. Add `role="alert"`.
+2. Scale the timeout to the message length (e.g. 6 s + 60 ms/char, capped), plus `role="alert"`.
+3. Keep the toast and additionally render the refusal into a persistent inline block in the view.
+4. Leave it and record a known limitation.
+
+**Chosen: option 1.** No arithmetic, matches the existing two-tier success/error split, and the
+message stays until the user has actually dealt with it.
+
+## SCENARIOS Y-b — a 50-parcel allocation is refused without saying what it adds up to
+
+- [x] Name the sum in the refusal, and show a running total in the allocation editor. Both halves
+      done. Server: `SellError::AllocationMismatch` now carries `{ allocated, quantity }` and its
+      `From<SellError> for ApiError` arm answers `the allocations sum to {allocated}, not the
+      {quantity} units sold` — the exact wording `reports::net_capital_gain` already uses on the
+      what-if path, and it reads correctly for the buy-back participation that raises the same
+      error (its own body field is `units`). `rights_sale`'s equivalent split in two, because a
+      negative row can sum correctly while being nonsense: `AllocationsDontSum { allocated, units }`
+      → `the allocations sum to {allocated}, not the {units} rights sold` (an empty list falls out
+      here as a nil sum), and a new `AllocationNotPositive` → `each anchoring parcel allocation must
+      be for a positive number of rights`. `transfer` confirmed to have no sum invariant — its
+      Sell's quantity *is* the allocations' own sum. Client: `allocationEditor` renders a live
+      running total over a new pure `util.js` `allocationSummary()` (exact decimal-string
+      arithmetic via `addDecimalStrings`, never parseFloat — 50 eight-decimal crypto rows are unit
+      tested), muted while nothing is allocated yet, green on a match, amber on a shortfall/excess,
+      and it names the amount. Callers: the Sell form passes `requiredTotal` reading its
+      `quantity`; the two allocation-taking actions declare `requiredField: 'units'` in `config.js`
+      and `viewAction` turns that into the same closure; the Transfer's two editors deliberately
+      declare none (no target exists) and show the running total alone. Driven at 50 rows: before,
+      `HTTP 422: the parcel allocations do not sum to the sell quantity` with no total on screen;
+      after, `Allocated: 4910 of 5000 — 90 short.` live in the editor and `HTTP 422: the
+      allocations sum to 4910, not the 5000 units sold` from the server. Tests: rejection-wording
+      tests in `sell.rs`/`rights_sale.rs`/`buyback_participation.rs`, 9 `util.test.js` cases,
+      `web::tests::allocation_editors_show_a_running_total`; `docs/API.md` updated in three places.
+      NOTE: the reproduction DB no longer held the finding's 50 open parcels — an earlier session's
+      successful 5000-unit Sell (trade 204) had consumed them; deleted it to restore the state.
+
+Y-03 driven with 50 open parcels on one listing. The editor itself holds up: "+ Add allocation" 49
+times took 413 ms, all 50 rows render, each parcel select carries all 50 options labelled
+`101: FIFTY — 100 remaining (acquired 2022-01-10)`, the submit button stays reachable, and a correct
+50-row allocation saves (`Sell saved.`). A wrong one is refused safely.
+
+But with one row typed as `10` instead of `100`, the refusal is
+`HTTP 422: the parcel allocations do not sum to the sell quantity` — it never says what they *do* sum
+to, no row is marked, and the editor shows no running total (`allocationEditor` renders heading,
+hint, rows and an add button, and nothing else). So the user is told 50 numbers are wrong by an
+unstated amount and must add them up by hand to find out which — inside the six-second window of
+Y-a.
+
+The better wording already exists one room away: `reports/net_capital_gain.rs:1244` refuses the same
+condition on the what-if path as `the allocations sum to {total}, not the {n} units sold`. The write
+path that matters has the worse message. Scope is `entities/sell.rs`'s `SellError::AllocationMismatch`
+(shared with buy-back participation) and `entities/rights_sale.rs`'s equivalent; `transfer` moves
+whole parcels and has no sum invariant.
+
+**Options offered:**
+1. **Both** — give the 422 the figures, and add a live allocated-vs-required total to the shared
+   `allocationEditor`.
+2. Server message only.
+3. Running total in the editor only.
+4. Leave it.
+
+**Chosen: option 1.** The server half is the correctness fix and is testable; the editor half is what
+actually helps at 50 rows.
+
+## SCENARIOS Y-c — the AMIT confirm dialog's own numbers do not add up
+
+- [x] Return each generated adjustment's re-based quantity too, and show both in the confirm gate.
+
+Y-05 driven on an AMMA statement over a listing carrying a 1-for-2 `ShareSplit` between acquisition
+and the statement's year end. The gate works in every other respect: it previews without writing,
+Cancel writes nothing (0 adjustments after), Accept writes 2 and reports the mismatch in the toast,
+and the mismatch warning is prominent. What it showed was:
+
+```
+  • 10: Buy 1000 (XASX:MEGA, 2023-08-10) — 1000
+  • 11: Buy 5 (XASX:MEGA, 2024-05-01) — 5
+
+Adjusted units 2005 vs the statement’s units held 1000
+
+⚠ MISMATCH of 1005 units.
+```
+
+The listed quantities sum to 1,005; the stated total is 2,005; and the mismatch figure is *also*
+1,005, which actively invites the reader to think one of the two is a typo for the other. Both server
+figures are right and deliberately so — `GeneratedAdjustments` documents that `created[].quantity` is
+each parcel's **as-acquired** units while `units_adjusted` is "re-based into the statement year's unit
+basis, so it is comparable with `units_held`". The dialog puts the two bases side by side unlabelled.
+
+**Control:** the same generation over a listing with no corporate action lists 50 parcels summing to
+exactly `units_adjusted` (5,000 = 5,000). The split re-basing is the whole cause — nothing else.
+
+**Options offered:**
+1. **Return both bases per row** — `created` gains the re-based quantity, so the dialog can read
+   `1000 units (2000 in the statement year's basis)` and the list visibly reaches the total.
+2. Label the difference in the dialog text only (no API change).
+3. List the re-based quantities instead of the stored ones.
+4. Leave it.
+
+**Chosen: option 1.** Option 3 was rejected because the dialog would then show figures that do not
+match the AMIT Adjustments screen afterwards; the stored quantity must stay visible.
+
+**Done.** `created` is now `Vec<GeneratedAdjustment>` — a wrapper carrying the stored `AmitAdjustment`
+`#[serde(flatten)]`ed (so the JSON row is unchanged: `id`, `amma_statement_id`, `trade_id`,
+`quantity`) plus its own `units_adjusted`, that row's quantity re-based into the statement year's
+basis. The figure was already being computed and summed at both push sites and then discarded; it is
+now attached to the row, so `Σ created[].units_adjusted == units_adjusted` holds by construction and
+a test asserts it. `adjustmentPreviewText` shows the second figure only on rows where the two differ,
+plus one explanatory line when any row does — the no-split control's dialog is byte-identical to
+before (diffed). The split case now reads
+`• 10: Buy 1000 (XASX:MEGA, 2023-08-10) — 1000 (2000 in the statement year’s basis)` above
+`• 11: … — 5`, so the list visibly reaches 2,005. Tests:
+`db_a_split_across_covered_parcels_is_costed_on_the_year_end_basis` pins both per-row bases and the
+Σ invariant, `db_a_split_after_the_year_end_does_not_change_the_reduction` pins the equal case,
+`api_generate_returns_201_with_the_created_rows` pins the flattened wire shape, three
+`adjustmentPreviewText` cases in `util.test.js` pin the wording (including "equal but written with a
+different number of decimals shows no bracket"), and `doc_checks` pins the `docs/API.md` paragraph.
+Nothing else consumed `created[]` — `forms.js`, `config.js`'s toast and `taxreport.js` read only the
+top-level totals (taxreport.js's `units_adjusted` is the cross-check report's, a different response).
+
+One correction to the write-up above: the finding says "the mismatch figure is *also* 1,005", reading
+as if the mismatch coincidentally equalled the listed sum. It does, but by arithmetic accident of
+this fixture (1000 held, 2005 adjusted), not by any shared derivation — `difference` is
+`units_adjusted − units_held` and never touches the listed quantities. The confusion the fix removes
+is the unlabelled two bases; the coincidence is fixture noise.
+
+## SCENARIOS Y-d — two Tax Summary money columns are rendered at four decimal places, ungrouped
+
+- [x] Classify both in `COLUMN_KINDS`, and pin the list with a test so the next one cannot drift.
+
+Y-10 driven by sweeping every numeric column actually rendered on every entity list and every report
+against `util.js`'s `columnKinds()`. The entity lists came back clean — every unclassified numeric
+column there is an id, a foreign key, or a code that verbatim rendering is *required* for
+(`currencies.numeric_code` is `036`, which money formatting would destroy). The performance report's
+`total_return_pct` / `money_weighted_return_pct` are unclassified but the server already
+`round_dp(4)`s both, so verbatim is stable and correct.
+
+Two real gaps, both in the Tax Summary and both `Decimal` money on the server
+(`reports/tax_summary.rs:103,135`): **`employment_income`** and
+**`foreign_tax_offsets_cgt_discount_reduction`** are absent from `COLUMN_KINDS`' money list. With an
+employment-income row of 1,234,567.8912 entered, the same figure renders three different ways:
+
+| where | rendered |
+| --- | --- |
+| Tax Summary screen, `Employment income` | `1234567.8912` |
+| Tax Summary screen, neighbouring `Gross assessable investment income` | `2,757.30` |
+| the screen's own **Export CSV** | `1234567.89` |
+
+So the screen is the odd one out, and it is odd against its own export — the CSV was already brought
+to cents by W-c/W-f. This is that same rule with a hole in it, in the one place a hand-maintained
+name list can always grow one.
+
+**Options offered:**
+1. **Add both, plus a test pinning the list** — walk every report/entity payload and require each
+   `Decimal` column to be in `COLUMN_KINDS` or an explicit verbatim allowlist.
+2. Just add the two columns.
+3. Leave it.
+
+**Chosen: option 1** — W's "when a rule needs a list, move the list somewhere the compiler sees it",
+applied to the UI's copy of it.
+
+**Done.** Both are classified `money` in `util.js` (the screen now reads `1,234,567.89` with
+`1234567.8912` on hover, matching its own CSV export), and
+`web::tests::every_money_column_on_the_wire_has_a_display_kind` pins the map: it walks every
+`Decimal` / `Option<Decimal>` field of every `Serialize` struct **and enum** under `src` — the
+server's whole wire surface — and requires each to be classified in `COLUMN_KINDS` or listed with
+its reason in one of two verbatim allowlists: `UNCLASSIFIED_WIRE_DECIMALS` (server-rounded
+percentages, the FX-import conflict rows, the chart's series point, the tax report's per-unit
+adjustment detail) or `NOT_RENDERED_THROUGH_COLUMN_KINDS` (the Annual Tax Report and its
+`CgtSummaryYear`, which `taxreport.js` formats itself). A stale or now-classified allowlist entry
+fails too. It keys off the Rust *type*, which is why ids, foreign keys and `numeric_code` (`036`)
+never enter the walk at all. Proven with three mutations (drop `employment_income`; add a money
+field to a report payload; classify an allowlisted column) — each fails, each restore passes. The
+`src` walk itself moved to `test_support::rust_sources`, shared with `infra::db`'s deferred-`BEGIN`
+scan rather than copied.
+
+Two corrections to the write-up above. The Y-10 sweep's "entity lists came back clean" holds only
+for the columns a *populated* fixture row happened to render — which is exactly the hole a
+type-driven walk closes. Two more unclassified `Decimal`s were sitting on the Corporate Actions
+list's own column list (`scrip_cash_per_unit`, `scrip_market_value`; both per-unit figures, so
+classifying them `rate` changes no pixel — but they were unclassified all the same), and eight more
+on payloads no fixture row put on screen: the trade DRP residual trio, `difference`, and the health
+report's four figures. All classified now. And the health report's `cost_base_total`,
+`discount_total`, `statement_discount`, `units_sold` are classified now but still print raw, because
+the health banner (`app.js`) concatenates them into prose without consulting `COLUMN_KINDS` — as
+does the AMIT generate-adjustments confirm dialog for `difference`. Money in prose is a second,
+separate hole in the same rule (`taxreport.js` solved it with a `moneyText` helper); worth its own
+finding. Also noticed: `buy_brokerage`, `buy_gst_on_brokerage`, `cost_base_per_unit_aud`,
+`proceeds_per_unit_aud` and `tfn_withholding_aud` are on the Annual Tax Report's wire but named
+nowhere in `taxreport.js`.
+
+## SCENARIOS Y-f — `#/e/<custom-slug>` renders a raw JavaScript TypeError as the whole page
+
+- [x] Send `#/e/jobs`, `#/e/closing_prices`, `#/e/sells` and `#/e/transfers` to their real routes. One line in the `parts[0] === 'e'` branch: an entity with a `custom` view is sent on with `location.replace('#/' + entity.custom)` — `replace`, not an assignment to `location.hash`, so the dead URL is not left in history for Back; the hashchange it fires re-enters `render()`, which resolves the custom route and stops. Placed before the `/new` and `/edit` checks, which were broken for these four too (`#/e/sells/new` → `entity.keyFields is not iterable`, `#/e/sells/edit/1` → `HTTP 405`) and now land on the real list screen. Driven in headless Chrome: all four (and a cold load straight onto `#/e/jobs`) land on `#/jobs` / `#/prices` / `#/sells` / `#/transfers` with the right `h2` and no console error, Back from a redirect returns to the route before it, all 21 non-custom entities still render at `#/e/<slug>`, and `#/e/nonsense` still renders "Unknown view". Pinned by `web::tests::custom_view_entities_redirect_off_the_generic_entity_route`, which asserts the `location.replace` form and that every `custom:` slug in config.js's ENTITIES has a router branch to land on; `docs/API.md`'s hash-route sentence notes the redirect.
+
+Four entities are rendered by custom views reached at their own routes (`#/jobs`, `#/prices`,
+`#/sells`, `#/transfers`). `app.js`'s router still resolves `#/e/<slug>` for them through the generic
+`viewEntityList`, which then fails: `#/e/jobs` → `Cannot read properties of undefined (reading
+'map')`, `#/e/closing_prices` and `#/e/transfers` → `... (reading 'concat')`, `#/e/sells` →
+`HTTP 404`, each rendered as the entire page body.
+
+Reachability is the mitigating half and was checked rather than assumed: `nav.js` correctly links
+`'#/' + e.custom` for a custom entity, no other module builds an `#/e/<custom>` href, and the 98-route
+sweep of Y-09 found no other broken route — every route the app itself generates renders a view. So
+this is reachable only by a hand-typed or stale-bookmarked URL, which is why it is logged last.
+
+**Options offered:**
+1. **Redirect to the entity's real route.**
+2. Reject a custom entity in the generic branch so it renders the existing "Unknown view".
+3. Dismiss as unreachable.
+
+**Chosen: option 1.** One line in the router, and a stale bookmark lands somewhere useful rather than
+on what reads as a crash.
+
+## SCENARIOS Y-g — the health banner prints money as prose, unformatted
+
+- [x] Format the six banner figures through the shared money formatter, and pin the convention.
+  `moneyText` — the wrapper `taxreport.js` already had for exactly this — moved into `util.js` as
+  the one shared prose-money formatter (`numericDisplay(v, 'money')`, falling back to `cellText`);
+  `taxreport.js` now imports it instead of declaring its own, and `app.js`'s six `problems.push`
+  sentences wrap their figure in it. Quantities beside them (`quantity`, `units_sold`) stay
+  verbatim. **No hover**: the whole banner is one `<span>` holding `problems.join(' ')`, so there
+  is no element per figure to hang a `title` on — and the alert names the row ids, whose own screen
+  shows the full value on hover. Line numbers in the write-up above had all shifted by ~17 (Y-f);
+  the six sites are now 1309 / 1316 / 1323 / 1331 / 1340 / 1362.
+  Pinned by `web::tests::money_in_prose_goes_through_the_shared_formatter`: it reuses
+  `column_kinds()` (the same `util.js` parser `every_money_column_on_the_wire_has_a_display_kind`
+  uses) and scans every served module for a leaf read of a money column that is an operand of `+`
+  beside a string literal, or interpolated into a `${…}`. `MONEY_PROSE_ALLOWED` exists but is
+  **empty**: requiring the adjacent literal excludes arithmetic, and requiring a leaf read excludes
+  `config.js`'s `r.income.id` — the write-up's one false positive needed no entry after all.
+  A sibling test (`the_prose_money_scan_separates_sentences_from_sums`) pins the matcher itself
+  against both, and each of the six was individually re-broken and re-run: all six fail the scan
+  raw, none when wrapped. Driven end to end (`scripts/ui-drive.js`, throwaway DB seeded so all six
+  fire at once): `12340.1234` → `12,340.12`, `1234567.8912` → `1,234,567.89`, `9876.5432` →
+  `9,876.54`, `4321.9876` → `4,321.99`, `8765.4321` → `8,765.43`, with `1000 shares` / `400 …
+  shares` / `5 MEGA` unchanged. `docs/API.md`'s health-banner paragraph states the rule.
+  Two corrections to the write-up above: the `cost_base_total` row is the **duplicate
+  inheritances** alert (`d.inheritance_count + ' identical inheritances of …'`), not
+  "duplicate ESS parcels" — inheritances are where that column lives; and `config.js`'s
+  match is on `r.income.id`, the id *inside* the row object, not on `r.income` itself,
+  which is what made a sharper matcher able to exclude it structurally.
+
+Found while fixing Y-d, and deliberately kept separate from it: `COLUMN_KINDS` governs table *cells*,
+and the health banner does not build cells — it builds sentences, concatenating the figure straight
+in. Same rule, different render path, so Y-d's fix does not reach it.
+
+Verified live with two identical ESS statements carrying a 12,340.1234 discount:
+
+> ⚠ … 2 identical ESS statements for MEGA vesting 1000 shares at 2024-01-15 with a **12340.1234** AUD
+> discount (ids 10, 11) — …
+
+Every table in the app renders that same figure `12,340.12` with the full value on hover.
+
+**Bounded by a sweep of all seven JS modules** rather than by estimate — a money name from
+`COLUMN_KINDS` concatenated into a string without passing through `numericDisplay`. **Six sites,
+all of them `problems.push(...)` in `app.js`'s health banner:**
+
+| line | figure |
+| --- | --- |
+| `app.js:1292` | `gross_amount` — duplicate income rows |
+| `app.js:1299` | `amount` — duplicate interest rows |
+| `app.js:1306` | `amount` — duplicate investment expenses |
+| `app.js:1314` | `discount_total` — duplicate ESS statements |
+| `app.js:1323` | `cost_base_total` — duplicate ESS parcels |
+| `app.js:1345` | `statement_discount` — an ESS parcel sold inside 30 days |
+
+(The one other match, `config.js:869`, is a false positive: `r.income` is a row object, not a figure.)
+Quantities in the same sentences — `units_sold`, `quantity` — are correctly verbatim and stay so.
+
+The sanctioned fix already exists in the tree: `taxreport.js` wraps `numericDisplay(v, 'money')` as
+`moneyText` for exactly this case, the Annual Tax Report being the other place money is written
+outside a `filterableTable` cell.
+
+**Options offered:**
+1. **Format all six, and pin the convention with a scan** — route them through the shared formatter,
+   then add a test that scans the JS modules for a `COLUMN_KINDS` money name concatenated into a
+   string without going through it.
+2. Just format the six.
+3. Leave it — the banner is prose, not a figure the user transcribes.
+
+**Chosen: option 1.** This is the second hole found in one rule in one pass, which is the argument
+for pinning the call-site convention rather than fixing six call sites and hoping.

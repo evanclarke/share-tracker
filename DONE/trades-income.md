@@ -935,3 +935,67 @@ answers a logged `500`, though the result would be representable. The other is W
 `AmitReductionEvent::reduction_for_units`, still open. Both want the `prorated_initial_cost`
 treatment rather than a magnitude bound — there *is* a lesser answer in each case, which is exactly
 what distinguishes them from this section.
+
+## SCENARIOS Y-e — a no-op edit writes an entitlement date that then stops tracking the pay date
+
+- [x] Offer the pay date as a placeholder, never as a written value.
+
+Found by the standing probe "what else moved that shouldn't have", applied to an
+**edit-and-save-unchanged** of the first row of every entity. Fifteen of sixteen entities round-trip
+untouched. Income does not: opening a simple-mode trust distribution and clicking Save without
+touching anything writes `entitlement_date = date_paid`.
+
+`forms.js`'s `applyEntitlement()` prefills the field when the franking selector reads `Trust`, which
+is right for a new entry and wrong for an existing row, because **NULL is a deliberate state** — the
+field's own hint says *"Leave empty to assess by the pay date."*
+
+Writing it is not immediately visible: `entitlement_date = date_paid` gives the same financial year
+and the same FX month as NULL. The harm is that the written date then **stops tracking**. Measured
+end to end on a trust row of A$9,000 paid 2025-07-05:
+
+| step | `entitlement_date` | FY2025 | FY2026 |
+| --- | --- | ---: | ---: |
+| as entered | `null` | 2,757.30 | 23,000 |
+| after a **no-op** open-and-Save | `2025-07-05` | 2,757.30 | 23,000 |
+| then pay date corrected to 2025-06-25 | `2025-07-05` | 2,757.30 | 23,000 |
+| **control** — same correction, `entitlement_date` never written | `null` | **11,757.30** | **14,000** |
+
+The control is what proves it: correcting a June distribution's pay date moves A$9,000 into FY2025
+unless an earlier no-op save silently pinned it to July. Nothing tells the user the row stopped
+following the pay date, because they never entered the date that pinned it.
+
+**Re-derived, per U's lesson.** The first mechanism I attributed this to was the franking at-risk
+walk, which anchors on `ex_date` *else* a trust row's `entitlement_date` and flags a row
+`untested_no_ex_date` when neither is recorded — so writing one would have turned an honest warning
+into a confident answer on a window starting weeks late. **That is unreachable**: a row only opens in
+simple mode when it fits a simple shape, and the trust shape carries no franking credits, so the rows
+this prefill touches have no credits to be at risk. Driven and confirmed — the advanced-mode row was
+left untouched (`applyEntitlement` returns early when the advanced flag is set). A correct
+reproduction was not evidence for the mechanism first attributed to it.
+
+**Options offered:**
+1. **Show the pay date as a placeholder, never a value** — nothing is stored unless typed.
+2. Prefill on new entry only (`if (!existing)`).
+3. Keep writing it, but re-track it when the pay date is edited.
+4. Leave it.
+
+**Chosen: option 1.** Option 2 was rejected because a newly entered trust row would still get a
+written date the user never chose, carrying exactly the same staleness exposure; the placeholder
+communicates the default without fixing it, and fixes both cases at once.
+
+**Done.** `applyEntitlement()` no longer assigns `entitlementInput.value`; the pay date is offered as
+the field's default in a live hint appended below it (`entitlementDefaultHint(datePaid)`, a pure
+export of `forms.js`), because `<input type="date">` renders no `placeholder` in any browser. The
+hint names the pay date currently entered and re-renders on every `input`/`change` of the pay-date
+field, in advanced mode too; `config.js`'s static hint drops its now-duplicated closing sentence.
+Reveal-on-Trust and the `mode !== 'Trust'` clearing at submit are unchanged (both re-driven).
+Tests: `src/web/forms.test.js` (new) unit-tests the hint wording — the part that can be executed —
+and `web::tests::income_entitlement_date_ui_present` pins the invariant as a served-bundle
+assertion, asserting the bundle contains no assignment to the entitlement input at all. `docs/API.md`'s
+UI paragraph now states the field opens empty with the pay date named as its default.
+Re-driven end to end (headless, `scripts/ui-drive.js`): the no-op open-and-Save leaves
+`entitlement_date` `null`, and the subsequent pay-date correction to 2025-06-25 now moves the
+A$9,000 to FY2025 — 11,757.30 / 14,000, identical to the API-only control. One correction to the
+write-up above: the "control" row was **not** reachable through the UI before this fix — merely
+opening the edit form pinned the date, so a UI-driven control reproduced the bug rather than the
+control. It was necessarily measured through the API, and now the UI matches it.
