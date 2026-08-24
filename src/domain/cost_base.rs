@@ -661,7 +661,10 @@ pub struct CostBaseAdjustment {
     /// the split's effective date.
     pub date: NaiveDate,
     /// Human-readable source of the row, e.g. "AMMA statement 12 (year ended
-    /// 2025-06-30)", "Return of capital @ 0.15 AUD/unit", "2-for-1 split".
+    /// 2025-06-30)", "Return of capital @ 0.15 AUD/unit", "2-for-1 split",
+    /// "1-for-2 consolidation", "1-for-10 bonus issue" (a re-basing event is
+    /// named by its own kind and announced terms — see
+    /// the event's own `RebaseTerms`).
     pub reference: String,
     /// Native-currency reduction per as-acquired unit, where meaningful
     /// (`None` for a whole-parcel AMIT row or a split rebase).
@@ -775,7 +778,12 @@ pub fn adjustment_detail(
         rows.push(CostBaseAdjustment {
             kind: AdjustmentKind::SplitRebase,
             date: s.date,
-            reference: format!("{}-for-{} split", s.new_units, s.old_units),
+            // Named from the action's own kind and announced terms
+            // (`RebaseTerms::label`), never from the derived rebase factor:
+            // this string is printed in an archived worksheet and reconciled
+            // against the company's announcement, and a bonus issue's factor
+            // (11/10 for a 1-for-10 issue) appears in no announcement.
+            reference: s.terms.label(),
             per_unit: None,
             amount: Decimal::ZERO,
             capped: false,
@@ -1381,11 +1389,7 @@ mod tests {
     fn roc_after_a_split_is_per_post_split_unit() {
         // 2-for-1 split, then 25c per post-split unit = 50c per as-acquired
         // unit: 100 as-acquired units lose 100 × 0.50 = 50.
-        let split = SplitEvent {
-            date: date(2024, 3, 1),
-            new_units: Decimal::from(2),
-            old_units: Decimal::ONE,
-        };
+        let split = SplitEvent::share_split(date(2024, 3, 1), Decimal::from(2), Decimal::ONE);
         let roc = RocEvent {
             date: date(2024, 4, 1),
             amount_per_unit: "0.25".parse().unwrap(),
@@ -1411,11 +1415,7 @@ mod tests {
     /// them.
     #[test]
     fn itemised_roc_and_split_rows_sum_to_the_netted_reduction() {
-        let split = SplitEvent {
-            date: date(2024, 3, 1),
-            new_units: Decimal::from(2),
-            old_units: Decimal::ONE,
-        };
+        let split = SplitEvent::share_split(date(2024, 3, 1), Decimal::from(2), Decimal::ONE);
         // Two ROC payments after the split: the second (per post-split unit)
         // exceeds what's left of the parcel's $1000 cost base and floors it.
         let roc = |amount: &str, d: NaiveDate| RocEvent {
@@ -1467,6 +1467,118 @@ mod tests {
         assert_eq!(rows[0].kind, AdjustmentKind::SplitRebase);
         assert_eq!(rows[1].date, date(2024, 4, 1));
         assert_eq!(rows[2].date, date(2024, 5, 1));
+    }
+
+    /// SCENARIOS Z-e: an informational re-basing row is named by the action
+    /// it came from, at the ratio that action's own terms were stated in.
+    /// The worksheet this reaches is archived and reconciled against the
+    /// company's announcement, so the derived rebase factor (11/10 for a
+    /// 1-for-10 bonus issue) is exactly the wrong thing to print, and
+    /// "split" is the wrong word for a consolidation.
+    #[test]
+    fn rebase_rows_are_named_by_their_own_kind_and_announced_terms() {
+        let events = [
+            SplitEvent::share_split(date(2024, 3, 1), Decimal::from(2), Decimal::ONE),
+            SplitEvent::share_split(date(2024, 4, 1), Decimal::ONE, Decimal::from(2)),
+            SplitEvent::bonus_issue(date(2024, 5, 1), Decimal::ONE, Decimal::from(10)),
+            // Terms typed with a scale were announced as "2-for-1".
+            SplitEvent::share_split(
+                date(2024, 6, 1),
+                "2.00".parse().unwrap(),
+                "1.00".parse().unwrap(),
+            ),
+            // The degenerate 1-for-1 ShareSplit: representable (both terms
+            // positive is all the write path asks), re-bases nothing, and
+            // keeps the action's own name — "consolidation" would claim a
+            // unit count fell.
+            SplitEvent::share_split(date(2024, 7, 1), Decimal::ONE, Decimal::ONE),
+        ];
+        let rows = adjustment_detail(
+            &parcel(100, 10),
+            Decimal::from(100),
+            &[],
+            &[],
+            &events,
+            Held::AsAt(None),
+        )
+        .unwrap();
+
+        let references: Vec<&str> = rows.iter().map(|r| r.reference.as_str()).collect();
+        assert_eq!(
+            references,
+            vec![
+                "2-for-1 split",
+                "1-for-2 consolidation",
+                "1-for-10 bonus issue",
+                "2-for-1 split",
+                "1-for-1 split",
+            ]
+        );
+        // Every one is still the informational nil-amount row it was.
+        assert!(rows.iter().all(|r| r.kind == AdjustmentKind::SplitRebase
+            && r.amount == Decimal::ZERO
+            && r.per_unit.is_none()
+            && !r.capped));
+    }
+
+    /// The label moved; the arithmetic did not. A return of capital after a
+    /// bonus issue and a consolidation is still per unit *of the basis it was
+    /// paid in*, re-based through both events' derived factors (11/10 then
+    /// 1/2) onto the parcel's as-acquired units.
+    #[test]
+    fn a_bonus_issue_and_a_consolidation_rebase_by_their_derived_factors() {
+        let events = [
+            SplitEvent::bonus_issue(date(2024, 3, 1), Decimal::ONE, Decimal::from(10)),
+            SplitEvent::share_split(date(2024, 5, 1), Decimal::ONE, Decimal::from(2)),
+        ];
+        let roc = |amount: &str, d: NaiveDate| RocEvent {
+            date: d,
+            amount_per_unit: amount.parse().unwrap(),
+            currency: "AUD".to_string(),
+            record_date: None,
+        };
+        // 100 as-acquired units → 110 after the bonus issue → 55 after the
+        // consolidation. 10c per post-bonus unit is 11c per as-acquired unit;
+        // 20c per post-consolidation unit is 11c per as-acquired unit too.
+        let payments = [roc("0.10", date(2024, 4, 1)), roc("0.20", date(2024, 6, 1))];
+        let cb = adjusted_cost_base(
+            &parcel(100, 10),
+            Decimal::from(100),
+            &[],
+            &payments,
+            &events,
+            Held::AsAt(None),
+        )
+        .unwrap();
+        assert_eq!(cb.roc_reduction, Decimal::from(22));
+        assert_eq!(cb.adjusted, Decimal::from(978));
+
+        // The itemised rows agree with those totals, beside the two
+        // informational rows naming the events that re-based the units.
+        let rows = adjustment_detail(
+            &parcel(100, 10),
+            Decimal::from(100),
+            &[],
+            &payments,
+            &events,
+            Held::AsAt(None),
+        )
+        .unwrap();
+        let roc_total: Decimal = rows
+            .iter()
+            .filter(|r| r.kind == AdjustmentKind::ReturnOfCapital)
+            .map(|r| r.amount)
+            .sum();
+        assert_eq!(roc_total, cb.roc_reduction);
+        let rebases: Vec<&str> = rows
+            .iter()
+            .filter(|r| r.kind == AdjustmentKind::SplitRebase)
+            .map(|r| r.reference.as_str())
+            .collect();
+        assert_eq!(
+            rebases,
+            vec!["1-for-10 bonus issue", "1-for-2 consolidation"]
+        );
     }
 
     #[test]

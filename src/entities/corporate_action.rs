@@ -371,11 +371,7 @@ mod tests {
     }
 
     fn split_event(date: NaiveDate, new: &str, old: &str) -> SplitEvent {
-        SplitEvent {
-            date,
-            new_units: new.parse().unwrap(),
-            old_units: old.parse().unwrap(),
-        }
+        SplitEvent::share_split(date, new.parse().unwrap(), old.parse().unwrap())
     }
 
     fn d(y: i32, m: u32, day: u32) -> NaiveDate {
@@ -1109,6 +1105,65 @@ mod tests {
         assert_eq!(for_listing.len(), 2);
         assert_eq!(for_listing[1].new_units, Decimal::from(11));
         assert_eq!(for_listing[1].old_units, Decimal::from(10));
+    }
+
+    /// SCENARIOS Z-e: the loaders carry each action's **announced terms**
+    /// alongside the derived rebase factor, so a human-readable surface can
+    /// name the event the way the company announced it. The factor is what it
+    /// always was — a bonus issue still re-bases 11-for-10 — and only the
+    /// label reads from the terms.
+    #[tokio::test]
+    async fn db_split_events_carry_each_actions_announced_terms() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BON").await;
+        db_upsert(&pool, &split(1, 1, d(2024, 11, 30), "2", "1"))
+            .await
+            .unwrap();
+        db_upsert(&pool, &bonus(2, 1, d(2025, 3, 1), "1", "10"))
+            .await
+            .unwrap();
+        // new < old: a consolidation, announced in the same new-for-old terms.
+        db_upsert(&pool, &split(3, 1, d(2025, 6, 1), "1", "2"))
+            .await
+            .unwrap();
+        // Terms typed with a scale were still announced as "2-for-1".
+        db_upsert(&pool, &split(4, 1, d(2025, 9, 1), "2.00", "1.00"))
+            .await
+            .unwrap();
+
+        for events in [
+            db_splits_for_listing(&pool, 1).await.unwrap(),
+            db_share_split_events(&pool).await.unwrap()[&1].clone(),
+        ] {
+            let labels: Vec<String> = events.iter().map(|e| e.terms.label()).collect();
+            assert_eq!(
+                labels,
+                vec![
+                    "2-for-1 split",
+                    "1-for-10 bonus issue",
+                    "1-for-2 consolidation",
+                    "2-for-1 split",
+                ]
+            );
+            // The re-basing arithmetic is untouched by the terms travelling
+            // with the event: the bonus issue is still its equivalent split.
+            let factors: Vec<(Decimal, Decimal)> =
+                events.iter().map(|e| (e.new_units, e.old_units)).collect();
+            assert_eq!(
+                factors,
+                vec![
+                    (Decimal::from(2), Decimal::ONE),
+                    (Decimal::from(11), Decimal::from(10)),
+                    (Decimal::ONE, Decimal::from(2)),
+                    ("2.00".parse().unwrap(), "1.00".parse().unwrap()),
+                ]
+            );
+            // 100 units → 200 → 220 → 110 → 220, over the same walk as before.
+            assert_eq!(
+                split_adjusted_quantity(Decimal::from(100), &events, d(2024, 1, 1), None),
+                Decimal::from(220)
+            );
+        }
     }
 
     #[test]

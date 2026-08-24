@@ -3579,6 +3579,101 @@ mod tests {
         assert_eq!(body["disposals"]["totals"], *subtotal);
     }
 
+    /// SCENARIOS Z-e: the archived worksheet names each unit-count event by
+    /// what it actually was, at the ratio its own terms were announced in — a
+    /// **bonus issue** by its bonus-for-held terms (never the 11-for-10
+    /// factor this tool derives from them, which appears in no announcement),
+    /// and a `ShareSplit` that *reduced* the unit count as a
+    /// **consolidation**. The rows stay informational (nil amount) and the
+    /// figures either side of them are untouched.
+    #[tokio::test]
+    async fn api_a_bonus_issue_and_a_consolidation_are_named_by_their_own_terms() {
+        let pool = test_support::test_pool().await;
+        test_support::listing(1)
+            .ticker("BON")
+            .name("Bonus Co")
+            .insert(&pool)
+            .await;
+        // 1,000 units @ $2 = $2,000.
+        test_support::buy(1, 1)
+            .date(ymd(2023, 8, 1))
+            .qty(dec("1000"))
+            .price(dec("2"))
+            .insert(&pool)
+            .await;
+
+        let client = test_support::ApiClient::full(&pool);
+        // 1 bonus unit for every 10 held: 1,000 → 1,100 units.
+        client
+            .put_ok(
+                "/corporate_actions/1",
+                &serde_json::json!({
+                    "action_type": "BonusIssue",
+                    "listing_id": 1,
+                    "date": "2023-10-01",
+                    "bonus_units": "1",
+                    "bonus_held_units": "10",
+                }),
+            )
+            .await;
+        // 1 new unit for every 2 old — a consolidation: 1,100 → 550 units.
+        client
+            .put_ok(
+                "/corporate_actions/2",
+                &serde_json::json!({
+                    "action_type": "ShareSplit",
+                    "listing_id": 1,
+                    "date": "2023-11-01",
+                    "split_new_units": "1",
+                    "split_old_units": "2",
+                }),
+            )
+            .await;
+
+        // Sell the whole re-based holding: 550 units @ $5 = $2,750.
+        test_support::sell(2, 1)
+            .date(ymd(2024, 3, 1))
+            .qty(dec("550"))
+            .price(dec("5"))
+            .insert(&pool)
+            .await;
+        test_support::allocate(&pool, 1, 2, 1, dec("550")).await;
+
+        let body: serde_json::Value = client
+            .post_json(
+                "/reports/tax-report",
+                &serde_json::json!({"tax_year": 2024}),
+            )
+            .await;
+        let parcel = &body["disposals"]["listings"][0]["parcels"][0];
+
+        let adjustments = parcel["adjustments"].as_array().expect("adjustments");
+        assert_eq!(
+            adjustments
+                .iter()
+                .map(|a| a["reference"].as_str().expect("a reference"))
+                .collect::<Vec<_>>(),
+            vec!["1-for-10 bonus issue", "1-for-2 consolidation"],
+            "each re-basing row names its own action at its announced ratio"
+        );
+        assert!(
+            adjustments
+                .iter()
+                .all(|a| a["amount"] == serde_json::json!("0")
+                    && a["kind"] == serde_json::json!("SplitRebase")),
+            "they explain a changed unit count, never a cost-base movement: {adjustments:?}"
+        );
+
+        // The label moved; the arithmetic did not. The row is the 550
+        // re-based units the sale disposed of, still costed at the parcel's
+        // $2,000 initial cost base and sold for $2,750.
+        assert_eq!(parcel["units"], serde_json::json!("550"));
+        assert_eq!(parcel["initial_cost_base_aud"], serde_json::json!("2000"));
+        assert_eq!(parcel["adjusted_cost_base_aud"], serde_json::json!("2000"));
+        assert_eq!(parcel["proceeds_aud"], serde_json::json!("2750"));
+        assert_eq!(parcel["gain_loss_aud"], serde_json::json!("750"));
+    }
+
     /// The general rule behind that regression, over a document with three
     /// listing groups — an ordinary AUD disposal, an AMIT parcel carrying
     /// itemised cost-base adjustments, and a USD parcel whose every figure is

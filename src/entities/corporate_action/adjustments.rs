@@ -221,6 +221,80 @@ where
     .transpose()
 }
 
+/// What a quantity re-basing event actually *was*, in the terms it was
+/// announced in — carried beside [`SplitEvent`]'s derived rebase factor for
+/// labelling only, never for arithmetic.
+///
+/// The factor normalises a bonus issue into its equivalent split (below),
+/// which is right for the re-basing but discards the announced terms: a
+/// 1-for-10 bonus issue re-bases by 11/10, a ratio that appears in no
+/// company announcement. A `ShareSplit`'s own ratio survives the
+/// normalisation intact, but its *name* does not — new < old is a
+/// consolidation, and calling it a split says the opposite of what happened
+/// to the unit count. So the announced terms travel with the event, and
+/// [`RebaseTerms::label`] is what any human-readable surface names it by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RebaseTerms {
+    /// A `ShareSplit` whose terms increase the unit count (`new_units >=
+    /// old_units`): every `old_units` units become `new_units`.
+    ///
+    /// The degenerate `new_units == old_units` (a 1-for-1 `ShareSplit`) lands
+    /// here deliberately. It is representable — the write path only requires
+    /// both terms positive — and re-bases nothing. "Consolidation" would be
+    /// actively wrong for it (no unit count fell), so it keeps the action's
+    /// own name: "1-for-1 split" reads as the no-op restatement it is.
+    Split {
+        new_units: Decimal,
+        old_units: Decimal,
+    },
+    /// A `ShareSplit` whose terms *reduce* the unit count (`new_units <
+    /// old_units`) — a consolidation (reverse split). Announced in exactly
+    /// the same new-for-old terms as a split; only the name differs.
+    Consolidation {
+        new_units: Decimal,
+        old_units: Decimal,
+    },
+    /// A `BonusIssue`: `bonus_units` new units for every `held_units` held —
+    /// the terms as announced, *not* the equivalent split factor the event's
+    /// `new_units`/`old_units` carry.
+    BonusIssue {
+        bonus_units: Decimal,
+        held_units: Decimal,
+    },
+}
+
+impl RebaseTerms {
+    /// The event named by its own kind at its own announced ratio —
+    /// `2-for-1 split`, `1-for-2 consolidation`, `1-for-10 bonus issue`.
+    /// Reaches the archived CGT worksheet (the annual tax report's per-parcel
+    /// `adjustments` rows, via `domain::cost_base::adjustment_detail`), where
+    /// a reader reconciles it against the company's announcement — so both
+    /// halves have to match what was announced.
+    pub fn label(&self) -> String {
+        match self {
+            RebaseTerms::Split {
+                new_units,
+                old_units,
+            } => format!("{} split", ratio(*new_units, *old_units)),
+            RebaseTerms::Consolidation {
+                new_units,
+                old_units,
+            } => format!("{} consolidation", ratio(*new_units, *old_units)),
+            RebaseTerms::BonusIssue {
+                bonus_units,
+                held_units,
+            } => format!("{} bonus issue", ratio(*bonus_units, *held_units)),
+        }
+    }
+}
+
+/// `new-for-old`, with trailing zeros stripped: terms entered as `2.00`/`1.00`
+/// were announced as "2-for-1", and the stored scale is an artefact of how
+/// they were typed.
+fn ratio(new: Decimal, old: Decimal) -> String {
+    format!("{}-for-{}", new.normalize(), old.normalize())
+}
+
 /// A quantity re-basing event, as consumed by the reports and write-time
 /// checks: on `date`, every `old_units` existing units become `new_units`.
 /// A ShareSplit (TD 2000/10) is stored as its ratio directly; a
@@ -228,30 +302,71 @@ where
 /// split — every `bonus_held_units` units become `bonus_held_units +
 /// bonus_units` units — because both preserve the parcel's total cost base
 /// and acquisition date while scaling the unit count.
+///
+/// `terms` carries what the action was and how it was announced, which that
+/// normalisation drops; it is for labelling only ([`RebaseTerms`]) and no
+/// arithmetic reads it.
 #[derive(Debug, Clone)]
 pub struct SplitEvent {
     pub date: NaiveDate,
     pub new_units: Decimal,
     pub old_units: Decimal,
+    pub terms: RebaseTerms,
+}
+
+impl SplitEvent {
+    /// A `ShareSplit`'s event: its stated ratio is the rebase factor as-is,
+    /// and the terms name it a split or a consolidation by which way the
+    /// unit count moves.
+    pub fn share_split(date: NaiveDate, new_units: Decimal, old_units: Decimal) -> Self {
+        let terms = if new_units < old_units {
+            RebaseTerms::Consolidation {
+                new_units,
+                old_units,
+            }
+        } else {
+            RebaseTerms::Split {
+                new_units,
+                old_units,
+            }
+        };
+        SplitEvent {
+            date,
+            new_units,
+            old_units,
+            terms,
+        }
+    }
+
+    /// A `BonusIssue`'s event, normalised into its equivalent split for the
+    /// arithmetic (`held + bonus` for every `held`) while `terms` keeps the
+    /// announced bonus-for-held ratio.
+    pub fn bonus_issue(date: NaiveDate, bonus_units: Decimal, held_units: Decimal) -> Self {
+        SplitEvent {
+            date,
+            new_units: held_units + bonus_units,
+            old_units: held_units,
+            terms: RebaseTerms::BonusIssue {
+                bonus_units,
+                held_units,
+            },
+        }
+    }
 }
 
 fn split_event_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<SplitEvent, sqlx::Error> {
     let date = row.try_get("date")?;
     match row.try_get::<String, _>("action_type")?.as_str() {
-        "BonusIssue" => {
-            let bonus = parse_dec("bonus_units", row.try_get("bonus_units")?)?;
-            let held = parse_dec("bonus_held_units", row.try_get("bonus_held_units")?)?;
-            Ok(SplitEvent {
-                date,
-                new_units: held + bonus,
-                old_units: held,
-            })
-        }
-        _ => Ok(SplitEvent {
+        "BonusIssue" => Ok(SplitEvent::bonus_issue(
             date,
-            new_units: parse_dec("split_new_units", row.try_get("split_new_units")?)?,
-            old_units: parse_dec("split_old_units", row.try_get("split_old_units")?)?,
-        }),
+            parse_dec("bonus_units", row.try_get("bonus_units")?)?,
+            parse_dec("bonus_held_units", row.try_get("bonus_held_units")?)?,
+        )),
+        _ => Ok(SplitEvent::share_split(
+            date,
+            parse_dec("split_new_units", row.try_get("split_new_units")?)?,
+            parse_dec("split_old_units", row.try_get("split_old_units")?)?,
+        )),
     }
 }
 

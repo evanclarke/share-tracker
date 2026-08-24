@@ -1674,3 +1674,74 @@ about (the parcel-outside-the-year check not firing on a mid-year disposal).
 Docs: `docs/API.md`'s AMIT adjustment cross-check section (four checks → five, the new bullet, the
 field list, the "empty report" sentence) and the report's `REPORTS` description in
 `src/web/config.js`.
+
+## SCENARIOS Z-e — the archived CGT worksheet calls a bonus issue and a consolidation "splits", at ratios nobody announced
+
+- [x] Name each unit-count event by what it was, at the ratio its terms were stated in.
+
+Found driving **Z-08** (the rights round trip), which ends with a 1-for-10 **bonus issue** and a 1-for-2
+**consolidation** over the same parcels. The [Annual Tax Report](docs/API.md#annual-tax-report) — the
+print document meant to be saved to PDF and archived — prints one `adjustments` row per event on every
+disposed parcel, with a `reference` naming the action it came from. Both come out wrong:
+
+| what was recorded | what the worksheet prints |
+| --- | --- |
+| `BonusIssue` 1 for every 10 held | `11-for-10 split` |
+| `ShareSplit` 1 new for 2 old (a consolidation) | `1-for-2 split` |
+
+`domain::cost_base::adjustment_detail` builds every one of these as
+`format!("{}-for-{} split", s.new_units, s.old_units)` over the *derived rebase factor*, so:
+
+- a **bonus issue** is not a split and was never announced as "11-for-10" — that factor is this tool's
+  own arithmetic (10 held → 11 held), and a reader reconciling the worksheet against the company's
+  announcement finds no such ratio in it;
+- a **consolidation** is announced as "1-for-2" and that part is right, but calling it a *split* says
+  the opposite of what happened — the parcel went from 2,200 units to 1,100.
+
+The figures are all correct (`amount` is 0 — these rows are informational, explaining a changed unit
+count, never a cost-base movement); it is the provenance label that misnames them, in the one document
+that exists to be handed to someone else. `docs/API.md`'s worked example of the field is `"2-for-1
+split"`, so the design only ever contemplated splits.
+
+**Direction.** The rebase events already know which action kind they came from. Carry that through and
+label each one from its own terms — `1-for-10 bonus issue`, `1-for-2 consolidation`, `2-for-1 split` —
+rather than formatting one derived factor three ways.
+
+**Fixed.** The announced terms now travel with the event.
+`entities::corporate_action::adjustments::SplitEvent` grew a `terms: RebaseTerms` field beside the
+existing `new_units`/`old_units` — an additive change, so every arithmetic caller
+(`split_ratio`, `split_adjusted_quantity`, `as_acquired_quantity`, `RocEvent::per_unit_for`, the
+report and write-time re-basing helpers) is untouched and the bonus issue still normalises into its
+equivalent split for the rebase factor. `RebaseTerms` is the three-way enum the *label* reads:
+`Split` / `Consolidation` (a `ShareSplit` split by whether `split_new_units < split_old_units`) and
+`BonusIssue` (the announced bonus-for-held pair, not the derived 11/10). Two constructors,
+`SplitEvent::share_split` and `SplitEvent::bonus_issue`, are the only way one is built — the row
+loader (`split_event_from_row`, so both `db_share_split_events` and `db_splits_for_listing`) and the
+test helpers all go through them, so the terms can never be dropped. `RebaseTerms::label` produces
+`2-for-1 split`, `1-for-2 consolidation`, `1-for-10 bonus issue`; `domain::cost_base`'s
+`adjustment_detail` calls it instead of formatting the factor. Terms are `normalize()`d, so terms
+typed `2.00`/`1.00` read `2-for-1` (the old code printed `2.00-for-1.00`).
+
+The degenerate `new_units == old_units` (a 1-for-1 `ShareSplit`) is representable — the write path
+only requires both terms positive — and re-bases nothing. It is classified `Split`, with the reason
+in a comment on the variant: "consolidation" would claim a unit count fell, so the no-op keeps the
+action's own name and reads `1-for-1 split`.
+
+Surfaces checked: `reference` is rendered only by the Annual Tax Report's `taxreport.js`, which passes
+it through verbatim — no UI change. The listing-activity ledger (`reports::activity::describe_action`)
+was already correct, and its wording is the precedent this follows.
+
+**Tests:**
+`entities::corporate_action::tests::db_split_events_carry_each_actions_announced_terms` — both
+loaders, over a split, a bonus issue, a consolidation and a `2.00`/`1.00` split: the four labels, and
+the *same* rebase factors (2/1, 11/10, 1/2) and re-based quantity as before.
+`domain::cost_base::tests::rebase_rows_are_named_by_their_own_kind_and_announced_terms` — the five
+`reference` strings out of `adjustment_detail`, all still nil-amount informational rows.
+`domain::cost_base::tests::a_bonus_issue_and_a_consolidation_rebase_by_their_derived_factors` — the
+regression that matters: a return of capital either side of both events still reduces by 11c per
+as-acquired unit each time.
+`reports::tax_report::tests::api_a_bonus_issue_and_a_consolidation_are_named_by_their_own_terms` —
+end to end through `POST /reports/tax-report` via `ApiClient::full`, asserting the two labels on the
+disposed parcel's `adjustments` and that its units, cost base, proceeds and gain are unchanged.
+
+Docs: `docs/API.md`'s `disposals` bullet now states the rule and gives all three labels.

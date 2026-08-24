@@ -246,35 +246,3 @@ landed on a half-cent, which is what made it visible.
 **Direction.** The sale-level `proceeds` is knowable exactly (`price × quantity − brokerage − gst`,
 converted once); computing it there and letting the last allocation absorb the difference keeps both
 properties W-d established — the total is exact, and the per-parcel rows still sum to it.
-
-## SCENARIOS Z-e — the archived CGT worksheet calls a bonus issue and a consolidation "splits", at ratios nobody announced
-
-- [ ] Name each unit-count event by what it was, at the ratio its terms were stated in.
-
-Found driving **Z-08** (the rights round trip), which ends with a 1-for-10 **bonus issue** and a 1-for-2
-**consolidation** over the same parcels. The [Annual Tax Report](docs/API.md#annual-tax-report) — the
-print document meant to be saved to PDF and archived — prints one `adjustments` row per event on every
-disposed parcel, with a `reference` naming the action it came from. Both come out wrong:
-
-| what was recorded | what the worksheet prints |
-| --- | --- |
-| `BonusIssue` 1 for every 10 held | `11-for-10 split` |
-| `ShareSplit` 1 new for 2 old (a consolidation) | `1-for-2 split` |
-
-`domain::cost_base::adjustment_detail` builds every one of these as
-`format!("{}-for-{} split", s.new_units, s.old_units)` over the *derived rebase factor*, so:
-
-- a **bonus issue** is not a split and was never announced as "11-for-10" — that factor is this tool's
-  own arithmetic (10 held → 11 held), and a reader reconciling the worksheet against the company's
-  announcement finds no such ratio in it;
-- a **consolidation** is announced as "1-for-2" and that part is right, but calling it a *split* says
-  the opposite of what happened — the parcel went from 2,200 units to 1,100.
-
-The figures are all correct (`amount` is 0 — these rows are informational, explaining a changed unit
-count, never a cost-base movement); it is the provenance label that misnames them, in the one document
-that exists to be handed to someone else. `docs/API.md`'s worked example of the field is `"2-for-1
-split"`, so the design only ever contemplated splits.
-
-**Direction.** The rebase events already know which action kind they came from. Carry that through and
-label each one from its own terms — `1-for-10 bonus issue`, `1-for-2 consolidation`, `2-for-1 split` —
-rather than formatting one derived factor three ways.
