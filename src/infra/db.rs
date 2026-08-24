@@ -718,6 +718,7 @@ mod tests {
         "reports/franking_at_risk.rs",
         "reports/fx_coverage.rs",
         "reports/health.rs",
+        "reports/indexation_cross_check.rs",
         "reports/net_capital_gain.rs",
         "reports/open_parcels.rs",
         "reports/parcel_optimiser.rs",

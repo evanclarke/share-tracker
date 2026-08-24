@@ -23,6 +23,7 @@ pub mod franking;
 pub mod franking_at_risk;
 pub mod fx_coverage;
 pub mod health;
+pub mod indexation_cross_check;
 pub mod mic_validation;
 pub mod net_capital_gain;
 pub mod open_parcels;
@@ -87,6 +88,7 @@ pub fn router() -> Router<SqlitePool> {
         .merge(mic_validation::router())
         .merge(settlement_coverage::router())
         .merge(e4_cross_check::router())
+        .merge(indexation_cross_check::router())
         .merge(amit_adjustment_cross_check::router())
         .merge(rollover_consistency::router())
         .merge(amit_cash_cross_check::router())

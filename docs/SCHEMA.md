@@ -66,6 +66,15 @@ mic_registry                  ISO 10383 MIC reference list (validation only; not
 ├── status        TEXT             ISO STATUS: ACTIVE | UPDATED | EXPIRED
 └── expiry_date   TEXT (nullable)  'YYYY-MM-DD' when EXPIRED, else NULL
 
+cpi_quarters                  The frozen ATO quarterly CPI series behind the indexation method (0046). Seeded verbatim from Appendix 2 of the Guide to capital gains tax 2025 (QC 104764, mirrored in docs/ato/consumer-price-index.md): 57 rows, the September 1985 quarter (the first CGT reaches) through the September 1999 quarter (where indexation is frozen), and deliberately nothing after it — a later quarter's CPI is real but is not a figure the method may use. Read-only reference data: no entity, no route and no import job writes it, so it is neither audited (nothing can UPDATE or DELETE it through the application) nor snapshot-stale-triggered (no snapshotted report reads it). Feeds the advisory indexed cost base only — the realised-gains parcel rows' `indexed_cost_base` and /reports/indexation_cross_check. No reported tax figure is computed from it
+├── quarter_end   TEXT PK          'YYYY-MM-DD' end of the quarter a cost was incurred in.
+                                   CHECK: between '1985-09-30' and '1999-09-30' (the indexable range)
+                                   CHECK: substr(quarter_end, 6) IN ('03-31','06-30','09-30','12-31')
+└── cpi           TEXT (decimal)   All groups CPI, weighted average of 8 capital cities, on the ABS's
+                                   current (2011-12) index reference base — the base the ATO's own stated
+                                   method reads on, its divisor 68.7 being the current-base September 1999
+                                   figure. The superseded 1989-90-base series is deliberately not stored
+
 currencies                    Recognised currencies: fiat (ISO 4217) + digital tokens (ISO 24165)
 ├── code          TEXT PK          ISO 4217 alpha code (fiat) or ISO 24165 DTI (token)
 ├── kind          TEXT             Fiat | DigitalToken
@@ -397,6 +406,9 @@ row_history                  Append-only audit trail of the financial fact table
 ## Relationships
 
 ```
+cpi_quarters — standalone (no foreign key in either direction): a published
+                       reference series keyed on its own quarter-end date, read by the
+                       indexation cross-check and nothing else
 exchanges ──< exchange_holidays
 exchanges ──< listings ──< trades >──────────────< parcel_allocations
                                 \                         /

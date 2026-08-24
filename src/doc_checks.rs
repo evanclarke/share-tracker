@@ -1570,21 +1570,85 @@ fn net_capital_gain_year_series_documented() {
     assert!(mirror.contains("**Step 11 — Capital losses carried forward**"));
 }
 
+/// Docs-sync pin for the indexation scope cut (SCENARIOS AA-a). Two halves:
+/// what is *still* out of scope (the election), and — the finding itself —
+/// that the reason once given for it, "the discount almost always gives an
+/// individual the better result", is gone and replaced by the actual
+/// boundary. The behaviour half is
+/// `reports::indexation_cross_check::tests` and
+/// `domain::indexation::tests::the_earliest_enterable_acquisition_indexes_at_1_730`.
 #[test]
 fn known_limitations_document_indexation_method() {
     let limitations = known_limitations();
-    // The indexation method (pre-21 September 1999 acquisitions, frozen at
-    // Sep 1999) is not modelled; the 50% discount is used throughout.
+    // The election (pre-22 September 1999 costs, frozen at Sep 1999) is not
+    // modelled; the 50% discount is applied throughout.
     assert!(limitations.contains("**Indexation method**"));
-    assert!(limitations.contains("before **21 September 1999**"));
+    assert!(limitations.contains("incurred by **21 September 1999**"));
     assert!(limitations.contains("frozen at the 30 September 1999 CPI"));
-    assert!(limitations.contains("indexation is not modelled"));
-    assert!(limitations.contains("50% discount is used throughout"));
-    // Cites the mirrored ATO guidance (QC 66024).
+    assert!(limitations.contains("**election is not modelled**"));
+    assert!(limitations.contains("50% discount is applied throughout"));
+    // The withdrawn claim, and the boundary that replaced it — the factor for
+    // the earliest enterable acquisition and the crossover it implies.
+    // The phrase survives in exactly one place: the sentence withdrawing it.
+    assert_eq!(limitations.matches("almost always").count(), 1);
+    assert!(limitations.contains(
+        "This entry used to say the discount \"almost always\" gives the better result. That \
+         was wrong for exactly the parcels most likely to be affected, and the claim is \
+         withdrawn."
+    ));
+    assert!(limitations.contains("68.7 ÷ 39.7 = **1.730**"));
+    assert!(limitations.contains("proceeds are below **2.460 × cost**"));
+    // What exists instead of the election, and the promise it is made under.
+    assert!(limitations.contains("[indexation cross-check](#indexation-cross-check)"));
+    assert!(limitations.contains("**No reported tax figure is computed from any of it.**"));
+    // Cites the mirrored ATO guidance (QC 66024) and the CPI series the
+    // factor is derived from (QC 104764).
     assert!(limitations.contains("docs/ato/indexing-the-cost-base.md"));
     assert!(include_str!("../docs/ato/indexing-the-cost-base.md").contains("QC 66024"));
+    assert!(limitations.contains("docs/ato/consumer-price-index.md"));
+    let cpi_mirror = include_str!("../docs/ato/consumer-price-index.md");
+    assert!(cpi_mirror.contains("QC 104764"));
+    // The two figures the whole method turns on, in the mirror itself.
+    assert!(cpi_mirror.contains("| 1985 | – | – | 39.7 | 40.5 |"));
+    assert!(cpi_mirror.contains("| 1999 | 67.8 | 68.1 | 68.7 | n/a (see Note 1) |"));
     assert!(README_MD.contains("indexation method"));
-    assert!(README_MD.contains("50% discount is used throughout"));
+    assert!(README_MD.contains("50% discount is applied throughout"));
+}
+
+/// Docs-sync pin for the indexation cross-check report (SCENARIOS AA-a): the
+/// section exists, and it states the two things that make it honest rather
+/// than merely more figures on a page — that no tax figure it reports is
+/// affected by it, and the exact comparison each row is making (per parcel,
+/// before capital losses, and a floor on indexation's case rather than the
+/// whole answer). The behaviour half is
+/// `reports::indexation_cross_check::tests`.
+#[test]
+fn indexation_cross_check_is_documented() {
+    assert!(API_MD.contains("### Indexation cross-check"));
+    assert!(API_MD.contains("GET /reports/indexation_cross_check"));
+    assert!(API_MD.contains("**Advisory only, and nothing here changes a reported tax figure**"));
+    // The comparison, stated.
+    assert!(API_MD.contains(
+        "Each row compares one parcel **in the absence of capital losses applied against its \
+         gain**"
+    ));
+    assert!(
+        API_MD.contains("**Read the rows as a floor on indexation's case, not the whole answer**")
+    );
+    // Why per parcel rather than per disposal or per year.
+    assert!(API_MD.contains(
+        "The comparison is stated **per parcel allocation** rather than per disposal or per year"
+    ));
+    // The two deliberate exclusions.
+    assert!(API_MD.contains("since indexation cannot be used on a capital loss at all"));
+    assert!(API_MD.contains("A loss allocation is therefore not shown as \"the discount wins\""));
+    // The rounding rule the factor is derived under.
+    assert!(
+        API_MD.contains("limited to 3 decimal places with the fourth decimal rounded up from 5")
+    );
+    // The seeded reference table is in the schema doc with its source.
+    assert!(SCHEMA_MD.contains("cpi_quarters"));
+    assert!(SCHEMA_MD.contains("QC 104764"));
 }
 
 /// Docs-sync pin for the joint-ownership entry convention (SCENARIOS AA-e,

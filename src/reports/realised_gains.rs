@@ -1,5 +1,6 @@
 use crate::domain::cgt_discount;
 use crate::domain::cost_base::{self, ParcelRow};
+use crate::domain::indexation;
 use crate::entities::corporate_action::{RocEvent, SplitEvent};
 use crate::infra::decimal::{Money, OptMoney, mul_div};
 use crate::infra::fx::{FxOverride, FxRates};
@@ -88,6 +89,28 @@ pub struct ParcelDetail {
     pub capital_gain_loss: Decimal,
     /// Held strictly more than 12 months at the sale date (50% CGT discount).
     pub discount_eligible: bool,
+    /// The parcel's cost was incurred by **21 September 1999**, so an
+    /// individual could have chosen the **indexation method** on this
+    /// allocation instead of the 50% discount
+    /// (`docs/ato/indexing-the-cost-base.md`). Advisory: nothing this report
+    /// or any other computes is changed by it — the 50% discount is applied
+    /// throughout. Only a gain carries the flag; indexation cannot be used on
+    /// a capital loss, so a loss allocation is `false` however old it is.
+    ///
+    /// The date tested is the parcel's own **trade date** — when the cost was
+    /// actually incurred — not `acquisition_date`, which is the discount
+    /// clock's anchor and may be a *deemed* date carried from a rollover or an
+    /// inheritance. The two rules are about different things, and the deemed
+    /// cases have their own indexation rules this system does not model (see
+    /// the *Indexation method* Known limitation).
+    pub indexation_eligible: bool,
+    /// The indexed cost base of the allocated units, AUD — the alternative to
+    /// `cost_base` under the indexation method, so the two methods can be
+    /// read side by side. `None` whenever `indexation_eligible` is false.
+    /// Reported, never summed: no total on this report or any other includes
+    /// it (`reports::indexation_cross_check` is where the comparison is
+    /// drawn).
+    pub indexed_cost_base: Option<Decimal>,
 }
 
 // Per-sale identity: capital_gain_loss == discount_eligible_gain
@@ -250,6 +273,9 @@ struct ReportData {
     /// Every imported ATO FX rate, so per-allocation conversions are map
     /// lookups instead of one DB round-trip each.
     fx: FxRates,
+    /// The frozen ATO quarterly CPI series, so the advisory indexed cost base
+    /// beside each pre-22-September-1999 allocation's own is a map lookup too.
+    cpi: indexation::CpiQuarters,
 }
 
 /// Reads the report's inputs on the caller's connection. Callers run this
@@ -324,6 +350,7 @@ async fn load_report_data(conn: &mut sqlx::SqliteConnection) -> Result<ReportDat
     // share splits/consolidations per listing (quantity re-basing)
     let split_events = crate::entities::corporate_action::db_share_split_events(&mut *conn).await?;
     let fx = FxRates::load(&mut *conn).await?;
+    let cpi = indexation::CpiQuarters::load(&mut *conn).await?;
 
     Ok(ReportData {
         sells: sells.into_iter().map(|s| (s.id, s)).collect(),
@@ -335,6 +362,7 @@ async fn load_report_data(conn: &mut sqlx::SqliteConnection) -> Result<ReportDat
         roc_events,
         split_events,
         fx,
+        cpi,
     })
 }
 
@@ -474,7 +502,7 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
         // acquisition month. `up_to` is the sale date: return-of-capital
         // payments after the sale don't touch these units — they were no
         // longer held.
-        let alloc_cost = cost_base::adjusted_cost_base(
+        let alloc_cost_base = cost_base::adjusted_cost_base(
             &buy.parcel(),
             qty_alloc_acquired,
             data.cba_reduction
@@ -484,20 +512,43 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
             splits,
             cost_base::Held::DisposedOn(sale.date),
         )?
-        .into_aud_with(&data.fx, &buy.currency, buy.acquired(), buy.fx_override())?
-        .adjusted;
+        .into_aud_with(&data.fx, &buy.currency, buy.acquired(), buy.fx_override())?;
+        let alloc_cost = alloc_cost_base.adjusted;
 
         // A partial-rollover scrip closing Sell realises only the cash
         // side's market-value share of the parcel's reduced cost base; the
         // scrip side's share rolled over into the replacement parcels (the
         // exchange carried exactly the complement, so the two sum to the
         // full reduced cost base).
-        let alloc_cost = match sale.scrip_cash_apportionment()? {
+        let cash_apportionment = sale.scrip_cash_apportionment()?;
+        let alloc_cost = match cash_apportionment {
             Some((num, den)) => mul_div(&[alloc_cost, num], den),
             None => alloc_cost,
         };
 
         let alloc_gain = alloc_proceeds - alloc_cost;
+
+        // The advisory indexation figure (`domain::indexation`): what this
+        // allocation's cost base would have been under the indexation method,
+        // for the cross-check report to set beside `alloc_cost`. Offered only
+        // where the method is actually available — the cost was incurred by
+        // 21 September 1999 *and* the allocation produced a gain, since
+        // indexation can never be used on a capital loss. Nothing below sums
+        // it: every total this report reports is the discount method's.
+        let indexation = if alloc_gain > Decimal::ZERO {
+            data.cpi.indexation_for(buy.date)
+        } else {
+            None
+        };
+        let indexed_cost_base = indexation.map(|ix| {
+            let indexed = indexation::indexed_cost_base(&alloc_cost_base, ix.factor);
+            // The cash apportionment is a share of the *whole* cost base, so
+            // it applies to the indexed figure exactly as it did above.
+            match cash_apportionment {
+                Some((num, den)) => mul_div(&[indexed, num], den),
+                None => indexed,
+            }
+        });
 
         *sale_proceeds.entry(sale_id).or_insert(Decimal::ZERO) += alloc_proceeds;
         *sale_cost_base.entry(sale_id).or_insert(Decimal::ZERO) += alloc_cost;
@@ -529,6 +580,8 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
             proceeds: alloc_proceeds,
             capital_gain_loss: alloc_gain,
             discount_eligible,
+            indexation_eligible: indexed_cost_base.is_some(),
+            indexed_cost_base,
         });
     }
 
@@ -644,6 +697,15 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
                 proceeds: alloc_proceeds,
                 capital_gain_loss: alloc_gain,
                 discount_eligible,
+                // A rights disposal is deliberately outside the indexation
+                // comparison. What would be indexed is the *rights'* own cost
+                // base — nil for the free rights this action models, and
+                // indexing nil gives nil — and the anchoring parcel's date is
+                // the discount clock's, not the date any cost of the rights
+                // was incurred. There is no honest figure to put here, so
+                // none is put.
+                indexation_eligible: false,
+                indexed_cost_base: None,
             });
         }
         parcels.sort_by(|a, b| {

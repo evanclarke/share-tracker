@@ -97,8 +97,19 @@ CGT discount.
 
 ---
 
-**How this project uses it:** not modelled — documented as a Known limitation
-(`docs/API.md`). The indexation method only ever applies to assets acquired
-before 21 September 1999, the discount is almost always the better result for
-an individual, and the net-capital-gain pipeline applies the 50% discount
-throughout.
+**How this project uses it:** the **election** is not modelled — documented as a
+Known limitation (`docs/API.md`) — and the net-capital-gain pipeline applies the
+50% discount throughout, as does every other report, total and export. The
+*comparison* is modelled: the quarterly CPI table this page's method needs is
+mirrored in [`consumer-price-index.md`](consumer-price-index.md) and seeded as
+`cpi_quarters` (migration 0046), the factor and the indexed cost base are
+`domain::indexation`, and `/reports/indexation_cross_check` sets both methods'
+assessable gains side by side per disposal. Val's two factors above (1.164 and
+1.159) are reproduced against the seeded table by that module's tests.
+
+An earlier version of this note said the discount is "almost always" the better
+result for an individual. That is not this page's claim — it says "in most
+cases", and adds the capital-loss caveat — and it is not true of the parcels
+this system can hold: the earliest acquisition it accepts is 20 September 1985,
+whose factor is 68.7 ÷ 39.7 = 1.730, so indexation assesses less whenever the
+proceeds are below 2.460 × cost (SCENARIOS AA-a).

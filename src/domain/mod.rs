@@ -7,6 +7,7 @@ pub mod contemplated_disposal;
 pub mod cost_base;
 pub mod deduction_destination;
 pub mod franking_credit;
+pub mod indexation;
 pub mod listing_identity;
 pub mod open_parcels;
 pub mod rollover;

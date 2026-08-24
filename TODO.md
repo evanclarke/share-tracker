@@ -272,7 +272,7 @@ It raised **five findings**, logged below.
 
 ## SCENARIOS AA-a — an indexation-eligible parcel is silently costed on the discount, and the reason given for not modelling it is false for a wide, enterable range
 
-- [ ] Decide and implement (options below).
+- [x] Decide and implement (options below).
 
 Scenario AA-02. `docs/API.md`'s [Known limitations](docs/API.md#known-limitations) justifies the
 scope cut this way:
@@ -335,6 +335,71 @@ frozen ATO quarterly CPI table is seeded and an indexed cost base computed, so t
 show the two methods against each other — but **no reported tax figure changes**: the net capital
 gain, the annual tax report and every CSV export stay on the 50% discount throughout. The indexed
 figure exists only to answer "which method wins here", which is the question the finding is about.
+
+**Fixed.** The frozen ATO quarterly CPI series is seeded as `cpi_quarters` (migration
+`0046_cpi_quarters.sql`, 57 rows — the September 1985 quarter through the September 1999 freeze and
+deliberately nothing after it), mirrored from Appendix 2 of the *Guide to capital gains tax 2025*
+(QC 104764) in [`docs/ato/consumer-price-index.md`](docs/ato/consumer-price-index.md) and indexed in
+`docs/ato/OVERVIEW.md`. `domain::indexation` holds the method's arithmetic — the eligibility
+boundary, the quarter mapping, the factor (68.7 ÷ the quarter's CPI, limited to 3 decimal places
+with the fourth decimal rounded up from 5), and the indexed cost base — and
+`domain::cost_base::CostBase` gained `costed_initial_cost`, the costed units' share of the initial
+cost base, which is the only *indexable* component and cannot be reconstructed from the netted
+total once CGT event E10/G1 has floored it at nil. `reports::realised_gains` computes the indexed
+figure per allocation and carries it on the parcel rows as `indexation_eligible` +
+`indexed_cost_base`, the annual tax report notes it under an eligible parcel on the archived
+document, and `GET /reports/indexation_cross_check` sets both methods' assessable gains against
+each other per parcel and per year. **No reported tax figure moved**: the same disposal driven
+through both builds — pre-change and post-change, same facts, same throwaway database — answers
+byte-identical net capital gain, realised gains, tax summary and annual tax report once the two new
+advisory fields are stripped.
+
+**The finding's arithmetic was wrong in one place, and it is the place it warned about.** The
+September 1985 factor is **1.730**, not 1.731: 68.7 ÷ 39.7 = 1.730478…, whose fourth decimal is a 4,
+so the ATO's "round the fourth decimal up from 5" rounds it *down*. 1.731 is what the **superseded
+1989-90-base** series gives (123.4 ÷ 71.3 = 1.73070…), and the ATO marks that table "no longer
+[usable] for tax and super purposes". So the finding's A$2,690 indexed gain is really **A$2,700**
+(A$10,000 → A$17,300 indexed). The **2.46× crossover was right** — with a 1.730 factor indexation
+wins below exactly 2.460 × cost, driven at A$24.59 / A$24.60 / A$24.61 per unit against a A$10 cost
+and answering Indexation / Equal / Discount. Both of the ATO's own worked-example factors (Val:
+1.164 and 1.159) reproduce against the seeded table, which is what says the table *and* the rounding
+rule are right rather than merely self-consistent.
+
+**How the comparison is stated, and why.** Per **parcel allocation**, and explicitly *before any
+capital losses applied against the gain* — stated in the module doc, in `docs/API.md`, and on every
+year's own `comparison` row so the qualifier travels with the figures into a printout. Per parcel
+because that is the only level at which it is a fact rather than an assumption: a parcel is a
+separate CGT asset, and one Sell can draw on a 1998 parcel and a 2015 one whose methods differ.
+Before losses because the two methods do not meet losses at the same point — losses come off the
+gross gain and the discount applies to what is left, while an indexed gain has no discount to follow
+— so writing `g` for the gross gain, `r` for the indexation uplift and `L` for the losses applied,
+indexation's advantage is `r − (g − L) / 2`, which **rises** with `L` until `L` reaches `g − r` and
+both methods reach nil together. Applying losses therefore never moves the answer toward the
+discount, which makes every row a **floor** on indexation's case rather than the whole answer; each
+year row carries the capital losses the year actually realised so a reader can see whether the
+qualifier bites. Two exclusions decided rather than assumed: a parcel disposed of at a **loss** is
+left out entirely rather than shown as "discount wins" (indexation cannot be used on a capital loss
+at all — its loss still reaches its year's `capital_losses_realised`), and a **rights sale** is left
+out because what would be indexed is the rights' own cost base, nil for the free rights modelled
+here. Eligibility is tested on the parcel's own **trade date** — when the cost was incurred — never
+on the deemed acquisition date the discount clock runs from, since an inherited or
+rollover-replacement parcel has its own indexation rules and none of them are modelled. Costs
+incurred after the cut-off cannot arise on the indexable side: the AMIT (E10) and return-of-capital
+(G1) movements are *reductions*, not costs, so they come off the indexed figure at face value (the
+conservative direction), and a disposal's own brokerage is netted from proceeds rather than added to
+the cost base.
+
+`cpi_quarters` is classified **exempt** for snapshot staleness (nothing writes it after its
+migration, and no snapshotted report reads it) and deliberately **not audited** (`row_history` exists
+to recover a user's edit of a financial fact; this table has no write path at all — contrast
+`exchange_holidays`, audited precisely because it has a DELETE route). The *Indexation method*
+Known limitation is rewritten: the "almost always" claim is explicitly withdrawn and replaced by the
+1.730 factor and the 2.460 × cost crossover, with the scope cut narrowed to the **election** —
+choosing per parcel, and that choice's interaction with the loss-netting walk — which stays out of
+scope. `docs/API.md` gains the report's own section, `docs/SCHEMA.md` the table and its
+relationships entry, `README.md` a feature line and a corrected scope clause, and `src/doc_checks.rs`
+two pins (one of which asserts "almost always" survives in exactly one place: the sentence
+withdrawing it).
 
 ## SCENARIOS AA-b — a non-renounceable rights issue is indistinguishable from a renounceable one, and its retail premium is recorded as a capital gain
 

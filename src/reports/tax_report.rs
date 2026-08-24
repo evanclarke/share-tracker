@@ -354,6 +354,18 @@ pub struct DisposalParcelRow {
     pub gain_loss_aud: Decimal,
     pub days_held: i64,
     pub discount_eligible: bool,
+    /// The parcel's cost was incurred by 21 September 1999, so the
+    /// **indexation method** was available on this disposal instead of the
+    /// 50% discount (`docs/ato/indexing-the-cost-base.md`). Informational on
+    /// an archived return document: every figure printed here is the
+    /// discount method's, unchanged — the alternative is set out in full by
+    /// the [indexation cross-check](crate::reports::indexation_cross_check).
+    pub indexation_eligible: bool,
+    /// The indexed cost base of the same units, AUD — printed beside the
+    /// cost base actually used, so an archived copy of the return records
+    /// what the other lawful method would have cost. `None` unless
+    /// `indexation_eligible`. Never summed into any total on this report.
+    pub indexed_cost_base_aud: Option<Decimal>,
     pub cgt_discount_amount_aud: Decimal,
     pub gain_after_discount_aud: Decimal,
 
@@ -411,6 +423,10 @@ impl DisposalParcelRow {
         for adjustment in &mut self.adjustments {
             adjustment.amount = to_cents(adjustment.amount);
         }
+        // The advisory indexed cost base prints beside the one used, so it
+        // rounds with it — a figure at 28 digits next to a cent-rounded
+        // neighbour is exactly what SCENARIOS W-c/W-d were about.
+        self.indexed_cost_base_aud = self.indexed_cost_base_aud.map(to_cents);
     }
 }
 
@@ -697,6 +713,8 @@ fn disposal_parcel_rows(
                 gain_loss_aud: p.capital_gain_loss,
                 days_held: (disposal.sale_date - p.acquisition_date).num_days(),
                 discount_eligible: p.discount_eligible,
+                indexation_eligible: p.indexation_eligible,
+                indexed_cost_base_aud: p.indexed_cost_base,
                 cgt_discount_amount_aud: discount_amount,
                 gain_after_discount_aud: p.capital_gain_loss - discount_amount,
                 currency: currency.clone(),
@@ -3472,7 +3490,13 @@ mod tests {
             .as_object()
             .expect("a parcel row")
             .iter()
-            .filter(|(name, _)| name.ends_with("_aud") && !name.ends_with("_per_unit_aud"))
+            // A `null` is a column that does not apply to this parcel at all
+            // (the indexed cost base of a parcel indexation was never
+            // available on) — there is no figure to reconcile, and rendering
+            // one would be the false statement this whole report avoids.
+            .filter(|(name, value)| {
+                name.ends_with("_aud") && !name.ends_with("_per_unit_aud") && !value.is_null()
+            })
             .map(|(name, value)| (name.as_str(), value))
             .collect()
     }

@@ -533,6 +533,16 @@ pub fn amit_reduction_for(
 pub struct CostBase {
     /// Whole-parcel initial cost base: price × quantity + brokerage + GST.
     pub initial_cost: Decimal,
+    /// The **costed units'** share of that figure — step 1's pro-rate, the
+    /// pool both reductions are taken out of. Equal to `initial_cost` when
+    /// the whole parcel is being costed. Kept alongside the whole-parcel
+    /// figure because it is the only component of the cost base that is
+    /// *indexable* under the indexation method (`domain::indexation`): the
+    /// reductions come off it at face value, and reconstructing it as
+    /// `adjusted + amit_reduction + roc_reduction` would be wrong for exactly
+    /// the parcels that matter — a cost base floored at nil by CGT event
+    /// E10/G1 loses the excess.
+    pub costed_initial_cost: Decimal,
     /// AMIT cost-base reduction reaching the costed units (the full amount,
     /// even where CGT event E10 has floored the cost base).
     pub amit_reduction: Decimal,
@@ -604,6 +614,11 @@ pub fn adjusted_cost_base(
     held: Held,
 ) -> Result<CostBase, sqlx::Error> {
     let initial_cost = parcel.initial_cost();
+    let costed_initial_cost = if parcel.quantity > Decimal::ZERO {
+        prorated_initial_cost(initial_cost, units, parcel.quantity)
+    } else {
+        Decimal::ZERO
+    };
     let amit_reduction =
         amit_reduction_for(amit_events, parcel.quantity, units, held.disposed_on());
     let roc_per_unit = per_unit_reduction(
@@ -620,15 +635,13 @@ pub fn adjusted_cost_base(
         // come off that share of the initial cost base directly — no second
         // pro-rating, and one floor covers both (each subtraction only ever
         // moves the balance the same way an earlier floor would have).
-        (prorated_initial_cost(initial_cost, units, parcel.quantity)
-            - amit_reduction
-            - roc_reduction)
-            .max(Decimal::ZERO)
+        (costed_initial_cost - amit_reduction - roc_reduction).max(Decimal::ZERO)
     } else {
         Decimal::ZERO
     };
     Ok(CostBase {
         initial_cost,
+        costed_initial_cost,
         amit_reduction,
         roc_reduction,
         adjusted,
@@ -842,6 +855,7 @@ impl CostBase {
         }
         CostBase {
             initial_cost: self.initial_cost / rate,
+            costed_initial_cost: self.costed_initial_cost / rate,
             amit_reduction: self.amit_reduction / rate,
             roc_reduction: self.roc_reduction / rate,
             adjusted: self.adjusted / rate,

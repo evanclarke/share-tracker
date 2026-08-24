@@ -711,6 +711,13 @@ const COLUMN_KINDS = (function () {
     'deductions_trust_distributions', 'deductions_foreign_income', 'deductions_foreign_debt',
     'deductions_dividend_and_interest',
     'deductions_total', 'net_assessable_investment_income',
+    // Indexation cross-check (and the indexed figure realised gains carries
+    // beside the discount one): the two methods' assessable gains, the
+    // indexed cost base, and the difference between them — all AUD, all
+    // advisory (SCENARIOS AA-a).
+    'indexed_cost_base', 'discount_method_gain', 'indexation_method_gain',
+    'indexation_advantage', 'discount_method_total', 'indexation_method_total',
+    'indexation_advantage_total', 'capital_losses_realised',
     // Period-performance report: opening/closing values and the
     // capital/FX/income breakdown, all AUD.
     'opening_market_value', 'closing_market_value', 'purchases', 'sale_proceeds',
@@ -734,6 +741,10 @@ const COLUMN_KINDS = (function () {
     'market_value_per_share', 'deductible_percentage', 'proceeds_per_right',
     // Period-performance report: the ATO/RBA rates used at each endpoint.
     'rate_from', 'rate_to',
+    // Indexation cross-check: the published CPI for a quarter and the factor
+    // derived from it (3 decimal places by the ATO's own rounding rule) —
+    // both kept verbatim, like every other figure read off a published table.
+    'cpi', 'indexation_factor',
   ]);
   // Average price figures — derived (avg_cost_base_per_unit, current_price)
   // or entered (average_price) — round to 4 dp for display; never

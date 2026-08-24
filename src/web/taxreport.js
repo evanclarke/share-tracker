@@ -123,6 +123,14 @@ function parcelRows(p) {
   ];
   p.adjustments.forEach(function (a) { rows.push(adjustmentRow(a)); });
   const notes = [];
+  // The other lawful method, named on the archived document rather than only
+  // in a report the reader may never open. Nothing printed above changes: the
+  // 50% discount is applied throughout (SCENARIOS AA-a).
+  if (p.indexation_eligible && p.indexed_cost_base_aud != null) {
+    notes.push('indexation was available on this parcel — indexed cost base '
+      + moneyText(p.indexed_cost_base_aud) + ' AUD against the adjusted cost base shown; '
+      + 'the 50% discount is applied here (see the Indexation Cross-Check report)');
+  }
   if (p.buy_contract_note_ref) notes.push('buy note ' + p.buy_contract_note_ref);
   if (p.sale_contract_note_ref) notes.push('sale note ' + p.sale_contract_note_ref);
   if (p.currency !== 'AUD') {

@@ -1080,6 +1080,29 @@ mod tests {
         assert!(js.contains("Tax-Deferred E4 Cross-Check"));
     }
 
+    /// The indexation comparison reaches the UI on three screens (SCENARIOS
+    /// AA-a): its own cross-check report, the realised-gains drill-in, whose
+    /// parcel rows carry the eligibility flag and the indexed figure beside
+    /// the cost base actually used, and the Annual Tax Report, whose parcel
+    /// note names the other method on the archived document — through the
+    /// shared `moneyText`, like every other money figure written into prose.
+    #[tokio::test]
+    async fn indexation_cross_check_ui_present() {
+        let js = app_js_body().await;
+        assert!(js.contains("/reports/indexation_cross_check"));
+        assert!(js.contains("Indexation Cross-Check"));
+        // The report's two tables, and the qualifier in the screen's own
+        // description — the comparison is made before capital losses.
+        assert!(js.contains("Eligible disposals — discount against indexation"));
+        assert!(js.contains("By financial year (and the losses each comparison is made before)"));
+        assert!(js.contains("the comparison is made before any capital losses"));
+        // The advisory pair on the realised-gains parcel drill-in.
+        assert!(js.contains("'indexation_eligible', 'indexed_cost_base'"));
+        // The Annual Tax Report's parcel note.
+        assert!(js.contains("indexation was available on this parcel"));
+        assert!(js.contains("moneyText(p.indexed_cost_base_aud)"));
+    }
+
     /// The franking-credit ceiling is enforced server-side, so the form has to
     /// say what the bound is before a user meets the 422 (SCENARIOS G-25) —
     /// including the trust exemption, which is why an identical-looking row
