@@ -706,3 +706,5 @@ folded into that commit.
 2. **Keep the figure, fix the label.** Rename the column to say it is the parcel's, not the disposal's
    (and say so in `docs/API.md`), leaving archived documents reconcilable against new ones.
 3. **Out of scope** — a display column that no total depends on.
+
+**Chosen: option 1 — print the costed units' initial cost.**
