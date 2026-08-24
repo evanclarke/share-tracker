@@ -469,8 +469,8 @@ const label = (id) => PARCELS[id] || 'trade #' + id;
 test('a reconciling generation preview lists the parcels and says the totals match', () => {
   const text = adjustmentPreviewText({
     created: [
-      { trade_id: 18, quantity: '509' },
-      { trade_id: 19, quantity: '1302' },
+      { trade_id: 18, quantity: '509', units_adjusted: '509' },
+      { trade_id: 19, quantity: '1302', units_adjusted: '1302' },
     ],
     units_adjusted: '1811', units_held: '1811', difference: '0',
   }, label);
@@ -479,6 +479,41 @@ test('a reconciling generation preview lists the parcels and says the totals mat
   assert.match(text, /Buy 1302 XASX:HNDQ on 2024-03-01 — 1302/);
   assert.match(text, /Adjusted units 1811 vs the statement’s units held 1811 — they match\./);
   assert.doesNotMatch(text, /MISMATCH/);
+  // No split, so the two bases coincide and the dialog stays exactly as
+  // short as it was — no bracket, no basis note (SCENARIOS Y-c).
+  assert.doesNotMatch(text, /basis/);
+  assert.doesNotMatch(text, /^  • .* \(/m);
+});
+
+// SCENARIOS Y-c: a split between an acquisition and the statement's year end
+// leaves the stored quantity and the total on different unit bases. The rows
+// carry both, so the list visibly reaches the total instead of looking like
+// an arithmetic mistake.
+test('a re-based row shows both unit bases, and the list adds up to the total', () => {
+  const text = adjustmentPreviewText({
+    created: [
+      { trade_id: 10, quantity: '1000', units_adjusted: '2000' },
+      { trade_id: 11, quantity: '5', units_adjusted: '5' },
+    ],
+    units_adjusted: '2005', units_held: '1000', difference: '1005',
+  }, label);
+  assert.match(text, /trade #10 — 1000 \(2000 in the statement year’s basis\)/);
+  // The row a split did not move keeps its single, unbracketed figure.
+  assert.match(text, /trade #11 — 5$/m);
+  assert.match(text, /as-acquired units/);
+  assert.match(text, /that is the one the total below counts/);
+  // 2000 + 5 = 2005, which is now readable off the list itself.
+  assert.match(text, /Adjusted units 2005 vs the statement’s units held 1000/);
+  assert.match(text, /MISMATCH of 1005 units/);
+});
+
+test('bases equal but written differently show no bracket and no basis note', () => {
+  const text = adjustmentPreviewText({
+    created: [{ trade_id: 18, quantity: '509', units_adjusted: '509.00' }],
+    units_adjusted: '509.00', units_held: '509', difference: '0',
+  }, label);
+  assert.match(text, /Buy 509 XASX:HNDQ on 2024-02-28 — 509$/m);
+  assert.doesNotMatch(text, /basis/);
 });
 
 test('a mismatch is spelled out, not folded into the total', () => {

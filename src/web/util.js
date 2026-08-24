@@ -491,10 +491,33 @@ export function tradeOrigin(t) {
 // current positions correct?" is checkable here rather than assumed — so a
 // mismatch is spelled out rather than folded into a total. Pure (no DOM, no
 // fetch) so it is unit-tested; `parcelLabel` names a trade id.
+//
+// Each row carries two unit bases and the dialog shows both where they differ
+// (SCENARIOS Y-c): `quantity` is the parcel's as-acquired units — what gets
+// stored, and what the AMIT Adjustments screen shows afterwards — while
+// `units_adjusted` re-bases it into the statement year's, which is the basis
+// the total and `units_held` are in. A share split between an acquisition and
+// the year end is what pulls them apart, and listing the stored figures under
+// a total in the other basis read as an arithmetic error. They coincide
+// whenever no split intervenes, which is the ordinary case: the bracket and
+// its explanatory line appear only when at least one row actually differs, so
+// the ordinary dialog is exactly as short as it was.
 export function adjustmentPreviewText(result, parcelLabel) {
+  const rebased = function (a) {
+    return a.units_adjusted != null && !decStrEq(a.units_adjusted, a.quantity)
+      ? a.units_adjusted : null;
+  };
+  const anyRebased = result.created.some(function (a) { return rebased(a) != null; });
   const lines = result.created.map(function (a) {
-    return '  • ' + parcelLabel(a.trade_id) + ' — ' + a.quantity;
+    const other = rebased(a);
+    return '  • ' + parcelLabel(a.trade_id) + ' — ' + a.quantity
+      + (other == null ? '' : ' (' + other + ' in the statement year’s basis)');
   });
+  const basisNote = anyRebased
+    ? ['', 'Quantities are stored in each parcel’s own as-acquired units. A split has since '
+      + 'changed the basis, so where it differs the statement year’s figure follows in brackets '
+      + '— that is the one the total below counts.']
+    : [];
   const totals = 'Adjusted units ' + result.units_adjusted
     + ' vs the statement’s units held ' + result.units_held;
   const verdict = decStrEq(result.difference, '0')
@@ -505,6 +528,7 @@ export function adjustmentPreviewText(result, parcelLabel) {
   return ['Create ' + result.created.length
     + ' AMIT adjustment(s) from the parcels held at the statement’s year end:']
     .concat(lines)
+    .concat(basisNote)
     .concat(['', totals + verdict, '', 'Proceed?'])
     .join('\n');
 }

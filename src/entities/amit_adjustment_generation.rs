@@ -65,10 +65,15 @@ pub struct GeneratedAdjustments {
     /// be. A preview writes nothing, so its rows carry no id yet
     /// ([`UNASSIGNED_ID`]): ids come from the database when the rows are
     /// really written, and are not predicted (SCENARIOS U-a).
-    pub created: Vec<AmitAdjustment>,
-    /// Σ of the generated quantities re-based into the statement year's unit
-    /// basis, so it is comparable with `units_held` (the stored quantities
-    /// are in each parcel's as-acquired units).
+    pub created: Vec<GeneratedAdjustment>,
+    /// Σ of `created[].units_adjusted` — the generated quantities re-based
+    /// into the statement year's unit basis, so the total is comparable with
+    /// `units_held` (the stored quantities are in each parcel's as-acquired
+    /// units). Carrying the same figure per row is what lets a caller show a
+    /// list that visibly adds up to this total: before SCENARIOS Y-c the
+    /// confirm dialog listed the stored quantities under this total and the
+    /// two bases silently disagreed wherever a split fell between an
+    /// acquisition and the year end.
     pub units_adjusted: Decimal,
     /// The statement's own `units_held`, verbatim.
     pub units_held: Decimal,
@@ -88,6 +93,24 @@ pub struct GeneratedAdjustments {
     /// are traceable back to this statement's account.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub unattributed: Vec<UnattributedUnits>,
+}
+
+/// One generated adjustment row in **both** the unit bases it is counted in.
+///
+/// The row itself is flattened in, so the JSON object is the stored
+/// [`AmitAdjustment`] plus one field: its `quantity` is the parcel's
+/// **as-acquired** units — what is written, and what the AMIT Adjustments
+/// screen shows afterwards — while `units_adjusted` is that same quantity
+/// re-based into the statement year's unit basis, the basis
+/// [`GeneratedAdjustments::units_adjusted`] and `units_held` are in. The two
+/// differ only where a share split/consolidation falls between the parcel's
+/// acquisition and the statement's year end; showing both is what stops a
+/// per-row list and its total reading as a contradiction (SCENARIOS Y-c).
+#[derive(Debug, Serialize)]
+pub struct GeneratedAdjustment {
+    #[serde(flatten)]
+    pub adjustment: AmitAdjustment,
+    pub units_adjusted: Decimal,
 }
 
 /// One source parcel's units that a rollover carried away and generation left
@@ -236,21 +259,28 @@ pub const UNASSIGNED_ID: i64 = 0;
 /// One generated row: written through the ordinary AMIT-adjustment write path
 /// — same per-row invariants, same audit trail — with the database assigning
 /// its id, or, in a preview, computed and counted without being written.
+/// `units_adjusted` is the row's own contribution to the run's total, in the
+/// statement year's unit basis; the caller has already computed it, and it is
+/// carried on the row so a list of the rows adds up to that total.
 async fn write_or_preview(
     conn: &mut sqlx::SqliteConnection,
     preview: bool,
     fields: AmitAdjustmentBody,
-) -> Result<AmitAdjustment, amit_adjustment::UpsertError> {
+    units_adjusted: Decimal,
+) -> Result<GeneratedAdjustment, amit_adjustment::UpsertError> {
     let id = if preview {
         UNASSIGNED_ID
     } else {
         amit_adjustment::db_insert_on(&mut *conn, &fields).await?
     };
-    Ok(AmitAdjustment {
-        id,
-        amma_statement_id: fields.amma_statement_id,
-        trade_id: fields.trade_id,
-        quantity: fields.quantity,
+    Ok(GeneratedAdjustment {
+        adjustment: AmitAdjustment {
+            id,
+            amma_statement_id: fields.amma_statement_id,
+            trade_id: fields.trade_id,
+            quantity: fields.quantity,
+        },
+        units_adjusted,
     })
 }
 
@@ -358,6 +388,12 @@ pub async fn db_generate(
             // reported for hand entry rather than attributed by inference.
             match movement.matching_replacement(parcel.parcel.acquired(), movement.units) {
                 Some(replacement) => {
+                    let rebased = corporate_action::split_adjusted_quantity(
+                        from_this_statement,
+                        &splits,
+                        parcel.parcel.date,
+                        Some(year_end),
+                    );
                     let adjustment = write_or_preview(
                         &mut tx,
                         body.preview,
@@ -367,14 +403,10 @@ pub async fn db_generate(
                             // Both figures are in the operation date's basis.
                             quantity: movement.units,
                         },
+                        rebased,
                     )
                     .await?;
-                    units_adjusted += corporate_action::split_adjusted_quantity(
-                        from_this_statement,
-                        &splits,
-                        parcel.parcel.date,
-                        Some(year_end),
-                    );
+                    units_adjusted += rebased;
                     created.push(adjustment);
                 }
                 None => unattributed.push(UnattributedUnits {
@@ -385,6 +417,12 @@ pub async fn db_generate(
             }
         }
         if source_quantity > Decimal::ZERO {
+            let rebased = corporate_action::split_adjusted_quantity(
+                source_quantity,
+                &splits,
+                parcel.parcel.date,
+                Some(year_end),
+            );
             let adjustment = write_or_preview(
                 &mut tx,
                 body.preview,
@@ -393,14 +431,10 @@ pub async fn db_generate(
                     trade_id: parcel.parcel.id,
                     quantity: source_quantity,
                 },
+                rebased,
             )
             .await?;
-            units_adjusted += corporate_action::split_adjusted_quantity(
-                source_quantity,
-                &splits,
-                parcel.parcel.date,
-                Some(year_end),
-            );
+            units_adjusted += rebased;
             created.push(adjustment);
         }
     }
@@ -530,7 +564,7 @@ mod tests {
         assert_eq!(
             fy24.created
                 .iter()
-                .map(|a| (a.trade_id, a.quantity))
+                .map(|a| (a.adjustment.trade_id, a.adjustment.quantity))
                 .collect::<Vec<_>>(),
             vec![(18, dec("509")), (19, dec("1302"))]
         );
@@ -545,7 +579,7 @@ mod tests {
         assert_eq!(
             fy25.created
                 .iter()
-                .map(|a| (a.trade_id, a.quantity))
+                .map(|a| (a.adjustment.trade_id, a.adjustment.quantity))
                 .collect::<Vec<_>>(),
             vec![
                 (18, dec("509")),
@@ -596,7 +630,12 @@ mod tests {
         // Nothing was written, so nothing was assigned an id: the database
         // hands one out only on the real write (SCENARIOS U-a — the generator
         // no longer predicts ids from `MAX(id) + 1`).
-        assert!(preview.created.iter().all(|a| a.id == UNASSIGNED_ID));
+        assert!(
+            preview
+                .created
+                .iter()
+                .all(|a| a.adjustment.id == UNASSIGNED_ID)
+        );
     }
 
     /// Generated rows take ids the database assigns, so deleting the newest
@@ -613,7 +652,7 @@ mod tests {
         let fy24 = db_generate(&pool, 6, &GenerateBody::default())
             .await
             .unwrap();
-        let freed: Vec<i64> = fy24.created.iter().map(|a| a.id).collect();
+        let freed: Vec<i64> = fy24.created.iter().map(|a| a.adjustment.id).collect();
         assert_eq!(freed.len(), 2);
         for id in &freed {
             crate::infra::http::crud_delete::<AmitAdjustment>(&pool, *id)
@@ -624,7 +663,8 @@ mod tests {
         let fy25 = db_generate(&pool, 7, &GenerateBody::default())
             .await
             .unwrap();
-        for adjustment in &fy25.created {
+        for generated in &fy25.created {
+            let adjustment = &generated.adjustment;
             assert!(
                 !freed.contains(&adjustment.id),
                 "adjustment {} took a deleted row's id back",
@@ -920,7 +960,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.created.len(), 1);
-        assert_eq!(result.created[0].trade_id, 1);
+        assert_eq!(result.created[0].adjustment.trade_id, 1);
     }
 
     /// SCENARIOS E-13: the fund splits *after* the statement's year end but
@@ -969,10 +1009,13 @@ mod tests {
             result
                 .created
                 .iter()
-                .map(|a| (a.trade_id, a.quantity))
+                .map(|a| (a.adjustment.trade_id, a.adjustment.quantity))
                 .collect::<Vec<_>>(),
             vec![(1, dec("100"))]
         );
+        // With no split before the year end the two bases coincide, which is
+        // the common case the confirm dialog must not get noisier for.
+        assert_eq!(result.created[0].units_adjusted, dec("100"));
         assert_eq!(result.units_adjusted, dec("100"));
         assert_eq!(result.difference, Decimal::ZERO);
 
@@ -1042,10 +1085,35 @@ mod tests {
             result
                 .created
                 .iter()
-                .map(|a| (a.trade_id, a.quantity))
+                .map(|a| (a.adjustment.trade_id, a.adjustment.quantity))
                 .collect::<Vec<_>>(),
             // Stored as-acquired, reported (and reconciled) in the year's basis.
             vec![(1, dec("100")), (2, dec("50"))]
+        );
+        // Each row carries *both* bases, so a caller listing the rows under
+        // the total is not showing two different units unlabelled: parcel 1's
+        // 100 as-acquired units are 200 of the statement year's, parcel 2's
+        // 50 were bought after the split and are 50 either way (SCENARIOS
+        // Y-c). Σ of the per-row figures is the total, by construction.
+        assert_eq!(
+            result
+                .created
+                .iter()
+                .map(|a| (a.adjustment.quantity, a.units_adjusted))
+                .collect::<Vec<_>>(),
+            vec![
+                (dec("100"), dec("200")),
+                // No split between this parcel and the year end: one basis.
+                (dec("50"), dec("50")),
+            ]
+        );
+        assert_eq!(
+            result
+                .created
+                .iter()
+                .map(|a| a.units_adjusted)
+                .sum::<Decimal>(),
+            result.units_adjusted
         );
         assert_eq!(result.units_adjusted, dec("250"));
         assert_eq!(result.difference, Decimal::ZERO);
@@ -1080,6 +1148,13 @@ mod tests {
         assert_eq!(resp.status, StatusCode::CREATED);
         let body: serde_json::Value = resp.json();
         assert_eq!(body["created"].as_array().unwrap().len(), 2);
+        // A row is the stored adjustment plus its year-end-basis quantity —
+        // flattened, so the adjustment's own columns stay at the top level.
+        let first = &body["created"][0];
+        assert_eq!(first["amma_statement_id"], 6);
+        assert!(first["id"].as_i64().unwrap() > 0);
+        assert_eq!(first["quantity"], "509");
+        assert_eq!(first["units_adjusted"], "509");
         assert_eq!(body["units_adjusted"], "1811");
         assert_eq!(body["units_held"], "1811");
         assert_eq!(body["difference"], "0");
@@ -1253,8 +1328,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.created.len(), 1);
-        assert_eq!(result.created[0].trade_id, replacement);
-        assert_eq!(result.created[0].quantity, dec("100"));
+        assert_eq!(result.created[0].adjustment.trade_id, replacement);
+        assert_eq!(result.created[0].adjustment.quantity, dec("100"));
         // The coverage figures still reconcile against the statement's units.
         assert_eq!(result.units_adjusted, dec("100"));
         assert_eq!(result.difference, Decimal::ZERO);
@@ -1302,7 +1377,7 @@ mod tests {
             result
                 .created
                 .iter()
-                .map(|a| (a.trade_id, a.quantity))
+                .map(|a| (a.adjustment.trade_id, a.adjustment.quantity))
                 .collect::<Vec<_>>(),
             vec![(1, dec("100"))]
         );
@@ -1344,7 +1419,7 @@ mod tests {
             result
                 .created
                 .iter()
-                .map(|a| (a.trade_id, a.quantity))
+                .map(|a| (a.adjustment.trade_id, a.adjustment.quantity))
                 .collect::<Vec<_>>(),
             vec![(1, dec("1000")), (2, dec("200"))]
         );
@@ -1425,7 +1500,7 @@ mod tests {
             result
                 .created
                 .iter()
-                .map(|a| (a.trade_id, a.quantity))
+                .map(|a| (a.adjustment.trade_id, a.adjustment.quantity))
                 .collect::<Vec<_>>(),
             vec![(replacement, dec("100"))]
         );

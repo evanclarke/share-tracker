@@ -1377,7 +1377,7 @@ mod tests {
                 .unwrap();
         // The DRP parcel is the parcel the statement's units are adjusted on.
         assert_eq!(generated.created.len(), 1);
-        assert_eq!(generated.created[0].trade_id, trade.id);
+        assert_eq!(generated.created[0].adjustment.trade_id, trade.id);
         assert_eq!(generated.difference, Decimal::ZERO);
 
         // Assessable: the AMMA's attribution, not the cash row — which is why

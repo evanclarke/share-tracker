@@ -702,6 +702,12 @@ fn amit_adjustment_generation_and_cross_check_documented() {
     // statement year's basis before the per-unit figure is applied.
     assert!(API_MD.contains("**share split** between the covered parcels' acquisition dates"));
     assert!(API_MD.contains("re-based into the year-end basis × `cost_base_adjustment`"));
+    // SCENARIOS Y-c: and because a split puts the stored quantity and the
+    // reconciling total on different unit bases, every generated row carries
+    // *both*, so a caller listing them under the total can show a list that
+    // adds up to it.
+    assert!(API_MD.contains("**plus its own `units_adjusted`**"));
+    assert!(API_MD.contains("`Σ created[].units_adjusted` is the response's `units_adjusted`"));
     // The write-time duplicate invariant and the index behind it.
     assert!(
         API_MD.contains("**another row already adjusts the same parcel on the same statement**")

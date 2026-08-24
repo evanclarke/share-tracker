@@ -326,7 +326,7 @@ actually helps at 50 rows.
 
 ## SCENARIOS Y-c — the AMIT confirm dialog's own numbers do not add up
 
-- [ ] Return each generated adjustment's re-based quantity too, and show both in the confirm gate.
+- [x] Return each generated adjustment's re-based quantity too, and show both in the confirm gate.
 
 Y-05 driven on an AMMA statement over a listing carrying a 1-for-2 `ShareSplit` between acquisition
 and the statement's year end. The gate works in every other respect: it previews without writing,
@@ -360,6 +360,30 @@ exactly `units_adjusted` (5,000 = 5,000). The split re-basing is the whole cause
 
 **Chosen: option 1.** Option 3 was rejected because the dialog would then show figures that do not
 match the AMIT Adjustments screen afterwards; the stored quantity must stay visible.
+
+**Done.** `created` is now `Vec<GeneratedAdjustment>` — a wrapper carrying the stored `AmitAdjustment`
+`#[serde(flatten)]`ed (so the JSON row is unchanged: `id`, `amma_statement_id`, `trade_id`,
+`quantity`) plus its own `units_adjusted`, that row's quantity re-based into the statement year's
+basis. The figure was already being computed and summed at both push sites and then discarded; it is
+now attached to the row, so `Σ created[].units_adjusted == units_adjusted` holds by construction and
+a test asserts it. `adjustmentPreviewText` shows the second figure only on rows where the two differ,
+plus one explanatory line when any row does — the no-split control's dialog is byte-identical to
+before (diffed). The split case now reads
+`• 10: Buy 1000 (XASX:MEGA, 2023-08-10) — 1000 (2000 in the statement year’s basis)` above
+`• 11: … — 5`, so the list visibly reaches 2,005. Tests:
+`db_a_split_across_covered_parcels_is_costed_on_the_year_end_basis` pins both per-row bases and the
+Σ invariant, `db_a_split_after_the_year_end_does_not_change_the_reduction` pins the equal case,
+`api_generate_returns_201_with_the_created_rows` pins the flattened wire shape, three
+`adjustmentPreviewText` cases in `util.test.js` pin the wording (including "equal but written with a
+different number of decimals shows no bracket"), and `doc_checks` pins the `docs/API.md` paragraph.
+Nothing else consumed `created[]` — `forms.js`, `config.js`'s toast and `taxreport.js` read only the
+top-level totals (taxreport.js's `units_adjusted` is the cross-check report's, a different response).
+
+One correction to the write-up above: the finding says "the mismatch figure is *also* 1,005", reading
+as if the mismatch coincidentally equalled the listed sum. It does, but by arithmetic accident of
+this fixture (1000 held, 2005 adjusted), not by any shared derivation — `difference` is
+`units_adjusted − units_held` and never touches the listed quantities. The confusion the fix removes
+is the unlabelled two bases; the coincidence is fixture noise.
 
 ## SCENARIOS Y-d — two Tax Summary money columns are rendered at four decimal places, ungrouped
 
