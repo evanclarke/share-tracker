@@ -1745,3 +1745,98 @@ end to end through `POST /reports/tax-report` via `ApiClient::full`, asserting t
 disposed parcel's `adjustments` and that its units, cost base, proceeds and gain are unchanged.
 
 Docs: `docs/API.md`'s `disposals` bullet now states the rule and gives all three labels.
+
+## SCENARIOS Z-a — one disposal's gain prints as two different figures on two screens
+
+- [x] Make a sale's own proceeds and gain the exact figures, not the sum of re-rounded shares.
+
+Found driving **Z-01** (the 10-year ETF), whose closing sale spans 10 parcels. Measured in a real
+browser on the two screens a user would compare:
+
+| screen | what it prints for the 2026-05-15 disposal |
+| --- | --- |
+| Realised Gains (`#/r/realised-gains`) | proceeds `69,785.05`  cost base `39,139.98`  **gain `30,645.07`** |
+| Annual Tax Report (`#/r/tax-report`) | *"Subtotal: proceeds 69,785.05, cost base 39,139.98, **gain/loss 30,645.08**"* |
+
+The exact figure is `69,785.05 − 39,139.975 = 30,645.075`, so the tax report is right and the
+Realised Gains cell is a cent low. **The same row disagrees with itself**: its discount-eligible and
+non-discountable columns print `30,316.38` and `328.70`, which add to `30,645.08` — the cent the gain
+cell beside them does not show. That is W-d's "printed columns do not add up", on screen this time.
+The [net capital gain](docs/API.md#net-capital-gain) report agrees with the tax report.
+
+**Mechanism.** `reports::realised_gains` never computes a sale's total: `sale_proceeds` is accumulated
+from the per-allocation shares. Each share is `sale.average_price × qty_alloc − alloc_costs`, and
+`alloc_costs` — the pro-rated brokerage — is deliberately a *cumulative difference* so the shares
+telescope to exactly `brokerage + gst`. They do. What breaks the telescoping is the **subtraction that
+follows**: `price × qty` is a large exact number and `alloc_costs` a 28-significant-digit repeating
+one, so each difference is re-rounded to fit `Decimal`'s mantissa and the residues no longer cancel.
+The report's own test comment names the hazard ("a larger price would re-round there") but only for
+the shares, not for the total.
+
+**Reproduced with three controls agreeing** (parcels of equal size, sale brokerage 9.95):
+
+| case | exact proceeds | reported |
+| --- | ---: | --- |
+| 3 parcels × 517u @ 45.00 | 69,785.05 | `69785.049999999999999999999999` |
+| 3 parcels × 517u @ **4.00** | 6,194.05 | `6194.0499999999999999999999999` |
+| 3 parcels × 517u, **no brokerage** | 69,795.00 | `69795.00` ✔ |
+| **1 parcel** × 1551u @ 45.00 | 69,785.05 | `69785.05` ✔ |
+
+So it is the apportionment, not the magnitude: the drift appears whenever the brokerage share is a
+repeating decimal, and disappears when there is nothing to apportion or nothing to apportion it
+across. Whether it changes a *displayed* cent then depends on where the exact figure sits — Z-01's
+landed on a half-cent, which is what made it visible.
+
+**Direction.** The sale-level `proceeds` is knowable exactly (`price × quantity − brokerage − gst`,
+converted once); computing it there and letting the last allocation absorb the difference keeps both
+properties W-d established — the total is exact, and the per-parcel rows still sum to it.
+
+**Fixed** in `reports::realised_gains::compute_realised_gains`: an allocation's proceeds is now a
+share of the sale's *own* net proceeds — `average_price × quantity − brokerage − gst`, converted to
+AUD **once** at the sale's single rate — apportioned by quantity through a new shared
+`cumulative_share` helper, instead of `price × qty_alloc` less a separately pro-rated brokerage
+share. Apportioning the whole figure is what removes the re-rounding: the old form subtracted a
+28-significant-digit repeating share from an exact large number, and every such subtraction rounds to
+fit Decimal's mantissa, so the residues stopped cancelling. `cumulative_share` keeps *both* of W-d's
+properties at once — the differences telescope, so the shares sum to the total, and the allocation
+that completes the disposal (`units_so_far == units_total`) is handed the whole total with no
+division at all, so not even the final `total × units / units` can re-round it. Converting once
+rather than per allocation is equivalent because every allocation of a sale converts at the same
+rate, and it removes one rounded division per allocation.
+
+The **`RightsSale`** accumulator had the same class of defect by a different route: nothing there is
+apportioned and then combined with an exact figure, but each allocation's two legs were converted to
+AUD separately, so every share carried its own rounded division. Measured: US$0.20 × 3 rights at 0.60
+USD/AUD summed to `0.9999999999999999999999999999` against an exact A$1.00, and the US$10.00 carried
+cost to one ulp under 10/0.6. Both totals are converted once now and apportioned by units through the
+same helper.
+
+Rounding *policy* is untouched — `infra::decimal::to_cents`, the CSV exports and the annual tax
+report's sum-of-rounded-rows convention (W-d) all behave exactly as before; only the exact figure the
+report computes changed.
+
+**Tests** (all five fail on the pre-fix code; the three controls pass either way, which is what says
+it was the apportionment):
+`reports::realised_gains::tests::pure_ten_parcel_disposal_reports_its_exact_proceeds_and_gain` — the
+finding's own shape: 1,551 units over 10 parcels at $45.00 less $9.95, asserting proceeds exactly
+`69785.05`, cost base exactly `39139.975`, gain exactly `30645.075`, `to_cents` of the gain
+`30645.08`, and that the 10 per-parcel rows still sum to each total exactly.
+`…::pure_equal_parcel_shares_sum_exactly_at_a_large_price` / `…_at_a_small_price` — 3 × 517 units at
+$45.00 and at $4.00 (69,785.05 and 6,194.05, previously `…049999999999999999999999` and
+`…0499999999999999999999999`).
+`…::pure_equal_parcel_shares_sum_exactly_without_brokerage` and `…::pure_single_parcel_proceeds_are_
+exact` — the two controls that were always exact: nothing to apportion, and nothing to apportion it
+across.
+`…::pure_non_aud_multi_parcel_proceeds_convert_the_exact_total_once` — a USD 3-parcel disposal pinning
+proceeds, cost base and gain.
+`…::pure_non_aud_rights_sale_shares_sum_exactly_to_the_converted_totals` — the rights regression.
+`…::api_one_disposal_reports_one_rounded_gain_on_both_screens` — the two-screens comparison end to
+end through `ApiClient::full`: `GET /portfolio/realised-gains` and `POST /reports/tax-report` must
+print the same cents for one 3-parcel disposal whose gain is exactly `30981.875` (before the fix:
+`30981.87` against `30981.88`).
+`…::pure_brokerage_shares_sum_exactly_across_allocations` keeps its $2 assertion; its comment no
+longer has to warn that a larger price would mask it.
+
+Docs: `docs/API.md`'s "Where a Sell's brokerage and GST land" paragraph now states that a disposal's
+`proceeds` is exactly `price × quantity − brokerage − GST` however many parcels it was allocated
+across, and that the `parcels` rows still sum to it exactly.

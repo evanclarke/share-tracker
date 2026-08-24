@@ -354,6 +354,40 @@ pub async fn db_realised_gains_on(
     compute_realised_gains(&load_report_data(conn).await?)
 }
 
+/// One allocation's share of a disposal-level total, apportioned by units as a
+/// cumulative difference: the entitlement of every unit allocated *so far*,
+/// less what earlier allocations already took.
+///
+/// Two properties have to hold at once, and this form gets both.
+///
+/// * **The shares sum exactly to `total`.** The differences telescope, so the
+///   sum after any allocation is that allocation's cumulative entitlement, not
+///   a sum of independently rounded shares — a division remainder (a third of
+///   $10) lands on the last allocation instead of leaking. And the allocation
+///   that *completes* the disposal (`units_so_far == units_total`) is handed
+///   the whole total with no division at all, so not even the final
+///   `total × units / units` can re-round it.
+/// * **Every share is still the parcel's own pro-rata figure**, so the
+///   per-parcel rows a UI drills into mean something on their own.
+///
+/// Apply it to the exact *total* the report publishes (net proceeds, a rights
+/// sale's cost), never to one component of it: a component apportioned and
+/// then combined with an exact figure re-rounds in the combining step and the
+/// telescoping is lost (SCENARIOS Z-a).
+fn cumulative_share(
+    total: Decimal,
+    units_so_far: Decimal,
+    units_total: Decimal,
+    taken_so_far: Decimal,
+) -> Decimal {
+    let entitlement = if units_so_far == units_total {
+        total
+    } else {
+        mul_div(&[total, units_so_far], units_total)
+    };
+    entitlement - taken_so_far
+}
+
 /// The gain/loss computation: a pure function over [`ReportData`], so the
 /// arithmetic is unit-testable without a database.
 fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sqlx::Error> {
@@ -366,10 +400,10 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
     // below, kept instead of only being summed into the totals above, so the
     // report can surface which parcel contributed what.
     let mut sale_parcels: HashMap<i64, Vec<ParcelDetail>> = HashMap::new();
-    // Running (quantity, sale-costs share) already handed to earlier
-    // allocations of each sale, for the cumulative-difference pro-rating
+    // Running (quantity, proceeds share) already handed to earlier
+    // allocations of each sale, for the cumulative-difference apportionment
     // below.
-    let mut sale_costs_assigned: HashMap<i64, (Decimal, Decimal)> = HashMap::new();
+    let mut sale_proceeds_assigned: HashMap<i64, (Decimal, Decimal)> = HashMap::new();
 
     for alloc in &data.allocations {
         let sale_id = alloc.sale_trade_id;
@@ -382,33 +416,45 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
             continue;
         };
 
-        // Proceeds for this allocation: pro-rate sale brokerage+gst by
-        // qty_alloc / sale_qty, as a cumulative difference — each share is the
-        // cumulative entitlement minus what earlier allocations already took —
-        // so the shares sum exactly to the total: any division remainder
-        // (e.g. a third of $10) lands on the sale's last allocation instead
-        // of each share rounding independently.
-        let sale_costs = sale.brokerage + sale.gst_on_brokerage;
+        // Proceeds for this allocation: its share of the sale's own net
+        // proceeds, apportioned by qty_alloc / sale_qty via
+        // `cumulative_share`.
+        //
+        // The sale's total is knowable exactly — average_price × quantity −
+        // brokerage − gst — so it is computed as a whole and converted to AUD
+        // *once*, at the sale's rate (the sale's deliberate spot override when
+        // set, else the ATO rate for the sale month, else the sale's manual
+        // fx_rate fallback). Every allocation of a sale converts at that one
+        // rate, so converting the total once and apportioning the AUD figure
+        // is the same money as converting each share — minus one rounded
+        // division per allocation.
+        //
+        // Apportioning the whole figure is what keeps the sale's `proceeds`
+        // exact. Pro-rating only the brokerage and then subtracting it from
+        // `price × qty_alloc` (the previous form) made every share an exact
+        // large number less a 28-significant-digit repeating one; each such
+        // subtraction re-rounds to fit Decimal's mantissa, so the shares no
+        // longer telescoped to the total (a 1551-unit 10-parcel sale reported
+        // 69785.049999999999999999999999 for an exact 69785.05 — a cent low
+        // once rounded, and a cent adrift from the same disposal's figure on
+        // the Annual Tax Report).
         let alloc_proceeds = if sale.quantity > Decimal::ZERO {
-            let (qty_so_far, costs_so_far) = sale_costs_assigned
+            let sale_total = data.fx.to_aud(
+                sale.average_price * sale.quantity - sale.brokerage - sale.gst_on_brokerage,
+                &sale.currency,
+                sale.date,
+                sale.fx_override(),
+            )?;
+            let (qty_so_far, proceeds_so_far) = sale_proceeds_assigned
                 .entry(sale_id)
                 .or_insert((Decimal::ZERO, Decimal::ZERO));
             *qty_so_far += qty_alloc;
-            let alloc_costs = mul_div(&[sale_costs, *qty_so_far], sale.quantity) - *costs_so_far;
-            *costs_so_far += alloc_costs;
-            sale.average_price * qty_alloc - alloc_costs
+            let share = cumulative_share(sale_total, *qty_so_far, sale.quantity, *proceeds_so_far);
+            *proceeds_so_far += share;
+            share
         } else {
             Decimal::ZERO
         };
-        // Convert to AUD at the sale's rate (the sale's deliberate spot
-        // override when set, else the ATO rate for the sale month, else the
-        // sale's manual fx_rate fallback) before aggregating.
-        let alloc_proceeds = data.fx.to_aud(
-            alloc_proceeds,
-            &sale.currency,
-            sale.date,
-            sale.fx_override(),
-        )?;
 
         // The allocated quantity is in the *sale date's* unit basis; the
         // purchase parcel's quantity and per-unit cost are as transacted. A
@@ -537,11 +583,27 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
         let mut non_discount_gain = Decimal::ZERO;
         let mut loss = Decimal::ZERO;
         let mut parcels: Vec<ParcelDetail> = Vec::new();
-        // rights_cost apportioned by units as a cumulative difference, so the
-        // per-allocation shares sum exactly to the total (any division
-        // remainder lands on the last allocation).
+        // Both legs convert at the sale month (manual fx_rate fallback): the
+        // rights' own purchase date isn't tracked, so the cost leg has no
+        // earlier anchor. Both totals are exact — proceeds_per_right × units,
+        // and the carried rights_cost as recorded — so each is converted once
+        // and then apportioned by units via `cumulative_share`, exactly as the
+        // Sell path apportions its net proceeds. Converting per allocation
+        // instead would round each division separately, so a non-AUD rights
+        // sale's shares need not have summed to the converted total.
+        let fx = FxOverride::Fallback(sale.fx_rate);
+        let total_proceeds = data.fx.to_aud(
+            sale.proceeds_per_right * sale.units,
+            &sale.currency,
+            sale.date,
+            fx,
+        )?;
+        let total_cost = data
+            .fx
+            .to_aud(sale.rights_cost, &sale.currency, sale.date, fx)?;
         let mut units_so_far = Decimal::ZERO;
         let mut cost_so_far = Decimal::ZERO;
+        let mut proceeds_so_far = Decimal::ZERO;
         for alloc in data
             .rights_allocations
             .iter()
@@ -551,28 +613,15 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
                 continue;
             };
             units_so_far += alloc.units;
-            let alloc_cost = if sale.units > Decimal::ZERO {
-                mul_div(&[sale.rights_cost, units_so_far], sale.units) - cost_so_far
+            let (alloc_proceeds, alloc_cost) = if sale.units > Decimal::ZERO {
+                let p = cumulative_share(total_proceeds, units_so_far, sale.units, proceeds_so_far);
+                let c = cumulative_share(total_cost, units_so_far, sale.units, cost_so_far);
+                proceeds_so_far += p;
+                cost_so_far += c;
+                (p, c)
             } else {
-                Decimal::ZERO
+                (Decimal::ZERO, Decimal::ZERO)
             };
-            cost_so_far += alloc_cost;
-
-            // Both legs convert at the sale month (manual fx_rate fallback):
-            // the rights' own purchase date isn't tracked, so the cost leg
-            // has no earlier anchor.
-            let alloc_proceeds = data.fx.to_aud(
-                sale.proceeds_per_right * alloc.units,
-                &sale.currency,
-                sale.date,
-                FxOverride::Fallback(sale.fx_rate),
-            )?;
-            let alloc_cost = data.fx.to_aud(
-                alloc_cost,
-                &sale.currency,
-                sale.date,
-                FxOverride::Fallback(sale.fx_rate),
-            )?;
 
             let alloc_gain = alloc_proceeds - alloc_cost;
             proceeds += alloc_proceeds;
@@ -682,6 +731,38 @@ mod tests {
             .price(price)
             .insert(pool)
             .await;
+    }
+
+    /// A decimal literal, for the exact-figure assertions.
+    fn dec(s: &str) -> Decimal {
+        s.parse().expect("a decimal literal")
+    }
+
+    /// One column of a disposal's per-parcel rows, summed — the property the
+    /// sale's own totals have to equal exactly.
+    fn parcel_sum(r: &RealisedGainLoss, f: impl Fn(&ParcelDetail) -> Decimal) -> Decimal {
+        r.parcels.iter().map(f).sum()
+    }
+
+    /// The SCENARIOS Z-a shape at its simplest: three equal 517-unit parcels
+    /// of a 1,551-unit sale, so each brokerage share is a repeating decimal.
+    fn three_equal_parcel_sale(price: i64, brokerage: &str) -> Vec<RealisedGainLoss> {
+        let d = |y, m, day| NaiveDate::from_ymd_opt(y, m, day).unwrap();
+        let mut sell = mem_sell(9, d(2026, 5, 15), 1551, price, "AUD");
+        sell.brokerage = dec(brokerage);
+        let mut buys: HashMap<i64, ParcelRow> = HashMap::new();
+        let mut allocations = Vec::new();
+        for id in 1..=3 {
+            buys.insert(id, mem_buy(id, d(2015, 3, 4), 517, 1, "AUD"));
+            allocations.push(mem_alloc(9, id, 517));
+        }
+        compute_realised_gains(&ReportData {
+            sells: [(9, sell)].into(),
+            buys,
+            allocations,
+            ..ReportData::default()
+        })
+        .expect("no FX needed")
     }
 
     // Pure-computation tests: `compute_realised_gains` over in-memory
@@ -845,12 +926,16 @@ mod tests {
         let d = |y, m, day| NaiveDate::from_ymd_opt(y, m, day).unwrap();
         // $10 brokerage over three 1-unit allocations of a 3-unit sale: each
         // independent share would be the non-terminating 10/3, so the three
-        // would sum to 9.999…, not 10. The cumulative-difference pro-rating
-        // hands the remainder to the last allocation, so total proceeds come
-        // out exactly 3 × $4 − $10 = $2. (The $4 price keeps each
-        // `price × qty − share` subtraction inside Decimal's 28-digit
-        // mantissa; a larger price would re-round there and mask what this
-        // test asserts — the shares themselves summing exactly.)
+        // would sum to 9.999…, not 10. The cumulative-difference
+        // apportionment hands the remainder to the last allocation, so total
+        // proceeds come out exactly 3 × $4 − $10 = $2.
+        //
+        // The $4 price used to matter: the shares were `price × qty − share`,
+        // and a larger price pushed that subtraction past Decimal's 28-digit
+        // mantissa, re-rounding it and masking what this test asserts
+        // (SCENARIOS Z-a). The whole net figure is apportioned now, so the
+        // price is arbitrary — `pure_equal_parcel_shares_sum_exactly_at_a_
+        // large_price` is this same shape at $45.00 and 1,551 units.
         let mut sell = mem_sell(4, d(2025, 6, 2), 3, 4, "AUD");
         sell.brokerage = Decimal::from(10);
         let data = ReportData {
@@ -873,6 +958,248 @@ mod tests {
         // Each allocation's net (4 − share) fell below its $1 cost: the three
         // per-allocation losses likewise sum exactly to the $1 total.
         assert_eq!(result[0].capital_loss, Decimal::ONE);
+    }
+
+    /// A disposal's own proceeds are `price × quantity − brokerage − gst`,
+    /// and the report must publish exactly that figure however many parcels
+    /// it was allocated across (SCENARIOS Z-a).
+    ///
+    /// Three equal parcels of 517 units at $45.00 less $9.95 brokerage is
+    /// exactly $69,785.05. Pro-rating only the brokerage and subtracting the
+    /// share from `price × qty` reported 69,785.049999999999999999999999
+    /// here: each share was an exact large number less a 28-significant-digit
+    /// repeating one, and every such subtraction re-rounds, so the shares
+    /// stopped telescoping to the total.
+    #[test]
+    fn pure_equal_parcel_shares_sum_exactly_at_a_large_price() {
+        let r = &three_equal_parcel_sale(45, "9.95")[0];
+        assert_eq!(r.proceeds, dec("69785.05"));
+        assert_eq!(parcel_sum(r, |p| p.proceeds), r.proceeds);
+    }
+
+    /// The same drift at a small price, which is the control that says it is
+    /// the apportionment and not the magnitude: 3 × 517 units at $4.00 less
+    /// $9.95 is exactly $6,194.05, and used to report
+    /// 6,194.0499999999999999999999999.
+    #[test]
+    fn pure_equal_parcel_shares_sum_exactly_at_a_small_price() {
+        let r = &three_equal_parcel_sale(4, "9.95")[0];
+        assert_eq!(r.proceeds, dec("6194.05"));
+        assert_eq!(parcel_sum(r, |p| p.proceeds), r.proceeds);
+    }
+
+    /// Control: with nothing to apportion, the same three parcels were always
+    /// exact — 3 × 517 × $45.00 = $69,795.00 — and still are.
+    #[test]
+    fn pure_equal_parcel_shares_sum_exactly_without_brokerage() {
+        let r = &three_equal_parcel_sale(45, "0")[0];
+        assert_eq!(r.proceeds, dec("69795.00"));
+        assert_eq!(parcel_sum(r, |p| p.proceeds), r.proceeds);
+    }
+
+    /// Control: with nothing to apportion the brokerage *across*, the figure
+    /// was always exact too — one 1,551-unit parcel takes the whole $9.95.
+    #[test]
+    fn pure_single_parcel_proceeds_are_exact() {
+        let d = |y, m, day| NaiveDate::from_ymd_opt(y, m, day).unwrap();
+        let mut sell = mem_sell(9, d(2026, 5, 15), 1551, 45, "AUD");
+        sell.brokerage = dec("9.95");
+        let data = ReportData {
+            sells: [(9, sell)].into(),
+            buys: [(1, mem_buy(1, d(2015, 3, 4), 1551, 25, "AUD"))].into(),
+            allocations: vec![mem_alloc(9, 1, 1551)],
+            ..ReportData::default()
+        };
+        let result = compute_realised_gains(&data).unwrap();
+        assert_eq!(result[0].proceeds, dec("69785.05"));
+    }
+
+    /// SCENARIOS Z-a in full, on the disposal that found it: 1,551 units over
+    /// **ten** parcels, sold at $45.00 less $9.95 brokerage.
+    ///
+    /// Proceeds are exactly $69,785.05 and the cost base exactly
+    /// $39,139.975, so the gain is exactly $30,645.075 — a half cent, which
+    /// is what made the drift visible on screen. Rounded for display that is
+    /// $30,645.08, the figure the annual tax report and the net-capital-gain
+    /// report print; the Realised Gains screen printed $30,645.07 from a
+    /// gain of 30,645.074999999999999999999999, a cent adrift both from the
+    /// other two screens and from its own discount-eligible +
+    /// non-discountable columns beside it (W-d's "columns do not add up").
+    ///
+    /// The two properties that have to hold together are both asserted: the
+    /// sale's totals are the exact arithmetic figures, *and* the ten
+    /// per-parcel rows still sum to each of them exactly.
+    #[test]
+    fn pure_ten_parcel_disposal_reports_its_exact_proceeds_and_gain() {
+        let d = |y, m, day| NaiveDate::from_ymd_opt(y, m, day).unwrap();
+        let mut sell = mem_sell(99, d(2026, 5, 15), 1551, 45, "AUD");
+        sell.brokerage = dec("9.95");
+
+        // Ten parcels totalling 1,551 units for a $39,139.975 cost base:
+        // eight of 155 units at $25.00 ($31,000.00), one of 156 at $27.00
+        // plus $15.00 brokerage ($4,227.00) bought inside 12 months of the
+        // sale — so its gain is the non-discountable one — and one of 155 at
+        // $25.245 ($3,912.975), which is where the half cent comes from.
+        let mut buys: HashMap<i64, ParcelRow> = HashMap::new();
+        let mut allocations = Vec::new();
+        for id in 1..=8 {
+            buys.insert(id, mem_buy(id, d(2015, 3, 4), 155, 25, "AUD"));
+            allocations.push(mem_alloc(99, id, 155));
+        }
+        let mut recent = mem_buy(9, d(2025, 11, 3), 156, 27, "AUD");
+        recent.brokerage = Decimal::from(15);
+        buys.insert(9, recent);
+        allocations.push(mem_alloc(99, 9, 156));
+        let mut half_cent = mem_buy(10, d(2016, 8, 9), 155, 25, "AUD");
+        half_cent.average_price = dec("25.245");
+        buys.insert(10, half_cent);
+        allocations.push(mem_alloc(99, 10, 155));
+
+        let data = ReportData {
+            sells: [(99, sell)].into(),
+            buys,
+            allocations,
+            ..ReportData::default()
+        };
+        let result = compute_realised_gains(&data).unwrap();
+        assert_eq!(result.len(), 1);
+        let r = &result[0];
+        assert_eq!(r.parcels.len(), 10);
+
+        // 1551 × 45.00 − 9.95, and 30,645.075 against the stated cost base.
+        assert_eq!(r.proceeds, dec("69785.05"));
+        assert_eq!(r.cost_base, dec("39139.975"));
+        assert_eq!(r.capital_gain_loss, dec("30645.075"));
+        // The cent the two screens disagreed on.
+        assert_eq!(
+            crate::infra::decimal::to_cents(r.capital_gain_loss),
+            dec("30645.08")
+        );
+
+        // The per-parcel rows still add up to each of the sale's totals.
+        assert_eq!(parcel_sum(r, |p| p.proceeds), r.proceeds);
+        assert_eq!(parcel_sum(r, |p| p.cost_base), r.cost_base);
+        assert_eq!(parcel_sum(r, |p| p.capital_gain_loss), r.capital_gain_loss);
+        // ...and the row's own gain columns add up to its gain.
+        assert_eq!(
+            r.discount_eligible_gain + r.non_discountable_gain - r.capital_loss,
+            r.capital_gain_loss
+        );
+        assert!(r.non_discountable_gain > Decimal::ZERO, "the 2025 parcel");
+    }
+
+    /// A non-AUD multi-parcel disposal: every allocation of a sale converts
+    /// at the sale's one rate, so converting the exact total once and
+    /// apportioning the AUD figure is the same money as converting each
+    /// share — with one rounded division instead of one per allocation.
+    /// 1,551 units at US$45.00 less US$9.95 is US$69,785.05, which at 0.50
+    /// USD per AUD is exactly A$139,570.10.
+    #[test]
+    fn pure_non_aud_multi_parcel_proceeds_convert_the_exact_total_once() {
+        let d = |y, m, day| NaiveDate::from_ymd_opt(y, m, day).unwrap();
+        let mut sell = mem_sell(5, d(2026, 5, 15), 1551, 45, "USD");
+        sell.brokerage = dec("9.95");
+        let mut buys: HashMap<i64, ParcelRow> = HashMap::new();
+        let mut allocations = Vec::new();
+        for (i, qty) in [517i64, 517, 517].into_iter().enumerate() {
+            let id = i as i64 + 1;
+            let mut buy = mem_buy(id, d(2015, 3, 4), qty, 20, "USD");
+            buy.currency = "USD".to_string();
+            buys.insert(id, buy);
+            allocations.push(mem_alloc(5, id, qty));
+        }
+        let data = ReportData {
+            sells: [(5, sell)].into(),
+            buys,
+            allocations,
+            fx: crate::infra::fx::FxRates::from_rates([
+                ("USD", "2015-03", dec("0.50")),
+                ("USD", "2026-05", dec("0.50")),
+            ]),
+            ..ReportData::default()
+        };
+        let result = compute_realised_gains(&data).unwrap();
+        let r = &result[0];
+        // US$69,785.05 / 0.50, and 3 × 517 × US$20.00 / 0.50 = A$62,040.00.
+        assert_eq!(r.proceeds, dec("139570.10"));
+        assert_eq!(r.cost_base, dec("62040.00"));
+        assert_eq!(r.capital_gain_loss, dec("77530.10"));
+        assert_eq!(parcel_sum(r, |p| p.proceeds), r.proceeds);
+        assert_eq!(parcel_sum(r, |p| p.cost_base), r.cost_base);
+    }
+
+    /// The finding's own two-screens comparison, end to end through the API:
+    /// one disposal's rounded gain must read the same on Realised Gains
+    /// (`GET /portfolio/realised-gains`, which answers the exact decimal the
+    /// screen rounds) and on the [annual tax
+    /// report](crate::reports::tax_report) (`POST /reports/tax-report`, which
+    /// cent-rounds each parcel row and prints the sum of those, SCENARIOS
+    /// W-d) — Z-a is those two printing 30,645.07 and 30,645.08 for one
+    /// disposal.
+    ///
+    /// 1,551 units at $45.00 less $9.95 brokerage over three parcels is
+    /// exactly $69,785.05; against a $38,803.175 cost base the gain is
+    /// exactly $30,981.875 — a half cent, which is what makes a drift of
+    /// 1e-24 visible at the cent. Both screens print $30,981.88 now; before
+    /// the fix the exact figure was 30,981.874999999999999999999999 and
+    /// Realised Gains printed $30,981.87.
+    #[tokio::test]
+    async fn api_one_disposal_reports_one_rounded_gain_on_both_screens() {
+        use crate::infra::decimal::to_cents;
+        let d = |y, m, day| NaiveDate::from_ymd_opt(y, m, day).unwrap();
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "VDHG").await;
+        // 200 + 115 + 1,236 = 1,551 units. The middle parcel's $25.245 price
+        // is where the half cent comes from, and its 2025 date makes its gain
+        // the non-discountable one.
+        let parcels = [
+            (1i64, 200i64, "25.00", d(2015, 3, 4)),
+            (2, 115, "25.245", d(2025, 11, 3)),
+            (3, 1236, "25.00", d(2016, 8, 9)),
+        ];
+        for (id, qty, price, date) in parcels {
+            insert_buy(&pool, id, 1, date, Decimal::from(qty), dec(price)).await;
+        }
+        test_support::sell(4, 1)
+            .date(d(2026, 5, 15))
+            .qty(Decimal::from(1551))
+            .price(Decimal::from(45))
+            .brokerage(dec("9.95"))
+            .insert(&pool)
+            .await;
+        for (id, qty, _, _) in parcels {
+            allocate(&pool, id, 4, id, Decimal::from(qty)).await;
+        }
+
+        let client = ApiClient::full(&pool);
+        let rows: Vec<RealisedGainLoss> = client.get_json("/portfolio/realised-gains").await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].proceeds, dec("69785.05"));
+        assert_eq!(rows[0].cost_base, dec("38803.175"));
+        assert_eq!(rows[0].capital_gain_loss, dec("30981.875"));
+
+        let report: serde_json::Value = client
+            .post_json(
+                "/reports/tax-report",
+                &serde_json::json!({"tax_year": 2026}),
+            )
+            .await;
+        let subtotal = &report["disposals"]["listings"][0]["subtotal"];
+        // The same disposal, so the two screens have to land on the same
+        // cents — the tax report from the sum of its rounded rows, Realised
+        // Gains from rounding the exact figure.
+        for (column, screen) in [
+            ("proceeds_aud", rows[0].proceeds),
+            ("cost_base_aud", rows[0].cost_base),
+            ("gain_loss_aud", rows[0].capital_gain_loss),
+        ] {
+            assert_eq!(
+                subtotal[column],
+                serde_json::json!(to_cents(screen).to_string()),
+                "{column} must read the same on both screens"
+            );
+        }
+        assert_eq!(subtotal["gain_loss_aud"], serde_json::json!("30981.88"));
     }
 
     // DB-level tests
@@ -2655,6 +2982,50 @@ mod tests {
             r.capital_gain_loss,
             r.discount_eligible_gain + r.non_discountable_gain - r.capital_loss
         );
+    }
+
+    /// A non-AUD rights sale's per-allocation shares sum exactly to the
+    /// sale's converted totals (SCENARIOS Z-a's property, on the other
+    /// disposal shape).
+    ///
+    /// The defect reached this path by a different route: nothing here is
+    /// apportioned *and then* combined with an exact figure, but each
+    /// allocation's leg used to be converted to AUD on its own, so every
+    /// share carried its own rounded division and the three need not have
+    /// summed to the converted total. US$0.20 × 3 rights at 0.60 USD per AUD
+    /// is exactly A$1.00 and came out 0.9999999999999999999999999999; the
+    /// US$10.00 carried cost is exactly 10/0.6 AUD and came out one ulp
+    /// short. Both totals are converted once now, then apportioned by units.
+    #[test]
+    fn pure_non_aud_rights_sale_shares_sum_exactly_to_the_converted_totals() {
+        let d = |y, m, day| NaiveDate::from_ymd_opt(y, m, day).unwrap();
+        let mut sale = mem_rights_sale(7, d(2024, 8, 1), 3, "0.20", "10");
+        sale.currency = "USD".to_string();
+        let data = ReportData {
+            buys: [
+                (1, mem_buy(1, d(2024, 1, 1), 100, 2, "AUD")),
+                (2, mem_buy(2, d(2024, 2, 1), 100, 2, "AUD")),
+                (3, mem_buy(3, d(2024, 3, 1), 100, 2, "AUD")),
+            ]
+            .into(),
+            rights_sales: vec![sale],
+            rights_allocations: vec![
+                mem_rights_alloc(7, 1, 1),
+                mem_rights_alloc(7, 2, 1),
+                mem_rights_alloc(7, 3, 1),
+            ],
+            fx: crate::infra::fx::FxRates::from_rates([("USD", "2024-08", dec("0.60"))]),
+            ..ReportData::default()
+        };
+
+        let result = compute_realised_gains(&data).unwrap();
+        let r = &result[0];
+        assert_eq!(r.proceeds, Decimal::ONE);
+        assert_eq!(r.cost_base, Decimal::from(10) / dec("0.60"));
+        assert_eq!(r.capital_gain_loss, r.proceeds - r.cost_base);
+        assert_eq!(parcel_sum(r, |p| p.proceeds), r.proceeds);
+        assert_eq!(parcel_sum(r, |p| p.cost_base), r.cost_base);
+        assert_eq!(r.capital_loss, r.cost_base - r.proceeds);
     }
 
     /// A paid right that lapses (nil proceeds) realises a capital loss equal
