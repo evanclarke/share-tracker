@@ -10,7 +10,7 @@ findings are all closed in DONE.md), except where a section's heading names anot
 (e.g. REQUIREMENTS, SCENARIOS). Each section records one finding; sections land in DONE.md as they
 are fixed or decided.
 
-**Nothing is open in this file.**
+**Open: the five findings of the SCENARIOS AA pass, at the end of this file.**
 
 **SCENARIOS.md sections A–Z are driven and every finding they raised is closed** in the `DONE/*.md`
 archive. Only section **AA. Boundary and out-of-scope scenarios** (20 scenarios) remains. Section **S. Settlement, holidays, and dates** was driven 2026-08-22 (`d501408`) and its
@@ -232,3 +232,258 @@ After Z, the next SCENARIOS pass is section **AA. Boundary and out-of-scope scen
 scenarios) — each a documented limitation, where the verification is that the system **fails safe**
 (refuses, or flags, or documents) rather than silently producing a wrong number, and that the
 documented workaround actually works. The lessons worth carrying forward are in the handover memory.
+
+---
+
+# SCENARIOS AA. Boundary and out-of-scope scenarios
+
+Section **AA** (20 scenarios) was driven on **2026-08-24** against a throwaway database through the
+HTTP API. AA is a different shape from every earlier pass: each entry is a *documented limitation*,
+so the verification is that the system **fails safe** — refuses, or flags, or documents — rather than
+silently producing a wrong number, and that the documented workaround actually works.
+
+**Fifteen came back correct.** A pre-CGT parcel cannot be entered by any path and the boundary is
+exact — 1985-09-19 refused, 1985-09-20 accepted — with the same guard on trades, Sells, ESS taxing
+points and inheritances, and the one legitimate pre-CGT interaction (`MarketValueAtDeath`) left open
+while `DeceasedCostBase` with a pre-CGT acquisition is refused (AA-01); rights over pre-CGT originals
+are unreachable by construction, since every anchoring parcel must be a post-CGT Buy/DRP (AA-14).
+The **individual-resident basis is stated on every report that applies the rate** — realised gains,
+net capital gain, tax summary, the parcel optimiser, the pre-sale what-if's year rows, and the
+archived Annual Tax Report's `meta` (AA-05). **Partial DRP participation is refused and its
+documented workaround works exactly as written**: the partial allotment as reinvest `units` is
+`422` naming both figures, the split-into-two-rows workaround costs the parcel at the cash actually
+applied, and both stated caveats hold — the per-share cross-check left on a half is itself a `422`,
+and an exactly half-and-half split does trip `duplicate_income` (AA-10). **K10/K11 is reported on
+the data, not only in a paragraph**: a USD trade contracted 2025-01-30 and settling 2025-02-03 raises
+FX coverage's `settlement_crosses_rate_month` with a detail sentence naming the omission (AA-11). A
+collectable, a personal-use asset, a main residence or any non-listed asset has **no `security_type`
+to arrive under** — the enum is five listed kinds plus `Crypto`, and a non-`Crypto` listing must
+carry an `exchange_mic` (AA-04, AA-18). The estate/LPR side (AA-15) and unvested ESS grants with
+their dividend equivalents (AA-16) are documented in unusual detail, and the recordable half works:
+a dividend equivalent entered as `EmploymentIncome` reports on its own `employment_income` line and
+in no dividend or investment-income total. Crypto chain splits and wrapping enter exactly as
+documented — a nil-price Buy dated the split, and a market-value Sell plus Buy (AA-17). The reduced
+cost base is identical to the cost base by construction, since element 3 is the only excluded element
+and it is not recordable (AA-09). The related-payments rule and the 30%-at-risk test are documented
+with the honest statement that what the walk denies is a floor, not the whole denial; an
+entity-level franking deficit has no shareholder-side consequence for the modelled taxpayer (AA-20).
+
+It raised **five findings**, logged below.
+
+## SCENARIOS AA-a — an indexation-eligible parcel is silently costed on the discount, and the reason given for not modelling it is false for a wide, enterable range
+
+- [ ] Decide and implement (options below).
+
+Scenario AA-02. `docs/API.md`'s [Known limitations](docs/API.md#known-limitations) justifies the
+scope cut this way:
+
+> **Indexation method** (2026-06-10) — for an asset acquired before **21 September 1999** an
+> individual may index the cost base for inflation (frozen at the 30 September 1999 CPI) *instead of*
+> applying the 50% discount … The discount **almost always** gives an individual the better result,
+> so indexation is not modelled — the 50% discount is used throughout.
+
+**"Almost always" is not true of the parcels this system can actually hold.** The earliest
+enterable acquisition is **1985-09-20** (AA-01's own floor), and the indexation factor for a
+September 1985 quarter cost is 68.7 ÷ 39.7 ≈ **1.731** — so indexation wins whenever the proceeds
+are below about **2.46 × cost**, which over a forty-year hold is an ordinary outcome, not an edge
+case. (The ATO's own page says only "in most cases", and adds the loss caveat that widens the range
+further: `docs/ato/indexing-the-cost-base.md`, "Indexation may give you a better result in some
+situations, such as if you also have capital losses.")
+
+Driven: a parcel bought 1985-09-20 for A$10,000, sold 2025-06-02 for A$20,000.
+
+| method | assessable gain |
+| --- | ---: |
+| 50% discount (what the system reports) | **A$5,000.00** |
+| indexation (10,000 × 1.731 = 17,310 indexed cost) | **A$2,690** |
+
+`GET /portfolio/net-capital-gain` reported the year's `cgt_discount` of `5450.00` and
+`net_capital_gain` of `5450.00` with this parcel's A$5,000 inside it. **Nothing anywhere names the
+alternative** — no report field, no cross-check row, no health entry mentions indexation for a
+directly held parcel. (The word is not absent from the tree: an AMMA statement already carries
+`cgt_indexation_gains`, so the *trust* side of the indexation method is modelled and reported while
+the taxpayer's own election is invisible.)
+
+**This does not compute a wrong number** — the discount method is a lawful choice, so the reported
+figure is defensible — but the taxpayer is never told a cheaper lawful choice existed, and the
+documented reason for withholding it is wrong for exactly the parcels most likely to be affected.
+
+> **Note for whoever fixes this:** re-derive the September 1985 CPI (39.7) and the factor from the
+> ATO's own published table rather than from this write-up — per the standing lesson, a finding's
+> arithmetic is not evidence. The rounding rule is "limited to 3 decimal places, round the fourth
+> decimal up from 5".
+
+**Options.**
+
+1. **Flag, don't compute.** Mark every disposal parcel acquired before 21 September 1999 as
+   indexation-eligible on the realised-gains / net-capital-gain / annual-tax-report parcel rows, and
+   add a cross-check (or health) row naming each affected disposal with the two figures side by side
+   so the taxpayer can see which method wins. Correct the Known-limitations wording to state the
+   actual boundary rather than "almost always". Cheapest honest fix; the arithmetic stays the
+   taxpayer's own adjustment, exactly as K10/K11 does — and K10/K11's `settlement_crosses_rate_month`
+   is the existing precedent for reporting an omission on the data.
+2. **Model it.** A frozen ATO quarterly CPI table (seeded, ~56 rows to September 1999), an indexed
+   cost base through `domain::cost_base`, and a per-parcel election reported both ways with the
+   better taken. Substantial: indexation is forbidden on a capital loss and cannot be combined with
+   the discount, so the net-capital-gain loss-netting walk has to choose per parcel, and the choice
+   interacts with the brought-forward loss chain.
+3. **Documentation only.** Correct the "almost always" claim and state the crossover, add nothing to
+   any report.
+
+**Chosen: option 1 — flag, don't compute.**
+
+## SCENARIOS AA-b — a non-renounceable rights issue is indistinguishable from a renounceable one, and its retail premium is recorded as a capital gain
+
+- [ ] Decide and implement (options below).
+
+Scenario AA-13. The two treatments of a retail premium turn entirely on whether the offer was
+renounceable, and `docs/ato/retail-premiums.md` states the split plainly: under a **renounceable**
+offer the premium is capital proceeds on the rights (TR 2017/4), and under a **non-renounceable**
+offer it is an **unfranked dividend** (TR 2012/1) — "enter it as unfranked dividend `income` against
+the listing, not as a corporate action or rights sale."
+
+**The `RightsIssue` corporate action records no such fact.** Its fields are `rights_units`,
+`rights_held_units`, `exercise_price` and `currency` — there is no `renounceable` column anywhere in
+the tree (`grep -ri renounce src` finds only prose). A non-renounceable entitlement offer is a
+perfectly legitimate thing to record, because *exercising* one is identical either way and the
+exercise path is the reason to enter the action at all. Having entered it, `sell_rights` is offered,
+and it accepts:
+
+```
+PUT  /corporate_actions/1  {"action_type":"RightsIssue", ... }          → 204
+POST /corporate_actions/1/sell_rights
+     {"units":"250","proceeds_per_right":"0.20", ... }                  → 201
+```
+
+A$50 of retail premium is now a **capital gain** — halved again if the anchoring parcel is past
+twelve months, since free rights inherit the original shares' acquisition date — where TR 2012/1
+makes it fully assessable unfranked dividend income at item 11S. Wrong amount and wrong return label,
+with nothing asked and nothing said. The endpoint's own documentation says "under this
+(**renounceable**) offer" and the UI's action description says "under this renounceable offer" — both
+*assume* the fact neither collects.
+
+**Options.**
+
+1. **Record it and refuse the wrong path.** Add `renounceable: bool` to the `RightsIssue` action
+   kind (defaulting existing rows to renounceable, which is what every stored row means today), and
+   have `sell_rights` refuse `422` on a non-renounceable offer when `proceeds_per_right` is positive
+   — naming TR 2012/1 and pointing at the income path. A **nil**-proceeds lapse stays accepted: a
+   non-renounceable right can lapse, and at nil/nil it is a non-event either way.
+2. **Record it and flag it.** Add the column and surface a cross-check row for every rights sale
+   with positive proceeds against a non-renounceable offer, refusing nothing.
+3. **Documentation only.** Add a Known-limitations line saying the action assumes a renounceable
+   offer, and that a non-renounceable premium is entered as unfranked income instead.
+
+**Chosen: option 1 — record `renounceable` and refuse the wrong path.**
+
+## SCENARIOS AA-c — the investor-not-share-trader assumption is stated nowhere
+
+- [ ] Decide and implement (options below).
+
+Scenario AA-07. Every figure this system produces assumes the holdings are **CGT assets held on
+capital account**. For a **share trader** carrying on a business, shares are **trading stock**: gains
+and losses are ordinary income and deductions, there is no CGT event, no 12-month discount, no
+capital-loss pool and no 18V carry-forward, and closing stock is valued at year end instead.
+
+`docs/API.md`'s Known limitations has **32 bullets and none of them says this.** The closest,
+*Taxpayer entity type*, is about a different axis entirely — individual vs SMSF vs company vs trust,
+and the *rate* of the discount — and a share trader is very often exactly the individual resident
+that bullet describes. `grep -in "trading stock\|share trader" docs/API.md README.md` returns
+nothing; the phrase appears only inside a mirrored ATO page (`docs/ato/worthless-shares.md`'s G3
+eligibility list).
+
+This is the one boundary in section AA with **no documented limitation behind it at all**, and the
+consequence is not a rounding: a trader who used this tool would lodge capital gains — half of them
+discounted away — where ordinary income belongs, and carry forward capital losses that should have
+been deductions.
+
+Nothing can detect it, so a refusal or a flag is not available; the fix is that the assumption is
+written down.
+
+**Options.**
+
+1. **Its own Known-limitations bullet** ("Investor, not share trader"), a README scope line beside
+   the other named scope cuts, and a `doc_checks` test pinning both.
+2. **Fold it into the existing *Taxpayer entity type* bullet** as a second paragraph, pinned the
+   same way.
+
+**Chosen: option 1 — its own Known-limitations bullet, README line, and `doc_checks` test.**
+
+## SCENARIOS AA-d — a disposal recorded at nil proceeds raises a capital loss that nothing questions
+
+- [ ] Decide and implement (options below).
+
+Scenario AA-03. A gift of shares is a CGT disposal at **market value** under the market-value
+substitution rule, and `docs/API.md` documents the entry convention: "enter a gift out as a manual
+Sell at market-value proceeds". The failure mode the convention exists to prevent is entering what
+was actually *received* — nothing — and that entry is accepted in full:
+
+```
+PUT /sells/71  {"average_price":"0","quantity":"1000", ...}   → 204
+```
+
+`GET /portfolio/realised-gains` then reports `proceeds: 0`, `cost_base: 20000.00`,
+`capital_loss: 20000.00`. **A$20,000 of capital loss that does not exist**, feeding the net-capital-
+gain netting and the 18V carry-forward. The health report is silent — its only non-empty lists after
+the write were `unpriced_days` and an unrelated `duplicate_income`.
+
+The system cannot know a nil-proceeds Sell is a gift, so this is a flag rather than a refusal — and
+a nil-proceeds disposal is a genuinely unusual shape worth naming, in the way `duplicate_trades` and
+`non_trading_day_trades` already are. (The one legitimate nil-proceeds disposal — worthless shares —
+has its own operation and writes a Sell carrying `worthless_action_id`, so it is distinguishable; a
+crypto burn is the residual honest case.)
+
+**Options.**
+
+1. **A health check** — `nil_proceeds_disposals`, listing every ordinary Sell and rights sale
+   recorded at nil proceeds (excluding the operation-written closing Sells), with the
+   market-value-substitution rule as its reason. Advisory, blocks nothing.
+2. **Documentation only** — extend the *Gifts / off-market related-party transfers* bullet to warn
+   that entering the nil consideration actually received fabricates a capital loss, and say so on
+   the Sells screen.
+3. **Out of scope** — a nil-proceeds disposal is legitimate often enough (a crypto burn, an
+   abandonment) that naming it would be noise.
+
+**Chosen: option 1 — a `nil_proceeds_disposals` health check.**
+
+## SCENARIOS AA-e — four limitations are documented without the workaround that exists and works
+
+- [ ] Decide and implement (options below).
+
+Scenarios AA-06, AA-08, AA-12, AA-19. Each of these bullets states what is *not* modelled and stops
+there, while a correct entry convention exists — and in three of the four it was driven and works.
+The pattern the file already uses elsewhere is the opposite: the *DRP partial participation*,
+*Gifts*, *Rollovers assume the rollover was chosen* and *multi-year expense* bullets each name their
+workaround, and the *Inherited parcels* bullet even prescribes the "enter your own share" convention
+that AA-06 needs.
+
+- **AA-06, joint ownership** — *One taxpayer* says the ownership dimension is not modelled and gives
+  no remedy. Driven: a 50% joint interest entered as **your own half** — 500 units at $10 — costs
+  A$5,000 and reports correctly throughout, with `amount_per_security` / `securities_held` keyed to
+  your half rather than the registry statement's whole. This is the same convention *Inherited
+  parcels* already prescribes for a parcel split between beneficiaries.
+- **AA-08, cost-base elements** — the bullet reads "elements 1 (acquisition) and 2 (incidental costs:
+  brokerage + GST) **are captured**", which over-states element 2: the ATO's element 2 also covers
+  stamp duty, transfer costs, and remuneration for professional advice on the acquisition, none of
+  which has a field. Driven: A$500 of off-market transfer stamp duty entered as `brokerage` with the
+  reason in `contract_note_ref` lands in the cost base exactly (100 units at $10 plus $500 →
+  A$1,500). It is the right answer arithmetically and is documented nowhere.
+- **AA-12, Div 775 forex on a foreign-currency cash balance** — documented only as a **clause inside
+  the *Crypto assets* bullet** ("Foreign-currency cash balances (Div 775 forex gains — ordinary
+  income, not CGT) are deferred to a separate specification"), where a reader looking for
+  foreign-currency scope will not find it. And unlike the others there is **no** workaround: an
+  [income](docs/API.md#income) row requires a `listing_id`, and a cash balance has no listing, so a
+  Div 775 gain has nowhere to be entered at all. The doc does not say so.
+- **AA-19, a second taxpayer** — *One taxpayer* again, with no remedy stated. The remedy the tool
+  already supports is **one database and one instance per taxpayer** (`--db`, `--port`), which is
+  worth naming precisely because the wrong answer is so easy: a spouse's holdings entered as a second
+  holding account aggregate into one net capital gain, one loss pool, one A$5,000 franking threshold
+  and one A$1,000 FITO de-minimis, silently wrong for both people.
+
+**Options.**
+
+1. **Add the workaround to all four bullets**, each pinned by a `doc_checks` test — including
+   AA-12's honest "there is no entry path", moved out of the Crypto bullet into one of its own.
+2. **A subset** — say which.
+
+**Chosen: option 1 — all four, with AA-12 promoted out of the Crypto bullet into one of its own.**
