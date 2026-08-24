@@ -247,31 +247,6 @@ landed on a half-cent, which is what made it visible.
 converted once); computing it there and letting the last allocation absorb the difference keeps both
 properties W-d established — the total is exact, and the per-parcel rows still sum to it.
 
-## SCENARIOS Z-c — a trade can change kind under the allocations that depend on it
-
-- [ ] Refuse an upsert that changes an existing trade's `trade_type`.
-
-The other half of Z-b's root, in both directions, and it corrupts rows that were already correct.
-Parcel allocations are read-only over HTTP precisely so a Sell can never become under-covered, and
-their two invariants — `purchase_trade_id` is a Buy or DRP, `sale_trade_id` is a Sell — are checked
-when the allocation is written. Neither is re-checked when the *trade* is rewritten:
-
-- **`PUT /sells/:id` over a Buy that a Sell already allocates from** → `204`. The allocation's
-  `purchase_trade_id` now names a **Sell**, so a sale is costed against a sale.
-- **`PUT /trades/:id` over an existing plain Sell** (any Buy body) → `204`. The Sell's allocations
-  are left behind with a `sale_trade_id` naming a **Buy**, and the row itself becomes an open parcel:
-  a 100-unit holding at a A$1,000 cost base that was never bought.
-
-Driven end to end, both states persist and **nothing surfaces them** — `/portfolio/open-parcels`
-serves the invented parcel as an ordinary holding, `/portfolio/realised-gains` simply omits the
-disposal that stopped being one, and `/reports/health` and `/reports/rollover_consistency` are both
-empty. The units the orphaned allocation consumed are silently un-consumed on one side and
-double-counted on the other.
-
-**Direction.** One rule covers every case above and needs no list: an existing trade's `trade_type`
-is part of its identity and an upsert may not change it. `PUT /trades/:id` already refuses a `Sell`
-*body*; what is missing is the symmetric check against the *stored* row.
-
 ## SCENARIOS Z-d — a back-dated parcel leaves an AMMA statement's adjustment set stale, and nothing says so
 
 - [ ] Surface an AMMA statement whose `units_held` disagrees with the units actually held at its year end.

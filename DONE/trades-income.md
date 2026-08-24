@@ -1054,3 +1054,50 @@ Tests (`src/entities/sell.rs`): `api_put_sell_over_a_reinvest_created_drp_is_ref
 gone), plus the two controls `api_put_sell_over_an_existing_plain_sell_still_edits_it` and
 `api_put_sell_at_a_free_id_still_creates_the_sell`. `docs/API.md`: the Sells `422` list and the
 Response-codes `422` row.
+
+## SCENARIOS Z-c — a trade can change kind under the allocations that depend on it
+
+- [x] Refuse an upsert that changes an existing trade's `trade_type`.
+
+The other half of Z-b's root, in both directions, and it corrupts rows that were already correct.
+Parcel allocations are read-only over HTTP precisely so a Sell can never become under-covered, and
+their two invariants — `purchase_trade_id` is a Buy or DRP, `sale_trade_id` is a Sell — are checked
+when the allocation is written. Neither is re-checked when the *trade* is rewritten:
+
+- **`PUT /sells/:id` over a Buy that a Sell already allocates from** → `204`. The allocation's
+  `purchase_trade_id` now names a **Sell**, so a sale is costed against a sale.
+- **`PUT /trades/:id` over an existing plain Sell** (any Buy body) → `204`. The Sell's allocations
+  are left behind with a `sale_trade_id` naming a **Buy**, and the row itself becomes an open parcel:
+  a 100-unit holding at a A$1,000 cost base that was never bought.
+
+Driven end to end, both states persist and **nothing surfaces them** — `/portfolio/open-parcels`
+serves the invented parcel as an ordinary holding, `/portfolio/realised-gains` simply omits the
+disposal that stopped being one, and `/reports/health` and `/reports/rollover_consistency` are both
+empty. The units the orphaned allocation consumed are silently un-consumed on one side and
+double-counted on the other.
+
+**Direction.** One rule covers every case above and needs no list: an existing trade's `trade_type`
+is part of its identity and an upsert may not change it. `PUT /trades/:id` already refuses a `Sell`
+*body*; what is missing is the symmetric check against the *stored* row.
+
+**Done.** Half of it arrived with Z-b: `PUT /sells/:id` now refuses any id whose stored row is not
+already a plain Sell (`sell::SellError::NotASell`, commit 19f5736), which closes the first bullet — a
+Buy a Sell allocates from can no longer be rewritten as a Sell. This entry closes the opposite
+direction. `trade::db::ExistingTrade` now selects `trade_type` too, and `db_upsert` refuses a body
+that would move it with the new `UpsertError::TradeTypeChange { id, existing, requested }` — `trade 2
+is a Sell, not a Buy — a trade's type is part of its identity, so this upsert would rewrite it as a
+Buy in place and leave the parcel allocations that name it drawing on a trade of the wrong kind. Edit
+that Sell with PUT /sells/2, or use an id no trade holds for the new Buy`. One rule, no list of
+columns: it covers a Buy or DRP body over any stored Sell (including the worthless-shares recognise
+closing Sell, which the provenance guards never named at all) and a Sell body over a stored parcel at
+the DB level. It runs **last** of the existing-row guards deliberately — a row a purpose-built
+operation owns (a rights exercise, a transfer group, a reinvested DRP) is better refused by the guard
+that names that operation and its own undo. No internal path writes a Buy/DRP over an existing Sell:
+every derived write path creates its own row, and the whole suite passes unchanged.
+Tests (`src/entities/trade.rs`): `api_a_buy_body_cannot_rewrite_a_stored_sell` (422, the id and the
+`PUT /sells/:id` pointer, the stored row still a Sell, **and the allocations byte-identical** — the
+one that pins the actual harm), `api_a_drp_body_cannot_rewrite_a_stored_sell`,
+`db_upsert_cannot_change_an_existing_trades_type` (Sell→Buy, Sell→DRP and Buy→Sell at the DB level,
+under the endpoint), and the controls `api_same_type_edits_and_free_ids_are_unaffected` (an ordinary
+Buy edit still succeeds; a free id still creates). `docs/API.md`: a new Trades paragraph and the
+Response-codes `422` row.

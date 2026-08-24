@@ -148,6 +148,26 @@ pub enum UpsertError {
     /// `entities::rights_sale`).
     #[error("this parcel anchors a rights sale and cannot be edited")]
     RightsAnchorParcel,
+    /// The upsert would change the stored row's `trade_type`. A trade's type
+    /// is part of its identity: the rows that reference it are typed against
+    /// it — a `parcel_allocations` row's `purchase_trade_id` is a Buy or DRP
+    /// and its `sale_trade_id` is a Sell, checked when the allocation is
+    /// written and never re-checked when the *trade* is rewritten. Re-typing
+    /// a Sell as a Buy therefore leaves its allocations naming a Buy as
+    /// their sale, un-consumes the units they drew, and turns the disposal
+    /// itself into an open parcel that was never bought — a state no report
+    /// surfaces (SCENARIOS Z-c). This is the stored-row half of the rule
+    /// `http::upsert` already applies to the *body* (no Sell, no DRP through
+    /// `PUT /trades/:id`) and the parcel side of
+    /// `sell::SellError::NotASell`, which refuses the opposite direction.
+    #[error(
+        "trade {id} is a {existing:?}: an existing trade's type cannot change to {requested:?}"
+    )]
+    TradeTypeChange {
+        id: i64,
+        existing: super::model::TradeType,
+        requested: super::model::TradeType,
+    },
     /// A supplied statement total failed the cross-check (see
     /// `check_statement_total`): it doesn't reconcile with the trade's own
     /// figures.
@@ -240,12 +260,14 @@ pub enum UpsertError {
     NonTradingDay(String),
 }
 
-/// The stored row an edit is checked against: the three fields whose *change*
-/// is what dependants care about (`listing_id`, `date`, `holding_account_id`)
-/// plus the provenance links that freeze the trade outright. Read once by
-/// [`db_upsert`] and mapped by column name via `FromRow`.
+/// The stored row an edit is checked against: the four fields whose *change*
+/// is what dependants care about (`trade_type`, `listing_id`, `date`,
+/// `holding_account_id`) plus the provenance links that freeze the trade
+/// outright. Read once by [`db_upsert`] and mapped by column name via
+/// `FromRow`.
 #[derive(sqlx::FromRow)]
 struct ExistingTrade {
+    trade_type: super::model::TradeType,
     listing_id: i64,
     date: chrono::NaiveDate,
     holding_account_id: i64,
@@ -328,7 +350,7 @@ pub async fn db_upsert(pool: &SqlitePool, trade: &Trade) -> Result<(), UpsertErr
     // break. (The INSERT below never sets any provenance column, so a normal
     // trade can't become one either.)
     let existing: Option<ExistingTrade> = sqlx::query_as(
-        "SELECT listing_id, date, holding_account_id, \
+        "SELECT trade_type, listing_id, date, holding_account_id, \
                 rights_action_id, buyback_action_id, scrip_action_id, \
                 demerger_action_id, transfer_id, ess_statement_id, inheritance_id \
          FROM trades WHERE id = ?",
@@ -395,6 +417,34 @@ pub async fn db_upsert(pool: &SqlitePool, trade: &Trade) -> Result<(), UpsertErr
             .await?;
     if is_reinvestment {
         return Err(UpsertError::ReinvestmentTrade);
+    }
+
+    // An existing trade's type is part of its identity and an upsert may not
+    // change it (SCENARIOS Z-c). Everything that references a trade is typed
+    // against it — a `parcel_allocations` row's `purchase_trade_id` is a
+    // Buy/DRP and its `sale_trade_id` is a Sell — and those invariants are
+    // checked when the *allocation* is written, never again when the trade
+    // is. So re-typing a stored Sell as a Buy leaves its allocations naming a
+    // Buy as their sale, silently un-consumes the units they drew from their
+    // parcels, and turns the disposal itself into an open parcel that was
+    // never bought; no report surfaces either state. One rule covers every
+    // such pair and needs no list of columns: the type may not move.
+    // `http::upsert` already refuses a Sell or DRP *body*; this is the
+    // symmetric check against the *stored* row, and the parcel side of
+    // `sell::SellError::NotASell`.
+    //
+    // Deliberately last of the existing-row guards: a row a purpose-built
+    // operation owns (a rights exercise, a transfer group, a reinvested DRP)
+    // is better refused by the guard that names that operation and its own
+    // undo, which is more use than being pointed at the other endpoint.
+    if let Some(existing) = &existing
+        && existing.trade_type != trade.trade_type
+    {
+        return Err(UpsertError::TradeTypeChange {
+            id: trade.id,
+            existing: existing.trade_type,
+            requested: trade.trade_type,
+        });
     }
 
     // The listing is frozen while dependants draw on the parcel: a Sell
@@ -738,6 +788,21 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome, sqlx
     Ok(DeleteOutcome::Deleted)
 }
 
+/// Where a trade of `existing`'s kind is actually written, for the
+/// [`UpsertError::TradeTypeChange`] refusal: a Sell carries its parcel
+/// allocations, so it is only ever written through `PUT /sells/:id`, and a
+/// DRP is only ever created by reinvesting its distribution.
+fn edit_it_with(id: i64, existing: super::model::TradeType) -> String {
+    match existing {
+        super::model::TradeType::Sell => format!("Edit that Sell with PUT /sells/{id}"),
+        super::model::TradeType::Buy => format!("Edit that Buy with PUT /trades/{id}"),
+        super::model::TradeType::DRP => {
+            "A DRP parcel is entered by reinvesting its distribution (POST /income/:id/reinvest)"
+                .to_string()
+        }
+    }
+}
+
 impl From<UpsertError> for ApiError {
     fn from(e: UpsertError) -> Self {
         match e {
@@ -836,6 +901,20 @@ impl From<UpsertError> for ApiError {
                  reinvestment via its distribution (DELETE /income/:id/reinvest) and \
                  re-reinvest instead",
             ),
+            // Names what the id actually holds and the endpoint that writes
+            // that kind of trade — the id collision is the usual cause, and
+            // the alternative (a free id) is the other half of the fix.
+            UpsertError::TradeTypeChange {
+                id,
+                existing,
+                requested,
+            } => ApiError::Unprocessable(format!(
+                "trade {id} is a {existing:?}, not a {requested:?} — a trade's type is part of \
+                 its identity, so this upsert would rewrite it as a {requested:?} in place and \
+                 leave the parcel allocations that name it drawing on a trade of the wrong \
+                 kind. {}, or use an id no trade holds for the new {requested:?}",
+                edit_it_with(id, existing)
+            )),
             UpsertError::RightsAnchorParcel => ApiError::unprocessable(
                 "this parcel anchors a rights sale and cannot be edited — delete the rights \
                  sale, edit, then re-enter it",
