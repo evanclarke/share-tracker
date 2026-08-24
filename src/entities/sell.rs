@@ -2628,6 +2628,7 @@ mod tests {
                     rights_held_units: Decimal::from(4),
                     exercise_price: "1.80".parse().unwrap(),
                     currency: "AUD".to_string(),
+                    renounceable: true,
                 },
             },
         )

@@ -283,11 +283,19 @@ pub async fn db_exercise(
         None => return Err(ExerciseError::ActionNotFound),
     };
     let (rights_units, rights_held_units, exercise_price, currency) = match &action.kind {
+        // The offer's renounceability is deliberately not read here:
+        // exercising is identical under both (`docs/ato/rights-issues.md` —
+        // the exercise rules turn on how the rights were acquired and on the
+        // original shares' pre/post-CGT status, never on renounceability), so
+        // a non-renounceable entitlement offer is exercised exactly like any
+        // other. It is the *disposal* path that turns on it
+        // (`entities::rights_sale`).
         ActionKind::RightsIssue {
             rights_units,
             rights_held_units,
             exercise_price,
             currency,
+            ..
         } => (
             *rights_units,
             *rights_held_units,
@@ -479,6 +487,7 @@ mod tests {
                     rights_held_units: Decimal::from(4),
                     exercise_price: "1.80".parse().unwrap(),
                     currency: "AUD".to_string(),
+                    renounceable: true,
                 },
             },
         )
@@ -692,6 +701,7 @@ mod tests {
                     rights_held_units: Decimal::from(7),
                     exercise_price: "1.80".parse().unwrap(),
                     currency: "AUD".to_string(),
+                    renounceable: true,
                 },
             },
         )
@@ -960,7 +970,7 @@ mod tests {
                     "action_type": "RightsIssue", "listing_id": 1,
                     "date": "2024-07-01", "rights_units": "1",
                     "rights_held_units": "4", "exercise_price": "1.80",
-                    "currency": "AUD",
+                    "currency": "AUD", "renounceable": true,
                 }),
             )
             .await;
@@ -997,6 +1007,7 @@ mod tests {
                     rights_held_units: Decimal::ONE,
                     exercise_price: Decimal::ONE,
                     currency: "AUD".to_string(),
+                    renounceable: true,
                 },
             },
         )
@@ -1059,6 +1070,7 @@ mod tests {
                     rights_held_units: Decimal::ONE,
                     exercise_price: "1000000000000000".parse().unwrap(),
                     currency: "AUD".to_string(),
+                    renounceable: true,
                 },
             },
         )
@@ -1141,6 +1153,7 @@ mod tests {
                     rights_held_units: Decimal::ONE,
                     exercise_price: Decimal::ONE,
                     currency: "AUD".to_string(),
+                    renounceable: true,
                 },
             },
         )
@@ -1183,6 +1196,7 @@ mod tests {
                     rights_held_units: "1000000000000000000000000000".parse().unwrap(),
                     exercise_price: Decimal::ONE,
                     currency: "AUD".to_string(),
+                    renounceable: true,
                 },
             },
         )
@@ -1229,6 +1243,7 @@ mod tests {
                     rights_held_units: Decimal::from(1_000_000),
                     exercise_price: Decimal::ONE,
                     currency: "AUD".to_string(),
+                    renounceable: true,
                 },
             },
         )
@@ -1271,6 +1286,7 @@ mod tests {
                     rights_held_units: Decimal::ONE,
                     exercise_price: "0.0000000000000000000000000001".parse().unwrap(),
                     currency: "AUD".to_string(),
+                    renounceable: true,
                 },
             },
         )

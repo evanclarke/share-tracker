@@ -1346,7 +1346,7 @@ mod tests {
         let from_migrations: Vec<(i64, String, bool, String)> =
             sqlx::query_as(recorded).fetch_all(&migrated).await.unwrap();
         assert_eq!(from_cache, from_migrations, "_sqlx_migrations differs");
-        assert_eq!(from_cache.len(), 46, "every migration is recorded");
+        assert_eq!(from_cache.len(), 47, "every migration is recorded");
 
         // Spelled out separately because it is the one piece of state a
         // schema-only cache would silently lose, and two tests in

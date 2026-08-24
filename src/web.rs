@@ -2197,6 +2197,14 @@ mod tests {
         assert!(js.contains("rights_units"));
         assert!(js.contains("rights_held_units"));
         assert!(js.contains("exercise_price"));
+        // …and whether the offer was renounceable, the fact that decides how a
+        // retail premium is taxed (SCENARIOS AA-b): the form asks for it, and
+        // the sell-rights action's description stops asserting a renounceable
+        // offer, naming the income path instead when the offer is not one.
+        assert!(js.contains("bool('renounceable', 'Rights: renounceable offer'"));
+        assert!(js.contains("a.renounceable === false"));
+        assert!(js.contains("TR 2012/1"));
+        assert!(js.contains("unfranked dividend income against the listing"));
         // A RightsIssue row's Exercise action drives the exercise endpoint
         // (a config-driven ACTIONS entry rendered by viewAction).
         assert!(js.contains("#/exercise/"));

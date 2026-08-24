@@ -25,7 +25,7 @@ const COLUMNS: &str = "id, action_type, listing_id, date, amount_per_unit, curre
                        scrip_cash_currency, demerger_listing_id, demerger_new_units, \
                        demerger_held_units, demerger_cost_base_pct, worthless_event, \
                        record_date, demerger_close_date, demerger_close_price, \
-                       demerger_close_sourced_from, demerger_close_reason";
+                       demerger_close_sourced_from, demerger_close_reason, renounceable";
 
 impl CrudEntity for CorporateAction {
     type Key = i64;
@@ -459,6 +459,7 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
         rights_units: OptMoney,
         rights_held_units: OptMoney,
         exercise_price: OptMoney,
+        renounceable: Option<bool>,
         buyback_price: OptMoney,
         buyback_dividend: OptMoney,
         buyback_franking_credit: OptMoney,
@@ -509,11 +510,13 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
             rights_held_units,
             exercise_price,
             currency,
+            renounceable,
         } => {
             c.rights_units = OptMoney(Some(*rights_units));
             c.rights_held_units = OptMoney(Some(*rights_held_units));
             c.exercise_price = OptMoney(Some(*exercise_price));
             c.currency = Some(currency.clone());
+            c.renounceable = Some(*renounceable);
         }
         ActionKind::BuyBack {
             buyback_price,
@@ -673,9 +676,9 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
           demerger_listing_id, demerger_new_units, demerger_held_units, \
           demerger_cost_base_pct, worthless_event, record_date, \
           demerger_close_date, demerger_close_price, demerger_close_sourced_from, \
-          demerger_close_reason) \
+          demerger_close_reason, renounceable) \
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \
-                 ?, ?, ?, ?, ?) \
+                 ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET \
              action_type       = excluded.action_type, \
              listing_id        = excluded.listing_id, \
@@ -708,7 +711,8 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
              demerger_close_date         = excluded.demerger_close_date, \
              demerger_close_price        = excluded.demerger_close_price, \
              demerger_close_sourced_from = excluded.demerger_close_sourced_from, \
-             demerger_close_reason       = excluded.demerger_close_reason",
+             demerger_close_reason       = excluded.demerger_close_reason, \
+             renounceable                = excluded.renounceable",
     )
     .bind(action.id)
     .bind(action.kind.type_str())
@@ -743,6 +747,7 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
     .bind(c.demerger_close_price)
     .bind(c.demerger_close_sourced_from)
     .bind(c.demerger_close_reason)
+    .bind(c.renounceable)
     .execute(&mut *tx)
     .await?;
 

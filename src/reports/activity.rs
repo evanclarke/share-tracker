@@ -769,10 +769,17 @@ fn describe_action(
             rights_held_units,
             exercise_price,
             currency,
+            renounceable,
         } => (
             "Rights issue".to_string(),
             format!(
-                "{rights_units}-for-{rights_held_units}, exercisable at {exercise_price} {currency}"
+                "{rights_units}-for-{rights_held_units}, exercisable at {exercise_price} \
+                 {currency} ({})",
+                if *renounceable {
+                    "renounceable"
+                } else {
+                    "non-renounceable"
+                }
             ),
             None,
         ),
@@ -1199,6 +1206,7 @@ mod tests {
                     rights_held_units: dec("4"),
                     exercise_price: dec("5"),
                     currency: "AUD".to_string(),
+                    renounceable: true,
                 },
             },
         )
@@ -1270,7 +1278,7 @@ mod tests {
         assert_eq!(by_event("Return of capital").detail, "0.50 AUD per unit");
         assert_eq!(
             by_event("Rights issue").detail,
-            "1-for-4, exercisable at 5 AUD"
+            "1-for-4, exercisable at 5 AUD (renounceable)"
         );
         // The counterpart listing is named by ticker, never a raw id.
         assert_eq!(

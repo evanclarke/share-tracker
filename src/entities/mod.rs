@@ -230,6 +230,7 @@ mod tests {
                     rights_held_units: dec("4"),
                     exercise_price: dec("1.80"),
                     currency: "AUD".to_string(),
+                    renounceable: true,
                 },
             },
         )

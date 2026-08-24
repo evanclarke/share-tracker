@@ -330,7 +330,7 @@ export const ENTITIES = [
   },
   {
     slug: 'rights_sales', title: 'Rights Sales', menu: 'Activity', api: '/rights_sales', deleteOnly: true,
-    desc: 'Disposals of renounceable rights — sold on-market, lapsed, or compensated by a retail premium — recorded via a rights issue row’s Sell rights action (Corporate Actions). Each is a CGT event on the rights themselves, not the shares: the holding is untouched, free rights have a nil cost base (purchased rights carry their cost), and the gain/loss is anchored to the original parcels’ acquisition dates in the realised-gains and net-capital-gain reports. Rows are immutable — delete (freeing the entitlement) and re-enter to amend.',
+    desc: 'Disposals of rights — sold on-market, lapsed, or compensated by a retail premium under a renounceable offer (a non-renounceable one can only lapse here; its premium is unfranked dividend income under Income) — recorded via a rights issue row’s Sell rights action (Corporate Actions). Each is a CGT event on the rights themselves, not the shares: the holding is untouched, free rights have a nil cost base (purchased rights carry their cost), and the gain/loss is anchored to the original parcels’ acquisition dates in the realised-gains and net-capital-gain reports. Rows are immutable — delete (freeing the entitlement) and re-enter to amend.',
     keyFields: [int('id', 'ID', { auto: true })],
     fields: [],
     columns: ['id', 'rights_action_id', 'date', 'units', 'proceeds_per_right', 'rights_cost', 'fx_rate', 'holding_account_id'],
@@ -367,6 +367,7 @@ export const ENTITIES = [
       dec('rights_units', 'Rights: new units', { optional: true, default: '' }),
       dec('rights_held_units', 'Rights: per units held', { optional: true, default: '' }),
       dec('exercise_price', 'Rights: exercise price per unit', { optional: true, default: '' }),
+      bool('renounceable', 'Rights: renounceable offer', { default: true, hint: 'Tick if the rights can be sold, transferred or renounced. Untick for a non-renounceable entitlement offer — its rights cannot be sold, and a retail premium paid for not taking it up is an unfranked dividend (TR 2012/1), entered under Income, not as a rights sale (which the server then refuses). Exercising is the same either way.' }),
       dec('buyback_price', 'Buy-back: price per unit', { optional: true, default: '' }),
       dec('buyback_dividend', 'Buy-back: dividend per unit', { optional: true, default: '', hint: '0 (or blank) when the price has no dividend component.' }),
       dec('buyback_franking_credit', 'Buy-back: franking credit per unit', { optional: true, default: '', hint: 'Needs a dividend.' }),
@@ -396,7 +397,7 @@ export const ENTITIES = [
       ReturnOfCapital: ['amount_per_unit', 'currency', 'record_date'],
       ShareSplit: ['split_new_units', 'split_old_units'],
       BonusIssue: ['bonus_units', 'bonus_held_units'],
-      RightsIssue: ['rights_units', 'rights_held_units', 'exercise_price', 'currency'],
+      RightsIssue: ['rights_units', 'rights_held_units', 'exercise_price', 'currency', 'renounceable'],
       BuyBack: ['buyback_price', 'buyback_dividend', 'buyback_franking_credit', 'buyback_market_value', 'currency'],
       ScripForScrip: ['scrip_listing_id', 'scrip_new_units', 'scrip_old_units', 'scrip_cash_per_unit', 'scrip_market_value', 'scrip_cash_currency'],
       Demerger: ['demerger_listing_id', 'demerger_new_units', 'demerger_held_units', 'demerger_cost_base_pct', 'demerger_close_date', 'demerger_close_price', 'demerger_close_sourced_from', 'demerger_close_reason'],
@@ -406,7 +407,7 @@ export const ENTITIES = [
       ReturnOfCapital: 'Return-of-capital payment (CGT event G1): the per-unit amount reduces the cost base of the parcels entitled to it and still held on the payment date — entitlement is fixed at the record date, so parcels bought on or after it are untouched (leave the record date blank and the payment date decides instead); any excess over a parcel’s cost base is a capital gain in the Net Capital Gain report.',
       ShareSplit: 'Share split/consolidation (TD 2000/10): on the conversion date every “old units” become “new units” (2-for-1 split: new 2, old 1; 1-for-10 consolidation: new 1, old 10) — no CGT event, the parcels keep their total cost base and original acquisition date.',
       BonusIssue: 'Bonus issue (non-assessable): on the issue date every “held units” receive “bonus units” extra units (1-for-10 issue: bonus 1, held 10) — no CGT event, the cost base is apportioned over original + bonus shares and the acquisition date is preserved; bonus shares chosen in lieu of a dividend are a DRP trade, not entered here.',
-      RightsIssue: 'Rights issue: units held before the record date earn “rights units” per “held units” at the exercise price (1-for-4 issue: rights 1, held 4) — recording the issue changes nothing; use the row’s Exercise action to create the new Buy parcel (acquired at the exercise date, cost base = exercise payment + any amount paid for the rights), or its Sell rights action to dispose of rights instead — sold, lapsed, or paid out as a retail premium (a CGT event on the rights themselves, anchored to the original parcels’ acquisition dates).',
+      RightsIssue: 'Rights issue: units held before the record date earn “rights units” per “held units” at the exercise price (1-for-4 issue: rights 1, held 4) — recording the issue changes nothing; use the row’s Exercise action to create the new Buy parcel (acquired at the exercise date, cost base = exercise payment + any amount paid for the rights), or its Sell rights action to dispose of rights instead — sold, lapsed, or paid out as a retail premium (a CGT event on the rights themselves, anchored to the original parcels’ acquisition dates). Say whether the offer was renounceable: under a non-renounceable one the rights cannot be sold at all and a retail premium is unfranked dividend income (TR 2012/1), not a capital gain — only a nil-proceeds lapse is recorded against it.',
       BuyBack: 'Off-market buy-back: record the per-unit buy-back price, the dividend component of that price and its franking credit (both 0 for a listed-company buy-back announced after 25 Oct 2022), and the market value had the buy-back not been proposed (blank if the price is at or above it); recording changes nothing — use the row’s Participate action to sell units into the buy-back, which creates the Sell at the capital proceeds (max(price, market value) − dividend) plus the dividend income row.',
       ScripForScrip: 'Scrip-for-scrip takeover (with rollover): on the exchange date every “old units” of this listing become “new units” of the replacement listing (1-for-1 merger: new 1, old 1), plus optionally cash per old unit (a partial rollover — also give the replacement share’s market value just after issue and the currency) — recording changes nothing; use the row’s Exchange action to substitute every open parcel: the scrip side’s gain is disregarded and each replacement parcel carries the consumed parcel’s remaining cost base (its market-value share when there is cash) and acquisition date (the combined period counts toward the 12-month discount), while the cash side is a capital gain assessed now in the realised-gains and net-capital-gain reports.',
       Demerger: 'Demerger (eligible, rollover chosen): on the demerger date every “held units” of this (head) listing receive “new units” of the demerged listing (BHP Steel’s 1-for-5: new 1, held 5), and the advised percentage of each parcel’s cost base moves to the new interests — recording changes nothing; use the row’s Demerge action to apportion every open parcel: any gain is disregarded, the head parcels keep the rest of the cost base and their acquisition dates, and the new parcels’ 12-month discount clock runs from the original acquisition. Separately, state what the security actually closed at on the last pre-demerger trading day: the price provider restates the whole pre-demerger series by its spin-off factor (a demerger moves no unit count here, so there is no ratio to read), and this stated close — divided by the provider’s own figure for that same day — is what re-bases the stored closing prices back into their own days. Leave it blank if no pre-demerger prices were fetched after the demerger; the Health report names any demerger that needs it.',
@@ -426,7 +427,7 @@ export const ENTITIES = [
         WorthlessShares: 'Event date',
       },
     },
-    columns: ['id', 'action_type', 'listing_id', 'date', 'amount_per_unit', 'currency', 'record_date', 'split_new_units', 'split_old_units', 'bonus_units', 'bonus_held_units', 'rights_units', 'rights_held_units', 'exercise_price', 'buyback_price', 'buyback_dividend', 'buyback_franking_credit', 'buyback_market_value', 'scrip_listing_id', 'scrip_new_units', 'scrip_old_units', 'scrip_cash_per_unit', 'scrip_market_value', 'scrip_cash_currency', 'demerger_listing_id', 'demerger_new_units', 'demerger_held_units', 'demerger_cost_base_pct', 'demerger_close_date', 'demerger_close_price', 'demerger_close_sourced_from', 'demerger_close_reason', 'worthless_event'],
+    columns: ['id', 'action_type', 'listing_id', 'date', 'amount_per_unit', 'currency', 'record_date', 'split_new_units', 'split_old_units', 'bonus_units', 'bonus_held_units', 'rights_units', 'rights_held_units', 'exercise_price', 'buyback_price', 'buyback_dividend', 'buyback_franking_credit', 'buyback_market_value', 'scrip_listing_id', 'scrip_new_units', 'scrip_old_units', 'scrip_cash_per_unit', 'scrip_market_value', 'scrip_cash_currency', 'demerger_listing_id', 'demerger_new_units', 'demerger_held_units', 'demerger_cost_base_pct', 'demerger_close_date', 'demerger_close_price', 'demerger_close_sourced_from', 'demerger_close_reason', 'worthless_event', 'renounceable'],
     rowActions: function (row) {
       if (row.action_type === 'RightsIssue') {
         return [
@@ -827,13 +828,25 @@ export const ACTIONS = [
     slug: 'sell-rights', nav: 'corporate_actions', ownerApi: '/corporate_actions', cancel: '#/e/corporate_actions', submit: 'Sell rights',
     post: function (id) { return '/corporate_actions/' + id + '/sell_rights'; },
     title: function (id, owner, listing) { return 'Sell ' + listing(owner.listing_id) + ' rights from issue #' + id; },
-    desc: function (a, listing) { return 'Records a disposal of the rights themselves — sold on-market, lapsed, or compensated by a retail premium under this renounceable offer (enter the premium as the proceeds per right). The ' + listing(a.listing_id) + ' holding is untouched. Free rights have a nil cost base and take each anchoring parcel’s acquisition date for the 12-month discount; rights you paid for carry that cost instead, so nil proceeds (a lapse) realise a capital loss. Together with exercises, sales may not exceed the record-date entitlement. Undo by deleting the row under Rights Sales.'; },
+    desc: function (a, listing) {
+      // What this operation may record turns on the offer's own terms: a
+      // non-renounceable entitlement cannot be sold or bought at all, so only
+      // a nil-proceeds lapse is left, and the retail premium that does arise
+      // under it is unfranked dividend income (TR 2012/1), entered under
+      // Income. The server refuses the rest; the description says so first
+      // rather than letting the form imply otherwise.
+      const common = 'The ' + listing(a.listing_id) + ' holding is untouched. Together with exercises, sales may not exceed the record-date entitlement. Undo by deleting the row under Rights Sales.';
+      if (a.renounceable === false) {
+        return 'This is a non-renounceable offer: its rights cannot be sold, transferred or assigned, so only a lapse — nil proceeds, nothing paid for the rights — is recorded here. A retail premium paid for not taking the entitlement up is an unfranked dividend (TR 2012/1), not a capital gain: enter it as unfranked dividend income against the listing instead. ' + common;
+      }
+      return 'Records a disposal of the rights themselves — sold on-market, lapsed, or compensated by a retail premium under this renounceable offer (enter the premium as the proceeds per right, a capital gain per TR 2017/4). ' + common + ' Free rights have a nil cost base and take each anchoring parcel’s acquisition date for the 12-month discount; rights you paid for carry that cost instead, so nil proceeds (a lapse) realise a capital loss.';
+    },
     fields: function (a) {
       return [
         dt('date', 'Sale / lapse date', { required: true, hint: 'On or after the record date (' + a.date + ').' }),
         dec('units', 'Rights sold or lapsed', { required: true, default: '' }),
-        dec('proceeds_per_right', 'Proceeds per right', { default: '0', hint: 'In ' + a.currency + '. 0 for a lapse; a retail premium is entered per right.' }),
-        dec('rights_cost', 'Amount paid for the rights', { default: '0', hint: 'Total, in ' + a.currency + '. 0 for rights issued free.' }),
+        dec('proceeds_per_right', 'Proceeds per right', { default: '0', hint: 'In ' + a.currency + '. 0 for a lapse; under a renounceable offer a retail premium is entered per right' + (a.renounceable === false ? ' — but this offer is non-renounceable, so only 0 is accepted.' : '.') }),
+        dec('rights_cost', 'Amount paid for the rights', { default: '0', hint: 'Total, in ' + a.currency + '. 0 for rights issued free' + (a.renounceable === false ? ' — a non-renounceable entitlement cannot have been bought, so only 0 is accepted.' : '.') }),
         dec('fx_rate', 'FX rate', { default: '1', hint: 'Optional; defaults to 1.' }),
         fk('holding_account_id', 'Holding account', 'holdingAccounts', { required: true, default: '1', hint: 'The account the disposal is reported under.' }),
       ];

@@ -266,6 +266,7 @@ mod tests {
                 rights_held_units: held.parse().unwrap(),
                 exercise_price: price.parse().unwrap(),
                 currency: "AUD".to_string(),
+                renounceable: true,
             },
         }
     }
@@ -456,6 +457,7 @@ mod tests {
                 rights_held_units: Decimal::from(7),
                 exercise_price: "1.805".parse().unwrap(),
                 currency: "AUD".to_string(),
+                renounceable: true,
             }
         );
     }
@@ -1608,6 +1610,7 @@ mod tests {
                 "rights_held_units": "4",
                 "exercise_price": "1.80",
                 "currency": "AUD",
+                "renounceable": true,
             }),
             StatusCode::NO_CONTENT,
         )
@@ -1620,8 +1623,90 @@ mod tests {
                 rights_held_units: Decimal::from(4),
                 exercise_price: "1.80".parse().unwrap(),
                 currency: "AUD".to_string(),
+                renounceable: true,
             }
         );
+    }
+
+    /// SCENARIOS AA-b. Whether the offer was renounceable is a term of the
+    /// action like any other: it round-trips through the PUT, it reads back on
+    /// the GET, and `false` — the offer whose retail premium is an unfranked
+    /// dividend rather than capital proceeds — is a state the row can hold.
+    #[tokio::test]
+    async fn api_non_renounceable_rights_issue_round_trip() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "RTS").await;
+        api_put_expecting(
+            &pool,
+            serde_json::json!({
+                "action_type": "RightsIssue",
+                "listing_id": 1,
+                "date": "2024-11-30",
+                "rights_units": "1",
+                "rights_held_units": "4",
+                "exercise_price": "1.80",
+                "currency": "AUD",
+                "renounceable": false,
+            }),
+            StatusCode::NO_CONTENT,
+        )
+        .await;
+        let got = db_get(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(
+            got.kind,
+            ActionKind::RightsIssue {
+                rights_units: Decimal::ONE,
+                rights_held_units: Decimal::from(4),
+                exercise_price: "1.80".parse().unwrap(),
+                currency: "AUD".to_string(),
+                renounceable: false,
+            }
+        );
+        // And it is on the JSON the UI reads back, not only in the row.
+        let resp = client(&pool).get("/corporate_actions/1").await;
+        let json: serde_json::Value = resp.json();
+        assert_eq!(json["renounceable"], serde_json::json!(false));
+    }
+
+    /// The flag is **required** on a rights issue and forbidden on every other
+    /// type. Required because the whole finding was that the fact was never
+    /// asked for: a quiet default would leave the same assumption in place for
+    /// every new entry, and the offer document always states it.
+    #[tokio::test]
+    async fn api_a_rights_issue_without_the_renounceable_flag_is_422() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "RTS").await;
+        api_put_expecting(
+            &pool,
+            serde_json::json!({
+                "action_type": "RightsIssue", "listing_id": 1, "date": "2024-11-30",
+                "rights_units": "1", "rights_held_units": "4", "exercise_price": "1.80",
+                "currency": "AUD",
+            }),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        )
+        .await;
+        for stray in [
+            serde_json::json!({
+                "action_type": "ShareSplit", "listing_id": 1, "date": "2024-11-30",
+                "split_new_units": "2", "split_old_units": "1", "renounceable": true,
+            }),
+            serde_json::json!({
+                "action_type": "BonusIssue", "listing_id": 1, "date": "2024-11-30",
+                "bonus_units": "1", "bonus_held_units": "10", "renounceable": false,
+            }),
+            serde_json::json!({
+                "action_type": "ReturnOfCapital", "listing_id": 1, "date": "2024-11-30",
+                "amount_per_unit": "0.50", "currency": "AUD", "renounceable": true,
+            }),
+        ] {
+            api_put_expecting(&pool, stray, StatusCode::UNPROCESSABLE_ENTITY).await;
+        }
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM corporate_actions")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 0, "nothing was written");
     }
 
     #[tokio::test]
@@ -1642,27 +1727,28 @@ mod tests {
             serde_json::json!({
                 "action_type": "RightsIssue", "listing_id": 1, "date": "2024-11-30",
                 "rights_units": "0", "rights_held_units": "4", "exercise_price": "1.80",
-                "currency": "AUD",
+                "currency": "AUD", "renounceable": true,
             }),
             serde_json::json!({
                 "action_type": "RightsIssue", "listing_id": 1, "date": "2024-11-30",
                 "rights_units": "1", "rights_held_units": "-4", "exercise_price": "1.80",
-                "currency": "AUD",
+                "currency": "AUD", "renounceable": true,
             }),
             serde_json::json!({
                 "action_type": "RightsIssue", "listing_id": 1, "date": "2024-11-30",
                 "rights_units": "1", "rights_held_units": "4", "exercise_price": "0",
-                "currency": "AUD",
+                "currency": "AUD", "renounceable": true,
             }),
             serde_json::json!({
                 "action_type": "RightsIssue", "listing_id": 1, "date": "2024-11-30",
                 "rights_units": "1", "rights_held_units": "4", "exercise_price": "1.80",
-                "currency": "AUD", "amount_per_unit": "0.50",
+                "currency": "AUD", "renounceable": true, "amount_per_unit": "0.50",
             }),
             serde_json::json!({
                 "action_type": "RightsIssue", "listing_id": 1, "date": "2024-11-30",
                 "rights_units": "1", "rights_held_units": "4", "exercise_price": "1.80",
-                "currency": "AUD", "split_new_units": "2", "split_old_units": "1",
+                "currency": "AUD", "renounceable": true, "split_new_units": "2",
+                "split_old_units": "1",
             }),
             serde_json::json!({
                 "action_type": "ShareSplit", "listing_id": 1, "date": "2024-11-30",
@@ -1800,7 +1886,7 @@ mod tests {
             serde_json::json!({
                 "action_type": "RightsIssue", "listing_id": 1, "date": "2024-11-30",
                 "rights_units": "1", "rights_held_units": "4", "exercise_price": "1.80",
-                "currency": "AUD", "buyback_market_value": "10.20",
+                "currency": "AUD", "renounceable": true, "buyback_market_value": "10.20",
             }),
         ] {
             api_put_expecting(&pool, body, StatusCode::UNPROCESSABLE_ENTITY).await;
@@ -2408,6 +2494,7 @@ mod tests {
                 "rights_held_units": "4",
                 "exercise_price": "1.80",
                 "currency": "AUD",
+                "renounceable": true,
                 "record_date": "2025-02-10",
             }),
         ] {

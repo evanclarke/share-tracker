@@ -1053,6 +1053,10 @@ async fn rights_issues_example_39_shanti_sale_of_rights() {
             "rights_held_units": "4",
             "exercise_price": "1.80",
             "currency": "AUD",
+            // Renounceable: Shanti sells the rights on-market, which is one of
+            // the three things the ATO's definition of a renounceable offer
+            // names (take up, lapse, or trade them).
+            "renounceable": true,
         }),
     )
     .await;
@@ -1132,6 +1136,10 @@ async fn rights_issues_example_40_shanti_rights_exercised() {
             "rights_held_units": "4",
             "exercise_price": "1.80",
             "currency": "AUD",
+            // Renounceable: Shanti sells the rights on-market, which is one of
+            // the three things the ATO's definition of a renounceable offer
+            // names (take up, lapse, or trade them).
+            "renounceable": true,
         }),
     )
     .await;

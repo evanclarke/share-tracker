@@ -209,7 +209,12 @@ is reproduced in `src/ato_examples.rs`. A **retail premium** under a
 renounceable offer is the same disposal with the premium as proceeds (TR
 2017/4 — see [`retail-premiums.md`](retail-premiums.md)).
 
+The rights issue itself records whether the offer was **renounceable** (0047),
+which changes nothing on this page — exercising, and the cost-base rules above,
+are identical either way — but decides how a **retail premium** is taxed (see
+[`retail-premiums.md`](retail-premiums.md)). Under a non-renounceable offer the
+sell-rights operation accepts only a nil-proceeds lapse; the premium is entered
+as unfranked dividend income instead.
+
 Out of scope (not modelled): pre-CGT original shares (the market-value uplift
-rule, and Example 39's pre-CGT half); employee share scheme rights;
-non-renounceable-offer retail premiums (an unfranked dividend — entered as
-income, TR 2012/1).
+rule, and Example 39's pre-CGT half); employee share scheme rights.

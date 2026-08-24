@@ -2064,6 +2064,119 @@ mod tests {
         );
     }
 
+    /// 0047 adds `corporate_actions.renounceable` (SCENARIOS AA-b). What needs
+    /// pinning is the meaning it gives existing rows: every rights issue
+    /// recorded before it was a **renounceable** offer — that is what the whole
+    /// feature was built for and what its documentation says — so they are
+    /// backfilled to 1 rather than left unknown, while every other action type
+    /// stays NULL, the per-type payload shape this table has always had. The
+    /// column's CHECK is what keeps that shape enforceable, and the audited
+    /// table's two triggers must come back naming the new column.
+    #[tokio::test]
+    async fn migration_0047_backfills_existing_rights_issues_as_renounceable() {
+        let pool = pool_migrated_below(47).await;
+        sqlx::query(
+            "INSERT INTO listings (id, exchange_mic, ticker, name, security_type, currency) \
+             VALUES (1, 'XASX', 'RTS', 'Rights Test Co', 'Share', 'AUD')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO corporate_actions \
+                 (id, action_type, listing_id, date, rights_units, rights_held_units, \
+                  exercise_price, currency) \
+             VALUES (1, 'RightsIssue', 1, '2024-07-01', '1', '4', '1.80', 'AUD')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO corporate_actions \
+                 (id, action_type, listing_id, date, bonus_units, bonus_held_units) \
+             VALUES (2, 'BonusIssue', 1, '2024-08-01', '1', '10')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        apply_migration(&pool, 47).await;
+
+        let flags: Vec<(i64, Option<bool>)> =
+            sqlx::query_as("SELECT id, renounceable FROM corporate_actions ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            flags,
+            [(1, Some(true)), (2, None)],
+            "the rights issue is renounceable, the bonus issue carries no flag"
+        );
+
+        // And the row reads back through the model as a renounceable offer, so
+        // an action entered before the column behaves exactly as it did.
+        let action = crate::entities::corporate_action::db_get(&pool, 1)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            action.kind,
+            crate::entities::corporate_action::ActionKind::RightsIssue {
+                renounceable: true,
+                ..
+            }
+        ));
+
+        // The CHECK holds the shape: only a rights issue may carry the flag,
+        // and only 0 or 1.
+        for bad in [
+            "INSERT INTO corporate_actions (id, action_type, listing_id, date, bonus_units, \
+             bonus_held_units, renounceable) VALUES (3, 'BonusIssue', 1, '2024-08-01', '1', \
+             '10', 1)",
+            "INSERT INTO corporate_actions (id, action_type, listing_id, date, rights_units, \
+             rights_held_units, exercise_price, currency, renounceable) \
+             VALUES (4, 'RightsIssue', 1, '2024-07-01', '1', '4', '1.80', 'AUD', 2)",
+        ] {
+            assert!(
+                sqlx::query(bad).execute(&pool).await.is_err(),
+                "the CHECK must refuse: {bad}"
+            );
+        }
+
+        // The audit trail is live again and records the new column.
+        sqlx::query("UPDATE corporate_actions SET renounceable = 0 WHERE id = 1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let old_row: String = sqlx::query_scalar(
+            "SELECT old_row FROM row_history \
+             WHERE table_name = 'corporate_actions' AND row_id = 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(old_row.contains("\"renounceable\":1"), "{old_row}");
+        let triggers: Vec<(String,)> = sqlx::query_as(
+            "SELECT name FROM sqlite_master \
+             WHERE type = 'trigger' AND name LIKE 'corporate_actions_row_history%' ORDER BY name",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            triggers
+                .iter()
+                .map(|t| t.0.as_str())
+                .collect::<Vec<_>>()
+                .as_slice(),
+            [
+                "corporate_actions_row_history_delete",
+                "corporate_actions_row_history_update"
+            ],
+            "both triggers are re-created, not left dropped"
+        );
+    }
+
     #[test]
     fn migrations_do_not_drop_tables_or_columns() {
         let migrations_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");

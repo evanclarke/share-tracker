@@ -403,7 +403,7 @@ withdrawing it).
 
 ## SCENARIOS AA-b — a non-renounceable rights issue is indistinguishable from a renounceable one, and its retail premium is recorded as a capital gain
 
-- [ ] Decide and implement (options below).
+- [x] Decide and implement (options below).
 
 Scenario AA-13. The two treatments of a retail premium turn entirely on whether the offer was
 renounceable, and `docs/ato/retail-premiums.md` states the split plainly: under a **renounceable**
@@ -444,6 +444,49 @@ with nothing asked and nothing said. The endpoint's own documentation says "unde
    offer, and that a non-renounceable premium is entered as unfranked income instead.
 
 **Chosen: option 1 — record `renounceable` and refuse the wrong path.**
+
+**Fixed.** `ActionKind::RightsIssue` carries `renounceable` (migration 0047: an INTEGER 0/1 column,
+CHECK-confined to `RightsIssue` rows, every stored row backfilled to renounceable — what they all
+already meant — with `corporate_actions`' two row-history triggers dropped and re-created around it).
+It is **required** on the PUT body and forbidden on every other action type, not defaulted: the
+whole finding is that the fact was never asked for, and a quiet default would have left the same
+assumption in place for every new entry. (The complementary CHECK — a rights issue *must* carry the
+flag — is the one part SQLite cannot express by `ALTER TABLE ADD COLUMN`, since it evaluates a new
+CHECK against the rows already there and would reject the very rows 0047 backfills; it lives in
+`CorporateActionBody::kind`, beside this table's other write-time rules a CHECK cannot express, and
+the migration header says so.)
+
+`sell_rights` now refuses **two** things against a non-renounceable offer, both `422`: a positive
+`proceeds_per_right` (naming TR 2012/1 and pointing at unfranked dividend income) and a positive
+`rights_cost`. The second was the open question in the write-up, and the ruling answers it: TR
+2012/1's scheme is defined by entitlements that "**cannot be traded, transferred, assigned or
+otherwise dealt with**" (para 2), so nothing can have been *bought* either — an unchecked cost would
+realise a capital loss on the lapse out of an amount that was never paid. A **nil/nil lapse stays
+accepted** and still consumes the entitlement. The premise held up too: exercising is identical
+under both offers (`docs/ato/rights-issues.md`'s rules turn on how the rights were acquired and on
+the original shares' pre/post-CGT status, never on renounceability), so recording a non-renounceable
+issue in order to exercise it is the normal case, and `rights_exercise` was deliberately left alone
+with a comment saying why.
+
+Re-derived rather than taken from the write-up, and it moved two things: QC 21832 had been
+restructured by a 22 June 2026 update, so `docs/ato/retail-premiums.md` was re-fetched in full
+(2026-08-25) and the drift recorded in `docs/ato/OVERVIEW.md`; and TR 2012/1 itself was fetched and
+quoted into that mirror, which is where the non-tradeable definition and paras 9–11 come from — the
+premium is **not** partly capital, since CGT event C2 does happen on the right to it but s 118-20
+reduces the gain by whatever is assessed as income. One documented caveat the finding did not have:
+TR 2012/1 expressly does not consider entitlement offers over **trust or stapled-group** equity, so
+for those the refusal still holds (the entitlements are non-tradeable either way) but the payment's
+character is whatever the distribution statement says.
+
+`docs/SCHEMA.md`, `docs/API.md` (the `RightsIssue` description, *Selling or lapsing rights* with its
+new `422`, and the Known-limitations bullet, which no longer says non-renounceable premiums "are not
+modelled" — the wrong path is refused and the right one named) and `README.md` were updated with it,
+and `src/web/config.js` asks for the flag (a checkbox defaulting to renounceable) and stops
+asserting "under this renounceable offer" — the sell-rights screen of a non-renounceable issue now
+opens by saying only a lapse can be recorded there. Tests: the two refusals and the accepted lapse
+(DB and API level, the API one pinning the wording), a renounceable offer unaffected, both
+round-trips through `PUT`, the flag required/forbidden, and `migration_0047_…` proving an existing
+row reads back as renounceable through the model.
 
 ## SCENARIOS AA-c — the investor-not-share-trader assumption is stated nowhere
 

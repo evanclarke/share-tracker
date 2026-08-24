@@ -85,6 +85,20 @@ pub enum ActionKind {
         /// Per-new-unit price paid on exercise, in `currency` (positive).
         exercise_price: Decimal,
         currency: String,
+        /// Whether the offer was **renounceable** — the rights can be taken
+        /// up, left to lapse, *or traded in the market*. Where they cannot be
+        /// traded, transferred or assigned, the offer is non-renounceable
+        /// (`docs/ato/retail-premiums.md`; TR 2012/1 para 2).
+        ///
+        /// It decides how a **retail premium** — the payment made to a holder
+        /// who did not or could not take the entitlement up — is taxed, and
+        /// nothing else about the action: exercising is identical either way.
+        /// Renounceable, the premium is capital proceeds on the rights (TR
+        /// 2017/4), which is the sell-rights operation; non-renounceable, it
+        /// is an unfranked dividend (TR 2012/1) and belongs on the income
+        /// path, so `sell_rights` refuses proceeds on such an offer
+        /// (`entities::rights_sale`).
+        renounceable: bool,
     },
     BuyBack {
         /// Per-unit buy-back price in `currency` (positive).
@@ -247,6 +261,15 @@ impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for ActionKind {
                 rights_held_units: row_dec(row, "rights_held_units")?,
                 exercise_price: row_dec(row, "exercise_price")?,
                 currency: row.try_get("currency")?,
+                // No write path can leave this NULL — the PUT body must state
+                // it and `db_upsert` always binds it, and 0047 backfilled
+                // every stored row — so the fallback is only reachable by a
+                // row hand-inserted with raw SQL. It reads as renounceable:
+                // what every row recorded before the column existed meant, and
+                // what 0047 backfilled them to.
+                renounceable: row
+                    .try_get::<Option<bool>, _>("renounceable")?
+                    .unwrap_or(true),
             }),
             "BuyBack" => Ok(ActionKind::BuyBack {
                 buyback_price: row_dec(row, "buyback_price")?,
@@ -348,6 +371,8 @@ pub struct CorporateActionBody {
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"
     )]
     exercise_price: Option<Decimal>,
+    #[serde(default)]
+    renounceable: Option<bool>,
     #[serde(
         default,
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"
@@ -432,7 +457,9 @@ impl CorporateActionBody {
     /// it would read as an entitlement fixed after the money was paid);
     /// ShareSplit a positive conversion ratio; BonusIssue a
     /// positive bonus ratio; RightsIssue a positive entitlement ratio,
-    /// exercise price, and a currency; BuyBack a positive per-unit price and
+    /// exercise price, a currency, and whether the offer was renounceable
+    /// (stated, never assumed — a retail premium's treatment turns on it);
+    /// BuyBack a positive per-unit price and
     /// a currency (dividend/franking-credit components default to 0; the
     /// dividend may not exceed the price — it is part of it — and a credit
     /// needs a dividend to attach to; market value, when given, is positive)
@@ -458,7 +485,10 @@ impl CorporateActionBody {
         let bonus = self.bonus_units.is_some() || self.bonus_held_units.is_some();
         let rights = self.rights_units.is_some()
             || self.rights_held_units.is_some()
-            || self.exercise_price.is_some();
+            || self.exercise_price.is_some()
+            // Folded in here so every *other* type's `!rights` guard rejects a
+            // stray renounceable flag — no arm needs its own test.
+            || self.renounceable.is_some();
         let buyback = self.buyback_price.is_some()
             || self.buyback_dividend.is_some()
             || self.buyback_franking_credit.is_some()
@@ -554,6 +584,12 @@ impl CorporateActionBody {
                     rights_held_units: positive(self.rights_held_units)?,
                     exercise_price: positive(self.exercise_price)?,
                     currency: self.currency?,
+                    // Required, not defaulted: the whole point of recording it
+                    // is that a retail premium's treatment turns on it, and a
+                    // flag that quietly defaults would leave the same
+                    // unasked assumption in place for every new entry
+                    // (SCENARIOS AA-b). The offer document always states it.
+                    renounceable: self.renounceable?,
                 })
             }
             ActionType::ScripForScrip

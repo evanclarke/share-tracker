@@ -17,6 +17,16 @@
 //! parcel's (possibly deemed) acquisition date. Unlike a Sell's
 //! `parcel_allocations`, these allocations consume nothing.
 //!
+//! Only a **renounceable** offer's rights can be sold at all: under a
+//! non-renounceable one the entitlements cannot be traded, transferred or
+//! assigned (TR 2012/1 para 2), and the payment that does arise for not taking
+//! one up — a **retail premium** — is an unfranked dividend, entered as
+//! `income`, not a capital gain (`docs/ato/retail-premiums.md`). So proceeds
+//! (and any cost paid to acquire the rights) are refused on a non-renounceable
+//! issue, while a nil-proceeds **lapse** stays recordable: a non-renounceable
+//! right lapses like any other, and nil against nil is a non-event on either
+//! treatment that still consumes the entitlement here.
+//!
 //! Cost base: nil for rights issued free; `rights_cost` carries the total
 //! paid to acquire the disposed rights (the purchased-rights case), which the
 //! report apportions over the allocations — so nil proceeds on a paid right
@@ -149,6 +159,28 @@ pub enum SellRightsError {
     /// The action is not a RightsIssue.
     #[error("that corporate action is not a rights issue")]
     NotARightsIssue,
+    /// Positive proceeds against a **non-renounceable** offer. Under such an
+    /// offer the entitlements "cannot be traded, transferred, assigned or
+    /// otherwise dealt with" (TR 2012/1 para 2, which is what the ATO's
+    /// definition of non-renounceable amounts to — `docs/ato/retail-premiums.md`),
+    /// so there are no proceeds to receive on them: the only payment that
+    /// arises is a **retail premium** for not taking the entitlement up, and
+    /// that is an unfranked dividend assessable under s 44 ITAA 1936 (TR
+    /// 2012/1), with any capital gain on it reduced to nil by s 118-20. Booked
+    /// here it would be a capital gain — halved again by the discount, since
+    /// free rights inherit the original shares' acquisition date — instead of
+    /// fully assessable income at item 11S (SCENARIOS AA-b). Mapped to `422`
+    /// naming the income path.
+    #[error("this rights issue is a non-renounceable offer, whose rights cannot be sold")]
+    ProceedsOnNonRenounceableOffer,
+    /// A cost paid to acquire rights under a **non-renounceable** offer. The
+    /// same terms make it impossible: an entitlement that cannot be traded,
+    /// transferred or assigned cannot have been bought, so the cost has no
+    /// source — and left unchecked it would realise a capital loss on a lapse
+    /// (proceeds nil against a positive cost base) out of an amount that could
+    /// never have been paid. Mapped to `422`.
+    #[error("this rights issue is a non-renounceable offer, whose rights cannot be bought")]
+    RightsCostOnNonRenounceableOffer,
     /// `units` is not strictly positive.
     #[error("the number of rights sold must be greater than zero")]
     NonPositiveUnits,
@@ -198,6 +230,22 @@ impl From<SellRightsError> for ApiError {
             SellRightsError::NotARightsIssue => {
                 ApiError::unprocessable("that corporate action is not a rights issue")
             }
+            // A non-renounceable offer's rights cannot be sold at all, and the
+            // one payment that does arise under it is income, not capital →
+            // 422 naming the ruling and the path the premium belongs on.
+            SellRightsError::ProceedsOnNonRenounceableOffer => ApiError::unprocessable(
+                "this rights issue is a non-renounceable offer, whose entitlements cannot be \
+                 traded, transferred or assigned — there are no capital proceeds to record on \
+                 them. A retail premium paid for not taking the entitlement up is an unfranked \
+                 dividend (TR 2012/1), not a capital gain: enter it as unfranked dividend income \
+                 against the listing instead. Only a lapse — nil proceeds — is recorded here",
+            ),
+            SellRightsError::RightsCostOnNonRenounceableOffer => ApiError::unprocessable(
+                "this rights issue is a non-renounceable offer, whose entitlements cannot be \
+                 traded, transferred or assigned — so nothing can have been paid to acquire the \
+                 rights it issued, and a cost recorded here would realise a capital loss on a \
+                 lapse out of an amount that was never paid",
+            ),
             SellRightsError::NonPositiveUnits => {
                 ApiError::unprocessable("the number of rights sold must be greater than zero")
             }
@@ -277,14 +325,31 @@ pub async fn db_sell_rights(
         Some(a) => a,
         None => return Err(SellRightsError::ActionNotFound),
     };
-    let (rights_units, rights_held_units) = match &action.kind {
+    let (rights_units, rights_held_units, renounceable) = match &action.kind {
         ActionKind::RightsIssue {
             rights_units,
             rights_held_units,
+            renounceable,
             ..
-        } => (*rights_units, *rights_held_units),
+        } => (*rights_units, *rights_held_units, *renounceable),
         _ => return Err(SellRightsError::NotARightsIssue),
     };
+    // What the offer's own terms allow. A non-renounceable entitlement cannot
+    // be traded, transferred or assigned (TR 2012/1 para 2), so it can neither
+    // be sold for proceeds nor have been bought for a cost — the payment that
+    // does arise, a retail premium for not taking it up, is an unfranked
+    // dividend and belongs on the income path. What remains recordable is the
+    // **lapse**: nil proceeds against a nil cost, which a non-renounceable
+    // right can certainly do and which is a non-event on either treatment,
+    // while still consuming the entitlement here (SCENARIOS AA-b).
+    if !renounceable {
+        if proceeds_per_right > Decimal::ZERO {
+            return Err(SellRightsError::ProceedsOnNonRenounceableOffer);
+        }
+        if rights_cost > Decimal::ZERO {
+            return Err(SellRightsError::RightsCostOnNonRenounceableOffer);
+        }
+    }
     let record_date = action.date;
     if body.date < record_date {
         return Err(SellRightsError::BeforeRecordDate);
@@ -529,6 +594,30 @@ mod tests {
             .await;
     }
 
+    /// A 1-for-4 **non-renounceable** rights issue at $1.80, record date
+    /// `date`: the entitlements cannot be traded, transferred or assigned, so
+    /// the only payment that can arise on them is a retail premium — an
+    /// unfranked dividend, not capital proceeds (TR 2012/1).
+    async fn insert_non_renounceable_issue(pool: &SqlitePool, id: i64, date: NaiveDate) {
+        corporate_action::db_upsert(
+            pool,
+            &CorporateAction {
+                id,
+                listing_id: 1,
+                date,
+                kind: ActionKind::RightsIssue {
+                    rights_units: Decimal::ONE,
+                    rights_held_units: Decimal::from(4),
+                    exercise_price: "1.80".parse().unwrap(),
+                    currency: "AUD".to_string(),
+                    renounceable: false,
+                },
+            },
+        )
+        .await
+        .unwrap();
+    }
+
     /// A 1-for-4 rights issue at $1.80, record date `date`.
     async fn insert_rights_issue(pool: &SqlitePool, id: i64, date: NaiveDate) {
         corporate_action::db_upsert(
@@ -542,6 +631,7 @@ mod tests {
                     rights_held_units: Decimal::from(4),
                     exercise_price: "1.80".parse().unwrap(),
                     currency: "AUD".to_string(),
+                    renounceable: true,
                 },
             },
         )
@@ -933,6 +1023,95 @@ mod tests {
         trade::db_upsert(&pool, &parcel).await.unwrap();
     }
 
+    /// SCENARIOS AA-b. A retail premium under a **non-renounceable** offer is
+    /// an unfranked dividend (TR 2012/1), not capital proceeds — and the
+    /// entitlements it was paid on could not have been sold in the first
+    /// place. Recorded here it would be a capital gain, discounted again off
+    /// the original parcel's acquisition date. Refused instead, with the
+    /// income path named.
+    #[tokio::test]
+    async fn proceeds_against_a_non_renounceable_offer_are_refused() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        insert_buy(&pool, 1, d(2024, 1, 15), "1000").await;
+        insert_non_renounceable_issue(&pool, 10, d(2024, 7, 1)).await;
+
+        let err = db_sell_rights(&pool, 10, &body(d(2024, 7, 20), "250", 1)).await;
+        assert!(matches!(
+            err,
+            Err(SellRightsError::ProceedsOnNonRenounceableOffer)
+        ));
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM rights_sales")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 0, "nothing is written");
+    }
+
+    /// The lapse stays recordable: a non-renounceable right lapses like any
+    /// other, and nil proceeds against the nil cost base of a free right is a
+    /// non-event on either treatment — while still consuming the entitlement,
+    /// which is the bookkeeping the row is there for.
+    #[tokio::test]
+    async fn a_lapse_at_nil_against_a_non_renounceable_offer_is_still_recorded() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        insert_buy(&pool, 1, d(2024, 1, 15), "1000").await;
+        insert_non_renounceable_issue(&pool, 10, d(2024, 7, 1)).await;
+
+        let mut lapse = body(d(2024, 7, 20), "250", 1);
+        lapse.proceeds_per_right = Some(Decimal::ZERO);
+        let sale = db_sell_rights(&pool, 10, &lapse).await.unwrap();
+        assert_eq!(sale.units, Decimal::from(250));
+        assert_eq!(sale.proceeds_per_right, Decimal::ZERO);
+        assert_eq!(sale.rights_cost, Decimal::ZERO);
+
+        // And it consumed the entitlement, which is what the row is for: the
+        // 1000 shares earned 250 rights and all 250 have now lapsed, so one
+        // more meets the shared cap.
+        let mut more = body(d(2024, 7, 21), "1", 1);
+        more.proceeds_per_right = Some(Decimal::ZERO);
+        assert!(matches!(
+            db_sell_rights(&pool, 10, &more).await,
+            Err(SellRightsError::ExceedsEntitlement)
+        ));
+    }
+
+    /// A cost paid to acquire the rights is impossible under the same terms —
+    /// an entitlement that cannot be traded cannot have been bought — and left
+    /// alone it would realise a capital loss on the lapse out of an amount
+    /// that was never paid.
+    #[tokio::test]
+    async fn a_purchase_cost_against_a_non_renounceable_offer_is_refused() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        insert_buy(&pool, 1, d(2024, 1, 15), "1000").await;
+        insert_non_renounceable_issue(&pool, 10, d(2024, 7, 1)).await;
+
+        let mut lapse = body(d(2024, 7, 20), "250", 1);
+        lapse.proceeds_per_right = Some(Decimal::ZERO);
+        lapse.rights_cost = Some("40".parse().unwrap());
+        assert!(matches!(
+            db_sell_rights(&pool, 10, &lapse).await,
+            Err(SellRightsError::RightsCostOnNonRenounceableOffer)
+        ));
+    }
+
+    /// The same premium under a **renounceable** offer is untouched: TR 2017/4
+    /// capital proceeds, which is what this operation has always recorded.
+    #[tokio::test]
+    async fn a_renounceable_offer_still_takes_its_premium_as_proceeds() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        insert_buy(&pool, 1, d(2024, 1, 15), "1000").await;
+        insert_rights_issue(&pool, 10, d(2024, 7, 1)).await;
+
+        let sale = db_sell_rights(&pool, 10, &body(d(2024, 7, 20), "250", 1))
+            .await
+            .unwrap();
+        assert_eq!(sale.proceeds_per_right, "0.20".parse::<Decimal>().unwrap());
+    }
+
     // API-level tests
 
     #[tokio::test]
@@ -1035,6 +1214,71 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(n, 0);
+    }
+
+    /// SCENARIOS AA-b at the HTTP surface: the refusal has to say *why* and
+    /// where the premium belongs, since the whole failure it replaces was a
+    /// silent acceptance. The lapse still answers `201`.
+    #[tokio::test]
+    async fn api_a_premium_on_a_non_renounceable_offer_is_refused_naming_the_income_path() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        insert_buy(&pool, 1, d(2024, 1, 15), "1000").await;
+        insert_non_renounceable_issue(&pool, 10, d(2024, 7, 1)).await;
+        let app = ApiClient::over(router().with_state(pool.clone()));
+
+        let resp = app
+            .post(
+                "/corporate_actions/10/sell_rights",
+                &serde_json::json!({
+                    "date": "2024-07-20",
+                    "units": "250",
+                    "proceeds_per_right": "0.20",
+                    "allocations": [{ "purchase_trade_id": 1, "units": "250" }],
+                }),
+            )
+            .await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+        let body = resp.text();
+        assert!(body.contains("non-renounceable"), "{body}");
+        assert!(body.contains("TR 2012/1"), "{body}");
+        assert!(body.contains("unfranked dividend income"), "{body}");
+
+        // A paid right under the same offer is refused for the same reason.
+        let resp = app
+            .post(
+                "/corporate_actions/10/sell_rights",
+                &serde_json::json!({
+                    "date": "2024-07-20",
+                    "units": "250",
+                    "proceeds_per_right": "0",
+                    "rights_cost": "40",
+                    "allocations": [{ "purchase_trade_id": 1, "units": "250" }],
+                }),
+            )
+            .await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(resp.text().contains("nothing can have been paid"));
+
+        // The lapse itself still lands.
+        let resp = app
+            .post(
+                "/corporate_actions/10/sell_rights",
+                &serde_json::json!({
+                    "date": "2024-07-20",
+                    "units": "250",
+                    "proceeds_per_right": "0",
+                    "allocations": [{ "purchase_trade_id": 1, "units": "250" }],
+                }),
+            )
+            .await;
+        assert_eq!(resp.status, StatusCode::CREATED);
+
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM rights_sales")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 1, "only the lapse was written");
     }
 
     /// The anchoring-allocation refusals name their figures rather than
