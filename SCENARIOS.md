@@ -89,7 +89,7 @@ behind or became a recorded finding.
 | W. Precision, rounding, and scale | 8 | 2026-08-23 (`d02cdc2`) | 6 raised, all closed — see below |
 | X. Transactional integrity and concurrency | 8 | 2026-08-23 (`f01d814`) | 2 raised, both closed — see below |
 | Y. Web UI | 12 | 2026-08-24 (`8f86b94`) | 7 raised, all closed — see below |
-| Z. Composite lifecycle scenarios | 12 | — | — |
+| Z. Composite lifecycle scenarios | 12 | 2026-08-24 (`c800fb2`) | 7 raised, all closed — see below |
 | AA. Boundary and out-of-scope scenarios | 20 | — | — |
 
 ### Section A findings
@@ -1350,6 +1350,95 @@ confirm text grows with parcel count — 2,710 characters at 50 parcels — agai
 elide limit on macOS and its 32-*row* limit on Linux/GTK, which 50 parcels already exceeds. Headless
 Chrome does not render the dialog (CDP reports the string passed in, not what is drawn — checked at
 500, 2,000, 4,000 and 9,000 characters), so there is no reproduction to reason from.
+
+### Section Z findings
+
+Driven 2026-08-24 (`c800fb2`) against throwaway databases, API-first, with the UI driven in a real
+browser (`scripts/ui-drive.js`) where the scenario is UI-shaped. Each chain's arithmetic was
+re-derived by hand and compared against the report rather than read for plausibility.
+
+**Six chains came back correct, and the correctness is structural rather than lucky.** The takeover
+chain holds end to end: a partial-rollover scrip-for-scrip apportioned 10% of a A$10,009.95 cost base
+to the cash side by market value, the demerger split the remaining A$9,008.955 exactly 70/30 with no
+remainder, a 1-for-10 consolidation left the cost base untouched, and the original 2018 acquisition
+date survived all three rollovers so the 2025 sale was still discountable (Z-02). Sixteen quarterly
+USD RSU vests, a mid-stream transfer to a personal broker, a sell-to-cover 12 days after a vest and a
+final sale across a USD/AUD move all costed at the right month's rate — each parcel's cost base at its
+*deemed* acquisition month, the proceeds at the sale month — with health flagging the ESS 30-day rule
+and naming the weekend vest dates as `an ESS vest` rather than as bad data (Z-03). The estate's four
+asset kinds each took the right clock: the pre-CGT parcel under `MarketValueAtDeath` was **not**
+discountable when sold two months after death, while the post-CGT parcel ran from the deceased's 2010
+acquisition, and the crypto's wallet-to-wallet move disposed of only the network fee (Z-04). Four
+currencies over three accounts apportioned the AMMA's Part C capital-gains FITO by the Division 115
+rule — `600 × 2500/4500 = 333.33` — and capped the year at the A$1,000 de-minimis with the excess
+reported separately (Z-06). The 20 June loss and 3 July re-buy were flagged **across both** the
+financial-year boundary and the holding-account boundary (Z-07). The two buy-backs either side of the
+25 October 2022 law change computed capital proceeds as `max(price, market value) − dividend` = 12.00
+in 2021 and 30.00 in 2024, creating the franked income row only for the first (Z-09). The suspended
+fund blocked its snapshot rather than guessing until `unpriced_from` was declared, then carried the
+last close forward under its own flag — rendered on the overview graph as amber rings with a
+"(carried-forward price)" tooltip and a legend explaining all four flag styles — and the eventual G3
+recognised the loss without staling any snapshot dated before it (Z-10). And one corrected AMMA
+statement propagated coherently through nine reports and stopped there (Z-12).
+
+**Seven findings, all closed.** Only three came from the scenario list. **Z-a** is Z-01's:
+a 10-parcel disposal printed its gain as `30,645.07` on Realised Gains and `30,645.08` on the Annual
+Tax Report, because the report summed per-allocation shares that each re-round instead of computing
+the sale's own total — and the row disagreed with itself, its discount-eligible and non-discountable
+columns adding to the cent the gain cell beside them did not show. **Z-d** is Z-05's: a Buy dated
+before an AMMA statement's year end leaves that statement's adjustment set covering fewer units than
+were held, and nothing said so — the cross-check reconciled the set to the *statement* and both agreed,
+while the *parcels* had moved. **Z-e** is Z-08's: the archived CGT worksheet called a 1-for-10 bonus
+issue an `11-for-10 split` — a ratio nobody announced, being this tool's own rebase factor — and a
+1-for-2 consolidation a `1-for-2 split`, which says the opposite of what happened to the unit count.
+
+**The other four came from the standing probes, and two of them are the pass's most serious.** Z-01's
+scripted sale collided with an auto-assigned DRP trade id and the collision was **accepted**: `PUT
+/sells/:id` guarded five provenance columns, every one of which names a Sell, and never checked the
+row's `trade_type` — so a reinvest-created DRP trade, a rights-exercise Buy, an ESS vest Buy and an
+inheritance parcel Buy, all of which `PUT`/`DELETE /trades/:id` refuse, were each rewritten as a Sell
+in place while their owning row kept pointing at them (**Z-b**). Pulling the same thread the other way
+found `PUT /trades/:id` turning a stored Sell into a Buy, leaving its allocations naming a Buy as
+their sale and inventing an open parcel that was never bought — with `/reports/health` and
+`/reports/rollover_consistency` both empty (**Z-c**). **Z-f** came from Z-11's reconciliation: thirteen
+of fourteen labels tied to a hand-computed return, and the fourteenth put a managed fund's franked and
+unfranked distribution under `11S + 11T`, dividends from *companies*, when they belong at 13C/13U —
+while the credits line beside it was already labelled `11U / 13Q`, so the report knew both destinations
+and only the ordinary trust row fell through. **Z-g** was found while fixing Z-d and confirmed
+independently: `docs/API.md` promises an AMIT adjustment against a rollover replacement parcel is
+accepted "wherever the operation moved them", but the listing check ran before the account-tracing
+reach-through, so the promise held only for replacements that stay on the same listing. For a fund
+taken over mid-year the three refusals formed a closed loop, each naming the other as the way out, and
+the final AMMA statement's whole cost-base reduction was recordable **nowhere**.
+
+| Finding | Scenarios | Fixed by |
+| --- | --- | --- |
+| A multi-parcel sale's gain prints a cent apart on two screens | Z-01 | `bf3b4e8` |
+| `PUT /sells/:id` rewrites an existing Buy or DRP trade as a Sell | probe (Z-01) | `19f5736` |
+| A trade can change kind under the allocations that depend on it | probe (Z-01) | `6b0cef5` |
+| A back-dated parcel leaves an AMMA adjustment set stale, silently | Z-05 | `1460c36` |
+| The archived CGT worksheet misnames bonus issues and consolidations | Z-08 | `a264db1` |
+| A trust distribution is reported under the dividends-from-companies label | Z-11 | `7aba321` |
+| A cross-listing rollover blocks its AMIT adjustment entirely | probe (fixing Z-d) | `d075a18` |
+
+**Four of the seven fixes replaced a hand-maintained list with a rule.** Z-b's guard was five
+provenance columns; it is now "an existing row must already be a plain Sell". Z-c's is the symmetric
+"a trade's `trade_type` is part of its identity" — and ordering it *after* the provenance guards
+exposed one more hole the column list never named, the worthless-shares recognise closing Sell. Z-e
+stopped formatting one derived factor three ways and carried each action's announced terms through
+instead. Z-g stopped consulting the listing pin and the account pin in sequence and asked one question
+of the existing chain-walk. That is Y-d and Y-g's lesson arriving on the server side.
+
+**Three lessons.** First, **an id collision is a probe**. Z-b and Z-c are the pass's most serious
+findings and neither is on the list; both surfaced because a scripted `PUT` landed on an id the
+database had already assigned to something else, and the response was `204`. Second, **a fix's own
+verification is where the next finding lives** — Z-g came out of fixing Z-d, exactly as W-e came out
+of fixing W-b, and it was confirmed against a fresh reproduction rather than taken on report. Third,
+**a plausible answer is not a measurement**: this pass read `?as_of=` into `/portfolio/open-parcels`
+and got sensible-looking holdings for five different dates before noticing the endpoint takes no query
+string at all and documents itself as "as at today". The reading that exposed it was a date on which
+the answer *had* to differ. Every figure in this write-up was re-derived by hand before it was
+believed.
 
 ## A. Deletion and mutation ripple effects
 

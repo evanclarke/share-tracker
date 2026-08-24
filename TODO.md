@@ -12,8 +12,8 @@ are fixed or decided.
 
 **Nothing is open in this file.**
 
-**SCENARIOS.md sections A–X are driven and every finding they raised is closed** in the `DONE/*.md`
-archive. Section **S. Settlement, holidays, and dates** was driven 2026-08-22 (`d501408`) and its
+**SCENARIOS.md sections A–Z are driven and every finding they raised is closed** in the `DONE/*.md`
+archive. Only section **AA. Boundary and out-of-scope scenarios** (20 scenarios) remains. Section **S. Settlement, holidays, and dates** was driven 2026-08-22 (`d501408`) and its
 four findings closed by `67c3096` (a trade dated in the future), `30d0e96` (a trade dated on a day
 its exchange was shut), `4a7ef1a` (a stored settlement date that is not a trading day) and
 `e453f21` (the settlement dates a completed calendar changes) — all four archived in
@@ -189,14 +189,46 @@ exceeds. Headless Chrome does not render the dialog at all (CDP reports the stri
 what is drawn — checked at 500, 2,000, 4,000 and 9,000 characters, all reported verbatim), so there
 is no reproduction to reason from and no TODO is opened for it.
 
-After Y, the next SCENARIOS pass is section **Z. Composite lifecycle scenarios** (12 scenarios),
-driven the way S through Y were. The lessons worth carrying forward are in the handover memory.
-Y added two. First, **drive the UI in a browser that can click, not one that can only render**:
-four of this pass's six findings are invisible to a `--dump-dom` render — the toast's lifetime, the
-50-row allocation refusal, the `confirm()` text, and the no-op save — and the fifth (Y-d) needed the
-rendered cell rather than the JSON behind it. Second, **an apparent finding is a measurement until
-its control agrees**: this pass produced two false alarms before either was written down — every
-graph preset appeared stuck (my own script left stale `id` attributes on earlier buttons, so every
-click hit `1M`), and `tax_year_settings` appeared to save a blank form (the "Saved." toast was the
-previous entity's, still on screen inside its 6-second window — which is Y-a seen from the other
-side). Both would have been logged as findings by a pass that trusted its first reading.
+Section **Z. Composite lifecycle scenarios** (12 scenarios) was driven on **2026-08-24** (`c800fb2`)
+against throwaway databases, API-first with the UI driven in a real browser where the scenario is
+UI-shaped, and every chain's arithmetic re-derived by hand rather than read for plausibility. Six
+chains came back correct: the takeover chain's cost base and discount clock across three consecutive
+rollovers (Z-02), four years of USD RSU vests through a transfer, a sell-to-cover and a currency move
+(Z-03), the estate's four asset kinds each taking the right discount clock (Z-04), four currencies
+over three accounts with the Division 115 FITO apportionment and the A$1,000 cap (Z-06), the wash sale
+flagged across both the FY and the holding-account boundary (Z-07), the two buy-backs either side of
+the 25 October 2022 law change (Z-09), the suspended fund's carried-forward prices and eventual G3
+(Z-10), and one corrected AMMA propagating coherently through nine reports and stopping there (Z-12).
+
+It raised **seven findings**, all now closed: `bf3b4e8` (a multi-parcel sale's gain printing a cent
+apart on two screens, Z-a), `19f5736` (`PUT /sells/:id` rewriting a Buy or DRP trade as a Sell, Z-b),
+`6b0cef5` (a trade changing kind under the allocations that depend on it, Z-c), `1460c36` (a
+back-dated parcel leaving an AMMA adjustment set stale, Z-d), `a264db1` (the archived CGT worksheet
+misnaming bonus issues and consolidations, Z-e), `7aba321` (a trust distribution reported under the
+dividends-from-companies label, Z-f) and `d075a18` (a cross-listing rollover blocking its AMIT
+adjustment entirely, Z-g) — archived in [`DONE/trades-income.md`](DONE/trades-income.md),
+[`DONE/reporting.md`](DONE/reporting.md) and [`DONE/tax-domain.md`](DONE/tax-domain.md), and
+summarised under [Section Z findings](SCENARIOS.md#section-z-findings).
+
+Only **three** of the seven came from the scenario list. Z-b and Z-c — the pass's most serious — came
+from a **scripted `PUT` landing on an id the database had already assigned to something else**, and
+being answered `204`; Z-f came from Z-11's label-by-label reconciliation against a hand-computed
+return; and Z-g was found while *fixing* Z-d, which is W's lesson again (W-e came out of fixing W-b),
+and was confirmed against a fresh reproduction rather than taken on the fixing agent's report. Four of
+the seven fixes replaced a hand-maintained list with a rule — Z-b's five provenance columns became
+"an existing row must already be a plain Sell", Z-c's became "a trade's `trade_type` is part of its
+identity" (and ordering it after the provenance guards exposed one more hole the column list never
+named), Z-e carried each action's announced terms through instead of formatting one derived factor
+three ways, and Z-g asked one question of the existing chain-walk instead of consulting two pins in
+sequence. That is Y-d and Y-g's lesson arriving on the server side.
+
+The pass also produced one **false reading, caught before it was written down**: `?as_of=` was read
+into `/portfolio/open-parcels` and returned sensible-looking holdings for five different dates before
+the endpoint turned out to take no query string at all and to document itself as "as at today". The
+reading that exposed it was a date on which the answer *had* to differ — which is Y's control lesson
+in its cheapest form.
+
+After Z, the next SCENARIOS pass is section **AA. Boundary and out-of-scope scenarios** (20
+scenarios) — each a documented limitation, where the verification is that the system **fails safe**
+(refuses, or flags, or documents) rather than silently producing a wrong number, and that the
+documented workaround actually works. The lessons worth carrying forward are in the handover memory.
