@@ -955,15 +955,31 @@ mod tests {
     async fn income_entitlement_date_ui_present() {
         let js = app_js_body().await;
         // Trust present-entitlement timing (docs/ato/trust-income-timing.md):
-        // the field exists, selecting Trust reveals it in simple mode
-        // prefilled with the pay date, and switching away clears it so the
-        // server's trust-only 422 can't be tripped by a leftover value.
+        // the field exists, selecting Trust reveals it in simple mode, and
+        // switching away clears it so the server's trust-only 422 can't be
+        // tripped by a leftover value.
         assert!(js.contains("entitlement_date"));
         assert!(js.contains("Entitlement date"));
         assert!(js.contains("applyEntitlement"));
         assert!(js.contains("presently entitled"));
         assert!(
             js.contains("if (mode !== 'Trust') { body.entitlement_date = null; body.tax_deferred_amount = null; }")
+        );
+        // The field is revealed empty: the pay date is *offered* as the
+        // default in a live hint (a date input renders no placeholder), never
+        // written into the input (SCENARIOS Y-e). The invariant is that the
+        // form never writes an entitlement date the user did not type, so the
+        // assertion is on the absence of any assignment to that input — a
+        // prefill is exactly what silently pinned a deliberate NULL on a
+        // no-op edit, after which the row stopped tracking the pay date. The
+        // hint's own wording is unit-tested in src/web/forms.test.js.
+        assert!(js.contains("entitlementDefaultHint"));
+        assert!(js.contains(
+            "entitlementDefault.textContent = entitlementDefaultHint(datePaidInput.value)"
+        ));
+        assert!(
+            !js.contains("entitlementInput.value ="),
+            "the income form must never write entitlement_date the user did not enter (SCENARIOS Y-e)"
         );
     }
 

@@ -126,6 +126,16 @@ function incomeSimpleShape(existing) {
   return null;
 }
 
+// What a blank entitlement date means, named for the pay date currently
+// entered — the "placeholder" a date input cannot render (see
+// wireIncomeEntry). Pure, so forms.test.js can execute it.
+export function entitlementDefaultHint(datePaid) {
+  const paid = (datePaid || '').trim();
+  return 'Leave blank and this distribution is assessed in the pay date’s financial year'
+    + (paid ? ' (' + paid + ')' : '')
+    + ', following the pay date if you later correct it. Enter a date only to assess it in that date’s year instead.';
+}
+
 // The income form's simple-first behaviour: a payment-amount input plus a
 // franking selector stand in for the component fields (mapped onto the
 // body at submit), the per-share pair shows its computed product as a
@@ -175,17 +185,32 @@ export function wireIncomeEntry(form, existing) {
 
   // Trust distributions are assessed by present entitlement, not payment
   // (docs/ato/trust-income-timing.md): selecting Trust reveals the
-  // entitlement-date field in simple mode too, prefilled with the pay date.
+  // entitlement-date field in simple mode too. It is deliberately *not*
+  // prefilled — the pay date is offered as the field's default, never
+  // written into it, so nothing is stored unless the user types a date
+  // (SCENARIOS Y-e). Prefilling wrote a date the user never entered on any
+  // open-and-Save of a row whose blank was deliberate, and the stored copy
+  // then stopped tracking the pay date: correcting a June distribution's pay
+  // date afterwards left the income assessed in the pinned date's year, with
+  // nothing on screen to say why. A `placeholder` cannot carry the default
+  // here — `<input type="date">` renders none in any browser — so it goes in
+  // the field's own hint instead, naming the actual pay date and updated
+  // live as the pay-date input changes.
   const entitlementInput = form.querySelector('[name="entitlement_date"]');
   const datePaidInput = form.querySelector('[name="date_paid"]');
+  const entitlementDefault = el('div', { class: 'hint' });
+  entitlementInput.closest('.field').appendChild(entitlementDefault);
   function applyEntitlement() {
+    // Set in both modes: the field is always visible in advanced mode, and
+    // the default it describes is the server's behaviour either way.
+    entitlementDefault.textContent = entitlementDefaultHint(datePaidInput.value);
     if (advFlag.checked) return; // advanced mode shows every field
     const isTrust = frankSel.value === 'Trust';
     entitlementInput.closest('.field').style.display = isTrust ? '' : 'none';
-    if (isTrust && !entitlementInput.value) entitlementInput.value = datePaidInput.value || '';
   }
   frankSel.addEventListener('change', applyEntitlement);
   datePaidInput.addEventListener('change', applyEntitlement);
+  datePaidInput.addEventListener('input', applyEntitlement);
 
   // Live product hint for the per-share cross-check pair.
   const apsInput = form.querySelector('[name="amount_per_security"]');

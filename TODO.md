@@ -339,7 +339,7 @@ applied to the UI's copy of it.
 
 ## SCENARIOS Y-e — a no-op edit writes an entitlement date that then stops tracking the pay date
 
-- [ ] Offer the pay date as a placeholder, never as a written value.
+- [x] Offer the pay date as a placeholder, never as a written value.
 
 Found by the standing probe "what else moved that shouldn't have", applied to an
 **edit-and-save-unchanged** of the first row of every entity. Fifteen of sixteen entities round-trip
@@ -383,6 +383,23 @@ reproduction was not evidence for the mechanism first attributed to it.
 **Chosen: option 1.** Option 2 was rejected because a newly entered trust row would still get a
 written date the user never chose, carrying exactly the same staleness exposure; the placeholder
 communicates the default without fixing it, and fixes both cases at once.
+
+**Done.** `applyEntitlement()` no longer assigns `entitlementInput.value`; the pay date is offered as
+the field's default in a live hint appended below it (`entitlementDefaultHint(datePaid)`, a pure
+export of `forms.js`), because `<input type="date">` renders no `placeholder` in any browser. The
+hint names the pay date currently entered and re-renders on every `input`/`change` of the pay-date
+field, in advanced mode too; `config.js`'s static hint drops its now-duplicated closing sentence.
+Reveal-on-Trust and the `mode !== 'Trust'` clearing at submit are unchanged (both re-driven).
+Tests: `src/web/forms.test.js` (new) unit-tests the hint wording — the part that can be executed —
+and `web::tests::income_entitlement_date_ui_present` pins the invariant as a served-bundle
+assertion, asserting the bundle contains no assignment to the entitlement input at all. `docs/API.md`'s
+UI paragraph now states the field opens empty with the pay date named as its default.
+Re-driven end to end (headless, `scripts/ui-drive.js`): the no-op open-and-Save leaves
+`entitlement_date` `null`, and the subsequent pay-date correction to 2025-06-25 now moves the
+A$9,000 to FY2025 — 11,757.30 / 14,000, identical to the API-only control. One correction to the
+write-up above: the "control" row was **not** reachable through the UI before this fix — merely
+opening the edit form pinned the date, so a UI-driven control reproduced the bug rather than the
+control. It was necessarily measured through the API, and now the UI matches it.
 
 ## SCENARIOS Y-f — `#/e/<custom-slug>` renders a raw JavaScript TypeError as the whole page
 
