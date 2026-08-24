@@ -745,7 +745,7 @@ entry-convention detail rather than a scope cut. Four new tests in `src/doc_chec
 
 ## SCENARIOS AA-f — the archived CGT worksheet prints a whole parcel's initial cost against a part of it
 
-- [ ] Decide and implement (options below).
+- [x] Decide and implement (options below).
 
 Reported in passing by the agent fixing [AA-a](#scenarios-aa-a), and **re-driven from scratch against a
 throwaway database before being logged** (per the standing lesson: a fixing agent's incidental report is
@@ -791,3 +791,31 @@ folded into that commit.
 3. **Out of scope** — a display column that no total depends on.
 
 **Chosen: option 1 — print the costed units' initial cost.**
+
+**Fixed.** `reports::tax_report`'s disposal row now takes `CostBase::costed_initial_cost` — the costed
+units' pro-rated share of the parcel's initial cost base, the same pool `cost_base::adjustment_detail`
+starts its itemised walk from — instead of the whole parcel's `initial_cost`. The reproduction row now
+prints 500 units / initial `5,000.00` / adjusted `5,000.00`, and the whole-parcel control is unmoved at
+1,000 / `10,000.00` / `10,000.00`. With real adjustments present the documented contract holds as an
+arithmetic identity: a 400-of-1,000-unit disposal of an A$10 parcel carrying a 50c/unit AMIT reduction
+prints initial `4,000.00` − `200.00` = adjusted `3,800.00`, and the same parcel carrying a 25c/unit
+return of capital prints `4,000.00` − `100.00` = `3,900.00` (the identity holds except where a row is
+flagged `capped` and CGT event E10/G1 has floored the balance at nil — the excess is a capital gain in
+the net-capital-gain report, not a cost-base movement). The rest of the row was swept for the same
+fault and is correct: `adjusted_cost_base_aud`, `proceeds_aud`, `gain_loss_aud` and the two per-unit
+figures all come from the allocation (`realised_gains::ParcelDetail`), the itemised adjustment amounts
+and per-unit figures are already stated for the costed units, and `indexed_cost_base_aud` was built on
+`costed_initial_cost` from the start (`domain::indexation::indexed_cost_base`). The one other
+whole-parcel figure is `buy_brokerage`/`buy_gst_on_brokerage` — deliberately the buy contract note's
+own figures for the whole trade, transcribed for checking against the note, carried in the JSON and
+printed in no column; that is now said in the field's doc comment and in `docs/API.md` rather than left
+to be inferred. Rounding is untouched (the column was already in `round_money_to_cents`'s list), and
+nothing totalled moved: driven end to end at the HTTP surface against a throwaway database, the whole
+document — every subtotal and grand total included — is byte-identical to the pre-fix binary's apart
+from this one column. Because it changes a printed number, `docs/API.md` says so where the column is
+described, so a reader comparing an archived PDF against a freshly generated one is not left guessing.
+Regression tests:
+`reports::tax_report::tests::api_a_partial_disposal_prints_the_disposed_units_initial_cost_base` (the
+partial disposal and the whole-parcel control in one document) and
+`api_the_itemised_adjustments_span_the_whole_gap_on_a_partial_disposal` (the identity, over both
+reduction kinds).

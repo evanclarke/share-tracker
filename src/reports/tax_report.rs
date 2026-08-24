@@ -335,8 +335,25 @@ pub struct DisposalParcelRow {
     // Buy side (native currency unless suffixed _aud)
     pub units: Decimal,
     pub buy_price: Option<Decimal>,
+    /// The buy contract note's own brokerage and GST — the **whole trade's**
+    /// figures in its native currency, transcribed for hand-checking against
+    /// the note itself, not this row's share of them. Where the sale took
+    /// only part of the parcel they are therefore larger than the amount
+    /// inside `initial_cost_base_aud`, which pro-rates the whole cost base
+    /// (brokerage and GST included) to the costed units. Printed nowhere on
+    /// the document — the schedule's columns are `units`/`buy_price`/the two
+    /// cost bases — and totalled nowhere.
     pub buy_brokerage: Option<Decimal>,
     pub buy_gst_on_brokerage: Option<Decimal>,
+    /// The **costed units'** share of the parcel's initial cost base, AUD —
+    /// `cost_base::CostBase::costed_initial_cost`, the pool the itemised
+    /// `adjustments` below draw down. It is the disposed units' figure, not
+    /// the whole parcel's, so `initial_cost_base_aud` less the adjustments
+    /// printed under it is `adjusted_cost_base_aud` on a partial disposal as
+    /// much as on a whole-parcel one (SCENARIOS AA-f; the identity holds
+    /// exactly except where an adjustment is `capped`, where CGT event
+    /// E10/G1 floors the balance at nil and the excess is a capital gain in
+    /// the net-capital-gain report instead).
     pub initial_cost_base_aud: Decimal,
     pub cost_base_per_unit_aud: Decimal,
 
@@ -614,7 +631,17 @@ fn disposal_parcel_rows(
                             )
                             .ok()
                         })
-                        .map(|cb| cb.initial_cost)
+                        // The **costed units'** share of the initial cost
+                        // base, not the whole parcel's: this row describes
+                        // the units the sale allocated, and the itemised
+                        // adjustments below it are stated for those same
+                        // units (`cost_base::adjustment_detail`). Printing
+                        // the whole parcel's figure left a partial disposal
+                        // irreconcilable on the page — 500 units at $10
+                        // printing an initial cost base of 10,000.00 above an
+                        // adjusted 5,000.00 with no adjustment row between
+                        // them to explain the 5,000 (SCENARIOS AA-f).
+                        .map(|cb| cb.costed_initial_cost)
                         .unwrap_or(p.cost_base);
                     let aud_rows: Vec<CostBaseAdjustment> = rows
                         .into_iter()
@@ -3894,5 +3921,208 @@ mod tests {
             parcel["adjusted_cost_base_aud"],
             serde_json::json!("4991.52")
         );
+    }
+    /// SCENARIOS AA-f: a **partial** disposal's initial cost base is the
+    /// disposed units' share of the parcel's, not the whole parcel's.
+    ///
+    /// The printed columns run `Units`, `Buy price`, `Initial cost base
+    /// (AUD)`, the itemised adjustment rows, `Adjusted cost base (AUD)` — so
+    /// 500 units of a 1,000-unit A$10 parcel printing an initial cost base of
+    /// 10,000.00 above an adjusted 5,000.00, with no adjustment row between
+    /// them, left the archived document irreconcilable against its own units
+    /// column (the class of fault SCENARIOS W-c/W-d were about). The control
+    /// in the same document is the case that was always right: a disposal of
+    /// the **whole** parcel, where the two figures are the parcel's.
+    #[tokio::test]
+    async fn api_a_partial_disposal_prints_the_disposed_units_initial_cost_base() {
+        let pool = test_support::test_pool().await;
+        for (listing_id, ticker, sold) in [(1, "PART", "500"), (2, "WHOLE", "1000")] {
+            test_support::listing(listing_id)
+                .ticker(ticker)
+                .name(ticker)
+                .insert(&pool)
+                .await;
+            let buy_id = listing_id * 10;
+            let sell_id = buy_id + 1;
+            test_support::buy(buy_id, listing_id)
+                .date(ymd(2022, 3, 15))
+                .qty(dec("1000"))
+                .price(dec("10"))
+                .insert(&pool)
+                .await;
+            test_support::sell(sell_id, listing_id)
+                .date(ymd(2024, 2, 15))
+                .qty(dec(sold))
+                .price(dec("14"))
+                .insert(&pool)
+                .await;
+            test_support::allocate(&pool, buy_id, sell_id, buy_id, dec(sold)).await;
+        }
+
+        let body: serde_json::Value = test_support::ApiClient::full(&pool)
+            .post_json(
+                "/reports/tax-report",
+                &serde_json::json!({"tax_year": 2024}),
+            )
+            .await;
+        let groups = body["disposals"]["listings"]
+            .as_array()
+            .expect("two groups")
+            .clone();
+        let row = |ticker: &str| {
+            groups
+                .iter()
+                .find(|g| g["ticker"] == serde_json::json!(ticker))
+                .expect("a group per listing")["parcels"][0]
+                .clone()
+        };
+
+        // Half the parcel: half its $10,000 cost base, and nothing between
+        // the two columns to explain a difference, because there is none.
+        let part = row("PART");
+        assert_eq!(part["units"], serde_json::json!("500"));
+        assert_eq!(part["buy_price"], serde_json::json!("10"));
+        assert_eq!(json_dec(&part["initial_cost_base_aud"]), dec("5000"));
+        assert_eq!(part["adjustments"], serde_json::json!([]));
+        assert_eq!(json_dec(&part["adjusted_cost_base_aud"]), dec("5000"));
+        assert_eq!(json_dec(&part["cost_base_per_unit_aud"]), dec("10"));
+        assert_eq!(json_dec(&part["proceeds_aud"]), dec("7000"));
+        assert_eq!(json_dec(&part["gain_loss_aud"]), dec("2000"));
+
+        // The control: the whole parcel prints the whole parcel's figure,
+        // which is the same number it always did.
+        let whole = row("WHOLE");
+        assert_eq!(whole["units"], serde_json::json!("1000"));
+        assert_eq!(json_dec(&whole["initial_cost_base_aud"]), dec("10000"));
+        assert_eq!(json_dec(&whole["adjusted_cost_base_aud"]), dec("10000"));
+    }
+
+    /// The point of the change above: with the costed figure printed, the
+    /// itemised rows account for the **whole** gap between the two cost-base
+    /// columns on a partial disposal — `initial − Σ adjustments = adjusted`,
+    /// which is what `docs/API.md` states this section prints — because
+    /// `cost_base::adjustment_detail` states every row for the costed units
+    /// too. Both reduction kinds are covered: an AMIT reduction (CGT event
+    /// E10) and a return of capital (G1), which cannot sit on the same
+    /// listing (`corporate_action::WriteError::ReturnOfCapitalOnAmit`) and so
+    /// take one partial disposal each.
+    #[tokio::test]
+    async fn api_the_itemised_adjustments_span_the_whole_gap_on_a_partial_disposal() {
+        use crate::entities::corporate_action;
+
+        let pool = test_support::test_pool().await;
+        listing_amit(&pool, 1, "VDHG").await;
+        test_support::listing(2)
+            .ticker("VAF")
+            .name("VAF")
+            .insert(&pool)
+            .await;
+        for listing_id in [1, 2] {
+            let buy_id = listing_id * 10;
+            let sell_id = buy_id + 1;
+            test_support::buy(buy_id, listing_id)
+                .date(ymd(2022, 7, 4))
+                .qty(dec("1000"))
+                .price(dec("10"))
+                .insert(&pool)
+                .await;
+            // 400 of the 1,000 units, in a later financial year.
+            test_support::sell(sell_id, listing_id)
+                .date(ymd(2024, 2, 15))
+                .qty(dec("400"))
+                .price(dec("14"))
+                .insert(&pool)
+                .await;
+            test_support::allocate(&pool, buy_id, sell_id, buy_id, dec("400")).await;
+        }
+
+        // 50c/unit of AMIT cost-base reduction over the FY2023 statement's
+        // 1,000 units of the AMIT holding …
+        test_support::amma(1, 1)
+            .units(dec("1000"))
+            .cost_base_adjustment(dec("0.50"))
+            .with(|a| a.tax_year_end_date = ymd(2023, 6, 30))
+            .insert(&pool)
+            .await;
+        crate::entities::amit_adjustment_generation::db_generate(
+            &pool,
+            1,
+            &crate::entities::amit_adjustment_generation::GenerateBody::default(),
+        )
+        .await
+        .unwrap();
+        // … and 25c/unit returned as capital on the ordinary trust.
+        corporate_action::db_upsert(
+            &pool,
+            &corporate_action::CorporateAction {
+                id: 1,
+                listing_id: 2,
+                date: ymd(2023, 9, 1),
+                kind: corporate_action::ActionKind::ReturnOfCapital {
+                    amount_per_unit: dec("0.25"),
+                    currency: "AUD".to_string(),
+                    record_date: None,
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+        let body: serde_json::Value = test_support::ApiClient::full(&pool)
+            .post_json(
+                "/reports/tax-report",
+                &serde_json::json!({"tax_year": 2024}),
+            )
+            .await;
+        let groups = body["disposals"]["listings"]
+            .as_array()
+            .expect("two groups")
+            .clone();
+        for (ticker, kind, per_unit, amount, adjusted) in [
+            ("VDHG", "AmitCostBase", "0.50", "200", "3800"),
+            ("VAF", "ReturnOfCapital", "0.25", "100", "3900"),
+        ] {
+            let parcel = groups
+                .iter()
+                .find(|g| g["ticker"] == serde_json::json!(ticker))
+                .expect("a group per listing")["parcels"][0]
+                .clone();
+            assert_eq!(parcel["units"], serde_json::json!("400"), "{ticker}");
+            // 400/1,000 of the $10,000 parcel.
+            assert_eq!(
+                json_dec(&parcel["initial_cost_base_aud"]),
+                dec("4000"),
+                "{ticker}"
+            );
+
+            let adjustments = parcel["adjustments"].as_array().expect("adjustments");
+            assert_eq!(
+                adjustments
+                    .iter()
+                    .map(|a| (
+                        a["kind"].as_str().expect("a kind").to_string(),
+                        json_dec(&a["per_unit"]),
+                        json_dec(&a["amount"]),
+                    ))
+                    .collect::<Vec<_>>(),
+                vec![(kind.to_string(), dec(per_unit), dec(amount))],
+                "{ticker}: the row states the reduction reaching the 400 costed units"
+            );
+            assert_eq!(
+                json_dec(&parcel["adjusted_cost_base_aud"]),
+                dec(adjusted),
+                "{ticker}"
+            );
+
+            // The identity a reader checks with a pencil, over the figures as
+            // printed: the initial cost base less every itemised row under it
+            // is the adjusted cost base beneath them.
+            let summed: Decimal = adjustments.iter().map(|a| json_dec(&a["amount"])).sum();
+            assert_eq!(
+                json_dec(&parcel["initial_cost_base_aud"]) - summed,
+                json_dec(&parcel["adjusted_cost_base_aud"]),
+                "{ticker}: the itemised rows must account for the whole gap"
+            );
+        }
     }
 }
