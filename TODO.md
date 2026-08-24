@@ -453,3 +453,48 @@ this is reachable only by a hand-typed or stale-bookmarked URL, which is why it 
 
 **Chosen: option 1.** One line in the router, and a stale bookmark lands somewhere useful rather than
 on what reads as a crash.
+
+## SCENARIOS Y-g — the health banner prints money as prose, unformatted
+
+- [ ] Format the six banner figures through the shared money formatter, and pin the convention.
+
+Found while fixing Y-d, and deliberately kept separate from it: `COLUMN_KINDS` governs table *cells*,
+and the health banner does not build cells — it builds sentences, concatenating the figure straight
+in. Same rule, different render path, so Y-d's fix does not reach it.
+
+Verified live with two identical ESS statements carrying a 12,340.1234 discount:
+
+> ⚠ … 2 identical ESS statements for MEGA vesting 1000 shares at 2024-01-15 with a **12340.1234** AUD
+> discount (ids 10, 11) — …
+
+Every table in the app renders that same figure `12,340.12` with the full value on hover.
+
+**Bounded by a sweep of all seven JS modules** rather than by estimate — a money name from
+`COLUMN_KINDS` concatenated into a string without passing through `numericDisplay`. **Six sites,
+all of them `problems.push(...)` in `app.js`'s health banner:**
+
+| line | figure |
+| --- | --- |
+| `app.js:1292` | `gross_amount` — duplicate income rows |
+| `app.js:1299` | `amount` — duplicate interest rows |
+| `app.js:1306` | `amount` — duplicate investment expenses |
+| `app.js:1314` | `discount_total` — duplicate ESS statements |
+| `app.js:1323` | `cost_base_total` — duplicate ESS parcels |
+| `app.js:1345` | `statement_discount` — an ESS parcel sold inside 30 days |
+
+(The one other match, `config.js:869`, is a false positive: `r.income` is a row object, not a figure.)
+Quantities in the same sentences — `units_sold`, `quantity` — are correctly verbatim and stay so.
+
+The sanctioned fix already exists in the tree: `taxreport.js` wraps `numericDisplay(v, 'money')` as
+`moneyText` for exactly this case, the Annual Tax Report being the other place money is written
+outside a `filterableTable` cell.
+
+**Options offered:**
+1. **Format all six, and pin the convention with a scan** — route them through the shared formatter,
+   then add a test that scans the JS modules for a `COLUMN_KINDS` money name concatenated into a
+   string without going through it.
+2. Just format the six.
+3. Leave it — the banner is prose, not a figure the user transcribes.
+
+**Chosen: option 1.** This is the second hole found in one rule in one pass, which is the argument
+for pinning the call-site convention rather than fixing six call sites and hoping.
