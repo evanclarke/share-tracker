@@ -475,7 +475,7 @@ crypto burn is the residual honest case.)
 
 ## SCENARIOS AA-e — four limitations are documented without the workaround that exists and works
 
-- [ ] Decide and implement (options below).
+- [x] Decide and implement (options below).
 
 Scenarios AA-06, AA-08, AA-12, AA-19. Each of these bullets states what is *not* modelled and stops
 there, while a correct entry convention exists — and in three of the four it was driven and works.
@@ -514,3 +514,57 @@ that AA-06 needs.
 2. **A subset** — say which.
 
 **Chosen: option 1 — all four, with AA-12 promoted out of the Crypto bullet into one of its own.**
+
+**Fixed.** All four bullets in `docs/API.md`'s Known limitations now carry their convention, each
+pinned by its own `doc_checks` test, and every claim was re-driven against a throwaway database
+before it was written down.
+
+*One taxpayer* was rewritten once and carries both remedies (AA-06 and AA-19 live on the same
+bullet, and splitting them would have left two halves each needing the other's context). **A second
+taxpayer is a second database and a second instance** — one server per taxpayer, `--db` and `--port`
+apart — with the wrong answer named: a spouse entered as another holding account aggregates into one
+net capital gain, one loss pool, one A$5,000 small-shareholder franking threshold and one A$1,000
+FITO de-minimis, wrong for both people and **not in one predictable direction** (pooled losses
+understate one person's gains, while a combined franking or foreign-tax total tips both out of
+thresholds neither reached alone — the finding's drafting had only the understating half). Nothing
+can detect it, because aggregating what is in the database is what the reports are for. **A jointly
+held parcel is entered as your own share** — 50% of a 1,000-unit holding is a 500-unit Buy, costing
+A$5,000, verified through `/portfolio/open-parcels`. One correction to the finding's write-up: it is
+**not** both per-share figures that are keyed to your half. `amount_per_security` stays the
+statement's per-unit rate and only `securities_held` is your own unit count — the cross-check is
+`amount_per_security × securities_held` against the entered cash, so $0.20 × 1000 against your half's
+$100 is the `422` and $0.20 × 500 is accepted. Cross-referenced to *Inherited parcels*, with the cost
+stated: your unit counts deliberately will not tie back to the registry's holding statement.
+
+*Cost base elements* no longer claims element 2 is captured: element 1 has a field and element 2 has
+**one** field. The other element-2 costs were re-derived from `docs/ato/cgt-cost-base.md` rather than
+from the finding — costs of transfer, stamp duty or other similar duty, remuneration for a broker,
+agent, accountant, consultant or legal adviser (tax advice only from a recognised tax adviser,
+incurred after 30 June 1989), a valuation or apportionment made to work out the gain, and expenses
+incurred as a direct result of ownership ending — with the ones a *listed-share* investor actually
+meets named. The convention (fold it into `brokerage`, say what it was in `contract_note_ref`) is
+exact: 100 units at $10 plus A$500 of transfer duty reports a A$1,500 cost base, and nothing bounds
+the fee above. Driving it turned up **two traps the finding did not have**, both now documented and
+pinned: `brokerage_includes_gst` would ÷11-split a A$500 duty into A$45.45 of GST that never existed
+(the cost base is identical, the GST column is not), and a supplied `statement_total` is reconciled
+against `quantity × price ± (brokerage + GST)` at write time, so a broker-note total that omits
+separately paid duty is a `422` naming the computed figure. The disposal-side asymmetry points at
+*Where a Sell's brokerage and GST land*, and the one thing with no home at all — an element-2 cost
+belonging to no single trade — is stated.
+
+*Div 775 forex on a foreign-currency cash balance* is now its own bullet, sited immediately after
+*Settlement-window forex — CGT events K10/K11*, and says plainly that **there is no entry path at
+all**: an [income](docs/API.md#income) row's `listing_id` is a required `i64` (verified —
+`IncomeBody`, and both a missing and a `null` one answer `422`) and a currency balance has no
+listing, so the gain has nowhere to go; the loss side is no better, since an investment expense would
+report a forex loss on a line it does not belong to. Cited to `docs/ato/forex-common-transactions.md`
+(QC 18322, s 775-15). The *Crypto assets* bullet keeps its load-bearing half — the deferral never
+reaches a crypto holding, TD 2014/25 and the 2023 statutory exclusion — and the two bullets now
+cross-reference each other instead of one carrying the other's scope.
+
+`README.md`'s scope-cut paragraph gained two clauses (one taxpayer per database, and the
+foreign-currency cash balance with no entry path); the element-2 convention stayed out of it as
+entry-convention detail rather than a scope cut. Four new tests in `src/doc_checks.rs`:
+`known_limitations_document_the_joint_ownership_entry_convention`,
+`..._the_second_taxpayer_remedy`, `..._the_element_two_incidental_cost_convention`, and
+`..._the_division_775_forex_omission`.

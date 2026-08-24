@@ -1553,6 +1553,154 @@ fn known_limitations_document_indexation_method() {
     assert!(README_MD.contains("50% discount is used throughout"));
 }
 
+/// Docs-sync pin for the joint-ownership entry convention (SCENARIOS AA-e,
+/// scenario AA-06): a jointly held parcel is entered as *your own share* —
+/// half a 1,000-unit registry holding is a 500-unit Buy — and the statement's
+/// per-share figures follow, `securities_held` keyed to your own units while
+/// `amount_per_security` stays the statement's per-unit rate. The two are
+/// cross-checked against the entered cash at write time
+/// (`entities::income::check_per_share`), so the wrong keying is a `422`, and
+/// the convention is the one *Inherited parcels* already prescribes.
+#[test]
+fn known_limitations_document_the_joint_ownership_entry_convention() {
+    let limitations = known_limitations();
+    assert!(limitations.contains("**A jointly held parcel is entered as your own share of it**"));
+    // Concrete: your half of a 1,000-unit holding is a 500-unit Buy.
+    assert!(
+        limitations
+            .contains("a 50% interest in a 1,000-unit registry holding is a Buy of **500** units")
+    );
+    // Which of the two per-share figures moves, and which does not.
+    assert!(limitations.contains(
+        "`amount_per_security` stays the statement's per-unit rate while `securities_held` is **your own** unit count"
+    ));
+    // The write-time cross-check is what makes the wrong keying visible.
+    assert!(limitations.contains("is a `422` naming the product it computed"));
+    // Same convention as the inherited-parcel split, and the same cost.
+    assert!(limitations.contains("the convention *Inherited parcels* below already prescribes"));
+    assert!(limitations.contains("will not tie back to the registry's holding statement"));
+    // The README carries the joint-holding half of the scope cut.
+    assert!(README_MD.contains("500 units of a 1,000-unit joint holding"));
+}
+
+/// Docs-sync pin for the second-taxpayer remedy (SCENARIOS AA-e, scenario
+/// AA-19): one database and one instance per taxpayer (`--db`, `--port`),
+/// because the easy wrong answer — a spouse as another holding account —
+/// aggregates two taxpayers into one of every per-taxpayer figure and nothing
+/// can see it.
+#[test]
+fn known_limitations_document_the_second_taxpayer_remedy() {
+    let limitations = known_limitations();
+    assert!(
+        limitations.contains("**A second taxpayer is a second database and a second instance**")
+    );
+    assert!(limitations.contains("each with its own `--db` and `--port`"));
+    // The wrong answer, named, and what it silently pools.
+    assert!(
+        limitations
+            .contains("must *not* be done is entering a spouse's or a trust's holdings as another")
+    );
+    assert!(
+        limitations.contains(
+            "A$5,000 small-shareholder franking threshold and one A$1,000 FITO de-minimis"
+        )
+    );
+    // Explicit that it cannot be detected.
+    assert!(
+        limitations
+            .contains("aggregating what is in the database is exactly what these reports are for")
+    );
+    // The README carries the same scope cut beside the other named ones.
+    assert!(README_MD.contains("**one taxpayer per database**"));
+    assert!(README_MD.contains("never a second holding account"));
+    // Both flags the remedy needs are in the README's options table.
+    assert!(README_MD.contains("| `--db` |"));
+    assert!(README_MD.contains("| `--port` |"));
+}
+
+/// Docs-sync pin for the second cost-base element (SCENARIOS AA-e, scenario
+/// AA-08): element 2 is wider than the one field it has, the ATO's other
+/// incidental costs are named, and the convention that works — fold the cost
+/// into the trade's `brokerage`, say what it was in `contract_note_ref` — is
+/// documented with its three traps (the GST-inclusive split, the
+/// `statement_total` reconciliation, and the disposal side's netting).
+#[test]
+fn known_limitations_document_the_element_two_incidental_cost_convention() {
+    let limitations = known_limitations();
+    assert!(limitations.contains("**Element 2 is wider than the one field it has**"));
+    // The ATO's element-2 costs a listed-share investor actually meets.
+    assert!(limitations.contains("**costs of transfer**"));
+    assert!(limitations.contains("**stamp duty or other similar duty**"));
+    assert!(
+        limitations.contains(
+            "**remuneration for a broker, agent, accountant, consultant or legal adviser**"
+        )
+    );
+    // The convention, and that it is exact rather than an approximation.
+    assert!(limitations.contains(
+        "**The convention is to fold such a cost into the trade's `brokerage` and say what it really was in `contract_note_ref`.**"
+    ));
+    assert!(limitations.contains("A$500 of transfer duty reports a A$1,500 cost base"));
+    // The three traps.
+    assert!(limitations.contains("would invent A$45.45 of GST on a A$500 duty"));
+    assert!(
+        limitations.contains(
+            "A supplied `statement_total` must be the total *including* the folded-in cost"
+        )
+    );
+    assert!(limitations.contains("**netted off proceeds rather than added to the cost base**"));
+    assert!(limitations.contains("*Where a Sell's brokerage and GST land*"));
+    // That passage is where it says it is, in the realised-gains section.
+    assert!(API_MD.contains("**Where a Sell's brokerage and GST land.**"));
+    // The ATO source the element-2 list is re-derived from.
+    assert!(limitations.contains("docs/ato/cgt-cost-base.md"));
+    let mirror = include_str!("../docs/ato/cgt-cost-base.md");
+    assert!(mirror.contains("Second element: incidental costs"));
+    assert!(mirror.contains("stamp duty or other similar duty"));
+    assert!(mirror.contains("costs of transfer"));
+}
+
+/// Docs-sync pin for the Division 775 forex omission (SCENARIOS AA-e, scenario
+/// AA-12): it is its own bullet, sited with the other FX limitations rather
+/// than buried in *Crypto assets*, and it says the honest thing — there is no
+/// entry path at all, because an [income] row requires a `listing_id`
+/// (`entities::income::IncomeBody::listing_id` is an `i64`, not an `Option`)
+/// and a currency balance has no listing. The crypto bullet keeps its own
+/// load-bearing half — the deferral never reaches a crypto holding — and the
+/// two cross-reference each other instead of duplicating.
+#[test]
+fn known_limitations_document_the_division_775_forex_omission() {
+    let limitations = known_limitations();
+    assert!(
+        limitations
+            .contains("- **Foreign-currency cash balances — Division 775 forex gains and losses**")
+    );
+    assert!(
+        limitations
+            .contains("assessable ordinary income and deductions under Division 775, not CGT")
+    );
+    // The honest part: no workaround, and why.
+    assert!(limitations.contains("there is no entry path at all"));
+    assert!(limitations.contains("an [income](#income) row's `listing_id` is **required**"));
+    assert!(limitations.contains("a currency balance has no [listing](#listings) to point at"));
+    assert!(limitations.contains("adds it to their return outside this tool"));
+    // Sited beside the other FX limitations, and cross-referenced both ways.
+    assert!(limitations.contains("*Settlement-window forex on foreign-currency trades* above"));
+    assert!(limitations.contains("(*Crypto assets* above)"));
+    assert!(
+        limitations.contains("has its own bullet below and **never reaches a crypto holding**")
+    );
+    // The crypto bullet keeps the exclusion itself, with its authorities.
+    assert!(limitations.contains("is not 'foreign currency' for Division 775"));
+    assert!(limitations.contains("TD 2014/25 and the 2023 statutory exclusion"));
+    // Cites the mirrored ATO guidance (QC 18322).
+    assert!(limitations.contains("docs/ato/forex-common-transactions.md"));
+    assert!(include_str!("../docs/ato/forex-common-transactions.md").contains("QC 18322"));
+    // The README carries the no-entry-path scope cut too.
+    assert!(README_MD.contains("**foreign-currency cash balances**"));
+    assert!(README_MD.contains("**no entry path at all**"));
+}
+
 /// Docs-sync pin for the capital-account assumption (SCENARIOS AA-c): every
 /// figure this system produces assumes a share **investor** holding CGT assets,
 /// never a **share trader** whose shares are trading stock (QC 66047). Nothing
