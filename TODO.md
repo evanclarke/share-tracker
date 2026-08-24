@@ -378,7 +378,7 @@ with nothing asked and nothing said. The endpoint's own documentation says "unde
 
 ## SCENARIOS AA-c — the investor-not-share-trader assumption is stated nowhere
 
-- [ ] Decide and implement (options below).
+- [x] Decide and implement (options below).
 
 Scenario AA-07. Every figure this system produces assumes the holdings are **CGT assets held on
 capital account**. For a **share trader** carrying on a business, shares are **trading stock**: gains
@@ -408,6 +408,33 @@ written down.
    same way.
 
 **Chosen: option 1 — its own Known-limitations bullet, README line, and `doc_checks` test.**
+
+**Fixed.** `docs/API.md`'s Known limitations gained its own **Investor, not share trader**
+(2026-08-24) bullet, placed directly after *Taxpayer entity type* with the two cross-referenced so
+neither reads as covering the other (that one is *which taxpayer* and the rate; this one is whether
+the CGT machinery applies at all). It states the trading-stock treatment concretely — profit on sale
+assessable as ordinary income, purchase price and transaction costs deductible in the year incurred
+so there is no per-parcel gain at all, losses deductible against income from any source, and
+Division 70's year-end stock adjustment (s 70-35 / s 70-45) not modelled anywhere — what that costs
+a trader who ran these reports (half each year's profit exempted as a discount at 18A, losses parked
+at 18V instead of claimed, brokerage capitalised that was already deductible), and that **nothing can
+detect it**: the test is how the activities are carried on, not anything on a trade row, so there is
+no refusal, no health flag and no `taxpayer_basis`-style marker — the assumption is written down
+instead of enforced. Two things the drafting of this finding did not have: the income side is
+**unaffected** (dividends and similar receipts are assessable either way, so the tax summary's
+dividend, franking and expense lines hold for a trader too), and 18V is not simply unavailable to a
+trader — an investor→trader change keeps unused prior-year capital losses as **capital** losses,
+which can never become revenue losses. The change-of-status rules are named as out of scope too
+(**CGT event K4** where the change elects market value; the trader→investor deemed sale at cost),
+with the manual Sell + Buy that is all an entry path could be.
+
+The ATO source was re-derived rather than taken from the finding: QC 66047 *Share investing versus
+share trading*, mirrored as `docs/ato/share-investing-versus-share-trading.md` (retrieved
+2026-08-24) with its investor/trader table, carrying-on-a-business factors, the George example and
+both change-of-status paths, and indexed at the head of `docs/ato/OVERVIEW.md`'s CGT table as the
+threshold question the rest of it sits on. `README.md`'s scope-cut paragraph carries the matching
+line, and `doc_checks::known_limitations_document_the_investor_not_share_trader_assumption` pins
+both halves plus the mirror's QC number and its two load-bearing sentences.
 
 ## SCENARIOS AA-d — a disposal recorded at nil proceeds raises a capital loss that nothing questions
 

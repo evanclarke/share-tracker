@@ -1553,6 +1553,41 @@ fn known_limitations_document_indexation_method() {
     assert!(README_MD.contains("50% discount is used throughout"));
 }
 
+/// Docs-sync pin for the capital-account assumption (SCENARIOS AA-c): every
+/// figure this system produces assumes a share **investor** holding CGT assets,
+/// never a **share trader** whose shares are trading stock (QC 66047). Nothing
+/// stored distinguishes the two, so there is no refusal and no flag to pin —
+/// the assumption itself is the deliverable, in `docs/API.md`, in the README's
+/// scope-cut paragraph, and cross-referenced against *Taxpayer entity type*,
+/// which is the other axis (which taxpayer, and the rate) and does not cover it.
+#[test]
+fn known_limitations_document_the_investor_not_share_trader_assumption() {
+    let limitations = known_limitations();
+    assert!(limitations.contains("**Investor, not share trader**"));
+    assert!(limitations.contains("**CGT assets held on capital account**"));
+    assert!(limitations.contains("**trading stock**"));
+    // What goes wrong, concretely, and that nothing can see it.
+    assert!(limitations.contains("**assessable as ordinary income**"));
+    assert!(limitations.contains("**deductible in the year incurred**"));
+    assert!(limitations.contains("**Nothing here can detect which one you are**"));
+    // The year-end trading-stock valuation is named as unmodelled.
+    assert!(limitations.contains("s 70-35"));
+    // The two axes cross-reference each other, so neither reads as the other.
+    assert!(limitations.contains("*Investor, not share trader* below"));
+    // Cites the mirrored ATO guidance (QC 66047).
+    assert!(limitations.contains("docs/ato/share-investing-versus-share-trading.md"));
+    let mirror = include_str!("../docs/ato/share-investing-versus-share-trading.md");
+    assert!(mirror.contains("QC 66047"));
+    assert!(mirror.contains(
+        "your shares are treated like trading stock in the ordinary course of a business"
+    ));
+    assert!(mirror.contains("**CGT event K4**"));
+    // The README carries the same scope cut beside the other named ones.
+    assert!(README_MD.contains("share **investor** holding CGT assets on capital account"));
+    assert!(README_MD.contains("**share trader** carrying on a business"));
+    assert!(README_MD.contains("nothing here can tell the two apart"));
+}
+
 /// Docs-sync pin for the FX spot-rate override (REQUIREMENTS 2026-06-12, QC
 /// 18020): the FX conversion section states the precedence rule honestly —
 /// spot override first, monthly RBA rate as the ATO-published convenience
