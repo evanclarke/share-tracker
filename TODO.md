@@ -247,46 +247,6 @@ landed on a half-cent, which is what made it visible.
 converted once); computing it there and letting the last allocation absorb the difference keeps both
 properties W-d established — the total is exact, and the per-parcel rows still sum to it.
 
-## SCENARIOS Z-d — a back-dated parcel leaves an AMMA statement's adjustment set stale, and nothing says so
-
-- [ ] Surface an AMMA statement whose `units_held` disagrees with the units actually held at its year end.
-
-Found driving **Z-05** (the correction cascade). A year is entered, its AMMA statements are entered and
-their [AMIT adjustments generated](docs/API.md#generating-amit-adjustments), the tax report is
-archived — and then a missed Buy dated **before** those year ends is discovered and entered. Every
-other consequence is handled: all 15 report snapshots were marked stale by the schema's staleness
-triggers, `regenerate_all` rebuilt them, and the archived FY2025 tax report came back **byte-identical**
-(0 fields changed), which is right — the new parcel was never sold.
-
-The AMIT side is not. Generation writes one row per parcel open at the statement's
-`tax_year_end_date`; entering a parcel dated before that year end adds a parcel that set never saw:
-
-| | statement `units_held` | Σ adjusted | units actually open at year end |
-| --- | ---: | ---: | ---: |
-| FY2024 statement, as generated | 1000 | 1000 | 1000 |
-| after the back-dated 300-unit Buy | 1000 | 1000 | **1300** |
-
-`GET /reports/amit_adjustment_cross_check` is **empty** in the second row, and so is
-`/reports/health`. The check reconciles the adjustment *set* to the *statement* — Σ 1000 against
-`units_held` 1000 — and by that measure it does reconcile. Nothing anywhere compares either figure
-with the parcels actually open at the year end, so the 300 units keep their full cost base while the
-fund's per-unit reduction was, per `docs/API.md`'s own rule, "applied uniformly to every unit held at
-the statement's `tax_year_end_date`". The FY2025 statement is stale in the same way and equally silent.
-
-**The control is what shows the check is blind precisely here.** Re-running generation with
-`"replace": true` writes the corrected set (Σ 1300) and the cross-check fires immediately —
-*"adjusted units 1300 exceed the statement's units held 1000 … (excess 300)"*. So the mismatch is
-detectable and the report already knows how to say it; it is only ever seen when the set is
-regenerated, which is the one action a user who does not know the set is stale has no reason to take.
-Entering the same statement against the same holding **without** back-dating is flagged too (generation
-covers 1300, `difference` 300). The blind spot is exactly the correction cascade: a parcel set that
-changes *after* generation.
-
-**Direction.** The cross-check already loads the open parcels it would need. Adding the statement's own
-`units_held` versus the units open at `tax_year_end_date` as a third comparison — beside Σ-versus-
-`units_held` — surfaces both a stale set and a statement typed against the wrong holding, and it says
-which of the two figures moved.
-
 ## SCENARIOS Z-e — the archived CGT worksheet calls a bonus issue and a consolidation "splits", at ratios nobody announced
 
 - [ ] Name each unit-count event by what it was, at the ratio its terms were stated in.

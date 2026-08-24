@@ -746,8 +746,9 @@ const COLUMN_KINDS = (function () {
     'quantity', 'quantity_allocated', 'securities_held', 'units_held', 'units',
     'original_quantity', 'remaining_quantity', 'quantity_held', 'cgt_discount_eligible_quantity',
     'split_new_units', 'split_old_units', 'bonus_units', 'bonus_held_units',
-    // AMIT adjustment cross-check: the statement's units against the set's.
-    'units_adjusted',
+    // AMIT adjustment cross-check: the statement's units against the set's,
+    // and (SCENARIOS Z-d) against the units actually open at the year end.
+    'units_adjusted', 'units_open_at_year_end',
     'rights_units', 'rights_held_units', 'scrip_new_units', 'scrip_old_units',
     'demerger_new_units', 'demerger_held_units',
     // Wash-sale and franking at-risk report unit columns.

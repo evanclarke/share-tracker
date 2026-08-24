@@ -12,6 +12,14 @@
 //! not merely understate a cost base — it can manufacture a gain that was
 //! never made.
 //!
+//! One check here is not about the set at all: the statement's own
+//! `units_held` against the units **actually open** at its year end. Every
+//! other comparison reconciles the set to the statement, so a set that
+//! matched when it was generated goes on matching forever — a Buy dated
+//! before the year end, entered afterwards to correct a missed parcel, adds
+//! units the stored set never saw while both of those terms stand still
+//! (SCENARIOS Z-d). The parcels are the third term.
+//!
 //! This is the set-level check, and like the other cross-checks
 //! ([`super::amit_cash_cross_check`], [`super::e4_cross_check`]) it is
 //! advisory and non-blocking: an empty report means every statement's
@@ -53,6 +61,14 @@ pub struct AmitAdjustmentAlert {
     /// quantity is in its parcel's as-acquired units, which a split between
     /// acquisition and the year end would otherwise make a false mismatch.
     pub units_adjusted: Decimal,
+    /// The units of the statement's listing **actually open on its holding
+    /// account** at `tax_year_end_date`, from the shared open-parcels loader
+    /// ([`crate::domain::open_parcels::load`]) — the same read
+    /// [generation](crate::entities::amit_adjustment_generation) derives its
+    /// set from — in that date's unit basis, so it is comparable with
+    /// `units_held` and `units_adjusted` term for term. This is what a stored
+    /// set has no way to notice moving under it.
+    pub units_open_at_year_end: Decimal,
     /// How many adjustment rows the statement has.
     pub parcel_count: i64,
     /// Every problem found, each a self-contained sentence naming what to fix.
@@ -83,6 +99,7 @@ struct StatementFacts {
     year_end: NaiveDate,
     units_held: Decimal,
     units_adjusted: Decimal,
+    units_open_at_year_end: Decimal,
     cost_base_adjustment: Decimal,
 }
 
@@ -117,6 +134,29 @@ pub async fn db_amit_adjustment_alerts(
     // Every sale allocation with its sale date — the "was this parcel already
     // gone before the year began?" input.
     let sold = open_parcels::db_units_sold(&mut tx, None).await?;
+    // What was *actually* held at each statement's year end, keyed by
+    // (year end, listing, holding account). One `load` per distinct year end
+    // — the same shared read [generation](crate::entities::amit_adjustment_generation)
+    // derives its set from, so this report cannot disagree with it about what
+    // was open — still on the report's own read transaction.
+    let mut open_at: HashMap<(NaiveDate, i64, i64), Decimal> = HashMap::new();
+    let mut year_ends: Vec<NaiveDate> = statement_rows
+        .iter()
+        .map(|r| r.try_get("tax_year_end_date"))
+        .collect::<Result<_, _>>()?;
+    year_ends.sort_unstable();
+    year_ends.dedup();
+    for year_end in year_ends {
+        for parcel in open_parcels::load(&mut tx, Some(year_end)).await? {
+            *open_at
+                .entry((
+                    year_end,
+                    parcel.parcel.listing_id,
+                    parcel.parcel.holding_account_id,
+                ))
+                .or_default() += parcel.remaining_as_of;
+        }
+    }
     tx.commit().await?;
 
     let mut by_statement: HashMap<i64, Vec<AdjustmentRow>> = HashMap::new();
@@ -143,6 +183,12 @@ pub async fn db_amit_adjustment_alerts(
         let adjustments = by_statement.get(&amma_statement_id).map_or(&[][..], |v| v);
         let listing_splits = splits.get(&listing_id).map_or(&[][..], |v| v);
 
+        let holding_account_id: i64 = row.try_get("holding_account_id")?;
+        let units_open_at_year_end = open_at
+            .get(&(year_end, listing_id, holding_account_id))
+            .copied()
+            .unwrap_or_default();
+
         let units_adjusted = adjustments
             .iter()
             .map(|a| {
@@ -162,6 +208,7 @@ pub async fn db_amit_adjustment_alerts(
                 year_end,
                 units_held,
                 units_adjusted,
+                units_open_at_year_end,
                 cost_base_adjustment,
             },
         );
@@ -173,9 +220,10 @@ pub async fn db_amit_adjustment_alerts(
             listing_id,
             ticker: row.try_get("ticker")?,
             tax_year: tax_year_for(year_end),
-            holding_account_id: row.try_get("holding_account_id")?,
+            holding_account_id,
             units_held,
             units_adjusted,
+            units_open_at_year_end,
             parcel_count: adjustments.len() as i64,
             problems,
         });
@@ -224,6 +272,7 @@ fn problems_for(
         units_held,
         units_adjusted,
         cost_base_adjustment,
+        ..
     } = facts;
     let mut problems = Vec::new();
 
@@ -238,6 +287,7 @@ fn problems_for(
                  enter one row per parcel held at year end"
             ));
         }
+        problems.extend(units_held_problem(facts, false));
         return problems;
     }
 
@@ -335,7 +385,70 @@ fn problems_for(
         }
     }
 
+    problems.extend(units_held_problem(facts, true));
     problems
+}
+
+/// The statement's own `units_held` against the units **actually open** at its
+/// `tax_year_end_date`, on its own listing and holding account.
+///
+/// The other checks all reconcile the adjustment *set* to the *statement*, so
+/// a set that matched its statement when it was generated goes on matching it
+/// forever — including after a Buy dated *before* the year end is entered to
+/// correct a missed parcel, which adds a parcel the stored set never saw
+/// (SCENARIOS Z-d). Nothing in that comparison can notice, because both of its
+/// terms stood still; only the parcels moved. This is the third term.
+///
+/// Both figures are in the year end's unit basis — `units_held` is what the
+/// registry stated for that date, and `open_parcels::load(.., Some(year_end))`
+/// re-bases each parcel's remainder into it — so a split between an
+/// acquisition and the year end cannot make a false mismatch, exactly as in
+/// the coverage check.
+///
+/// There is no allowance band here, unlike the coverage check: both terms are
+/// *year-end* positions, so units disposed of during the year are already out
+/// of both. A holding sold out (or transferred, exchanged, demerged away)
+/// during the year has nil open at the year end and a statement stating nil
+/// units held, and reconciles.
+fn units_held_problem(facts: &StatementFacts, has_adjustments: bool) -> Option<String> {
+    let &StatementFacts {
+        year_end,
+        units_held,
+        units_adjusted,
+        units_open_at_year_end,
+        ..
+    } = facts;
+    if units_open_at_year_end == units_held {
+        return None;
+    }
+    let difference = units_open_at_year_end - units_held;
+    // Which of the two figures moved. When the set still sums to the
+    // statement's own figure, the statement and its set agree with each other
+    // and it is the parcels that changed underneath them — the stale-set case,
+    // whose fix is to regenerate. When the set already sums to what is open,
+    // the set has been rebuilt and it is the statement's stated figure left
+    // behind (or the statement is against the wrong holding account).
+    let cause = if !has_adjustments {
+        // With no rows at all there is no set to have gone stale, and the
+        // zero sum agrees with nothing on purpose — say only what is known.
+        "check the statement's units held and holding account against the parcels entered"
+    } else if units_adjusted == units_held {
+        "the adjustment set still sums to the statement's figure, so it is the parcels that \
+         changed after the set was generated — re-generate the set from the statement (replace) \
+         once they are right"
+    } else if units_adjusted == units_open_at_year_end {
+        "the adjustment set already covers the units that are open, so it is the statement's \
+         stated figure that disagrees — check it against the registry's holding statement, and \
+         that it is the right holding account"
+    } else {
+        "check the statement's units held and holding account against the parcels entered, then \
+         re-generate its adjustment set"
+    };
+    Some(format!(
+        "the statement states {units_held} unit(s) held at {year_end} but \
+         {units_open_at_year_end} unit(s) are open on its holding account at that date \
+         (difference {difference:+}) — {cause}"
+    ))
 }
 
 async fn report(
@@ -351,8 +464,69 @@ async fn report(
 mod tests {
     use super::*;
     use crate::entities::corporate_action::{ActionKind, CorporateAction};
+    use crate::entities::holding_account::{self, HoldingAccount};
+    use crate::entities::sell::AllocationInput;
+    use crate::entities::transfer::{self, TransferBody};
     use crate::test_support::{self, ApiClient, allocate, dec, test_pool, ymd};
     use axum::http::StatusCode;
+
+    /// The units-held comparison's own sentence (SCENARIOS Z-d) for one
+    /// statement, if the report made one. Used by the legitimate shapes that
+    /// carry an unrelated problem of their own: what they pin is that *this*
+    /// comparison stayed quiet.
+    fn units_held_problem_for(alerts: &[AmitAdjustmentAlert], statement_id: i64) -> Option<String> {
+        alerts
+            .iter()
+            .find(|a| a.amma_statement_id == statement_id)
+            .and_then(|a| {
+                a.problems
+                    .iter()
+                    .find(|p| p.contains("unit(s) are open on its holding account"))
+                    .cloned()
+            })
+    }
+
+    /// A second holding account, for the transfer and wrong-account cases.
+    async fn second_account(pool: &SqlitePool) {
+        holding_account::db_upsert(
+            pool,
+            &HoldingAccount {
+                id: 2,
+                name: "Second".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    /// Move `qty` units of parcel `purchase_trade_id` from account 1 to
+    /// account 2 on `date`, as transfer #1.
+    async fn transfer_all(
+        pool: &SqlitePool,
+        purchase_trade_id: i64,
+        date: NaiveDate,
+        qty: Decimal,
+    ) {
+        transfer::db_transfer(
+            pool,
+            1,
+            &TransferBody {
+                listing_id: 1,
+                date,
+                from_account_id: 1,
+                to_account_id: 2,
+                allocations: vec![AllocationInput {
+                    purchase_trade_id,
+                    quantity_allocated: qty,
+                }],
+                fee_allocations: Vec::new(),
+                fee_market_price: None,
+                fee_fx_rate: None,
+            },
+        )
+        .await
+        .unwrap();
+    }
 
     async fn amit_listing(pool: &SqlitePool, id: i64, ticker: &str) {
         test_support::listing(id)
@@ -628,7 +802,12 @@ mod tests {
     }
 
     /// A parcel disposed of *during* the year was genuinely held for part of
-    /// it, so the statement legitimately covers it — never flagged.
+    /// it, so the statement legitimately covers it — never flagged. The
+    /// statement states **nil** units held, which is what a registry states at
+    /// 30 June for a holding that closed in February; the units-held check
+    /// (SCENARIOS Z-d) compares that against the nil open at the year end and
+    /// agrees, while the coverage band still allows the row over the units
+    /// disposed of during the year.
     #[tokio::test]
     async fn db_a_mid_year_disposal_is_not_flagged() {
         let pool = test_pool().await;
@@ -644,8 +823,428 @@ mod tests {
             .insert(&pool)
             .await;
         allocate(&pool, 1, 2, 1, dec("509")).await;
-        amma(&pool, 1, 1, ymd(2024, 6, 30), "509").await;
+        amma(&pool, 1, 1, ymd(2024, 6, 30), "0").await;
         test_support::amit_adjustment(&pool, 1, 1, 1, dec("509")).await;
+
+        assert!(db_amit_adjustment_alerts(&pool).await.unwrap().is_empty());
+    }
+
+    // ---------------------------------------------------------------------
+    // SCENARIOS Z-d: the statement's own `units_held` against the units
+    // actually open at its year end. The first two must flag; everything
+    // after them is a legitimate shape that must stay unflagged.
+    // ---------------------------------------------------------------------
+
+    /// The finding's own reproduction, end to end through the API: a year is
+    /// entered, its statement's adjustment set is generated and reconciles —
+    /// and then a missed Buy dated *before* the year end is discovered and
+    /// entered. Σ still equals `units_held` (neither moved), so every
+    /// set-versus-statement comparison goes on agreeing; only the parcels
+    /// changed, and the report has to say so.
+    #[tokio::test]
+    async fn api_a_back_dated_parcel_entered_after_generation_is_flagged() {
+        let pool = test_pool().await;
+        amit_listing(&pool, 1, "VDHG").await;
+        test_support::buy(1, 1)
+            .date(ymd(2023, 8, 1))
+            .qty(dec("1000"))
+            .insert(&pool)
+            .await;
+        amma(&pool, 1, 1, ymd(2024, 6, 30), "1000").await;
+
+        let client = ApiClient::full(&pool);
+        client
+            .post(
+                "/amma_statements/1/generate_adjustments",
+                &serde_json::json!({}),
+            )
+            .await
+            .expect_status(StatusCode::CREATED);
+        let clean: Vec<AmitAdjustmentAlert> = client
+            .get_json("/reports/amit_adjustment_cross_check")
+            .await;
+        assert_eq!(clean, vec![]);
+
+        // The missed parcel, dated inside the statement's year.
+        test_support::buy(2, 1)
+            .date(ymd(2024, 3, 1))
+            .qty(dec("300"))
+            .insert(&pool)
+            .await;
+
+        let alerts: Vec<AmitAdjustmentAlert> = client
+            .get_json("/reports/amit_adjustment_cross_check")
+            .await;
+        assert_eq!(alerts.len(), 1);
+        let a = &alerts[0];
+        // The two set-versus-statement terms are unmoved and still agree; the
+        // parcels are the term that changed.
+        assert_eq!(a.units_held, dec("1000"));
+        assert_eq!(a.units_adjusted, dec("1000"));
+        assert_eq!(a.units_open_at_year_end, dec("1300"));
+        assert_eq!(a.parcel_count, 1);
+        assert_eq!(a.problems.len(), 1);
+        let problem = &a.problems[0];
+        assert!(
+            problem.contains("states 1000 unit(s) held at 2024-06-30"),
+            "{problem}"
+        );
+        assert!(
+            problem.contains("1300 unit(s) are open on its holding account"),
+            "{problem}"
+        );
+        assert!(problem.contains("difference +300"), "{problem}");
+        assert!(
+            problem.contains("it is the parcels that changed after the set was generated"),
+            "{problem}"
+        );
+
+        // Regenerating the set with `replace` — the documented repair — moves
+        // the set onto the parcels, and the report then says the *other*
+        // figure is the one left behind: the statement's own units held, which
+        // the registry would have stated as 1300 if 1300 were really held.
+        client
+            .post(
+                "/amma_statements/1/generate_adjustments",
+                &serde_json::json!({ "replace": true }),
+            )
+            .await
+            .expect_status(StatusCode::CREATED);
+        let regenerated: Vec<AmitAdjustmentAlert> = client
+            .get_json("/reports/amit_adjustment_cross_check")
+            .await;
+        assert_eq!(regenerated.len(), 1);
+        assert_eq!(regenerated[0].units_adjusted, dec("1300"));
+        let problem = units_held_problem_for(&regenerated, 1).expect("still flagged");
+        assert!(
+            problem.contains("it is the statement's stated figure that disagrees"),
+            "{problem}"
+        );
+
+        // Correcting `units_held` to what was really held closes it out.
+        sqlx::query("UPDATE amma_statements SET units_held = '1300' WHERE id = 1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let cleared: Vec<AmitAdjustmentAlert> = client
+            .get_json("/reports/amit_adjustment_cross_check")
+            .await;
+        assert_eq!(cleared, vec![]);
+    }
+
+    /// The other thing the third term surfaces: a statement typed against the
+    /// wrong holding account. The parcels are all in account 1, so account 2
+    /// held nothing at the year end — and no adjustment row can even be
+    /// entered, since a row may only touch its statement's own account.
+    #[tokio::test]
+    async fn db_a_statement_against_an_account_that_held_nothing_is_flagged() {
+        let pool = test_pool().await;
+        amit_listing(&pool, 1, "HNDQ").await;
+        holding_account::db_upsert(
+            &pool,
+            &HoldingAccount {
+                id: 2,
+                name: "Second".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        test_support::buy(1, 1)
+            .date(ymd(2023, 8, 1))
+            .qty(dec("1000"))
+            .insert(&pool)
+            .await;
+        test_support::amma(1, 1)
+            .units(dec("1000"))
+            .cost_base_adjustment(dec("0.05"))
+            .with(|a| {
+                a.tax_year_end_date = ymd(2024, 6, 30);
+                a.date_received = ymd(2024, 8, 29);
+                a.holding_account_id = 2;
+            })
+            .insert(&pool)
+            .await;
+
+        let alerts = db_amit_adjustment_alerts(&pool).await.unwrap();
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].units_open_at_year_end, Decimal::ZERO);
+        // The "no adjustments" problem, and then the units-held one.
+        assert!(
+            alerts[0].problems[0].contains("no AMIT adjustments entered"),
+            "{:?}",
+            alerts[0].problems
+        );
+        let problem = &alerts[0].problems[1];
+        assert!(
+            problem.contains("states 1000 unit(s) held at 2024-06-30"),
+            "{problem}"
+        );
+        assert!(problem.contains("0 unit(s) are open"), "{problem}");
+        assert!(problem.contains("difference -1000"), "{problem}");
+        assert!(
+            problem.contains("holding account against the parcels"),
+            "{problem}"
+        );
+    }
+
+    /// A **partial sale during the year**: the units open at the year end are
+    /// legitimately fewer than the units the statement's per-unit figure
+    /// covered, and the statement states the year-end figure. Both terms of
+    /// the units-held comparison are year-end positions, so the sold units
+    /// are already out of both and there is nothing to allow for.
+    #[tokio::test]
+    async fn db_a_partial_sale_during_the_year_is_not_flagged() {
+        let pool = test_pool().await;
+        amit_listing(&pool, 1, "HNDQ").await;
+        test_support::buy(1, 1)
+            .date(ymd(2022, 2, 1))
+            .qty(dec("1000"))
+            .insert(&pool)
+            .await;
+        test_support::sell(2, 1)
+            .date(ymd(2024, 2, 1))
+            .qty(dec("400"))
+            .insert(&pool)
+            .await;
+        allocate(&pool, 1, 2, 1, dec("400")).await;
+        amma(&pool, 1, 1, ymd(2024, 6, 30), "600").await;
+        // The whole parcel is covered — the fund attributed to the units sold
+        // in February too (s 104-107B / LCR 2015/11 para 13).
+        test_support::amit_adjustment(&pool, 1, 1, 1, dec("1000")).await;
+
+        assert!(db_amit_adjustment_alerts(&pool).await.unwrap().is_empty());
+    }
+
+    /// A **share split** between acquisition and the year end: `units_held` is
+    /// in the statement year's basis and the parcel was transacted in another,
+    /// so the comparison must be split-aware in both terms — the open-parcels
+    /// loader re-bases the remainder into the year end's basis.
+    #[tokio::test]
+    async fn db_a_split_does_not_false_positive_the_units_held_check() {
+        let pool = test_pool().await;
+        amit_listing(&pool, 1, "HNDQ").await;
+        test_support::buy(1, 1)
+            .date(ymd(2023, 8, 1))
+            .qty(dec("500"))
+            .insert(&pool)
+            .await;
+        split(&pool, 1, 1, ymd(2024, 1, 15), "2").await;
+        amma(&pool, 1, 1, ymd(2024, 6, 30), "1000").await;
+        test_support::amit_adjustment(&pool, 1, 1, 1, dec("500")).await;
+
+        assert!(db_amit_adjustment_alerts(&pool).await.unwrap().is_empty());
+
+        // The naive comparison this replaces: 500 as-acquired units against a
+        // statement stating the year's 1000 would have read as 500 missing.
+        sqlx::query("UPDATE amma_statements SET units_held = '1100' WHERE id = 1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let alerts = db_amit_adjustment_alerts(&pool).await.unwrap();
+        assert_eq!(alerts.len(), 1);
+        // Both figures are in the year end's basis, not the parcel's.
+        assert_eq!(alerts[0].units_open_at_year_end, dec("1000"));
+        assert!(
+            alerts[0]
+                .problems
+                .iter()
+                .any(|p| p.contains("1000 unit(s) are open on its holding account")),
+            "{:?}",
+            alerts[0].problems
+        );
+    }
+
+    /// A **bonus issue** re-bases units the same way a split does, and must be
+    /// just as invisible to the comparison.
+    #[tokio::test]
+    async fn db_a_bonus_issue_does_not_false_positive_the_units_held_check() {
+        let pool = test_pool().await;
+        amit_listing(&pool, 1, "HNDQ").await;
+        test_support::buy(1, 1)
+            .date(ymd(2023, 8, 1))
+            .qty(dec("1000"))
+            .insert(&pool)
+            .await;
+        corporate_action::db_upsert(
+            &pool,
+            &CorporateAction {
+                id: 1,
+                listing_id: 1,
+                date: ymd(2024, 1, 15),
+                kind: ActionKind::BonusIssue {
+                    bonus_units: Decimal::ONE,
+                    bonus_held_units: dec("10"),
+                },
+            },
+        )
+        .await
+        .unwrap();
+        // 1 for every 10 held: 1000 as transacted are 1100 at the year end.
+        amma(&pool, 1, 1, ymd(2024, 6, 30), "1100").await;
+        test_support::amit_adjustment(&pool, 1, 1, 1, dec("1000")).await;
+
+        assert!(db_amit_adjustment_alerts(&pool).await.unwrap().is_empty());
+    }
+
+    /// A **transfer after the year end** — the ordinary order of events, since
+    /// the statement arrives months after 30 June. At the year end the source
+    /// parcel was still open on the statement's account (the closing Sell is
+    /// dated the transfer), so the statement reconciles; the adjustment row
+    /// itself is written against the replacement parcel (SCENARIOS N-06).
+    #[tokio::test]
+    async fn db_a_transfer_after_the_year_end_is_not_flagged() {
+        let pool = test_pool().await;
+        amit_listing(&pool, 1, "HNDQ").await;
+        test_support::buy(1, 1)
+            .date(ymd(2023, 8, 1))
+            .qty(dec("1000"))
+            .insert(&pool)
+            .await;
+        amma(&pool, 1, 1, ymd(2024, 6, 30), "1000").await;
+        second_account(&pool).await;
+        transfer_all(&pool, 1, ymd(2024, 8, 15), dec("1000")).await;
+
+        crate::entities::amit_adjustment_generation::db_generate(
+            &pool,
+            1,
+            &crate::entities::amit_adjustment_generation::GenerateBody::default(),
+        )
+        .await
+        .unwrap();
+
+        assert!(db_amit_adjustment_alerts(&pool).await.unwrap().is_empty());
+    }
+
+    /// A **transfer during the year**: the units left the statement's account
+    /// before 30 June, so it states nil units held and nil is what is open —
+    /// the units-held comparison agrees and stays quiet. (The row against the
+    /// replacement parcel does trip the *coverage* check, whose disposal
+    /// allowance is measured on the adjusted parcels and finds none on a
+    /// replacement — behaviour that predates this comparison and is not what
+    /// this test pins.)
+    #[tokio::test]
+    async fn db_a_transfer_during_the_year_is_not_flagged() {
+        let pool = test_pool().await;
+        amit_listing(&pool, 1, "HNDQ").await;
+        test_support::buy(1, 1)
+            .date(ymd(2023, 8, 1))
+            .qty(dec("1000"))
+            .insert(&pool)
+            .await;
+        amma(&pool, 1, 1, ymd(2024, 6, 30), "0").await;
+        second_account(&pool).await;
+        transfer_all(&pool, 1, ymd(2024, 3, 15), dec("1000")).await;
+
+        let replacement: i64 = sqlx::query_scalar(
+            "SELECT id FROM trades WHERE transfer_id = 1 AND trade_type = 'Buy'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        test_support::amit_adjustment(&pool, 1, 1, replacement, dec("1000")).await;
+
+        let alerts = db_amit_adjustment_alerts(&pool).await.unwrap();
+        assert_eq!(alerts[0].units_held, Decimal::ZERO);
+        assert_eq!(alerts[0].units_open_at_year_end, Decimal::ZERO);
+        assert_eq!(units_held_problem_for(&alerts, 1), None);
+    }
+
+    /// A **scrip-for-scrip exchange during the year** takes the whole holding
+    /// of the statement's listing, so nothing of it is open at the year end
+    /// and the statement states nil — the same shape as a sold-out holding,
+    /// and the units-held comparison agrees. (Its replacement parcels are of
+    /// *another* listing, which `amit_adjustment`'s write-time check refuses
+    /// outright, so such a statement carries no rows at all and the
+    /// pre-existing "no adjustments entered" problem is what flags it. That
+    /// is not this comparison's business either way.)
+    #[tokio::test]
+    async fn db_a_scrip_exchange_during_the_year_is_not_flagged() {
+        let pool = test_pool().await;
+        amit_listing(&pool, 1, "HNDQ").await;
+        test_support::listing(2).ticker("NEWCO").insert(&pool).await;
+        test_support::buy(1, 1)
+            .date(ymd(2023, 8, 1))
+            .qty(dec("1000"))
+            .price(dec("10"))
+            .insert(&pool)
+            .await;
+        corporate_action::db_upsert(
+            &pool,
+            &CorporateAction {
+                id: 10,
+                listing_id: 1,
+                date: ymd(2024, 3, 15),
+                kind: ActionKind::ScripForScrip {
+                    scrip_listing_id: 2,
+                    scrip_new_units: Decimal::ONE,
+                    scrip_old_units: Decimal::ONE,
+                    scrip_cash_per_unit: None,
+                    scrip_market_value: None,
+                    scrip_cash_currency: None,
+                },
+            },
+        )
+        .await
+        .unwrap();
+        crate::entities::scrip_exchange::db_exchange(&pool, 10)
+            .await
+            .unwrap();
+        amma(&pool, 1, 1, ymd(2024, 6, 30), "0").await;
+
+        let alerts = db_amit_adjustment_alerts(&pool).await.unwrap();
+        assert_eq!(alerts[0].units_held, Decimal::ZERO);
+        assert_eq!(alerts[0].units_open_at_year_end, Decimal::ZERO);
+        assert_eq!(units_held_problem_for(&alerts, 1), None);
+    }
+
+    /// A **demerger during the year** substitutes the head parcel with a
+    /// replacement of the *same* listing carrying the same units, so the
+    /// statement's units held are open at the year end all along — the
+    /// comparison must follow the substitution rather than see a holding that
+    /// vanished.
+    #[tokio::test]
+    async fn db_a_demerger_during_the_year_is_not_flagged() {
+        let pool = test_pool().await;
+        amit_listing(&pool, 1, "HEAD").await;
+        test_support::listing(2).ticker("SPUN").insert(&pool).await;
+        test_support::buy(1, 1)
+            .date(ymd(2023, 8, 1))
+            .qty(dec("1000"))
+            .price(dec("10"))
+            .insert(&pool)
+            .await;
+        corporate_action::db_upsert(
+            &pool,
+            &CorporateAction {
+                id: 10,
+                listing_id: 1,
+                date: ymd(2024, 3, 15),
+                kind: ActionKind::Demerger {
+                    demerger_listing_id: 2,
+                    demerger_new_units: Decimal::ONE,
+                    demerger_held_units: Decimal::ONE,
+                    demerger_cost_base_pct: dec("30"),
+                    demerger_close_date: None,
+                    demerger_close_price: None,
+                    demerger_close_sourced_from: None,
+                    demerger_close_reason: None,
+                },
+            },
+        )
+        .await
+        .unwrap();
+        crate::entities::demerger::db_demerge(&pool, 10)
+            .await
+            .unwrap();
+        amma(&pool, 1, 1, ymd(2024, 6, 30), "1000").await;
+        let replacement: i64 = sqlx::query_scalar(
+            "SELECT id FROM trades WHERE demerger_action_id = 10 AND trade_type = 'Buy' \
+             AND listing_id = 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        test_support::amit_adjustment(&pool, 1, 1, replacement, dec("1000")).await;
 
         assert!(db_amit_adjustment_alerts(&pool).await.unwrap().is_empty());
     }

@@ -1575,3 +1575,102 @@ api_trust_and_company_income_report_on_separately_labelled_lines}`, the two new 
 `reports::tax_report::tests::{a_converted_funds_pre_amit_income_prints_behind_its_tax_summary_line,
 conduit_foreign_income_prints_as_a_memo_column_and_is_not_double_counted}`,
 `entities::drp_reinvestment::tests::the_partial_participation_workaround_costs_the_parcel_at_the_cash_reinvested`).
+
+## SCENARIOS Z-d — a back-dated parcel leaves an AMMA statement's adjustment set stale, and nothing says so
+
+- [x] Surface an AMMA statement whose `units_held` disagrees with the units actually held at its year end.
+
+Found driving **Z-05** (the correction cascade). A year is entered, its AMMA statements are entered and
+their [AMIT adjustments generated](docs/API.md#generating-amit-adjustments), the tax report is
+archived — and then a missed Buy dated **before** those year ends is discovered and entered. Every
+other consequence is handled: all 15 report snapshots were marked stale by the schema's staleness
+triggers, `regenerate_all` rebuilt them, and the archived FY2025 tax report came back **byte-identical**
+(0 fields changed), which is right — the new parcel was never sold.
+
+The AMIT side is not. Generation writes one row per parcel open at the statement's
+`tax_year_end_date`; entering a parcel dated before that year end adds a parcel that set never saw:
+
+| | statement `units_held` | Σ adjusted | units actually open at year end |
+| --- | ---: | ---: | ---: |
+| FY2024 statement, as generated | 1000 | 1000 | 1000 |
+| after the back-dated 300-unit Buy | 1000 | 1000 | **1300** |
+
+`GET /reports/amit_adjustment_cross_check` is **empty** in the second row, and so is
+`/reports/health`. The check reconciles the adjustment *set* to the *statement* — Σ 1000 against
+`units_held` 1000 — and by that measure it does reconcile. Nothing anywhere compares either figure
+with the parcels actually open at the year end, so the 300 units keep their full cost base while the
+fund's per-unit reduction was, per `docs/API.md`'s own rule, "applied uniformly to every unit held at
+the statement's `tax_year_end_date`". The FY2025 statement is stale in the same way and equally silent.
+
+**The control is what shows the check is blind precisely here.** Re-running generation with
+`"replace": true` writes the corrected set (Σ 1300) and the cross-check fires immediately —
+*"adjusted units 1300 exceed the statement's units held 1000 … (excess 300)"*. So the mismatch is
+detectable and the report already knows how to say it; it is only ever seen when the set is
+regenerated, which is the one action a user who does not know the set is stale has no reason to take.
+Entering the same statement against the same holding **without** back-dating is flagged too (generation
+covers 1300, `difference` 300). The blind spot is exactly the correction cascade: a parcel set that
+changes *after* generation.
+
+**Direction.** The cross-check already loads the open parcels it would need. Adding the statement's own
+`units_held` versus the units open at `tax_year_end_date` as a third comparison — beside Σ-versus-
+`units_held` — surfaces both a stale set and a statement typed against the wrong holding, and it says
+which of the two figures moved.
+
+**Fixed.** `reports::amit_adjustment_cross_check` grew a **fifth check**, beside the four that all
+reconcile the adjustment *set* to the *statement*: the statement's own `units_held` against the units
+actually open at its `tax_year_end_date`, **on its own listing and holding account**. The units come
+from `domain::open_parcels::load(conn, Some(year_end))` — the same shared read
+[generation](docs/API.md#generating-amit-adjustments) derives its set from, so the report cannot
+disagree with generation about what was open — one `load` per distinct year end, on the report's own
+single `pool.begin()` read transaction. A new reported field `units_open_at_year_end` carries the
+figure (classified `quantity` in `src/web/util.js`'s `COLUMN_KINDS`; the default humaniser labels it
+"Units open at year end", so no `COLUMN_LABELS` entry). The sentence is:
+
+> the statement states {units_held} unit(s) held at {year_end} but {units_open_at_year_end} unit(s)
+> are open on its holding account at that date (difference {±diff}) — {cause}
+
+and `cause` says **which of the two figures moved**: `the adjustment set still sums to the statement's
+figure, so it is the parcels that changed after the set was generated — re-generate the set from the
+statement (replace) once they are right` (the finding's own case); `the adjustment set already covers
+the units that are open, so it is the statement's stated figure that disagrees — check it against the
+registry's holding statement, and that it is the right holding account`; or, where neither agrees (or
+there are no rows at all), `check the statement's units held and holding account against the parcels
+entered[, then re-generate its adjustment set]`. There is deliberately **no allowance band** here,
+unlike the coverage check: both terms are *year-end* positions, so units disposed of during the year
+are already out of both. The check runs for every statement, including one with no adjustment rows —
+it is a statement-level comparison, not a set-level one — and is pushed *last* so the existing
+problems keep their order.
+
+**Legitimate shapes driven, each pinned as a test that must stay unflagged by this comparison:**
+
+| shape | what happens | test |
+| --- | --- | --- |
+| holding **sold out during the year** (F-04: statement states nil) | nil open at year end = nil stated → agrees | `db_a_statement_covering_units_sold_during_the_year_reconciles` (existing, now also pins this) |
+| **partial sale during the year** | the statement states the year-end figure and that is what is open; the sold units are out of *both* terms | `db_a_partial_sale_during_the_year_is_not_flagged` |
+| **share split** between acquisition and the year end | `load` re-bases the remainder into the year end's basis, `units_held` is already in it → split-aware in both terms | `db_a_split_does_not_false_positive_the_units_held_check` |
+| **bonus issue** likewise | same re-basing path | `db_a_bonus_issue_does_not_false_positive_the_units_held_check` |
+| **transfer after the year end** (the ordinary order — the statement arrives in spring) | the source parcel is still open at the year end, because its closing Sell is dated the transfer → agrees, while the row itself is written against the replacement (N-06) | `db_a_transfer_after_the_year_end_is_not_flagged` |
+| **transfer during the year** | nil open on the statement's account at the year end = nil stated → this comparison stays quiet. (The row against the replacement parcel does trip the *coverage* check, whose disposal allowance is measured on the adjusted parcels and finds none on a replacement — pre-existing behaviour, not this finding's) | `db_a_transfer_during_the_year_is_not_flagged` |
+| **scrip-for-scrip exchange during the year** | the whole holding of the statement's listing is consumed → nil open, nil stated → agrees. (Its replacements are of *another* listing, which `amit_adjustment`'s write-time `ListingMismatch` refuses outright, so such a statement carries no rows and the pre-existing "no adjustments entered" problem is what flags it) | `db_a_scrip_exchange_during_the_year_is_not_flagged` |
+| **demerger during the year** | the head listing's replacement parcel carries the same units under the same listing, so the units are open at the year end all along → agrees | `db_a_demerger_during_the_year_is_not_flagged` |
+| everything agrees | absent from the report — the "empty means everything reconciles" contract | `db_a_reconciling_set_is_not_flagged` (existing) |
+
+**Tests that must flag:** `api_a_back_dated_parcel_entered_after_generation_is_flagged` — the finding's
+own reproduction end to end through `ApiClient::full`: generate the FY2024 set (empty report), enter
+the 300-unit Buy dated 2024-03-01, and the report now carries one row with `units_held` 1000,
+`units_adjusted` 1000 and `units_open_at_year_end` **1300**, naming both figures, `difference +300`
+and the stale-set cause. It goes on to pin the repair: `replace: true` moves the set onto the parcels
+and the row *stays*, now saying the statement's own figure is the one left behind (the control from
+the write-up), and correcting `units_held` to 1300 clears the report.
+`db_a_statement_against_an_account_that_held_nothing_is_flagged` — the second thing the comparison
+surfaces: a statement typed against holding account 2 when every parcel is in account 1 (0 open
+against 1000 stated).
+
+One existing fixture was corrected rather than tolerated: `db_a_mid_year_disposal_is_not_flagged`
+stated `units_held` 509 for a holding that closed in February, which no registry would say at 30 June
+— it now states nil, which is the realistic figure and still exercises exactly what that test is
+about (the parcel-outside-the-year check not firing on a mid-year disposal).
+
+Docs: `docs/API.md`'s AMIT adjustment cross-check section (four checks → five, the new bullet, the
+field list, the "empty report" sentence) and the report's `REPORTS` description in
+`src/web/config.js`.
