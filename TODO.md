@@ -10,7 +10,7 @@ findings are all closed in DONE.md), except where a section's heading names anot
 (e.g. REQUIREMENTS, SCENARIOS). Each section records one finding; sections land in DONE.md as they
 are fixed or decided.
 
-**Open: the five findings of the SCENARIOS AA pass, at the end of this file.**
+**Open: the findings of the SCENARIOS AA pass, at the end of this file.**
 
 **SCENARIOS.md sections A–Z are driven and every finding they raised is closed** in the `DONE/*.md`
 archive. Only section **AA. Boundary and out-of-scope scenarios** (20 scenarios) remains. Section **S. Settlement, holidays, and dates** was driven 2026-08-22 (`d501408`) and its
@@ -659,3 +659,50 @@ entry-convention detail rather than a scope cut. Four new tests in `src/doc_chec
 `known_limitations_document_the_joint_ownership_entry_convention`,
 `..._the_second_taxpayer_remedy`, `..._the_element_two_incidental_cost_convention`, and
 `..._the_division_775_forex_omission`.
+
+## SCENARIOS AA-f — the archived CGT worksheet prints a whole parcel's initial cost against a part of it
+
+- [ ] Decide and implement (options below).
+
+Reported in passing by the agent fixing [AA-a](#scenarios-aa-a), and **re-driven from scratch against a
+throwaway database before being logged** (per the standing lesson: a fixing agent's incidental report is
+re-derived, not taken on trust). The reproduction is real and the mechanism is as reported.
+
+`reports::tax_report` takes `CostBase::initial_cost` — the **whole parcel's** figure — for a disposal
+row's `initial_cost_base_aud`. Sell 500 units of a 1,000-unit A$10 parcel and the Annual Tax Report's
+disposal schedule prints:
+
+| Units | Buy price | Initial cost base (AUD) | *(adjustment rows)* | Adjusted cost base (AUD) |
+| ---: | ---: | ---: | --- | ---: |
+| 500 | 10.00 | **10,000.00** | *(none)* | **5,000.00** |
+
+with `cost_base_per_unit_aud` of `10.00` beside it. A hand-checker multiplies 500 × $10, gets $5,000,
+and finds an "Initial cost base" of $10,000 with **nothing between the two columns explaining the
+difference** — which is precisely the contract `docs/API.md` states for this section:
+
+> the initial cost base and, **itemised underneath it, one row per cost-base adjustment** … with its
+> own date, reference, and per-unit figure
+
+**Bounded with its control**: a disposal of the *whole* parcel prints correctly (1,000 units → initial
+`10,000.00`, adjusted `10,000.00`). The fault appears only on a **partial** disposal, which is the
+ordinary case for any holding sold down in tranches.
+
+**No tax figure is wrong.** `initial_cost_base_aud` is a display column, not one of the five the
+section totals — the subtotal, the gain and the discount all take the adjusted figure. But this is the
+print document meant to be saved to PDF and archived, and a column that does not reconcile against the
+units beside it is exactly the class of fault [W-c](DONE/reporting.md) and [W-d](DONE/reporting.md)
+were about: *a column has to add up on the page*.
+
+The AA-a commit (`369e040`) added `CostBase::costed_initial_cost`, which is precisely the figure this
+row wants, so option 1 is a small change — but it changes a **printed number**, which is why it was not
+folded into that commit.
+
+**Options.**
+
+1. **Print the costed units' initial cost.** `initial_cost_base_aud` becomes `costed_initial_cost`, so
+   the row reads 500 units / initial `5,000.00` / adjusted `5,000.00`, and where adjustments exist they
+   account for the whole of the gap — restoring the documented contract. A previously archived PDF will
+   disagree with a freshly generated one for the same year in this one column.
+2. **Keep the figure, fix the label.** Rename the column to say it is the parcel's, not the disposal's
+   (and say so in `docs/API.md`), leaving archived documents reconcilable against new ones.
+3. **Out of scope** — a display column that no total depends on.
