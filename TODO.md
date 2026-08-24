@@ -330,7 +330,11 @@ documented reason for withholding it is wrong for exactly the parcels most likel
 3. **Documentation only.** Correct the "almost always" claim and state the crossover, add nothing to
    any report.
 
-**Chosen: option 1 — flag, don't compute.**
+**Chosen: option 1 — flag, don't compute.** Clarified 2026-08-25: *both figures side by side*. The
+frozen ATO quarterly CPI table is seeded and an indexed cost base computed, so the advisory row can
+show the two methods against each other — but **no reported tax figure changes**: the net capital
+gain, the annual tax report and every CSV export stay on the 50% discount throughout. The indexed
+figure exists only to answer "which method wins here", which is the question the finding is about.
 
 ## SCENARIOS AA-b — a non-renounceable rights issue is indistinguishable from a renounceable one, and its retail premium is recorded as a capital gain
 
