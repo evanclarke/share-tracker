@@ -10,7 +10,8 @@ findings are all closed in DONE.md), except where a section's heading names anot
 (e.g. REQUIREMENTS, SCENARIOS). Each section records one finding; sections land in DONE.md as they
 are fixed or decided.
 
-**Nothing is open in this file.**
+**Open: the SCENARIOS Z pass's findings** — see the `## SCENARIOS Z-*` sections at the end of this
+file. Everything else is closed.
 
 **SCENARIOS.md sections A–X are driven and every finding they raised is closed** in the `DONE/*.md`
 archive. Section **S. Settlement, holidays, and dates** was driven 2026-08-22 (`d501408`) and its
@@ -200,3 +201,223 @@ graph preset appeared stuck (my own script left stale `id` attributes on earlier
 click hit `1M`), and `tax_year_settings` appeared to save a blank form (the "Saved." toast was the
 previous entity's, still on screen inside its 6-second window — which is Y-a seen from the other
 side). Both would have been logged as findings by a pass that trusted its first reading.
+
+## SCENARIOS Z-a — one disposal's gain prints as two different figures on two screens
+
+- [ ] Make a sale's own proceeds and gain the exact figures, not the sum of re-rounded shares.
+
+Found driving **Z-01** (the 10-year ETF), whose closing sale spans 10 parcels. Measured in a real
+browser on the two screens a user would compare:
+
+| screen | what it prints for the 2026-05-15 disposal |
+| --- | --- |
+| Realised Gains (`#/r/realised-gains`) | proceeds `69,785.05`  cost base `39,139.98`  **gain `30,645.07`** |
+| Annual Tax Report (`#/r/tax-report`) | *"Subtotal: proceeds 69,785.05, cost base 39,139.98, **gain/loss 30,645.08**"* |
+
+The exact figure is `69,785.05 − 39,139.975 = 30,645.075`, so the tax report is right and the
+Realised Gains cell is a cent low. **The same row disagrees with itself**: its discount-eligible and
+non-discountable columns print `30,316.38` and `328.70`, which add to `30,645.08` — the cent the gain
+cell beside them does not show. That is W-d's "printed columns do not add up", on screen this time.
+The [net capital gain](docs/API.md#net-capital-gain) report agrees with the tax report.
+
+**Mechanism.** `reports::realised_gains` never computes a sale's total: `sale_proceeds` is accumulated
+from the per-allocation shares. Each share is `sale.average_price × qty_alloc − alloc_costs`, and
+`alloc_costs` — the pro-rated brokerage — is deliberately a *cumulative difference* so the shares
+telescope to exactly `brokerage + gst`. They do. What breaks the telescoping is the **subtraction that
+follows**: `price × qty` is a large exact number and `alloc_costs` a 28-significant-digit repeating
+one, so each difference is re-rounded to fit `Decimal`'s mantissa and the residues no longer cancel.
+The report's own test comment names the hazard ("a larger price would re-round there") but only for
+the shares, not for the total.
+
+**Reproduced with three controls agreeing** (parcels of equal size, sale brokerage 9.95):
+
+| case | exact proceeds | reported |
+| --- | ---: | --- |
+| 3 parcels × 517u @ 45.00 | 69,785.05 | `69785.049999999999999999999999` |
+| 3 parcels × 517u @ **4.00** | 6,194.05 | `6194.0499999999999999999999999` |
+| 3 parcels × 517u, **no brokerage** | 69,795.00 | `69795.00` ✔ |
+| **1 parcel** × 1551u @ 45.00 | 69,785.05 | `69785.05` ✔ |
+
+So it is the apportionment, not the magnitude: the drift appears whenever the brokerage share is a
+repeating decimal, and disappears when there is nothing to apportion or nothing to apportion it
+across. Whether it changes a *displayed* cent then depends on where the exact figure sits — Z-01's
+landed on a half-cent, which is what made it visible.
+
+**Direction.** The sale-level `proceeds` is knowable exactly (`price × quantity − brokerage − gst`,
+converted once); computing it there and letting the last allocation absorb the difference keeps both
+properties W-d established — the total is exact, and the per-parcel rows still sum to it.
+
+## SCENARIOS Z-b — `PUT /sells/:id` rewrites an existing Buy or DRP trade as a Sell
+
+- [ ] Refuse a `PUT /sells/:id` whose id already holds a trade that is not a plain Sell.
+
+Found by the standing probes while driving **Z-01**: the pass's own scripted sale collided with an
+auto-assigned DRP trade id, and the collision was accepted rather than refused.
+
+`entities::sell`'s upsert guard reads five provenance columns — `buyback_action_id`,
+`scrip_action_id`, `demerger_action_id`, `transfer_id`, `worthless_action_id` — plus the
+`transfers.fee_sale_trade_id` link. Every one of them names a **Sell**. Nothing checks the row's
+`trade_type`, so an id holding a Buy or a DRP trade is overwritten in place, and the four
+purpose-built parcels that `PUT`/`DELETE /trades/:id` explicitly refuse to touch are all reachable
+this way:
+
+| existing trade | `PUT /trades/:id` | `DELETE /trades/:id` | `PUT /sells/:id` |
+| --- | --- | --- | --- |
+| reinvest-created DRP trade | `422` | `422` | **`204` — becomes a Sell** |
+| rights-exercise Buy (`rights_action_id`) | `422` | `422` | **`204`** |
+| ESS vest Buy (`ess_statement_id`) | `422` | `422` | **`204`** |
+| inheritance parcel Buy (`inheritance_id`) | `422` | `422` | **`204`** |
+| transfer-in Buy (`transfer_id`) | `422` | `422` | `422` |
+| scrip replacement Buy (`scrip_action_id`) | `422` | `422` | `422` |
+
+The last two rows are the control: they are refused only because their provenance column happens to
+be one of the five the Sell guard reads — and the refusal then calls a **Buy** "this Sell is a
+holding-account transfer-out", which is the same missing `trade_type` check seen from the other side.
+
+**What it leaves behind.** The parcel is gone and its owner still points at it:
+`income.reinvestment_trade_id` names a Sell (so the distribution reads as reinvested into a
+disposal), and `rights_action_id` / `ess_statement_id` / `inheritance_id` survive on a row whose kind
+contradicts them. `docs/API.md` states that the reinvestment link is cleared only by
+`DELETE /income/:id/reinvest`, "so an orphaned DRP trade can never exist" — this is the same
+invariant broken from the other end.
+
+**Direction.** The guard is a hand-maintained list of columns, which is the hazard Y-d and Y-g named
+in the UI. The rule that does not need maintaining is that `PUT /sells/:id` writes Sells: an existing
+row must already be a plain Sell, and a new id must be free.
+
+## SCENARIOS Z-c — a trade can change kind under the allocations that depend on it
+
+- [ ] Refuse an upsert that changes an existing trade's `trade_type`.
+
+The other half of Z-b's root, in both directions, and it corrupts rows that were already correct.
+Parcel allocations are read-only over HTTP precisely so a Sell can never become under-covered, and
+their two invariants — `purchase_trade_id` is a Buy or DRP, `sale_trade_id` is a Sell — are checked
+when the allocation is written. Neither is re-checked when the *trade* is rewritten:
+
+- **`PUT /sells/:id` over a Buy that a Sell already allocates from** → `204`. The allocation's
+  `purchase_trade_id` now names a **Sell**, so a sale is costed against a sale.
+- **`PUT /trades/:id` over an existing plain Sell** (any Buy body) → `204`. The Sell's allocations
+  are left behind with a `sale_trade_id` naming a **Buy**, and the row itself becomes an open parcel:
+  a 100-unit holding at a A$1,000 cost base that was never bought.
+
+Driven end to end, both states persist and **nothing surfaces them** — `/portfolio/open-parcels`
+serves the invented parcel as an ordinary holding, `/portfolio/realised-gains` simply omits the
+disposal that stopped being one, and `/reports/health` and `/reports/rollover_consistency` are both
+empty. The units the orphaned allocation consumed are silently un-consumed on one side and
+double-counted on the other.
+
+**Direction.** One rule covers every case above and needs no list: an existing trade's `trade_type`
+is part of its identity and an upsert may not change it. `PUT /trades/:id` already refuses a `Sell`
+*body*; what is missing is the symmetric check against the *stored* row.
+
+## SCENARIOS Z-d — a back-dated parcel leaves an AMMA statement's adjustment set stale, and nothing says so
+
+- [ ] Surface an AMMA statement whose `units_held` disagrees with the units actually held at its year end.
+
+Found driving **Z-05** (the correction cascade). A year is entered, its AMMA statements are entered and
+their [AMIT adjustments generated](docs/API.md#generating-amit-adjustments), the tax report is
+archived — and then a missed Buy dated **before** those year ends is discovered and entered. Every
+other consequence is handled: all 15 report snapshots were marked stale by the schema's staleness
+triggers, `regenerate_all` rebuilt them, and the archived FY2025 tax report came back **byte-identical**
+(0 fields changed), which is right — the new parcel was never sold.
+
+The AMIT side is not. Generation writes one row per parcel open at the statement's
+`tax_year_end_date`; entering a parcel dated before that year end adds a parcel that set never saw:
+
+| | statement `units_held` | Σ adjusted | units actually open at year end |
+| --- | ---: | ---: | ---: |
+| FY2024 statement, as generated | 1000 | 1000 | 1000 |
+| after the back-dated 300-unit Buy | 1000 | 1000 | **1300** |
+
+`GET /reports/amit_adjustment_cross_check` is **empty** in the second row, and so is
+`/reports/health`. The check reconciles the adjustment *set* to the *statement* — Σ 1000 against
+`units_held` 1000 — and by that measure it does reconcile. Nothing anywhere compares either figure
+with the parcels actually open at the year end, so the 300 units keep their full cost base while the
+fund's per-unit reduction was, per `docs/API.md`'s own rule, "applied uniformly to every unit held at
+the statement's `tax_year_end_date`". The FY2025 statement is stale in the same way and equally silent.
+
+**The control is what shows the check is blind precisely here.** Re-running generation with
+`"replace": true` writes the corrected set (Σ 1300) and the cross-check fires immediately —
+*"adjusted units 1300 exceed the statement's units held 1000 … (excess 300)"*. So the mismatch is
+detectable and the report already knows how to say it; it is only ever seen when the set is
+regenerated, which is the one action a user who does not know the set is stale has no reason to take.
+Entering the same statement against the same holding **without** back-dating is flagged too (generation
+covers 1300, `difference` 300). The blind spot is exactly the correction cascade: a parcel set that
+changes *after* generation.
+
+**Direction.** The cross-check already loads the open parcels it would need. Adding the statement's own
+`units_held` versus the units open at `tax_year_end_date` as a third comparison — beside Σ-versus-
+`units_held` — surfaces both a stale set and a statement typed against the wrong holding, and it says
+which of the two figures moved.
+
+## SCENARIOS Z-e — the archived CGT worksheet calls a bonus issue and a consolidation "splits", at ratios nobody announced
+
+- [ ] Name each unit-count event by what it was, at the ratio its terms were stated in.
+
+Found driving **Z-08** (the rights round trip), which ends with a 1-for-10 **bonus issue** and a 1-for-2
+**consolidation** over the same parcels. The [Annual Tax Report](docs/API.md#annual-tax-report) — the
+print document meant to be saved to PDF and archived — prints one `adjustments` row per event on every
+disposed parcel, with a `reference` naming the action it came from. Both come out wrong:
+
+| what was recorded | what the worksheet prints |
+| --- | --- |
+| `BonusIssue` 1 for every 10 held | `11-for-10 split` |
+| `ShareSplit` 1 new for 2 old (a consolidation) | `1-for-2 split` |
+
+`domain::cost_base::adjustment_detail` builds every one of these as
+`format!("{}-for-{} split", s.new_units, s.old_units)` over the *derived rebase factor*, so:
+
+- a **bonus issue** is not a split and was never announced as "11-for-10" — that factor is this tool's
+  own arithmetic (10 held → 11 held), and a reader reconciling the worksheet against the company's
+  announcement finds no such ratio in it;
+- a **consolidation** is announced as "1-for-2" and that part is right, but calling it a *split* says
+  the opposite of what happened — the parcel went from 2,200 units to 1,100.
+
+The figures are all correct (`amount` is 0 — these rows are informational, explaining a changed unit
+count, never a cost-base movement); it is the provenance label that misnames them, in the one document
+that exists to be handed to someone else. `docs/API.md`'s worked example of the field is `"2-for-1
+split"`, so the design only ever contemplated splits.
+
+**Direction.** The rebase events already know which action kind they came from. Carry that through and
+label each one from its own terms — `1-for-10 bonus issue`, `1-for-2 consolidation`, `2-for-1 split` —
+rather than formatting one derived factor three ways.
+
+## SCENARIOS Z-f — a trust distribution is reported under the dividends-from-companies label
+
+- [ ] Report a non-AMIT trust distribution's components at question 13, not inside `dividends_assessable`.
+
+Found driving **Z-11** (the full financial year, reconciled), whose whole job is to tie every figure
+in the [annual tax report](docs/API.md#annual-tax-report) back to a hand-computed return. Thirteen of
+the fourteen labels reconciled exactly — 11U/13Q, 10L, 10M, 20E (both lines), 20O, Item 12, D7, D8,
+18H, 18V and 18A (the one-cent difference on 18A is W-f's deliberate rounding of the concession
+half away from zero, not an error). One did not:
+
+| | franked | unfranked | credits |
+| --- | ---: | ---: | ---: |
+| a **company** dividend row | 11T | 11S | 11U |
+| an **AMMA** statement's components | `amma_franked_dividends` → **13C** | `amma_dividends_unfranked` → **13U** | 13Q |
+| a **non-AMIT trust** income row (a managed fund, an ordinary unit trust) | rolled into `dividends_assessable` → **11S + 11T** | same | 13Q ✔ |
+
+A managed-fund distribution of A$900 franked + A$600 unfranked was reported inside
+`dividends_assessable` = 7,550.00 under the label **`11S + 11T`**. Those amounts belong at question
+13 (*Partnerships and trusts*), not question 11 (*Dividends*). A taxpayer transcribing the summary
+puts A$1,500 of trust income under dividends from companies, and the year's question-13 income is
+understated by the same amount — there is no line for it at all.
+
+**The credits line already knows better.** `franking_credits` is labelled **`11U / 13Q`**, explicitly
+covering both routes; and the AMMA path carries proper `13C`/`13U` lines. So the two correct
+destinations are already in the report — the ordinary trust row is the one case that falls through
+to the dividends line. The [Annual Tax Report](docs/API.md#annual-tax-report) is not confused about
+what the row *is*: it prints a separate `income.trust_income` drilldown table beside `income.dividends`.
+Only the labelled summary line collapses them.
+
+**The documentation states the property that does not hold.** `docs/API.md`'s tax-summary label table
+says of `dividends_assessable`: *"The single column is unfranked (11S) + franked (11T) dividends
+summed; split per the underlying income records"* — but the column also contains trust amounts, which
+cannot be split into 11S/11T at all.
+
+**Direction.** Trust rows are already identified (`income.trust_income`, and the annual report
+separates them). Give them their own summary lines — franked → `13C`, unfranked → `13U` — mirroring the
+`amma_*` lines already there, and leave `dividends_assessable` to company dividends so its documented
+11S/11T split becomes true. `gross_assessable_investment_income` is unchanged: the same dollars move
+between lines.
