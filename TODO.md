@@ -202,7 +202,42 @@ side). Both would have been logged as findings by a pass that trusted its first 
 
 ## SCENARIOS Y-a — an error toast holds a refusal for six seconds and then it is gone
 
-- [ ] Make an error toast persist until it is dismissed, and announce it.
+- [x] Make an error toast persist until it is dismissed, and announce it. Option 1, as chosen.
+      `util.js`'s `toast()` is now two tiers that differ in *kind*: a success toast keeps its 3 s
+      auto-hide (measured 3,043 ms after, 3,051 ms before — unchanged), an error toast is given no
+      timeout at all and stays until dismissed (measured still on screen, text intact, at 15,042 ms;
+      before it hid at 6,595 ms from the click). Dismissal is a real `<button class="toast-close">`
+      (click, Enter and Space all measured), click anywhere on the toast, and Escape while the close
+      button has focus. The item carries `role="alert"` (error) / `role="status"` (success) — on the
+      inserted item rather than on `#toast`, which is `hidden` whenever the stack is empty and so is
+      not a live region anything is already watching. Signature unchanged, so none of the ~25 call
+      sites moved.
+      **Replacement:** toasts now *stack* instead of overwriting. Silently replacing an undismissed
+      error loses exactly what the auto-hide lost, so a new message is appended below; the newest is
+      the bottom item, where the single toast used to sit. A repeat of a message already showing
+      re-inserts that one (so it is announced again) rather than stacking a duplicate — driven:
+      four toasts, one a repeat, leave three items with the first error still readable. The stack is
+      capped at the viewport and scrolls, so nothing is ever dropped to make room (five undismissed
+      251-character errors fit inside 820×700).
+      **Navigation:** clears nothing. An error naming the records to go and remove is read *while*
+      navigating to remove them, so clearing on the hash change would destroy it at the moment it is
+      being acted on — and several save paths set `location.hash` immediately after toasting, so
+      clearing on navigation would mean a "Saved." was never seen at all. Driven: the refusal
+      survives two hash changes. `web::tests` pins this the strong way, by asserting the `#toast`
+      element is reached from exactly one place in the whole served bundle — `toast()` itself — so
+      no view and no route change *can* take a refusal away.
+      One thing the write-up did not raise, found while measuring: last in the document, the close
+      button took **113 Tab presses** to reach on the listings screen. `#toast` is now first in
+      `<body>` (`position: fixed`, so the layout is identical) — **1 Tab press**.
+      Rendering is unchanged at all three viewports the finding measured (2/2/3 lines at 1280×900,
+      1024×768, 820×700, nothing clipped, no horizontal body scroll), a 1,059-character refusal
+      wraps to 7/10/12 lines and still fits, and `@media print` still hides it.
+      Tests: `toastLifetime` unit-tested in `src/web/util.test.js` (an error's lifetime is
+      *absent*, not merely longer); `web::tests`'s
+      `error_toasts_persist_until_dismissed_and_announce_themselves` and
+      `toast_stack_markup_and_styling` pin the wiring, the single-owner negative assertion above,
+      the tab-order position and the print/hidden CSS rules. `docs/API.md`'s "Error bodies"
+      paragraph now says the error toast stays until dismissed and that toasts stack.
 
 Driven through `scripts/ui-drive.js` against a throwaway database. Deleting a listing that nine other
 tables draw on answers `422 this listing is still referenced by AMMA statements (1), closing prices

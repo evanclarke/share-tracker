@@ -831,6 +831,89 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn error_toasts_persist_until_dismissed_and_announce_themselves() {
+        let js = app_js_body().await;
+        // SCENARIOS Y-a. An error toast is the only statement of why a write
+        // was refused — deleting a listing nine tables draw on answers a
+        // 251-character 422 naming all nine — and it used to auto-hide 6 s
+        // later, after which the text existed nowhere in the document. The two
+        // tiers now differ in kind, not in duration: success expires, error
+        // persists until the user dismisses it.
+        assert!(js.contains("export function toastLifetime(isError)"));
+        assert!(
+            js.contains(
+                "return isError ? { persist: true, ms: 0 } : { persist: false, ms: 3000 };"
+            )
+        );
+        // The auto-hide timer is armed only for the tier that has a lifetime…
+        assert!(js.contains("if (!life.persist) item._timer = setTimeout(dismiss, life.ms);"));
+        // …and no error branch schedules a hide of its own any more.
+        assert!(
+            !js.contains("isError ? 6000 : 3000"),
+            "an error toast must never be given an auto-hide timeout (SCENARIOS Y-a)"
+        );
+        // Dismissal: a real <button> (so it is in the tab order and answers
+        // Enter/Space), click-anywhere on the toast, and Escape.
+        assert!(js.contains("class: 'toast-close'"));
+        assert!(js.contains("'aria-label': 'Dismiss this message'"));
+        assert!(js.contains("onclick: dismiss,"));
+        assert!(js.contains("if (e.key === 'Escape') dismiss();"));
+        // Announced to a screen reader: role goes on the inserted item, since
+        // the #toast container is `hidden` whenever the stack is empty and so
+        // is not a live region anything is already watching.
+        assert!(js.contains("role: isError ? 'alert' : 'status',"));
+        // A new toast stacks; it never overwrites a standing one, which would
+        // lose an unread refusal exactly as the auto-hide did.
+        assert!(js.contains("t.appendChild(item);"));
+        assert!(
+            !js.contains("t.textContent = msg"),
+            "a new toast must not overwrite an undismissed one (SCENARIOS Y-a)"
+        );
+        // And a navigation takes nothing away: the toast element is reached
+        // from exactly one place in the whole bundle — toast() itself — so no
+        // view, no route change and no other module can hide a refusal the
+        // user has not dealt with.
+        assert_eq!(
+            js.matches("getElementById('toast')").count(),
+            1,
+            "only util.js's toast() may touch the #toast element, so nothing \
+             (a hash change included) can clear an undismissed error (SCENARIOS Y-a)"
+        );
+    }
+
+    #[test]
+    fn toast_stack_markup_and_styling() {
+        // The container the stack is appended into, and the two rules that
+        // make persistence safe: an empty stack must still hide (an id
+        // selector's `display: flex` outranks the UA `[hidden]` rule), and a
+        // persisting toast must not print.
+        assert!(INDEX_HTML.contains(r#"<div id="toast" hidden></div>"#));
+        // First in the body, purely for tab order: an error toast is dismissed
+        // by its close button, and last in the document that button was 113
+        // Tab presses away on the listings screen. `position: fixed` keeps it
+        // bottom-right regardless.
+        let body = INDEX_HTML
+            .split("<body>")
+            .nth(1)
+            .expect("index.html has a body");
+        assert!(
+            body.find(r#"<div id="toast""#) < body.find(r#"<header id="topbar">"#),
+            "the toast's close button must be an early tab stop (SCENARIOS Y-a)"
+        );
+        assert!(STYLE_CSS.contains("#toast[hidden] { display: none; }"));
+        assert!(STYLE_CSS.contains(".toast-item.error { background: var(--danger); }"));
+        assert!(STYLE_CSS.contains(".toast-close {"));
+        let print = STYLE_CSS
+            .split("@media print")
+            .nth(1)
+            .expect("style.css has a @media print block");
+        assert!(
+            print.contains("#toast"),
+            "an error toast now persists, so the print rule that hides it matters more, not less"
+        );
+    }
+
+    #[tokio::test]
     async fn gst_inclusive_brokerage_and_statement_total_ui_present() {
         let js = app_js_body().await;
         // The GST-included checkbox ships on both the trades (Buy/DRP) and

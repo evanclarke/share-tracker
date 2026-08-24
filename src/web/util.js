@@ -32,13 +32,97 @@ export function el(tag, attrs, children) {
   return n;
 }
 
+// ---- toasts -----------------------------------------------------------
+//
+// Two tiers that differ in *kind*, not just in duration (SCENARIOS Y-a):
+//
+//   success — a receipt for something that worked. Auto-hides after 3 s; the
+//             user has nothing to do with it.
+//   error   — the only statement of why a write was refused, and frequently a
+//             task list: deleting a listing nine other tables draw on answers
+//             a 251-character 422 naming all nine, and the longest refusal the
+//             API can produce is 638 characters. Once it hides, that text
+//             exists nowhere else in the document and cannot be brought back,
+//             so it does not hide on its own — it stays until the user
+//             dismisses it.
+//
+// Three consequences, each deliberate:
+//
+//  * Toasts stack; a new one never replaces a standing one. Overwriting an
+//    undismissed error with the next message loses exactly what the auto-hide
+//    lost, in a new shape. Newest is the bottom item — the corner the single
+//    toast used to occupy — and the stack scrolls rather than running off the
+//    top of the viewport, so nothing is ever dropped to make room.
+//  * A navigation does not clear anything. An error naming records to go and
+//    remove is read *while* navigating to remove them; clearing it on the hash
+//    change would destroy it at the moment it is being acted on. (Success
+//    toasts cannot outstay their welcome anyway: several save paths set
+//    `location.hash` immediately after toasting, so clearing on navigation
+//    would mean the confirmation was never seen at all.) This is why nothing
+//    outside this function touches the `#toast` element — `web.rs` pins that.
+//  * `role="alert"` goes on the inserted item, not on the `#toast` container:
+//    the container is `hidden` whenever the stack is empty, so it is not a
+//    live region a screen reader is already watching. An element inserted
+//    carrying `role="alert"` is announced; a success item gets the polite
+//    `role="status"` instead, since it is not worth interrupting for.
+//
+// The signature stays `toast(msg, isError)` — ~25 call sites, none changed.
+
+// How long a toast of each tier lives. Pure, and separate from the DOM work,
+// so the "an error toast never auto-hides" rule is one testable expression
+// rather than a ternary buried in a `setTimeout` argument (src/web/util.test.js).
+export function toastLifetime(isError) {
+  return isError ? { persist: true, ms: 0 } : { persist: false, ms: 3000 };
+}
+
 export function toast(msg, isError) {
   const t = document.getElementById('toast');
-  t.textContent = msg;
-  t.className = isError ? 'error' : '';
+  const text = String(msg);
+  const life = toastLifetime(isError);
+
+  // The same message again (clicking Delete twice on the same row) re-inserts
+  // the one already showing rather than stacking a second copy: the re-insert
+  // is what makes a screen reader announce it again.
+  Array.prototype.slice.call(t.children).forEach(function (prev) {
+    if (prev.dataset.msg === text) prev.remove();
+  });
+
+  function dismiss() {
+    clearTimeout(item._timer);
+    item.remove();
+    if (!t.firstChild) t.hidden = true;
+  }
+
+  const item = el('div', {
+    class: 'toast-item' + (isError ? ' error' : ''),
+    role: isError ? 'alert' : 'status',
+    // Click anywhere on the toast dismisses it. The close button is a real
+    // <button>, so it is in the tab order and answers Enter and Space for
+    // free (all three measured), and Escape dismisses while it has focus —
+    // the keydown reaches this handler by bubbling out of the button, which
+    // is why the item itself needs no tabindex. The button carries no `name`,
+    // so neither the form code (`form.querySelector('[name=…]')`) nor
+    // `filterableTable` can pick it up, and it lives outside `#app`, where
+    // every view renders.
+    onclick: dismiss,
+    onkeydown: function (e) { if (e.key === 'Escape') dismiss(); },
+  }, [
+    el('span', { class: 'toast-msg' }, text),
+    isError
+      ? el('button', {
+        class: 'toast-close',
+        type: 'button',
+        'aria-label': 'Dismiss this message',
+        onclick: function (e) { e.stopPropagation(); dismiss(); },
+      }, '\u00d7')
+      : null,
+  ]);
+  item.dataset.msg = text;
+
   t.hidden = false;
-  clearTimeout(toast._timer);
-  toast._timer = setTimeout(function () { t.hidden = true; }, isError ? 6000 : 3000);
+  t.appendChild(item);
+  t.scrollTop = t.scrollHeight; // the newest item, when the stack has to scroll
+  if (!life.persist) item._timer = setTimeout(dismiss, life.ms);
 }
 
 export function setMain(node) {

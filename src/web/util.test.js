@@ -18,7 +18,7 @@ import {
   addDecimalStrings, decParts, mulToCents, frankingCreditFor, decEq,
   looksNumeric, columnKinds, columnLabel, tradeOrigin, periodReturnPct,
   holdingHasActivity, loadPref, savePref, pathSeg, basePath, apiUrl, authEnabled,
-  cellText, adjustmentPreviewText, allocationSummary,
+  cellText, adjustmentPreviewText, allocationSummary, toastLifetime,
 } from './util.js';
 
 // ---- roundDecimalStr ----------------------------------------------------
@@ -584,4 +584,20 @@ test('an empty required figure never renders as NaN or undefined', () => {
     assert.equal(s.status, 'none');
     assert.ok(!/NaN|undefined/.test(s.text), String(req) + ': ' + s.text);
   });
+});
+
+// ---- toastLifetime ------------------------------------------------------
+// SCENARIOS Y-a: an error toast used to auto-hide after 6 s, taking with it
+// the only statement of why a write was refused (a delete blocked by nine
+// dependant tables is a 251-character task list). The two tiers now differ in
+// kind: a success toast expires, an error toast never does.
+test('a success toast auto-hides after three seconds', () => {
+  assert.deepEqual(toastLifetime(false), { persist: false, ms: 3000 });
+  assert.deepEqual(toastLifetime(undefined), { persist: false, ms: 3000 });
+});
+
+test('an error toast never auto-hides — it persists until dismissed', () => {
+  assert.equal(toastLifetime(true).persist, true);
+  // Not "a longer timeout": there must be no duration at all to schedule.
+  assert.equal(toastLifetime(true).ms, 0);
 });

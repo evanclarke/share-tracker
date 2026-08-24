@@ -16,6 +16,17 @@
   <link rel="stylesheet" href="{{BASE}}/static/style.css">
 </head>
 <body>
+  <!-- The toast stack, populated by util.js's toast(). Hidden while empty;
+       each message is appended as its own .toast-item carrying role="alert"
+       (error) or role="status" (success). An error item stays until the user
+       dismisses it — see the toast() comment in util.js.
+
+       It is first in the body purely for *tab order*: an error toast's close
+       button is the only way to dismiss it, and last in the document it took
+       113 Tab presses to reach on the listings screen. `position: fixed` puts
+       it bottom-right whatever its DOM position, so nothing about the layout
+       depends on this. -->
+  <div id="toast" hidden></div>
   <header id="topbar">
     <a id="brand" href="#/"><h1>share-tracker</h1><span id="version">v{{VERSION}}</span></a>
     <nav id="nav"><!-- top menu bar, populated by app.js --></nav>
@@ -23,7 +34,6 @@
   </header>
   <div id="health-banner" hidden><!-- stale-data / failed-job strip, populated by app.js --></div>
   <main id="app"><!-- views render here --></main>
-  <div id="toast" hidden></div>
   <script type="module" src="{{BASE}}/static/app.js"></script>
 </body>
 </html>

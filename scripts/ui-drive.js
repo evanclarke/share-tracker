@@ -265,11 +265,16 @@ class Page {
     return this.eval(`(document.querySelector(${JSON.stringify(sel)}) || {}).outerHTML ?? null`);
   }
 
-  /** The visible toast text, or null when no toast is showing. */
+  /**
+   * The visible toast text, or null when no toast is showing. Toasts stack
+   * (error ones persist until dismissed), so this is every showing message
+   * joined by newlines — and the message text only, without the close glyph.
+   */
   async toast() {
     return this.eval(`
       const t = document.getElementById('toast');
-      return t && !t.hidden ? t.innerText : null;
+      if (!t || t.hidden) return null;
+      return Array.from(t.querySelectorAll('.toast-msg'), (m) => m.innerText).join('\\n') || null;
     `);
   }
 
@@ -277,8 +282,20 @@ class Page {
   async waitForToast(opts = {}) {
     return this.waitFor(`
       const t = document.getElementById('toast');
-      return t && !t.hidden && t.innerText ? t.innerText : null;
+      if (!t || t.hidden) return null;
+      return Array.from(t.querySelectorAll('.toast-msg'), (m) => m.innerText).join('\\n') || null;
     `, { msg: 'a toast to appear', ...opts });
+  }
+
+  /** Dismiss every showing toast (an error one never goes away on its own). */
+  async dismissToasts() {
+    return this.eval(`
+      const t = document.getElementById('toast');
+      if (!t) return 0;
+      const items = Array.from(t.querySelectorAll('.toast-item'));
+      items.forEach((i) => i.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+      return items.length;
+    `);
   }
 
   /** Uncaught errors the page recorded, including ones thrown before attach. */
