@@ -64,7 +64,11 @@
 //!   — a holding that can never be priced again and, once it has history,
 //!   cannot be corrected in place either (see [`ExchangeCurrencyMismatch`]);
 //! - every trade dated on a day its own exchange did not trade — the CGT
-//!   event date on a day the market was shut (see [`NonTradingDayTrade`]).
+//!   event date on a day the market was shut (see [`NonTradingDayTrade`]);
+//! - every disposal recorded at **nil proceeds** — where the market-value
+//!   substitution rule may put the asset's market value in place of the
+//!   nothing that was received, and entering the nothing fabricates a capital
+//!   loss the size of the whole cost base (see [`NilProceedsDisposal`]).
 //!
 //! The non-trading-day entry is the safety net under a write-time rule rather
 //! than a check of its own: `PUT /trades/:id` and `PUT /sells/:id` **refuse**
@@ -95,6 +99,7 @@ use crate::entities::income::Income;
 use crate::entities::inheritance::{self, Inheritance};
 use crate::entities::interest_income::InterestIncome;
 use crate::entities::investment_expense::{ExpenseType, InvestmentExpense};
+use crate::entities::trade;
 use crate::infra::decimal::Money;
 use crate::infra::http::ApiError;
 use axum::{Json, Router, extract::State, routing::get};
@@ -1087,6 +1092,124 @@ struct EssThirtyDaySaleRow {
     rollover_action_id: Option<i64>,
 }
 
+/// A disposal recorded at **nil proceeds** — a Sell at a zero price, or a
+/// disposal of *paid-for* rights at nothing per right (SCENARIOS AA-03).
+///
+/// Why it is worth naming. Under the **market-value substitution rule**
+/// (`docs/ato/capital-proceeds-market-value-substitution.md`, QC 66021; ITAA
+/// 1997 s 116-30) a taxpayer who receives nothing for a CGT asset is taken to
+/// have received its **market value** at the time of the event — which is
+/// exactly why `docs/API.md`'s *Gifts / off-market related-party transfers*
+/// limitation prescribes entering a gift out as a Sell at market-value
+/// proceeds. The failure mode that convention exists to prevent is entering
+/// what was actually *received*: nothing. Nothing refuses it, every figure
+/// downstream is individually valid, and the result is a capital loss the size
+/// of the whole cost base — netted against the year's gains and carried
+/// forward under 18V for as long as it takes to absorb.
+///
+/// **Advisory, and it blocks nothing** — like `duplicate_trades` and
+/// `non_trading_day_trades` beside it. A nil-proceeds disposal is not wrong by
+/// construction: a crypto burn, an abandonment, or paid-for rights left to
+/// lapse each realise a real loss at genuinely nil proceeds, and no stored fact
+/// says whether a Sell was a gift. So this names the shape and leaves the
+/// judgement where it belongs.
+///
+/// # What is *not* listed
+///
+/// - **Every operation-written closing Sell.** A worthless-shares recognise, a
+///   scrip-for-scrip exchange, a demerger, a holding-account transfer (and its
+///   crypto network-fee disposal) and a buy-back participation all construct
+///   their Sells mechanically, at nil or derived proceeds; none is a user
+///   entry, and the worthless-shares one is nil proceeds *by definition*. They
+///   are excluded by `trade::operation_written_sql` — the one place that
+///   answers "did an operation write this row?", so a future operation's
+///   column is covered without editing this check.
+/// - **A free right that lapses.** `rights_cost` defaults to `0` for rights
+///   issued free, so nil proceeds against a nil cost base is the "nil/nil
+///   non-event" `docs/API.md` describes: no gain, no loss, nothing fabricated
+///   — and it is what *every* ordinary lapse looks like. Only a right that was
+///   **paid for** is listed, where nil proceeds turn `rights_cost` into a
+///   capital loss.
+///
+/// # Why the *price*, not the computed proceeds
+///
+/// Net proceeds are `average_price × quantity − brokerage − GST`, but the test
+/// here is `average_price == 0`: nothing was received **per unit**, which is
+/// the shape the market-value substitution rule is about. A non-zero price
+/// whose brokerage happens to cancel it to the cent is a different and much
+/// stranger animal — arithmetic, not a nil-consideration disposal — and
+/// flagging it under this rule's reason would be saying something untrue about
+/// it.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct NilProceedsDisposal {
+    /// Which record the alert is about, and therefore what `record_id` and
+    /// `quantity` mean.
+    pub kind: NilProceedsKind,
+    /// The `trades` id (`Sell`) or the `rights_sales` id (`RightsSale`).
+    pub record_id: i64,
+    pub listing_id: i64,
+    pub ticker: String,
+    /// The disposal date — the CGT event date the market value would be read
+    /// at.
+    pub date: NaiveDate,
+    /// Units disposed of: the Sell's `quantity`, or the rights sale's `units`.
+    pub quantity: Decimal,
+    /// ISO 4217 currency of the record (the trade's, or the rights issue's).
+    pub currency: String,
+    /// `RightsSale` only: the `rights_cost` the nil proceeds realise as a
+    /// capital loss, in `currency`. Always positive when set — a nil cost is
+    /// the free-right non-event and is not listed. `None` for a Sell, whose
+    /// loss is the parcel's adjusted cost base and is not computed here: that
+    /// needs the whole `domain::cost_base` pipeline, and the figure actually
+    /// wanted — market value on `date` — is not a stored fact at all.
+    pub rights_cost: Option<Decimal>,
+}
+
+/// Which kind of record a [`NilProceedsDisposal`] names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NilProceedsKind {
+    /// An ordinary Sell trade entered by hand, at a zero `average_price`.
+    Sell,
+    /// A disposal of rights that were **paid for** (`rights_cost > 0`) at a
+    /// zero `proceeds_per_right` — a sale, a lapse, or a nil retail premium.
+    RightsSale,
+}
+
+/// A candidate Sell for [`NilProceedsDisposal`]: the price is compared as a
+/// `Decimal` in Rust rather than in SQL, since the money columns are exact
+/// TEXT decimals ("0", "0.00" and "0.0000" are one value and three strings)
+/// and casting them to SQLite REAL to compare would be the one thing the
+/// decimal rule forbids.
+#[derive(sqlx::FromRow)]
+struct NilProceedsSellRow {
+    record_id: i64,
+    listing_id: i64,
+    ticker: String,
+    date: NaiveDate,
+    #[sqlx(try_from = "Money")]
+    average_price: Decimal,
+    #[sqlx(try_from = "Money")]
+    quantity: Decimal,
+    currency: String,
+}
+
+/// A candidate rights disposal for [`NilProceedsDisposal`], compared in Rust
+/// for the same reason as [`NilProceedsSellRow`].
+#[derive(sqlx::FromRow)]
+struct NilProceedsRightsSaleRow {
+    record_id: i64,
+    listing_id: i64,
+    ticker: String,
+    date: NaiveDate,
+    #[sqlx(try_from = "Money")]
+    units: Decimal,
+    currency: String,
+    #[sqlx(try_from = "Money")]
+    proceeds_per_right: Decimal,
+    #[sqlx(try_from = "Money")]
+    rights_cost: Decimal,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct HealthReport {
     /// Latest `closing_prices` date stored with status ok, across every
@@ -1176,6 +1299,11 @@ pub struct HealthReport {
     /// first. Empty when every trade falls on a market day (which the trade
     /// and Sell write paths now enforce for the rows they see).
     pub non_trading_day_trades: Vec<NonTradingDayTrade>,
+    /// Every disposal recorded at **nil proceeds**, newest first — where the
+    /// market-value substitution rule may mean the proceeds are the asset's
+    /// market value rather than the nothing that was received. Empty when
+    /// every disposal records what it realised.
+    pub nil_proceeds_disposals: Vec<NilProceedsDisposal>,
 }
 
 /// Business days (Mon–Fri) strictly after `from`, up to and including `today`.
@@ -2322,22 +2450,13 @@ async fn db_exchange_currency_mismatches(
 async fn db_non_trading_day_trades(
     conn: &mut sqlx::SqliteConnection,
 ) -> Result<Vec<NonTradingDayTrade>, sqlx::Error> {
-    let candidates: Vec<NonTradingDayCandidate> = sqlx::query_as(
+    let candidates: Vec<NonTradingDayCandidate> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT t.id AS trade_id, t.trade_type AS trade_type, t.listing_id AS listing_id, \
-                l.ticker AS ticker, t.date AS date, \
-                CASE WHEN t.ess_statement_id     IS NOT NULL THEN 'an ESS vest' \
-                     WHEN t.inheritance_id       IS NOT NULL THEN 'an inherited parcel' \
-                     WHEN t.rights_action_id     IS NOT NULL THEN 'a rights exercise' \
-                     WHEN t.buyback_action_id    IS NOT NULL THEN 'a buy-back participation' \
-                     WHEN t.scrip_action_id      IS NOT NULL THEN 'a scrip-for-scrip exchange' \
-                     WHEN t.demerger_action_id   IS NOT NULL THEN 'a demerger' \
-                     WHEN t.transfer_id          IS NOT NULL THEN 'a holding-account transfer' \
-                     WHEN t.worthless_action_id  IS NOT NULL THEN 'a worthless-shares recognise' \
-                     WHEN t.trade_type = 'DRP'                THEN 'a DRP reinvestment' \
-                     ELSE 'entered directly' END AS source \
+                l.ticker AS ticker, t.date AS date, {} AS source \
          FROM trades t JOIN listings l ON l.id = t.listing_id \
          ORDER BY t.date DESC, t.id DESC",
-    )
+        trade::source_case_sql("t"),
+    )))
     .fetch_all(&mut *conn)
     .await?;
 
@@ -2371,6 +2490,77 @@ async fn db_non_trading_day_trades(
             source: c.source,
         });
     }
+    Ok(alerts)
+}
+
+/// Every disposal recorded at nil proceeds (see [`NilProceedsDisposal`]).
+///
+/// Two reads, one list. The Sell half excludes the mechanically constructed
+/// closing Sells through `trade::operation_written_sql`, the single place that
+/// answers what wrote a trade row; the rights half keeps only rights that were
+/// paid for, since nil proceeds on a free right is the nil/nil non-event every
+/// ordinary lapse looks like. Both compare the money column in Rust — see
+/// [`NilProceedsSellRow`].
+async fn db_nil_proceeds_disposals(
+    conn: &mut sqlx::SqliteConnection,
+) -> Result<Vec<NilProceedsDisposal>, sqlx::Error> {
+    let sells: Vec<NilProceedsSellRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT t.id AS record_id, t.listing_id AS listing_id, l.ticker AS ticker, \
+                t.date AS date, t.average_price AS average_price, t.quantity AS quantity, \
+                t.currency AS currency \
+         FROM trades t JOIN listings l ON l.id = t.listing_id \
+         WHERE t.trade_type = 'Sell' AND NOT {}",
+        trade::operation_written_sql("t"),
+    )))
+    .fetch_all(&mut *conn)
+    .await?;
+
+    let mut alerts: Vec<NilProceedsDisposal> = sells
+        .into_iter()
+        .filter(|s| s.average_price.is_zero())
+        .map(|s| NilProceedsDisposal {
+            kind: NilProceedsKind::Sell,
+            record_id: s.record_id,
+            listing_id: s.listing_id,
+            ticker: s.ticker,
+            date: s.date,
+            quantity: s.quantity,
+            currency: s.currency,
+            rights_cost: None,
+        })
+        .collect();
+
+    // The rights issue's own `currency` is on the corporate action — the
+    // rights_sales row deliberately has no currency column of its own.
+    let rights_sales: Vec<NilProceedsRightsSaleRow> = sqlx::query_as(
+        "SELECT rs.id AS record_id, ca.listing_id AS listing_id, l.ticker AS ticker, \
+                rs.date AS date, rs.units AS units, ca.currency AS currency, \
+                rs.proceeds_per_right AS proceeds_per_right, rs.rights_cost AS rights_cost \
+         FROM rights_sales rs \
+         JOIN corporate_actions ca ON ca.id = rs.rights_action_id \
+         JOIN listings l ON l.id = ca.listing_id",
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    alerts.extend(
+        rights_sales
+            .into_iter()
+            .filter(|r| r.proceeds_per_right.is_zero() && r.rights_cost > Decimal::ZERO)
+            .map(|r| NilProceedsDisposal {
+                kind: NilProceedsKind::RightsSale,
+                record_id: r.record_id,
+                listing_id: r.listing_id,
+                ticker: r.ticker,
+                date: r.date,
+                quantity: r.units,
+                currency: r.currency,
+                rights_cost: Some(r.rights_cost),
+            }),
+    );
+
+    // Newest first, like every other dated list here; the two kinds share one
+    // id space only by accident, so the id is a tie-break for stability.
+    alerts.sort_by(|a, b| b.date.cmp(&a.date).then(b.record_id.cmp(&a.record_id)));
     Ok(alerts)
 }
 
@@ -2531,6 +2721,7 @@ pub async fn db_health(
     let exchange_currency_mismatches = db_exchange_currency_mismatches(&mut tx).await?;
     let ess_30_day_rule = db_ess_30_day_rule(&mut tx).await?;
     let non_trading_day_trades = db_non_trading_day_trades(&mut tx).await?;
+    let nil_proceeds_disposals = db_nil_proceeds_disposals(&mut tx).await?;
     tx.commit().await?;
     let unpriced_days = db_unpriced_days(pool, now).await?;
 
@@ -2563,6 +2754,7 @@ pub async fn db_health(
         exchange_currency_mismatches,
         ess_30_day_rule,
         non_trading_day_trades,
+        nil_proceeds_disposals,
     })
 }
 
@@ -2679,6 +2871,7 @@ mod tests {
         assert!(h.duplicate_ess_statements.is_empty());
         assert!(h.ess_30_day_rule.is_empty());
         assert!(h.non_trading_day_trades.is_empty());
+        assert!(h.nil_proceeds_disposals.is_empty());
     }
 
     #[tokio::test]
@@ -5599,5 +5792,317 @@ mod tests {
         let h: HealthReport = resp.json();
         assert_eq!(h.failed_jobs.len(), 1);
         assert_eq!(h.failed_jobs[0].name, "backup");
+    }
+    // Disposals recorded at nil proceeds (SCENARIOS AA-03).
+
+    /// A gift entered as what was actually *received* — nothing — is accepted
+    /// in full and raises a capital loss the size of the whole cost base. The
+    /// market-value substitution rule says the proceeds are the asset's market
+    /// value instead, so the shape is named here; a Sell that records what it
+    /// realised is not.
+    #[tokio::test]
+    async fn a_sell_at_nil_proceeds_is_flagged_and_a_priced_one_is_not() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("GIFT").insert(&pool).await;
+        test_support::buy(1, 1)
+            .date(ymd(2024, 1, 2))
+            .qty(dec("1000"))
+            .price(dec("20"))
+            .insert(&pool)
+            .await;
+        // The gift out, entered at the nil consideration received.
+        test_support::sell(2, 1)
+            .date(ymd(2025, 5, 1))
+            .qty(dec("1000"))
+            .price(Decimal::ZERO)
+            .insert(&pool)
+            .await;
+        // An ordinary sale of the same listing, which must not be flagged.
+        test_support::sell(3, 1)
+            .date(ymd(2025, 5, 2))
+            .qty(dec("100"))
+            .price(dec("25"))
+            .insert(&pool)
+            .await;
+
+        let h = health(&pool, ymd(2025, 6, 1)).await;
+        assert_eq!(h.nil_proceeds_disposals.len(), 1);
+        let d = &h.nil_proceeds_disposals[0];
+        assert_eq!(d.kind, NilProceedsKind::Sell);
+        assert_eq!(d.record_id, 2);
+        assert_eq!(d.listing_id, 1);
+        assert_eq!(d.ticker, "GIFT");
+        assert_eq!(d.date, ymd(2025, 5, 1));
+        assert_eq!(d.quantity, dec("1000"));
+        assert_eq!(d.currency, "AUD");
+        // The loss is the parcel's adjusted cost base, which this flag does
+        // not compute — and market value on the day, the figure actually
+        // wanted, is not a stored fact at all.
+        assert_eq!(d.rights_cost, None);
+    }
+
+    /// The price is what is tested, not the netted proceeds: a real price
+    /// whose brokerage happens to cancel it exactly is arithmetic, not a
+    /// nil-consideration disposal, and saying the market-value substitution
+    /// rule is about it would be untrue.
+    #[tokio::test]
+    async fn brokerage_cancelling_the_proceeds_is_not_a_nil_proceeds_disposal() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("EVEN").insert(&pool).await;
+        test_support::buy(1, 1).qty(dec("100")).insert(&pool).await;
+        // 100 × $1 = $100 of proceeds, $100 of brokerage: nil net, real price.
+        test_support::sell(2, 1)
+            .date(ymd(2025, 5, 1))
+            .qty(dec("100"))
+            .price(Decimal::ONE)
+            .brokerage(dec("100"))
+            .insert(&pool)
+            .await;
+
+        let h = health(&pool, ymd(2025, 6, 1)).await;
+        assert!(h.nil_proceeds_disposals.is_empty());
+    }
+
+    /// The exclusion that matters most: a worthless-shares recognise closes
+    /// the holding at nil proceeds **by definition** — that is what
+    /// recognising a G3/C2 loss is — so it must never be flagged. Driven
+    /// through the real operation, since it is the one nil-proceeds Sell the
+    /// system writes itself.
+    #[tokio::test]
+    async fn a_worthless_shares_recognise_is_never_flagged() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("DEAD").insert(&pool).await;
+        test_support::buy(1, 1)
+            .date(ymd(2024, 1, 2))
+            .qty(dec("1000"))
+            .price(dec("2"))
+            .insert(&pool)
+            .await;
+        corporate_action::db_upsert(
+            &pool,
+            &corporate_action::CorporateAction {
+                id: 10,
+                listing_id: 1,
+                date: ymd(2025, 3, 31),
+                kind: corporate_action::ActionKind::WorthlessShares {
+                    worthless_event: corporate_action::WorthlessEvent::G3Declaration,
+                },
+            },
+        )
+        .await
+        .unwrap();
+        let recognised = crate::entities::worthless::db_recognise(&pool, 10)
+            .await
+            .unwrap();
+        assert_eq!(recognised.sell.average_price, Decimal::ZERO);
+
+        let h = health(&pool, ymd(2025, 6, 1)).await;
+        assert!(
+            h.nil_proceeds_disposals.is_empty(),
+            "a recognise closes the holding at nil proceeds by definition: {:?}",
+            h.nil_proceeds_disposals
+        );
+    }
+
+    /// Every other operation-written closing Sell is excluded too — a scrip
+    /// exchange, a demerger, a transfer out, a buy-back participation, and the
+    /// transfer's crypto network-fee disposal, which carries its link on the
+    /// *transfer* rather than on the trade row. Each is stamped directly here:
+    /// what is under test is the exclusion predicate
+    /// (`trade::operation_written_sql`), not the operations, which have their
+    /// own tests.
+    #[tokio::test]
+    async fn operation_written_closing_sells_are_never_flagged() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("OPS").insert(&pool).await;
+        test_support::buy(1, 1)
+            .qty(dec("10000"))
+            .insert(&pool)
+            .await;
+        let columns = [
+            "buyback_action_id",
+            "scrip_action_id",
+            "demerger_action_id",
+            "transfer_id",
+            "worthless_action_id",
+        ];
+        // The Sells: five to stamp, plus the network-fee disposal the transfer
+        // links to instead of stamping.
+        for id in 100..=104 {
+            test_support::sell(id, 1)
+                .date(ymd(2025, 5, 1))
+                .qty(dec("100"))
+                .price(Decimal::ZERO)
+                .insert(&pool)
+                .await;
+        }
+        test_support::sell(200, 1)
+            .date(ymd(2025, 5, 1))
+            .qty(dec("1"))
+            .price(Decimal::ZERO)
+            .insert(&pool)
+            .await;
+
+        // The records the provenance columns point at. Which action or
+        // transfer is irrelevant to the predicate — it asks only whether the
+        // column is set — but the foreign keys are real.
+        corporate_action::db_upsert(
+            &pool,
+            &corporate_action::CorporateAction {
+                id: 1,
+                listing_id: 1,
+                date: ymd(2025, 2, 1),
+                kind: corporate_action::ActionKind::RightsIssue {
+                    rights_units: Decimal::ONE,
+                    rights_held_units: Decimal::from(4),
+                    exercise_price: dec("1.80"),
+                    currency: "AUD".to_string(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+        holding_account::db_upsert(
+            &pool,
+            &holding_account::HoldingAccount {
+                id: 2,
+                name: "Broker".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO transfers (id, listing_id, date, from_account_id, to_account_id, \
+                                    fee_sale_trade_id) \
+             VALUES (1, 1, '2025-05-01', 1, 2, 200)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Stamped directly: what is under test is the exclusion predicate, not
+        // the operations, each of which has its own tests.
+        for (i, column) in columns.iter().enumerate() {
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "UPDATE trades SET {column} = 1 WHERE id = ?"
+            )))
+            .bind(100 + i as i64)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let h = health(&pool, ymd(2025, 6, 1)).await;
+        assert!(
+            h.nil_proceeds_disposals.is_empty(),
+            "no operation-written Sell is a user entry: {:?}",
+            h.nil_proceeds_disposals
+        );
+    }
+
+    /// Rights: a **free** right that lapses is the nil/nil non-event
+    /// `docs/API.md` describes — nil proceeds against a nil cost base
+    /// fabricates nothing, and it is what every ordinary lapse looks like — so
+    /// only a right that was **paid for** is listed, where the nil proceeds
+    /// turn its cost into a capital loss.
+    #[tokio::test]
+    async fn only_a_paid_for_right_disposed_of_at_nil_is_flagged() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("RTS").insert(&pool).await;
+        test_support::buy(1, 1)
+            .date(ymd(2024, 1, 2))
+            .qty(dec("4000"))
+            .insert(&pool)
+            .await;
+        corporate_action::db_upsert(
+            &pool,
+            &corporate_action::CorporateAction {
+                id: 10,
+                listing_id: 1,
+                date: ymd(2025, 2, 1),
+                kind: corporate_action::ActionKind::RightsIssue {
+                    rights_units: Decimal::ONE,
+                    rights_held_units: Decimal::from(4),
+                    exercise_price: dec("1.80"),
+                    currency: "AUD".to_string(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+        let lapse = |date: NaiveDate, units: &str, cost: Option<Decimal>| {
+            crate::entities::rights_sale::SellRightsBody {
+                date,
+                units: units.parse().unwrap(),
+                proceeds_per_right: Some(Decimal::ZERO),
+                rights_cost: cost,
+                fx_rate: None,
+                holding_account_id: 1,
+                allocations: vec![crate::entities::rights_sale::AllocationInput {
+                    purchase_trade_id: 1,
+                    units: units.parse().unwrap(),
+                }],
+            }
+        };
+        // A free right left to lapse…
+        crate::entities::rights_sale::db_sell_rights(
+            &pool,
+            10,
+            &lapse(ymd(2025, 3, 1), "400", None),
+        )
+        .await
+        .unwrap();
+        // …and one that cost $80 on-market, lapsing worthless.
+        let paid = crate::entities::rights_sale::db_sell_rights(
+            &pool,
+            10,
+            &lapse(ymd(2025, 3, 2), "400", Some(dec("80"))),
+        )
+        .await
+        .unwrap();
+
+        let h = health(&pool, ymd(2025, 6, 1)).await;
+        assert_eq!(h.nil_proceeds_disposals.len(), 1);
+        let d = &h.nil_proceeds_disposals[0];
+        assert_eq!(d.kind, NilProceedsKind::RightsSale);
+        assert_eq!(d.record_id, paid.id);
+        assert_eq!(d.ticker, "RTS");
+        assert_eq!(d.date, ymd(2025, 3, 2));
+        assert_eq!(d.quantity, dec("400"));
+        assert_eq!(d.rights_cost, Some(dec("80")));
+    }
+
+    /// Served over the endpoint the banner polls, newest disposal first —
+    /// which is the only way the flag reaches anyone.
+    #[tokio::test]
+    async fn api_nil_proceeds_disposals_are_served_to_the_banner() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("GIFT").insert(&pool).await;
+        test_support::buy(1, 1).qty(dec("1000")).insert(&pool).await;
+        test_support::sell(2, 1)
+            .date(ymd(2025, 5, 1))
+            .qty(dec("400"))
+            .price(Decimal::ZERO)
+            .insert(&pool)
+            .await;
+        test_support::sell(3, 1)
+            .date(ymd(2025, 6, 2))
+            .qty(dec("600"))
+            .price(Decimal::ZERO)
+            .insert(&pool)
+            .await;
+
+        let body: serde_json::Value = ApiClient::over(router().with_state(pool))
+            .get("/reports/health")
+            .await
+            .json();
+        let list = body["nil_proceeds_disposals"].as_array().unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0]["record_id"], 3);
+        assert_eq!(list[0]["kind"], "Sell");
+        assert_eq!(list[0]["date"], "2025-06-02");
+        assert_eq!(list[0]["quantity"], "600");
+        assert_eq!(list[0]["rights_cost"], serde_json::Value::Null);
+        assert_eq!(list[1]["record_id"], 2);
     }
 }

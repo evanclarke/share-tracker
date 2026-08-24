@@ -2093,6 +2093,19 @@ mod tests {
         assert!(js.contains("correct it to the day the trade actually executed"));
         assert!(js.contains("'#/e/trades'"));
         assert!(js.contains("Open Trades"));
+        // …plus a disposal recorded at nil proceeds (SCENARIOS AA-03): the
+        // market-value substitution rule puts the asset's market value in
+        // place of the nothing received, so entering the nothing fabricates a
+        // capital loss — named with the rule and the remedy, and linking to
+        // the screen the proceeds are corrected on.
+        assert!(js.contains("nil_proceeds_disposals"));
+        assert!(js.contains("at nil proceeds"));
+        assert!(js.contains("the market-value substitution rule makes the proceeds"));
+        assert!(js.contains("records a capital loss that does not exist"));
+        assert!(js.contains("'#/sells'"));
+        assert!(js.contains("Open Sells"));
+        assert!(js.contains("'#/e/rights_sales'"));
+        assert!(js.contains("Open Rights Sales"));
         // …and refreshes on every route render so it appears on the main views.
         assert!(js.contains("refreshHealthBanner(); // deliberately not awaited"));
         // The strip's host element ships in the page shell with its styles.

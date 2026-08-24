@@ -438,7 +438,7 @@ both halves plus the mirror's QC number and its two load-bearing sentences.
 
 ## SCENARIOS AA-d — a disposal recorded at nil proceeds raises a capital loss that nothing questions
 
-- [ ] Decide and implement (options below).
+- [x] Decide and implement (options below).
 
 Scenario AA-03. A gift of shares is a CGT disposal at **market value** under the market-value
 substitution rule, and `docs/API.md` documents the entry convention: "enter a gift out as a manual
@@ -472,6 +472,28 @@ crypto burn is the residual honest case.)
    abandonment) that naming it would be noise.
 
 **Chosen: option 1 — a `nil_proceeds_disposals` health check.**
+
+**Fixed.** `reports::health` now carries `nil_proceeds_disposals`: every ordinary Sell at a zero
+`average_price`, plus every rights disposal at a zero `proceeds_per_right` whose rights were **paid
+for** (`rights_cost > 0`) — a *free* right lapsing is nil against nil, the non-event `docs/API.md`
+describes, and flagging it would fire on every ordinary lapse. The test is the *price*, not the
+netted proceeds: a real price a brokerage happens to cancel is arithmetic, not a nil-consideration
+disposal, and the market-value substitution rule has nothing to say about it. Advisory, blocking
+nothing, with the rule (`docs/ato/capital-proceeds-market-value-substitution.md`, QC 66021) as its
+reason, a cross-view banner sentence linking to Sells / Rights Sales, and the Gifts limitation,
+the Health field list and the README feature line all updated (pinned by
+`doc_checks::nil_proceeds_disposals_are_documented_with_the_market_value_rule`).
+
+The exclusion of the operation-written closing Sells is the part that needed the rule rather than a
+list. There were already **three** transcriptions of the provenance columns (the two guards in
+`entities::sell`, and the write-path `CASE` in `non_trading_day_trades`), so the exclusion became
+`entities::trade::provenance` — one list of (column, plain-English write path) with two SQL
+builders over it, `operation_written_sql` and `source_case_sql`, and a test that reads the live
+schema's foreign keys on `trades` and fails on one that is neither classified as a provenance link
+nor named as ordinary trade data with the reason. A future operation's column is picked up by both
+callers with no edit. `non_trading_day_trades` now builds its label from the same list, which also
+fixed a mislabel it carried: a crypto transfer's network-fee Sell (linked from
+`transfers.fee_sale_trade_id`, not `trades.transfer_id`) read as `entered directly`.
 
 ## SCENARIOS AA-e — four limitations are documented without the workaround that exists and works
 

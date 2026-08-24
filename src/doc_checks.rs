@@ -1032,6 +1032,37 @@ fn known_limitations_document_the_ess_30_day_rule() {
     assert!(README_MD.contains("**ESS sale inside the 30-day rule's window**"));
 }
 
+/// Doc pin (SCENARIOS AA-03): the gift entry convention is only safe if what
+/// happens when it is *not* followed is written down. The market-value
+/// substitution rule, the fabricated capital loss, the health check that names
+/// it, and both exclusions (the operation-written closing Sells, and the free
+/// right whose lapse is nil against nil) belong where a reader meets them —
+/// the Health field list, the Gifts limitation, and the README's feature line.
+#[test]
+fn nil_proceeds_disposals_are_documented_with_the_market_value_rule() {
+    assert!(
+        API_MD.contains("`nil_proceeds_disposals` — every disposal recorded at **nil proceeds**")
+    );
+    assert!(API_MD.contains("\"non_trading_day_trades\", \"nil_proceeds_disposals\" }`"));
+    // The rule it is about, cited to the mirror, which carries its QC header.
+    assert!(API_MD.contains("docs/ato/capital-proceeds-market-value-substitution.md"));
+    assert!(
+        include_str!("../docs/ato/capital-proceeds-market-value-substitution.md")
+            .contains("QC 66021")
+    );
+    // Advisory, and what to do about it.
+    assert!(API_MD.contains("correct the proceeds to the market value on `date`"));
+    // Both exclusions, so neither reads as an oversight.
+    assert!(API_MD.contains("since none is a user entry; and a **free right that lapses**"));
+    // The limitation that prescribes the convention says what breaks without it.
+    assert!(known_limitations().contains(
+        "Entering the nil consideration actually *received* instead is accepted in full and \
+         fabricates a capital loss the size of the whole cost base"
+    ));
+    // Surfaced in the README's health-monitoring feature line.
+    assert!(README_MD.contains("**disposal recorded at nil proceeds**"));
+}
+
 /// Doc pin (SCENARIOS S-08): a trade dated on a day its exchange did not
 /// trade is refused, and the derived write paths that are exempt are named
 /// where a reader would look — the 422 catalogue, the Trades and Sells
@@ -1063,7 +1094,10 @@ fn trading_day_rule_and_its_exemptions_are_documented() {
     assert!(API_MD.contains(
         "`non_trading_day_trades` — every trade dated on a day its own exchange did not trade"
     ));
-    assert!(API_MD.contains("\"non_trading_day_trades\" }`"));
+    // In the endpoint's returned shape, beside the entry it follows (it is no
+    // longer the last field, and pinning it as one would break on the next
+    // check added).
+    assert!(API_MD.contains("\"ess_30_day_rule\", \"non_trading_day_trades\""));
     // The one place the as-at calendar and the live-exchange settlement
     // calculation disagree is written down where the limitation lives.
     assert!(known_limitations().contains(

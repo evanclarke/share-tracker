@@ -10,6 +10,7 @@ mod checks;
 mod db;
 mod http;
 mod model;
+mod provenance;
 mod settlement;
 
 /// Referenced by name only from tests (its variants reach non-test callers
@@ -28,6 +29,10 @@ pub use http::router;
 #[cfg(test)]
 pub use model::SettlementDateSource;
 pub use model::{Trade, TradeBody, TradeType};
+/// The one place that answers "did an operation write this trade row?" — the
+/// provenance-column list and the two SQL fragments over it, used by the
+/// health report's write-path label and its nil-proceeds exclusion.
+pub(crate) use provenance::{operation_written_sql, source_case_sql};
 
 pub(crate) use checks::{
     AmountsCheck, AmountsError, CGT_START, SpotFxRateError, StatementTotalCheck,

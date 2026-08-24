@@ -1378,6 +1378,25 @@ async function refreshHealthBanner() {
         + ' event date, so it sets the discount clock, the financial year and the settlement'
         + ' count; correct it to the day the trade actually executed.');
     });
+    // A disposal recorded at nil proceeds. The market-value substitution rule
+    // puts the asset's market value in place of the nothing that was received,
+    // so entering the nothing (the shape a gift takes) fabricates a capital
+    // loss the size of the whole cost base. Advisory: a burn, an abandonment
+    // or a paid-for right left to lapse is legitimately nil, and no stored
+    // fact says which this is. The operation-written closing Sells — a
+    // worthless-shares recognise above all — never reach here.
+    const nilProceeds = h.nil_proceeds_disposals || [];
+    nilProceeds.forEach(function (d) {
+      problems.push((d.kind === 'RightsSale'
+        ? 'Rights sale ' + d.record_id + ' disposes of ' + d.quantity + ' ' + d.ticker
+          + ' rights that cost ' + moneyText(d.rights_cost) + ' ' + d.currency
+        : 'Sell ' + d.record_id + ' disposes of ' + d.quantity + ' ' + d.ticker)
+        + ' on ' + d.date + ' at nil proceeds — if this was a gift or another'
+        + ' non-arm\u2019s-length transfer, the market-value substitution rule makes the proceeds'
+        + ' the market value on that date, not the nothing received, and entering the nothing'
+        + ' records a capital loss that does not exist. Correct the proceeds, or leave it if the'
+        + ' disposal really did realise nothing.');
+    });
     if (problems.length === 0) {
       banner.hidden = true;
       banner.innerHTML = '';
@@ -1416,6 +1435,14 @@ async function refreshHealthBanner() {
     }
     if (nonTradingDays.length > 0 || duplicateTrades.length > 0) {
       banner.appendChild(el('a', { href: '#/e/trades' }, 'Open Trades →'));
+    }
+    // The proceeds are corrected on the Sell itself (or on the rights sale,
+    // which is delete-and-re-enter), so each kind links to its own screen.
+    if (nilProceeds.some(function (d) { return d.kind === 'Sell'; })) {
+      banner.appendChild(el('a', { href: '#/sells' }, 'Open Sells →'));
+    }
+    if (nilProceeds.some(function (d) { return d.kind === 'RightsSale'; })) {
+      banner.appendChild(el('a', { href: '#/e/rights_sales' }, 'Open Rights Sales →'));
     }
     banner.hidden = false;
   } catch (e) {
