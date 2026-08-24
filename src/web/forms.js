@@ -7,7 +7,7 @@
 //
 import {
   el, api, toast, loadOptions, listingNamer, describeTrade,
-  addDecimalStrings, decParts, mulToCents, frankingCreditFor, decEq,
+  addDecimalStrings, decParts, mulToCents, frankingCreditFor, decEq, allocationSummary,
   confirmGeneratedAdjustments,
 } from './util.js';
 
@@ -371,13 +371,25 @@ export function wireAmmaEntry(form, existing) {
 
 // ---- allocation editor --------------------------------------------------
 // Shared parcel-allocation row builder used by the Sell form, the Transfer
-// form, and the buy-back Participate action: a list of (purchase-parcel
-// select, decimal quantity) rows with add/remove buttons. Returns the
-// section element to append to the form and a `read()` harvesting the rows
-// as [{ purchase_trade_id, quantity_allocated }] (blank rows skipped; the
+// form (twice — the parcels moved and the optional network fee), and the
+// Participate / Sell-rights actions: a list of (purchase-parcel select,
+// decimal quantity) rows with add/remove buttons. Returns the section element
+// to append to the form, a `read()` harvesting the rows as
+// [{ purchase_trade_id, quantity_allocated }] (blank rows skipped; the
 // quantity key is `labels.qtyField` when a caller's API names it differently,
-// e.g. the sell-rights action's `units`). The callers differ only in labels
-// and hint text.
+// e.g. the sell-rights action's `units`), and `refreshTotal()` for a caller
+// whose required figure lives in a field outside this section.
+//
+// Every editor carries a live running total (`allocationSummary`), because at
+// 50 open parcels a refusal naming only the shortfall still leaves the user
+// hunting the row that caused it — and the total shows the mistake *before*
+// the submit (SCENARIOS Y-b). `labels.requiredTotal`, when a caller supplies
+// it, is a function returning the figure the rows must sum to, read fresh on
+// every keystroke: the Sell form's `quantity`, the buy-back's / rights sale's
+// `units`. The Transfer's two editors deliberately supply none — a transfer
+// moves whole or partial parcels and its Sell quantity *is* the allocations'
+// own sum (`entities::transfer`), so there is no target to be short of; the
+// line reports the running total alone.
 export function allocationEditor(parcelOptions, existingAllocs, labels) {
   labels = Object.assign({
     heading: 'Parcel allocations',
@@ -406,17 +418,36 @@ export function allocationEditor(parcelOptions, existingAllocs, labels) {
     const row = el('div', { class: 'alloc-row' }, [
       el('div', { class: 'field' }, [el('label', null, labels.parcelLabel), purchaseSel]),
       el('div', { class: 'field' }, [el('label', null, labels.qtyLabel), qtyInput]),
-      el('button', { type: 'button', class: 'small danger', onclick: function () { list.removeChild(row); } }, 'Remove'),
+      el('button', { type: 'button', class: 'small danger', onclick: function () { list.removeChild(row); refreshTotal(); } }, 'Remove'),
     ]);
     list.appendChild(row);
+    refreshTotal();
+  }
+  // The running total, recomputed from the rows' raw text on every edit.
+  const totalLine = el('p', { class: 'hint alloc-total' }, '');
+  function refreshTotal() {
+    const qtys = [];
+    list.querySelectorAll('[name="alloc_qty"]').forEach(function (i) { qtys.push(i.value); });
+    const summary = allocationSummary(qtys, labels.requiredTotal ? labels.requiredTotal() : null);
+    totalLine.textContent = summary.text;
+    // Quiet until there is something to be wrong about: 'none' (no target at
+    // all) and 'pending' (a target, nothing allocated yet) stay muted.
+    totalLine.className = 'hint alloc-total'
+      + (summary.status === 'match' ? ' ok'
+        : summary.status === 'none' || summary.status === 'pending' ? '' : ' warn');
   }
   if (existingAllocs && existingAllocs.length) existingAllocs.forEach(addRow); else addRow(null);
+  // `input` bubbles, so one delegated listener covers every row — including
+  // rows added later.
+  list.addEventListener('input', refreshTotal);
   const section = el('div', null, [
     el('h3', null, labels.heading),
     el('p', { class: 'hint' }, labels.hint),
     list,
+    totalLine,
     el('button', { type: 'button', class: 'small', onclick: function () { addRow(null); } }, labels.addLabel),
   ]);
+  refreshTotal();
   function read() {
     const allocs = [];
     list.querySelectorAll('.alloc-row').forEach(function (r) {
@@ -440,5 +471,5 @@ export function allocationEditor(parcelOptions, existingAllocs, labels) {
       populateSelect(sel, sel.value);
     });
   }
-  return { section: section, read: read, setOptions: setOptions };
+  return { section: section, read: read, setOptions: setOptions, refreshTotal: refreshTotal };
 }

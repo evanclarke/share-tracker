@@ -87,9 +87,17 @@ pub struct SellBody {
 pub enum SellError {
     #[error("Sell write failed: {0}")]
     Db(#[from] sqlx::Error),
-    /// Allocated quantities do not sum exactly to the sell quantity.
-    #[error("the parcel allocations do not sum to the sell quantity")]
-    AllocationMismatch,
+    /// Allocated quantities do not sum exactly to the sell quantity. Both
+    /// figures are carried so the refusal can name them: at 50 open parcels
+    /// (SCENARIOS Y-b) "they do not sum" leaves the user to add 50 rows up by
+    /// hand to find the amount they are out by. Same wording the pre-sale
+    /// what-if path already answers with (`reports::net_capital_gain`), so the
+    /// dry run and the real write read identically.
+    #[error("the parcel allocations sum to {allocated}, not the sell quantity {quantity}")]
+    AllocationMismatch {
+        allocated: Decimal,
+        quantity: Decimal,
+    },
     /// A referenced purchase trade does not exist.
     #[error("an allocated purchase parcel does not exist")]
     PurchaseParcelMissing,
@@ -201,9 +209,12 @@ pub enum SellError {
 impl From<SellError> for ApiError {
     fn from(e: SellError) -> Self {
         match e {
-            SellError::AllocationMismatch => {
-                ApiError::unprocessable("the parcel allocations do not sum to the sell quantity")
-            }
+            SellError::AllocationMismatch {
+                allocated,
+                quantity,
+            } => ApiError::unprocessable(format!(
+                "the allocations sum to {allocated}, not the {quantity} units sold"
+            )),
             SellError::PurchaseParcelMissing => {
                 ApiError::unprocessable("an allocated purchase parcel does not exist")
             }
@@ -548,7 +559,10 @@ pub(crate) async fn upsert_sell_in_tx(
     }
     let allocated: Decimal = body.allocations.iter().map(|a| a.quantity_allocated).sum();
     if allocated != body.quantity {
-        return Err(SellError::AllocationMismatch);
+        return Err(SellError::AllocationMismatch {
+            allocated,
+            quantity: body.quantity,
+        });
     }
 
     // A GST-inclusive brokerage entry is split here (the operations that
@@ -894,7 +908,7 @@ mod tests {
             }],
         );
         let err = db_upsert_sell(&pool, 2, &body).await.unwrap_err();
-        assert!(matches!(err, SellError::AllocationMismatch));
+        assert!(matches!(err, SellError::AllocationMismatch { .. }));
         // nothing persisted
         assert!(!trade_exists(&pool, 2).await);
         assert_eq!(count_allocations(&pool, 2).await, 0);
@@ -938,7 +952,7 @@ mod tests {
             }],
         );
         let err = db_upsert_sell(&pool, 3, &body).await.unwrap_err();
-        assert!(matches!(err, SellError::AllocationMismatch));
+        assert!(matches!(err, SellError::AllocationMismatch { .. }));
         assert!(!trade_exists(&pool, 3).await);
     }
 
@@ -957,7 +971,7 @@ mod tests {
             }],
         );
         let err = db_upsert_sell(&pool, 2, &body).await.unwrap_err();
-        assert!(matches!(err, SellError::AllocationMismatch));
+        assert!(matches!(err, SellError::AllocationMismatch { .. }));
     }
 
     #[tokio::test]
@@ -1692,11 +1706,11 @@ mod tests {
         let resp = client(&pool).put("/sells/2", &body).await;
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
         let detail = resp.text().to_string();
-        // The rejection says why, not a bare "HTTP 422".
-        assert!(
-            detail.contains("sum to the sell quantity"),
-            "detail: {detail}"
-        );
+        // The rejection says why, not a bare "HTTP 422" — and names both
+        // figures, so a 50-parcel allocation does not have to be added up by
+        // hand to find the amount it is out by (SCENARIOS Y-b). Same wording
+        // the pre-sale what-if answers with (`reports::net_capital_gain`).
+        assert_eq!(detail, "the allocations sum to 60, not the 100 units sold");
     }
 
     /// A zero or negative allocation is rejected outright: −5 on parcel A and
@@ -2067,7 +2081,7 @@ mod tests {
             );
             let err = db_upsert_sell(&pool, 2, &body).await.unwrap_err();
             assert!(
-                matches!(err, SellError::AllocationMismatch),
+                matches!(err, SellError::AllocationMismatch { .. }),
                 "{allocated}: {err}"
             );
             assert!(!trade_exists(&pool, 2).await);

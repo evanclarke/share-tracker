@@ -215,6 +215,12 @@ input[type=checkbox] { width: auto; }
 
 .alloc-row { display: flex; gap: 8px; align-items: flex-end; margin-bottom: 8px; }
 .alloc-row .field { margin-bottom: 0; }
+/* The allocation editor's running total: quiet while nothing is wrong, and
+   coloured the moment the rows are short of / over the required figure, so a
+   50-row allocation shows the mistake before the submit (SCENARIOS Y-b). */
+.alloc-total { margin: 4px 0 8px; font-variant-numeric: tabular-nums; }
+.alloc-total.ok { color: var(--ok); font-weight: 600; }
+.alloc-total.warn { color: var(--warn); font-weight: 600; }
 
 .empty { color: var(--muted); padding: 16px 0; }
 .loading { color: var(--muted); padding: 16px 0; }

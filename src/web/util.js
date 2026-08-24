@@ -825,3 +825,61 @@ export function decEq(a, b) {
   const scale = BigInt(Math.max(pa.dp, pb.dp));
   return pa.units * 10n ** (scale - BigInt(pa.dp)) === pb.units * 10n ** (scale - BigInt(pb.dp));
 }
+
+// ---- allocation running total -------------------------------------------
+// The shared allocation editor's live "allocated vs required" line, kept pure
+// so `util.test.js` can pin it. `quantities` are the raw strings typed into
+// the rows; `required` is the figure they must sum to — the Sell's quantity,
+// the buy-back's units, the rights sold — or null/'' where the caller has no
+// target at all (a Transfer moves whole parcels, so any sum it reaches is
+// legitimate; the line then just reports what has been allocated so far).
+//
+// Rows that are blank are skipped rather than counted as zero: an untouched
+// row is not yet a mistake. A row that is *not* blank and not a decimal is
+// counted separately and reported, so a typo can never silently drop out of
+// the total. The arithmetic is exact decimal-string throughout
+// (`addDecimalStrings`) — an 8-decimal crypto quantity across 50 parcels is
+// exactly what parseFloat would drift on, and it is the case that has to
+// work. SCENARIOS Y-b.
+const DECIMAL_RE = /^-?\d+(\.\d+)?$/;
+function negateDecimalString(s) { return s.charAt(0) === '-' ? s.slice(1) : '-' + s; }
+export function allocationSummary(quantities, required) {
+  let total = '0';
+  let counted = 0, invalid = 0;
+  (quantities || []).forEach(function (q) {
+    const s = String(q == null ? '' : q).trim();
+    if (s === '') return;
+    if (!DECIMAL_RE.test(s)) { invalid += 1; return; }
+    total = addDecimalStrings(total, s);
+    counted += 1;
+  });
+  const req = String(required == null ? '' : required).trim();
+  const hasReq = DECIMAL_RE.test(req);
+  // required − total: '0' exactly when they agree, because addDecimalStrings
+  // normalises the result (100.00 and 100 both land on '0').
+  const signed = hasReq ? addDecimalStrings(req, negateDecimalString(total)) : '0';
+  // 'pending' is a target, not yet a mistake: a form nobody has typed an
+  // allocation into is merely incomplete (its required fields say so), so it
+  // states the figure to reach without colouring it as an error.
+  const status = !hasReq ? 'none'
+    : counted === 0 && invalid === 0 ? 'pending'
+      : signed === '0' ? 'match' : signed.charAt(0) === '-' ? 'over' : 'short';
+  const difference = status === 'over' ? signed.slice(1) : status === 'short' ? signed : '0';
+  let text;
+  if (status === 'none') {
+    text = counted === 0 ? 'Nothing allocated yet.'
+      : 'Allocated: ' + total + ' across ' + counted + ' parcel(s).';
+  } else if (status === 'pending') {
+    text = 'Allocated: 0 of ' + req + ' so far.';
+  } else if (status === 'match') {
+    text = 'Allocated: ' + total + ' of ' + req + ' — matches.';
+  } else {
+    text = 'Allocated: ' + total + ' of ' + req + ' — ' + difference
+      + (status === 'short' ? ' short.' : ' over.');
+  }
+  if (invalid > 0) text += ' ' + invalid + ' row(s) not a valid quantity.';
+  return {
+    total: total, counted: counted, invalid: invalid,
+    required: hasReq ? req : null, status: status, difference: difference, text: text,
+  };
+}

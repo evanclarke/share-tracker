@@ -1243,6 +1243,42 @@ mod tests {
         assert_eq!(js.matches("allocationEditor(").count(), 5);
     }
 
+    /// Every allocation editor carries a live running total, so a wrong
+    /// 50-row allocation shows itself before the submit rather than as a
+    /// server refusal the user then has to add 50 rows up to interpret
+    /// (SCENARIOS Y-b). The figure it is measured against is declared by the
+    /// caller: the Sell form's `quantity`, and `requiredField` on the two
+    /// allocation-taking actions (buy-back participate, sell rights). The
+    /// Transfer's two editors deliberately declare none — a transfer's Sell
+    /// quantity is the allocations' own sum, so there is no target.
+    #[tokio::test]
+    async fn allocation_editors_show_a_running_total() {
+        let js = app_js_body().await;
+        // The total itself, computed by the exact decimal-string helper (a
+        // parseFloat here would drift over 50 eight-decimal crypto rows).
+        assert!(js.contains("function allocationSummary"));
+        assert!(js.contains("allocationSummary(qtys, labels.requiredTotal"));
+        assert!(js.contains("addDecimalStrings(total, s)"));
+        assert!(js.contains("alloc-total"));
+        assert!(js.contains("Nothing allocated yet."));
+        assert!(js.contains(" so far."));
+        assert!(js.contains(" short."));
+        assert!(js.contains(" over."));
+        // Recomputed as rows are typed in, added and removed…
+        assert!(js.contains("list.addEventListener('input', refreshTotal)"));
+        // …and as the required figure itself changes, from wherever it lives.
+        assert!(js.contains(
+            "requiredTotal: function () { return form.querySelector('[name=\"quantity\"]').value; }"
+        ));
+        assert_eq!(js.matches("requiredField: 'units'").count(), 2);
+        assert!(js.contains("labels.requiredField"));
+        // Three of the five editors have a required figure — the Sell form
+        // supplies it directly, the two `requiredField` actions through
+        // viewAction; the Transfer's two say why they have none.
+        assert!(js.contains("labels.requiredTotal = function ()"));
+        assert!(js.contains("allocations' own sum (`entities::transfer`), so there is no figure"));
+    }
+
     #[tokio::test]
     async fn drp_enrolment_ui_present() {
         let js = app_js_body().await;

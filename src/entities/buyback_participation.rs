@@ -700,7 +700,7 @@ mod tests {
         assert!(matches!(
             err,
             Err(ParticipationError::Sell(
-                sell::SellError::AllocationMismatch
+                sell::SellError::AllocationMismatch { .. }
             ))
         ));
         // …and may not over-allocate the parcel.
@@ -937,7 +937,7 @@ mod tests {
                     "units": "1000",
                     "allocations": [ { "purchase_trade_id": 1, "quantity_allocated": "600" } ],
                 }),
-                "do not sum to the sell quantity",
+                "the allocations sum to 600, not the 1000 units sold",
             ),
             // Over-allocating the parcel.
             (

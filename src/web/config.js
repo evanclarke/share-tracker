@@ -831,7 +831,7 @@ export const ACTIONS = [
     },
     allocations: {
       heading: 'Anchoring parcels', parcelLabel: 'Original parcel', qtyLabel: 'Rights anchored',
-      addLabel: '+ Add parcel', qtyField: 'units',
+      addLabel: '+ Add parcel', qtyField: 'units', requiredField: 'units',
       hint: 'Which original parcels earned the sold rights — each anchors its rights to that parcel’s acquisition date for the CGT discount; no parcel units are consumed. Must sum exactly to the rights sold; each parcel is capped at the entitlement its record-date units earned.',
       // No remaining-quantity or holding-account constraint here — a parcel
       // fully sold since still earned rights it held at the record date. The
@@ -858,6 +858,7 @@ export const ACTIONS = [
       ];
     },
     allocations: {
+      requiredField: 'units',
       hint: 'Allocations must sum exactly to the units sold. Each parcel must be a Buy/DRP with enough remaining units.',
       // Same two things the server itself requires: the action's own
       // listing, and the chosen holding account (its parcels only).

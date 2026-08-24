@@ -18,7 +18,7 @@ import {
   addDecimalStrings, decParts, mulToCents, frankingCreditFor, decEq,
   looksNumeric, columnKinds, columnLabel, tradeOrigin, periodReturnPct,
   holdingHasActivity, loadPref, savePref, pathSeg, basePath, apiUrl, authEnabled,
-  cellText, adjustmentPreviewText,
+  cellText, adjustmentPreviewText, allocationSummary,
 } from './util.js';
 
 // ---- roundDecimalStr ----------------------------------------------------
@@ -498,4 +498,90 @@ test('a zero difference written with decimals still reads as matching', () => {
   assert.match(text, /they match\./);
   // An unlabelled parcel falls back to its id rather than "undefined".
   assert.match(text, /trade #99 — 10\.5/);
+});
+
+// ---- allocationSummary --------------------------------------------------
+// The allocation editor's running total (SCENARIOS Y-b). Exact
+// decimal-string arithmetic throughout: parseFloat is what these tests exist
+// to keep out.
+test('a matching allocation reads as matching, whatever the trailing zeros', () => {
+  const s = allocationSummary(['60', '40.00'], '100');
+  assert.equal(s.total, '100');
+  assert.equal(s.status, 'match');
+  assert.equal(s.difference, '0');
+  assert.equal(s.text, 'Allocated: 100 of 100 — matches.');
+});
+
+test('a shortfall names the amount short, not just that it is wrong', () => {
+  const s = allocationSummary(['100', '100', '10'], '300');
+  assert.equal(s.status, 'short');
+  assert.equal(s.difference, '90');
+  assert.equal(s.text, 'Allocated: 210 of 300 — 90 short.');
+});
+
+test('an over-allocation names the excess', () => {
+  const s = allocationSummary(['100', '120'], '200');
+  assert.equal(s.status, 'over');
+  assert.equal(s.difference, '20');
+  assert.equal(s.text, 'Allocated: 220 of 200 — 20 over.');
+});
+
+test('50 eight-decimal crypto quantities sum exactly (float would drift)', () => {
+  const rows = new Array(50).fill('0.00000001');
+  const s = allocationSummary(rows, '0.0000005');
+  assert.equal(s.total, '0.0000005');
+  assert.equal(s.status, 'match');
+  // The float answer: 50 * 1e-8 is 5.000000000000001e-7, not 5e-7.
+  assert.notEqual(String(rows.reduce((a, b) => a + Number(b), 0)), '5e-7');
+});
+
+test('the 50-parcel reproduction: one row typed 10 instead of 100', () => {
+  const rows = new Array(50).fill('100');
+  rows[17] = '10';
+  const s = allocationSummary(rows, '5000');
+  assert.equal(s.total, '4910');
+  assert.equal(s.text, 'Allocated: 4910 of 5000 — 90 short.');
+});
+
+test('a target with nothing allocated yet is stated, not flagged as an error', () => {
+  const s = allocationSummary(['', ''], '100');
+  assert.equal(s.status, 'pending');
+  assert.equal(s.text, 'Allocated: 0 of 100 so far.');
+  // …but a row that is there and wrong flips it straight to a shortfall.
+  assert.equal(allocationSummary(['1'], '100').status, 'short');
+  assert.equal(allocationSummary(['x'], '100').status, 'short');
+});
+
+test('blank rows are skipped, never counted as zero or as NaN', () => {
+  const s = allocationSummary(['', '  ', '100', null, undefined], '100');
+  assert.equal(s.status, 'match');
+  assert.equal(s.counted, 1);
+  assert.equal(s.invalid, 0);
+  assert.ok(!/NaN/.test(s.text), s.text);
+});
+
+test('a partially typed row is reported, not silently dropped', () => {
+  const s = allocationSummary(['100', '1.'], '200');
+  assert.equal(s.invalid, 1);
+  assert.equal(s.total, '100');
+  assert.equal(s.text, 'Allocated: 100 of 200 — 100 short. 1 row(s) not a valid quantity.');
+});
+
+test('with no required figure the line reports the running total alone', () => {
+  const none = allocationSummary([], null);
+  assert.equal(none.status, 'none');
+  assert.equal(none.required, null);
+  assert.equal(none.text, 'Nothing allocated yet.');
+  const some = allocationSummary(['12.5', '7.5'], '');
+  assert.equal(some.status, 'none');
+  assert.equal(some.total, '20');
+  assert.equal(some.text, 'Allocated: 20 across 2 parcel(s).');
+});
+
+test('an empty required figure never renders as NaN or undefined', () => {
+  ['', null, undefined, 'abc'].forEach(function (req) {
+    const s = allocationSummary(['1'], req);
+    assert.equal(s.status, 'none');
+    assert.ok(!/NaN|undefined/.test(s.text), String(req) + ': ' + s.text);
+  });
 });

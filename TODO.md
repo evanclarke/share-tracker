@@ -235,7 +235,31 @@ message stays until the user has actually dealt with it.
 
 ## SCENARIOS Y-b — a 50-parcel allocation is refused without saying what it adds up to
 
-- [ ] Name the sum in the refusal, and show a running total in the allocation editor.
+- [x] Name the sum in the refusal, and show a running total in the allocation editor. Both halves
+      done. Server: `SellError::AllocationMismatch` now carries `{ allocated, quantity }` and its
+      `From<SellError> for ApiError` arm answers `the allocations sum to {allocated}, not the
+      {quantity} units sold` — the exact wording `reports::net_capital_gain` already uses on the
+      what-if path, and it reads correctly for the buy-back participation that raises the same
+      error (its own body field is `units`). `rights_sale`'s equivalent split in two, because a
+      negative row can sum correctly while being nonsense: `AllocationsDontSum { allocated, units }`
+      → `the allocations sum to {allocated}, not the {units} rights sold` (an empty list falls out
+      here as a nil sum), and a new `AllocationNotPositive` → `each anchoring parcel allocation must
+      be for a positive number of rights`. `transfer` confirmed to have no sum invariant — its
+      Sell's quantity *is* the allocations' own sum. Client: `allocationEditor` renders a live
+      running total over a new pure `util.js` `allocationSummary()` (exact decimal-string
+      arithmetic via `addDecimalStrings`, never parseFloat — 50 eight-decimal crypto rows are unit
+      tested), muted while nothing is allocated yet, green on a match, amber on a shortfall/excess,
+      and it names the amount. Callers: the Sell form passes `requiredTotal` reading its
+      `quantity`; the two allocation-taking actions declare `requiredField: 'units'` in `config.js`
+      and `viewAction` turns that into the same closure; the Transfer's two editors deliberately
+      declare none (no target exists) and show the running total alone. Driven at 50 rows: before,
+      `HTTP 422: the parcel allocations do not sum to the sell quantity` with no total on screen;
+      after, `Allocated: 4910 of 5000 — 90 short.` live in the editor and `HTTP 422: the
+      allocations sum to 4910, not the 5000 units sold` from the server. Tests: rejection-wording
+      tests in `sell.rs`/`rights_sale.rs`/`buyback_participation.rs`, 9 `util.test.js` cases,
+      `web::tests::allocation_editors_show_a_running_total`; `docs/API.md` updated in three places.
+      NOTE: the reproduction DB no longer held the finding's 50 open parcels — an earlier session's
+      successful 5000-unit Sell (trade 204) had consumed them; deleted it to restore the state.
 
 Y-03 driven with 50 open parcels on one listing. The editor itself holds up: "+ Add allocation" 49
 times took 413 ms, all 50 rows render, each parcel select carries all 50 options labelled

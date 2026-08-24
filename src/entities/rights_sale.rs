@@ -161,9 +161,18 @@ pub enum SellRightsError {
     /// The sale date precedes the issue's record date.
     #[error("the sale date is before the issue's record date")]
     BeforeRecordDate,
-    /// The allocations are empty, non-positive, or do not sum to `units`.
-    #[error("the parcel allocations must be positive and sum to the rights sold")]
-    AllocationsDontSum,
+    /// An allocation anchors a zero or negative number of rights. Split out
+    /// from [`SellRightsError::AllocationsDontSum`] so that one can name its
+    /// figures: a negative row can sum correctly while being nonsense, so
+    /// "they sum to N" would be the wrong thing to say about it.
+    #[error("each anchoring parcel allocation must be for a positive number of rights")]
+    AllocationNotPositive,
+    /// The allocations (none at all counting as nil) do not sum to `units`.
+    /// Both figures are carried so the refusal can name them — see
+    /// [`crate::entities::sell::SellError::AllocationMismatch`], the same
+    /// wording on the Sell side (SCENARIOS Y-b).
+    #[error("the parcel allocations sum to {allocated}, not the rights sold {units}")]
+    AllocationsDontSum { allocated: Decimal, units: Decimal },
     /// An allocation's parcel is missing, not a Buy/DRP of the issue's
     /// listing, or not held before the record date (so it earned no rights).
     #[error(
@@ -201,8 +210,11 @@ impl From<SellRightsError> for ApiError {
             SellRightsError::BeforeRecordDate => {
                 ApiError::unprocessable("the sale date is before the issue's record date")
             }
-            SellRightsError::AllocationsDontSum => ApiError::unprocessable(
-                "the parcel allocations must be positive and sum to the rights sold",
+            SellRightsError::AllocationNotPositive => ApiError::unprocessable(
+                "each anchoring parcel allocation must be for a positive number of rights",
+            ),
+            SellRightsError::AllocationsDontSum { allocated, units } => ApiError::unprocessable(
+                format!("the allocations sum to {allocated}, not the {units} rights sold"),
             ),
             SellRightsError::NotAnOriginalParcel => ApiError::unprocessable(
                 "an allocated parcel is not a Buy/DRP of the issue's listing held before the \
@@ -245,11 +257,18 @@ pub async fn db_sell_rights(
     if rights_cost < Decimal::ZERO {
         return Err(SellRightsError::NegativeRightsCost);
     }
-    if body.allocations.is_empty()
-        || body.allocations.iter().any(|a| a.units <= Decimal::ZERO)
-        || body.allocations.iter().map(|a| a.units).sum::<Decimal>() != body.units
-    {
-        return Err(SellRightsError::AllocationsDontSum);
+    if body.allocations.iter().any(|a| a.units <= Decimal::ZERO) {
+        return Err(SellRightsError::AllocationNotPositive);
+    }
+    // No allocations at all sums to nil, which `body.units` (already checked
+    // positive above) can never equal — so the empty case falls out here,
+    // named with its figures like any other shortfall.
+    let allocated: Decimal = body.allocations.iter().map(|a| a.units).sum();
+    if allocated != body.units {
+        return Err(SellRightsError::AllocationsDontSum {
+            allocated,
+            units: body.units,
+        });
     }
 
     let mut tx = write_tx(pool).await?;
@@ -829,11 +848,23 @@ mod tests {
         let mut bad = body(d(2024, 7, 20), "10", 1);
         bad.allocations.clear();
         let err = db_sell_rights(&pool, 10, &bad).await;
-        assert!(matches!(err, Err(SellRightsError::AllocationsDontSum)));
+        assert!(matches!(
+            err,
+            Err(SellRightsError::AllocationsDontSum { .. })
+        ));
         let mut bad = body(d(2024, 7, 20), "10", 1);
         bad.allocations[0].units = "9".parse().unwrap();
         let err = db_sell_rights(&pool, 10, &bad).await;
-        assert!(matches!(err, Err(SellRightsError::AllocationsDontSum)));
+        assert!(matches!(
+            err,
+            Err(SellRightsError::AllocationsDontSum { .. })
+        ));
+        // A non-positive anchoring row is its own rejection: it could sum
+        // correctly while being nonsense (SCENARIOS Y-b).
+        let mut bad = body(d(2024, 7, 20), "10", 1);
+        bad.allocations[0].units = "-10".parse().unwrap();
+        let err = db_sell_rights(&pool, 10, &bad).await;
+        assert!(matches!(err, Err(SellRightsError::AllocationNotPositive)));
 
         // Anchoring to a missing parcel, or to one dated on the record date
         // (ex-rights), is rejected.
@@ -1004,5 +1035,58 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(n, 0);
+    }
+
+    /// The anchoring-allocation refusals name their figures rather than
+    /// restating the rule, so a wrong row is found by reading the message and
+    /// not by adding the rows up (SCENARIOS Y-b). Same shape as the Sell
+    /// side's `the allocations sum to …, not the … units sold`.
+    #[tokio::test]
+    async fn api_allocation_refusals_name_the_sum_and_what_it_should_be() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        insert_buy(&pool, 1, d(2024, 1, 15), "1000").await;
+        insert_rights_issue(&pool, 10, d(2024, 7, 1)).await;
+        let app = ApiClient::over(router().with_state(pool.clone()));
+
+        let short = serde_json::json!({
+            "date": "2024-07-20", "units": "10",
+            "allocations": [{ "purchase_trade_id": 1, "units": "9" }],
+        });
+        let resp = app.post("/corporate_actions/10/sell_rights", &short).await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            resp.text(),
+            "the allocations sum to 9, not the 10 rights sold"
+        );
+
+        // No allocations at all is the same refusal, with a nil sum.
+        let none = serde_json::json!({
+            "date": "2024-07-20", "units": "10", "allocations": [],
+        });
+        let resp = app.post("/corporate_actions/10/sell_rights", &none).await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            resp.text(),
+            "the allocations sum to 0, not the 10 rights sold"
+        );
+
+        // A non-positive row is its own message: it can sum correctly while
+        // being nonsense, so naming the sum would say the wrong thing.
+        let negative = serde_json::json!({
+            "date": "2024-07-20", "units": "10",
+            "allocations": [
+                { "purchase_trade_id": 1, "units": "-5" },
+                { "purchase_trade_id": 1, "units": "15" },
+            ],
+        });
+        let resp = app
+            .post("/corporate_actions/10/sell_rights", &negative)
+            .await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            resp.text(),
+            "each anchoring parcel allocation must be for a positive number of rights"
+        );
     }
 }

@@ -673,7 +673,11 @@ async function viewSellForm(id) {
   }
   const allocEditor = allocationEditor(validParcelOptions(), existingAllocs, {
     hint: 'Allocations must sum exactly to the sell quantity. Each parcel must be a Buy/DRP with enough remaining units, in the chosen listing and holding account.',
+    // The figure the rows must reach: the Sell's own quantity, read live so
+    // the running total follows an edit of either side.
+    requiredTotal: function () { return form.querySelector('[name="quantity"]').value; },
   });
+  form.querySelector('[name="quantity"]').addEventListener('input', function () { allocEditor.refreshTotal(); });
   form.querySelector('[name="listing_id"]').addEventListener('change', function () { allocEditor.setOptions(validParcelOptions()); });
   form.querySelector('[name="holding_account_id"]').addEventListener('change', function () { allocEditor.setOptions(validParcelOptions()); });
 
@@ -760,7 +764,10 @@ async function viewTransferForm() {
   for (const f of fields) form.appendChild(await buildFieldInput(f, null, false));
 
   // The parcels to move — the same shape as a Sell's allocations (the shared
-  // editor); partial parcels allowed. Narrowed to open parcels matching the
+  // editor); partial parcels allowed. Neither this editor nor the fee one
+  // below declares a `requiredTotal`: a transfer's Sell quantity *is* the
+  // allocations' own sum (`entities::transfer`), so there is no figure they
+  // could be short of — their running total just reports what is being moved. Narrowed to open parcels matching the
   // chosen listing + source account — the two things the server itself
   // requires a parcel to match (`entities::transfer`) — re-filtered live as
   // either field changes.
@@ -878,8 +885,18 @@ async function viewAction(action, id) {
         return true;
       });
     }
-    allocEditor = allocationEditor(currentParcelOptions(), null, action.allocations);
+    // `requiredField` names the action field the rows must sum to (the
+    // buy-back's / rights sale's `units`) — turned into the editor's live
+    // `requiredTotal` so its running total is measured against it.
+    const labels = Object.assign({}, action.allocations);
+    if (labels.requiredField) {
+      labels.requiredTotal = function () { return form.querySelector('[name="' + labels.requiredField + '"]').value; };
+    }
+    allocEditor = allocationEditor(currentParcelOptions(), null, labels);
     form.appendChild(allocEditor.section);
+    if (labels.requiredField) {
+      form.querySelector('[name="' + labels.requiredField + '"]').addEventListener('input', function () { allocEditor.refreshTotal(); });
+    }
     [filter.listingField, filter.accountField].forEach(function (name) {
       if (!name) return;
       form.querySelector('[name="' + name + '"]').addEventListener('change', function () { allocEditor.setOptions(currentParcelOptions()); });
