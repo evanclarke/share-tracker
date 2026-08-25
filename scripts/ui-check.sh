@@ -181,10 +181,13 @@ shot_file=""
 dom_ready() { tail -c 64 "$dump" 2>/dev/null | LC_ALL=C grep -qa '</html>'; }
 shot_ready() { tail -c 8 "$shot_file" 2>/dev/null | LC_ALL=C grep -qa 'IEND'; }
 
-# chrome_run READY_FN CHROME_ARG... — 0 once the artifact is complete, 1 if
-# Chrome exited without producing one, 124 if the ceiling elapsed first.
-chrome_run() {
+# chrome_attempt READY_FN CHROME_ARG... — one render: 0 once the artifact is
+# complete, 1 if Chrome exited without producing one, 124 if the ceiling
+# elapsed first.
+chrome_attempt() {
   local ready="$1"; shift
+  # A retried screenshot must not poll the previous attempt's partial file.
+  [ -n "$shot_file" ] && rm -f "$shot_file"
   "$chrome" "${chrome_common[@]}" "$@" >"$dump" 2>/dev/null &
   local cpid=$!
   local deadline=$(( SECONDS + chrome_timeout ))
@@ -206,6 +209,32 @@ chrome_run() {
     wait "$cpid" 2>/dev/null || true
     pkill -9 -f "$profile" 2>/dev/null || true
   } 2>/dev/null
+  return $rc
+}
+
+# chrome_run READY_FN CHROME_ARG... — same contract as chrome_attempt, but a
+# ceiling elapsing (124) buys one retry.
+#
+# The *first* Chrome launch on a machine costs far more than the ones after it:
+# on CI the opening route of scripts/ui-smoke.sh repeatedly ran to the 23s
+# ceiling and produced no document at all, while every later route — a fresh
+# temp profile each time, so not profile warmth — rendered in about 1.2s. It
+# failed the run outright on 2026-08-21 and 2026-08-25, and squeaked in just
+# under the ceiling on 2026-08-22. Paying that cold start once inside a route's
+# own budget makes the opening assertion of any run a coin toss.
+#
+# Only 124 is retried, and only once. The failure class this script exists to
+# catch — a broken /static module route, a load-time exception — *completes* its
+# render and fails the caller's marker assertions (rc 0), so it is not retried
+# and not slowed down; a genuinely blocking render still fails, just twice over.
+chrome_run() {
+  local rc=0
+  chrome_attempt "$@" || rc=$?
+  if [ "$rc" = 124 ]; then
+    echo "ui-check: render did not complete within ${chrome_timeout}s — retrying once" >&2
+    rc=0
+    chrome_attempt "$@" || rc=$?
+  fi
   return $rc
 }
 
