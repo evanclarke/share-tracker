@@ -10,107 +10,12 @@ findings are all closed in DONE.md), except where a section's heading names anot
 (e.g. REQUIREMENTS, SCENARIOS). Each section records one finding; sections land in DONE.md as they
 are fixed or decided.
 
-**Open: 16 sections from the 2026-08-25 code review** — a whole-codebase pass over `src`
-(business-logic errors, code quality, duplication), distinct from the SCENARIOS passes below, all of
-which remain closed. Every finding was adversarially verified against the code at `f171999`; one
-(the rights-exercise FX default) is marked plausible rather than confirmed. Sections are ordered
-correctness first, then efficiency/quality. Four sections — the scrip-exchange cash component, the
-rights sale, the crypto transfer fee, and the rights exercise — are one family (a silent
-`fx_rate = 1` default where the ESS-vest path refuses with a 422) and should share one fix shape.
-
-## A rollover carries AMIT reductions into the replacement parcel unbounded by its own date (code review 2026-08-25)
-(`rollover::CostBaseInputs::load` (src/domain/rollover.rs:60) passes `None` to
-`db_cost_base_reduction_events`, and `Held::AsAt`'s `up_to` bounds only ROC events
-(src/domain/cost_base.rs:622-630) — so `carried_cost_base`'s documented "bounded so an adjustment
-dated after the operation does not reach it" is false for AMIT. A transfer, scrip exchange or
-demerger back-dated before an already-entered AMMA statement's year end folds that statement's
-per-unit reduction into the replacement Buy's cost base; regenerating the statement's adjustments
-then writes the row against the replacement parcel too, applying the reduction twice.
-`UnitsCarriedIntoReplacement` guards only the opposite ordering, so no write-time check refuses the
-state. Sibling of the next section — two faces of the same missing date/provenance bound.)
-- [ ] Reproduce: parcel of 1000 units / $10,000 cost; FY2025 AMMA statement ($1/unit, year end
-  2025-06-30) entered and adjustments generated; transfer dated 2025-05-01 → the replacement Buy
-  carries $9,000 while `open_parcels::load` on the same date says $10,000; regenerating the
-  statement's adjustments reduces the replacement to $8,000 — the reduction applied twice
-- [ ] Fix: bound the AMIT events `carried_cost_base` folds in by the operation's date the way ROC
-  events already are, or refuse the back-dated operation the way the opposite ordering already is —
-  decide together with the sibling section
-- [ ] Tests: the reproduction ends with the reduction applied exactly once, and `carried_cost_base`
-  agreeing with `open_parcels::load` as at the operation date
-- [ ] Docs sync if the fix adds a refusal: `docs/API.md` 422 catalogue
-
-## A transfer's closing Sell counts as a disposal in the AMIT held/spill split (code review 2026-08-25)
-(`disposed_by_year_end` (src/entities/amit_adjustment.rs:522) sums every `parcel_allocations` row
-dated on or before the statement's year end with no transfer/provenance filter —
-`open_parcels::db_units_sold` (src/domain/open_parcels.rs:80-87) carries none — so a transfer's
-zero-proceeds closing Sell, an account move rather than a disposal, shifts a partial-coverage AMIT
-row's held/spill split in `realised_gains` and retroactively changes an *earlier real Sell's*
-computed cost base. The exclude-`transfer_id` filter is the one `realised_gains`,
-`net_capital_gain`, `wash_sales` and `franking_at_risk` all already apply (the N-08 rule).)
-- [ ] Reproduce: parcel of 1000 units; real Sell of 400 on 2025-03-01; FY2025 statement row covers
-  the remaining 600; a transfer of those 600 dated 2025-05-01 pushes `disposed_by_year_end` from
-  400 to 1000, so `realised_gains` reclassifies the parcel as fully disposed and spills the
-  reduction onto the March allocation — the March Sell's realised gain silently rises, while the
-  same reduction was also carried into the replacement parcel (previous section)
-- [ ] Fix: exclude transfer-provenance closing Sells from `disposed_by_year_end`; audit
-  `db_units_sold`'s other callers (performance, net-capital-gain per-cohort walk) for whether each
-  wants disposals or all consumptions, and make the distinction explicit at the API rather than at
-  each call site
-- [ ] Tests: the reproduction's March Sell gain unchanged by the transfer; a real Sell still counts
-
-## The scrip-exchange cash component converts at a hardcoded fx_rate of 1 (code review 2026-08-25)
-(src/entities/scrip_exchange.rs:223 writes the cash-component closing Sell with
-`fx_rate = Decimal::ONE` and the exchange endpoint takes no body, so foreign-currency cash
-consideration converts at parity in the gains reports whenever the exchange month's RBA rate is
-missing — `FxOverride::Fallback(1)` — with no error and no way to override. RBA rates publish only
-after month end, so the gap always exists for current-month events. This is the exact silent-parity
-failure the ESS-vest path refuses with a 422. `fx_coverage` flags the row as `missing_rate`, but
-the tax path itself stays silent. First of the fx-default family named in the preamble.)
-- [ ] Reproduce: a ScripForScrip action with `scrip_cash_per_unit` on a USD listing, exchanged
-  before the month's rate is imported → realised gains price US$100,000 of cash as A$100,000
-- [ ] Fix (family-wide shape): refuse the operation 422 when the listing is non-AUD and the month's
-  rate is missing (the ess_vest treatment), or take an explicit `fx_rate` in a body — same decision
-  for all four family sections
-- [ ] Tests: the refusal (or override) plus the happy path once the rate exists
-- [ ] Docs sync: `docs/API.md` 422 catalogue / request body; README Known limitations if any gap
-  remains documented rather than fixed
-
-## A foreign-currency rights sale defaults fx to parity and no report ever flags it (code review 2026-08-25)
-(src/entities/rights_sale.rs:447 stores `fx_rate = body.fx_rate.unwrap_or(Decimal::ONE)` with no
-AUD-currency guard, and `rights_sales` rows are absent from `fx_coverage`'s seven-source scan —
-neither scanned nor in its deliberately-omitted list — so a foreign-currency rights sale in a
-missing-rate month converts proceeds at parity with **no flag anywhere in the system**, unlike the
-other default-1 sites which at least surface in `fx_coverage`. Fx-default family.)
-- [ ] Reproduce: a USD rights issue's retail premium recorded with `fx_rate` omitted, dated in a
-  month with no imported RBA rate → realised_gains.rs:647 books USD proceeds 1:1 as AUD, and
-  `GET /reports/fx_coverage` shows nothing
-- [ ] Fix: add `rights_sales` to `fx_coverage`'s source list regardless of the family decision;
-  then apply the family fix (guard/422 or required rate for non-AUD listings)
-- [ ] Tests: fx_coverage surfaces the row; the family guard's refusal
-- [ ] Docs sync: `docs/API.md` fx_coverage source list
-
-## The crypto transfer's network-fee Sell defaults fx to parity (code review 2026-08-25)
-(src/entities/transfer.rs:582 defaults `body.fee_fx_rate.unwrap_or(Decimal::ONE)` on a Sell that
-carries no `transfer_id` and is therefore a *real disposal* in the realised-gains and
-net-capital-gain reports — a missing month rate silently converts the fee disposal at parity where
-every `FxOverride::None` conversion fails loudly with `MissingRate`. `fx_coverage` flags the row,
-but the tax path stays silent. Fx-default family.)
-- [ ] Reproduce: transfer of a USD-quoted crypto listing with `fee_allocations` set and
-  `fee_fx_rate` omitted, in a missing-rate month → the fee Sell's USD proceeds book 1:1 as AUD
-- [ ] Fix: the family decision (guard/422 for non-AUD when the rate is missing, or required rate)
-- [ ] Tests + `docs/API.md` sync per the fix
-
-## A rights exercise with fx omitted costs the parcel at parity in the missing-rate window (code review 2026-08-25)
-(src/entities/rights_exercise.rs:386 stores `body.fx_rate.unwrap_or(Decimal::ONE)` with no
-validation tying the default to AUD-quoted listings. Narrower than its siblings — the ATO monthly
-rate wins once imported (`ParcelRow::fx_override`) and `fx_coverage` flags the row meanwhile — but
-inside the missing-rate window cost-base reports still convert via `Fallback(1)` silently where
-ess_vest refuses with 422. Verifier verdict: **plausible**, not confirmed — re-derive the mechanism
-before fixing (the U lesson). Fx-default family.)
-- [ ] Re-derive: confirm the `Fallback(1)` path is actually reachable for a rights-exercise Buy in
-  a missing-rate month, with a failing test, before changing anything
-- [ ] Fix: the family decision, if confirmed; otherwise record why not reproducible and close
-- [ ] Tests + docs sync per the outcome
+**Open: 9 sections — 7 from the 2026-08-25 code review, plus 2 follow-ups.** Sixteen sections were
+recorded from that review (a whole-codebase pass over `src` — business-logic errors, quality,
+duplication — every finding adversarially verified against `f171999`). Nine are closed and archived
+in [`DONE/reviews.md`](DONE/reviews.md): the AMIT×rollover pair (`44b8a6b`), the four-endpoint
+fx-parity family (`1341068`), and the three web findings (`c190871`). The remaining seven are
+below, with two follow-up sections recorded from observations made while fixing.
 
 ## The tax report's per-parcel `capped` flags apply events in kind order, the CGT walk in date order (code review 2026-08-25)
 (`adjustment_detail` (src/domain/cost_base.rs:755) computes its per-row `capped` flags by applying
@@ -149,14 +54,6 @@ the file never types `.begin()`, and `reports/period_performance.rs` is absent f
 so the archived worksheet no longer explains its own quantity. Cosmetic: informational-only row.)
 - [ ] Fix: align the boundary (`<=`) so the same-day split emits no row; test with a 2-for-1 split
   effective on the Buy's own date — unit count unchanged and no rebase row printed
-
-## The performance chart's axis labels format money by browser locale (code review 2026-08-25)
-(src/web/chart.js:107 renders y-axis ticks as `Math.round(v).toLocaleString()` — grouping and
-separator from the browser locale — while the tooltip in the same file and every table cell go
-through util.js's exact-string formatting. In a de-DE browser the axis reads `1.234` where the
-tooltip reads `1,234`; a change to the app's money-display rule in util.js also skips these labels.)
-- [ ] Fix: format the tick labels through util.js's shared helpers (whole-dollar rounding for ticks
-  can stay, but grouping must be the app's own); Node test in `src/web/*.test.js` pins it
 
 ## The Annual Tax Report runs the realised-gains pipeline twice per request (code review 2026-08-25)
 (`db_tax_report` (src/reports/tax_report.rs:1512) calls `disposals_section` → `db_realised_gains_on`
@@ -198,25 +95,36 @@ raw instead of calling `infra::fx`, so a change to FX resolution semantics silen
 - [ ] Tests: existing behaviour pinned through the refactor (404 wording via the shared
   missing-row test)
 
-## JOB_DESC and tradeOrigin are unpinned hand-maintained parallels of Rust-side lists (code review 2026-08-25)
-(web/app.js:1454's `JOB_DESC` mirrors the scheduler registry's job names; web/util.js:486's
-`tradeOrigin` mirrors the trade-provenance columns. Neither has a pinning test, and a
-hand-maintained list has been the actual bug for the sixth and seventh time in this project
-(AA-d found three provenance transcriptions with one already wrong). A new job or provenance
-column ships without its JS counterpart and the UI shows an unlabelled job / mis-attributed origin
-while the suite stays green.)
-- [ ] Add pinning tests: each Rust-side name (registry job names; provenance columns) asserted
-  present in the served bundle (`app_js_body`), the same way other UI items are pinned — or better,
-  derive the JS from one source where feasible
-- [ ] While there: check for other unpinned Rust↔JS parallel lists
+## net_capital_gain's C2 branch can treat a rollover cohort as a C2-triggering disposal (code review 2026-08-25 follow-up)
+(Observed while fixing the held/spill finding, `44b8a6b`. In the per-cohort E10/G1/C2 walk
+(src/reports/net_capital_gain.rs), the C2 branch treats any cohort with a `disposed_on` between a
+ROC event's record and payment dates as a C2-triggering disposal; a rollover cohort in that window
+could produce a phantom C2 gain while the replacement parcel also takes the G1 reduction.
+Distinguishing real-disposal cohorts there would need per-allocation provenance in the cohort read.
+This is an unverified observation from the fixing pass — re-derive it with a failing reproduction
+first, per the U lesson.)
+- [ ] Reproduce: a transfer (or scrip/demerger) dated between a ROC's record and payment dates;
+  assert whether a C2 gain is raised on the rollover cohort while the replacement parcel also takes
+  the G1 reduction
+- [ ] Fix if confirmed; if not reproducible, record why and close
+- [ ] Tests + docs sync per the outcome
 
-## SELL_FIELDS in app.js has drifted from config.js (code review 2026-08-25)
-(web/app.js:574's `SELL_FIELDS` is a hand-maintained copy of the Sell field configuration that has
-already drifted — a stale `settlement_date` hint and a missing `fx_rate` hint — instead of deriving
-from the single `ENTITIES` config entry. Same failure family as the previous section.)
-- [ ] Fix: derive `SELL_FIELDS` from the config.js entry (or delete it in favour of the config);
-  the two current drifts corrected by construction
-- [ ] Tests: a pin that a Sell field defined in config.js cannot be shadowed by a stale copy
+## config.js's sel() option lists and the health banner's field names are unpinned mirrors of Rust-side definitions (code review 2026-08-25 follow-up)
+(Found by the JOB_DESC/tradeOrigin fix's sweep, `c190871`. config.js `sel(…)` option lists mirror
+CHECK-constrained Rust enums with no programmatic pin: `security_type`, `cost_base_rule`,
+`income_type`, `expense_type`, `residual_handling`, `action_type`, `worthless_event` — the
+`action_type` set *is* pinned (`corporate_action_form_is_split_by_type`) but by a hand-written list
+inside the test, a third copy. No iterable Rust const of the variant names exists (only per-variant
+match arms and the migration CHECK), so a real derivation needs a new Rust const or a
+schema-CHECK-parsing pin. Separately, the health banner's field names in app.js are pinned in
+`health_banner_ui_present` by hand-written strings, not derived from `reports::health`'s serde
+field names. chart.js's `fyStart` deliberately restates `domain::tax_year`'s July rule (commented,
+unit-tested) — an inherent no-build-step mirror, acceptable as is.)
+- [ ] Pin each `sel()` option list to its Rust enum / schema CHECK programmatically (a new Rust
+  const per enum, or a pin that parses the live schema's CHECK), replacing the hand-written
+  `action_type` list in the existing test rather than adding beside it
+- [ ] Derive the health-banner pin from `reports::health`'s serde field names
+- [ ] Tests are the deliverable; no docs change expected
 
 **Every section of SCENARIOS.md — A through AA — is now driven and every finding they raised is
 closed** in the `DONE/*.md` archive. Section **S. Settlement, holidays, and dates** was driven 2026-08-22 (`d501408`) and its

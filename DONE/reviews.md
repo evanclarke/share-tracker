@@ -4585,3 +4585,252 @@ date can never be forgotten at one of the two call sites.
   doc sentences.
 - Gates: `cargo build`, `cargo test` (1854 passed), `cargo fmt --check`, `cargo clippy --all-targets
   -- -D warnings` all clean.
+
+## A rollover carries AMIT reductions into the replacement parcel unbounded by its own date (code review 2026-08-25)
+(`rollover::CostBaseInputs::load` (src/domain/rollover.rs:60) passes `None` to
+`db_cost_base_reduction_events`, and `Held::AsAt`'s `up_to` bounds only ROC events
+(src/domain/cost_base.rs:622-630) — so `carried_cost_base`'s documented "bounded so an adjustment
+dated after the operation does not reach it" is false for AMIT. A transfer, scrip exchange or
+demerger back-dated before an already-entered AMMA statement's year end folds that statement's
+per-unit reduction into the replacement Buy's cost base; regenerating the statement's adjustments
+then writes the row against the replacement parcel too, applying the reduction twice.
+`UnitsCarriedIntoReplacement` guards only the opposite ordering, so no write-time check refuses the
+state. Sibling of the next section — two faces of the same missing date/provenance bound.)
+- [x] Reproduce: parcel of 1000 units / $10,000 cost; FY2025 AMMA statement ($1/unit, year end
+  2025-06-30) entered and adjustments generated; transfer dated 2025-05-01 → the replacement Buy
+  carries $9,000 while `open_parcels::load` on the same date says $10,000; regenerating the
+  statement's adjustments reduces the replacement to $8,000 — the reduction applied twice
+- [x] Fix: bound the AMIT events `carried_cost_base` folds in by the operation's date the way ROC
+  events already are, or refuse the back-dated operation the way the opposite ordering already is —
+  decide together with the sibling section
+- [x] Tests: the reproduction ends with the reduction applied exactly once, and `carried_cost_base`
+  agreeing with `open_parcels::load` as at the operation date
+- [x] Docs sync if the fix adds a refusal: `docs/API.md` 422 catalogue — no refusal was added; the
+  operation sections instead gained the counted-as-at-the-operation-date clarifications below
+
+**Resolution (2026-08-25, `44b8a6b`): the bound lives at load time.** `CostBaseInputs` stores the
+operation date once (`up_to`) and `load(conn, listing_id, up_to)` passes it to
+`db_cost_base_reduction_events`, mirroring how `open_parcels::load` bounds the same events — not an
+in-pipeline bound, because a statement whose year end postdates a *disposal* must still spill onto
+sold units (`DisposedOn` semantics), so an in-pipeline `up_to` bound on AMIT events would be wrong;
+`Held`'s two variants are untouched. `carried_cost_base` and `open_parcels` dropped their date
+params and use the stored one, so the three bounds can no longer be given different dates. Call
+sites updated: scrip exchange, demerger, transfer, and `reports::rollover_consistency`'s recompute
+— a fourth caller the finding did not list. The reproductions failed exactly as predicted before
+the fix (the transfer carried 9,000 for 10,000; the demerger's 80/20 legs 7,200/1,800 for
+8,000/2,000). Tests:
+`domain::rollover::tests::a_statement_year_ending_after_the_operation_does_not_reach_the_carried_cost_base`
+(the section's scenario end-to-end — carry 10,000, agreement with `open_parcels::load` at the
+operation date, and after re-entering the statement's row against the replacement the live adjusted
+cost base is 9,000: applied exactly once) and
+`entities::demerger::tests::a_statement_year_ending_after_the_demerger_does_not_reach_the_carried_cost_base`
+(the shared-machinery exposure; scrip exchange shares the identical `carried_cost_base` line). One
+existing test's shared fixture had unknowingly encoded the buggy ordering
+(`db_an_adjustment_entered_before_a_rollover_carries_into_the_replacement`, transfer dated before
+the year end) — re-dated with comments, intent and figure preserved. docs/API.md: the transfer,
+scrip-exchange and demerger sections now state that adjustments are counted as at the operation
+date — a statement for a year ending after it reaches the replacement through its own row, never
+both.
+
+## A transfer's closing Sell counts as a disposal in the AMIT held/spill split (code review 2026-08-25)
+(`disposed_by_year_end` (src/entities/amit_adjustment.rs:522) sums every `parcel_allocations` row
+dated on or before the statement's year end with no transfer/provenance filter —
+`open_parcels::db_units_sold` (src/domain/open_parcels.rs:80-87) carries none — so a transfer's
+zero-proceeds closing Sell, an account move rather than a disposal, shifts a partial-coverage AMIT
+row's held/spill split in `realised_gains` and retroactively changes an *earlier real Sell's*
+computed cost base. The exclude-`transfer_id` filter is the one `realised_gains`,
+`net_capital_gain`, `wash_sales` and `franking_at_risk` all already apply (the N-08 rule).)
+- [x] Reproduce: parcel of 1000 units; real Sell of 400 on 2025-03-01; FY2025 statement row covers
+  the remaining 600; a transfer of those 600 dated 2025-05-01 pushes `disposed_by_year_end` from
+  400 to 1000, so `realised_gains` reclassifies the parcel as fully disposed and spills the
+  reduction onto the March allocation — the March Sell's realised gain silently rises, while the
+  same reduction was also carried into the replacement parcel (previous section)
+- [x] Fix: exclude transfer-provenance closing Sells from `disposed_by_year_end`; audit
+  `db_units_sold`'s other callers (performance, net-capital-gain per-cohort walk) for whether each
+  wants disposals or all consumptions, and make the distinction explicit at the API rather than at
+  each call site
+- [x] Tests: the reproduction's March Sell gain unchanged by the transfer; a real Sell still counts
+
+**Resolution (2026-08-25, `44b8a6b`): every caller now states which question it asks.**
+`open_parcels::db_units_sold` takes a `Counted` enum — `AllConsumptions` vs `DisposalsOnly` — and
+`DisposalsOnly` excludes **all three** rollover provenance columns, not just `transfer_id`:
+generation's reach-through treats scrip and demerger closing Sells as units-carried-forward too, so
+counting any of them as disposed would apply the same reduction twice (spill at the source + row at
+the replacement). The SQL filter is built from `rollover::PROVENANCE_COLUMNS` via the new
+`rollover::no_provenance_sql` — no hand-maintained list. Callers classified at their call sites
+with rationale comments: `open_parcels::load` stays `AllConsumptions` (a closing Sell empties its
+source parcel; the units reappear as replacement rows in the same read), as do
+`reports::performance` (remaining-units per parcel; less would double-count against the walked
+replacement Buys), `net_capital_gain`'s per-cohort walk (units carried away stop accruing this
+parcel's events at the operation date exactly as sold ones do; their later chain runs at the
+replacement) and the AMIT cross-check's allowance band (deliberately counts rollover departures,
+SCENARIOS Z-g); `db_cost_base_reduction_events` is the fix's `DisposalsOnly`. A transfer's
+network-fee Sell carries no provenance column and correctly still counts as a real disposal. The
+reproductions failed as predicted (1000 for 400; gain 1040 for 800). Tests:
+`entities::amit_adjustment::tests::a_transfers_closing_sell_is_not_a_disposal_in_the_held_spill_split`
+and `reports::realised_gains::tests::db_a_transfer_does_not_change_an_earlier_sells_realised_gain`
+(the 2025-03-01 of the scenario is an XASX Saturday; the Sell is dated 2025-03-03). The cohort
+walk's C2 branch was observed to have a related exposure and is recorded as its own follow-up
+section in TODO.md.
+
+## The scrip-exchange cash component converts at a hardcoded fx_rate of 1 (code review 2026-08-25)
+(src/entities/scrip_exchange.rs:223 writes the cash-component closing Sell with
+`fx_rate = Decimal::ONE` and the exchange endpoint takes no body, so foreign-currency cash
+consideration converts at parity in the gains reports whenever the exchange month's RBA rate is
+missing — `FxOverride::Fallback(1)` — with no error and no way to override. RBA rates publish only
+after month end, so the gap always exists for current-month events. This is the exact silent-parity
+failure the ESS-vest path refuses with a 422. `fx_coverage` flags the row as `missing_rate`, but
+the tax path itself stays silent. First of the fx-default family named in the preamble.)
+- [x] Reproduce: a ScripForScrip action with `scrip_cash_per_unit` on a USD listing, exchanged
+  before the month's rate is imported → realised gains price US$100,000 of cash as A$100,000
+- [x] Fix (family-wide shape): refuse the operation 422 when the listing is non-AUD and the month's
+  rate is missing (the ess_vest treatment), or take an explicit `fx_rate` in a body — same decision
+  for all four family sections
+- [x] Tests: the refusal (or override) plus the happy path once the rate exists
+- [x] Docs sync: `docs/API.md` 422 catalogue / request body; README Known limitations if any gap
+  remains documented rather than fixed — no README change needed, no gap remains
+
+**Resolution (2026-08-25, `1341068`): resolve or refuse — no body added.** `db_exchange` loads
+`FxRates` and resolves the Sell currency's rate at the exchange date; a non-zero foreign cash
+component with no month rate is `ExchangeError::MissingFxRate` → 422 naming the month and the fix;
+an all-scrip or nil-cash exchange binds 1 harmlessly (nothing converts). The endpoint deliberately
+stays parameterless: the ESS precedent's user-supplied rate lives on the *source record*, never in
+the operation request, and an optional body would have made this the only operation whose stored
+financial outcome depends on ephemeral request data with no provenance. The escape is importing the
+month's RBA rates — the action itself is recordable immediately, only the exchange waits —
+documented in API.md's scrip-exchange section. Tests:
+`api_a_foreign_cash_component_with_no_month_rate_is_refused_naming_the_month`,
+`a_foreign_cash_component_converts_at_the_imported_month_rate` (US$1,000 → A$2,000 at 0.5),
+`an_all_scrip_exchange_of_a_foreign_listing_needs_no_rate`.
+
+## A foreign-currency rights sale defaults fx to parity and no report ever flags it (code review 2026-08-25)
+(src/entities/rights_sale.rs:447 stores `fx_rate = body.fx_rate.unwrap_or(Decimal::ONE)` with no
+AUD-currency guard, and `rights_sales` rows are absent from `fx_coverage`'s seven-source scan —
+neither scanned nor in its deliberately-omitted list — so a foreign-currency rights sale in a
+missing-rate month converts proceeds at parity with **no flag anywhere in the system**, unlike the
+other default-1 sites which at least surface in `fx_coverage`. Fx-default family.)
+- [x] Reproduce: a USD rights issue's retail premium recorded with `fx_rate` omitted, dated in a
+  month with no imported RBA rate → realised_gains.rs:647 books USD proceeds 1:1 as AUD, and
+  `GET /reports/fx_coverage` shows nothing
+- [x] Fix: add `rights_sales` to `fx_coverage`'s source list regardless of the family decision;
+  then apply the family fix (guard/422 or required rate for non-AUD listings)
+- [x] Tests: fx_coverage surfaces the row; the family guard's refusal
+- [x] Docs sync: `docs/API.md` fx_coverage source list
+
+**Resolution (2026-08-25, `1341068`): stated rate wins → month rate resolved and bound onto the
+row → else 422; and rights_sales is the eighth fx_coverage source.** The currency comes from the
+RightsIssue action the sale names; a nil/nil lapse binds 1 harmlessly (a free foreign right can
+always lapse). `fx_coverage::load_convertibles` joins `rights_sales` through its action for
+listing/ticker/currency with `rs.fx_rate` as the fallback column. Tests:
+`api_a_foreign_sale_with_fx_omitted_in_a_missing_month_is_refused_naming_the_month`,
+`a_foreign_sale_resolves_the_imported_month_rate_when_fx_omitted` (stores 0.65),
+`a_stated_fx_rate_is_stored_even_when_the_month_is_missing`,
+`a_nil_lapse_of_a_foreign_issue_needs_no_rate`, and
+`fx_coverage::tests::db_a_rights_sale_in_a_missing_month_is_flagged` (kind `missing_rate`, record
+"rights sale", resting on `record_fx_rate`). docs/API.md: the sell-rights conversion paragraph
+rewritten (resolve-or-refuse, nil lapse exempt, fx_coverage pointer) and fx_coverage's source list
+now enumerated.
+
+## The crypto transfer's network-fee Sell defaults fx to parity (code review 2026-08-25)
+(src/entities/transfer.rs:582 defaults `body.fee_fx_rate.unwrap_or(Decimal::ONE)` on a Sell that
+carries no `transfer_id` and is therefore a *real disposal* in the realised-gains and
+net-capital-gain reports — a missing month rate silently converts the fee disposal at parity where
+every `FxOverride::None` conversion fails loudly with `MissingRate`. `fx_coverage` flags the row,
+but the tax path stays silent. Fx-default family.)
+- [x] Reproduce: transfer of a USD-quoted crypto listing with `fee_allocations` set and
+  `fee_fx_rate` omitted, in a missing-rate month → the fee Sell's USD proceeds book 1:1 as AUD
+- [x] Fix: the family decision (guard/422 for non-AUD when the rate is missing, or required rate)
+- [x] Tests + `docs/API.md` sync per the fix
+
+**Resolution (2026-08-25, `1341068`).** `write_fee_sale`: a stated `fee_fx_rate` wins, else the
+transfer date's month rate is resolved and bound, else `TransferError::MissingFeeFxRate` → 422 —
+no lenient path, since the fee price is always positive. Tests:
+`a_foreign_fee_disposal_with_fx_omitted_in_a_missing_month_is_refused_naming_the_month`,
+`a_foreign_fee_disposal_resolves_the_imported_month_rate`,
+`a_stated_fee_fx_rate_is_stored_even_when_the_month_is_missing`. docs/API.md: the transfers
+section's `fee_fx_rate` semantics and 422 list.
+
+## A rights exercise with fx omitted costs the parcel at parity in the missing-rate window (code review 2026-08-25)
+(src/entities/rights_exercise.rs:386 stores `body.fx_rate.unwrap_or(Decimal::ONE)` with no
+validation tying the default to AUD-quoted listings. Narrower than its siblings — the ATO monthly
+rate wins once imported (`ParcelRow::fx_override`) and `fx_coverage` flags the row meanwhile — but
+inside the missing-rate window cost-base reports still convert via `Fallback(1)` silently where
+ess_vest refuses with 422. Verifier verdict: **plausible**, not confirmed — re-derive the mechanism
+before fixing (the U lesson). Fx-default family.)
+- [x] Re-derive: confirm the `Fallback(1)` path is actually reachable for a rights-exercise Buy in
+  a missing-rate month, with a failing test, before changing anything
+- [x] Fix: the family decision, if confirmed; otherwise record why not reproducible and close
+- [x] Tests + docs sync per the outcome
+
+**Resolution (2026-08-25, `1341068`): the plausible verdict re-derived to confirmed before
+fixing.** A temporary derivation test, run before any fix and then removed, proved the whole chain:
+an exercise of a USD issue with fx omitted in a missing-rate month stored `fx_rate: 1` and
+`reports::open_parcels` answered the US$450 parcel's `remaining_cost_base` as A$450 —
+`FxOverride::Fallback(1)` reachable exactly as claimed. The fix mirrors the family rule (resolve or
+`ExerciseError::MissingFxRate` → 422); a nil-cost exercise (`exercise_price × units + rights_cost
+== 0`) binds 1 harmlessly. Tests:
+`api_a_foreign_exercise_with_fx_omitted_in_a_missing_month_is_refused_naming_the_month`,
+`a_foreign_exercise_resolves_the_imported_month_rate_when_fx_omitted` (open parcels cost A$900 at
+0.5), `a_stated_fx_rate_is_stored_even_when_the_month_is_missing`,
+`a_nil_cost_foreign_exercise_needs_no_rate`. docs/API.md: the exercise section's fx_rate semantics
+and 422 list; and `src/web/config.js`'s Exercise and Sell-rights forms no longer pre-fill fx `1` —
+blank omits the field so the server resolves or refuses, with hints saying so.
+
+## The performance chart's axis labels format money by browser locale (code review 2026-08-25)
+(src/web/chart.js:107 renders y-axis ticks as `Math.round(v).toLocaleString()` — grouping and
+separator from the browser locale — while the tooltip in the same file and every table cell go
+through util.js's exact-string formatting. In a de-DE browser the axis reads `1.234` where the
+tooltip reads `1,234`; a change to the app's money-display rule in util.js also skips these labels.)
+- [x] Fix: format the tick labels through util.js's shared helpers (whole-dollar rounding for ticks
+  can stay, but grouping must be the app's own); Node test in `src/web/*.test.js` pins it
+
+**Resolution (2026-08-25, `c190871`).** New exported pure helper `tickLabel(v)` in chart.js —
+whole-dollar `Math.round` kept, grouping via util.js's own `groupThousands` — used at the tick
+render site, with a doc comment explaining the de-DE disagreement it fixes. Node tests
+(`src/web/chart.test.js`): `tickLabel: whole dollars with comma thousands grouping, sign kept` and
+`tickLabel: grouping is util.js's own groupThousands, not the browser locale` (asserts
+`tickLabel(v) === groupThousands(String(Math.round(v)))` across values).
+
+## JOB_DESC and tradeOrigin are unpinned hand-maintained parallels of Rust-side lists (code review 2026-08-25)
+(web/app.js:1454's `JOB_DESC` mirrors the scheduler registry's job names; web/util.js:486's
+`tradeOrigin` mirrors the trade-provenance columns. Neither has a pinning test, and a
+hand-maintained list has been the actual bug for the sixth and seventh time in this project
+(AA-d found three provenance transcriptions with one already wrong). A new job or provenance
+column ships without its JS counterpart and the UI shows an unlabelled job / mis-attributed origin
+while the suite stays green.)
+- [x] Add pinning tests: each Rust-side name (registry job names; provenance columns) asserted
+  present in the served bundle (`app_js_body`), the same way other UI items are pinned — or better,
+  derive the JS from one source where feasible
+- [x] While there: check for other unpinned Rust↔JS parallel lists
+
+**Resolution (2026-08-25, `c190871`): pinned to the real Rust lists — no third copy.**
+`web::tests::every_registered_job_is_described_on_the_jobs_screen` builds the live registry exactly
+as `main` does (offline `QuoteStub`) and iterates its keys, asserting each name appears as a
+JOB_DESC key in the served bundle — a new `register(…)` call fails the test until the UI describes
+it. `trade_origin_labelling_present` now iterates `entities::trade::TRADE_PROVENANCE` (the AA-d
+single-rule list, itself held to `PRAGMA foreign_key_list('trades')` by its own guard; re-exported
+`#[cfg(test)]`) asserting each provenance column's check appears in the bundle — a new column
+reaches this pin through the schema→classification chain with no hand list anywhere. The sweep
+found further unpinned mirrors — config.js's `sel()` option lists vs CHECK-constrained enums (the
+`action_type` pin is itself a hand-written third copy), the health banner's field names vs
+`reports::health`'s serde fields — recorded as a follow-up section in TODO.md; chart.js's `fyStart`
+deliberately restates `domain::tax_year`'s July rule (commented, unit-tested), an inherent
+no-build-step mirror.
+
+## SELL_FIELDS in app.js has drifted from config.js (code review 2026-08-25)
+(web/app.js:574's `SELL_FIELDS` is a hand-maintained copy of the Sell field configuration that has
+already drifted — a stale `settlement_date` hint and a missing `fx_rate` hint — instead of deriving
+from the single `ENTITIES` config entry. Same failure family as the previous section.)
+- [x] Fix: derive `SELL_FIELDS` from the config.js entry (or delete it in favour of the config);
+  the two current drifts corrected by construction
+- [x] Tests: a pin that a Sell field defined in config.js cannot be shadowed by a stale copy
+
+**Resolution (2026-08-25, `c190871`): derived, with the deliberate divergences in an overrides
+map.** The 17-line hand copy is replaced by `entityBySlug.trades.fields` minus `trade_type`, with
+`SELL_FIELD_OVERRIDES` carrying only the two deliberate divergences (net-proceeds
+`statement_total` hint; allocations `holding_account_id` hint) — both drifts corrected by
+construction and confirmed in a live headless render (the Sell form now shows the full T+N
+`settlement_date` hint and the `fx_rate` hint).
+`web::tests::sell_form_fields_derive_from_the_trades_config` pins the derivation expression, the
+`trade_type` filter, the overrides map, and exactly one occurrence in the bundle of each shared
+field's constructor call — a second is a shadow copy growing back.
