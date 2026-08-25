@@ -343,7 +343,7 @@ fn build_row(
 }
 
 /// The dated cash-flow accumulation shared by `db_performance` (which turns
-/// it into report rows valued at `as_of`) and `overall_flows` (which
+/// it into report rows valued at `as_of`) and `overall_flows_on` (which
 /// `period_performance` reuses to build a window-scoped money-weighted
 /// return) — the trade/income processing (internal-movement exclusion,
 /// AUD conversion, carried cost) needs to happen exactly once either way.
@@ -353,20 +353,10 @@ struct Accumulated {
     tickers: HashMap<i64, String>,
 }
 
-async fn accumulate(
-    pool: &SqlitePool,
-    as_of: NaiveDate,
-) -> Result<Option<Accumulated>, sqlx::Error> {
-    // One read transaction: every input below comes from the same snapshot.
-    let mut tx = pool.begin().await?;
-    let accumulated = accumulate_on(&mut tx, as_of).await?;
-    tx.commit().await?;
-    Ok(accumulated)
-}
-
-/// [`accumulate`] on the caller's own connection, for a caller that already
+/// The accumulation on the caller's own connection, for a caller that already
 /// holds a transaction — snapshot generation accumulates inside the write
-/// transaction that stores the result (SCENARIOS X-a).
+/// transaction that stores the result (SCENARIOS X-a), and
+/// `period_performance` inside its one read transaction.
 async fn accumulate_on(
     conn: &mut sqlx::SqliteConnection,
     as_of: NaiveDate,
@@ -557,12 +547,14 @@ async fn accumulate_on(
 /// inception up to `as_of`, portfolio-wide — the same flows `db_performance`
 /// feeds to `money_weighted_annual_return` for its OVERALL row, exposed for
 /// `period_performance` to filter to a window and combine with the window's
-/// opening/closing market value as boundary flows.
-pub(crate) async fn overall_flows(
-    pool: &SqlitePool,
+/// opening/closing market value as boundary flows. On the caller's own
+/// connection, so it reads the same snapshot as the rest of that report's
+/// single read transaction.
+pub(crate) async fn overall_flows_on(
+    conn: &mut sqlx::SqliteConnection,
     as_of: NaiveDate,
 ) -> Result<Vec<(NaiveDate, Decimal)>, sqlx::Error> {
-    Ok(accumulate(pool, as_of)
+    Ok(accumulate_on(conn, as_of)
         .await?
         .map_or_else(Vec::new, |a| a.overall.flows))
 }

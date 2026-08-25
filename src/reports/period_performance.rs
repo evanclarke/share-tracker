@@ -193,20 +193,22 @@ impl From<PeriodError> for ApiError {
 
 /// Every held listing's stored valuation at `date`, or empty when nothing was
 /// held then (an inception-style `from` before the first holding) — unlike
-/// `valuation::stored_valuations`, which treats "nothing held" as a blocker
+/// `valuation::stored_valuations_on`, which treats "nothing held" as a blocker
 /// (the right behaviour for snapshot generation, where the caller already
 /// knows something is held). A date with holdings that can't be fully valued
-/// (missing/errored price) still fails loudly.
+/// (missing/errored price) still fails loudly. On the caller's connection, so
+/// both endpoints read `compute`'s one snapshot; the held set is loaded once
+/// here and priced via `valuations_of_markets`, not re-loaded per step.
 async fn valuations_or_empty(
-    pool: &SqlitePool,
+    conn: &mut sqlx::SqliteConnection,
     date: NaiveDate,
     now: DateTime<Utc>,
 ) -> Result<valuation::StoredValuations, PeriodError> {
-    let markets = valuation::held_markets(pool, Some(date)).await?;
+    let markets = valuation::held_markets_on(&mut *conn, Some(date)).await?;
     if markets.is_empty() {
         return Ok(valuation::StoredValuations::default());
     }
-    Ok(valuation::stored_valuations(pool, date, now).await?)
+    Ok(valuation::valuations_of_markets(conn, &markets, date, now).await?)
 }
 
 /// Per-currency FX accumulator: the running total, the (rate_from, rate_to)
@@ -232,8 +234,16 @@ pub async fn compute(
         )));
     }
 
-    let resolved_from = valuations_or_empty(pool, from, now).await?;
-    let resolved_to = valuations_or_empty(pool, to, now).await?;
+    // One read transaction: every input below — both endpoint valuations,
+    // both cumulative performance runs, the FX table, the window's flows and
+    // realised gains — comes from the same snapshot. Without it, a write
+    // committing between the `from` and `to` reads (a backdated Buy, a
+    // scheduled price/FX import) makes the endpoints describe different
+    // states, and `purchases`/`total_return` misbook the difference.
+    let mut tx = pool.begin().await?;
+
+    let resolved_from = valuations_or_empty(&mut tx, from, now).await?;
+    let resolved_to = valuations_or_empty(&mut tx, to, now).await?;
     // Every caller of an exclusion must surface it (migration 0037): the two
     // endpoint valuations are the only thing that can leave a holding out, so
     // the union of what they excluded is what this report's totals omit.
@@ -275,8 +285,8 @@ pub async fn compute(
     let price_carried_forward = valuations_from.iter().any(|v| v.price_carried_forward)
         || valuations_to.iter().any(|v| v.price_carried_forward);
 
-    let perf_from = performance::db_performance(pool, &prices_from, from).await?;
-    let perf_to = performance::db_performance(pool, &prices_to, to).await?;
+    let perf_from = performance::db_performance_on(&mut tx, &prices_from, from).await?;
+    let perf_to = performance::db_performance_on(&mut tx, &prices_to, to).await?;
 
     // Index both endpoints by (listing_id, holding_account_id); the OVERALL
     // row (listing_id: None) is skipped — portfolio totals are summed from
@@ -301,7 +311,7 @@ pub async fn compute(
     // Only reached for a listing whose closing quantity is positive (else FX
     // is defined as zero — see the module docs on the closing-exposure
     // convention), so a rate lookup failure here is a real blocker.
-    let fx = FxRates::load(pool).await?;
+    let fx = FxRates::load(&mut *tx).await?;
 
     let mut holdings = Vec::with_capacity(by_key.len());
     let mut currency_acc: BTreeMap<String, CurrencyAcc> = BTreeMap::new();
@@ -406,7 +416,7 @@ pub async fn compute(
     // flows — capital already committed going into the window is an outflow
     // at `from`, capital still held at `to` is an inflow, the same sign
     // convention `overall_flows`'s own entries use.
-    let mut mw_flows: Vec<(NaiveDate, Decimal)> = performance::overall_flows(pool, to)
+    let mut mw_flows: Vec<(NaiveDate, Decimal)> = performance::overall_flows_on(&mut tx, to)
         .await?
         .into_iter()
         .filter(|&(d, _)| d > from)
@@ -420,12 +430,15 @@ pub async fn compute(
     let money_weighted_return_pct = performance::money_weighted_annual_return(&mw_flows)
         .map(|r| (r * Decimal::from(100)).round_dp(4));
 
-    let realised_capital_gain = realised_gains::db_realised_gains(pool)
+    let realised_capital_gain = realised_gains::db_realised_gains_on(&mut tx)
         .await?
         .into_iter()
         .filter(|g| g.sale_date > from && g.sale_date <= to)
         .map(|g| g.capital_gain_loss)
         .sum();
+
+    // Every read is done; the computation below is pure.
+    tx.commit().await?;
 
     let fx_by_currency = currency_acc
         .into_iter()

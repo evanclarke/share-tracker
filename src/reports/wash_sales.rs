@@ -88,21 +88,23 @@ pub async fn db_wash_sales(
     pool: &SqlitePool,
     window_days: i64,
 ) -> Result<Vec<WashSaleAlert>, sqlx::Error> {
-    let mut losses: Vec<_> = realised_gains::db_realised_gains(pool)
+    // One read transaction: the realised losses, the fee-sale exclusions, and
+    // the Buy candidates all come from the same snapshot — a Sell or transfer
+    // committed between the reads must not pair a loss with Buys (or an
+    // exclusion list) from a different state.
+    let mut tx = pool.begin().await?;
+    let mut losses: Vec<_> = realised_gains::db_realised_gains_on(&mut tx)
         .await?
         .into_iter()
         .filter(|r| r.source == DisposalSource::Sell && r.capital_loss > Decimal::ZERO)
         .collect();
-    if losses.is_empty() {
-        return Ok(Vec::new());
-    }
 
     // A transfer's network-fee disposal is compelled by the transfer, not
     // entered into for its loss — never a candidate (see the module docs).
     let fee_sale_ids: HashSet<i64> = sqlx::query_scalar(
         "SELECT fee_sale_trade_id FROM transfers WHERE fee_sale_trade_id IS NOT NULL",
     )
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await?
     .into_iter()
     .collect();
@@ -119,8 +121,9 @@ pub async fn db_wash_sales(
            AND t.demerger_action_id IS NULL AND t.inheritance_id IS NULL \
          ORDER BY t.date, t.id",
     )
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await?;
+    tx.commit().await?;
 
     let mut alerts = Vec::new();
     for sale in &losses {

@@ -152,11 +152,25 @@ pub async fn held_markets_on(
     Ok(markets)
 }
 
+/// [`stored_valuations_on`] on a connection acquired for the call — the test
+/// convenience; every live caller composes the `_on` form into its own
+/// transaction instead.
+#[cfg(test)]
+pub async fn stored_valuations(
+    pool: &SqlitePool,
+    date: NaiveDate,
+    now: DateTime<Utc>,
+) -> Result<StoredValuations, ValuationError> {
+    let mut conn = pool.acquire().await.map_err(ValuationError::from)?;
+    stored_valuations_on(&mut conn, date, now).await
+}
+
 /// Resolve every held listing's AUD valuation at `date` from stored closing
-/// prices: each listing is valued at its nearest trading day on or before
-/// `date`, whose stored price must be ok and final, converted at the
-/// valuation FX rate. Fails with the full list of blockers otherwise — a
-/// partly-priced day yields no result at all, never a partial one.
+/// prices, on the caller's own connection: each listing is valued at its
+/// nearest trading day on or before `date`, whose stored price must be ok and
+/// final, converted at the valuation FX rate. Fails with the full list of
+/// blockers otherwise — a partly-priced day yields no result at all, never a
+/// partial one.
 ///
 /// Two exceptions, one at each end of the provider's series:
 ///
@@ -175,22 +189,15 @@ pub async fn held_markets_on(
 /// A date on which *every* held listing is excluded is a blocker, not an
 /// empty result: a total missing every holding is zero of zero, and storing
 /// it would draw a false floor through the series.
-pub async fn stored_valuations(
-    pool: &SqlitePool,
-    date: NaiveDate,
-    now: DateTime<Utc>,
-) -> Result<StoredValuations, ValuationError> {
-    let mut conn = pool.acquire().await.map_err(ValuationError::from)?;
-    stored_valuations_on(&mut conn, date, now).await
-}
-
-/// [`stored_valuations`] on the caller's own connection. Snapshot generation
-/// resolves its prices this way — inside the write transaction that stores
-/// the result — so a closing price (or a trade) committed by another
-/// connection cannot land between the valuation and the `stale = 0` it is
-/// stored with (SCENARIOS X-a). Every read below is a database read; nothing
-/// here touches the price provider, so the write lock is never held on
-/// network I/O.
+///
+/// The connection-taking form is the live one so callers hold a single
+/// snapshot: snapshot generation resolves its prices inside the write
+/// transaction that stores the result — so a closing price (or a trade)
+/// committed by another connection cannot land between the valuation and the
+/// `stale = 0` it is stored with (SCENARIOS X-a) — and the period-performance
+/// report inside its one read transaction. Every read below is a database
+/// read; nothing here touches the price provider, so the write lock is never
+/// held on network I/O.
 pub async fn stored_valuations_on(
     conn: &mut sqlx::SqliteConnection,
     date: NaiveDate,
@@ -202,14 +209,27 @@ pub async fn stored_valuations_on(
             "nothing was held on {date}"
         )));
     }
+    valuations_of_markets(conn, &markets, date, now).await
+}
 
+/// [`stored_valuations_on`] over market contexts the caller already loaded
+/// (via [`held_markets_on`], for this same `date`) — so a caller that needs
+/// the held set for its own purposes first (the period-performance report,
+/// which treats "nothing held" as an empty endpoint rather than a blocker)
+/// prices it without loading every listing's market context a second time.
+pub(crate) async fn valuations_of_markets(
+    conn: &mut sqlx::SqliteConnection,
+    markets: &[Market],
+    date: NaiveDate,
+    now: DateTime<Utc>,
+) -> Result<StoredValuations, ValuationError> {
     let mut valuations = Vec::with_capacity(markets.len());
     let mut excluded: Vec<ExcludedHolding> = Vec::new();
     let mut blockers: Vec<String> = Vec::new();
     // every imported ATO FX rate — per-listing conversions below are map
     // lookups, not one DB round-trip each
     let fx = FxRates::load(&mut *conn).await?;
-    for market in &markets {
+    for market in markets {
         let ticker = &market.listing.ticker;
         let Some(valuation_day) = market.latest_trading_day_on_or_before(date) else {
             blockers.push(format!(

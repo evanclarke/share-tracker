@@ -723,6 +723,7 @@ mod tests {
         "reports/open_parcels.rs",
         "reports/parcel_optimiser.rs",
         "reports/performance.rs",
+        "reports/period_performance.rs",
         "reports/portfolio.rs",
         "reports/realised_gains.rs",
         "reports/rollover_consistency.rs",
@@ -731,6 +732,45 @@ mod tests {
         "reports/tax_report.rs",
         "reports/tax_summary.rs",
         "reports/unrealised_gains.rs",
+        "reports/wash_sales.rs",
+    ];
+
+    /// Report files that begin **no** transaction of their own, each with the
+    /// reason it needs none. Everything under `src/reports/` must be either
+    /// here or in [`DEFERRED_BEGIN_ALLOWED`] —
+    /// [`every_report_file_is_classified_for_transaction_discipline`] fails an
+    /// unclassified file, so a new report is an offender until someone decides
+    /// which side it is on.
+    const REPORTS_WITHOUT_A_READ_TRANSACTION: &[(&str, &str)] = &[
+        (
+            "reports/attachments.rs",
+            "one SELECT — a single statement is its own consistent snapshot",
+        ),
+        (
+            "reports/export.rs",
+            "no database access: CSV projection and rendering helpers only",
+        ),
+        (
+            "reports/mic_validation.rs",
+            "one SELECT — a single statement is its own consistent snapshot",
+        ),
+        (
+            "reports/mod.rs",
+            "router assembly plus the two message-label helpers, one SELECT each — no \
+             multi-read result to hold together",
+        ),
+        (
+            "reports/snapshot.rs",
+            "the one report that writes: its transaction is infra::db::write_tx, and its \
+             reads run inside it via the _on helpers",
+        ),
+        (
+            "reports/valuation.rs",
+            "connection-taking helpers composed into the callers' own transactions \
+             (snapshot generation's write_tx, period performance's read transaction); \
+             the remaining pool forms acquire one connection for a single-read probe \
+             (latest_snapshot_date's candidate scan) or a test",
+        ),
     ];
 
     /// The convention `write_tx` exists to hold: no write path may begin a
@@ -783,6 +823,84 @@ mod tests {
             stale.is_empty(),
             "DEFERRED_BEGIN_ALLOWED names files that no longer begin a deferred \
              transaction — drop them: {stale:?}"
+        );
+    }
+
+    /// The companion the scan above needs to be airtight for reports: that
+    /// scan only sees a file once it *types* `.begin()`, so a report reading
+    /// straight off the pool — each query its own implicit transaction, no
+    /// consistent snapshot — used to pass unclassified. That is exactly how
+    /// `period_performance`'s multi-snapshot read hid (code review
+    /// 2026-08-25). So the whole of `src/reports/` is classified, the way
+    /// every table is classified for snapshot staleness: a report file is
+    /// either in [`DEFERRED_BEGIN_ALLOWED`] — and the scan above holds it to
+    /// actually beginning its read transaction — or in
+    /// [`REPORTS_WITHOUT_A_READ_TRANSACTION`] with the reason it needs none.
+    /// A new report in neither list fails here until someone decides.
+    #[test]
+    fn every_report_file_is_classified_for_transaction_discipline() {
+        // Assembled so this test's own lines are not themselves matches.
+        let deferred = format!(".{}()", "begin");
+        let mut report_files: Vec<String> = Vec::new();
+        let mut unclassified: Vec<String> = Vec::new();
+        for (rel, body) in crate::test_support::rust_sources() {
+            if !rel.starts_with("reports/") {
+                continue;
+            }
+            report_files.push(rel.clone());
+            let allowed = DEFERRED_BEGIN_ALLOWED.contains(&rel.as_str());
+            let exempt = REPORTS_WITHOUT_A_READ_TRANSACTION
+                .iter()
+                .any(|(f, _)| *f == rel);
+            assert!(
+                !(allowed && exempt),
+                "{rel} is in both DEFERRED_BEGIN_ALLOWED and \
+                 REPORTS_WITHOUT_A_READ_TRANSACTION — pick the one that is true"
+            );
+            if !allowed && !exempt {
+                unclassified.push(rel.clone());
+                continue;
+            }
+            // An exempt entry's reason is "begins no transaction": the moment
+            // the file grows one it belongs on the other list, where the scan
+            // above polices it.
+            if exempt {
+                let begins: Vec<String> = body
+                    .lines()
+                    .enumerate()
+                    .filter(|(_, line)| {
+                        let code = line.trim_start();
+                        !code.starts_with("//") && code.contains(&deferred)
+                    })
+                    .map(|(n, line)| format!("{rel}:{}: {}", n + 1, line.trim()))
+                    .collect();
+                assert!(
+                    begins.is_empty(),
+                    "listed in REPORTS_WITHOUT_A_READ_TRANSACTION but begins a \
+                     transaction — move it to DEFERRED_BEGIN_ALLOWED:\n{}",
+                    begins.join("\n")
+                );
+            }
+        }
+        assert!(
+            unclassified.is_empty(),
+            "every report file must hold its reads together: either it opens one \
+             pool.begin() read transaction for all of them (add it to \
+             DEFERRED_BEGIN_ALLOWED) or it genuinely needs none (add it to \
+             REPORTS_WITHOUT_A_READ_TRANSACTION with the reason). Unclassified:\n{}",
+            unclassified.join("\n")
+        );
+        // …and the exempt list may not rot: an entry that no longer names a
+        // report file has to go, or the list stops meaning anything.
+        let gone: Vec<&&str> = REPORTS_WITHOUT_A_READ_TRANSACTION
+            .iter()
+            .map(|(f, _)| f)
+            .filter(|f| !report_files.iter().any(|r| r == **f))
+            .collect();
+        assert!(
+            gone.is_empty(),
+            "REPORTS_WITHOUT_A_READ_TRANSACTION names files that no longer exist — \
+             drop them: {gone:?}"
         );
     }
 

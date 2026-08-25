@@ -213,10 +213,13 @@ fn valuation_months(date: NaiveDate) -> Vec<String> {
 /// rate (at most [`VALUATION_FALLBACK_MONTHS`] back, flagged provisional),
 /// else a loud [`FxError::MissingRate`] for the valuation month.
 ///
-/// Valuation-only: exactly the snapshot-generation and live-quote paths may
-/// call this. Tax calculations and FY reports must use the strict
-/// [`resolve_rate`] / [`FxRates::resolve_rate`] so no tax figure is ever
-/// computed from a fallback-month rate.
+/// Valuation-only: exactly the snapshot-generation, live-quote-conversion,
+/// and period-performance FX-attribution paths may call this (either form),
+/// and each must surface the `provisional` flag. Tax calculations and FY
+/// reports must use the strict [`resolve_rate`] / [`FxRates::resolve_rate`]
+/// so no tax figure is ever computed from a fallback-month rate — a scan
+/// test (`tests::valuation_rate_fallback_is_called_only_from_valuation_paths`)
+/// holds any new caller to that, file by file.
 pub async fn resolve_valuation_rate(
     pool: &SqlitePool,
     currency: &str,
@@ -309,8 +312,10 @@ impl FxRates {
         pick_rate(ato_rate, currency, month, manual)
     }
 
-    /// [`resolve_valuation_rate`], over the pre-loaded map — same valuation-only
-    /// restriction: snapshot generation and live-quote conversion only.
+    /// [`resolve_valuation_rate`], over the pre-loaded map — same
+    /// valuation-only restriction (and the same scan test enforcing it):
+    /// snapshot generation, live-quote conversion, and the
+    /// period-performance report's FX attribution only.
     pub fn resolve_valuation_rate(
         &self,
         currency: &str,
@@ -768,6 +773,85 @@ mod tests {
             .unwrap();
         assert_eq!(vr.rate, Decimal::ONE);
         assert!(!vr.provisional);
+    }
+
+    /// Files that may call the **valuation-only** fallback resolver —
+    /// [`resolve_valuation_rate`] in either form (the pool lookup or
+    /// [`FxRates::resolve_valuation_rate`] over the pre-loaded map) — each
+    /// with the valuation surface it serves. CLAUDE.md restricts the fallback
+    /// to exactly these paths so no tax figure is ever computed from a
+    /// fallback-month rate; like `infra::db`'s deferred-`BEGIN` scan, nothing
+    /// in the type system enforces that, so this scan does: a new caller is
+    /// an offender until it is classified here — and classifying it means
+    /// deciding it is a valuation, never a tax calculation or FY report
+    /// (those stay on the strict [`resolve_rate`]), and that it surfaces the
+    /// `provisional` flag.
+    const VALUATION_RATE_CALLERS_ALLOWED: &[(&str, &str)] = &[
+        ("infra/fx.rs", "the resolver's own definition and tests"),
+        (
+            "reports/valuation.rs",
+            "the stored-price valuation path — snapshot generation and the \
+             period-performance endpoints value through it, surfacing `provisional`",
+        ),
+        (
+            "entities/closing_price.rs",
+            "live-quote AUD conversion, surfacing `fx_provisional`",
+        ),
+        (
+            "reports/period_performance.rs",
+            "FX attribution's opening-endpoint rate for a holding not held at \
+             `from`, surfacing the period `provisional` flag",
+        ),
+    ];
+
+    /// The valuation-only restriction on the fallback resolver, as a scan
+    /// (mirroring `infra::db::tests::
+    /// write_side_modules_never_begin_a_deferred_transaction`): only the
+    /// files in [`VALUATION_RATE_CALLERS_ALLOWED`] may call
+    /// `resolve_valuation_rate` — either form. Doc mentions (`` `…` `` in
+    /// comments) don't count; call sites do.
+    #[test]
+    fn valuation_rate_fallback_is_called_only_from_valuation_paths() {
+        // The call token with its opening paren, so prose mentions of the
+        // name (no paren) never match; comment lines are skipped anyway.
+        let call = format!("{}(", "resolve_valuation_rate");
+        let mut offenders = Vec::new();
+        let mut seen_in_allowed: Vec<&str> = Vec::new();
+        for (rel, body) in crate::test_support::rust_sources() {
+            let allowed = VALUATION_RATE_CALLERS_ALLOWED
+                .iter()
+                .find(|(f, _)| *f == rel);
+            for (n, line) in body.lines().enumerate() {
+                let code = line.trim_start();
+                if code.starts_with("//") || !code.contains(&call) {
+                    continue;
+                }
+                match allowed {
+                    Some((file, _)) => seen_in_allowed.push(file),
+                    None => offenders.push(format!("{rel}:{}: {code}", n + 1)),
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "resolve_valuation_rate is valuation-only (CLAUDE.md): its fallback-month \
+             rate must never reach a tax figure, so only the named valuation surfaces \
+             may call it. Use the strict resolve_rate/to_aud instead, or — if this \
+             genuinely is a new valuation surface that surfaces the provisional flag — \
+             classify it in VALUATION_RATE_CALLERS_ALLOWED with its reason:\n{}",
+            offenders.join("\n")
+        );
+        // …and the allowlist may not rot: an entry that no longer calls the
+        // resolver has to go, or the list stops meaning anything.
+        let stale: Vec<&(&str, &str)> = VALUATION_RATE_CALLERS_ALLOWED
+            .iter()
+            .filter(|(f, _)| !seen_in_allowed.contains(f))
+            .collect();
+        assert!(
+            stale.is_empty(),
+            "VALUATION_RATE_CALLERS_ALLOWED names files that no longer call \
+             resolve_valuation_rate — drop them: {stale:?}"
+        );
     }
 
     #[test]
