@@ -29,6 +29,12 @@ pub use http::router;
 #[cfg(test)]
 pub use model::SettlementDateSource;
 pub use model::{Trade, TradeBody, TradeType};
+/// The classified provenance-column list itself, named outside this module
+/// only by `web::tests` (which pins the UI's `tradeOrigin` labelling against
+/// it), so the re-export is test-gated to keep the non-test build
+/// warning-free.
+#[cfg(test)]
+pub(crate) use provenance::TRADE_PROVENANCE;
 /// The one place that answers "did an operation write this trade row?" — the
 /// provenance-column list and the two SQL fragments over it, used by the
 /// health report's write-path label and its nil-proceeds exclusion.

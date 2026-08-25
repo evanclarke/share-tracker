@@ -15,7 +15,7 @@
 // need a DOM and are exercised indirectly via the served-bundle assertions in
 // web.rs.
 //
-import { el, moneyText } from './util.js';
+import { el, moneyText, groupThousands } from './util.js';
 
 // The series the graph can plot, in selector order. `klass` styles the line
 // and its point markers, `legendClass` the legend swatch.
@@ -76,6 +76,16 @@ export function pointNotes(p) {
   return notes.join('; ');
 }
 
+// One y-axis tick label: whole-dollar rounding (an axis label needs no
+// cents), thousands-grouped by util.js's own `groupThousands` — never
+// `Number.toLocaleString`, whose grouping and separator follow the browser
+// locale and so disagreed with the tooltip (moneyText) and every table cell
+// in any non-en locale (a de-DE browser drew `1.234` on the axis against
+// `1,234` in the tooltip). Pure (no DOM), unit-tested by chart.test.js.
+export function tickLabel(v) {
+  return groupThousands(String(Math.round(v)));
+}
+
 export function svgEl(tag, attrs) {
   const n = document.createElementNS('http://www.w3.org/2000/svg', tag);
   if (attrs) for (const k in attrs) { if (attrs[k] != null) n.setAttribute(k, attrs[k]); }
@@ -104,7 +114,7 @@ export function seriesChart(points, fieldKey) {
     const v = yMin + (yMax - yMin) * i / 4;
     chart.appendChild(svgEl('line', { x1: padL, x2: W - padR, y1: y(v), y2: y(v), class: 'grid' }));
     const label = svgEl('text', { x: padL - 6, y: y(v) + 4, 'text-anchor': 'end', class: 'axis' });
-    label.textContent = Math.round(v).toLocaleString();
+    label.textContent = tickLabel(v);
     chart.appendChild(label);
   }
   // With the axis no longer anchored at zero, a series that crosses zero (an

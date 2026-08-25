@@ -7,7 +7,8 @@
 //
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { presetRange, sliceSeries, yBounds, seriesField, pointNotes, SERIES_FIELDS } from './chart.js';
+import { presetRange, sliceSeries, yBounds, seriesField, pointNotes, tickLabel, SERIES_FIELDS } from './chart.js';
+import { groupThousands } from './util.js';
 
 function series(dates) {
   return dates.map(function (d) { return { snapshot_date: d, market_value: '100', unrealised_gain: '10' }; });
@@ -152,4 +153,22 @@ test('pointNotes: names every qualification the point carries, and what a total 
     pointNotes({ stale: true, provisional: true }),
     'stale snapshot; provisional FX',
   );
+});
+
+// ---- tickLabel --------------------------------------------------------------
+
+test('tickLabel: whole dollars with comma thousands grouping, sign kept', () => {
+  assert.equal(tickLabel(1234567.89), '1,234,568');
+  assert.equal(tickLabel(-98765.4), '-98,765');
+  assert.equal(tickLabel(999.2), '999');
+  assert.equal(tickLabel(0), '0');
+});
+
+test('tickLabel: grouping is util.js\'s own groupThousands, not the browser locale', () => {
+  // The axis must read the same as the tooltip and every table cell whatever
+  // the browser's locale — so the label is exactly the app's own grouping of
+  // the rounded whole-dollar figure, never Number.toLocaleString's.
+  [1234567.89, -98765.4, 1000, 12, 0].forEach(function (v) {
+    assert.equal(tickLabel(v), groupThousands(String(Math.round(v))));
+  });
 });

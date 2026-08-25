@@ -966,8 +966,9 @@ mod tests {
     #[tokio::test]
     async fn spot_fx_rate_override_ui_present() {
         let js = app_js_body().await;
-        // Two field declarations: the trades config entry and SELL_FIELDS.
-        assert_eq!(js.matches("dec('spot_fx_rate'").count(), 2);
+        // One field declaration — the trades config entry, which SELL_FIELDS
+        // derives from (see sell_form_fields_derive_from_the_trades_config).
+        assert_eq!(js.matches("dec('spot_fx_rate'").count(), 1);
         assert!(js.contains("Spot FX rate override"));
         assert!(js.contains("wins over the monthly RBA rate"));
         // Trades list column, classified as a rate in COLUMN_KINDS.
@@ -1452,6 +1453,56 @@ mod tests {
         assert!(js.contains("entity.deriveRow"));
         assert!(js.contains("t.origin = tradeOrigin(t)"));
         assert!(js.contains("brokerage = carried cost base, not a fee"));
+        // …and tradeOrigin tests every provenance column the schema carries —
+        // checked against `entities::trade::provenance::TRADE_PROVENANCE`, the
+        // classified list `every_trades_foreign_key_is_classified` keeps
+        // honest against the live schema's foreign keys, never a transcribed
+        // copy — so an operation's new provenance column fails here until the
+        // UI labels it, instead of its trades silently reading as entered
+        // directly.
+        for p in crate::entities::trade::TRADE_PROVENANCE {
+            assert!(
+                js.contains(&format!("t.{} != null", p.column)),
+                "tradeOrigin never tests provenance column {} — its trades would \
+                 show no Origin label",
+                p.column
+            );
+        }
+    }
+
+    /// The Sell form's field list is *derived* from the Trades entity's config
+    /// entry, not a second copy of it: the derivation expression must be in
+    /// the bundle, and each shared field's constructor call must appear
+    /// exactly once (in config.js). A hand-maintained copy in app.js drifted
+    /// twice (a stale settlement_date hint, a missing fx_rate hint), and a
+    /// second `dt('settlement_date'…)` in the bundle is exactly a shadow copy
+    /// growing back.
+    #[tokio::test]
+    async fn sell_form_fields_derive_from_the_trades_config() {
+        let js = app_js_body().await;
+        assert!(
+            js.contains("const SELL_FIELDS = entityBySlug.trades.fields"),
+            "SELL_FIELDS no longer derives from the Trades config entry"
+        );
+        // trade_type is the one Trades field the Sell form drops (PUT /sells
+        // sets it server-side), and the two Sell-specific hints are declared
+        // as overrides of the shared fields, not as re-spelled fields.
+        assert!(js.contains("f.name !== 'trade_type'"));
+        assert!(js.contains("SELL_FIELD_OVERRIDES"));
+        for ctor in [
+            "dt('settlement_date'",
+            "dec('average_price'",
+            "dec('spot_fx_rate'",
+            "dec('statement_total'",
+            "bool('brokerage_includes_gst'",
+        ] {
+            assert_eq!(
+                js.matches(ctor).count(),
+                1,
+                "expected exactly one {ctor}…) in the served bundle (the Trades \
+                 config's) — a second is a shadow copy of the field list"
+            );
+        }
     }
 
     #[tokio::test]
@@ -2004,6 +2055,36 @@ mod tests {
             js.contains("'status', 'note', 'error'"),
             "the note belongs on both the jobs table and its run-history expansion"
         );
+    }
+
+    /// The Jobs screen's `JOB_DESC` map covers every registered maintenance
+    /// job — checked against the scheduler registry itself (built here exactly
+    /// as `main` builds it, over an offline price stub), never a transcribed
+    /// name list, so registering a new job fails this test until the UI can
+    /// describe it. Without the pin a new job rendered with an empty
+    /// Description cell while the suite stayed green — the same
+    /// hand-maintained-parallel-list failure the audited-table and
+    /// provenance pins exist for.
+    #[tokio::test]
+    async fn every_registered_job_is_described_on_the_jobs_screen() {
+        let js = app_js_body().await;
+        let pool = crate::test_support::test_pool().await;
+        let registry = crate::infra::scheduler::registry(
+            pool,
+            // Only the backup job's *body* reads the path; registration never
+            // touches it, and no job runs in this test.
+            "unused.db".to_string(),
+            None,
+            None,
+            crate::entities::closing_price::test_support::QuoteStub::default().shared(),
+        );
+        assert!(!registry.is_empty(), "the registry registers jobs");
+        for name in registry.keys() {
+            assert!(
+                js.contains(&format!("'{name}':")),
+                "JOB_DESC has no description for registered job {name}"
+            );
+        }
     }
 
     #[tokio::test]
