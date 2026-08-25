@@ -705,6 +705,12 @@ pub struct CostBaseAdjustment {
 /// `tax_year_end_date` order. `roc_events`, `splits` and `held` are its other
 /// inputs unchanged. Every row describes the **costed units**, so the rows sum
 /// to the same reductions that function reports for them.
+///
+/// Rows come back — and their `capped` flags are computed — in the **date
+/// order the events arise in**, the same `(date, rank)` order the
+/// net-capital-gain report's E10/G1 walk applies these events in, so the two
+/// halves of one archived Annual Tax Report agree on which event exhausted
+/// the cost base (see the walk comment inside).
 pub fn adjustment_detail(
     parcel: &Parcel<'_>,
     units: Decimal,
@@ -715,28 +721,12 @@ pub fn adjustment_detail(
 ) -> Result<Vec<CostBaseAdjustment>, sqlx::Error> {
     let mut rows = Vec::new();
 
-    // The costed units' share of the initial cost base: the pool both
-    // reduction kinds draw down, the same [`prorated_initial_cost`] term
-    // adjusted_cost_base starts from.
-    let mut running = if parcel.quantity > Decimal::ZERO {
-        prorated_initial_cost(parcel.initial_cost(), units, parcel.quantity)
-    } else {
-        Decimal::ZERO
-    };
-
-    // AMIT reductions (CGT event E10) on the costed units, in statement-year
-    // order. The running balance floors at nil exactly like
-    // adjusted_cost_base's single `.max(0)` — flooring after each step never
-    // loses value versus one accumulated subtraction, since every step only
-    // ever subtracts a non-negative amount.
+    // AMIT reductions (CGT event E10) on the costed units.
     for e in amit_events {
         // The reduction reaching *these* units, which is the statement's own
         // per-unit figure only where its row covers them.
         let amount = e.reduction_for_units(parcel.quantity, units, held.disposed_on());
         let per_unit = e.per_unit_for(parcel.quantity, held.disposed_on());
-        let before = running;
-        running = (running - amount).max(Decimal::ZERO);
-        let capped = before <= Decimal::ZERO || amount > before;
         rows.push(CostBaseAdjustment {
             kind: AdjustmentKind::AmitCostBase,
             date: e.tax_year_end_date,
@@ -746,13 +736,11 @@ pub fn adjustment_detail(
             ),
             per_unit: Some(per_unit),
             amount,
-            capped,
+            capped: false,
         });
     }
 
-    // Return-of-capital payments (CGT event G1), on the costed units too —
-    // drawing down what the AMIT rows left of the same pool.
-    let mut roc_running = running;
+    // Return-of-capital payments (CGT event G1), on the costed units too.
     for e in roc_events {
         // Applicability, the currency guard and the split re-basing are the
         // payment's own (`RocEvent::per_unit_for`) — the same call
@@ -769,23 +757,23 @@ pub fn adjustment_detail(
             continue;
         };
         let amount = per_unit * units;
-        let before = roc_running;
-        roc_running = (roc_running - amount).max(Decimal::ZERO);
-        let capped = before <= Decimal::ZERO || amount > before;
         rows.push(CostBaseAdjustment {
             kind: AdjustmentKind::ReturnOfCapital,
             date: e.date,
             reference: format!("Return of capital @ {per_unit} {}/unit", parcel.currency),
             per_unit: Some(per_unit),
             amount,
-            capped,
+            capped: false,
         });
     }
 
     // Split/consolidation rebases: informational only (amount 0) — they
-    // explain a changed unit count, never a cost-base reduction.
+    // explain a changed unit count, never a cost-base reduction. The window
+    // is `split_ratio`'s own half-open one: a split dated **on** the trade
+    // date never re-based this parcel (its stated quantity is already in
+    // post-split units), so it gets no row.
     for s in splits {
-        if s.date < parcel.trade_date || held.up_to().is_some_and(|d| s.date > d) {
+        if s.date <= parcel.trade_date || held.up_to().is_some_and(|d| s.date > d) {
             continue;
         }
         rows.push(CostBaseAdjustment {
@@ -808,12 +796,48 @@ pub fn adjustment_detail(
             .cmp(&b.date)
             .then(kind_rank(a.kind).cmp(&kind_rank(b.kind)))
     });
+
+    // One ordering rule, not two: the `capped` flags come from walking the
+    // sorted rows — the **date order the reductions arise in** (an AMMA
+    // statement at its `tax_year_end_date`, a payment at its payment date,
+    // AMIT first on a tie), exactly the `(date, rank)` order the
+    // net-capital-gain report's E10/G1 walk applies the same events in
+    // (`Reduction::date`/`rank`) — so the worksheet and the CGT summary of
+    // one archived Annual Tax Report agree on which event exhausted the cost
+    // base. Chronology is also the events' own law: a payment reduces "the
+    // cost base of the shares at the time of the payment"
+    // (`docs/ato/cgt-non-assessable-payments.md`) and an AMIT net amount
+    // applies just before the end of its income year (s 104-107B,
+    // `docs/ato/amit-cost-base-adjustments.md`), so each row meets the
+    // balance as the events before it left it.
+    //
+    // The running balance starts from the costed units' share of the initial
+    // cost base — the same [`prorated_initial_cost`] pool `adjusted_cost_base`
+    // draws both reduction kinds out of — and floors at nil exactly like that
+    // function's single `.max(0)`: flooring after each step never loses value
+    // versus one accumulated subtraction, since every step only ever
+    // subtracts a non-negative amount.
+    let mut running = if parcel.quantity > Decimal::ZERO {
+        prorated_initial_cost(parcel.initial_cost(), units, parcel.quantity)
+    } else {
+        Decimal::ZERO
+    };
+    for row in &mut rows {
+        if row.kind == AdjustmentKind::SplitRebase {
+            continue; // re-bases nothing, draws down nothing
+        }
+        let before = running;
+        running = (running - row.amount).max(Decimal::ZERO);
+        row.capped = before <= Decimal::ZERO || row.amount > before;
+    }
     Ok(rows)
 }
 
 /// Stable tie-break for same-date rows: AMIT, then return of capital, then
-/// the split that made room for it — an arbitrary but deterministic order
-/// (`adjustment_detail`'s doc comment).
+/// the split that made room for it — a deterministic order shared with the
+/// net-capital-gain report's E10/G1 walk (`Reduction::rank`), which applies
+/// the same events by the same `(date, rank)` key so the two presentations
+/// agree on which event exhausted the cost base.
 fn kind_rank(kind: AdjustmentKind) -> u8 {
     match kind {
         AdjustmentKind::AmitCostBase => 0,
@@ -1481,6 +1505,116 @@ mod tests {
         assert_eq!(rows[0].kind, AdjustmentKind::SplitRebase);
         assert_eq!(rows[1].date, date(2024, 4, 1));
         assert_eq!(rows[2].date, date(2024, 5, 1));
+    }
+
+    /// The `capped` flags come from applying the events in the same **date
+    /// order** the net-capital-gain report's E10/G1 walk applies them in
+    /// (`Reduction::date`/`rank` — an AMMA statement at its year end, a
+    /// payment at its payment date, AMIT first on a tie), so the two halves
+    /// of one archived Annual Tax Report agree on which event exhausted the
+    /// cost base. Base $100, ROC 60c/unit (2023-09), AMIT 60c/unit (year
+    /// ended 2024-06-30): the payment came first and found a full cost base,
+    /// so the later statement is the capped row — applying all AMIT rows
+    /// before any ROC rows would have flagged the payment instead, while the
+    /// same report's CGT summary attributed the $20 excess to CGT event E10
+    /// (2026-08-25 code review).
+    #[test]
+    fn capped_flags_apply_events_in_the_walks_date_order_across_kinds() {
+        let p = Parcel {
+            trade_date: date(2023, 1, 1),
+            ..parcel(100, 1)
+        };
+        let amit_events = [whole(1, 2024, "0.60", 100)];
+        let roc = RocEvent {
+            date: date(2023, 9, 15),
+            amount_per_unit: "0.60".parse().unwrap(),
+            currency: "AUD".to_string(),
+            record_date: None,
+        };
+        let rows = adjustment_detail(
+            &p,
+            Decimal::from(100),
+            &amit_events,
+            std::slice::from_ref(&roc),
+            &[],
+            Held::AsAt(None),
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 2);
+        // Date order: the 2023 payment before the 2024 year end.
+        assert_eq!(rows[0].kind, AdjustmentKind::ReturnOfCapital);
+        assert_eq!(rows[1].kind, AdjustmentKind::AmitCostBase);
+        // The payment found a full $100 cost base; the statement's $60 then
+        // exceeded the $40 left — the E10 walk attributes the $20 excess to
+        // the statement, and so must this flag.
+        assert!(!rows[0].capped, "the earlier payment is not the capped row");
+        assert!(rows[1].capped, "the later statement exhausted the balance");
+        // The netted totals are order-independent and unchanged, and the
+        // rows still sum to them.
+        let cb = adjusted_cost_base(
+            &p,
+            Decimal::from(100),
+            &amit_events,
+            std::slice::from_ref(&roc),
+            &[],
+            Held::AsAt(None),
+        )
+        .unwrap();
+        assert_eq!(rows[0].amount, cb.roc_reduction);
+        assert_eq!(rows[1].amount, cb.amit_reduction);
+        assert_eq!(cb.adjusted, Decimal::ZERO);
+    }
+
+    /// A split effective **on** the parcel's own trade date never re-based
+    /// this parcel — `split_ratio`'s window is half-open, skipping
+    /// `s.date <= from`, because the Buy's stated quantity is already in
+    /// post-split units — so the worksheet must not print a rebase row that
+    /// rebased nothing. A split the day after did re-base it and still
+    /// prints (2026-08-25 code review).
+    #[test]
+    fn a_split_on_the_trade_date_itself_prints_no_rebase_row() {
+        use crate::entities::corporate_action::as_acquired_quantity;
+
+        let p = parcel(100, 10); // trade date 2024-01-01
+        let same_day = SplitEvent::share_split(date(2024, 1, 1), Decimal::from(2), Decimal::ONE);
+        // The unit count the row would claim to explain is unchanged …
+        assert_eq!(
+            as_acquired_quantity(
+                Decimal::from(100),
+                std::slice::from_ref(&same_day),
+                p.trade_date,
+                date(2024, 6, 1),
+            ),
+            Decimal::from(100)
+        );
+        // … so no row prints.
+        let rows = adjustment_detail(
+            &p,
+            Decimal::from(100),
+            &[],
+            &[],
+            std::slice::from_ref(&same_day),
+            Held::AsAt(None),
+        )
+        .unwrap();
+        assert!(
+            rows.is_empty(),
+            "a same-day split rebased nothing: {rows:?}"
+        );
+
+        // Control: dated the next day it re-bases this parcel and prints.
+        let next_day = SplitEvent::share_split(date(2024, 1, 2), Decimal::from(2), Decimal::ONE);
+        let rows = adjustment_detail(
+            &p,
+            Decimal::from(100),
+            &[],
+            &[],
+            std::slice::from_ref(&next_day),
+            Held::AsAt(None),
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].kind, AdjustmentKind::SplitRebase);
     }
 
     /// SCENARIOS Z-e: an informational re-basing row is named by the action

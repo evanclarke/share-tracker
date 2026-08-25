@@ -653,7 +653,8 @@ pub async fn db_net_capital_gain(
     // e.g. land an AMMA row between the realised read and the E10 walk).
     let mut tx = pool.begin().await?;
     let realised = super::realised_gains::db_realised_gains_on(&mut tx).await?;
-    let buckets = gross_buckets(&mut tx, &realised).await?;
+    let fx = FxRates::load(&mut *tx).await?;
+    let buckets = gross_buckets(&mut tx, &realised, &fx).await?;
     let opening = crate::entities::cgt_settings::db_opening_capital_loss(&mut *tx).await?;
     tx.commit().await?;
 
@@ -683,17 +684,18 @@ pub async fn db_net_capital_gain(
 /// disposal's buckets before netting). `realised` is fetched once by the
 /// caller — both callers also need the same rows for their own purposes (the
 /// report to attach each year's `disposals`, the what-if's totals having
-/// already come from `parcel_optimiser` directly). Runs on the caller's read
-/// transaction, the same snapshot the realised rows came from.
+/// already come from `parcel_optimiser` directly). `fx` is likewise the
+/// caller's pre-loaded rate table (every imported ATO rate, so the
+/// AMMA/E10/G1 conversions below are map lookups, not one DB round-trip
+/// each) — the annual tax report shares one load across its whole document.
+/// Runs on the caller's read transaction, the same snapshot the realised
+/// rows came from.
 async fn gross_buckets(
     conn: &mut sqlx::SqliteConnection,
     realised: &[super::realised_gains::RealisedGainLoss],
+    fx: &FxRates,
 ) -> Result<HashMap<i32, GrossBuckets>, sqlx::Error> {
     let mut buckets: HashMap<i32, GrossBuckets> = HashMap::new();
-
-    // Every imported ATO FX rate — the AMMA/E10/G1 conversions below are map
-    // lookups, not one DB round-trip each.
-    let fx = FxRates::load(&mut *conn).await?;
 
     // Realised parcel gains (already AUD), bucketed by the sale's tax year.
     for r in realised {
@@ -725,9 +727,9 @@ async fn gross_buckets(
         let d = year_end;
         // AMMA discount-method gains are the already-halved "discounted capital gain"
         // line; gross up ×2 to the pre-discount gain before netting losses.
-        let discount_net = aud_field(&fx, row, "cgt_discount_gains", &currency, d)?;
-        let indexation = aud_field(&fx, row, "cgt_indexation_gains", &currency, d)?;
-        let other = aud_field(&fx, row, "cgt_other_gains", &currency, d)?;
+        let discount_net = aud_field(fx, row, "cgt_discount_gains", &currency, d)?;
+        let indexation = aud_field(fx, row, "cgt_indexation_gains", &currency, d)?;
+        let other = aud_field(fx, row, "cgt_other_gains", &currency, d)?;
 
         let b = buckets.entry(year_end.year()).or_default();
         let grossed_up = discount_net * Decimal::from(2);
@@ -742,7 +744,7 @@ async fn gross_buckets(
     // (discount-eligible or not, per the holding period at the event date), so
     // losses can offset them and the discount applies to the eligible portion.
     // They are also reported on their own informational line per event type.
-    for gain in non_disposal_gains(&mut *conn, &fx).await? {
+    for gain in non_disposal_gains(&mut *conn, fx).await? {
         let b = buckets.entry(gain.tax_year).or_default();
         if gain.discount_eligible {
             b.discount_eligible += gain.amount;
@@ -962,7 +964,8 @@ pub(crate) async fn db_cgt_years(
     conn: &mut sqlx::SqliteConnection,
 ) -> Result<Vec<i32>, sqlx::Error> {
     let realised = super::realised_gains::db_realised_gains_on(&mut *conn).await?;
-    let buckets = gross_buckets(&mut *conn, &realised).await?;
+    let fx = FxRates::load(&mut *conn).await?;
+    let buckets = gross_buckets(&mut *conn, &realised, &fx).await?;
     let opening = crate::entities::cgt_settings::db_opening_capital_loss(&mut *conn).await?;
     Ok(net_years(buckets, opening, current_tax_year())
         .into_iter()
@@ -981,12 +984,18 @@ pub(crate) async fn db_cgt_years(
 /// only be computed by walking every prior year in order — then picks out
 /// the requested one, the same full-history computation
 /// [`db_net_capital_gain`] already does.
+///
+/// `realised` and `fx` are the caller's — the annual tax report (this
+/// function's one caller) already fetched both for its disposals schedule on
+/// the same read transaction, so it passes them through rather than running
+/// the realised-gains pipeline a second time per request.
 pub(crate) async fn db_cgt_summary_year(
     conn: &mut sqlx::SqliteConnection,
     tax_year: i32,
+    realised: &[super::realised_gains::RealisedGainLoss],
+    fx: &FxRates,
 ) -> Result<Option<CgtSummaryYear>, sqlx::Error> {
-    let realised = super::realised_gains::db_realised_gains_on(&mut *conn).await?;
-    let buckets = gross_buckets(&mut *conn, &realised).await?;
+    let buckets = gross_buckets(&mut *conn, realised, fx).await?;
     let amma_grossed_up: HashMap<i32, Decimal> = buckets
         .iter()
         .map(|(y, b)| (*y, b.amma_discount_grossed_up))
@@ -1200,7 +1209,8 @@ async fn what_if_handler(
     let realised = super::realised_gains::db_realised_gains_on(&mut tx)
         .await
         .map_err(ApiError::from)?;
-    let buckets = gross_buckets(&mut tx, &realised)
+    let fx = FxRates::load(&mut *tx).await.map_err(ApiError::from)?;
+    let buckets = gross_buckets(&mut tx, &realised, &fx)
         .await
         .map_err(ApiError::from)?;
     let opening = crate::entities::cgt_settings::db_opening_capital_loss(&mut *tx)

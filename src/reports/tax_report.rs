@@ -481,6 +481,7 @@ struct DisposalInputs {
 
 async fn load_disposal_inputs(
     conn: &mut sqlx::SqliteConnection,
+    fx: FxRates,
 ) -> Result<DisposalInputs, sqlx::Error> {
     let buys: Vec<ParcelRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {} FROM trades WHERE trade_type IN ('Buy', 'DRP')",
@@ -530,7 +531,6 @@ async fn load_disposal_inputs(
     let roc_events =
         crate::entities::corporate_action::db_return_of_capital_events(&mut *conn).await?;
     let split_events = crate::entities::corporate_action::db_share_split_events(&mut *conn).await?;
-    let fx = FxRates::load(&mut *conn).await?;
 
     Ok(DisposalInputs {
         buys: buys.into_iter().map(|b| (b.id, b)).collect(),
@@ -759,10 +759,11 @@ fn disposal_parcel_rows(
 async fn disposals_section(
     conn: &mut sqlx::SqliteConnection,
     tax_year: i32,
+    all: &[realised_gains::RealisedGainLoss],
+    fx: FxRates,
 ) -> Result<DisposalsSection, sqlx::Error> {
-    let all = realised_gains::db_realised_gains_on(&mut *conn).await?;
-    let year_disposals: Vec<_> = all
-        .into_iter()
+    let year_disposals: Vec<&realised_gains::RealisedGainLoss> = all
+        .iter()
         .filter(|d| tax_year_for(d.sale_date) == tax_year)
         .collect();
     if year_disposals.is_empty() {
@@ -772,7 +773,7 @@ async fn disposals_section(
         });
     }
 
-    let inputs = load_disposal_inputs(conn).await?;
+    let inputs = load_disposal_inputs(conn, fx).await?;
     let listing_names: HashMap<i64, (String, String)> =
         sqlx::query("SELECT id, ticker, name FROM listings")
             .fetch_all(&mut *conn)
@@ -788,7 +789,7 @@ async fn disposals_section(
     let renames = RenameHistory::load(conn).await?;
 
     let mut by_listing: HashMap<i64, Vec<DisposalParcelRow>> = HashMap::new();
-    for d in &year_disposals {
+    for &d in &year_disposals {
         by_listing
             .entry(d.listing_id)
             .or_default()
@@ -1045,11 +1046,13 @@ struct IncomeContext {
 }
 
 impl IncomeContext {
+    /// `fx` is the caller's pre-loaded rate table — the annual tax report
+    /// loads it once for the whole document.
     async fn load(
         conn: &mut sqlx::SqliteConnection,
         tax_year: TaxYear,
+        fx: FxRates,
     ) -> Result<Self, sqlx::Error> {
-        let fx = FxRates::load(&mut *conn).await?;
         let tickers: HashMap<i64, String> = sqlx::query("SELECT id, ticker FROM listings")
             .fetch_all(&mut *conn)
             .await?
@@ -1082,8 +1085,9 @@ async fn income_section(
     conn: &mut sqlx::SqliteConnection,
     tax_year: TaxYear,
     franking_alerts: &HashMap<i64, franking_at_risk::FrankingAtRiskAlert>,
+    fx: FxRates,
 ) -> Result<IncomeSections, sqlx::Error> {
-    let ctx = IncomeContext::load(&mut *conn, tax_year).await?;
+    let ctx = IncomeContext::load(&mut *conn, tax_year, fx).await?;
     let mut out = IncomeSections::default();
     push_income_rows(&mut *conn, &ctx, franking_alerts, &mut out).await?;
     push_amma_rows(&mut *conn, &ctx, &mut out).await?;
@@ -1526,9 +1530,16 @@ pub async fn db_tax_report(pool: &SqlitePool, tax_year: i32) -> Result<TaxReport
 
     let mut tx = pool.begin().await?;
     let amma_missing_alerts = amma_missing(&mut tx, year).await?;
-    let disposals = disposals_section(&mut tx, tax_year).await?;
-    let cgt_summary = net_capital_gain::db_cgt_summary_year(&mut tx, tax_year).await?;
-    let income = income_section(&mut tx, year, &franking_alerts).await?;
+    // The realised-gains pipeline and the FX rate table each run/load once
+    // for the whole document: the disposals schedule, the CGT summary and
+    // the income section all read from this one pass rather than each
+    // re-running it on the same snapshot (2026-08-25 code review).
+    let fx = FxRates::load(&mut *tx).await?;
+    let realised = realised_gains::db_realised_gains_on(&mut tx).await?;
+    let disposals = disposals_section(&mut tx, tax_year, &realised, fx.clone()).await?;
+    let cgt_summary =
+        net_capital_gain::db_cgt_summary_year(&mut tx, tax_year, &realised, &fx).await?;
+    let income = income_section(&mut tx, year, &franking_alerts, fx).await?;
     let all_years_summary = tax_summary::db_tax_summary_on(&mut tx).await?;
     tx.commit().await?;
 
@@ -4124,5 +4135,125 @@ mod tests {
                 "{ticker}: the itemised rows must account for the whole gap"
             );
         }
+    }
+
+    /// 2026-08-25 code review: the worksheet's `capped` flags used to apply
+    /// all AMIT rows before any ROC rows (kind order), while the CGT
+    /// summary's E10/G1 walk applies the same events in date order — so the
+    /// two halves of one archived document could disagree about which event
+    /// exhausted the cost base. A fund that converted to an AMIT mid-history
+    /// carries both kinds against one parcel: $100 cost base, a 60c/unit
+    /// return of capital in the pre-AMIT year (2023-05), then the FY2024
+    /// AMMA statement's 60c/unit reduction (year ended 2024-06-30). Both
+    /// halves must attribute the $20 excess to the later AMIT event.
+    #[tokio::test]
+    async fn api_worksheet_capped_flags_and_cgt_summary_attribute_the_excess_to_the_same_event() {
+        use crate::entities::corporate_action;
+
+        let pool = test_support::test_pool().await;
+        // An AMIT from FY2024 only, so the FY2023 return of capital is
+        // recordable (`listing::amit_in_tax_year`).
+        test_support::listing(1)
+            .ticker("CNV")
+            .name("CNV")
+            .amit(true)
+            .amit_from(ymd(2023, 7, 1))
+            .insert(&pool)
+            .await;
+        test_support::buy(10, 1)
+            .date(ymd(2022, 7, 4))
+            .qty(dec("100"))
+            .price(dec("1"))
+            .insert(&pool)
+            .await;
+        corporate_action::db_upsert(
+            &pool,
+            &corporate_action::CorporateAction {
+                id: 1,
+                listing_id: 1,
+                date: ymd(2023, 5, 1),
+                kind: corporate_action::ActionKind::ReturnOfCapital {
+                    amount_per_unit: dec("0.60"),
+                    currency: "AUD".to_string(),
+                    record_date: None,
+                },
+            },
+        )
+        .await
+        .unwrap();
+        test_support::amma(1, 1)
+            .units(dec("100"))
+            .cost_base_adjustment(dec("0.60"))
+            .insert(&pool)
+            .await; // year ended 2024-06-30 (the builder's default)
+        crate::entities::amit_adjustment_generation::db_generate(
+            &pool,
+            1,
+            &crate::entities::amit_adjustment_generation::GenerateBody::default(),
+        )
+        .await
+        .unwrap();
+        // Dispose of the whole parcel in FY2025 so the worksheet prints it.
+        test_support::sell(11, 1)
+            .date(ymd(2024, 8, 1))
+            .qty(dec("100"))
+            .price(dec("2"))
+            .insert(&pool)
+            .await;
+        test_support::allocate(&pool, 10, 11, 10, dec("100")).await;
+
+        let client = test_support::ApiClient::full(&pool);
+
+        // The CGT summary half: the payment (2023-05) met a full $100 cost
+        // base, so the later statement's $60 against the $40 left is the one
+        // that runs past nil — a $20 CGT event E10 gain in FY2024, none of
+        // it G1.
+        let fy2024: serde_json::Value = client
+            .post_json(
+                "/reports/tax-report",
+                &serde_json::json!({"tax_year": 2024}),
+            )
+            .await;
+        assert_eq!(
+            json_dec(&fy2024["cgt_summary"]["cgt_event_e10_gain"]),
+            dec("20")
+        );
+        assert_eq!(
+            json_dec(&fy2024["cgt_summary"]["cgt_event_g1_gain"]),
+            Decimal::ZERO
+        );
+
+        // The worksheet half of the same archived report: rows in date order,
+        // and the **AMIT** row — not the earlier payment — flagged `capped`,
+        // agreeing with the summary's attribution.
+        let fy2025: serde_json::Value = client
+            .post_json(
+                "/reports/tax-report",
+                &serde_json::json!({"tax_year": 2025}),
+            )
+            .await;
+        let adjustments = fy2025["disposals"]["listings"][0]["parcels"][0]["adjustments"]
+            .as_array()
+            .expect("two itemised adjustment rows")
+            .clone();
+        assert_eq!(
+            adjustments
+                .iter()
+                .map(|a| (
+                    a["kind"].as_str().expect("a kind").to_string(),
+                    a["date"].as_str().expect("a date").to_string(),
+                    a["capped"].as_bool().expect("a capped flag"),
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "ReturnOfCapital".to_string(),
+                    "2023-05-01".to_string(),
+                    false
+                ),
+                ("AmitCostBase".to_string(), "2024-06-30".to_string(), true),
+            ],
+            "worksheet order and capped flags must match the E10/G1 walk's date order"
+        );
     }
 }
