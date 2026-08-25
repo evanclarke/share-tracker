@@ -10,90 +10,14 @@ findings are all closed in DONE.md), except where a section's heading names anot
 (e.g. REQUIREMENTS, SCENARIOS). Each section records one finding; sections land in DONE.md as they
 are fixed or decided.
 
-**Open: 9 sections — 7 from the 2026-08-25 code review, plus 2 follow-ups.** Sixteen sections were
-recorded from that review (a whole-codebase pass over `src` — business-logic errors, quality,
-duplication — every finding adversarially verified against `f171999`). Nine are closed and archived
-in [`DONE/reviews.md`](DONE/reviews.md): the AMIT×rollover pair (`44b8a6b`), the four-endpoint
-fx-parity family (`1341068`), and the three web findings (`c190871`). The remaining seven are
-below, with two follow-up sections recorded from observations made while fixing.
-
-## The tax report's per-parcel `capped` flags apply events in kind order, the CGT walk in date order (code review 2026-08-25)
-(`adjustment_detail` (src/domain/cost_base.rs:755) computes its per-row `capped` flags by applying
-all AMIT rows before any ROC rows — kind order, dates ignored, then merely sorts for display —
-while `net_capital_gain`'s E10/G1 walk (net_capital_gain.rs:529) applies the same events in date
-order. The two halves of one archived Annual Tax Report can disagree about which event exhausted
-the cost base and by how much.)
-- [ ] Reproduce: base $100, ROC $60 (2023-09), AMIT $60 (year end 2024-06-30) → the printed
-  per-parcel worksheet flags the 2023 ROC row as capped (AMIT fully absorbed) while the same
-  report's CGT summary shows `cgt_event_e10_gain` = $20 attributed to the AMIT event —
-  contradictory attribution inside one archived PDF
-- [ ] Fix: `adjustment_detail` applies events in the same date order as the E10/G1 walk — one
-  ordering rule, not two
-- [ ] Tests: the reproduction's worksheet and CGT summary attribute the excess to the same event
-
-## The period-performance report reads across five-plus separate snapshots, invisibly to the scan test (code review 2026-08-25)
-(`compute` (src/reports/period_performance.rs:278) takes `&SqlitePool` and reads through separate
-implicit transactions — `valuations_or_empty` twice, `db_performance` twice (each opening its own
-internal `pool.begin()`), plus `FxRates::load(pool)` — instead of one `pool.begin()` snapshot,
-violating the one-consistent-snapshot rule. The `DEFERRED_BEGIN_ALLOWED` scan never sees it because
-the file never types `.begin()`, and `reports/period_performance.rs` is absent from the allowlist.)
-- [ ] Reproduce/fix: a backdated Buy committing between the `perf_from` and `perf_to` reads appears
-  in `invested(to)` but not `invested(from)`, so `purchases` misbooks it as an in-window purchase
-  and the Capital + FX + Income identity no longer sums; refactor `compute` onto one read
-  transaction threaded through its helpers, and add the file to `DEFERRED_BEGIN_ALLOWED`
-- [ ] Strengthen the scan: a report file that reaches the pool without ever typing `.begin()`
-  currently passes unclassified — extend the scan (or add a companion check) so a report absent
-  from the allowlist that queries via `&SqlitePool` is also an offender
-- [ ] Fold in the redundant-loads section below if the same refactor removes them
-- [ ] Tests: the one-transaction shape pinned the way other reports are
-
-## A split dated on the parcel's own trade date prints a no-op rebase row (code review 2026-08-25)
-(`adjustment_detail`'s informational split-rebase rows skip only strictly-earlier splits
-(`s.date < parcel.trade_date`, src/domain/cost_base.rs:788) while `split_ratio`'s window skips
-`s.date <= from` — a split dated exactly on the trade date emits a rebase row that rebased nothing,
-so the archived worksheet no longer explains its own quantity. Cosmetic: informational-only row.)
-- [ ] Fix: align the boundary (`<=`) so the same-day split emits no row; test with a 2-for-1 split
-  effective on the Buy's own date — unit count unchanged and no rebase row printed
-
-## The Annual Tax Report runs the realised-gains pipeline twice per request (code review 2026-08-25)
-(`db_tax_report` (src/reports/tax_report.rs:1512) calls `disposals_section` → `db_realised_gains_on`
-(line 763), then `db_cgt_summary_year` (line 1530) re-runs `db_realised_gains_on` plus
-`gross_buckets`; `FxRates` and `IncomeContext` each load twice. All inside the one transaction, so
-consistent — efficiency only. `gross_buckets` already takes a `&realised` slice, so a
-`db_cgt_summary_year` variant accepting the caller's precomputed slice is a small signature change.)
-- [ ] Fix: compute the realised set once and pass it through; drop the duplicate `FxRates` /
-  `IncomeContext` loads
-- [ ] Tests: existing tax-report figures unchanged (the suite already pins them)
-
-## The period-performance report loads every held listing's market data about four times (code review 2026-08-25)
-(`valuations_or_empty` (src/reports/period_performance.rs:205) calls `valuation::held_markets`
-solely for an `is_empty()` check, then `stored_valuations_on`'s first line re-runs
-`held_markets_on` for the same date; `compute` runs the pair for both `from` and `to`. Each
-`load_market_on` is several queries per listing (listing, full `RenameHistory`, exchange, holidays)
-— identical loads executed ~4× per request on different pooled connections. Likely closed by the
-one-transaction refactor above; fold there if so.)
-- [ ] Fix: load each date's markets once and pass them through (or drop the pre-check); verify with
-  the one-transaction refactor
-
-## resolve_valuation_rate's valuation-only restriction has no scan test (code review 2026-08-25)
-(`infra/fx.rs:220`'s fallback-rate resolver is restricted by CLAUDE.md to three callers — snapshot
-generation, live-quote conversion, period-performance FX attribution — so no tax figure is ever
-computed from a fallback-month rate. Unlike the deferred-`BEGIN` rule it parallels, nothing
-enforces it: a future tax-path change can call it and the suite stays green.)
-- [ ] Add a source-scan test naming the allowed caller files, mirroring
-  `write_side_modules_never_begin_a_deferred_transaction` — a new caller is an offender until
-  classified
-
-## entities::inheritance skips the CrudEntity pattern and re-implements the FX lookup (code review 2026-08-25)
-(src/entities/inheritance.rs implements no `CrudEntity` — hand-writing list/get against the
-entity-module pattern, so the generic handlers' contracts (column list, 404 wording) can drift
-untested — and its `check_convertible` (~line 540) re-implements the `FxRates` month-rate lookup
-raw instead of calling `infra::fx`, so a change to FX resolution semantics silently misses it.)
-- [ ] Refactor onto `CrudEntity` + the generic handlers for the verbs they cover (hand-written
-  verbs stay only where they do more than one table's work, per the pattern)
-- [ ] Replace the raw month-rate lookup with the `infra::fx` API
-- [ ] Tests: existing behaviour pinned through the refactor (404 wording via the shared
-  missing-row test)
+**Open: 2 follow-up sections.** All sixteen sections recorded from the **2026-08-25 code review**
+(a whole-codebase pass over `src` — business-logic errors, quality, duplication — every finding
+adversarially verified against `f171999`) are closed and archived in
+[`DONE/reviews.md`](DONE/reviews.md): the AMIT×rollover pair (`44b8a6b`), the four-endpoint
+fx-parity family (`1341068`), the three web findings (`c190871`), the CGT worksheet/report trio
+(`85b8fe8`), the period-performance snapshot refactor with the two new convention scans — which
+also caught and fixed `wash_sales.rs` (`9c2ae3b`) — and the inheritance refactor (`85a255d`). The
+two sections below were recorded from observations made while fixing and are the open work.
 
 ## net_capital_gain's C2 branch can treat a rollover cohort as a C2-triggering disposal (code review 2026-08-25 follow-up)
 (Observed while fixing the held/spill finding, `44b8a6b`. In the per-cohort E10/G1/C2 walk
