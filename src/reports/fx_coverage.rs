@@ -110,7 +110,7 @@ async fn load_convertibles(
     let mut out = Vec::new();
     // (label, SQL) — each yields id, listing_id, ticker, date, currency, and
     // the record's fallback columns (NULL where the record has none).
-    let sources: [(&'static str, &'static str); 7] = [
+    let sources: [(&'static str, &'static str); 8] = [
         (
             "trade",
             "SELECT t.id, t.listing_id, l.ticker, t.date, t.currency, t.fx_rate AS fallback, \
@@ -157,6 +157,19 @@ async fn load_convertibles(
              FROM corporate_actions c JOIN listings l ON l.id = c.listing_id \
              WHERE c.action_type = 'ReturnOfCapital' AND c.currency IS NOT NULL \
                AND c.currency <> 'AUD'",
+        ),
+        // Both legs of a rights sale — proceeds and rights cost — convert at
+        // the *sale* month in the issue's currency, with the row's own
+        // `fx_rate` as the manual fallback (`reports::realised_gains`), so a
+        // missing month rests on that stored rate like a trade's does.
+        (
+            "rights sale",
+            "SELECT rs.id, ca.listing_id, l.ticker, rs.date, ca.currency, \
+                    rs.fx_rate AS fallback, NULL AS spot \
+             FROM rights_sales rs \
+             JOIN corporate_actions ca ON ca.id = rs.rights_action_id \
+             JOIN listings l ON l.id = ca.listing_id \
+             WHERE ca.currency <> 'AUD'",
         ),
     ];
     for (record, sql) in sources {
@@ -624,6 +637,72 @@ mod tests {
             "{}",
             reductions[0].detail
         );
+    }
+
+    /// A foreign-currency rights sale converts its proceeds and rights cost
+    /// at the sale month, so a missing month must surface here like every
+    /// other source — before `rights_sales` joined the scan this was the one
+    /// default-1 site flagged nowhere (code review 2026-08-25). The row rests
+    /// on its stored `fx_rate` (the write path requires one, stated or
+    /// resolved, for a non-nil foreign sale).
+    #[tokio::test]
+    async fn db_a_rights_sale_in_a_missing_month_is_flagged() {
+        let pool = test_pool().await;
+        usd_listing(&pool, 1, "RTU").await;
+        test_support::buy(1, 1)
+            .date(ymd(2024, 1, 16))
+            .currency("USD")
+            .fx_rate(dec("0.60"))
+            .insert(&pool)
+            .await;
+        corporate_action::db_upsert(
+            &pool,
+            &crate::entities::corporate_action::CorporateAction {
+                id: 10,
+                listing_id: 1,
+                date: ymd(2024, 7, 1),
+                kind: crate::entities::corporate_action::ActionKind::RightsIssue {
+                    rights_units: Decimal::ONE,
+                    rights_held_units: Decimal::ONE,
+                    exercise_price: dec("1.80"),
+                    currency: "USD".to_string(),
+                    renounceable: true,
+                },
+            },
+        )
+        .await
+        .unwrap();
+        crate::entities::rights_sale::db_sell_rights(
+            &pool,
+            10,
+            &crate::entities::rights_sale::SellRightsBody {
+                date: ymd(2024, 7, 20),
+                units: dec("50"),
+                proceeds_per_right: Some(dec("0.20")),
+                rights_cost: None,
+                fx_rate: Some(dec("0.99")),
+                holding_account_id: 1,
+                allocations: vec![crate::entities::rights_sale::AllocationInput {
+                    purchase_trade_id: 1,
+                    units: dec("50"),
+                }],
+            },
+        )
+        .await
+        .unwrap();
+
+        let alerts = db_fx_coverage(&pool).await.unwrap();
+        let sale_rows: Vec<_> = of_kind(&alerts, "missing_rate")
+            .into_iter()
+            .filter(|a| a.record == "rights sale")
+            .collect();
+        assert_eq!(sale_rows.len(), 1, "{alerts:#?}");
+        let row = sale_rows[0];
+        assert_eq!(row.month, "2024-07");
+        assert_eq!(row.currency, "USD");
+        assert_eq!(row.ticker.as_deref(), Some("RTU"));
+        assert_eq!(row.resting_on.as_deref(), Some("record_fx_rate"));
+        assert!(row.detail.contains("0.99"), "{}", row.detail);
     }
 
     #[tokio::test]

@@ -134,8 +134,11 @@ pub struct SellRightsBody {
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"
     )]
     pub rights_cost: Option<Decimal>,
-    /// Optional foreign-per-AUD override (defaults to 1; reports prefer the
-    /// ATO rate and fall back to this — see `infra::fx`).
+    /// Optional foreign-per-AUD override (reports prefer the ATO rate and
+    /// fall back to this — see `infra::fx`). When omitted, the sale month's
+    /// ATO rate is resolved and bound (AUD resolves to 1); a non-AUD,
+    /// non-nil sale in a month with no imported rate is refused rather than
+    /// defaulted to parity ([`SellRightsError::MissingFxRate`]).
     #[serde(
         default,
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"
@@ -223,6 +226,13 @@ pub enum SellRightsError {
     /// entitlement earned by the units held at the record date.
     #[error("the rights sold and exercised exceed the entitlement earned at the record date")]
     ExceedsEntitlement,
+    /// A non-AUD sale whose month has no imported ATO rate and whose body
+    /// states no `fx_rate`: the proceeds and rights cost have no rate to
+    /// convert at, and binding a placeholder 1 would silently book them at
+    /// parity via `FxOverride::Fallback(1)` — the path the ESS vest refuses
+    /// (`ess_vest::VestError::MissingFxRate`). Mapped to 422.
+    #[error("no ATO FX rate for {currency} in {month} and the request states none")]
+    MissingFxRate { currency: String, month: String },
 }
 
 impl From<SellRightsError> for ApiError {
@@ -278,6 +288,12 @@ impl From<SellRightsError> for ApiError {
                 "the rights anchored to a parcel exceed the entitlement its record-date units \
                  earned",
             ),
+            SellRightsError::MissingFxRate { currency, month } => ApiError::unprocessable(format!(
+                "this rights sale is in {currency} but no ATO/RBA rate has been imported \
+                     for {currency} in {month} and the request states no fx_rate — supply \
+                     fx_rate or import that month's RBA rates; recording without one would \
+                     convert the proceeds at parity (1 AUD per {currency})"
+            )),
             SellRightsError::ExceedsEntitlement => ApiError::unprocessable(
                 "the rights sold and exercised exceed the entitlement earned by the holding at \
                  the record date",
@@ -331,13 +347,19 @@ pub async fn db_sell_rights(
         Some(a) => a,
         None => return Err(SellRightsError::ActionNotFound),
     };
-    let (rights_units, rights_held_units, renounceable) = match &action.kind {
+    let (rights_units, rights_held_units, currency, renounceable) = match &action.kind {
         ActionKind::RightsIssue {
             rights_units,
             rights_held_units,
+            currency,
             renounceable,
             ..
-        } => (*rights_units, *rights_held_units, *renounceable),
+        } => (
+            *rights_units,
+            *rights_held_units,
+            currency.clone(),
+            *renounceable,
+        ),
         _ => return Err(SellRightsError::NotARightsIssue),
     };
     // What the offer's own terms allow. A non-renounceable entitlement cannot
@@ -444,7 +466,33 @@ pub async fn db_sell_rights(
         in_request.insert(alloc.purchase_trade_id, anchored);
     }
 
-    let fx_rate = body.fx_rate.unwrap_or(Decimal::ONE);
+    // The rate the row carries. The realised-gains report converts both legs
+    // via `FxOverride::Fallback(fx_rate)`, so a placeholder 1 would become
+    // the real answer exactly when the sale month's ATO rate is missing and
+    // book USD proceeds 1:1 as AUD — the silent-parity path the ESS vest
+    // refuses (`ess_vest::VestError::MissingFxRate`). The body's stated rate
+    // is bound when the caller gave one; otherwise the sale month's ATO rate
+    // is resolved and bound (AUD resolves to 1), and a month with neither is
+    // refused rather than invented. A nil/nil lapse converts nothing, so a
+    // missing month cannot corrupt it and parity is bound harmlessly.
+    let fx_rate = match body.fx_rate {
+        Some(rate) => rate,
+        None => {
+            let fx = crate::infra::fx::FxRates::load(&mut *tx).await?;
+            match fx.resolve_rate(&currency, body.date, crate::infra::fx::FxOverride::None) {
+                Ok(rate) => rate,
+                Err(_) if proceeds_per_right == Decimal::ZERO && rights_cost == Decimal::ZERO => {
+                    Decimal::ONE
+                }
+                Err(_) => {
+                    return Err(SellRightsError::MissingFxRate {
+                        currency: currency.clone(),
+                        month: body.date.format("%Y-%m").to_string(),
+                    });
+                }
+            }
+        }
+    };
     let result = sqlx::query(
         "INSERT INTO rights_sales \
          (rights_action_id, date, units, proceeds_per_right, rights_cost, fx_rate, \
@@ -575,7 +623,7 @@ mod tests {
     use super::*;
     use crate::entities::corporate_action::CorporateAction;
     use crate::entities::{listing, rights_exercise, trade};
-    use crate::test_support::{self, ApiClient, test_pool};
+    use crate::test_support::{self, ApiClient, dec, test_pool};
 
     fn d(y: i32, m: u32, day: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(y, m, day).unwrap()
@@ -666,7 +714,7 @@ mod tests {
     async fn sell_rights_persists_the_sale_with_its_anchoring() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        insert_buy(&pool, 1, d(2024, 1, 15), "1000").await;
+        insert_buy(&pool, 1, d(2024, 1, 16), "1000").await;
         insert_rights_issue(&pool, 10, d(2024, 7, 1)).await;
 
         let sale = db_sell_rights(&pool, 10, &body(d(2024, 7, 20), "250", 1))
@@ -758,7 +806,7 @@ mod tests {
     async fn entitlement_cap_is_shared_with_exercises() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        insert_buy(&pool, 1, d(2024, 1, 15), "1000").await;
+        insert_buy(&pool, 1, d(2024, 1, 16), "1000").await;
         insert_rights_issue(&pool, 10, d(2024, 7, 1)).await; // entitled to 250
 
         // Exercise 100, sell 150 — the entitlement is exactly consumed.
@@ -874,7 +922,7 @@ mod tests {
     async fn parcel_cap_reflects_units_sold_before_the_record_date() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        insert_buy(&pool, 1, d(2024, 1, 15), "1000").await;
+        insert_buy(&pool, 1, d(2024, 1, 16), "1000").await;
         insert_buy(&pool, 3, d(2024, 2, 1), "1000").await;
         test_support::sell(2, 1)
             .date(d(2024, 5, 1))
@@ -901,7 +949,7 @@ mod tests {
     async fn invalid_sales_are_rejected_and_nothing_persisted() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        insert_buy(&pool, 1, d(2024, 1, 15), "1000").await;
+        insert_buy(&pool, 1, d(2024, 1, 16), "1000").await;
         insert_buy(&pool, 2, d(2024, 7, 1), "400").await; // ex-rights — earned nothing
         insert_rights_issue(&pool, 10, d(2024, 7, 1)).await;
         corporate_action::db_upsert(
@@ -982,7 +1030,7 @@ mod tests {
     async fn referenced_action_cannot_be_edited_or_deleted() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        insert_buy(&pool, 1, d(2024, 1, 15), "1000").await;
+        insert_buy(&pool, 1, d(2024, 1, 16), "1000").await;
         insert_rights_issue(&pool, 10, d(2024, 7, 1)).await;
         let sale = db_sell_rights(&pool, 10, &body(d(2024, 7, 20), "250", 1))
             .await
@@ -1010,7 +1058,7 @@ mod tests {
     async fn anchoring_parcel_is_frozen_while_referenced() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        insert_buy(&pool, 1, d(2024, 1, 15), "1000").await;
+        insert_buy(&pool, 1, d(2024, 1, 16), "1000").await;
         insert_rights_issue(&pool, 10, d(2024, 7, 1)).await;
         let sale = db_sell_rights(&pool, 10, &body(d(2024, 7, 20), "250", 1))
             .await
@@ -1039,7 +1087,7 @@ mod tests {
     async fn proceeds_against_a_non_renounceable_offer_are_refused() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        insert_buy(&pool, 1, d(2024, 1, 15), "1000").await;
+        insert_buy(&pool, 1, d(2024, 1, 16), "1000").await;
         insert_non_renounceable_issue(&pool, 10, d(2024, 7, 1)).await;
 
         let err = db_sell_rights(&pool, 10, &body(d(2024, 7, 20), "250", 1)).await;
@@ -1062,7 +1110,7 @@ mod tests {
     async fn a_lapse_at_nil_against_a_non_renounceable_offer_is_still_recorded() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        insert_buy(&pool, 1, d(2024, 1, 15), "1000").await;
+        insert_buy(&pool, 1, d(2024, 1, 16), "1000").await;
         insert_non_renounceable_issue(&pool, 10, d(2024, 7, 1)).await;
 
         let mut lapse = body(d(2024, 7, 20), "250", 1);
@@ -1091,7 +1139,7 @@ mod tests {
     async fn a_purchase_cost_against_a_non_renounceable_offer_is_refused() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        insert_buy(&pool, 1, d(2024, 1, 15), "1000").await;
+        insert_buy(&pool, 1, d(2024, 1, 16), "1000").await;
         insert_non_renounceable_issue(&pool, 10, d(2024, 7, 1)).await;
 
         let mut lapse = body(d(2024, 7, 20), "250", 1);
@@ -1109,7 +1157,7 @@ mod tests {
     async fn a_renounceable_offer_still_takes_its_premium_as_proceeds() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        insert_buy(&pool, 1, d(2024, 1, 15), "1000").await;
+        insert_buy(&pool, 1, d(2024, 1, 16), "1000").await;
         insert_rights_issue(&pool, 10, d(2024, 7, 1)).await;
 
         let sale = db_sell_rights(&pool, 10, &body(d(2024, 7, 20), "250", 1))
@@ -1124,7 +1172,7 @@ mod tests {
     async fn api_sell_rights_returns_201_then_lists_gets_and_deletes() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        insert_buy(&pool, 1, d(2024, 1, 15), "1000").await;
+        insert_buy(&pool, 1, d(2024, 1, 16), "1000").await;
         insert_rights_issue(&pool, 10, d(2024, 7, 1)).await;
         let app = ApiClient::over(router().with_state(pool.clone()));
 
@@ -1166,7 +1214,7 @@ mod tests {
     async fn api_invalid_sales_return_404_or_422_with_a_reason() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        insert_buy(&pool, 1, d(2024, 1, 15), "1000").await;
+        insert_buy(&pool, 1, d(2024, 1, 16), "1000").await;
         insert_rights_issue(&pool, 10, d(2024, 7, 1)).await;
         let app = ApiClient::over(router().with_state(pool.clone()));
 
@@ -1229,7 +1277,7 @@ mod tests {
     async fn api_a_premium_on_a_non_renounceable_offer_is_refused_naming_the_income_path() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        insert_buy(&pool, 1, d(2024, 1, 15), "1000").await;
+        insert_buy(&pool, 1, d(2024, 1, 16), "1000").await;
         insert_non_renounceable_issue(&pool, 10, d(2024, 7, 1)).await;
         let app = ApiClient::over(router().with_state(pool.clone()));
 
@@ -1295,7 +1343,7 @@ mod tests {
     async fn api_allocation_refusals_name_the_sum_and_what_it_should_be() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        insert_buy(&pool, 1, d(2024, 1, 15), "1000").await;
+        insert_buy(&pool, 1, d(2024, 1, 16), "1000").await;
         insert_rights_issue(&pool, 10, d(2024, 7, 1)).await;
         let app = ApiClient::over(router().with_state(pool.clone()));
 
@@ -1338,5 +1386,180 @@ mod tests {
             resp.text(),
             "each anchoring parcel allocation must be for a positive number of rights"
         );
+    }
+
+    // --- fx-default family (code review 2026-08-25) ---
+
+    /// A USD listing whose trades must be recorded in USD.
+    async fn insert_usd_listing(pool: &SqlitePool, id: i64) {
+        test_support::listing(id)
+            .mic("XNYS")
+            .ticker("RTU")
+            .name("Rights Test Co US")
+            .currency("USD")
+            .insert(pool)
+            .await;
+    }
+
+    /// A USD parcel carrying its own stated rate, so only the *sale* under
+    /// test is missing one.
+    async fn insert_usd_buy(pool: &SqlitePool, id: i64, date: NaiveDate, qty: &str) {
+        test_support::buy(id, 1)
+            .date(date)
+            .settlement(date)
+            .qty(qty.parse().unwrap())
+            .price("2.00".parse().unwrap())
+            .currency("USD")
+            .fx_rate(dec("0.60"))
+            .insert(pool)
+            .await;
+    }
+
+    /// A 1-for-4 renounceable rights issue in USD, record date `date`.
+    async fn insert_usd_rights_issue(pool: &SqlitePool, id: i64, date: NaiveDate) {
+        corporate_action::db_upsert(
+            pool,
+            &CorporateAction {
+                id,
+                listing_id: 1,
+                date,
+                kind: ActionKind::RightsIssue {
+                    rights_units: Decimal::ONE,
+                    rights_held_units: Decimal::from(4),
+                    exercise_price: "1.80".parse().unwrap(),
+                    currency: "USD".to_string(),
+                    renounceable: true,
+                },
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    /// Fx-default family (code review 2026-08-25): a USD retail premium
+    /// recorded with `fx_rate` omitted, dated in a month with no imported RBA
+    /// rate, used to store parity silently — realised gains booked USD
+    /// proceeds 1:1 as AUD, and (before it joined the fx_coverage scan)
+    /// nothing anywhere flagged it. Now refused like the ESS vest, naming the
+    /// currency, the month, and the remedies, with nothing persisted.
+    #[tokio::test]
+    async fn api_a_foreign_sale_with_fx_omitted_in_a_missing_month_is_refused_naming_the_month() {
+        let pool = test_pool().await;
+        insert_usd_listing(&pool, 1).await;
+        insert_usd_buy(&pool, 1, d(2024, 1, 16), "1000").await;
+        insert_usd_rights_issue(&pool, 10, d(2024, 7, 1)).await;
+
+        let resp = ApiClient::over(router().with_state(pool.clone()))
+            .post(
+                "/corporate_actions/10/sell_rights",
+                &serde_json::json!({
+                    "date": "2024-07-20",
+                    "units": "250",
+                    "proceeds_per_right": "0.20",
+                    "allocations": [ { "purchase_trade_id": 1, "units": "250" } ],
+                }),
+            )
+            .await;
+        let (status, body) = resp.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert!(body.contains("USD") && body.contains("2024-07"), "{body}");
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM rights_sales")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 0, "nothing persisted");
+    }
+
+    /// With the month's rate imported an omitted `fx_rate` resolves to it —
+    /// the stored row carries the real rate, never parity.
+    #[tokio::test]
+    async fn a_foreign_sale_resolves_the_imported_month_rate_when_fx_omitted() {
+        let pool = test_pool().await;
+        insert_usd_listing(&pool, 1).await;
+        insert_usd_buy(&pool, 1, d(2024, 1, 16), "1000").await;
+        insert_usd_rights_issue(&pool, 10, d(2024, 7, 1)).await;
+        crate::entities::rba_fx_rate::db_import_rate(&pool, "USD", "2024-07", dec("0.65"))
+            .await
+            .unwrap();
+
+        let sale = db_sell_rights(
+            &pool,
+            10,
+            &SellRightsBody {
+                date: d(2024, 7, 20),
+                units: dec("250"),
+                proceeds_per_right: Some(dec("0.20")),
+                rights_cost: None,
+                fx_rate: None,
+                holding_account_id: 1,
+                allocations: vec![AllocationInput {
+                    purchase_trade_id: 1,
+                    units: dec("250"),
+                }],
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(sale.fx_rate, dec("0.65"));
+    }
+
+    /// A stated `fx_rate` is bound as given even in a missing-rate month —
+    /// the caller said what the money converted at.
+    #[tokio::test]
+    async fn a_stated_fx_rate_is_stored_even_when_the_month_is_missing() {
+        let pool = test_pool().await;
+        insert_usd_listing(&pool, 1).await;
+        insert_usd_buy(&pool, 1, d(2024, 1, 16), "1000").await;
+        insert_usd_rights_issue(&pool, 10, d(2024, 7, 1)).await;
+
+        let sale = db_sell_rights(
+            &pool,
+            10,
+            &SellRightsBody {
+                date: d(2024, 7, 20),
+                units: dec("250"),
+                proceeds_per_right: Some(dec("0.20")),
+                rights_cost: None,
+                fx_rate: Some(dec("0.62")),
+                holding_account_id: 1,
+                allocations: vec![AllocationInput {
+                    purchase_trade_id: 1,
+                    units: dec("250"),
+                }],
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(sale.fx_rate, dec("0.62"));
+    }
+
+    /// A nil/nil lapse of a foreign issue converts nothing, so a missing
+    /// month does not block it — a free right can always lapse.
+    #[tokio::test]
+    async fn a_nil_lapse_of_a_foreign_issue_needs_no_rate() {
+        let pool = test_pool().await;
+        insert_usd_listing(&pool, 1).await;
+        insert_usd_buy(&pool, 1, d(2024, 1, 16), "1000").await;
+        insert_usd_rights_issue(&pool, 10, d(2024, 7, 1)).await;
+
+        let sale = db_sell_rights(
+            &pool,
+            10,
+            &SellRightsBody {
+                date: d(2024, 7, 20),
+                units: dec("250"),
+                proceeds_per_right: None,
+                rights_cost: None,
+                fx_rate: None,
+                holding_account_id: 1,
+                allocations: vec![AllocationInput {
+                    purchase_trade_id: 1,
+                    units: dec("250"),
+                }],
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(sale.fx_rate, Decimal::ONE);
     }
 }

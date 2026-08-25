@@ -68,8 +68,12 @@ pub struct ExerciseBody {
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"
     )]
     pub rights_cost: Option<Decimal>,
-    /// Optional foreign-per-AUD override for the created trade (defaults to
-    /// 1; reports prefer the ATO rate and fall back to this — see `infra::fx`).
+    /// Optional foreign-per-AUD override for the created trade (reports
+    /// prefer the ATO rate and fall back to this — see `infra::fx`). When
+    /// omitted, the exercise month's ATO rate is resolved and bound (AUD
+    /// resolves to 1); a non-AUD, non-nil-cost exercise in a month with no
+    /// imported rate is refused rather than defaulted to parity
+    /// ([`ExerciseError::MissingFxRate`]).
     #[serde(
         default,
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"
@@ -140,6 +144,13 @@ pub enum ExerciseError {
     /// 422.
     #[error("this parcel's quantity re-bases beyond the representable range: {0}")]
     UnrepresentableRebasedQuantity(#[source] crate::domain::cost_base::UnrepresentableQuantity),
+    /// A non-AUD exercise whose month has no imported ATO rate and whose body
+    /// states no `fx_rate`: the parcel's cost base has no rate to convert at,
+    /// and binding a placeholder 1 would silently cost it at parity via
+    /// `FxOverride::Fallback(1)` — the path the ESS vest refuses
+    /// (`ess_vest::VestError::MissingFxRate`). Mapped to 422.
+    #[error("no ATO FX rate for {currency} in {month} and the request states none")]
+    MissingFxRate { currency: String, month: String },
 }
 
 impl From<ExerciseError> for ApiError {
@@ -179,6 +190,12 @@ impl From<ExerciseError> for ApiError {
             ExerciseError::UnrepresentableRebasedQuantity(e) => {
                 ApiError::Unprocessable(e.message())
             }
+            ExerciseError::MissingFxRate { currency, month } => ApiError::unprocessable(format!(
+                "this exercise is in {currency} but no ATO/RBA rate has been imported for \
+                 {currency} in {month} and the request states no fx_rate — supply fx_rate or \
+                 import that month's RBA rates; exercising without one would cost the parcel \
+                 at parity (1 AUD per {currency})"
+            )),
             ExerciseError::Db(err) => err.into(),
         }
     }
@@ -383,7 +400,35 @@ pub async fn db_exercise(
     ])
     .map_err(ExerciseError::UnrepresentableCostBase)?;
 
-    let fx_rate = body.fx_rate.unwrap_or(Decimal::ONE);
+    // The rate the Buy carries. `trades.fx_rate` is the *fallback* applied
+    // when no ATO monthly rate exists for the month (`infra::fx::pick_rate`),
+    // so a placeholder 1 would become a real answer exactly when the exercise
+    // month's rate is missing, and every cost-base report would cost a US$450
+    // parcel at A$450 via `FxOverride::Fallback(1)` — the silent-parity path
+    // the ESS vest refuses (`ess_vest::VestError::MissingFxRate`). The body's
+    // stated rate is bound when the caller gave one; otherwise the exercise
+    // month's ATO rate is resolved and bound (AUD resolves to 1), and a month
+    // with neither is refused rather than invented. A nil-cost exercise
+    // converts nothing, so a missing month cannot corrupt it and parity is
+    // bound harmlessly.
+    let fx_rate = match body.fx_rate {
+        Some(rate) => rate,
+        None => {
+            let fx = crate::infra::fx::FxRates::load(&mut *tx).await?;
+            match fx.resolve_rate(&currency, body.date, crate::infra::fx::FxOverride::None) {
+                Ok(rate) => rate,
+                Err(_) if exercise_price * body.units + rights_cost == Decimal::ZERO => {
+                    Decimal::ONE
+                }
+                Err(_) => {
+                    return Err(ExerciseError::MissingFxRate {
+                        currency: currency.clone(),
+                        month: body.date.format("%Y-%m").to_string(),
+                    });
+                }
+            }
+        }
+    };
     let result = sqlx::query(
         "INSERT INTO trades \
          (trade_type, date, settlement_date, settlement_date_source, listing_id, \
@@ -442,7 +487,7 @@ async fn exercise(
 mod tests {
     use super::*;
     use crate::entities::{corporate_action::CorporateAction, listing, sell};
-    use crate::test_support::{self, ApiClient, test_pool};
+    use crate::test_support::{self, ApiClient, dec, test_pool};
 
     fn d(y: i32, m: u32, day: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(y, m, day).unwrap()
@@ -1576,5 +1621,141 @@ mod tests {
             exercised["original_cost_base"],
             "0.0079000000000000000000000000"
         );
+    }
+
+    // --- fx-default family (code review 2026-08-25) ---
+
+    /// A USD listing whose trades must be recorded in USD.
+    async fn insert_usd_listing(pool: &SqlitePool, id: i64) {
+        test_support::listing(id)
+            .mic("XNYS")
+            .ticker("RTU")
+            .name("Rights Test Co US")
+            .currency("USD")
+            .insert(pool)
+            .await;
+    }
+
+    /// A USD parcel carrying its own stated rate, so only the *exercise*
+    /// under test is missing one.
+    async fn insert_usd_buy(pool: &SqlitePool, id: i64, date: NaiveDate, qty: &str) {
+        test_support::buy(id, 1)
+            .date(date)
+            .settlement(date)
+            .qty(qty.parse().unwrap())
+            .price("2.00".parse().unwrap())
+            .currency("USD")
+            .fx_rate("0.60".parse().unwrap())
+            .insert(pool)
+            .await;
+    }
+
+    /// A 1-for-4 renounceable rights issue in USD at the given exercise
+    /// price, record date `date`.
+    async fn insert_usd_rights_issue(pool: &SqlitePool, id: i64, date: NaiveDate, price: &str) {
+        corporate_action::db_upsert(
+            pool,
+            &CorporateAction {
+                id,
+                listing_id: 1,
+                date,
+                kind: crate::entities::corporate_action::ActionKind::RightsIssue {
+                    rights_units: Decimal::ONE,
+                    rights_held_units: Decimal::from(4),
+                    exercise_price: price.parse().unwrap(),
+                    currency: "USD".to_string(),
+                    renounceable: true,
+                },
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    /// Fx-default family (code review 2026-08-25), mechanism re-derived: with
+    /// `fx_rate` omitted and the exercise month's RBA rate not imported, the
+    /// Buy used to store parity and `domain::cost_base` converted it via
+    /// `FxOverride::Fallback(1)` — a US$450 parcel costed as A$450 in every
+    /// cost-base report — exactly the silent-parity path the ESS vest refuses.
+    /// Now refused the same way, naming the currency, the month, and the
+    /// remedies, with nothing persisted.
+    #[tokio::test]
+    async fn api_a_foreign_exercise_with_fx_omitted_in_a_missing_month_is_refused_naming_the_month()
+    {
+        let pool = test_pool().await;
+        insert_usd_listing(&pool, 1).await;
+        insert_usd_buy(&pool, 1, d(2024, 1, 16), "1000").await;
+        insert_usd_rights_issue(&pool, 10, d(2024, 7, 1), "1.80").await;
+
+        let resp = ApiClient::over(router().with_state(pool.clone()))
+            .post(
+                "/corporate_actions/10/exercise",
+                &serde_json::json!({ "date": "2024-08-01", "units": "250" }),
+            )
+            .await;
+        let (status, body) = resp.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert!(body.contains("USD") && body.contains("2024-08"), "{body}");
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM trades WHERE rights_action_id = 10")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 0, "nothing persisted");
+    }
+
+    /// With the month's rate imported an omitted `fx_rate` resolves to it —
+    /// the Buy carries the real rate and the open-parcels report costs the
+    /// parcel through it, never through parity.
+    #[tokio::test]
+    async fn a_foreign_exercise_resolves_the_imported_month_rate_when_fx_omitted() {
+        let pool = test_pool().await;
+        insert_usd_listing(&pool, 1).await;
+        insert_usd_buy(&pool, 1, d(2024, 1, 16), "1000").await;
+        insert_usd_rights_issue(&pool, 10, d(2024, 7, 1), "1.80").await;
+        crate::entities::rba_fx_rate::db_import_rate(&pool, "USD", "2024-08", dec("0.5"))
+            .await
+            .unwrap();
+
+        let trade = db_exercise(&pool, 10, &body(d(2024, 8, 1), "250"))
+            .await
+            .unwrap();
+        assert_eq!(trade.fx_rate, dec("0.5"));
+
+        let parcels = crate::reports::open_parcels::db_open_parcels(&pool)
+            .await
+            .unwrap();
+        let exercised = parcels.iter().find(|p| p.trade_id == trade.id).unwrap();
+        // 250 × US$1.80 = US$450 → A$900 at 0.5 USD per AUD.
+        assert_eq!(exercised.remaining_cost_base, dec("900"));
+    }
+
+    /// A stated `fx_rate` is bound as given even in a missing-rate month —
+    /// the caller said what the money converted at.
+    #[tokio::test]
+    async fn a_stated_fx_rate_is_stored_even_when_the_month_is_missing() {
+        let pool = test_pool().await;
+        insert_usd_listing(&pool, 1).await;
+        insert_usd_buy(&pool, 1, d(2024, 1, 16), "1000").await;
+        insert_usd_rights_issue(&pool, 10, d(2024, 7, 1), "1.80").await;
+
+        let mut b = body(d(2024, 8, 1), "250");
+        b.fx_rate = Some(dec("0.62"));
+        let trade = db_exercise(&pool, 10, &b).await.unwrap();
+        assert_eq!(trade.fx_rate, dec("0.62"));
+    }
+
+    /// A nil-cost foreign exercise (nil exercise price, no rights cost)
+    /// converts nothing, so a missing month does not block it.
+    #[tokio::test]
+    async fn a_nil_cost_foreign_exercise_needs_no_rate() {
+        let pool = test_pool().await;
+        insert_usd_listing(&pool, 1).await;
+        insert_usd_buy(&pool, 1, d(2024, 1, 16), "1000").await;
+        insert_usd_rights_issue(&pool, 10, d(2024, 7, 1), "0").await;
+
+        let trade = db_exercise(&pool, 10, &body(d(2024, 8, 1), "250"))
+            .await
+            .unwrap();
+        assert_eq!(trade.fx_rate, Decimal::ONE);
     }
 }

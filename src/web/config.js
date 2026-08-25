@@ -822,7 +822,7 @@ export const ACTIONS = [
         dt('date', 'Exercise date', { required: true, hint: 'The new parcel’s acquisition date; on or after the record date (' + a.date + ').' }),
         dec('units', 'Units acquired', { required: true, default: '' }),
         dec('rights_cost', 'Amount paid for the rights', { default: '0', hint: 'Total, in ' + a.currency + '. 0 for rights issued free' + (a.renounceable === false ? ' — a non-renounceable entitlement cannot have been bought, so only 0 is accepted.' : '.') }),
-        dec('fx_rate', 'FX rate', { default: '1', hint: 'Optional; defaults to 1.' }),
+        dec('fx_rate', 'FX rate', { default: '', hint: 'Optional; leave blank to use the exercise month\u2019s imported ATO/RBA rate (AUD needs none). A non-AUD exercise in a month with no imported rate is refused without one.' }),
         fk('holding_account_id', 'Holding account', 'holdingAccounts', { required: true, default: '1', hint: 'Where the exercised parcel lands.' }),
       ];
     },
@@ -856,7 +856,7 @@ export const ACTIONS = [
         dec('units', 'Rights sold or lapsed', { required: true, default: '' }),
         dec('proceeds_per_right', 'Proceeds per right', { default: '0', hint: 'In ' + a.currency + '. 0 for a lapse; under a renounceable offer a retail premium is entered per right' + (a.renounceable === false ? ' — but this offer is non-renounceable, so only 0 is accepted.' : '.') }),
         dec('rights_cost', 'Amount paid for the rights', { default: '0', hint: 'Total, in ' + a.currency + '. 0 for rights issued free' + (a.renounceable === false ? ' — a non-renounceable entitlement cannot have been bought, so only 0 is accepted.' : '.') }),
-        dec('fx_rate', 'FX rate', { default: '1', hint: 'Optional; defaults to 1.' }),
+        dec('fx_rate', 'FX rate', { default: '', hint: 'Optional; leave blank to use the sale month\u2019s imported ATO/RBA rate (AUD needs none). A non-AUD sale in a month with no imported rate is refused without one; a nil lapse never is.' }),
         fk('holding_account_id', 'Holding account', 'holdingAccounts', { required: true, default: '1', hint: 'The account the disposal is reported under.' }),
       ];
     },
