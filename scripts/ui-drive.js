@@ -132,6 +132,21 @@ const INFLIGHT_SHIM = `
   };
 `;
 
+// A JavaScript *source literal* for `value`, for the expression strings below.
+// JSON.stringify is not one on its own: it escapes for JSON, and leaves `<`,
+// `>`, U+2028 and U+2029 as themselves — so a selector or field value carrying
+// `</script>` ends the script it is interpolated into, and a line separator can
+// change where the surrounding statement ends. Escaping those four as `\uXXXX`
+// leaves the string's value identical while making the characters inert.
+// (CodeQL's js/bad-code-sanitization is the check that names this.)
+const JS_UNSAFE = { '<': '\\u003C', '>': '\\u003E', '\u2028': '\\u2028', '\u2029': '\\u2029' };
+
+function jsLiteral(value) {
+  const json = JSON.stringify(value);
+  // `undefined` has no JSON form; keep the interpolation it used to produce.
+  return json === undefined ? 'undefined' : json.replace(/[<>\u2028\u2029]/g, (c) => JS_UNSAFE[c]);
+}
+
 class Page {
   constructor(cdp, base, defaultTimeout) {
     this.cdp = cdp;
@@ -238,7 +253,7 @@ class Page {
     if (!hash.startsWith('#')) hash = '#' + hash;
     const current = await this.eval('location.href').catch(() => '');
     if (!current.startsWith(this.base)) return this.goto('/' + hash);
-    await this.eval(`location.hash = ${JSON.stringify(hash)}`);
+    await this.eval(`location.hash = ${jsLiteral(hash)}`);
     await this.settle();
   }
 
@@ -246,23 +261,23 @@ class Page {
 
   /** Does the selector match anything? */
   exists(sel) {
-    return this.eval(`!!document.querySelector(${JSON.stringify(sel)})`);
+    return this.eval(`!!document.querySelector(${jsLiteral(sel)})`);
   }
 
   /** innerText of the first match (null when absent). */
   text(sel) {
-    return this.eval(`(document.querySelector(${JSON.stringify(sel)}) || {}).innerText ?? null`);
+    return this.eval(`(document.querySelector(${jsLiteral(sel)}) || {}).innerText ?? null`);
   }
 
   /** innerText of every match. */
   texts(sel) {
-    return this.eval(`Array.from(document.querySelectorAll(${JSON.stringify(sel)}), (e) => e.innerText)`);
+    return this.eval(`Array.from(document.querySelectorAll(${jsLiteral(sel)}), (e) => e.innerText)`);
   }
 
   /** outerHTML of the first match (the whole document when sel is omitted). */
   html(sel) {
     if (!sel) return this.eval('document.documentElement.outerHTML');
-    return this.eval(`(document.querySelector(${JSON.stringify(sel)}) || {}).outerHTML ?? null`);
+    return this.eval(`(document.querySelector(${jsLiteral(sel)}) || {}).outerHTML ?? null`);
   }
 
   /**
@@ -308,7 +323,7 @@ class Page {
   /** Viewport centre of an element, scrolling it into view first. */
   async #centre(sel) {
     const box = await this.eval(`
-      const e = document.querySelector(${JSON.stringify(sel)});
+      const e = document.querySelector(${jsLiteral(sel)});
       if (!e) return null;
       e.scrollIntoView({ block: 'center', inline: 'center' });
       const r = e.getBoundingClientRect();
@@ -343,11 +358,11 @@ class Page {
    */
   async fill(sel, value) {
     await this.eval(`
-      const e = document.querySelector(${JSON.stringify(sel)});
-      if (!e) throw new Error('no element matches ' + ${JSON.stringify(sel)});
+      const e = document.querySelector(${jsLiteral(sel)});
+      if (!e) throw new Error('no element matches ' + ${jsLiteral(sel)});
       const proto = e instanceof HTMLSelectElement ? HTMLSelectElement.prototype
         : e instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-      Object.getOwnPropertyDescriptor(proto, 'value').set.call(e, ${JSON.stringify(String(value))});
+      Object.getOwnPropertyDescriptor(proto, 'value').set.call(e, ${jsLiteral(String(value))});
       e.dispatchEvent(new Event('input', { bubbles: true }));
       e.dispatchEvent(new Event('change', { bubbles: true }));
       return true;
@@ -360,7 +375,7 @@ class Page {
     await this.click(sel, { settle: false });
     await this.cdp.send('Input.insertText', { text: String(value) });
     await this.eval(`
-      const e = document.querySelector(${JSON.stringify(sel)});
+      const e = document.querySelector(${jsLiteral(sel)});
       e.dispatchEvent(new Event('input', { bubbles: true }));
       e.dispatchEvent(new Event('change', { bubbles: true }));
       return true;
@@ -394,11 +409,11 @@ class Page {
   /** Computed style of the first match, for the properties named. */
   async style(sel, props) {
     return this.eval(`
-      const e = document.querySelector(${JSON.stringify(sel)});
+      const e = document.querySelector(${jsLiteral(sel)});
       if (!e) return null;
       const cs = getComputedStyle(e);
       const out = {};
-      for (const p of ${JSON.stringify(props)}) out[p] = cs.getPropertyValue(p);
+      for (const p of ${jsLiteral(props)}) out[p] = cs.getPropertyValue(p);
       return out;
     `);
   }
