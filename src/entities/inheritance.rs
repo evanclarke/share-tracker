@@ -105,7 +105,7 @@
 
 use crate::infra::db::write_tx;
 use crate::infra::decimal::Money;
-use crate::infra::http::ApiError;
+use crate::infra::http::{self, ApiError, CrudEntity};
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -218,11 +218,25 @@ fn default_currency() -> String {
     "AUD".to_string()
 }
 
+impl CrudEntity for Inheritance {
+    type Key = i64;
+    const TABLE: &'static str = "inheritances";
+    const COLUMNS: &'static str = COLUMNS;
+    const ORDER_BY: &'static str = "date_of_death, id";
+    const NOUN: &'static str = "inheritance";
+}
+
 pub fn router() -> Router<SqlitePool> {
-    Router::new().route("/inheritances", get(list)).route(
-        "/inheritances/{id}",
-        get(get_one).put(upsert).delete(delete),
-    )
+    Router::new()
+        .route("/inheritances", get(http::list_handler::<Inheritance>))
+        .route(
+            "/inheritances/{id}",
+            get(http::get_handler::<Inheritance>)
+                .put(upsert)
+                // Hand-written: deleting the inheritance deletes its linked
+                // parcel Buy in the same transaction (see `db_delete`).
+                .delete(delete),
+        )
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -441,21 +455,12 @@ impl From<UpsertError> for ApiError {
     }
 }
 
-pub async fn db_list(pool: &SqlitePool) -> Result<Vec<Inheritance>, sqlx::Error> {
-    sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT {COLUMNS} FROM inheritances ORDER BY date_of_death, id"
-    )))
-    .fetch_all(pool)
-    .await
-}
-
+/// One-line delegation to the shared CRUD read, kept because the DB-level
+/// tests call it by name; the route reaches the same query through
+/// `get_handler` (see CLAUDE.md's entity-module pattern).
+#[cfg(test)]
 pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<Inheritance>, sqlx::Error> {
-    sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT {COLUMNS} FROM inheritances WHERE id = ?"
-    )))
-    .bind(id)
-    .fetch_optional(pool)
-    .await
+    http::crud_get(pool, id).await
 }
 
 /// The id of the inheritance's linked Buy (`trades.inheritance_id`), if the
@@ -483,14 +488,12 @@ async fn buy_drawn_on(tx: &mut sqlx::SqliteConnection, buy_id: i64) -> Result<bo
     .await
 }
 
-/// The month the parcel's cost base converts at — `ParcelRow::acquired()`'s
+/// The date the parcel's cost base converts at — `ParcelRow::acquired()`'s
 /// rule spelled out on the inheritance: the deceased's acquisition under
 /// `DeceasedCostBase` (carried as the Buy's deemed date), else the death.
-fn conversion_month(inh: &Inheritance) -> String {
-    inh.deceased_acquisition_date
-        .unwrap_or(inh.date_of_death)
-        .format("%Y-%m")
-        .to_string()
+/// The conversion month is this date's month.
+fn conversion_date(inh: &Inheritance) -> NaiveDate {
+    inh.deceased_acquisition_date.unwrap_or(inh.date_of_death)
 }
 
 /// Refuse a non-AUD inheritance that has no rate to convert at. `fx_rate` is
@@ -535,19 +538,23 @@ async fn check_convertible(
     if inh.currency.eq_ignore_ascii_case("AUD") || inh.fx_rate != Decimal::ONE {
         return Ok(());
     }
-    let month = conversion_month(inh);
-    let ato_rate: Option<String> =
-        sqlx::query_scalar("SELECT rate FROM rba_fx_rates WHERE currency = ? AND month = ?")
-            .bind(&inh.currency)
-            .bind(&month)
-            .fetch_optional(tx)
-            .await?;
-    if ato_rate.is_none() {
-        return Err(UpsertError::MissingFxRate {
+    // The strict resolution rule (`infra::fx::pick_rate`) with no override —
+    // the question is exactly whether the conversion would fail with the
+    // fallback left at its default — over the same in-transaction snapshot
+    // this write validates against (the `ess_vest` pattern). Never the
+    // valuation fallback: an earlier month's rate is a tax figure computed
+    // from the wrong month.
+    let rates = crate::infra::fx::FxRates::load(&mut *tx).await?;
+    rates
+        .resolve_rate(
+            &inh.currency,
+            conversion_date(inh),
+            crate::infra::fx::FxOverride::None,
+        )
+        .map_err(|_| UpsertError::MissingFxRate {
             currency: inh.currency.clone(),
-            month,
-        });
-    }
+            month: conversion_date(inh).format("%Y-%m").to_string(),
+        })?;
     Ok(())
 }
 
@@ -820,21 +827,6 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome, sqlx
 
     tx.commit().await?;
     Ok(DeleteOutcome::Deleted)
-}
-
-async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<Inheritance>>, ApiError> {
-    db_list(&pool).await.map(Json).map_err(ApiError::from)
-}
-
-async fn get_one(
-    State(pool): State<SqlitePool>,
-    Path(id): Path<i64>,
-) -> Result<Json<Inheritance>, ApiError> {
-    db_get(&pool, id)
-        .await
-        .map_err(ApiError::from)?
-        .map(Json)
-        .ok_or(ApiError::NotFound)
 }
 
 async fn upsert(
@@ -1785,6 +1777,28 @@ mod tests {
         assert_eq!(resp.status, StatusCode::NO_CONTENT);
         let resp = ApiClient::over(app()).delete("/inheritances/1").await;
         assert_eq!(resp.status, StatusCode::NOT_FOUND);
+    }
+
+    /// The list orders by date of death, then id — the `ORDER_BY` the
+    /// generic list handler runs, pinned here because a refactor of the
+    /// trait impl could silently fall back to id order.
+    #[tokio::test]
+    async fn api_list_orders_by_date_of_death() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        db_upsert(&pool, &post_cgt(1)).await.unwrap();
+        let mut earlier = post_cgt(2);
+        earlier.date_of_death = ymd(2024, 1, 10);
+        db_upsert(&pool, &earlier).await.unwrap();
+
+        let rows: Vec<Inheritance> = ApiClient::over(router().with_state(pool))
+            .get_json("/inheritances")
+            .await;
+        assert_eq!(
+            rows.iter().map(|i| i.id).collect::<Vec<_>>(),
+            [2, 1],
+            "the earlier death lists first regardless of id"
+        );
     }
 
     #[tokio::test]
