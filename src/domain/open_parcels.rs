@@ -67,21 +67,57 @@ pub struct OpenParcel {
     pub cost_base: CostBase,
 }
 
+/// Which parcel-consuming Sells [`db_units_sold`] tallies. A rollover's
+/// closing Sell — a transfer's, a scrip-for-scrip exchange's, a demerger's
+/// (the trades carrying a `rollover::Provenance` column) — consumes its
+/// parcel without the units leaving the taxpayer's hands: they are carried
+/// into the operation's replacement parcels, and an AMMA statement's
+/// reduction follows them there (the reach-through entry
+/// `entities::amit_adjustment_generation` and the adjustment write path both
+/// accept). So "how many units has this parcel got left?" and "how many of
+/// its units were disposed of?" are different questions, and a caller must
+/// say which it is asking rather than every call site quietly meaning the
+/// first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Counted {
+    /// Every allocation — any Sell that consumed units of the parcel,
+    /// rollover closing Sells included: the read behind a parcel's remaining
+    /// units ([`load`], the performance walk, the net-capital-gain report's
+    /// unit cohorts, the cross-check's departed-units allowance).
+    AllConsumptions,
+    /// Only real disposals — allocations whose Sell carries no rollover
+    /// provenance column: the read behind the AMIT held/spill split
+    /// (`entities::amit_adjustment::db_cost_base_reduction_events`), where a
+    /// transfer counted as a disposal spilled a statement's reduction onto an
+    /// earlier real Sell and silently changed its realised gain. A transfer's
+    /// separate network-fee Sell carries no provenance column and still
+    /// counts — that one *is* a disposal.
+    DisposalsOnly,
+}
+
 /// Units allocated out of each purchase parcel by a Sell on or before
 /// `as_of`, keyed by `purchase_trade_id` and carrying each sale's date: the
 /// allocated quantity is in *sale-date* units, so a caller must re-base it to
 /// the parcel's as-acquired basis (`corporate_action::sold_in_acquired_units`,
 /// or `as_acquired_quantity` per sale where the sale date matters on its own)
-/// rather than subtracting it directly. `None` bounds nothing.
+/// rather than subtracting it directly. `None` bounds nothing. `counted` says
+/// which Sells tally — see [`Counted`].
 pub async fn db_units_sold(
     conn: &mut sqlx::SqliteConnection,
     as_of: Option<NaiveDate>,
+    counted: Counted,
 ) -> Result<HashMap<i64, Vec<(NaiveDate, Decimal)>>, sqlx::Error> {
-    let rows = sqlx::query(
+    let provenance_filter = match counted {
+        Counted::AllConsumptions => String::new(),
+        Counted::DisposalsOnly => {
+            format!(" AND {}", crate::domain::rollover::no_provenance_sql("s"))
+        }
+    };
+    let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
         "SELECT pa.purchase_trade_id, pa.quantity_allocated, s.date AS sale_date \
          FROM parcel_allocations pa JOIN trades s ON s.id = pa.sale_trade_id \
-         WHERE s.date <= ?",
-    )
+         WHERE s.date <= ?{provenance_filter}",
+    )))
     .bind(as_of_or_open(as_of))
     .fetch_all(&mut *conn)
     .await?;
@@ -132,7 +168,10 @@ pub async fn load(
         return Ok(vec![]);
     }
 
-    let qty_sold = db_units_sold(&mut *conn, as_of).await?;
+    // Every consumption: a rollover's closing Sell empties its source parcel
+    // exactly as a real disposal does — the units live on in the replacement
+    // parcels, which this same read sees as their own rows.
+    let qty_sold = db_units_sold(&mut *conn, as_of, Counted::AllConsumptions).await?;
     // Total AMIT cost-base reduction per parcel (statements for years ending
     // after `as_of` excluded — the adjustment arises at its statement's year
     // end).
@@ -729,7 +768,9 @@ mod tests {
         allocate(&pool, 2, 3, 1, dec("20")).await;
 
         let mut conn = pool.acquire().await.unwrap();
-        let sold = db_units_sold(&mut conn, None).await.unwrap();
+        let sold = db_units_sold(&mut conn, None, Counted::AllConsumptions)
+            .await
+            .unwrap();
         assert_eq!(
             sold.get(&1),
             Some(&vec![
@@ -739,7 +780,7 @@ mod tests {
         );
 
         // Bounded at a date between the two sales, only the first counts.
-        let sold = db_units_sold(&mut conn, Some(ymd(2024, 6, 30)))
+        let sold = db_units_sold(&mut conn, Some(ymd(2024, 6, 30)), Counted::AllConsumptions)
             .await
             .unwrap();
         assert_eq!(sold.get(&1), Some(&vec![(ymd(2024, 5, 1), dec("30"))]));

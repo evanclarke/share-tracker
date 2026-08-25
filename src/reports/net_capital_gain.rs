@@ -516,7 +516,18 @@ async fn non_disposal_gains(
     // received. The same allocations read the open-parcel loader does
     // (`domain::open_parcels::db_units_sold`); this walk needs the per-sale
     // dates rather than a single remainder, so only that read is shared.
-    let sold = crate::domain::open_parcels::db_units_sold(&mut *conn, None).await?;
+    // Every consumption: a cohort is a group of units sharing an event
+    // history *at this parcel*, and units a rollover carried away stop
+    // accruing this parcel's events at the operation date exactly as sold
+    // ones do — their later reductions run against the replacement parcel's
+    // own chain. Treating them as still held here would apply those later
+    // events to them twice.
+    let sold = crate::domain::open_parcels::db_units_sold(
+        &mut *conn,
+        None,
+        crate::domain::open_parcels::Counted::AllConsumptions,
+    )
+    .await?;
 
     let mut out = Vec::new();
     for trade_id in order {

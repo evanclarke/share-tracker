@@ -503,8 +503,18 @@ pub async fn db_cost_base_reduction_events(
     }
     // Sales after `up_to` are already excluded by the year-end filter above
     // (a statement's year end is never after the cutoff), so this read needs
-    // no bound of its own.
-    let sold = crate::domain::open_parcels::db_units_sold(&mut *conn, None).await?;
+    // no bound of its own. Disposals only: a rollover's closing Sell — a
+    // transfer above all — is an account move, not a disposal, and its units
+    // are still held (in the replacement parcels) at the year end. Counting
+    // it flipped a partial-coverage row's held/spill split and retroactively
+    // changed an earlier real Sell's cost base, while the same reduction also
+    // reaches the replacement through its own adjustment row.
+    let sold = crate::domain::open_parcels::db_units_sold(
+        &mut *conn,
+        None,
+        crate::domain::open_parcels::Counted::DisposalsOnly,
+    )
+    .await?;
 
     let mut map: HashMap<i64, Vec<AmitReductionEvent>> = HashMap::new();
     for row in &rows {
@@ -607,7 +617,10 @@ impl From<UpsertError> for ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{self, ApiClient, dec, test_pool, ymd};
+    use crate::entities::holding_account::{self, HoldingAccount};
+    use crate::entities::sell::AllocationInput;
+    use crate::entities::transfer::{self, TransferBody};
+    use crate::test_support::{self, ApiClient, allocate, dec, test_pool, ymd};
 
     /// Client over this module's own routes.
     fn client(pool: &SqlitePool) -> ApiClient {
@@ -636,6 +649,73 @@ mod tests {
         db_cost_base_reduction_events(&mut conn, None)
             .await
             .unwrap()
+    }
+
+    /// `disposed_by_year_end` counts real disposals only: a transfer's
+    /// zero-proceeds closing Sell is an account move, not a disposal — the
+    /// units are still held (in the replacement parcel) at the statement's
+    /// year end, so it must not flip a partial-coverage row's held/spill
+    /// split. The real Sell before it still counts.
+    #[tokio::test]
+    async fn a_transfers_closing_sell_is_not_a_disposal_in_the_held_spill_split() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("VDHG").insert(&pool).await;
+        holding_account::db_upsert(
+            &pool,
+            &HoldingAccount {
+                id: 2,
+                name: "Broker".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        test_support::buy(1, 1)
+            .date(ymd(2024, 1, 10))
+            .qty(dec("1000"))
+            .insert(&pool)
+            .await;
+        // A real Sell of 400 units before the statement's year end.
+        test_support::sell(2, 1)
+            .date(ymd(2025, 3, 3))
+            .qty(dec("400"))
+            .insert(&pool)
+            .await;
+        allocate(&pool, 1, 2, 1, dec("400")).await;
+        // FY2025 statement covering the remaining 600 units.
+        test_support::amma(6, 1)
+            .units(dec("600"))
+            .cost_base_adjustment(dec("1"))
+            .with(|a| a.tax_year_end_date = ymd(2025, 6, 30))
+            .insert(&pool)
+            .await;
+        test_support::amit_adjustment(&pool, 1, 6, 1, dec("600")).await;
+        // Those 600 units then move to another account, dated before the
+        // year end.
+        transfer::db_transfer(
+            &pool,
+            1,
+            &TransferBody {
+                listing_id: 1,
+                date: ymd(2025, 5, 1),
+                from_account_id: 1,
+                to_account_id: 2,
+                allocations: vec![AllocationInput {
+                    purchase_trade_id: 1,
+                    quantity_allocated: dec("600"),
+                }],
+                fee_allocations: Vec::new(),
+                fee_market_price: None,
+                fee_fx_rate: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let events = events(&pool).await;
+        // The March Sell counts as disposed by the year end; the transfer's
+        // closing Sell does not — the row's 600 covered units stay on the
+        // held side of the split.
+        assert_eq!(events[&1][0].disposed_by_year_end, dec("400"));
     }
 
     async fn insert_test_listing(pool: &SqlitePool, id: i64, exchange_mic: &str, ticker: &str) {
@@ -1111,12 +1191,17 @@ mod tests {
         )
         .await
         .unwrap();
+        // Dated after the default statement fixture's 2024-06-30 year end:
+        // the ordering in which an already-entered adjustment legitimately
+        // folds into the carried cost base (a statement whose year end
+        // *postdates* the operation reaches the replacement only through its
+        // own adjustment row instead).
         let group = transfer::db_transfer(
             pool,
             1,
             &TransferBody {
                 listing_id: 1,
-                date: ymd(2024, 5, 1),
+                date: ymd(2024, 8, 1),
                 from_account_id: 1,
                 to_account_id: 2,
                 allocations: vec![AllocationInput {
@@ -1207,7 +1292,10 @@ mod tests {
     /// The way out the refusal names, end to end: entering the adjustment
     /// *before* the transfer leaves the replacement parcel carrying the
     /// reduced cost base — which is why the refusal says to delete the
-    /// operation, enter the row, and re-run it.
+    /// operation, enter the row, and re-run it. The statement's year end
+    /// (2024-06-30) precedes the transfer (2024-08-01), which is what makes
+    /// the carry legitimate: the adjustment had already arisen when the units
+    /// moved.
     #[tokio::test]
     async fn db_an_adjustment_entered_before_a_rollover_carries_into_the_replacement() {
         let pool = test_pool().await;

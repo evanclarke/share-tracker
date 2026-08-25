@@ -208,14 +208,12 @@ pub async fn db_demerge(pool: &SqlitePool, action_id: i64) -> Result<Demerge, De
     // machinery (as-acquired units internally; allocations re-based across
     // splits). The ATO's step 1 takes the cost base immediately before the
     // demerger, so it is bounded at the demerger date.
-    let inputs = rollover::CostBaseInputs::load(&mut tx, action.listing_id).await?;
-    let parcels = inputs
-        .open_parcels(&mut tx, action.listing_id, action.date)
-        .await?;
+    let inputs = rollover::CostBaseInputs::load(&mut tx, action.listing_id, action.date).await?;
+    let parcels = inputs.open_parcels(&mut tx, action.listing_id).await?;
 
     let mut replacements: Vec<Replacement> = Vec::with_capacity(parcels.len());
     for p in &parcels {
-        let carried_cost_base = inputs.carried_cost_base(&p.parcel, p.remaining, action.date)?;
+        let carried_cost_base = inputs.carried_cost_base(&p.parcel, p.remaining)?;
 
         // Step 2: apportion by the advised percentage. demerged + head sum
         // exactly to the carried cost base by construction. Both pro-rates go
@@ -728,6 +726,38 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(n, 2);
+    }
+
+    /// An AMMA statement whose year end postdates the demerger must not fold
+    /// its reduction into the carried cost base the two legs apportion: the
+    /// adjustment arises at the statement's year end, which has not happened
+    /// yet as at the demerger date (the bound the return-of-capital events
+    /// already observe). The reduction reaches the replacement parcels later,
+    /// through their own adjustment rows — never through the carry as well.
+    #[tokio::test]
+    async fn a_statement_year_ending_after_the_demerger_does_not_reach_the_carried_cost_base() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "HEAD").await;
+        insert_listing(&pool, 2, "DEM").await;
+        // 1,000 units at $10: a $10,000 initial cost base.
+        insert_buy(&pool, 1, 1, d(2024, 1, 10), "1000", "10").await;
+        // FY2025 statement ($1/unit, year end 2025-06-30) entered with its
+        // adjustment row before the demerger, which is dated earlier in the
+        // same year.
+        test_support::amma(6, 1)
+            .units(dec("1000"))
+            .cost_base_adjustment(dec("1"))
+            .with(|a| a.tax_year_end_date = d(2025, 6, 30))
+            .insert(&pool)
+            .await;
+        test_support::amit_adjustment(&pool, 1, 6, 1, dec("1000")).await;
+        insert_demerger(&pool, 10, d(2025, 5, 1)).await;
+
+        let dm = db_demerge(&pool, 10).await.unwrap();
+
+        // 80/20 of the unreduced $10,000 — not of $9,000.
+        assert_eq!(dm.head_replacements[0].brokerage, dec("8000"));
+        assert_eq!(dm.demerged_replacements[0].brokerage, dec("2000"));
     }
 
     /// A sub-unit percentage (BHP Steel's 5.063%) splits the cost base with

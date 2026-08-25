@@ -157,8 +157,13 @@ pub async fn db_amit_adjustment_alerts(
     }
     let splits = corporate_action::db_share_split_events(&mut *tx).await?;
     // Every sale allocation with its sale date — the "was this parcel already
-    // gone before the year began?" input.
-    let sold = open_parcels::db_units_sold(&mut tx, None).await?;
+    // gone before the year began?" input. Every consumption, deliberately: the
+    // coverage check's allowance band counts the units that *left the
+    // statement's account* during its year, and a rollover's closing Sell is
+    // exactly such a departure (SCENARIOS Z-g — a fund taken over mid-year
+    // must not flag its honest rows as excess coverage forever).
+    let sold =
+        open_parcels::db_units_sold(&mut tx, None, open_parcels::Counted::AllConsumptions).await?;
     // What was *actually* held at each statement's year end, keyed by
     // (year end, listing, holding account). One `load` per distinct year end
     // — the same shared read [generation](crate::entities::amit_adjustment_generation)

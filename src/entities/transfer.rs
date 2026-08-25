@@ -94,7 +94,10 @@ pub struct TransferBody {
     )]
     pub fee_market_price: Option<Decimal>,
     /// The fee disposal's manual AUD fallback FX rate for a non-AUD-priced
-    /// crypto listing (defaults to 1, the AUD case).
+    /// crypto listing. When omitted, the transfer month's ATO rate is
+    /// resolved and bound (AUD resolves to 1); a non-AUD fee in a month with
+    /// no imported rate is refused rather than defaulted to parity
+    /// ([`TransferError::MissingFeeFxRate`]).
     #[serde(
         default,
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"
@@ -173,6 +176,14 @@ pub enum TransferError {
     /// arithmetic, which is what says the quantity asked for is impossible.
     #[error("the moved quantity is beyond the representable range: {0}")]
     UnrepresentableMovedQuantity(#[source] crate::domain::cost_base::UnrepresentableQuantity),
+    /// A network-fee disposal on a non-AUD listing whose transfer month has
+    /// no imported ATO rate, with no `fee_fx_rate` in the body: the fee Sell
+    /// is a real disposal in the gains reports, and binding a placeholder 1
+    /// would silently convert its proceeds at parity via
+    /// `FxOverride::Fallback(1)` — the path the ESS vest refuses
+    /// (`ess_vest::VestError::MissingFxRate`). Mapped to 422.
+    #[error("no ATO FX rate for {currency} in {month} and the request states no fee_fx_rate")]
+    MissingFeeFxRate { currency: String, month: String },
     // There is deliberately no sibling of
     // `trade::UpsertError::UnrepresentableRebasedQuantity` here, though a
     // transfer-in Buy is one of the eight parcel-creating writes that rule
@@ -222,6 +233,14 @@ impl From<TransferError> for ApiError {
             // basis at all → 422 quoting the arithmetic, the same wording every
             // beyond-the-range refusal answers with.
             TransferError::UnrepresentableMovedQuantity(e) => ApiError::Unprocessable(e.message()),
+            TransferError::MissingFeeFxRate { currency, month } => {
+                ApiError::unprocessable(format!(
+                    "the network fee is disposed of in {currency} but no ATO/RBA rate has been \
+                     imported for {currency} in {month} and the request states no fee_fx_rate — \
+                     supply fee_fx_rate or import that month's RBA rates; recording without one \
+                     would convert the fee proceeds at parity (1 AUD per {currency})"
+                ))
+            }
             TransferError::FeeMarketPriceMissing => ApiError::unprocessable(
                 "a network fee was specified without a positive per-unit market value for the \
                  fee crypto — the disposal needs its capital proceeds",
@@ -367,7 +386,7 @@ pub async fn db_transfer(
     // Cost-base inputs, shared with the scrip-for-scrip exchange and the
     // demerge: splits re-base units, AMIT adjustments and return-of-capital
     // payments up to the transfer date reduce the carried cost base.
-    let inputs = rollover::CostBaseInputs::load(&mut tx, body.listing_id).await?;
+    let inputs = rollover::CostBaseInputs::load(&mut tx, body.listing_id, body.date).await?;
     let transfer_ins = transfer_ins(&mut tx, body, &inputs).await?;
 
     // The transfer-out Sell: zero proceeds (nothing is disposed of; the
@@ -524,7 +543,7 @@ async fn transfer_ins(
             body.date,
         )
         .map_err(TransferError::UnrepresentableMovedQuantity)?;
-        let carried_cost_base = inputs.carried_cost_base(&parcel, moved_as_acquired, body.date)?;
+        let carried_cost_base = inputs.carried_cost_base(&parcel, moved_as_acquired)?;
 
         out.push(TransferIn {
             quantity: alloc.quantity_allocated,
@@ -571,6 +590,33 @@ async fn write_fee_sale(
         }
     }
 
+    // The rate the fee Sell carries. Unlike the transfer legs it is a *real
+    // disposal* in the gains reports, and `trades.fx_rate` is the fallback
+    // applied when no ATO monthly rate exists for the month
+    // (`infra::fx::pick_rate`) — so a placeholder 1 would book USD fee
+    // proceeds 1:1 as AUD exactly when the transfer month's rate is missing,
+    // the silent-parity path the ESS vest refuses
+    // (`ess_vest::VestError::MissingFxRate`). The body's stated rate is bound
+    // when the caller gave one; otherwise the month's ATO rate is resolved
+    // and bound (AUD resolves to 1), and a month with neither is refused
+    // rather than invented (the fee price is always positive here, so there
+    // is always an amount to convert).
+    let fee_fx_rate = match body.fee_fx_rate {
+        Some(rate) => rate,
+        None => {
+            let fx = crate::infra::fx::FxRates::load(&mut *conn).await?;
+            fx.resolve_rate(
+                &listing_currency,
+                body.date,
+                crate::infra::fx::FxOverride::None,
+            )
+            .map_err(|_| TransferError::MissingFeeFxRate {
+                currency: listing_currency.clone(),
+                month: body.date.format("%Y-%m").to_string(),
+            })?
+        }
+    };
+
     // An ordinary Sell at the fee crypto's market value: no `transfer_id`, so
     // the gains reports count it like any disposal.
     let fee_body = rollover::closing_sell_body(
@@ -579,7 +625,7 @@ async fn write_fee_sale(
         body.from_account_id,
         fee_market_price,
         listing_currency,
-        body.fee_fx_rate.unwrap_or(Decimal::ONE),
+        fee_fx_rate,
         body.fee_allocations
             .iter()
             .map(|a| AllocationInput {
@@ -2089,5 +2135,115 @@ mod tests {
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(rows[0]["holding_account_id"], 1);
         assert_eq!(rows[0]["remaining_quantity"], "100000000000000000000000");
+    }
+
+    // --- fx-default family (code review 2026-08-25) ---
+
+    /// A USD-quoted crypto whose fee disposal must convert USD proceeds. The
+    /// parcel carries its own stated rate, so only the *fee Sell* under test
+    /// is missing one.
+    async fn insert_usd_crypto(pool: &SqlitePool, qty: &str, price: &str) {
+        test_support::listing(1)
+            .crypto()
+            .ticker("ETH")
+            .name("Ether")
+            .currency("USD")
+            .insert(pool)
+            .await;
+        test_support::buy(1, 1)
+            .date(d(2023, 3, 1))
+            .settlement(d(2023, 3, 1))
+            .qty(dec(qty))
+            .price(dec(price))
+            .currency("USD")
+            .fx_rate(dec("1.5"))
+            .account(2)
+            .insert(pool)
+            .await;
+    }
+
+    /// Fx-default family (code review 2026-08-25): the network-fee Sell is a
+    /// *real disposal* in the gains reports (no `transfer_id`), and with
+    /// `fee_fx_rate` omitted in a month with no imported RBA rate it used to
+    /// store parity silently — USD fee proceeds booked 1:1 as AUD. Now
+    /// refused like the ESS vest, naming the currency, the month, and the
+    /// remedies, with nothing persisted.
+    #[tokio::test]
+    async fn a_foreign_fee_disposal_with_fx_omitted_in_a_missing_month_is_refused_naming_the_month()
+    {
+        let pool = test_pool().await;
+        insert_usd_crypto(&pool, "1.0", "3000").await;
+
+        let resp = ApiClient::over(router().with_state(pool.clone()))
+            .put(
+                "/transfers/1",
+                &serde_json::json!({
+                    "listing_id": 1,
+                    "date": "2024-06-01",
+                    "from_account_id": 2,
+                    "to_account_id": 1,
+                    "allocations": [ { "purchase_trade_id": 1, "quantity_allocated": "0.5" } ],
+                    "fee_allocations": [ { "purchase_trade_id": 1, "quantity_allocated": "0.001" } ],
+                    "fee_market_price": "4000",
+                }),
+            )
+            .await;
+        let (status, body) = resp.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert!(body.contains("USD") && body.contains("2024-06"), "{body}");
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM transfers")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 0, "nothing persisted");
+    }
+
+    /// With the month's rate imported an omitted `fee_fx_rate` resolves to
+    /// it — the fee Sell carries the real rate, never parity.
+    #[tokio::test]
+    async fn a_foreign_fee_disposal_resolves_the_imported_month_rate_when_fx_omitted() {
+        let pool = test_pool().await;
+        insert_usd_crypto(&pool, "1.0", "3000").await;
+        crate::entities::rba_fx_rate::db_import_rate(&pool, "USD", "2024-06", dec("0.5"))
+            .await
+            .unwrap();
+
+        let group = db_transfer(
+            &pool,
+            1,
+            &fee_body(
+                d(2024, 6, 1),
+                2,
+                1,
+                vec![(1, "0.5")],
+                vec![(1, "0.001")],
+                "4000",
+            ),
+        )
+        .await
+        .unwrap();
+        let fee = group.fee_sale.as_ref().expect("a fee Sell was created");
+        assert_eq!(fee.fx_rate, dec("0.5"));
+    }
+
+    /// A stated `fee_fx_rate` is bound as given even in a missing-rate
+    /// month — the caller said what the fee converted at.
+    #[tokio::test]
+    async fn a_stated_fee_fx_rate_is_stored_even_when_the_month_is_missing() {
+        let pool = test_pool().await;
+        insert_usd_crypto(&pool, "1.0", "3000").await;
+
+        let mut b = fee_body(
+            d(2024, 6, 1),
+            2,
+            1,
+            vec![(1, "0.5")],
+            vec![(1, "0.001")],
+            "4000",
+        );
+        b.fee_fx_rate = Some(dec("0.62"));
+        let group = db_transfer(&pool, 1, &b).await.unwrap();
+        let fee = group.fee_sale.as_ref().expect("a fee Sell was created");
+        assert_eq!(fee.fx_rate, dec("0.62"));
     }
 }

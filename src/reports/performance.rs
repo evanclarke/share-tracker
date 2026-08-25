@@ -396,7 +396,17 @@ async fn accumulate_on(
     // every trade including the Sells, and values acquisitions at their
     // initial cost rather than the adjusted cost base — but the allocations
     // read is the same one, so it comes from there.
-    let qty_sold = open_parcels::db_units_sold(&mut *conn, Some(as_of)).await?;
+    // Every consumption: this read feeds the remaining-units count per
+    // parcel, and a rollover's closing Sell empties its source parcel exactly
+    // as a real disposal does — the moved units re-enter through the
+    // replacement Buys this walk also sees, so counting anything less would
+    // double the holding.
+    let qty_sold = open_parcels::db_units_sold(
+        &mut *conn,
+        Some(as_of),
+        open_parcels::Counted::AllConsumptions,
+    )
+    .await?;
 
     let split_events = crate::entities::corporate_action::db_share_split_events(&mut *conn).await?;
     let ticker_rows = sqlx::query("SELECT id, ticker FROM listings")

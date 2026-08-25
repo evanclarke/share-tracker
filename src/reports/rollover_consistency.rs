@@ -308,7 +308,7 @@ async fn problems_for(
 
     // What the consumed units' cost base is *now*, through the operations' own
     // call, so this report cannot disagree with them about the pipeline.
-    let inputs = CostBaseInputs::load(&mut *conn, group.listing_id).await?;
+    let inputs = CostBaseInputs::load(&mut *conn, group.listing_id, group.date).await?;
     let allocation_rows = sqlx::query(sqlx::AssertSqlSafe(format!(
         "SELECT pa.quantity_allocated, {} \
          FROM parcel_allocations pa JOIN trades t ON t.id = pa.purchase_trade_id \
@@ -327,7 +327,7 @@ async fn problems_for(
         let as_acquired = as_acquired_quantity(allocated, &inputs.splits, parcel.date, group.date);
         *expected_cost_base
             .entry(parcel.currency.clone())
-            .or_default() += inputs.carried_cost_base(&parcel, as_acquired, group.date)?;
+            .or_default() += inputs.carried_cost_base(&parcel, as_acquired)?;
         expected_units += allocated;
     }
 

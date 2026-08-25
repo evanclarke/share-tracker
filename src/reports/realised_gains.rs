@@ -1802,6 +1802,77 @@ mod tests {
         assert_eq!(result[0].discount_eligible_gain, Decimal::from(505));
     }
 
+    /// A transfer's zero-proceeds closing Sell is an account move, not a
+    /// disposal: it must not count in the AMIT held/spill split and so must
+    /// not retroactively change an *earlier* real Sell's cost base. The
+    /// statement's partial-coverage row covers the 600 units still held at
+    /// its year end (they are — in the replacement parcel), spilling nothing
+    /// onto the 400 sold in March.
+    #[tokio::test]
+    async fn db_a_transfer_does_not_change_an_earlier_sells_realised_gain() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "VDHG").await;
+        crate::entities::holding_account::db_upsert(
+            &pool,
+            &crate::entities::holding_account::HoldingAccount {
+                id: 2,
+                name: "Broker".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let d = |y, m, day| NaiveDate::from_ymd_opt(y, m, day).unwrap();
+        // 1,000 units at $10; a real Sell of 400 at $12 on 2025-03-03.
+        insert_buy(&pool, 1, 1, d(2024, 1, 10), dec("1000"), dec("10")).await;
+        insert_sell(&pool, 2, 1, d(2025, 3, 3), dec("400"), dec("12")).await;
+        allocate(&pool, 1, 2, 1, dec("400")).await;
+        // FY2025 statement ($1/unit) covering the remaining 600 units.
+        test_support::amma(6, 1)
+            .units(dec("600"))
+            .cost_base_adjustment(dec("1"))
+            .with(|a| a.tax_year_end_date = d(2025, 6, 30))
+            .insert(&pool)
+            .await;
+        test_support::amit_adjustment(&pool, 1, 6, 1, dec("600")).await;
+
+        let march_gain = |rows: &[RealisedGainLoss]| {
+            rows.iter()
+                .find(|r| r.sale_trade_id == 2)
+                .expect("the March sale")
+                .capital_gain_loss
+        };
+        let before = db_realised_gains(&pool).await.unwrap();
+        // proceeds 4,800 − cost 4,000 (no spill: the row covers the held 600)
+        assert_eq!(march_gain(&before), dec("800"));
+
+        // Transferring the 600 held units to another account, dated before
+        // the year end, changes nothing about the March disposal.
+        crate::entities::transfer::db_transfer(
+            &pool,
+            1,
+            &crate::entities::transfer::TransferBody {
+                listing_id: 1,
+                date: d(2025, 5, 1),
+                from_account_id: 1,
+                to_account_id: 2,
+                allocations: vec![crate::entities::sell::AllocationInput {
+                    purchase_trade_id: 1,
+                    quantity_allocated: dec("600"),
+                }],
+                fee_allocations: Vec::new(),
+                fee_market_price: None,
+                fee_fx_rate: None,
+            },
+        )
+        .await
+        .unwrap();
+        let after = db_realised_gains(&pool).await.unwrap();
+        assert_eq!(march_gain(&after), dec("800"));
+        // The transfer's closing Sell itself still never appears as a
+        // disposal.
+        assert_eq!(after.len(), before.len());
+    }
+
     #[tokio::test]
     async fn db_sorted_by_sale_date() {
         let pool = test_pool().await;

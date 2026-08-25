@@ -135,6 +135,14 @@ pub enum ExchangeError {
     /// to 422.
     #[error("the replacement listing re-bases a quantity beyond the representable range: {0}")]
     UnrepresentableRebasedQuantity(#[source] crate::domain::cost_base::UnrepresentableQuantity),
+    /// A cash component in a non-AUD currency whose exchange month has no
+    /// imported ATO rate: the endpoint takes no body, so there is no
+    /// stated-rate channel, and binding a placeholder 1 would price the cash
+    /// consideration at parity in the gains reports via
+    /// `FxOverride::Fallback(1)` — the path the ESS vest refuses
+    /// (`ess_vest::VestError::MissingFxRate`). Mapped to 422.
+    #[error("no ATO FX rate for {currency} in {month} for the cash component")]
+    MissingFxRate { currency: String, month: String },
     /// The Sell-side invariants failed — defensive as to the allocations,
     /// which the exchange constructs to satisfy them; the reachable case is an
     /// exchange dated after today (SCENARIOS S-10), which the 422 names.
@@ -188,13 +196,11 @@ pub async fn db_exchange(pool: &SqlitePool, action_id: i64) -> Result<Exchange, 
     // The original listing's open parcels, costed by the shared rollover
     // machinery (as-acquired units internally; allocations re-based across
     // splits; AMIT/return-of-capital reductions up to the exchange date).
-    let inputs = rollover::CostBaseInputs::load(&mut tx, action.listing_id).await?;
-    let parcels = inputs
-        .open_parcels(&mut tx, action.listing_id, action.date)
-        .await?;
+    let inputs = rollover::CostBaseInputs::load(&mut tx, action.listing_id, action.date).await?;
+    let parcels = inputs.open_parcels(&mut tx, action.listing_id).await?;
     let mut replacements: Vec<Replacement> = Vec::new();
     for p in &parcels {
-        replacements.push(terms.replacement_for(p, &inputs, action.date)?);
+        replacements.push(terms.replacement_for(p, &inputs)?);
     }
     if replacements.is_empty() {
         return Err(ExchangeError::NothingHeld);
@@ -214,13 +220,40 @@ pub async fn db_exchange(pool: &SqlitePool, action_id: i64) -> Result<Exchange, 
         Some((cash_per_unit, _, currency)) => (*cash_per_unit, currency.clone()),
         None => (Decimal::ZERO, listing_currency),
     };
+    // The rate the closing Sell carries. `trades.fx_rate` is the *fallback*
+    // applied when no ATO monthly rate exists for the month
+    // (`infra::fx::pick_rate`), so a hardcoded 1 would price a foreign cash
+    // consideration at parity in the gains reports exactly when the exchange
+    // month's rate is missing — the silent-parity path the ESS vest refuses
+    // (`ess_vest::VestError::MissingFxRate`). The endpoint takes no body (the
+    // action's terms and the holdings determine everything), so there is no
+    // stated-rate channel: the month's ATO rate is resolved and bound (AUD
+    // resolves to 1), and a cash component in a month with no rate is refused
+    // until the month's rates are imported. An all-scrip exchange (and a nil
+    // cash amount) converts nothing — zero proceeds, rollover disregarded —
+    // so a missing month does not block it and parity is bound harmlessly.
+    let fx = crate::infra::fx::FxRates::load(&mut *tx).await?;
+    let sell_fx_rate = match fx.resolve_rate(
+        &sell_currency,
+        action.date,
+        crate::infra::fx::FxOverride::None,
+    ) {
+        Ok(rate) => rate,
+        Err(_) if sell_price == Decimal::ZERO => Decimal::ONE,
+        Err(_) => {
+            return Err(ExchangeError::MissingFxRate {
+                currency: sell_currency.clone(),
+                month: action.date.format("%Y-%m").to_string(),
+            });
+        }
+    };
     let sell_body = rollover::closing_sell_body(
         action.date,
         action.listing_id,
         1,
         sell_price,
         sell_currency,
-        Decimal::ONE,
+        sell_fx_rate,
         replacements
             .iter()
             .map(|r| AllocationInput {
@@ -353,9 +386,8 @@ impl Terms {
         &self,
         p: &rollover::RolledParcel,
         inputs: &rollover::CostBaseInputs,
-        exchange_date: NaiveDate,
     ) -> Result<Replacement, ExchangeError> {
-        let reduced_cost_base = inputs.carried_cost_base(&p.parcel, p.remaining, exchange_date)?;
+        let reduced_cost_base = inputs.carried_cost_base(&p.parcel, p.remaining)?;
 
         // With a cash component, only the scrip side's market-value share of
         // the cost base rolls over into the replacement; the cash side's
@@ -471,6 +503,12 @@ impl From<ExchangeError> for ApiError {
             ),
             // The same body every parcel-creating path answers for this fact —
             // here the parcels are the exchange's own replacements.
+            ExchangeError::MissingFxRate { currency, month } => ApiError::unprocessable(format!(
+                "this exchange's cash component is in {currency} but no ATO/RBA rate has been \
+                 imported for {currency} in {month} — import that month's RBA rates and \
+                 exchange then; exchanging without one would price the cash consideration at \
+                 parity (1 AUD per {currency})"
+            )),
             ExchangeError::BackDatedOverWholeHolding(e) => ApiError::Unprocessable(e.message()),
             // The ratio times the holding is past what a decimal can hold →
             // 422 quoting the arithmetic, the same wording every
@@ -1619,5 +1657,117 @@ mod tests {
             .post_json("/portfolio/overview", &serde_json::json!({}))
             .await;
         assert_eq!(overview[0]["quantity"], "79000000000000000000000000000");
+    }
+
+    // --- fx-default family (code review 2026-08-25) ---
+
+    /// A USD parcel on listing 1, carrying its own stated rate, so only the
+    /// exchange's cash component is missing one.
+    async fn insert_usd_buy(pool: &SqlitePool, id: i64, date: NaiveDate, qty: &str, price: &str) {
+        test_support::buy(id, 1)
+            .date(date)
+            .settlement(date)
+            .qty(dec(qty))
+            .price(dec(price))
+            .currency("USD")
+            .fx_rate(dec("0.70"))
+            .insert(pool)
+            .await;
+    }
+
+    /// A takeover of listing 1 by listing 2 with a USD cash component:
+    /// `cash` is `(cash per old unit, market value per new unit)` in USD.
+    async fn insert_usd_scrip_cash_terms(
+        pool: &SqlitePool,
+        id: i64,
+        date: NaiveDate,
+        cash: (&str, &str),
+    ) {
+        corporate_action::db_upsert(
+            pool,
+            &CorporateAction {
+                id,
+                listing_id: 1,
+                date,
+                kind: ActionKind::ScripForScrip {
+                    scrip_listing_id: 2,
+                    scrip_new_units: Decimal::ONE,
+                    scrip_old_units: Decimal::ONE,
+                    scrip_cash_per_unit: Some(cash.0.parse().unwrap()),
+                    scrip_market_value: Some(cash.1.parse().unwrap()),
+                    scrip_cash_currency: Some("USD".to_string()),
+                },
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    /// Fx-default family (code review 2026-08-25): the cash-component closing
+    /// Sell used to be written with a hardcoded `fx_rate = 1`, so a USD cash
+    /// consideration in a month with no imported RBA rate converted at parity
+    /// in the gains reports (`FxOverride::Fallback(1)`) — silently, with no
+    /// body to override it. Now refused like the ESS vest, naming the
+    /// currency, the month, and the remedy, with nothing persisted.
+    #[tokio::test]
+    async fn api_a_foreign_cash_component_with_no_month_rate_is_refused_naming_the_month() {
+        let pool = test_pool().await;
+        insert_listing_in(&pool, 1, "OLD", "USD").await;
+        insert_listing_in(&pool, 2, "NEW", "USD").await;
+        insert_usd_buy(&pool, 1, d(2020, 10, 1), "100", "9").await;
+        insert_usd_scrip_cash_terms(&pool, 10, d(2024, 7, 1), ("10", "20")).await;
+
+        let resp = client(&pool)
+            .post_empty("/corporate_actions/10/exchange")
+            .await;
+        let (status, body) = resp.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert!(body.contains("USD") && body.contains("2024-07"), "{body}");
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM trades WHERE scrip_action_id = 10")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 0, "nothing persisted");
+    }
+
+    /// With the month's rate imported the closing Sell carries it, and the
+    /// realised-gains report converts the cash consideration through the real
+    /// rate, never parity.
+    #[tokio::test]
+    async fn a_foreign_cash_component_converts_at_the_imported_month_rate() {
+        let pool = test_pool().await;
+        insert_listing_in(&pool, 1, "OLD", "USD").await;
+        insert_listing_in(&pool, 2, "NEW", "USD").await;
+        insert_usd_buy(&pool, 1, d(2020, 10, 1), "100", "9").await;
+        insert_usd_scrip_cash_terms(&pool, 10, d(2024, 7, 1), ("10", "20")).await;
+        crate::entities::rba_fx_rate::db_import_rate(&pool, "USD", "2024-07", dec("0.5"))
+            .await
+            .unwrap();
+
+        let ex = db_exchange(&pool, 10).await.unwrap();
+        assert_eq!(ex.sell.currency, "USD");
+        assert_eq!(ex.sell.fx_rate, dec("0.5"));
+
+        // US$1,000 of cash at 0.5 USD per AUD = A$2,000 of proceeds.
+        let realised = crate::reports::realised_gains::db_realised_gains(&pool)
+            .await
+            .unwrap();
+        assert_eq!(realised.len(), 1);
+        assert_eq!(realised[0].proceeds, dec("2000"));
+    }
+
+    /// An all-scrip exchange of a foreign listing converts nothing (zero
+    /// proceeds, rollover disregarded), so a missing month does not block it.
+    #[tokio::test]
+    async fn an_all_scrip_exchange_of_a_foreign_listing_needs_no_rate() {
+        let pool = test_pool().await;
+        insert_listing_in(&pool, 1, "OLD", "USD").await;
+        insert_listing_in(&pool, 2, "NEW", "USD").await;
+        insert_usd_buy(&pool, 1, d(2020, 10, 1), "100", "9").await;
+        insert_scrip(&pool, 10, d(2024, 7, 1)).await;
+
+        let ex = db_exchange(&pool, 10).await.unwrap();
+        assert_eq!(ex.sell.average_price, Decimal::ZERO);
+        assert_eq!(ex.sell.fx_rate, Decimal::ONE);
     }
 }
