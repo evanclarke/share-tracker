@@ -685,6 +685,12 @@ pub struct LatestQuote {
 
 pub type QuoteFuture<'a> = Pin<Box<dyn Future<Output = Result<LatestQuote, String>> + Send + 'a>>;
 
+/// One result per market asked for, positionally — see
+/// [`PriceFetcher::latest_quotes`]. Every element is its own `Result`, so one
+/// listing the provider cannot serve never costs the others their valuation.
+pub type QuotesFuture<'a> =
+    Pin<Box<dyn Future<Output = Vec<Result<LatestQuote, String>>> + Send + 'a>>;
+
 /// A source of prices. Implementations do their own symbol mapping and
 /// candle-timestamp→trading-date conversion (both are provider-specific); a
 /// failure is an error result, never a silent zero or a skipped row.
@@ -729,6 +735,30 @@ pub trait PriceFetcher: Send + Sync {
     /// listings alike. Drives on-demand live valuation (the price-dependent
     /// reports). A failure is an error result, never a silent zero.
     fn latest_quote<'a>(&'a self, market: &'a Market) -> QuoteFuture<'a>;
+
+    /// [`Self::latest_quote`] for **every** market at once, which is how live
+    /// valuation actually asks: a price-dependent report values the whole
+    /// portfolio, so the per-listing loop this replaces cost one provider
+    /// round trip per held listing — the dominant cost of loading the
+    /// Portfolio Overview screen (measured: ~2.5 s for five holdings against
+    /// ~0.6 s for the same five in one request, and it grew with the
+    /// portfolio). Providers that quote many symbols per request override
+    /// this; the default is the honest sequential loop, so a fetcher that
+    /// cannot batch stays correct by implementing nothing.
+    ///
+    /// The answer is **positional and total**: `out[i]` is `markets[i]`'s
+    /// result and `out.len() == markets.len()`, so no listing can go missing
+    /// from a valuation. A whole-batch failure is therefore reported as that
+    /// failure against each market, never as a short answer.
+    fn latest_quotes<'a>(&'a self, markets: &'a [Market]) -> QuotesFuture<'a> {
+        Box::pin(async move {
+            let mut out = Vec::with_capacity(markets.len());
+            for market in markets {
+                out.push(self.latest_quote(market).await);
+            }
+            out
+        })
+    }
 }
 
 /// The fetcher handlers receive via an axum `Extension` (so tests can inject a
@@ -876,23 +906,105 @@ impl PriceFetcher for YahooFetcher {
             let quotes = yfinance_rs::quotes(&self.client, [symbol.clone()])
                 .await
                 .map_err(|e| format!("yahoo quote for {symbol} failed: {e}"))?;
-            let quote = quotes
-                .into_iter()
-                .next()
-                .ok_or_else(|| format!("yahoo returned no quote for {symbol}"))?;
-            let price = quote
-                .price
-                .ok_or_else(|| format!("yahoo quote for {symbol} carries no price"))?;
-            let as_of = quote
-                .as_of
-                .ok_or_else(|| format!("yahoo quote for {symbol} carries no timestamp"))?;
-            Ok(LatestQuote {
-                price: clean_price(price.into_inner()),
-                currency: quote.currency.to_string(),
-                as_of,
-            })
+            yahoo_quote_named(&quotes, &symbol)
         })
     }
+
+    /// Yahoo's quote endpoint takes a symbol *list* and answers the lot in one
+    /// request, so a portfolio is one round trip rather than one per holding
+    /// (see the trait method's docs for the measurement).
+    fn latest_quotes<'a>(&'a self, markets: &'a [Market]) -> QuotesFuture<'a> {
+        Box::pin(async move {
+            // Symbols first: a market whose symbol cannot be resolved at all
+            // (an exchange with no mapping) is its own failure and is never
+            // put to the provider — but it still occupies its own slot in the
+            // answer, so the positional contract holds.
+            let symbols: Vec<Result<String, String>> =
+                markets.iter().map(yahoo_symbol_now).collect();
+            // Deduplicated: two listings can resolve to one symbol, and asking
+            // twice in the same request would be asking Yahoo to repeat itself.
+            let mut wanted: Vec<&str> = symbols
+                .iter()
+                .filter_map(|s| s.as_deref().ok())
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect();
+            // HashSet order is arbitrary; sorting makes the requests (and so
+            // the failure messages below) reproducible.
+            wanted.sort_unstable();
+
+            let mut quotes: Vec<yfinance_rs::Quote> = Vec::with_capacity(wanted.len());
+            // Which symbols their own request failed for, and why. Attributed
+            // per chunk rather than per batch: a chunk that failed says
+            // nothing about the symbols in a chunk that succeeded.
+            // Owned keys: `wanted` borrows `symbols`, which is consumed
+            // below to build the answer.
+            let mut failures: HashMap<String, String> = HashMap::new();
+            for chunk in wanted.chunks(QUOTE_BATCH_SYMBOLS) {
+                match yfinance_rs::quotes(&self.client, chunk.iter().copied()).await {
+                    Ok(answered) => quotes.extend(answered),
+                    // One request failed for every symbol in it, so each of
+                    // them carries that failure.
+                    Err(e) => {
+                        let message = format!("yahoo quote for {} failed: {e}", chunk.join(", "));
+                        for &symbol in chunk {
+                            failures.insert(symbol.to_string(), message.clone());
+                        }
+                    }
+                }
+            }
+
+            symbols
+                .into_iter()
+                .map(|s| {
+                    // A market that never reached the provider keeps its own
+                    // failure; one whose request failed gets that request's.
+                    let symbol = s?;
+                    match failures.get(symbol.as_str()) {
+                        Some(message) => Err(message.clone()),
+                        None => yahoo_quote_named(&quotes, &symbol),
+                    }
+                })
+                .collect()
+        })
+    }
+}
+
+/// How many symbols one quote request carries. Yahoo accepts a long list, but
+/// not an unbounded one (a request past its limit — or past the URL length
+/// the list is spelled into — fails as a whole), and a whole-portfolio fetch
+/// is the caller here. Chunking bounds what a single over-long request could
+/// cost: the failure is confined to its own chunk's symbols rather than
+/// leaving every holding unvalued, which is the one way batching could have
+/// come out worse than the per-listing loop it replaced. Well above any
+/// portfolio this is built for, so in practice it stays a single request.
+const QUOTE_BATCH_SYMBOLS: usize = 50;
+
+/// The quote for `symbol` within a provider answer, as a [`LatestQuote`].
+///
+/// Found **by symbol**, never by position: Yahoo answers a batch in an order
+/// of its own and simply omits a symbol it cannot serve, so position carries
+/// no meaning across a multi-symbol request. Matched case-insensitively
+/// because the crate canonicalises what it parses to uppercase, while the
+/// symbol asked for came from a listing's own (already uppercase) ticker —
+/// this way nothing depends on those two conventions staying in step.
+fn yahoo_quote_named(quotes: &[yfinance_rs::Quote], symbol: &str) -> Result<LatestQuote, String> {
+    let quote = quotes
+        .iter()
+        .find(|q| q.instrument.symbol.as_str().eq_ignore_ascii_case(symbol))
+        .ok_or_else(|| format!("yahoo returned no quote for {symbol}"))?;
+    let price = quote
+        .price
+        .as_ref()
+        .ok_or_else(|| format!("yahoo quote for {symbol} carries no price"))?;
+    let as_of = quote
+        .as_of
+        .ok_or_else(|| format!("yahoo quote for {symbol} carries no timestamp"))?;
+    Ok(LatestQuote {
+        price: clean_price(*price.as_decimal()),
+        currency: quote.currency.to_string(),
+        as_of,
+    })
 }
 
 /// Midnight at the start of `date` in `tz`, as a UTC instant (a DST gap at
@@ -2010,12 +2122,35 @@ pub async fn fetch_live_aud_prices(
     listing_ids: &[i64],
 ) -> Result<HashMap<i64, Result<LiveValuation, String>>, sqlx::Error> {
     let mut out = HashMap::new();
+    // Resolve every market before quoting any of them, so the provider is
+    // asked **once** for the whole portfolio rather than once per holding
+    // (`PriceFetcher::latest_quotes`). A listing that has since been deleted
+    // is answered from here and never occupies a slot in the request.
+    let mut quoted_ids = Vec::with_capacity(listing_ids.len());
+    let mut markets = Vec::with_capacity(listing_ids.len());
     for &id in listing_ids {
-        let Some(market) = load_market(pool, id).await? else {
-            out.insert(id, Err(format!("listing {id} no longer exists")));
-            continue;
-        };
-        let result = match fetcher.latest_quote(&market).await {
+        match load_market(pool, id).await? {
+            Some(market) => {
+                quoted_ids.push(id);
+                markets.push(market);
+            }
+            None => {
+                out.insert(id, Err(format!("listing {id} no longer exists")));
+            }
+        }
+    }
+    if markets.is_empty() {
+        return Ok(out);
+    }
+    let mut quotes = fetcher.latest_quotes(&markets).await;
+    // One result per market is the trait's contract; hold a misbehaving
+    // fetcher to it here rather than letting `zip` drop the tail, which would
+    // leave a held listing missing from the valuation with nothing said.
+    quotes.resize_with(markets.len(), || {
+        Err("price source returned no result for this listing".to_string())
+    });
+    for ((id, market), quote) in quoted_ids.into_iter().zip(&markets).zip(quotes) {
+        let result = match quote {
             Err(e) => Err(e),
             Ok(quote) if quote.currency != market.listing.currency => Err(format!(
                 "currency mismatch: provider quoted {}, listing is {}",
@@ -2659,6 +2794,21 @@ mod tests {
         chrono::TimeZone::with_ymd_and_hms(&Utc, y, m, d, h, min, 0).unwrap()
     }
 
+    /// One entry of a provider answer in `yfinance-rs`'s own shape — what
+    /// `yahoo_quote_named` reads a batch out of.
+    fn yahoo_quote(symbol: &str, price: &str, as_of: DateTime<Utc>) -> yfinance_rs::Quote {
+        let mut quote = yfinance_rs::Quote::new(
+            yfinance_rs::Instrument::new(
+                yfinance_rs::Symbol::new(symbol).unwrap(),
+                yfinance_rs::AssetKind::Equity,
+            ),
+            yfinance_rs::Currency::Iso(yfinance_rs::IsoCurrency::AUD),
+        );
+        quote.price = Some(yfinance_rs::PriceAmount::new(price.parse().unwrap()));
+        quote.as_of = Some(as_of);
+        quote
+    }
+
     async fn insert_listing(pool: &SqlitePool, id: i64, ticker: &str, mic: &str, currency: &str) {
         crate::test_support::listing(id)
             .ticker(ticker)
@@ -2717,6 +2867,10 @@ mod tests {
         /// call was made with — lets a test confirm a backfill `symbol`
         /// override actually reached the fetcher.
         symbols: Mutex<Vec<String>>,
+        /// The listing ids of each `latest_quotes` call, one entry per call —
+        /// so a test can assert live valuation asks the provider *once* for
+        /// the whole portfolio rather than once per holding.
+        quote_batches: Mutex<Vec<Vec<i64>>>,
     }
 
     impl StubFetcher {
@@ -2776,6 +2930,10 @@ mod tests {
         fn symbols(&self) -> Vec<String> {
             self.symbols.lock().unwrap().clone()
         }
+
+        fn quote_batches(&self) -> Vec<Vec<i64>> {
+            self.quote_batches.lock().unwrap().clone()
+        }
     }
 
     impl PriceFetcher for StubFetcher {
@@ -2827,6 +2985,24 @@ mod tests {
                     .get(&market.listing.id)
                     .cloned()
                     .ok_or_else(|| format!("no stub quote for listing {}", market.listing.id))
+            })
+        }
+
+        /// Records the batch, then answers it the way the trait's default
+        /// does. The recording is the point: it is what lets a test see how
+        /// many times the provider was asked, which is the whole subject of
+        /// the batching.
+        fn latest_quotes<'a>(&'a self, markets: &'a [Market]) -> QuotesFuture<'a> {
+            Box::pin(async move {
+                self.quote_batches
+                    .lock()
+                    .unwrap()
+                    .push(markets.iter().map(|m| m.listing.id).collect());
+                let mut out = Vec::with_capacity(markets.len());
+                for market in markets {
+                    out.push(self.latest_quote(market).await);
+                }
+                out
             })
         }
     }
@@ -5049,6 +5225,138 @@ mod tests {
             .await
             .unwrap();
         assert!(u[&3].as_ref().unwrap_err().contains("no ATO FX rate"));
+    }
+
+    /// Live valuation is a whole-portfolio question, so the provider is asked
+    /// **once** — one batch carrying every held listing, not one round trip
+    /// per holding. This is the point of `PriceFetcher::latest_quotes`: the
+    /// old per-listing loop made the Portfolio Overview screen's load time
+    /// grow with the portfolio (~500 ms of provider latency per holding).
+    #[tokio::test]
+    async fn live_valuation_asks_the_price_source_once_for_the_whole_portfolio() {
+        let pool = test_pool().await;
+        let as_of = utc(2026, 6, 5, 6, 30);
+        let mut fetcher = StubFetcher::default();
+        for id in 1..=4 {
+            insert_listing(&pool, id, &format!("T{id}"), "XASX", "AUD").await;
+            fetcher = fetcher.with_quote(id, "10", "AUD", as_of);
+        }
+
+        let prices = fetch_live_aud_prices(&pool, &fetcher, &[1, 2, 3, 4])
+            .await
+            .unwrap();
+
+        assert_eq!(prices.len(), 4, "every listing is valued");
+        assert_eq!(
+            fetcher.quote_batches(),
+            vec![vec![1, 2, 3, 4]],
+            "one call carrying all four listings, not four calls"
+        );
+    }
+
+    /// A batched answer is matched back to the listing it belongs to, and a
+    /// listing that never reached the provider (deleted since the holdings
+    /// were read) still gets its own reason. Mis-assigning one holding's
+    /// price to another would be a silent valuation error, so the pairing is
+    /// pinned rather than assumed.
+    #[tokio::test]
+    async fn a_batched_answer_is_paired_back_to_each_listing() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
+        insert_listing(&pool, 2, "WBC", "XASX", "AUD").await;
+        insert_listing(&pool, 3, "CBA", "XASX", "AUD").await;
+        let as_of = utc(2026, 6, 5, 6, 30);
+        // Listing 2 is deliberately unquoted: its failure must stay its own.
+        let fetcher = StubFetcher::default()
+            .with_quote(1, "62.48", "AUD", as_of)
+            .with_quote(3, "180.10", "AUD", as_of);
+
+        // Listing 99 does not exist at all.
+        let prices = fetch_live_aud_prices(&pool, &fetcher, &[1, 2, 3, 99])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            prices[&1].as_ref().unwrap().aud_price,
+            "62.48".parse::<Decimal>().unwrap()
+        );
+        assert!(prices[&2].as_ref().unwrap_err().contains("listing 2"));
+        assert_eq!(
+            prices[&3].as_ref().unwrap().aud_price,
+            "180.10".parse::<Decimal>().unwrap()
+        );
+        assert!(
+            prices[&99]
+                .as_ref()
+                .unwrap_err()
+                .contains("no longer exists")
+        );
+        assert_eq!(
+            fetcher.quote_batches(),
+            vec![vec![1, 2, 3]],
+            "the missing listing never occupies a slot in the request"
+        );
+    }
+
+    /// The trait's default `latest_quotes` — what a fetcher that cannot batch
+    /// inherits by implementing nothing. It must still answer positionally
+    /// and in full, since `fetch_live_aud_prices` pairs by position.
+    /// `QuoteStub` deliberately does not override it, so this exercises the
+    /// default body.
+    #[tokio::test]
+    async fn the_default_batch_is_the_per_market_loop_answered_positionally() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
+        insert_listing(&pool, 2, "WBC", "XASX", "AUD").await;
+        let as_of = utc(2026, 6, 5, 6, 30);
+        let fetcher = test_support::QuoteStub::default().with_quote(2, "30", "AUD", as_of);
+        let markets = vec![
+            load_market(&pool, 1).await.unwrap().unwrap(),
+            load_market(&pool, 2).await.unwrap().unwrap(),
+        ];
+
+        let quotes = fetcher.latest_quotes(&markets).await;
+
+        assert_eq!(quotes.len(), 2, "one result per market, always");
+        assert!(quotes[0].as_ref().unwrap_err().contains("listing 1"));
+        assert_eq!(
+            quotes[1].as_ref().unwrap().price,
+            Decimal::from(30),
+            "the second market's own quote, in its own slot"
+        );
+    }
+
+    /// Yahoo answers a multi-symbol request in an order of its own and simply
+    /// omits a symbol it cannot serve, so `yahoo_quote_named` pairs by symbol.
+    /// Pairing by position instead would hand one holding another's price —
+    /// wrong figures with nothing to show for it — which is why this is
+    /// pinned here rather than left to the provider's habits.
+    #[test]
+    fn a_yahoo_batch_is_read_by_symbol_not_by_position() {
+        let as_of = utc(2026, 6, 5, 6, 30);
+        // Answered in the reverse of the order asked, and missing VGS.AX.
+        let quotes = vec![
+            yahoo_quote("WBC.AX", "30.10", as_of),
+            yahoo_quote("BHP.AX", "62.48", as_of),
+        ];
+
+        assert_eq!(
+            yahoo_quote_named(&quotes, "BHP.AX").unwrap().price,
+            "62.48".parse::<Decimal>().unwrap()
+        );
+        assert_eq!(
+            yahoo_quote_named(&quotes, "WBC.AX").unwrap().price,
+            "30.10".parse::<Decimal>().unwrap()
+        );
+        // The symbol the provider dropped is its own failure, not another
+        // listing's price.
+        assert!(
+            yahoo_quote_named(&quotes, "VGS.AX")
+                .unwrap_err()
+                .contains("no quote for VGS.AX")
+        );
+        // The crate canonicalises to uppercase; matching survives either way.
+        assert!(yahoo_quote_named(&quotes, "bhp.ax").is_ok());
     }
 
     #[tokio::test]
