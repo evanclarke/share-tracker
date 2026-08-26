@@ -16,7 +16,7 @@ import assert from 'node:assert/strict';
 import {
   roundDecimalStr, groupThousands, padMinDp, decStrEq, numericDisplay,
   addDecimalStrings, decParts, mulToCents, frankingCreditFor, decEq,
-  looksNumeric, columnKinds, columnLabel, tradeOrigin, periodReturnPct,
+  looksNumeric, columnKinds, columnLabel, columnLinks, tradeOrigin, periodReturnPct,
   holdingHasActivity, loadPref, savePref, pathSeg, basePath, apiUrl, authEnabled,
   cellText, adjustmentPreviewText, allocationSummary, toastLifetime, moneyText,
 } from './util.js';
@@ -213,6 +213,43 @@ test('columnLabel: overrides win, humaniser handles _id and acronyms', () => {
   assert.equal(columnLabel('gst_on_brokerage'), 'GST on brokerage');
   assert.equal(columnLabel('date_paid'), 'Date paid');
   assert.equal(columnLabel('aud_deferral_discount'), 'Statement AUD deferral (F)');
+});
+
+// ---- columnLinks --------------------------------------------------------
+test('columnLinks: every column naming a listing drills into its activity ledger', () => {
+  // Keyed off FK_COLUMN_SOURCES, so the counterpart-listing columns are
+  // linked on the same footing as listing_id itself — nothing per-report.
+  const links = columnLinks(['listing_id', 'scrip_listing_id', 'demerger_listing_id']);
+  assert.equal(links.listing_id({ listing_id: 7 }), '#/r/activity/7');
+  assert.equal(links.scrip_listing_id({ scrip_listing_id: 2 }), '#/r/activity/2');
+  assert.equal(links.demerger_listing_id({ demerger_listing_id: 3 }), '#/r/activity/3');
+});
+
+test('columnLinks: a column naming no linkable source gets no link at all', () => {
+  // An account or a trade has no screen worth landing on, and a plain data
+  // column is not a foreign key — absent, not a function returning null, so
+  // filterableTable renders the cell exactly as it did before.
+  const links = columnLinks(['holding_account_id', 'sale_trade_id', 'quantity', 'ticker']);
+  assert.deepEqual(links, {});
+});
+
+test('columnLinks: a null or blank id links nowhere', () => {
+  // The performance report's whole-portfolio row and an expense attributed
+  // to no listing both carry a null listing_id — a link to '#/r/activity/'
+  // (or to 'null') would be a dead end.
+  const links = columnLinks(['listing_id']);
+  assert.equal(links.listing_id({ listing_id: null }), null);
+  assert.equal(links.listing_id({ listing_id: '' }), null);
+  assert.equal(links.listing_id({}), null);
+});
+
+test('columnLinks: no link back to the screen the reader is already on', () => {
+  // The Listing Activity report's own holding summary names the listing the
+  // report is about; linking it would re-run the screen you are looking at.
+  const links = columnLinks(['listing_id'], '#/r/activity');
+  assert.equal(links.listing_id({ listing_id: 7 }), null);
+  // …and any other report's rows still link there.
+  assert.equal(columnLinks(['listing_id'], '#/r/overview').listing_id({ listing_id: 7 }), '#/r/activity/7');
 });
 
 // ---- tradeOrigin ----------------------------------------------------------

@@ -15,6 +15,7 @@ import {
   el, toast, setMain, looksNumeric, isTimestamp, fmtLocalTimestamp, utcTooltip,
   cellText, numericDisplay, moneyText, columnKinds, columnLabel, columnLabelMaps,
   fkLabelMaps, api, apiUrl, pathSeg, nextId, loadOptions, listingNamer, describeTrade, tradeOrigin,
+  columnLinks,
   periodReturnPct, holdingHasActivity, loadPref, savePref,
 } from './util.js';
 import {
@@ -53,9 +54,9 @@ const PAGE_SIZE = 50;
 // foreign-key id — filtering and sorting follow the label, and the id moves to
 // the tooltip. `opts.links`, if given, is `{col: row => href}`: that column's
 // cell renders as a link to the returned hash route (a null/empty href leaves
-// it plain text) — how the Portfolio Overview's listing name drills into that
-// listing's own activity report. The link changes nothing about the cell's
-// text, so filtering and sorting are unaffected.
+// it plain text) — how a report cell naming a listing drills into that
+// listing's own activity ledger (`columnLinks`). The link changes nothing
+// about the cell's text, so filtering and sorting are unaffected.
 // `opts.expand`, if given, is a synchronous `row => childSpec`
 // (`{ rows, cols, opts }`, or a falsy value/empty `rows` for a childless row):
 // a leading toggle column shows ▸/▾ for a row with children, and an expanded
@@ -305,7 +306,7 @@ function expandColumns(expandCfg) {
 // FK-label-map set already fetched for every level, shared unchanged down
 // the recursion — every column name maps to the same source regardless of
 // nesting depth.
-function buildExpand(expandCfg, labels, context) {
+function buildExpand(expandCfg, labels, context, selfRoute) {
   return function (row) {
     let childRows;
     if (expandCfg.key) {
@@ -319,9 +320,12 @@ function buildExpand(expandCfg, labels, context) {
       childRows = [];
     }
     if (!childRows.length) return null;
-    const childOpts = { statusField: expandCfg.statusField, labels: labels };
-    if (expandCfg.expand) childOpts.expand = buildExpand(expandCfg.expand, labels, context);
-    return { rows: childRows, cols: expandCfg.columns || Object.keys(childRows[0]), opts: childOpts };
+    const cols = expandCfg.columns || Object.keys(childRows[0]);
+    const childOpts = {
+      statusField: expandCfg.statusField, labels: labels, links: columnLinks(cols, selfRoute),
+    };
+    if (expandCfg.expand) childOpts.expand = buildExpand(expandCfg.expand, labels, context, selfRoute);
+    return { rows: childRows, cols: cols, opts: childOpts };
   };
 }
 
@@ -342,10 +346,12 @@ function rowActionLink(a) {
 // FK_COLUMN_SOURCES), same as the entity lists. `expandCfg` (a REPORTS
 // `expand` entry) turns each row into a expand-to-a-child-table row (see
 // `buildExpand`); `context` is the whole multi-`tables` response object,
-// needed only for an expand config's `from` sibling lookup. `cellLinks` (a
-// REPORTS `cellLinks` entry) turns named columns into links into another
-// view — see `filterableTable`'s `opts.links`.
-async function dataTable(rows, columns, statusField, expandCfg, context, rowActions, cellLinks) {
+// needed only for an expand config's `from` sibling lookup. A column naming a
+// listing is additionally rendered as a link into that listing's own activity
+// ledger (`columnLinks`, keyed by column name like the label maps beside it —
+// no per-report configuration), suppressed on the activity report itself via
+// `selfRoute`, the '#/r/<slug>' of the screen being rendered.
+async function dataTable(rows, columns, statusField, expandCfg, context, rowActions, selfRoute) {
   if (!rows || rows.length === 0) return el('div', { class: 'empty' }, 'No records.');
   // A `key` expand reads its children from a nested field on the row itself
   // (e.g. `parcels`) — excluded from the parent's own columns, whether
@@ -354,9 +360,8 @@ async function dataTable(rows, columns, statusField, expandCfg, context, rowActi
   let cols = columns || Object.keys(rows[0]);
   if (expandCfg && expandCfg.key) cols = cols.filter(function (c) { return c !== expandCfg.key; });
   const labels = await columnLabelMaps(cols.concat(expandColumns(expandCfg)));
-  const opts = { statusField: statusField, labels: labels };
-  if (cellLinks) opts.links = cellLinks;
-  if (expandCfg) opts.expand = buildExpand(expandCfg, labels, context);
+  const opts = { statusField: statusField, labels: labels, links: columnLinks(cols, selfRoute) };
+  if (expandCfg) opts.expand = buildExpand(expandCfg, labels, context, selfRoute);
   // The Actions column appears only where some row actually has an action:
   // a report answering rows of more than one shape (Row History, whose browse
   // entries link into a row's own trail while that trail's own rows do not)
@@ -2451,7 +2456,7 @@ async function viewReport(report, args) {
       for (const s of sections.groups) {
         if (s.title) result.appendChild(el('h3', null, s.title));
         if (s.desc) result.appendChild(el('p', { class: 'hint' }, s.desc));
-        result.appendChild(await dataTable(s.rows, s.columns || null, report.statusField, null, null, report.rowActions, report.cellLinks));
+        result.appendChild(await dataTable(s.rows, s.columns || null, report.statusField, null, null, report.rowActions, '#/r/' + report.slug));
       }
       if (more) result.appendChild(more);
       return;
@@ -2469,12 +2474,12 @@ async function viewReport(report, args) {
         // (the what-if's `years` rows flatten in `NetCapitalGainYear`'s
         // `disposals`, always empty here since the drilldown belongs to the
         // main report, not the hypothetical dry-run).
-        result.appendChild(await dataTable(arr, t.columns || null, report.statusField, t.expand, rows, report.rowActions, report.cellLinks));
+        result.appendChild(await dataTable(arr, t.columns || null, report.statusField, t.expand, rows, report.rowActions, '#/r/' + report.slug));
       }
       if (more) result.appendChild(more);
       return;
     }
-    result.appendChild(await dataTable(rows, report.columns || null, report.statusField, report.expand, null, report.rowActions, report.cellLinks));
+    result.appendChild(await dataTable(rows, report.columns || null, report.statusField, report.expand, null, report.rowActions, '#/r/' + report.slug));
     if (more) result.appendChild(more);
   }
 

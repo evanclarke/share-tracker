@@ -1738,41 +1738,34 @@ mod tests {
         assert!(js.contains("/portfolio/net-capital-gain"));
     }
 
-    /// Every holdings report whose rows name a listing lets that name be
-    /// clicked through to the listing's own activity ledger — the question a
-    /// holding raises ("what actually happened in this one?") answered from
-    /// the row that raised it. Pinned per report entry, not by a bare
-    /// substring over the whole bundle, so one screen's link can't stand in
-    /// for the other's.
+    /// Wherever a report row names a listing, that name is a link into the
+    /// listing's own activity ledger — the question a figure raises ("what
+    /// actually happened in this holding?") answered from the row that
+    /// raised it. Derived from the column name via the same FK map that
+    /// gives the cell its label, so no report opts in and a new one showing
+    /// a listing column inherits it; the pins here are on the derivation,
+    /// with the behaviour itself unit-tested in `util.test.js`.
     #[tokio::test]
     async fn listing_name_cells_link_into_the_activity_report() {
         let js = app_js_body().await;
-        // The generic mechanism: a per-column cell link in filterableTable,
-        // fed from a REPORTS `cellLinks` entry through dataTable.
+        // Keyed by source, off FK_COLUMN_SOURCES — the map that already
+        // names the listing in that cell.
+        assert!(js.contains("const FK_LINK_ROUTES"));
+        assert!(js.contains("listings: function (id) { return '#/r/activity/' + id; }"));
+        assert!(js.contains("FK_LINK_ROUTES[FK_COLUMN_SOURCES[c]]"));
+        // Applied by the shared report-table renderer to the top-level rows
+        // and to every nested level of an expandable report alike, never by
+        // a per-report config entry.
+        assert!(js.contains("links: columnLinks(cols, selfRoute)"));
+        assert!(js.contains("labels: labels, links: columnLinks(cols, selfRoute),"));
+        assert!(js.contains("report.rowActions, '#/r/' + report.slug)"));
+        // …rendered by filterableTable as the anchor the stylesheet styles.
         assert!(js.contains("opts.links"));
-        assert!(js.contains("if (cellLinks) opts.links = cellLinks;"));
         assert!(js.contains("cell-link"));
-
+        // The route they point at is the activity report's own, reached by
+        // the positional deep link that prefills its listing and runs it.
         let config = body_string(get("/static/config.js").await).await;
-        let reports = config
-            .split("export const REPORTS")
-            .nth(1)
-            .expect("config.js declares REPORTS");
-        for slug in ["overview", "unrealised-gains"] {
-            let entry = reports
-                .split(&format!("slug: '{slug}'"))
-                .nth(1)
-                .unwrap_or_else(|| panic!("REPORTS has no `{slug}` entry"));
-            // The entry ends where the next one's slug begins.
-            let entry = entry.split("slug: '").next().expect("an entry body");
-            assert!(
-                entry.contains("cellLinks") && entry.contains("'#/r/activity/' + row.listing_id"),
-                "the `{slug}` report's listing name no longer links into the Listing Activity report"
-            );
-        }
-        // …and the route those links point at is the activity report's own,
-        // reached by the positional deep link that prefills and runs it.
-        assert!(reports.contains("slug: 'activity'"));
+        assert!(config.contains("slug: 'activity'"));
         assert!(js.contains("const deepLink = (args || []).length > 0;"));
     }
 

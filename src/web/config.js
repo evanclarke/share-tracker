@@ -471,13 +471,7 @@ export const REPORTS = [
   {
     slug: 'overview', title: 'Portfolio Overview', api: '/portfolio/overview', method: 'POST', prices: true, performancePanel: true,
     menu: 'Reports', section: 'Portfolio',
-    desc: 'Open holdings per listing and holding account, with optional market value, a market-value or unrealised-gain graph (one series at a time) over a selectable date range, and a period performance summary (capital growth / FX movement / income). A listing name links to that listing\u2019s own activity report.',
-    // The listing name in each holding row drills into the Listing Activity
-    // report for that listing (`#/r/<slug>/<arg>` prefills a parameterised
-    // report's params positionally, so the id lands in `listing_id`).
-    cellLinks: {
-      listing_id: function (row) { return '#/r/activity/' + row.listing_id; },
-    },
+    desc: 'Open holdings per listing and holding account, with optional market value, a market-value or unrealised-gain graph (one series at a time) over a selectable date range, and a period performance summary (capital growth / FX movement / income).',
     // Shortcut buttons for the most common data-entry paths, shown above the
     // performance panel — this is the app's home screen (#/).
     shortcuts: [
@@ -538,17 +532,7 @@ export const REPORTS = [
       },
     ],
   },
-  {
-    slug: 'unrealised-gains', title: 'Unrealised Gains', api: '/portfolio/unrealised-gains', method: 'POST', prices: true, asOfDate: true,
-    menu: 'Reports', section: 'CGT & tax',
-    desc: 'Per-holding (listing × holding account) unrealised gain/loss vs cost base. A listing name links to that listing’s own activity report.',
-    // Same drill-down as the Portfolio Overview: the listing name opens the
-    // Listing Activity report for that listing. The as-of date is not carried
-    // — the activity ledger is that listing's whole history, not an as-at view.
-    cellLinks: {
-      listing_id: function (row) { return '#/r/activity/' + row.listing_id; },
-    },
-  },
+  { slug: 'unrealised-gains', title: 'Unrealised Gains', api: '/portfolio/unrealised-gains', method: 'POST', prices: true, asOfDate: true, menu: 'Reports', section: 'CGT & tax', desc: 'Per-holding (listing × holding account) unrealised gain/loss vs cost base.' },
   {
     slug: 'realised-gains', title: 'Realised Gains', api: '/portfolio/realised-gains', method: 'GET',
     menu: 'Reports', section: 'CGT & tax',

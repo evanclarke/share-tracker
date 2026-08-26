@@ -624,6 +624,40 @@ export async function fkLabelMaps(specs) {
   return out;
 }
 
+// Where a foreign-key cell drills through to, keyed by the *source* it names
+// — so the same map that gives a cell its label (FK_COLUMN_SOURCES above)
+// also gives it its link, and a column naming a listing links into that
+// listing's own activity ledger wherever it appears, `listing_id` and
+// `scrip_listing_id`/`demerger_listing_id` alike. A source with no screen
+// worth landing on (an account, a trade, a statement) is deliberately absent
+// and its cells stay plain text.
+const FK_LINK_ROUTES = {
+  listings: function (id) { return '#/r/activity/' + id; },
+};
+
+// Drill-down href per column for whichever of `cols` name a linkable source —
+// the report tables' twin of columnLabelMaps, and derived from the same map,
+// so a new report showing a listing column inherits the drill-down by name
+// alone rather than by anyone remembering to configure it. A null/blank id
+// (an unattributed expense, the performance report's whole-portfolio row)
+// yields no href, leaving that cell plain text. `selfRoute` ('#/r/<slug>' of
+// the screen being rendered) suppresses a link back to the screen the reader
+// is already on — the Listing Activity report's own holding summary.
+export function columnLinks(cols, selfRoute) {
+  const out = {};
+  cols.forEach(function (c) {
+    const route = FK_LINK_ROUTES[FK_COLUMN_SOURCES[c]];
+    if (!route) return;
+    out[c] = function (row) {
+      const id = row[c];
+      if (id == null || id === '') return null;
+      const href = route(id);
+      return selfRoute && href.indexOf(selfRoute + '/') === 0 ? null : href;
+    };
+  });
+  return out;
+}
+
 // Label maps for whichever of `cols` are foreign-key id columns (per
 // FK_COLUMN_SOURCES) — the shared path for the report tables and the generic
 // entity list, so every id column renders its referenced row's name.
