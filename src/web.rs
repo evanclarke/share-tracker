@@ -1738,13 +1738,14 @@ mod tests {
         assert!(js.contains("/portfolio/net-capital-gain"));
     }
 
-    /// Wherever a report row names a listing, that name is a link into the
-    /// listing's own activity ledger — the question a figure raises ("what
-    /// actually happened in this holding?") answered from the row that
-    /// raised it. Derived from the column name via the same FK map that
-    /// gives the cell its label, so no report opts in and a new one showing
-    /// a listing column inherits it; the pins here are on the derivation,
-    /// with the behaviour itself unit-tested in `util.test.js`.
+    /// Wherever a table names a listing — a report row, an entity list row,
+    /// the rows nested inside an expandable report — that name is a link into
+    /// the listing's own activity ledger, so the question a figure raises
+    /// ("what actually happened in this holding?") is answered from the row
+    /// that raised it. Derived from the column name via the same FK map that
+    /// gives the cell its label, in the one shared table renderer, so no
+    /// screen opts in and a new one inherits it; the pins here are on that
+    /// derivation, with the behaviour itself unit-tested in `util.test.js`.
     #[tokio::test]
     async fn listing_name_cells_link_into_the_activity_report() {
         let js = app_js_body().await;
@@ -1753,18 +1754,30 @@ mod tests {
         assert!(js.contains("const FK_LINK_ROUTES"));
         assert!(js.contains("listings: function (id) { return '#/r/activity/' + id; }"));
         assert!(js.contains("FK_LINK_ROUTES[FK_COLUMN_SOURCES[c]]"));
-        // Applied by the shared report-table renderer to the top-level rows
-        // and to every nested level of an expandable report alike, never by
-        // a per-report config entry.
-        assert!(js.contains("links: columnLinks(cols, selfRoute)"));
-        assert!(js.contains("labels: labels, links: columnLinks(cols, selfRoute),"));
+        // Derived in filterableTable itself — the one renderer every table in
+        // the app goes through — so an entity list, a custom list view and a
+        // report table all have the drill-down without wiring one.
+        assert!(js.contains("const links = opts.links || columnLinks(cols, opts.selfRoute);"));
+        // …at every nested level of an expandable report, and never back to
+        // the screen the reader is already on (the activity report's own
+        // holding summary).
+        assert!(js.contains("labels: labels, selfRoute: selfRoute,"));
         assert!(js.contains("report.rowActions, '#/r/' + report.slug)"));
-        // …rendered by filterableTable as the anchor the stylesheet styles.
-        assert!(js.contains("opts.links"));
-        assert!(js.contains("cell-link"));
-        // The route they point at is the activity report's own, reached by
-        // the positional deep link that prefills its listing and runs it.
+        // Two screens compose the listing name for display instead of showing
+        // the raw FK cell, and ask for the same drill-down by name.
+        assert!(js.contains("links: { listing: listingLinkFrom('_listing_id') }"));
+        assert_eq!(
+            js.matches("links: { ticker: listingLinkFrom('_listing_id') }")
+                .count(),
+            2
+        );
+        // The Listings list names the listing by its own `id`, which means
+        // something different on every other screen — so there it is a row
+        // action rather than a linked cell.
         let config = body_string(get("/static/config.js").await).await;
+        assert!(config.contains("{ label: 'Activity', href: '#/r/activity/' + row.id }"));
+        // The route they all point at is the activity report's own, reached
+        // by the positional deep link that prefills its listing and runs it.
         assert!(config.contains("slug: 'activity'"));
         assert!(js.contains("const deepLink = (args || []).length > 0;"));
     }

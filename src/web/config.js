@@ -60,8 +60,13 @@ export const ENTITIES = [
     // POST /listings/:id/rename). Rename is that endpoint, and Rename
     // history is the recorded chain (GET /listings/:id/renames) with the
     // newest entry's undo.
+    // Activity is the same drill-down every other table gets from a
+    // `listing_id` cell (util.js's FK_LINK_ROUTES); this list names the
+    // listing by its own `id`, which means something different on every
+    // other screen, so here it is a row action rather than a linked cell.
     rowActions: function (row) {
       return [
+        { label: 'Activity', href: '#/r/activity/' + row.id },
         { label: 'Rename', href: '#/rename/' + row.id },
         { label: 'Rename history', href: '#/renames/' + row.id },
       ];

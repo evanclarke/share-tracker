@@ -15,7 +15,7 @@ import {
   el, toast, setMain, looksNumeric, isTimestamp, fmtLocalTimestamp, utcTooltip,
   cellText, numericDisplay, moneyText, columnKinds, columnLabel, columnLabelMaps,
   fkLabelMaps, api, apiUrl, pathSeg, nextId, loadOptions, listingNamer, describeTrade, tradeOrigin,
-  columnLinks,
+  columnLinks, listingLinkFrom,
   periodReturnPct, holdingHasActivity, loadPref, savePref,
 } from './util.js';
 import {
@@ -52,11 +52,14 @@ const PAGE_SIZE = 50;
 // `opts.statusField` renders that column as a status badge; `opts.labels`
 // ({col: {id → label}}, from fkLabelMaps) shows the label instead of the raw
 // foreign-key id — filtering and sorting follow the label, and the id moves to
-// the tooltip. `opts.links`, if given, is `{col: row => href}`: that column's
-// cell renders as a link to the returned hash route (a null/empty href leaves
-// it plain text) — how a report cell naming a listing drills into that
-// listing's own activity ledger (`columnLinks`). The link changes nothing
-// about the cell's text, so filtering and sorting are unaffected.
+// the tooltip. A cell naming a listing renders as a link into that listing's
+// own activity ledger — derived from the column name by `columnLinks`, so
+// *every* table in the app has the drill-down without its caller wiring one
+// (`opts.selfRoute`, the '#/r/<slug>' of the screen being rendered, drops a
+// link back to the screen the reader is already on). The link changes nothing
+// about the cell's text, so filtering and sorting are unaffected; `opts.links`
+// ({col: row => href}) overrides the derived set outright, for a table that
+// needs some other drill-down or none at all.
 // `opts.expand`, if given, is a synchronous `row => childSpec`
 // (`{ rows, cols, opts }`, or a falsy value/empty `rows` for a childless row):
 // a leading toggle column shows ▸/▾ for a row with children, and an expanded
@@ -71,7 +74,7 @@ function filterableTable(rows, cols, opts) {
   const actions = opts.actions;
   const expand = opts.expand;
   const labels = opts.labels || {};
-  const links = opts.links || {};
+  const links = opts.links || columnLinks(cols, opts.selfRoute);
   // Display kinds are derived from the column names alone (COLUMN_KINDS), so
   // every caller of filterableTable gets money rounding / rate precision with
   // no per-call wiring; numeric sorting still uses the raw underlying value.
@@ -320,12 +323,11 @@ function buildExpand(expandCfg, labels, context, selfRoute) {
       childRows = [];
     }
     if (!childRows.length) return null;
-    const cols = expandCfg.columns || Object.keys(childRows[0]);
     const childOpts = {
-      statusField: expandCfg.statusField, labels: labels, links: columnLinks(cols, selfRoute),
+      statusField: expandCfg.statusField, labels: labels, selfRoute: selfRoute,
     };
     if (expandCfg.expand) childOpts.expand = buildExpand(expandCfg.expand, labels, context, selfRoute);
-    return { rows: childRows, cols: cols, opts: childOpts };
+    return { rows: childRows, cols: expandCfg.columns || Object.keys(childRows[0]), opts: childOpts };
   };
 }
 
@@ -346,11 +348,10 @@ function rowActionLink(a) {
 // FK_COLUMN_SOURCES), same as the entity lists. `expandCfg` (a REPORTS
 // `expand` entry) turns each row into a expand-to-a-child-table row (see
 // `buildExpand`); `context` is the whole multi-`tables` response object,
-// needed only for an expand config's `from` sibling lookup. A column naming a
-// listing is additionally rendered as a link into that listing's own activity
-// ledger (`columnLinks`, keyed by column name like the label maps beside it —
-// no per-report configuration), suppressed on the activity report itself via
-// `selfRoute`, the '#/r/<slug>' of the screen being rendered.
+// needed only for an expand config's `from` sibling lookup. `selfRoute` (the
+// '#/r/<slug>' of the screen being rendered) is passed to every level so the
+// listing drill-down `filterableTable` derives never points at the screen the
+// reader is already on — the activity report's own holding summary.
 async function dataTable(rows, columns, statusField, expandCfg, context, rowActions, selfRoute) {
   if (!rows || rows.length === 0) return el('div', { class: 'empty' }, 'No records.');
   // A `key` expand reads its children from a nested field on the row itself
@@ -360,7 +361,7 @@ async function dataTable(rows, columns, statusField, expandCfg, context, rowActi
   let cols = columns || Object.keys(rows[0]);
   if (expandCfg && expandCfg.key) cols = cols.filter(function (c) { return c !== expandCfg.key; });
   const labels = await columnLabelMaps(cols.concat(expandColumns(expandCfg)));
-  const opts = { statusField: statusField, labels: labels, links: columnLinks(cols, selfRoute) };
+  const opts = { statusField: statusField, labels: labels, selfRoute: selfRoute };
   if (expandCfg) opts.expand = buildExpand(expandCfg, labels, context, selfRoute);
   // The Actions column appears only where some row actually has an action:
   // a report answering rows of more than one shape (Row History, whose browse
@@ -1641,6 +1642,10 @@ async function viewClosingPrices() {
     'fetched_symbol', 'status', 'origin', 'sourced_from', 'reason', 'error', 'fetched_at'];
   const table = filterableTable(rows, cols, {
     statusField: 'status',
+    // The listing name here is composed for display (the id is kept beside it
+    // in `_listing_id`), so the drill-down every listing_id cell derives is
+    // asked for by name — same route, same ledger.
+    links: { listing: listingLinkFrom('_listing_id') },
     actions: function (row) {
       // A hand-entered price is a deliberate correction for a day the
       // provider got wrong or cannot serve, so the provider never takes the
@@ -1827,6 +1832,7 @@ async function viewClosingPrices() {
     erroredRows,
     ['ticker', 'errored_days', 'latest_errored_date', 'latest_error'],
     {
+      links: { ticker: listingLinkFrom('_listing_id') },
       actions: function (row) {
         const btn = el('button', { class: 'small primary' }, 'Backfill');
         btn.addEventListener('click', function () {
@@ -1856,6 +1862,7 @@ async function viewClosingPrices() {
     unpricedRows,
     ['ticker', 'unpriced_days', 'earliest_date', 'latest_date'],
     {
+      links: { ticker: listingLinkFrom('_listing_id') },
       actions: function (row) {
         const btn = el('button', { class: 'small primary' }, 'Backfill');
         btn.addEventListener('click', function () {

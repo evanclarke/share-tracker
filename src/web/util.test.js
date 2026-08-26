@@ -16,7 +16,8 @@ import assert from 'node:assert/strict';
 import {
   roundDecimalStr, groupThousands, padMinDp, decStrEq, numericDisplay,
   addDecimalStrings, decParts, mulToCents, frankingCreditFor, decEq,
-  looksNumeric, columnKinds, columnLabel, columnLinks, tradeOrigin, periodReturnPct,
+  looksNumeric, columnKinds, columnLabel, columnLinks, listingLinkFrom, tradeOrigin,
+  periodReturnPct,
   holdingHasActivity, loadPref, savePref, pathSeg, basePath, apiUrl, authEnabled,
   cellText, adjustmentPreviewText, allocationSummary, toastLifetime, moneyText,
 } from './util.js';
@@ -250,6 +251,15 @@ test('columnLinks: no link back to the screen the reader is already on', () => {
   assert.equal(links.listing_id({ listing_id: 7 }), null);
   // …and any other report's rows still link there.
   assert.equal(columnLinks(['listing_id'], '#/r/overview').listing_id({ listing_id: 7 }), '#/r/activity/7');
+});
+
+test('listingLinkFrom: a composed listing name drills through on its kept id', () => {
+  // The Closing Prices screen and the price-health surfaces build the name
+  // for display ("XASX:VAS", a bare ticker) and keep the id beside it.
+  const link = listingLinkFrom('_listing_id');
+  assert.equal(link({ listing: 'XASX:VAS', _listing_id: 4 }), '#/r/activity/4');
+  assert.equal(link({ listing: 'listing 9', _listing_id: null }), null);
+  assert.equal(link({}), null);
 });
 
 // ---- tradeOrigin ----------------------------------------------------------

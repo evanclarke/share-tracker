@@ -635,6 +635,18 @@ const FK_LINK_ROUTES = {
   listings: function (id) { return '#/r/activity/' + id; },
 };
 
+// The same drill-down for a table that shows a *composed* listing name
+// instead of a raw foreign-key cell — the Closing Prices screen's "listing"
+// and the price-health surfaces' "ticker", each of which keeps the id beside
+// it in a private `_listing_id` field. Pass the field holding the id; the
+// route itself is still spelled once, above.
+export function listingLinkFrom(idField) {
+  return function (row) {
+    const id = row[idField];
+    return id == null || id === '' ? null : FK_LINK_ROUTES.listings(id);
+  };
+}
+
 // Drill-down href per column for whichever of `cols` name a linkable source —
 // the report tables' twin of columnLabelMaps, and derived from the same map,
 // so a new report showing a listing column inherits the drill-down by name
