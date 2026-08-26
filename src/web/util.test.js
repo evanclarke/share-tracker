@@ -16,7 +16,8 @@ import assert from 'node:assert/strict';
 import {
   roundDecimalStr, groupThousands, padMinDp, decStrEq, numericDisplay,
   addDecimalStrings, decParts, mulToCents, frankingCreditFor, decEq,
-  looksNumeric, columnKinds, columnLabel, columnLinks, listingLinkFrom, tradeOrigin,
+  looksNumeric, columnKinds, columnLabel, columnLinks, listingLinkFrom, defaultSortColumn,
+  tradeOrigin,
   periodReturnPct,
   holdingHasActivity, loadPref, savePref, pathSeg, basePath, apiUrl, authEnabled,
   cellText, adjustmentPreviewText, allocationSummary, toastLifetime, moneyText,
@@ -251,6 +252,32 @@ test('columnLinks: no link back to the screen the reader is already on', () => {
   assert.equal(links.listing_id({ listing_id: 7 }), null);
   // …and any other report's rows still link there.
   assert.equal(columnLinks(['listing_id'], '#/r/overview').listing_id({ listing_id: 7 }), '#/r/activity/7');
+});
+
+// ---- defaultSortColumn --------------------------------------------------
+test('defaultSortColumn: the four date namings the API uses', () => {
+  assert.equal(defaultSortColumn(['id', 'date', 'quantity']), 'date');
+  assert.equal(defaultSortColumn(['id', 'date_paid']), 'date_paid');
+  assert.equal(defaultSortColumn(['id', 'sale_date']), 'sale_date');
+  assert.equal(defaultSortColumn(['id', 'uploaded_at']), 'uploaded_at');
+});
+
+test('defaultSortColumn: the row\'s own date leads a secondary one', () => {
+  // Column order is the table's own, which puts the date the row happened on
+  // ahead of a derived or related one.
+  assert.equal(defaultSortColumn(['id', 'date', 'settlement_date']), 'date');
+  assert.equal(defaultSortColumn(['sale_date', 'acquisition_date']), 'sale_date');
+  assert.equal(defaultSortColumn(['price_date', 'fetched_at']), 'price_date');
+});
+
+test('defaultSortColumn: no date column leaves the server order alone', () => {
+  // A listing, a holding, an exchange — nothing to open newest-first on.
+  assert.equal(defaultSortColumn(['id', 'ticker', 'name', 'security_type']), null);
+  assert.equal(defaultSortColumn(['listing_id', 'quantity', 'total_cost_base']), null);
+  // A financial year is not a date column: those tables stay as sent.
+  assert.equal(defaultSortColumn(['tax_year', 'net_capital_gain']), null);
+  // Nor is a column that merely ends in the letters "at" or "date".
+  assert.equal(defaultSortColumn(['format', 'update', 'flat']), null);
 });
 
 test('listingLinkFrom: a composed listing name drills through on its kept id', () => {

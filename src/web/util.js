@@ -679,6 +679,27 @@ export async function columnLabelMaps(cols) {
   return fkLabelMaps(specs);
 }
 
+// Which column a table sorts on by default, derived from the column names
+// the same way the display kinds and the drill-down links below and above
+// are: the first date-valued column, which every table then shows
+// newest-first. A date column is named `date`, `date_*` (date_paid,
+// date_incurred), `*_date` (sale_date, price_date, tax_year_end_date) or
+// `*_at` (uploaded_at, fetched_at) — the naming the JSON API already uses
+// throughout, so a new table inherits the ordering by name alone.
+//
+// "First" is the table's own column order, which puts the row's own date
+// ahead of a secondary one (a trade's `date` before its `settlement_date`,
+// a disposal's `sale_date` before the parcel's `acquisition_date`). Null
+// where a table has no date column at all — a listing, a holding, an
+// exchange — which leaves those in the order the server sent, and null is
+// also what a caller passes to keep an order that is load-bearing.
+export function defaultSortColumn(cols) {
+  for (const c of cols) {
+    if (c === 'date' || /^date_/.test(c) || /_date$/.test(c) || /_at$/.test(c)) return c;
+  }
+  return null;
+}
+
 // Display kind per numeric column, looked up by name across every table.
 // 'money' rounds to 2 dp + thousands grouping; 'rate' / 'quantity' keep the
 // entered precision; 'rate4' is a derived-or-entered average price rounded

@@ -15,7 +15,7 @@ import {
   el, toast, setMain, looksNumeric, isTimestamp, fmtLocalTimestamp, utcTooltip,
   cellText, numericDisplay, moneyText, columnKinds, columnLabel, columnLabelMaps,
   fkLabelMaps, api, apiUrl, pathSeg, nextId, loadOptions, listingNamer, describeTrade, tradeOrigin,
-  columnLinks, listingLinkFrom,
+  columnLinks, listingLinkFrom, defaultSortColumn,
   periodReturnPct, holdingHasActivity, loadPref, savePref,
 } from './util.js';
 import {
@@ -92,8 +92,15 @@ function filterableTable(rows, cols, opts) {
   const numeric = {};
   cols.forEach(function (c) { numeric[c] = !labels[c] && rows.some(function (r) { return looksNumeric(r[c]); }); });
 
-  let sortCol = null;
-  let sortDir = 1; // 1 = ascending, -1 = descending
+  // Every table opens newest-first on its own date column, derived from the
+  // column names (`defaultSortColumn`) so no caller wires an order and a new
+  // table inherits one. `opts.sort` overrides: a column name to lead on that
+  // instead, or null to keep the rows in the order the server sent — which
+  // is what a table whose order is load-bearing passes (the activity
+  // ledger's running units-held balance only reads forwards). A table with
+  // no date column has no default and likewise keeps the server's order.
+  let sortCol = opts.sort === undefined ? defaultSortColumn(cols) : opts.sort;
+  let sortDir = sortCol ? -1 : 1; // 1 = ascending, -1 = descending
   const filters = {}; // column → lowercased substring; absent/empty = no filter
   let page = 0; // zero-based current page within the filtered/sorted result set
   // Rows currently shown expanded (row object identity is stable across
@@ -128,7 +135,10 @@ function filterableTable(rows, cols, opts) {
   // indicator loop must iterate this, not `headCells` below, which gains a
   // non-sortable expand/Actions th with no `_ind`/`_col` of its own.
   const colHeadCells = cols.map(function (c) {
-    const indicator = el('span', { class: 'sort-ind' }, '');
+    // The opening sort shows its indicator from the start — an order nothing
+    // in the header admitted to would read as the server's own.
+    const indicator = el('span', { class: 'sort-ind' },
+      c === sortCol ? (sortDir === 1 ? ' ▲' : ' ▼') : '');
     const th = el('th', { class: (numeric[c] ? 'num ' : '') + 'sortable' }, [columnLabel(c), indicator]);
     th._col = c;
     th._ind = indicator;
@@ -345,28 +355,35 @@ function rowActionLink(a) {
 // Attachments report's Download/View/Record links); `dataTable` renders them
 // the same way the entity list's Actions column does, via `rowActionLink`.
 // Foreign-key id columns render the referenced row's name (per
-// FK_COLUMN_SOURCES), same as the entity lists. `expandCfg` (a REPORTS
-// `expand` entry) turns each row into a expand-to-a-child-table row (see
-// `buildExpand`); `context` is the whole multi-`tables` response object,
-// needed only for an expand config's `from` sibling lookup. `selfRoute` (the
-// '#/r/<slug>' of the screen being rendered) is passed to every level so the
+// FK_COLUMN_SOURCES), same as the entity lists. `cfg` carries the rest, all
+// optional: `columns`, `statusField`, `expand` (a REPORTS `expand` entry,
+// turning each row into an expand-to-a-child-table row — see `buildExpand`),
+// `context` (the whole multi-`tables` response object, needed only for an
+// expand config's `from` sibling lookup), `rowActions`, `selfRoute` (the
+// '#/r/<slug>' of the screen being rendered, passed to every level so the
 // listing drill-down `filterableTable` derives never points at the screen the
-// reader is already on — the activity report's own holding summary.
-async function dataTable(rows, columns, statusField, expandCfg, context, rowActions, selfRoute) {
+// reader is already on — the activity report's own holding summary), and
+// `keepOrder` (leave the rows in the order the server sent, for a table whose
+// order is load-bearing, rather than opening newest-first).
+async function dataTable(rows, cfg) {
   if (!rows || rows.length === 0) return el('div', { class: 'empty' }, 'No records.');
+  cfg = cfg || {};
+  const expandCfg = cfg.expand;
   // A `key` expand reads its children from a nested field on the row itself
   // (e.g. `parcels`) — excluded from the parent's own columns, whether
   // `columns` was explicit or (as every report passes) auto-derived from the
   // first row's keys.
-  let cols = columns || Object.keys(rows[0]);
+  let cols = cfg.columns || Object.keys(rows[0]);
   if (expandCfg && expandCfg.key) cols = cols.filter(function (c) { return c !== expandCfg.key; });
   const labels = await columnLabelMaps(cols.concat(expandColumns(expandCfg)));
-  const opts = { statusField: statusField, labels: labels, selfRoute: selfRoute };
-  if (expandCfg) opts.expand = buildExpand(expandCfg, labels, context, selfRoute);
+  const opts = { statusField: cfg.statusField, labels: labels, selfRoute: cfg.selfRoute };
+  if (cfg.keepOrder) opts.sort = null;
+  if (expandCfg) opts.expand = buildExpand(expandCfg, labels, cfg.context, cfg.selfRoute);
   // The Actions column appears only where some row actually has an action:
   // a report answering rows of more than one shape (Row History, whose browse
   // entries link into a row's own trail while that trail's own rows do not)
   // would otherwise carry a permanently empty column.
+  const rowActions = cfg.rowActions;
   if (rowActions && rows.some(function (r) { return rowActions(r).length > 0; })) {
     opts.actions = function (row) {
       return el('td', { class: 'actions' }, rowActions(row).map(rowActionLink));
@@ -2153,7 +2170,9 @@ async function renderPeriodSummary(r) {
   const detailParts = [];
   if (r.fx_by_currency.length > 0) {
     detailParts.push(el('h4', null, 'FX movement by currency'));
-    detailParts.push(await dataTable(r.fx_by_currency, ['currency', 'fx_movement', 'rate_from', 'rate_to', 'provisional']));
+    detailParts.push(await dataTable(r.fx_by_currency, {
+      columns: ['currency', 'fx_movement', 'rate_from', 'rate_to', 'provisional'],
+    }));
   }
 
   // `holdings` includes a row for every holding with any history at all —
@@ -2175,10 +2194,12 @@ async function renderPeriodSummary(r) {
         'All ' + hiddenCount + (hiddenCount === 1 ? ' holding had' : ' holdings had') + ' no activity in this period.'));
       return;
     }
-    contribHolder.appendChild(await dataTable(rows, [
-      'listing_id', 'holding_account_id', 'opening_market_value', 'closing_market_value',
-      'purchases', 'sale_proceeds', 'income', 'capital_growth', 'fx_movement', 'total_return',
-    ]));
+    contribHolder.appendChild(await dataTable(rows, {
+      columns: [
+        'listing_id', 'holding_account_id', 'opening_market_value', 'closing_market_value',
+        'purchases', 'sale_proceeds', 'income', 'capital_growth', 'fx_movement', 'total_return',
+      ],
+    }));
     if (hiddenCount > 0) {
       contribHolder.appendChild(el('p', { class: 'hint' },
         hiddenCount + (hiddenCount === 1 ? ' holding' : ' holdings') + ' with no activity in this period hidden.'));
@@ -2437,6 +2458,10 @@ async function viewReport(report, args) {
     return el('p', { class: 'hint' }, ['Older entries remain beyond this page.', ' ', btn]);
   }
 
+  // Every table on the screen knows which screen it is on, so the listing
+  // drill-down never points back at it (see `dataTable`).
+  const selfRoute = '#/r/' + report.slug;
+
   async function render(rows) {
     result.innerHTML = '';
     const asAt = asAtSummary(Array.isArray(rows) ? rows : [rows]);
@@ -2463,7 +2488,10 @@ async function viewReport(report, args) {
       for (const s of sections.groups) {
         if (s.title) result.appendChild(el('h3', null, s.title));
         if (s.desc) result.appendChild(el('p', { class: 'hint' }, s.desc));
-        result.appendChild(await dataTable(s.rows, s.columns || null, report.statusField, null, null, report.rowActions, '#/r/' + report.slug));
+        result.appendChild(await dataTable(s.rows, {
+          columns: s.columns, statusField: report.statusField, rowActions: report.rowActions,
+          selfRoute: selfRoute, keepOrder: report.keepOrder,
+        }));
       }
       if (more) result.appendChild(more);
       return;
@@ -2481,12 +2509,18 @@ async function viewReport(report, args) {
         // (the what-if's `years` rows flatten in `NetCapitalGainYear`'s
         // `disposals`, always empty here since the drilldown belongs to the
         // main report, not the hypothetical dry-run).
-        result.appendChild(await dataTable(arr, t.columns || null, report.statusField, t.expand, rows, report.rowActions, '#/r/' + report.slug));
+        result.appendChild(await dataTable(arr, {
+          columns: t.columns, statusField: report.statusField, expand: t.expand, context: rows,
+          rowActions: report.rowActions, selfRoute: selfRoute, keepOrder: t.keepOrder,
+        }));
       }
       if (more) result.appendChild(more);
       return;
     }
-    result.appendChild(await dataTable(rows, report.columns || null, report.statusField, report.expand, null, report.rowActions, '#/r/' + report.slug));
+    result.appendChild(await dataTable(rows, {
+      columns: report.columns, statusField: report.statusField, expand: report.expand,
+      rowActions: report.rowActions, selfRoute: selfRoute, keepOrder: report.keepOrder,
+    }));
     if (more) result.appendChild(more);
   }
 

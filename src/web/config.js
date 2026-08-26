@@ -509,7 +509,11 @@ export const REPORTS = [
       dec('price', 'Current price per unit (AUD)', { optional: true, default: '', hint: 'Blank = the live price from the price source; a fetch failure leaves the summary unvalued (never zero).' }),
     ],
     tables: [
-      { key: 'events', title: 'Activity' },
+      // The ledger's order is load-bearing: `units_after` is a running
+      // units-held balance, which only reads forwards. So this one table
+      // keeps the server's chronological order instead of opening
+      // newest-first like every other table (a click still re-sorts it).
+      { key: 'events', title: 'Activity', keepOrder: true },
       { key: 'holdings', title: 'Holding summary' },
     ],
   },

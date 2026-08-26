@@ -1762,7 +1762,7 @@ mod tests {
         // the screen the reader is already on (the activity report's own
         // holding summary).
         assert!(js.contains("labels: labels, selfRoute: selfRoute,"));
-        assert!(js.contains("report.rowActions, '#/r/' + report.slug)"));
+        assert!(js.contains("const selfRoute = '#/r/' + report.slug;"));
         // Two screens compose the listing name for display instead of showing
         // the raw FK cell, and ask for the same drill-down by name.
         assert!(js.contains("links: { listing: listingLinkFrom('_listing_id') }"));
@@ -1780,6 +1780,34 @@ mod tests {
         // by the positional deep link that prefills its listing and runs it.
         assert!(config.contains("slug: 'activity'"));
         assert!(js.contains("const deepLink = (args || []).length > 0;"));
+    }
+
+    /// Every table opens newest-first on its own date column, so the row a
+    /// reader wants — the trade just entered, the latest price, the newest
+    /// distribution — is at the top instead of buried on the last page of a
+    /// pager. Derived from the column names like the drill-down above it, so
+    /// no screen wires an order; `defaultSortColumn`'s own naming rule is
+    /// unit-tested in `util.test.js`.
+    #[tokio::test]
+    async fn tables_open_newest_first_on_their_own_date_column() {
+        let js = app_js_body().await;
+        assert!(js.contains("export function defaultSortColumn(cols)"));
+        // Derived in filterableTable itself — the one renderer every table in
+        // the app goes through — and descending, not the ascending direction
+        // a header click starts from.
+        assert!(js.contains(
+            "let sortCol = opts.sort === undefined ? defaultSortColumn(cols) : opts.sort;"
+        ));
+        assert!(js.contains("let sortDir = sortCol ? -1 : 1;"));
+        // The opening order shows its own indicator, rather than looking like
+        // the order the server sent.
+        assert!(js.contains("c === sortCol ? (sortDir === 1 ? ' \u{25b2}' : ' \u{25bc}') : ''"));
+        // One table opts out, and only one: the activity ledger's running
+        // units-held balance only reads forwards.
+        assert!(js.contains("if (cfg.keepOrder) opts.sort = null;"));
+        let config = body_string(get("/static/config.js").await).await;
+        assert_eq!(config.matches("keepOrder: true").count(), 1);
+        assert!(config.contains("{ key: 'events', title: 'Activity', keepOrder: true }"));
     }
 
     #[tokio::test]
