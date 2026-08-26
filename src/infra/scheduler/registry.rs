@@ -38,10 +38,20 @@ type Job = Arc<dyn Fn(JobParams) -> JobFuture + Send + Sync>;
 
 /// Caller-supplied parameters for a manual job trigger, taken from the
 /// `POST /jobs/{name}` query string. Currently only the `backup` job reads
-/// `suffix` (see [`crate::infra::db::backup`]); every other registered job
-/// ignores it. The scheduled loop always passes [`JobParams::default`] — a
-/// suffix only makes sense for a deliberately-labelled one-off backup, not
-/// the weekly scheduled run.
+/// them — `suffix` and `skip_command` (see [`crate::infra::db::backup`]);
+/// every other registered job ignores both. The scheduled loop always passes
+/// [`JobParams::default`]: a label and a suppressed off-machine copy only make
+/// sense for a deliberate one-off backup, never for the weekly scheduled run,
+/// which is the run the off-machine copy exists for.
+///
+/// `skip_command` suppresses the configured post-backup command for that one
+/// run. Its case is the pre-upgrade backup (`pkg/freebsd/update.sh`): that
+/// backup is a local rollback point taken seconds before `pkg add`, and
+/// shipping a full copy of the database off-machine — which is what the
+/// command typically does — delays the upgrade for as long as the transfer
+/// takes, for a file the weekly run will send anyway. Suppressing the command
+/// is deliberately *per-run* and never sticky: the configuration is untouched,
+/// so the next scheduled backup copies off-machine as configured.
 ///
 /// `deny_unknown_fields` makes a misspelt parameter a rejection rather than a
 /// silent no-op: without it `POST /jobs/backup?sufix=pre-0.5.1` answered `204`
@@ -52,6 +62,26 @@ type Job = Arc<dyn Fn(JobParams) -> JobFuture + Send + Sync>;
 #[serde(deny_unknown_fields)]
 pub struct JobParams {
     pub suffix: Option<String>,
+    #[serde(default, deserialize_with = "flag")]
+    pub skip_command: bool,
+}
+
+/// Read a query-string boolean flag, accepting the bare `?skip_command` form
+/// (an empty value) as `true` alongside the spelt-out `=true` / `=false`.
+///
+/// serde's own `bool` would reject the bare form — the same silent-loss shape
+/// as the misspelt `suffix` above, only louder: a `422` for what every other
+/// tool on the box treats as *the* way to write a flag. Anything that is
+/// neither is still an error, so a typo can never read as "off" by accident.
+fn flag<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
+    let raw = String::deserialize(deserializer)?;
+    match raw.to_ascii_lowercase().as_str() {
+        "" | "true" | "1" | "yes" | "on" => Ok(true),
+        "false" | "0" | "no" | "off" => Ok(false),
+        other => Err(serde::de::Error::custom(format!(
+            "'{other}' is not a flag value (use true or false)"
+        ))),
+    }
 }
 
 /// How a registered job is meant to be started — the registry's record of
@@ -155,6 +185,16 @@ pub fn registry(
             let (pool, db_path) = (pool.clone(), db_path.clone());
             let (backup_dir, backup_command) = (backup_dir.clone(), backup_command.clone());
             async move {
+                // `?skip_command=true` drops the hook for this run only, by
+                // handing `backup` the same `None` a host with no command
+                // configured gets — so the skip cannot half-apply (the command
+                // never runs, rather than running against nothing) and the
+                // stored configuration is untouched.
+                let skipped = params.skip_command && backup_command.is_some();
+                if skipped {
+                    tracing::info!("post-backup command skipped at the caller's request");
+                }
+                let backup_command = backup_command.filter(|_| !params.skip_command);
                 crate::infra::db::backup(
                     &pool,
                     &db_path,
@@ -163,8 +203,14 @@ pub fn registry(
                     params.suffix.as_deref(),
                 )
                 .await
-                .map(|()| None)
-                .map_err(|e| e.to_string())
+                .map_err(|e| e.to_string())?;
+                // A run that took the backup but deliberately did not copy it
+                // off-machine is a success that did less than the whole of the
+                // job's work — exactly what the note is for, so the Jobs screen
+                // says so rather than showing an unqualified `ok` (SCENARIOS
+                // T-09).
+                Ok(skipped
+                    .then(|| "post-backup command skipped at the caller's request".to_string()))
             }
         }
     });

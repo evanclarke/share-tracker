@@ -947,6 +947,184 @@ mod tests {
         );
     }
 
+    /// A hook-appending registry plus the file it appends to: each run of the
+    /// backup job adds one line, so a test can count how many times the
+    /// post-backup command actually ran.
+    async fn registry_with_counting_hook() -> (
+        JobRegistry,
+        SqlitePool,
+        tempfile::TempDir,
+        std::path::PathBuf,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("t.db").to_string_lossy().to_string();
+        let pool = db::init(&db_path).await.unwrap();
+        let log = dir.path().join("hook-runs");
+        let command = format!("echo ran >> {}", log.to_string_lossy());
+        let reg = registry(pool.clone(), db_path, None, Some(command), stub_fetcher());
+        (reg, pool, dir, log)
+    }
+
+    /// How many times the counting hook has run.
+    fn hook_runs(log: &std::path::Path) -> usize {
+        std::fs::read_to_string(log).map_or(0, |s| s.lines().count())
+    }
+
+    #[tokio::test]
+    async fn skip_command_takes_the_backup_without_running_the_hook() {
+        // The pre-upgrade path (`pkg/freebsd/update.sh`): the backup must still
+        // be taken — it is the rollback point — while the off-machine copy is
+        // deliberately left to the weekly run.
+        let (reg, pool, dir, log) = registry_with_counting_hook().await;
+        let app = ApiClient::over(router().with_state(pool).layer(Extension(reg)));
+
+        let resp = app
+            .post_empty("/jobs/backup?suffix=pre-9.9.9&skip_command=true")
+            .await;
+
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
+        let made_backup = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                name.starts_with("t-") && name.ends_with("-pre-9.9.9.db")
+            });
+        assert!(made_backup, "the backup itself must still be written");
+        assert_eq!(hook_runs(&log), 0, "the post-backup command must not run");
+    }
+
+    #[tokio::test]
+    async fn a_skipped_hook_is_a_success_that_says_what_it_skipped() {
+        // Not an unqualified `ok`: the run did less than the whole of the job's
+        // work, so the Jobs screen shows the reason beside the success
+        // (SCENARIOS T-09), the same as the credential-gated currency import.
+        let (reg, pool, _dir, _log) = registry_with_counting_hook().await;
+        let job = reg.get("backup").unwrap();
+        run_job(
+            &pool,
+            "backup",
+            job,
+            JobParams {
+                skip_command: true,
+                ..JobParams::default()
+            },
+        )
+        .await
+        .expect("a deliberately skipped hook is not a failure");
+
+        let app = ApiClient::over(router().with_state(pool).layer(Extension(reg)));
+        let statuses: Vec<JobStatus> = app.get("/jobs").await.json();
+        let backup = statuses.iter().find(|s| s.name == "backup").unwrap();
+        assert_eq!(backup.last_status, Some(JobRunStatus::Ok));
+        assert!(backup.last_error.is_none());
+        assert_eq!(
+            backup.last_note.as_deref(),
+            Some("post-backup command skipped at the caller's request")
+        );
+    }
+
+    #[tokio::test]
+    async fn skipping_the_hook_applies_to_that_run_only() {
+        // The flag suppresses the command, it does not unconfigure it: the very
+        // next run — the weekly scheduled one, which is what the off-machine
+        // copy exists for — must copy off-machine as configured, and record no
+        // note.
+        let (reg, pool, _dir, log) = registry_with_counting_hook().await;
+        let job = reg.get("backup").unwrap();
+        run_job(
+            &pool,
+            "backup",
+            job,
+            JobParams {
+                suffix: Some("pre-9.9.9".to_string()),
+                skip_command: true,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(hook_runs(&log), 0);
+
+        run_job(&pool, "backup", job, JobParams::default())
+            .await
+            .unwrap();
+
+        assert_eq!(hook_runs(&log), 1, "the next run must run the hook again");
+        let app = ApiClient::over(router().with_state(pool).layer(Extension(reg)));
+        let statuses: Vec<JobStatus> = app.get("/jobs").await.json();
+        let backup = statuses.iter().find(|s| s.name == "backup").unwrap();
+        assert!(backup.last_note.is_none(), "a complete run carries no note");
+    }
+
+    #[tokio::test]
+    async fn skip_command_with_no_hook_configured_is_an_ordinary_complete_run() {
+        // Nothing was passed over on a host with no backup_command, so the run
+        // must not claim it skipped anything.
+        let (reg, pool, _dir, _path) = test_registry().await;
+        let job = reg.get("backup").unwrap();
+        run_job(
+            &pool,
+            "backup",
+            job,
+            JobParams {
+                skip_command: true,
+                ..JobParams::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let app = ApiClient::over(router().with_state(pool).layer(Extension(reg)));
+        let statuses: Vec<JobStatus> = app.get("/jobs").await.json();
+        let backup = statuses.iter().find(|s| s.name == "backup").unwrap();
+        assert_eq!(backup.last_status, Some(JobRunStatus::Ok));
+        assert!(backup.last_note.is_none());
+    }
+
+    #[tokio::test]
+    async fn skip_command_accepts_the_bare_flag_form() {
+        // `?skip_command` with no value is how a flag is written everywhere
+        // else on the box; rejecting it would be a 422 for a request whose
+        // meaning is unambiguous.
+        let (reg, pool, _dir, log) = registry_with_counting_hook().await;
+        let app = ApiClient::over(router().with_state(pool).layer(Extension(reg)));
+
+        let resp = app.post_empty("/jobs/backup?skip_command").await;
+
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
+        assert_eq!(hook_runs(&log), 0);
+    }
+
+    #[tokio::test]
+    async fn skip_command_false_still_runs_the_hook() {
+        let (reg, pool, _dir, log) = registry_with_counting_hook().await;
+        let app = ApiClient::over(router().with_state(pool).layer(Extension(reg)));
+
+        let resp = app.post_empty("/jobs/backup?skip_command=false").await;
+
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
+        assert_eq!(hook_runs(&log), 1);
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_skip_command_value_is_422_and_runs_nothing() {
+        // The `sufix` lesson (SCENARIOS T-10) applied to the flag: a value that
+        // is neither true nor false must not quietly read as "off" and copy a
+        // pre-upgrade backup off-machine after all.
+        let (reg, pool, _dir, log) = registry_with_counting_hook().await;
+        let app = ApiClient::over(router().with_state(pool).layer(Extension(reg)));
+
+        let resp = app.post_empty("/jobs/backup?skip_command=maybe").await;
+        let (status, body) = resp.status_and_body();
+
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            body.contains("maybe") && body.contains("true or false"),
+            "the reason must name the bad value: {body}"
+        );
+        assert_eq!(hook_runs(&log), 0, "and nothing must have run");
+    }
+
     #[tracing_test::traced_test]
     #[tokio::test]
     async fn run_job_logs_started_and_finished() {

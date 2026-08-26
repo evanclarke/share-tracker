@@ -120,7 +120,9 @@ async fn trigger(
     })?;
     // Reject an invalid suffix before the registry lookup or run_job: a
     // malformed request must not be recorded as a failed job run (only the
-    // backup job reads it, but the query string is shared across all names).
+    // backup job reads it — as it does `skip_command`, which needs no
+    // validation beyond the flag parsing — but the query string is shared
+    // across all names).
     if let Some(suffix) = &params.suffix {
         crate::infra::db::validate_backup_suffix(suffix)
             .map_err(crate::infra::http::ApiError::unprocessable)?;

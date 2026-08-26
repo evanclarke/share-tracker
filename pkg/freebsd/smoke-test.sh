@@ -117,6 +117,17 @@ ls /var/db/share-tracker/backups/*-pre-smoke.db >/dev/null 2>&1 || {
   ls -la /var/db/share-tracker/backups >&2 2>/dev/null || true
   exit 1
 }
+# The whole query string update.sh actually sends: the skip_command flag rides
+# alongside the suffix, and an ampersand in a URL is a shell-quoting trap, so
+# the installed package must accept the real thing (a rejected flag would be a
+# 422 and fail this curl).
+curl -sf -X POST \
+  'http://127.0.0.1:3000/jobs/backup?suffix=pre-smoke2&skip_command=true' >/dev/null
+ls /var/db/share-tracker/backups/*-pre-smoke2.db >/dev/null 2>&1 || {
+  echo "expected a skip_command backup in /var/db/share-tracker/backups" >&2
+  ls -la /var/db/share-tracker/backups >&2 2>/dev/null || true
+  exit 1
+}
 ok=""
 for _ in $(seq 1 15); do
   if grep -q "job started" /var/log/share-tracker.log 2>/dev/null; then

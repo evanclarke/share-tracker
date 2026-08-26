@@ -13,7 +13,12 @@
 # Before installing, if the service is running, this takes a one-off backup
 # suffixed pre-<version> via POST /jobs/backup?suffix=pre-<version> (see
 # docs/API.md#jobs) — a rollback point taken right before the upgrade, on top
-# of the weekly scheduled backup which may be up to a week stale. A backup
+# of the weekly scheduled backup which may be up to a week stale. It is taken
+# with skip_command=true, so a configured post-backup command (the off-machine
+# copy, README "Off-machine copies") is left to the weekly run: shipping a full
+# copy of the database over the network would hold the upgrade open for the
+# length of the transfer, and the rollback point that matters here is the local
+# file. A backup
 # failure aborts the upgrade before pkg add touches anything. If the service
 # is not running (e.g. first install), there is nothing to back up and the
 # step is skipped with a warning — pass -n/--no-backup to skip it
@@ -115,7 +120,7 @@ pre_upgrade_backup() {
   # rather than risking it being re-split by the shell.
   set -- curl -fsS -m 900 -X POST
   [ -n "$AUTH_HEADER" ] && set -- "$@" -H "$AUTH_HEADER"
-  set -- "$@" "http://$HOST:$PORT/jobs/backup?suffix=pre-$WANT"
+  set -- "$@" "http://$HOST:$PORT/jobs/backup?suffix=pre-$WANT&skip_command=true"
   if ! "$@" >/dev/null; then
     echo "pre-upgrade backup failed; aborting upgrade (database untouched)." >&2
     if [ -z "$AUTH_HEADER" ] && grep -q '^\[auth\]' "$CONF" 2>/dev/null; then

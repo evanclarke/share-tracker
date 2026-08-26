@@ -2056,6 +2056,25 @@ fn backup_suffix_param_documented() {
     assert!(README_MD.contains("never exempt from pruning"));
 }
 
+/// Docs-sync pin for the `?skip_command=` param on `POST /jobs/:name` (the
+/// other half of the update.sh pre-upgrade backup): the jobs API documents
+/// that the backup is still taken, that the run reports success carrying the
+/// note naming what it passed over, and that the suppression lasts for that
+/// run only — and the README says the same where the off-machine copy is
+/// configured, which is where an operator reading `--backup-command` would
+/// look for it.
+#[test]
+fn backup_skip_command_param_documented() {
+    assert!(API_MD.contains("The optional `?skip_command=true` query param"));
+    assert!(API_MD.contains("post-backup command skipped at the caller's request"));
+    assert!(
+        API_MD.contains(
+            "The suppression is per-run and never sticky: the configuration is untouched"
+        )
+    );
+    assert!(README_MD.contains("`POST /jobs/backup?skip_command=true`"));
+}
+
 /// SCENARIOS T-10. `POST /jobs/:name`'s two failures used to be bare status
 /// codes, which the Jobs screen could only toast as "HTTP 404" / "HTTP 500".
 /// The docs pin the bodies they now carry — including that this is the one
