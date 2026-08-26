@@ -196,8 +196,11 @@ td.detail-cell table { background: var(--panel); }
 }
 /* The performance panel (graph + stat grid) isn't a data-entry form, so the
    .card default's form-friendly 720px cap just wastes the width the removed
-   sidebar freed up. */
-.perf-panel { max-width: 1200px; }
+   sidebar freed up. It takes the full viewport width, like the holdings table
+   below it: the graph is built at its holder's measured width (chart.js
+   `chartWidth`), so a wide panel gives the series more horizontal room rather
+   than scaling the whole drawing up. */
+.perf-panel { max-width: none; }
 
 .price-overrides { margin-bottom: 16px; }
 .price-overrides summary { cursor: pointer; font-weight: 600; font-size: 1.17em; margin-bottom: 8px; }
@@ -309,7 +312,9 @@ input[type=checkbox] { width: auto; }
 .toast-close:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
 
 /* Snapshot time-series chart (built as inline SVG, no chart library). */
-.series-chart { width: 100%; max-width: 1160px; height: auto; }
+/* No width ceiling: the viewBox is built at the holder's measured width, so
+   width:100% renders it at a ~1 scale factor instead of zooming it. */
+.series-chart { width: 100%; height: auto; }
 .series-chart .grid { stroke: #e3e7eb; stroke-width: 1; }
 .series-chart .axis { fill: var(--muted); font-size: 11px; }
 .series-chart polyline.line-mv { stroke: var(--accent); stroke-width: 2; }

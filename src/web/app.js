@@ -2275,9 +2275,32 @@ async function performancePanel() {
   // The range currently drawn, so switching series redraws the same window
   // without re-running the period-performance request below it.
   let shownFrom = null, shownTo = null;
+  // The width the plot was last built at. The graph is drawn at the holder's
+  // measured width (chart.js `chartWidth`) rather than at a fixed viewBox, so
+  // a wide window buys horizontal room for the series instead of scaling the
+  // whole drawing — axis type, gridlines and point markers keep their designed
+  // sizes at any width.
+  let drawnWidth = 0;
   function drawChart() {
+    drawnWidth = chartHolder.clientWidth;
     chartHolder.innerHTML = '';
-    chartHolder.appendChild(seriesChart(sliceSeries(series, shownFrom, shownTo), seriesSel.value));
+    chartHolder.appendChild(
+      seriesChart(sliceSeries(series, shownFrom, shownTo), seriesSel.value, drawnWidth));
+  }
+  // Redraw when the holder's width changes. This is also where the *first*
+  // real measurement arrives: the initial `applyRange` below runs before the
+  // panel is attached to the document, so it measures 0 and draws at the
+  // fallback width, and the observer's first callback (on attach) redraws it
+  // to fit. Quantised to 16px so dragging a window edge redraws a handful of
+  // times rather than per pixel — the SVG still scales to 100% of the holder,
+  // so the sub-bucket residue is a uniform scale of about 1% at a desktop
+  // width, which is invisible.
+  // Width only: a redraw changes the holder's height (a taller plot, a
+  // wrapped legend), which would otherwise feed back into the observer.
+  if (typeof ResizeObserver === 'function') {
+    new ResizeObserver(function () {
+      if (shownTo !== null && Math.abs(chartHolder.clientWidth - drawnWidth) >= 16) drawChart();
+    }).observe(chartHolder);
   }
 
   async function applyRange(from, to) {

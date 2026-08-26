@@ -7,7 +7,11 @@
 //
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { presetRange, sliceSeries, yBounds, seriesField, pointNotes, tickLabel, SERIES_FIELDS } from './chart.js';
+import {
+  presetRange, sliceSeries, yBounds, seriesField, pointNotes, tickLabel, chartWidth,
+  weekTicks, isoDate, WEEK_MS, MIN_LABEL_GAP, MIN_GRID_GAP,
+  SERIES_FIELDS, CHART_WIDTH_FALLBACK, CHART_WIDTH_MIN,
+} from './chart.js';
 import { groupThousands } from './util.js';
 
 function series(dates) {
@@ -171,4 +175,108 @@ test('tickLabel: grouping is util.js\'s own groupThousands, not the browser loca
   [1234567.89, -98765.4, 1000, 12, 0].forEach(function (v) {
     assert.equal(tickLabel(v), groupThousands(String(Math.round(v))));
   });
+});
+
+// ---- chartWidth -----------------------------------------------------------
+
+test('chartWidth: builds the viewBox at the measured width, so the SVG renders at ~1 scale', () => {
+  assert.equal(chartWidth(1400), 1400);
+  assert.equal(chartWidth(2560), 2560);
+  // Rounded, since the measurement can be fractional on a scaled display.
+  assert.equal(chartWidth(1279.6), 1280);
+});
+
+test('chartWidth: an unlaid-out holder (clientWidth 0) falls back to the default width', () => {
+  assert.equal(chartWidth(0), CHART_WIDTH_FALLBACK);
+  assert.equal(chartWidth(undefined), CHART_WIDTH_FALLBACK);
+  assert.equal(chartWidth(null), CHART_WIDTH_FALLBACK);
+  assert.equal(chartWidth(NaN), CHART_WIDTH_FALLBACK);
+  assert.equal(chartWidth(-100), CHART_WIDTH_FALLBACK);
+});
+
+test('chartWidth: a narrow viewport floors at the minimum and scales down instead', () => {
+  assert.equal(chartWidth(320), CHART_WIDTH_MIN);
+  assert.equal(chartWidth(CHART_WIDTH_MIN + 1), CHART_WIDTH_MIN + 1);
+});
+// ---- weekTicks ------------------------------------------------------------
+
+// A span of `weeks` ending at 2024-10-02 (a Wednesday), and the plot width
+// that gives it `perWeek` pixels a week.
+function span(weeks) {
+  const tMax = Date.UTC(2024, 9, 2);
+  return { tMin: tMax - weeks * WEEK_MS, tMax: tMax };
+}
+function width(weeks, perWeek) { return weeks * perWeek; }
+function labelled(ticks) { return ticks.filter(function (t) { return t.label !== null; }); }
+
+test('weekTicks: gridlines are whole weeks back from the latest snapshot', () => {
+  const s = span(4);
+  const ticks = weekTicks(s.tMin, s.tMax, width(4, 200));
+  assert.deepEqual(ticks.map(function (t) { return t.label; }),
+    ['2024-09-04', '2024-09-11', '2024-09-18', '2024-09-25', '2024-10-02']);
+  // Ascending, and the last line is the latest snapshot itself.
+  assert.equal(ticks[ticks.length - 1].t, s.tMax);
+  for (let i = 1; i < ticks.length; i++) assert.equal(ticks[i].t - ticks[i - 1].t, WEEK_MS);
+});
+
+test('weekTicks: every week is dated when each week has room for a date', () => {
+  const s = span(12);
+  const ticks = weekTicks(s.tMin, s.tMax, width(12, 100));
+  assert.equal(ticks.length, 13);
+  assert.equal(labelled(ticks).length, 13);
+});
+
+test('weekTicks: too narrow for weekly dates falls back to fortnightly, weekly lines kept', () => {
+  const s = span(12);
+  const ticks = weekTicks(s.tMin, s.tMax, width(12, 50));
+  assert.equal(ticks.length, 13, 'still a line every week');
+  assert.deepEqual(ticks.map(function (t) { return t.label !== null; }),
+    [true, false, true, false, true, false, true, false, true, false, true, false, true]);
+});
+
+test('weekTicks: narrower again falls back to four-weekly dates, weekly lines kept', () => {
+  const s = span(12);
+  // 19px a week — the six-month range on a ~610px plot, i.e. the app at its
+  // narrowest usable window: four-weekly (76px) still clears the label gap.
+  const ticks = weekTicks(s.tMin, s.tMax, width(12, 19));
+  assert.equal(ticks.length, 13, 'still a line every week');
+  assert.deepEqual(labelled(ticks).map(function (t) { return t.label; }),
+    ['2024-07-10', '2024-08-07', '2024-09-04', '2024-10-02']);
+});
+
+test('weekTicks: dated lines never sit closer than the label gap', () => {
+  [[12, 100], [12, 50], [12, 25], [26, 30], [156, 8], [156, 3]].forEach(function (c) {
+    const s = span(c[0]);
+    const plot = width(c[0], c[1]);
+    const dated = labelled(weekTicks(s.tMin, s.tMax, plot));
+    const perMs = plot / (s.tMax - s.tMin);
+    for (let i = 1; i < dated.length; i++) {
+      assert.ok((dated[i].t - dated[i - 1].t) * perMs >= MIN_LABEL_GAP,
+        `weeks=${c[0]} perWeek=${c[1]}: dates crowd`);
+    }
+  });
+});
+
+test('weekTicks: a long range on a narrow plot steps the gridlines up too', () => {
+  // 3 years (~156 weeks) across 800px is ~5px a week — a grey wash, so the
+  // grid itself doubles until the lines are legible.
+  const s = span(156);
+  const ticks = weekTicks(s.tMin, s.tMax, 800);
+  const perMs = 800 / (s.tMax - s.tMin);
+  for (let i = 1; i < ticks.length; i++) {
+    assert.equal((ticks[i].t - ticks[i - 1].t) / WEEK_MS, 2, 'fortnightly gridlines');
+    assert.ok((ticks[i].t - ticks[i - 1].t) * perMs >= MIN_GRID_GAP);
+  }
+});
+
+test('weekTicks: a span under two weeks names both ends rather than one lone date', () => {
+  const tMax = Date.UTC(2024, 9, 2);
+  const tMin = tMax - 4 * 24 * 60 * 60 * 1000;
+  assert.deepEqual(weekTicks(tMin, tMax, 800),
+    [{ t: tMin, label: '2024-09-28' }, { t: tMax, label: '2024-10-02' }]);
+});
+
+test('isoDate: round-trips the plot\'s own UTC date parse', () => {
+  assert.equal(isoDate(Date.UTC(2024, 9, 2)), '2024-10-02');
+  assert.equal(isoDate(new Date('2025-01-01T00:00:00Z').getTime()), '2025-01-01');
 });

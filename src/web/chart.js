@@ -92,13 +92,102 @@ export function svgEl(tag, attrs) {
   return n;
 }
 
-// `fieldKey` names which of `SERIES_FIELDS` to plot (see seriesField).
-export function seriesChart(points, fieldKey) {
+// The viewBox width to build the plot at, from the holder's measured pixel
+// width. The viewBox is *not* a fixed constant, because the SVG scales
+// uniformly (width:100%, height:auto): a fixed 860-wide drawing stretched
+// across a wide window would grow its height, its axis type and its stroke
+// weights along with it, which is what the old `max-width` ceiling existed to
+// prevent. Building the viewBox at the measured width instead pins the scale
+// factor at ~1, so extra window width becomes horizontal room for the series
+// while the type and line weights keep their designed sizes.
+//
+// `CHART_WIDTH_FALLBACK` (the historic 860) covers a holder that has not been
+// laid out yet — the first draw happens before the panel is attached to the
+// document, where clientWidth is 0 — and the floor keeps a narrow viewport from
+// collapsing the plot into its own left padding (there, the SVG's width:100%
+// scales the floor-width drawing down, as it did at every width before).
+export const CHART_WIDTH_FALLBACK = 860;
+export const CHART_WIDTH_MIN = 480;
+export function chartWidth(measured) {
+  const w = Math.round(Number(measured));
+  if (!Number.isFinite(w) || w <= 0) return CHART_WIDTH_FALLBACK;
+  return Math.max(CHART_WIDTH_MIN, w);
+}
+
+// The x axis is a calendar grid rather than a per-point one: a faint vertical
+// line every week, dated on as many of those lines as the plot is wide enough
+// to carry. The weeks are counted back from the *latest* snapshot, so the
+// right-hand edge is always a dated line and every line falls on that
+// snapshot's own weekday — which, for a daily series, is a trading day.
+export const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+// The room a date label needs before the next one starts. A 'YYYY-MM-DD'
+// measures 66.1px at the axis font size (measured in the browser, not
+// estimated — every one is ten digits and two hyphens, so the figure barely
+// varies), leaving ~8px of clearance. Labels thin out a week at a time until
+// they clear it: weekly, fortnightly, four-weekly (the "monthly" step — kept a
+// multiple of a week so every label still sits on a gridline and the spacing
+// stays even), and on past that for a long range on a narrow plot. The
+// clearance is deliberately slim: it is what lets a ~610px plot of a
+// six-month range keep four-weekly dates (76px apart) instead of dropping to
+// eight-weekly.
+export const MIN_LABEL_GAP = 74;
+// Below this the weekly lines stop reading as a grid and start reading as a
+// grey wash, so the grid itself climbs the same ladder. Only a long range on a
+// narrow plot gets there — a 3-year preset is ~156 weeks, which is under 8px a
+// week from about 1250px down.
+export const MIN_GRID_GAP = 8;
+// Half a rendered 'YYYY-MM-DD' (66.1px, see MIN_LABEL_GAP). Every date is centred on its gridline —
+// including the closing one — so the plot's right padding is derived from this
+// rather than set independently: an end-anchored closing label would reach a
+// whole half-label further left than the even spacing `MIN_LABEL_GAP` assumes
+// and collide with the date before it.
+export const DATE_LABEL_HALF = 33;
+
+// 'YYYY-MM-DD' for a UTC timestamp — the inverse of the `snapshot_date +
+// 'T00:00:00Z'` parse the x scale is built on, so a tick landing on a snapshot
+// date prints that date back exactly.
+export function isoDate(t) {
+  return new Date(t).toISOString().slice(0, 10);
+}
+
+// The x-axis ticks for a plot `plotWidth` px wide spanning [tMin, tMax] (UTC
+// ms). Ascending `{ t, label }`, `label` null for a gridline that carries no
+// date. Both intervals are whole weeks: the gridline step is one week unless
+// that would draw them closer than `MIN_GRID_GAP`, and the label step is the
+// first multiple of the gridline step that clears `MIN_LABEL_GAP`.
+export function weekTicks(tMin, tMax, plotWidth) {
+  const span = tMax - tMin;
+  const perWeek = span > 0 ? plotWidth / (span / WEEK_MS) : plotWidth;
+  let gridWeeks = 1;
+  while (perWeek * gridWeeks < MIN_GRID_GAP) gridWeeks *= 2;
+  let labelWeeks = gridWeeks;
+  while (perWeek * labelWeeks < MIN_LABEL_GAP) labelWeeks *= 2;
+  const ticks = [];
+  for (let k = 0; ; k++) {
+    const t = tMax - k * gridWeeks * WEEK_MS;
+    if (t < tMin) break;
+    ticks.push({ t: t, label: k % (labelWeeks / gridWeeks) === 0 ? isoDate(t) : null });
+  }
+  ticks.reverse();
+  // A span under two grid steps (a handful of days, or a preset narrower than
+  // a stepped-up grid) would leave the axis with a single line and a single
+  // date: name both ends instead, which is what the axis did before it had a
+  // grid at all.
+  if (ticks.length < 2) {
+    return [{ t: tMin, label: isoDate(tMin) }, { t: tMax, label: isoDate(tMax) }];
+  }
+  return ticks;
+}
+
+// `fieldKey` names which of `SERIES_FIELDS` to plot (see seriesField), and
+// `measuredWidth` the pixel width to build it at (see chartWidth).
+export function seriesChart(points, fieldKey, measuredWidth) {
   const series = seriesField(fieldKey);
   if (!points || points.length < 2) {
     return el('p', { class: 'hint' }, 'The graph appears once two or more daily snapshots are stored.');
   }
-  const W = 860, H = 280, padL = 84, padR = 16, padT = 12, padB = 30;
+  const W = chartWidth(measuredWidth), H = 280;
+  const padL = 84, padR = DATE_LABEL_HALF + 6, padT = 12, padB = 30;
   const xs = points.map(function (p) { return new Date(p.snapshot_date + 'T00:00:00Z').getTime(); });
   const bounds = yBounds(points, series.key);
   const yMin = bounds.min, yMax = bounds.max;
@@ -123,12 +212,18 @@ export function seriesChart(points, fieldKey) {
   if (yMin < 0 && yMax > 0) {
     chart.appendChild(svgEl('line', { x1: padL, x2: W - padR, y1: y(0), y2: y(0), class: 'zero' }));
   }
-  // First and last snapshot dates on the x axis.
-  [0, points.length - 1].forEach(function (i) {
-    const label = svgEl('text', {
-      x: x(xs[i]), y: H - 8, 'text-anchor': i === 0 ? 'start' : 'end', class: 'axis',
-    });
-    label.textContent = points[i].snapshot_date;
+  // The x axis: a weekly gridline, dated where the plot is wide enough to
+  // carry the date (weekTicks). Drawn before the series, so the line and its
+  // points sit over the grid.
+  weekTicks(xMin, xMax, W - padL - padR).forEach(function (tick) {
+    const xp = x(tick.t);
+    chart.appendChild(svgEl('line', { x1: xp, x2: xp, y1: padT, y2: H - padB, class: 'grid' }));
+    if (!tick.label) return;
+    // Centred on the line, every one of them: `padR` leaves the closing date
+    // its right half, and a leftmost date's left half reaches into the y-axis
+    // gutter, which is empty at the axis's own baseline.
+    const label = svgEl('text', { x: xp, y: H - 8, class: 'axis', 'text-anchor': 'middle' });
+    label.textContent = tick.label;
     chart.appendChild(label);
   });
   // The hover tooltip: an absolutely-positioned HTML box over the plot, so
