@@ -1795,19 +1795,20 @@ mod tests {
         // Derived in filterableTable itself — the one renderer every table in
         // the app goes through — and descending, not the ascending direction
         // a header click starts from.
-        assert!(js.contains(
-            "let sortCol = opts.sort === undefined ? defaultSortColumn(cols) : opts.sort;"
-        ));
+        assert!(js.contains("let sortCol = defaultSortColumn(cols);"));
         assert!(js.contains("let sortDir = sortCol ? -1 : 1;"));
         // The opening order shows its own indicator, rather than looking like
         // the order the server sent.
         assert!(js.contains("c === sortCol ? (sortDir === 1 ? ' \u{25b2}' : ' \u{25bc}') : ''"));
-        // One table opts out, and only one: the activity ledger's running
-        // units-held balance only reads forwards.
-        assert!(js.contains("if (cfg.keepOrder) opts.sort = null;"));
+        // No table opts out — including the activity ledger, whose running
+        // units-held balance stays readable because a tie in the sort key
+        // reverses with the sort: descending is the exact reverse of
+        // ascending, so the balance steps monotonically down the page even
+        // across a day carrying several events.
+        assert!(js.contains("if (cmp === 0) cmp = given.get(a) - given.get(b);"));
         let config = body_string(get("/static/config.js").await).await;
-        assert_eq!(config.matches("keepOrder: true").count(), 1);
-        assert!(config.contains("{ key: 'events', title: 'Activity', keepOrder: true }"));
+        assert!(!config.contains("keepOrder"));
+        assert!(config.contains("{ key: 'events', title: 'Activity' }"));
     }
 
     #[tokio::test]

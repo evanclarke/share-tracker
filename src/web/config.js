@@ -503,17 +503,13 @@ export const REPORTS = [
   {
     slug: 'activity', title: 'Listing Activity', api: '/portfolio/activity', method: 'POST',
     menu: 'Reports', section: 'Portfolio',
-    desc: 'Everything ever recorded against one listing, in date order — trades labelled with the operation that created them, transfers, income, corporate actions, statements — with a running units-held balance, ending in the final holding summary per account (units held, cost base, market value).',
+    desc: 'Everything ever recorded against one listing, newest first — trades labelled with the operation that created them, transfers, income, corporate actions, statements — each with the units held after it, so the top row is the holding as it stands. Sort the Date column to read it forwards. Ends in the holding summary per account (units held, cost base, market value).',
     params: [
       fk('listing_id', 'Listing', 'listings', { required: true }),
       dec('price', 'Current price per unit (AUD)', { optional: true, default: '', hint: 'Blank = the live price from the price source; a fetch failure leaves the summary unvalued (never zero).' }),
     ],
     tables: [
-      // The ledger's order is load-bearing: `units_after` is a running
-      // units-held balance, which only reads forwards. So this one table
-      // keeps the server's chronological order instead of opening
-      // newest-first like every other table (a click still re-sorts it).
-      { key: 'events', title: 'Activity', keepOrder: true },
+      { key: 'events', title: 'Activity' },
       { key: 'holdings', title: 'Holding summary' },
     ],
   },

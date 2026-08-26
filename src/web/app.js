@@ -94,13 +94,18 @@ function filterableTable(rows, cols, opts) {
 
   // Every table opens newest-first on its own date column, derived from the
   // column names (`defaultSortColumn`) so no caller wires an order and a new
-  // table inherits one. `opts.sort` overrides: a column name to lead on that
-  // instead, or null to keep the rows in the order the server sent — which
-  // is what a table whose order is load-bearing passes (the activity
-  // ledger's running units-held balance only reads forwards). A table with
-  // no date column has no default and likewise keeps the server's order.
-  let sortCol = opts.sort === undefined ? defaultSortColumn(cols) : opts.sort;
+  // table inherits one. A table with no date column keeps the order the
+  // server sent it in.
+  let sortCol = defaultSortColumn(cols);
   let sortDir = sortCol ? -1 : 1; // 1 = ascending, -1 = descending
+  // Where the sort key ties, the rows keep their given order — reversed
+  // under a descending sort, so descending is the exact reverse of ascending
+  // rather than dates-backwards-but-same-date-rows-forwards. That is what
+  // lets a table carrying a running total (the activity ledger's units-held
+  // balance) read newest-first: the balance still steps monotonically down
+  // the page across a day with several events in it.
+  const given = new Map();
+  rows.forEach(function (r, i) { given.set(r, i); });
   const filters = {}; // column → lowercased substring; absent/empty = no filter
   let page = 0; // zero-based current page within the filtered/sorted result set
   // Rows currently shown expanded (row object identity is stable across
@@ -206,6 +211,7 @@ function filterableTable(rows, cols, opts) {
         let cmp;
         if (numeric[sortCol] && looksNumeric(av) && looksNumeric(bv)) cmp = Number(av) - Number(bv);
         else cmp = displayText(a, sortCol).localeCompare(displayText(b, sortCol));
+        if (cmp === 0) cmp = given.get(a) - given.get(b);
         return cmp * sortDir;
       });
     }
@@ -362,9 +368,7 @@ function rowActionLink(a) {
 // expand config's `from` sibling lookup), `rowActions`, `selfRoute` (the
 // '#/r/<slug>' of the screen being rendered, passed to every level so the
 // listing drill-down `filterableTable` derives never points at the screen the
-// reader is already on — the activity report's own holding summary), and
-// `keepOrder` (leave the rows in the order the server sent, for a table whose
-// order is load-bearing, rather than opening newest-first).
+// reader is already on — the activity report's own holding summary).
 async function dataTable(rows, cfg) {
   if (!rows || rows.length === 0) return el('div', { class: 'empty' }, 'No records.');
   cfg = cfg || {};
@@ -377,7 +381,6 @@ async function dataTable(rows, cfg) {
   if (expandCfg && expandCfg.key) cols = cols.filter(function (c) { return c !== expandCfg.key; });
   const labels = await columnLabelMaps(cols.concat(expandColumns(expandCfg)));
   const opts = { statusField: cfg.statusField, labels: labels, selfRoute: cfg.selfRoute };
-  if (cfg.keepOrder) opts.sort = null;
   if (expandCfg) opts.expand = buildExpand(expandCfg, labels, cfg.context, cfg.selfRoute);
   // The Actions column appears only where some row actually has an action:
   // a report answering rows of more than one shape (Row History, whose browse
@@ -2490,7 +2493,7 @@ async function viewReport(report, args) {
         if (s.desc) result.appendChild(el('p', { class: 'hint' }, s.desc));
         result.appendChild(await dataTable(s.rows, {
           columns: s.columns, statusField: report.statusField, rowActions: report.rowActions,
-          selfRoute: selfRoute, keepOrder: report.keepOrder,
+          selfRoute: selfRoute,
         }));
       }
       if (more) result.appendChild(more);
@@ -2511,7 +2514,7 @@ async function viewReport(report, args) {
         // main report, not the hypothetical dry-run).
         result.appendChild(await dataTable(arr, {
           columns: t.columns, statusField: report.statusField, expand: t.expand, context: rows,
-          rowActions: report.rowActions, selfRoute: selfRoute, keepOrder: t.keepOrder,
+          rowActions: report.rowActions, selfRoute: selfRoute,
         }));
       }
       if (more) result.appendChild(more);
@@ -2519,7 +2522,7 @@ async function viewReport(report, args) {
     }
     result.appendChild(await dataTable(rows, {
       columns: report.columns, statusField: report.statusField, expand: report.expand,
-      rowActions: report.rowActions, selfRoute: selfRoute, keepOrder: report.keepOrder,
+      rowActions: report.rowActions, selfRoute: selfRoute,
     }));
     if (more) result.appendChild(more);
   }
