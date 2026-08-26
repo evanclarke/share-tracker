@@ -1533,6 +1533,12 @@ mod tests {
         assert!(js.contains("statsHolder"));
         assert!(js.contains("summary.headline"));
         assert!(js.contains("summary.detail"));
+        // Each holding's listing name is a link into that listing's own
+        // Listing Activity report (the generic per-column cell link).
+        assert!(js.contains("cellLinks"));
+        assert!(js.contains("'#/r/activity/' + row.listing_id"));
+        assert!(js.contains("opts.links"));
+        assert!(js.contains("cell-link"));
     }
 
     #[tokio::test]

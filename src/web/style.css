@@ -155,6 +155,11 @@ th { background: #f0f2f5; font-weight: 600; position: sticky; top: 0; }
 tbody tr:hover { background: #f7f9fc; }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 td.actions { white-space: nowrap; }
+/* A drill-down cell link (filterableTable's opts.links) — e.g. the Portfolio
+   Overview's listing name into that listing's activity report. Underlined on
+   hover only, so a column of them doesn't shout over the figures beside it. */
+td a.cell-link { color: var(--accent); text-decoration: none; }
+td a.cell-link:hover { text-decoration: underline; }
 th.sortable { cursor: pointer; user-select: none; }
 th.sortable:hover { background: #e7eaef; }
 .sort-ind { color: var(--muted); font-size: 11px; }

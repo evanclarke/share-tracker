@@ -51,7 +51,12 @@ const PAGE_SIZE = 50;
 // `opts.statusField` renders that column as a status badge; `opts.labels`
 // ({col: {id → label}}, from fkLabelMaps) shows the label instead of the raw
 // foreign-key id — filtering and sorting follow the label, and the id moves to
-// the tooltip. `opts.expand`, if given, is a synchronous `row => childSpec`
+// the tooltip. `opts.links`, if given, is `{col: row => href}`: that column's
+// cell renders as a link to the returned hash route (a null/empty href leaves
+// it plain text) — how the Portfolio Overview's listing name drills into that
+// listing's own activity report. The link changes nothing about the cell's
+// text, so filtering and sorting are unaffected.
+// `opts.expand`, if given, is a synchronous `row => childSpec`
 // (`{ rows, cols, opts }`, or a falsy value/empty `rows` for a childless row):
 // a leading toggle column shows ▸/▾ for a row with children, and an expanded
 // row's children render as a nested `filterableTable` in a full-width detail
@@ -65,6 +70,7 @@ function filterableTable(rows, cols, opts) {
   const actions = opts.actions;
   const expand = opts.expand;
   const labels = opts.labels || {};
+  const links = opts.links || {};
   // Display kinds are derived from the column names alone (COLUMN_KINDS), so
   // every caller of filterableTable gets money rounding / rate precision with
   // no per-call wiring; numeric sorting still uses the raw underlying value.
@@ -240,7 +246,12 @@ function filterableTable(rows, cols, opts) {
           const nd = numericDisplay(v, kinds[c]);
           if (nd && nd.tip) title = nd.tip;
         }
-        return el('td', { class: numeric[c] ? 'num' : null, title: title }, text);
+        // A linked cell (opts.links) wraps that same display text in an
+        // anchor — never the status-badge or timestamp cells above, which
+        // are not link columns.
+        const href = links[c] ? links[c](row) : null;
+        return el('td', { class: numeric[c] ? 'num' : null, title: title },
+          href ? el('a', { class: 'cell-link', href: href }, text) : text);
       });
 
       let childSpec = null;
@@ -331,8 +342,10 @@ function rowActionLink(a) {
 // FK_COLUMN_SOURCES), same as the entity lists. `expandCfg` (a REPORTS
 // `expand` entry) turns each row into a expand-to-a-child-table row (see
 // `buildExpand`); `context` is the whole multi-`tables` response object,
-// needed only for an expand config's `from` sibling lookup.
-async function dataTable(rows, columns, statusField, expandCfg, context, rowActions) {
+// needed only for an expand config's `from` sibling lookup. `cellLinks` (a
+// REPORTS `cellLinks` entry) turns named columns into links into another
+// view — see `filterableTable`'s `opts.links`.
+async function dataTable(rows, columns, statusField, expandCfg, context, rowActions, cellLinks) {
   if (!rows || rows.length === 0) return el('div', { class: 'empty' }, 'No records.');
   // A `key` expand reads its children from a nested field on the row itself
   // (e.g. `parcels`) — excluded from the parent's own columns, whether
@@ -342,6 +355,7 @@ async function dataTable(rows, columns, statusField, expandCfg, context, rowActi
   if (expandCfg && expandCfg.key) cols = cols.filter(function (c) { return c !== expandCfg.key; });
   const labels = await columnLabelMaps(cols.concat(expandColumns(expandCfg)));
   const opts = { statusField: statusField, labels: labels };
+  if (cellLinks) opts.links = cellLinks;
   if (expandCfg) opts.expand = buildExpand(expandCfg, labels, context);
   // The Actions column appears only where some row actually has an action:
   // a report answering rows of more than one shape (Row History, whose browse
@@ -2437,7 +2451,7 @@ async function viewReport(report, args) {
       for (const s of sections.groups) {
         if (s.title) result.appendChild(el('h3', null, s.title));
         if (s.desc) result.appendChild(el('p', { class: 'hint' }, s.desc));
-        result.appendChild(await dataTable(s.rows, s.columns || null, report.statusField, null, null, report.rowActions));
+        result.appendChild(await dataTable(s.rows, s.columns || null, report.statusField, null, null, report.rowActions, report.cellLinks));
       }
       if (more) result.appendChild(more);
       return;
@@ -2455,12 +2469,12 @@ async function viewReport(report, args) {
         // (the what-if's `years` rows flatten in `NetCapitalGainYear`'s
         // `disposals`, always empty here since the drilldown belongs to the
         // main report, not the hypothetical dry-run).
-        result.appendChild(await dataTable(arr, t.columns || null, report.statusField, t.expand, rows, report.rowActions));
+        result.appendChild(await dataTable(arr, t.columns || null, report.statusField, t.expand, rows, report.rowActions, report.cellLinks));
       }
       if (more) result.appendChild(more);
       return;
     }
-    result.appendChild(await dataTable(rows, report.columns || null, report.statusField, report.expand, null, report.rowActions));
+    result.appendChild(await dataTable(rows, report.columns || null, report.statusField, report.expand, null, report.rowActions, report.cellLinks));
     if (more) result.appendChild(more);
   }
 
