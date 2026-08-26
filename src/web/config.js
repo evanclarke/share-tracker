@@ -538,7 +538,17 @@ export const REPORTS = [
       },
     ],
   },
-  { slug: 'unrealised-gains', title: 'Unrealised Gains', api: '/portfolio/unrealised-gains', method: 'POST', prices: true, asOfDate: true, menu: 'Reports', section: 'CGT & tax', desc: 'Per-holding (listing × holding account) unrealised gain/loss vs cost base.' },
+  {
+    slug: 'unrealised-gains', title: 'Unrealised Gains', api: '/portfolio/unrealised-gains', method: 'POST', prices: true, asOfDate: true,
+    menu: 'Reports', section: 'CGT & tax',
+    desc: 'Per-holding (listing × holding account) unrealised gain/loss vs cost base. A listing name links to that listing’s own activity report.',
+    // Same drill-down as the Portfolio Overview: the listing name opens the
+    // Listing Activity report for that listing. The as-of date is not carried
+    // — the activity ledger is that listing's whole history, not an as-at view.
+    cellLinks: {
+      listing_id: function (row) { return '#/r/activity/' + row.listing_id; },
+    },
+  },
   {
     slug: 'realised-gains', title: 'Realised Gains', api: '/portfolio/realised-gains', method: 'GET',
     menu: 'Reports', section: 'CGT & tax',
