@@ -325,13 +325,14 @@ async fn rename(
 }
 
 /// A held span straddling a rename is fetched under **each** ticker that was
-/// actually in force over it, not once under the one in force at its start.
+/// actually in force over it, not once under the one in force at its start —
+/// and a span whose own ticker the provider has retired is re-asked under the
+/// ticker that survived it.
 ///
-/// The real case: LAR's held span begins before its 2025 rename from LAAC.
-/// Asking for the whole span under LAAC gets Yahoo's `NoSuchSymbol` for a
-/// ticker it retired, and before this the listing was left with no calendar at
-/// all — both alerts silent for it forever — while its post-rename history sat
-/// there to be collected under LAR.
+/// The real case: LAR was renamed from LAAC in January 2025. Yahoo 404s LAAC
+/// outright and serves LAR's candles from 2021-01-04, four years before the
+/// rename — measured 2026-08-28 — so the surviving ticker carries the whole
+/// history and the retired one carries none of it.
 #[tokio::test]
 async fn a_span_straddling_a_rename_is_fetched_under_each_ticker_in_force() {
     let pool = test_pool().await;
@@ -343,38 +344,114 @@ async fn a_span_straddling_a_rename_is_fetched_under_each_ticker_in_force() {
         .insert(&pool)
         .await;
 
-    // The provider serves the series only under the surviving ticker.
-    let stub = DistributionStub::default().serving_only("LAR").with_event(
-        1,
-        ymd(2025, 7, 1),
-        dec("0.31"),
-        "AUD",
+    // The provider serves the series only under the surviving ticker — one
+    // distribution either side of the rename.
+    let stub = DistributionStub::default()
+        .serving_only("LAR")
+        .with_event(1, ymd(2024, 7, 1), dec("0.11"), "AUD")
+        .with_event(1, ymd(2025, 7, 1), dec("0.31"), "AUD");
+    assert_eq!(
+        refresh(&pool, &stub).await,
+        Ok(None),
+        "nothing is left uncollected, so the run has nothing to qualify"
     );
-    let note = refresh(&pool, &stub).await.expect("the run succeeds");
 
-    // Two calls, split on the effective date, each under its own ticker.
+    // Three calls: the pre-rename span under its own ticker, which the
+    // provider has retired; the same span again under the surviving one; then
+    // the post-rename span.
     assert_eq!(
         stub.calls(),
         vec![
             ("LAAC".to_string(), ymd(2024, 1, 10), ymd(2025, 2, 28)),
+            ("LAR".to_string(), ymd(2024, 1, 10), ymd(2025, 2, 28)),
             ("LAR".to_string(), ymd(2025, 3, 1), ymd(2026, 8, 27)),
         ]
     );
-    // The post-rename half is collected rather than lost with the pre-rename
-    // half — the whole point of segmenting.
+    let stored = db_list(&pool).await.unwrap();
+    assert_eq!(
+        stored.iter().map(|e| e.ex_date).collect::<Vec<_>>(),
+        vec![ymd(2025, 7, 1), ymd(2024, 7, 1)],
+        "both halves of the span are collected"
+    );
+    assert!(
+        stored.iter().all(|e| e.fetched_symbol == "LAR"),
+        "each row records the symbol that actually answered for it"
+    );
+}
+
+/// The shape the real LAR has, which the fallback exists for: **every** day the
+/// listing was held predates its rename, so there is only one segment and its
+/// ticker is one the provider has retired.
+///
+/// Segmenting alone does nothing here — the one segment is still LAAC — and
+/// before the fallback this listing had no calendar at all, both alerts silent
+/// for it out of ignorance rather than evidence. LAR was bought 2021-03-25 and
+/// sold out 2025-01-13, a fortnight before the 2025-01-27 rename.
+#[tokio::test]
+async fn a_span_wholly_under_a_retired_ticker_is_recovered_from_the_surviving_one() {
+    let pool = test_pool().await;
+    listing(1).ticker("LAR").insert(&pool).await;
+    rename(&pool, 1, ymd(2025, 1, 27), "LAAC", "LAR").await;
+    buy(1, 1)
+        .date(ymd(2021, 3, 25))
+        .qty(dec("1049"))
+        .insert(&pool)
+        .await;
+    sell(2, 1)
+        .date(ymd(2025, 1, 13))
+        .qty(dec("1049"))
+        .insert(&pool)
+        .await;
+    allocate(&pool, 1, 2, 1, dec("1049")).await;
+
+    let stub = DistributionStub::default().serving_only("LAR").with_event(
+        1,
+        ymd(2023, 6, 1),
+        dec("0.11"),
+        "AUD",
+    );
+    assert_eq!(refresh(&pool, &stub).await, Ok(None));
+
+    assert_eq!(
+        stub.calls(),
+        vec![
+            ("LAAC".to_string(), ymd(2021, 3, 25), ymd(2025, 1, 12)),
+            ("LAR".to_string(), ymd(2021, 3, 25), ymd(2025, 1, 12)),
+        ],
+        "one segment, asked under its own ticker and then the surviving one"
+    );
     let stored = db_list(&pool).await.unwrap();
     assert_eq!(stored.len(), 1);
-    assert_eq!(stored[0].ex_date, ymd(2025, 7, 1));
-    assert_eq!(
-        stored[0].fetched_symbol, "LAR",
-        "the row records the symbol its own segment was fetched under"
-    );
-    // …and the span that genuinely has no calendar is still said out loud,
-    // naming the symbol and the window rather than the listing as a whole.
-    let note = note.expect("the retired span qualifies the run");
+    assert_eq!(stored[0].ex_date, ymd(2023, 6, 1));
+    assert_eq!(stored[0].fetched_symbol, "LAR");
+}
+
+/// A span with no calendar under **either** ticker still says so — the note is
+/// narrowed by the fallback, not removed by it, and it names both symbols so a
+/// reader knows the surviving one was tried.
+#[tokio::test]
+async fn a_span_no_ticker_serves_still_notes_the_run() {
+    let pool = test_pool().await;
+    listing(1).ticker("LAR").insert(&pool).await;
+    rename(&pool, 1, ymd(2025, 3, 1), "LAAC", "LAR").await;
+    buy(1, 1)
+        .date(ymd(2024, 1, 10))
+        .qty(dec("100"))
+        .insert(&pool)
+        .await;
+
+    // The provider serves nothing under any spelling.
+    let stub = DistributionStub::default().serving_only("SOMETHING-ELSE");
+    let note = refresh(&pool, &stub)
+        .await
+        .expect("a retired ticker is not a failure")
+        .expect("but it does qualify the run");
     assert!(note.contains("no calendar"), "{note}");
-    assert!(note.contains("as LAAC"), "{note}");
-    assert!(note.contains("2024-01-10..2025-02-28"), "{note}");
+    assert!(
+        note.contains("as LAAC then LAR"),
+        "the note names every symbol tried: {note}"
+    );
+    assert!(db_list(&pool).await.unwrap().is_empty());
 }
 
 /// The control for the segmented fetch: an outage on **one** segment carries

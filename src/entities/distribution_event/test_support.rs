@@ -118,11 +118,12 @@ impl DistributionFetcher for DistributionStub {
     fn distributions<'a>(
         &'a self,
         market: &'a Market,
+        symbol: &'a str,
         from: NaiveDate,
         to: NaiveDate,
     ) -> DistributionFuture<'a> {
         let listing_id = market.listing.id;
-        let symbol = self.symbol(market, from).unwrap_or_default();
+        let symbol = symbol.to_string();
         Box::pin(async move {
             self.calls
                 .lock()

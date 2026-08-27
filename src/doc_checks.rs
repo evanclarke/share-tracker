@@ -4272,6 +4272,12 @@ fn distribution_calendar_matching_and_refresh_rules_documented() {
     assert!(API_MD.contains("**A span straddling a [rename](#listings) is quoted"));
     assert!(API_MD.contains("under each ticker that was actually in force over it**"));
     assert!(API_MD.contains("left the listing with **no calendar at all**"));
+    // The fallback, and the live measurement that licenses it.
+    assert!(API_MD.contains(
+        "**A span whose own ticker the provider has retired is re-asked under the ticker that \
+         survived it**"
+    ));
+    assert!(API_MD.contains("`LAR` serves candles from 2021-01-04"));
 
     // A re-fetch that changes nothing writes nothing — and what that means for
     // the timestamp the unit basis is dated by.

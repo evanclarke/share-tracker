@@ -223,16 +223,25 @@ pub trait DistributionFetcher: Send + Sync {
     /// `fetched_symbol` are always in the same namespace.
     fn symbol(&self, market: &Market, date: NaiveDate) -> Result<String, String>;
 
-    /// Every distribution with an ex-date in `from..=to`, ascending.
+    /// Every distribution `symbol` reports with an ex-date in `from..=to`,
+    /// ascending.
     ///
     /// **`from..=to` is guaranteed to sit wholly inside one of the market's
-    /// identities**, so the implementation resolves one symbol for the whole
-    /// window — the same contract `closing_price::PriceFetcher::daily_closes`
-    /// states, and [`run_refresh`] is what upholds it by splitting a held span
-    /// on `Market::identity_segments` before it calls.
+    /// identities**, and `symbol` is the one that window is to be quoted under
+    /// — the same contract `closing_price::PriceFetcher::daily_closes` states,
+    /// and [`run_refresh`] is what upholds it by splitting a held span on
+    /// `Market::identity_segments` before it calls.
+    ///
+    /// The symbol is a **parameter** rather than something the implementation
+    /// re-derives from `from`, because the caller does not always want the one
+    /// in force over the window: a span whose own ticker the provider has
+    /// retired is re-asked under the ticker that survived it (see
+    /// [`run_refresh`]). `market` is still needed for the exchange calendar
+    /// the window's dates are read against.
     fn distributions<'a>(
         &'a self,
         market: &'a Market,
+        symbol: &'a str,
         from: NaiveDate,
         to: NaiveDate,
     ) -> DistributionFuture<'a>;
@@ -476,14 +485,51 @@ pub async fn run_refresh(
                     break;
                 }
             };
-            let answer = match fetcher
-                .distributions(&market, segment_from, segment_to)
-                .await
+            // Every symbol this segment was asked under, in order — one
+            // ordinarily, two where the fallback below was needed.
+            let mut attempted = vec![symbol.clone()];
+            let mut answered_under = symbol.clone();
+            let mut result = fetcher
+                .distributions(&market, &symbol, segment_from, segment_to)
+                .await;
+
+            // **A retired ticker is re-asked under the one that survived it.**
+            // The provider does not merely stop serving the old symbol, it
+            // restates the security's whole history onto the new one: measured
+            // 2026-08-28, Yahoo 404s `LAAC` outright while `LAR` serves candles
+            // from 2021-01-04 — four years before the 2025-01-27 rename, and
+            // covering the whole of the span this listing was held over.
+            // Without this, a listing whose every held day predates its rename
+            // (LAR's does: bought 2021-03-25, sold out 2025-01-13, renamed a
+            // fortnight later) has no calendar at all, and both alerts are
+            // silent for it out of ignorance rather than evidence.
+            //
+            // It also narrows the risk it inherits rather than widening it. A
+            // retired ticker can be *reassigned* to some other security, and
+            // this asks under the **current** one, which is by definition still
+            // this listing — where reading the old symbol's answer would have
+            // been reading another company's dividends.
+            if matches!(result, Err(FetchError::NoSuchSymbol(_)))
+                // `current().from` is `Some` exactly when the listing has been
+                // renamed at all, so this is also the guard against re-asking
+                // the same symbol twice.
+                && let Some(effective) = market.current().from
+                && let Ok(surviving) = fetcher.symbol(&market, effective)
+                && surviving != symbol
             {
+                result = fetcher
+                    .distributions(&market, &surviving, segment_from, segment_to)
+                    .await;
+                answered_under.clone_from(&surviving);
+                attempted.push(surviving);
+            }
+
+            let answer = match result {
                 Ok(answer) => answer,
                 // The provider positively answers that it serves no such
-                // series: the ticker this span was quoted under was retired,
-                // and asking again next week will get the same answer forever.
+                // series under either symbol tried, so there is nothing to
+                // collect for this span and asking again next week will get
+                // the same answer forever.
                 // Failing the run on it would leave a red Jobs screen nothing
                 // can clear — the shape SCENARIOS Q-02 fixed for prices —
                 // while the honest consequence is only that *this span* has no
@@ -492,8 +538,9 @@ pub async fn run_refresh(
                 // are still collected, which is the whole point of segmenting.
                 Err(FetchError::NoSuchSymbol(message)) => {
                     retired.push(format!(
-                        "{} ({listing_id}) {segment_from}..{segment_to} as {symbol}: {message}",
-                        market.listing.ticker
+                        "{} ({listing_id}) {segment_from}..{segment_to} as {}: {message}",
+                        market.listing.ticker,
+                        attempted.join(" then ")
                     ));
                     continue;
                 }
@@ -505,18 +552,23 @@ pub async fn run_refresh(
                 // history is not a fact about the other half.
                 Err(FetchError::Other(message)) => {
                     segment_failure = Some(format!(
-                        "{} ({listing_id}) {segment_from}..{segment_to} as {symbol}: {message}",
+                        "{} ({listing_id}) {segment_from}..{segment_to} as {answered_under}: \
+                         {message}",
                         market.listing.ticker
                     ));
                     break;
                 }
             };
             undatable.extend(answer.undatable);
+            // Recorded under the symbol that actually answered, not the one
+            // the span was quoted under at the time — `fetched_symbol` is
+            // provenance, and the provenance of a fallback fetch is the
+            // surviving ticker.
             collected.extend(
                 answer
                     .events
                     .into_iter()
-                    .map(|event| (symbol.clone(), event)),
+                    .map(|event| (answered_under.clone(), event)),
             );
         }
         if let Some(message) = segment_failure {

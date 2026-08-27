@@ -134,11 +134,16 @@ impl DistributionFetcher for YahooDistributionFetcher {
     fn distributions<'a>(
         &'a self,
         market: &'a Market,
+        symbol: &'a str,
         from: NaiveDate,
         to: NaiveDate,
     ) -> DistributionFuture<'a> {
         Box::pin(async move {
-            let symbol = self.symbol(market, from)?;
+            // The dates are read against the calendar **the window was traded
+            // on**, which is the segment's own identity — not the symbol's.
+            // Where the two differ the caller is re-asking a retired span
+            // under the surviving ticker, and the trading days it is placing
+            // are still the ones that happened.
             let tz = market.identity_at(from).tz()?;
             // Widened by the candle-join margin at both ends so a boundary
             // event's own candle is inside the window; the events are filtered
@@ -150,7 +155,7 @@ impl DistributionFetcher for YahooDistributionFetcher {
             // the action stream (see the module docs on the entity).
             // `auto_adjust(false)` matches the price fetcher: nothing here
             // wants the provider's own adjustment applied on top.
-            let response = yfinance_rs::HistoryBuilder::new(&self.client, &symbol)
+            let response = yfinance_rs::HistoryBuilder::new(&self.client, symbol)
                 .between(start, end)
                 .interval(yfinance_rs::Interval::D1)
                 .auto_adjust(false)
@@ -161,7 +166,7 @@ impl DistributionFetcher for YahooDistributionFetcher {
                 // matching words in a message — the same call
                 // `closing_price::yahoo` makes, so a retired ticker is
                 // diagnosed identically on both paths.
-                .map_err(|e| closing_price::classify_yahoo_failure(&symbol, e))?;
+                .map_err(|e| closing_price::classify_yahoo_failure(symbol, e))?;
 
             // The join table: the UTC date of each candle's own instant, to
             // the exchange-local trading day it is.
