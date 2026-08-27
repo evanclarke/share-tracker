@@ -4233,6 +4233,10 @@ fn distribution_calendar_documented() {
     // turned out to be.
     assert!(API_MD.contains("**every date the row carries as an anchor and none as a filter**"));
     assert!(API_MD.contains("prints a **Record Date** and no ex-date at all"));
+    // The registry's own DRP surplus overriding the feed, and the guard that
+    // stops a nil surplus "proving" anything.
+    assert!(API_MD.contains("**The registry's own DRP surplus can veto an entry**"));
+    assert!(API_MD.contains("hand on a **non-zero** surplus unchanged"));
     assert!(API_MD.contains("**The gross is compared and never the components**"));
 
     // The limitation: what an alert not firing does not prove, and the

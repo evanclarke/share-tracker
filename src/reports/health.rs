@@ -1312,6 +1312,89 @@ struct CalendarIncomeRow {
     foreign_source_income: Decimal,
 }
 
+/// One DRP reinvestment's place in the registry's own running cash surplus:
+/// the payment it was made on, what it brought forward, and what it carried
+/// on (see [`DrpChain`]).
+#[derive(sqlx::FromRow)]
+struct DrpReinvestmentRow {
+    listing_id: i64,
+    holding_account_id: i64,
+    /// The reinvestment trade's date — the distribution's **payment** date,
+    /// which is a couple of weeks after its own ex-date.
+    date: NaiveDate,
+    #[sqlx(try_from = "Money")]
+    residual_brought_forward: Decimal,
+    #[sqlx(try_from = "Money")]
+    residual_carried_forward: Decimal,
+}
+
+/// The registry's running DRP cash surplus for one (listing, holding account),
+/// by payment date — and the question worth asking of it: **did the registry
+/// distribute anything in this gap?**
+///
+/// A DRP advice states the surplus brought forward from the last distribution
+/// and the surplus carried to the next, so consecutive advices chain. That
+/// chain is a *recorded fact from the registry itself*, and it is far better
+/// evidence about whether a distribution happened than an absent income row
+/// is: an income row can be missing because it was never entered, but a
+/// surplus cannot arrive intact across a distribution that consumed it.
+///
+/// This is what the alert's one false positive on the real portfolio turned
+/// out to be. The provider's stream carried a VDHG event on 2 November 2020;
+/// the September advice carried $50.4362 forward and the December advice
+/// brought exactly $50.4362 back, so nothing was distributed in between and
+/// there was never a row to enter.
+struct DrpChain {
+    /// Ascending by date.
+    payments: HashMap<(i64, i64), Vec<DrpReinvestmentRow>>,
+}
+
+impl DrpChain {
+    /// Whether the registry's own surplus arrives **intact** across `ex_date`
+    /// — evidence that it distributed nothing there.
+    ///
+    /// True only when the reinvestments either side of the date exist, hand on
+    /// a **non-zero** surplus unchanged, and the later one is too late to be
+    /// the reinvestment of the distribution in question. The non-zero
+    /// guard is what makes the equality mean something: an account whose
+    /// residual handling is `PayOut` carries nothing by design, so its chain
+    /// is `0 → 0` across every gap and would otherwise "prove" that no
+    /// distribution ever happened anywhere.
+    ///
+    /// The direction of the risk is stated rather than hidden. Suppressing on
+    /// this evidence trades a permanent false positive — which teaches a
+    /// reader to ignore the banner, the failure this project guards against
+    /// everywhere else — for a false negative that needs the registry to have
+    /// distributed while leaving an enrolled holder's DRP surplus untouched.
+    fn closes_across(&self, listing_id: i64, account_id: i64, ex_date: NaiveDate) -> bool {
+        let Some(payments) = self.payments.get(&(listing_id, account_id)) else {
+            return false;
+        };
+        let Some(before) = payments.iter().rev().find(|p| p.date < ex_date) else {
+            return false;
+        };
+        let Some(after) = payments.iter().find(|p| p.date > ex_date) else {
+            return false;
+        };
+        // **The next payment must be too late to be this distribution's own.**
+        // A reinvestment lands on its distribution's *payment* date, a couple
+        // of weeks after its ex-date — so if `after` is inside the window that
+        // decides whether a payment belongs to this ex-date, it may be the
+        // reinvestment of the very distribution in question, and its brought-
+        // forward is then simply the previous carried-forward *before* this
+        // distribution was added to it. Those two always agree, so without
+        // this guard the chain would appear to close across every DRP
+        // distribution and the alert would be suppressed exactly when it was
+        // right — a missing income row for a reinvested distribution, which is
+        // the likeliest missing row there is.
+        if (after.date - ex_date).num_days() <= DIVIDEND_MATCH_AFTER_DAYS {
+            return false;
+        }
+        before.residual_carried_forward > Decimal::ZERO
+            && before.residual_carried_forward == after.residual_brought_forward
+    }
+}
+
 impl CalendarIncomeRow {
     /// The same gross the entity's own `gross_cash_income` sums — franking
     /// credits are notional and withholdings come *out of* this, so neither
@@ -2898,6 +2981,30 @@ async fn db_distribution_calendar(
             .into_iter()
             .collect();
     let timeline = HeldTimeline::load_on(&mut *conn).await?;
+    // The registry's own running DRP surplus — the strongest recorded evidence
+    // there is about whether a distribution happened at all (see [`DrpChain`]).
+    // Keyed on the trade's own `trade_type`, not on `income.reinvestment_trade_id`:
+    // a DRP trade *is* a reinvestment by identity, and the residual columns are
+    // its own. Reading the provenance link instead would make the evidence
+    // depend on a column only the reinvest operation ever writes.
+    let drp_rows: Vec<DrpReinvestmentRow> = sqlx::query_as(
+        "SELECT listing_id, holding_account_id, date, \
+                residual_brought_forward, residual_carried_forward \
+         FROM trades WHERE trade_type = 'DRP' \
+         ORDER BY listing_id, holding_account_id, date",
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut chain = DrpChain {
+        payments: HashMap::new(),
+    };
+    for row in drp_rows {
+        chain
+            .payments
+            .entry((row.listing_id, row.holding_account_id))
+            .or_default()
+            .push(row);
+    }
 
     // Income rows by (listing, account), so the match is run one registered
     // holder at a time — the same listing in two accounts pays two
@@ -2947,6 +3054,14 @@ async fn db_distribution_calendar(
                 .cloned()
                 .unwrap_or_else(|| account_id.to_string());
             let Some((_, row)) = matched else {
+                // Before reporting a distribution as unrecorded, ask the
+                // registry's own books whether it happened: a DRP surplus that
+                // arrives intact across the ex-date says nothing was
+                // distributed there, which is a recorded fact and beats an
+                // external feed's say-so.
+                if chain.closes_across(event.listing_id, account_id, event.ex_date) {
+                    continue;
+                }
                 missing.push(MissingDividendEntry {
                     listing_id: event.listing_id,
                     ticker: event.ticker.clone(),
@@ -6761,6 +6876,149 @@ mod tests {
             dec("72.6547"),
             "the same dollars either side of the split — a total is basis-independent"
         );
+    }
+
+    /// The registry's own DRP surplus contradicts the feed, and wins.
+    ///
+    /// The real portfolio's only surviving alert: the provider's stream
+    /// carried a VDHG event on 2 November 2020, but the September advice
+    /// carried $50.4362 forward and the December advice brought exactly
+    /// $50.4362 back. A distribution in that gap would have consumed the
+    /// surplus through the DRP, so there was none, and there was never a row
+    /// to enter.
+    #[tokio::test]
+    async fn a_drp_surplus_arriving_intact_disproves_a_distribution_in_the_gap() {
+        let pool = test_pool().await;
+        holding_before_the_ex_date(&pool).await;
+        // Two reinvested distributions either side of the disputed event, the
+        // second bringing forward exactly what the first carried on.
+        reinvested(&pool, 2, 1, ymd(2020, 10, 16), "0", "50.4362").await;
+        reinvested(&pool, 3, 2, ymd(2021, 1, 19), "50.4362", "38.7177").await;
+        insert_event(
+            &pool,
+            1,
+            ymd(2020, 11, 2),
+            "0.038237",
+            "2026-08-27T00:00:00Z",
+        )
+        .await;
+
+        let h = health(&pool, ymd(2026, 8, 27)).await;
+        assert!(
+            h.missing_dividend_entries.is_empty(),
+            "the registry's own surplus says nothing was distributed there: {:?}",
+            h.missing_dividend_entries
+        );
+
+        // The control, and it is the whole point: break the chain — the
+        // surplus arrives *changed*, as it would if something had been
+        // distributed and reinvested in between — and the alert fires again.
+        sqlx::query("UPDATE trades SET residual_brought_forward = '12.3456' WHERE id = 3")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let h = health(&pool, ymd(2026, 8, 27)).await;
+        assert_eq!(h.missing_dividend_entries.len(), 1);
+        assert_eq!(h.missing_dividend_entries[0].ex_date, ymd(2020, 11, 2));
+    }
+
+    /// The control that matters: a genuinely missing **reinvested**
+    /// distribution must still be reported.
+    ///
+    /// This is where the veto is most dangerous, and a first cut of it was
+    /// wrong. A reinvestment lands on its own distribution's payment date, so
+    /// the pair bracketing that distribution's ex-date is (previous payment,
+    /// *its own* payment) — and those two always chain, because the later
+    /// one's brought-forward is the earlier one's carried-forward before this
+    /// distribution was added to it. Read naively, the chain "closes" across
+    /// every DRP distribution, and the alert would be suppressed exactly when
+    /// it was right.
+    #[tokio::test]
+    async fn a_missing_reinvested_distribution_is_still_reported() {
+        let pool = test_pool().await;
+        holding_before_the_ex_date(&pool).await;
+        // VDHG's real chain: September reinvested on 16 October carrying
+        // $50.4362 on, December reinvested on 19 January bringing it back.
+        reinvested(&pool, 2, 1, ymd(2020, 10, 16), "0", "50.4362").await;
+        reinvested(&pool, 3, 2, ymd(2021, 1, 19), "50.4362", "38.7177").await;
+        // The December distribution itself: ex 4 January, paid 19 January —
+        // and its income row is the one that was never entered.
+        sqlx::query("DELETE FROM income WHERE id = 2")
+            .execute(&pool)
+            .await
+            .unwrap();
+        insert_event(
+            &pool,
+            1,
+            ymd(2021, 1, 4),
+            "0.993767",
+            "2026-08-27T00:00:00Z",
+        )
+        .await;
+
+        let h = health(&pool, ymd(2026, 8, 27)).await;
+        assert_eq!(
+            h.missing_dividend_entries.len(),
+            1,
+            "the 19 January payment is this distribution's own reinvestment, so the chain \
+             across 4 January proves nothing"
+        );
+        assert_eq!(h.missing_dividend_entries[0].ex_date, ymd(2021, 1, 4));
+    }
+
+    /// A nil surplus proves nothing, so it must not suppress anything.
+    ///
+    /// An account whose residual handling is `PayOut` carries nothing by
+    /// design: its chain is `0 → 0` across every gap, and reading that as
+    /// evidence would silently switch the alert off for the whole holding.
+    #[tokio::test]
+    async fn a_nil_drp_surplus_is_not_evidence_and_suppresses_nothing() {
+        let pool = test_pool().await;
+        holding_before_the_ex_date(&pool).await;
+        reinvested(&pool, 2, 1, ymd(2020, 10, 16), "0", "0").await;
+        reinvested(&pool, 3, 2, ymd(2021, 1, 19), "0", "0").await;
+        insert_event(
+            &pool,
+            1,
+            ymd(2020, 11, 2),
+            "0.038237",
+            "2026-08-27T00:00:00Z",
+        )
+        .await;
+
+        let h = health(&pool, ymd(2026, 8, 27)).await;
+        assert_eq!(h.missing_dividend_entries.len(), 1);
+    }
+
+    /// A DRP reinvestment and the income row that funded it, with the
+    /// registry's brought/carried surplus as the advice states them.
+    async fn reinvested(
+        pool: &SqlitePool,
+        trade_id: i64,
+        income_id: i64,
+        date: NaiveDate,
+        brought: &str,
+        carried: &str,
+    ) {
+        test_support::drp(trade_id, 1)
+            .date(date)
+            .qty(dec("10"))
+            .with(|t| {
+                t.residual_brought_forward = dec(brought);
+                t.residual_carried_forward = dec(carried);
+            })
+            .insert(pool)
+            .await;
+        // The funding distribution. Its `reinvestment_trade_id` is deliberately
+        // not set: that link is server-owned provenance the reinvest operation
+        // writes, and the chain is read off the DRP trades themselves.
+        test_support::income(income_id, 1, date)
+            .with(|i| {
+                i.unfranked_amount = dec("100");
+                i.trust_income = true;
+            })
+            .insert(pool)
+            .await;
     }
 
     #[tokio::test]
