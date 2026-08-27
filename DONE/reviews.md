@@ -5165,3 +5165,67 @@ and that a missing walk falls back to `acquired()`. `docs/API.md`'s `ReturnOfCap
 states the chain rule beside the per-operation one. No schema change and no endpoint change: the
 column is derived in the SELECT list, not stored.
 
+## config.js's sel() option lists and the health banner's field names are unpinned mirrors of Rust-side definitions (code review 2026-08-25 follow-up)
+(Found by the JOB_DESC/tradeOrigin fix's sweep, `c190871`. config.js `sel(…)` option lists mirror
+CHECK-constrained Rust enums with no programmatic pin: `security_type`, `cost_base_rule`,
+`income_type`, `expense_type`, `residual_handling`, `action_type`, `worthless_event` — the
+`action_type` set *is* pinned (`corporate_action_form_is_split_by_type`) but by a hand-written list
+inside the test, a third copy. No iterable Rust const of the variant names exists (only per-variant
+match arms and the migration CHECK), so a real derivation needs a new Rust const or a
+schema-CHECK-parsing pin. Separately, the health banner's field names in app.js are pinned in
+`health_banner_ui_present` by hand-written strings, not derived from `reports::health`'s serde
+field names. chart.js's `fyStart` deliberately restates `domain::tax_year`'s July rule (commented,
+unit-tested) — an inherent no-build-step mirror, acceptable as is.)
+- [x] Pin each `sel()` option list to its Rust enum / schema CHECK programmatically (a new Rust
+  const per enum, or a pin that parses the live schema's CHECK), replacing the hand-written
+  `action_type` list in the existing test rather than adding beside it
+- [x] Derive the health-banner pin from `reports::health`'s serde field names
+- [x] Tests are the deliverable; no docs change expected
+
+**Closed 2026-08-27.** Both mirrors are now derived rather than transcribed, and the two tests that
+already carried hand-written copies were folded into them rather than left beside them.
+
+`select_option_lists_are_pinned_to_their_server_side_source` (`web.rs`) parses **every** `sel()` call
+in `config.js` — the picker's field name and the values its options submit, plain-string and
+`{ value, label }` lists alike — and checks each against the definition it copies:
+
+- the seven stored enums (`security_type`, `cost_base_rule`, `income_type`, `expense_type`,
+  `residual_handling`, `action_type`, `worthless_event`) against the **live schema's own**
+  `CHECK (<column> IN (…))`, read out of `sqlite_master` — so the pin is against what the database
+  enforces, not against a Rust or JS transcription of it. No new Rust const was needed, which was the
+  point: a fourth copy of a variant list would have been the same problem one layer down. The reader
+  fails loudly if a column ever grows a second `IN (…)` constraint, since a pin could then not say
+  which one is the enum
+- the two lists that are stored nowhere against their Rust consts —
+  `reports::row_history::AUDITED_TABLES` for the audit-trail table picker, and
+  `parcel_optimiser::ALL_STRATEGIES` **through serde**, so the picker is checked against the wire
+  names the endpoint deserialises rather than the variant names
+- `trade_type` as the one deliberate subset (the Trades form enters acquisitions only; a Sell is
+  entered under Sells so it always carries its allocations), stated as an intention and still checked
+  against the schema so the value it does offer cannot drift into one the column refuses
+
+A picker in none of those lists fails the test, so a new `sel()` is classified there rather than
+shipping unpinned. The three existing hand-written copies went with it: the strategy list in
+`cgt_decision_support_ui_present` and the `AUDITED_TABLES` loop in `row_history_ui_present` are
+deleted (both now checked for exact equality rather than mere presence), and
+`corporate_action_form_is_split_by_type`'s eight-line field-group list now reads its types from the
+same schema CHECK — so a new action type cannot reach the form without a group.
+
+`health_banner_renders_every_field_of_the_health_report` walks `GET /reports/health`'s **own
+serialised shape** and requires each field to be read as `h.<field>` inside `refreshHealthBanner`'s
+body (extracted from the bundle, so a mention elsewhere in the app cannot answer for it; the property
+match is bounded, so `h.duplicate_income` is not satisfied by `h.duplicate_incomes`). The 18 bare
+field-name assertions in `health_banner_ui_present` are deleted — what it asserts now is the wording
+each alert reaches the user as and the screen it links to, which is the part no derivation can check.
+
+Writing it turned up one field the banner does not read at all: **`unpriced_days`**. That is
+deliberate rather than an oversight — the missing-row counterpart of `errored_prices` is a
+listing-level to-do with a remedy attached, listed on the Closing Prices screen with a Backfill
+action that pre-fills the form over exactly the hole, which a banner sentence cannot do — so it is
+recorded in `HEALTH_FIELDS_SURFACED_OFF_THE_BANNER` with the read that surfaces it, and the test
+checks *that* read exists and that the exemption still names a live field. An exemption therefore
+still has to prove the alert reaches a user.
+
+Every arm was checked by mutation before being believed: a value dropped from a picker, a mistyped
+strategy, a mistyped audited table, a renamed field group, an unclassified new `sel()`, a banner
+that stops reading an alert, and a broken exempt read each fail the test they should.

@@ -10,8 +10,7 @@ findings are all closed in DONE.md), except where a section's heading names anot
 (e.g. REQUIREMENTS, SCENARIOS). Each section records one finding; sections land in DONE.md as they
 are fixed or decided.
 
-**Open: 2 sections** — the `config.js` mirrors follow-up from the 2026-08-25 code review and the
-distribution calendar recorded from REQUIREMENTS 2026-08-27. All sixteen sections recorded from the **2026-08-25 code review**
+**Open: 1 section** — the distribution calendar recorded from REQUIREMENTS 2026-08-27. All sixteen sections recorded from the **2026-08-25 code review**
 (a whole-codebase pass over `src` — business-logic errors, quality, duplication — every finding
 adversarially verified against `f171999`) are closed and archived in
 [`DONE/reviews.md`](DONE/reviews.md): the AMIT×rollover pair (`44b8a6b`), the four-endpoint
@@ -25,23 +24,6 @@ together — the demerger head-parcel question it left in its place, which repro
 rollover-chain question *that* left, where a transfer or demerger after an earlier scrip exchange
 reinstated the entitlement the exchange had denied — reproduced at $100 on 2,000 units and closed by
 a recursive register walk in `ParcelRow`'s SELECT list.
-
-## config.js's sel() option lists and the health banner's field names are unpinned mirrors of Rust-side definitions (code review 2026-08-25 follow-up)
-(Found by the JOB_DESC/tradeOrigin fix's sweep, `c190871`. config.js `sel(…)` option lists mirror
-CHECK-constrained Rust enums with no programmatic pin: `security_type`, `cost_base_rule`,
-`income_type`, `expense_type`, `residual_handling`, `action_type`, `worthless_event` — the
-`action_type` set *is* pinned (`corporate_action_form_is_split_by_type`) but by a hand-written list
-inside the test, a third copy. No iterable Rust const of the variant names exists (only per-variant
-match arms and the migration CHECK), so a real derivation needs a new Rust const or a
-schema-CHECK-parsing pin. Separately, the health banner's field names in app.js are pinned in
-`health_banner_ui_present` by hand-written strings, not derived from `reports::health`'s serde
-field names. chart.js's `fyStart` deliberately restates `domain::tax_year`'s July rule (commented,
-unit-tested) — an inherent no-build-step mirror, acceptable as is.)
-- [ ] Pin each `sel()` option list to its Rust enum / schema CHECK programmatically (a new Rust
-  const per enum, or a pin that parses the live schema's CHECK), replacing the hand-written
-  `action_type` list in the existing test rather than adding beside it
-- [ ] Derive the health-banner pin from `reports::health`'s serde field names
-- [ ] Tests are the deliverable; no docs change expected
 
 **Every section of SCENARIOS.md — A through AA — is now driven and every finding they raised is
 closed** in the `DONE/*.md` archive. Section **S. Settlement, holidays, and dates** was driven 2026-08-22 (`d501408`) and its

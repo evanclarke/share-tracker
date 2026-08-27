@@ -557,9 +557,9 @@ mod tests {
         // strategy picker naming each optimiser strategy.
         assert!(js.contains("'net-capital-gain-what-if'"));
         assert!(js.contains("/portfolio/net-capital-gain/what-if"));
-        for strategy in ["'fifo'", "'min_gain'", "'max_discount'", "'harvest_losses'"] {
-            assert!(js.contains(strategy), "missing strategy {strategy}");
-        }
+        // (Which strategies the picker offers is pinned to the endpoint's own
+        // `ALL_STRATEGIES` by
+        // `select_option_lists_are_pinned_to_their_server_side_source`.)
         // Both render through the generic report runner's params form and
         // per-key result tables (no bespoke views).
         assert!(js.contains("report.params"));
@@ -593,16 +593,9 @@ mod tests {
         // the row-history endpoint (no bespoke view)…
         assert!(js.contains("'row-history'"));
         assert!(js.contains("/reports/row_history"));
-        // …whose table picker names every audited table — checked against
-        // the Rust const the endpoint validates with, so a table added to
-        // the trigger set cannot be forgotten here (an extra/mistyped UI
-        // option is caught by the endpoint's own 422).
-        for table in crate::reports::row_history::AUDITED_TABLES {
-            assert!(
-                js.contains(&format!("'{table}'")),
-                "table picker missing {table}"
-            );
-        }
+        // (…whose table picker names exactly the audited tables — pinned to
+        // the const the endpoint validates with by
+        // `select_option_lists_are_pinned_to_their_server_side_source`.)
         // …and the same screen browses the trail with no row id at all
         // (SCENARIOS U-b): the cursor param, the paged response's own
         // continuation field, and the drill-in deep link a browse entry
@@ -2199,32 +2192,30 @@ mod tests {
     #[tokio::test]
     async fn health_banner_ui_present() {
         let js = app_js_body().await;
+        // *Which* alerts the banner surfaces is pinned to the report's own
+        // fields by `health_banner_renders_every_field_of_the_health_report`;
+        // what this asserts is the wording each one reaches the user as, and
+        // the screen it links to.
         // The cross-view banner is driven by the health/freshness endpoint…
         assert!(js.contains("refreshHealthBanner"));
         assert!(js.contains("/reports/health"));
         // …surfacing stale prices, stale FX, and failed jobs, linking to the
         // Jobs page…
-        assert!(js.contains("prices_stale"));
-        assert!(js.contains("fx_stale"));
-        assert!(js.contains("failed_jobs"));
         assert!(js.contains("'#/jobs'"));
         // …plus the two states no *recorded run* can show, both linking to the
         // same Jobs page: a schedule whose timer has stopped moving its stored
         // next run on, and a run that started and never finished
         // (SCENARIOS T-11/T-02/T-12).
-        assert!(js.contains("overdue_jobs"));
         assert!(js.contains("is overdue by"));
         assert!(js.contains("j.overdue_hours"));
         assert!(js.contains("j.next_run_at"));
         assert!(js.contains("j.cron"));
-        assert!(js.contains("stalled_jobs"));
         assert!(js.contains("has been running since"));
         assert!(js.contains("j.running_hours"));
         // …plus two listings holding one price series between them — the same
         // close on a long run of consecutive trading days, the only signal a
         // series fetched under the wrong symbol leaves — linking to the screen
         // the borrowed rows are cleared from…
-        assert!(js.contains("duplicate_price_series"));
         assert!(js.contains("closed at exactly the same price on"));
         assert!(js.contains("consecutive trading day(s)"));
         assert!(js.contains("d.fetched_days"));
@@ -2236,7 +2227,6 @@ mod tests {
         // shared contract note reference is the evidence, so the strip names
         // it with both trade ids), linking to the screen the surplus row is
         // deleted from…
-        assert!(js.contains("duplicate_trades"));
         assert!(js.contains("share contract note"));
         assert!(js.contains("one confirmation entered twice doubles the parcel and its cost base"));
         assert!(js.contains("'#/e/trades'"));
@@ -2244,21 +2234,18 @@ mod tests {
         // …plus duplicated corporate actions (silently compounded, so the
         // strip names the type, ticker, date and ids), linking to the screen
         // the surplus row is deleted from…
-        assert!(js.contains("duplicate_actions"));
         assert!(js.contains("each is applied separately"));
         assert!(js.contains("'#/e/corporate_actions'"));
         assert!(js.contains("Open Corporate Actions"));
         // …plus two AMMA statements for one fund-year and holding account
         // (SCENARIOS F-06: every figure counted once per statement), linking
         // to the screen the superseded row is deleted from…
-        assert!(js.contains("duplicate_amma_statements"));
         assert!(js.contains("every figure is counted once per statement"));
         assert!(js.contains("'#/e/amma_statements'"));
         assert!(js.contains("Open AMMA Statements"));
         // …plus one distribution entered twice (SCENARIOS G-24: the dividend
         // and its franking credits counted once per row), linking to the
         // screen the duplicate is deleted from…
-        assert!(js.contains("duplicate_income"));
         assert!(js.contains("identical income rows of"));
         assert!(js.contains("the dividend and its franking credits are counted once per row"));
         assert!(js.contains("'#/e/income'"));
@@ -2266,12 +2253,10 @@ mod tests {
         // …plus the same double-entry on the two listing-less sides of the tax
         // summary (SCENARIOS H-01, H-06: an interest credit or a deductible
         // expense counted once per row), each linking to its own screen…
-        assert!(js.contains("duplicate_interest"));
         assert!(js.contains("identical interest rows of"));
         assert!(js.contains("the year’s gross interest counts each row"));
         assert!(js.contains("'#/e/interest_income'"));
         assert!(js.contains("Open Interest Income"));
-        assert!(js.contains("duplicate_expenses"));
         assert!(js.contains("identical ' + d.expense_type + ' expenses of"));
         assert!(js.contains("the deduction is claimed once per row"));
         assert!(js.contains("'#/e/investment_expenses'"));
@@ -2279,14 +2264,12 @@ mod tests {
         // …plus the same double-entry on the employee-share-scheme side
         // (SCENARIOS J-11: the discount assessed and the parcel vested once per
         // statement), linking to the screen the superseded row is deleted from…
-        assert!(js.contains("duplicate_ess_statements"));
         assert!(js.contains("identical ESS statements for"));
         assert!(js.contains("the discount is assessed and the parcel vested once per statement"));
         assert!(js.contains("'#/e/ess_statements'"));
         assert!(js.contains("Open ESS Statements"));
         // …and on the deceased-estate side (SCENARIOS K-09: the one duplicate
         // that doubles a holding rather than a year's income)…
-        assert!(js.contains("duplicate_inheritances"));
         assert!(js.contains("identical inheritances of"));
         assert!(js.contains("the holding and its cost base are doubled"));
         assert!(js.contains("'#/e/inheritances'"));
@@ -2295,7 +2278,6 @@ mod tests {
         // (SCENARIOS J-04: a sale inside the ESS 30-day rule's window), which
         // names the days apart, the statement, and the remedy — and the two
         // financial years only when the rule actually moves the discount.
-        assert!(js.contains("ess_30_day_rule"));
         assert!(js.contains("day(s) after the taxing point of statement"));
         assert!(js.contains("the 30-day rule moves the taxing point to the sale date"));
         assert!(js.contains("there is no separate capital gain"));
@@ -2307,7 +2289,6 @@ mod tests {
         // in (SCENARIOS R-01): unpriceable from then on, and uncorrectable in
         // place once it has history, so the strip names both currencies and the
         // remedy, linking to the screen the exchange is fixed on.
-        assert!(js.contains("exchange_currency_mismatches"));
         assert!(js.contains("but trades on ' + d.exchange_mic"));
         assert!(js.contains("which quotes in ' + d.exchange_currency"));
         assert!(js.contains("its prices cannot be collected"));
@@ -2317,7 +2298,6 @@ mod tests {
         // S-08): the two hand-entry routes refuse one outright, so the strip
         // exists for the rows a derived path wrote, and names the reason, the
         // exchange and which path it came from.
-        assert!(js.contains("non_trading_day_trades"));
         assert!(js.contains("d.reason === 'weekend' ? 'a weekend' : 'a public holiday'"));
         assert!(js.contains("the market was shut"));
         assert!(js.contains("correct it to the day the trade actually executed"));
@@ -2328,7 +2308,6 @@ mod tests {
         // place of the nothing received, so entering the nothing fabricates a
         // capital loss — named with the rule and the remedy, and linking to
         // the screen the proceeds are corrected on.
-        assert!(js.contains("nil_proceeds_disposals"));
         assert!(js.contains("at nil proceeds"));
         assert!(js.contains("the market-value substitution rule makes the proceeds"));
         assert!(js.contains("records a capital loss that does not exist"));
@@ -2530,17 +2509,276 @@ mod tests {
         // ...and editing a row to a different type warns that the saved
         // type's fields clear on save.
         assert!(js.contains("clears the saved"));
-        for group in [
-            "ReturnOfCapital: [",
-            "ShareSplit: [",
-            "BonusIssue: [",
-            "RightsIssue: [",
-            "BuyBack: [",
-            "ScripForScrip: [",
-            "Demerger: [",
-            "WorthlessShares: [",
+        // Every action type has a group of its own — the types read from the
+        // schema's own CHECK list rather than transcribed here, so a new
+        // action type cannot reach the form without one. The picker that
+        // offers them is pinned to the same list by
+        // `select_option_lists_are_pinned_to_their_server_side_source`.
+        let pool = crate::test_support::test_pool().await;
+        for action_type in schema_check_values(&pool, "corporate_actions", "action_type").await {
+            assert!(
+                js.contains(&format!("{action_type}: [")),
+                "missing field group for action type {action_type}"
+            );
+        }
+    }
+
+    /// Every `sel(name, label, options, …)` picker in `config.js`, as field
+    /// name → the values its options submit. An option list is either plain
+    /// strings or `{ value, label }` objects; both yield the values.
+    fn config_select_options() -> std::collections::BTreeMap<String, Vec<String>> {
+        let config = JS_MODULES
+            .iter()
+            .find(|(path, _)| *path == "/static/config.js")
+            .expect("config.js is served")
+            .1;
+        let mut pickers = std::collections::BTreeMap::new();
+        // `sel('` rather than `sel(`: a field name is always a literal, and
+        // the only other `sel` in the tree is `populateSelect`'s parameter in
+        // forms.js.
+        for call in config.split("sel('").skip(1) {
+            let (name, rest) = call
+                .split_once('\'')
+                .expect("a sel() field name is a quoted literal");
+            // The label between the name and the option array carries no
+            // bracket, so the first `[` opens the list and the first `]`
+            // closes it — asserted rather than assumed.
+            let (_, rest) = rest.split_once('[').expect("sel() takes an option array");
+            let list = rest.split_once(']').expect("the option array closes").0;
+            assert!(!list.contains('['), "{name}'s option list nests an array");
+            let values: Vec<String> = if list.contains("value:") {
+                list.split("value: '")
+                    .skip(1)
+                    .map(|v| {
+                        v.split_once('\'')
+                            .expect("an option value is a quoted literal")
+                            .0
+                            .to_string()
+                    })
+                    .collect()
+            } else {
+                quoted_strings(list)
+            };
+            assert!(!values.is_empty(), "the {name} picker offers nothing");
+            assert!(
+                pickers.insert(name.to_string(), values).is_none(),
+                "two sel() pickers are named {name} — the pin below cannot tell them apart"
+            );
+        }
+        pickers
+    }
+
+    /// The single-quoted string literals in a fragment of JS or SQL, in order.
+    fn quoted_strings(source: &str) -> Vec<String> {
+        source
+            .split('\'')
+            .skip(1)
+            .step_by(2)
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// The values a `CHECK (<column> IN (…))` admits, read from the **live**
+    /// schema — what the database itself enforces, so no Rust-side or
+    /// JS-side transcription of an enum is what a pin checks against.
+    async fn schema_check_values(pool: &SqlitePool, table: &str, column: &str) -> Vec<String> {
+        let sql: String =
+            sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?")
+                .bind(table)
+                .fetch_one(pool)
+                .await
+                .unwrap_or_else(|e| panic!("{table} is a table in the live schema: {e}"));
+        let needle = format!("{column} IN (");
+        let mut lists = sql.split(&needle);
+        lists.next();
+        let list = lists
+            .next()
+            .unwrap_or_else(|| panic!("{table}.{column} has no `IN (…)` CHECK in the live schema"));
+        assert!(
+            lists.next().is_none(),
+            "{table}.{column} has more than one `IN (…)` constraint — a pin cannot tell \
+             which one is the enum"
+        );
+        quoted_strings(list.split_once(')').expect("the IN list closes").0)
+    }
+
+    /// A `sel()` option list in `config.js` is a copy of a list the server
+    /// defines, and an unpinned copy drifts: a value added to an enum is
+    /// unreachable from the UI until someone remembers this file, and one
+    /// removed stays on offer until its `422` is hit. Every picker is
+    /// classified here against the definition it copies — the live schema's
+    /// own CHECK for a stored enum, the Rust const for the two that are not
+    /// stored — and a picker in neither list fails this test, so a new one
+    /// cannot ship unpinned.
+    #[tokio::test]
+    async fn select_option_lists_are_pinned_to_their_server_side_source() {
+        let pool = crate::test_support::test_pool().await;
+        let pickers = config_select_options();
+        let mut classified: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+        // Order is a UI choice (the pickers happen to follow their schema
+        // order); membership is what must match.
+        let mut check = |field: &'static str, mut expected: Vec<String>| {
+            classified.insert(field);
+            let mut offered = pickers
+                .get(field)
+                .unwrap_or_else(|| panic!("config.js has no {field} picker"))
+                .clone();
+            offered.sort();
+            expected.sort();
+            assert_eq!(
+                offered, expected,
+                "the {field} picker's options are not the list the server defines"
+            );
+        };
+
+        // The stored enums: exactly what the column's CHECK admits.
+        for (field, table, column) in [
+            ("security_type", "listings", "security_type"),
+            ("cost_base_rule", "inheritances", "cost_base_rule"),
+            ("income_type", "income", "income_type"),
+            ("expense_type", "investment_expenses", "expense_type"),
+            ("residual_handling", "drp_enrolments", "residual_handling"),
+            ("action_type", "corporate_actions", "action_type"),
+            ("worthless_event", "corporate_actions", "worthless_event"),
         ] {
-            assert!(js.contains(group), "missing field group {group}");
+            check(field, schema_check_values(&pool, table, column).await);
+        }
+
+        // The audit trail's table picker names no column: its source is the
+        // const the endpoint validates against, itself pinned to the
+        // migration's trigger set (`reports::row_history`).
+        check(
+            "table",
+            crate::reports::row_history::AUDITED_TABLES
+                .iter()
+                .map(|t| (*t).to_string())
+                .collect(),
+        );
+        // The parcel-selection strategies are never stored, so the source is
+        // the enum the endpoint deserialises — taken through serde, so the
+        // picker is checked against the wire names rather than the variants.
+        check(
+            "strategy",
+            crate::reports::parcel_optimiser::ALL_STRATEGIES
+                .iter()
+                .map(|s| {
+                    serde_json::to_value(s)
+                        .expect("a strategy serialises")
+                        .as_str()
+                        .expect("to a string")
+                        .to_string()
+                })
+                .collect(),
+        );
+
+        // The one deliberate subset, so it is a stated intention rather than
+        // an omission: the Trades form enters acquisitions only. A Sell is
+        // entered under Sells so it always carries its parcel allocations,
+        // and every other `trade_type` is written by an operation rather than
+        // typed. Still checked against the schema, so the one value it offers
+        // cannot drift into one the column refuses.
+        classified.insert("trade_type");
+        let trade_types = schema_check_values(&pool, "trades", "trade_type").await;
+        assert_eq!(
+            pickers["trade_type"],
+            ["Buy"],
+            "the Trades form enters acquisitions only"
+        );
+        assert!(
+            trade_types.contains(&"Buy".to_string()),
+            "trades.trade_type no longer admits Buy"
+        );
+
+        assert_eq!(
+            classified,
+            pickers
+                .keys()
+                .map(String::as_str)
+                .collect::<std::collections::BTreeSet<_>>(),
+            "every sel() picker must be pinned to the list it copies — classify the new one above"
+        );
+    }
+
+    /// Whether `js` reads `<object>.<property>` — the property name bounded,
+    /// so a longer name it prefixes (`h.duplicate_income` inside
+    /// `h.duplicate_incomes`) does not answer for it.
+    fn reads_property(js: &str, object: &str, property: &str) -> bool {
+        js.split(&format!("{object}.{property}"))
+            .skip(1)
+            .any(|after| {
+                !after.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+            })
+    }
+
+    /// `refreshHealthBanner`'s own body from the served bundle, so the pin
+    /// below cannot be satisfied by a field name mentioned somewhere else in
+    /// the app.
+    fn health_banner_source(js: &str) -> &str {
+        let body = js
+            .split_once("async function refreshHealthBanner(")
+            .expect("the bundle declares refreshHealthBanner")
+            .1;
+        // A top-level function: the first brace in column 0 closes it.
+        body.split_once("\n}").expect("the function closes").0
+    }
+
+    /// The health-report fields the banner deliberately does **not** carry,
+    /// each with the read that surfaces it instead — so an exemption still
+    /// has to prove the alert reaches a user, and is not just a way past this
+    /// test.
+    const HEALTH_FIELDS_SURFACED_OFF_THE_BANNER: [(&str, &str); 1] = [
+        // The missing-row counterpart of `errored_prices` is a listing-level
+        // to-do with a remedy attached rather than a one-line warning: the
+        // Closing Prices screen lists each hole and pre-fills the backfill
+        // form over exactly its span, which a banner sentence cannot do.
+        ("unpriced_days", "health.unpriced_days"),
+    ];
+
+    /// The banner is the only place a health alert reaches the user without
+    /// being looked for, and it reads the report field by field. An alert
+    /// added to `HealthReport` that nothing renders is computed on every page
+    /// load and shown to nobody — so the field names come from the report's
+    /// own serialised shape rather than from a list kept here, and a new one
+    /// fails this test until the banner renders it or it is classified above.
+    #[tokio::test]
+    async fn health_banner_renders_every_field_of_the_health_report() {
+        let pool = crate::test_support::test_pool().await;
+        let report: serde_json::Value = ApiClient::full(&pool).get_json("/reports/health").await;
+        let fields = report
+            .as_object()
+            .expect("the health report is a flat JSON object of alerts");
+        assert!(
+            fields.contains_key("prices_stale"),
+            "the health report has changed shape — this pin walks its top-level fields"
+        );
+        let js = app_js_body().await;
+        let banner = health_banner_source(&js);
+        for field in fields.keys() {
+            if let Some((_, read)) = HEALTH_FIELDS_SURFACED_OFF_THE_BANNER
+                .iter()
+                .find(|(f, _)| f == field)
+            {
+                let (object, property) = read.split_once('.').expect("an exempt read is a.b");
+                assert!(
+                    reads_property(&js, object, property),
+                    "{field} is exempt from the banner because {read} surfaces it, and it does not"
+                );
+                continue;
+            }
+            assert!(
+                reads_property(banner, "h", field),
+                "refreshHealthBanner never reads h.{field} — a health alert nothing surfaces. \
+                 Render it, or classify it in HEALTH_FIELDS_SURFACED_OFF_THE_BANNER with the \
+                 read that does"
+            );
+        }
+        // An exemption for a field the report no longer has is a stale note
+        // that would quietly excuse a future field of the same name.
+        for (field, _) in HEALTH_FIELDS_SURFACED_OFF_THE_BANNER {
+            assert!(
+                fields.contains_key(field),
+                "{field} is no longer a health-report field — drop its exemption"
+            );
         }
     }
 
