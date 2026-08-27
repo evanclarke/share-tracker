@@ -10,7 +10,17 @@ findings are all closed in DONE.md), except where a section's heading names anot
 (e.g. REQUIREMENTS, SCENARIOS). Each section records one finding; sections land in DONE.md as they
 are fixed or decided.
 
-**Open: 1 section** — the distribution calendar recorded from REQUIREMENTS 2026-08-27. All sixteen sections recorded from the **2026-08-25 code review**
+**Open: none.** The distribution calendar recorded from REQUIREMENTS 2026-08-27 is closed and
+archived in [`DONE/reporting.md`](DONE/reporting.md): its research gate — whether the price
+provider's ASX coverage is real enough to read "no ex-date" as "no distribution" — was settled
+against Betashares' own published history (`6ae6d45`), the table, the provider-agnostic fetch, the
+weekly job and the two advisory health alerts were built on it (`16f9eb1`), and the whole thing was
+documented and driven against the **live** provider (`849bb83`). Two provider facts had to be
+measured rather than assumed and both changed the code: `Action::Dividend.date` is a UTC date, a day
+early for every ASX event in AEDT, so the ex-date is recovered by joining each event to the candle
+sharing its UTC date; and Yahoo restates a whole dividend history into the *current* unit basis every
+time a security splits, so the stored per-unit amount is kept in the basis of its own fetch and
+multiplied by units in that same basis. All sixteen sections recorded from the **2026-08-25 code review**
 (a whole-codebase pass over `src` — business-logic errors, quality, duplication — every finding
 adversarially verified against `f171999`) are closed and archived in
 [`DONE/reviews.md`](DONE/reviews.md): the AMIT×rollover pair (`44b8a6b`), the four-endpoint
@@ -285,48 +295,3 @@ already wrong (a crypto network-fee Sell reported as "entered directly"), replac
 rule plus a `PRAGMA foreign_key_list` guard; AA-b made `renounceable` a **required** field rather than
 a defaulted one, because a default would have left the same silent assumption for every new entry; and
 AA-b's second item pulled the shared clause out so the two refusals read as one rule in two places.
-
-## Distribution calendar and the missing-dividend alert (REQUIREMENTS 2026-08-27, narrowed same day)
-(Advisory data-completeness only — the feed must never gate a tax figure. Narrowed from the first
-draft after the AMMA coverage fix landed on recorded facts alone: the third `amma_missing` limb and
-the resolution of the advisory `amma_nothing_recorded` list are both **cut**, with reasons in
-REQUIREMENTS' "Deliberately out of scope". Provider capability verified live against `yfinance-rs`
-0.9.1 on 2026-08-27; three measured facts constrain the work — `Range::Max` silently truncates the
-action stream (VDHG 8 events vs 28 for the same span as an explicit period), so the fetch must pass
-an explicit `between(start, end)`; the stored date is the **ex-date**, which for an ASX fund's
-June-half distribution falls a day or two into July while the income is attributed to the year just
-*ended*, so events are matched to income rows by event and never bucketed into a financial year;
-and matching cannot key on `ex_date`, since 13 of the live database's 47 income rows have none.)
-- [x] **Gate on this first, before any code**: settle whether Yahoo's ASX ETF coverage is complete.
-  It returns 8 HNDQ events since the August 2020 launch where a semi-annual payer should have 11–12
-  (2022-01, 2022-07, 2023-07, 2026-01 absent). Compare against Betashares' published HNDQ
-  distribution history and record the answer in REQUIREMENTS. If the coverage is holed, "no ex-date
-  found" cannot mean "no distribution" and the alerts below can only ever fire on events Yahoo
-  *does* have — still useful, but say so rather than implying completeness
-  — **settled 2026-08-27: the coverage is not holed.** Betashares' own distribution table (read out
-  of the raw HTML, not a rendering) prints a bare `-` in its amount column for exactly the four
-  periods Yahoo lacks, so HNDQ distributed nothing on them; its other eight rows match Yahoo's
-  eight events to 6 dp. Recorded in REQUIREMENTS under "Coverage settled", with the two limits on
-  how far one security generalises. **The gate is clear** — the alerts below may read "no ex-date
-  found" as "no distribution"
-- [ ] **Found while settling the gate, and it corrects a fact recorded in REQUIREMENTS earlier the
-  same day**: `Action::Dividend.date` is a **UTC** calendar date, not the ex-date — one day early
-  for every ASX event in AEDT (October–April), where it then routinely lands on a day the market
-  was shut (New Year's Day, a Sunday, Easter Monday). The fetch must recover the true ex-date by
-  joining the event to the candle sharing its UTC date (`fetch_full()` returns candles and actions
-  from one response, and `Candle::ts` keeps the instant the action lost) — verified 10 of 10
-  against issuer-published dates across HNDQ, BHP and VDHG. See REQUIREMENTS "The one-day ex-date
-  shift" and "The correction, verified"
-- [ ] `distribution_events` table + migration (listing, ex-date, amount per unit, currency,
-  provenance); classify it for snapshot staleness and `row_history` auditing per CLAUDE.md
-- [ ] Provider-agnostic fetch behind a trait, Yahoo the only provider-specific part, on the
-  `closing_price` pattern; explicit period, never `Range::Max`; candle-joined ex-date, never the
-  raw `Action::Dividend.date`
-- [ ] Scheduled refresh job in `infra/scheduler/registry.rs` + its `schedule.cron` line
-- [ ] `reports::health` **missing dividend entry** alert: known ex-date, units held on it, no
-  matching income row — carrying ticker, ex-date and expected amount (per unit × units held)
-- [ ] `reports::health` **amount cross-check** alert: known ex-date matched to an income row whose
-  gross cash differs materially from per unit × units held. Gross total only, never components —
-  this is the likelier error of the two and the one the 6 dp reconciliation shows Yahoo can catch
-- [ ] Docs: `docs/SCHEMA.md` (table + relationships), `docs/API.md` (both alert shapes), README
-  Features

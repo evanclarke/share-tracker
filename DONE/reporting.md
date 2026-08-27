@@ -1976,3 +1976,84 @@ Regression tests:
 partial disposal and the whole-parcel control in one document) and
 `api_the_itemised_adjustments_span_the_whole_gap_on_a_partial_disposal` (the identity, over both
 reduction kinds).
+
+<!-- Closed 2026-08-27 (6ae6d45 the research gate, 16f9eb1 the build, 849bb83 the docs and
+the live-provider verification). Archived here rather than in infra.md because the deliverable is
+two health-report alerts; the table and the import job exist to feed them. -->
+
+## Distribution calendar and the missing-dividend alert (REQUIREMENTS 2026-08-27, narrowed same day)
+(Advisory data-completeness only — the feed must never gate a tax figure. Narrowed from the first
+draft after the AMMA coverage fix landed on recorded facts alone: the third `amma_missing` limb and
+the resolution of the advisory `amma_nothing_recorded` list are both **cut**, with reasons in
+REQUIREMENTS' "Deliberately out of scope". Provider capability verified live against `yfinance-rs`
+0.9.1 on 2026-08-27; three measured facts constrain the work — `Range::Max` silently truncates the
+action stream (VDHG 8 events vs 28 for the same span as an explicit period), so the fetch must pass
+an explicit `between(start, end)`; the stored date is the **ex-date**, which for an ASX fund's
+June-half distribution falls a day or two into July while the income is attributed to the year just
+*ended*, so events are matched to income rows by event and never bucketed into a financial year;
+and matching cannot key on `ex_date`, since 13 of the live database's 47 income rows have none.)
+- [x] **Gate on this first, before any code**: settle whether Yahoo's ASX ETF coverage is complete.
+  It returns 8 HNDQ events since the August 2020 launch where a semi-annual payer should have 11–12
+  (2022-01, 2022-07, 2023-07, 2026-01 absent). Compare against Betashares' published HNDQ
+  distribution history and record the answer in REQUIREMENTS. If the coverage is holed, "no ex-date
+  found" cannot mean "no distribution" and the alerts below can only ever fire on events Yahoo
+  *does* have — still useful, but say so rather than implying completeness
+  — **settled 2026-08-27: the coverage is not holed.** Betashares' own distribution table (read out
+  of the raw HTML, not a rendering) prints a bare `-` in its amount column for exactly the four
+  periods Yahoo lacks, so HNDQ distributed nothing on them; its other eight rows match Yahoo's
+  eight events to 6 dp. Recorded in REQUIREMENTS under "Coverage settled", with the two limits on
+  how far one security generalises. **The gate is clear** — the alerts below may read "no ex-date
+  found" as "no distribution"
+- [x] **Found while settling the gate, and it corrects a fact recorded in REQUIREMENTS earlier the
+  same day**: `Action::Dividend.date` is a **UTC** calendar date, not the ex-date — one day early
+  for every ASX event in AEDT (October–April), where it then routinely lands on a day the market
+  was shut (New Year's Day, a Sunday, Easter Monday). The fetch must recover the true ex-date by
+  joining the event to the candle sharing its UTC date (`fetch_full()` returns candles and actions
+  from one response, and `Candle::ts` keeps the instant the action lost) — verified 10 of 10
+  against issuer-published dates across HNDQ, BHP and VDHG. See REQUIREMENTS "The one-day ex-date
+  shift" and "The correction, verified"
+  — done in `entities::distribution_event::yahoo` (`16f9eb1`), and proved in production rather than
+  only in tests: `POST /jobs/distribution-import` against the live provider stored all 8 HNDQ events
+  at exactly Betashares' published ex-dates, four of them the AEDT ones the crate reports a day
+  early (`849bb83`)
+- [x] `distribution_events` table + migration (listing, ex-date, amount per unit, currency,
+  provenance); classify it for snapshot staleness and `row_history` auditing per CLAUDE.md
+  — migration 0048: audited (the 23rd table, with the `row_history` CHECK rebuild its addition
+  needs) and classified **staleness-exempt**, since the three snapshotted reports are the
+  price-dependent ones and its only reader, `reports::health`, is computed live
+- [x] Provider-agnostic fetch behind a trait, Yahoo the only provider-specific part, on the
+  `closing_price` pattern; explicit period, never `Range::Max`; candle-joined ex-date, never the
+  raw `Action::Dividend.date`
+  — a **third** measured provider fact turned up while building the cross-check and inverted a
+  default: Yahoo restates a security's whole dividend history into the **current** unit basis,
+  cumulatively (NVDA's pre-split dividends come back as 0.004 against a declared $0.04, and the ones
+  before its 2021 4-for-1 as 0.004 too, against a declared $0.16). So `amount_per_unit` is stored in
+  the basis of its own `fetched_at`, exactly as served — a conversion back could only use the splits
+  recorded at fetch time and would be silently wrong for any recorded later — and the reader
+  multiplies it by units in that same basis, a total being basis-independent
+  (`HeldTimeline::units_by_account_on` takes the basis as its own parameter). Recorded in
+  REQUIREMENTS and `docs/SCHEMA.md`
+- [x] Scheduled refresh job in `infra/scheduler/registry.rs` + its `schedule.cron` line
+  — `distribution-import`, weekly (Monday 05:00). One provider call per held listing over the span
+  it was held; it never deletes, and an event it cannot place on the market's calendar qualifies the
+  run with a note rather than vanishing
+- [x] `reports::health` **missing dividend entry** alert: known ex-date, units held on it, no
+  matching income row — carrying ticker, ex-date and expected amount (per unit × units held)
+  — one deliberate departure from the wording, stated because it changes the answer: held is
+  measured on the **last cum-dividend day**, the day *before* the ex-date, since that is what
+  entitles a holder. A Buy dated on the ex-date bought the security without the distribution
+  attached, and counting it would invent an entitlement; the test carries the control (the same Buy
+  one day earlier does fire the alert). Matching is per **holding account** — an entitlement is paid
+  to a registered holder — on the income row's own `ex_date` where it has one and otherwise a
+  −15/+45-day window over `entitlement_date`/`date_paid`, with no row claimed by two events
+- [x] `reports::health` **amount cross-check** alert: known ex-date matched to an income row whose
+  gross cash differs materially from per unit × units held. Gross total only, never components —
+  this is the likelier error of the two and the one the 6 dp reconciliation shows Yahoo can catch
+  — "materially" is 2% of the expected gross **and** at least $1: the band absorbs registry rounding
+  while a mistyped figure sits far outside it, and the floor stops a fraction-of-a-cent per-unit
+  distribution (HNDQ paid 0.018741) alerting on cents
+- [x] Docs: `docs/SCHEMA.md` (table + relationships), `docs/API.md` (both alert shapes), README
+  Features
+  — plus a `docs/API.md` **Distribution calendar** section and a Known-limitations entry saying what
+  an alert *not* firing does not prove, all pinned by
+  `doc_checks::distribution_calendar_documented`
