@@ -2405,7 +2405,22 @@ async function viewReport(report, args) {
   // Config-driven, not overview-specific — any report can opt in by setting
   // `performancePanel` (see config.js). Currently only the Portfolio
   // Overview screen does.
-  const panel = report.performancePanel ? await performancePanel() : null;
+  //
+  // The holder is built now and filled when the panel's own requests land,
+  // rather than awaited before the screen is assembled: nothing else here
+  // depends on it, and awaiting it held the *whole page* blank for its two
+  // round trips before anything at all was drawn. The chart still sizes
+  // itself correctly — it measures 0 while detached and redraws from its
+  // ResizeObserver on attach, which is what already happened when the panel
+  // was built ahead of `setMain` (see `performancePanel`).
+  const panel = report.performancePanel ? el('div') : null;
+  const panelReady = panel
+    ? performancePanel().then(function (built) {
+      panel.appendChild(built);
+    }).catch(function (e) {
+      panel.appendChild(el('p', { class: 'hint warn' }, e.message));
+    })
+    : Promise.resolve();
   // Shortcut buttons for the report's most common follow-on actions — the
   // Portfolio Overview (the app's home screen) uses this for New trade/
   // income/sell/transfer so they don't require a menu hunt.
@@ -2553,6 +2568,10 @@ async function viewReport(report, args) {
   if (report.method === 'GET') {
     await render(await api('GET', report.api));
     setMain(el('div', null, [header, shortcuts, panel, result]));
+    // Resolve only once the screen is actually complete: the panel paints
+    // when it lands, but a caller awaiting this view is entitled to a
+    // finished one.
+    await panelReady;
     return;
   }
 
@@ -2598,6 +2617,7 @@ async function viewReport(report, args) {
     // optional — Row History, which opens on the browse page and narrows from
     // there. A report with a required input still waits for the form.
     if (deepLink || report.autoRun) form.requestSubmit();
+    await panelReady;
     return;
   }
 
@@ -2608,19 +2628,12 @@ async function viewReport(report, args) {
   // below the holdings table it values, not as a headline element — the
   // Portfolio Overview's performance panel and the table itself are what
   // lead the screen.
-  const listings = await api('GET', '/listings');
   const priceForm = el('form', { class: 'price-form' });
   const priceDetails = el('details', { class: 'price-overrides' }, [
     el('summary', null, 'Manual Price Overrides'),
     el('p', { class: 'hint' },
       'Leave blank to value from the live price source. Enter a price to override that listing.'),
   ]);
-  listings.forEach(function (l) {
-    priceDetails.appendChild(el('div', { class: 'field' }, [
-      el('label', null, l.id + ': ' + l.ticker + ' (' + (l.exchange_mic || 'Crypto') + ')'),
-      el('input', { type: 'text', inputmode: 'decimal', 'data-listing': l.id }),
-    ]));
-  });
   priceForm.appendChild(priceDetails);
   if (report.asOfDate) {
     priceForm.appendChild(el('div', { class: 'field' }, [
@@ -2652,13 +2665,37 @@ async function viewReport(report, args) {
       toast(e.message, true);
     }
   });
+  // The override inputs are the one thing here that needs the listing list,
+  // and on first load there can be no override to read — the form has just
+  // been built empty — so the report is asked for now and the inputs fill in
+  // when they arrive. Awaiting the listings first (as this did) put a whole
+  // request in front of the valuation that could not change its answer.
+  const overridesReady = api('GET', '/listings').then(function (listings) {
+    listings.forEach(function (l) {
+      priceDetails.appendChild(el('div', { class: 'field' }, [
+        el('label', null, l.id + ': ' + l.ticker + ' (' + (l.exchange_mic || 'Crypto') + ')'),
+        el('input', { type: 'text', inputmode: 'decimal', 'data-listing': l.id }),
+      ]));
+    });
+  }).catch(function (e) {
+    priceDetails.appendChild(el('p', { class: 'hint warn' },
+      'Could not load the listings to override: ' + e.message));
+  });
+
+  // Paint the shell before any of it has landed: the header, the shortcuts
+  // and the (empty) holdings section are on screen while the panel, the
+  // valuation and the override inputs are all still in flight, instead of
+  // after them one at a time.
   setMain(el('div', null, [header, shortcuts, panel, el('h3', null, 'Holdings'), result, priceForm]));
   // Run live on first load so the valuation is shown without manual entry.
-  try {
-    await render(await api('POST', report.api, buildBody()));
-  } catch (e) {
-    toast(e.message, true);
-  }
+  const firstRun = api('POST', report.api, buildBody())
+    .then(render)
+    .catch(function (e) {
+      toast(e.message, true);
+    });
+  // Independent requests, so they overlap rather than stack; the view is
+  // finished only when all three have landed.
+  await Promise.all([firstRun, panelReady, overridesReady]);
 }
 
 // ---- router -----------------------------------------------------------

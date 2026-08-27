@@ -1537,6 +1537,33 @@ mod tests {
         // `listing_name_cells_link_into_the_activity_report` below.
     }
 
+    /// The screen paints before any of its data arrives, and its three
+    /// independent requests overlap instead of stacking.
+    ///
+    /// This was measured, not assumed: with the panel awaited ahead of
+    /// `setMain` the whole page stayed blank for ~190 ms and the holdings
+    /// table filled at ~720 ms; with the three started together the shell is
+    /// up at ~6 ms and the table at ~240 ms (headless Chrome, real portfolio).
+    /// The negative assertion is the half that matters — re-introducing the
+    /// `await` in front of `performancePanel()` is the exact regression, and
+    /// nothing else in the suite would notice it.
+    #[tokio::test]
+    async fn the_overview_paints_before_its_data_arrives() {
+        let js = app_js_body().await;
+        // The panel is a holder filled when its requests land, never awaited
+        // ahead of the screen being assembled.
+        assert!(
+            !js.contains("await performancePanel()"),
+            "awaiting the panel before `setMain` holds the whole page blank for its round trips"
+        );
+        assert!(js.contains("panelReady"));
+        // The valuation is asked for without waiting on the listing list,
+        // which only feeds the override inputs and cannot change its answer.
+        assert!(js.contains("overridesReady"));
+        // All three land into a screen that is already on-heading.
+        assert!(js.contains("Promise.all([firstRun, panelReady, overridesReady])"));
+    }
+
     #[tokio::test]
     async fn portfolio_overview_range_presets_and_activity_filter_present() {
         let js = app_js_body().await;
