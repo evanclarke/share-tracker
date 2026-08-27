@@ -33,6 +33,30 @@ use sqlx::SqlitePool;
 const INDEX_HTML: &str = include_str!("web/index.html");
 const STYLE_CSS: &str = include_str!("web/style.css");
 
+/// The colour-scheme bootstrap, inlined into the `<head>` of *both* HTML
+/// documents this application serves — the SPA shell below and the login page
+/// (`infra::auth`), which substitutes it into the same `{{THEME}}` placeholder.
+///
+/// It exists because the scheme has to be on `<html>` before the first paint:
+/// a `<script type="module">` runs after the document is parsed, so a
+/// dark-mode reload would flash a full white page first. The login page has
+/// the stronger reason — it loads no modules at all, so this is the only
+/// JavaScript it gets.
+///
+/// It is a deliberately minimal restatement of `util.js`'s `resolveTheme`
+/// (remembered choice wins, otherwise follow the OS), and one const shared by
+/// both documents rather than a literal copied into each template, so the two
+/// pages cannot come to disagree about which scheme is in force.
+pub(crate) const THEME_BOOT_SCRIPT: &str = r#"  <script>
+    try {
+      var t = localStorage.getItem('share-tracker.theme');
+      if (t !== 'light' && t !== 'dark') {
+        t = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+      }
+      document.documentElement.setAttribute('data-theme', t);
+    } catch (e) { /* storage or matchMedia unavailable: the light default stands */ }
+  </script>"#;
+
 /// The ES modules making up the app, as (route, source) pairs: the `app.js`
 /// entry point plus everything it (transitively) imports. A new module is
 /// served by adding a pair here.
@@ -87,6 +111,7 @@ fn index_html(base_path: &str, auth_enabled: bool) -> String {
         .replace("{{VERSION}}", env!("CARGO_PKG_VERSION"))
         .replace("{{BASE}}", base_path)
         .replace("{{AUTH}}", if auth_enabled { "1" } else { "" })
+        .replace("{{THEME}}", THEME_BOOT_SCRIPT)
 }
 
 fn asset(content_type: &'static str, body: &'static str) -> Response {
@@ -1605,10 +1630,214 @@ mod tests {
         assert!(css.contains(".menu:hover .menu-panel"));
         assert!(css.contains(".menu:focus-within .menu-panel"));
         // A hovered/active menu label must set its own background — the
-        // generic `button:hover` rule's light background is a different
+        // generic `button:hover` rule's panel background is a different
         // property to `.menu-label:hover`'s color change, so without this it
-        // still applies and gives near-white text on a near-white button.
-        assert!(css.contains(".menu-label:hover, .menu-label.active { color: #fff; background:"));
+        // still applies and gives topbar-coloured text on a panel-coloured
+        // button.
+        assert!(css.contains(
+            ".menu-label:hover, .menu-label.active { color: var(--topbar-ink); background: var(--overlay-hover); }"
+        ));
+    }
+
+    /// Strips CSS comments, blanking their content but keeping their
+    /// newlines, so a line number in the stripped text still names the same
+    /// line of the file. The colour scans below all read declarations, and a
+    /// comment quoting a colour is prose, not a rule.
+    fn without_comments(css: &str) -> String {
+        let mut out = String::with_capacity(css.len());
+        let mut rest = css;
+        loop {
+            match rest.find("/*") {
+                None => {
+                    out.push_str(rest);
+                    return out;
+                }
+                Some(start) => {
+                    out.push_str(&rest[..start]);
+                    let after = &rest[start + 2..];
+                    let end = after.find("*/").map_or(after.len(), |e| e + 2);
+                    for ch in after[..end].chars() {
+                        if ch == '\n' {
+                            out.push('\n');
+                        }
+                    }
+                    rest = &after[end..];
+                }
+            }
+        }
+    }
+
+    /// The `(line number, text)` of every line of `css` that is *not* inside
+    /// a palette block — a rule opening with a `:root` selector. Those blocks
+    /// are the only place a colour literal is allowed to appear.
+    fn lines_outside_the_palettes(css: &str) -> Vec<(usize, String)> {
+        let mut out = Vec::new();
+        let mut depth = 0usize;
+        for (n, line) in css.lines().enumerate() {
+            let trimmed = line.trim();
+            if depth == 0 && trimmed.starts_with(":root") && trimmed.ends_with('{') {
+                depth = 1;
+                continue;
+            }
+            if depth > 0 {
+                depth += trimmed.matches('{').count();
+                depth -= trimmed.matches('}').count();
+                continue;
+            }
+            out.push((n + 1, line.to_string()));
+        }
+        out
+    }
+
+    /// The first colour literal on a line, if any: a `#rgb`-style hex run or
+    /// an `rgb()`/`rgba()` call. An id selector is not one — `#brand` and
+    /// `#app` open with too few hex digits to be a colour, and a run that
+    /// continues into a non-hex letter (`#f00d-something`) is a name too.
+    fn colour_literal(line: &str) -> Option<String> {
+        if line.contains("rgb(") || line.contains("rgba(") {
+            return Some("rgb()/rgba()".to_string());
+        }
+        let chars: Vec<char> = line.chars().collect();
+        for (i, c) in chars.iter().enumerate() {
+            if *c != '#' {
+                continue;
+            }
+            let mut n = 0;
+            while i + 1 + n < chars.len() && chars[i + 1 + n].is_ascii_hexdigit() {
+                n += 1;
+            }
+            let next = chars.get(i + 1 + n);
+            let ends_cleanly = !next.is_some_and(|c| c.is_ascii_alphanumeric() || *c == '-');
+            if n >= 3 && ends_cleanly {
+                return Some(chars[i..=i + n].iter().collect());
+            }
+        }
+        None
+    }
+
+    /// The `--token` names declared by the palette block that opens with
+    /// `opening` at the start of a line (so the indented print-media override
+    /// is not mistaken for one of the two whole-scheme palettes).
+    fn palette_tokens(css: &str, opening: &str) -> Vec<String> {
+        let start = css
+            .find(&format!("\n{opening}"))
+            .unwrap_or_else(|| panic!("style.css has a `{opening}` palette block"));
+        let block = &css[start..];
+        let end = block.find("\n}").expect("the palette block closes");
+        block[..end]
+            .lines()
+            .filter_map(|l| {
+                let t = l.trim();
+                t.strip_prefix("--")
+                    .and_then(|t| t.split(':').next())
+                    .map(|name| format!("--{name}"))
+            })
+            .collect()
+    }
+
+    /// The UI has two colour schemes and a toggle between them, remembered
+    /// across reloads. The scheme is stamped on `<html>` as `data-theme`,
+    /// which is what every palette in the stylesheet keys off.
+    #[tokio::test]
+    async fn colour_scheme_toggle_ui_present() {
+        let js = app_js_body().await;
+        let css = STYLE_CSS;
+
+        // The rule lives in one place (util.js), because the stylesheet
+        // deliberately carries no `prefers-color-scheme` block of its own:
+        // an explicit remembered choice wins, else follow the OS.
+        assert!(js.contains("function resolveTheme("));
+        assert!(js.contains("share-tracker.theme"));
+        assert!(js.contains("prefers-color-scheme: dark"));
+        assert!(js.contains("function toggleTheme("));
+        assert!(
+            js.contains("initTheme()"),
+            "the toggle must be wired at boot"
+        );
+        assert!(
+            !without_comments(css).contains("prefers-color-scheme"),
+            "the scheme is chosen in JS only — a second copy of the rule in CSS is what drifts"
+        );
+
+        // The control itself: markup in the shell, labelled from the scheme
+        // actually in force rather than hard-coded either way round.
+        assert!(INDEX_HTML.contains(r#"<button id="theme-toggle""#));
+        assert!(js.contains("getElementById('theme-toggle')"));
+        assert!(css.contains(".theme-toggle {"));
+
+        // The scheme is applied before the first paint, or a dark-mode reload
+        // flashes a full white page while the module graph loads.
+        let shell = index_html("", false);
+        assert!(shell.contains("document.documentElement.setAttribute('data-theme'"));
+        assert!(shell.contains("localStorage.getItem('share-tracker.theme')"));
+        assert!(
+            !shell.contains("{{THEME}}"),
+            "the shell must substitute the bootstrap, not serve its placeholder"
+        );
+        assert!(
+            shell.find("data-theme") < shell.find("/static/app.js"),
+            "the bootstrap must run before the module graph, not with it"
+        );
+    }
+
+    /// The two schemes must define exactly the same token set. A token added
+    /// to one alone would silently inherit the other scheme's value —
+    /// invisible to whoever added it, and wrong on every machine using the
+    /// scheme they weren't looking at.
+    #[tokio::test]
+    async fn both_colour_schemes_define_the_same_tokens() {
+        let css = without_comments(STYLE_CSS);
+        let light = palette_tokens(&css, ":root {");
+        let dark = palette_tokens(&css, r#":root[data-theme="dark"] {"#);
+        assert!(light.len() > 20, "the light palette is the token list");
+        for token in &light {
+            assert!(
+                dark.contains(token),
+                "{token} is not defined in the dark scheme"
+            );
+        }
+        for token in &dark {
+            assert!(
+                light.contains(token),
+                "{token} is not defined in the light scheme"
+            );
+        }
+    }
+
+    /// Every colour in the stylesheet is a palette token. A literal anywhere
+    /// else is a colour that only belongs to one of the two schemes and would
+    /// stay put when the other is selected.
+    #[tokio::test]
+    async fn no_colour_is_hard_coded_outside_the_palettes() {
+        let css = without_comments(STYLE_CSS);
+        let offenders: Vec<String> = lines_outside_the_palettes(&css)
+            .into_iter()
+            .filter_map(|(n, line)| colour_literal(&line).map(|c| format!("line {n}: {c}")))
+            .collect();
+        assert!(
+            offenders.is_empty(),
+            "colour literals outside the palette blocks: {offenders:?}"
+        );
+    }
+
+    /// Print reverts to the light tokens whatever the screen was showing: the
+    /// archived tax-report PDF must not depend on the scheme that happened to
+    /// be selected, and a dark page prints as a black slab or as unreadably
+    /// pale text depending on the browser's background-graphics setting.
+    #[tokio::test]
+    async fn printing_is_never_dark() {
+        let print = STYLE_CSS
+            .split("@media print")
+            .nth(1)
+            .expect("style.css has a @media print block");
+        assert!(
+            print.contains(r#":root, :root[data-theme="dark"] {"#),
+            "the print override must name the dark scheme — `:root[data-theme=\"dark\"]` \
+             outweighs a bare `:root`, so a plain `:root` override would lose to it"
+        );
+        assert!(print.contains("color-scheme: light;"));
+        assert!(print.contains("--bg: #ffffff;"));
+        assert!(print.contains("--ink: #000000;"));
     }
 
     /// "Log out" (nav.js) renders in the top bar only when `[auth]` is

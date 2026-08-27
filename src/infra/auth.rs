@@ -386,7 +386,12 @@ fn render_login(base_path: &str, error: Option<&str>) -> Html<String> {
     Html(
         LOGIN_HTML
             .replace("{{BASE}}", base_path)
-            .replace("{{ERROR}}", &error_html),
+            .replace("{{ERROR}}", &error_html)
+            // The same pre-paint colour-scheme script the SPA shell carries —
+            // one const, so the login page can never disagree with the app it
+            // leads to about which scheme is in force. It is also the only
+            // JavaScript this page has: it loads no modules.
+            .replace("{{THEME}}", crate::web::THEME_BOOT_SCRIPT),
     )
 }
 
@@ -680,6 +685,20 @@ mod api_tests {
         let c = client(&pool, auth());
         assert_eq!(c.get("/login").await.status, StatusCode::OK);
         assert_eq!(c.get("/static/style.css").await.status, StatusCode::OK);
+    }
+
+    /// The login page carries the app's colour-scheme bootstrap. It is the
+    /// one page here that loads no JS modules at all, so without this inline
+    /// script a dark-mode user meets a white page on every session expiry —
+    /// and the placeholder must be substituted, not served.
+    #[tokio::test]
+    async fn the_login_page_applies_the_remembered_colour_scheme() {
+        let pool = test_pool().await;
+        let c = client(&pool, auth());
+        let resp = c.get("/login").await;
+        let body = resp.text();
+        assert!(body.contains(crate::web::THEME_BOOT_SCRIPT));
+        assert!(!body.contains("{{THEME}}"));
     }
 
     #[tokio::test]

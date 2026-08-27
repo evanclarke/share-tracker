@@ -1,14 +1,118 @@
+/* ---- palettes ---------------------------------------------------------
+   Every colour in this file is a token defined here, so the whole app has
+   exactly two colour schemes and no rule below hard-codes one of them. The
+   light scheme is the default; the dark scheme is the same token list
+   redefined under `[data-theme="dark"]` on <html>.
+
+   Which one is in force is decided in JS, not CSS: util.js's resolveTheme
+   reads the remembered choice (localStorage) and falls back to the OS
+   `prefers-color-scheme`, and a pre-paint inline script in the shell (and in
+   the login page, which loads no modules) stamps the attribute before the
+   first paint so a dark-mode reload never flashes light. There is
+   deliberately no `@media (prefers-color-scheme: dark)` block: a second copy
+   of ~40 tokens is a maintenance hazard, and the one that fell out of step
+   would only show on the machines nobody develops on. The cost is that with
+   JS disabled the login page renders light — the app itself does not render
+   at all without JS, so this is the only page affected.
+
+   `color-scheme` is part of each palette on purpose: it is what tells the
+   browser to paint its *own* widgets to match — scrollbars, the native date
+   picker, a <select>'s dropdown list — none of which this stylesheet can
+   reach. Without it a dark page grows white scrollbars and an unreadable
+   date picker. */
 :root {
-  --bg: #f5f6f8;
+  color-scheme: light;
+
+  --bg: #f4f6f9;
   --panel: #ffffff;
-  --ink: #1c2330;
-  --muted: #6b7480;
-  --line: #e1e4e9;
-  --accent: #1f6feb;
+  --panel-alt: #eaeff5;    /* table headers */
+  --row-hover: #f2f7fc;    /* hovered row, filter row, detail row */
+  --hover: #e6edf5;        /* hovered button / menu item */
+  --hover-strong: #dae3ee; /* hovered sortable header */
+  --ink: #0c2340;
+  --muted: #5b6b7f;
+  --line: #d7dee7;
+  --field-bg: #ffffff;
+  --grid: #e2e8ef;         /* chart gridlines */
+
+  --accent: #0072ce;
   --accent-ink: #ffffff;
-  --danger: #c0392b;
-  --ok: #1e7d34;
-  --warn: #b8860b;
+  --accent-soft: #e2eefb;
+  --danger: #b3261e;
+  --danger-soft: #fceceb;
+  --danger-line: #f2c4c0;
+  --ok: #00785a;
+  --ok-soft: #e0f2ec;
+  --warn: #96620a;
+  --warn-soft: #fbf0da;
+  --neutral-soft: #e8ecf1; /* a badge that reports neither good nor bad news */
+  --banner-bg: #fdf4dc;    /* health strip, section notice */
+
+  --topbar-bg: #0c2340;
+  --topbar-ink: #ffffff;   /* the topbar's foreground at full strength */
+  --topbar-link: #dfe4ea;  /* its menu labels at rest */
+  --topbar-dim: #9fb2c8;   /* version, subtitle */
+  --overlay-hover: rgba(255, 255, 255, .12);
+
+  --tip-bg: #0c2340;       /* chart point tooltip */
+  --tip-ink: #ffffff;
+  --tip-dim: #9fb2c8;
+  --tip-note: #ffd9a0;
+  --toast-ink: #ffffff;    /* text on the solid --ok / --danger toast */
+  --focus-ring: #ffffff;   /* focus outline drawn on a solid accent/toast fill */
+  --shadow: rgba(12, 35, 64, .18);
+}
+
+/* The dark scheme is not the light one inverted: it is built for a dim room
+   and long sessions on dense figure tables. The page recedes to near-black so
+   the numbers carry the contrast, the accent is warm (a cool blue accent
+   vibrates against a black ground at small sizes), and the soft badge fills
+   are dark tints of their own hue rather than pale washes — a pale fill would
+   glare next to a black table. --ink is warm rather than pure white, which is
+   what keeps a full screen of figures from buzzing. */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --bg: #0a0b0d;
+  --panel: #121417;
+  --panel-alt: #191c21;
+  --row-hover: #1b1f25;
+  --hover: #1f242b;
+  --hover-strong: #282e36;
+  --ink: #e6e4e0;
+  --muted: #8b9099;
+  --line: #272b31;
+  --field-bg: #0e1014;
+  --grid: #23272e;
+
+  --accent: #ff9d1e;
+  --accent-ink: #14100a;
+  --accent-soft: #3a2a0d;
+  --danger: #ff5f52;
+  --danger-soft: #3a1714;
+  --danger-line: #6d2721;
+  --ok: #35d07f;
+  --ok-soft: #10301f;
+  --warn: #f5c443;
+  --warn-soft: #3a2d0b;
+  --neutral-soft: #23272d;
+  --banner-bg: #2e2409;
+
+  --topbar-bg: #000000;
+  --topbar-ink: #f5f3ef;
+  --topbar-link: #cfd3d8;
+  --topbar-dim: #8b9099;
+  --overlay-hover: rgba(255, 255, 255, .12);
+
+  --tip-bg: #23272d;
+  --tip-ink: #f0eeea;
+  --tip-dim: #9aa0a8;
+  --tip-note: #ffd9a0;
+  /* --ok and --danger are bright enough here that white text on them is the
+     weaker pairing — a toast reads as dark ink on the fill instead. */
+  --toast-ink: #0a0b0d;
+  --focus-ring: #ffffff;
+  --shadow: rgba(0, 0, 0, .6);
 }
 
 * { box-sizing: border-box; }
@@ -27,13 +131,13 @@ body {
   align-items: center;
   gap: 20px;
   padding: 0 20px;
-  background: var(--ink);
-  color: #fff;
+  background: var(--topbar-bg);
+  color: var(--topbar-ink);
 }
 #brand { display: flex; align-items: baseline; gap: 6px; text-decoration: none; color: inherit; }
 #topbar h1 { margin: 0; padding: 12px 0; font-size: 18px; font-weight: 600; }
-#version { color: #aab3c0; font-size: 11px; }
-#topbar .subtitle { margin-left: auto; color: #aab3c0; font-size: 12px; }
+#version { color: var(--topbar-dim); font-size: 11px; }
+#topbar .subtitle { margin-left: auto; color: var(--topbar-dim); font-size: 12px; }
 
 /* Cross-view health strip: stale price/FX data and failed jobs, populated by
    refreshHealthBanner in app.js from GET /reports/health. */
@@ -42,7 +146,7 @@ body {
   align-items: baseline;
   gap: 12px;
   padding: 8px 20px;
-  background: #fdf3d7;
+  background: var(--banner-bg);
   color: var(--warn);
   border-bottom: 1px solid var(--warn);
   font-size: 13px;
@@ -67,8 +171,8 @@ body {
    alongside the menu bar, styled to match .menu-label rather than the
    light-background button default. */
 .logout-form { margin: 0; }
-.logout-form button { border: none; border-radius: 0; background: none; color: #dfe4ea; padding: 14px 12px; }
-.logout-form button:hover { color: #fff; background: rgba(255, 255, 255, 0.12); }
+.logout-form button { border: none; border-radius: 0; background: none; color: var(--topbar-link); padding: 14px 12px; }
+.logout-form button:hover { color: var(--topbar-ink); background: var(--overlay-hover); }
 .menu { position: relative; }
 .menu-label {
   font: inherit;
@@ -76,16 +180,33 @@ body {
   border: none;
   border-radius: 0;
   background: none;
-  color: #dfe4ea;
+  color: var(--topbar-link);
   cursor: pointer;
 }
-/* The generic `button:hover { background: #eef1f5 }` rule (below) would
+/* The generic `button:hover { background: var(--hover) }` rule (below) would
    otherwise still apply here (it sets a different property than this rule,
    so it isn't overridden by specificity alone), giving near-white text on a
    near-white background — explicit background keeps it a light overlay on
    the dark topbar instead. */
-.menu-label:hover, .menu-label.active { color: #fff; background: rgba(255, 255, 255, 0.12); }
+.menu-label:hover, .menu-label.active { color: var(--topbar-ink); background: var(--overlay-hover); }
 .menu-label::after { content: ' ▾'; font-size: 11px; }
+
+/* The light/dark toggle (index.html's #theme-toggle, wired by util.js). It is
+   plain topbar chrome, so it borrows .menu-label's look rather than the
+   light-background button default — but it is not a menu, hence no ::after
+   caret and a round hit area sized to its single glyph. */
+.theme-toggle {
+  font: inherit;
+  line-height: 1;
+  padding: 6px 8px;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  color: var(--topbar-link);
+  cursor: pointer;
+}
+.theme-toggle:hover { color: var(--topbar-ink); background: var(--overlay-hover); }
+.theme-toggle:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 
 .menu-panel {
   display: none;
@@ -98,7 +219,7 @@ body {
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 0 0 8px 8px;
-  box-shadow: 0 8px 20px rgba(0,0,0,.15);
+  box-shadow: 0 8px 20px var(--shadow);
   white-space: nowrap;
 }
 .menu:hover .menu-panel, .menu:focus-within .menu-panel { display: flex; }
@@ -112,8 +233,8 @@ body {
   color: var(--ink);
   text-decoration: none;
 }
-.menu-panel a:hover { background: #eef1f5; }
-.menu-panel a.active { background: #e7f0ff; color: var(--accent); font-weight: 600; }
+.menu-panel a:hover { background: var(--hover); }
+.menu-panel a.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
 
 #app { padding: 20px 24px; max-width: 100%; overflow-x: auto; }
 
@@ -130,7 +251,7 @@ button {
   border-radius: 5px;
   cursor: pointer;
 }
-button:hover { background: #eef1f5; }
+button:hover { background: var(--hover); }
 button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
 button.primary:hover { filter: brightness(1.05); }
 button.danger { color: var(--danger); }
@@ -147,12 +268,12 @@ a.export-link {
   color: inherit;
   text-decoration: none;
 }
-a.export-link:hover { background: #eef1f5; }
+a.export-link:hover { background: var(--hover); }
 
 table { border-collapse: collapse; width: 100%; background: var(--panel); }
 th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
-th { background: #f0f2f5; font-weight: 600; position: sticky; top: 0; }
-tbody tr:hover { background: #f7f9fc; }
+th { background: var(--panel-alt); font-weight: 600; position: sticky; top: 0; }
+tbody tr:hover { background: var(--row-hover); }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 td.actions { white-space: nowrap; }
 /* A drill-down cell link (filterableTable's opts.links) — e.g. the Portfolio
@@ -161,9 +282,9 @@ td.actions { white-space: nowrap; }
 td a.cell-link { color: var(--accent); text-decoration: none; }
 td a.cell-link:hover { text-decoration: underline; }
 th.sortable { cursor: pointer; user-select: none; }
-th.sortable:hover { background: #e7eaef; }
+th.sortable:hover { background: var(--hover-strong); }
 .sort-ind { color: var(--muted); font-size: 11px; }
-.filter-row th { position: static; background: #f7f9fc; padding: 4px 6px; font-weight: 400; }
+.filter-row th { position: static; background: var(--row-hover); padding: 4px 6px; font-weight: 400; }
 .table-filter { width: 100%; box-sizing: border-box; padding: 3px 6px; font-size: 12px; }
 
 /* Client-side pager beneath a table; hidden when the result set fits one page. */
@@ -183,7 +304,7 @@ th.expand-col, td.expand-col { width: 1%; padding-left: 6px; padding-right: 0; }
 }
 .expand-toggle:hover { color: var(--ink); }
 tr.detail-row:hover { background: none; }
-td.detail-cell { padding: 8px 10px 12px 28px; background: #f7f9fc; white-space: normal; }
+td.detail-cell { padding: 8px 10px 12px 28px; background: var(--row-hover); white-space: normal; }
 td.detail-cell table { background: var(--panel); }
 
 .card {
@@ -216,7 +337,8 @@ input, select, textarea {
   padding: 6px 8px;
   border: 1px solid var(--line);
   border-radius: 5px;
-  background: #fff;
+  background: var(--field-bg);
+  color: var(--ink);
 }
 input[type=checkbox] { width: auto; }
 .form-actions { margin-top: 16px; display: flex; gap: 8px; }
@@ -232,7 +354,7 @@ input[type=checkbox] { width: auto; }
 
 .empty { color: var(--muted); padding: 16px 0; }
 .loading { color: var(--muted); padding: 16px 0; }
-.error { color: var(--danger); padding: 12px; background: #fdecea; border: 1px solid #f5c6cb; border-radius: 6px; }
+.error { color: var(--danger); padding: 12px; background: var(--danger-soft); border: 1px solid var(--danger-line); border-radius: 6px; }
 
 /* The server-rendered /login page (infra/auth), outside the SPA shell: it
    must render and be usable before any JS module loads. Reuses the .field/
@@ -245,18 +367,18 @@ input[type=checkbox] { width: auto; }
 .login-card button.primary { width: 100%; }
 
 .badge { padding: 1px 8px; border-radius: 10px; font-size: 12px; font-weight: 600; }
-.badge.ok { background: #e6f4ea; color: var(--ok); }
-.badge.expired { background: #fdecea; color: var(--danger); }
-.badge.failed { background: #fdecea; color: var(--danger); }
-.badge.error { background: #fdecea; color: var(--danger); }
-.badge.unknown { background: #fdf3e0; color: var(--warn); }
-.badge.never { background: #eceff1; color: var(--muted); }
+.badge.ok { background: var(--ok-soft); color: var(--ok); }
+.badge.expired { background: var(--danger-soft); color: var(--danger); }
+.badge.failed { background: var(--danger-soft); color: var(--danger); }
+.badge.error { background: var(--danger-soft); color: var(--danger); }
+.badge.unknown { background: var(--warn-soft); color: var(--warn); }
+.badge.never { background: var(--neutral-soft); color: var(--muted); }
 /* A run that started and has not finished: in flight, or interrupted by a
    restart. Deliberately neither the ok green nor the failed red. */
-.badge.running { background: #e7effc; color: var(--accent); }
-.badge.outside_holiday_coverage { background: #fdf3e0; color: var(--warn); }
-.badge.no_holiday_coverage { background: #fdecea; color: var(--danger); }
-.badge.inside_holiday_coverage { background: #eceff1; color: var(--muted); }
+.badge.running { background: var(--accent-soft); color: var(--accent); }
+.badge.outside_holiday_coverage { background: var(--warn-soft); color: var(--warn); }
+.badge.no_holiday_coverage { background: var(--danger-soft); color: var(--danger); }
+.badge.inside_holiday_coverage { background: var(--neutral-soft); color: var(--muted); }
 
 /* The toast stack (util.js's toast()). Anchored bottom-right and growing
    upward, so the newest message sits in the corner a single toast used to
@@ -289,9 +411,9 @@ input[type=checkbox] { width: auto; }
   gap: 10px;
   padding: 10px 16px;
   border-radius: 6px;
-  color: #fff;
+  color: var(--toast-ink);
   background: var(--ok);
-  box-shadow: 0 4px 12px rgba(0,0,0,.18);
+  box-shadow: 0 4px 12px var(--shadow);
   cursor: pointer; /* the whole toast is click-to-dismiss */
 }
 .toast-item.error { background: var(--danger); }
@@ -309,19 +431,19 @@ input[type=checkbox] { width: auto; }
   cursor: pointer;
 }
 .toast-close:hover { opacity: .75; }
-.toast-close:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+.toast-close:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 
 /* Snapshot time-series chart (built as inline SVG, no chart library). */
 /* No width ceiling: the viewBox is built at the holder's measured width, so
    width:100% renders it at a ~1 scale factor instead of zooming it. */
 .series-chart { width: 100%; height: auto; }
-.series-chart .grid { stroke: #e3e7eb; stroke-width: 1; }
+.series-chart .grid { stroke: var(--grid); stroke-width: 1; }
 .series-chart .axis { fill: var(--muted); font-size: 11px; }
 .series-chart polyline.line-mv { stroke: var(--accent); stroke-width: 2; }
 .series-chart polyline.line-ug { stroke: var(--ok); stroke-width: 2; }
 .series-chart circle.line-mv { fill: var(--accent); }
 .series-chart circle.line-ug { fill: var(--ok); }
-.series-chart circle.stale { fill: #ffffff; stroke-width: 2; }
+.series-chart circle.stale { fill: var(--panel); stroke-width: 2; }
 .series-chart circle.line-mv.stale { stroke: var(--accent); }
 .series-chart circle.line-ug.stale { stroke: var(--ok); }
 /* Provisional points (valued at a fallback-month FX rate): dashed ring. */
@@ -354,21 +476,21 @@ input[type=checkbox] { width: auto; }
   transform: translate(-50%, -100%);
   margin-top: -10px;
   padding: 6px 9px;
-  background: var(--ink);
-  color: #fff;
+  background: var(--tip-bg);
+  color: var(--tip-ink);
   border-radius: 4px;
   font-size: 12px;
   line-height: 1.4;
   white-space: nowrap;
   pointer-events: none;
-  box-shadow: 0 2px 6px rgba(0, 0, 0, .25);
+  box-shadow: 0 2px 6px var(--shadow);
 }
 .chart-tip[hidden] { display: none; }
 .chart-tip.tip-right { transform: translate(0, -100%); }
 .chart-tip.tip-left { transform: translate(-100%, -100%); }
-.chart-tip-date { color: #aab3c0; }
+.chart-tip-date { color: var(--tip-dim); }
 .chart-tip-value { font-weight: 600; }
-.chart-tip-note { color: #ffd9a0; }
+.chart-tip-note { color: var(--tip-note); }
 
 /* The market-value / unrealised-gain selector above the graph. */
 .series-control { display: flex; align-items: center; gap: 8px; margin: 4px 0 8px; }
@@ -376,10 +498,10 @@ input[type=checkbox] { width: auto; }
 
 .legend-mv { color: var(--accent); }
 .legend-ug { color: var(--ok); }
-.badge.stale { background: #fdf3e0; color: var(--warn); }
-.badge.provisional { background: #e7effc; color: var(--accent); }
-.badge.carried { background: #fdf3e0; color: var(--warn); }
-.badge.excluded { background: #fdeaea; color: var(--danger); }
+.badge.stale { background: var(--warn-soft); color: var(--warn); }
+.badge.provisional { background: var(--accent-soft); color: var(--accent); }
+.badge.carried { background: var(--warn-soft); color: var(--warn); }
+.badge.excluded { background: var(--danger-soft); color: var(--danger); }
 .hint.warn { color: var(--warn); }
 .hint.as-at { margin: 0 0 10px; }
 .hint.as-at .warn { color: var(--warn); }
@@ -416,11 +538,11 @@ input[type=checkbox] { width: auto; }
 /* ---- Annual Tax Report (src/web/taxreport.js) --------------------------
    A printable document, not a data grid — plain semantic tables, not
    filterableTable, so no filter row / sort indicators / pager to style. */
-.badge.warn { background: #fdf3e0; color: var(--warn); }
+.badge.warn { background: var(--warn-soft); color: var(--warn); }
 /* Advisory, not a failure: a question the recorded facts cannot answer
    (held across 30 June, nothing recorded for the fund-year). Reads as
    neutral information so it never competes with the warn badge. */
-.badge.note { background: #eceff1; color: var(--muted); }
+.badge.note { background: var(--neutral-soft); color: var(--muted); }
 .tax-report-doc h1 { margin-bottom: 4px; }
 .tax-report-doc .doc-section { margin: 24px 0; }
 .tax-report-doc h4 { margin: 16px 0 8px; }
@@ -439,8 +561,40 @@ input[type=checkbox] { width: auto; }
 .tax-report-doc table.amma-table { width: auto; max-width: 100%; }
 
 @media print {
+  /* Paper is paper: the archived tax-report PDF must look the same whichever
+     scheme the screen was in, and a dark page prints as either a black slab or
+     (with backgrounds off) unreadably pale text. The whole token set reverts to
+     the light one for the duration. The selector has to name the dark scheme
+     explicitly — `:root[data-theme="dark"]` outweighs a bare `:root`, so a
+     plain `:root` override here would lose to it. */
+  :root, :root[data-theme="dark"] {
+    color-scheme: light;
+    --bg: #ffffff;
+    --panel: #ffffff;
+    --panel-alt: #ffffff;
+    --row-hover: #ffffff;
+    --hover: #ffffff;
+    --hover-strong: #ffffff;
+    --ink: #000000;
+    --muted: #444444;
+    --line: #999999;
+    --field-bg: #ffffff;
+    --grid: #cccccc;
+    --accent: #0056a3;
+    --accent-soft: #eef4fb;
+    --danger: #8c1d16;
+    --danger-soft: #f7e7e6;
+    --danger-line: #c9a6a2;
+    --ok: #005a43;
+    --ok-soft: #e6f2ee;
+    --warn: #6f4907;
+    --warn-soft: #f7efdc;
+    --neutral-soft: #eeeeee;
+    --banner-bg: #f7efdc;
+    --shadow: transparent;
+  }
   #topbar, #nav, #health-banner, #toast, .tax-report-toolbar { display: none !important; }
-  body, #app { background: #fff; color: #000; }
+  body, #app { background: var(--bg); color: var(--ink); }
   .card, table { box-shadow: none; }
   /* Landscape by default: the archived PDF must not depend on remembering a
      print-dialog setting, and the document's wide tables want the full width.
@@ -490,7 +644,7 @@ input[type=checkbox] { width: auto; }
 .section-notice {
   padding: 10px 12px;
   margin: 12px 0;
-  background: #fdf3d7;
+  background: var(--banner-bg);
   color: var(--warn);
   border: 1px solid var(--warn);
   border-radius: 4px;

@@ -13,6 +13,7 @@
        "Log out"; util.js reads it to decide whether a 401 means "go to
        /login" (see infra::auth's module doc). -->
   <meta name="auth" content="{{AUTH}}">
+{{THEME}}
   <link rel="stylesheet" href="{{BASE}}/static/style.css">
 </head>
 <body>
@@ -31,6 +32,11 @@
     <a id="brand" href="#/"><h1>share-tracker</h1><span id="version">v{{VERSION}}</span></a>
     <nav id="nav"><!-- top menu bar, populated by app.js --></nav>
     <span class="subtitle">Australian share portfolio &amp; tax tracker</span>
+    <!-- The light/dark toggle. Deliberately empty markup: its glyph, title
+         and aria-label are written by util.js's applyTheme from the scheme
+         actually in force, so there is no hard-coded label here that could
+         disagree with what the page is showing. -->
+    <button id="theme-toggle" type="button" class="theme-toggle"></button>
   </header>
   <div id="health-banner" hidden><!-- stale-data / failed-job strip, populated by app.js --></div>
   <main id="app"><!-- views render here --></main>

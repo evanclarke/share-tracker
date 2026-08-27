@@ -21,6 +21,8 @@ import {
   periodReturnPct,
   holdingHasActivity, loadPref, savePref, pathSeg, basePath, apiUrl, authEnabled,
   cellText, adjustmentPreviewText, allocationSummary, toastLifetime, moneyText,
+  resolveTheme, otherTheme, themeToggleLabel, applyTheme, currentTheme, toggleTheme,
+  THEME_PREF_KEY,
 } from './util.js';
 
 // ---- roundDecimalStr ----------------------------------------------------
@@ -429,6 +431,99 @@ test('savePref: a throwing store does not raise', () => {
     setItem: function () { throw new Error('storage disabled'); },
   };
   assert.doesNotThrow(function () { savePref('k', 'v', angry); });
+});
+
+// ---- colour scheme ------------------------------------------------------
+
+// A <html> + #theme-toggle stand-in, enough for applyTheme/currentTheme:
+// Node has no DOM, and the point of passing the document in is that these
+// need no browser to test.
+function stubDoc(theme) {
+  const attrs = {};
+  if (theme) attrs['data-theme'] = theme;
+  const btn = {
+    textContent: '', title: '', aria: null,
+    setAttribute: function (k, v) { if (k === 'aria-label') this.aria = v; },
+  };
+  return {
+    documentElement: {
+      setAttribute: function (k, v) { attrs[k] = v; },
+      getAttribute: function (k) { return k in attrs ? attrs[k] : null; },
+    },
+    getElementById: function (id) { return id === 'theme-toggle' ? btn : null; },
+    btn: btn,
+  };
+}
+
+test('resolveTheme: a remembered choice wins over the OS preference', () => {
+  assert.equal(resolveTheme('dark', false), 'dark');
+  assert.equal(resolveTheme('light', true), 'light');
+});
+
+test('resolveTheme: with nothing remembered, the OS preference decides', () => {
+  assert.equal(resolveTheme(null, true), 'dark');
+  assert.equal(resolveTheme(null, false), 'light');
+  assert.equal(resolveTheme(undefined, true), 'dark');
+});
+
+test('resolveTheme: a stored value that names neither scheme is ignored', () => {
+  // Storage is shared with everything else the app remembers, and the key
+  // could hold anything (a hand-edited value, an older format) — it must not
+  // reach the DOM as a third scheme with no palette behind it.
+  assert.equal(resolveTheme('', true), 'dark');
+  assert.equal(resolveTheme('Dark', false), 'light');
+  assert.equal(resolveTheme('midnight', false), 'light');
+});
+
+test('otherTheme: the two schemes are each other\'s opposite', () => {
+  assert.equal(otherTheme('dark'), 'light');
+  assert.equal(otherTheme('light'), 'dark');
+});
+
+test('themeToggleLabel: names what the click will do, not what is showing', () => {
+  assert.equal(themeToggleLabel('light').title, 'Switch to dark mode');
+  assert.equal(themeToggleLabel('dark').title, 'Switch to light mode');
+  assert.notEqual(themeToggleLabel('light').glyph, themeToggleLabel('dark').glyph);
+});
+
+test('applyTheme: stamps <html> and labels the toggle', () => {
+  const doc = stubDoc(null);
+  applyTheme('dark', doc);
+  assert.equal(doc.documentElement.getAttribute('data-theme'), 'dark');
+  assert.equal(doc.btn.title, 'Switch to light mode');
+  assert.equal(doc.btn.aria, 'Switch to light mode'); // screen readers, not just the tooltip
+});
+
+test('applyTheme: works on a page with no toggle (the login page)', () => {
+  const doc = stubDoc(null);
+  doc.getElementById = function () { return null; };
+  assert.doesNotThrow(function () { applyTheme('dark', doc); });
+  assert.equal(doc.documentElement.getAttribute('data-theme'), 'dark');
+});
+
+test('currentTheme: anything but the dark attribute reads as light', () => {
+  assert.equal(currentTheme(stubDoc('dark')), 'dark');
+  assert.equal(currentTheme(stubDoc('light')), 'light');
+  assert.equal(currentTheme(stubDoc(null)), 'light');
+});
+
+test('toggleTheme: flips the scheme and remembers the result', () => {
+  const doc = stubDoc('light');
+  const store = stubStore();
+  assert.equal(toggleTheme(doc, store), 'dark');
+  assert.equal(doc.documentElement.getAttribute('data-theme'), 'dark');
+  assert.equal(loadPref(THEME_PREF_KEY, null, store), 'dark');
+  // …and back again, so the remembered value tracks the flip both ways
+  // rather than latching on the first click.
+  assert.equal(toggleTheme(doc, store), 'light');
+  assert.equal(loadPref(THEME_PREF_KEY, null, store), 'light');
+});
+
+test('toggleTheme: the flip still applies when storage refuses it', () => {
+  const doc = stubDoc('light');
+  const angry = { setItem: function () { throw new Error('storage disabled'); } };
+  assert.equal(toggleTheme(doc, angry), 'dark');
+  assert.equal(doc.documentElement.getAttribute('data-theme'), 'dark');
 });
 
 // ---- pathSeg ------------------------------------------------------------

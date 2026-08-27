@@ -16,7 +16,7 @@ import {
   cellText, numericDisplay, moneyText, columnKinds, columnLabel, columnLabelMaps,
   fkLabelMaps, api, apiUrl, pathSeg, nextId, loadOptions, listingNamer, describeTrade, tradeOrigin,
   columnLinks, listingLinkFrom, defaultSortColumn,
-  periodReturnPct, holdingHasActivity, loadPref, savePref,
+  periodReturnPct, holdingHasActivity, loadPref, savePref, initTheme,
 } from './util.js';
 import {
   field, dt, fk,
@@ -2781,6 +2781,10 @@ async function render() {
   }
 }
 
+// Before buildNav, so the toggle in the shell is labelled by the time the
+// first view paints. The scheme itself is already applied by the shell's
+// inline script; this only labels the control and wires its click.
+initTheme();
 buildNav();
 window.addEventListener('hashchange', render);
 render();

@@ -170,6 +170,80 @@ export function savePref(key, value, store) {
   }
 }
 
+// ---- colour scheme ------------------------------------------------------
+
+// The remembered light/dark choice, in the same localStorage the range
+// presets use — so storage being unavailable degrades to "nothing stored"
+// (the OS preference below) rather than breaking the page.
+export const THEME_PREF_KEY = 'share-tracker.theme';
+
+// Which scheme applies, given what is remembered and what the OS asks for.
+// An explicit choice always wins; with nothing stored (or something stored
+// that is neither name) the OS `prefers-color-scheme` decides, so a first
+// visit already matches the rest of the machine.
+//
+// Kept pure and exported so it is the single statement of the rule: style.css
+// has no `@media (prefers-color-scheme: dark)` block, precisely so the choice
+// is made in one place rather than in two that can drift apart.
+export function resolveTheme(stored, prefersDark) {
+  if (stored === 'light' || stored === 'dark') return stored;
+  return prefersDark ? 'dark' : 'light';
+}
+
+export function otherTheme(theme) {
+  return theme === 'dark' ? 'light' : 'dark';
+}
+
+// The glyph and label a toggle shows for the scheme currently in force: both
+// describe what a click *will do*, not what is on screen, which is the way
+// round a two-state control reads correctly.
+export function themeToggleLabel(theme) {
+  const next = otherTheme(theme);
+  return { glyph: theme === 'dark' ? '\u2600' : '\u263E', title: 'Switch to ' + next + ' mode' };
+}
+
+// Stamps the scheme on <html>, which is where every palette in style.css is
+// keyed off, and re-labels the toggle. Both are idempotent, so the pre-paint
+// script in the shell having already set the attribute costs nothing.
+export function applyTheme(theme, doc) {
+  const d = doc || document;
+  d.documentElement.setAttribute('data-theme', theme);
+  const btn = d.getElementById('theme-toggle');
+  if (!btn) return;
+  const label = themeToggleLabel(theme);
+  btn.textContent = label.glyph;
+  btn.title = label.title;
+  btn.setAttribute('aria-label', label.title);
+}
+
+export function currentTheme(doc) {
+  const d = doc || document;
+  return d.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light';
+}
+
+// Flips the scheme and remembers the result. Remembering here rather than in
+// initTheme is deliberate: only an explicit click is a choice, so a machine
+// that has never been toggled keeps following its OS setting when that
+// changes, instead of being frozen at whatever it was on the first visit.
+export function toggleTheme(doc, store) {
+  const next = otherTheme(currentTheme(doc));
+  savePref(THEME_PREF_KEY, next, store);
+  applyTheme(next, doc);
+  return next;
+}
+
+// Called once at boot. The shell's inline script has already applied the
+// scheme before the first paint (that is its whole job — a module import
+// cannot run that early, and a dark-mode reload would flash light); this
+// re-applies it to label the toggle and wires the click.
+export function initTheme() {
+  const prefersDark = typeof matchMedia === 'function'
+    && matchMedia('(prefers-color-scheme: dark)').matches;
+  applyTheme(resolveTheme(loadPref(THEME_PREF_KEY, null), prefersDark));
+  const btn = document.getElementById('theme-toggle');
+  if (btn) btn.addEventListener('click', function () { toggleTheme(); });
+}
+
 export function looksNumeric(v) {
   return typeof v !== 'boolean' && v != null && v !== '' && /^-?\d+(\.\d+)?$/.test(String(v));
 }
