@@ -4260,3 +4260,235 @@ fn distribution_calendar_documented() {
     assert!(README_MD.contains("- **Distribution calendar and the missing-dividend alert** —"));
     assert!(README_MD.contains("**Advisory by decision**"));
 }
+
+// ---------------------------------------------------------------------------
+// Cross-document links
+// ---------------------------------------------------------------------------
+
+/// Strip inline HTML tags and reduce `[text](target)` to `text`, the two things
+/// GitHub removes from a heading before slugging what is left.
+fn heading_text(heading: &str) -> String {
+    let mut out = String::new();
+    let mut chars = heading.chars().peekable();
+    let mut depth = 0usize;
+    while let Some(c) = chars.next() {
+        match c {
+            '<' => depth += 1,
+            '>' if depth > 0 => depth -= 1,
+            '[' if depth == 0 => {}
+            // Drop the `(target)` that follows a link's text, if any.
+            ']' if depth == 0 && chars.peek() == Some(&'(') => {
+                chars.next();
+                for c in chars.by_ref() {
+                    if c == ')' {
+                        break;
+                    }
+                }
+            }
+            ']' if depth == 0 => {}
+            _ if depth == 0 => out.push(c),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// GitHub's `github-slugger`: lowercase, drop every character that is not
+/// alphanumeric, `_`, `-` or whitespace, then turn each remaining whitespace
+/// character into one `-`.
+///
+/// The repeats are **not** collapsed, which is the whole subtlety: an em dash is
+/// punctuation, so `A — B` loses the dash and keeps both spaces around it,
+/// slugging to `a--b`. A rule that collapsed them would accept a link GitHub
+/// 404s *and* reject a correct one — both of which happened while this test was
+/// being written, which is why it is spelled out here.
+fn slugify(heading: &str) -> String {
+    heading
+        .to_lowercase()
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-' || c.is_whitespace())
+        .map(|c| if c.is_whitespace() { '-' } else { c })
+        .collect()
+}
+
+/// The anchors a rendered markdown file offers: one per ATX heading, with
+/// GitHub's `-1`, `-2`, … disambiguating suffix on a repeated slug.
+fn heading_anchors(src: &str) -> std::collections::HashSet<String> {
+    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut anchors = std::collections::HashSet::new();
+    for (_, line) in markdown_lines(src) {
+        let hashes = line.chars().take_while(|c| *c == '#').count();
+        if hashes == 0 || hashes > 6 || !line[hashes..].starts_with(' ') {
+            continue;
+        }
+        let base = slugify(&heading_text(line[hashes..].trim()));
+        let n = seen.entry(base.clone()).or_insert(0);
+        anchors.insert(if *n == 0 {
+            base.clone()
+        } else {
+            format!("{base}-{n}")
+        });
+        *n += 1;
+    }
+    anchors
+}
+
+/// The numbered lines of a markdown file that are prose rather than fenced code
+/// — a heading and a link only mean what they say outside a code block (a shell
+/// snippet's `# comment` is not a heading, and a sample's `[a](b)` is not a
+/// link).
+fn markdown_lines(src: &str) -> impl Iterator<Item = (usize, &str)> {
+    let mut fence: Option<char> = None;
+    src.lines().enumerate().filter_map(move |(n, line)| {
+        let t = line.trim_start();
+        let marker = t.chars().next().filter(|c| *c == '`' || *c == '~');
+        if let Some(m) = marker.filter(|m| t.starts_with(m.to_string().repeat(3).as_str())) {
+            match fence {
+                Some(open) if open == m => fence = None,
+                None => fence = Some(m),
+                Some(_) => {}
+            }
+            return None;
+        }
+        fence.is_none().then_some((n + 1, line))
+    })
+}
+
+/// Every `[text](target)` outside a code block, as `(line number, text, target)`.
+fn markdown_links(src: &str) -> Vec<(usize, String, String)> {
+    let mut found = Vec::new();
+    for (n, line) in markdown_lines(src) {
+        // `![alt](src)` is the same shape and resolves the same way, so an image
+        // is checked as a link is.
+        for (i, _) in line.match_indices("](") {
+            let text = line[..i]
+                .rfind('[')
+                .map(|s| line[s + 1..i].to_string())
+                .unwrap_or_default();
+            let rest = &line[i + 2..];
+            let Some(close) = rest.find(')') else {
+                continue;
+            };
+            // `(target "title")` — a title is not part of the target.
+            let target = rest[..close]
+                .split_whitespace()
+                .next()
+                .unwrap_or_default()
+                .to_string();
+            if !target.is_empty() {
+                found.push((n, text, target));
+            }
+        }
+    }
+    found
+}
+
+/// Resolve `rel` against the directory holding the linking file, folding away
+/// `.` and `..` textually — the target may not exist, which is the very thing
+/// being tested, so `canonicalize` is not available.
+fn resolve(from_dir: &std::path::Path, rel: &str) -> std::path::PathBuf {
+    let mut out = std::path::PathBuf::new();
+    for comp in from_dir.join(rel).components() {
+        match comp {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::CurDir => {}
+            c => out.push(c.as_os_str()),
+        }
+    }
+    out
+}
+
+/// Every relative link in the markdown tree resolves: the file it names exists,
+/// and a `#fragment` names a heading that is really there.
+///
+/// The archive is maintained by **moving** whole sections between files
+/// (CLAUDE.md's archiving rule), and a link written relative to the repo root
+/// keeps its old text when its section lands a directory down — `docs/API.md`
+/// read from inside `DONE/` is `../docs/API.md`. Forty-one links had rotted
+/// exactly that way, alongside eight in the live docs naming anchors that never
+/// existed at all (`**Ticker or name changes:**` is a bold paragraph lead, not a
+/// heading, so `#ticker-or-name-changes` never resolved). Nothing surfaces a
+/// dead link until a reader clicks one, so the tree is pinned here instead.
+#[test]
+fn every_markdown_link_resolves() {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut files = Vec::new();
+    let mut walk = vec![root.clone()];
+    while let Some(dir) = walk.pop() {
+        for entry in std::fs::read_dir(&dir)
+            .expect("repository directories are readable")
+            .flatten()
+        {
+            let path = entry.path();
+            let name = entry.file_name();
+            if path.is_dir() {
+                // Build output and vendored trees are not ours to fix.
+                if !matches!(
+                    name.to_str(),
+                    Some("target") | Some(".git") | Some("node_modules")
+                ) {
+                    walk.push(path);
+                }
+            } else if path.extension().is_some_and(|x| x == "md") {
+                files.push(path);
+            }
+        }
+    }
+    assert!(
+        files.len() > 50,
+        "expected the whole markdown tree, found {} file(s)",
+        files.len()
+    );
+
+    let mut anchors = std::collections::HashMap::new();
+    for path in &files {
+        let src = std::fs::read_to_string(path).expect("markdown is readable");
+        anchors.insert(path.clone(), heading_anchors(&src));
+    }
+
+    let mut offenders = Vec::new();
+    for path in &files {
+        let src = std::fs::read_to_string(path).expect("markdown is readable");
+        let dir = path.parent().expect("a file has a parent directory");
+        let shown = path.strip_prefix(&root).unwrap_or(path).display();
+        for (line, text, target) in markdown_links(&src) {
+            if target.starts_with("http://")
+                || target.starts_with("https://")
+                || target.starts_with("mailto:")
+            {
+                continue;
+            }
+            let (file_part, anchor) = match target.split_once('#') {
+                Some((f, a)) => (f, Some(a)),
+                None => (target.as_str(), None),
+            };
+            let tgt = if file_part.is_empty() {
+                path.clone()
+            } else {
+                resolve(dir, file_part)
+            };
+            if !tgt.exists() {
+                offenders.push(format!("{shown}:{line}: [{text}]({target}) — no such file"));
+                continue;
+            }
+            // A link into a non-markdown file carries no anchors to check.
+            if let Some(anchor) = anchor.filter(|a| !a.is_empty())
+                && let Some(have) = anchors.get(&tgt)
+                && !have.contains(anchor)
+            {
+                offenders.push(format!(
+                    "{shown}:{line}: [{text}]({target}) — no such heading in {}",
+                    tgt.strip_prefix(&root).unwrap_or(&tgt).display()
+                ));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "broken markdown link(s) — a moved section keeps the link text it had one \
+         directory up, and a bold lead-in is not a heading:\n{}",
+        offenders.join("\n")
+    );
+}
