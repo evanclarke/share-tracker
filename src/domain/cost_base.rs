@@ -42,6 +42,7 @@ use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::Serialize;
 
+use crate::domain::rollover;
 use crate::entities::corporate_action::{RocEvent, RolloverOrigin, SplitEvent, per_unit_reduction};
 use crate::infra::decimal::{Money, OptMoney, mul_div};
 use crate::infra::fx;
@@ -315,6 +316,20 @@ pub struct ParcelRow {
     /// (see [`Self::rollover`]). [`Self::columns_qualified`] reads it back off
     /// `corporate_actions`, so every query built from that list has it.
     pub demerger_head_listing_id: Option<i64>,
+    /// The date this parcel's units joined **this listing's** register, walked
+    /// back up the rollover chain — set only where that walk is needed, i.e.
+    /// on a replacement parcel the operation left registered
+    /// ([`Self::registered_across_the_rollover`]); `None` on any other row.
+    ///
+    /// Not a `trades` column either: it is the recursive walk
+    /// [`Self::registered_from_sql`] builds into the SELECT list, so — like
+    /// [`Self::demerger_head_listing_id`] — every query built from
+    /// [`Self::columns_qualified`] has it and none can leave it behind. `None`
+    /// on a row that *is* register-continuous means the chain could not be
+    /// walked at all (nothing links the replacement back to a source, or it
+    /// ran past `rollover::MAX_ROLLOVER_DEPTH`), and [`Self::rollover`] then
+    /// falls back to the parcel's own [`Self::acquired`].
+    pub registered_from: Option<NaiveDate>,
 }
 
 impl ParcelRow {
@@ -332,14 +347,15 @@ impl ParcelRow {
     /// (`quantity`, `date` and `currency` all recur elsewhere in the schema)
     /// would otherwise be ambiguous, and the `FromRow` mapping reads by name.
     ///
-    /// The final entry is the derived [`Self::demerger_head_listing_id`],
-    /// which is why the mapping has one list rather than a bare column const:
-    /// a caller cannot select the `trades` columns and quietly leave the
-    /// demerger's head listing behind, which would silently reinstate the
-    /// entitlement bug [`Self::rollover`] documents. The subquery aliases the
-    /// action table `head_action` rather than anything short — a caller's own
-    /// query may already have `corporate_actions` in scope under an alias
-    /// (`reports::net_capital_gain`'s return-of-capital join does).
+    /// The final two entries are the derived [`Self::demerger_head_listing_id`]
+    /// and [`Self::registered_from`], which is why the mapping has one list
+    /// rather than a bare column const: a caller cannot select the `trades`
+    /// columns and quietly leave either behind, which would silently reinstate
+    /// one of the two entitlement bugs [`Self::rollover`] documents. Both
+    /// subqueries alias every table they name distinctively (`head_action`,
+    /// the `chain_*` aliases) rather than anything short — a caller's own
+    /// query may already have `corporate_actions` or `trades` in scope under
+    /// an alias (`reports::net_capital_gain`'s return-of-capital join does).
     pub fn columns_qualified(alias: &str) -> String {
         let mut columns = Self::TRADE_COLUMNS
             .split(',')
@@ -352,7 +368,85 @@ impl ParcelRow {
             "(SELECT head_action.listing_id FROM corporate_actions head_action \
               WHERE head_action.id = {alias}.demerger_action_id) AS demerger_head_listing_id"
         ));
+        columns.push(Self::registered_from_sql(alias));
         columns.join(", ")
+    }
+
+    /// The [`Self::registered_from`] entry of the SELECT list: a recursive walk
+    /// back up the rollover chain from the parcel aliased `alias`, answering
+    /// the date its units joined **this listing's** register.
+    ///
+    /// Each step asks the same question [`Self::registered_across_the_rollover`]
+    /// asks of one row. A **transfer** and a **demerger's head parcel** kept
+    /// the units on this register, so the answer is their source parcel's, and
+    /// the walk carries on through the group's closing Sell and its
+    /// allocations. Anything else terminates it: a **scrip exchange** or a
+    /// **demerger's spun-off parcel** put the units on a register they were
+    /// not on before, so the answer is that operation's own date, and an
+    /// ordinary parcel's is its [`Self::acquired`] — the two cases the
+    /// `MAX(CASE …)` picks between. Bounded by
+    /// [`rollover::MAX_ROLLOVER_DEPTH`](crate::domain::rollover::MAX_ROLLOVER_DEPTH),
+    /// the same bound the two id walks beside it observe.
+    ///
+    /// A rollover records only the *group* both sides share, never which
+    /// replacement replaced which source — the coarseness
+    /// `rollover::source_ancestors` documents. Here the deemed acquisition
+    /// date closes most of that gap: all three operations write it as the
+    /// source parcel's own `acquired()`, so a source whose acquisition date
+    /// differs cannot be this replacement's and is filtered out. Where an
+    /// operation moved several parcels acquired on the *same* date the walk
+    /// still cannot separate them, and `MAX` takes the latest of their
+    /// register dates — the reading that never hands back an entitlement one
+    /// of those parcels had lost, which is the defect this walk exists to
+    /// close.
+    ///
+    /// Skipped entirely (`NULL`) for a parcel carrying neither of the two
+    /// register-continuous provenance columns: [`Self::rollover`] never reads
+    /// it there, and the guard keeps the walk off the ordinary parcels that
+    /// make up nearly every row a report loads.
+    fn registered_from_sql(alias: &str) -> String {
+        let depth = rollover::MAX_ROLLOVER_DEPTH;
+        format!(
+            "CASE WHEN {alias}.transfer_id IS NOT NULL OR {alias}.demerger_action_id IS NOT NULL \
+             THEN (WITH RECURSIVE chain_parcel(\
+                     listing_id, date, deemed_acquisition_date, scrip_action_id, \
+                     demerger_action_id, transfer_id, head_listing_id, depth) AS (\
+                   SELECT chain_start.listing_id, chain_start.date, \
+                          chain_start.deemed_acquisition_date, chain_start.scrip_action_id, \
+                          chain_start.demerger_action_id, chain_start.transfer_id, \
+                          (SELECT chain_action.listing_id FROM corporate_actions chain_action \
+                            WHERE chain_action.id = chain_start.demerger_action_id), 0 \
+                     FROM trades chain_start WHERE chain_start.id = {alias}.id \
+                   UNION ALL \
+                   SELECT chain_source.listing_id, chain_source.date, \
+                          chain_source.deemed_acquisition_date, chain_source.scrip_action_id, \
+                          chain_source.demerger_action_id, chain_source.transfer_id, \
+                          (SELECT chain_action.listing_id FROM corporate_actions chain_action \
+                            WHERE chain_action.id = chain_source.demerger_action_id), \
+                          chain_parcel.depth + 1 \
+                     FROM chain_parcel \
+                     JOIN trades chain_closing ON chain_closing.trade_type = 'Sell' \
+                      AND (chain_closing.transfer_id = chain_parcel.transfer_id \
+                           OR chain_closing.demerger_action_id = chain_parcel.demerger_action_id) \
+                     JOIN parcel_allocations chain_alloc \
+                       ON chain_alloc.sale_trade_id = chain_closing.id \
+                     JOIN trades chain_source ON chain_source.id = chain_alloc.purchase_trade_id \
+                      AND (chain_parcel.deemed_acquisition_date IS NULL \
+                           OR COALESCE(chain_source.deemed_acquisition_date, chain_source.date) \
+                              = chain_parcel.deemed_acquisition_date) \
+                    WHERE chain_parcel.depth < {depth} \
+                      AND (chain_parcel.transfer_id IS NOT NULL \
+                           OR chain_parcel.head_listing_id IS chain_parcel.listing_id)) \
+                   SELECT MAX(CASE WHEN chain_parcel.scrip_action_id IS NOT NULL \
+                                     OR chain_parcel.demerger_action_id IS NOT NULL \
+                                   THEN chain_parcel.date \
+                                   ELSE COALESCE(chain_parcel.deemed_acquisition_date, \
+                                                 chain_parcel.date) END) \
+                     FROM chain_parcel \
+                    WHERE chain_parcel.transfer_id IS NULL \
+                      AND chain_parcel.head_listing_id IS NOT chain_parcel.listing_id) \
+             END AS registered_from"
+        )
     }
 
     /// [`Self::columns_qualified`] for the unaliased `FROM trades` every
@@ -399,21 +493,22 @@ impl ParcelRow {
     /// this listing's register. `None` for an ordinary (or inherited) parcel.
     /// See [`RolloverOrigin`] and [`Self::registered_across_the_rollover`].
     ///
-    /// Where the units did stay registered, the date they joined is taken as
-    /// the parcel's own [`Self::acquired`] — its deemed acquisition date, the
-    /// original units' trade date. That is exact for a parcel whose whole
-    /// chain of rollovers kept it on one register, and reads back too far for
-    /// one that changed listings earlier on (a scrip exchange, then a transfer
-    /// or demerger): the deemed date carries all the way to the first buy,
-    /// while the register the payment is against only goes back to the
-    /// exchange, so the later operation reinstates an entitlement the exchange
-    /// had correctly denied. Only a payment paid after the *last* operation
-    /// with a record date before that exchange can tell the difference —
-    /// everything earlier is already excluded as folded into the carried cost
-    /// base (`RocEvent::per_unit_for`'s operation-date guard). Reproduced and
-    /// recorded as its own TODO section rather than fixed here: the exact
-    /// answer is the *source* parcel's `registered_from`, which is a walk back
-    /// up the rollover chain and not something a single row can answer.
+    /// Where the units did stay registered, the date they joined is
+    /// [`Self::registered_from`] — the walk back up the rollover chain to the
+    /// source parcel. The parcel's own [`Self::acquired`] cannot answer it:
+    /// that is its deemed acquisition date, which carries all the way to the
+    /// first buy, so a chain that changed listings earlier on (a scrip
+    /// exchange, then a transfer or demerger) would read back past the
+    /// exchange and reinstate an entitlement the exchange had correctly
+    /// denied. Only a payment paid after the *last* operation with a record
+    /// date before that exchange can tell the difference — everything earlier
+    /// is already excluded as folded into the carried cost base
+    /// (`RocEvent::per_unit_for`'s operation-date guard).
+    ///
+    /// The fallback to [`Self::acquired`] is the pre-walk behaviour, and is
+    /// reached only where the walk found nothing to follow (see
+    /// [`Self::registered_from`]) — never because a query left the column out,
+    /// which [`Self::columns_qualified`] makes impossible.
     pub fn rollover(&self) -> Option<RolloverOrigin> {
         (self.scrip_action_id.is_some()
             || self.demerger_action_id.is_some()
@@ -421,7 +516,7 @@ impl ParcelRow {
         .then(|| RolloverOrigin {
             on: self.date,
             registered_from: if self.registered_across_the_rollover() {
-                self.acquired()
+                self.registered_from.unwrap_or_else(|| self.acquired())
             } else {
                 self.date
             },
@@ -1025,6 +1120,7 @@ mod tests {
             demerger_action_id: None,
             transfer_id: None,
             demerger_head_listing_id: None,
+            registered_from: None,
         };
         provenance(&mut row);
         row
@@ -1077,6 +1173,54 @@ mod tests {
         // An ordinary parcel has no rollover at all, however it was acquired.
         let ordinary = replacement(1, acquired, operated, |_| {});
         assert!(ordinary.rollover().is_none());
+    }
+
+    /// Where the units *did* stay registered, how far back is the walked
+    /// [`ParcelRow::registered_from`], not the parcel's own acquisition date:
+    /// a chain that changed listings earlier on (bought, scrip-exchanged, then
+    /// transferred or demerged) joined this register at the exchange, years
+    /// after the deemed date. The two shapes that did not stay registered
+    /// ignore the column entirely — their answer is the operation date either
+    /// way.
+    #[test]
+    fn a_register_continuous_parcel_reads_the_walked_register_date_not_its_own() {
+        let acquired = date(2019, 1, 10);
+        let exchanged = date(2023, 3, 1);
+        let operated = date(2025, 4, 1);
+
+        let registered_from = |row: ParcelRow| row.rollover().map(|r| r.registered_from);
+        let walked = |row: &mut ParcelRow| row.registered_from = Some(exchanged);
+
+        let transferred = replacement(1, acquired, operated, |row| {
+            row.transfer_id = Some(3);
+            walked(row);
+        });
+        let head = replacement(1, acquired, operated, |row| {
+            row.demerger_action_id = Some(10);
+            row.demerger_head_listing_id = Some(1);
+            walked(row);
+        });
+        assert_eq!(registered_from(transferred), Some(exchanged));
+        assert_eq!(registered_from(head), Some(exchanged));
+
+        // Nothing to follow — a chain the walk could not read — falls back to
+        // the parcel's own acquisition date, the behaviour before the walk.
+        let transferred = replacement(1, acquired, operated, |row| row.transfer_id = Some(3));
+        assert_eq!(registered_from(transferred), Some(acquired));
+
+        // The two that left the register answer with the operation date
+        // whatever the column says.
+        let exchanged_parcel = replacement(2, acquired, operated, |row| {
+            row.scrip_action_id = Some(7);
+            walked(row);
+        });
+        let demerged = replacement(2, acquired, operated, |row| {
+            row.demerger_action_id = Some(10);
+            row.demerger_head_listing_id = Some(1);
+            walked(row);
+        });
+        assert_eq!(registered_from(exchanged_parcel), Some(operated));
+        assert_eq!(registered_from(demerged), Some(operated));
     }
 
     #[test]

@@ -869,6 +869,7 @@ mod tests {
             demerger_action_id: None,
             transfer_id: None,
             demerger_head_listing_id: None,
+            registered_from: None,
         }
     }
 

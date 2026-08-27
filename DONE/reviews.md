@@ -5102,3 +5102,66 @@ no schema change, no endpoint change; the entitlement itself is what
 Fixing it turned up one narrower defect beside it, reproduced and recorded as its own TODO.md
 section rather than folded in here: a *chain* of rollovers that changes listing and then keeps it,
 where the later operation reinstates an entitlement the listing change had correctly denied.
+
+## A rollover after a listing change reinstates an entitlement the change denied (demerger head-parcel follow-up, 2026-08-27)
+(Found and reproduced while fixing the section above. `ParcelRow::rollover` dates a
+register-continuous replacement parcel — a transfer, or a demerger's head parcel — from its own
+`acquired()`, i.e. its deemed acquisition date, which carries all the way back to the first buy. That
+is exact only while the *whole* chain stayed on one register. Buy on listing 1 in 2019, scrip-exchange
+into listing 2 in 2023, transfer holding accounts in 2025: the replacement carries a 2019 deemed date,
+so a return of capital on listing 2 with a record date in 2022 and payment in 2026 is treated as
+entitled — a $100 cost-base reduction on 2,000 units that the exchange itself had correctly refused
+before the transfer. The transfer reinstates it. Confirmed against `db_open_parcels`: $0 after the
+exchange, $100.00 after the transfer. The exact answer is the *source* parcel's `registered_from`,
+which is a walk back up the rollover chain — `domain::rollover::source_ancestors` already walks one,
+bounded by `MAX_ROLLOVER_DEPTH` — and so is not something a single row can answer, which is why it is
+recorded rather than folded into the head-parcel fix. Documented on `ParcelRow::rollover`.)
+- [x] Decide where the walk belongs: a recursive CTE column beside
+  `demerger_head_listing_id` in `ParcelRow::columns_qualified`, or a loaded map the callers of
+  `rollover()` pass in — the latter touching every `ParcelRow` reader
+- [x] Fix, keeping the four shapes the head-parcel fix pinned unchanged
+- [x] A test over the reproduced chain (exchange, then transfer; the same again with a demerger in
+  the transfer's place)
+
+**Confirmed and fixed.** Two reproductions in `domain::rollover::tests`, sharing one setup
+(`exchanged_across_a_return_of_capital_record_date`: a 2,000-unit $2,000 parcel of listing 1, a
+$0.05/unit return of capital on listing 2 with record date 2022-06-25 and payment 2026-08-01, and a
+2023-03-01 scrip exchange onto listing 2 between them). After the exchange the replacement parcel is
+correctly ex-entitlement — $0 reduction, $2,000 cost base. A 2025 transfer of it between the
+taxpayer's own accounts turned that into a $100.00 reduction and a $1,900 cost base
+(`a_transfer_does_not_reinstate_the_entitlement_an_earlier_exchange_denied`), and a 2025 demerger of
+listing 2 in the transfer's place did the same to its head parcel — $100.00 off $1,600
+(`a_demergers_head_parcel_does_not_reinstate_it_either`). Both now assert the reduction stays nil.
+
+**Where the walk belongs: a column in the SELECT list**, beside `demerger_head_listing_id` — the
+loaded-map option would have touched every `ParcelRow` reader and left `rollover()` unable to answer
+on its own. `ParcelRow::registered_from` is a correlated recursive CTE built by
+`ParcelRow::registered_from_sql`, appended by `columns_qualified`, so — exactly as with the head
+listing — no query built from that list can leave it behind. Each step of the walk asks what
+`registered_across_the_rollover()` asks of one row: a transfer or a demerger's head parcel carries
+on to its source parcel through the group's closing Sell and allocations; a scrip exchange or a
+demerger's spun-off parcel terminates it at the operation date, and an ordinary parcel at its
+`acquired()`. It is bounded by `rollover::MAX_ROLLOVER_DEPTH`, which became `pub` so the three chain
+walks cannot disagree about how far back a chain is read. `rollover()` reads the column only in the
+register-continuous branch, falling back to `acquired()` — the pre-walk behaviour — where the walk
+found nothing to follow.
+
+A rollover records only the *group* both sides share, never which replacement replaced which source
+(the coarseness `rollover::source_ancestors` documents). The deemed acquisition date closes most of
+that gap here: all three operations write it as the source parcel's own `acquired()`, so a source
+whose acquisition date differs cannot be this replacement's and the walk filters it out. Where one
+operation moved several parcels acquired on the *same* date the record still cannot separate them,
+and `MAX` takes the latest of their register dates — the reading that never hands back an entitlement
+one of those parcels had lost. That is a scope decision, so it is written up in `docs/API.md`'s
+Known limitations ("Which replacement parcel replaced which source parcel"), with the workaround
+(a transfer can be entered one parcel at a time; a demerger acts on the whole holding and cannot).
+
+The four shapes the head-parcel fix pinned are unchanged —
+`rollover_registers_a_transfer_and_a_demerger_head_from_the_units_own_acquisition` still passes
+untouched — and a new unit test beside it,
+`a_register_continuous_parcel_reads_the_walked_register_date_not_its_own`, pins that the walked
+column wins for the two register-continuous shapes, that the two that left the register ignore it,
+and that a missing walk falls back to `acquired()`. `docs/API.md`'s `ReturnOfCapital` paragraph now
+states the chain rule beside the per-operation one. No schema change and no endpoint change: the
+column is derived in the SELECT list, not stored.
+

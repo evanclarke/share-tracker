@@ -250,11 +250,13 @@ impl Provenance {
     }
 }
 
-/// How deep a chain of rollovers [`replacement_descendants`] and
-/// [`source_ancestors`] will follow. A parcel transferred between accounts,
-/// caught in a takeover and then demerged is three; ten is far past anything
-/// real and stops a cycle (which the write paths cannot create) from looping.
-const MAX_ROLLOVER_DEPTH: usize = 10;
+/// How deep a chain of rollovers [`replacement_descendants`],
+/// [`source_ancestors`] and `domain::cost_base::ParcelRow`'s register walk
+/// will follow. A parcel transferred between accounts, caught in a takeover
+/// and then demerged is three; ten is far past anything real and stops a cycle
+/// (which the write paths cannot create) from looping. Shared so the three
+/// walks cannot disagree about how far back a chain is read.
+pub const MAX_ROLLOVER_DEPTH: usize = 10;
 
 /// The provenance columns a replacement Buy and its closing Sell share, in the
 /// order [`Provenance`] lists them. The chain walks are the only readers that
@@ -521,9 +523,12 @@ mod tests {
     use super::*;
     use crate::domain::open_parcels;
     use crate::entities::amit_adjustment_generation::{self, GenerateBody};
+    use crate::entities::corporate_action::{ActionKind, CorporateAction};
     use crate::entities::holding_account::{self, HoldingAccount};
     use crate::entities::sell::AllocationInput;
     use crate::entities::transfer::{self, TransferBody};
+    use crate::entities::{demerger, scrip_exchange};
+    use crate::reports::open_parcels::{OpenParcel, db_open_parcels};
     use crate::test_support::{self, dec, test_pool, ymd};
 
     /// A transfer dated *before* an already-entered AMMA statement's year end
@@ -698,5 +703,169 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    /// The chain the register question turns on: a parcel bought on one
+    /// listing, **scrip-exchanged** onto another, and then moved by an
+    /// operation that keeps it there — a transfer between the taxpayer's own
+    /// accounts, or a demerger of the acquiring listing.
+    ///
+    /// A return of capital on the acquiring listing whose record date falls
+    /// *before* the exchange found the taxpayer not on that register, so the
+    /// exchange's replacement parcel is ex-entitlement to it
+    /// (`entities::scrip_exchange`'s
+    /// `a_replacement_parcel_is_ex_entitlement_to_the_acquirers_return_of_capital`).
+    /// The later operation must not hand the entitlement back — which it would
+    /// if `registered_from` were the parcel's own deemed acquisition date,
+    /// since that chains all the way to the first buy, years before the record
+    /// date. `ParcelRow::registered_from` walks up to the source parcel
+    /// instead.
+    ///
+    /// Seeds listings 1 (bought) and 2 (acquiring), a 2,000-unit parcel at $1
+    /// costing $2,000, a $0.05/unit payment (record date 2022-06-25, paid
+    /// 2026-08-01 — $100 over the parcel) and the 2023 exchange already run,
+    /// leaving one open parcel on listing 2. Answers its id.
+    async fn exchanged_across_a_return_of_capital_record_date(pool: &sqlx::SqlitePool) -> i64 {
+        test_support::listing(1).ticker("OLD").insert(pool).await;
+        test_support::listing(2).ticker("NEW").insert(pool).await;
+        test_support::buy(1, 1)
+            .date(ymd(2019, 1, 10))
+            .qty(dec("2000"))
+            .price(dec("1"))
+            .insert(pool)
+            .await;
+        corporate_action::db_upsert(
+            pool,
+            &CorporateAction {
+                id: 5,
+                listing_id: 2,
+                date: ymd(2026, 8, 1),
+                kind: ActionKind::ReturnOfCapital {
+                    amount_per_unit: dec("0.05"),
+                    currency: "AUD".to_string(),
+                    record_date: Some(ymd(2022, 6, 25)),
+                },
+            },
+        )
+        .await
+        .unwrap();
+        corporate_action::db_upsert(
+            pool,
+            &CorporateAction {
+                id: 10,
+                listing_id: 1,
+                date: ymd(2023, 3, 1),
+                kind: ActionKind::ScripForScrip {
+                    scrip_listing_id: 2,
+                    scrip_new_units: dec("1"),
+                    scrip_old_units: dec("1"),
+                    scrip_cash_per_unit: None,
+                    scrip_market_value: None,
+                    scrip_cash_currency: None,
+                },
+            },
+        )
+        .await
+        .unwrap();
+        scrip_exchange::db_exchange(pool, 10)
+            .await
+            .unwrap()
+            .replacements[0]
+            .id
+    }
+
+    /// The one open parcel of listing 2: its return-of-capital reduction and
+    /// remaining cost base, for the two chain tests below.
+    async fn listing_2_parcel(pool: &sqlx::SqlitePool) -> (Decimal, Decimal) {
+        let open: Vec<OpenParcel> = db_open_parcels(pool)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|p| p.listing_id == 2)
+            .collect();
+        assert_eq!(open.len(), 1);
+        (
+            open[0].return_of_capital_reduction,
+            open[0].remaining_cost_base,
+        )
+    }
+
+    /// A transfer between the taxpayer's own accounts leaves the units on
+    /// listing 2's register exactly as long as they already had been — since
+    /// the 2023 exchange, eight months after the payment was fixed — so the
+    /// parcel stays ex-entitlement across it.
+    #[tokio::test]
+    async fn a_transfer_does_not_reinstate_the_entitlement_an_earlier_exchange_denied() {
+        let pool = test_pool().await;
+        let exchanged = exchanged_across_a_return_of_capital_record_date(&pool).await;
+        holding_account::db_upsert(
+            &pool,
+            &HoldingAccount {
+                id: 2,
+                name: "Broker".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(listing_2_parcel(&pool).await, (Decimal::ZERO, dec("2000")));
+
+        transfer::db_transfer(
+            &pool,
+            1,
+            &TransferBody {
+                listing_id: 2,
+                date: ymd(2025, 4, 1),
+                from_account_id: 1,
+                to_account_id: 2,
+                allocations: vec![AllocationInput {
+                    purchase_trade_id: exchanged,
+                    quantity_allocated: dec("2000"),
+                }],
+                fee_allocations: Vec::new(),
+                fee_market_price: None,
+                fee_fx_rate: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(listing_2_parcel(&pool).await, (Decimal::ZERO, dec("2000")));
+    }
+
+    /// The same chain with a **demerger of listing 2** in the transfer's
+    /// place: its head parcel stays on listing 2, whose register the units
+    /// only joined at the exchange, so it too stays ex-entitlement. Only the
+    /// head parcel is asserted — the spun-off listing 3 parcel is of a
+    /// register the payment was never against.
+    #[tokio::test]
+    async fn a_demergers_head_parcel_does_not_reinstate_it_either() {
+        let pool = test_pool().await;
+        exchanged_across_a_return_of_capital_record_date(&pool).await;
+        test_support::listing(3).ticker("SPUN").insert(&pool).await;
+        corporate_action::db_upsert(
+            &pool,
+            &CorporateAction {
+                id: 20,
+                listing_id: 2,
+                date: ymd(2025, 4, 1),
+                kind: ActionKind::Demerger {
+                    demerger_listing_id: 3,
+                    demerger_new_units: dec("1"),
+                    demerger_held_units: dec("5"),
+                    demerger_cost_base_pct: dec("20"),
+                    demerger_close_date: None,
+                    demerger_close_price: None,
+                    demerger_close_sourced_from: None,
+                    demerger_close_reason: None,
+                },
+            },
+        )
+        .await
+        .unwrap();
+        demerger::db_demerge(&pool, 20).await.unwrap();
+
+        // 80% of the $2,000 stays with the head parcel, and none of the
+        // payment reaches it.
+        assert_eq!(listing_2_parcel(&pool).await, (Decimal::ZERO, dec("1600")));
     }
 }

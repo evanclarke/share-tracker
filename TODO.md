@@ -10,40 +10,21 @@ findings are all closed in DONE.md), except where a section's heading names anot
 (e.g. REQUIREMENTS, SCENARIOS). Each section records one finding; sections land in DONE.md as they
 are fixed or decided.
 
-**Open: 3 sections** — the `config.js` mirrors follow-up from the 2026-08-25 code review, a
-rollover-chain follow-up two generations down from its sibling C2 section, and the distribution
-calendar recorded from REQUIREMENTS 2026-08-27. All sixteen sections recorded from the **2026-08-25 code review**
+**Open: 2 sections** — the `config.js` mirrors follow-up from the 2026-08-25 code review and the
+distribution calendar recorded from REQUIREMENTS 2026-08-27. All sixteen sections recorded from the **2026-08-25 code review**
 (a whole-codebase pass over `src` — business-logic errors, quality, duplication — every finding
 adversarially verified against `f171999`) are closed and archived in
 [`DONE/reviews.md`](DONE/reviews.md): the AMIT×rollover pair (`44b8a6b`), the four-endpoint
 fx-parity family (`1341068`), the three web findings (`c190871`), the CGT worksheet/report trio
 (`85b8fe8`), the period-performance snapshot refactor with the two new convention scans — which
 also caught and fixed `wash_sales.rs` (`9c2ae3b`) — and the inheritance refactor (`85a255d`). Of the
-two follow-up sections recorded from observations made while fixing, both are now closed (archived
-in [`DONE/reviews.md`](DONE/reviews.md)): the C2/rollover one, whose reproduction confirmed the
-phantom C2 gain and turned up a second defect beside it — the lost G1 reduction, both fixed
-together — and the demerger head-parcel question it left in its place, which reproduced likewise and
-left the narrower rollover-chain question below.
-
-## A rollover after a listing change reinstates an entitlement the change denied (demerger head-parcel follow-up, 2026-08-27)
-(Found and reproduced while fixing the section above. `ParcelRow::rollover` dates a
-register-continuous replacement parcel — a transfer, or a demerger's head parcel — from its own
-`acquired()`, i.e. its deemed acquisition date, which carries all the way back to the first buy. That
-is exact only while the *whole* chain stayed on one register. Buy on listing 1 in 2019, scrip-exchange
-into listing 2 in 2023, transfer holding accounts in 2025: the replacement carries a 2019 deemed date,
-so a return of capital on listing 2 with a record date in 2022 and payment in 2026 is treated as
-entitled — a $100 cost-base reduction on 2,000 units that the exchange itself had correctly refused
-before the transfer. The transfer reinstates it. Confirmed against `db_open_parcels`: $0 after the
-exchange, $100.00 after the transfer. The exact answer is the *source* parcel's `registered_from`,
-which is a walk back up the rollover chain — `domain::rollover::source_ancestors` already walks one,
-bounded by `MAX_ROLLOVER_DEPTH` — and so is not something a single row can answer, which is why it is
-recorded rather than folded into the head-parcel fix. Documented on `ParcelRow::rollover`.)
-- [ ] Decide where the walk belongs: a recursive CTE column beside
-  `demerger_head_listing_id` in `ParcelRow::columns_qualified`, or a loaded map the callers of
-  `rollover()` pass in — the latter touching every `ParcelRow` reader
-- [ ] Fix, keeping the four shapes the head-parcel fix pinned unchanged
-- [ ] A test over the reproduced chain (exchange, then transfer; the same again with a demerger in
-  the transfer's place)
+three follow-up sections recorded from observations made while fixing, all three are now closed
+(archived in [`DONE/reviews.md`](DONE/reviews.md)): the C2/rollover one, whose reproduction confirmed
+the phantom C2 gain and turned up a second defect beside it — the lost G1 reduction, both fixed
+together — the demerger head-parcel question it left in its place, which reproduced likewise, and the
+rollover-chain question *that* left, where a transfer or demerger after an earlier scrip exchange
+reinstated the entitlement the exchange had denied — reproduced at $100 on 2,000 units and closed by
+a recursive register walk in `ParcelRow`'s SELECT list.
 
 ## config.js's sel() option lists and the health banner's field names are unpinned mirrors of Rust-side definitions (code review 2026-08-25 follow-up)
 (Found by the JOB_DESC/tradeOrigin fix's sweep, `c190871`. config.js `sel(…)` option lists mirror
