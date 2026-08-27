@@ -1193,6 +1193,159 @@ struct NilProceedsSellRow {
     currency: String,
 }
 
+/// How far **before** an ex-date an income row may be dated and still be that
+/// distribution's, for [`MissingDividendEntry`]'s matching.
+///
+/// A fund's `entitlement_date` is the distribution period's end and sits a day
+/// or two *before* the ex-date (period ending 30 June, ex 1 July), so the
+/// window has to reach backwards at all — but only just.
+const DIVIDEND_MATCH_BEFORE_DAYS: i64 = 15;
+
+/// How far **after** an ex-date an income row may be dated and still be that
+/// distribution's.
+///
+/// The registry pays ~15 days after the ex-date for a fund and up to about six
+/// weeks for a company, and `date_paid` is the anchor most rows have. Together
+/// with [`DIVIDEND_MATCH_BEFORE_DAYS`] the window is 61 days, comfortably
+/// inside the ~88-day minimum spacing of a quarterly payer — so two events can
+/// never compete for one income row on spacing alone.
+const DIVIDEND_MATCH_AFTER_DAYS: i64 = 45;
+
+/// The relative band [`DividendAmountMismatch`] treats as agreement, as a
+/// percentage of the expected gross.
+///
+/// The per-unit figure carries the provider's ~7 significant digits and the
+/// units are exact, so two facts that agree agree to fractions of a cent. The
+/// band is not for arithmetic slack — it absorbs the small legitimate
+/// divergences (a registry's own rounding convention, a component recorded
+/// slightly differently) while leaving the error this alert exists for, a
+/// mistyped figure, far outside it.
+const DIVIDEND_AMOUNT_TOLERANCE_PERCENT: i64 = 2;
+
+/// The absolute floor under [`DIVIDEND_AMOUNT_TOLERANCE_PERCENT`], in the
+/// distribution's own currency: a difference smaller than this is never
+/// reported however large it is in percentage terms.
+///
+/// Without it a distribution of a fraction of a cent per unit — HNDQ paid
+/// 0.018741 — would alert on a few cents of registry rounding.
+const DIVIDEND_AMOUNT_TOLERANCE_FLOOR: i64 = 1;
+
+/// A distribution the provider knows about that no income row records
+/// (see [`db_distribution_calendar`]).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MissingDividendEntry {
+    pub listing_id: i64,
+    pub ticker: String,
+    pub holding_account_id: i64,
+    pub holding_account: String,
+    /// The ex-date, as stored by the distribution calendar.
+    pub ex_date: NaiveDate,
+    /// Units held at the close of the **last cum-dividend day** (the day
+    /// before the ex-date), which is what entitles a holder — expressed in the
+    /// unit basis the per-unit figure came in.
+    pub units_held: Decimal,
+    pub amount_per_unit: Decimal,
+    /// `amount_per_unit × units_held`, in `currency` — the gross the missing
+    /// income row would carry.
+    pub expected_amount: Decimal,
+    pub currency: String,
+}
+
+/// A recorded distribution whose gross does not match what the provider's
+/// per-unit figure implies (see [`db_distribution_calendar`]).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DividendAmountMismatch {
+    /// The `income` row the alert is about.
+    pub income_id: i64,
+    pub listing_id: i64,
+    pub ticker: String,
+    pub holding_account_id: i64,
+    pub holding_account: String,
+    pub ex_date: NaiveDate,
+    pub date_paid: NaiveDate,
+    pub units_held: Decimal,
+    pub amount_per_unit: Decimal,
+    pub expected_amount: Decimal,
+    /// The row's own gross cash — `franked + unfranked + foreign source`, the
+    /// same total the per-share statement check reconciles against. **Gross
+    /// only, never the components**: a component split is a matter for the
+    /// registry statement, and no external feed is evidence about it.
+    pub recorded_amount: Decimal,
+    /// `recorded_amount - expected_amount`; negative when less was recorded
+    /// than the calendar implies.
+    ///
+    /// Named `amount_difference` rather than `difference` because the display
+    /// kinds are keyed on the column *name* across the whole app, and
+    /// `difference` is already the AMIT generation's units figure — one name
+    /// cannot be both money and a quantity.
+    pub amount_difference: Decimal,
+    pub currency: String,
+}
+
+/// A stored calendar event with its listing's ticker.
+#[derive(sqlx::FromRow)]
+struct CalendarEventRow {
+    listing_id: i64,
+    ticker: String,
+    ex_date: NaiveDate,
+    #[sqlx(try_from = "Money")]
+    amount_per_unit: Decimal,
+    currency: String,
+    fetched_at: String,
+}
+
+/// A candidate income row for the calendar match: the dates it can be anchored
+/// on and the gross it records.
+#[derive(sqlx::FromRow)]
+struct CalendarIncomeRow {
+    id: i64,
+    listing_id: i64,
+    holding_account_id: i64,
+    date_paid: NaiveDate,
+    ex_date: Option<NaiveDate>,
+    entitlement_date: Option<NaiveDate>,
+    #[sqlx(try_from = "Money")]
+    franked_amount: Decimal,
+    #[sqlx(try_from = "Money")]
+    unfranked_amount: Decimal,
+    #[sqlx(try_from = "Money")]
+    foreign_source_income: Decimal,
+}
+
+impl CalendarIncomeRow {
+    /// The same gross the entity's own `gross_cash_income` sums — franking
+    /// credits are notional and withholdings come *out of* this, so neither
+    /// belongs in it.
+    fn gross(&self) -> Decimal {
+        self.franked_amount + self.unfranked_amount + self.foreign_source_income
+    }
+
+    /// How far this row sits from `ex_date`, in days, or `None` when no anchor
+    /// it carries falls inside the match window.
+    ///
+    /// A row's own `ex_date` is decisive when it has one — it is the same fact
+    /// the calendar stores — but 13 of the 47 income rows in the live database
+    /// carry none, so the window over `entitlement_date` / `date_paid` is what
+    /// the matching actually runs on. Whichever anchor is nearest wins, so a
+    /// fund row carrying both a period-end and a payment date is matched on
+    /// the closer of the two rather than on whichever was checked first.
+    fn distance_from(&self, ex_date: NaiveDate) -> Option<i64> {
+        if let Some(own) = self.ex_date {
+            return (own == ex_date).then_some(0);
+        }
+        [self.entitlement_date, Some(self.date_paid)]
+            .into_iter()
+            .flatten()
+            .filter_map(|anchor| {
+                let days = (anchor - ex_date).num_days();
+                (-DIVIDEND_MATCH_BEFORE_DAYS..=DIVIDEND_MATCH_AFTER_DAYS)
+                    .contains(&days)
+                    .then_some(days.abs())
+            })
+            .min()
+    }
+}
+
 /// A candidate rights disposal for [`NilProceedsDisposal`], compared in Rust
 /// for the same reason as [`NilProceedsSellRow`].
 #[derive(sqlx::FromRow)]
@@ -1304,6 +1457,19 @@ pub struct HealthReport {
     /// market value rather than the nothing that was received. Empty when
     /// every disposal records what it realised.
     pub nil_proceeds_disposals: Vec<NilProceedsDisposal>,
+    /// Every distribution the calendar knows about that the books do not:
+    /// a stored ex-date where the (listing, holding account) held units on the
+    /// last cum-dividend day and no income row matches it, newest ex-date
+    /// first. Empty when every known distribution has been entered — and, on a
+    /// database whose `distribution-import` job has never run, empty because
+    /// nothing is known.
+    pub missing_dividend_entries: Vec<MissingDividendEntry>,
+    /// Every entered distribution whose gross does not match the calendar's
+    /// per-unit figure times the units held, newest ex-date first. The
+    /// likelier of the two errors — a typo in a figure, against a distribution
+    /// wholly forgotten — and the one the provider's 6 dp agreement with the
+    /// registry shows it is accurate enough to catch.
+    pub dividend_amount_mismatches: Vec<DividendAmountMismatch>,
 }
 
 /// Business days (Mon–Fri) strictly after `from`, up to and including `today`.
@@ -2657,6 +2823,163 @@ async fn db_stalled_jobs(
     Ok(stalled)
 }
 
+/// The distribution calendar's two advisory alerts, in one walk: a known
+/// distribution the books never recorded, and a recorded one whose gross does
+/// not match what the calendar implies.
+///
+/// **Advisory, and structurally so.** Nothing here can change a tax figure —
+/// `reports::tax_report`'s completeness gate stays on recorded facts alone,
+/// by decision (REQUIREMENTS, "Deliberately out of scope"). Reading "the
+/// provider knows of no ex-date" as "there was no distribution" was checked
+/// against an issuer before this was built (REQUIREMENTS, "Coverage settled"):
+/// the four HNDQ periods Yahoo omits are the four Betashares' own table prints
+/// a bare `-` against.
+///
+/// Three reads and an in-memory match, rather than a query per event: the
+/// calendar, the dividend income rows, and the account names, over one
+/// [`HeldTimeline`] the caller's transaction already affords.
+///
+/// # What "held" means here
+///
+/// Entitlement runs to the holders at the close of the **day before** the
+/// ex-date — that is what an ex-date *is*, and on a T+2 market a purchase made
+/// that day is still on the register at the record date. So the alert asks the
+/// timeline about `ex_date - 1`, never about the ex-date itself: a Buy dated on
+/// the ex-date bought the security without this distribution attached, and
+/// counting it would invent an entitlement.
+///
+/// # What "per unit" means here
+///
+/// The stored per-unit amount is in the unit basis of its own `fetched_at`,
+/// because that is the basis the provider quotes in (see
+/// `entities::distribution_event::DistributionEvent::amount_per_unit`). The
+/// units it multiplies are therefore requested in that same basis. A total is
+/// basis-independent — the two scale inversely — so the product is the right
+/// number of dollars whichever basis the pair happens to share, and a split
+/// recorded between the ex-date and the fetch cannot skew it.
+async fn db_distribution_calendar(
+    conn: &mut sqlx::SqliteConnection,
+) -> Result<(Vec<MissingDividendEntry>, Vec<DividendAmountMismatch>), sqlx::Error> {
+    let events: Vec<CalendarEventRow> = sqlx::query_as(
+        "SELECT de.listing_id AS listing_id, l.ticker AS ticker, de.ex_date AS ex_date, \
+                de.amount_per_unit AS amount_per_unit, de.currency AS currency, \
+                de.fetched_at AS fetched_at \
+         FROM distribution_events de JOIN listings l ON l.id = de.listing_id \
+         ORDER BY de.ex_date DESC, de.listing_id",
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    if events.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+
+    // Only `Dividend` rows: an employment-income row is not a distribution of
+    // the holding at all, and matching one to an ex-date would be a category
+    // error rather than a near miss.
+    let income: Vec<CalendarIncomeRow> = sqlx::query_as(
+        "SELECT id, listing_id, holding_account_id, date_paid, ex_date, entitlement_date, \
+                franked_amount, unfranked_amount, foreign_source_income \
+         FROM income WHERE income_type = 'Dividend'",
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    let accounts: HashMap<i64, String> =
+        sqlx::query_as::<_, (i64, String)>("SELECT id, name FROM holding_accounts")
+            .fetch_all(&mut *conn)
+            .await?
+            .into_iter()
+            .collect();
+    let timeline = HeldTimeline::load_on(&mut *conn).await?;
+
+    // Income rows by (listing, account), so the match is run one registered
+    // holder at a time — the same listing in two accounts pays two
+    // distributions and is entered as two rows.
+    let mut by_holder: HashMap<(i64, i64), Vec<&CalendarIncomeRow>> = HashMap::new();
+    for row in &income {
+        by_holder
+            .entry((row.listing_id, row.holding_account_id))
+            .or_default()
+            .push(row);
+    }
+
+    let (mut missing, mut mismatches) = (Vec::new(), Vec::new());
+    // A row is claimed by at most one event: without this a half-yearly payer
+    // whose two events fall inside one row's window would report the second as
+    // missing *and* match it, saying opposite things about the same fact.
+    let mut claimed: HashSet<i64> = HashSet::new();
+    for event in &events {
+        let basis_at = DateTime::parse_from_rfc3339(&event.fetched_at)
+            .map_err(|e| {
+                sqlx::Error::Decode(
+                    format!(
+                        "distribution event for listing {} on {} has an unreadable fetched_at \
+                         {:?}: {e}",
+                        event.listing_id, event.ex_date, event.fetched_at
+                    )
+                    .into(),
+                )
+            })?
+            .date_naive();
+        let cum_date = event.ex_date - Duration::days(1);
+        for (account_id, units) in
+            timeline.units_by_account_on(event.listing_id, cum_date, basis_at)
+        {
+            let expected = event.amount_per_unit * units;
+            let candidates = by_holder
+                .get(&(event.listing_id, account_id))
+                .map_or(&[][..], |v| v);
+            let matched = candidates
+                .iter()
+                .filter(|row| !claimed.contains(&row.id))
+                .filter_map(|row| row.distance_from(event.ex_date).map(|d| (d, *row)))
+                .min_by_key(|(distance, row)| (*distance, row.id));
+
+            let account = accounts
+                .get(&account_id)
+                .cloned()
+                .unwrap_or_else(|| account_id.to_string());
+            let Some((_, row)) = matched else {
+                missing.push(MissingDividendEntry {
+                    listing_id: event.listing_id,
+                    ticker: event.ticker.clone(),
+                    holding_account_id: account_id,
+                    holding_account: account,
+                    ex_date: event.ex_date,
+                    units_held: units,
+                    amount_per_unit: event.amount_per_unit,
+                    expected_amount: expected,
+                    currency: event.currency.clone(),
+                });
+                continue;
+            };
+            claimed.insert(row.id);
+            let recorded = row.gross();
+            let difference = recorded - expected;
+            let tolerance = (expected.abs() * Decimal::from(DIVIDEND_AMOUNT_TOLERANCE_PERCENT)
+                / Decimal::ONE_HUNDRED)
+                .max(Decimal::from(DIVIDEND_AMOUNT_TOLERANCE_FLOOR));
+            if difference.abs() > tolerance {
+                mismatches.push(DividendAmountMismatch {
+                    income_id: row.id,
+                    listing_id: event.listing_id,
+                    ticker: event.ticker.clone(),
+                    holding_account_id: account_id,
+                    holding_account: account,
+                    ex_date: event.ex_date,
+                    date_paid: row.date_paid,
+                    units_held: units,
+                    amount_per_unit: event.amount_per_unit,
+                    expected_amount: expected,
+                    recorded_amount: recorded,
+                    amount_difference: difference,
+                    currency: event.currency.clone(),
+                });
+            }
+        }
+    }
+    Ok((missing, mismatches))
+}
+
 /// Read the freshness facts on one snapshot. `today` and `now` are parameters
 /// so tests can pin the staleness thresholds and the "close is final yet"
 /// cut-off to fixed dates.
@@ -2722,6 +3045,8 @@ pub async fn db_health(
     let ess_30_day_rule = db_ess_30_day_rule(&mut tx).await?;
     let non_trading_day_trades = db_non_trading_day_trades(&mut tx).await?;
     let nil_proceeds_disposals = db_nil_proceeds_disposals(&mut tx).await?;
+    let (missing_dividend_entries, dividend_amount_mismatches) =
+        db_distribution_calendar(&mut tx).await?;
     tx.commit().await?;
     let unpriced_days = db_unpriced_days(pool, now).await?;
 
@@ -2755,6 +3080,8 @@ pub async fn db_health(
         ess_30_day_rule,
         non_trading_day_trades,
         nil_proceeds_disposals,
+        missing_dividend_entries,
+        dividend_amount_mismatches,
     })
 }
 
@@ -6106,5 +6433,307 @@ mod tests {
         assert_eq!(list[0]["quantity"], "600");
         assert_eq!(list[0]["rights_cost"], serde_json::Value::Null);
         assert_eq!(list[1]["record_id"], 2);
+    }
+
+    // ---- distribution calendar ------------------------------------------
+    //
+    // The two alerts are the only external evidence the health report has
+    // about the *books*: every other check compares recorded facts against
+    // each other, so a distribution nobody entered is invisible to all of
+    // them.
+
+    /// Store one calendar event directly — the shape the `distribution-import`
+    /// job writes, without the job or a provider.
+    async fn insert_event(
+        pool: &SqlitePool,
+        listing_id: i64,
+        ex_date: NaiveDate,
+        amount_per_unit: &str,
+        fetched_at: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO distribution_events \
+                 (listing_id, ex_date, amount_per_unit, currency, source, fetched_symbol, \
+                  fetched_at) \
+             VALUES (?, ?, ?, 'AUD', 'yahoo', 'T1.AX', ?)",
+        )
+        .bind(listing_id)
+        .bind(ex_date)
+        .bind(amount_per_unit)
+        .bind(fetched_at)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// One listing with a 100-unit parcel bought well before the ex-date.
+    async fn holding_before_the_ex_date(pool: &SqlitePool) {
+        test_support::listing(1).ticker("ABC").insert(pool).await;
+        test_support::buy(1, 1)
+            .date(ymd(2024, 1, 10))
+            .qty(dec("100"))
+            .insert(pool)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn a_known_distribution_with_no_income_row_is_reported() {
+        let pool = test_pool().await;
+        holding_before_the_ex_date(&pool).await;
+        insert_event(
+            &pool,
+            1,
+            ymd(2024, 7, 1),
+            "0.726547",
+            "2026-08-27T00:00:00Z",
+        )
+        .await;
+
+        let h = health(&pool, ymd(2026, 8, 27)).await;
+        assert_eq!(h.missing_dividend_entries.len(), 1);
+        let m = &h.missing_dividend_entries[0];
+        assert_eq!(m.ticker, "ABC");
+        assert_eq!(m.ex_date, ymd(2024, 7, 1));
+        assert_eq!(m.units_held, dec("100"));
+        // The expected gross is the per-unit figure times the units — not an
+        // eligibility flag, the figure the missing row would carry.
+        assert_eq!(m.expected_amount, dec("72.6547"));
+        assert_eq!(m.currency, "AUD");
+        assert!(h.dividend_amount_mismatches.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_entered_distribution_clears_the_alert() {
+        let pool = test_pool().await;
+        holding_before_the_ex_date(&pool).await;
+        insert_event(
+            &pool,
+            1,
+            ymd(2024, 7, 1),
+            "0.726547",
+            "2026-08-27T00:00:00Z",
+        )
+        .await;
+        // Paid 15 days after the ex-date, carrying no ex_date of its own —
+        // the ordinary shape, and the one the window exists for.
+        test_support::income(1, 1, ymd(2024, 7, 16))
+            .with(|i| i.unfranked_amount = dec("72.65"))
+            .insert(&pool)
+            .await;
+
+        let h = health(&pool, ymd(2026, 8, 27)).await;
+        assert!(h.missing_dividend_entries.is_empty());
+        assert!(
+            h.dividend_amount_mismatches.is_empty(),
+            "72.65 against 72.6547 is agreement, not a mismatch"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_distribution_entered_with_the_wrong_gross_is_reported() {
+        let pool = test_pool().await;
+        holding_before_the_ex_date(&pool).await;
+        insert_event(
+            &pool,
+            1,
+            ymd(2024, 7, 1),
+            "0.726547",
+            "2026-08-27T00:00:00Z",
+        )
+        .await;
+        // A transposed figure: 726.55 for 72.65.
+        test_support::income(1, 1, ymd(2024, 7, 16))
+            .with(|i| i.unfranked_amount = dec("726.55"))
+            .insert(&pool)
+            .await;
+
+        let h = health(&pool, ymd(2026, 8, 27)).await;
+        assert!(
+            h.missing_dividend_entries.is_empty(),
+            "the row matched — it is the amount that is wrong, not the entry that is absent"
+        );
+        assert_eq!(h.dividend_amount_mismatches.len(), 1);
+        let m = &h.dividend_amount_mismatches[0];
+        assert_eq!(m.income_id, 1);
+        assert_eq!(m.expected_amount, dec("72.6547"));
+        assert_eq!(m.recorded_amount, dec("726.55"));
+        assert_eq!(m.amount_difference, dec("653.8953"));
+        assert_eq!(m.date_paid, ymd(2024, 7, 16));
+    }
+
+    #[tokio::test]
+    async fn a_holding_bought_on_the_ex_date_is_not_entitled_and_raises_nothing() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("ABC").insert(&pool).await;
+        // Bought *on* the ex-date: the security traded that day without this
+        // distribution attached, so there is nothing missing.
+        test_support::buy(1, 1)
+            .date(ymd(2024, 7, 1))
+            .qty(dec("100"))
+            .insert(&pool)
+            .await;
+        insert_event(
+            &pool,
+            1,
+            ymd(2024, 7, 1),
+            "0.726547",
+            "2026-08-27T00:00:00Z",
+        )
+        .await;
+
+        let h = health(&pool, ymd(2026, 8, 27)).await;
+        assert!(h.missing_dividend_entries.is_empty());
+
+        // The control: one day earlier is the last cum-dividend day, and that
+        // holding *is* entitled — so the silence above is the entitlement
+        // rule, not a walk that fails to see the parcel at all.
+        sqlx::query("UPDATE trades SET date = '2024-06-30' WHERE id = 1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let h = health(&pool, ymd(2026, 8, 27)).await;
+        assert_eq!(h.missing_dividend_entries.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn each_holding_account_is_asked_separately() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("ABC").insert(&pool).await;
+        holding_account::db_upsert(
+            &pool,
+            &holding_account::HoldingAccount {
+                id: 2,
+                name: "Second".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        test_support::buy(1, 1)
+            .date(ymd(2024, 1, 10))
+            .qty(dec("100"))
+            .insert(&pool)
+            .await;
+        test_support::buy(2, 1)
+            .date(ymd(2024, 1, 10))
+            .qty(dec("40"))
+            .account(2)
+            .insert(&pool)
+            .await;
+        insert_event(&pool, 1, ymd(2024, 7, 1), "1", "2026-08-27T00:00:00Z").await;
+        // Only the first account's distribution was entered.
+        test_support::income(1, 1, ymd(2024, 7, 16))
+            .with(|i| i.unfranked_amount = dec("100"))
+            .insert(&pool)
+            .await;
+
+        let h = health(&pool, ymd(2026, 8, 27)).await;
+        assert_eq!(h.missing_dividend_entries.len(), 1);
+        let m = &h.missing_dividend_entries[0];
+        assert_eq!(m.holding_account_id, 2);
+        assert_eq!(m.holding_account, "Second");
+        assert_eq!(m.units_held, dec("40"));
+        assert_eq!(m.expected_amount, dec("40"));
+        assert!(h.dividend_amount_mismatches.is_empty());
+    }
+
+    #[tokio::test]
+    async fn one_income_row_is_claimed_by_one_event_only() {
+        let pool = test_pool().await;
+        holding_before_the_ex_date(&pool).await;
+        // Two events 30 days apart — inside one another's match windows, which
+        // is what an unclaimed-row match would fall for.
+        insert_event(&pool, 1, ymd(2024, 7, 1), "1", "2026-08-27T00:00:00Z").await;
+        insert_event(&pool, 1, ymd(2024, 7, 31), "1", "2026-08-27T00:00:00Z").await;
+        test_support::income(1, 1, ymd(2024, 8, 5))
+            .with(|i| i.unfranked_amount = dec("100"))
+            .insert(&pool)
+            .await;
+
+        let h = health(&pool, ymd(2026, 8, 27)).await;
+        // The row is nearest 31 July, so that one is matched and 1 July is the
+        // one reported missing — exactly one of the two, never both or neither.
+        assert_eq!(h.missing_dividend_entries.len(), 1);
+        assert_eq!(h.missing_dividend_entries[0].ex_date, ymd(2024, 7, 1));
+        assert!(h.dividend_amount_mismatches.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_row_carrying_its_own_ex_date_matches_on_it_exactly() {
+        let pool = test_pool().await;
+        holding_before_the_ex_date(&pool).await;
+        insert_event(&pool, 1, ymd(2024, 7, 1), "1", "2026-08-27T00:00:00Z").await;
+        // The payment date is far outside the window, but the row states the
+        // ex-date itself — the same fact the calendar stores.
+        test_support::income(1, 1, ymd(2025, 3, 1))
+            .with(|i| {
+                i.ex_date = Some(ymd(2024, 7, 1));
+                i.unfranked_amount = dec("100");
+            })
+            .insert(&pool)
+            .await;
+
+        let h = health(&pool, ymd(2026, 8, 27)).await;
+        assert!(h.missing_dividend_entries.is_empty());
+        assert!(h.dividend_amount_mismatches.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_split_between_the_ex_date_and_the_fetch_does_not_skew_the_expected_amount() {
+        let pool = test_pool().await;
+        holding_before_the_ex_date(&pool).await;
+        // A 10-for-1 split after the distribution. The provider restates its
+        // whole dividend history into the current basis, so the stored figure
+        // is a tenth of what was declared — and the units it multiplies must
+        // be in that same basis, or the product is out by the ratio.
+        insert_action(
+            &pool,
+            1,
+            1,
+            ymd(2025, 1, 15),
+            corporate_action::ActionKind::ShareSplit {
+                split_new_units: dec("10"),
+                split_old_units: dec("1"),
+            },
+        )
+        .await;
+        insert_event(
+            &pool,
+            1,
+            ymd(2024, 7, 1),
+            "0.0726547",
+            "2026-08-27T00:00:00Z",
+        )
+        .await;
+
+        let h = health(&pool, ymd(2026, 8, 27)).await;
+        assert_eq!(h.missing_dividend_entries.len(), 1);
+        let m = &h.missing_dividend_entries[0];
+        assert_eq!(
+            m.units_held,
+            dec("1000"),
+            "100 units in the post-split basis"
+        );
+        assert_eq!(
+            m.expected_amount,
+            dec("72.6547"),
+            "the same dollars either side of the split — a total is basis-independent"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_empty_calendar_raises_nothing() {
+        let pool = test_pool().await;
+        holding_before_the_ex_date(&pool).await;
+        test_support::income(1, 1, ymd(2024, 7, 16))
+            .with(|i| i.unfranked_amount = dec("72.65"))
+            .insert(&pool)
+            .await;
+
+        // A database whose import job has never run knows of no ex-date, and
+        // must therefore say nothing at all — the alerts are evidence about
+        // the books, never the absence of evidence.
+        let h = health(&pool, ymd(2026, 8, 27)).await;
+        assert!(h.missing_dividend_entries.is_empty());
+        assert!(h.dividend_amount_mismatches.is_empty());
     }
 }

@@ -71,12 +71,23 @@ mod tests {
         crate::entities::closing_price::test_support::QuoteStub::default().shared()
     }
 
+    fn stub_distributions() -> crate::entities::distribution_event::SharedDistributionFetcher {
+        crate::entities::distribution_event::test_support::DistributionStub::default().shared()
+    }
+
     async fn test_registry() -> (JobRegistry, SqlitePool, tempfile::TempDir, String) {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db").to_string_lossy().to_string();
         let pool = db::init(&db_path).await.unwrap();
         (
-            registry(pool.clone(), db_path.clone(), None, None, stub_fetcher()),
+            registry(
+                pool.clone(),
+                db_path.clone(),
+                None,
+                None,
+                stub_fetcher(),
+                stub_distributions(),
+            ),
             pool,
             dir,
             db_path,
@@ -777,7 +788,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("t.db").to_string_lossy().to_string();
         let pool = db::init(&db_path).await.unwrap();
-        let reg = registry(pool.clone(), db_path.clone(), None, None, stub_fetcher());
+        let reg = registry(
+            pool.clone(),
+            db_path.clone(),
+            None,
+            None,
+            stub_fetcher(),
+            stub_distributions(),
+        );
         let app = ApiClient::over(router().with_state(pool).layer(Extension(reg)));
 
         let resp = app.post_empty("/jobs/backup").await;
@@ -807,7 +825,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("t.db").to_string_lossy().to_string();
         let pool = db::init(&db_path).await.unwrap();
-        let reg = registry(pool.clone(), db_path.clone(), None, None, stub_fetcher());
+        let reg = registry(
+            pool.clone(),
+            db_path.clone(),
+            None,
+            None,
+            stub_fetcher(),
+            stub_distributions(),
+        );
         let app = ApiClient::over(router().with_state(pool).layer(Extension(reg)));
 
         let resp = app.post_empty("/jobs/backup?suffix=pre-0.5.1").await;
@@ -828,7 +853,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("t.db").to_string_lossy().to_string();
         let pool = db::init(&db_path).await.unwrap();
-        let reg = registry(pool.clone(), db_path, None, None, stub_fetcher());
+        let reg = registry(
+            pool.clone(),
+            db_path,
+            None,
+            None,
+            stub_fetcher(),
+            stub_distributions(),
+        );
         let app = ApiClient::over(router().with_state(pool.clone()).layer(Extension(reg)));
 
         let resp = app.post_empty("/jobs/backup?suffix=../etc/passwd").await;
@@ -902,6 +934,7 @@ mod tests {
             Some(backup_dir.path().to_string_lossy().into_owned()),
             None,
             stub_fetcher(),
+            stub_distributions(),
         );
 
         let job = reg.get("backup").unwrap();
@@ -934,7 +967,14 @@ mod tests {
         let pool = db::init(&db_path).await.unwrap();
         let marker = db_dir.path().join("hook-ran");
         let command = format!("touch {}", marker.to_string_lossy());
-        let reg = registry(pool.clone(), db_path, None, Some(command), stub_fetcher());
+        let reg = registry(
+            pool.clone(),
+            db_path,
+            None,
+            Some(command),
+            stub_fetcher(),
+            stub_distributions(),
+        );
 
         let job = reg.get("backup").unwrap();
         run_job(&pool, "backup", job, JobParams::default())
@@ -961,7 +1001,14 @@ mod tests {
         let pool = db::init(&db_path).await.unwrap();
         let log = dir.path().join("hook-runs");
         let command = format!("echo ran >> {}", log.to_string_lossy());
-        let reg = registry(pool.clone(), db_path, None, Some(command), stub_fetcher());
+        let reg = registry(
+            pool.clone(),
+            db_path,
+            None,
+            Some(command),
+            stub_fetcher(),
+            stub_distributions(),
+        );
         (reg, pool, dir, log)
     }
 
@@ -1146,7 +1193,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("t.db").to_string_lossy().to_string();
         let pool = db::init(&db_path).await.unwrap();
-        let reg = registry(pool.clone(), db_path, None, None, stub_fetcher());
+        let reg = registry(
+            pool.clone(),
+            db_path,
+            None,
+            None,
+            stub_fetcher(),
+            stub_distributions(),
+        );
         let app = ApiClient::over(router().with_state(pool).layer(Extension(reg)));
 
         let resp = app.post_empty("/jobs/backup").await;
@@ -1164,7 +1218,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("t.db").to_string_lossy().to_string();
         let pool = db::init(&db_path).await.unwrap();
-        let reg = registry(pool.clone(), db_path, None, None, stub_fetcher());
+        let reg = registry(
+            pool.clone(),
+            db_path,
+            None,
+            None,
+            stub_fetcher(),
+            stub_distributions(),
+        );
         let app = ApiClient::over(router().with_state(pool).layer(Extension(reg)));
 
         let resp = app.post_empty("/jobs/does-not-exist").await;
@@ -1230,7 +1291,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("t.db").to_string_lossy().to_string();
         let pool = db::init(&db_path).await.unwrap();
-        let reg = registry(pool.clone(), db_path, None, None, stub_fetcher());
+        let reg = registry(
+            pool.clone(),
+            db_path,
+            None,
+            None,
+            stub_fetcher(),
+            stub_distributions(),
+        );
         let app = ApiClient::over(router().with_state(pool.clone()).layer(Extension(reg)));
 
         let resp = app.post_empty("/jobs/backup?sufix=pre-0.5.1").await;
@@ -1265,7 +1333,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("t.db").to_string_lossy().to_string();
         let pool = db::init(&db_path).await.unwrap();
-        let reg = registry(pool.clone(), db_path, None, None, stub_fetcher());
+        let reg = registry(
+            pool.clone(),
+            db_path,
+            None,
+            None,
+            stub_fetcher(),
+            stub_distributions(),
+        );
         let app = ApiClient::over(router().with_state(pool).layer(Extension(reg)));
 
         let resp = app.get("/jobs").await;

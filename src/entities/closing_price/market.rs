@@ -36,7 +36,11 @@ pub struct MarketIdentity {
 impl MarketIdentity {
     /// The timezone trading days are keyed on: the exchange's, or UTC for
     /// exchange-less (Crypto) listings, per the resolved cut-off convention.
-    pub(super) fn tz(&self) -> Result<Tz, String> {
+    /// `pub(crate)` rather than `pub(super)`: the distribution calendar's own
+    /// Yahoo adapter asks the same question of the same identity, and the
+    /// answer must be the one this module gives (see
+    /// `entities::distribution_event::yahoo`).
+    pub(crate) fn tz(&self) -> Result<Tz, String> {
         match &self.exchange {
             None => Ok(chrono_tz::UTC),
             Some(ex) => ex.timezone.parse().map_err(|_| {

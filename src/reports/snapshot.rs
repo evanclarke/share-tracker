@@ -1094,7 +1094,7 @@ mod tests {
     /// an omission. The snapshotted reports are the price-dependent three
     /// ([`SnapshotReport`]); a table only the live-computed CGT reports or the
     /// (un-snapshotted) tax summary read is therefore exempt.
-    const STALENESS_EXEMPT_TABLES: [(&str, &str); 21] = [
+    const STALENESS_EXEMPT_TABLES: [(&str, &str); 22] = [
         (
             "attachments",
             "documents are provenance, not financial facts; no snapshotted report reads them \
@@ -1116,6 +1116,13 @@ mod tests {
             "currencies",
             "the ISO code list every currency column is foreign-keyed to: an identity, not a \
              figure any report computes with",
+        ),
+        (
+            "distribution_events",
+            "the provider's advisory dividend calendar: the three snapshotted reports are the \
+             price-dependent ones and none of them reads a distribution event, while its only \
+             reader — reports::health — is computed live on every request and never stored \
+             (0048_distribution_events.sql)",
         ),
         (
             "drp_enrolments",

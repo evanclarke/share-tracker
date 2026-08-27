@@ -15,6 +15,12 @@ use std::collections::HashMap;
 /// units from `acquired`, less the units each sale allocated out of it from
 /// that sale's date.
 struct ParcelHolding {
+    /// Which account the parcel sits in. Only
+    /// [`HeldTimeline::units_by_account_on`] reads it — every other question
+    /// here is about the listing as a whole — but a holding *is* per account
+    /// (an entitlement is paid to a registered holder, not to a security), so
+    /// the split has to survive the load.
+    holding_account_id: i64,
     acquired: NaiveDate,
     qty: Decimal,
     /// `(sale date, units sold)`, each already re-based to this parcel's
@@ -60,6 +66,11 @@ pub struct HeldTimeline {
     /// Purchase parcels per listing; a listing appears exactly if it was ever
     /// bought, whether or not it is still held.
     parcels: HashMap<i64, Vec<ParcelHolding>>,
+    /// The recorded share splits per listing, kept from the load so a holding
+    /// can be expressed in the unit basis of a **past** date rather than only
+    /// in each parcel's as-acquired one
+    /// ([`HeldTimeline::units_by_account_on`]).
+    splits: HashMap<i64, Vec<crate::entities::corporate_action::SplitEvent>>,
 }
 
 impl HeldTimeline {
@@ -74,7 +85,7 @@ impl HeldTimeline {
     /// cannot be missed (SCENARIOS X-a).
     pub async fn load_on(conn: &mut sqlx::SqliteConnection) -> Result<Self, sqlx::Error> {
         let buys = sqlx::query(
-            "SELECT id, listing_id, date, quantity FROM trades \
+            "SELECT id, listing_id, holding_account_id, date, quantity FROM trades \
              WHERE trade_type IN ('Buy', 'DRP')",
         )
         .fetch_all(&mut *conn)
@@ -120,12 +131,72 @@ impl HeldTimeline {
                 })
                 .collect();
             parcels.entry(listing_id).or_default().push(ParcelHolding {
+                holding_account_id: row.try_get("holding_account_id")?,
                 acquired,
                 qty,
                 sales,
             });
         }
-        Ok(HeldTimeline { parcels })
+        Ok(HeldTimeline {
+            parcels,
+            splits: split_events,
+        })
+    }
+
+    /// Units of `listing_id` held **in each holding account** at the close of
+    /// `held_on`, expressed in the unit basis in force at `unit_basis_at`,
+    /// ascending by account; an account holding nothing is omitted.
+    ///
+    /// Per account because an entitlement is paid to a registered holder: the
+    /// same listing held in two accounts pays two distributions and is entered
+    /// as two income rows, so the distribution calendar's alerts
+    /// (`reports::health`) have to ask the question one holder at a time.
+    ///
+    /// **The two dates are separate on purpose.** The holding is a fact about
+    /// one day (for a distribution, the last cum-dividend day), but the number
+    /// of units that holding *is* depends on which side of a split you ask
+    /// from — and the figure it will be multiplied by has a basis of its own.
+    /// A provider quotes a distribution per unit in the basis in force when it
+    /// answered, not in the basis of the ex-date: Yahoo reports NVDA's
+    /// pre-split dividends as 0.004 against a declared $0.04, restated
+    /// cumulatively through every later split. Multiplying a figure in one
+    /// basis by units in another is off by the split ratio; multiplying within
+    /// one basis gives the same total dollars whichever basis that is, since
+    /// the two scale inversely. So the caller names the basis its per-unit
+    /// figure came in, and gets units to match.
+    ///
+    /// Pass `held_on` for both when the question is simply "what did the
+    /// register say that day".
+    pub fn units_by_account_on(
+        &self,
+        listing_id: i64,
+        held_on: NaiveDate,
+        unit_basis_at: NaiveDate,
+    ) -> Vec<(i64, Decimal)> {
+        let Some(parcels) = self.parcels.get(&listing_id) else {
+            return Vec::new();
+        };
+        let splits = self.splits.get(&listing_id).map_or(&[][..], |v| v);
+        let mut by_account: HashMap<i64, Decimal> = HashMap::new();
+        for p in parcels {
+            let remaining = p.remaining_on(held_on);
+            if remaining <= Decimal::ZERO {
+                continue;
+            }
+            *by_account.entry(p.holding_account_id).or_default() +=
+                crate::entities::corporate_action::split_adjusted_quantity(
+                    remaining,
+                    splits,
+                    p.acquired,
+                    Some(unit_basis_at),
+                );
+        }
+        let mut out: Vec<(i64, Decimal)> = by_account
+            .into_iter()
+            .filter(|(_, qty)| *qty > Decimal::ZERO)
+            .collect();
+        out.sort_by_key(|(account, _)| *account);
+        out
     }
 
     /// Listings with a non-zero holding as at `as_of` (live holdings when

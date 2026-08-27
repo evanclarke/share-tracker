@@ -155,6 +155,10 @@ mod yahoo;
 
 pub use collection::{COLLECTION_LOOKBACK_DAYS, run_collection};
 pub use db::{db_get_one, db_latest_ok_price_on_or_before, db_rebase_listing_prices, run_rebase};
+/// Shared with the distribution calendar for the same reason: Yahoo serves
+/// every figure as a float32-precision binary float, and a per-unit
+/// distribution arrives with the same noise a price does.
+pub(crate) use fetcher::clean_price;
 pub use fetcher::{CachingFetcher, SharedFetcher};
 pub use held::{HeldTimeline, db_held_listing_ids, db_held_listing_ids_on};
 pub use http::router;
@@ -166,6 +170,14 @@ pub use market::{Market, NonTradingReason, load_market};
 pub(crate) use market::{db_non_trading_day, load_market_on, non_trading_day};
 pub use model::{PriceOrigin, PriceStatus};
 pub use yahoo::YahooFetcher;
+/// The two provider-mapping pieces the **distribution calendar's** own Yahoo
+/// adapter shares with this one (`entities::distribution_event::yahoo`): the
+/// listing→Yahoo-symbol resolution, and the exchange-local window a dated
+/// request is expressed in. Shared rather than copied because both adapters
+/// must ask Yahoo for the same security over the same days — a second spelling
+/// of either would be a silent divergence between a listing's prices and its
+/// distributions.
+pub(crate) use yahoo::{local_midnight_utc, yahoo_symbol};
 
 // Everything below is reached by name only from `#[cfg(test)]` code — the
 // tests in this file, and the report/web test modules that drive the price
@@ -186,7 +198,6 @@ pub use db::{ClearOutcome, db_clear_unpriced_before, db_list};
 #[cfg(test)]
 pub use fetcher::{
     FetchError, FetchFuture, FetchedClose, LatestQuote, PriceFetcher, QuoteFuture, QuotesFuture,
-    clean_price,
 };
 #[cfg(test)]
 pub use http::{BackfillSummary, ClearSummary};
@@ -199,7 +210,7 @@ pub use model::{ClosingPrice, MANUAL_SOURCE, UNASSIGNED_ID};
 /// have recorded), its provider-failure classification, and the by-symbol
 /// reading of a batch answer.
 #[cfg(test)]
-use yahoo::{classify_yahoo_failure, yahoo_quote_named, yahoo_symbol, yahoo_symbol_now};
+use yahoo::{classify_yahoo_failure, yahoo_quote_named, yahoo_symbol_now};
 
 // The test modules below were written against the single file's imports; these
 // keep them compiling unchanged, which is what makes them a behaviour lock on

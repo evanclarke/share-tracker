@@ -718,6 +718,9 @@ const COLUMN_KINDS = (function () {
     // The income row carries the LIC's advised attributable part; the tax
     // summary reports the 50% of it deductible at D8. Both are money.
     'lic_capital_gain_amount', 'lic_capital_gain_deduction',
+    // Distribution calendar health alerts: the gross the calendar implies, the
+    // gross actually recorded, and the gap between them.
+    'expected_amount', 'recorded_amount', 'amount_difference',
     'australian_interest', 'australian_dividends_unfranked', 'franked_dividends', 'net_rent',
     'foreign_income', 'foreign_tax_credits', 'foreign_tax_credits_capital_gains',
     'other_income', 'cgt_discount_gains',

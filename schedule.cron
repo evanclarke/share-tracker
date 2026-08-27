@@ -9,6 +9,16 @@
 0 3 1 * *   mic-import      # monthly, 1st at 03:00 (ISO publishes monthly)
 0 4 1 * *   currency-import # monthly, 1st at 04:00 (ISO 4217 + ISO 24165 / DTIF)
 
+# Distribution calendar: the provider's dividend history per held listing, read
+# by the health report's two advisory alerts (a known ex-date with units held
+# and no income row; an entered distribution whose gross does not match per unit
+# x units held). Weekly rather than daily because it is one provider call per
+# held listing and the thing it watches for moves at most quarterly — and
+# because the income row it looks for is entered from a payment advice that
+# arrives ~15 days after the ex-date, so a few days' latency costs nothing.
+# Monday 05:00, after the reference-data imports above rather than beside them.
+0 5 * * 1   distribution-import
+
 # Closing prices, once per market close, each entry pinned to its market's own
 # timezone so a DST transition at either end can't shift the run's margin over
 # the close (the Sydney<->New York offset swings 14-16h across the year). Each

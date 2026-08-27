@@ -1438,6 +1438,27 @@ async function refreshHealthBanner() {
         + ' records a capital loss that does not exist. Correct the proceeds, or leave it if the'
         + ' disposal really did realise nothing.');
     });
+    // The distribution calendar's two advisory alerts. Both are external
+    // evidence about the *books*, which nothing else here provides: every
+    // other duplicate/completeness check compares recorded facts against each
+    // other, so a distribution nobody ever entered is invisible to all of
+    // them. Advisory by decision — no tax figure is computed from the feed —
+    // so the wording asks rather than asserts.
+    (h.missing_dividend_entries || []).forEach(function (d) {
+      problems.push(d.ticker + ' went ex-distribution on ' + d.ex_date + ' while '
+        + d.holding_account + ' held ' + d.units_held + ' units, but no income row matches it.'
+        + ' At ' + d.amount_per_unit + ' per unit that is about '
+        + moneyText(d.expected_amount) + ' ' + d.currency + ' — enter the distribution from its'
+        + ' payment advice, or ignore this if the registry paid nothing.');
+    });
+    (h.dividend_amount_mismatches || []).forEach(function (d) {
+      problems.push('Income ' + d.income_id + ' records ' + moneyText(d.recorded_amount) + ' '
+        + d.currency + ' gross for ' + d.ticker + '\u2019s ' + d.ex_date + ' distribution ('
+        + d.holding_account + ', paid ' + d.date_paid + '), but ' + d.amount_per_unit
+        + ' per unit on ' + d.units_held + ' units held is ' + moneyText(d.expected_amount)
+        + ' \u2014 a difference of ' + moneyText(d.amount_difference) + '. Check the figure'
+        + ' against the payment advice; the gross is compared, never the components.');
+    });
     if (problems.length === 0) {
       banner.hidden = true;
       banner.innerHTML = '';
@@ -1501,6 +1522,7 @@ const JOB_DESC = {
   'price-rebase': 'Re-derive every stored closing price from the figure the provider served, over the share splits and bonus issues recorded since \u2014 a one-off repair for prices stored before that rule existed. Recording a split already does this for its own listing, so this normally changes nothing.',
   'settlement-recompute': 'Re-derive every auto-calculated settlement date from the exchange holiday calendar as it now stands \u2014 run it after seeding a missing holiday year, which otherwise clears the settlement holiday-coverage report without correcting the dates it flagged. A settlement date you entered yourself is never touched, and the job is idempotent.',
   'report-snapshot': 'Store the price-dependent reports\' results for every missing date in the last 14 days up to the latest the whole portfolio can be valued at with final prices, regenerating stale or provisional ones; a blocked date is skipped (reported) and retried next run.',
+  'distribution-import': 'Refresh the distribution calendar: the provider\u2019s dividend history over the span each listing was held, one call per listing. It never deletes, so a provider that drops history cannot retire a distribution the books may have missed — and it feeds the two advisory health alerts (a known ex-date with no income row, and an entered distribution whose gross does not match). Advisory only: no tax figure is computed from it.',
 };
 
 async function viewJobs() {

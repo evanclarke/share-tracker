@@ -14,6 +14,7 @@ pub mod closing_price;
 pub mod corporate_action;
 pub mod currencies;
 pub mod demerger;
+pub mod distribution_event;
 pub mod drp_enrolment;
 pub mod drp_reinvestment;
 pub mod ess_statement;
@@ -62,6 +63,7 @@ pub fn router() -> Router<SqlitePool> {
         .merge(cgt_settings::router())
         .merge(tax_year_settings::router())
         .merge(closing_price::router())
+        .merge(distribution_event::router())
         .merge(corporate_action::router())
         .merge(rights_exercise::router())
         .merge(rights_sale::router())

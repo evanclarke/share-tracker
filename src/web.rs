@@ -2179,6 +2179,7 @@ mod tests {
             None,
             None,
             crate::entities::closing_price::test_support::QuoteStub::default().shared(),
+            crate::entities::distribution_event::test_support::DistributionStub::default().shared(),
         );
         assert!(!registry.is_empty(), "the registry registers jobs");
         for name in registry.keys() {

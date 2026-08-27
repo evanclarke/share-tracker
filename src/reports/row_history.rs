@@ -40,7 +40,7 @@ use sqlx::{Row, SqlitePool};
 /// became correctable) and `exchange_holidays` (0039, once the calendar was
 /// shown to be read *live* by valuation rather than only consumed at trade
 /// write time) — each migration rebuilding `row_history` to extend the CHECK.
-pub const AUDITED_TABLES: [&str; 22] = [
+pub const AUDITED_TABLES: [&str; 23] = [
     "trades",
     "parcel_allocations",
     "income",
@@ -63,6 +63,7 @@ pub const AUDITED_TABLES: [&str; 22] = [
     "tax_year_settings",
     "rba_fx_rates",
     "exchange_holidays",
+    "distribution_events",
 ];
 
 /// One audited table, resolved from a requested name: how `row_history`
@@ -1539,6 +1540,16 @@ mod tests {
                 "name",
                 "'Renamed Closure'",
             ),
+            (
+                "distribution_events",
+                Some(
+                    "INSERT INTO distribution_events (id, listing_id, ex_date, amount_per_unit, currency, source, fetched_symbol, fetched_at) VALUES (21, 1, '2024-07-01', '0.726547', 'AUD', 'yahoo', 'T1.AX', '2024-07-02T08:00:00Z')",
+                ),
+                "id",
+                21,
+                "amount_per_unit",
+                "'0.8'",
+            ),
         ];
         assert_eq!(cases.len(), AUDITED_TABLES.len());
 
@@ -1612,15 +1623,16 @@ mod tests {
     fn audited_tables_match_migration_check_and_triggers() {
         let sql = include_str!("../../migrations/0013_row_history.sql");
         // listing_renames (0018), closing_prices (0021), tax_year_settings
-        // (0027), rba_fx_rates (0031) and exchange_holidays (0039) postdate
-        // 0013, and are checked below — every other table was audited from
-        // the start.
+        // (0027), rba_fx_rates (0031), exchange_holidays (0039) and
+        // distribution_events (0048) postdate 0013, and are checked below —
+        // every other table was audited from the start.
         let tables_as_of_0013 = AUDITED_TABLES.into_iter().filter(|&t| {
             t != "listing_renames"
                 && t != "closing_prices"
                 && t != "tax_year_settings"
                 && t != "rba_fx_rates"
                 && t != "exchange_holidays"
+                && t != "distribution_events"
         });
         let mut count = 0;
         for table in tables_as_of_0013 {
@@ -1978,6 +1990,59 @@ mod tests {
                 flat39.matches(&format!("'{col}', OLD.{col}")).count(),
                 2,
                 "both exchange_holidays triggers must record {col}"
+            );
+        }
+
+        // 0048 introduced distribution_events — the provider's advisory
+        // dividend calendar — and audited it. A brand-new table, so nothing
+        // needed rebuilding except row_history's own CHECK: this pins the
+        // CHECK, the never-reused surrogate key, the natural key as a UNIQUE,
+        // the re-created append-only guards and the audit pair recording every
+        // column. The table is deliberately provider-owned (no PUT, no DELETE
+        // route), which is why the UPDATE trigger is the one that matters: it
+        // is what records a per-unit figure the provider silently revised
+        // under an entered distribution the cross-check had already
+        // reconciled.
+        let sql48 = include_str!("../../migrations/0048_distribution_events.sql");
+        assert!(
+            sql48.contains("'distribution_events'"),
+            "0048 must add distribution_events to the table_name CHECK"
+        );
+        assert!(
+            sql48.contains("id              INTEGER PRIMARY KEY AUTOINCREMENT"),
+            "the surrogate key must not reuse a deleted row's id"
+        );
+        assert!(
+            sql48.contains("UNIQUE (listing_id, ex_date)"),
+            "one distribution per listing per ex-date stays enforced"
+        );
+        for op in ["update", "delete"] {
+            assert!(
+                sql48.contains(&format!(
+                    "CREATE TRIGGER distribution_events_row_history_{op} "
+                )),
+                "0048 must create the distribution_events {op} trigger"
+            );
+            assert!(
+                sql48.contains(&format!("CREATE TRIGGER row_history_append_only_{op} ")),
+                "0048 must re-create the row_history {op} guard"
+            );
+        }
+        let flat48 = sql48.split_whitespace().collect::<Vec<_>>().join(" ");
+        for col in [
+            "id",
+            "listing_id",
+            "ex_date",
+            "amount_per_unit",
+            "currency",
+            "source",
+            "fetched_symbol",
+            "fetched_at",
+        ] {
+            assert_eq!(
+                flat48.matches(&format!("'{col}', OLD.{col}")).count(),
+                2,
+                "both distribution_events triggers must record {col}"
             );
         }
 

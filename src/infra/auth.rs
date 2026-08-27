@@ -626,6 +626,7 @@ mod api_tests {
             None,
             None,
             fetcher.clone(),
+            crate::entities::distribution_event::test_support::DistributionStub::default().shared(),
         );
         ApiClient::over(crate::app::router(
             "",

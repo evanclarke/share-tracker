@@ -100,12 +100,20 @@ async fn main() {
             std::sync::Arc::new(entities::closing_price::YahooFetcher::default()),
             QUOTE_CACHE_TTL,
         ));
+    // The live distribution source, for the weekly calendar refresh. Its own
+    // instance rather than the price fetcher's: it is provider-specific in a
+    // different way (the ex-date recovery), and it reaches only the scheduler,
+    // never the router. Not wrapped in the quote cache — nothing asks it the
+    // same question twice in a window.
+    let distribution_fetcher: entities::distribution_event::SharedDistributionFetcher =
+        std::sync::Arc::new(entities::distribution_event::YahooDistributionFetcher::default());
     let registry = scheduler::registry(
         pool.clone(),
         settings.db.clone(),
         settings.backup_dir.clone(),
         settings.backup_command.clone(),
         fetcher.clone(),
+        distribution_fetcher,
     );
     scheduler::spawn(registry.clone(), pool.clone(), &schedule)
         .await

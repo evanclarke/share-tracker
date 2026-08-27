@@ -176,6 +176,7 @@ pub fn registry(
     backup_dir: Option<String>,
     backup_command: Option<String>,
     fetcher: crate::entities::closing_price::SharedFetcher,
+    distribution_fetcher: crate::entities::distribution_event::SharedDistributionFetcher,
 ) -> JobRegistry {
     let mut jobs: HashMap<String, Arc<RegisteredJob>> = HashMap::new();
 
@@ -305,6 +306,25 @@ pub fn registry(
                 crate::entities::trade::run_recompute(&pool)
                     .await
                     .map(|()| None)
+            }
+        }
+    });
+
+    register(&mut jobs, "distribution-import", {
+        let pool = pool.clone();
+        move |_| {
+            let (pool, fetcher) = (pool.clone(), distribution_fetcher.clone());
+            async move {
+                // Returns the run's note directly: a run that could not place
+                // some provider event on its market's calendar succeeded while
+                // doing less than the whole of its work, which is what the note
+                // is for (SCENARIOS T-09).
+                crate::entities::distribution_event::run_refresh(
+                    &pool,
+                    fetcher.as_ref(),
+                    chrono::Utc::now(),
+                )
+                .await
             }
         }
     });

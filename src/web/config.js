@@ -98,6 +98,12 @@ export const ENTITIES = [
     desc: 'Stored daily closing prices per held listing, collected by the price-import job.',
   },
   {
+    slug: 'distribution_events', title: 'Distribution Calendar', menu: 'Jobs',
+    api: '/distribution_events', readonly: true,
+    desc: 'What the price provider says each held listing distributed, per ex-date \u2014 collected by the distribution-import job and read by the health report\u2019s two advisory alerts (a known ex-date with no matching income row, and an entered distribution whose gross does not match). Advisory only: no tax figure is computed from it, and the per-unit amount is in the unit basis of its own fetch, which is how the provider quotes it.',
+    columns: ['id', 'listing_id', 'ex_date', 'amount_per_unit', 'currency', 'source', 'fetched_symbol', 'fetched_at'],
+  },
+  {
     slug: 'rba_fx_rates', title: 'RBA FX Rates', menu: 'Reference Data', api: '/rba_fx_rates', readonly: true,
     desc: 'Monthly RBA F11 rates (foreign units per AUD) used for ATO conversion (import-managed).',
     columns: ['id', 'currency', 'month', 'rate'],
@@ -739,7 +745,7 @@ export const REPORTS = [
         'rights_sale_allocations', 'investment_expenses', 'drp_enrolments',
         'cgt_settings', 'attachments', 'listings', 'listing_renames',
         'closing_prices', 'tax_year_settings', 'rba_fx_rates',
-        'exchange_holidays',
+        'exchange_holidays', 'distribution_events',
       ], { optional: true, hint: 'Blank browses every audited table. With a Row ID, the table that id belongs to.' }),
       int('row_id', 'Row ID', { hint: 'Blank to browse recent changes across the whole trail \u2014 the only way in for a row created and destroyed by an operation, which no list shows. Otherwise the audited row\u2019s own id: the id column of its entity list while it exists, or the Row ID an entry here carries once it is gone \u2014 for tax_year_settings, the financial year itself (e.g. 2026).' }),
       int('before_id', 'Older than (history id)', { hint: 'Browse cursor: show the entries older than this trail entry. The \u201cLoad older\u201d button below the table fills it in.' }),

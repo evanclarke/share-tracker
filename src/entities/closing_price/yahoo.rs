@@ -36,7 +36,7 @@ pub struct YahooFetcher {
 /// `.AX`, NYSE/Nasdaq are plain, crypto is `<TICKER>-<quote currency>` (so
 /// Yahoo quotes it in the listing's own currency). Other exchanges need a
 /// mapping added here, or a `price_symbol` override on the listing.
-pub(super) fn yahoo_symbol(market: &Market, date: NaiveDate) -> Result<String, String> {
+pub(crate) fn yahoo_symbol(market: &Market, date: NaiveDate) -> Result<String, String> {
     yahoo_symbol_for(market, market.identity_at(date))
 }
 
@@ -247,7 +247,7 @@ pub(super) fn yahoo_quote_named(
 
 /// Midnight at the start of `date` in `tz`, as a UTC instant (a DST gap at
 /// midnight resolves to the earliest valid time).
-fn local_midnight_utc(date: NaiveDate, tz: Tz) -> Result<DateTime<Utc>, String> {
+pub(crate) fn local_midnight_utc(date: NaiveDate, tz: Tz) -> Result<DateTime<Utc>, String> {
     date.and_hms_opt(0, 0, 0)
         .and_then(|dt| dt.and_local_timezone(tz).earliest())
         .map(|dt| dt.with_timezone(&Utc))

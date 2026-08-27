@@ -24,7 +24,7 @@ use tower::ServiceExt;
 
 /// Fresh in-memory database with migrations and seed data applied.
 ///
-/// The 46 migration files are replayed **once** per test process, into a
+/// The 48 migration files are replayed **once** per test process, into a
 /// template database that is then dumped to a single SQL script (see
 /// [`schema_template`]); every call after the first builds its database from
 /// that script instead. Applying the migrations costs ~89 ms against the
@@ -270,6 +270,7 @@ impl ApiClient {
             None,
             None,
             fetcher.clone(),
+            crate::entities::distribution_event::test_support::DistributionStub::default().shared(),
         );
         // Mounted at the root, auth off — the default. `app::router`'s own
         // tests cover a router nested under a reverse-proxy base path;
@@ -1256,7 +1257,7 @@ mod tests {
     use serde_json::json;
 
     /// The cached schema `test_pool` builds every database from must be the
-    /// database the 46 migrations produce — not approximately, exactly.
+    /// database the 48 migrations produce — not approximately, exactly.
     ///
     /// So this builds one of each and compares the **whole** of `sqlite_master`:
     /// every table, index, trigger and view, by name and by definition
@@ -1346,7 +1347,7 @@ mod tests {
         let from_migrations: Vec<(i64, String, bool, String)> =
             sqlx::query_as(recorded).fetch_all(&migrated).await.unwrap();
         assert_eq!(from_cache, from_migrations, "_sqlx_migrations differs");
-        assert_eq!(from_cache.len(), 47, "every migration is recorded");
+        assert_eq!(from_cache.len(), 48, "every migration is recorded");
 
         // Spelled out separately because it is the one piece of state a
         // schema-only cache would silently lose, and two tests in
