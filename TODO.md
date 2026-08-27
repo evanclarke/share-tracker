@@ -10,29 +10,38 @@ findings are all closed in DONE.md), except where a section's heading names anot
 (e.g. REQUIREMENTS, SCENARIOS). Each section records one finding; sections land in DONE.md as they
 are fixed or decided.
 
-**Open: 3 sections** — the two 2026-08-25 code-review follow-ups below, plus the distribution
-calendar recorded from REQUIREMENTS 2026-08-27. All sixteen sections recorded from the **2026-08-25 code review**
+**Open: 3 sections** — the `config.js` mirrors follow-up from the 2026-08-25 code review, a
+demerger follow-up its sibling C2 section turned up while being fixed, and the distribution calendar
+recorded from REQUIREMENTS 2026-08-27. All sixteen sections recorded from the **2026-08-25 code review**
 (a whole-codebase pass over `src` — business-logic errors, quality, duplication — every finding
 adversarially verified against `f171999`) are closed and archived in
 [`DONE/reviews.md`](DONE/reviews.md): the AMIT×rollover pair (`44b8a6b`), the four-endpoint
 fx-parity family (`1341068`), the three web findings (`c190871`), the CGT worksheet/report trio
 (`85b8fe8`), the period-performance snapshot refactor with the two new convention scans — which
-also caught and fixed `wash_sales.rs` (`9c2ae3b`) — and the inheritance refactor (`85a255d`). The
-two sections below were recorded from observations made while fixing and are the open work.
+also caught and fixed `wash_sales.rs` (`9c2ae3b`) — and the inheritance refactor (`85a255d`). Of the
+two follow-up sections recorded from observations made while fixing, the C2/rollover one is now
+closed (archived in [`DONE/reviews.md`](DONE/reviews.md)) — its reproduction confirmed the phantom
+C2 gain and turned up a second defect beside it, the lost G1 reduction, both fixed together — and
+left the demerger question below in its place.
 
-## net_capital_gain's C2 branch can treat a rollover cohort as a C2-triggering disposal (code review 2026-08-25 follow-up)
-(Observed while fixing the held/spill finding, `44b8a6b`. In the per-cohort E10/G1/C2 walk
-(src/reports/net_capital_gain.rs), the C2 branch treats any cohort with a `disposed_on` between a
-ROC event's record and payment dates as a C2-triggering disposal; a rollover cohort in that window
-could produce a phantom C2 gain while the replacement parcel also takes the G1 reduction.
-Distinguishing real-disposal cohorts there would need per-allocation provenance in the cohort read.
-This is an unverified observation from the fixing pass — re-derive it with a failing reproduction
-first, per the U lesson.)
-- [ ] Reproduce: a transfer (or scrip/demerger) dated between a ROC's record and payment dates;
-  assert whether a C2 gain is raised on the rollover cohort while the replacement parcel also takes
-  the G1 reduction
-- [ ] Fix if confirmed; if not reproducible, record why and close
-- [ ] Tests + docs sync per the outcome
+## A demerger's head parcel is treated as ex-entitlement to a return of capital it was registered for (net_capital_gain C2 follow-up, 2026-08-27)
+(Found while fixing the C2/rollover section above, and deliberately left out of that fix so the
+narrowing was the safe one. `domain::cost_base::ParcelRow::rollover` dates a replacement parcel's
+return-of-capital entitlement from its units' own acquisition date only for a **transfer**, whose
+units demonstrably stayed on the same listing's register. A **demerger** writes *two* replacement
+parcels — one on the head listing (`action.listing_id`) and one on the demerged entity
+(`demerger_listing_id`, `entities::demerger`) — and the head parcel has a transfer's continuity: the
+head listing continued and the taxpayer was on its register throughout. Both carry the same
+`demerger_action_id` though, and telling them apart needs the parcel's `listing_id` compared with the
+action's, which `ParcelRow` does not carry. So a return of capital on the **head** listing whose
+record date falls before the demerger currently misses the head parcel, exactly as the transfer case
+did before `RolloverOrigin`. A scrip-for-scrip exchange is correctly ex-entitlement and must stay so.)
+- [ ] Reproduce: a demerger dated between a head-listing return of capital's record and payment
+  dates; assert whether the head replacement parcel takes the G1 reduction
+- [ ] Fix if confirmed — `ParcelRow` would need the demerger's head listing (or the row's own
+  listing compared against it) to set `RolloverOrigin::registered_from`
+- [ ] Keep the scrip-exchange case ex-entitlement; a test pins both
+  (`per_unit_reduction_dates_a_replacement_parcels_entitlement_from_the_register`)
 
 ## config.js's sel() option lists and the health banner's field names are unpinned mirrors of Rust-side definitions (code review 2026-08-25 follow-up)
 (Found by the JOB_DESC/tradeOrigin fix's sweep, `c190871`. config.js `sel(…)` option lists mirror

@@ -285,7 +285,7 @@ pub async fn db_amit_adjustment_alerts(
 fn disposed_between(
     adjustments: &[AdjustmentRow],
     splits: &[SplitEvent],
-    sold: &HashMap<i64, Vec<(NaiveDate, Decimal)>>,
+    sold: &HashMap<i64, Vec<open_parcels::UnitsConsumed>>,
     from: NaiveDate,
     to: NaiveDate,
 ) -> Decimal {
@@ -299,10 +299,8 @@ fn disposed_between(
     parcels
         .iter()
         .flat_map(|trade_id| sold.get(trade_id).map_or(&[][..], |v| v))
-        .filter(|(sale_date, _)| *sale_date >= from && *sale_date <= to)
-        .map(|&(sale_date, qty)| {
-            corporate_action::split_adjusted_quantity(qty, splits, sale_date, Some(to))
-        })
+        .filter(|c| c.date >= from && c.date <= to)
+        .map(|c| corporate_action::split_adjusted_quantity(c.quantity, splits, c.date, Some(to)))
         .sum()
 }
 
@@ -310,7 +308,7 @@ fn disposed_between(
 fn problems_for(
     adjustments: &[AdjustmentRow],
     splits: &[SplitEvent],
-    sold: &HashMap<i64, Vec<(NaiveDate, Decimal)>>,
+    sold: &HashMap<i64, Vec<open_parcels::UnitsConsumed>>,
     facts: &StatementFacts,
 ) -> Vec<String> {
     let &StatementFacts {
@@ -412,13 +410,11 @@ fn problems_for(
             continue;
         }
         let sold_before_year = corporate_action::sold_in_acquired_units(
-            &sold
-                .get(&a.trade_id)
+            sold.get(&a.trade_id)
                 .map_or(&[][..], |v| v)
                 .iter()
-                .copied()
-                .filter(|&(sale_date, _)| sale_date < year_start)
-                .collect::<Vec<_>>(),
+                .filter(|c| c.date < year_start)
+                .map(open_parcels::UnitsConsumed::dated),
             splits,
             a.trade_date,
         );

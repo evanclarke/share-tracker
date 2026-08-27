@@ -4998,3 +4998,59 @@ never-silently-swallow rule; such a row is unreachable through the app's write p
 pre-existing inheritance tests pass unchanged as the pin; the delete-404 contract was already in
 the shared missing-row test; added `api_list_orders_by_date_of_death`, the one thing the refactor
 exposed as unpinned.
+
+## net_capital_gain's C2 branch can treat a rollover cohort as a C2-triggering disposal (code review 2026-08-25 follow-up)
+(Observed while fixing the held/spill finding, `44b8a6b`. In the per-cohort E10/G1/C2 walk
+(src/reports/net_capital_gain.rs), the C2 branch treats any cohort with a `disposed_on` between a
+ROC event's record and payment dates as a C2-triggering disposal; a rollover cohort in that window
+could produce a phantom C2 gain while the replacement parcel also takes the G1 reduction.
+Distinguishing real-disposal cohorts there would need per-allocation provenance in the cohort read.
+This is an unverified observation from the fixing pass — re-derive it with a failing reproduction
+first, per the U lesson.)
+- [x] Reproduce: a transfer (or scrip/demerger) dated between a ROC's record and payment dates;
+  assert whether a C2 gain is raised on the rollover cohort while the replacement parcel also takes
+  the G1 reduction
+- [x] Fix if confirmed; if not reproducible, record why and close
+- [x] Tests + docs sync per the outcome
+
+**Outcome — the C2 half confirmed, the G1 half refuted and worse than predicted.** A 100-unit parcel,
+a return of capital with record date 25 Sep and payment 1 Nov, and the whole parcel transferred to a
+second holding account on 3 Oct (inside the window) produced **both**:
+
+1. a phantom **$50 C2 gain** on the transfer's closing Sell, as this section predicted; and
+2. **no G1 reduction at all** on the replacement parcel — not the double count the section guessed
+   at. The cost base stayed $1000 instead of $950, so the error is wrong in two years: $50 assessable
+   now that never arose, and $50 of cost base that will understate a later disposal's gain.
+
+Both are triggered by the **record date**: with none recorded the same scenario was already correct
+(entitlement falls back to the payment date, and the C2 branch needs a `record_date` to fire at all),
+which is why nothing had caught it.
+
+**Fix 1 — provenance in the cohort walk.** `domain::open_parcels::db_units_sold` now answers
+`UnitsConsumed { date, quantity, disposal }` instead of a bare `(date, quantity)` tuple, deriving
+`disposal` from the same `rollover::no_provenance_sql` predicate its `Counted::DisposalsOnly` filter
+already used — so a caller that must count *every* consumption can still tell a disposal from a
+rollover without a second read. `net_capital_gain`'s `unit_cohorts` carries it into a named `Cohort`,
+and the C2 branch requires it. Every cost-base reduction still treats both kinds alike: a rollover's
+closing Sell ends the *parcel's* hold on the units exactly as a real Sell does.
+`corporate_action::sold_in_acquired_units` became iterator-generic so both row shapes feed it without
+a duplicated re-basing loop.
+
+**Fix 2 — entitlement dates from the register, not the parcel.** `RocEvent::per_unit_for`'s
+entitlement test used the parcel's own trade date, which for a replacement parcel *is* the operation
+date and so is never before a record date the operation fell after. `Parcel::rolled_over_on:
+Option<NaiveDate>` became `rollover: Option<RolloverOrigin>`, carrying the operation date (the
+existing SCENARIOS N-06 guard, unchanged) plus `registered_from` — the date the units joined **this
+listing's** register. A transfer sets it to the units' own acquisition date: they moved between the
+taxpayer's own accounts and stayed on the register throughout. A scrip exchange keeps the operation
+date — its replacement units are of a listing the taxpayer was not on the register of — and a
+demerger does too, deliberately narrowly: see the follow-up section in TODO.md for its head parcel,
+which has a transfer's continuity but cannot be told from its spun-off sibling by `ParcelRow` alone.
+
+Tests: `net_capital_gain::db_a_transfer_inside_the_roc_window_is_not_a_c2_disposal` (the
+reproduction, now asserting the $50 G1 reduction lands on the replacement and no C2 arises),
+`db_c2_reaches_the_sold_units_of_a_parcel_and_not_the_transferred_ones` (30 units really sold, 40
+transferred and 30 still held out of one parcel — C2 on the 30 only, G1 across the other 70), and
+`corporate_action::per_unit_reduction_dates_a_replacement_parcels_entitlement_from_the_register`
+(the rule itself, pinning the scrip case ex-entitlement and the N-06 guard intact). `docs/API.md`'s
+`ReturnOfCapital` paragraph documents both halves.

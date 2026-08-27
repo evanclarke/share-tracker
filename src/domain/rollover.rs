@@ -149,7 +149,11 @@ impl CostBaseInputs {
             // allocated quantity is re-based back across any splits between
             // acquisition and that sale.
             let sold = sold_in_acquired_units(
-                qty_sold.get(&parcel.id).map_or(&[][..], |v| v),
+                qty_sold
+                    .get(&parcel.id)
+                    .map_or(&[][..], |v| v)
+                    .iter()
+                    .copied(),
                 &self.splits,
                 parcel.date,
             );

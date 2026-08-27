@@ -337,7 +337,8 @@ async fn db_write_on(
         }
         // Allocations are in their sale date's units; the parcel's own
         // quantity — and this row's — are as acquired.
-        let carried = corporate_action::sold_in_acquired_units(&sales, &splits, trade_date);
+        let carried =
+            corporate_action::sold_in_acquired_units(sales.iter().copied(), &splits, trade_date);
         let adjustable = (trade_qty - carried).max(Decimal::ZERO);
         if adj.quantity > adjustable {
             groups.sort_unstable();
@@ -532,9 +533,9 @@ pub async fn db_cost_base_reduction_events(
         let disposed_by_year_end = sold.get(&trade_id).map_or(Decimal::ZERO, |sales| {
             sales
                 .iter()
-                .filter(|(sale_date, _)| *sale_date <= tax_year_end_date)
-                .map(|&(sale_date, qty)| {
-                    corporate_action::as_acquired_quantity(qty, splits, trade_date, sale_date)
+                .filter(|c| c.date <= tax_year_end_date)
+                .map(|c| {
+                    corporate_action::as_acquired_quantity(c.quantity, splits, trade_date, c.date)
                 })
                 .sum()
         });

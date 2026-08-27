@@ -134,10 +134,10 @@ mod http;
 mod model;
 
 pub use adjustments::{
-    PriceBasisEvent, RocEvent, SplitEvent, as_acquired_quantity, checked_as_acquired_quantity,
-    contemporaneous_price, db_demerger_price_statements, db_payment_currency_conflict,
-    db_return_of_capital_events, db_share_split_events, db_splits_for_listing, per_unit_reduction,
-    sold_in_acquired_units, split_adjusted_quantity,
+    PriceBasisEvent, RocEvent, RolloverOrigin, SplitEvent, as_acquired_quantity,
+    checked_as_acquired_quantity, contemporaneous_price, db_demerger_price_statements,
+    db_payment_currency_conflict, db_return_of_capital_events, db_share_split_events,
+    db_splits_for_listing, per_unit_reduction, sold_in_acquired_units, split_adjusted_quantity,
 };
 pub use db::{db_get_tx, rebased_quantity_beyond_range};
 pub use http::router;
@@ -1343,6 +1343,69 @@ mod tests {
         // Acquired on the event date: held on the payment date, so it applies.
         let pu = per_unit_reduction(&events, &[], "AUD", d(2024, 6, 1), None, None).unwrap();
         assert_eq!(pu, "0.60".parse::<Decimal>().unwrap());
+    }
+
+    /// A rollover replacement parcel's entitlement is decided by when its
+    /// units joined *this listing's* register, not by the parcel's own trade
+    /// date — which is the operation date, and so always on or after a record
+    /// date the operation fell after.
+    ///
+    /// A **transfer** keeps the units registered throughout (they move between
+    /// the taxpayer's own accounts), so a payment they were entitled to at its
+    /// record date still reduces their cost base in the replacement parcel. A
+    /// **scrip exchange** does not: those units are of a listing the taxpayer
+    /// was not on the register of when the record date passed.
+    #[test]
+    fn per_unit_reduction_dates_a_replacement_parcels_entitlement_from_the_register() {
+        let events = vec![RocEvent {
+            date: d(2023, 11, 1),
+            amount_per_unit: "0.50".parse().unwrap(),
+            currency: "AUD".into(),
+            record_date: Some(d(2023, 9, 25)),
+        }];
+        // Units bought 10 Jan, rolled over 3 Oct — inside the window.
+        let operation = d(2023, 10, 3);
+        let acquired = d(2023, 1, 10);
+
+        let transfer = RolloverOrigin {
+            on: operation,
+            registered_from: acquired,
+        };
+        assert_eq!(
+            per_unit_reduction(&events, &[], "AUD", operation, Some(transfer), None).unwrap(),
+            "0.50".parse::<Decimal>().unwrap()
+        );
+
+        // A scrip exchange's replacement: registered only from the operation.
+        let scrip = RolloverOrigin {
+            on: operation,
+            registered_from: operation,
+        };
+        assert_eq!(
+            per_unit_reduction(&events, &[], "AUD", operation, Some(scrip), None).unwrap(),
+            Decimal::ZERO
+        );
+
+        // Either way, a payment on or before the operation date is already in
+        // the carried cost base and must not reduce it twice (SCENARIOS N-06).
+        let already_carried = vec![RocEvent {
+            date: operation,
+            amount_per_unit: "0.50".parse().unwrap(),
+            currency: "AUD".into(),
+            record_date: Some(d(2023, 9, 25)),
+        }];
+        assert_eq!(
+            per_unit_reduction(
+                &already_carried,
+                &[],
+                "AUD",
+                operation,
+                Some(transfer),
+                None
+            )
+            .unwrap(),
+            Decimal::ZERO
+        );
     }
 
     #[test]

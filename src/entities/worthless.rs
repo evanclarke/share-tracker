@@ -184,7 +184,11 @@ pub async fn db_recognise(pool: &SqlitePool, action_id: i64) -> Result<Recognise
         let qty = parse_dec("quantity", row.try_get("quantity")?)?;
 
         let sold = sold_in_acquired_units(
-            qty_sold.get(&parcel_id).map_or(&[][..], |v| v),
+            qty_sold
+                .get(&parcel_id)
+                .map_or(&[][..], |v| v)
+                .iter()
+                .copied(),
             &splits,
             date,
         );

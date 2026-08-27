@@ -440,7 +440,8 @@ pub async fn db_sell_rights(
                 parse_dec("quantity_allocated", row.try_get("quantity_allocated")?)?,
             ));
         }
-        let remaining = parcel_qty - sold_in_acquired_units(&sold, &splits, parcel_date);
+        let remaining =
+            parcel_qty - sold_in_acquired_units(sold.iter().copied(), &splits, parcel_date);
         let at_record = split_adjusted_quantity(remaining, &splits, parcel_date, Some(record_date));
         let parcel_entitled = entitled_units(at_record, rights_units, rights_held_units);
 

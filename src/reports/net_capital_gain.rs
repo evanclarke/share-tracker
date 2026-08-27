@@ -42,6 +42,7 @@
 //! only in years with a CGT event — see [`net_years`]).
 
 use crate::domain::cost_base::{self, ParcelRow};
+use crate::domain::open_parcels;
 use crate::domain::tax_year::tax_year_for;
 use crate::entities::corporate_action::{self, RocEvent};
 use crate::infra::decimal::{parse_dec, to_cents};
@@ -298,33 +299,52 @@ impl Reduction {
     }
 }
 
+/// One group of a parcel's units that shares an event history.
+struct Cohort {
+    /// When the units left the parcel, or `None` while still held. Every
+    /// cost-base reduction asks only this — a rollover's closing Sell ends the
+    /// parcel's hold exactly as a real Sell does.
+    left_on: Option<NaiveDate>,
+    /// Whether leaving was a **disposal**. False while still held, and false
+    /// for a rollover's closing Sell — the units went into a replacement
+    /// parcel, still the taxpayer's, so no CGT event happened to them. Only
+    /// the C2 branch reads it: a right to receive a payment is ended by a
+    /// disposal, and a transfer between one's own accounts is not one.
+    disposal: bool,
+    /// Units, in the parcel's as-acquired basis.
+    units: Decimal,
+}
+
 /// The groups of a parcel's units that share an event history: one per sale
-/// allocation (carrying that sale's date), plus whatever is still held. Every
-/// reduction either reaches a whole group or none of it, so walking the
-/// cost base down group by group is what lets the excess be computed against
-/// the cost base those units actually carry.
+/// allocation (carrying that sale's date and kind), plus whatever is still
+/// held. Every reduction either reaches a whole group or none of it, so
+/// walking the cost base down group by group is what lets the excess be
+/// computed against the cost base those units actually carry.
 ///
 /// Allocated quantities are in their own sale date's unit basis, so each is
 /// re-based back to the parcel's as-acquired basis first. Groups with no units
 /// left are dropped.
 fn unit_cohorts(
     parcel: &ParcelRow,
-    sales: &[(NaiveDate, Decimal)],
+    sales: &[open_parcels::UnitsConsumed],
     splits: &[corporate_action::SplitEvent],
-) -> Vec<(Option<NaiveDate>, Decimal)> {
-    let mut cohorts: Vec<(Option<NaiveDate>, Decimal)> = sales
+) -> Vec<Cohort> {
+    let mut cohorts: Vec<Cohort> = sales
         .iter()
-        .map(|&(sale_date, qty)| {
-            (
-                Some(sale_date),
-                corporate_action::as_acquired_quantity(qty, splits, parcel.date, sale_date),
-            )
+        .map(|c| Cohort {
+            left_on: Some(c.date),
+            disposal: c.disposal,
+            units: corporate_action::as_acquired_quantity(c.quantity, splits, parcel.date, c.date),
         })
-        .filter(|&(_, units)| units > Decimal::ZERO)
+        .filter(|c| c.units > Decimal::ZERO)
         .collect();
-    let still_held = parcel.quantity - cohorts.iter().map(|&(_, u)| u).sum::<Decimal>();
+    let still_held = parcel.quantity - cohorts.iter().map(|c| c.units).sum::<Decimal>();
     if still_held > Decimal::ZERO {
-        cohorts.push((None, still_held));
+        cohorts.push(Cohort {
+            left_on: None,
+            disposal: false,
+            units: still_held,
+        });
     }
     cohorts
 }
@@ -490,7 +510,7 @@ async fn non_disposal_gains(
             // is not a G1 reduction of it (SCENARIOS N-06) — the same call the
             // cost-base pipeline makes, so this walk cannot describe a different
             // set of payments than the cost base it compares against.
-            parcel.rolled_over_on(),
+            parcel.rollover(),
             None,
         )?
         else {
@@ -522,12 +542,9 @@ async fn non_disposal_gains(
     // ones do — their later reductions run against the replacement parcel's
     // own chain. Treating them as still held here would apply those later
     // events to them twice.
-    let sold = crate::domain::open_parcels::db_units_sold(
-        &mut *conn,
-        None,
-        crate::domain::open_parcels::Counted::AllConsumptions,
-    )
-    .await?;
+    let sold =
+        open_parcels::db_units_sold(&mut *conn, None, open_parcels::Counted::AllConsumptions)
+            .await?;
 
     let mut out = Vec::new();
     for trade_id in order {
@@ -552,7 +569,11 @@ async fn non_disposal_gains(
         // cost base, which a pooled chain cannot see. Where every reduction
         // reaches every unit — the ordinary case — the groups' chains are
         // proportional to each other and add back up to the pooled one.
-        for (disposed_on, units) in unit_cohorts(
+        for Cohort {
+            left_on: disposed_on,
+            disposal,
+            units,
+        } in unit_cohorts(
             parcel,
             sold.get(&trade_id).map_or(&[][..], |v| v),
             splits_of(&splits, parcel.listing_id),
@@ -566,12 +587,21 @@ async fn non_disposal_gains(
                 // the disposal (`docs/ato/return-of-capital-right-to-receive.md`).
                 // So the whole payment is the gain, and it is discountable on
                 // the share's holding period exactly as a G1 gain would be.
+                //
+                // Only a real disposal ends the right: a rollover's closing
+                // Sell moves the units into a replacement parcel that is still
+                // the taxpayer's, so nothing was disposed of and the payment
+                // remains an ordinary G1 reduction of the units — reaching them
+                // in the replacement parcel, which this walk sees as its own
+                // row. Without this, a transfer dated inside the window raised
+                // a C2 gain that never happened.
                 if let Reduction::Roc {
                     date,
                     currency,
                     per_unit,
                     record_date: Some(record_date),
                 } = event
+                    && disposal
                     && disposed_on.is_some_and(|d| d >= *record_date && d < *date)
                 {
                     out.push(EventGain {
@@ -2854,6 +2884,181 @@ mod tests {
             .unwrap();
         assert_eq!(open[0].return_of_capital_reduction, Decimal::from(25));
         assert_eq!(open[0].remaining_cost_base, Decimal::from(475));
+    }
+
+    /// **Reproduction (TODO, code review 2026-08-25 follow-up).** A holding
+    /// **transfer** dated between a return of capital's record and payment
+    /// dates is not a disposal — the units keep the same beneficial owner and
+    /// `domain::rollover` carries their cost base into a replacement parcel —
+    /// so it can raise no CGT event C2. But the cohort walk sees only a
+    /// `disposed_on` from `parcel_allocations`, which a transfer's closing Sell
+    /// writes exactly as a real Sell does.
+    #[tokio::test]
+    async fn db_a_transfer_inside_the_roc_window_is_not_a_c2_disposal() {
+        use crate::entities::transfer::{self, TransferBody};
+
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "RAP").await;
+        crate::entities::holding_account::db_upsert(
+            &pool,
+            &crate::entities::holding_account::HoldingAccount {
+                id: 2,
+                name: "Second".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        insert_trade(
+            &pool,
+            1,
+            trade::TradeType::Buy,
+            1,
+            NaiveDate::from_ymd_opt(2023, 1, 10).unwrap(),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
+        // Record date 25 Sep, payment 1 Nov; the whole parcel moves accounts
+        // on 3 Oct — inside the window, and still owned at the payment date.
+        transfer::db_transfer(
+            &pool,
+            1,
+            &TransferBody {
+                listing_id: 1,
+                date: NaiveDate::from_ymd_opt(2023, 10, 3).unwrap(),
+                from_account_id: 1,
+                to_account_id: 2,
+                allocations: vec![crate::entities::sell::AllocationInput {
+                    purchase_trade_id: 1,
+                    quantity_allocated: Decimal::from(100),
+                }],
+                fee_allocations: vec![],
+                fee_market_price: None,
+                fee_fx_rate: None,
+            },
+        )
+        .await
+        .unwrap();
+        apply_roc_with_record(
+            &pool,
+            1,
+            1,
+            NaiveDate::from_ymd_opt(2023, 11, 1).unwrap(),
+            "0.50",
+            Some(NaiveDate::from_ymd_opt(2023, 9, 25).unwrap()),
+        )
+        .await;
+
+        // The units are still owned at the payment date, in the replacement
+        // parcel, so the payment is an ordinary G1 cost-base reduction there —
+        // established first, because it is what makes a C2 gain beside it a
+        // *double* count rather than a substitution.
+        let open = crate::reports::open_parcels::db_open_parcels(&pool)
+            .await
+            .unwrap();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].return_of_capital_reduction, Decimal::from(50));
+
+        let r = db_net_capital_gain(&pool).await.unwrap();
+        assert_eq!(
+            r.iter().map(|y| y.cgt_event_c2_gain).sum::<Decimal>(),
+            Decimal::ZERO,
+            "a transfer is not a disposal, so it can end no right to receive"
+        );
+    }
+
+    /// The two kinds of consumption side by side, which is what the provenance
+    /// on a cohort exists to tell apart: of one 100-unit parcel, 30 units are
+    /// really sold inside the record-to-payment window, 40 are transferred to
+    /// another account inside it, and 30 are still held at the payment date.
+    /// Only the 30 sold end a right to receive.
+    #[tokio::test]
+    async fn db_c2_reaches_the_sold_units_of_a_parcel_and_not_the_transferred_ones() {
+        use crate::entities::transfer::{self, TransferBody};
+
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "RAP").await;
+        crate::entities::holding_account::db_upsert(
+            &pool,
+            &crate::entities::holding_account::HoldingAccount {
+                id: 2,
+                name: "Second".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        insert_trade(
+            &pool,
+            1,
+            trade::TradeType::Buy,
+            1,
+            NaiveDate::from_ymd_opt(2023, 1, 10).unwrap(),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
+        insert_trade(
+            &pool,
+            2,
+            trade::TradeType::Sell,
+            1,
+            NaiveDate::from_ymd_opt(2023, 10, 3).unwrap(),
+            Decimal::from(30),
+            Decimal::from(15),
+        )
+        .await;
+        allocate(&pool, 1, 2, 1, Decimal::from(30)).await;
+        transfer::db_transfer(
+            &pool,
+            1,
+            &TransferBody {
+                listing_id: 1,
+                date: NaiveDate::from_ymd_opt(2023, 10, 10).unwrap(),
+                from_account_id: 1,
+                to_account_id: 2,
+                allocations: vec![crate::entities::sell::AllocationInput {
+                    purchase_trade_id: 1,
+                    quantity_allocated: Decimal::from(40),
+                }],
+                fee_allocations: vec![],
+                fee_market_price: None,
+                fee_fx_rate: None,
+            },
+        )
+        .await
+        .unwrap();
+        apply_roc_with_record(
+            &pool,
+            1,
+            1,
+            NaiveDate::from_ymd_opt(2023, 11, 1).unwrap(),
+            "0.50",
+            Some(NaiveDate::from_ymd_opt(2023, 9, 25).unwrap()),
+        )
+        .await;
+
+        let r = db_net_capital_gain(&pool).await.unwrap();
+        assert_eq!(
+            r.iter().map(|y| y.cgt_event_c2_gain).sum::<Decimal>(),
+            Decimal::from(15),
+            "30 sold units × 50c — the 40 transferred units were not disposed of"
+        );
+
+        // The 70 units still owned take the reduction: 30 in the original
+        // parcel and 40 in the replacement, 50c each either way.
+        let mut open = crate::reports::open_parcels::db_open_parcels(&pool)
+            .await
+            .unwrap();
+        open.sort_by_key(|p| p.remaining_quantity);
+        assert_eq!(
+            open.iter()
+                .map(|p| (p.remaining_quantity, p.return_of_capital_reduction))
+                .collect::<Vec<_>>(),
+            vec![
+                (Decimal::from(30), Decimal::from(15)),
+                (Decimal::from(40), Decimal::from(20)),
+            ]
+        );
     }
 
     /// Without a recorded record date entitlement falls back to the payment

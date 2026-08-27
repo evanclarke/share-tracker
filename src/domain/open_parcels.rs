@@ -95,26 +95,59 @@ pub enum Counted {
     DisposalsOnly,
 }
 
+/// One Sell's consumption of a purchase parcel's units: how many, when, and
+/// whether that Sell was a **real disposal**.
+///
+/// Both kinds of consumption end the *parcel's* hold on the units, so a "were
+/// these units still in this parcel on that date?" test — which is what every
+/// cost-base reduction asks — treats them alike. Only a question about a CGT
+/// event, where the answer turns on whether the taxpayer disposed of anything,
+/// needs [`Self::disposal`]: a rollover's closing Sell empties the parcel
+/// without the units leaving the taxpayer's hands.
+#[derive(Debug, Clone, Copy)]
+pub struct UnitsConsumed {
+    /// The Sell's date.
+    pub date: NaiveDate,
+    /// Units allocated, in *sale-date* units (see [`db_units_sold`]).
+    pub quantity: Decimal,
+    /// False for a rollover's closing Sell — a transfer's, a scrip-for-scrip
+    /// exchange's or a demerger's, the trades carrying a
+    /// `rollover::Provenance` column. Always true under
+    /// [`Counted::DisposalsOnly`], which filters the rest out at the query.
+    pub disposal: bool,
+}
+
+impl UnitsConsumed {
+    /// The `(date, quantity)` pair the split re-basing helpers take — the two
+    /// fields that matter to a quantity question, without the provenance that
+    /// does not.
+    pub fn dated(&self) -> (NaiveDate, Decimal) {
+        (self.date, self.quantity)
+    }
+}
+
 /// Units allocated out of each purchase parcel by a Sell on or before
 /// `as_of`, keyed by `purchase_trade_id` and carrying each sale's date: the
 /// allocated quantity is in *sale-date* units, so a caller must re-base it to
 /// the parcel's as-acquired basis (`corporate_action::sold_in_acquired_units`,
 /// or `as_acquired_quantity` per sale where the sale date matters on its own)
 /// rather than subtracting it directly. `None` bounds nothing. `counted` says
-/// which Sells tally — see [`Counted`].
+/// which Sells tally — see [`Counted`] — and each row says which kind it is,
+/// so a caller that must count every consumption can still tell a disposal
+/// from a rollover without a second read.
 pub async fn db_units_sold(
     conn: &mut sqlx::SqliteConnection,
     as_of: Option<NaiveDate>,
     counted: Counted,
-) -> Result<HashMap<i64, Vec<(NaiveDate, Decimal)>>, sqlx::Error> {
+) -> Result<HashMap<i64, Vec<UnitsConsumed>>, sqlx::Error> {
+    let no_provenance = crate::domain::rollover::no_provenance_sql("s");
     let provenance_filter = match counted {
         Counted::AllConsumptions => String::new(),
-        Counted::DisposalsOnly => {
-            format!(" AND {}", crate::domain::rollover::no_provenance_sql("s"))
-        }
+        Counted::DisposalsOnly => format!(" AND {no_provenance}"),
     };
     let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
-        "SELECT pa.purchase_trade_id, pa.quantity_allocated, s.date AS sale_date \
+        "SELECT pa.purchase_trade_id, pa.quantity_allocated, s.date AS sale_date, \
+                ({no_provenance}) AS is_disposal \
          FROM parcel_allocations pa JOIN trades s ON s.id = pa.sale_trade_id \
          WHERE s.date <= ?{provenance_filter}",
     )))
@@ -122,13 +155,16 @@ pub async fn db_units_sold(
     .fetch_all(&mut *conn)
     .await?;
 
-    let mut sold: HashMap<i64, Vec<(NaiveDate, Decimal)>> = HashMap::new();
+    let mut sold: HashMap<i64, Vec<UnitsConsumed>> = HashMap::new();
     for row in &rows {
         let purchase_trade_id: i64 = row.try_get("purchase_trade_id")?;
-        sold.entry(purchase_trade_id).or_default().push((
-            row.try_get("sale_date")?,
-            parse_dec("quantity_allocated", row.try_get("quantity_allocated")?)?,
-        ));
+        sold.entry(purchase_trade_id)
+            .or_default()
+            .push(UnitsConsumed {
+                date: row.try_get("sale_date")?,
+                quantity: parse_dec("quantity_allocated", row.try_get("quantity_allocated")?)?,
+                disposal: row.try_get::<i64, _>("is_disposal")? != 0,
+            });
     }
     Ok(sold)
 }
@@ -192,7 +228,11 @@ pub async fn load(
         // sale's allocated quantity is re-based back across any splits
         // between acquisition and that sale.
         let sold = corporate_action::sold_in_acquired_units(
-            qty_sold.get(&parcel.id).map_or(&[][..], |v| v),
+            qty_sold
+                .get(&parcel.id)
+                .map_or(&[][..], |v| v)
+                .iter()
+                .map(UnitsConsumed::dated),
             splits,
             parcel.date,
         );
@@ -771,18 +811,24 @@ mod tests {
         let sold = db_units_sold(&mut conn, None, Counted::AllConsumptions)
             .await
             .unwrap();
+        let dated = |sold: &HashMap<i64, Vec<UnitsConsumed>>, id: i64| {
+            sold.get(&id)
+                .map(|v| v.iter().map(UnitsConsumed::dated).collect::<Vec<_>>())
+        };
         assert_eq!(
-            sold.get(&1),
-            Some(&vec![
+            dated(&sold, 1),
+            Some(vec![
                 (ymd(2024, 5, 1), dec("30")),
                 (ymd(2024, 9, 3), dec("20"))
             ])
         );
+        // Both are ordinary Sells, so both are disposals.
+        assert!(sold[&1].iter().all(|c| c.disposal));
 
         // Bounded at a date between the two sales, only the first counts.
         let sold = db_units_sold(&mut conn, Some(ymd(2024, 6, 30)), Counted::AllConsumptions)
             .await
             .unwrap();
-        assert_eq!(sold.get(&1), Some(&vec![(ymd(2024, 5, 1), dec("30"))]));
+        assert_eq!(dated(&sold, 1), Some(vec![(ymd(2024, 5, 1), dec("30"))]));
     }
 }

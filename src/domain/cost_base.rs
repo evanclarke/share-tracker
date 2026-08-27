@@ -42,7 +42,7 @@ use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::Serialize;
 
-use crate::entities::corporate_action::{RocEvent, SplitEvent, per_unit_reduction};
+use crate::entities::corporate_action::{RocEvent, RolloverOrigin, SplitEvent, per_unit_reduction};
 use crate::infra::decimal::{Money, OptMoney, mul_div};
 use crate::infra::fx;
 
@@ -64,13 +64,12 @@ pub struct Parcel<'a> {
     /// parcels), where different, only drives the discount clock and the AUD
     /// translation month, never which events touch the parcel.
     pub trade_date: NaiveDate,
-    /// Set — to [`Self::trade_date`] — when a rollover created this parcel: the
-    /// operation folded every return-of-capital payment up to **and including**
-    /// its own date into the cost base this parcel carries, so those payments
-    /// must not reduce it a second time here
-    /// (`RocEvent::per_unit_for`, SCENARIOS N-06). `None` on an ordinary parcel,
-    /// and on an inherited one, whose cost base is stated rather than carried.
-    pub rolled_over_on: Option<NaiveDate>,
+    /// Set when a rollover created this parcel, carrying the operation date
+    /// and the date the units joined this listing's register — see
+    /// [`RolloverOrigin`], and `RocEvent::per_unit_for`, its only reader.
+    /// `None` on an ordinary parcel, and on an inherited one, whose cost base
+    /// is stated rather than carried.
+    pub rollover: Option<RolloverOrigin>,
 }
 
 impl Parcel<'_> {
@@ -347,15 +346,32 @@ impl ParcelRow {
         fx::FxOverride::from_trade(self.fx_rate, self.spot_fx_rate)
     }
 
-    /// The date a rollover carried this parcel's cost base forward on, when it
-    /// is a replacement parcel — its own trade date, which is also the operation
-    /// date. `None` for an ordinary (or inherited) parcel. See
-    /// [`Parcel::rolled_over_on`].
-    pub fn rolled_over_on(&self) -> Option<NaiveDate> {
+    /// The rollover that created this parcel, when it is a replacement parcel:
+    /// the operation date (its own trade date) and the date its units joined
+    /// this listing's register. `None` for an ordinary (or inherited) parcel.
+    /// See [`RolloverOrigin`].
+    ///
+    /// Only a **transfer** registers its units before the operation: it moves
+    /// them between the taxpayer's own accounts, leaving them on the same
+    /// listing's register throughout, so a payment whose record date precedes
+    /// the transfer still reaches them. A scrip exchange's replacement is of
+    /// another listing entirely, and a demerger's parcels are treated the same
+    /// way for now — its **head** parcel is on the continuing listing and has
+    /// a transfer's continuity, but head and spun-off parcels carry the same
+    /// `demerger_action_id` and are told apart only by comparing the parcel's
+    /// listing with the action's, which this row does not know (TODO).
+    pub fn rollover(&self) -> Option<RolloverOrigin> {
         (self.scrip_action_id.is_some()
             || self.demerger_action_id.is_some()
             || self.transfer_id.is_some())
-        .then_some(self.date)
+        .then(|| RolloverOrigin {
+            on: self.date,
+            registered_from: if self.transfer_id.is_some() {
+                self.acquired()
+            } else {
+                self.date
+            },
+        })
     }
 
     /// The row as [`adjusted_cost_base`]'s input.
@@ -367,7 +383,7 @@ impl ParcelRow {
             gst_on_brokerage: self.gst_on_brokerage,
             currency: &self.currency,
             trade_date: self.date,
-            rolled_over_on: self.rolled_over_on(),
+            rollover: self.rollover(),
         }
     }
 }
@@ -626,7 +642,7 @@ pub fn adjusted_cost_base(
         splits,
         parcel.currency,
         parcel.trade_date,
-        parcel.rolled_over_on,
+        parcel.rollover,
         held.up_to(),
     )?;
     let roc_reduction = roc_per_unit * units;
@@ -750,7 +766,7 @@ pub fn adjustment_detail(
             splits,
             parcel.currency,
             parcel.trade_date,
-            parcel.rolled_over_on,
+            parcel.rollover,
             held.up_to(),
         )?
         else {
@@ -905,7 +921,7 @@ mod tests {
             gst_on_brokerage: Decimal::ZERO,
             currency: "AUD",
             trade_date: date(2024, 1, 1),
-            rolled_over_on: None,
+            rollover: None,
         }
     }
 

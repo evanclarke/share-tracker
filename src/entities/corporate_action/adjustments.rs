@@ -45,6 +45,32 @@ pub struct RocEvent {
     pub record_date: Option<NaiveDate>,
 }
 
+/// What a rollover replacement parcel tells a return-of-capital payment about
+/// the operation that created it — [`RocEvent::per_unit_for`] is the only
+/// reader, and `domain::cost_base::ParcelRow::rollover` the only producer.
+#[derive(Debug, Clone, Copy)]
+pub struct RolloverOrigin {
+    /// The operation date, which is also the replacement parcel's own trade
+    /// date. `domain::rollover` folded every payment up to **and including**
+    /// it into the cost base this parcel carries, so those must not reduce it
+    /// a second time (SCENARIOS N-06).
+    pub on: NaiveDate,
+    /// The date the units joined **this listing's** register — what decides
+    /// entitlement to a payment whose record date precedes the operation.
+    ///
+    /// For a **transfer** it is the units' own acquisition date: they never
+    /// left the listing's register or the taxpayer's ownership, they only
+    /// moved between the taxpayer's own accounts. A payment they were entitled
+    /// to at its record date still reduces their cost base; it is simply the
+    /// replacement parcel that holds them by the time it is paid.
+    ///
+    /// For a **scrip-for-scrip exchange**, and for a demerger, it is the
+    /// operation date. The exchange's replacement units are of a listing the
+    /// taxpayer was not on the register of beforehand, so a record date
+    /// preceding the operation found them not there.
+    pub registered_from: NaiveDate,
+}
+
 impl RocEvent {
     /// What this payment reduces the cost base by, per *as-acquired* unit of
     /// a parcel acquired on `acquired` and still held at `up_to` (`None` =
@@ -84,12 +110,19 @@ impl RocEvent {
         splits: &[SplitEvent],
         parcel_currency: &str,
         acquired: NaiveDate,
-        rolled_over_on: Option<NaiveDate>,
+        rollover: Option<RolloverOrigin>,
         up_to: Option<NaiveDate>,
     ) -> Result<Option<Decimal>, sqlx::Error> {
+        // Entitlement asks when the units joined *this listing's* register,
+        // which for a rollover replacement parcel is not its own trade date:
+        // a transfer between the taxpayer's accounts leaves them registered
+        // throughout (see `RolloverOrigin::registered_from`). The split
+        // re-basing below still runs from `acquired`, the parcel's own trade
+        // date, because that is the basis its quantity is stated in.
+        let registered_from = rollover.map_or(acquired, |r| r.registered_from);
         let entitled = match self.record_date {
-            Some(record_date) => acquired < record_date,
-            None => acquired <= self.date,
+            Some(record_date) => registered_from < record_date,
+            None => registered_from <= self.date,
         };
         if !entitled || up_to.is_some_and(|d| self.date > d) {
             return Ok(None);
@@ -106,7 +139,7 @@ impl RocEvent {
         // also the only side that can account for it when the replacement is of
         // a *different* listing (a scrip-for-scrip exchange) or splits one
         // parcel's cost base across two (a demerger).
-        if rolled_over_on.is_some_and(|rolled| self.date <= rolled) {
+        if rollover.is_some_and(|r| self.date <= r.on) {
             return Ok(None);
         }
         if self.currency != parcel_currency {
@@ -506,13 +539,13 @@ pub fn checked_as_acquired_quantity(
 /// the unit basis of its own sale date — a post-split sale allocates post-split
 /// units against the pre-split parcel.
 pub fn sold_in_acquired_units(
-    sales: &[(NaiveDate, Decimal)],
+    sales: impl IntoIterator<Item = (NaiveDate, Decimal)>,
     splits: &[SplitEvent],
     acquired: NaiveDate,
 ) -> Decimal {
     sales
-        .iter()
-        .map(|&(date, qty)| as_acquired_quantity(qty, splits, acquired, date))
+        .into_iter()
+        .map(|(date, qty)| as_acquired_quantity(qty, splits, acquired, date))
         .sum()
 }
 
@@ -534,14 +567,12 @@ pub fn per_unit_reduction(
     splits: &[SplitEvent],
     trade_currency: &str,
     acquired: NaiveDate,
-    rolled_over_on: Option<NaiveDate>,
+    rollover: Option<RolloverOrigin>,
     up_to: Option<NaiveDate>,
 ) -> Result<Decimal, sqlx::Error> {
     let mut total = Decimal::ZERO;
     for e in events {
-        if let Some(per_unit) =
-            e.per_unit_for(splits, trade_currency, acquired, rolled_over_on, up_to)?
-        {
+        if let Some(per_unit) = e.per_unit_for(splits, trade_currency, acquired, rollover, up_to)? {
             total += per_unit;
         }
     }
