@@ -3851,10 +3851,17 @@ fn amma_coverage_rule_is_documented_with_its_ato_authority() {
             .contains("[`attributing-amounts-to-members.md`](attributing-amounts-to-members.md)")
     );
 
-    // API.md states both limbs and the disposal case they exclude.
-    assert!(API_MD.contains("**still held at 30 June**"));
+    // API.md states what makes attribution *known*, the disposal case that is
+    // excluded, and — the point of the hard/advisory split — that holding
+    // units alone is advisory rather than a gate on the report.
+    assert!(API_MD.contains("**known to have attributed something**"));
     assert!(API_MD.contains("**before the year's first distribution**"));
-    assert!(API_MD.contains("A mid-year disposal alone never suppresses the check"));
+    assert!(API_MD.contains("Selling out mid-year is on its own no excuse"));
+    assert!(API_MD.contains("**Advisory: deliberately not part of `complete`.**"));
+    assert!(API_MD.contains(
+        "Holding units is not evidence of attribution; only a distribution or an issued \
+         statement is."
+    ));
 }
 
 /// Pins for the FreeBSD packaging + versioned-release pipeline (REQUIREMENTS

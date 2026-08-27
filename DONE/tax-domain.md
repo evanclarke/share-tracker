@@ -2357,13 +2357,21 @@ record date fell in the held part of the year, so nothing was attributed.)
   member if all of the member's determined member components for the income year are nil" and the
   AMIT cost base net amount is nil (`docs/ato/amit-reporting-requirements.md`). Being **attributed
   something** is the test
-- [x] Rule replaced with two limbs, either of which expects a statement: **units still held at
-  30 June** (the closing holding the year's final distribution is determined on), or **income
-  assessed to the year** via `Income::assessment_date` — the entitlement date for a trust row, so a
-  July-paid June distribution counts against the year just *ended*. Both over-expect rather than
-  under-expect, the safe direction: an extra limb raises a flag the entered statement clears, it
-  never silences a real gap. The holdings limb is what still catches a fund-year with no cash rows
-  at all, which `amit_cash_cross_check` documents it cannot
+- [x] Rule replaced, then corrected within the same task after Evan asked the right question:
+  "even if I held HNDQ past 30 Jun 2026 would I get an AMMA statement if there was no new
+  distribution?" No — so a **holdings** walk cannot answer a question about **attribution**, and an
+  intermediate version that expected a statement from anyone holding at 30 June was overclaiming.
+  Worse, in a distribution-free year (Yahoo shows no HNDQ ex-date anywhere in FY2022) it raised an
+  error with *nothing to enter to clear it* — the same class of bug as the one being fixed. The
+  landed rule splits the question in two: `amma_missing` (a **gap**, part of `complete`) fires only
+  where something is known to have been attributed — income assessed to the year in that account
+  via `Income::assessment_date`, or units held at 30 June *plus* evidence the fund attributed for
+  that listing-year, being an income row or an issued statement in any holding account (which is
+  what asks each account for its own statement once one of them has one, SCENARIOS F-03/F-08);
+  `amma_nothing_recorded` (a **question**, deliberately not part of `complete`) carries units held
+  at 30 June with nothing recorded for the fund-year anywhere, plus the units held. That advisory
+  list is what still surfaces a fund-year with no cash rows at all, which `amit_cash_cross_check`
+  documents it cannot — without blocking a report on a statement that may not exist
 - [x] `docs/ato/attributing-amounts-to-members.md` mirrored (QC 82269, retrieved 2026-08-27) and
   indexed in `docs/ato/OVERVIEW.md`. It is the authority for both halves: attribution is of the
   determined member component *for the income year*, which "may be different from the amount you
@@ -2372,18 +2380,27 @@ record date fell in the held part of the year, so nothing was attributed.)
   unitholder at 31 December 2016 and **not** one at 30 June 2017 (so a mid-year disposal alone
   never excuses a statement), while Example 4 allocates nothing to a member who "was not a
   unitholder at the final record date"
-- [x] Three tests in `reports::tax_report`:
+- [x] Five tests in `reports::tax_report`:
   `amma_missing_ignores_a_holding_disposed_before_the_years_first_distribution` (the live HNDQ
   shape), `amma_missing_still_expects_a_statement_after_a_mid_year_disposal_that_took_income`
-  (ATO Example 3), and `amma_missing_keys_a_july_paid_june_distribution_to_the_year_that_ended`
-  (the ex-date/entitlement-date split). Plus
+  (ATO Example 3), `amma_missing_keys_a_july_paid_june_distribution_to_the_year_that_ended` (the
+  ex-date/entitlement-date split), `amma_missing_fires_where_a_distribution_shows_the_fund_attributed`
+  (the hard gap) and `amma_nothing_recorded_is_advisory_and_never_blocks_the_report` (the
+  distribution-free year that must stay fileable). Plus
   `doc_checks::amma_coverage_rule_is_documented_with_its_ato_authority` pinning both mirrors, the
-  OVERVIEW index row, and the `docs/API.md` wording
-- [x] Verified end-to-end against a copy of the live database: FY2026 clean; deleting VDHG's FY2026
-  statement flags it (the check is live, not vacuous); pushing HNDQ's sell past 30 June 2026 flags
-  HNDQ via the holdings limb; restoring the sell and adding an in-year distribution flags it via
-  the income limb
-- [ ] Remaining hole, recorded as its own open section rather than closed here: a holding sold
-  mid-year that *was* attributed a distribution whose cash row was never entered satisfies neither
-  limb. Closing it needs external knowledge of the fund's distribution dates — see the
-  "Distribution calendar and the missing-dividend alert" section in TODO.md
+  OVERVIEW index row and the `docs/API.md` wording, and the two new sentences in
+  `web::tests::annual_tax_report_ui_present`
+- [x] Web UI: the Annual Tax Report's completeness section renders the advisory list under a
+  neutral `badge note` (new style, deliberately not `warn`) in both the passing and failing states,
+  naming the units held and saying plainly that a fund which distributed nothing owes no statement
+- [x] Verified end-to-end against a copy of the live database: FY2024–26 clean; deleting VDHG's
+  FY2026 statement while its income rows stand produces a **hard** gap (`complete: false`); also
+  deleting those income rows moves it to the **advisory** list naming 10829 units with `complete`
+  back to true; HNDQ never appears in either list
+- [ ] Remaining hole, recorded as its own open section rather than closed here: neither list can
+  tell "the fund distributed nothing" from "I have not entered it yet", so a holding sold mid-year
+  that *was* attributed a distribution whose cash row was never entered is silent, and a
+  distribution-free year sits in the advisory list looking like an omission. Both need external
+  knowledge of the fund's distribution dates — see the "Distribution calendar and the
+  missing-dividend alert" section in TODO.md, whose third limb resolves the advisory list into one
+  answer or the other

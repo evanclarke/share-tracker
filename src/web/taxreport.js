@@ -56,12 +56,29 @@ function fyLabel(taxYear) {
 
 // ---- completeness -------------------------------------------------------
 
+// Units held at 30 June with nothing recorded for the fund-year at all. This
+// is a question rather than a gap — an AMIT that attributed nothing owes no
+// statement, so there would be nothing to enter to clear it — and it is kept
+// out of the pass/fail badge for exactly that reason.
+function nothingRecordedList(c) {
+  const unrecorded = c.amma_nothing_recorded || [];
+  if (!unrecorded.length) return null;
+  return el('div', null, [
+    el('p', { class: 'badge note' }, 'Worth checking — held across 30 June with no distribution recorded for the year. If the fund distributed nothing, there is nothing to enter and no statement to expect:'),
+    el('ul', null, unrecorded.map(function (a) {
+      return el('li', null, a.ticker + ' in account #' + a.holding_account_id + ': ' + a.units_held
+        + ' units held at 30 June, but no distribution and no AMMA statement recorded for the year.');
+    })),
+  ]);
+}
+
 function completenessSection(c) {
   if (c.complete) {
     return el('div', { class: 'doc-section' }, [
       el('h3', null, 'Data completeness'),
-      el('p', { class: 'badge ok' }, '✓ Verified — every AMIT fund held this year has a covering AMMA statement, and no cross-check gaps were found.'),
-    ]);
+      el('p', { class: 'badge ok' }, '✓ Verified — every AMIT fund known to have attributed for this year has a covering AMMA statement, and no cross-check gaps were found.'),
+      nothingRecordedList(c),
+    ].filter(Boolean));
   }
   const items = [];
   // Both AMMA-coverage checks are per holding account (a registry issues one
@@ -70,7 +87,7 @@ function completenessSection(c) {
   // sentences.
   c.amma_missing.forEach(function (a) {
     items.push(el('li', null, 'No AMMA statement for ' + a.ticker + ' in account #' + a.holding_account_id
-      + ' — held at some point during the year (checked by holdings, not just cash rows).'));
+      + ' — the fund attributed for this year, so this account is owed one.'));
   });
   c.amit_cash_alerts.forEach(function (a) {
     items.push(el('li', null, a.ticker + ' (account #' + a.holding_account_id + '): ' + a.cash_rows
@@ -98,7 +115,8 @@ function completenessSection(c) {
     el('h3', null, 'Data completeness'),
     el('p', { class: 'badge warn' }, '⚠ Issues found for this year — this report may understate income or the cost base until they are resolved:'),
     el('ul', null, items),
-  ]);
+    nothingRecordedList(c),
+  ].filter(Boolean));
 }
 
 // ---- disposals ------------------------------------------------------------

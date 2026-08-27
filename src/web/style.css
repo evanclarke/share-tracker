@@ -417,6 +417,10 @@ input[type=checkbox] { width: auto; }
    A printable document, not a data grid — plain semantic tables, not
    filterableTable, so no filter row / sort indicators / pager to style. */
 .badge.warn { background: #fdf3e0; color: var(--warn); }
+/* Advisory, not a failure: a question the recorded facts cannot answer
+   (held across 30 June, nothing recorded for the fund-year). Reads as
+   neutral information so it never competes with the warn badge. */
+.badge.note { background: #eceff1; color: var(--muted); }
 .tax-report-doc h1 { margin-bottom: 4px; }
 .tax-report-doc .doc-section { margin: 24px 0; }
 .tax-report-doc h4 { margin: 16px 0 8px; }

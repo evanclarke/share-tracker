@@ -326,8 +326,11 @@ distribution falls one or two days into July while the income is attributed to t
 - [ ] Scheduled refresh job in `infra/scheduler/registry.rs` + its `schedule.cron` line
 - [ ] `reports::health` "missing dividend entry" alert: known ex-date, units held on it, no
   matching income row — carrying ticker, ex-date and expected amount (per unit × units held)
-- [ ] Third limb on `reports::tax_report`'s `amma_missing`: a known ex-date inside the year's held
-  window also expects a statement. **Additive only** — Yahoo's coverage has real gaps (HNDQ 8
-  events against VDHG's 28), so a missing event must never suppress an expectation
+- [ ] Resolve `reports::tax_report`'s advisory `amma_nothing_recorded` list with a third limb: a
+  known ex-date inside the year's held window turns the entry into a hard `amma_missing` gap;
+  a fund-year with no known ex-date at all is the answer "the fund distributed nothing", and the
+  advisory entry can be dropped rather than left as a standing question. **Additive only on the
+  hard side** — Yahoo's coverage has real gaps (HNDQ 8 events against VDHG's 28), so a missing
+  event must never suppress an expectation the recorded facts already justify
 - [ ] Docs: `docs/SCHEMA.md` (table + relationships), `docs/API.md` (health alert shape), README
   Features

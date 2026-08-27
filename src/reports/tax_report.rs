@@ -147,17 +147,42 @@ pub struct AmmaMissingAlert {
     pub holding_account_id: i64,
 }
 
+/// An AMIT (listing, holding account) whose units were still held at 30 June
+/// but for which **nothing at all** is recorded for the fund-year — no income
+/// in any account, no statement in any account. Advisory: it does not drop
+/// [`Completeness::complete`], because a fund that attributed nothing owes no
+/// statement and there would be nothing to enter to clear it. It is a
+/// question, not a gap — either the year's distributions have not been entered
+/// yet, or the fund genuinely made none.
+#[derive(Debug, Serialize)]
+pub struct AmmaNothingRecordedAlert {
+    pub listing_id: i64,
+    pub ticker: String,
+    pub holding_account_id: i64,
+    /// Units held at 30 June, so the line can say what position is unaccounted
+    /// for rather than just naming the fund.
+    pub units_held: Decimal,
+}
+
+/// What [`amma_coverage`] found, split by whether it is a gap or a question.
+struct AmmaCoverage {
+    missing: Vec<AmmaMissingAlert>,
+    nothing_recorded: Vec<AmmaNothingRecordedAlert>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct Completeness {
     pub complete: bool,
-    /// AMIT (listing, holding account) pairs the fund is expected to issue a
-    /// statement to for the year — see [`amma_missing`] for the two limbs
-    /// that stand in for attribution — with no AMMA statement covering that
-    /// account and year. The holdings limb is why this catches a fund-year
-    /// where no cash rows were entered at all, which
-    /// [`amit_cash_cross_check`](super::amit_cash_cross_check) (whose own doc
-    /// comment names the gap) cannot.
+    /// AMIT (listing, holding account) pairs **known to have been attributed
+    /// something** for the year with no AMMA statement covering that account
+    /// and year — a real gap, so it drops [`Self::complete`]. See
+    /// [`amma_coverage`] for what counts as knowing.
     pub amma_missing: Vec<AmmaMissingAlert>,
+    /// Units held at 30 June with nothing recorded for the fund-year at all.
+    /// **Advisory** — deliberately not part of [`Self::complete`], since a
+    /// fund that attributed nothing owes no statement to enter. See
+    /// [`AmmaNothingRecordedAlert`].
+    pub amma_nothing_recorded: Vec<AmmaNothingRecordedAlert>,
     pub amit_cash_alerts: Vec<amit_cash_cross_check::AmitCashAlert>,
     pub e4_alerts: Vec<e4_cross_check::E4CrossCheckAlert>,
     /// AMMA statements for this year whose per-parcel AMIT adjustment set
@@ -174,52 +199,58 @@ pub struct Completeness {
     pub rollover_alerts: Vec<rollover_consistency::RolloverAlert>,
 }
 
-/// Every (AMIT listing, holding account) the fund is **expected to issue an
-/// AMMA statement to** for the year, that has no `amma_statements` row for
-/// that account whose `tax_year_end_date` falls in the year.
+/// AMMA statement coverage for the year, split into a **gap** and a
+/// **question**.
 ///
 /// An AMIT must give a statement "to each person who was a member during the
 /// income year" — but is **not required** to where that member's determined
-/// member components *and* AMIT cost base net amount for the year are both
-/// nil (`docs/ato/amit-reporting-requirements.md`). So having been a member
-/// during the year is not the test; having been **attributed something** is,
-/// and a holding disposed of in full before the year's first record date is
-/// attributed nothing and will never receive a statement to enter.
+/// member components *and* AMIT cost base net amount for the year are both nil
+/// (`docs/ato/amit-reporting-requirements.md`). So neither having been a member
+/// during the year nor still holding at its end is the test: having been
+/// **attributed something** is, and attribution is not something a holdings
+/// walk can see. A fund that distributed nothing all year owes no statement to
+/// anyone, however long they held.
 ///
-/// Two limbs stand in for attribution, either of which expects a statement.
-/// Both over-expect rather than under-expect, which is the safe direction
-/// here: an extra limb can only raise a flag the entered statement clears,
-/// never silence a real gap.
+/// What the recorded facts can answer is therefore split in two:
 ///
-/// - **Units still held at 30 June.** The year's final distribution is
-///   determined on the closing holding, so a holder at year end is attributed
-///   it. ASX funds set that record date a day or two into July — which is why
-///   a statement for the year ended 30 June covers cash paid the following
-///   month at all — so this limb over-expects by at most those few days.
-/// - **Income assessed to the year.** A distribution taken while the units
-///   were held, keyed by [`Income::assessment_date`] — the entitlement date
-///   for a trust row, so a July-paid June distribution counts against the
-///   year just *ended*, exactly as the registry's own payment advice says.
+/// - [`AmmaCoverage::missing`] — a real gap, and part of
+///   [`Completeness::complete`]. Something is **known** to have been attributed
+///   to this (listing, account) for the year, and no statement covers it:
+///   either income assessed to the year in this very account, or — for units
+///   still held at 30 June — evidence that the fund attributed *something* for
+///   this listing-year, being an income row or an issued statement in any
+///   holding account. The second arm is what asks each account for its own
+///   statement once one of them has one (SCENARIOS F-03, F-08).
+/// - [`AmmaCoverage::nothing_recorded`] — a question, and deliberately **not**
+///   part of `complete`. Units were still held at 30 June, but nothing at all
+///   is recorded for the fund-year in any account. Either the year's
+///   distributions have not been entered yet, or the fund genuinely made none
+///   — and in the second case no statement will ever exist to clear a flag
+///   with, which is exactly why this one does not block the report.
 ///
-/// Together the two bracket the ATO's own examples
-/// (`docs/ato/attributing-amounts-to-members.md`): in Example 3 a member who
-/// sold out before year end is still issued a statement for the interim
-/// distribution attributed to him — so disposal alone never excuses one — and
-/// in Example 4 no amount is allocated to a member who "was not a unitholder
-/// at the final record date", who is therefore owed no statement.
+/// The income limb is keyed by [`Income::assessment_date`] — the entitlement
+/// date for a trust row — so an ASX fund's June-half distribution, whose record
+/// date falls a day or two into July and whose cash lands mid-month, counts
+/// against the year just *ended*, as the registry's own payment advice says and
+/// as `docs/ato/attributing-amounts-to-members.md` requires ("your determined
+/// member components … will be used to determine your assessable income for the
+/// income year. This may be different from the amount you receive in actual
+/// cash payments").
 ///
-/// A simple net-units walk (Buy/DRP minus Sell quantities, not cost-base
-/// aware): good enough for a held/not-held flag, not a financial figure.
+/// A holding disposed of in full before the year's first distribution appears
+/// in neither list: it was attributed nothing and is owed nothing. Selling out
+/// mid-year is on its own no excuse, though — in ATO Example 3 a member who was
+/// the sole unitholder at 31 December and not one at 30 June is still issued a
+/// statement for the half-year attributed to him, which the income limb catches
+/// from his distribution row.
 ///
-/// The account is part of the key because the statement is: a registry issues
-/// one AMMA statement per holder account, and one account's statement
-/// attributes only its own units — so a fund held in two accounts with a
-/// statement for one of them is exactly the gap this section exists to catch
-/// (SCENARIOS F-03, F-08).
-async fn amma_missing(
+/// The units walk is a simple net of Buy/DRP minus Sell quantities, not
+/// cost-base aware: good enough for a held/not-held flag, not a financial
+/// figure.
+async fn amma_coverage(
     conn: &mut sqlx::SqliteConnection,
     tax_year: TaxYear,
-) -> Result<Vec<AmmaMissingAlert>, sqlx::Error> {
+) -> Result<AmmaCoverage, sqlx::Error> {
     let (start, end) = period_for(tax_year);
 
     // Listings that are an AMIT *for this year*: one that converted part-way
@@ -247,10 +278,13 @@ async fn amma_missing(
             .map(|(id, ticker, _)| (id, ticker))
             .collect();
     if tickers.is_empty() {
-        return Ok(vec![]);
+        return Ok(AmmaCoverage {
+            missing: vec![],
+            nothing_recorded: vec![],
+        });
     }
 
-    // Limb one: the closing holding at 30 June, per account.
+    // The closing holding at 30 June, per account.
     let trade_rows = sqlx::query(
         "SELECT listing_id, holding_account_id, trade_type, quantity FROM trades \
          WHERE listing_id IN (SELECT id FROM listings WHERE amit) \
@@ -283,15 +317,17 @@ async fn amma_missing(
         *closing.entry(key).or_insert(Decimal::ZERO) += signed;
     }
 
-    // Limb two: a distribution assessed to this year, in the account it was
-    // paid into. The assessment date is the income entity's own rule — the
-    // entitlement date for a trust row, payment otherwise — shared with the
-    // tax summary and the AMIT cash cross-check rather than restated here.
+    // Distributions assessed to this year: per account, and — for the
+    // fund-level "did this listing attribute anything at all" question — per
+    // listing. The assessment date is the income entity's own rule, shared
+    // with the tax summary and the AMIT cash cross-check rather than restated
+    // here.
     let income_rows =
         sqlx::query("SELECT i.* FROM income i JOIN listings l ON l.id = i.listing_id WHERE l.amit")
             .fetch_all(&mut *conn)
             .await?;
     let mut attributed: HashSet<(i64, i64)> = HashSet::new();
+    let mut fund_attributed: HashSet<i64> = HashSet::new();
     for row in &income_rows {
         let income = Income::from_row(row)?;
         if !tickers.contains_key(&income.listing_id) {
@@ -300,10 +336,12 @@ async fn amma_missing(
         let assessed = income.assessment_date();
         if assessed >= start && assessed <= end {
             attributed.insert((income.listing_id, income.holding_account_id));
+            fund_attributed.insert(income.listing_id);
         }
     }
 
-    let covered: HashSet<(i64, i64)> = sqlx::query(
+    let mut covered: HashSet<(i64, i64)> = HashSet::new();
+    for row in sqlx::query(
         "SELECT listing_id, holding_account_id FROM amma_statements \
          WHERE tax_year_end_date BETWEEN ? AND ?",
     )
@@ -311,33 +349,66 @@ async fn amma_missing(
     .bind(end)
     .fetch_all(&mut *conn)
     .await?
-    .into_iter()
-    .map(|r| Ok::<_, sqlx::Error>((r.try_get("listing_id")?, r.try_get("holding_account_id")?)))
-    .collect::<Result<_, _>>()?;
+    {
+        let listing_id: i64 = row.try_get("listing_id")?;
+        covered.insert((listing_id, row.try_get("holding_account_id")?));
+        // An issued statement is itself proof the fund attributed something
+        // for this listing-year, so the *other* accounts holding it are owed
+        // one too (SCENARIOS F-03, F-08).
+        fund_attributed.insert(listing_id);
+    }
 
-    // Every (listing, account) either limb expects a statement for, and that
-    // has none — sorted by ticker, then account, so the section reads in the
-    // same order as the cross-check alerts beside it.
-    let mut expected: Vec<(i64, i64)> = closing
+    // Sorted by ticker, then account, so both sections read in the same order
+    // as the cross-check alerts beside them.
+    let sort_key = |listing_id: &i64, account_id: &i64| {
+        (tickers.get(listing_id).cloned(), *account_id, *listing_id)
+    };
+
+    let mut missing: Vec<(i64, i64)> = attributed
         .iter()
-        .filter(|(_, q)| **q > Decimal::ZERO)
-        .map(|(key, _)| *key)
-        .chain(attributed.iter().copied())
+        .copied()
+        .chain(
+            closing
+                .iter()
+                .filter(|(key, qty)| **qty > Decimal::ZERO && fund_attributed.contains(&key.0))
+                .map(|(key, _)| *key),
+        )
         .filter(|key| !covered.contains(key))
         .collect();
-    expected.sort_unstable_by_key(|(listing_id, account_id)| {
-        (tickers.get(listing_id).cloned(), *account_id, *listing_id)
-    });
-    expected.dedup();
+    missing.sort_unstable_by_key(|(listing_id, account_id)| sort_key(listing_id, account_id));
+    missing.dedup();
 
-    Ok(expected
-        .into_iter()
-        .map(|(listing_id, holding_account_id)| AmmaMissingAlert {
-            listing_id,
-            ticker: tickers.get(&listing_id).cloned().unwrap_or_default(),
-            holding_account_id,
+    let mut unrecorded: Vec<((i64, i64), Decimal)> = closing
+        .iter()
+        .filter(|(key, qty)| {
+            **qty > Decimal::ZERO && !fund_attributed.contains(&key.0) && !covered.contains(key)
         })
-        .collect())
+        .map(|(key, qty)| (*key, *qty))
+        .collect();
+    unrecorded
+        .sort_unstable_by_key(|((listing_id, account_id), _)| sort_key(listing_id, account_id));
+
+    Ok(AmmaCoverage {
+        missing: missing
+            .into_iter()
+            .map(|(listing_id, holding_account_id)| AmmaMissingAlert {
+                listing_id,
+                ticker: tickers.get(&listing_id).cloned().unwrap_or_default(),
+                holding_account_id,
+            })
+            .collect(),
+        nothing_recorded: unrecorded
+            .into_iter()
+            .map(
+                |((listing_id, holding_account_id), units_held)| AmmaNothingRecordedAlert {
+                    listing_id,
+                    ticker: tickers.get(&listing_id).cloned().unwrap_or_default(),
+                    holding_account_id,
+                    units_held,
+                },
+            )
+            .collect(),
+    })
 }
 
 // ---- disposals ------------------------------------------------------------
@@ -1578,7 +1649,7 @@ pub async fn db_tax_report(pool: &SqlitePool, tax_year: i32) -> Result<TaxReport
             .collect();
 
     let mut tx = pool.begin().await?;
-    let amma_missing_alerts = amma_missing(&mut tx, year).await?;
+    let amma_coverage_result = amma_coverage(&mut tx, year).await?;
     // The realised-gains pipeline and the FX rate table each run/load once
     // for the whole document: the disposals schedule, the CGT summary and
     // the income section all read from this one pass rather than each
@@ -1616,12 +1687,16 @@ pub async fn db_tax_report(pool: &SqlitePool, tax_year: i32) -> Result<TaxReport
     let rollover_alerts = rollover_consistency::db_rollover_alerts(pool).await?;
 
     let completeness = Completeness {
-        complete: amma_missing_alerts.is_empty()
+        // `amma_nothing_recorded` is deliberately absent from this: it is a
+        // question the recorded facts cannot answer, and a fund that
+        // attributed nothing would leave it permanently unclearable.
+        complete: amma_coverage_result.missing.is_empty()
             && amit_cash_alerts.is_empty()
             && e4_alerts.is_empty()
             && amit_adjustment_alerts.is_empty()
             && rollover_alerts.is_empty(),
-        amma_missing: amma_missing_alerts,
+        amma_missing: amma_coverage_result.missing,
+        amma_nothing_recorded: amma_coverage_result.nothing_recorded,
         amit_cash_alerts,
         e4_alerts,
         amit_adjustment_alerts,
@@ -2345,12 +2420,50 @@ mod tests {
         );
     }
 
-    /// The holdings-based completeness check must fire for an AMIT fund held
-    /// all year with *no* cash rows at all — the gap the existing
-    /// (cash-driven) `amit_cash_cross_check` documents it cannot catch — and
-    /// clear once the statement is entered.
+    /// A fund held across 30 June that **is** known to have attributed
+    /// something for the year — its distribution row is entered — is a real
+    /// gap while the statement is missing: it drops `complete`, and entering
+    /// the statement clears it.
     #[tokio::test]
-    async fn amma_missing_is_holdings_based_and_clears_once_entered() {
+    async fn amma_missing_fires_where_a_distribution_shows_the_fund_attributed() {
+        let pool = test_support::test_pool().await;
+        listing_amit(&pool, 1, "AMT").await;
+        test_support::buy(1, 1)
+            .date(ymd(2023, 1, 3))
+            .qty(dec("100"))
+            .price(dec("10"))
+            .insert(&pool)
+            .await;
+        test_support::income(1, 1, ymd(2024, 3, 15))
+            .with(|i| {
+                i.trust_income = true;
+                i.unfranked_amount = dec("50");
+            })
+            .insert(&pool)
+            .await;
+
+        let report = db_tax_report(&pool, 2024).await.unwrap();
+        assert!(!report.completeness.complete);
+        assert_eq!(report.completeness.amma_missing.len(), 1);
+        assert_eq!(report.completeness.amma_missing[0].listing_id, 1);
+        // The holdings side has nothing to ask: the fund's year is accounted
+        // for, it is this account's statement that is missing.
+        assert!(report.completeness.amma_nothing_recorded.is_empty());
+
+        test_support::amma(1, 1).insert(&pool).await;
+        let report2 = db_tax_report(&pool, 2024).await.unwrap();
+        assert!(report2.completeness.amma_missing.is_empty());
+        assert!(report2.completeness.complete);
+    }
+
+    /// The same fund held across 30 June with **nothing** recorded for the
+    /// year — no distribution row, no statement — is a question, not a gap. A
+    /// fund that attributed nothing owes no statement, so there would be
+    /// nothing to enter to clear a hard flag: it is listed as advisory and
+    /// `complete` stays true. Entering the statement (or the distribution that
+    /// proves one is owed) moves it out of the advisory list.
+    #[tokio::test]
+    async fn amma_nothing_recorded_is_advisory_and_never_blocks_the_report() {
         let pool = test_support::test_pool().await;
         listing_amit(&pool, 1, "AMT").await;
         test_support::buy(1, 1)
@@ -2361,16 +2474,21 @@ mod tests {
             .await;
 
         let report = db_tax_report(&pool, 2024).await.unwrap();
-        assert!(!report.completeness.complete);
-        assert_eq!(report.completeness.amma_missing.len(), 1);
-        assert_eq!(report.completeness.amma_missing[0].listing_id, 1);
-        // No cash rows at all, so the existing cross-check has nothing to
-        // flag — this is exactly the gap the holdings-based check closes.
+        assert!(report.completeness.amma_missing.is_empty());
+        assert_eq!(report.completeness.amma_nothing_recorded.len(), 1);
+        assert_eq!(report.completeness.amma_nothing_recorded[0].listing_id, 1);
+        assert_eq!(
+            report.completeness.amma_nothing_recorded[0].units_held,
+            dec("100")
+        );
+        // No cash rows at all, so the cash-driven cross-check has nothing to
+        // say either — and the report is still fileable.
         assert!(report.completeness.amit_cash_alerts.is_empty());
+        assert!(report.completeness.complete);
 
         test_support::amma(1, 1).insert(&pool).await;
         let report2 = db_tax_report(&pool, 2024).await.unwrap();
-        assert!(report2.completeness.amma_missing.is_empty());
+        assert!(report2.completeness.amma_nothing_recorded.is_empty());
         assert!(report2.completeness.complete);
     }
 
@@ -2453,6 +2571,17 @@ mod tests {
             .account(2)
             .insert(&pool)
             .await;
+        // The first account's distribution is enough to know the fund
+        // attributed for this year — so the second account, holding the same
+        // fund at 30 June, is owed its own statement too even though its cash
+        // row has not been entered.
+        test_support::income(1, 1, ymd(2024, 3, 15))
+            .with(|i| {
+                i.trust_income = true;
+                i.unfranked_amount = dec("50");
+            })
+            .insert(&pool)
+            .await;
 
         let report = db_tax_report(&pool, 2024).await.unwrap();
         assert_eq!(
@@ -2505,10 +2634,26 @@ mod tests {
             .price(dec("10"))
             .insert(&pool)
             .await;
+        // A distribution in each year, so the coverage question turns purely
+        // on which years the fund was an AMIT for.
+        test_support::income(1, 1, ymd(2024, 3, 15))
+            .with(|i| {
+                i.trust_income = true;
+                i.unfranked_amount = dec("50");
+            })
+            .insert(&pool)
+            .await;
+        test_support::income(2, 1, ymd(2025, 3, 14))
+            .with(|i| {
+                i.trust_income = true;
+                i.unfranked_amount = dec("50");
+            })
+            .insert(&pool)
+            .await;
 
         let before = db_tax_report(&pool, 2024).await.unwrap();
         assert!(before.completeness.amma_missing.is_empty());
-        assert!(before.completeness.complete);
+        assert!(before.completeness.amma_nothing_recorded.is_empty());
 
         // FY2025, the first AMIT year, does want one.
         let after = db_tax_report(&pool, 2025).await.unwrap();
@@ -2544,6 +2689,22 @@ mod tests {
             .price(dec("10"))
             .insert(&pool)
             .await;
+        // Both funds distribute in both years, so the only thing separating
+        // them is which years each was an AMIT for.
+        for (id, listing_id, paid) in [
+            (1, 1, ymd(2024, 3, 15)),
+            (2, 1, ymd(2025, 3, 14)),
+            (3, 2, ymd(2024, 3, 15)),
+            (4, 2, ymd(2025, 3, 14)),
+        ] {
+            test_support::income(id, listing_id, paid)
+                .with(|i| {
+                    i.trust_income = true;
+                    i.unfranked_amount = dec("50");
+                })
+                .insert(&pool)
+                .await;
+        }
 
         // FY2024: only the lifelong AMIT is asked for a statement.
         let before = db_tax_report(&pool, 2024).await.unwrap();

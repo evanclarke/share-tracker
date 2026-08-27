@@ -1890,6 +1890,13 @@ mod tests {
         assert!(js.contains("Print / Save as PDF"));
         assert!(js.contains("window.print()"));
         assert!(js.contains("Data completeness"));
+        // The completeness section renders two AMMA-coverage surfaces: the
+        // gap that blocks the report, and the advisory question that must not
+        // (a fund that attributed nothing owes no statement to enter, so a
+        // hard flag there would be unclearable).
+        assert!(js.contains("amma_nothing_recorded"));
+        assert!(js.contains("the fund attributed for this year, so this account is owed one."));
+        assert!(js.contains("If the fund distributed nothing, there is nothing to enter"));
         assert!(js.contains("Trading activity"));
         assert!(js.contains("Gain / loss summary"));
         assert!(js.contains("Overall tax summary"));
