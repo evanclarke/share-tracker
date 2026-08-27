@@ -1044,7 +1044,9 @@ fn nil_proceeds_disposals_are_documented_with_the_market_value_rule() {
     assert!(
         API_MD.contains("`nil_proceeds_disposals` — every disposal recorded at **nil proceeds**")
     );
-    assert!(API_MD.contains("\"non_trading_day_trades\", \"nil_proceeds_disposals\" }`"));
+    // In the Health response's field list — not pinned as the *last* field,
+    // since a later alert may follow it (the distribution calendar's two do).
+    assert!(API_MD.contains("\"non_trading_day_trades\", \"nil_proceeds_disposals\""));
     // The rule it is about, cited to the mirror, which carries its QC header.
     assert!(API_MD.contains("docs/ato/capital-proceeds-market-value-substitution.md"));
     assert!(
@@ -4190,4 +4192,62 @@ fn distribution_calendar_research_gate_recorded() {
     assert!(REQUIREMENTS_MD.contains(
         "The stored ex-date is the\n  **candle-joined** date, never `Action::Dividend.date`"
     ));
+}
+
+/// Docs-sync pin for the distribution calendar (REQUIREMENTS 2026-08-27). The
+/// behaviour is pinned by `entities::distribution_event`'s and
+/// `reports::health`'s own tests; this is the documentation half.
+///
+/// Three things have to stay written down, because each is a decision a reader
+/// would otherwise have to rediscover from the code: the feed is **advisory**
+/// and gates no tax figure, the stored `ex_date` is candle-joined rather than
+/// the provider's own, and `amount_per_unit` is in the basis of its own fetch.
+/// The Known-limitations entry carries the fourth — what an alert *not* firing
+/// does and does not prove.
+#[test]
+fn distribution_calendar_documented() {
+    // The endpoints and the section they live in.
+    assert!(API_MD.contains("## Distribution calendar"));
+    assert!(API_MD.contains("`/distribution_events`"));
+    assert!(API_MD.contains("`/distribution_events/:id`"));
+    // Provider-owned: the absence of a write surface is a decision, not a gap.
+    assert!(API_MD.contains("The table is **provider-owned**: there is no `PUT` and no `DELETE`."));
+    // The explicit period, and why a max-range fetch is not an option.
+    assert!(API_MD.contains("`Range::Max` silently truncates the action stream"));
+    // The ex-date correction, in the reader-facing direction.
+    assert!(API_MD.contains("**`ex_date` is not the date the provider's action stream carries.**"));
+    assert!(API_MD.contains("**one day early in AEDT**"));
+    assert!(API_MD.contains("joining each event to the candle sharing its UTC date"));
+    // The unit basis, with the measurement behind it.
+    assert!(API_MD.contains("**`amount_per_unit` is in the unit basis of its own `fetched_at`**"));
+    assert!(API_MD.contains("NVDA's pre-split dividends come back as `0.004`"));
+
+    // Both alert shapes, and the two rules a reader has to know to act on one:
+    // which day "held" is measured on, and that only the gross is compared.
+    assert!(API_MD.contains("- `missing_dividend_entries` —"));
+    assert!(API_MD.contains("- `dividend_amount_mismatches` —"));
+    assert!(API_MD.contains("\"missing_dividend_entries\", \"dividend_amount_mismatches\" }`:"));
+    assert!(API_MD.contains("last cum-dividend day"));
+    assert!(API_MD.contains("**The gross is compared and never the components**"));
+
+    // The limitation: what an alert not firing does not prove, and the
+    // coverage check that licensed reading silence as evidence at all.
+    assert!(API_MD.contains("- **Distribution calendar coverage** (2026-08-27)"));
+    assert!(API_MD.contains("an alert *not* firing is not proof a distribution was entered"));
+    assert!(API_MD.contains(
+        "prints a bare `-` in its amount column for exactly the four Yahoo \
+                             lacks"
+    ));
+
+    // The schema half: the table, its staleness exemption and its auditing.
+    assert!(SCHEMA_MD.contains("distribution_events          The distribution calendar"));
+    assert!(
+        SCHEMA_MD.contains("listings ──< distribution_events (one row per listing per ex-date)")
+    );
+    assert!(SCHEMA_MD.contains("`distribution_events` (0048) is exempt on the same ground"));
+    assert!(SCHEMA_MD.contains("`distribution_events` joined in 0048 with the table itself"));
+
+    // And the README feature, carrying the advisory framing.
+    assert!(README_MD.contains("- **Distribution calendar and the missing-dividend alert** —"));
+    assert!(README_MD.contains("**Advisory by decision**"));
 }
