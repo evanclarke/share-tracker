@@ -10,7 +10,8 @@ findings are all closed in DONE.md), except where a section's heading names anot
 (e.g. REQUIREMENTS, SCENARIOS). Each section records one finding; sections land in DONE.md as they
 are fixed or decided.
 
-**Open: 2 follow-up sections.** All sixteen sections recorded from the **2026-08-25 code review**
+**Open: 3 sections** — the two 2026-08-25 code-review follow-ups below, plus the distribution
+calendar recorded from REQUIREMENTS 2026-08-27. All sixteen sections recorded from the **2026-08-25 code review**
 (a whole-codebase pass over `src` — business-logic errors, quality, duplication — every finding
 adversarially verified against `f171999`) are closed and archived in
 [`DONE/reviews.md`](DONE/reviews.md): the AMIT×rollover pair (`44b8a6b`), the four-endpoint
@@ -310,3 +311,23 @@ already wrong (a crypto network-fee Sell reported as "entered directly"), replac
 rule plus a `PRAGMA foreign_key_list` guard; AA-b made `renounceable` a **required** field rather than
 a defaulted one, because a default would have left the same silent assumption for every new entry; and
 AA-b's second item pulled the shared clause out so the two refusals read as one rule in two places.
+
+## Distribution calendar and the missing-dividend alert (REQUIREMENTS 2026-08-27)
+(Provider capability verified live against `yfinance-rs` 0.9.1 on 2026-08-27 — see REQUIREMENTS for
+the measured facts. Two constrain the work: `Range::Max` silently truncates the action stream
+(VDHG 8 events vs 28 for the same span as an explicit period), so the fetch must pass an explicit
+`between(start, end)`; and the stored date is the **ex-date**, which for an ASX fund's June-half
+distribution falls one or two days into July while the income is attributed to the year just
+*ended* — so events must be matched to income rows by event, never bucketed into a financial year.)
+- [ ] `distribution_events` table + migration (listing, ex-date, amount per unit, currency,
+  provenance); classify it for snapshot staleness and `row_history` auditing per CLAUDE.md
+- [ ] Provider-agnostic fetch behind a trait, Yahoo the only provider-specific part, on the
+  `closing_price` pattern; explicit period, never `Range::Max`
+- [ ] Scheduled refresh job in `infra/scheduler/registry.rs` + its `schedule.cron` line
+- [ ] `reports::health` "missing dividend entry" alert: known ex-date, units held on it, no
+  matching income row — carrying ticker, ex-date and expected amount (per unit × units held)
+- [ ] Third limb on `reports::tax_report`'s `amma_missing`: a known ex-date inside the year's held
+  window also expects a statement. **Additive only** — Yahoo's coverage has real gaps (HNDQ 8
+  events against VDHG's 28), so a missing event must never suppress an expectation
+- [ ] Docs: `docs/SCHEMA.md` (table + relationships), `docs/API.md` (health alert shape), README
+  Features

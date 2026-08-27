@@ -2346,3 +2346,44 @@ entry-convention detail rather than a scope cut. Four new tests in `src/doc_chec
 `known_limitations_document_the_joint_ownership_entry_convention`,
 `..._the_second_taxpayer_remedy`, `..._the_element_two_incidental_cost_convention`, and
 `..._the_division_775_forex_omission`.
+
+## Annual Tax Report asked for an AMMA statement that would never be issued (2026-08-27)
+(Reported from the live database: FY2026 completeness flagged HNDQ as missing an AMMA statement,
+but no statement exists to enter — all 2671 units were sold on 2025-11-17 and no distribution
+record date fell in the held part of the year, so nothing was attributed.)
+- [x] Root cause: `reports::tax_report`'s `amma_missing` expected a statement for any AMIT held at
+  *any point* in the year (non-zero opening balance, or any Buy/DRP dated within it). Being a
+  member during the year is not the test — an AMIT "is not required to give an AMMA statement to a
+  member if all of the member's determined member components for the income year are nil" and the
+  AMIT cost base net amount is nil (`docs/ato/amit-reporting-requirements.md`). Being **attributed
+  something** is the test
+- [x] Rule replaced with two limbs, either of which expects a statement: **units still held at
+  30 June** (the closing holding the year's final distribution is determined on), or **income
+  assessed to the year** via `Income::assessment_date` — the entitlement date for a trust row, so a
+  July-paid June distribution counts against the year just *ended*. Both over-expect rather than
+  under-expect, the safe direction: an extra limb raises a flag the entered statement clears, it
+  never silences a real gap. The holdings limb is what still catches a fund-year with no cash rows
+  at all, which `amit_cash_cross_check` documents it cannot
+- [x] `docs/ato/attributing-amounts-to-members.md` mirrored (QC 82269, retrieved 2026-08-27) and
+  indexed in `docs/ato/OVERVIEW.md`. It is the authority for both halves: attribution is of the
+  determined member component *for the income year*, which "may be different from the amount you
+  receive in actual cash payments" (so `entitlement_date`, not `date_paid`, keys the income limb),
+  and its examples bracket the coverage rule — Example 3 issues a statement to Entity E, sole
+  unitholder at 31 December 2016 and **not** one at 30 June 2017 (so a mid-year disposal alone
+  never excuses a statement), while Example 4 allocates nothing to a member who "was not a
+  unitholder at the final record date"
+- [x] Three tests in `reports::tax_report`:
+  `amma_missing_ignores_a_holding_disposed_before_the_years_first_distribution` (the live HNDQ
+  shape), `amma_missing_still_expects_a_statement_after_a_mid_year_disposal_that_took_income`
+  (ATO Example 3), and `amma_missing_keys_a_july_paid_june_distribution_to_the_year_that_ended`
+  (the ex-date/entitlement-date split). Plus
+  `doc_checks::amma_coverage_rule_is_documented_with_its_ato_authority` pinning both mirrors, the
+  OVERVIEW index row, and the `docs/API.md` wording
+- [x] Verified end-to-end against a copy of the live database: FY2026 clean; deleting VDHG's FY2026
+  statement flags it (the check is live, not vacuous); pushing HNDQ's sell past 30 June 2026 flags
+  HNDQ via the holdings limb; restoring the sell and adding an in-year distribution flags it via
+  the income limb
+- [ ] Remaining hole, recorded as its own open section rather than closed here: a holding sold
+  mid-year that *was* attributed a distribution whose cash row was never entered satisfies neither
+  limb. Closing it needs external knowledge of the fund's distribution dates — see the
+  "Distribution calendar and the missing-dividend alert" section in TODO.md

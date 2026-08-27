@@ -150,11 +150,13 @@ pub struct AmmaMissingAlert {
 #[derive(Debug, Serialize)]
 pub struct Completeness {
     pub complete: bool,
-    /// AMIT listings held at any point in the year, per holding account, with
-    /// no AMMA statement covering that account and year — holdings-based, so
-    /// (unlike [`amit_cash_cross_check`](super::amit_cash_cross_check), whose
-    /// own doc comment names the gap) this also catches a fund-year where no
-    /// cash rows were entered at all.
+    /// AMIT (listing, holding account) pairs the fund is expected to issue a
+    /// statement to for the year — see [`amma_missing`] for the two limbs
+    /// that stand in for attribution — with no AMMA statement covering that
+    /// account and year. The holdings limb is why this catches a fund-year
+    /// where no cash rows were entered at all, which
+    /// [`amit_cash_cross_check`](super::amit_cash_cross_check) (whose own doc
+    /// comment names the gap) cannot.
     pub amma_missing: Vec<AmmaMissingAlert>,
     pub amit_cash_alerts: Vec<amit_cash_cross_check::AmitCashAlert>,
     pub e4_alerts: Vec<e4_cross_check::E4CrossCheckAlert>,
@@ -172,12 +174,42 @@ pub struct Completeness {
     pub rollover_alerts: Vec<rollover_consistency::RolloverAlert>,
 }
 
-/// Every (AMIT listing, holding account) with a non-zero opening balance at
-/// the start of the year, or any Buy/DRP trade dated within it — i.e. held at
-/// some point during the year — that has no `amma_statements` row for that
-/// account whose `tax_year_end_date` falls in the year. A simple net-units
-/// walk (Buy/DRP minus Sell quantities, not cost-base aware): good enough for
-/// a held/not-held flag, not a financial figure.
+/// Every (AMIT listing, holding account) the fund is **expected to issue an
+/// AMMA statement to** for the year, that has no `amma_statements` row for
+/// that account whose `tax_year_end_date` falls in the year.
+///
+/// An AMIT must give a statement "to each person who was a member during the
+/// income year" — but is **not required** to where that member's determined
+/// member components *and* AMIT cost base net amount for the year are both
+/// nil (`docs/ato/amit-reporting-requirements.md`). So having been a member
+/// during the year is not the test; having been **attributed something** is,
+/// and a holding disposed of in full before the year's first record date is
+/// attributed nothing and will never receive a statement to enter.
+///
+/// Two limbs stand in for attribution, either of which expects a statement.
+/// Both over-expect rather than under-expect, which is the safe direction
+/// here: an extra limb can only raise a flag the entered statement clears,
+/// never silence a real gap.
+///
+/// - **Units still held at 30 June.** The year's final distribution is
+///   determined on the closing holding, so a holder at year end is attributed
+///   it. ASX funds set that record date a day or two into July — which is why
+///   a statement for the year ended 30 June covers cash paid the following
+///   month at all — so this limb over-expects by at most those few days.
+/// - **Income assessed to the year.** A distribution taken while the units
+///   were held, keyed by [`Income::assessment_date`] — the entitlement date
+///   for a trust row, so a July-paid June distribution counts against the
+///   year just *ended*, exactly as the registry's own payment advice says.
+///
+/// Together the two bracket the ATO's own examples
+/// (`docs/ato/attributing-amounts-to-members.md`): in Example 3 a member who
+/// sold out before year end is still issued a statement for the interim
+/// distribution attributed to him — so disposal alone never excuses one — and
+/// in Example 4 no amount is allocated to a member who "was not a unitholder
+/// at the final record date", who is therefore owed no statement.
+///
+/// A simple net-units walk (Buy/DRP minus Sell quantities, not cost-base
+/// aware): good enough for a held/not-held flag, not a financial figure.
 ///
 /// The account is part of the key because the statement is: a registry issues
 /// one AMMA statement per holder account, and one account's statement
@@ -218,17 +250,18 @@ async fn amma_missing(
         return Ok(vec![]);
     }
 
+    // Limb one: the closing holding at 30 June, per account.
     let trade_rows = sqlx::query(
-        "SELECT listing_id, holding_account_id, trade_type, date, quantity FROM trades \
+        "SELECT listing_id, holding_account_id, trade_type, quantity FROM trades \
          WHERE listing_id IN (SELECT id FROM listings WHERE amit) \
            AND trade_type IN ('Buy', 'DRP', 'Sell') \
-         ORDER BY listing_id, holding_account_id, date",
+           AND date <= ?",
     )
+    .bind(end)
     .fetch_all(&mut *conn)
     .await?;
 
-    let mut opening: HashMap<(i64, i64), Decimal> = HashMap::new();
-    let mut bought_in_year: HashSet<(i64, i64)> = HashSet::new();
+    let mut closing: HashMap<(i64, i64), Decimal> = HashMap::new();
     for row in &trade_rows {
         let key: (i64, i64) = (
             row.try_get("listing_id")?,
@@ -241,16 +274,32 @@ async fn amma_missing(
             continue;
         }
         let trade_type: TradeType = row.try_get("trade_type")?;
-        let date: NaiveDate = row.try_get("date")?;
         let qty = crate::infra::decimal::row_dec(row, "quantity")?;
-        let signed = match trade_type {
-            TradeType::Buy | TradeType::DRP => qty,
-            TradeType::Sell => -qty,
+        let signed = if trade_type.is_acquisition() {
+            qty
+        } else {
+            -qty
         };
-        if date < start {
-            *opening.entry(key).or_insert(Decimal::ZERO) += signed;
-        } else if date <= end && trade_type.is_acquisition() {
-            bought_in_year.insert(key);
+        *closing.entry(key).or_insert(Decimal::ZERO) += signed;
+    }
+
+    // Limb two: a distribution assessed to this year, in the account it was
+    // paid into. The assessment date is the income entity's own rule — the
+    // entitlement date for a trust row, payment otherwise — shared with the
+    // tax summary and the AMIT cash cross-check rather than restated here.
+    let income_rows =
+        sqlx::query("SELECT i.* FROM income i JOIN listings l ON l.id = i.listing_id WHERE l.amit")
+            .fetch_all(&mut *conn)
+            .await?;
+    let mut attributed: HashSet<(i64, i64)> = HashSet::new();
+    for row in &income_rows {
+        let income = Income::from_row(row)?;
+        if !tickers.contains_key(&income.listing_id) {
+            continue;
+        }
+        let assessed = income.assessment_date();
+        if assessed >= start && assessed <= end {
+            attributed.insert((income.listing_id, income.holding_account_id));
         }
     }
 
@@ -266,22 +315,22 @@ async fn amma_missing(
     .map(|r| Ok::<_, sqlx::Error>((r.try_get("listing_id")?, r.try_get("holding_account_id")?)))
     .collect::<Result<_, _>>()?;
 
-    // Every (listing, account) the walk saw, held at some point in the year
-    // and not covered — sorted by ticker, then account, so the section reads
-    // in the same order as the cross-check alerts beside it.
-    let mut held: Vec<(i64, i64)> = opening
+    // Every (listing, account) either limb expects a statement for, and that
+    // has none — sorted by ticker, then account, so the section reads in the
+    // same order as the cross-check alerts beside it.
+    let mut expected: Vec<(i64, i64)> = closing
         .iter()
         .filter(|(_, q)| **q > Decimal::ZERO)
         .map(|(key, _)| *key)
-        .chain(bought_in_year.iter().copied())
+        .chain(attributed.iter().copied())
         .filter(|key| !covered.contains(key))
         .collect();
-    held.sort_unstable_by_key(|(listing_id, account_id)| {
+    expected.sort_unstable_by_key(|(listing_id, account_id)| {
         (tickers.get(listing_id).cloned(), *account_id, *listing_id)
     });
-    held.dedup();
+    expected.dedup();
 
-    Ok(held
+    Ok(expected
         .into_iter()
         .map(|(listing_id, holding_account_id)| AmmaMissingAlert {
             listing_id,
@@ -2615,6 +2664,152 @@ mod tests {
         let report = db_tax_report(&pool, 2024).await.unwrap();
         assert!(report.completeness.amma_missing.is_empty());
         assert!(report.completeness.complete);
+    }
+
+    /// A holding carried into the year and disposed of in full **before the
+    /// year's first distribution** is attributed nothing, so the fund is not
+    /// required to issue a statement for it
+    /// (`docs/ato/amit-reporting-requirements.md`: no AMMA statement is
+    /// required where the member's determined member components and AMIT cost
+    /// base net amount for the year are both nil). Neither limb of
+    /// [`amma_missing`] holds — nothing is held at 30 June, and no income is
+    /// assessed to the year — so the year must not be flagged for a statement
+    /// that will never arrive.
+    ///
+    /// This is the live HNDQ FY2026 shape: 2620 units carried in at 1 July,
+    /// all sold in November, the next record date falling after the sale.
+    /// (The sale is dated a Monday — the XASX calendar rejects a weekend.)
+    #[tokio::test]
+    async fn amma_missing_ignores_a_holding_disposed_before_the_years_first_distribution() {
+        let pool = test_support::test_pool().await;
+        listing_amit(&pool, 1, "AMT").await;
+        test_support::buy(1, 1)
+            .date(ymd(2023, 8, 15))
+            .qty(dec("2620"))
+            .price(dec("10"))
+            .insert(&pool)
+            .await;
+        // Held across 30 June 2024, so FY2024 does expect a statement…
+        test_support::amma(1, 1).insert(&pool).await;
+        // …then sold out in November 2024, before any FY2025 distribution.
+        test_support::sell(2, 1)
+            .date(ymd(2024, 11, 18))
+            .qty(dec("2620"))
+            .price(dec("12"))
+            .insert(&pool)
+            .await;
+        test_support::allocate(&pool, 1, 2, 1, dec("2620")).await;
+
+        let report = db_tax_report(&pool, 2025).await.unwrap();
+        assert!(
+            report.completeness.amma_missing.is_empty(),
+            "nothing was attributed for FY2025, so no statement is owed: {:?}",
+            report.completeness.amma_missing
+        );
+        assert!(report.completeness.complete);
+    }
+
+    /// The converse, and the reason a mid-year disposal can never suppress the
+    /// check on its own: ATO Example 3
+    /// (`docs/ato/attributing-amounts-to-members.md`) issues an AMMA statement
+    /// to Entity E, who was the sole unitholder at 31 December 2016 and **not**
+    /// a unitholder at 30 June 2017, for the half-year attributed to him.
+    ///
+    /// Same disposal shape as the test above, but with a distribution taken
+    /// while the units were held — so the income limb expects a statement, and
+    /// entering it clears the flag.
+    #[tokio::test]
+    async fn amma_missing_still_expects_a_statement_after_a_mid_year_disposal_that_took_income() {
+        let pool = test_support::test_pool().await;
+        listing_amit(&pool, 1, "AMT").await;
+        test_support::buy(1, 1)
+            .date(ymd(2023, 8, 15))
+            .qty(dec("2620"))
+            .price(dec("10"))
+            .insert(&pool)
+            .await;
+        test_support::amma(1, 1).insert(&pool).await;
+        // The interim distribution, taken while the units were still held.
+        test_support::income(1, 1, ymd(2025, 1, 17))
+            .with(|i| {
+                i.trust_income = true;
+                i.entitlement_date = Some(ymd(2024, 12, 31));
+                i.unfranked_amount = dec("250");
+            })
+            .insert(&pool)
+            .await;
+        test_support::sell(2, 1)
+            .date(ymd(2025, 2, 20))
+            .qty(dec("2620"))
+            .price(dec("12"))
+            .insert(&pool)
+            .await;
+        test_support::allocate(&pool, 1, 2, 1, dec("2620")).await;
+
+        let report = db_tax_report(&pool, 2025).await.unwrap();
+        assert_eq!(report.completeness.amma_missing.len(), 1);
+        assert_eq!(report.completeness.amma_missing[0].listing_id, 1);
+        assert!(!report.completeness.complete);
+
+        test_support::amma(2, 1)
+            .with(|a| a.tax_year_end_date = ymd(2025, 6, 30))
+            .insert(&pool)
+            .await;
+        let cleared = db_tax_report(&pool, 2025).await.unwrap();
+        assert!(cleared.completeness.amma_missing.is_empty());
+    }
+
+    /// The income limb is keyed on the **entitlement** date, not the payment
+    /// date: an ASX fund's June-half distribution has a record date a day or
+    /// two into July and is paid in the middle of it, but is attributed to the
+    /// year just ended — "your determined member components relating to
+    /// assessable income will be used to determine your assessable income for
+    /// the income year \[which\] may be different from the amount you receive
+    /// in actual cash payments" (`docs/ato/attributing-amounts-to-members.md`).
+    ///
+    /// So a holding sold in July, after that record date, expects a statement
+    /// for the year that just **ended** and not for the one the cash landed in.
+    #[tokio::test]
+    async fn amma_missing_keys_a_july_paid_june_distribution_to_the_year_that_ended() {
+        let pool = test_support::test_pool().await;
+        listing_amit(&pool, 1, "AMT").await;
+        test_support::buy(1, 1)
+            .date(ymd(2023, 8, 15))
+            .qty(dec("2620"))
+            .price(dec("10"))
+            .insert(&pool)
+            .await;
+        test_support::amma(1, 1).insert(&pool).await;
+        // Record date 2 July 2025, paid 16 July 2025, attributed to FY2025.
+        test_support::income(1, 1, ymd(2025, 7, 16))
+            .with(|i| {
+                i.trust_income = true;
+                i.ex_date = Some(ymd(2025, 7, 2));
+                i.entitlement_date = Some(ymd(2025, 6, 30));
+                i.unfranked_amount = dec("2267.99");
+            })
+            .insert(&pool)
+            .await;
+        test_support::sell(2, 1)
+            .date(ymd(2025, 7, 30))
+            .qty(dec("2620"))
+            .price(dec("12"))
+            .insert(&pool)
+            .await;
+        test_support::allocate(&pool, 1, 2, 1, dec("2620")).await;
+
+        // FY2025: held at 30 June and attributed the June half — expected.
+        let fy2025 = db_tax_report(&pool, 2025).await.unwrap();
+        assert_eq!(fy2025.completeness.amma_missing.len(), 1);
+
+        // FY2026: the cash landed here, but the attribution did not, and the
+        // units were gone by 30 June 2026 — nothing is owed.
+        let fy2026 = db_tax_report(&pool, 2026).await.unwrap();
+        assert!(
+            fy2026.completeness.amma_missing.is_empty(),
+            "the July cash belongs to FY2025, not the year it was paid in: {:?}",
+            fy2026.completeness.amma_missing
+        );
     }
 
     /// SCENARIOS H-09, H-10: a year whose only activity is an investment

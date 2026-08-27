@@ -3805,6 +3805,58 @@ fn overdue_jobs_and_the_stored_schedule_documented() {
     assert!(README_MD.contains("the Jobs screen carries a **next run** column"));
 }
 
+/// Docs-sync pin for the AMMA-coverage rule (`reports::tax_report`'s
+/// `amma_missing`). The rule turns on a statutory carve-out — an AMIT need
+/// not issue a statement where the member's determined member components
+/// *and* AMIT cost base net amount for the year are both nil — and on the
+/// attribution year being the income year rather than the year the cash
+/// lands in. Both live in ATO mirrors, so this pins that they still say so,
+/// that the newer one is indexed, and that `API.md` documents the rule the
+/// web UI's completeness section shows.
+#[test]
+fn amma_coverage_rule_is_documented_with_its_ato_authority() {
+    const REPORTING: &str = include_str!("../docs/ato/amit-reporting-requirements.md");
+    const ATTRIBUTING: &str = include_str!("../docs/ato/attributing-amounts-to-members.md");
+    const ATO_OVERVIEW: &str = include_str!("../docs/ato/OVERVIEW.md");
+
+    // The carve-out that makes a nil year legitimately statement-less.
+    assert!(REPORTING.contains(
+        "the trustee of an attribution MIT is not required to give an AMMA statement to a member if:"
+    ));
+    assert!(
+        REPORTING.contains(
+            "all of the member’s determined member components for the income year are nil"
+        )
+    );
+
+    // The attribution year is the income year, not the payment year —
+    // the authority for keying the income limb on `entitlement_date`.
+    assert!(ATTRIBUTING.contains(
+        "will be used to determine your assessable income for the income year. \
+         **This may be different from the amount you receive in actual cash payments.**"
+    ));
+    // Example 3: sold out before year end, statement still issued — so a
+    // mid-year disposal alone can never suppress the check.
+    assert!(
+        ATTRIBUTING
+            .contains("AMIT D issues an AMMA statement to Entity E for the amount of $50,000")
+    );
+    // Example 4: nothing attributed to a member who held at no record date.
+    assert!(
+        ATTRIBUTING.contains("he was not a unitholder at the final record date of the income year")
+    );
+    assert!(ATTRIBUTING.contains("QC 82269"));
+    assert!(
+        ATO_OVERVIEW
+            .contains("[`attributing-amounts-to-members.md`](attributing-amounts-to-members.md)")
+    );
+
+    // API.md states both limbs and the disposal case they exclude.
+    assert!(API_MD.contains("**still held at 30 June**"));
+    assert!(API_MD.contains("**before the year's first distribution**"));
+    assert!(API_MD.contains("A mid-year disposal alone never suppresses the check"));
+}
+
 /// Pins for the FreeBSD packaging + versioned-release pipeline (REQUIREMENTS
 /// 2026-07-13). The release workflow and package skeleton are plain text CI
 /// consumes, so these tests keep their load-bearing pieces from silently

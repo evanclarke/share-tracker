@@ -1597,3 +1597,55 @@ Web UI, per the workflow this should actually have:
 Not in scope: generating **without** the confirm step, and inferring a set from anything other than
 the recorded position. Generation is a proposal the held position justifies and the fund's
 `units_held` checks; it is not a substitute for the user knowing their positions are complete.
+
+## Distribution calendar and the missing-dividend alert (2026-08-27)
+
+Nothing in the system knows when a holding *should* have paid a distribution. A dividend or trust
+distribution that was never entered is invisible: it understates the year's income, and (for an
+AMIT) leaves the attribution unreconciled with cash the AMMA cross-check can only compare against
+rows that exist. The gap was found from the other side — `reports::tax_report`'s `amma_missing`
+asking for an HNDQ FY2026 statement that no fund would ever issue, because nothing had been
+attributed. The coverage rule was fixed from recorded facts alone (see `DONE/` for that section);
+this is the external-data half that closes the remaining hole.
+
+**Provider capability (verified live against `yfinance-rs` 0.9.1 on 2026-08-27).** Yahoo returns a
+typed corporate-action stream — `Ticker::actions()` yielding `Action::Dividend { date, amount }`,
+the amount a `Decimal`-backed `Price` carrying its own currency, so no `f64` ever enters. Two
+measured facts constrain the implementation:
+
+- **`Range::Max` silently truncates.** `VDHG.AX` returned 8 events over `Range::Max` and **28**
+  for the same span requested as an explicit `between(start, end)` period. Any fetch must pass an
+  explicit period; `Range::Max` would quietly lose most of the history
+- **The date is the ex-date, and the amounts reconcile.** All three recorded HNDQ distributions
+  matched Yahoo per-unit to 6 dp (2024-07-01 → 0.726547 against $1315.78/1811; 2025-01-01 →
+  0.018741 against $49.08/2620; 2025-07-01 → 0.865644 against $2267.99/2620)
+
+**The FY-bucketing trap.** An ASX fund's June-half distribution has an ex-date one or two days
+*into* July (HNDQ: ex 2 July 2025, paid 16 July 2025) but is attributed to the year just **ended** —
+the registry's own payment advice says so, and `docs/ato/attributing-amounts-to-members.md` is the
+authority. So a stored ex-date must never be bucketed into a financial year directly. Match a
+calendar event to an income row **by event** (ex-date within a tolerance of the row's `ex_date` or
+`date_paid`), not by financial year.
+
+Scope:
+
+- A `distribution_events` table — listing, ex-date, amount per unit, currency, provenance — on the
+  `closing_prices` pattern: a provider-agnostic fetch behind a trait, the Yahoo implementation the
+  only provider-specific part, stored rather than queried live, refreshed by a scheduled job
+  registered in `infra/scheduler/registry.rs` with its `schedule.cron` line. Classify the new table
+  for snapshot staleness and for `row_history` auditing, per CLAUDE.md
+- A `reports::health` alert — the cross-view banner's "missing dividend entry": every known ex-date
+  where the (listing, holding account) held units on that date and no income row matches it, with
+  the ticker, the ex-date, and the expected amount (per unit × units held) so the row can be
+  entered or the alert dismissed as a known gap
+- A **third limb** on `amma_missing`: still expect a statement where a known ex-date fell inside the
+  held window of the year. This is the one place the feed touches a tax figure, and it may only
+  ever **add** an expectation, never remove one — Yahoo's coverage has real gaps (HNDQ shows 8
+  events where VDHG shows 28), so a missing event must degrade to "no extra flag", never to a
+  suppressed one
+- Docs: `docs/SCHEMA.md` (new table + relationships), `docs/API.md` (the health alert's shape),
+  README Features
+
+Not in scope: treating the feed as a source of *amounts* for income rows. A distribution's franking,
+foreign-source and cost-base components come from the registry statement and nowhere else; the
+calendar answers "was there one", never "what was in it".
