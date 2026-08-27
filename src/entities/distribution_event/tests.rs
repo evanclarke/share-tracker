@@ -198,6 +198,42 @@ async fn an_undatable_event_qualifies_the_run_instead_of_vanishing() {
     assert_eq!(db_list(&pool).await.unwrap().len(), 1);
 }
 
+/// A ticker the provider has retired must not fail the weekly job **forever**.
+///
+/// The distinction is drawn from the provider's own typed error, so the
+/// control is the other arm: an outage carries no verdict on the symbol and
+/// still fails. Found against the real portfolio — LAR, whose whole held span
+/// predates its 2025 rename from LAAC, a symbol Yahoo now 404s.
+#[tokio::test]
+async fn a_retired_ticker_notes_the_run_rather_than_failing_it_forever() {
+    let pool = test_pool().await;
+    listing(1).insert(&pool).await;
+    buy(1, 1)
+        .date(ymd(2024, 1, 10))
+        .qty(dec("100"))
+        .insert(&pool)
+        .await;
+
+    let note = refresh(&pool, &DistributionStub::retired("Not found at …/LAAC"))
+        .await
+        .expect("a retired ticker is not a failure")
+        .expect("but it does qualify the run");
+    assert!(note.contains("no calendar"), "{note}");
+    assert!(note.contains("T1 (1)"), "{note}");
+    assert!(
+        note.contains("cannot speak for them"),
+        "the note says what the alerts can no longer claim: {note}"
+    );
+
+    // The control: the *other* arm of the same classification still fails, so
+    // this is the provider's verdict being read, not every failure going quiet.
+    assert!(
+        refresh(&pool, &DistributionStub::failing("upstream 503"))
+            .await
+            .is_err()
+    );
+}
+
 #[tokio::test]
 async fn a_currency_the_listing_does_not_trade_in_is_refused() {
     let pool = test_pool().await;

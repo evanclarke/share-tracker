@@ -4228,6 +4228,11 @@ fn distribution_calendar_documented() {
     assert!(API_MD.contains("- `dividend_amount_mismatches` —"));
     assert!(API_MD.contains("\"missing_dividend_entries\", \"dividend_amount_mismatches\" }`:"));
     assert!(API_MD.contains("last cum-dividend day"));
+    // Why the row's own ex_date cannot be a filter — the registry-statement
+    // fact behind it, which is what the false positives on the real portfolio
+    // turned out to be.
+    assert!(API_MD.contains("**every date the row carries as an anchor and none as a filter**"));
+    assert!(API_MD.contains("prints a **Record Date** and no ex-date at all"));
     assert!(API_MD.contains("**The gross is compared and never the components**"));
 
     // The limitation: what an alert not firing does not prove, and the

@@ -97,7 +97,11 @@ impl DistributionFetcher for YahooDistributionFetcher {
                 .actions(true)
                 .fetch_full()
                 .await
-                .map_err(|e| format!("yahoo distribution fetch for {symbol} failed: {e}"))?;
+                // Classified from the provider's own **typed** error, not by
+                // matching words in a message — the same call
+                // `closing_price::yahoo` makes, so a retired ticker is
+                // diagnosed identically on both paths.
+                .map_err(|e| closing_price::classify_yahoo_failure(&symbol, e))?;
 
             // The join table: the UTC date of each candle's own instant, to
             // the exchange-local trading day it is.

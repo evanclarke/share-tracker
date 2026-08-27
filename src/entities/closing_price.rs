@@ -155,6 +155,12 @@ mod yahoo;
 
 pub use collection::{COLLECTION_LOOKBACK_DAYS, run_collection};
 pub use db::{db_get_one, db_latest_ok_price_on_or_before, db_rebase_listing_prices, run_rebase};
+/// Shared with the distribution calendar so both provider paths draw the one
+/// distinction that matters about a failed fetch — did the provider *positively
+/// answer* that it serves no such series, or did the call merely not succeed?
+/// A retired ticker and an outage must never be treated alike: one is a
+/// standing fact about the security, the other is a reason to try again.
+pub(crate) use fetcher::FetchError;
 /// Shared with the distribution calendar for the same reason: Yahoo serves
 /// every figure as a float32-precision binary float, and a per-unit
 /// distribution arrives with the same noise a price does.
@@ -170,6 +176,7 @@ pub use market::{Market, NonTradingReason, load_market};
 pub(crate) use market::{db_non_trading_day, load_market_on, non_trading_day};
 pub use model::{PriceOrigin, PriceStatus};
 pub use yahoo::YahooFetcher;
+pub(crate) use yahoo::classify_yahoo_failure;
 /// The two provider-mapping pieces the **distribution calendar's** own Yahoo
 /// adapter shares with this one (`entities::distribution_event::yahoo`): the
 /// listing→Yahoo-symbol resolution, and the exchange-local window a dated
@@ -197,7 +204,7 @@ pub(crate) use db::db_store;
 pub use db::{ClearOutcome, db_clear_unpriced_before, db_list};
 #[cfg(test)]
 pub use fetcher::{
-    FetchError, FetchFuture, FetchedClose, LatestQuote, PriceFetcher, QuoteFuture, QuotesFuture,
+    FetchFuture, FetchedClose, LatestQuote, PriceFetcher, QuoteFuture, QuotesFuture,
 };
 #[cfg(test)]
 pub use http::{BackfillSummary, ClearSummary};
@@ -210,7 +217,7 @@ pub use model::{ClosingPrice, MANUAL_SOURCE, UNASSIGNED_ID};
 /// have recorded), its provider-failure classification, and the by-symbol
 /// reading of a batch answer.
 #[cfg(test)]
-use yahoo::{classify_yahoo_failure, yahoo_quote_named, yahoo_symbol_now};
+use yahoo::{yahoo_quote_named, yahoo_symbol_now};
 
 // The test modules below were written against the single file's imports; these
 // keep them compiling unchanged, which is what makes them a behaviour lock on

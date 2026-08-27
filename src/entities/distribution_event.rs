@@ -88,7 +88,7 @@
 //!   mapping and re-running the job, not by hand-editing the provider's
 //!   answer.
 
-use crate::entities::closing_price::{self, Market};
+use crate::entities::closing_price::{self, FetchError, Market};
 use crate::infra::decimal::Money;
 use crate::infra::http::{self, ApiError, CrudEntity};
 use axum::{Router, routing::get};
@@ -196,12 +196,19 @@ pub struct FetchedDistributions {
 }
 
 pub type DistributionFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<FetchedDistributions, String>> + Send + 'a>>;
+    Pin<Box<dyn Future<Output = Result<FetchedDistributions, FetchError>> + Send + 'a>>;
 
 /// A source of distribution history. Implementations do their own symbol
 /// mapping and their own provider-date→ex-date recovery, both being
 /// provider-specific; a failure is an error result, never an empty list, so a
 /// provider outage can never read as "this listing paid nothing".
+///
+/// The failure is a [`FetchError`], shared with the price fetcher, so both
+/// paths draw the one distinction that matters: did the provider **positively
+/// answer** that it serves no such series ([`FetchError::NoSuchSymbol`]), or
+/// did the call merely not succeed? A retired ticker is a standing fact about
+/// the security and would otherwise fail the weekly job forever; an outage is a
+/// reason to try again. See [`run_refresh`].
 pub trait DistributionFetcher: Send + Sync {
     /// Identifier stored in each row's `source` column, e.g. `"yahoo"`.
     fn source(&self) -> &'static str;
@@ -374,6 +381,7 @@ pub async fn run_refresh(
     let (mut stored, mut listings) = (0usize, 0usize);
     let mut failures: Vec<String> = Vec::new();
     let mut undated: Vec<String> = Vec::new();
+    let mut retired: Vec<String> = Vec::new();
     for listing_id in timeline.listing_ids() {
         let Some(market) = closing_price::load_market(pool, listing_id)
             .await
@@ -402,8 +410,28 @@ pub async fn run_refresh(
         };
         let answer = match fetcher.distributions(&market, from, to).await {
             Ok(answer) => answer,
-            Err(e) => {
-                failures.push(format!("{} ({listing_id}): {e}", market.listing.ticker));
+            // The provider positively answers that it serves no such series:
+            // the security's ticker was retired, and asking again next week
+            // will get the same answer forever. Failing the run on it would
+            // leave a red Jobs screen nothing can clear — the shape SCENARIOS
+            // Q-02 fixed for prices — while the honest consequence is only
+            // that this listing has no calendar, which the alerts degrade
+            // gracefully around (an alert not firing was never proof).
+            Err(FetchError::NoSuchSymbol(message)) => {
+                retired.push(format!(
+                    "{} ({listing_id}): {message}",
+                    market.listing.ticker
+                ));
+                continue;
+            }
+            // Anything else — an outage, a rate limit, a transport failure —
+            // carries no verdict on the symbol and must fail loudly, or a
+            // provider having a bad morning would read as "nothing to report".
+            Err(FetchError::Other(message)) => {
+                failures.push(format!(
+                    "{} ({listing_id}): {message}",
+                    market.listing.ticker
+                ));
                 continue;
             }
         };
@@ -461,19 +489,35 @@ pub async fn run_refresh(
         stored,
         failed = failures.len(),
         undated = undated.len(),
+        retired = retired.len(),
         "distribution calendar refresh complete"
     );
     if !failures.is_empty() {
         return Err(failures.join("; "));
     }
-    Ok((!undated.is_empty()).then(|| {
-        format!(
+    // Both notes qualify a run that succeeded while doing less than the whole
+    // of its work, and both are permanent facts rather than transient ones —
+    // so they are said on every run, where the Jobs screen shows them beside
+    // an `ok` status (SCENARIOS T-09).
+    let mut notes: Vec<String> = Vec::new();
+    if !retired.is_empty() {
+        notes.push(format!(
+            "{} listing(s) have no calendar: the provider serves no series under the symbol they \
+             were quoted under, so nothing can be collected for them and the missing-distribution \
+             alert cannot speak for them: {}",
+            retired.len(),
+            retired.join("; ")
+        ));
+    }
+    if !undated.is_empty() {
+        notes.push(format!(
             "{} provider event(s) could not be placed on their market's calendar and were not \
              stored: {}",
             undated.len(),
             undated.join("; ")
-        )
-    }))
+        ));
+    }
+    Ok((!notes.is_empty()).then(|| notes.join(" ")))
 }
 
 // ---------------------------------------------------------------------------

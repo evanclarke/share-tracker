@@ -1320,20 +1320,28 @@ impl CalendarIncomeRow {
         self.franked_amount + self.unfranked_amount + self.foreign_source_income
     }
 
-    /// How far this row sits from `ex_date`, in days, or `None` when no anchor
+    /// How far this row sits from `ex_date`, in days, or `None` when no date
     /// it carries falls inside the match window.
     ///
-    /// A row's own `ex_date` is decisive when it has one — it is the same fact
-    /// the calendar stores — but 13 of the 47 income rows in the live database
-    /// carry none, so the window over `entitlement_date` / `date_paid` is what
-    /// the matching actually runs on. Whichever anchor is nearest wins, so a
-    /// fund row carrying both a period-end and a payment date is matched on
-    /// the closer of the two rather than on whichever was checked first.
+    /// **Every date the row carries is an anchor, its own `ex_date` included —
+    /// none of them is a filter.** An earlier version made `ex_date` decisive
+    /// when present (match it exactly or not at all), on the reasoning that it
+    /// is the same fact the calendar stores. Run against the real portfolio
+    /// that reported 34 distributions missing which were all in fact recorded:
+    /// registries label the date inconsistently, and the live database's rows
+    /// carry what looks like the **record** date — VDHG's period ending
+    /// 31 March 2021 is recorded `ex_date` 2021-04-06 against a true ex-date of
+    /// 1 April, five days out across the Easter weekend. Treating a
+    /// differently-labelled date as a mismatch excluded the row from matching
+    /// altogether, so the event read as missing *and* the row went unclaimed —
+    /// a false positive on both halves at once.
+    ///
+    /// So the nearest anchor wins and an exact `ex_date` simply scores zero,
+    /// which no other anchor can beat. 13 of the 47 income rows in the live
+    /// database carry no `ex_date` at all, which is why the window over
+    /// `entitlement_date` / `date_paid` has to carry the matching regardless.
     fn distance_from(&self, ex_date: NaiveDate) -> Option<i64> {
-        if let Some(own) = self.ex_date {
-            return (own == ex_date).then_some(0);
-        }
-        [self.entitlement_date, Some(self.date_paid)]
+        [self.ex_date, self.entitlement_date, Some(self.date_paid)]
             .into_iter()
             .flatten()
             .filter_map(|anchor| {
@@ -6654,6 +6662,41 @@ mod tests {
         // one reported missing — exactly one of the two, never both or neither.
         assert_eq!(h.missing_dividend_entries.len(), 1);
         assert_eq!(h.missing_dividend_entries[0].ex_date, ymd(2024, 7, 1));
+        assert!(h.dividend_amount_mismatches.is_empty());
+    }
+
+    /// The regression the real portfolio found: a row whose recorded `ex_date`
+    /// is a **different label for the same distribution** (a record date, which
+    /// is what the live database's rows carry) must still match.
+    ///
+    /// This was a false positive on both halves at once — the event reported
+    /// missing *and* the row left unclaimed — because `ex_date` was a filter
+    /// rather than an anchor. 34 of Evan's recorded distributions read as
+    /// missing against a calendar that agreed with every one of them to the
+    /// cent.
+    #[tokio::test]
+    async fn a_row_whose_recorded_ex_date_is_a_few_days_out_still_matches() {
+        let pool = test_pool().await;
+        holding_before_the_ex_date(&pool).await;
+        insert_event(&pool, 1, ymd(2025, 4, 1), "1", "2026-08-27T00:00:00Z").await;
+        // VDHG's real shape: period ending 31 March, true ex-date 1 April, and
+        // the row records 2025-04-06 — five days out across an Easter weekend.
+        test_support::income(1, 1, ymd(2025, 4, 16))
+            .with(|i| {
+                i.ex_date = Some(ymd(2025, 4, 6));
+                i.entitlement_date = Some(ymd(2025, 3, 31));
+                i.trust_income = true;
+                i.unfranked_amount = dec("100");
+            })
+            .insert(&pool)
+            .await;
+
+        let h = health(&pool, ymd(2026, 8, 27)).await;
+        assert!(
+            h.missing_dividend_entries.is_empty(),
+            "the distribution is recorded, under a differently-labelled date: {:?}",
+            h.missing_dividend_entries
+        );
         assert!(h.dividend_amount_mismatches.is_empty());
     }
 

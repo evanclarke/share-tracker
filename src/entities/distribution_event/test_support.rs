@@ -10,7 +10,7 @@ use super::{
     DistributionFetcher, DistributionFuture, FetchedDistribution, FetchedDistributions,
     SharedDistributionFetcher,
 };
-use crate::entities::closing_price::Market;
+use crate::entities::closing_price::{FetchError, Market};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use std::{collections::HashMap, sync::Arc};
@@ -20,9 +20,10 @@ use std::{collections::HashMap, sync::Arc};
 pub struct DistributionStub {
     events: HashMap<i64, Vec<FetchedDistribution>>,
     undatable: HashMap<i64, Vec<NaiveDate>>,
-    /// When set, every call fails with this message — the provider-outage
-    /// case, which must never read as "this listing paid nothing".
-    failure: Option<String>,
+    /// When set, every call fails this way — the provider-outage case, which
+    /// must never read as "this listing paid nothing", and its opposite, the
+    /// retired ticker, which must never fail the run forever.
+    failure: Option<FetchError>,
 }
 
 impl DistributionStub {
@@ -55,10 +56,20 @@ impl DistributionStub {
         self
     }
 
-    /// A provider that fails every call.
+    /// A provider that fails every call for a reason that carries **no
+    /// verdict on the symbol** — an outage, a rate limit, a transport failure.
     pub fn failing(message: &str) -> Self {
         Self {
-            failure: Some(message.to_string()),
+            failure: Some(FetchError::Other(message.to_string())),
+            ..Self::default()
+        }
+    }
+
+    /// A provider that positively answers that it serves no such series — the
+    /// retired ticker, a standing fact rather than a transient failure.
+    pub fn retired(message: &str) -> Self {
+        Self {
+            failure: Some(FetchError::NoSuchSymbol(message.to_string())),
             ..Self::default()
         }
     }
