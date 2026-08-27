@@ -1598,34 +1598,45 @@ Not in scope: generating **without** the confirm step, and inferring a set from 
 the recorded position. Generation is a proposal the held position justifies and the fund's
 `units_held` checks; it is not a substitute for the user knowing their positions are complete.
 
-## Distribution calendar and the missing-dividend alert (2026-08-27)
+## Distribution calendar and the missing-dividend alert (2026-08-27, narrowed same day)
 
 Nothing in the system knows when a holding *should* have paid a distribution. A dividend or trust
-distribution that was never entered is invisible: it understates the year's income, and (for an
-AMIT) leaves the attribution unreconciled with cash the AMMA cross-check can only compare against
-rows that exist. The gap was found from the other side — `reports::tax_report`'s `amma_missing`
-asking for an HNDQ FY2026 statement that no fund would ever issue, because nothing had been
-attributed. The coverage rule was fixed from recorded facts alone (see `DONE/` for that section);
-this is the external-data half that closes the remaining hole.
+distribution that was never entered — or entered with a fat-fingered amount — is invisible: it
+misstates the year's income and franking credits, and the AMIT cash cross-check can only compare
+against rows that exist. This is an **advisory** data-completeness feature. It must not become a
+tax gate: see "Deliberately out of scope" below.
 
 **Provider capability (verified live against `yfinance-rs` 0.9.1 on 2026-08-27).** Yahoo returns a
 typed corporate-action stream — `Ticker::actions()` yielding `Action::Dividend { date, amount }`,
-the amount a `Decimal`-backed `Price` carrying its own currency, so no `f64` ever enters. Two
+the amount a `Decimal`-backed `Price` carrying its own currency, so no `f64` ever enters. Three
 measured facts constrain the implementation:
 
-- **`Range::Max` silently truncates.** `VDHG.AX` returned 8 events over `Range::Max` and **28**
-  for the same span requested as an explicit `between(start, end)` period. Any fetch must pass an
+- **`Range::Max` silently truncates.** `VDHG.AX` returned 8 events over `Range::Max` and **28** for
+  the same span requested as an explicit `between(start, end)` period. Any fetch must pass an
   explicit period; `Range::Max` would quietly lose most of the history
 - **The date is the ex-date, and the amounts reconcile.** All three recorded HNDQ distributions
   matched Yahoo per-unit to 6 dp (2024-07-01 → 0.726547 against $1315.78/1811; 2025-01-01 →
   0.018741 against $49.08/2620; 2025-07-01 → 0.865644 against $2267.99/2620)
+- **Coverage per security is unproven.** Yahoo returns 8 HNDQ events since the fund launched in
+  August 2020, where a semi-annual payer should have 11–12 (2022-01, 2022-07, 2023-07 and 2026-01
+  are absent). Either HNDQ genuinely distributed nothing across the 2022 bear market and mid-2023,
+  or Yahoo's ASX ETF coverage has holes
+
+**That last point gates the work.** If the coverage is holed, "no ex-date found" cannot mean "no
+distribution", and every conclusion the feed could draw in the *negative* direction collapses.
+Settle it first by comparing Yahoo's 8 HNDQ events against Betashares' published distribution
+history — a manual check, not code — and record the answer here before building anything.
 
 **The FY-bucketing trap.** An ASX fund's June-half distribution has an ex-date one or two days
-*into* July (HNDQ: ex 2 July 2025, paid 16 July 2025) but is attributed to the year just **ended** —
-the registry's own payment advice says so, and `docs/ato/attributing-amounts-to-members.md` is the
-authority. So a stored ex-date must never be bucketed into a financial year directly. Match a
-calendar event to an income row **by event** (ex-date within a tolerance of the row's `ex_date` or
-`date_paid`), not by financial year.
+*into* July (HNDQ: ex 2 July 2025, paid 16 July 2025) but is attributed to the year just **ended**
+— the registry's own payment advice says so, and `docs/ato/attributing-amounts-to-members.md` is
+the authority. So a stored ex-date must never be bucketed into a financial year. Match a calendar
+event to an income row **by event**, never by financial year.
+
+**Matching cannot key on `ex_date`.** 13 of the 47 income rows in the live database have none
+(chiefly ICE), and the VDHG row for the June 2026 distribution has none either. Match on
+`entitlement_date`/`date_paid` with a tolerance wide enough for the ~15-day ex-date-to-payment gap,
+using `ex_date` only where it is present.
 
 Scope:
 
@@ -1634,18 +1645,28 @@ Scope:
   only provider-specific part, stored rather than queried live, refreshed by a scheduled job
   registered in `infra/scheduler/registry.rs` with its `schedule.cron` line. Classify the new table
   for snapshot staleness and for `row_history` auditing, per CLAUDE.md
-- A `reports::health` alert — the cross-view banner's "missing dividend entry": every known ex-date
-  where the (listing, holding account) held units on that date and no income row matches it, with
-  the ticker, the ex-date, and the expected amount (per unit × units held) so the row can be
-  entered or the alert dismissed as a known gap
-- A **third limb** on `amma_missing`: still expect a statement where a known ex-date fell inside the
-  held window of the year. This is the one place the feed touches a tax figure, and it may only
-  ever **add** an expectation, never remove one — Yahoo's coverage has real gaps (HNDQ shows 8
-  events where VDHG shows 28), so a missing event must degrade to "no extra flag", never to a
-  suppressed one
-- Docs: `docs/SCHEMA.md` (new table + relationships), `docs/API.md` (the health alert's shape),
-  README Features
+- A `reports::health` alert — the cross-view banner's **missing dividend entry**: every known
+  ex-date where the (listing, holding account) held units on that date and no income row matches
+  it, carrying the ticker, the ex-date, and the expected amount (per unit × units held) so the row
+  can be entered
+- A `reports::health` alert — the **amount cross-check**: a known ex-date that *does* match an
+  income row whose gross cash differs materially from per unit × units held. This is the likelier
+  error of the two — a typo in a figure, against a distribution wholly forgotten — and the one the
+  6 dp reconciliation above shows the feed is accurate enough to catch. It compares the **gross
+  total only**, never the components
+- Docs: `docs/SCHEMA.md` (new table + relationships), `docs/API.md` (both alert shapes), README
+  Features
 
-Not in scope: treating the feed as a source of *amounts* for income rows. A distribution's franking,
-foreign-source and cost-base components come from the registry statement and nowhere else; the
-calendar answers "was there one", never "what was in it".
+Deliberately out of scope, and why:
+
+- **Any limb on `reports::tax_report`'s `amma_missing`.** An earlier draft of this section proposed
+  one — still expect an AMMA statement where a known ex-date fell inside the year's held window. It
+  is cut: it closes a hole that needs the user to sell out mid-year *and* never enter the
+  distribution, and it would couple a tax-completeness gate to an external feed of unproven
+  coverage. The gate stays on recorded facts alone
+- **Resolving the advisory `amma_nothing_recorded` list.** Same reason in the other direction:
+  using "Yahoo knows of no ex-date" to *drop* an advisory entry would let a coverage gap silently
+  retire a real question. The advisory list stays exactly as it is, answered by the user
+- **Treating the feed as a source of amounts for income rows.** A distribution's franking,
+  foreign-source and cost-base components come from the registry statement and nowhere else. The
+  calendar answers "was there one" and "does the total look right", never "what was in it"

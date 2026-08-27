@@ -312,25 +312,32 @@ rule plus a `PRAGMA foreign_key_list` guard; AA-b made `renounceable` a **requir
 a defaulted one, because a default would have left the same silent assumption for every new entry; and
 AA-b's second item pulled the shared clause out so the two refusals read as one rule in two places.
 
-## Distribution calendar and the missing-dividend alert (REQUIREMENTS 2026-08-27)
-(Provider capability verified live against `yfinance-rs` 0.9.1 on 2026-08-27 — see REQUIREMENTS for
-the measured facts. Two constrain the work: `Range::Max` silently truncates the action stream
-(VDHG 8 events vs 28 for the same span as an explicit period), so the fetch must pass an explicit
-`between(start, end)`; and the stored date is the **ex-date**, which for an ASX fund's June-half
-distribution falls one or two days into July while the income is attributed to the year just
-*ended* — so events must be matched to income rows by event, never bucketed into a financial year.)
+## Distribution calendar and the missing-dividend alert (REQUIREMENTS 2026-08-27, narrowed same day)
+(Advisory data-completeness only — the feed must never gate a tax figure. Narrowed from the first
+draft after the AMMA coverage fix landed on recorded facts alone: the third `amma_missing` limb and
+the resolution of the advisory `amma_nothing_recorded` list are both **cut**, with reasons in
+REQUIREMENTS' "Deliberately out of scope". Provider capability verified live against `yfinance-rs`
+0.9.1 on 2026-08-27; three measured facts constrain the work — `Range::Max` silently truncates the
+action stream (VDHG 8 events vs 28 for the same span as an explicit period), so the fetch must pass
+an explicit `between(start, end)`; the stored date is the **ex-date**, which for an ASX fund's
+June-half distribution falls a day or two into July while the income is attributed to the year just
+*ended*, so events are matched to income rows by event and never bucketed into a financial year;
+and matching cannot key on `ex_date`, since 13 of the live database's 47 income rows have none.)
+- [ ] **Gate on this first, before any code**: settle whether Yahoo's ASX ETF coverage is complete.
+  It returns 8 HNDQ events since the August 2020 launch where a semi-annual payer should have 11–12
+  (2022-01, 2022-07, 2023-07, 2026-01 absent). Compare against Betashares' published HNDQ
+  distribution history and record the answer in REQUIREMENTS. If the coverage is holed, "no ex-date
+  found" cannot mean "no distribution" and the alerts below can only ever fire on events Yahoo
+  *does* have — still useful, but say so rather than implying completeness
 - [ ] `distribution_events` table + migration (listing, ex-date, amount per unit, currency,
   provenance); classify it for snapshot staleness and `row_history` auditing per CLAUDE.md
 - [ ] Provider-agnostic fetch behind a trait, Yahoo the only provider-specific part, on the
   `closing_price` pattern; explicit period, never `Range::Max`
 - [ ] Scheduled refresh job in `infra/scheduler/registry.rs` + its `schedule.cron` line
-- [ ] `reports::health` "missing dividend entry" alert: known ex-date, units held on it, no
+- [ ] `reports::health` **missing dividend entry** alert: known ex-date, units held on it, no
   matching income row — carrying ticker, ex-date and expected amount (per unit × units held)
-- [ ] Resolve `reports::tax_report`'s advisory `amma_nothing_recorded` list with a third limb: a
-  known ex-date inside the year's held window turns the entry into a hard `amma_missing` gap;
-  a fund-year with no known ex-date at all is the answer "the fund distributed nothing", and the
-  advisory entry can be dropped rather than left as a standing question. **Additive only on the
-  hard side** — Yahoo's coverage has real gaps (HNDQ 8 events against VDHG's 28), so a missing
-  event must never suppress an expectation the recorded facts already justify
-- [ ] Docs: `docs/SCHEMA.md` (table + relationships), `docs/API.md` (health alert shape), README
+- [ ] `reports::health` **amount cross-check** alert: known ex-date matched to an income row whose
+  gross cash differs materially from per unit × units held. Gross total only, never components —
+  this is the likelier error of the two and the one the 6 dp reconciliation shows Yahoo can catch
+- [ ] Docs: `docs/SCHEMA.md` (table + relationships), `docs/API.md` (both alert shapes), README
   Features

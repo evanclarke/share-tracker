@@ -2397,10 +2397,13 @@ record date fell in the held part of the year, so nothing was attributed.)
   FY2026 statement while its income rows stand produces a **hard** gap (`complete: false`); also
   deleting those income rows moves it to the **advisory** list naming 10829 units with `complete`
   back to true; HNDQ never appears in either list
-- [ ] Remaining hole, recorded as its own open section rather than closed here: neither list can
-  tell "the fund distributed nothing" from "I have not entered it yet", so a holding sold mid-year
-  that *was* attributed a distribution whose cash row was never entered is silent, and a
-  distribution-free year sits in the advisory list looking like an omission. Both need external
-  knowledge of the fund's distribution dates — see the "Distribution calendar and the
-  missing-dividend alert" section in TODO.md, whose third limb resolves the advisory list into one
-  answer or the other
+- [ ] Remaining hole, recorded here rather than closed: neither list can tell "the fund
+  distributed nothing" from "I have not entered it yet", so a holding sold mid-year that *was*
+  attributed a distribution whose cash row was never entered is silent, and a distribution-free
+  year sits in the advisory list looking like an omission. Answering either needs external
+  knowledge of the fund's distribution dates. The "Distribution calendar and the missing-dividend
+  alert" section in TODO.md was first specified to close both, then **narrowed to leave them
+  open**: an external feed of unproven coverage (Yahoo returns 8 HNDQ events where a semi-annual
+  payer since August 2020 should have 11–12) must not gate a tax figure in either direction — it
+  would either add an expectation the recorded facts do not justify, or silently retire a real
+  question. The calendar stays advisory, and this hole stays open by decision
