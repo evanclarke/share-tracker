@@ -1102,7 +1102,7 @@ directly, and building it moved its own boundary twice: the guard had to cover t
 listing of an exchange or demerger as well as the source (an OLD→NEW exchange can leave a NEW parcel
 behind a NEW recognise), and a first draft that refused *edits* as well as creations broke an
 existing test — a source parcel the operation consumed sits behind it by definition, and editing its
-price is precisely the state [rollover consistency](#rollover-consistency) exists to report. The
+price is precisely the state [rollover consistency](docs/API.md#rollover-consistency) exists to report. The
 guard therefore compares against the trade's **stored** `(listing_id, date)`, refusing only a write
 that *newly* strands units. `WorthlessShares` joined that report as a fourth `kind` in the same
 change, which widened what the report is for: it now flags two faults — stored figures that no longer

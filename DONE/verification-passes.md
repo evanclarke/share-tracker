@@ -17,10 +17,13 @@ places that are maintained and should be read first:
 - The topical [`DONE/*.md`](../DONE.md) files — one `##` section per finding, with the
   implementation notes attached when it was closed.
 
-The text below is otherwise as it stood in `TODO.md`. Two mechanical changes only: a `##` heading
-was added above each pass so the file is navigable like the rest of the archive, and relative link
-*targets* were rebased for this directory (`DONE/x.md` → `x.md`, `SCENARIOS.md` →
-`../SCENARIOS.md`) so they still resolve. No wording was changed.
+The text below is otherwise as it stood in `TODO.md`. Only link targets and headings changed, never
+wording: a `##` heading was added above each pass so the file is navigable like the rest of the
+archive; relative link *targets* were rebased for this directory (`DONE/x.md` → `x.md`,
+`SCENARIOS.md` → `../SCENARIOS.md`) so they still resolve; and one link that was already broken in
+`TODO.md` was repointed at the heading it means — the *rollover consistency* report is documented in
+[`docs/API.md`](../docs/API.md#rollover-consistency), not in `SCENARIOS.md`, which has no such
+heading. The same broken link in `SCENARIOS.md` itself was fixed in the same change.
 
 ## Where the sections in TODO.md came from
 
@@ -145,7 +148,7 @@ trade entered twice that was the one duplication the health report did not look 
 (`2d9c3a8`, archived in [`DONE/reporting.md`](reporting.md)); and the parcel dated behind an
 executed scrip exchange, demerge or worthless recognise that was never consumed, now refused across
 all eight parcel-creating paths and reported by
-[rollover consistency](../SCENARIOS.md#rollover-consistency) for any database already in that state
+[rollover consistency](../docs/API.md#rollover-consistency) for any database already in that state
 (`fc1fd7b`, archived in [`DONE/tax-domain.md`](tax-domain.md)). All five are summarised under
 [Section V findings](../SCENARIOS.md#section-v-findings).
 
