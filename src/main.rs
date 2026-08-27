@@ -18,6 +18,18 @@ use clap::Parser;
 use infra::args::{Args, Command};
 use infra::{config, db, logging, scheduler};
 
+/// How long a live quote is reused before the provider is asked again.
+///
+/// A minute collapses what a session actually does — open the home screen,
+/// look at a report, come back, reload — into one fetch, while staying well
+/// inside the freshness the figures claim: Yahoo's own equity quotes are
+/// delayed around 20 minutes, so a minute-old cached ASX price is very often
+/// the identical quote, and a row states the provider's timestamp
+/// (`price_as_of`) rather than the time it was served. It also bounds how
+/// long a listing re-pointed at a new symbol keeps answering from the old
+/// one (see `CachingFetcher`).
+const QUOTE_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
@@ -77,8 +89,17 @@ async fn main() {
     };
     // The live price source, constructed once and shared by the scheduled
     // price-import job and the on-demand live valuation in the router.
+    //
+    // Wrapped in the quote cache: the three price-taking reports ask for the
+    // same quotes on every visit to the home screen, and inside the window
+    // those are answered without a round trip. Only `latest_quote(s)` is
+    // cached — the price-import job's history fetches pass straight through
+    // (see `CachingFetcher`).
     let fetcher: entities::closing_price::SharedFetcher =
-        std::sync::Arc::new(entities::closing_price::YahooFetcher::default());
+        std::sync::Arc::new(entities::closing_price::CachingFetcher::new(
+            std::sync::Arc::new(entities::closing_price::YahooFetcher::default()),
+            QUOTE_CACHE_TTL,
+        ));
     let registry = scheduler::registry(
         pool.clone(),
         settings.db.clone(),

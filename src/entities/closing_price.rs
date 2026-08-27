@@ -147,7 +147,8 @@ use std::{
     collections::{HashMap, HashSet},
     future::Future,
     pin::Pin,
-    sync::Arc,
+    sync::{Arc, Mutex},
+    time::Instant,
 };
 
 use crate::entities::{exchange, listing};
@@ -750,7 +751,12 @@ pub trait PriceFetcher: Send + Sync {
     /// result and `out.len() == markets.len()`, so no listing can go missing
     /// from a valuation. A whole-batch failure is therefore reported as that
     /// failure against each market, never as a short answer.
-    fn latest_quotes<'a>(&'a self, markets: &'a [Market]) -> QuotesFuture<'a> {
+    ///
+    /// Takes **borrowed** markets so a caller holding only some of them — a
+    /// cache passing on the ones it could not answer ([`CachingFetcher`]) —
+    /// can forward a subset without copying a `Market` (each carries its
+    /// exchange's whole holiday calendar).
+    fn latest_quotes<'a>(&'a self, markets: &'a [&'a Market]) -> QuotesFuture<'a> {
         Box::pin(async move {
             let mut out = Vec::with_capacity(markets.len());
             for market in markets {
@@ -764,6 +770,155 @@ pub trait PriceFetcher: Send + Sync {
 /// The fetcher handlers receive via an axum `Extension` (so tests can inject a
 /// stub instead of the live provider).
 pub type SharedFetcher = Arc<dyn PriceFetcher>;
+
+/// A [`PriceFetcher`] that remembers each listing's latest quote for a short
+/// window, so repeat valuations inside it are answered without reaching the
+/// provider at all.
+///
+/// The Portfolio Overview is the app's home screen and three reports take
+/// live prices (overview, unrealised gains, performance), so the same quotes
+/// are asked for again on every visit, every reload, and every hop between
+/// those three — each one a fresh round trip to Yahoo before this.
+///
+/// What is cached, and what deliberately is not:
+///
+/// - **Quotes only.** [`Self::daily_closes`] passes straight through: price
+///   *history* is already persisted in `closing_prices`, and the
+///   `price-import` job that collects it must never read a remembered answer.
+/// - **The provider's quote, not the AUD conversion.** The conversion depends
+///   on `rba_fx_rates`, which a rate import can change under us; caching the
+///   raw quote leaves every valuation to convert against the database as it
+///   is now. This is what keeps a cached price out of the FX rules.
+/// - **Successes only.** A failed fetch is never remembered, so an outage or
+///   a rate limit is retried on the next request rather than pinned for the
+///   window — recovery is the behaviour worth having, and a failure costs the
+///   provider nothing to re-ask.
+///
+/// Nothing here makes a stale price *look* current: a row's `price_as_of` is
+/// the provider's own quote timestamp, carried through the cache untouched,
+/// so a served-from-cache valuation reports exactly the moment it was
+/// observed — which is what the UI's "Live prices as at …" line shows.
+///
+/// Keyed by listing id rather than provider symbol: it is the identity the
+/// caller asks with, and it keeps this decorator free of any provider's
+/// symbol conventions. That also bounds the map at one entry per listing —
+/// a small reference table — so an expired entry is overwritten in place
+/// rather than needing eviction. The cost is that re-pointing a listing at a
+/// different symbol (a ticker rename, an edited `price_symbol`) keeps
+/// answering from the old symbol's quote until the entry ages out — bounded
+/// by the TTL, and the reason that window is a minute rather than an hour.
+pub struct CachingFetcher {
+    inner: SharedFetcher,
+    ttl: std::time::Duration,
+    /// listing id → when it was fetched, and what came back.
+    cached: Mutex<HashMap<i64, (Instant, LatestQuote)>>,
+}
+
+impl CachingFetcher {
+    pub fn new(inner: SharedFetcher, ttl: std::time::Duration) -> Self {
+        Self {
+            inner,
+            ttl,
+            cached: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// The remembered quote for `listing_id`, if it is still inside the
+    /// window. A zero TTL is therefore never a hit, which is how a caller
+    /// turns the cache off.
+    fn remembered(&self, listing_id: i64) -> Option<LatestQuote> {
+        let cached = self.cached.lock().ok()?;
+        let (fetched_at, quote) = cached.get(&listing_id)?;
+        (fetched_at.elapsed() < self.ttl).then(|| quote.clone())
+    }
+
+    fn remember(&self, listing_id: i64, quote: &LatestQuote) {
+        // A poisoned lock means another thread panicked mid-update. That is
+        // not a reason to fail a valuation: the cache is an optimisation, and
+        // the quote in hand is already correct.
+        if let Ok(mut cached) = self.cached.lock() {
+            cached.insert(listing_id, (Instant::now(), quote.clone()));
+        }
+    }
+}
+
+impl PriceFetcher for CachingFetcher {
+    fn source(&self) -> &'static str {
+        self.inner.source()
+    }
+
+    fn symbol(&self, market: &Market, date: NaiveDate) -> Result<String, String> {
+        self.inner.symbol(market, date)
+    }
+
+    /// Never cached — see the type's docs.
+    fn daily_closes<'a>(
+        &'a self,
+        market: &'a Market,
+        from: NaiveDate,
+        to: NaiveDate,
+    ) -> FetchFuture<'a> {
+        self.inner.daily_closes(market, from, to)
+    }
+
+    fn latest_quote<'a>(&'a self, market: &'a Market) -> QuoteFuture<'a> {
+        Box::pin(async move {
+            if let Some(quote) = self.remembered(market.listing.id) {
+                return Ok(quote);
+            }
+            let quote = self.inner.latest_quote(market).await?;
+            self.remember(market.listing.id, &quote);
+            Ok(quote)
+        })
+    }
+
+    /// The misses go to the provider as **one** batch, so the caching and the
+    /// batching compose: a portfolio with one newly-held listing costs one
+    /// request carrying one symbol, not one request per holding.
+    fn latest_quotes<'a>(&'a self, markets: &'a [&'a Market]) -> QuotesFuture<'a> {
+        Box::pin(async move {
+            let remembered: Vec<Option<LatestQuote>> = markets
+                .iter()
+                .map(|m| self.remembered(m.listing.id))
+                .collect();
+            let misses: Vec<&Market> = markets
+                .iter()
+                .zip(&remembered)
+                .filter(|(_, hit)| hit.is_none())
+                .map(|(m, _)| *m)
+                .collect();
+            if misses.is_empty() {
+                return remembered.into_iter().flatten().map(Ok).collect();
+            }
+
+            let mut fetched = self.inner.latest_quotes(&misses).await;
+            // The positional contract again, one level down: hold the inner
+            // fetcher to one result per market it was given, so a short answer
+            // cannot slide the results onto the wrong listings below.
+            fetched.resize_with(misses.len(), || {
+                Err("price source returned no result for this listing".to_string())
+            });
+            for (market, result) in misses.iter().zip(&fetched) {
+                if let Ok(quote) = result {
+                    self.remember(market.listing.id, quote);
+                }
+            }
+
+            let mut fetched = fetched.into_iter();
+            remembered
+                .into_iter()
+                .map(|hit| match hit {
+                    Some(quote) => Ok(quote),
+                    // One `fetched` entry per `None`, in the order the misses
+                    // were collected — which is the order of `markets`.
+                    None => fetched
+                        .next()
+                        .unwrap_or_else(|| Err("price source skipped this listing".to_string())),
+                })
+                .collect()
+        })
+    }
+}
 
 /// Round away the float noise in a provider price: Yahoo serves float32-
 /// precision values (`62.48` arrives as `62.4799995422363`, which is exactly
@@ -913,14 +1068,14 @@ impl PriceFetcher for YahooFetcher {
     /// Yahoo's quote endpoint takes a symbol *list* and answers the lot in one
     /// request, so a portfolio is one round trip rather than one per holding
     /// (see the trait method's docs for the measurement).
-    fn latest_quotes<'a>(&'a self, markets: &'a [Market]) -> QuotesFuture<'a> {
+    fn latest_quotes<'a>(&'a self, markets: &'a [&'a Market]) -> QuotesFuture<'a> {
         Box::pin(async move {
             // Symbols first: a market whose symbol cannot be resolved at all
             // (an exchange with no mapping) is its own failure and is never
             // put to the provider — but it still occupies its own slot in the
             // answer, so the positional contract holds.
             let symbols: Vec<Result<String, String>> =
-                markets.iter().map(yahoo_symbol_now).collect();
+                markets.iter().copied().map(yahoo_symbol_now).collect();
             // Deduplicated: two listings can resolve to one symbol, and asking
             // twice in the same request would be asking Yahoo to repeat itself.
             let mut wanted: Vec<&str> = symbols
@@ -2142,7 +2297,8 @@ pub async fn fetch_live_aud_prices(
     if markets.is_empty() {
         return Ok(out);
     }
-    let mut quotes = fetcher.latest_quotes(&markets).await;
+    let borrowed: Vec<&Market> = markets.iter().collect();
+    let mut quotes = fetcher.latest_quotes(&borrowed).await;
     // One result per market is the trait's contract; hold a misbehaving
     // fetcher to it here rather than letting `zip` drop the tail, which would
     // leave a held listing missing from the valuation with nothing said.
@@ -2992,7 +3148,7 @@ mod tests {
         /// does. The recording is the point: it is what lets a test see how
         /// many times the provider was asked, which is the whole subject of
         /// the batching.
-        fn latest_quotes<'a>(&'a self, markets: &'a [Market]) -> QuotesFuture<'a> {
+        fn latest_quotes<'a>(&'a self, markets: &'a [&'a Market]) -> QuotesFuture<'a> {
             Box::pin(async move {
                 self.quote_batches
                     .lock()
@@ -5310,12 +5466,13 @@ mod tests {
         insert_listing(&pool, 2, "WBC", "XASX", "AUD").await;
         let as_of = utc(2026, 6, 5, 6, 30);
         let fetcher = test_support::QuoteStub::default().with_quote(2, "30", "AUD", as_of);
-        let markets = vec![
+        let markets = [
             load_market(&pool, 1).await.unwrap().unwrap(),
             load_market(&pool, 2).await.unwrap().unwrap(),
         ];
+        let borrowed: Vec<&Market> = markets.iter().collect();
 
-        let quotes = fetcher.latest_quotes(&markets).await;
+        let quotes = fetcher.latest_quotes(&borrowed).await;
 
         assert_eq!(quotes.len(), 2, "one result per market, always");
         assert!(quotes[0].as_ref().unwrap_err().contains("listing 1"));
@@ -5357,6 +5514,159 @@ mod tests {
         );
         // The crate canonicalises to uppercase; matching survives either way.
         assert!(yahoo_quote_named(&quotes, "bhp.ax").is_ok());
+    }
+
+    // --- quote cache ---
+
+    /// The window is what the cache is for: a second valuation inside it is
+    /// answered without the provider being asked again.
+    #[tokio::test]
+    async fn a_quote_inside_the_window_is_answered_without_asking_again() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
+        insert_listing(&pool, 2, "WBC", "XASX", "AUD").await;
+        let as_of = utc(2026, 6, 5, 6, 30);
+        let inner = Arc::new(
+            StubFetcher::default()
+                .with_quote(1, "62.48", "AUD", as_of)
+                .with_quote(2, "30", "AUD", as_of),
+        );
+        let cache = CachingFetcher::new(inner.clone(), std::time::Duration::from_secs(300));
+
+        let first = fetch_live_aud_prices(&pool, &cache, &[1, 2]).await.unwrap();
+        let second = fetch_live_aud_prices(&pool, &cache, &[1, 2]).await.unwrap();
+
+        assert_eq!(
+            inner.quote_batches(),
+            vec![vec![1, 2]],
+            "the second valuation asked the provider nothing"
+        );
+        // And answered with the same figures, not an empty or defaulted row.
+        for prices in [&first, &second] {
+            assert_eq!(
+                prices[&1].as_ref().unwrap().aud_price,
+                "62.48".parse::<Decimal>().unwrap()
+            );
+            assert_eq!(prices[&2].as_ref().unwrap().aud_price, Decimal::from(30));
+        }
+        // The provider's own quote timestamp survives the cache: a served
+        // row states when the price was *observed*, never when it was served.
+        assert_eq!(second[&1].as_ref().unwrap().as_of, as_of.to_rfc3339());
+    }
+
+    /// Past the window the provider is asked again — the cache is a window,
+    /// not a memo. A zero TTL is the same code path with the window shut, and
+    /// is how a caller turns the cache off.
+    #[tokio::test]
+    async fn a_quote_past_the_window_is_fetched_again() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
+        let as_of = utc(2026, 6, 5, 6, 30);
+        let inner = Arc::new(StubFetcher::default().with_quote(1, "62.48", "AUD", as_of));
+        let cache = CachingFetcher::new(inner.clone(), std::time::Duration::ZERO);
+
+        fetch_live_aud_prices(&pool, &cache, &[1]).await.unwrap();
+        fetch_live_aud_prices(&pool, &cache, &[1]).await.unwrap();
+
+        assert_eq!(
+            inner.quote_batches(),
+            vec![vec![1], vec![1]],
+            "an expired entry is re-fetched"
+        );
+    }
+
+    /// Only the listings the cache cannot answer reach the provider, and they
+    /// go as one batch — the caching and the batching compose rather than one
+    /// undoing the other. The answers must still land on the right listings,
+    /// which is what the interleaving here is for.
+    #[tokio::test]
+    async fn only_the_misses_are_asked_for_and_they_go_as_one_batch() {
+        let pool = test_pool().await;
+        for id in 1..=4 {
+            insert_listing(&pool, id, &format!("T{id}"), "XASX", "AUD").await;
+        }
+        let as_of = utc(2026, 6, 5, 6, 30);
+        let inner = Arc::new(
+            StubFetcher::default()
+                .with_quote(1, "10", "AUD", as_of)
+                .with_quote(2, "20", "AUD", as_of)
+                .with_quote(3, "30", "AUD", as_of)
+                .with_quote(4, "40", "AUD", as_of),
+        );
+        let cache = CachingFetcher::new(inner.clone(), std::time::Duration::from_secs(300));
+
+        // Warm 2 and 4, so the next call's misses are 1 and 3 — interleaved,
+        // so a positional slip would show up as swapped prices.
+        fetch_live_aud_prices(&pool, &cache, &[2, 4]).await.unwrap();
+        let all = fetch_live_aud_prices(&pool, &cache, &[1, 2, 3, 4])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            inner.quote_batches(),
+            vec![vec![2, 4], vec![1, 3]],
+            "one batch carrying only the two listings not already known"
+        );
+        for (id, expected) in [(1, 10), (2, 20), (3, 30), (4, 40)] {
+            assert_eq!(
+                all[&id].as_ref().unwrap().aud_price,
+                Decimal::from(expected),
+                "listing {id} kept its own price across the cache/fetch mix"
+            );
+        }
+    }
+
+    /// A failure is never remembered: an outage or a rate limit must be
+    /// retried on the next request, not pinned for the whole window. The
+    /// recovery is the point — the second call here succeeds.
+    #[tokio::test]
+    async fn a_failed_quote_is_not_remembered() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
+        let as_of = utc(2026, 6, 5, 6, 30);
+        // Quotes listing 2 only, so listing 1 fails.
+        let down = Arc::new(StubFetcher::default());
+        let cache = CachingFetcher::new(down, std::time::Duration::from_secs(300));
+        let failed = fetch_live_aud_prices(&pool, &cache, &[1]).await.unwrap();
+        assert!(failed[&1].is_err());
+
+        // A fresh cache over a working provider stands in for the outage
+        // ending; what matters is that nothing was pinned by the failure.
+        let up = Arc::new(StubFetcher::default().with_quote(1, "62.48", "AUD", as_of));
+        let cache = CachingFetcher::new(up.clone(), std::time::Duration::from_secs(300));
+        fetch_live_aud_prices(&pool, &cache, &[1]).await.unwrap();
+        let recovered = fetch_live_aud_prices(&pool, &cache, &[1]).await.unwrap();
+        assert_eq!(
+            recovered[&1].as_ref().unwrap().aud_price,
+            "62.48".parse::<Decimal>().unwrap()
+        );
+        assert_eq!(
+            up.quote_batches(),
+            vec![vec![1]],
+            "the recovered quote is then cached like any other"
+        );
+    }
+
+    /// Price *history* is never cached — it is already persisted in
+    /// `closing_prices`, and the `price-import` job that collects it must
+    /// reach the provider every time it runs.
+    #[tokio::test]
+    async fn history_fetches_are_not_cached() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
+        let day = ymd(2026, 6, 5);
+        let inner = Arc::new(StubFetcher::default().with_close(1, day, "62.48", "AUD"));
+        let cache = CachingFetcher::new(inner.clone(), std::time::Duration::from_secs(300));
+        let market = load_market(&pool, 1).await.unwrap().unwrap();
+
+        cache.daily_closes(&market, day, day).await.unwrap();
+        cache.daily_closes(&market, day, day).await.unwrap();
+
+        assert_eq!(
+            inner.calls(),
+            vec![(1, day, day), (1, day, day)],
+            "both history fetches reached the provider"
+        );
     }
 
     #[tokio::test]
