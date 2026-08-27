@@ -33,11 +33,12 @@ use crate::domain::cost_base::{self, CostBaseAdjustment, ParcelRow};
 use crate::domain::deduction_destination::{DeductionDestination, DeductionRouting};
 use crate::domain::listing_identity::RenameHistory;
 use crate::domain::tax_year::tax_year_for;
+use crate::entities::closing_price::HeldTimeline;
 use crate::entities::corporate_action::{RocEvent, SplitEvent};
 use crate::entities::income::{Income, IncomeType};
 use crate::entities::investment_expense::ExpenseType;
 use crate::entities::listing;
-use crate::entities::trade::{Trade, TradeType};
+use crate::entities::trade::Trade;
 use crate::infra::decimal::{parse_dec, to_cents};
 use crate::infra::fx::FxRates;
 use crate::infra::http::ApiError;
@@ -244,9 +245,14 @@ pub struct Completeness {
 /// statement for the half-year attributed to him, which the income limb catches
 /// from his distribution row.
 ///
-/// The units walk is a simple net of Buy/DRP minus Sell quantities, not
-/// cost-base aware: good enough for a held/not-held flag, not a financial
-/// figure.
+/// The closing holding comes from `closing_price::HeldTimeline`, which is the
+/// only walk in the tree that re-bases each sale allocation into its parcel's
+/// as-acquired units before netting it off. Netting the raw quantities instead
+/// mixes unit bases across a split — a parcel bought as 100 units and part-sold
+/// as 150 post-split ones nets to `-50` — and the pair then fails the `> 0`
+/// test and drops out of **both** lists at once, so a genuinely missing
+/// statement goes unreported. It is still not cost-base aware: good enough for
+/// a held/not-held flag and the units figure beside it, not a financial figure.
 async fn amma_coverage(
     conn: &mut sqlx::SqliteConnection,
     tax_year: TaxYear,
@@ -284,38 +290,23 @@ async fn amma_coverage(
         });
     }
 
-    // The closing holding at 30 June, per account.
-    let trade_rows = sqlx::query(
-        "SELECT listing_id, holding_account_id, trade_type, quantity FROM trades \
-         WHERE listing_id IN (SELECT id FROM listings WHERE amit) \
-           AND trade_type IN ('Buy', 'DRP', 'Sell') \
-           AND date <= ?",
-    )
-    .bind(end)
-    .fetch_all(&mut *conn)
-    .await?;
-
-    let mut closing: HashMap<(i64, i64), Decimal> = HashMap::new();
-    for row in &trade_rows {
-        let key: (i64, i64) = (
-            row.try_get("listing_id")?,
-            row.try_get("holding_account_id")?,
-        );
-        // The SQL above matches every listing that is an AMIT *now*; only the
-        // ones that were one in this year can be missing a statement for it
-        // (SCENARIOS F-23), and `tickers` is that per-year set.
-        if !tickers.contains_key(&key.0) {
-            continue;
-        }
-        let trade_type: TradeType = row.try_get("trade_type")?;
-        let qty = crate::infra::decimal::row_dec(row, "quantity")?;
-        let signed = if trade_type.is_acquisition() {
-            qty
-        } else {
-            -qty
-        };
-        *closing.entry(key).or_insert(Decimal::ZERO) += signed;
-    }
+    // The closing holding at 30 June, per account — from the shared timeline,
+    // which alone re-bases each sale allocation into its parcel's as-acquired
+    // units. `tickers` is the set of listings that were an AMIT *in this year*;
+    // only they can be missing a statement for it (SCENARIOS F-23).
+    //
+    // Both dates are `end`: the holding is the fact at 30 June, and the units
+    // are wanted in that day's own basis, which is what the alert displays.
+    let timeline = HeldTimeline::load_on(&mut *conn).await?;
+    let closing: HashMap<(i64, i64), Decimal> = tickers
+        .keys()
+        .flat_map(|listing_id| {
+            timeline
+                .units_by_account_on(*listing_id, end, end)
+                .into_iter()
+                .map(|(account_id, units)| ((*listing_id, account_id), units))
+        })
+        .collect();
 
     // Distributions assessed to this year: per account, and — for the
     // fund-level "did this listing attribute anything at all" question — per
@@ -2490,6 +2481,59 @@ mod tests {
         let report2 = db_tax_report(&pool, 2024).await.unwrap();
         assert!(report2.completeness.amma_nothing_recorded.is_empty());
         assert!(report2.completeness.complete);
+    }
+
+    /// The closing holding is walked in **one** unit basis, so a split between
+    /// a parcel and a sale out of it cannot make a live holding read as
+    /// negative.
+    ///
+    /// Netting the raw quantities — 100 as-acquired units bought, 150
+    /// post-split units sold — gives `-50`, which fails the `> 0` test and
+    /// drops the pair out of *both* coverage lists at once. The fund really is
+    /// still held, so this is a genuinely missing statement going entirely
+    /// unreported.
+    #[tokio::test]
+    async fn a_split_between_a_parcel_and_its_sale_does_not_hide_the_holding() {
+        let pool = test_support::test_pool().await;
+        listing_amit(&pool, 1, "AMT").await;
+        test_support::buy(1, 1)
+            .date(ymd(2023, 1, 3))
+            .qty(dec("100"))
+            .price(dec("10"))
+            .insert(&pool)
+            .await;
+        // 2-for-1: the 100 units become 200, and everything after is quoted in
+        // that basis.
+        crate::entities::corporate_action::db_upsert(
+            &pool,
+            &crate::entities::corporate_action::CorporateAction {
+                id: 1,
+                listing_id: 1,
+                date: ymd(2023, 6, 1),
+                kind: crate::entities::corporate_action::ActionKind::ShareSplit {
+                    split_new_units: dec("2"),
+                    split_old_units: dec("1"),
+                },
+            },
+        )
+        .await
+        .unwrap();
+        test_support::sell(2, 1)
+            .date(ymd(2023, 9, 1))
+            .qty(dec("150"))
+            .price(dec("6"))
+            .insert(&pool)
+            .await;
+        test_support::allocate(&pool, 1, 2, 1, dec("150")).await;
+
+        let report = db_tax_report(&pool, 2024).await.unwrap();
+        // 200 post-split units less the 150 sold: still held, still owed a
+        // statement, and the units are stated in 30 June's own basis.
+        assert_eq!(report.completeness.amma_nothing_recorded.len(), 1);
+        assert_eq!(
+            report.completeness.amma_nothing_recorded[0].units_held,
+            dec("50")
+        );
     }
 
     /// An AMMA statement whose per-parcel AMIT adjustments are missing drops

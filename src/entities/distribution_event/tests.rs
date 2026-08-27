@@ -300,3 +300,200 @@ async fn the_list_and_get_routes_serve_the_stored_calendar() {
         .await
         .expect_status(axum::http::StatusCode::NOT_FOUND);
 }
+
+/// Record a rename directly, the way `domain::listing_identity`'s own tests
+/// do: the entity's operation rewrites the listing's ticker as a side effect,
+/// and what this needs is only the chain the market timeline is built from.
+async fn rename(
+    pool: &SqlitePool,
+    listing_id: i64,
+    effective_date: NaiveDate,
+    old_ticker: &str,
+    new_ticker: &str,
+) {
+    sqlx::query(
+        "INSERT INTO listing_renames (listing_id, effective_date, old_ticker, new_ticker) \
+         VALUES (?, ?, ?, ?)",
+    )
+    .bind(listing_id)
+    .bind(effective_date)
+    .bind(old_ticker)
+    .bind(new_ticker)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+/// A held span straddling a rename is fetched under **each** ticker that was
+/// actually in force over it, not once under the one in force at its start.
+///
+/// The real case: LAR's held span begins before its 2025 rename from LAAC.
+/// Asking for the whole span under LAAC gets Yahoo's `NoSuchSymbol` for a
+/// ticker it retired, and before this the listing was left with no calendar at
+/// all — both alerts silent for it forever — while its post-rename history sat
+/// there to be collected under LAR.
+#[tokio::test]
+async fn a_span_straddling_a_rename_is_fetched_under_each_ticker_in_force() {
+    let pool = test_pool().await;
+    listing(1).ticker("LAR").insert(&pool).await;
+    rename(&pool, 1, ymd(2025, 3, 1), "LAAC", "LAR").await;
+    buy(1, 1)
+        .date(ymd(2024, 1, 10))
+        .qty(dec("100"))
+        .insert(&pool)
+        .await;
+
+    // The provider serves the series only under the surviving ticker.
+    let stub = DistributionStub::default().serving_only("LAR").with_event(
+        1,
+        ymd(2025, 7, 1),
+        dec("0.31"),
+        "AUD",
+    );
+    let note = refresh(&pool, &stub).await.expect("the run succeeds");
+
+    // Two calls, split on the effective date, each under its own ticker.
+    assert_eq!(
+        stub.calls(),
+        vec![
+            ("LAAC".to_string(), ymd(2024, 1, 10), ymd(2025, 2, 28)),
+            ("LAR".to_string(), ymd(2025, 3, 1), ymd(2026, 8, 27)),
+        ]
+    );
+    // The post-rename half is collected rather than lost with the pre-rename
+    // half — the whole point of segmenting.
+    let stored = db_list(&pool).await.unwrap();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].ex_date, ymd(2025, 7, 1));
+    assert_eq!(
+        stored[0].fetched_symbol, "LAR",
+        "the row records the symbol its own segment was fetched under"
+    );
+    // …and the span that genuinely has no calendar is still said out loud,
+    // naming the symbol and the window rather than the listing as a whole.
+    let note = note.expect("the retired span qualifies the run");
+    assert!(note.contains("no calendar"), "{note}");
+    assert!(note.contains("as LAAC"), "{note}");
+    assert!(note.contains("2024-01-10..2025-02-28"), "{note}");
+}
+
+/// The control for the segmented fetch: an outage on **one** segment carries
+/// no verdict on the symbol, so it fails the listing loudly rather than
+/// quietly storing half a history.
+#[tokio::test]
+async fn an_outage_on_one_segment_still_fails_the_whole_listing() {
+    let pool = test_pool().await;
+    listing(1).ticker("LAR").insert(&pool).await;
+    rename(&pool, 1, ymd(2025, 3, 1), "LAAC", "LAR").await;
+    buy(1, 1)
+        .date(ymd(2024, 1, 10))
+        .qty(dec("100"))
+        .insert(&pool)
+        .await;
+
+    let error = refresh(&pool, &DistributionStub::failing("upstream 503"))
+        .await
+        .unwrap_err();
+    assert!(error.contains("LAR (1)"), "{error}");
+    assert!(error.contains("upstream 503"), "{error}");
+    assert!(db_list(&pool).await.unwrap().is_empty());
+}
+
+/// A weekly run over years of unchanged history must leave the audit trail
+/// alone.
+///
+/// The job re-stores each listing's whole held span every run, so left to bump
+/// `fetched_at` alone it would UPDATE every stored event every Monday — and
+/// `row_history` is append-only with keep-forever retention, so the Row
+/// History screen's browse mode would show nothing but refresh noise.
+#[tokio::test]
+async fn re_storing_an_unrevised_event_writes_nothing_at_all() {
+    let pool = test_pool().await;
+    listing(1).insert(&pool).await;
+    buy(1, 1)
+        .date(ymd(2024, 1, 10))
+        .qty(dec("100"))
+        .insert(&pool)
+        .await;
+
+    let stub = DistributionStub::default().with_event(1, ymd(2024, 7, 1), dec("0.726547"), "AUD");
+    refresh(&pool, &stub).await.unwrap();
+    let first = db_list(&pool).await.unwrap();
+
+    // The next week's run, at a later instant, over the same answer.
+    run_refresh(
+        &pool,
+        &stub,
+        ymd(2026, 9, 3).and_hms_opt(0, 0, 0).unwrap().and_utc(),
+    )
+    .await
+    .unwrap();
+
+    let second = db_list(&pool).await.unwrap();
+    assert_eq!(second.len(), 1);
+    assert_eq!(
+        second[0].fetched_at, first[0].fetched_at,
+        "fetched_at dates the answer that last changed the row — and with it \
+         the unit basis the amount is in, which an unrevised amount proves has \
+         not moved"
+    );
+    let trail: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM row_history WHERE table_name = 'distribution_events'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        trail, 0,
+        "nothing changed, so nothing is recorded as having"
+    );
+}
+
+/// The control for the no-op guard: a re-fetch whose **symbol** differs is a
+/// real change of provenance and is still written — the guard tests the whole
+/// of the provider's answer, not just its amount.
+#[tokio::test]
+async fn a_re_fetch_under_a_different_symbol_is_still_recorded() {
+    let pool = test_pool().await;
+    listing(1).ticker("LAAC").insert(&pool).await;
+    buy(1, 1)
+        .date(ymd(2024, 1, 10))
+        .qty(dec("100"))
+        .insert(&pool)
+        .await;
+    let stub = DistributionStub::default().with_event(1, ymd(2025, 7, 1), dec("0.31"), "AUD");
+    refresh(&pool, &stub).await.unwrap();
+    assert_eq!(db_list(&pool).await.unwrap()[0].fetched_symbol, "LAAC");
+
+    // The security is renamed with effect from before that ex-date, so the
+    // event now falls in the segment quoted under the new ticker.
+    rename(&pool, 1, ymd(2025, 3, 1), "LAAC", "LAR").await;
+    sqlx::query("UPDATE listings SET ticker = 'LAR' WHERE id = 1")
+        .execute(&pool)
+        .await
+        .unwrap();
+    run_refresh(
+        &pool,
+        &stub,
+        ymd(2026, 9, 3).and_hms_opt(0, 0, 0).unwrap().and_utc(),
+    )
+    .await
+    .unwrap();
+
+    let stored = db_list(&pool).await.unwrap();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].fetched_symbol, "LAR");
+    assert!(
+        stored[0].fetched_at.starts_with("2026-09-03T"),
+        "a real change re-dates the answer: {}",
+        stored[0].fetched_at
+    );
+    let trail: Vec<String> = sqlx::query_scalar(
+        "SELECT old_row FROM row_history WHERE table_name = 'distribution_events'",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(trail.len(), 1, "the provenance change is recorded");
+    assert!(trail[0].contains("LAAC"), "{}", trail[0]);
+}

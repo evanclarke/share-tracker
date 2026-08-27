@@ -1199,6 +1199,11 @@ struct NilProceedsSellRow {
 /// A fund's `entitlement_date` is the distribution period's end and sits a day
 /// or two *before* the ex-date (period ending 30 June, ex 1 July), so the
 /// window has to reach backwards at all — but only just.
+///
+/// It reaches backwards **for the entitlement anchors alone**. A payment
+/// cannot precede its own ex-date, so `date_paid` is held to
+/// `0..=DIVIDEND_MATCH_AFTER_DAYS` instead — see
+/// [`CalendarIncomeRow::distance_from`].
 const DIVIDEND_MATCH_BEFORE_DAYS: i64 = 15;
 
 /// How far **after** an ex-date an income row may be dated and still be that
@@ -1207,8 +1212,16 @@ const DIVIDEND_MATCH_BEFORE_DAYS: i64 = 15;
 /// The registry pays ~15 days after the ex-date for a fund and up to about six
 /// weeks for a company, and `date_paid` is the anchor most rows have. Together
 /// with [`DIVIDEND_MATCH_BEFORE_DAYS`] the window is 61 days, comfortably
-/// inside the ~88-day minimum spacing of a quarterly payer — so two events can
-/// never compete for one income row on spacing alone.
+/// inside the ~88-day minimum spacing of a quarterly payer — so two of a
+/// quarterly payer's events can never compete for one income row on spacing
+/// alone.
+///
+/// A **monthly** payer is well inside it, though, and that is what
+/// [`CalendarIncomeRow::distance_from`]'s two ordering rules are for: at ~15
+/// days from ex-date to payment, the previous month's payment sits about as
+/// far before an ex-date as this month's sits after it. The window cannot be
+/// narrowed to separate them without losing the six-week company payment it
+/// was widened for.
 const DIVIDEND_MATCH_AFTER_DAYS: i64 = 45;
 
 /// The relative band [`DividendAmountMismatch`] treats as agreement, as a
@@ -1310,6 +1323,12 @@ struct CalendarIncomeRow {
     unfranked_amount: Decimal,
     #[sqlx(try_from = "Money")]
     foreign_source_income: Decimal,
+    /// ISO 4217 currency the three component amounts are recorded in. Nothing
+    /// ties it to the listing's quote currency — `income.currency` defaults to
+    /// `'AUD'` and the entity's write path never consults the listing — so it
+    /// has to be read and compared, not assumed. See the amount check in
+    /// [`db_distribution_calendar`].
+    currency: String,
 }
 
 /// One DRP reinvestment's place in the registry's own running cash surplus:
@@ -1403,8 +1422,31 @@ impl CalendarIncomeRow {
         self.franked_amount + self.unfranked_amount + self.foreign_source_income
     }
 
-    /// How far this row sits from `ex_date`, in days, or `None` when no date
-    /// it carries falls inside the match window.
+    /// How far this row sits from `ex_date`, as the sort key
+    /// `(days from the ex-date, dated before it)` — or `None` when no date it
+    /// carries falls inside the match window. Lower is a better match, and the
+    /// second element is the tie-break: **at equal distance the anchor on or
+    /// after the ex-date wins**, because a distribution is always paid after
+    /// it goes ex, never before.
+    ///
+    /// **A payment cannot precede its own ex-date**, so `date_paid` anchors
+    /// only from the ex-date forwards, while the two entitlement anchors keep
+    /// the full backwards reach [`DIVIDEND_MATCH_BEFORE_DAYS`] exists for. And
+    /// where two anchors are equally far away, the one on or after the ex-date
+    /// wins, for the same reason.
+    ///
+    /// Both rules are about a **monthly** payer, whose spacing fits inside the
+    /// window ([`DIVIDEND_MATCH_AFTER_DAYS`]). A fund paying ~15 days after
+    /// going ex puts the previous month's payment about 14 days *before* an
+    /// ex-date and its own about 15 days *after* it — so on absolute distance
+    /// the previous month's row was the better match and simply won. The
+    /// symptom is one alert saying the wrong thing rather than none: the event
+    /// matched, compared its gross against the wrong month's, and reported a
+    /// mismatch that was really a mis-assignment. It needs that earlier row to
+    /// still be unclaimed, which the provider's own coverage gaps supply —
+    /// Yahoo serves 8 of HNDQ's 12 periods (see
+    /// `entities::distribution_event`), so an income row whose event the
+    /// calendar never knew about is an ordinary thing to meet.
     ///
     /// **Every date the row carries is an anchor, its own `ex_date` included —
     /// none of them is a filter.** An earlier version made `ex_date` decisive
@@ -1423,15 +1465,17 @@ impl CalendarIncomeRow {
     /// which no other anchor can beat. 13 of the 47 income rows in the live
     /// database carry no `ex_date` at all, which is why the window over
     /// `entitlement_date` / `date_paid` has to carry the matching regardless.
-    fn distance_from(&self, ex_date: NaiveDate) -> Option<i64> {
-        [self.ex_date, self.entitlement_date, Some(self.date_paid)]
+    fn distance_from(&self, ex_date: NaiveDate) -> Option<(i64, bool)> {
+        [self.ex_date, self.entitlement_date]
             .into_iter()
             .flatten()
-            .filter_map(|anchor| {
+            .map(|anchor| (anchor, -DIVIDEND_MATCH_BEFORE_DAYS))
+            .chain(std::iter::once((self.date_paid, 0)))
+            .filter_map(|(anchor, earliest)| {
                 let days = (anchor - ex_date).num_days();
-                (-DIVIDEND_MATCH_BEFORE_DAYS..=DIVIDEND_MATCH_AFTER_DAYS)
+                (earliest..=DIVIDEND_MATCH_AFTER_DAYS)
                     .contains(&days)
-                    .then_some(days.abs())
+                    .then_some((days.abs(), days < 0))
             })
             .min()
     }
@@ -2969,7 +3013,7 @@ async fn db_distribution_calendar(
     // error rather than a near miss.
     let income: Vec<CalendarIncomeRow> = sqlx::query_as(
         "SELECT id, listing_id, holding_account_id, date_paid, ex_date, entitlement_date, \
-                franked_amount, unfranked_amount, foreign_source_income \
+                franked_amount, unfranked_amount, foreign_source_income, currency \
          FROM income WHERE income_type = 'Dividend'",
     )
     .fetch_all(&mut *conn)
@@ -3076,6 +3120,21 @@ async fn db_distribution_calendar(
                 continue;
             };
             claimed.insert(row.id);
+            // The row **is** this distribution's record — so it is claimed,
+            // and the event is not reported missing — but its gross can only
+            // be compared against the calendar's when the two are in the same
+            // currency. `expected` is `amount_per_unit × units` in the
+            // listing's quote currency (what the calendar stores, enforced at
+            // write time), while `recorded` is in whatever the income row
+            // says; a USD-quoted holding whose distribution was entered in AUD
+            // would otherwise subtract one from the other and alert forever on
+            // the exchange rate. Neither side is AUD-converted to rescue the
+            // comparison: the event carries no `fx_rate`, and converting it
+            // would put a tax-strict figure on a monthly reference rate for an
+            // advisory alert.
+            if !row.currency.eq_ignore_ascii_case(&event.currency) {
+                continue;
+            }
             let recorded = row.gross();
             let difference = recorded - expected;
             let tolerance = (expected.abs() * Decimal::from(DIVIDEND_AMOUNT_TOLERANCE_PERCENT)
@@ -6574,15 +6633,37 @@ mod tests {
         amount_per_unit: &str,
         fetched_at: &str,
     ) {
+        insert_event_in(
+            pool,
+            listing_id,
+            ex_date,
+            amount_per_unit,
+            "AUD",
+            fetched_at,
+        )
+        .await;
+    }
+
+    /// [`insert_event`] in a nominated quote currency — the calendar stores
+    /// the listing's, never AUD.
+    async fn insert_event_in(
+        pool: &SqlitePool,
+        listing_id: i64,
+        ex_date: NaiveDate,
+        amount_per_unit: &str,
+        currency: &str,
+        fetched_at: &str,
+    ) {
         sqlx::query(
             "INSERT INTO distribution_events \
                  (listing_id, ex_date, amount_per_unit, currency, source, fetched_symbol, \
                   fetched_at) \
-             VALUES (?, ?, ?, 'AUD', 'yahoo', 'T1.AX', ?)",
+             VALUES (?, ?, ?, ?, 'yahoo', 'T1.AX', ?)",
         )
         .bind(listing_id)
         .bind(ex_date)
         .bind(amount_per_unit)
+        .bind(currency)
         .bind(fetched_at)
         .execute(pool)
         .await
@@ -7033,6 +7114,162 @@ mod tests {
         // A database whose import job has never run knows of no ex-date, and
         // must therefore say nothing at all — the alerts are evidence about
         // the books, never the absence of evidence.
+        let h = health(&pool, ymd(2026, 8, 27)).await;
+        assert!(h.missing_dividend_entries.is_empty());
+        assert!(h.dividend_amount_mismatches.is_empty());
+    }
+
+    /// The gross comparison is refused across currencies rather than made
+    /// wrong. `income.currency` defaults to `'AUD'` and nothing in the income
+    /// write path ties it to the listing's, so a USD-quoted holding entered in
+    /// AUD is entirely ordinary — and subtracting one gross from the other
+    /// would alert forever on the exchange rate.
+    #[tokio::test]
+    async fn a_gross_in_another_currency_is_not_compared_against_the_calendar() {
+        let pool = test_pool().await;
+        test_support::listing(1)
+            .ticker("ABC")
+            .currency("USD")
+            .insert(&pool)
+            .await;
+        test_support::buy(1, 1)
+            .date(ymd(2024, 1, 10))
+            .qty(dec("100"))
+            .currency("USD")
+            .insert(&pool)
+            .await;
+        insert_event_in(
+            &pool,
+            1,
+            ymd(2024, 7, 1),
+            "0.726547",
+            "USD",
+            "2026-08-27T00:00:00Z",
+        )
+        .await;
+        // USD 72.6547 of distribution, entered as its AUD equivalent.
+        test_support::income(1, 1, ymd(2024, 7, 16))
+            .with(|i| {
+                i.unfranked_amount = dec("110.00");
+                i.currency = "AUD".to_string();
+            })
+            .insert(&pool)
+            .await;
+
+        let h = health(&pool, ymd(2026, 8, 27)).await;
+        assert!(
+            h.missing_dividend_entries.is_empty(),
+            "the row is still this distribution's record, so it is claimed"
+        );
+        assert!(
+            h.dividend_amount_mismatches.is_empty(),
+            "AUD 110.00 minus USD 72.6547 is not a number this alert may report"
+        );
+    }
+
+    /// The control for the currency guard: the same divergence *within* one
+    /// currency is still reported, so the guard suppresses a comparison that
+    /// cannot be made rather than the alert itself.
+    #[tokio::test]
+    async fn the_same_divergence_inside_one_currency_is_still_reported() {
+        let pool = test_pool().await;
+        test_support::listing(1)
+            .ticker("ABC")
+            .currency("USD")
+            .insert(&pool)
+            .await;
+        test_support::buy(1, 1)
+            .date(ymd(2024, 1, 10))
+            .qty(dec("100"))
+            .currency("USD")
+            .insert(&pool)
+            .await;
+        insert_event_in(
+            &pool,
+            1,
+            ymd(2024, 7, 1),
+            "0.726547",
+            "USD",
+            "2026-08-27T00:00:00Z",
+        )
+        .await;
+        test_support::income(1, 1, ymd(2024, 7, 16))
+            .with(|i| {
+                i.unfranked_amount = dec("110.00");
+                i.currency = "USD".to_string();
+            })
+            .insert(&pool)
+            .await;
+
+        let h = health(&pool, ymd(2026, 8, 27)).await;
+        assert_eq!(h.dividend_amount_mismatches.len(), 1);
+        let m = &h.dividend_amount_mismatches[0];
+        assert_eq!(m.currency, "USD");
+        assert_eq!(m.recorded_amount, dec("110.00"));
+        assert_eq!(m.expected_amount, dec("72.6547"));
+    }
+
+    /// A monthly payer's income rows must go to the month they belong to.
+    ///
+    /// A fund paying ~15 days after going ex puts February's payment 14 days
+    /// *before* the March ex-date and March's own 15 days after it — so on
+    /// absolute distance the previous month's row was the nearer anchor and
+    /// took the match outright. The gross then compared was February's, and
+    /// the alert reported a mismatch that was really a mis-assignment.
+    ///
+    /// February's own event is absent from the calendar here, which is what
+    /// leaves its row unclaimed for March to steal: Yahoo serves 8 of HNDQ's
+    /// 12 periods, so a recorded distribution the calendar never knew about is
+    /// an ordinary thing to meet.
+    #[tokio::test]
+    async fn a_monthly_payer_does_not_match_the_previous_month_s_payment() {
+        let pool = test_pool().await;
+        holding_before_the_ex_date(&pool).await;
+        insert_event(&pool, 1, ymd(2024, 3, 1), "0.20", "2026-08-27T00:00:00Z").await;
+
+        // Both payments carry only `date_paid` — the anchor 13 of the 47 rows
+        // in the live database have, and the one the window has to carry the
+        // matching on.
+        test_support::income(1, 1, ymd(2024, 2, 16))
+            .with(|i| i.unfranked_amount = dec("10.00"))
+            .insert(&pool)
+            .await;
+        test_support::income(2, 1, ymd(2024, 3, 16))
+            .with(|i| i.unfranked_amount = dec("20.00"))
+            .insert(&pool)
+            .await;
+
+        let h = health(&pool, ymd(2026, 8, 27)).await;
+        assert!(
+            h.dividend_amount_mismatches.is_empty(),
+            "March's event is March's payment, exactly: {:?}",
+            h.dividend_amount_mismatches
+        );
+        assert!(h.missing_dividend_entries.is_empty());
+    }
+
+    /// The control for the `date_paid` rule: an **entitlement** anchor before
+    /// the ex-date still matches, which is the whole reason
+    /// [`DIVIDEND_MATCH_BEFORE_DAYS`] reaches backwards at all.
+    #[tokio::test]
+    async fn an_entitlement_date_before_the_ex_date_still_matches() {
+        let pool = test_pool().await;
+        holding_before_the_ex_date(&pool).await;
+        insert_event(&pool, 1, ymd(2024, 7, 1), "0.20", "2026-08-27T00:00:00Z").await;
+        // The distribution period ends 30 June and the security goes ex on
+        // 1 July; the cash lands far outside the window, so the entitlement
+        // date is the only anchor that can carry this match.
+        test_support::income(1, 1, ymd(2024, 12, 1))
+            .with(|i| {
+                i.unfranked_amount = dec("20.00");
+                // An entitlement date is a trust row's fact, so the row has to
+                // be one — which is also the shape that carries this anchor.
+                i.trust_income = true;
+                i.entitlement_date = Some(ymd(2024, 6, 30));
+            })
+            .insert(&pool)
+            .await;
+
         let h = health(&pool, ymd(2026, 8, 27)).await;
         assert!(h.missing_dividend_entries.is_empty());
         assert!(h.dividend_amount_mismatches.is_empty());

@@ -64,10 +64,18 @@ pub struct RolloverOrigin {
     /// to at its record date still reduces their cost base; it is simply the
     /// replacement parcel that holds them by the time it is paid.
     ///
-    /// For a **scrip-for-scrip exchange**, and for a demerger, it is the
-    /// operation date. The exchange's replacement units are of a listing the
-    /// taxpayer was not on the register of beforehand, so a record date
-    /// preceding the operation found them not there.
+    /// For a **scrip-for-scrip exchange**, and for a **demerger's spun-off**
+    /// parcel, it is the operation date. Those replacement units are of a
+    /// listing the taxpayer was not on the register of beforehand, so a record
+    /// date preceding the operation found them not there.
+    ///
+    /// A **demerger's head** parcel goes the other way, with the transfer: the
+    /// units stayed on the head company's own register throughout — the
+    /// demerger spun a subsidiary out from under them, it did not move them —
+    /// so it too carries its source parcel's date. `domain::cost_base`'s
+    /// `ParcelRow::registered_across_the_rollover` is where the three cases are
+    /// decided, and treating the head parcel as the exchange's twin is exactly
+    /// the entitlement it used to lose.
     pub registered_from: NaiveDate,
 }
 

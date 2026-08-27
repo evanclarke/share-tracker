@@ -77,7 +77,9 @@
 //!   stored: the alerts are about a distribution the books may have missed,
 //!   and a provider that drops history must not be able to quietly retire one.
 //!   An event whose amount the provider revises is updated in place, and the
-//!   audit trail records what it said before (migration 0048).
+//!   audit trail records what it said before (migration 0048). An event the
+//!   provider re-serves **unchanged** is not rewritten at all, so a weekly run
+//!   over years of history leaves no trace in that trail (see [`db_store`]).
 //! - The fetch always passes an **explicit period**. `Range::Max` silently
 //!   truncates the action stream — `VDHG.AX` returned 8 events over
 //!   `Range::Max` against 28 for the same span requested as
@@ -148,7 +150,10 @@ pub struct DistributionEvent {
     /// provenance, served by `GET /distribution_events`, shown on the
     /// Distribution Calendar screen and carried into `row_history`.
     pub fetched_symbol: String,
-    /// RFC 3339 UTC timestamp of the fetch that produced the row.
+    /// RFC 3339 UTC timestamp of the fetch that produced this **answer** —
+    /// the one that last inserted or revised the row, not the last one to
+    /// re-confirm it (see [`db_store`]). That is what
+    /// [`Self::amount_per_unit`]'s unit basis is dated by.
     pub fetched_at: String,
 }
 
@@ -219,6 +224,12 @@ pub trait DistributionFetcher: Send + Sync {
     fn symbol(&self, market: &Market, date: NaiveDate) -> Result<String, String>;
 
     /// Every distribution with an ex-date in `from..=to`, ascending.
+    ///
+    /// **`from..=to` is guaranteed to sit wholly inside one of the market's
+    /// identities**, so the implementation resolves one symbol for the whole
+    /// window — the same contract `closing_price::PriceFetcher::daily_closes`
+    /// states, and [`run_refresh`] is what upholds it by splitting a held span
+    /// on `Market::identity_segments` before it calls.
     fn distributions<'a>(
         &'a self,
         market: &'a Market,
@@ -283,6 +294,30 @@ impl From<StoreError> for ApiError {
 /// figure would misdate the provider's own revision. The audit trail records
 /// what the row said before (migration 0048), which is where a revised amount
 /// stays visible.
+///
+/// # A re-fetch that changes nothing writes nothing
+///
+/// The refresh job re-stores each listing's **whole** held span every week, so
+/// nearly every write it makes restates a row the provider has not revised.
+/// Left to bump `fetched_at` alone, each weekly run would UPDATE every stored
+/// event and fire its `row_history` trigger — hundreds of audit rows a week
+/// differing in nothing but a timestamp, in an append-only trail whose
+/// retention is keep-forever by decision, drowning the Row History screen's
+/// browse mode in refresh noise.
+///
+/// So the `DO UPDATE` carries a `WHERE`: the row is rewritten only when the
+/// provider's own answer differs — the amount, its currency, the provider, or
+/// the symbol it was fetched under. A conflict whose `WHERE` is false is not
+/// an error; SQLite simply skips the update.
+///
+/// **`fetched_at` therefore dates the observation that last *changed* the row,
+/// not the last one to confirm it — and that is what
+/// [`DistributionEvent::amount_per_unit`]'s unit basis needs.** The figure is
+/// in the basis in force when the provider served it, and Yahoo restates a
+/// whole dividend history whenever the security splits: a split since the last
+/// fetch necessarily changes the amount, so an amount that has *not* changed
+/// is still in the basis its own `fetched_at` names. Bumping the timestamp
+/// past an unchanged figure would be the reading that could be wrong.
 pub async fn db_store(
     conn: &mut sqlx::SqliteConnection,
     listing_id: i64,
@@ -308,7 +343,16 @@ pub async fn db_store(
         });
     }
     // ON CONFLICT over the natural key, so the surrogate id — and with it the
-    // row's audit trail — survives a re-fetch.
+    // row's audit trail — survives a re-fetch. The `WHERE` is what keeps a
+    // weekly re-statement of an unrevised row out of that trail entirely (see
+    // the doc above); `fetched_at` is deliberately not among the columns it
+    // tests, since it differs on every single run and would make the guard a
+    // no-op.
+    //
+    // The amounts are compared as the TEXT decimals they are stored as, never
+    // cast to REAL — and here that is exact rather than a compromise: both
+    // sides of the comparison are written by the same `Money` encoding of a
+    // `Decimal`, so equal values are equal strings.
     sqlx::query(
         "INSERT INTO distribution_events \
              (listing_id, ex_date, amount_per_unit, currency, source, fetched_symbol, fetched_at) \
@@ -318,7 +362,11 @@ pub async fn db_store(
              currency = excluded.currency, \
              source = excluded.source, \
              fetched_symbol = excluded.fetched_symbol, \
-             fetched_at = excluded.fetched_at",
+             fetched_at = excluded.fetched_at \
+         WHERE amount_per_unit <> excluded.amount_per_unit \
+            OR currency <> excluded.currency \
+            OR source <> excluded.source \
+            OR fetched_symbol <> excluded.fetched_symbol",
     )
     .bind(listing_id)
     .bind(event.ex_date)
@@ -359,8 +407,9 @@ pub const CANDLE_JOIN_MARGIN_DAYS: i64 = 5;
 /// because the question the alerts ask is retrospective — "is there a
 /// distribution from any year we held this that was never entered?" — and a
 /// lookback would answer it only for the weeks since the feature was built.
-/// One provider call per listing per run, which is why this is weekly work
-/// rather than daily.
+/// One provider call per *identity* per listing per run — a span straddling a
+/// rename is quoted under each ticker that was actually in force over it — so
+/// this is weekly work rather than daily.
 ///
 /// A listing whose fetch fails does not stop the others, and the run fails
 /// (so the Jobs screen shows it) naming each failure. Events the adapter could
@@ -401,46 +450,85 @@ pub async fn run_refresh(
             continue;
         }
 
-        let symbol = match fetcher.symbol(&market, from) {
-            Ok(symbol) => symbol,
-            Err(e) => {
-                failures.push(format!("{} ({listing_id}): {e}", market.listing.ticker));
-                continue;
-            }
-        };
-        let answer = match fetcher.distributions(&market, from, to).await {
-            Ok(answer) => answer,
-            // The provider positively answers that it serves no such series:
-            // the security's ticker was retired, and asking again next week
-            // will get the same answer forever. Failing the run on it would
-            // leave a red Jobs screen nothing can clear — the shape SCENARIOS
-            // Q-02 fixed for prices — while the honest consequence is only
-            // that this listing has no calendar, which the alerts degrade
-            // gracefully around (an alert not firing was never proof).
-            Err(FetchError::NoSuchSymbol(message)) => {
-                retired.push(format!(
-                    "{} ({listing_id}): {message}",
-                    market.listing.ticker
-                ));
-                continue;
-            }
-            // Anything else — an outage, a rate limit, a transport failure —
-            // carries no verdict on the symbol and must fail loudly, or a
-            // provider having a bad morning would read as "nothing to report".
-            Err(FetchError::Other(message)) => {
-                failures.push(format!(
-                    "{} ({listing_id}): {message}",
-                    market.listing.ticker
-                ));
-                continue;
-            }
-        };
-        if !answer.undatable.is_empty() {
+        // **One provider call per identity, not one per listing.** A held span
+        // that straddles a rename was quoted under a different ticker either
+        // side of it, so asking for the whole of it under the symbol in force
+        // at its *start* asks for a ticker that was not quoted for most of it
+        // — the same split `closing_price::collection`'s `fetch_and_store`
+        // makes over `Market::identity_segments`, and for the same reason.
+        //
+        // Found on the real portfolio: LAR's held span begins before its 2025
+        // rename from LAAC, so the single call went out as LAAC, Yahoo
+        // answered `NoSuchSymbol`, and the listing was left with **no calendar
+        // at all** — both alerts silent for it forever — when its post-rename
+        // history was there to be collected under LAR.
+        let mut collected: Vec<(String, FetchedDistribution)> = Vec::new();
+        let mut undatable: Vec<NaiveDate> = Vec::new();
+        let mut segment_failure = None;
+        for (segment_from, segment_to, _identity) in market.identity_segments(from, to) {
+            // Resolved per segment, so the symbol a row records is the one its
+            // own span was actually fetched under.
+            let symbol = match fetcher.symbol(&market, segment_from) {
+                Ok(symbol) => symbol,
+                Err(e) => {
+                    segment_failure =
+                        Some(format!("{} ({listing_id}): {e}", market.listing.ticker));
+                    break;
+                }
+            };
+            let answer = match fetcher
+                .distributions(&market, segment_from, segment_to)
+                .await
+            {
+                Ok(answer) => answer,
+                // The provider positively answers that it serves no such
+                // series: the ticker this span was quoted under was retired,
+                // and asking again next week will get the same answer forever.
+                // Failing the run on it would leave a red Jobs screen nothing
+                // can clear — the shape SCENARIOS Q-02 fixed for prices —
+                // while the honest consequence is only that *this span* has no
+                // calendar, which the alerts degrade gracefully around (an
+                // alert not firing was never proof). The listing's other spans
+                // are still collected, which is the whole point of segmenting.
+                Err(FetchError::NoSuchSymbol(message)) => {
+                    retired.push(format!(
+                        "{} ({listing_id}) {segment_from}..{segment_to} as {symbol}: {message}",
+                        market.listing.ticker
+                    ));
+                    continue;
+                }
+                // Anything else — an outage, a rate limit, a transport failure
+                // — carries no verdict on the symbol and must fail loudly, or
+                // a provider having a bad morning would read as "nothing to
+                // report". It fails the whole listing rather than the one
+                // segment: the listing's set is stored atomically, and half a
+                // history is not a fact about the other half.
+                Err(FetchError::Other(message)) => {
+                    segment_failure = Some(format!(
+                        "{} ({listing_id}) {segment_from}..{segment_to} as {symbol}: {message}",
+                        market.listing.ticker
+                    ));
+                    break;
+                }
+            };
+            undatable.extend(answer.undatable);
+            collected.extend(
+                answer
+                    .events
+                    .into_iter()
+                    .map(|event| (symbol.clone(), event)),
+            );
+        }
+        if let Some(message) = segment_failure {
+            failures.push(message);
+            continue;
+        }
+        if !undatable.is_empty() {
+            undatable.sort_unstable();
             undated.push(format!(
                 "{} ({listing_id}): {}",
                 market.listing.ticker,
-                answer
-                    .undatable
+                undatable
                     .iter()
                     .map(ToString::to_string)
                     .collect::<Vec<_>>()
@@ -456,14 +544,14 @@ pub async fn run_refresh(
             .await
             .map_err(|e| e.to_string())?;
         let mut failed = None;
-        for event in &answer.events {
+        for (symbol, event) in &collected {
             if let Err(e) = db_store(
                 &mut tx,
                 listing_id,
                 event,
                 &market.listing.currency,
                 fetcher.source(),
-                &symbol,
+                symbol,
                 &fetched_at,
             )
             .await
@@ -479,7 +567,7 @@ pub async fn run_refresh(
             }
             None => {
                 tx.commit().await.map_err(|e| e.to_string())?;
-                stored += answer.events.len();
+                stored += collected.len();
             }
         }
     }
@@ -502,7 +590,7 @@ pub async fn run_refresh(
     let mut notes: Vec<String> = Vec::new();
     if !retired.is_empty() {
         notes.push(format!(
-            "{} listing(s) have no calendar: the provider serves no series under the symbol they \
+            "{} held span(s) have no calendar: the provider serves no series under the symbol they \
              were quoted under, so nothing can be collected for them and the missing-distribution \
              alert cannot speak for them: {}",
             retired.len(),

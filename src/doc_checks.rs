@@ -4261,6 +4261,38 @@ fn distribution_calendar_documented() {
     assert!(README_MD.contains("**Advisory by decision**"));
 }
 
+/// Docs-sync pin for the four corrections the 2026-08-28 review of the
+/// distribution calendar produced. Each is a rule a reader acting on an alert
+/// — or wondering why one did not fire — would otherwise have to rediscover
+/// from the code, and each has a behavioural test of its own beside it.
+#[test]
+fn distribution_calendar_matching_and_refresh_rules_documented() {
+    // The fetch is split per identity: a renamed listing's calendar is the
+    // case that had none at all, and the note is where the gap is said aloud.
+    assert!(API_MD.contains("**A span straddling a [rename](#listings) is quoted"));
+    assert!(API_MD.contains("under each ticker that was actually in force over it**"));
+    assert!(API_MD.contains("left the listing with **no calendar at all**"));
+
+    // A re-fetch that changes nothing writes nothing — and what that means for
+    // the timestamp the unit basis is dated by.
+    assert!(
+        API_MD.contains("**An event the provider re-serves unchanged is not rewritten at all**")
+    );
+    assert!(
+        API_MD.contains("**`fetched_at` dates the answer that last inserted or revised the row**")
+    );
+    assert!(SCHEMA_MD.contains("that last **inserted or revised** the row"));
+
+    // A payment cannot precede its own ex-date — the rule that keeps a monthly
+    // payer's rows on their own month.
+    assert!(API_MD.contains("**a payment cannot precede its own ex-date**"));
+    assert!(API_MD.contains("the previous month's row was the nearer anchor"));
+
+    // The gross comparison is refused across currencies rather than made wrong.
+    assert!(API_MD.contains("**And only within one currency.**"));
+    assert!(API_MD.contains("only the amount comparison is skipped"));
+}
+
 // ---------------------------------------------------------------------------
 // Cross-document links
 // ---------------------------------------------------------------------------
