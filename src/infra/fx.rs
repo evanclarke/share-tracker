@@ -794,7 +794,7 @@ mod tests {
              period-performance endpoints value through it, surfacing `provisional`",
         ),
         (
-            "entities/closing_price.rs",
+            "entities/closing_price/live.rs",
             "live-quote AUD conversion, surfacing `fx_provisional`",
         ),
         (
