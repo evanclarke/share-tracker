@@ -1608,27 +1608,76 @@ tax gate: see "Deliberately out of scope" below.
 
 **Provider capability (verified live against `yfinance-rs` 0.9.1 on 2026-08-27).** Yahoo returns a
 typed corporate-action stream — `Ticker::actions()` yielding `Action::Dividend { date, amount }`,
-the amount a `Decimal`-backed `Price` carrying its own currency, so no `f64` ever enters. Three
+the amount a `Decimal`-backed `Price` carrying its own currency, so no `f64` ever enters. Four
 measured facts constrain the implementation:
 
 - **`Range::Max` silently truncates.** `VDHG.AX` returned 8 events over `Range::Max` and **28** for
   the same span requested as an explicit `between(start, end)` period. Any fetch must pass an
   explicit period; `Range::Max` would quietly lose most of the history
-- **The date is the ex-date, and the amounts reconcile.** All three recorded HNDQ distributions
-  matched Yahoo per-unit to 6 dp (2024-07-01 → 0.726547 against $1315.78/1811; 2025-01-01 →
-  0.018741 against $49.08/2620; 2025-07-01 → 0.865644 against $2267.99/2620)
-- **Coverage per security is unproven.** Yahoo returns 8 HNDQ events since the fund launched in
-  August 2020, where a semi-annual payer should have 11–12 (2022-01, 2022-07, 2023-07 and 2026-01
-  are absent). Either HNDQ genuinely distributed nothing across the 2022 bear market and mid-2023,
-  or Yahoo's ASX ETF coverage has holes
+- **The amounts reconcile exactly.** All three recorded HNDQ distributions matched Yahoo per-unit
+  to 6 dp (0.726547 against $1315.78/1811; 0.018741 against $49.08/2620; 0.865644 against
+  $2267.99/2620), and all 8 of Yahoo's HNDQ amounts match Betashares' published figures to 6 dp
+- **The date is *not* the ex-date — it is a UTC calendar date, and half the year it is a day
+  early.** See "The one-day ex-date shift" below: this is the finding that shapes the fetch
+- **Coverage is complete for the one security it could be checked against.** See "Coverage
+  settled" below
 
-**That last point gates the work.** If the coverage is holed, "no ex-date found" cannot mean "no
-distribution", and every conclusion the feed could draw in the *negative* direction collapses.
-Settle it first by comparing Yahoo's 8 HNDQ events against Betashares' published distribution
-history — a manual check, not code — and record the answer here before building anything.
+**Coverage settled (2026-08-27, the gate that stood in front of this work).** Yahoo's ASX ETF
+coverage is **not** holed — the four "absent" HNDQ events were periods on which HNDQ **distributed
+nothing**. Betashares' own "Recent distributions" table for HNDQ (fetched from
+`betashares.com.au/fund/nasdaq-100-etf-currency-hedged/`, read out of the raw HTML rather than a
+rendering) lists 12 semi-annual periods since the fund's 20 July 2020 inception, and prints a bare
+`-` in the "Distribution Unit ($)" column for exactly four of them: ex 4 Jan 2022, 1 Jul 2022,
+3 Jul 2023 and 2 Jan 2026. The remaining eight carry an amount, and those eight are precisely the
+eight events Yahoo returns, each matching to 6 dp. So "Yahoo knows of no ex-date" for a security it
+covers **can** be read as "no distribution", and the alerts below may draw conclusions in the
+negative direction.
+
+Two limits on how far that generalises, both to be stated rather than assumed away: it is one
+security's history, and Betashares' table is headed "Recent distributions" — it happens to reach
+inception for a fund only six years old, and would not for an older one. The alerts are advisory,
+so a coverage hole in some other security degrades them rather than breaking anything; nothing here
+is permitted to gate a tax figure regardless (see "Deliberately out of scope").
+
+**The one-day ex-date shift (2026-08-27, found while settling the gate; it corrects the "the date
+is the ex-date" reading recorded earlier the same day).** `Action::Dividend.date` is **not the
+ex-date**. The crate converts Yahoo's event timestamp with
+`DateTime::from_timestamp(ts, 0).date_naive()` (`core/conversions.rs`'s `i64_to_date`) — a **UTC**
+calendar date — discarding the `chart.meta.exchangeTimezoneName` the same response carries. Yahoo
+stamps the event at the exchange's session start, so for an ASX security the returned date is the
+true ex-date only in **AEST** (UTC+10); in **AEDT** (UTC+11, October–April) it is **one day early**,
+and it then routinely lands on a day the ASX was shut. Measured across three securities:
+
+| security | crate date | true ASX ex-date | source |
+| --- | --- | --- | --- |
+| HNDQ | 2025-01-01 (New Year's Day) | 2 Jan 2025 | Betashares |
+| HNDQ | 2024-01-01 (New Year's Day) | 2 Jan 2024 | Betashares |
+| HNDQ | 2023-01-02 | 3 Jan 2023 | Betashares |
+| HNDQ | 2021-01-03 (a Sunday) | 4 Jan 2021 | Betashares |
+| HNDQ | 2025-07-01 | 1 Jul 2025 | Betashares (unshifted — AEST) |
+| BHP | 2025-03-05 | 6 Mar 2025 | BHP 2025 interim dividend notice |
+| BHP | 2025-09-04 | 4 Sep 2025 | BHP FY2025 final (unshifted — AEST) |
+| VDHG | 2025-03-31 | 1 Apr 2025 | consistent with the same rule |
+
+The two offsets bracket the stamp hour: a UTC+11 event shifts and a UTC+10 event does not, so the
+timestamp sits in [10:00, 11:00) exchange-local — ASX open. The crate offers no route to the raw
+instant (`Action::Dividend` carries only the collapsed `NaiveDate`), and 0.9.1 is the current
+release, so there is no upstream fix to wait for.
+
+**The correction, verified: join the event to the candle sharing its UTC date.** `HistoryBuilder`
+with `.actions(true)` and `fetch_full()` returns the candles *and* the actions from one response,
+and `Candle::ts` is a full `DateTime<Utc>` — the instant survives there. Daily candles are stamped
+at session start too, which is what `closing_price::yahoo`'s `daily_closes` already relies on when
+it takes `c.ts.with_timezone(&tz).date_naive()`. So the event whose UTC date is `D` belongs to the
+candle whose UTC `ts` date is `D`, and **that candle's exchange-local date is the ex-date**. This
+assumes nothing about the stamp hour — both sides share one convention. Checked against every
+issuer-published date above: **10 of 10**, including all 8 HNDQ events against Betashares and both
+BHP dividends against BHP's own notices. The fetch must do this rather than store
+`Action::Dividend.date`; storing the raw date would put a quarter of ASX ex-dates on a day the
+market was closed, and would ask "units held on the ex-date" about the wrong day.
 
 **The FY-bucketing trap.** An ASX fund's June-half distribution has an ex-date one or two days
-*into* July (HNDQ: ex 2 July 2025, paid 16 July 2025) but is attributed to the year just **ended**
+*into* July (HNDQ: ex 1 July 2025, paid 16 July 2025) but is attributed to the year just **ended**
 — the registry's own payment advice says so, and `docs/ato/attributing-amounts-to-members.md` is
 the authority. So a stored ex-date must never be bucketed into a financial year. Match a calendar
 event to an income row **by event**, never by financial year.
@@ -1644,7 +1693,8 @@ Scope:
   `closing_prices` pattern: a provider-agnostic fetch behind a trait, the Yahoo implementation the
   only provider-specific part, stored rather than queried live, refreshed by a scheduled job
   registered in `infra/scheduler/registry.rs` with its `schedule.cron` line. Classify the new table
-  for snapshot staleness and for `row_history` auditing, per CLAUDE.md
+  for snapshot staleness and for `row_history` auditing, per CLAUDE.md. The stored ex-date is the
+  **candle-joined** date, never `Action::Dividend.date` — see "The one-day ex-date shift" above
 - A `reports::health` alert — the cross-view banner's **missing dividend entry**: every known
   ex-date where the (listing, holding account) held units on that date and no income row matches
   it, carrying the ticker, the ex-date, and the expected amount (per unit × units held) so the row

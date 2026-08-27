@@ -297,16 +297,31 @@ an explicit `between(start, end)`; the stored date is the **ex-date**, which for
 June-half distribution falls a day or two into July while the income is attributed to the year just
 *ended*, so events are matched to income rows by event and never bucketed into a financial year;
 and matching cannot key on `ex_date`, since 13 of the live database's 47 income rows have none.)
-- [ ] **Gate on this first, before any code**: settle whether Yahoo's ASX ETF coverage is complete.
+- [x] **Gate on this first, before any code**: settle whether Yahoo's ASX ETF coverage is complete.
   It returns 8 HNDQ events since the August 2020 launch where a semi-annual payer should have 11–12
   (2022-01, 2022-07, 2023-07, 2026-01 absent). Compare against Betashares' published HNDQ
   distribution history and record the answer in REQUIREMENTS. If the coverage is holed, "no ex-date
   found" cannot mean "no distribution" and the alerts below can only ever fire on events Yahoo
   *does* have — still useful, but say so rather than implying completeness
+  — **settled 2026-08-27: the coverage is not holed.** Betashares' own distribution table (read out
+  of the raw HTML, not a rendering) prints a bare `-` in its amount column for exactly the four
+  periods Yahoo lacks, so HNDQ distributed nothing on them; its other eight rows match Yahoo's
+  eight events to 6 dp. Recorded in REQUIREMENTS under "Coverage settled", with the two limits on
+  how far one security generalises. **The gate is clear** — the alerts below may read "no ex-date
+  found" as "no distribution"
+- [ ] **Found while settling the gate, and it corrects a fact recorded in REQUIREMENTS earlier the
+  same day**: `Action::Dividend.date` is a **UTC** calendar date, not the ex-date — one day early
+  for every ASX event in AEDT (October–April), where it then routinely lands on a day the market
+  was shut (New Year's Day, a Sunday, Easter Monday). The fetch must recover the true ex-date by
+  joining the event to the candle sharing its UTC date (`fetch_full()` returns candles and actions
+  from one response, and `Candle::ts` keeps the instant the action lost) — verified 10 of 10
+  against issuer-published dates across HNDQ, BHP and VDHG. See REQUIREMENTS "The one-day ex-date
+  shift" and "The correction, verified"
 - [ ] `distribution_events` table + migration (listing, ex-date, amount per unit, currency,
   provenance); classify it for snapshot staleness and `row_history` auditing per CLAUDE.md
 - [ ] Provider-agnostic fetch behind a trait, Yahoo the only provider-specific part, on the
-  `closing_price` pattern; explicit period, never `Range::Max`
+  `closing_price` pattern; explicit period, never `Range::Max`; candle-joined ex-date, never the
+  raw `Action::Dividend.date`
 - [ ] Scheduled refresh job in `infra/scheduler/registry.rs` + its `schedule.cron` line
 - [ ] `reports::health` **missing dividend entry** alert: known ex-date, units held on it, no
   matching income row — carrying ticker, ex-date and expected amount (per unit × units held)

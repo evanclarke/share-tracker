@@ -8,6 +8,7 @@ const API_MD: &str = include_str!("../docs/API.md");
 const README_MD: &str = include_str!("../README.md");
 const SCHEMA_MD: &str = include_str!("../docs/SCHEMA.md");
 const DENY_TOML: &str = include_str!("../deny.toml");
+const REQUIREMENTS_MD: &str = include_str!("../REQUIREMENTS.md");
 
 /// The body of the `# Known limitations` section of `docs/API.md`.
 fn known_limitations() -> &'static str {
@@ -4138,4 +4139,55 @@ mod freebsd_packaging {
         assert!(README_MD.contains("## Releases and versioning"));
         assert!(README_MD.contains("**Cutting a release = bumping `version` in `Cargo.toml`**"));
     }
+}
+
+/// Research-gate pin for the distribution calendar (TODO / REQUIREMENTS
+/// 2026-08-27). Both conclusions the remaining work is built on are recorded
+/// in `REQUIREMENTS.md`, so neither can be deleted while code still depends
+/// on it.
+///
+/// The gate was "is Yahoo's ASX ETF coverage complete?", and the answer —
+/// checked against Betashares' own published HNDQ history — is that it is:
+/// the four periods Yahoo lacks are periods HNDQ distributed nothing on. That
+/// is what licenses the missing-dividend alert to read "no ex-date found" as
+/// "no distribution", so it has to stay written down with its two stated
+/// limits.
+///
+/// Settling it turned up a second fact that shapes the fetch:
+/// `Action::Dividend.date` is a UTC calendar date, a day early for every ASX
+/// event in AEDT, and the true ex-date is recovered by joining the event to
+/// the candle sharing its UTC date. This is the documentation half; the
+/// behaviour is pinned by the fetcher's own tests once it exists.
+#[test]
+fn distribution_calendar_research_gate_recorded() {
+    // The gate's verdict, and that it is a verdict rather than a restatement
+    // of the open question.
+    assert!(REQUIREMENTS_MD.contains("**Coverage settled"));
+    assert!(REQUIREMENTS_MD.contains("Yahoo's ASX ETF\ncoverage is **not** holed"));
+    // What the issuer's own table said, which is the whole basis.
+    assert!(REQUIREMENTS_MD.contains("HNDQ **distributed\nnothing**"));
+    assert!(REQUIREMENTS_MD.contains("ex 4 Jan 2022, 1 Jul 2022,\n3 Jul 2023 and 2 Jan 2026"));
+    // The permission the verdict grants, stated explicitly.
+    assert!(REQUIREMENTS_MD.contains(
+        "\"Yahoo knows of no ex-date\" for a security it\ncovers **can** be read as \"no \
+         distribution\""
+    ));
+    // And the two limits on it, so the permission is never read as unbounded.
+    assert!(REQUIREMENTS_MD.contains("it is one\nsecurity's history"));
+    assert!(REQUIREMENTS_MD.contains("nothing here\nis permitted to gate a tax figure"));
+
+    // The one-day shift, its mechanism, and the correction the fetch must use.
+    assert!(REQUIREMENTS_MD.contains("**The one-day ex-date shift"));
+    assert!(REQUIREMENTS_MD.contains("`Action::Dividend.date` is **not the\nex-date**"));
+    assert!(REQUIREMENTS_MD.contains("discarding the `chart.meta.exchangeTimezoneName`"));
+    assert!(
+        REQUIREMENTS_MD.contains("in **AEDT** (UTC+11, October–April) it is **one day early**")
+    );
+    assert!(REQUIREMENTS_MD.contains("join the event to the candle sharing its UTC date"));
+    assert!(REQUIREMENTS_MD.contains("**10 of 10**"));
+    // The scope bullet carries the rule too, so the fetch cannot be built off
+    // the raw date by reading the scope list alone.
+    assert!(REQUIREMENTS_MD.contains(
+        "The stored ex-date is the\n  **candle-joined** date, never `Action::Dividend.date`"
+    ));
 }
