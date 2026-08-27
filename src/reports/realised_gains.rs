@@ -332,7 +332,7 @@ async fn load_report_data(conn: &mut sqlx::SqliteConnection) -> Result<ReportDat
 
     let buys: Vec<ParcelRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {} FROM trades WHERE trade_type IN ('Buy', 'DRP')",
-        ParcelRow::COLUMNS
+        ParcelRow::columns()
     )))
     .fetch_all(&mut *conn)
     .await?;
@@ -868,6 +868,7 @@ mod tests {
             scrip_action_id: None,
             demerger_action_id: None,
             transfer_id: None,
+            demerger_head_listing_id: None,
         }
     }
 

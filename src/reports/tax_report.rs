@@ -605,7 +605,7 @@ async fn load_disposal_inputs(
 ) -> Result<DisposalInputs, sqlx::Error> {
     let buys: Vec<ParcelRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {} FROM trades WHERE trade_type IN ('Buy', 'DRP')",
-        ParcelRow::COLUMNS
+        ParcelRow::columns()
     )))
     .fetch_all(&mut *conn)
     .await?;

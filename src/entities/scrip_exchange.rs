@@ -746,6 +746,48 @@ mod tests {
         assert_eq!(n, 2);
     }
 
+    /// The counterpart to a demerger's head parcel (`entities::demerger`): an
+    /// exchange's replacement parcel is **ex-entitlement** to a return of
+    /// capital on the acquiring listing whose record date preceded it. The
+    /// taxpayer was not on that listing's register when the entitlement was
+    /// fixed — they held the target — so the payment reduces nothing, even
+    /// though the parcel's *deemed* acquisition date is years before it.
+    #[tokio::test]
+    async fn a_replacement_parcel_is_ex_entitlement_to_the_acquirers_return_of_capital() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "OLD").await;
+        insert_listing(&pool, 2, "NEW").await;
+        insert_buy(&pool, 1, 1, d(2020, 10, 1), "1000", "1.50").await;
+
+        // Record date 25 Jun, payment 1 Aug, exchange 1 Jul — inside the
+        // window, and on the listing the units are exchanged *into*.
+        corporate_action::db_upsert(
+            &pool,
+            &CorporateAction {
+                id: 5,
+                listing_id: 2,
+                date: d(2024, 8, 1),
+                kind: ActionKind::ReturnOfCapital {
+                    amount_per_unit: dec("0.05"),
+                    currency: "AUD".to_string(),
+                    record_date: Some(d(2024, 6, 25)),
+                },
+            },
+        )
+        .await
+        .unwrap();
+        insert_scrip(&pool, 10, d(2024, 7, 1)).await;
+        db_exchange(&pool, 10).await.unwrap();
+
+        let open = crate::reports::open_parcels::db_open_parcels(&pool)
+            .await
+            .unwrap();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].listing_id, 2);
+        assert_eq!(open[0].return_of_capital_reduction, Decimal::ZERO);
+        assert_eq!(open[0].remaining_cost_base, dec("1500"));
+    }
+
     /// A partly sold parcel carries only its remaining units' share of the
     /// cost base (incl. brokerage) into the replacement.
     #[tokio::test]

@@ -511,7 +511,7 @@ async fn transfer_ins(
     for alloc in &body.allocations {
         let parcel: Option<ParcelRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "SELECT {} FROM trades WHERE id = ?",
-            ParcelRow::COLUMNS
+            ParcelRow::columns()
         )))
         .bind(alloc.purchase_trade_id)
         .fetch_optional(&mut *conn)

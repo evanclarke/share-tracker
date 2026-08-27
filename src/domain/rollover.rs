@@ -118,7 +118,7 @@ impl CostBaseInputs {
         let parcel_rows: Vec<ParcelRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "SELECT {} FROM trades \
              WHERE listing_id = ? AND trade_type IN ('Buy', 'DRP') ORDER BY date, id",
-            ParcelRow::COLUMNS
+            ParcelRow::columns()
         )))
         .bind(listing_id)
         .fetch_all(&mut *conn)

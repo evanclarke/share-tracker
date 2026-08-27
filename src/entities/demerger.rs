@@ -941,6 +941,70 @@ mod tests {
         assert_eq!(dm.demerged_replacements[0].brokerage, dec("270"));
     }
 
+    /// **Reproduction (TODO, `net_capital_gain` C2 follow-up).** A return of
+    /// capital whose record date falls *before* a demerger and whose payment
+    /// falls after it still reaches the **head** replacement parcel: the head
+    /// listing continued, and the taxpayer was on its register when
+    /// entitlement was fixed. The demerged entity's own payment, fixed at the
+    /// same record date, does not reach the parcel it spun off into: those
+    /// units are of a listing the taxpayer was not yet on the register of.
+    ///
+    /// Both parcels carry the same `demerger_action_id`, so the two halves of
+    /// this are one question — which is why they are asserted together.
+    #[tokio::test]
+    async fn a_head_parcel_keeps_its_entitlement_to_a_return_of_capital_across_the_demerger() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "HEAD").await;
+        insert_listing(&pool, 2, "DEM").await;
+        insert_buy(&pool, 1, 1, d(2020, 10, 1), "1000", "1.50").await;
+
+        // Record date 25 Jun, payment 1 Aug, demerger 1 Jul — inside the
+        // window. Both listings pay 5c a unit off the same record date.
+        for (id, listing_id) in [(5, 1), (6, 2)] {
+            corporate_action::db_upsert(
+                &pool,
+                &CorporateAction {
+                    id,
+                    listing_id,
+                    date: d(2024, 8, 1),
+                    kind: ActionKind::ReturnOfCapital {
+                        amount_per_unit: dec("0.05"),
+                        currency: "AUD".to_string(),
+                        record_date: Some(d(2024, 6, 25)),
+                    },
+                },
+            )
+            .await
+            .unwrap();
+        }
+        insert_demerger(&pool, 10, d(2024, 7, 1)).await;
+        let dm = db_demerge(&pool, 10).await.unwrap();
+
+        // The payment is dated after the demerger, so it is not in the cost
+        // base apportioned at it: head $1,200 + demerged $300 of the $1,500.
+        assert_eq!(dm.head_replacements[0].brokerage, dec("1200"));
+        assert_eq!(dm.demerged_replacements[0].brokerage, dec("300"));
+
+        let open = crate::reports::open_parcels::db_open_parcels(&pool)
+            .await
+            .unwrap();
+        let head = open
+            .iter()
+            .find(|p| p.listing_id == 1)
+            .expect("the head replacement parcel is open");
+        let demerged = open
+            .iter()
+            .find(|p| p.listing_id == 2)
+            .expect("the demerged parcel is open");
+        // 1,000 units × 5c against the head parcel. Nothing against the
+        // demerged one: its 200 units only joined that register at the
+        // demerger, a week after the record date fixed the entitlement.
+        assert_eq!(head.return_of_capital_reduction, dec("50"));
+        assert_eq!(head.remaining_cost_base, dec("1150"));
+        assert_eq!(demerged.return_of_capital_reduction, Decimal::ZERO);
+        assert_eq!(demerged.remaining_cost_base, dec("300"));
+    }
+
     /// A split on the head listing before the demerger re-bases the units
     /// the entitlement ratio applies to; the cost base is unchanged.
     #[tokio::test]

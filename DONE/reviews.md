@@ -5054,3 +5054,51 @@ transferred and 30 still held out of one parcel — C2 on the 30 only, G1 across
 `corporate_action::per_unit_reduction_dates_a_replacement_parcels_entitlement_from_the_register`
 (the rule itself, pinning the scrip case ex-entitlement and the N-06 guard intact). `docs/API.md`'s
 `ReturnOfCapital` paragraph documents both halves.
+
+## A demerger's head parcel is treated as ex-entitlement to a return of capital it was registered for (net_capital_gain C2 follow-up, 2026-08-27)
+(Found while fixing the C2/rollover section above, and deliberately left out of that fix so the
+narrowing was the safe one. `domain::cost_base::ParcelRow::rollover` dates a replacement parcel's
+return-of-capital entitlement from its units' own acquisition date only for a **transfer**, whose
+units demonstrably stayed on the same listing's register. A **demerger** writes *two* replacement
+parcels — one on the head listing (`action.listing_id`) and one on the demerged entity
+(`demerger_listing_id`, `entities::demerger`) — and the head parcel has a transfer's continuity: the
+head listing continued and the taxpayer was on its register throughout. Both carry the same
+`demerger_action_id` though, and telling them apart needs the parcel's `listing_id` compared with the
+action's, which `ParcelRow` does not carry. So a return of capital on the **head** listing whose
+record date falls before the demerger currently misses the head parcel, exactly as the transfer case
+did before `RolloverOrigin`. A scrip-for-scrip exchange is correctly ex-entitlement and must stay so.)
+- [x] Reproduce: a demerger dated between a head-listing return of capital's record and payment
+  dates; assert whether the head replacement parcel takes the G1 reduction
+- [x] Fix if confirmed — `ParcelRow` would need the demerger's head listing (or the row's own
+  listing compared against it) to set `RolloverOrigin::registered_from`
+- [x] Keep the scrip-exchange case ex-entitlement; a test pins both
+  (`per_unit_reduction_dates_a_replacement_parcels_entitlement_from_the_register`)
+
+**Confirmed and fixed.** The reproduction — `entities::demerger::tests`'s
+`a_head_parcel_keeps_its_entitlement_to_a_return_of_capital_across_the_demerger` — reported a $0
+return-of-capital reduction against a head replacement parcel entitled to $50, so the head parcel's
+cost base stayed $50 too high and would understate a later disposal's gain — the same shape as the
+transfer defect, one operation over.
+
+`ParcelRow` gained `demerger_head_listing_id`, the listing its `demerger_action_id`'s action was
+recorded against, read back off `corporate_actions` by a correlated subquery. That subquery lives in
+the SELECT list itself: `COLUMNS` became the private `TRADE_COLUMNS` behind
+`ParcelRow::columns()` / `columns_qualified(alias)`, so no caller can select the `trades` columns and
+quietly leave the head listing behind. `rollover()` now asks
+`registered_across_the_rollover()` — a transfer, or a demerger parcel whose own listing *is* the
+action's — rather than testing `transfer_id` alone, and the four shapes are pinned side by side in
+`domain::cost_base::tests`'s
+`rollover_registers_a_transfer_and_a_demerger_head_from_the_units_own_acquisition`. The
+scrip-exchange half is pinned end-to-end too, in `entities::scrip_exchange::tests`'s
+`a_replacement_parcel_is_ex_entitlement_to_the_acquirers_return_of_capital`, against a payment on
+the *acquiring* listing whose record date preceded the exchange.
+
+`docs/API.md`'s `ReturnOfCapital` paragraph had stated the narrowing ("a **demerger** is treated as
+the exchange is, for both its parcels") and now states the split: the head parcel entitled as a
+transfer's is, the demerged-entity parcel ex-entitlement as an exchange's is. Nothing else moved —
+no schema change, no endpoint change; the entitlement itself is what
+`docs/ato/cgt-non-assessable-payments.md` already says.
+
+Fixing it turned up one narrower defect beside it, reproduced and recorded as its own TODO.md
+section rather than folded in here: a *chain* of rollovers that changes listing and then keeps it,
+where the later operation reinstates an entitlement the listing change had correctly denied.

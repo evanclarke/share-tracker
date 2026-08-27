@@ -364,7 +364,7 @@ async fn accumulate_on(
     let trades: Vec<TradeFlow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {}, trade_type, transfer_id, scrip_action_id, demerger_action_id \
          FROM trades WHERE date <= ?",
-        ParcelRow::COLUMNS
+        ParcelRow::columns()
     )))
     .bind(as_of)
     .fetch_all(&mut *conn)

@@ -270,7 +270,7 @@ pub fn checked_cost_base(terms: &[Term<'_>]) -> Result<Decimal, UnrepresentableC
 
 /// A Buy/DRP trade row as every cost-base report reads it — one `FromRow`
 /// mapping (TEXT decimal columns via `infra::decimal`'s [`Money`]/[`OptMoney`])
-/// instead of a per-report field-by-field copy. Select [`ParcelRow::COLUMNS`]
+/// instead of a per-report field-by-field copy. Select [`ParcelRow::columns`]
 /// from `trades`.
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct ParcelRow {
@@ -307,30 +307,58 @@ pub struct ParcelRow {
     pub scrip_action_id: Option<i64>,
     pub demerger_action_id: Option<i64>,
     pub transfer_id: Option<i64>,
+    /// The **head** listing of [`Self::demerger_action_id`]'s demerger — the
+    /// continuing listing the action was recorded against — `None` on any
+    /// other parcel. Not a `trades` column: a demerger writes two replacement
+    /// parcels carrying the same action id, one on the head listing and one on
+    /// the demerged entity, and this is the only thing that tells them apart
+    /// (see [`Self::rollover`]). [`Self::columns_qualified`] reads it back off
+    /// `corporate_actions`, so every query built from that list has it.
+    pub demerger_head_listing_id: Option<i64>,
 }
 
 impl ParcelRow {
-    /// The column list matching the `FromRow` mapping, for single-table
-    /// queries against `trades`.
-    pub const COLUMNS: &'static str = "id, listing_id, holding_account_id, date, quantity, \
+    /// The `trades` columns of the `FromRow` mapping. Not a SELECT list on its
+    /// own — the mapping also carries [`Self::demerger_head_listing_id`],
+    /// which is read off another table; build the list with [`Self::columns`]
+    /// or [`Self::columns_qualified`].
+    const TRADE_COLUMNS: &'static str = "id, listing_id, holding_account_id, date, quantity, \
          average_price, brokerage, gst_on_brokerage, currency, fx_rate, spot_fx_rate, \
          deemed_acquisition_date, scrip_action_id, demerger_action_id, transfer_id";
 
-    /// [`Self::COLUMNS`] qualified by a table alias and re-aliased back to the
-    /// plain names, for a query that joins `trades` to a table carrying
-    /// columns of the same name — `quantity`, `date` and `currency` all recur
-    /// elsewhere in the schema, and the `FromRow` mapping reads by name, so an
-    /// unqualified `quantity` would be ambiguous. Same set as `COLUMNS`, so a
-    /// column added to one is added to both.
+    /// The SELECT list matching the `FromRow` mapping, over `trades` under the
+    /// given alias, with every column re-aliased back to its plain name — a
+    /// query that joins `trades` to a table carrying columns of the same name
+    /// (`quantity`, `date` and `currency` all recur elsewhere in the schema)
+    /// would otherwise be ambiguous, and the `FromRow` mapping reads by name.
+    ///
+    /// The final entry is the derived [`Self::demerger_head_listing_id`],
+    /// which is why the mapping has one list rather than a bare column const:
+    /// a caller cannot select the `trades` columns and quietly leave the
+    /// demerger's head listing behind, which would silently reinstate the
+    /// entitlement bug [`Self::rollover`] documents. The subquery aliases the
+    /// action table `head_action` rather than anything short — a caller's own
+    /// query may already have `corporate_actions` in scope under an alias
+    /// (`reports::net_capital_gain`'s return-of-capital join does).
     pub fn columns_qualified(alias: &str) -> String {
-        Self::COLUMNS
+        let mut columns = Self::TRADE_COLUMNS
             .split(',')
             .map(|column| {
                 let column = column.trim();
                 format!("{alias}.{column} AS {column}")
             })
-            .collect::<Vec<_>>()
-            .join(", ")
+            .collect::<Vec<_>>();
+        columns.push(format!(
+            "(SELECT head_action.listing_id FROM corporate_actions head_action \
+              WHERE head_action.id = {alias}.demerger_action_id) AS demerger_head_listing_id"
+        ));
+        columns.join(", ")
+    }
+
+    /// [`Self::columns_qualified`] for the unaliased `FROM trades` every
+    /// single-table read of a parcel uses.
+    pub fn columns() -> String {
+        Self::columns_qualified("trades")
     }
 
     /// The CGT acquisition date: the deemed date where set (rollover
@@ -346,27 +374,53 @@ impl ParcelRow {
         fx::FxOverride::from_trade(self.fx_rate, self.spot_fx_rate)
     }
 
+    /// Whether this parcel's units stayed on **this listing's** register
+    /// across the operation that created it — the question
+    /// [`RolloverOrigin::registered_from`] asks.
+    ///
+    /// Two of the operations keep them there. A **transfer** moves them
+    /// between the taxpayer's own holding accounts, so they never leave the
+    /// listing's register at all. A **demerger** leaves its *head* parcel on
+    /// the continuing listing, which the taxpayer was on the register of
+    /// throughout — the demerged-entity parcel beside it is of a listing they
+    /// were not, and both carry the same `demerger_action_id`, so the two are
+    /// told apart by the parcel's own listing against the action's
+    /// ([`Self::demerger_head_listing_id`]).
+    ///
+    /// A **scrip-for-scrip exchange** does not: its replacement units are of
+    /// another listing entirely, so a record date preceding the exchange found
+    /// the taxpayer not on that register.
+    fn registered_across_the_rollover(&self) -> bool {
+        self.transfer_id.is_some() || self.demerger_head_listing_id == Some(self.listing_id)
+    }
+
     /// The rollover that created this parcel, when it is a replacement parcel:
     /// the operation date (its own trade date) and the date its units joined
     /// this listing's register. `None` for an ordinary (or inherited) parcel.
-    /// See [`RolloverOrigin`].
+    /// See [`RolloverOrigin`] and [`Self::registered_across_the_rollover`].
     ///
-    /// Only a **transfer** registers its units before the operation: it moves
-    /// them between the taxpayer's own accounts, leaving them on the same
-    /// listing's register throughout, so a payment whose record date precedes
-    /// the transfer still reaches them. A scrip exchange's replacement is of
-    /// another listing entirely, and a demerger's parcels are treated the same
-    /// way for now — its **head** parcel is on the continuing listing and has
-    /// a transfer's continuity, but head and spun-off parcels carry the same
-    /// `demerger_action_id` and are told apart only by comparing the parcel's
-    /// listing with the action's, which this row does not know (TODO).
+    /// Where the units did stay registered, the date they joined is taken as
+    /// the parcel's own [`Self::acquired`] — its deemed acquisition date, the
+    /// original units' trade date. That is exact for a parcel whose whole
+    /// chain of rollovers kept it on one register, and reads back too far for
+    /// one that changed listings earlier on (a scrip exchange, then a transfer
+    /// or demerger): the deemed date carries all the way to the first buy,
+    /// while the register the payment is against only goes back to the
+    /// exchange, so the later operation reinstates an entitlement the exchange
+    /// had correctly denied. Only a payment paid after the *last* operation
+    /// with a record date before that exchange can tell the difference —
+    /// everything earlier is already excluded as folded into the carried cost
+    /// base (`RocEvent::per_unit_for`'s operation-date guard). Reproduced and
+    /// recorded as its own TODO section rather than fixed here: the exact
+    /// answer is the *source* parcel's `registered_from`, which is a walk back
+    /// up the rollover chain and not something a single row can answer.
     pub fn rollover(&self) -> Option<RolloverOrigin> {
         (self.scrip_action_id.is_some()
             || self.demerger_action_id.is_some()
             || self.transfer_id.is_some())
         .then(|| RolloverOrigin {
             on: self.date,
-            registered_from: if self.transfer_id.is_some() {
+            registered_from: if self.registered_across_the_rollover() {
                 self.acquired()
             } else {
                 self.date
@@ -943,6 +997,86 @@ mod tests {
     /// been sold by the year end.
     fn whole(id: i64, year: i32, per_unit: &str, quantity: i64) -> AmitReductionEvent {
         amit(id, year, per_unit, quantity, 0)
+    }
+
+    /// A replacement parcel on `listing_id`, created by an operation on
+    /// `operated` (its own trade date) out of units acquired on `acquired`.
+    /// `provenance` sets the one column the operation writes.
+    fn replacement(
+        listing_id: i64,
+        acquired: NaiveDate,
+        operated: NaiveDate,
+        provenance: impl Fn(&mut ParcelRow),
+    ) -> ParcelRow {
+        let mut row = ParcelRow {
+            id: 1,
+            listing_id,
+            holding_account_id: 1,
+            date: operated,
+            quantity: Decimal::from(100),
+            average_price: Decimal::ONE,
+            brokerage: Decimal::ZERO,
+            gst_on_brokerage: Decimal::ZERO,
+            currency: "AUD".to_string(),
+            fx_rate: Decimal::ONE,
+            spot_fx_rate: None,
+            deemed_acquisition_date: Some(acquired),
+            scrip_action_id: None,
+            demerger_action_id: None,
+            transfer_id: None,
+            demerger_head_listing_id: None,
+        };
+        provenance(&mut row);
+        row
+    }
+
+    /// Which replacement parcels stayed on their listing's register across the
+    /// operation that created them, and so keep an entitlement fixed before it
+    /// — the four shapes `domain::rollover` writes, side by side.
+    ///
+    /// A **transfer** and a **demerger's head parcel** did: the units never
+    /// left the listing's register, so `registered_from` is their own
+    /// acquisition date. A **scrip exchange** and a **demerger's demerged
+    /// parcel** did not: those units are of a listing the taxpayer was not on
+    /// the register of, so it is the operation date. Head and demerged carry
+    /// the same `demerger_action_id` and differ only in their listing against
+    /// the action's, which is what `demerger_head_listing_id` is for.
+    #[test]
+    fn rollover_registers_a_transfer_and_a_demerger_head_from_the_units_own_acquisition() {
+        let acquired = date(2020, 10, 1);
+        let operated = date(2024, 7, 1);
+
+        let registered_from = |row: ParcelRow| row.rollover().map(|r| r.registered_from);
+
+        // Head listing 1, demerged entity listing 2.
+        let head = replacement(1, acquired, operated, |row| {
+            row.demerger_action_id = Some(10);
+            row.demerger_head_listing_id = Some(1);
+        });
+        let demerged = replacement(2, acquired, operated, |row| {
+            row.demerger_action_id = Some(10);
+            row.demerger_head_listing_id = Some(1);
+        });
+        let transferred = replacement(1, acquired, operated, |row| row.transfer_id = Some(3));
+        let exchanged = replacement(2, acquired, operated, |row| row.scrip_action_id = Some(7));
+
+        assert_eq!(registered_from(head), Some(acquired));
+        assert_eq!(registered_from(transferred), Some(acquired));
+        assert_eq!(registered_from(demerged), Some(operated));
+        assert_eq!(registered_from(exchanged), Some(operated));
+
+        // Both operations still date the *operation* itself at the parcel's
+        // trade date — the guard against counting a payment already folded
+        // into the carried cost base (SCENARIOS N-06).
+        let head = replacement(1, acquired, operated, |row| {
+            row.demerger_action_id = Some(10);
+            row.demerger_head_listing_id = Some(1);
+        });
+        assert_eq!(head.rollover().map(|r| r.on), Some(operated));
+
+        // An ordinary parcel has no rollover at all, however it was acquired.
+        let ordinary = replacement(1, acquired, operated, |_| {});
+        assert!(ordinary.rollover().is_none());
     }
 
     #[test]

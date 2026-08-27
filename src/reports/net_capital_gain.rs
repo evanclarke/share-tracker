@@ -453,7 +453,7 @@ async fn non_disposal_gains(
     let amit_parcels: Vec<ParcelRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {} FROM trades \
          WHERE id IN (SELECT trade_id FROM amit_adjustments) ORDER BY id",
-        ParcelRow::COLUMNS
+        ParcelRow::columns()
     )))
     .fetch_all(&mut *conn)
     .await?;

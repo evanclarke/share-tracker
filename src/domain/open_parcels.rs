@@ -193,7 +193,7 @@ pub async fn load(
     let as_of = Some(cutoff);
     let parcels: Vec<ParcelRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {} FROM trades WHERE trade_type IN ('Buy', 'DRP') AND date <= ? ORDER BY id",
-        ParcelRow::COLUMNS
+        ParcelRow::columns()
     )))
     .bind(cutoff)
     .fetch_all(&mut *conn)
