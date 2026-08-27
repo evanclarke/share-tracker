@@ -609,7 +609,7 @@ warnings` clean.
 
 ## Editing a split/bonus/return-of-capital in place restates the same figures a delete now can't
 (Found closing *Deleting a split/bonus/return-of-capital silently restates reported gains* — now in
-[DONE/reviews.md](DONE/reviews.md) — 2026-08-14. `PUT /corporate_actions/:id` re-checks only the
+[DONE/reviews.md](reviews.md) — 2026-08-14. `PUT /corporate_actions/:id` re-checks only the
 `trades.*_action_id` references (`WriteError::ReferencedByTrade`), so for the three read-time
 action types an edit is unguarded: changing a `ShareSplit`'s ratio from 2:1 to 1:1, or moving its
 `date` past a Sell, restates every quantity, cost base, and realised gain computed from it — the
@@ -1901,7 +1901,7 @@ tax-summary and Known-limitations wording and the new 422, README the recorded-p
 is **ordinary income as remuneration** under s 6-5 — "not a dividend in the employee's hands", not
 part of the ESS discount, and carrying no franking (TD 2017/26,
 `docs/ato/ess-dividend-equivalents.md`). `docs/API.md` Known limitations tells the user it is
-"enterable manually as an [income](#income) row if the user wants it aggregated here".)
+"enterable manually as an [income](../docs/API.md#income) row if the user wants it aggregated here".)
 - [x] J-10 — reproduced: that row (`unfranked_amount 250` against the employer's listing) reports as
   `dividends_assessable 250` — **item 11S, unfranked dividends** — counts in
   `gross_assessable_investment_income`, and prints in the annual document's **Dividend income**
@@ -3334,7 +3334,7 @@ only CGT fact is the loss it inherits from the year before has no bucket, so it 
   every surface is empty, which reads as "no losses to carry" rather than "$12,345 to carry"
 - [x] Tests: the two reproductions above as regression tests (the opening-loss-only database, and the
   quiet year between two active ones), plus the annual tax report's 18V for a quiet year
-- [x] Docs sync: `docs/API.md`'s [Net capital gain](docs/API.md#net-capital-gain) year-series wording
+- [x] Docs sync: `docs/API.md`'s [Net capital gain](../docs/API.md#net-capital-gain) year-series wording
   and the annual tax report's `cgt_summary` description; README Known limitations if (d)
 
 **Resolution (2026-08-19): a quiet year that carries a balance gets a row.**
@@ -3396,7 +3396,7 @@ with **no as-at date** — the parcels open *today*, whatever `date` / `sale_dat
 - [x] **Decided 2026-08-19 (Evan): option (a)** — read the candidates as at the request's date.
 - [x] A model decision, four options:
   - **(a)** ← **chosen.** Read the candidates **as at the request's date** — `db_open_parcels_on` already takes an
-    as-of date everywhere else (`docs/API.md`'s [As-at date](docs/API.md#as-at-date) section), so
+    as-of date everywhere else (`docs/API.md`'s [As-at date](../docs/API.md#as-at-date) section), so
     both endpoints would model the holding as it actually stood. The fullest answer, and the one
     that makes a past-dated what-if mean "what if I had sold then"; note it then offers parcels that
     have since been sold, which for a *contemplated* sale is advice the user cannot act on
@@ -3408,8 +3408,8 @@ with **no as-at date** — the parcels open *today*, whatever `date` / `sale_dat
     holding and that a past `date` is only meaningful for the tax-year and discount-clock arithmetic
 - [x] Tests: the reproduction above (what-if and optimiser), the same-day boundary staying accepted,
   and — per the option — the refusal or the as-at candidate set
-- [x] Docs sync: `docs/API.md`'s [Parcel-selection optimiser](docs/API.md#parcel-selection-optimiser)
-  and [Pre-sale what-if](docs/API.md#pre-sale-what-if) sections, and the 422 catalogue row if (b)/(c)
+- [x] Docs sync: `docs/API.md`'s [Parcel-selection optimiser](../docs/API.md#parcel-selection-optimiser)
+  and [Pre-sale what-if](../docs/API.md#pre-sale-what-if) sections, and the 422 catalogue row if (b)/(c)
 
 **Implemented 2026-08-19 (option (a)).** `domain::open_parcels::load` already took an `as_of`; the
 two pre-sale tools were the only holdings readers not passing one. `reports::open_parcels::db_open_parcels_on`
@@ -3718,9 +3718,9 @@ representable financial year a user could legitimately want is refused. `docs/AP
 
 ## SCENARIOS Q-01: `docs/API.md`'s Jobs section states the wrong price-collection window
 
-- [x] `docs/API.md`'s [Jobs](docs/API.md#jobs) section says `price-import` "re-attempts, per held
+- [x] `docs/API.md`'s [Jobs](../docs/API.md#jobs) section says `price-import` "re-attempts, per held
   listing, every trading day in the **last 7** whose stored row is missing or errored". It is 14:
-  `closing_price::COLLECTION_LOOKBACK_DAYS = 14`, and both the [Closing prices](docs/API.md#closing-prices)
+  `closing_price::COLLECTION_LOOKBACK_DAYS = 14`, and both the [Closing prices](../docs/API.md#closing-prices)
   section and README's Features list say 14 — the Closing-prices section additionally explains *why*
   it must be 14 ("deliberately the same length as the report-snapshot catch-up window: a date the
   snapshot job keeps retrying but collection no longer refills could never unblock itself"). The
@@ -3729,7 +3729,7 @@ representable financial year a user could legitimately want is refused. `docs/AP
 
 **Closed 2026-08-20.** One-line doc fix — the Jobs section's `price-import` parenthetical now reads
 "every trading day in the last 14 calendar days whose stored row is missing or errored", the same
-window (and the same calendar-days basis) the [Closing prices](docs/API.md#closing-prices) section
+window (and the same calendar-days basis) the [Closing prices](../docs/API.md#closing-prices) section
 states two sections earlier. A sweep of `docs/` and README found no third place stating a different
 figure; the Jobs sentence was the only one still on 7.
 
@@ -3799,7 +3799,7 @@ the snapshot whose valuation day it was, whose regeneration is then blocked with
 The docs' *reasoning* was corrected, not just their wording. `docs/API.md`'s lodged-year limitation
 now says the trade-side claim it made is true only of `trades.settlement_date`, that the calendar
 itself is a live valuation input, and that a holiday write now stales what it re-values; the
-[Exchange holidays](docs/API.md#exchange-holidays) section says the same at its own surface.
+[Exchange holidays](../docs/API.md#exchange-holidays) section says the same at its own surface.
 `docs/SCHEMA.md` gains the table in its staleness-trigger paragraph and relationship list, and its
 `row_history` paragraph no longer rests the exclusion on the falsified "only influence values
 persisted onto trades at write time" claim — `exchanges` keeps that reasoning (correctly: its
@@ -3891,7 +3891,7 @@ Reproduced end to end against the running system (throwaway DB, real provider):
   **A$181,322.93** on 2024-06-07, and the stored cost base for the same date is A$172,491.38 — so
   the `unrealised_gains` snapshot reports an **89.5% unrealised loss on a holding that was up**.
 
-- [x] Nothing about this is documented. `docs/API.md`'s [Closing prices](docs/API.md#closing-prices)
+- [x] Nothing about this is documented. `docs/API.md`'s [Closing prices](../docs/API.md#closing-prices)
   section describes the stored figure only as "the close of every trading day", and there is no
   Known limitation for it — unlike the neighbouring price/valuation caveats (*Intraday prices*, *A
   manually entered price is one-way*, *Snapshot ticker labels…*), which are all recorded.
@@ -4034,7 +4034,7 @@ The system fails safe and the way out exists — the manual price, whose own `re
   priced" fact (only `WorthlessShares`, which ends the holding — wrong for a suspended-but-valuable
   security), and `DELETE /closing_prices/:listing_id/:price_date` explicitly does *not* unblock the
   date, only the health alarm.
-- [x] Not in the Known limitations, and not in the [Closing prices](docs/API.md#closing-prices)
+- [x] Not in the Known limitations, and not in the [Closing prices](../docs/API.md#closing-prices)
   section, which describes hand-pricing as the answer to "a day the provider can never serve" —
   singular — without saying what an unbounded run of such days costs.
 

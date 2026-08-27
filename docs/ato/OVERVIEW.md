@@ -37,7 +37,7 @@ holds: when a task leans on a specific rule in a mirror, **re-fetch that page**,
 a page that only *gains* prose compares clean on figures.
 
 These pages were captured because several TODO items in
-[`../TODO.md`](../TODO.md) need clarification on intended ATO behaviour before
+[`../TODO.md`](../../TODO.md) need clarification on intended ATO behaviour before
 implementation — see "How this maps to open TODO items" at the end.
 
 ## Capital gains tax — calculation mechanics

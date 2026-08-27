@@ -1047,7 +1047,7 @@ All ten scenarios were driven on 2026-08-23 against throwaway databases. **Six c
 and the correctness is structural rather than incidental**: every figure in the system is keyed on a
 *date*, never on the order rows were entered or the ids they were given. Entering a year of trades in
 reverse changes no figure — the parcel optimiser's `fifo` strategy picks the oldest *acquisition
-date* while the ids run the other way, the [listing activity](#listing-activity) ledger orders by
+date* while the ids run the other way, the [listing activity](docs/API.md#listing-activity) ledger orders by
 date, and a Sell entered before its Buys is refused by the allocation-sum invariant rather than
 half-written (V-01). A Sell allocated to the wrong parcel is corrected by re-`PUT`ting it once the
 forgotten Buy arrives, the superseded allocation's `DELETE` landing in the trail and the
@@ -1058,7 +1058,7 @@ with `replace` reconciles it (V-04). A rename recorded after prices were collect
 stored price untouched and records `old_price_symbol` correctly (V-05). A return of capital dated
 inside a snapshotted period stales exactly the snapshots on and after it, and *moving* its date
 afterwards stales both the span it left and the span it entered, in either direction (V-07). A
-back-dated fact re-chains every later year's carried-forward loss, the [CGT settings](#cgt-settings)
+back-dated fact re-chains every later year's carried-forward loss, the [CGT settings](docs/API.md#cgt-settings)
 opening balance included (V-10) — that the restatement is unmarked is the documented A-15
 limitation, not a new finding.
 

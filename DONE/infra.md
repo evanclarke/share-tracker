@@ -585,7 +585,7 @@ in place and the Jobs screen keeps showing `ok`, indefinitely. Driven on 2026-08
 - Same outcome, no ERROR line at all, for the ordinary operational cases: the server was down at
   00:00 every Sunday, or a hand-edited `--schedule` file lost its `backup` line (that one logs a
   single startup `WARN`; it was indistinguishable from the two deliberate ones until T-09/schedule
-  marked the manual-only jobs in the registry — closed in [`DONE/infra.md`](DONE/infra.md) — so it
+  marked the manual-only jobs in the registry — closed in [`DONE/infra.md`](infra.md) — so it
   now fires only for a line that has actually been lost).
 
 Prices and FX each have a *database-derived* freshness signal that catches their job going quiet —
@@ -1404,7 +1404,7 @@ Options offered:
 - [x] Refuse a JSON number in every money/quantity request field with a `422` naming it, with a test
       that walks every handler-reachable request body's `Decimal`/`Option<Decimal>` fields so a new
       body is covered without anyone remembering; document the rule in `docs/API.md` beside
-      [Unrecognised body fields](docs/API.md#unrecognised-body-fields)
+      [Unrecognised body fields](../docs/API.md#unrecognised-body-fields)
       — `infra::decimal` gained a **serde** half beside its sqlx one (`strict_decimal`,
       `strict_optional_decimal`, `strict_decimal_map`), spelled as
       `#[serde(deserialize_with = …)]` on **120 fields** across 25 files, so a body field stays a

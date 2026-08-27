@@ -609,7 +609,7 @@ walk and its covered set are now keyed by `(listing, account)`, `AmmaMissingAler
 `holding_account_id`, and the printed completeness lines name the account ("… for AMT in account
 #2"), which two accounts of one fund would otherwise render as two identical sentences.
 
-Docs: the [AMIT cash cross-check](docs/API.md#amit-cash-cross-check) section states the per-account
+Docs: the [AMIT cash cross-check](../docs/API.md#amit-cash-cross-check) section states the per-account
 rule, its reason, and the new response field; the annual tax report's completeness bullet says the
 same for `amma_missing`; the README's cross-check bullet and the web UI's report description follow.
 
@@ -1126,7 +1126,7 @@ as its own section:
 
 ## SCENARIOS W-f — The tax-return CSV's printed working does not reconcile to the figure it works to
 
-Surfaced by [W-c](#scenarios-w-c) and confirmed while building [W-d](#scenarios-w-d): now that each
+Surfaced by [W-c](#scenarios-w-c--the-tax-return-ready-csv-exports-carry-28-digit-figures-under-ato-labels) and confirmed while building [W-d](#scenarios-w-d--the-annual-tax-reports-printed-columns-do-not-add-up): now that each
 money column of `net-capital-gain.csv` rounds to the cent independently, the columns that are
 *arithmetically related to each other* need not agree. Reproduced at the export endpoint on an
 entirely ordinary single-parcel disposal — 100 units bought 2022-01-05 at $10, sold 2024-03-15 at
@@ -1262,7 +1262,7 @@ exports and `infra::decimal::to_cents` now all share.
 ## The parcel optimiser's candidates are costed as *held*, not as *disposed of*
 
 Raised while sweeping `reports::parcel_optimiser.rs`'s pro-rate onto `mul_div` (the section archived
-in [`DONE/tax-domain.md`](DONE/tax-domain.md) flagged the line as `domain::cost_base`'s pro-rate
+in [`DONE/tax-domain.md`](tax-domain.md) flagged the line as `domain::cost_base`'s pro-rate
 re-implemented locally and asked whether the local copy had drifted).
 
 The pro-rate itself has **not** drifted: `disposal_figures` starts from `remaining_cost_base`, which
@@ -1415,7 +1415,7 @@ so the race has not yet corrupted anything live. The window there is ~41 ms per 
 1.65 s, which is why.
 
 **The other seven section X scenarios came back correct** — see
-[Section X findings](SCENARIOS.md#section-x-findings).
+[Section X findings](../SCENARIOS.md#section-x-findings).
 
 **Options considered** (Evan asked for the pass to pick and proceed rather than stop per finding):
 
@@ -1510,7 +1510,7 @@ the `_on` split it needs is a pattern the reports already have.
 - [x] Report a non-AMIT trust distribution's components at question 13, not inside `dividends_assessable`.
 
 Found driving **Z-11** (the full financial year, reconciled), whose whole job is to tie every figure
-in the [annual tax report](docs/API.md#annual-tax-report) back to a hand-computed return. Thirteen of
+in the [annual tax report](../docs/API.md#annual-tax-report) back to a hand-computed return. Thirteen of
 the fourteen labels reconciled exactly — 11U/13Q, 10L, 10M, 20E (both lines), 20O, Item 12, D7, D8,
 18H, 18V and 18A (the one-cent difference on 18A is W-f's deliberate rounding of the concession
 half away from zero, not an error). One did not:
@@ -1530,7 +1530,7 @@ understated by the same amount — there is no line for it at all.
 **The credits line already knows better.** `franking_credits` is labelled **`11U / 13Q`**, explicitly
 covering both routes; and the AMMA path carries proper `13C`/`13U` lines. So the two correct
 destinations are already in the report — the ordinary trust row is the one case that falls through
-to the dividends line. The [Annual Tax Report](docs/API.md#annual-tax-report) is not confused about
+to the dividends line. The [Annual Tax Report](../docs/API.md#annual-tax-report) is not confused about
 what the row *is*: it prints a separate `income.trust_income` drilldown table beside `income.dividends`.
 Only the labelled summary line collapses them.
 
@@ -1581,7 +1581,7 @@ conduit_foreign_income_prints_as_a_memo_column_and_is_not_double_counted}`,
 - [x] Surface an AMMA statement whose `units_held` disagrees with the units actually held at its year end.
 
 Found driving **Z-05** (the correction cascade). A year is entered, its AMMA statements are entered and
-their [AMIT adjustments generated](docs/API.md#generating-amit-adjustments), the tax report is
+their [AMIT adjustments generated](../docs/API.md#generating-amit-adjustments), the tax report is
 archived — and then a missed Buy dated **before** those year ends is discovered and entered. Every
 other consequence is handled: all 15 report snapshots were marked stale by the schema's staleness
 triggers, `regenerate_all` rebuilt them, and the archived FY2025 tax report came back **byte-identical**
@@ -1620,7 +1620,7 @@ which of the two figures moved.
 reconcile the adjustment *set* to the *statement*: the statement's own `units_held` against the units
 actually open at its `tax_year_end_date`, **on its own listing and holding account**. The units come
 from `domain::open_parcels::load(conn, Some(year_end))` — the same shared read
-[generation](docs/API.md#generating-amit-adjustments) derives its set from, so the report cannot
+[generation](../docs/API.md#generating-amit-adjustments) derives its set from, so the report cannot
 disagree with generation about what was open — one `load` per distinct year end, on the report's own
 single `pool.begin()` read transaction. A new reported field `units_open_at_year_end` carries the
 figure (classified `quantity` in `src/web/util.js`'s `COLUMN_KINDS`; the default humaniser labels it
@@ -1680,7 +1680,7 @@ field list, the "empty report" sentence) and the report's `REPORTS` description 
 - [x] Name each unit-count event by what it was, at the ratio its terms were stated in.
 
 Found driving **Z-08** (the rights round trip), which ends with a 1-for-10 **bonus issue** and a 1-for-2
-**consolidation** over the same parcels. The [Annual Tax Report](docs/API.md#annual-tax-report) — the
+**consolidation** over the same parcels. The [Annual Tax Report](../docs/API.md#annual-tax-report) — the
 print document meant to be saved to PDF and archived — prints one `adjustments` row per event on every
 disposed parcel, with a `reference` naming the action it came from. Both come out wrong:
 
@@ -1762,7 +1762,7 @@ The exact figure is `69,785.05 − 39,139.975 = 30,645.075`, so the tax report i
 Realised Gains cell is a cent low. **The same row disagrees with itself**: its discount-eligible and
 non-discountable columns print `30,316.38` and `328.70`, which add to `30,645.08` — the cent the gain
 cell beside them does not show. That is W-d's "printed columns do not add up", on screen this time.
-The [net capital gain](docs/API.md#net-capital-gain) report agrees with the tax report.
+The [net capital gain](../docs/API.md#net-capital-gain) report agrees with the tax report.
 
 **Mechanism.** `reports::realised_gains` never computes a sale's total: `sale_proceeds` is accumulated
 from the per-allocation shares. Each share is `sale.average_price × qty_alloc − alloc_costs`, and
@@ -1904,7 +1904,7 @@ fixed a mislabel it carried: a crypto transfer's network-fee Sell (linked from
 
 - [x] Decide and implement (options below).
 
-Reported in passing by the agent fixing [AA-a](#scenarios-aa-a), and **re-driven from scratch against a
+Reported in passing by the agent fixing [AA-a](tax-domain.md#scenarios-aa-a--an-indexation-eligible-parcel-is-silently-costed-on-the-discount-and-the-reason-given-for-not-modelling-it-is-false-for-a-wide-enterable-range), and **re-driven from scratch against a
 throwaway database before being logged** (per the standing lesson: a fixing agent's incidental report is
 re-derived, not taken on trust). The reproduction is real and the mechanism is as reported.
 
@@ -1930,7 +1930,7 @@ ordinary case for any holding sold down in tranches.
 **No tax figure is wrong.** `initial_cost_base_aud` is a display column, not one of the five the
 section totals — the subtotal, the gain and the discount all take the adjusted figure. But this is the
 print document meant to be saved to PDF and archived, and a column that does not reconcile against the
-units beside it is exactly the class of fault [W-c](DONE/reporting.md) and [W-d](DONE/reporting.md)
+units beside it is exactly the class of fault [W-c](reporting.md) and [W-d](reporting.md)
 were about: *a column has to add up on the page*.
 
 The AA-a commit (`369e040`) added `CostBase::costed_initial_cost`, which is precisely the figure this

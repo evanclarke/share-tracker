@@ -357,7 +357,7 @@ and `demergers_missing_close` down to `adjusted_days: 1, manual_days: 0` — the
 
 ### Things to know before running it
 
-- **Nothing is destroyed.** `closing_prices` is an [audited table](docs/SCHEMA.md), so every deleted
+- **Nothing is destroyed.** `closing_prices` is an [audited table](../docs/SCHEMA.md), so every deleted
   row lands in `row_history` with its figure and its `sourced_from`/`reason` intact. The 375 manual
   rows' careful note about what they were survives; it just stops being read as a valuation.
 - **The trade Evan accepted**, worth re-reading before running: 922 dates currently report a

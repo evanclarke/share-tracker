@@ -846,12 +846,12 @@ apportioned across parcels acquired at different times, `docs/ato/amit-cost-base
   its split between parcels is an approximation — which matters when only some parcels are later
   sold. Behaviour pinned by
   `amit_adjustment_generation::db_a_parcel_bought_after_the_last_distribution_is_still_covered`
-- [x] Document it in the [Generating AMIT adjustments](docs/API.md) section: the per-unit figure is
+- [x] Document it in the [Generating AMIT adjustments](../docs/API.md) section: the per-unit figure is
   applied to every unit held at the statement's year end, a member whose statement gives a *total*
   AMIT cost base net amount derives the per-unit figure by dividing over the units the statement
   covers, and a member who wants a different apportionment enters the rows by hand
 
-**Resolution (2026-08-16): documented in [Generating AMIT adjustments](docs/API.md#generating-amit-adjustments).**
+**Resolution (2026-08-16): documented in [Generating AMIT adjustments](../docs/API.md#generating-amit-adjustments).**
 
 A "Which parcels the per-unit figure reaches" paragraph states the rule the reconciliation depends
 on — `cost_base_adjustment` applies uniformly to every unit held at the statement's
@@ -1620,7 +1620,7 @@ give, so that is W-e's shape — a write-time refusal naming the arithmetic — 
 ## A replacement quantity no `Decimal` can hold
 
 Split out of the multiply-before-divide sweep (archived in
-[`DONE/tax-domain.md`](DONE/tax-domain.md)), which closed the arithmetic but deliberately left this
+[`DONE/tax-domain.md`](tax-domain.md)), which closed the arithmetic but deliberately left this
 decision open: `infra::decimal::mul_div` cannot help here, because the *result* is what is
 unrepresentable rather than the working.
 
@@ -1836,8 +1836,8 @@ them exactly as before.
 
 - [x] Accept an AMIT adjustment against a cross-listing rollover replacement parcel, as the refusals already promise.
 
-Found while fixing [Z-d](DONE/reporting.md), and confirmed independently against a throwaway database.
-`docs/API.md`'s [AMIT adjustments](docs/API.md#amit-adjustments) section states the rule plainly:
+Found while fixing [Z-d](reporting.md), and confirmed independently against a throwaway database.
+`docs/API.md`'s [AMIT adjustments](../docs/API.md#amit-adjustments) section states the rule plainly:
 
 > a **rollover replacement parcel** whose units trace back to the statement's own account through a
 > [transfer], [scrip-for-scrip exchange] or [demerger] *is* accepted, wherever the operation moved
@@ -1849,9 +1849,9 @@ is consulted — so the promise holds for exactly the replacements that happen t
 
 | replacement parcel | same listing? | row accepted? |
 | --- | --- | --- |
-| a [transfer](docs/API.md#transfers)'s transfer-in parcel | yes | `204` ✔ |
-| a [demerger](docs/API.md#demerging)'s **head** replacement | yes | `204` ✔ |
-| a [scrip-for-scrip](docs/API.md#exchanging-a-scrip-for-scrip-takeover) replacement | **no** | `422` *the trade's listing differs from the AMMA statement's listing* |
+| a [transfer](../docs/API.md#transfers)'s transfer-in parcel | yes | `204` ✔ |
+| a [demerger](../docs/API.md#demerging)'s **head** replacement | yes | `204` ✔ |
+| a [scrip-for-scrip](../docs/API.md#exchanging-a-scrip-for-scrip-takeover) replacement | **no** | `422` *the trade's listing differs from the AMMA statement's listing* |
 | a demerger's **demerged-entity** parcel | **no** | `422` *(same)* |
 
 **The two refusals point at each other, so there is no way through.** An AMIT fund taken over part-way
@@ -1874,7 +1874,7 @@ In the reproduction that is 10,000 units × A$0.20 = **A$2,000** of cost base th
 entry, and manual entry is what is refused.
 
 **It fails loudly rather than silently**, which is the good half — nothing computes a wrong figure — and
-the [AMIT adjustment cross-check](docs/API.md#amit-adjustment-cross-check) then flags the statement as
+the [AMIT adjustment cross-check](../docs/API.md#amit-adjustment-cross-check) then flags the statement as
 having no adjustments, forever. But the documented recovery does not exist.
 
 **Direction.** The account-tracing reach-through is already written and already used; the listing check
@@ -1937,7 +1937,7 @@ unchanged.
 
 - [x] Decide and implement (options below).
 
-Scenario AA-02. `docs/API.md`'s [Known limitations](docs/API.md#known-limitations) justifies the
+Scenario AA-02. `docs/API.md`'s [Known limitations](../docs/API.md#known-limitations) justifies the
 scope cut this way:
 
 > **Indexation method** (2026-06-10) — for an asset acquired before **21 September 1999** an
@@ -2002,7 +2002,7 @@ figure exists only to answer "which method wins here", which is the question the
 **Fixed.** The frozen ATO quarterly CPI series is seeded as `cpi_quarters` (migration
 `0046_cpi_quarters.sql`, 57 rows — the September 1985 quarter through the September 1999 freeze and
 deliberately nothing after it), mirrored from Appendix 2 of the *Guide to capital gains tax 2025*
-(QC 104764) in [`docs/ato/consumer-price-index.md`](docs/ato/consumer-price-index.md) and indexed in
+(QC 104764) in [`docs/ato/consumer-price-index.md`](../docs/ato/consumer-price-index.md) and indexed in
 `docs/ato/OVERVIEW.md`. `domain::indexation` holds the method's arithmetic — the eligibility
 boundary, the quarter mapping, the factor (68.7 ÷ the quarter's CPI, limited to 3 decimal places
 with the fourth decimal rounded up from 5), and the indexed cost base — and
@@ -2277,7 +2277,7 @@ that AA-06 needs.
   the *Crypto assets* bullet** ("Foreign-currency cash balances (Div 775 forex gains — ordinary
   income, not CGT) are deferred to a separate specification"), where a reader looking for
   foreign-currency scope will not find it. And unlike the others there is **no** workaround: an
-  [income](docs/API.md#income) row requires a `listing_id`, and a cash balance has no listing, so a
+  [income](../docs/API.md#income) row requires a `listing_id`, and a cash balance has no listing, so a
   Div 775 gain has nowhere to be entered at all. The doc does not say so.
 - **AA-19, a second taxpayer** — *One taxpayer* again, with no remedy stated. The remedy the tool
   already supports is **one database and one instance per taxpayer** (`--db`, `--port`), which is
@@ -2332,7 +2332,7 @@ belonging to no single trade — is stated.
 
 *Div 775 forex on a foreign-currency cash balance* is now its own bullet, sited immediately after
 *Settlement-window forex — CGT events K10/K11*, and says plainly that **there is no entry path at
-all**: an [income](docs/API.md#income) row's `listing_id` is a required `i64` (verified —
+all**: an [income](../docs/API.md#income) row's `listing_id` is a required `i64` (verified —
 `IncomeBody`, and both a missing and a `null` one answer `422`) and a currency balance has no
 listing, so the gain has nowhere to go; the loss side is no better, since an investment expense would
 report a forex loss on a line it does not belong to. Cited to `docs/ato/forex-common-transactions.md`
