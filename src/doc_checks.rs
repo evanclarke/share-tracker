@@ -3298,6 +3298,25 @@ fn franking_credit_ceiling_documented() {
     assert!(include_str!("../docs/ato/OVERVIEW.md").contains("allocating-franking-credits.md"));
 }
 
+/// Docs-sync pin for the annual tax report's **version stamp**. An archived
+/// PDF is the only record of what a year's figures were — nothing is ever
+/// stored, and no year is closed — so the document says which code produced
+/// it, and the docs say why that is worth a line beside the timestamp: a rule
+/// this system has since corrected moves a figure with no input changing, and
+/// the timestamp alone cannot tell that from an edited fact.
+#[test]
+fn tax_report_version_stamp_documented() {
+    assert!(API_MD.contains("`app_version` (the `share-tracker` version that produced it)"));
+    assert!(API_MD.contains(
+        "The printed document carries the last three on one provenance line under its heading"
+    ));
+    // …and the limitation it exists for names it as part of the remedy.
+    assert!(API_MD.contains(
+        "it stamps the version that produced it beside the timestamp, so a later disagreement \
+         can be told from a changed *rule* as well as changed facts"
+    ));
+}
+
 /// Docs-sync pin for the annual tax report's **foreign income totals** — the
 /// three lines printed under that table. The behaviour is pinned by
 /// `reports::tax_report`'s own three tests; this is the documentation half,

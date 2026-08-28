@@ -2111,6 +2111,10 @@ mod tests {
         assert!(js.contains("Generate report"));
         assert!(js.contains("Print / Save as PDF"));
         assert!(js.contains("window.print()"));
+        // The document's provenance line: when it was produced, and by which
+        // version — an archived PDF that disagrees with a fresh run needs
+        // both, since the figures are always recomputed live.
+        assert!(js.contains("' · share-tracker v' + m.app_version"));
         assert!(js.contains("Data completeness"));
         // The completeness section renders two AMMA-coverage surfaces: the
         // gap that blocks the report, and the advisory question that must not

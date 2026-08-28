@@ -79,6 +79,15 @@ pub struct TaxReportMeta {
     pub period_end: NaiveDate,
     pub generated_at: chrono::DateTime<Utc>,
     pub taxpayer_basis: String,
+    /// The `share-tracker` version that produced the document, printed with
+    /// the timestamp above it. No financial year is ever closed here — every
+    /// figure is computed live from the current facts — so an archived PDF is
+    /// the only record of what a year's figures *were*, and the two questions
+    /// asked of one that disagrees with a fresh run are when it was produced
+    /// and by which code. A rule this system has since corrected (the LIC
+    /// halving, the partial-disposal initial cost base) is exactly the kind of
+    /// difference the version answers and the timestamp alone cannot.
+    pub app_version: String,
 }
 
 /// The `tax_year` values this report accepts, each naming the calendar year
@@ -1821,6 +1830,7 @@ pub async fn db_tax_report(pool: &SqlitePool, tax_year: i32) -> Result<TaxReport
             period_end,
             generated_at: Utc::now(),
             taxpayer_basis: super::TAXPAYER_BASIS.to_string(),
+            app_version: env!("CARGO_PKG_VERSION").to_string(),
         },
         completeness,
         disposals,
@@ -2375,6 +2385,22 @@ mod tests {
         assert_eq!(
             report.income.foreign_income[0].ticker.as_deref(),
             Some("ICE")
+        );
+    }
+
+    /// An archived document names the code that produced it. Nothing else on
+    /// the page can answer why a PDF disagrees with a fresh run of the same
+    /// year: no year is ever closed here, so the figures are recomputed live,
+    /// and a rule this system has since corrected moves them without any input
+    /// changing.
+    #[tokio::test]
+    async fn meta_names_the_version_that_produced_the_document() {
+        let pool = test_support::test_pool().await;
+        let report = db_tax_report(&pool, 2024).await.unwrap();
+        assert_eq!(report.meta.app_version, env!("CARGO_PKG_VERSION"));
+        assert!(
+            !report.meta.app_version.is_empty(),
+            "the crate version is never blank"
         );
     }
 

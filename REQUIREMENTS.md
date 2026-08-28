@@ -1395,6 +1395,9 @@ Resolution: a rename becomes an explicit, dated, audited event, not a bare field
     reconcilable from the document alone
   - **Overall tax summary** — the existing `TaxYearSummary` fields for the year, each paired
     with its ATO tax-return label (reusing the CSV export's existing label mapping)
+  - **Provenance** — the document names when it was produced, the taxpayer basis, and the
+    share-tracker version that produced it: no year is ever closed, so an archived copy that
+    disagrees with a re-run has to be attributable to a changed rule as well as changed facts
 - Print path: a "Print / Save as PDF" button (`window.print()`) plus a new `@media print`
   stylesheet (none exists today) — hides nav/menus/buttons/the year-select form, drops
   sticky headers and any pager, repeats table headers per page, forces black-on-white. No

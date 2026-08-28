@@ -2094,3 +2094,20 @@ explaining them.
   — verified end to end as well as by unit test: a seeded year carrying all four kinds prints
   100.00 + 40.01 under a non-AMMA subtotal of 140.01, the AMMA row's 70.00 under its own, and 210.01
   as the total, with the ESS memo in the table and in none of the three
+
+## REQUIREMENTS: annual tax report — the version that produced the document (2026-08-28)
+
+An archived PDF is the only record of what a year's figures *were*: nothing is stored and no year is
+ever closed, so a re-run always recomputes from today's facts and today's rules.
+
+- [x] `meta.app_version` (`env!("CARGO_PKG_VERSION")`), printed on the document's provenance line
+  under the heading — `Produced <timestamp> · <taxpayer basis> · share-tracker v<version>`
+  — the version answers what the timestamp cannot: a rule this system has since corrected (the LIC
+  halving, the partial-disposal initial cost base) moves a printed figure with **no input having
+  changed**, so a PDF disagreeing with a fresh run is only diagnosable if it names the code. Pinned
+  by `meta_names_the_version_that_produced_the_document` and the bundle assertion in
+  `web::tests::annual_tax_report_ui_present`
+- [x] Docs: the `meta` bullet in `docs/API.md`, and the "a lodged financial year can be restated"
+  limitation — whose remedy is "save the PDF at lodgement and compare" — now says the archived copy
+  stamps its version, so a later disagreement can be told from a changed rule as well as changed
+  facts; pinned by `doc_checks::tax_report_version_stamp_documented`

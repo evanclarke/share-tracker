@@ -446,7 +446,13 @@ function renderReport(report) {
   const m = report.meta;
   const wrap = el('div', { class: 'tax-report-doc' }, [
     el('h1', null, 'Annual Tax Report — ' + fyLabel(m.tax_year) + ' (' + m.period_start + ' – ' + m.period_end + ')'),
-    el('p', { class: 'hint' }, 'Produced ' + fmtLocalTimestamp(m.generated_at) + ' · ' + m.taxpayer_basis),
+    // The document's provenance line. The version matters as much as the
+    // timestamp on an archived copy: every figure is computed live from the
+    // current facts, so a PDF that disagrees with a fresh run was produced
+    // either from different facts or by different code, and only this says
+    // which code.
+    el('p', { class: 'hint' }, 'Produced ' + fmtLocalTimestamp(m.generated_at) + ' · ' + m.taxpayer_basis
+      + ' · share-tracker v' + m.app_version),
     completenessSection(report.completeness),
     disposalsSection(report.disposals),
     cgtSummarySection(report.cgt_summary),
