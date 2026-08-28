@@ -114,10 +114,42 @@ decomposition exists that moves no invariant.
   Both are behaviour-preserving, so the existing suite is the proof: the currency-import parse tests
   (incl. the minor-units/dedup/missing-code and entity-reference cases) and the valuation,
   snapshot and period-performance tests, 2,336 total, with fmt and `clippy -D warnings` clean.
-- [ ] Review `entities::rights_sale::db_sell_rights` (`src/entities/rights_sale.rs:314`, CCN 47,
+- [x] Review `entities::rights_sale::db_sell_rights` (`src/entities/rights_sale.rs:314`, CCN 47,
   nest 6, 176 NLOC) — the highest-CCN function that is *not* flat, so unlike the guard chains its
   branch count is not explained by breadth. Decide whether the record-date anchoring walk separates
   from the write, or record here that it does not and why
+
+  **Verdict 2026-08-28: it separates, cleanly.** The walk is a *validation pass and nothing else* —
+  it computes no figure the write goes on to store, so its only output is Ok-or-refuse and the cut
+  moves no invariant. `db_sell_rights` is now CCN 21 / 98 NLOC / nest 3, down from 47 / 176 / 6, and
+  nothing in the file is above CCN 21. Four named pieces came out:
+
+  - `check_parcel_anchoring` (6) — the per-parcel cap loop, over `parcel_units_at_record_date` (15,
+    the anchoring walk proper: the parcel is an original Buy/DRP of the listing, less the units sold
+    before the record date, re-based to record-date units) and `prior_anchored_units` (4)
+  - `check_body` (6) — the checks that need nothing but the request, which is why they run *before*
+    the transaction is opened; it returns the two defaulted amounts as a `SaleAmounts`
+  - `resolve_fx_rate` (5) — the stated-rate / ATO-rate / nil-lapse-parity decision, with
+    `SaleAmounts::converts_nothing` naming the condition its comment had to spell out inline
+
+  What the orchestrator reads as now is the order the refusals are owed in — request figures, the
+  offer's terms, the total cap, the per-parcel cap, then the rate and the insert — and its doc
+  comment says so. Unlike the guard chains the audit ruled should stay, none of these are guards in
+  one sequence: they are three different *kinds* of question (the request alone, one parcel at a
+  time, the sale month's rate), which is why the branch count wasn't breadth.
+
+  **The extraction found a live bug, now fixed.** The per-parcel cap read each parcel's *stored*
+  prior anchoring inside the allocation loop and added it to the in-request running total on every
+  iteration, so a request naming one parcel in two allocations counted that parcel's earlier sales
+  twice and refused a request that was inside the cap purely for having been split — the very shape
+  the loop's own comment says is allowed ("a request can't split one parcel over two allocations to
+  dodge the cap"). The prior figure is now read once per distinct parcel and carried forward by the
+  running total. It was over-strict, never permissive, so nothing invalid was ever accepted and no
+  stored figure is wrong. Pinned by `splitting_one_parcel_over_allocations_counts_prior_sales_once`,
+  which fails with `ExceedsParcelEntitlement` against the old logic, and which re-asserts the cap
+  itself still bites afterwards so the fix can't be read as having loosened it. The rest is
+  behaviour-preserving, so the file's other 27 tests are the proof: 2,337 total, fmt and
+  `clippy -D warnings` clean.
 - [ ] Consider a `Presence` flags struct for `entities::corporate_action::model::kind`
   (`src/entities/corporate_action/model.rs:498`, CCN 129 — the codebase maximum, 3.5× the next).
   The one-arm-per-action-type table itself should **not** be broken up. But 84 of its ~129 decision

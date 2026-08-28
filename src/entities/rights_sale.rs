@@ -48,7 +48,7 @@
 //! against `PUT`/`DELETE /trades` while referenced (`entities::trade`).
 
 use crate::entities::corporate_action::{
-    self, ActionKind, NOTHING_PAID_FOR_NON_RENOUNCEABLE_RIGHTS, sold_in_acquired_units,
+    self, ActionKind, NOTHING_PAID_FOR_NON_RENOUNCEABLE_RIGHTS, SplitEvent, sold_in_acquired_units,
     split_adjusted_quantity,
 };
 use crate::entities::rights_exercise::{db_held_at_record_date, db_rights_used, entitled_units};
@@ -310,12 +310,26 @@ pub fn router() -> Router<SqlitePool> {
         .route("/rights_sales/{id}", get(get_one).delete(delete_one))
 }
 
-/// Record a rights sale/lapse with its parcel anchoring, atomically.
-pub async fn db_sell_rights(
-    pool: &SqlitePool,
-    action_id: i64,
-    body: &SellRightsBody,
-) -> Result<RightsSale, SellRightsError> {
+/// The amounts a sale carries once the body-only checks have passed, each
+/// defaulted from its optional field.
+struct SaleAmounts {
+    proceeds_per_right: Decimal,
+    rights_cost: Decimal,
+}
+
+impl SaleAmounts {
+    /// A nil/nil disposal — a lapse of a free right — converts nothing, so no
+    /// FX rate can affect what it books (see [`resolve_fx_rate`]).
+    fn converts_nothing(&self) -> bool {
+        self.proceeds_per_right == Decimal::ZERO && self.rights_cost == Decimal::ZERO
+    }
+}
+
+/// The checks that need nothing but the request: rights sold strictly
+/// positive, proceeds and cost non-negative, every allocation positive, and
+/// the allocations summing exactly to the rights sold. They run before the
+/// transaction is opened, since none of them reads the database.
+fn check_body(body: &SellRightsBody) -> Result<SaleAmounts, SellRightsError> {
     if body.units <= Decimal::ZERO {
         return Err(SellRightsError::NonPositiveUnits);
     }
@@ -340,6 +354,193 @@ pub async fn db_sell_rights(
             units: body.units,
         });
     }
+    Ok(SaleAmounts {
+        proceeds_per_right,
+        rights_cost,
+    })
+}
+
+/// The issue's own terms, as the per-parcel anchoring cap needs them: which
+/// action and listing the rights were earned under, the record date they were
+/// earned on, the offer's ratio, and the listing's splits (every quantity in
+/// the walk is compared in record-date units).
+struct Anchoring<'a> {
+    action_id: i64,
+    listing_id: i64,
+    record_date: NaiveDate,
+    rights_units: Decimal,
+    rights_held_units: Decimal,
+    splits: &'a [SplitEvent],
+}
+
+/// The allocated parcel's units still held when the record date arrived, in
+/// record-date units — its as-acquired quantity minus the units consumed by
+/// sales dated *before* the record date, re-based across any splits. That is
+/// what decides the entitlement the parcel earned.
+///
+/// Errors with [`SellRightsError::NotAnOriginalParcel`] unless the trade is a
+/// Buy/DRP of the issue's own listing dated before the record date: a parcel
+/// that is none of those earned no rights, so no sold right can borrow its
+/// acquisition date for the 12-month discount clock.
+async fn parcel_units_at_record_date(
+    conn: &mut sqlx::SqliteConnection,
+    anchoring: &Anchoring<'_>,
+    purchase_trade_id: i64,
+) -> Result<Decimal, SellRightsError> {
+    let parcel =
+        sqlx::query("SELECT trade_type, listing_id, date, quantity FROM trades WHERE id = ?")
+            .bind(purchase_trade_id)
+            .fetch_optional(&mut *conn)
+            .await?;
+    let Some(parcel) = parcel else {
+        return Err(SellRightsError::NotAnOriginalParcel);
+    };
+    let parcel_listing: i64 = parcel.try_get("listing_id")?;
+    let parcel_date: NaiveDate = parcel.try_get("date")?;
+    let parcel_type: TradeType = parcel.try_get("trade_type")?;
+    if !parcel_type.is_acquisition()
+        || parcel_listing != anchoring.listing_id
+        || parcel_date >= anchoring.record_date
+    {
+        return Err(SellRightsError::NotAnOriginalParcel);
+    }
+    let parcel_qty = parse_dec("quantity", parcel.try_get("quantity")?)?;
+
+    let sold_rows = sqlx::query(
+        "SELECT s.date AS sale_date, pa.quantity_allocated \
+         FROM parcel_allocations pa JOIN trades s ON s.id = pa.sale_trade_id \
+         WHERE pa.purchase_trade_id = ? AND s.date < ?",
+    )
+    .bind(purchase_trade_id)
+    .bind(anchoring.record_date)
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut sold: Vec<(NaiveDate, Decimal)> = Vec::with_capacity(sold_rows.len());
+    for row in &sold_rows {
+        sold.push((
+            row.try_get("sale_date")?,
+            parse_dec("quantity_allocated", row.try_get("quantity_allocated")?)?,
+        ));
+    }
+    let remaining =
+        parcel_qty - sold_in_acquired_units(sold.iter().copied(), anchoring.splits, parcel_date);
+    Ok(split_adjusted_quantity(
+        remaining,
+        anchoring.splits,
+        parcel_date,
+        Some(anchoring.record_date),
+    ))
+}
+
+/// Rights already anchored to a parcel by the action's *stored* sales, in
+/// record-date units. Read once per distinct parcel — the in-request running
+/// total carries it forward across a request that splits one parcel over
+/// several allocations, so it is never counted twice.
+async fn prior_anchored_units(
+    conn: &mut sqlx::SqliteConnection,
+    action_id: i64,
+    purchase_trade_id: i64,
+) -> Result<Decimal, SellRightsError> {
+    let prior: Vec<String> = sqlx::query_scalar(
+        "SELECT rsa.units FROM rights_sale_allocations rsa \
+         JOIN rights_sales rs ON rs.id = rsa.rights_sale_id \
+         WHERE rs.rights_action_id = ? AND rsa.purchase_trade_id = ?",
+    )
+    .bind(action_id)
+    .bind(purchase_trade_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut anchored = Decimal::ZERO;
+    for units in prior {
+        anchored += parse_dec("units", units)?;
+    }
+    Ok(anchored)
+}
+
+/// Per-parcel cap: each anchoring parcel must have earned the rights anchored
+/// to it (cumulatively, across the action's sales), per its units held when
+/// the record date arrived. In-request totals accumulate so a request can't
+/// split one parcel over two allocations to dodge the cap.
+///
+/// A validation pass and nothing else: it computes no figure the write goes on
+/// to store, so it reads the caller's transaction and answers only whether the
+/// anchoring stands.
+async fn check_parcel_anchoring(
+    conn: &mut sqlx::SqliteConnection,
+    anchoring: &Anchoring<'_>,
+    allocations: &[AllocationInput],
+) -> Result<(), SellRightsError> {
+    let mut in_request: HashMap<i64, Decimal> = HashMap::new();
+    for alloc in allocations {
+        let at_record =
+            parcel_units_at_record_date(conn, anchoring, alloc.purchase_trade_id).await?;
+        let parcel_entitled = entitled_units(
+            at_record,
+            anchoring.rights_units,
+            anchoring.rights_held_units,
+        );
+
+        let already = match in_request.get(&alloc.purchase_trade_id) {
+            Some(&running) => running,
+            None => {
+                prior_anchored_units(conn, anchoring.action_id, alloc.purchase_trade_id).await?
+            }
+        };
+        let anchored = already + alloc.units;
+        if parcel_entitled.is_some_and(|parcel_entitled| anchored > parcel_entitled) {
+            return Err(SellRightsError::ExceedsParcelEntitlement);
+        }
+        in_request.insert(alloc.purchase_trade_id, anchored);
+    }
+    Ok(())
+}
+
+/// The rate the row carries. The realised-gains report converts both legs
+/// via `FxOverride::Fallback(fx_rate)`, so a placeholder 1 would become
+/// the real answer exactly when the sale month's ATO rate is missing and
+/// book USD proceeds 1:1 as AUD — the silent-parity path the ESS vest
+/// refuses (`ess_vest::VestError::MissingFxRate`). The body's stated rate
+/// is bound when the caller gave one; otherwise the sale month's ATO rate
+/// is resolved and bound (AUD resolves to 1), and a month with neither is
+/// refused rather than invented. A nil/nil lapse converts nothing
+/// (`converts_nothing`), so a missing month cannot corrupt it and parity is
+/// bound harmlessly.
+async fn resolve_fx_rate(
+    conn: &mut sqlx::SqliteConnection,
+    stated: Option<Decimal>,
+    currency: &str,
+    date: NaiveDate,
+    converts_nothing: bool,
+) -> Result<Decimal, SellRightsError> {
+    if let Some(rate) = stated {
+        return Ok(rate);
+    }
+    let fx = crate::infra::fx::FxRates::load(&mut *conn).await?;
+    match fx.resolve_rate(currency, date, crate::infra::fx::FxOverride::None) {
+        Ok(rate) => Ok(rate),
+        Err(_) if converts_nothing => Ok(Decimal::ONE),
+        Err(_) => Err(SellRightsError::MissingFxRate {
+            currency: currency.to_string(),
+            month: date.format("%Y-%m").to_string(),
+        }),
+    }
+}
+
+/// Record a rights sale/lapse with its parcel anchoring, atomically.
+///
+/// The order is the order the refusals are owed in: the request's own figures
+/// ([`check_body`]) before anything is opened, then what the offer's terms
+/// allow, then the two caps — the total one shared with exercises, and the
+/// per-parcel anchoring walk ([`check_parcel_anchoring`]) — and only then the
+/// rate and the insert. Every check above the insert is a pure validation
+/// pass: none of them produces a figure the write stores, so the whole walk
+/// separates from it.
+pub async fn db_sell_rights(
+    pool: &SqlitePool,
+    action_id: i64,
+    body: &SellRightsBody,
+) -> Result<RightsSale, SellRightsError> {
+    let amounts = check_body(body)?;
 
     let mut tx = write_tx(pool).await?;
 
@@ -371,10 +572,10 @@ pub async fn db_sell_rights(
     // right can certainly do and which is a non-event on either treatment,
     // while still consuming the entitlement here (SCENARIOS AA-b).
     if !renounceable {
-        if proceeds_per_right > Decimal::ZERO {
+        if amounts.proceeds_per_right > Decimal::ZERO {
             return Err(SellRightsError::ProceedsOnNonRenounceableOffer);
         }
-        if rights_cost > Decimal::ZERO {
+        if amounts.rights_cost > Decimal::ZERO {
             return Err(SellRightsError::RightsCostOnNonRenounceableOffer);
         }
     }
@@ -396,104 +597,28 @@ pub async fn db_sell_rights(
         return Err(SellRightsError::ExceedsEntitlement);
     }
 
-    // Per-parcel cap: each anchoring parcel must have earned the rights
-    // anchored to it (cumulatively, across the action's sales), per its units
-    // held when the record date arrived. In-request totals accumulate so a
-    // request can't split one parcel over two allocations to dodge the cap.
-    let mut in_request: HashMap<i64, Decimal> = HashMap::new();
-    for alloc in &body.allocations {
-        let parcel =
-            sqlx::query("SELECT trade_type, listing_id, date, quantity FROM trades WHERE id = ?")
-                .bind(alloc.purchase_trade_id)
-                .fetch_optional(&mut *tx)
-                .await?;
-        let Some(parcel) = parcel else {
-            return Err(SellRightsError::NotAnOriginalParcel);
-        };
-        let parcel_listing: i64 = parcel.try_get("listing_id")?;
-        let parcel_date: NaiveDate = parcel.try_get("date")?;
-        let parcel_type: TradeType = parcel.try_get("trade_type")?;
-        if !parcel_type.is_acquisition()
-            || parcel_listing != action.listing_id
-            || parcel_date >= record_date
-        {
-            return Err(SellRightsError::NotAnOriginalParcel);
-        }
-        let parcel_qty = parse_dec("quantity", parcel.try_get("quantity")?)?;
+    check_parcel_anchoring(
+        &mut tx,
+        &Anchoring {
+            action_id,
+            listing_id: action.listing_id,
+            record_date,
+            rights_units,
+            rights_held_units,
+            splits: &splits,
+        },
+        &body.allocations,
+    )
+    .await?;
 
-        // The parcel's units still held when the record date arrived: its
-        // as-acquired quantity minus units consumed by sales dated before the
-        // record date, re-based to record-date units.
-        let sold_rows = sqlx::query(
-            "SELECT s.date AS sale_date, pa.quantity_allocated \
-             FROM parcel_allocations pa JOIN trades s ON s.id = pa.sale_trade_id \
-             WHERE pa.purchase_trade_id = ? AND s.date < ?",
-        )
-        .bind(alloc.purchase_trade_id)
-        .bind(record_date)
-        .fetch_all(&mut *tx)
-        .await?;
-        let mut sold: Vec<(NaiveDate, Decimal)> = Vec::with_capacity(sold_rows.len());
-        for row in &sold_rows {
-            sold.push((
-                row.try_get("sale_date")?,
-                parse_dec("quantity_allocated", row.try_get("quantity_allocated")?)?,
-            ));
-        }
-        let remaining =
-            parcel_qty - sold_in_acquired_units(sold.iter().copied(), &splits, parcel_date);
-        let at_record = split_adjusted_quantity(remaining, &splits, parcel_date, Some(record_date));
-        let parcel_entitled = entitled_units(at_record, rights_units, rights_held_units);
-
-        let prior: Vec<String> = sqlx::query_scalar(
-            "SELECT rsa.units FROM rights_sale_allocations rsa \
-             JOIN rights_sales rs ON rs.id = rsa.rights_sale_id \
-             WHERE rs.rights_action_id = ? AND rsa.purchase_trade_id = ?",
-        )
-        .bind(action_id)
-        .bind(alloc.purchase_trade_id)
-        .fetch_all(&mut *tx)
-        .await?;
-        let mut anchored = *in_request
-            .get(&alloc.purchase_trade_id)
-            .unwrap_or(&Decimal::ZERO);
-        for units in prior {
-            anchored += parse_dec("units", units)?;
-        }
-        anchored += alloc.units;
-        if parcel_entitled.is_some_and(|parcel_entitled| anchored > parcel_entitled) {
-            return Err(SellRightsError::ExceedsParcelEntitlement);
-        }
-        in_request.insert(alloc.purchase_trade_id, anchored);
-    }
-
-    // The rate the row carries. The realised-gains report converts both legs
-    // via `FxOverride::Fallback(fx_rate)`, so a placeholder 1 would become
-    // the real answer exactly when the sale month's ATO rate is missing and
-    // book USD proceeds 1:1 as AUD — the silent-parity path the ESS vest
-    // refuses (`ess_vest::VestError::MissingFxRate`). The body's stated rate
-    // is bound when the caller gave one; otherwise the sale month's ATO rate
-    // is resolved and bound (AUD resolves to 1), and a month with neither is
-    // refused rather than invented. A nil/nil lapse converts nothing, so a
-    // missing month cannot corrupt it and parity is bound harmlessly.
-    let fx_rate = match body.fx_rate {
-        Some(rate) => rate,
-        None => {
-            let fx = crate::infra::fx::FxRates::load(&mut *tx).await?;
-            match fx.resolve_rate(&currency, body.date, crate::infra::fx::FxOverride::None) {
-                Ok(rate) => rate,
-                Err(_) if proceeds_per_right == Decimal::ZERO && rights_cost == Decimal::ZERO => {
-                    Decimal::ONE
-                }
-                Err(_) => {
-                    return Err(SellRightsError::MissingFxRate {
-                        currency: currency.clone(),
-                        month: body.date.format("%Y-%m").to_string(),
-                    });
-                }
-            }
-        }
-    };
+    let fx_rate = resolve_fx_rate(
+        &mut tx,
+        body.fx_rate,
+        &currency,
+        body.date,
+        amounts.converts_nothing(),
+    )
+    .await?;
     let result = sqlx::query(
         "INSERT INTO rights_sales \
          (rights_action_id, date, units, proceeds_per_right, rights_cost, fx_rate, \
@@ -503,8 +628,8 @@ pub async fn db_sell_rights(
     .bind(action_id)
     .bind(body.date)
     .bind(Money(body.units))
-    .bind(Money(proceeds_per_right))
-    .bind(Money(rights_cost))
+    .bind(Money(amounts.proceeds_per_right))
+    .bind(Money(amounts.rights_cost))
     .bind(Money(fx_rate))
     .bind(body.holding_account_id)
     .execute(&mut *tx)
@@ -913,6 +1038,50 @@ mod tests {
         // before the per-parcel one).
         let err = db_sell_rights(&pool, 10, &body(d(2024, 7, 21), "1", 2)).await;
         assert!(matches!(err, Err(SellRightsError::ExceedsEntitlement)));
+    }
+
+    /// A parcel's *stored* anchoring is counted once, however many
+    /// allocations of the same request name that parcel. The in-request
+    /// running total carries the prior figure forward
+    /// (`check_parcel_anchoring`); adding it again per allocation would
+    /// refuse a request that is inside the cap purely for having been split.
+    #[tokio::test]
+    async fn splitting_one_parcel_over_allocations_counts_prior_sales_once() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        // 800 units (entitled 200) plus a second parcel keeping the *total*
+        // entitlement (300) roomy, so only the per-parcel cap is in play.
+        insert_buy(&pool, 1, d(2023, 1, 17), "800").await;
+        insert_buy(&pool, 2, d(2024, 6, 3), "400").await;
+        insert_rights_issue(&pool, 10, d(2024, 7, 1)).await;
+
+        // 100 rights anchored to parcel 1, stored.
+        db_sell_rights(&pool, 10, &body(d(2024, 7, 20), "100", 1))
+            .await
+            .unwrap();
+
+        // 100 more, split 50 + 50 over the same parcel: 200 anchored in all,
+        // exactly its entitlement.
+        let mut split = body(d(2024, 7, 21), "100", 1);
+        split.allocations = vec![
+            AllocationInput {
+                purchase_trade_id: 1,
+                units: "50".parse().unwrap(),
+            },
+            AllocationInput {
+                purchase_trade_id: 1,
+                units: "50".parse().unwrap(),
+            },
+        ];
+        db_sell_rights(&pool, 10, &split).await.unwrap();
+
+        // The cap is still the cap: parcel 1 is exhausted, while the holding
+        // has 100 of its 300 rights left (so this is the per-parcel refusal).
+        let err = db_sell_rights(&pool, 10, &body(d(2024, 7, 22), "1", 1)).await;
+        assert!(matches!(
+            err,
+            Err(SellRightsError::ExceedsParcelEntitlement)
+        ));
     }
 
     /// Units sold out of a parcel before the record date earned no rights:
