@@ -2232,6 +2232,37 @@ mod tests {
         assert!(js.contains("'amount_aud'"));
         assert!(js.contains("'units_after'"));
         assert!(js.contains("Amount (AUD)"));
+        // The screen is laid out like the Portfolio Overview, one listing
+        // wide: the listing selector alone at the top, then that listing's
+        // own snapshot graph, then the holding summary, then the price box
+        // collapsed under the summary it re-values, then the ledger. The
+        // table order is the config's, and both the graph and the panel are
+        // config-driven off the same params (`chart` / `paramsPanel`) rather
+        // than a bespoke view.
+        let config = body_string(get("/static/config.js").await).await;
+        let holdings = config.find("{ key: 'holdings', title: 'Holding summary' }");
+        let events = config.find("{ key: 'events', title: 'Activity' }");
+        assert!(holdings.is_some() && events.is_some());
+        assert!(holdings < events, "the holding summary is above the ledger");
+        assert!(config.contains("chart: 'listing_id'"));
+        assert!(config.contains(
+            "paramsPanel: { fields: ['price'], after: 'holdings', summary: 'Manual Price Override' }"
+        ));
+        // The graph is the overview's, narrowed to the chosen listing by the
+        // series endpoint's own filter, and drawn by the shared builder both
+        // screens use — with its own remembered range and series, so opening
+        // one screen never re-ranges the other.
+        assert!(js.contains("function listingChartPanel("));
+        assert!(
+            js.contains("'/report_snapshots/series?listing_id=' + encodeURIComponent(listingId)")
+        );
+        assert!(js.contains("function rangedChart("));
+        assert!(js.contains("share-tracker.activity.range"));
+        assert!(js.contains("share-tracker.activity.series"));
+        // The panel form is re-appended under the table `after` names, and
+        // the body a run submits is read from whichever form holds the field.
+        assert!(js.contains("report.paramsPanel.after === t.key"));
+        assert!(js.contains("readFieldValue(f, fieldOwner(f))"));
     }
 
     #[tokio::test]

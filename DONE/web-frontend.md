@@ -199,6 +199,50 @@ last.
   confirmed Manual Price Overrides and Run report now render below the holdings table
 
 
+## Listing Activity laid out like the Portfolio Overview (2026-08-28 user request)
+"The listing summary screen should be similar layout to the Portfolio overview screen. First have
+the chart, then the holdings summary followed by all the listing activity in the same order it is
+now" — and, in a follow-up the same request: "the listing selector should be at the top, with the
+price override collapsed under the holdings summary like in portfolio overview". The screen led
+with its whole params form (listing + price) and then the ledger, so its two headline facts — what
+the holding is worth and how it got there — were the last things on the page, and it had no graph
+at all.
+
+Both halves were done generically rather than as a bespoke view: the graph and the split form are
+config fields on the report (`chart` / `paramsPanel`), so another params report can take the same
+shape. The chart is the overview's own, narrowed server-side.
+- [x] `reports::snapshot`: `db_series` takes `Option<i64>`, surfaced as `GET
+      /report_snapshots/series?listing_id=`. A narrowed series sums that listing's unrealised-gains
+      rows alone; a date it has no row on is **not a point** (it was not held then, or was held and
+      excluded — a subset sum cannot report an exclusion as a stepped total the way the portfolio
+      series does, so the gap in the line is the signal), and `provisional`/`price_carried_forward`
+      come from that listing's rows rather than the snapshot's portfolio-wide flags. `stale` stays
+      the snapshot's own. Test: `api_the_series_narrows_to_one_listing`
+- [x] `app.js`: the chart, its series selector and its range control extracted out of
+      `performancePanel` into `rangedChart`, which both screens now build from — no second copy of
+      the preset/ResizeObserver/redraw machinery. `listingChartPanel` is the new caller, with its
+      own remembered range and series keys (`share-tracker.activity.*`): one screen reads the whole
+      portfolio and the other a single holding, so a shared key would have the last screen visited
+      silently re-range the other
+- [x] `viewReport`: `report.chart` names the param the graph is scoped to (drawn above the tables,
+      filled when its own request lands rather than holding the tables back); `report.paramsPanel`
+      moves named params out of the header form into a collapsed panel re-appended under the table
+      it belongs beneath. Both forms submit one body — which form a field is read from is decided
+      once, in `fieldOwner`
+- [x] `config.js`: `chart: 'listing_id'`, `paramsPanel: { fields: ['price'], after: 'holdings', … }`,
+      and the two tables swapped so the holding summary is above the ledger (whose own newest-first
+      order is untouched)
+- [x] Docs: `docs/API.md` (the series endpoint's filter + the screen's layout under Listing
+      activity), `docs/FEATURES.md`
+- [x] `cargo test` (2345 passed), `cargo fmt --check`, `cargo clippy --all-targets -D warnings`,
+      `node --test 'src/web/*.test.js'` (126 passed) all clean. `scripts/ui-smoke.sh` gained the
+      deep-linked `#/r/activity/1/12.50` route (the price is passed so the summary does not value
+      live — no smoke route may touch the network). Driven end to end with `scripts/ui-drive.js`
+      against the showcase fixture: switching listing in the top selector re-scopes the graph (BHP
+      axis 7,310–8,439 → VAS 42,863–44,365), the series selector and range presets work on it, and
+      the collapsed override re-values the summary with the layout order intact across re-renders
+
+
 ## SCENARIOS R-01/R-05: the rename feature has no web UI, and the listing form sends the user to an endpoint the UI does not offer
 
 `POST /listings/:id/rename`, `GET /listings/:id/renames` and `DELETE /listings/:id/renames/:id` have

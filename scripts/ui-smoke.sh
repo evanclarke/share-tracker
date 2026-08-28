@@ -48,6 +48,15 @@ checks=(
   # Rust unit/API tests in reports::period_performance and a manual /verify
   # pass instead).
   '#/r/overview|<h2>Portfolio Overview</h2>|graph appears once two or more'
+  # The Listing Activity screen, deep-linked (`#/r/<slug>/<listing>/<price>`
+  # positionally prefills its params and runs on load). The price is passed
+  # deliberately: without one the holding summary values live, and no route
+  # here may touch the network. Markers cover its Portfolio-Overview-shaped
+  # layout — the chart panel above the holding summary above the ledger — and
+  # a fixture figure in the ledger itself. The demo fixture seeds no closing
+  # prices, so this listing's series is empty and the chart shows its hint,
+  # which still catches a load-time exception in the panel.
+  '#/r/activity/1/12.50|<h2>Listing Activity</h2>|graph appears once two or more|Holding summary|Manual Price Override|1234.5678'
   # `#/` is the home screen (the same view as #/r/overview, rendered
   # directly): also checks the top menu bar rendered and the New trade
   # shortcut is present, since menu items are in the DOM even with every

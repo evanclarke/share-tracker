@@ -158,7 +158,7 @@ Shortcut buttons (**New trade**, **New income**, **New sell**, **New transfer**)
 
 ### Listing activity ledger
 
-Everything ever recorded against one listing in chronological order (trades labelled with the operation that created them, transfers, income, corporate actions, AMMA/ESS statements, rights sales, DRP enrolment periods, listing-scoped expenses), each row with its AUD amount and a running units-held balance that splits and bonus issues re-base, ending in the final holding summary per account: units held, cost base, and current market value (live-priced; an explicit price wins) — see [Listing activity](API.md#listing-activity)
+Everything ever recorded against one listing in chronological order (trades labelled with the operation that created them, transfers, income, corporate actions, AMMA/ESS statements, rights sales, DRP enrolment periods, listing-scoped expenses), each row with its AUD amount and a running units-held balance that splits and bonus issues re-base, ending in the final holding summary per account: units held, cost base, and current market value (live-priced; an explicit price wins). The screen is laid out like the Portfolio Overview, one listing wide — the listing's own market-value/unrealised-gain graph over a selectable range, then the holding summary, then the ledger — see [Listing activity](API.md#listing-activity)
 
 ### Unrealised gains report
 

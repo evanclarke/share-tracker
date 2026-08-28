@@ -2137,6 +2137,12 @@ const HIDE_INACTIVE_PREF_KEY = 'share-tracker.overview.hideInactive';
 // Which of chart.js's SERIES_FIELDS the graph plots, remembered the same way
 // (one series at a time — see chart.js for why they can't share an axis).
 const SERIES_PREF_KEY = 'share-tracker.overview.series';
+// The Listing Activity screen's own pair. Deliberately not the overview's:
+// one screen reads the whole portfolio and the other a single holding, so the
+// window worth looking at on each is a different question — and a shared key
+// would have the last screen visited silently re-range the other.
+const LISTING_RANGE_PREF_KEY = 'share-tracker.activity.range';
+const LISTING_SERIES_PREF_KEY = 'share-tracker.activity.series';
 
 // A period figure formatted through the shared money display rules
 // (COLUMN_KINDS 'money': round to 2 dp + thousands grouping, full value on
@@ -2248,54 +2254,43 @@ async function renderPeriodSummary(r) {
   return { headline: el('div', null, headlineParts), detail: el('div', null, detailParts) };
 }
 
-// The Portfolio Overview screen's market-value graph and period-performance
-// summary (moved here from the Snapshots maintenance screen — see
-// `viewSnapshots`). Range presets and a custom from/to both resolve to the
-// nearest actual stored snapshot dates before calling the report, so the
-// summary always matches stored prices and the chart's own endpoints.
+// The chart and its two controls — the series selector above it and the range
+// presets / custom from-to below — shared by the Portfolio Overview's
+// performance panel and the Listing Activity screen's own graph
+// (`listingChartPanel`). Everything screen-specific is in `opts`:
+// `rangeKey`/`seriesKey` are the localStorage keys the two remembered choices
+// live under (each screen remembers its own window and series, so opening one
+// does not rewrite the other's), `selectId` the series select's id, and
+// `onRange(from, to)` an optional hook called with every window the reader
+// selects — how the overview panel re-runs its period summary beneath the
+// same chart.
 //
-// Layout puts the headline stat grid above the chart (so the return figures
-// are visible without scrolling, since this panel opens the app's home
-// screen) and the FX/per-holding detail below the range control, where a
-// closed-by-default `<details>` doesn't compete for attention.
-async function performancePanel() {
-  const series = await api('GET', '/report_snapshots/series');
-  if (!series || series.length < 2) {
-    return el('div', { class: 'card perf-panel' }, [
-      el('h3', null, 'Performance'),
-      seriesChart(series, loadPref(SERIES_PREF_KEY, SERIES_FIELDS[0].key)),
-    ]);
-  }
-
-  const statsHolder = el('div');
+// Returns the three built elements plus `start()`, which restores the
+// remembered preset and draws; call it once they are placed. Callers must
+// have checked the series carries at least two points (the chart itself only
+// renders a hint below that, and there is no window to select).
+function rangedChart(series, opts) {
   const chartHolder = el('div');
   // The series selector: market value and unrealised gain are an order of
   // magnitude apart, so the graph draws one at a time and scales its y axis
   // to that one (chart.js `yBounds`). The choice is remembered across
   // reloads, like the range preset.
-  const seriesSel = el('select', { id: 'series-field' }, SERIES_FIELDS.map(function (s) {
+  const seriesSel = el('select', { id: opts.selectId }, SERIES_FIELDS.map(function (s) {
     return el('option', { value: s.key }, s.label);
   }));
-  seriesSel.value = seriesField(loadPref(SERIES_PREF_KEY, SERIES_FIELDS[0].key)).key;
+  seriesSel.value = seriesField(loadPref(opts.seriesKey, SERIES_FIELDS[0].key)).key;
   seriesSel.addEventListener('change', function () {
-    savePref(SERIES_PREF_KEY, seriesSel.value);
+    savePref(opts.seriesKey, seriesSel.value);
     drawChart();
   });
-  const detailHolder = el('div');
+  const seriesControl = el('div', { class: 'series-control' }, [
+    el('label', { for: opts.selectId }, 'Series'), seriesSel,
+  ]);
   const fromInp = el('input', { type: 'date' });
   const toInp = el('input', { type: 'date' });
 
-  function nearestSeriesDates(from, to) {
-    let rFrom = null, rTo = null;
-    series.forEach(function (p) {
-      if (p.snapshot_date >= from && rFrom === null) rFrom = p.snapshot_date;
-      if (p.snapshot_date <= to) rTo = p.snapshot_date;
-    });
-    return { from: rFrom, to: rTo };
-  }
-
   // The range currently drawn, so switching series redraws the same window
-  // without re-running the period-performance request below it.
+  // without re-running whatever `onRange` does below it.
   let shownFrom = null, shownTo = null;
   // The width the plot was last built at. The graph is drawn at the holder's
   // measured width (chart.js `chartWidth`) rather than at a fixed viewBox, so
@@ -2332,24 +2327,7 @@ async function performancePanel() {
     shownFrom = from;
     shownTo = to;
     drawChart();
-    statsHolder.innerHTML = '';
-    detailHolder.innerHTML = '';
-    const resolved = nearestSeriesDates(from, to);
-    if (!resolved.from || !resolved.to || resolved.from >= resolved.to) {
-      statsHolder.appendChild(el('p', { class: 'hint' },
-        'Select a range spanning at least two stored snapshots for a period summary.'));
-      return;
-    }
-    try {
-      const result = await api('POST', '/portfolio/period-performance', {
-        from: resolved.from, to: resolved.to,
-      });
-      const summary = await renderPeriodSummary(result);
-      statsHolder.appendChild(summary.headline);
-      detailHolder.appendChild(summary.detail);
-    } catch (e) {
-      statsHolder.appendChild(el('p', { class: 'hint warn' }, e.message));
-    }
+    if (opts.onRange) await opts.onRange(from, to);
   }
 
   // `activePreset` is null while a custom From/To range is in effect (no
@@ -2361,7 +2339,7 @@ async function performancePanel() {
     btn._presetKey = p[0];
     btn.addEventListener('click', function () {
       activePreset = p[0];
-      savePref(RANGE_PREF_KEY, activePreset);
+      savePref(opts.rangeKey, activePreset);
       const r = presetRange(series, p[0]);
       applyRange(r.from, r.to);
     });
@@ -2387,23 +2365,117 @@ async function performancePanel() {
       // page load falls back to the default (all) rather than reapplying
       // stale fixed dates.
       activePreset = null;
-      savePref(RANGE_PREF_KEY, null);
+      savePref(opts.rangeKey, null);
       applyRange(fromInp.value, toInp.value);
     }
+  });
+
+  return {
+    seriesControl: seriesControl,
+    chartHolder: chartHolder,
+    rangeForm: rangeForm,
+    start: function () {
+      const storedPreset = loadPref(opts.rangeKey, 'all');
+      activePreset = RANGE_PRESETS.some(function (p) { return p[0] === storedPreset; })
+        ? storedPreset : 'all';
+      const initial = presetRange(series, activePreset);
+      return applyRange(initial.from, initial.to);
+    },
+  };
+}
+
+// The Portfolio Overview screen's market-value graph and period-performance
+// summary (moved here from the Snapshots maintenance screen — see
+// `viewSnapshots`). Range presets and a custom from/to both resolve to the
+// nearest actual stored snapshot dates before calling the report, so the
+// summary always matches stored prices and the chart's own endpoints.
+//
+// Layout puts the headline stat grid above the chart (so the return figures
+// are visible without scrolling, since this panel opens the app's home
+// screen) and the FX/per-holding detail below the range control, where a
+// closed-by-default `<details>` doesn't compete for attention.
+async function performancePanel() {
+  const series = await api('GET', '/report_snapshots/series');
+  if (!series || series.length < 2) {
+    return el('div', { class: 'card perf-panel' }, [
+      el('h3', null, 'Performance'),
+      seriesChart(series, loadPref(SERIES_PREF_KEY, SERIES_FIELDS[0].key)),
+    ]);
+  }
+
+  const statsHolder = el('div');
+  const detailHolder = el('div');
+
+  function nearestSeriesDates(from, to) {
+    let rFrom = null, rTo = null;
+    series.forEach(function (p) {
+      if (p.snapshot_date >= from && rFrom === null) rFrom = p.snapshot_date;
+      if (p.snapshot_date <= to) rTo = p.snapshot_date;
+    });
+    return { from: rFrom, to: rTo };
+  }
+
+  const chart = rangedChart(series, {
+    rangeKey: RANGE_PREF_KEY, seriesKey: SERIES_PREF_KEY, selectId: 'series-field',
+    onRange: async function (from, to) {
+      statsHolder.innerHTML = '';
+      detailHolder.innerHTML = '';
+      const resolved = nearestSeriesDates(from, to);
+      if (!resolved.from || !resolved.to || resolved.from >= resolved.to) {
+        statsHolder.appendChild(el('p', { class: 'hint' },
+          'Select a range spanning at least two stored snapshots for a period summary.'));
+        return;
+      }
+      try {
+        const result = await api('POST', '/portfolio/period-performance', {
+          from: resolved.from, to: resolved.to,
+        });
+        const summary = await renderPeriodSummary(result);
+        statsHolder.appendChild(summary.headline);
+        detailHolder.appendChild(summary.detail);
+      } catch (e) {
+        statsHolder.appendChild(el('p', { class: 'hint warn' }, e.message));
+      }
+    },
   });
 
   const panel = el('div', { class: 'card perf-panel' }, [
     el('h3', null, 'Market value and unrealised gain over time'),
     statsHolder,
-    el('div', { class: 'series-control' }, [el('label', { for: 'series-field' }, 'Series'), seriesSel]),
-    chartHolder,
-    rangeForm,
+    chart.seriesControl,
+    chart.chartHolder,
+    chart.rangeForm,
     detailHolder,
   ]);
-  const storedPreset = loadPref(RANGE_PREF_KEY, 'all');
-  activePreset = RANGE_PRESETS.some(function (p) { return p[0] === storedPreset; }) ? storedPreset : 'all';
-  const initial = presetRange(series, activePreset);
-  await applyRange(initial.from, initial.to);
+  await chart.start();
+  return panel;
+}
+
+// The Listing Activity screen's graph: the same stored snapshots the overview
+// plots, narrowed to one listing (`GET /report_snapshots/series?listing_id=`,
+// which sums that listing's holding accounts together and has no point for a
+// date it was not held on). It carries the chart and its controls and nothing
+// else — the period-performance report is whole-portfolio, and this screen's
+// own figures are the holding summary immediately below the graph.
+async function listingChartPanel(listingId) {
+  const series = await api('GET',
+    '/report_snapshots/series?listing_id=' + encodeURIComponent(listingId));
+  const heading = el('h3', null, 'Market value and unrealised gain over time');
+  if (!series || series.length < 2) {
+    return el('div', { class: 'card perf-panel' }, [
+      heading,
+      seriesChart(series, loadPref(LISTING_SERIES_PREF_KEY, SERIES_FIELDS[0].key)),
+    ]);
+  }
+  const chart = rangedChart(series, {
+    rangeKey: LISTING_RANGE_PREF_KEY,
+    seriesKey: LISTING_SERIES_PREF_KEY,
+    selectId: 'listing-series-field',
+  });
+  const panel = el('div', { class: 'card perf-panel' }, [
+    heading, chart.seriesControl, chart.chartHolder, chart.rangeForm,
+  ]);
+  await chart.start();
   return panel;
 }
 
@@ -2502,6 +2574,15 @@ async function viewReport(report, args) {
   // The params form, once built — held here so a paged response can re-run it
   // with the next cursor (see `pageNote`).
   let paramsForm = null;
+  // The collapsed panel form some of the params are rendered in instead
+  // (`paramsPanel`, config.js) — held here because `render` re-appends it
+  // under the table it belongs beneath, and the body a run submits is read
+  // from both forms. Null for a report without one.
+  let paramsPanelForm = null;
+  // The body the report was last run with: `report.chart` (config.js) names
+  // the param whose value the graph above the tables is scoped to, and only
+  // a run knows what the reader chose.
+  let lastBody = null;
 
   // A cursor-paged response says for itself whether more remains:
   // `next_before_id` is non-null exactly when there are older entries (Row
@@ -2531,6 +2612,20 @@ async function viewReport(report, args) {
     if (asAt) result.appendChild(asAt);
     const basis = basisNote(rows);
     if (basis) result.appendChild(basis);
+    // `chart` (config.js) leads the results with the snapshot graph for the
+    // listing the run was scoped to — the Portfolio Overview's layout, one
+    // listing wide (Listing Activity). Its own request fills the holder when
+    // it lands rather than holding the tables back for it, the same way the
+    // overview's panel does.
+    if (report.chart && lastBody && lastBody[report.chart] != null) {
+      const chartHolder = el('div');
+      result.appendChild(chartHolder);
+      listingChartPanel(lastBody[report.chart]).then(function (built) {
+        chartHolder.appendChild(built);
+      }).catch(function (e) {
+        chartHolder.appendChild(el('p', { class: 'hint warn' }, e.message));
+      });
+    }
     // Reports with `tables` return one object whose listed keys each render
     // as a titled table (a non-array value renders as a one-row table). The
     // array check is what lets one report answer both shapes: Row History's
@@ -2576,6 +2671,12 @@ async function viewReport(report, args) {
           columns: t.columns, statusField: report.statusField, expand: t.expand, context: rows,
           rowActions: report.rowActions, selfRoute: selfRoute,
         }));
+        // The collapsed params panel sits under the table `paramsPanel.after`
+        // names — the price override below the holding summary it re-values,
+        // as on the Portfolio Overview.
+        if (paramsPanelForm && report.paramsPanel.after === t.key) {
+          result.appendChild(paramsPanelForm);
+        }
       }
       if (more) result.appendChild(more);
       return;
@@ -2604,36 +2705,71 @@ async function viewReport(report, args) {
   // that carries the values in the hash, and a report declaring `autoRun`
   // because every one of its fields is optional (Row History's browse page).
   if (report.params) {
+    // `paramsPanel` (config.js) moves the named fields out of the header form
+    // into a collapsed panel rendered under one of the tables — the Portfolio
+    // Overview's price-override shape, so a screen whose point is a graph and
+    // a holding summary is led by its selector alone rather than by the whole
+    // form. Both forms submit the same body: which one a field is read from
+    // is decided here, once.
+    const panelFields = (report.paramsPanel && report.paramsPanel.fields) || [];
+    function inPanel(f) { return panelFields.indexOf(f.name) >= 0; }
     const form = el('form', { class: 'card' });
     paramsForm = form;
-    for (const f of report.params) form.appendChild(await buildFieldInput(f));
+    for (const f of report.params) {
+      if (!inPanel(f)) form.appendChild(await buildFieldInput(f));
+    }
     form.appendChild(el('div', { class: 'form-actions' }, [
       el('button', { type: 'submit', class: 'primary' }, 'Run report'),
     ]));
+    if (panelFields.length > 0) {
+      const details = el('details', { class: 'price-overrides' },
+        [el('summary', null, report.paramsPanel.summary)]);
+      for (const f of report.params) {
+        if (inPanel(f)) details.appendChild(await buildFieldInput(f));
+      }
+      paramsPanelForm = el('form', { class: 'price-form' }, [
+        details,
+        el('div', { class: 'form-actions' }, [
+          el('button', { type: 'submit', class: 'primary' }, 'Run report'),
+        ]),
+      ]);
+    }
+    function fieldOwner(f) { return inPanel(f) ? paramsPanelForm : form; }
     // A deep link (`#/r/<slug>/a/b`) prefills the params positionally and
     // runs the report on load — how a Row History browse entry drills into
-    // that row's own trail.
+    // that row's own trail, and how every `listing_id` cell in the app drills
+    // into that listing's activity ledger.
     const deepLink = (args || []).length > 0;
     if (deepLink) {
       report.params.forEach(function (f, i) {
         if (args[i] == null || args[i] === '') return;
-        const inp = form.querySelector('[name="' + f.name + '"]');
+        const inp = fieldOwner(f).querySelector('[name="' + f.name + '"]');
         if (inp) inp.value = decodeURIComponent(args[i]);
       });
     }
-    form.addEventListener('submit', async function (ev) {
-      ev.preventDefault();
+    async function runReport() {
       const body = {};
       report.params.forEach(function (f) {
-        const v = readFieldValue(f, form);
+        const v = readFieldValue(f, fieldOwner(f));
         if (v !== null) body[f.name] = v;
       });
+      lastBody = body;
       try {
         await render(await api('POST', report.api, body));
       } catch (e) {
         toast(e.message, true);
       }
+    }
+    form.addEventListener('submit', function (ev) {
+      ev.preventDefault();
+      runReport();
     });
+    if (paramsPanelForm) {
+      paramsPanelForm.addEventListener('submit', function (ev) {
+        ev.preventDefault();
+        runReport();
+      });
+    }
     setMain(el('div', null, [header, shortcuts, panel, form, result]));
     // `autoRun` (config.js) is for a params report whose fields are *all*
     // optional — Row History, which opens on the browse page and narrows from

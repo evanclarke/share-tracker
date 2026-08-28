@@ -509,14 +509,20 @@ export const REPORTS = [
   {
     slug: 'activity', title: 'Listing Activity', api: '/portfolio/activity', method: 'POST',
     menu: 'Reports', section: 'Portfolio',
-    desc: 'Everything ever recorded against one listing, newest first — trades labelled with the operation that created them, transfers, income, corporate actions, statements — each with the units held after it, so the top row is the holding as it stands. Sort the Date column to read it forwards. Ends in the holding summary per account (units held, cost base, market value).',
+    desc: 'One listing, laid out like the Portfolio Overview: its market-value or unrealised-gain graph over a selectable date range, then the holding summary per account (units held, cost base, market value), then everything ever recorded against it, newest first — trades labelled with the operation that created them, transfers, income, corporate actions, statements — each with the units held after it, so the top row is the holding as it stands. Sort the Date column to read it forwards.',
     params: [
       fk('listing_id', 'Listing', 'listings', { required: true }),
       dec('price', 'Current price per unit (AUD)', { optional: true, default: '', hint: 'Blank = the live price from the price source; a fetch failure leaves the summary unvalued (never zero).' }),
     ],
+    // The graph leads the screen, scoped to the chosen listing.
+    chart: 'listing_id',
+    // …so the selector alone stays at the top, and the price override sits
+    // collapsed under the summary it re-values — the Portfolio Overview's
+    // layout (see `viewReport`).
+    paramsPanel: { fields: ['price'], after: 'holdings', summary: 'Manual Price Override' },
     tables: [
-      { key: 'events', title: 'Activity' },
       { key: 'holdings', title: 'Holding summary' },
+      { key: 'events', title: 'Activity' },
     ],
   },
   {

@@ -307,7 +307,27 @@ pub async fn db_get(
 /// The graphable time series: per snapshot date, the unrealised-gains
 /// snapshot's portfolio totals (every held listing is priced at generation,
 /// so the sums cover the whole portfolio). Oldest first.
-pub async fn db_series(pool: &SqlitePool) -> Result<Vec<SeriesPoint>, sqlx::Error> {
+///
+/// `listing` narrows the series to one listing — the same stored snapshots,
+/// summed over that listing's rows alone (its holding accounts together), for
+/// the Listing Activity screen's own graph. Three consequences follow from
+/// summing a subset:
+///
+/// * A date the listing has no row on is **not a point**. It was not held
+///   then — or it was held and *excluded* (no price obtainable before the
+///   provider's series began, `listings.unpriced_before`), which a subset sum
+///   cannot report as a stepped total the way the portfolio series does. The
+///   gap in the line is the signal, so `holding_excluded` is never set on a
+///   narrowed series and `excluded_holdings` stays empty.
+/// * `provisional` and `price_carried_forward` come from **this listing's**
+///   rows, not the snapshot's portfolio-wide flags: another holding's
+///   fallback-month rate says nothing about this one.
+/// * `stale` stays the snapshot's own flag — a back-dated fact stales the
+///   whole stored result, this listing's rows included.
+pub async fn db_series(
+    pool: &SqlitePool,
+    listing: Option<i64>,
+) -> Result<Vec<SeriesPoint>, sqlx::Error> {
     let rows = sqlx::query(
         "SELECT snapshot_date, stale, provisional, price_carried_forward, holding_excluded, \
                 excluded_holdings, rows_json \
@@ -333,10 +353,31 @@ pub async fn db_series(pool: &SqlitePool) -> Result<Vec<SeriesPoint>, sqlx::Erro
             total_cost_base: Decimal::ZERO,
             unrealised_gain: Decimal::ZERO,
         };
-        for g in &gains {
-            point.market_value += g.market_value.unwrap_or(Decimal::ZERO);
-            point.total_cost_base += g.total_cost_base;
-            point.unrealised_gain += g.unrealised_gain_loss.unwrap_or(Decimal::ZERO);
+        if let Some(listing_id) = listing {
+            // The narrowed series: this listing's rows alone, and the flags
+            // those rows carry rather than the portfolio's (see above).
+            let rows: Vec<&unrealised_gains::UnrealisedGain> = gains
+                .iter()
+                .filter(|g| g.listing_id == listing_id)
+                .collect();
+            if rows.is_empty() {
+                continue;
+            }
+            point.provisional = rows.iter().any(|g| g.fx_provisional);
+            point.price_carried_forward = rows.iter().any(|g| g.price_carried_forward);
+            point.holding_excluded = false;
+            point.excluded_holdings = ExcludedHoldings(Vec::new());
+            for g in rows {
+                point.market_value += g.market_value.unwrap_or(Decimal::ZERO);
+                point.total_cost_base += g.total_cost_base;
+                point.unrealised_gain += g.unrealised_gain_loss.unwrap_or(Decimal::ZERO);
+            }
+        } else {
+            for g in &gains {
+                point.market_value += g.market_value.unwrap_or(Decimal::ZERO);
+                point.total_cost_base += g.total_cost_base;
+                point.unrealised_gain += g.unrealised_gain_loss.unwrap_or(Decimal::ZERO);
+            }
         }
         series.push(point);
     }
@@ -855,6 +896,14 @@ struct ListParams {
     to: Option<NaiveDate>,
 }
 
+/// `GET /report_snapshots/series` query: `listing_id` narrows the series to
+/// one listing (see `db_series`), absent means the whole portfolio.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SeriesParams {
+    listing_id: Option<i64>,
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct GenerateBody {
@@ -872,8 +921,14 @@ async fn list(
         .map_err(ApiError::from)
 }
 
-async fn series(State(pool): State<SqlitePool>) -> Result<Json<Vec<SeriesPoint>>, ApiError> {
-    db_series(&pool).await.map(Json).map_err(ApiError::from)
+async fn series(
+    State(pool): State<SqlitePool>,
+    Query(params): Query<SeriesParams>,
+) -> Result<Json<Vec<SeriesPoint>>, ApiError> {
+    db_series(&pool, params.listing_id)
+        .await
+        .map(Json)
+        .map_err(ApiError::from)
 }
 
 async fn get_one(
@@ -1637,7 +1692,7 @@ mod tests {
         let now = friday_evening_sydney();
         generate(&pool, ymd(2026, 6, 4), now).await.unwrap();
         generate(&pool, ymd(2026, 6, 5), now).await.unwrap();
-        let series = db_series(&pool).await.unwrap();
+        let series = db_series(&pool, None).await.unwrap();
         assert_eq!(series[1].market_value, "5073.08".parse().unwrap());
         assert!(!series[1].stale);
 
@@ -1658,7 +1713,7 @@ mod tests {
 
         // Regenerating values the Friday at Thursday's close instead.
         generate(&pool, ymd(2026, 6, 5), now).await.unwrap();
-        let series = db_series(&pool).await.unwrap();
+        let series = db_series(&pool, None).await.unwrap();
         assert_eq!(series[1].market_value, "4443.08".parse().unwrap());
         assert!(!series[1].stale);
 
@@ -1669,7 +1724,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            db_series(&pool).await.unwrap()[2].market_value,
+            db_series(&pool, None).await.unwrap()[2].market_value,
             "4443.08".parse::<Decimal>().unwrap()
         );
 
@@ -1808,7 +1863,7 @@ mod tests {
         assert!(gains[1].price_carried_forward);
 
         // The series point carries it too, so the graph can mark it.
-        let series = db_series(&pool).await.unwrap();
+        let series = db_series(&pool, None).await.unwrap();
         assert_eq!(series.len(), 1);
         assert!(series[0].price_carried_forward);
 
@@ -1982,7 +2037,7 @@ mod tests {
 
         // The series point carries both the flag and the list, so the graph
         // can mark the step where LAC's own series begins.
-        let series = db_series(&pool).await.unwrap();
+        let series = db_series(&pool, None).await.unwrap();
         assert_eq!(series[0].snapshot_date, ymd(2026, 6, 3));
         assert!(series[0].holding_excluded);
         assert_eq!(series[0].excluded_holdings.0[0].ticker, "LAC");
@@ -1992,7 +2047,7 @@ mod tests {
         // up by the holding that rejoined.
         generate(&pool, ymd(2026, 6, 4), now).await.unwrap();
         assert_eq!(excluded_flags(&pool, ymd(2026, 6, 4)).await, vec![false; 3]);
-        let series = db_series(&pool).await.unwrap();
+        let series = db_series(&pool, None).await.unwrap();
         assert_eq!(series[1].market_value, "7493.00".parse().unwrap()); // + 50 × 24.90
         assert!(series[1].excluded_holdings.0.is_empty());
     }
@@ -2081,7 +2136,7 @@ mod tests {
         generate(&pool, ymd(2026, 6, 3), now).await.unwrap();
         assert_eq!(excluded_flags(&pool, ymd(2026, 6, 3)).await, vec![false; 3]);
         assert_eq!(stale_flags(&pool, ymd(2026, 6, 3)).await, vec![false; 3]);
-        let series = db_series(&pool).await.unwrap();
+        let series = db_series(&pool, None).await.unwrap();
         assert_eq!(series[0].market_value, "7493.00".parse().unwrap()); // 6248 + 50 × 24.90
     }
 
@@ -2113,7 +2168,7 @@ mod tests {
         let now = friday_evening_sydney();
         generate(&pool, ymd(2026, 6, 3), now).await.unwrap();
         assert_eq!(excluded_flags(&pool, ymd(2026, 6, 3)).await, vec![true; 3]);
-        let before = db_series(&pool).await.unwrap()[0].market_value;
+        let before = db_series(&pool, None).await.unwrap()[0].market_value;
         assert_eq!(before, "6248.00".parse().unwrap());
 
         let cleared = crate::entities::closing_price::db_clear_unpriced_before(&pool, 1)
@@ -2129,7 +2184,10 @@ mod tests {
             "no stored figure was valued at the cleared row, so none is stale"
         );
         generate(&pool, ymd(2026, 6, 3), now).await.unwrap();
-        assert_eq!(db_series(&pool).await.unwrap()[0].market_value, before);
+        assert_eq!(
+            db_series(&pool, None).await.unwrap()[0].market_value,
+            before
+        );
         assert_eq!(excluded_flags(&pool, ymd(2026, 6, 3)).await, vec![true; 3]);
 
         // Clearing the marker afterwards stales the prefix, and regeneration
@@ -2226,7 +2284,7 @@ mod tests {
         assert!(gains[0].fx_provisional);
 
         // The series marks the point provisional for the graph.
-        let series = db_series(&pool).await.unwrap();
+        let series = db_series(&pool, None).await.unwrap();
         assert!(series[0].provisional);
 
         // June's real rate lands (no staleness trigger fires) — the next job
@@ -2463,6 +2521,71 @@ mod tests {
             let resp = app.get(uri).await;
             assert_eq!(resp.status, StatusCode::NOT_FOUND, "{uri}");
         }
+    }
+
+    /// The series narrowed to one listing (the Listing Activity screen's
+    /// graph): the same stored snapshots summed over that listing's rows
+    /// alone, and no point at all for a date it had no rows on — it was not
+    /// held then, and a zero would read as a holding worth nothing rather
+    /// than as an absent one.
+    #[tokio::test]
+    async fn api_the_series_narrows_to_one_listing() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BHP", Some("XASX"), "AUD").await;
+        insert_listing(&pool, 2, "CBA", Some("XASX"), "AUD").await;
+        insert_buy(&pool, 1, 1, ymd(2024, 1, 16), "100", "10", "AUD").await;
+        // CBA is bought between the two snapshot dates, so it is held on the
+        // Friday and not on the Thursday.
+        insert_buy(&pool, 2, 2, ymd(2026, 6, 5), "50", "20", "AUD").await;
+        for (listing, date, price) in [
+            (1, ymd(2026, 6, 4), "44.4308"),
+            (1, ymd(2026, 6, 5), "50.7308"),
+            (2, ymd(2026, 6, 4), "100"),
+            (2, ymd(2026, 6, 5), "110"),
+        ] {
+            store_price(&pool, listing, date, price).await;
+        }
+        let now = friday_evening_sydney();
+        generate(&pool, ymd(2026, 6, 4), now).await.unwrap();
+        generate(&pool, ymd(2026, 6, 5), now).await.unwrap();
+
+        let app = ApiClient::full(&pool);
+        // The whole portfolio: the Friday totals both holdings.
+        let points = app.get("/report_snapshots/series").await;
+        let points = body_json(points).await;
+        assert_eq!(points.as_array().unwrap().len(), 2);
+        assert_eq!(points[1]["market_value"], "10573.0800");
+
+        // BHP alone: both dates, its own totals.
+        let resp = app.get("/report_snapshots/series?listing_id=1").await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let bhp = body_json(resp).await;
+        let bhp = bhp.as_array().unwrap();
+        assert_eq!(bhp.len(), 2);
+        assert_eq!(bhp[0]["snapshot_date"], "2026-06-04");
+        assert_eq!(bhp[0]["market_value"], "4443.0800");
+        assert_eq!(bhp[1]["market_value"], "5073.0800");
+        assert_eq!(bhp[1]["total_cost_base"], "1000");
+        assert_eq!(bhp[1]["unrealised_gain"], "4073.0800");
+
+        // CBA alone: only the date it was held on.
+        let cba = body_json(app.get("/report_snapshots/series?listing_id=2").await).await;
+        let cba = cba.as_array().unwrap();
+        assert_eq!(cba.len(), 1, "no point for the day before it was bought");
+        assert_eq!(cba[0]["snapshot_date"], "2026-06-05");
+        assert_eq!(cba[0]["market_value"], "5500");
+        assert_eq!(cba[0]["holding_excluded"], false);
+        assert_eq!(cba[0]["excluded_holdings"].as_array().unwrap().len(), 0);
+
+        // A listing that has never been held has no series at all.
+        let none = body_json(app.get("/report_snapshots/series?listing_id=99").await).await;
+        assert_eq!(none.as_array().unwrap().len(), 0);
+
+        // A misspelt query parameter is refused, not silently ignored —
+        // axum's own `Query` rejection, the same 400 the sibling
+        // `/report_snapshots` list answers an unknown filter with.
+        let resp = app.get("/report_snapshots/series?listingid=1").await;
+        assert_eq!(resp.status, StatusCode::BAD_REQUEST);
     }
 
     /// The bulk repair endpoints: regenerate-all re-runs every stored date
@@ -2857,7 +2980,7 @@ mod tests {
         generate(&pool, ymd(2026, 6, 5), now).await.unwrap();
         generate(&pool, ymd(2026, 6, 11), now).await.unwrap();
 
-        let series = db_series(&pool).await.unwrap();
+        let series = db_series(&pool, None).await.unwrap();
         let value = |date: NaiveDate| {
             series
                 .iter()
