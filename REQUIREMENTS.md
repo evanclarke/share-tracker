@@ -68,7 +68,7 @@ unchanged — the work is letting an asset exist without an exchange, not new ta
 
 Out of scope (record as Known limitations):
 - **Foreign-currency cash balances** — deferred. Holding FX itself is generally not CGT (Division
-  775 forex realisation gains/losses are ordinary income, with the $250k limited-balance election),
+  775 forex realisation gains/losses are ordinary income, with the \$250k limited-balance election),
   so it needs its own tax engine and will be specified separately
 - **Crypto-to-crypto swaps** (e.g. BTC→ETH) as an atomic operation — a swap is a disposal at market
   value and can be entered manually as a Sell plus a Buy; a dedicated swap operation (like the
@@ -182,7 +182,7 @@ reinvested under a DRP is entered in the same form as the income itself.
   - The income form opens in a simple mode showing: listing, date paid, the payment amount, and a
     franking selector — **Fully franked (30%)** / **Unfranked** / **Trust distribution**
   - Fully franked: the amount is submitted as `franked_amount` and the franking credit is
-    auto-computed as amount × 30/70 rounded to the cent (PLS example: $2,757.30 → $1,181.70).
+    auto-computed as amount × 30/70 rounded to the cent (PLS example: \$2,757.30 → \$1,181.70).
     Unfranked: the amount is `unfranked_amount`. Trust distribution: the amount is
     `unfranked_amount` with `trust_income` set (component breakdown arrives later via the AMMA
     statement for AMIT funds)
@@ -202,7 +202,7 @@ reinvested under a DRP is entered in the same form as the income itself.
     securities_held, rounded to the cent (half away from zero), must equal the gross cash
     components `franked_amount + unfranked_amount + foreign_source_income` (franking credits are
     notional and TFN withholding is deducted from, not part of, the gross). Mismatch → 422.
-    Both statements reconcile: 0.14 × 19,695 = $2,757.30 (PLS); 0.89891492 × 866 = $778.46
+    Both statements reconcile: 0.14 × 19,695 = \$2,757.30 (PLS); 0.89891492 × 866 = \$778.46
     (VDHG, cent-rounded)
   - The stored values are validation/cross-reference only — no report uses them (informational
     columns, mirroring `trades.statement_total`)
@@ -216,8 +216,8 @@ reinvested under a DRP is entered in the same form as the income itself.
     `POST /income/{id}/reinvest`. If the reinvest step fails (e.g. not DRP-enrolled), the saved
     income row stands, the error is shown, and the row's existing Reinvest action remains the
     fallback — no new endpoint, no change to reinvestment semantics (whole units + residual are
-    still computed server-side; the VDHG advice reconciles: $778.46 at $52.0017 → 14 units =
-    $728.02, residual $50.44 carried forward)
+    still computed server-side; the VDHG advice reconciles: \$778.46 at \$52.0017 → 14 units =
+    \$728.02, residual \$50.44 carried forward)
 - Docs: the new columns update `docs/SCHEMA.md`; the new 422 validations update `docs/API.md`;
   the simpler entry flow is a user-visible feature for the README
 
@@ -494,7 +494,7 @@ consistent. It **supersedes the current "ESS income reporting is out of scope" K
 - A new ESS-income record capturing the figures an employer's **ESS statement** prints (the
   individual tax return's Item 12 labels), per statement, attributed to a `listing_id` and
   `holding_account_id`:
-  - `taxed_upfront_eligible` — discount from taxed-upfront schemes **eligible** for the $1,000
+  - `taxed_upfront_eligible` — discount from taxed-upfront schemes **eligible** for the \$1,000
     reduction (label D)
   - `taxed_upfront_not_eligible` — discount from taxed-upfront schemes **not** eligible (label E)
   - `deferral_discount` — discount from tax-deferral schemes (label F; the RSU case)
@@ -505,11 +505,11 @@ consistent. It **supersedes the current "ESS income reporting is out of scope" K
     given to the employer
   - the taxing-point date and the market value at the taxing point (drives both the assessable
     discount and the linked Buy's cost base)
-- The **$1,000 reduction** (taxed-upfront eligible schemes): reduce the assessable discount by up
-  to the lesser of $1,000 and `taxed_upfront_eligible`, and surface the reduction applied — but the
-  full eligibility test needs the taxpayer's **adjusted taxable income ≤ $180,000**, which is
-  outside this system's data. So apply the up-to-$1,000 de-minimis and flag the income-test caveat
-  as the user's responsibility, exactly mirroring the FITO $1,000 cap pattern (a
+- The **\$1,000 reduction** (taxed-upfront eligible schemes): reduce the assessable discount by up
+  to the lesser of \$1,000 and `taxed_upfront_eligible`, and surface the reduction applied — but the
+  full eligibility test needs the taxpayer's **adjusted taxable income ≤ \$180,000**, which is
+  outside this system's data. So apply the up-to-\$1,000 de-minimis and flag the income-test caveat
+  as the user's responsibility, exactly mirroring the FITO \$1,000 cap pattern (a
   `taxed_upfront_reduction` field + an informational caveat in the row)
 - The tax summary gains an **assessable ESS discount** total per Australian financial year (total
   of the labels, net of the applied reduction), reported separately from dividend/trust income, in
@@ -522,7 +522,7 @@ consistent. It **supersedes the current "ESS income reporting is out of scope" K
   is symmetric (deleting the ESS record removes its linked vest Buy unless that parcel is already
   drawn on by a Sell/allocation, per the existing group-integrity rules)
 - ATO documentation: mirror the ESS guidance into `docs/ato/` (the "tax-deferred schemes",
-  "taxed-upfront $1,000 reduction", "ESS and capital gains tax", and Item 12 pages; source URL +
+  "taxed-upfront \$1,000 reduction", "ESS and capital gains tax", and Item 12 pages; source URL +
   retrieval date, indexed in `OVERVIEW.md`); add an `ato_examples.rs` acceptance test for any
   worked example the feature makes representable
 - Web UI: a CRUD screen + the vesting operation via the existing `ENTITIES`/`ACTIONS` config; the
@@ -537,7 +537,7 @@ Out of scope (record as Known limitations):
   forfeiture and no disposal restriction, or 15 years). The **30-day rule** (a sale within 30 days
   of the taxing point moves the taxing point to the sale date) is likewise reflected by the user
   entering the correct taxing-point date/value
-- **The $180,000 adjusted-taxable-income test** for the $1,000 reduction — needs the taxpayer's
+- **The \$180,000 adjusted-taxable-income test** for the \$1,000 reduction — needs the taxpayer's
   whole income position (as with FITO); the de-minimis is applied and the caveat surfaced
 - **Unvested grants and forfeiture before the taxing point** — there is no ESS interest to value
   yet, so nothing is tracked until vesting (consistent with the prior limitation)
@@ -602,7 +602,7 @@ statements are unaffected (attributed by `tax_year_end_date`).
     component of that row by `entitlement_date` instead of `date_paid`; absent, behaviour is
     unchanged (`date_paid`), so existing rows are unaffected
   - The franking 45-day at-risk test keeps anchoring on `ex_date`/`date_paid` (the at-risk window
-    is about holding the shares, not the assessment year); the A$5,000 threshold year follows the
+    is about holding the shares, not the assessment year); the A\$5,000 threshold year follows the
     row's assessment year
 - Web UI: the income form's **Trust distribution** selection reveals the entitlement-date field
   (defaulting to the pay date); the advanced field set includes it
@@ -800,7 +800,7 @@ distribution must be entered as an `income` row to drive the DRP reinvestment ma
 income row's cash components land in the tax summary's `dividends_assessable` line — while the
 fund's AMMA statement attributes the same income to 13U/13C/18/20E. With both entered (both are
 needed: the cash rows for the DRP chain, the AMMA for the return figures) the year's assessable
-dividends are inflated by the full trust cash (~$12k–22k per FY in the live data). For an AMIT the
+dividends are inflated by the full trust cash (~\$12k–22k per FY in the live data). For an AMIT the
 **AMMA attribution is the only assessable record**; the cash advice is not a tax document.
 
 - An AMIT distribution income row must be recordable as **cash-only**: it funds DRP reinvestment
@@ -833,7 +833,7 @@ the income→trade link and the DRP trade type.
 
 Employer ESS statements convert the discount at the **release-date spot rate** (e.g. 1.4034 for
 Feb-2022); the tax summary converts the recorded foreign-currency discount at the **RBA monthly
-rate** — the live data differs by $65–214/yr (0.6–2.3%). The ATO-prefilled return carries the
+rate** — the live data differs by \$65–214/yr (0.6–2.3%). The ATO-prefilled return carries the
 employer statement's AUD figure, so the tool's figure disagrees with what the user must lodge.
 
 - `ess_statements` gains optional statement-AUD amounts for the discount labels (at minimum the
@@ -856,11 +856,11 @@ be entered without the cross-check.
 Two scope cuts surfaced by the archive entry; document in Known limitations (no modelling):
 
 - **Dividend equivalents on unvested RSUs**: employer plans accrue dividend equivalents on unvested
-  grants (the archive's release confirmations show $77.88–$193.44); they are ordinary income when
+  grants (the archive's release confirmations show \$77.88–\$193.44); they are ordinary income when
   paid and are not modelled — enterable manually as income if paid out in cash
 - **Foreign broker-cash interest classification**: interest income is reported at question 10
   (gross interest, 10L) regardless of source; foreign broker-cash/money-market income (the archive's
-  USD Treasury Liquidity Fund dividends, ~$12–17/yr) strictly belongs at 20E assessable foreign
+  USD Treasury Liquidity Fund dividends, ~\$12–17/yr) strictly belongs at 20E assessable foreign
   source income — state the 10L simplification
 
 ## FX conversion granularity — spot-rate override for one-off capital transactions (2026-06-12)
@@ -927,7 +927,7 @@ interest (question 10, label 10L), and foreign tax withheld from it is claimed v
   (`foreign_tax_paid`)
 - The tax summary reports foreign-source interest on its own `foreign_interest_income` line
   mapped to 20E (never 10L), with the foreign tax joining the FITO line under the existing
-  A$1,000 de-minimis; both classifications count in gross assessable investment income
+  A\$1,000 de-minimis; both classifications count in gross assessable investment income
 - Withholding must match the classification at write time: foreign tax on an Australian-source
   row (or a TFN amount on a foreign-source row) is rejected 422 — otherwise the FITO line could
   claim an offset the row can't support
@@ -1620,8 +1620,8 @@ measured facts constrain the implementation:
   the same span requested as an explicit `between(start, end)` period. Any fetch must pass an
   explicit period; `Range::Max` would quietly lose most of the history
 - **The amounts reconcile exactly.** All three recorded HNDQ distributions matched Yahoo per-unit
-  to 6 dp (0.726547 against $1315.78/1811; 0.018741 against $49.08/2620; 0.865644 against
-  $2267.99/2620), and all 8 of Yahoo's HNDQ amounts match Betashares' published figures to 6 dp
+  to 6 dp (0.726547 against \$1315.78/1811; 0.018741 against \$49.08/2620; 0.865644 against
+  \$2267.99/2620), and all 8 of Yahoo's HNDQ amounts match Betashares' published figures to 6 dp
 - **The date is *not* the ex-date — it is a UTC calendar date, and half the year it is a day
   early.** See "The one-day ex-date shift" below: this is the finding that shapes the fetch
 - **Coverage is complete for the one security it could be checked against.** See "Coverage
@@ -1632,7 +1632,7 @@ coverage is **not** holed — the four "absent" HNDQ events were periods on whic
 nothing**. Betashares' own "Recent distributions" table for HNDQ (fetched from
 `betashares.com.au/fund/nasdaq-100-etf-currency-hedged/`, read out of the raw HTML rather than a
 rendering) lists 12 semi-annual periods since the fund's 20 July 2020 inception, and prints a bare
-`-` in the "Distribution Unit ($)" column for exactly four of them: ex 4 Jan 2022, 1 Jul 2022,
+`-` in the "Distribution Unit (\$)" column for exactly four of them: ex 4 Jan 2022, 1 Jul 2022,
 3 Jul 2023 and 2 Jan 2026. The remaining eight carry an amount, and those eight are precisely the
 eight events Yahoo returns, each matching to 6 dp. So "Yahoo knows of no ex-date" for a security it
 covers **can** be read as "no distribution", and the alerts below may draw conclusions in the

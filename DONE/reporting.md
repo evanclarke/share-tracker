@@ -84,7 +84,7 @@
 - [x] Parcel-selection optimiser report: given listing, account, units, sale date, price (live-fetched default per the live-valuation rules; explicit override wins) → candidate strategies (minimise current-year gain, maximise discount-eligible proportion, harvest losses first, FIFO baseline), each with per-parcel allocations and gross gain / discountable split — `POST /portfolio/parcel-optimiser` (`reports/parcel_optimiser.rs`): the candidates are the open-parcels rows (so AMIT/E10, return-of-capital/G1, splits, and rollover carried dates/cost bases all flow through unchanged); each strategy allocates greedily in its preference order with FIFO tie-breaks (`min_gain` orders by per-unit *assessable* contribution — losses in full, discount-eligible gains at half weight; `max_discount` puts eligible gains before losses before non-eligible gains; `harvest_losses` biggest per-unit loss first, then FIFO); proceeds are spread by cumulative difference so they sum exactly to price × units; an unobtainable live price (with no explicit one) rejects with 422 and the reason rather than valuing nothing
 - [x] Pre-sale what-if: net-capital-gain accepts a hypothetical disposal (units, proceeds, date, allocations or a named strategy) and returns the year's figures with and without it — dry run, no rows written; whole-of-income tax estimate stays out of scope — `POST /portfolio/net-capital-gain/what-if`: `db_net_capital_gain` split into `gross_buckets` + `net_years`, the hypothetical's realised-gains buckets injected into the disposal's tax year and the full loss-chaining walk re-run for both scenarios (the disposal year is ensured in both runs, so a year with no recorded activity still yields rows carrying the correct brought-forward chain); explicit allocations are validated like a real Sell's (open parcel of the listing, within remaining units, summing to the units), or derived from an optimiser strategy at the implied per-unit price `proceeds ÷ units`
 - [x] Web UI: screens via the existing `REPORTS`/action config — the generic `viewReport` gained two config-driven capabilities used by both entries (no bespoke views): `params` (a submit-to-run form built from the shared field constructors) and `tables` (an object result rendered as titled tables per configured key, the comparison/summary/allocations layout)
-- [x] Tests: each strategy's allocation choice; what-if leaves the DB untouched; API tests — `parcel_optimiser::tests::{fifo_takes_oldest_parcels_first, harvest_losses_takes_loss_parcels_then_fifo, min_gain_orders_by_assessable_contribution, max_discount_takes_eligible_gain_parcels_first, discount_window_edge_is_strictly_more_than_12_months, disposal_totals_split_gains_losses_and_sum_exactly, disposal_proceeds_sum_exactly_to_the_total}` + API tests (explicit/live/failing price, over-allocation and non-positive-unit 422s); `net_capital_gain::tests::{api_what_if_reports_the_year_with_and_without_the_disposal, api_what_if_on_an_empty_year_chains_earlier_losses, api_what_if_loss_offsets_recorded_gains, api_what_if_rejects_bad_allocations_and_modes}` (the first asserts unchanged trade/allocation counts and an unchanged report after the dry run); `web::tests::cgt_decision_support_ui_present`; `ato_examples::keeping_records_example_boris_optimiser_recommends_the_loss_parcel` (the harvest-losses candidate makes Boris's choice — all 1,500 from the 2024 $10 parcel, the $3,000 loss — the what-if previews the 2025 income year, and the holding is untouched)
+- [x] Tests: each strategy's allocation choice; what-if leaves the DB untouched; API tests — `parcel_optimiser::tests::{fifo_takes_oldest_parcels_first, harvest_losses_takes_loss_parcels_then_fifo, min_gain_orders_by_assessable_contribution, max_discount_takes_eligible_gain_parcels_first, discount_window_edge_is_strictly_more_than_12_months, disposal_totals_split_gains_losses_and_sum_exactly, disposal_proceeds_sum_exactly_to_the_total}` + API tests (explicit/live/failing price, over-allocation and non-positive-unit 422s); `net_capital_gain::tests::{api_what_if_reports_the_year_with_and_without_the_disposal, api_what_if_on_an_empty_year_chains_earlier_losses, api_what_if_loss_offsets_recorded_gains, api_what_if_rejects_bad_allocations_and_modes}` (the first asserts unchanged trade/allocation counts and an unchanged report after the dry run); `web::tests::cgt_decision_support_ui_present`; `ato_examples::keeping_records_example_boris_optimiser_recommends_the_loss_parcel` (the harvest-losses candidate makes Boris's choice — all 1,500 from the 2024 \$10 parcel, the \$3,000 loss — the what-if previews the 2025 income year, and the holding is untouched)
 - [x] Docs: `docs/API.md`, README Features — new "Parcel-selection optimiser" and "Pre-sale what-if" sections (incl. Response codes: the new 422 reasons, 200 covering report POSTs), two README Features bullets
 
 ## Compliance alert reports — wash sales and franking at-risk foresight (2026-06-10)
@@ -93,7 +93,7 @@
 
 - [x] Mirror the ATO wash-sale guidance (TR 2008/1 / current ATO page) into `docs/ato/` + `OVERVIEW.md` — read before implementing — `docs/ato/wash-sales.md` (TR 2008/1 legal-database print view + the QC 69938 "cleaning up dirty laundry" media release, retrieved 2026-06-11): no statutory window — Part IVA is a dominant-purpose test over the s 177D factors (Example 2's planned 24-hour round trip fails; Example 6's market-driven 3-day one survives) — so the report is advisory, never blocking
 - [x] Wash-sale report: every loss-realising Sell with a Buy of the same listing within a configurable window (default 30 days), either side, across all holding accounts; writes never rejected — `POST /reports/wash_sales` (`reports/wash_sales.rs`, body `{"window_days": n}` optional, `n ≥ 1`): loss Sells come from `db_realised_gains` (capital_loss > 0 on any allocation — so the rollover/transfer exclusions and the cost-base pipeline apply unchanged), matched by date pattern against Buy/DRP trades of the listing in any account; provenance Buys that merely continue/relocate a holding (transfer-in, scrip replacement, demerger, inheritance) never match, rights-exercise and ESS Buys do
-- [x] Franking at-risk foresight report: each dividend whose credits are denied by the 45-day walk (with the failing window/dates), plus a contemplated-sale mode reusing the holding-period walk; surfaced near the Sell flow in the UI — `GET /reports/franking_at_risk` + `POST /reports/franking_at_risk/what-if` (`reports/franking_at_risk.rs`): rows carry the qualification window (`ex_date`, `required_days` 45/90, `window_end`), entitled/disqualified units, and `credits_at_risk`/`credits_denied` with an `exempt_small_shareholder` status when the year's under-$5,000 exemption shields the failing walk. The candidates come from `franking::db_franked_dividends`, a loader extracted from (and now shared with) the tax summary, so the two cannot disagree; the what-if injects a hypothetical Sell into `franking::holding_period_test_with_sale` (the existing walk refactored over an event list) and reports each dividend whose denial would grow. The Sells list and Sell form link to the what-if, wash-sales, and parcel-optimiser screens (`sellForesightLinks`)
+- [x] Franking at-risk foresight report: each dividend whose credits are denied by the 45-day walk (with the failing window/dates), plus a contemplated-sale mode reusing the holding-period walk; surfaced near the Sell flow in the UI — `GET /reports/franking_at_risk` + `POST /reports/franking_at_risk/what-if` (`reports/franking_at_risk.rs`): rows carry the qualification window (`ex_date`, `required_days` 45/90, `window_end`), entitled/disqualified units, and `credits_at_risk`/`credits_denied` with an `exempt_small_shareholder` status when the year's under-\$5,000 exemption shields the failing walk. The candidates come from `franking::db_franked_dividends`, a loader extracted from (and now shared with) the tax summary, so the two cannot disagree; the what-if injects a hypothetical Sell into `franking::holding_period_test_with_sale` (the existing walk refactored over an event list) and reports each dividend whose denial would grow. The Sells list and Sell form link to the what-if, wash-sales, and parcel-optimiser screens (`sellForesightLinks`)
 - [x] Tests: window edges; cross-account detection; denied-credit explanation matches the tax summary's denial — `wash_sales::tests::{db_window_edges_inclusive_either_side, db_window_is_configurable, db_repurchase_in_another_account_is_flagged, db_mixed_sell_with_a_loss_allocation_is_flagged, db_transfer_in_buy_is_not_a_reacquisition, db_gain_sell_is_not_flagged, db_buy_of_other_listing_is_not_flagged, api_post_wash_sales_defaults_and_custom_window}`; `franking_at_risk::tests::{db_denied_dividend_lists_failing_window_and_amounts, db_denied_amounts_match_the_tax_summary, db_small_shareholder_exemption_flagged_but_not_denied, db_what_if_shows_credits_a_contemplated_sale_would_cost, db_what_if_sale_after_window_end_is_safe, db_preference_listing_reports_90_day_window, api_get_franking_at_risk, api_post_what_if_and_validation}`; `web::tests::{wash_sales_report_ui_present, franking_at_risk_ui_present}`
 - [x] Docs: `docs/API.md` (both reports), README Features — new "Wash sales" and "Franking at-risk" API sections (incl. the 422 reasons in Response codes and a cross-link from the tax summary's franking paragraph), two README Features bullets, `docs/ato/OVERVIEW.md` row for `wash-sales.md`
 
@@ -101,7 +101,7 @@
 
 (REQUIREMENTS 2026-06-10.)
 
-- [x] Verify the current year's myTax/paper labels from the ATO instructions and mirror the label reference into `docs/ato/` (+ `OVERVIEW.md`), recording which year's form the mapping targets — `docs/ato/tax-return-labels-2026.md` (retrieved 2026-06-11): the **Individual tax return 2026** instructions (FY2025–26, live on ato.gov.au since 30 May 2026) for questions 10, 11, 12, 13, 18, 20 and D7/D8, verified label by label from the paper-return question pages plus the myTax 2026 managed-funds SDS cross-reference (myTax shows the same labels, so one mapping serves both lodgment paths). Notable 2026 confirmations: 18A/18H/18V capital gains, 11S/11T/11U/11V dividends, 13U/13C/13Q/13R trust components (13C includes the attached credits), 20E/20M/20O foreign income with the A$1,000 FITO de-minimis restated, D7 (label I)/D8 (label H) with the LIC deduction at D8, ESS 12B/12D/12E/12F/12C/12A — the pre-2009 cessation label G no longer appears on the 2026 form. Question 10 (10L/10M) recorded ahead of the planned `interest_income` entity
+- [x] Verify the current year's myTax/paper labels from the ATO instructions and mirror the label reference into `docs/ato/` (+ `OVERVIEW.md`), recording which year's form the mapping targets — `docs/ato/tax-return-labels-2026.md` (retrieved 2026-06-11): the **Individual tax return 2026** instructions (FY2025–26, live on ato.gov.au since 30 May 2026) for questions 10, 11, 12, 13, 18, 20 and D7/D8, verified label by label from the paper-return question pages plus the myTax 2026 managed-funds SDS cross-reference (myTax shows the same labels, so one mapping serves both lodgment paths). Notable 2026 confirmations: 18A/18H/18V capital gains, 11S/11T/11U/11V dividends, 13U/13C/13Q/13R trust components (13C includes the attached credits), 20E/20M/20O foreign income with the A\$1,000 FITO de-minimis restated, D7 (label I)/D8 (label H) with the LIC deduction at D8, ESS 12B/12D/12E/12F/12C/12A — the pre-2009 cessation label G no longer appears on the 2026 form. Question 10 (10L/10M) recorded ahead of the planned `interest_income` entity
 - [x] Carry the mapping on the exports themselves (second header row or label column) without changing existing columns; document the full mapping in `docs/API.md` — `reports::export::csv_response` now writes a second header record from a per-report `CSV_ATO_LABELS` list (same length as `CSV_HEADER`, enforced by the non-flexible csv writer, so a column added without a label fails the request loudly); its first cell is `export::ATO_LABELS_MARKER` (`ato_labels_2026`), naming the form year on the export itself. Tax summary: direct labels (`11S + 11T`, `13U`, `13C`, `11U / 13Q`, `20E + 20M`, `20O`, `11V / 13R / 12C`, `12B`, `12A`, `D8` for the LIC deduction, `D7 / D8` for the deduction lines), `18 (working)` for the AMMA CGT inputs (the net-capital-gain export carries the final question-18 figures), empty for informational/derived columns. Net capital gain: `18A`, `18V`, `18V (prior year)` for the brought-forward column, `18H (component)` for the two gross-gain columns that sum to 18H, `18 (working)` for intermediate steps. Data rows and existing columns unchanged
 - [x] Tests: export carries the labels; existing column assertions unchanged — `export::tests::{renders_headers_labels_and_rows_with_decimal_precision, empty_report_still_exports_both_header_rows, label_row_drift_is_an_error_not_misaligned_columns}` (plus the pre-existing header-drift test unchanged); `tax_summary::tests::db_ato_labels_align_with_their_columns` and `net_capital_gain::tests::db_ato_labels_align_with_their_columns` (each headline column's label under its column index); both reports' `api_export_returns_csv_with_expected_columns` keep their first-line `CSV_HEADER` assertion verbatim and additionally assert line 2 = the label row led by the marker; both empty-export tests assert the two header rows
 - [x] Docs: `docs/API.md`, README — both export sections describe the second header row and carry the full per-column mapping table (with the 13C-includes-credits and 20E/20M notes); README's Tax-return CSV export bullet names the labels and the 2026 form target; `docs/ato/OVERVIEW.md` indexes the new mirror
@@ -404,8 +404,8 @@ Presentation/reconciliation only — no new tax math; every figure is sourced fr
   clean; `cargo deny check advisories` clean (no dependency changes). Manually verified end-to-end
   against a live scratch server: seeded an AUD listing with a discount-eligible disposal and an
   AMIT listing with no AMMA statement — `POST /reports/tax-report` returned the correct itemised
-  cost base ($8010.945 initial → $3204.378 adjusted for the 40/100-unit allocation), proceeds
-  ($4389.055), gain ($1184.677), and 50%-discounted gain ($592.3385), matching `realised_gains` and
+  cost base (\$8010.945 initial → \$3204.378 adjusted for the 40/100-unit allocation), proceeds
+  (\$4389.055), gain (\$1184.677), and 50%-discounted gain (\$592.3385), matching `realised_gains` and
   `net_capital_gain` exactly; `completeness.amma_missing` correctly flagged the AMIT listing (held,
   no cash rows, no statement — the gap the existing cash-driven check misses) and cleared once an
   AMMA statement was entered. `scripts/ui-check.sh --seed demo '#/r/tax-report'` confirmed the
@@ -473,13 +473,13 @@ announced weeks before they take effect — is therefore already in force in eve
 that call, while the as-of-dated reports correctly ignore it.)
 - [x] E-14 — reproduced: Buy ×100 on 2023-01-10, `ShareSplit` 2-for-1 dated **2030-03-01**.
   `GET /portfolio/open-parcels` and `POST /portfolio/overview` report **200 units** (market value
-  $2,000 at $10) today, in 2026; `POST /portfolio/unrealised-gains` for the same day reports **100**
-  ($1,000). Two reports, one database, one day, two answers
-- [x] E-14b — the same with a `ReturnOfCapital` of $1.00/unit dated 2030-03-01: open parcels report
+  \$2,000 at \$10) today, in 2026; `POST /portfolio/unrealised-gains` for the same day reports **100**
+  (\$1,000). Two reports, one database, one day, two answers
+- [x] E-14b — the same with a `ReturnOfCapital` of \$1.00/unit dated 2030-03-01: open parcels report
   `return_of_capital_reduction: 100.00` and `remaining_cost_base: 900.00` today, the overview's
   `total_cost_base` follows, and the **parcel optimiser** (`POST /portfolio/parcel-optimiser`,
-  `src/reports/parcel_optimiser.rs:109`) prices a contemplated sale off the reduced $9.00/unit,
-  overstating the gain on every candidate strategy. Unrealised gains still show $1,000
+  `src/reports/parcel_optimiser.rs:109`) prices a contemplated sale off the reduced \$9.00/unit,
+  overstating the gain on every candidate strategy. Unrealised gains still show \$1,000
 - [x] The write paths are consistent with the *correct* reading — a Sell entered today is validated
   and costed against the pre-split basis — so it is only the live read that disagrees, which is what
   makes it silent
@@ -511,13 +511,13 @@ that call, while the as-of-dated reports correctly ignore it.)
       (portfolio overview, open parcels, the parcel optimiser and the pre-sale what-if through it,
       the listing-activity holdings block) is fixed by the one change, with no report-side edits
 - [x] Tests: `domain::open_parcels::tests::the_live_view_ignores_a_future_dated_corporate_action`
-      (E-14/E-14b at the loader — a future split and a $1.00/unit return of capital leave 100 units
-      at $1,000 today, `load(None) == load(Some(today))`, and both take effect on their own date),
+      (E-14/E-14b at the loader — a future split and a \$1.00/unit return of capital leave 100 units
+      at \$1,000 today, `load(None) == load(Some(today))`, and both take effect on their own date),
       `the_live_view_ignores_a_future_dated_trade` (the no-carve-out half: a future-dated Buy isn't
       held yet and a future-dated Sell hasn't consumed its parcel yet), and
       `the_live_reports_agree_with_todays_unrealised_report_on_a_future_action` (the finding as
       stated — overview, open parcels, parcel-optimiser candidates and the unrealised report for
-      today all report 100 units / $1,000). The future dates are computed from `today()`, not
+      today all report 100 units / \$1,000). The future dates are computed from `today()`, not
       hardcoded, so the tests can't rot into the past
 - [x] Snapshot and valuation paths re-checked as the fix shape asked: `reports::snapshot` values a
       day through `portfolio::db_holdings(pool, Some(date))` and
@@ -537,8 +537,8 @@ that call, while the as-of-dated reports correctly ignore it.)
 (SCENARIOS.md section E verification pass, 2026-08-16. Two actions of the same type, listing and
 date are two independent events to every reader: `db_return_of_capital_events` and
 `db_share_split_events` load both, and the pipeline sums / multiplies them.)
-- [x] E-03 — two identical `ReturnOfCapital` rows ($0.50/unit, same date, same listing) reduce a
-  100-unit parcel by **$100.00**, not $50.00
+- [x] E-03 — two identical `ReturnOfCapital` rows (\$0.50/unit, same date, same listing) reduce a
+  100-unit parcel by **\$100.00**, not \$50.00
 - [x] E-15 — two identical 2-for-1 `ShareSplit` rows on one date turn 100 units into **400**
 - [x] Both are plausible double entries (a re-submitted form, a re-imported statement), both restate
   every cost base and quantity of the listing, and nothing — not the health report, not any
@@ -1072,7 +1072,7 @@ at exactly that.
       per-unit figure shows at 4+ dp by the documented display rule, never cent-rounded —
       `buy_price`/`sale_price`, `units`, `days_held`, the two FX rates, and
       `buy_brokerage`/`buy_gst_on_brokerage`, the contract note's own native-currency figures,
-      transcribed for hand-checking against it (99.5c of GST on $9.95 of brokerage is genuinely
+      transcribed for hand-checking against it (99.5c of GST on \$9.95 of brokerage is genuinely
       sub-cent) and totalled nowhere. Nothing downstream reads these rows — the report computes
       nothing new — so no tax figure moved: `realised_gains` and `net_capital_gain` still answer
       the exact decimal, and the tax-report/realised-gains reconciliation test still passes.
@@ -1129,8 +1129,8 @@ as its own section:
 Surfaced by [W-c](#scenarios-w-c--the-tax-return-ready-csv-exports-carry-28-digit-figures-under-ato-labels) and confirmed while building [W-d](#scenarios-w-d--the-annual-tax-reports-printed-columns-do-not-add-up): now that each
 money column of `net-capital-gain.csv` rounds to the cent independently, the columns that are
 *arithmetically related to each other* need not agree. Reproduced at the export endpoint on an
-entirely ordinary single-parcel disposal — 100 units bought 2022-01-05 at $10, sold 2024-03-15 at
-$11.0001, no brokerage:
+entirely ordinary single-parcel disposal — 100 units bought 2022-01-05 at \$10, sold 2024-03-15 at
+\$11.0001, no brokerage:
 
 ```
 discount_eligible_gains  100.01   (label 18H component)
@@ -1284,20 +1284,20 @@ that year end. The optimiser then applies no reduction at all, while the same di
 recorded, spills the statement onto the disposed units per s 104-107B / LCR 2015/11 (the adjustment
 is made just before the CGT event).
 
-Measured: a 100-unit parcel at $13.3166…/unit, an AMMA for the year ended 2026-06-30 with a −$0.13
+Measured: a 100-unit parcel at \$13.3166…/unit, an AMMA for the year ended 2026-06-30 with a −\$0.13
 per-unit cost-base adjustment covering the whole parcel, and 40 units disposed of on 2026-03-02.
-`POST /portfolio/parcel-optimiser` costs the 40 units at **A$532.67**; the same 40 units recorded as
-a Sell are costed **A$537.87** by `/portfolio/realised-gains` — A$5.20 apart, the statement's whole
+`POST /portfolio/parcel-optimiser` costs the 40 units at **A\$532.67**; the same 40 units recorded as
+a Sell are costed **A\$537.87** by `/portfolio/realised-gains` — A\$5.20 apart, the statement's whole
 reduction on those units. `POST /reports/net-capital-gain/what-if` shares the same reader and so the
 same figure. Narrow (it needs a contemplated sale dated before a recorded statement's year end) but
 live, and silent: nothing marks the estimate as resting on a different rule from the report it is
 meant to predict.
 
 Reproduced independently on a second fixture before this was accepted: a 100-unit VDHG parcel at
-$60, an AMMA for the year ended 2026-06-30 carrying a **$1.30** per-unit adjustment over the whole
-parcel, 40 units contemplated on 2026-03-02. The optimiser costs them **A$2,400.00**; the same 40
-units recorded as a Sell are costed **A$2,348.00** — A$52.00, again exactly the statement's whole
-reduction on the disposed units (40 × $1.30). The gap therefore **scales with the per-unit
+\$60, an AMMA for the year ended 2026-06-30 carrying a **\$1.30** per-unit adjustment over the whole
+parcel, 40 units contemplated on 2026-03-02. The optimiser costs them **A\$2,400.00**; the same 40
+units recorded as a Sell are costed **A\$2,348.00** — A\$52.00, again exactly the statement's whole
+reduction on the disposed units (40 × \$1.30). The gap therefore **scales with the per-unit
 adjustment and the units sold**, and is not inherently small: a Vanguard AMMA's per-unit cost-base
 adjustment is routinely in this range, so a four-figure holding puts it in the hundreds of dollars.
 
@@ -1317,7 +1317,7 @@ cost-base events.
       told rather than infers — and either make the two agree or say in `docs/API.md` where they
       deliberately do not, with a test pinning whichever answer is chosen
       — **made to agree**, and the fix is one step larger than the finding's own diagnosis. Two
-      corrections to the write-up above. First, the **mechanism**: the reproduction's A$52.00 gap
+      corrections to the write-up above. First, the **mechanism**: the reproduction's A\$52.00 gap
       is not `Held::AsAt` taking `reduction_for_units`' still-held branch — it is
       `open_parcels::load` passing its as-of date to
       `amit_adjustment::db_cost_base_reduction_events`, whose `tax_year_end_date <= ?` filter drops
@@ -1333,7 +1333,7 @@ cost-base events.
       `per_unit × (covered − held)⁺ × u ÷ (D + u)`, whose denominator moves with `u`, so
       `disposal_figures`' pro-rate off the whole parcel could not be kept. Measured: with the rest
       of the fix in place but the pro-rate restored, a 100-unit parcel whose FY2026 row covers the
-      70 open at that year end estimates A$2,363.60 for a 40-unit pick against the A$2,370.2857…
+      70 open at that year end estimates A\$2,363.60 for a 40-unit pick against the A\$2,370.2857…
       the Sell realises.
       Built: `domain/contemplated_disposal.rs` — the shared "cost a disposal that is not recorded
       yet" calculation (`Costing::load` reads the AMIT/ROC/split events and `FxRates` on the
@@ -1362,7 +1362,7 @@ cost-base events.
       `agreement_across_a_split_between_acquisition_and_the_sale`,
       `agreement_across_two_parcels_with_every_cost_base_event`; plus
       `the_amma_reduction_reaches_the_estimate_of_a_sale_inside_its_year` (the reproduction's own
-      A$2,348.00), `an_amma_inside_the_sale_year_reorders_the_strategies` (the failure that
+      A\$2,348.00), `an_amma_inside_the_sale_year_reorders_the_strategies` (the failure that
       matters: min-gain now advises a *different parcel*), and
       `the_what_if_costs_the_same_disposal_the_same_way`; and
       `domain::contemplated_disposal::tests::{a_sale_inside_the_statement_year_joins_its_disposed_units,
@@ -1396,7 +1396,7 @@ this one function.
    `PUT /closing_prices/6/2025-06-30 {"price":"25", …}` → `204` in 2 ms.
 3. The snapshot lands at `stale: false`, holding `current_price: "10"` and
    `market_value: "6000000"` for that listing — while the stored closing price for that very day is
-   `25`, i.e. a market value of `15000000`. The archived valuation is out by **A$9,000,000** and
+   `25`, i.e. a market value of `15000000`. The archived valuation is out by **A\$9,000,000** and
    nothing will ever say so.
 
 **Bounded by its controls, both of which are correct.** The same correction applied *entirely
@@ -1470,7 +1470,7 @@ the `_on` split it needs is a pattern the reports already have.
       finding's own reproduction**: `POST /report_snapshots/generate {"date":"2025-06-30"}` with a
       `PUT /closing_prices/1/2025-06-30 {"price":"25"}` fired 500 ms in. *Before*: the correction
       returned `204` in **1 ms** and the snapshot landed `stale: false` holding `current_price: "10"`
-      / `market_value: "6000000"` against a stored price of `25` — A$9,000,000 of archived valuation
+      / `market_value: "6000000"` against a stored price of `25` — A\$9,000,000 of archived valuation
       with nothing left to ask for a regeneration. *After*: the same correction returns `204` in
       **81 ms** (it waits for the run) and all three snapshots land **`stale: true`** — the run's own
       figures, correctly flagged, and a following `generate` stores `current_price: "25"` /
@@ -1521,10 +1521,10 @@ half away from zero, not an error). One did not:
 | an **AMMA** statement's components | `amma_franked_dividends` → **13C** | `amma_dividends_unfranked` → **13U** | 13Q |
 | a **non-AMIT trust** income row (a managed fund, an ordinary unit trust) | rolled into `dividends_assessable` → **11S + 11T** | same | 13Q ✔ |
 
-A managed-fund distribution of A$900 franked + A$600 unfranked was reported inside
+A managed-fund distribution of A\$900 franked + A\$600 unfranked was reported inside
 `dividends_assessable` = 7,550.00 under the label **`11S + 11T`**. Those amounts belong at question
 13 (*Partnerships and trusts*), not question 11 (*Dividends*). A taxpayer transcribing the summary
-puts A$1,500 of trust income under dividends from companies, and the year's question-13 income is
+puts A\$1,500 of trust income under dividends from companies, and the year's question-13 income is
 understated by the same amount — there is no line for it at all.
 
 **The credits line already knows better.** `franking_credits` is labelled **`11U / 13Q`**, explicitly
@@ -1806,8 +1806,8 @@ rate, and it removes one rounded division per allocation.
 
 The **`RightsSale`** accumulator had the same class of defect by a different route: nothing there is
 apportioned and then combined with an exact figure, but each allocation's two legs were converted to
-AUD separately, so every share carried its own rounded division. Measured: US$0.20 × 3 rights at 0.60
-USD/AUD summed to `0.9999999999999999999999999999` against an exact A$1.00, and the US$10.00 carried
+AUD separately, so every share carried its own rounded division. Measured: US\$0.20 × 3 rights at 0.60
+USD/AUD summed to `0.9999999999999999999999999999` against an exact A\$1.00, and the US\$10.00 carried
 cost to one ulp under 10/0.6. Both totals are converted once now and apportioned by units through the
 same helper.
 
@@ -1818,11 +1818,11 @@ report computes changed.
 **Tests** (all five fail on the pre-fix code; the three controls pass either way, which is what says
 it was the apportionment):
 `reports::realised_gains::tests::pure_ten_parcel_disposal_reports_its_exact_proceeds_and_gain` — the
-finding's own shape: 1,551 units over 10 parcels at $45.00 less $9.95, asserting proceeds exactly
+finding's own shape: 1,551 units over 10 parcels at \$45.00 less \$9.95, asserting proceeds exactly
 `69785.05`, cost base exactly `39139.975`, gain exactly `30645.075`, `to_cents` of the gain
 `30645.08`, and that the 10 per-parcel rows still sum to each total exactly.
 `…::pure_equal_parcel_shares_sum_exactly_at_a_large_price` / `…_at_a_small_price` — 3 × 517 units at
-$45.00 and at $4.00 (69,785.05 and 6,194.05, previously `…049999999999999999999999` and
+\$45.00 and at \$4.00 (69,785.05 and 6,194.05, previously `…049999999999999999999999` and
 `…0499999999999999999999999`).
 `…::pure_equal_parcel_shares_sum_exactly_without_brokerage` and `…::pure_single_parcel_proceeds_are_
 exact` — the two controls that were always exact: nothing to apportion, and nothing to apportion it
@@ -1834,7 +1834,7 @@ proceeds, cost base and gain.
 end through `ApiClient::full`: `GET /portfolio/realised-gains` and `POST /reports/tax-report` must
 print the same cents for one 3-parcel disposal whose gain is exactly `30981.875` (before the fix:
 `30981.87` against `30981.88`).
-`…::pure_brokerage_shares_sum_exactly_across_allocations` keeps its $2 assertion; its comment no
+`…::pure_brokerage_shares_sum_exactly_across_allocations` keeps its \$2 assertion; its comment no
 longer has to warn that a larger price would mask it.
 
 Docs: `docs/API.md`'s "Where a Sell's brokerage and GST land" paragraph now states that a disposal's
@@ -1855,7 +1855,7 @@ PUT /sells/71  {"average_price":"0","quantity":"1000", ...}   → 204
 ```
 
 `GET /portfolio/realised-gains` then reports `proceeds: 0`, `cost_base: 20000.00`,
-`capital_loss: 20000.00`. **A$20,000 of capital loss that does not exist**, feeding the net-capital-
+`capital_loss: 20000.00`. **A\$20,000 of capital loss that does not exist**, feeding the net-capital-
 gain netting and the 18V carry-forward. The health report is silent — its only non-empty lists after
 the write were `unpriced_days` and an unrelated `duplicate_income`.
 
@@ -1909,15 +1909,15 @@ throwaway database before being logged** (per the standing lesson: a fixing agen
 re-derived, not taken on trust). The reproduction is real and the mechanism is as reported.
 
 `reports::tax_report` takes `CostBase::initial_cost` — the **whole parcel's** figure — for a disposal
-row's `initial_cost_base_aud`. Sell 500 units of a 1,000-unit A$10 parcel and the Annual Tax Report's
+row's `initial_cost_base_aud`. Sell 500 units of a 1,000-unit A\$10 parcel and the Annual Tax Report's
 disposal schedule prints:
 
 | Units | Buy price | Initial cost base (AUD) | *(adjustment rows)* | Adjusted cost base (AUD) |
 | ---: | ---: | ---: | --- | ---: |
 | 500 | 10.00 | **10,000.00** | *(none)* | **5,000.00** |
 
-with `cost_base_per_unit_aud` of `10.00` beside it. A hand-checker multiplies 500 × $10, gets $5,000,
-and finds an "Initial cost base" of $10,000 with **nothing between the two columns explaining the
+with `cost_base_per_unit_aud` of `10.00` beside it. A hand-checker multiplies 500 × \$10, gets \$5,000,
+and finds an "Initial cost base" of \$10,000 with **nothing between the two columns explaining the
 difference** — which is precisely the contract `docs/API.md` states for this section:
 
 > the initial cost base and, **itemised underneath it, one row per cost-base adjustment** … with its
@@ -1954,7 +1954,7 @@ units' pro-rated share of the parcel's initial cost base, the same pool `cost_ba
 starts its itemised walk from — instead of the whole parcel's `initial_cost`. The reproduction row now
 prints 500 units / initial `5,000.00` / adjusted `5,000.00`, and the whole-parcel control is unmoved at
 1,000 / `10,000.00` / `10,000.00`. With real adjustments present the documented contract holds as an
-arithmetic identity: a 400-of-1,000-unit disposal of an A$10 parcel carrying a 50c/unit AMIT reduction
+arithmetic identity: a 400-of-1,000-unit disposal of an A\$10 parcel carrying a 50c/unit AMIT reduction
 prints initial `4,000.00` − `200.00` = adjusted `3,800.00`, and the same parcel carrying a 25c/unit
 return of capital prints `4,000.00` − `100.00` = `3,900.00` (the identity holds except where a row is
 flagged `capped` and CGT event E10/G1 has floored the balance at nil — the excess is a capital gain in
@@ -2026,8 +2026,8 @@ and matching cannot key on `ex_date`, since 13 of the live database's 47 income 
   raw `Action::Dividend.date`
   — a **third** measured provider fact turned up while building the cross-check and inverted a
   default: Yahoo restates a security's whole dividend history into the **current** unit basis,
-  cumulatively (NVDA's pre-split dividends come back as 0.004 against a declared $0.04, and the ones
-  before its 2021 4-for-1 as 0.004 too, against a declared $0.16). So `amount_per_unit` is stored in
+  cumulatively (NVDA's pre-split dividends come back as 0.004 against a declared \$0.04, and the ones
+  before its 2021 4-for-1 as 0.004 too, against a declared \$0.16). So `amount_per_unit` is stored in
   the basis of its own `fetched_at`, exactly as served — a conversion back could only use the splits
   recorded at fetch time and would be silently wrong for any recorded later — and the reader
   multiplies it by units in that same basis, a total being basis-independent
@@ -2049,7 +2049,7 @@ and matching cannot key on `ex_date`, since 13 of the live database's 47 income 
 - [x] `reports::health` **amount cross-check** alert: known ex-date matched to an income row whose
   gross cash differs materially from per unit × units held. Gross total only, never components —
   this is the likelier error of the two and the one the 6 dp reconciliation shows Yahoo can catch
-  — "materially" is 2% of the expected gross **and** at least $1: the band absorbs registry rounding
+  — "materially" is 2% of the expected gross **and** at least \$1: the band absorbs registry rounding
   while a mistyped figure sits far outside it, and the floor stops a fraction-of-a-cent per-unit
   distribution (HNDQ paid 0.018741) alerting on cents
 - [x] Docs: `docs/SCHEMA.md` (table + relationships), `docs/API.md` (both alert shapes), README

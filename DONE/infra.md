@@ -1338,7 +1338,7 @@ Measured against a throwaway database:
 | `PUT /trades/7` | `contract_note: "CN123"` | `contract_note_ref: null` | `204` |
 | `POST /reports/row_history` | `table_name: "parcel_allocations"` | filter ignored — whole trail returned | `200` |
 
-The AMMA row is the one that matters: A$7,142 of a lodgeable tax figure vanished with nothing
+The AMMA row is the one that matters: A\$7,142 of a lodgeable tax figure vanished with nothing
 anywhere saying so. `income` (every component `#[serde(default)]`), `interest_income` (`amount`
 itself defaults, as does `foreign_source`, which routes the row between 10L and 20E) and
 `investment_expense` have the same shape.
@@ -1469,7 +1469,7 @@ in as-acquired units), and a trillion units of a sub-cent token with `$1.95` bro
 (`price × qty²` is what matters, not the holding's value). So the trigger is a mistyped trade,
 not a large portfolio — which is precisely why it should answer with a message.
 
-Found by the standing probes while driving **W-05** ($10M beside $0.01) and **W-08** (scale) — neither
+Found by the standing probes while driving **W-05** (\$10M beside \$0.01) and **W-08** (scale) — neither
 scenario names an overflow.
 
 Options offered:

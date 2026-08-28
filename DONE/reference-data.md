@@ -263,8 +263,8 @@ full evidence; in brief:
 | 260 | 2022-09-20 → 2023-10-02 | `fetched` | `POST /closing_prices/backfill`'s one-off `symbol` override, which recorded nothing about the symbol used |
 
 Effect: **922 snapshot dates / 2,766 stored snapshot rows** value LAC at LAR's price. At 2023-09-29
-the stored `portfolio_overview` row reads `market_value` A$11,123.21 against `total_cost_base`
-A$19,869.26 — a 44% unrealised loss — where old Lithium Americas closed near US$16.85 (≈ A$27,400).
+the stored `portfolio_overview` row reads `market_value` A\$11,123.21 against `total_cost_base`
+A\$19,869.26 — a 44% unrealised loss — where old Lithium Americas closed near US\$16.85 (≈ A\$27,400).
 **No tax figure is affected**: closing prices feed valuation only, never cost base or proceeds.
 
 ### Development prerequisites (these *are* repo work, and are not all done)
@@ -276,7 +276,7 @@ A$19,869.26 — a 44% unrealised loss — where old Lithium Americas closed near
   - Done 2026-08-20 (migration 0037); the section is closed and archived in `DONE/reviews.md`. The
     snapshot carries `holding_excluded` plus an `excluded_holdings` list naming the absent holding
     and why, and setting it on listing 7 was rehearsed against an upgraded copy of the deployed
-    database: 2023-09-29's total drops from A$495,429.52 to A$484,306.31, LAC's row unvalued with the
+    database: 2023-09-29's total drops from A\$495,429.52 to A\$484,306.31, LAC's row unvalued with the
     reason. Note that the marker **supersedes** the stored rows for the span, so step 4 of the
     procedure is no longer what makes the totals honest — it is now housekeeping on rows nothing
     reads.
@@ -320,10 +320,10 @@ it predicted came back to the last decimal place. What was done, in the order th
    period is unblocked, not accurate" note preserved in the trail.
 5. `POST /report_snapshots/regenerate_all` `{"to": "2023-10-02"}` → **1,128 regenerated, 0 blocked**,
    leaving only the 3 rows that were already stale in the backup.
-6. Spot-check 2023-09-29: the stored `portfolio_overview` total fell from A$495,429.52 to
-   **A$484,306.31** — smaller by exactly **A$11,123.21**, the figure that was another company's price
+6. Spot-check 2023-09-29: the stored `portfolio_overview` total fell from A\$495,429.52 to
+   **A\$484,306.31** — smaller by exactly **A\$11,123.21**, the figure that was another company's price
    — with LAC's row unvalued and `excluded_holdings` naming it and why. 2023-10-02 values LAC at its
-   own A$16,744.99.
+   own A\$16,744.99.
 
 Health afterwards: `duplicate_price_series` **empty**, `errored_prices` empty, `failed_jobs` empty,
 and `demergers_missing_close` down to `adjusted_days: 1, manual_days: 0` — the single genuine
@@ -347,11 +347,11 @@ and `demergers_missing_close` down to `adjusted_days: 1, manual_days: 0` — the
    before its date, which reaches back past LAC's own first holding to the first-ever-held date
    (2020-08-31 on the rehearsal — 206 dates a 2021-03-25 start would have left stale). The rehearsal
    regenerated 1,128 dates, 0 blocked, leaving only the 3 rows already stale in the backup.
-6. Spot-check 2023-09-29: the LAC row should be absent and the total lower by A$11,123.21, with the
+6. Spot-check 2023-09-29: the LAC row should be absent and the total lower by A\$11,123.21, with the
    snapshot naming LAC as excluded. On the rehearsal the stored `portfolio_overview` total went from
-   A$495,429.52 to A$484,306.31, LAC's row carrying `price_unavailable` and the snapshot
+   A\$495,429.52 to A\$484,306.31, LAC's row carrying `price_unavailable` and the snapshot
    `holding_excluded` with `excluded_holdings` naming it; 2023-10-02 valued LAC at its own
-   A$16,744.99. `GET /reports/health`'s `demergers_missing_close` then reads `adjusted_days: 1,
+   A\$16,744.99. `GET /reports/health`'s `demergers_missing_close` then reads `adjusted_days: 1,
    manual_days: 0` — the single genuine row, which is what the stated-close item above is waiting
    for.
 
@@ -398,8 +398,8 @@ missing. They split into two halves that must not be confused:
   the symbol actually used is stored nowhere.
 
 Impact: 922 snapshot dates / 2,766 stored snapshot rows value LAC at LAR's price. At 2023-09-29 the
-stored `portfolio_overview` row reads `market_value` A$11,123.21 against `total_cost_base`
-A$19,869.26 — a 44% unrealised loss — where old Lithium Americas closed near US$16.85 (≈ A$27,400).
+stored `portfolio_overview` row reads `market_value` A\$11,123.21 against `total_cost_base`
+A\$19,869.26 — a 44% unrealised loss — where old Lithium Americas closed near US\$16.85 (≈ A\$27,400).
 **No tax figure is affected**: closing prices feed valuation only.
 
 - [x] **`reports::health`'s `demergers_missing_close` (added `16db704`) under-reports this by more
@@ -553,8 +553,8 @@ A$19,869.26 — a 44% unrealised loss — where old Lithium Americas closed near
     prices" card for listings carrying the marker. Rehearsed end to end on an upgraded copy of the
     deployed backup: marker set on listing 7, **634** rows cleared (375 manual + 259 fetched), 0 on a
     re-run, `row_history` up from 13 to 647 with the 375 rows' "unblocked, not accurate" note intact,
-    2023-09-29's total falling from A$495,429.52 to A$484,306.31 — smaller by exactly the
-    A$11,123.21 that was another company's price — with LAC named as excluded, and 2023-10-02 onward
+    2023-09-29's total falling from A\$495,429.52 to A\$484,306.31 — smaller by exactly the
+    A\$11,123.21 that was another company's price — with LAC named as excluded, and 2023-10-02 onward
     valuing LAC at its own price. Tests: the six new ones in `entities::closing_price::tests`
     (delete inside the span for both origins, refused on/after the marker, refused inside an
     `unpriced_from` run, the audited deletion, the bulk clear's exact span + idempotence, its two
@@ -609,8 +609,8 @@ percentages attach to the *ticker*, not to the head/demerged role, so re-modelli
 Both parcels inherit the 2021-03-25 acquisition date and were discount-eligible on the 2025-01-13
 disposals. Proven rather than assumed: the whole FY2025 tax document, before and after, is identical
 but for two `purchase_trade_id` values swapping roles (9073↔9074), and FY2024 is byte-identical.
-LAC cost base A$12,716.33 / proceeds A$5,309.35 / loss A$7,406.98; LAAC A$7,152.93 / A$4,756.64 /
-loss A$2,396.29, over a combined A$19,869.26. **Nothing needed re-filing.**
+LAC cost base A\$12,716.33 / proceeds A\$5,309.35 / loss A\$7,406.98; LAAC A\$7,152.93 / A\$4,756.64 /
+loss A\$2,396.29, over a combined A\$19,869.26. **Nothing needed re-filing.**
 
 - [x] **Re-model so listing 8 is the head.** Done 2026-08-21 on the deployed database, entirely
   through the supported API — **no code change was needed**, and no raw SQL was used. Rehearsed first
@@ -637,9 +637,9 @@ loss A$2,396.29, over a combined A$19,869.26. **Nothing needed re-filing.**
 - [x] **The valuation history it was all for.** `regenerate_all` rebuilt **2,181 dates, 0 blocked**.
   Where 2,763 snapshot rows across **921 dates** (2021-03-25 → 2023-10-01) had the holding *excluded*
   as unvaluable, there are now **zero** excluded holdings and zero stale snapshots. 2022-09-19 went
-  from a portfolio total of A$404,812.63 with LAC excluded to **A$454,637.56** with the holding
-  valued at A$49,824.93; 2023-09-29 from A$484,306.31 to **A$513,349.75**. The 2021-03-25 holding
-  values at A$21,032.06 against a cost base of A$19,869.26 — the first time the position's own
+  from a portfolio total of A\$404,812.63 with LAC excluded to **A\$454,637.56** with the holding
+  valued at A\$49,824.93; 2023-09-29 from A\$484,306.31 to **A\$513,349.75**. The 2021-03-25 holding
+  values at A\$21,032.06 against a cost base of A\$19,869.26 — the first time the position's own
   history has been valuable at all.
 
 Two things remain, one of them needing a figure from Evan:
@@ -648,7 +648,7 @@ Two things remain, one of them needing a figure from Evan:
   This corrects the finding as first written, which had the arithmetic wrong.** The original claim
   was that the re-base walk is off by a day for demergers (the provider's adjustment runs through
   2023-10-03 inclusive, its ex-date being 2023-10-04) and that the row understates listing 8 by
-  ~A$1,373. Both halves are wrong, and extending the walk would have been a real corruption.
+  ~A\$1,373. Both halves are wrong, and extending the walk would have been a real corruption.
   - **Un-adjusting the row yields the *combined* entity, which the model already counts twice over.**
     6.517713 × 2.611067 = **17.01818** is what the whole undivided company closed at on 3 October —
     NewCo included. But the demerge Buy is dated 2023-10-03, so listing 7 is *already held* that day
@@ -896,7 +896,7 @@ one and the candle's currency is not the listing's, which the documented cross-c
 an errored row. Neither is wrong on its own terms; together they leave a holding that can never be
 valued again and cannot be corrected in place.
 
-Reproduced: `CBA` on XASX in AUD, `POST /closing_prices/fetch` for 2026-08-19 → `ok`, A$160.71 under
+Reproduced: `CBA` on XASX in AUD, `POST /closing_prices/fetch` for 2026-08-19 → `ok`, A\$160.71 under
 `CBA.AX`. `POST /listings/13/rename {"effective_date":"2026-08-20","ticker":"CBA","exchange_mic":
 "XNYS"}` → `201`. The next fetch stored an errored row under `CBA`. `PUT /listings/13` correcting
 `currency` to USD → `422`, "this listing's currency cannot change from AUD to USD once it has
@@ -1012,7 +1012,7 @@ for any year after the park prints a ticker the security never traded under. Not
       on the old listing so collection stops asking for a code the provider now serves for someone
       else. The one thing that marker does *not* bound is stated too — a backfill of the old
       listing's earlier history still derives the reissued code: fetching a pre-park date for the
-      2005 parcel bought at A$1.00 returned a A$50.19 close for the security holding `AAA.AX`
+      2005 parcel bought at A\$1.00 returned a A\$50.19 close for the security holding `AAA.AX`
       today, so the entry says to check `fetched_symbol` across a reissue and cross-references
       *Nothing verifies that a fetched symbol names the same security*. Pinned by
       `doc_checks::known_limitations_document_a_reissued_ticker_cannot_be_recorded`.

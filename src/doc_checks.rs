@@ -830,7 +830,7 @@ fn unmodelled_franking_qualified_person_tests_documented() {
     assert!(limitations.contains("Related payments are not recordable."));
     // The related payments rule applies separately from the holding period, so
     // the A$5,000 exemption does not excuse it — the trap in the ATO wording.
-    assert!(limitations.contains("not excused by the A$5,000 threshold"));
+    assert!(limitations.contains("not excused by the A\\$5,000 threshold"));
 
     // The at-risk report's all-clear is qualified by what it does not test,
     // while staying an all-clear for what it does (G-11's `untested_no_ex_date`).
@@ -992,7 +992,7 @@ fn per_year_ess_reduction_eligibility_documented() {
     );
     // The limitation is now "answered by you", not "unrecordable".
     assert!(
-        known_limitations().contains("≤A$180,000 income test is answered by you, not computed")
+        known_limitations().contains("≤A\\$180,000 income test is answered by you, not computed")
     );
     // SCHEMA: the table, its year key, and its audit identity.
     assert!(
@@ -1703,11 +1703,9 @@ fn known_limitations_document_the_second_taxpayer_remedy() {
         limitations
             .contains("must *not* be done is entering a spouse's or a trust's holdings as another")
     );
-    assert!(
-        limitations.contains(
-            "A$5,000 small-shareholder franking threshold and one A$1,000 FITO de-minimis"
-        )
-    );
+    assert!(limitations.contains(
+        "A\\$5,000 small-shareholder franking threshold and one A\\$1,000 FITO de-minimis"
+    ));
     // Explicit that it cannot be detected.
     assert!(
         limitations
@@ -1743,9 +1741,9 @@ fn known_limitations_document_the_element_two_incidental_cost_convention() {
     assert!(limitations.contains(
         "**The convention is to fold such a cost into the trade's `brokerage` and say what it really was in `contract_note_ref`.**"
     ));
-    assert!(limitations.contains("A$500 of transfer duty reports a A$1,500 cost base"));
+    assert!(limitations.contains("A\\$500 of transfer duty reports a A\\$1,500 cost base"));
     // The three traps.
-    assert!(limitations.contains("would invent A$45.45 of GST on a A$500 duty"));
+    assert!(limitations.contains("would invent A\\$45.45 of GST on a A\\$500 duty"));
     assert!(
         limitations.contains(
             "A supplied `statement_total` must be the total *including* the folded-in cost"
@@ -2860,7 +2858,7 @@ fn sale_side_incidental_costs_convention_documented() {
     assert!(API_MD.contains("**The capital gain is identical either way**"));
     // The worked example both presentations are shown through.
     assert!(API_MD.contains("`proceeds: 1189.055` / `cost_base: 1010.945`"));
-    assert!(API_MD.contains("$1,200.00 / $1,021.89"));
+    assert!(API_MD.contains("\\$1,200.00 / \\$1,021.89"));
     // Why: the parcel's cost base must read the same before and after sale.
     assert!(API_MD.contains("doesn't move the moment it is sold"));
     // And the ATO's own definition of the second element.
@@ -3107,7 +3105,7 @@ fn dated_amit_status_documented() {
     // rule means for each is stated where that report documents itself.
     assert!(API_MD.contains("completeness section *and* its printed income rows"));
     assert!(API_MD.contains(
-        "still holding-period tested and still count toward the year's A$5,000 small-shareholder \
+        "still holding-period tested and still count toward the year's A\\$5,000 small-shareholder \
          total"
     ));
     assert!(API_MD.contains(
@@ -3116,7 +3114,7 @@ fn dated_amit_status_documented() {
     ));
     assert!(API_MD.contains(
         "a converted fund's pre-conversion distributions are ordinary trust income, so they are \
-         tested here and their credits count toward the year's A$5,000 total"
+         tested here and their credits count toward the year's A\\$5,000 total"
     ));
     assert!(SCHEMA_MD.contains("amit_from    TEXT (nullable)"));
     assert!(FEATURES_MD.contains("A fund that **converted** to an AMIT records the 1 July"));
@@ -3609,7 +3607,7 @@ fn lpr_expenditure_on_a_foreign_parcel_documented() {
     // Named against the FX-timing limitation it follows from, with the size of
     // the error it would otherwise report.
     assert!(limits.contains("*Cost-base FX timing*"));
-    assert!(limits.contains("US$1,000 fee incurred at 0.50 reported as A$500"));
+    assert!(limits.contains("US\\$1,000 fee incurred at 0.50 reported as A\\$500"));
     // …and that the ordinary case is untouched.
     assert!(limits.contains("Australian LPR fees on Australian holdings"));
 

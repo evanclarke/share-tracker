@@ -54,7 +54,7 @@ Medium value:
 Smaller:
 
 - [x] Pro-rating remainders: per-allocation brokerage shares (`sale_costs * qty_alloc / sale.quantity`, `realised_gains.rs:186`) may not sum exactly to the total. Sub-cent today, but if rows are ever rounded to cents for display/export, assign the remainder to the last allocation rather than rounding each independently
-  - Done: `compute_realised_gains` pro-rates by cumulative difference — each allocation's share is `sale_costs × cum_qty / sale_qty` minus what earlier allocations took, so the last allocation absorbs the division remainder and the shares sum exactly to the total (pure test: $10 over three 1-unit allocations of a 3-unit sale). Caveat discovered en route: per-allocation `price × qty − share` subtraction can still re-round at Decimal's 28-significant-digit mantissa limit (≈1e-26 on $100-scale prices) — inherent to fixed-precision decimals, noted in the test comment
+  - Done: `compute_realised_gains` pro-rates by cumulative difference — each allocation's share is `sale_costs × cum_qty / sale_qty` minus what earlier allocations took, so the last allocation absorbs the division remainder and the shares sum exactly to the total (pure test: \$10 over three 1-unit allocations of a 3-unit sale). Caveat discovered en route: per-allocation `price × qty − share` subtraction can still re-round at Decimal's 28-significant-digit mantissa limit (≈1e-26 on \$100-scale prices) — inherent to fixed-precision decimals, noted in the test comment
 - [x] Split `web/app.js` (2,445 lines, one file) into native ES modules (`<script type="module">`) — config (`ENTITIES`/`REPORTS`/`ACTIONS`) separate from the generic rendering engine; no build step needed
   - Done as four modules with an acyclic import graph, served from `/static/`: `app.js` (the entry point — generic views, `filterableTable`, router) imports `config.js` (`ENTITIES`/`REPORTS`/`ACTIONS`), `forms.js` (field constructors, `buildFieldInput`/`readFieldValue`, GST/income form wiring, `allocationEditor`), and `util.js` (DOM/API/formatting/label-map helpers, exact decimal-string arithmetic); code unchanged beyond exports/imports and the IIFE dedent. `web.rs` serves the modules from one `JS_MODULES` table; new tests assert each module is served as JavaScript byte-for-byte and that every `./x.js` import specifier resolves to a served route (a module missing from the table would 404 and break the app), and the UI-presence tests now assert over the concatenated served bundle. Runtime-verified with `scripts/ui-check.sh --seed demo '#/r/open-parcels'` — the DOM renders identically (the script's "timed out" message after a successful dump is a pre-existing Chrome-exit quirk, reproduced on the pre-split code)
 - [x] Trim `tokio` features in Cargo.toml from `full` to what the server uses (`rt-multi-thread`, `macros`, `signal`, `net`, `time`, `fs`) for slightly faster builds
@@ -558,8 +558,8 @@ action types that re-base parcels instead of creating trades — `ShareSplit`, `
 and realised gain is computed from them at read time.)
 - [x] A-20 — deleting a `ShareSplit` after trades were entered on the post-split basis can leave
   allocations the write path rejects. Reproduced: Buy 2023-01-10 ×100, 2-for-1 split 2023-03-01,
-  Sell 2023-06-01 ×200 (post-split, the whole holding) → realised **gain $200**. `DELETE
-  /corporate_actions/1` → `204`, and the same Sell now reports a **loss of $800** against a parcel
+  Sell 2023-06-01 ×200 (post-split, the whole holding) → realised **gain \$200**. `DELETE
+  /corporate_actions/1` → `204`, and the same Sell now reports a **loss of \$800** against a parcel
   it over-consumes: re-`PUT`ting the identical Sell body is refused `422 "the allocations exceed a
   purchase parcel's available quantity"`. A `BonusIssue` delete has the same shape
 - [x] A-06 — the same delete leaves a generated AMIT adjustment covering more units than the parcel
@@ -567,7 +567,7 @@ and realised gain is computed from them at read time.)
   cross-check does flag the resulting statement, so this half fails visibly rather than silently
 - [x] A-21 — deleting a `ReturnOfCapital` cannot break a quantity invariant (it changes no unit
   count), but it does silently drop an already-reported CGT event G1 gain from a prior year's net
-  capital gain (reproduced: G1 gain $50.00 in FY2023 → the year disappears from the report entirely)
+  capital gain (reproduced: G1 gain \$50.00 in FY2023 → the year disappears from the report entirely)
 - [x] Decide the guard: refuse the delete while any trade of the listing is dated on/after the
   action's `date` (the rule the `demerge`/`exchange`/`recognise` operations already apply at the
   other end), or require an explicit override. Whichever way, a delete must not be able to leave
@@ -664,9 +664,9 @@ Five tests in `entities::corporate_action::tests` (the A-20 shape reached by `PU
 date moved past the Sell, with the stored terms asserted untouched; the correction that still lands,
 including the `ReturnOfCapital` amount edit; the new-consolidation insert; the cross-listing move;
 and the 422 body over the router). Verified end to end against a running server: the A-20 repro
-(realised gain $200) refuses all three breaking edits with the 422 body, leaves
+(realised gain \$200) refuses all three breaking edits with the 422 body, leaves
 `GET /corporate_actions/10` on its original terms, and accepts 2:1 → 4:1 plus a compensating 1-for-2
-consolidation, after which the reports still compute (`cost_base` 850.00 = $1,000 less a $0.75/unit
+consolidation, after which the reports still compute (`cost_base` 850.00 = \$1,000 less a \$0.75/unit
 return of capital re-based across the splits). Full suite 1382 passed / 0 failed; `cargo fmt
 --check` and `cargo clippy --all-targets -- -D warnings` clean.
 
@@ -751,7 +751,7 @@ warnings` all clean.
 carried forward moves to `residual_paid_out` on that DRP trade, in the same transaction, because the
 registry refunds it at termination (`db_unenrolment_pays_out_trailing_carried_residual` pins this).
 `DELETE /drp_enrolments/:id` ends the period just as finally and does none of it.)
-- [x] Reproduced: enrol open-ended, reinvest $100 at $10.50 → DRP trade with
+- [x] Reproduced: enrol open-ended, reinvest \$100 at \$10.50 → DRP trade with
   `residual_carried_forward: 5.5`, `residual_paid_out: 0`. Unenrolling → `carried 0 / paid_out 5.5`.
   Deleting the period instead → `carried 5.5 / paid_out 0` — cash recorded as carrying forward into
   a period that no longer exists, and nothing can pick it up (a later reinvestment is refused
@@ -806,12 +806,12 @@ lodged. Report snapshots do not cover this — they snapshot the three price-dep
 never the tax summary, net capital gain, or annual tax report. `row_history` records the change, so
 the restatement is *auditable* after the fact, but nothing *surfaces* it.)
 - [x] Reproduced four ways, all `204`/`200` with no flag: changing a lodged year's Buy price
-  (FY2023 net capital gain $500 → $1,100, A-15); deleting a `ReturnOfCapital` after its G1 gain was
+  (FY2023 net capital gain \$500 → \$1,100, A-15); deleting a `ReturnOfCapital` after its G1 gain was
   reported (A-21 — that *delete* is now refused `422`, see DONE/reviews.md; editing the payment
   amount in place restates the same year, so the finding stands); deleting the `cgt_settings`
   opening carried-forward loss after later years
-  consumed it (FY2024 net gain $500 → $1,000, A-25); deleting the only disposal of a loss year that
-  a later year's carry-forward drew on (FY2024 net gain $750 → $1,500, A-35). The annual tax report
+  consumed it (FY2024 net gain \$500 → \$1,000, A-25); deleting the only disposal of a loss year that
+  a later year's carry-forward drew on (FY2024 net gain \$750 → \$1,500, A-35). The annual tax report
   keeps reporting `completeness.complete: true` throughout
 - [x] Decide the scope: this may be honest "not modelled" — there is no lodged/closed-year concept
   in the data model, and adding one is a real feature (a lodgement marker per FY, plus a
@@ -864,8 +864,8 @@ footnote, and the README clause). Full suite 1392 passed / 0 failed; `cargo buil
 entitlement by it: every parcel with `t.date <= ca.date` is reduced. Entitlement to a return of
 capital is fixed at the **record date**, weeks earlier — shares bought after the ex date carry no
 entitlement.)
-- [x] Reproduced: parcel bought 2025-02-15, `ReturnOfCapital` of $0.50/unit paid 2025-03-01 — the
-  parcel's cost base is reduced by $50 although it was bought ex-entitlement and received nothing.
+- [x] Reproduced: parcel bought 2025-02-15, `ReturnOfCapital` of \$0.50/unit paid 2025-03-01 — the
+  parcel's cost base is reduced by \$50 although it was bought ex-entitlement and received nothing.
   Its cost base is understated, so every later gain on it is overstated
 - [x] The converse is right and stays right: a parcel **sold** between the record date and the
   payment is unaffected (checked), matching G1's own "own the shares at the time of the payment"
@@ -916,10 +916,10 @@ payment date; on a `ShareSplit`/`RightsIssue`; and the same-day fixing that is l
 `db_deleting_a_return_of_capital_is_refused_while_it_reduced_a_parcel` (extended: the ex-entitlement
 parcel deletes, one day earlier it doesn't);
 `open_parcels::tests::db_return_of_capital_skips_parcels_bought_after_the_record_date` (the
-reproduction — the ex-entitlement parcel keeps its $1,010.945 cost base — and the payment-date
+reproduction — the ex-entitlement parcel keeps its \$1,010.945 cost base — and the payment-date
 fallback reducing both parcels);
 `net_capital_gain::tests::db_g1_skips_a_parcel_bought_after_the_record_date` (one parcel's excess,
-not both; $50 → $100 without the record date);
+not both; \$50 → \$100 without the record date);
 `realised_gains::tests::db_return_of_capital_needs_both_entitlement_and_holding_at_payment` (both
 ways of missing a payment, in one report);
 `doc_checks::return_of_capital_record_date_documented`; `web::tests::corporate_actions_ui_present`
@@ -934,8 +934,8 @@ warnings`, and `node --test 'src/web/*.test.js'` all clean.
 (SCENARIOS.md section B verification pass, 2026-08-15. Neither produces a wrong figure; both leave
 a reader unable to tell what the system did.)
 - [x] B-17 — a Sell's brokerage and GST are **netted off `proceeds`** rather than added to the
-  cost base: a 100-unit sale at $12 with $10.945 of costs reports `proceeds: 1189.055` /
-  `cost_base: 1010.945`, where the ATO's own presentation is capital proceeds $1,200 against a cost
+  cost base: a 100-unit sale at \$12 with \$10.945 of costs reports `proceeds: 1189.055` /
+  `cost_base: 1010.945`, where the ATO's own presentation is capital proceeds \$1,200 against a cost
   base including the disposal's incidental costs (`docs/ato/cgt-cost-base.md`, second element:
   costs "that relate to the CGT event"). The capital gain is identical either way — only the two
   reported components differ — but `docs/API.md`'s realised-gains section defines neither, so a
@@ -956,8 +956,8 @@ B-17: the realised-gains section gained *Where a Sell's brokerage and GST land*,
 convention (netted off `proceeds`, pro-rated across the sale's allocations, never added to
 `cost_base`), contrasts it with the ATO's own presentation (`docs/ato/cgt-cost-base.md`, second
 element — incidental costs "that relate to the CGT event"), and works the TODO's figures through
-both: `proceeds: 1189.055` / `cost_base: 1010.945` here against $1,200.00 / $1,021.89 on a
-worksheet, the same $178.11 gain. It also says *why* the convention is what it is, which is the part
+both: `proceeds: 1189.055` / `cost_base: 1010.945` here against \$1,200.00 / \$1,021.89 on a
+worksheet, the same \$178.11 gain. It also says *why* the convention is what it is, which is the part
 a user can't infer: netting keeps `proceeds` the cash actually received and keeps `cost_base` the
 same figure the open-parcels and unrealised reports show for that parcel while it is still held, so
 a parcel's cost base doesn't move the moment it is sold. The reader reconciling against a worksheet
@@ -1112,15 +1112,15 @@ reconciles-to-the-cent (1000 × 33.3333%) cases all accepted. Full suite 1554 pa
   full in that year (`tax_summary`'s deduction loop buckets by `tax_year_for(date_incurred)`). Two
   ordinary share-investor expenses do not work that way:
   - **Borrowing expenses** — loan establishment fees, legal expenses, stamp duty on the loan: "If
-    your expenses total more than $100, apportion them over 5 years or the loan term, whichever is
-    shorter. If your expenses are $100 or less, you can claim a deduction for the full amount in the
+    your expenses total more than \$100, apportion them over 5 years or the loan term, whichever is
+    shorter. If your expenses are \$100 or less, you can claim a deduction for the full amount in the
     year you incur them" (ATO, *Dividend income deductions*, QC 104069, retrieved 2026-08-17; s 25-25)
   - **Prepaid interest** — a prepayment whose eligible service period runs over 12 months, or ends
     after the last day of the next income year, is apportioned by days across the years it covers
-    (ATO, *Deductions for prepaid expenses*, the Martin example: $1,250 over 397 days → $573 in the
-    first year, $677 in the second). Inside the 12-month rule it *is* immediately deductible, which
+    (ATO, *Deductions for prepaid expenses*, the Martin example: \$1,250 over 397 days → \$573 in the
+    first year, \$677 in the second). Inside the 12-month rule it *is* immediately deductible, which
     is the case the current model gets right by construction
-- [x] So a $2,000 loan establishment fee entered as one row claims 5× the first year's deduction, and
+- [x] So a \$2,000 loan establishment fee entered as one row claims 5× the first year's deduction, and
   nothing refuses it, flags it, or documents the alternative. `gross_amount`/`deductible_percentage`
   are no help: they describe the private-vs-income-producing split, not a split across time, so there
   is not even a provenance field saying "this row is one year of five"
@@ -1150,13 +1150,13 @@ the taxpayer's working, exactly as the private-use percentage beside it already 
 
 - **The ATO mirror.** `docs/ato/expense-time-apportionment.md` carries both rules verbatim from
   their own sources: the borrowing-expenses paragraph of *Dividend income deductions* (QC 104069,
-  retrieved 2026-08-17 — over $100 apportioned over 5 years or the loan term, whichever is shorter;
-  $100 or less deductible in full when incurred; ordinary loan *interest* deductible when incurred,
+  retrieved 2026-08-17 — over \$100 apportioned over 5 years or the loan term, whichever is shorter;
+  \$100 or less deductible in full when incurred; ordinary loan *interest* deductible when incurred,
   which is the distinction that keeps a monthly interest charge a single row), and the non-business
   prepayment rules of *Deductions for prepaid expenses 2026* (QC 106556 — the 12-month rule, the
   `A × (B ÷ C)` day-count formula, and both worked examples). The Martin example is mirrored at the
-  ATO's current 2026 figures ($1,250 over 396 days → $572 + $678) with a note that the ATO rolls the
-  example's dates forward each year — the TODO's $573/$677 was the 2025 edition's 397 days. Indexed
+  ATO's current 2026 figures (\$1,250 over 396 days → \$572 + \$678) with a note that the ATO rolls the
+  example's dates forward each year — the TODO's \$573/\$677 was the 2025 edition's 397 days. Indexed
   in `docs/ato/OVERVIEW.md`.
 - **Known limitation.** `docs/API.md` states it as a scope decision naming both rules, both QC
   numbers, the day-count formula, the workaround, and why it isn't modelled — a
@@ -1169,8 +1169,8 @@ the taxpayer's working, exactly as the private-use percentage beside it already 
   field hint both say one row is one year and name the two spread-across-years cases.
 
 Tests: `reports::tax_summary::tests::db_a_multi_year_expense_deducts_per_year_when_entered_per_year`
-(a $2,000 fee entered as five $400 rows deducts $400 in each of FY2025–FY2029 and no more — and the
-same fee keyed as one row lands $2,000 in FY2025, accepted without complaint, which is the
+(a \$2,000 fee entered as five \$400 rows deducts \$400 in each of FY2025–FY2029 and no more — and the
+same fee keyed as one row lands \$2,000 in FY2025, accepted without complaint, which is the
 limitation being documented), `doc_checks::multi_year_expense_apportionment_documented` (both rules
 quoted in the mirror with their QC headers, the formula and worked figures, the index entry, and the
 limitation naming both sources and the workaround), and
@@ -1185,15 +1185,15 @@ going ex and its payment — the ordinary way a DRP is stopped — and then the 
 disagree with the ex-date one: the trailing-residual settlement in `drp_enrolment::db_upsert`, the
 `residual_brought_forward` chain lookup in `drp_reinvestment::db_reinvest`, and the
 `CoversReinvestment` delete guard in `drp_enrolment::db_delete`.)
-- [x] I-01 — reproduced: period `[2020-01-01, 2024-07-01)` CarryForward; a $100 distribution ex
-  2024-06-20, paid 2024-07-15, reinvested at $7 → `201`, trade dated **2024-07-15**, 14 units,
-  `residual_carried_forward: 2`. That $2 is **stranded**: the period's settlement walk
+- [x] I-01 — reproduced: period `[2020-01-01, 2024-07-01)` CarryForward; a \$100 distribution ex
+  2024-06-20, paid 2024-07-15, reinvested at \$7 → `201`, trade dated **2024-07-15**, 14 units,
+  `residual_carried_forward: 2`. That \$2 is **stranded**: the period's settlement walk
   (`date >= enrolment_date AND date < unenrolment_date`) never sees the trade, so it is neither
   paid out nor available to any later reinvestment — re-saving the closed period does not reach it
   either. The registry refunds that leftover at termination; the record says it is still carried
 - [x] I-01 — same fixture, re-enrolling on the same day (`[2024-07-01, …)` PayOut): the trade dated
   2024-07-15 now falls inside the **new** period, and the next reinvestment (Sep 2024) brings its
-  $2 forward — the carry crosses a period boundary the module doc guarantees it never crosses, and
+  \$2 forward — the carry crosses a period boundary the module doc guarantees it never crosses, and
   the *new* period's residual handling settles money the *old* period's plan left over
 - [x] I-02 — the A-43 guard is defeated by the same mismatch: `DELETE /drp_enrolments/1` on the
   first fixture answers **`204`**, deleting a period that demonstrably produced a reinvestment.
@@ -1242,11 +1242,11 @@ nothing).
 one-way: nothing restores it if the closure is undone or moved, and `db_upsert`'s own comment calls
 the settlement "idempotent — once moved, carried is zero", which is exactly why the reverse edit
 cannot recover.)
-- [x] I-03 — reproduced: open period, $100 reinvested at $7 → 14 units, `carried 2`. Unenrol
+- [x] I-03 — reproduced: open period, \$100 reinvested at \$7 → 14 units, `carried 2`. Unenrol
   (`carried 0 / paid_out 2` — correct). Then correct the mistake by clearing the unenrolment date:
   the trade still reads `carried 0 / paid_out 2`, and the next reinvestment in the re-opened period
-  brings forward **0**, buying 14 units off $100 instead of 14 off $102 (`carried 2` instead of
-  `carried 4`). The chain has silently lost $2 — and with a smaller price step it loses a *unit*
+  brings forward **0**, buying 14 units off \$100 instead of 14 off \$102 (`carried 2` instead of
+  `carried 4`). The chain has silently lost \$2 — and with a smaller price step it loses a *unit*
 - [x] I-01 — the realistic version is a mistyped end date, not a change of mind: closing at
   `2021-01-01` and correcting to `2025-01-01` settles the residual under the first window and never
   un-settles it, leaving a mid-chain trade carrying `paid_out` and every later reinvestment in the
@@ -1283,15 +1283,15 @@ against the available cash to within `1 unit-step at the stated precision × pri
 columns record zero because a fractional allotment leaves no cash behind. The tolerance scales with
 the units' own scale, so at scale 0 it is a *whole unit's* worth of cash — and the discarded
 difference is real money, not statement rounding.)
-- [x] I-06 — reproduced: $100 available, price $7, `units: "14"` → **`201`**, quantity 14,
-  `residual_brought_forward/carried_forward/paid_out` all `0`. The $2 that bought no whole unit is
+- [x] I-06 — reproduced: \$100 available, price \$7, `units: "14"` → **`201`**, quantity 14,
+  `residual_brought_forward/carried_forward/paid_out` all `0`. The \$2 that bought no whole unit is
   neither carried nor paid out; the next reinvestment brings forward nothing. At `units: "14.286"`
-  (3 dp, the fractional case the path is for) the tolerance is $0.007 and the same $100 is fully
+  (3 dp, the fractional case the path is for) the tolerance is \$0.007 and the same \$100 is fully
   spent — the behaviour is right there. A full step off (`14.290`) is correctly refused `422`
   carrying both figures
 - [x] The entry path makes this reachable: the reinvest form's units field is offered on every
   distribution, and an ASX registry statement *does* state whole units allotted — keying them in
-  is the natural thing to do, and it silently costs the parcel $2 less than the cash applied while
+  is the natural thing to do, and it silently costs the parcel \$2 less than the cash applied while
   losing the carry
 - [x] **Decided 2026-08-17 (Evan): (a) treat the difference as a residual.** Compute
   `available − units × price` as the leftover and apply the period's residual handling to it,
@@ -1325,10 +1325,10 @@ unit's price.
 
 Not fixed, and deliberately: the *overspend* direction is still bounded only by that tolerance, so
 stated units costing up to a unit's price **more** than the available cash are accepted with no
-residual (15 units at $7 against $100). Tightening it needs a bound that does not reject a genuine
+residual (15 units at \$7 against \$100). Tightening it needs a bound that does not reject a genuine
 fractional statement — a separate question, noted here rather than guessed at.
 
-Tests: `stated_whole_units_carry_the_cash_they_left_over` (14 units at $7 against $100 carries $2,
+Tests: `stated_whole_units_carry_the_cash_they_left_over` (14 units at \$7 against \$100 carries \$2,
 and the next reinvestment brings it forward), `stated_whole_units_pay_out_the_leftover_where_the_period_says_so`,
 and the three fractional tests unchanged. `docs/API.md`'s "Stated allotments (`units`)" paragraph
 and the reinvest form's units hint now state both halves.
@@ -1345,7 +1345,7 @@ itself refuses.)
   chain, and enrolment is per (listing, account));
   **ex date** moved outside every enrolment period (the reinvestment now rests on an enrolment that
   does not cover it — the very check that gated its creation);
-  **cash amounts** changed from $100 to $200 (the trade still says 14 units and `carried 2`, figures
+  **cash amounts** changed from \$100 to \$200 (the trade still says 14 units and `carried 2`, figures
   computed from a distribution that no longer exists)
 - [x] I-01/I-04 — the cash edit is the one that reaches a report: the parcel's cost base stays at
   the old cash while the assessable dividend becomes the new figure, so the ATO identity the whole
@@ -1388,7 +1388,7 @@ to AUD using the record's `fx_rate` before aggregating or comparing — never mi
 calculation".)
 - [x] I-08 — reproduced: AUD listing, income row `currency: "USD"` with `foreign_source_income: 100`
   → reinvest at `7` answers `201` with quantity **14** and `residual_carried_forward: 2` on an
-  **AUD** trade. US$100 was divided by A$7; the parcel is costed A$98 for cash that was US$100
+  **AUD** trade. US\$100 was divided by A\$7; the parcel is costed A\$98 for cash that was US\$100
 - [x] The mismatch is reachable because an income row's currency is free-form (the currencies FK
   aside) and is not tied to its listing's. Whether *that* should be constrained in general is a
   wider question than this section — but the reinvest operation is a single calculation over the
@@ -1422,13 +1422,13 @@ is all-or-nothing per (listing, holding account): a registry plan that reinvests
 holding's units is not modelled" — and the system fails safe: stating the partial units is refused
 `422` with both figures. What it doesn't say is what to do instead, which the scenario asks to
 verify.)
-- [x] I-09 — reproduced: a $100 distribution half reinvested, entered as `units: "7"` at $7 → `422`
+- [x] I-09 — reproduced: a \$100 distribution half reinvested, entered as `units: "7"` at \$7 → `422`
   "the stated units at the reinvestment price spend 49, but the reinvestable cash … is 100". Good
   refusal, no guidance
 - [x] I-09 — the workaround does produce a defensible cost base, verified end to end: split the
-  distribution into two income rows — the reinvested $50 and the cash $50 — and reinvest the first.
-  The parcel costs $49 for 7 units with $1 carried (the dividends actually applied, per
-  `docs/ato/cgt-dividend-reinvestment-plans.md`), and the tax summary still declares the full $100
+  distribution into two income rows — the reinvested \$50 and the cash \$50 — and reinvest the first.
+  The parcel costs \$49 for 7 units with \$1 carried (the dividends actually applied, per
+  `docs/ato/cgt-dividend-reinvestment-plans.md`), and the tax summary still declares the full \$100
   as assessable dividend income. The per-share cross-check (`amount_per_security`/`securities_held`)
   has to be left off the split rows, since neither half reconciles against the whole holding
 - [x] Caveat worth stating with it: an exactly half-and-half split trips the `duplicate_income`
@@ -1449,7 +1449,7 @@ The README's DRP feature line carries the short version.
 Tests: `known_limitations_document_the_partial_drp_workaround` (doc_checks, the entry and its ATO
 citation) and
 `the_partial_participation_workaround_costs_the_parcel_at_the_cash_reinvested` — the refusal, then
-the two-row entry producing a $49 cost base for 7 units with the full $100 still declared.
+the two-row entry producing a \$49 cost base for 7 units with the full \$100 still declared.
 
 ## The ESS vest Buy's FX rate is a hard-coded 1, so a foreign-currency vest can cost at parity (SCENARIOS J-08, J-12)
 (SCENARIOS.md section J verification pass, 2026-08-18. `entities::ess_vest::db_vest` INSERTs the
@@ -1458,10 +1458,10 @@ cost-base-reset Buy with `fx_rate` literal `'1'`. On the trade that column is **
 for the month*. So the placeholder becomes a real answer exactly when the RBA rate is missing, and
 the answer is 1 AUD per USD.)
 - [x] J-12 — reproduced: a USD listing, statement `taxing_point_date 2024-09-01`, 100 shares at
-  US$150, no `rba_fx_rates` row for `USD 2024-09`. `POST /ess_statements/1/vest` → `201` with
+  US\$150, no `rba_fx_rates` row for `USD 2024-09`. `POST /ess_statements/1/vest` → `201` with
   `currency USD, fx_rate 1`, and `POST /portfolio/overview` answers `total_cost_base 15000` — a
-  **US$15,000 parcel costed at A$15,000**. Importing the month's rate (0.65) moves it to
-  A$23,076.92, so the figure was ~35% understated with nothing marked provisional
+  **US\$15,000 parcel costed at A\$15,000**. Importing the month's rate (0.65) moves it to
+  A\$23,076.92, so the figure was ~35% understated with nothing marked provisional
 - [x] J-12 — the two sides disagree about the same missing month: `GET /portfolio/tax-summary`
   **500s** (`FxError::MissingRate`, documented in `docs/API.md` as "no rate ⇒ fails loudly with
   `500`") while the price-free CGT reports keep answering off the parity cost base. A user in this
@@ -1510,7 +1510,7 @@ tax report's, via `aud_label`/`aud_field_with` taking an `FxOverride` and the sh
 sides now convert at the same rate, and a statement with no rate anywhere fails loudly on both.
 
 Tests: `a_foreign_vest_with_no_rate_anywhere_is_refused_rather_than_costed_at_parity` (the refusal,
-nothing written, then A$23,076.92… once the month is imported),
+nothing written, then A\$23,076.92… once the month is imported),
 `a_statements_stated_rate_costs_the_parcel`, `an_aud_vest_carries_the_parity_rate_because_aud_never_converts`,
 `api_vest_without_a_rate_returns_422_naming_the_month`,
 `db_fx_rate_must_be_positive_and_only_on_a_non_aud_statement`, `api_fx_rate_on_an_aud_statement_rejected_422`,
@@ -1528,7 +1528,7 @@ either a data-entry slip or two currencies in one row — and the vest copies th
 onto the parcel regardless.)
 - [x] J-08 — reproduced: an **AUD** ASX listing, statement `currency USD`, 100 shares at 150 →
   `204`, vest `201` with a **USD** parcel on an AUD-priced security. With `USD 2024-09` imported at
-  0.65 the overview reports `total_cost_base 23076.92` for what the listing says is a A$15,000
+  0.65 the overview reports `total_cost_base 23076.92` for what the listing says is a A\$15,000
   holding, and a later closing price (AUD, from the exchange) values a USD-costed parcel
 - [x] Precedent: the DRP side already refuses this (`450b887`, "reinvesting … a distribution
   recorded in a currency other than its listing's (the cash and the per-unit price are one
@@ -1610,10 +1610,10 @@ unchallenged.)
 - [x] J-09 — reproduced: `deferral_discount -1000` with `tfn_withholding -50` → `204`. The tax
   summary reports `tfn_withholding_tax: "-50"` — negative withholding is a refund from nowhere,
   and the negative discount silently nets against the other statements' discounts in the same year
-  (four statements totalling A$17,000 of positive labels reported `ess_discount_assessable 16000`)
+  (four statements totalling A\$17,000 of positive labels reported `ess_discount_assessable 16000`)
 - [x] J-01 — reproduced: `quantity -100`, `market_value_per_share -10` → `204` (the vest then
   refuses, `NothingToVest`, so the nonsense row simply sits there claiming income)
-- [x] J-01 — reproduced: 100 shares at $10 (A$1,000 of market value) with `deferral_discount 15000`
+- [x] J-01 — reproduced: 100 shares at \$10 (A\$1,000 of market value) with `deferral_discount 15000`
   → `204`. The discount is *by definition* market value less what the employee paid
   (`docs/ato/employee-share-schemes.md`), so a discount above the vested shares' market value
   implies a negative payment. The obvious cause is a transposed column or a foreign-currency figure
@@ -1659,11 +1659,11 @@ bodies:
   `quantity × market_value_per_share`, both cent-rounded (a per-share market value can carry
   sub-cent precision while the statement's discount is cents), and only when both figures are
   positive. Exact equality is the RSU case (nil consideration) and is the *normal* entry, not an
-  edge: the ATO's own Example 11 (400 × $3.795 = $1,518 of discount) is pinned in `ato_examples`.
+  edge: the ATO's own Example 11 (400 × \$3.795 = \$1,518 of discount) is pinned in `ato_examples`.
 
 One existing test moved with the rule rather than around it:
 `ess_vest::tests::deleting_the_statement_removes_the_vest_buy` revised its statement's discount
-*down* (600 → 500) instead of up past the vested shares' $600 market value — still the point being
+*down* (600 → 500) instead of up past the vested shares' \$600 market value — still the point being
 made (the income side stays editable after the vest), now within the invariant.
 
 Tests: `db_negative_amounts_are_refused_naming_the_field` (a sweep over all thirteen fields, each
@@ -1689,7 +1689,7 @@ corporate actions (E-03), AMMA statements (F), income (G-24), interest and expen
 `ess_statements` is the one income-bearing fact table with no such check.)
 - [x] J-11 — reproduced: the same statement entered twice (same listing, account, taxing point,
   quantity, market value and discount) is accepted, vests **two** parcels, and doubles both the
-  Item 12 discount (`ess_discount_assessable 2000` for a $1,000 grant) and the holding
+  Item 12 discount (`ess_discount_assessable 2000` for a \$1,000 grant) and the holding
   (`quantity 200`). The health report answers with every list empty
 - [x] The 30-day rule makes this the *expected* accident rather than a hypothetical: the employer
   issues an **amended** statement for the same vest (`docs/ato/ess-30-day-rule.md` — an amended 2019
@@ -1750,13 +1750,13 @@ The mirror is indexed in `docs/ato/OVERVIEW.md`, but the words "30-day rule" app
 `README.md`, `docs/API.md`, or the ESS screen, and no report flags the pattern.)
 - [x] The corrected entry works and is now pinned: `ato_examples::ess_30_day_rule_example_11_wyatt_amended_statement`
   enters the *amended* statement (taxing point = the 20 July 2019 disposal, market value = the
-  $3.795 per-share sale price), vests it, and sells the same day — FY2020 discount $1,518, capital
-  gain $0, exactly the ATO's answer. `docs/ato/OVERVIEW.md` already claimed this test existed; it
+  \$3.795 per-share sale price), vests it, and sells the same day — FY2020 discount \$1,518, capital
+  gain \$0, exactly the ATO's answer. `docs/ato/OVERVIEW.md` already claimed this test existed; it
   does now
 - [x] J-04 — the *natural* entry is wrong in two ways at once and nothing says so. Entering the
-  employer's original statement (taxing point 23 June 2019, discount $1,400) and then the 20 July
-  sale gives `ess_discount_assessable 1400` in **FY2019** and a **$118 capital gain** in FY2020 —
-  where the ATO's answer is $1,518 of discount in FY2020 and no capital gain. Both figures are
+  employer's original statement (taxing point 23 June 2019, discount \$1,400) and then the 20 July
+  sale gives `ess_discount_assessable 1400` in **FY2019** and a **\$118 capital gain** in FY2020 —
+  where the ATO's answer is \$1,518 of discount in FY2020 and no capital gain. Both figures are
   wrong, in different years, from an entry the system accepts without comment
 - [x] The trigger is mechanically detectable from data already held: a Sell allocating a parcel
   whose Buy carries `ess_statement_id`, dated within 30 days after that statement's
@@ -1822,9 +1822,9 @@ rule is flagged, never applied** Known-limitations entry (what the rule does, wh
 it, and what to enter instead); README's health-monitoring feature line gained the clause; and
 `config.js`'s taxing-point hint now states the rule where the date is typed.
 
-## The $1,000 taxed-upfront reduction is always applied, with no way to record failing the income test (SCENARIOS J-02)
+## The \$1,000 taxed-upfront reduction is always applied, with no way to record failing the income test (SCENARIOS J-02)
 (SCENARIOS.md section J verification pass, 2026-08-18. The reduction is available only if *adjusted
-taxable income* is ≤ A$180,000 — a taxpayer-level test outside this system's data
+taxable income* is ≤ A\$180,000 — a taxpayer-level test outside this system's data
 (`docs/ato/employee-share-schemes.md`). The tool applies `min(A$1,000, D)` unconditionally and
 documents the test as the user's responsibility in `README.md`, `docs/API.md` (both the tax-summary
 section and Known limitations) and the ESS screen description — thorough, and the applied amount is
@@ -1832,18 +1832,18 @@ surfaced as its own `ess_taxed_upfront_reduction` line so it can be added back b
 - [x] J-02 — the gap is that "add it back by hand" has no home in the system: there is no
   per-taxpayer or per-year flag, and the only way to make the summary report the right figure is to
   enter the discount at label **E** (taxed-upfront *not eligible*), which misstates 12D/12E to get
-  12B right. An ineligible taxpayer's every stored figure and export stays $1,000 light
+  12B right. An ineligible taxpayer's every stored figure and export stays \$1,000 light
 - [x] J-02 — the printed archival document (`/reports/tax-report`, the PDF the accountant gets)
   prints `ess_taxed_upfront_reduction 1,000` as a bare line with an empty ATO label and no statement
   of the condition it assumes. `taxreport.js` already carries the precedent for exactly this: the
   CFI footnote (`cfiFootnote`) explains a figure the reader would otherwise misread
-- [x] **Decide the model.** (a) **A footnote only** — print the ≤A$180,000 condition under the ESS
+- [x] **Decide the model.** (a) **A footnote only** — print the ≤A\$180,000 condition under the ESS
   table whenever a reduction was applied (cheap, honest, matches the CFI precedent). (b) **Plus a
   `cgt_settings` flag** — the singleton settings entity already carries a taxpayer-level fact (the
   opening capital loss); an `ess_taxed_upfront_reduction_eligible` boolean (default true) would let
   the summary report the ineligible position and keep the exports right. (c) **Per-year** rather
   than singleton, since the income test is answered year by year — more faithful, and the only one
-  that survives a year where the taxpayer crosses $180,000; costs a new dated settings table
+  that survives a year where the taxpayer crosses \$180,000; costs a new dated settings table
 - [x] Tests: whichever is chosen — a `doc_checks`/bundle assertion for the footnote wording, and a
   summary test that an ineligible year reports the unreduced discount
 - [x] Docs sync: `docs/API.md` tax summary + Known limitations, README
@@ -1851,7 +1851,7 @@ surfaced as its own `ess_taxed_upfront_reduction` line so it can be added back b
 **Closed 2026-08-18 — Evan chose (c), the per-year flag, plus (a)'s footnote.** The singleton (b) was
 rejected for a concrete reason rather than a stylistic one: the tax summary reports **every** recorded
 year in one response, so a global flag would strip the reduction from years that never crossed
-A$180,000 — wrong for any taxpayer whose income crosses the threshold partway through their recorded
+A\$180,000 — wrong for any taxpayer whose income crosses the threshold partway through their recorded
 history, which is the ordinary case over a working life.
 
 New table `tax_year_settings` (migration 0027), keyed on the financial year itself, with a matching
@@ -1957,8 +1957,8 @@ nothing persisted), `tax_summary::db_employment_income_is_not_a_dividend_and_not
 `tax_report::employment_income_prints_in_its_own_table_not_among_the_dividends`,
 `web.rs::income_type_ui_present`, and the updated
 `doc_checks::known_limitations_document_rsu_dividend_equivalents`. Full suite 1627 passed / 0 failed;
-`node --test` 69 passed; ui-smoke green. Verified end to end against a running server: a $100
-dividend and a $250 dividend equivalent on one day report `dividends_assessable 100 /
+`node --test` 69 passed; ui-smoke green. Verified end to end against a running server: a \$100
+dividend and a \$250 dividend equivalent on one day report `dividends_assessable 100 /
 employment_income 250 / gross_assessable_investment_income 100`; the printed document lists the
 dividend and the equivalent in separate tables; a franking credit on the equivalent is `422`;
 reinvesting it is `422`; the activity ledger reads "Employment income (dividend equivalent)".
@@ -2037,7 +2037,7 @@ column is not a constant: `infra::fx::pick_rate` treats it as `FxOverride::Fallb
 is missing, and the answer is 1 AUD per USD.)
 - [x] Reproduced: a USD listing, `cost_base 3000`, `currency USD`, no `fx_rate` given and no
   `rba_fx_rates` row for the acquisition month → `204`, and `GET /portfolio/open-parcels` reports
-  `original_cost_base 3000` — a **US$3,000 parcel costed at A$3,000**, with nothing marked
+  `original_cost_base 3000` — a **US\$3,000 parcel costed at A\$3,000**, with nothing marked
   provisional
 - [x] The exposure is larger here than it was for ESS, because the translation month is the
   *parcel's* (`ParcelRow::acquired()`): under `DeceasedCostBase` that is the **deceased's**
@@ -2081,8 +2081,8 @@ required body field.
 
 Tests: `a_non_aud_inheritance_with_no_rate_is_refused_not_costed_at_parity` — a USD inheritance with
 only the *death* month imported is refused naming `2020-02` (the deceased's acquisition month) with
-nothing persisted; a stated 0.75 converts US$3,200 to A$4,266.67; and importing `2020-02` at 0.80
-lets the same row through at A$4,000, the ATO rate outranking the fallback. Docs: `docs/API.md`
+nothing persisted; a stated 0.75 converts US\$3,200 to A\$4,266.67; and importing `2020-02` at 0.80
+lets the same row through at A\$4,000, the ATO rate outranking the fallback. Docs: `docs/API.md`
 (Inheritances' `fx_rate` paragraph, the `422` list, the 422 catalogue) and the field hint in
 `src/web/config.js`.
 
@@ -2186,10 +2186,10 @@ to enter without saying what it must be net of.)
 - [x] **Apportionment between beneficiaries.** K-09 verified as the documented boundary — one
   taxpayer, so the beneficiary records their own share and there is nowhere to represent the other
   beneficiaries — and entering a part share works cleanly (500 of the estate's 1,000 units at
-  $10,000 of its $20,000 cost base gives the expected parcel, fractional quantities included). What
+  \$10,000 of its \$20,000 cost base gives the expected parcel, fractional quantities included). What
   is missing is that the *cost base* must be apportioned with the units: a user who takes half a
   holding and types the deceased's whole cost base doubles their cost base, and no check can see it
-  (a 500-unit inheritance at a $20,000 cost base is a perfectly ordinary row). The Known-limitations
+  (a 500-unit inheritance at a \$20,000 cost base is a perfectly ordinary row). The Known-limitations
   entry says only that the estate/LPR side is out of scope
 - [x] Fix (documentation, unless Evan wants more): a hint on the `cost_base` field for each rule
   (`typeDescs` already carries per-rule prose to extend), a sentence in `docs/API.md`'s Inheritances
@@ -2233,10 +2233,10 @@ the Buy's single `brokerage` figure, so `domain::cost_base` translates the whole
 element *and* LPR expenditure together — at one rate: the parcel's (possibly deemed) acquisition
 month. Under `DeceasedCostBase` that month is the **deceased's acquisition**, while the LPR incurred
 the expense after the death, by definition a later month and often a much later one.)
-- [x] Reproduced: a USD listing; deceased acquired 2015-05-05, died 2024-03-01; `cost_base` US$2,000
-  and `lpr_expenditure` US$1,000 incurred 2024-06-01. Rates imported: `USD 2015-05 = 2`,
-  `USD 2024-06 = 0.5`. `GET /portfolio/open-parcels` reports `original_cost_base 1500` (US$3,000 ÷ 2).
-  Translating each element at its own month gives A$1,000 + A$2,000 = **A$3,000** — the LPR element
+- [x] Reproduced: a USD listing; deceased acquired 2015-05-05, died 2024-03-01; `cost_base` US\$2,000
+  and `lpr_expenditure` US\$1,000 incurred 2024-06-01. Rates imported: `USD 2015-05 = 2`,
+  `USD 2024-06 = 0.5`. `GET /portfolio/open-parcels` reports `original_cost_base 1500` (US\$3,000 ÷ 2).
+  Translating each element at its own month gives A\$1,000 + A\$2,000 = **A\$3,000** — the LPR element
   is understated 4×, and it moves the reported cost base by 50%
 - [x] The existing Known limitation does not cover it. "Cost-base FX timing" (2026-07-13) is about
   the AMIT/return-of-capital **reductions** and argues the single rate "keeps each parcel's
@@ -2282,8 +2282,8 @@ home a foreign parcel can hold correctly, and folding it into `cost_base` by han
 the same wrong month, so nothing is gained by accepting it. The ordinary case — an Australian LPR
 fee on an Australian holding, where the conversion is the identity — is untouched.
 
-Tests: `lpr_expenditure_is_refused_on_a_foreign_parcel` (a US$1,000 fee on a USD parcel refused with
-the previously accepted row untouched, and the AUD parcel still taking its $200 fee onto the Buy),
+Tests: `lpr_expenditure_is_refused_on_a_foreign_parcel` (a US\$1,000 fee on a USD parcel refused with
+the previously accepted row untouched, and the AUD parcel still taking its \$200 fee onto the Buy),
 and `doc_checks::lpr_expenditure_on_a_foreign_parcel_documented` pinning the Known limitation
 (including the size of the error it would otherwise report), the Inheritances section, the 422
 catalogue entry, the README line and the SCHEMA column. The module doc's old claim that "LPR
@@ -2364,16 +2364,16 @@ what is missing is the sentence naming the entry path, the way the gift and swap
   — you derive **no** ordinary income and make no capital gain on receipt, and the tokens have a
   **cost base of zero** (or what you paid). Reproduced: a Buy of 800 units at price `0` is accepted,
   opens a nil-cost-base parcel with its clock from receipt, and the later sale reports the ATO's
-  Josh example exactly — $4,000 proceeds, $4,000 discount-eligible gain, $2,000 after the discount.
+  Josh example exactly — \$4,000 proceeds, \$4,000 discount-eligible gain, \$2,000 after the discount.
   The documented "an income row plus a Buy at receipt-date market value" is wrong for this half of
   L-04 and would overstate assessable income by the full market value
 - [x] **Chain split** (L-05): the new asset is neither ordinary income nor a capital gain on
   receipt, has a nil cost base, is acquired at the split, and is discountable after 12 months
-  (QC 69953, Alex's example: 2 Bitcoin Cash for $1,260 → a $630 discount gain). That is the same
+  (QC 69953, Alex's example: 2 Bitcoin Cash for \$1,260 → a \$630 discount gain). That is the same
   nil-cost-base Buy dated the split. The page's *other* case — no post-split asset continues the
   original, so a **CGT event C2** happens to it — is representable too: reproduced with a
   `WorthlessShares` corporate action carrying `worthless_event: "C2Cancellation"`, whose recognise
-  closed the parcel at nil proceeds for a capital loss of $8,300, Ming's stated figure to the dollar
+  closed the parcel at nil proceeds for a capital loss of \$8,300, Ming's stated figure to the dollar
 - [x] **Wrapping** (L-06): the ATO says wrapping or unwrapping a token *is* a CGT event — you
   exchange one crypto asset for another, with capital proceeds equal to the market value of the
   wrapped token received. That is the documented **swap** recipe, already implemented and already
@@ -2384,7 +2384,7 @@ what is missing is the sentence naming the entry path, the way the gift and swap
   No. 4) Act 2023 excluded digital currency from the definition for income years starting on or
   after 1 July 2021. So the Div 775 deferral in the same limitation entry **never reaches a
   stablecoin**: it is a CGT asset like any other crypto, which is exactly what the system does
-  (verified: a stablecoin holding bought at A$1.55 and spent at A$1.60 reports a $500 capital gain).
+  (verified: a stablecoin holding bought at A\$1.55 and spent at A\$1.60 reports a \$500 capital gain).
   The entry should say so rather than leaving a reader to wonder which half applies
 - [x] Nothing in `docs/ato/` mirrors any of this: `crypto-cgt.md` covers only the CGT basics and the
   swap, and `OVERVIEW.md` indexes nothing on staking, airdrops, chain splits, or wrapping
@@ -2413,9 +2413,9 @@ staking reward as income plus a Buy, with the income half named as the open limi
 (item 24 has no label here — the L-03/L-04 finding). The personal-use-asset exemption stays listed
 as genuinely not modelled, and the Div 775 deferral now says it never reaches a crypto holding.
 
-Tests: `ato_examples.rs` reproduces Alex (chain split: a $1,260 discount gain, $630 after the
-discount), Ming (the abandoned original: a capital loss of $8,300 via C2) and Josh (initial-
-allocation airdrop: nil cost base, $4,000 gain, $2,000 after the discount) — the module doc records
+Tests: `ato_examples.rs` reproduces Alex (chain split: a \$1,260 discount gain, \$630 after the
+discount), Ming (the abandoned original: a capital loss of \$8,300 via C2) and Josh (initial-
+allocation airdrop: nil cost base, \$4,000 gain, \$2,000 after the discount) — the module doc records
 why Kal, Anastasia, Merindah, Calista, Craig and Bree are not reproduced. `doc_checks::
 known_limitations_document_the_crypto_entry_paths` pins the rewritten entry, each mirror's source
 header, and that OVERVIEW.md indexes all four.
@@ -2437,7 +2437,7 @@ for an on-chain network fee.)
   disposal); a fee **paid in a third asset you hold** (a disposal of those units at market value,
   entered as a Sell, *and* the same AUD value as the trade's brokerage). Only the middle one is
   what the current sentence describes
-- [x] This is live data, not a hypothetical: the 2026-07-13 crypto reconciliation traced a $4.14
+- [x] This is live data, not a hypothetical: the 2026-07-13 crypto reconciliation traced a \$4.14
   gap to a Binance trade fee charged in ETH
 - [x] Fix (decision): documentation naming the three cases beside the existing brokerage-currency
   limitation, or an entry path — `fee_allocations` on a Buy/Sell, the shape `transfers` already has,
@@ -2504,7 +2504,7 @@ time of receipt**, declared "as **other income**" — item 24 of the individual 
 documented workaround — README + `docs/API.md` Known limitations, "an income row plus a Buy at
 receipt-date market value" — has nowhere to put that income: `income.income_type` is
 `Dividend | EmploymentIncome`, so the row is a dividend unless it is remuneration.)
-- [x] Reproduced: 0.5 ETH of staking rewards worth A$2,000 entered as an income row on the ETH
+- [x] Reproduced: 0.5 ETH of staking rewards worth A\$2,000 entered as an income row on the ETH
   listing → `GET /portfolio/tax-summary` reports `dividends_assessable: "2000"` against ATO label
   **`11S + 11T`**, and the annual tax report prints it in the **Dividends** table with
   `franking_status: "entitled"` — a franking entitlement on a payment no company made. The total
@@ -2554,7 +2554,7 @@ Tests: `api_other_income_round_trips_and_refuses_distribution_fields`,
 `row_history::audited_tables_match_migration_check_and_triggers` (trigger pair, staleness triggers,
 five indexes, every column, and the pragma pair), the web bundle assertions, and
 `ato_examples::crypto_defi_reward_example_craig_stablecoin_tokens` — Craig's DeFi reward (QC 73649),
-whose $10 of ordinary income and $10 cost base is the same pair a staking reward is entered as.
+whose \$10 of ordinary income and \$10 cost base is the same pair a staking reward is entered as.
 Docs: `docs/API.md` (Income, the tax-summary label table, Known limitations), `docs/SCHEMA.md`,
 README, and the income form's kind hint in `src/web/config.js`.
 
@@ -2564,9 +2564,9 @@ document the year is archived as, and each non-AUD disposal row prints `currency
 `buy_month_fx_rate` and `sell_month_fx_rate` beside its AUD figures so the arithmetic can be
 checked. The buy side prints the rate actually applied; the sell side prints the ATO monthly rate
 whatever the proceeds used.)
-- [x] Reproduced (a): a Sell of US$20,000 carrying `spot_fx_rate: 0.5000` in a month whose ATO rate
+- [x] Reproduced (a): a Sell of US\$20,000 carrying `spot_fx_rate: 0.5000` in a month whose ATO rate
   is 0.6800 prints `proceeds_aud: 40000` (= 20000 / 0.50, correct) beside
-  `sell_month_fx_rate: 0.6800`, which computes A$29,411.76 — a A$10,588 gap between the printed
+  `sell_month_fx_rate: 0.6800`, which computes A\$29,411.76 — a A\$10,588 gap between the printed
   figure and the printed rate, in the document a reader checks the return against
 - [x] Reproduced (b): a Sell in a month with no imported ATO rate, resting on its own `fx_rate` of
   0.55, prints `proceeds_aud: 36363.64` beside `sell_month_fx_rate: null` — the fallback rate the
@@ -2645,7 +2645,7 @@ is old. That answers "has the import run lately", not "is every amount I have re
 - [x] Reproduced (M-14): an F11 CSV with an empty February cell imports January and March and skips
   February silently (`{"inserted": 2}`); health then reports `latest_fx_month: "2024-03"` — healthy
   by its own measure — while a February USD trade is costed from its own `fx_rate` of 0.99 at
-  A$15,151 where the real rate would give A$22,727, and a February income row would `500`
+  A\$15,151 where the real rate would give A\$22,727, and a February income row would `500`
 - [x] The gap is invisible in both directions: a *silent* one (an amount resting on a per-trade
   `fx_rate` fallback because its month is missing) and a *fatal* one (an income/AMMA amount with no
   fallback at all, which fails the whole report)
@@ -2850,9 +2850,9 @@ capital gains." The AMMA guidance notes confirm the trustee reports the **gross*
 the reduction is the investor's job — this system's job.)
 - [x] Reproduced: an AMMA statement with `cgt_discount_gains: 5000` and `foreign_tax_credits: 1500`
   reports `foreign_tax_offsets: 1000` and `foreign_tax_offset_excess: 500`. Apportioned to the
-  assessable half, the claimable figure is A$750 — so the report's A$1,000 over-claims by A$250,
+  assessable half, the claimable figure is A\$750 — so the report's A\$1,000 over-claims by A\$250,
   and a smaller de-minimis-covered case over-claims by the full apportionment
-- [x] The de-minimis cap bounds the damage at A$1,000 but does not remove it, and the excess figure
+- [x] The de-minimis cap bounds the damage at A\$1,000 but does not remove it, and the excess figure
   the user is told they *may* claim with their own limit calculation is overstated by the whole
   un-apportioned amount
 - [x] The blocker is the data model: `amma_statements.foreign_tax_credits` is one field for both
@@ -2916,14 +2916,14 @@ and both behave exactly as documented — the verification confirmed each. What 
 surface telling a user that *their* data has hit it, though in both cases the affected rows are
 identifiable from stored facts. The third member of the family, LPR expenditure on a foreign
 inherited parcel, was refused outright at write time in the section K pass for the same reason.)
-- [x] **K10/K11 (M-09)**: reproduced with a US$1.5m disposal contracted 27 March (rate 0.66) and
-  settled 2 April (rate 0.60). Proceeds convert at the contract month, correctly; the A$227,272 of
+- [x] **K10/K11 (M-09)**: reproduced with a US\$1.5m disposal contracted 27 March (rate 0.66) and
+  settled 2 April (rate 0.60). Proceeds convert at the contract month, correctly; the A\$227,272 of
   settlement-window movement is a CGT event K10 gain or K11 loss the system does not compute, per
   the Known-limitations entry. A trade at risk is exactly identifiable: non-AUD, and
   `date`'s month ≠ `settlement_date`'s month
 - [x] **Cost-base FX timing (M-10)**: reproduced with a USD parcel acquired at 0.70 taking a USD
-  AMIT reduction whose own month is 0.60 — the reduction converts at 0.70 (A$2,857 where its own
-  month gives A$3,333), keeping `initial − reductions = adjusted` exact in AUD. Affected rows are
+  AMIT reduction whose own month is 0.60 — the reduction converts at 0.70 (A\$2,857 where its own
+  month gives A\$3,333), keeping `initial − reductions = adjusted` exact in AUD. Affected rows are
   likewise identifiable: a non-AUD parcel with a non-AUD AMIT or return-of-capital reduction. The
   limitation says this "in practice does not arise"; nothing checks whether it has
 - [x] Fix: surface both, non-blocking, on the `reports::settlement_coverage` model
@@ -3014,21 +3014,21 @@ replacement parcel's carried cost base — on the replacement Buy's `brokerage` 
 `CostBaseInputs` as they stood when the operation ran. Every later-entered fact dated on or before
 the operation restates the *source* parcel, which the reports still walk, but cannot reach the
 frozen figure.)
-- [x] Reproduced (return of capital): 100 units bought 2023-01-10 for $500, a $1.00/unit return of
+- [x] Reproduced (return of capital): 100 units bought 2023-01-10 for \$500, a \$1.00/unit return of
   capital on 2023-05-01, transferred to another holding account 2023-08-01, sold 2024-06-01 for
-  $900. Entering the ROC **before** the transfer reports cost base $400 / gain $500 (correct — G1
-  reduces the cost base by $100). Entering the same ROC **after** the transfer reports cost base
-  $500 / gain **$400** — a $100 understated capital gain. No refusal, no flag, and the E4
+  \$900. Entering the ROC **before** the transfer reports cost base \$400 / gain \$500 (correct — G1
+  reduces the cost base by \$100). Entering the same ROC **after** the transfer reports cost base
+  \$500 / gain **\$400** — a \$100 understated capital gain. No refusal, no flag, and the E4
   cross-check is empty in both runs. The order of *entry* changes the tax figure
 - [x] Reproduced (split, worse): the same parcel transferred 2023-08-01, then a 2-for-1 split dated
   2023-05-01 entered afterwards. `db_units_sold` re-bases the transfer-out Sell's allocation into
   post-split units, so it now consumes only 50 as-acquired units — the **source parcel reappears as
-  an open holding** (100 current units, cost base $250) beside the untouched destination parcel (100
-  units, $500). The portfolio reports 200 units and $750 of cost base where the taxpayer holds 200
-  units and $500
+  an open holding** (100 current units, cost base \$250) beside the untouched destination parcel (100
+  units, \$500). The portfolio reports 200 units and \$750 of cost base where the taxpayer holds 200
+  units and \$500
 - [x] Reproduced on a scrip-for-scrip exchange too (`domain::rollover` is shared): a ROC on the old
-  listing dated before the exchange, entered after it, leaves the replacement parcel at $500 instead
-  of $400. A demerger has the same shape
+  listing dated before the exchange, entered after it, leaves the replacement parcel at \$500 instead
+  of \$400. A demerger has the same shape
 - [x] The AMIT half of this is **already guarded** — F-17's `UnitsCarriedIntoReplacement` refuses an
   adjustment covering units a rollover carried away, naming the replacement parcels. Corporate
   actions have no equivalent guard, and the split case is about `quantity`, which no guard covers
@@ -3097,18 +3097,18 @@ finding above. `domain::rollover` folds every return-of-capital payment dated **
 operation date into the replacement parcel's carried cost base, while `RocEvent::per_unit_for` tests
 entitlement against the parcel's own **trade date** — which for a replacement parcel *is* the
 operation date. The two windows overlap on exactly one day.)
-- [x] Reproduced: 100 units bought 2023-01-10 for $500, transferred 2023-08-01, with a $1.00/unit
+- [x] Reproduced: 100 units bought 2023-01-10 for \$500, transferred 2023-08-01, with a \$1.00/unit
   return of capital dated 2023-07-31, 2023-08-01 and 2023-08-02 in turn. The day before and the day
-  after both report a $400 cost base (correct — the payment comes off once, from the carried figure
-  and from the replacement parcel respectively). Dated **on the transfer date** it reports **$300**:
-  the carried cost base is $400 *and* the pipeline takes the $100 again
+  after both report a \$400 cost base (correct — the payment comes off once, from the carried figure
+  and from the replacement parcel respectively). Dated **on the transfer date** it reports **\$300**:
+  the carried cost base is \$400 *and* the pipeline takes the \$100 again
 - [x] Consequence: the cost base is understated by the whole payment, so the capital gain on those
   units is **overstated** by it — silently, and on all three of `domain::rollover`'s operations. A
   capital return or special distribution paid on a scheme's implementation date is the ordinary case,
   not an edge one
 - [x] Splits are not affected: the pipeline re-bases a parcel only for splits dated strictly after
   its trade date, and the fold converts the moved quantity for splits up to the operation date, so
-  the boundary is already disjoint (verified at all three dates — 200 units, $500, throughout)
+  the boundary is already disjoint (verified at all three dates — 200 units, \$500, throughout)
 - [x] Fixed: the **operation date belongs to the operation**. `cost_base::Parcel` carries
   `rolled_over_on` (the replacement parcel's own trade date, `None` for an ordinary *or inherited*
   parcel — an inheritance also has a deemed acquisition date but states its cost base rather than
@@ -3213,10 +3213,10 @@ pairs every `parcel_allocations` row whose Sell falls 1..=30 days after a statem
 with that statement. It does not exclude the transfer-out Sell, which carries `transfer_id` and is
 not a disposal — the same filter `realised_gains`, `net_capital_gain`, `wash_sales` and
 `franking_at_risk` all apply.)
-- [x] Reproduced: an ESS statement with a 2024-03-01 taxing point, 100 shares at $20 with a $2,000
+- [x] Reproduced: an ESS statement with a 2024-03-01 taxing point, 100 shares at \$20 with a \$2,000
   deferral discount, vested into holding account 2, then transferred to account 3 on 2024-03-11 —
   the RSU-plan-to-broker move `entities::transfer`'s own module doc gives as the feature's purpose.
-  `GET /reports/health` reports one `ess_30_day_rule` row (`days_after: 10`, the full $2,000
+  `GET /reports/health` reports one `ess_30_day_rule` row (`days_after: 10`, the full \$2,000
   discount) while `GET /portfolio/realised-gains` correctly reports nothing
 - [x] Consequence: the alert says the taxing point moves to the "disposal" date and the capital gain
   is cancelled — advice that, followed, re-measures an assessable discount and amends a return over
@@ -3304,13 +3304,13 @@ only CGT fact is the loss it inherits from the year before has no bucket, so it 
 - [x] Reproduced (the ordinary form): losses in FY2023–FY2025 leaving `capital_loss_carried_forward`
   of `4000` on the FY2025 row, then no activity in FY2026. `POST /reports/tax-report {"tax_year":2026}`
   returns `cgt_summary: null` — a zeroed but otherwise complete FY2026 tax document that says nothing
-  about the $4,000 the return must still carry — and FY2026 is not offered by the year picker at all
+  about the \$4,000 the return must still carry — and FY2026 is not offered by the year picker at all
 - [x] The chain itself is **not** broken: enter activity in FY2027 and its
   `capital_loss_brought_forward` is the correct `4000`. This is a reporting gap in the quiet year,
   not an arithmetic one
 - [x] Why it matters: label 18V (*Net capital losses carried forward to later income years*) is
   reported **every** year until the loss is used, not only in years with a CGT event
-  (`docs/ato/capital-gains-question-18.md`, step 11 / Kathleen Example 6, where the $500 at label V
+  (`docs/ato/capital-gains-question-18.md`, step 11 / Kathleen Example 6, where the \$500 at label V
   is carried forward with no gain to report it against). A year in which the investor simply held
   everything is exactly the year this figure has to come from somewhere
 - [x] **Decided 2026-08-19 (Evan): option (b)** — a row for a quiet year that carries a balance.
@@ -3331,7 +3331,7 @@ only CGT fact is the loss it inherits from the year before has no bucket, so it 
   - **(d)** Documentation only: a Known limitation stating that a year with no CGT event produces no
     net-capital-gain row, and the carry-forward must be read off the last year that has one
 - [x] Whichever is chosen, the "opening loss and nothing else" case has to answer something: today
-  every surface is empty, which reads as "no losses to carry" rather than "$12,345 to carry"
+  every surface is empty, which reads as "no losses to carry" rather than "\$12,345 to carry"
 - [x] Tests: the two reproductions above as regression tests (the opening-loss-only database, and the
   quiet year between two active ones), plus the annual tax report's 18V for a quiet year
 - [x] Docs sync: `docs/API.md`'s [Net capital gain](../docs/API.md#net-capital-gain) year-series wording
@@ -3361,7 +3361,7 @@ requested by `tax_year` directly.
 
 Tests: `api_an_opening_loss_alone_is_reported_in_the_current_year` (the strongest reproduction — the
 JSON row and the CSV export's record, which used to be two header rows and nothing else),
-`api_quiet_years_after_the_last_activity_still_report_the_balance` (the ordinary form: $4,000 left
+`api_quiet_years_after_the_last_activity_still_report_the_balance` (the ordinary form: \$4,000 left
 carried in FY2025, every quiet year after it reporting it), `db_a_quiet_year_with_no_balance_gets_no_row`
 (the other half of the rule), `tax_report::a_quiet_year_still_reports_its_carried_forward_loss` (the
 annual document's `cgt_summary`, over `db_tax_report` and `POST /reports/tax-report`), and
@@ -3375,7 +3375,7 @@ export note, and the `cgt_summary` `null` wording, pinned by `doc_checks::net_ca
 with **no as-at date** — the parcels open *today*, whatever `date` / `sale_date` the request names.)
 - [x] Reproduced: a parcel acquired **2022-01-01**, and
   `POST /portfolio/net-capital-gain/what-if` for a disposal dated **2021-12-31** allocating it
-  explicitly. Accepted `200`, projecting a $10,000 non-discountable gain into FY2021. The identical
+  explicitly. Accepted `200`, projecting a \$10,000 non-discountable gain into FY2021. The identical
   allocation on `PUT /sells/:id` is refused `422` — *"an allocated parcel is dated after the sale
   date"* — so the what-if answers with figures for a sale that can never be recorded
 - [x] Boundary probed: a disposal dated **on** the acquisition date is legitimate on both paths (a
@@ -3384,7 +3384,7 @@ with **no as-at date** — the parcels open *today*, whatever `date` / `sale_dat
 - [x] The discount clock runs backwards with it: every parcel acquired after the disposal date is
   classified `discount_eligible: false`. `POST /portfolio/parcel-optimiser` with `sale_date`
   2021-01-01 returned **all four strategies identical** (`fifo`, `min_gain`, `max_discount`,
-  `harvest_losses` — same parcels, same $7,000), because nothing was discountable and the orderings
+  `harvest_losses` — same parcels, same \$7,000), because nothing was discountable and the orderings
   collapsed. The screen exists to show the choice, and it silently shows none
 - [x] The other half of the same read: a parcel that *was* open at the disposal date but has since
   been sold is **excluded** from the candidates, so a past-dated what-if also under-reports what
@@ -3529,8 +3529,8 @@ report *does* produce content for are missing from it — each reproduced agains
   distribution belongs to — is unreachable.
 - [x] **A CGT event that is not a trade puts no year on the list.** A return of capital above the
   cost base (CGT event G1) dated 15 September 2025 against a parcel bought in FY2023 gives FY2026 a
-  `net_capital_gain` of $200 and a full `cgt_summary`; the year list answers `[2023]`. Likewise a
-  rights sale as a year's only fact: a $25 FY2025 net capital gain, year list `[2022]`. `rights_sales`
+  `net_capital_gain` of \$200 and a full `cgt_summary`; the year list answers `[2023]`. Likewise a
+  rights sale as a year's only fact: a \$25 FY2025 net capital gain, year list `[2022]`. `rights_sales`
   and `corporate_actions` are in neither the union nor anything that stands in for them, and the same
   applies to an AMIT E10 excess. `docs/API.md` describes the endpoint as "every Australian financial
   year with any recorded fact touching a tax figure", which these *are* — so the doc and the code
@@ -3539,7 +3539,7 @@ report *does* produce content for are missing from it — each reproduced agains
   `net_capital_gain::net_years` emit such a year, and `tax_report`'s own
   `a_quiet_year_still_reports_its_carried_forward_loss` pins that the document prints its label 18V
   figure — but the year list still doesn't offer it (FY2025 loss, `years: [2025]`, FY2026 carries
-  $4,000). `docs/API.md` currently resolves this with "request a quiet year by `tax_year` directly",
+  \$4,000). `docs/API.md` currently resolves this with "request a quiet year by `tax_year` directly",
   which is not a thing the UI can do: the picker is a closed `<select>`.
 
 **Fix — Evan chose 2026-08-20: widen the year list** (over a free-typed year input beside the
@@ -3578,17 +3578,17 @@ first AMIT income year — its earlier years' distributions are assessable exact
 trust's. Five readers call it. **Two don't**, and both use a flat `WHERE NOT l.amit` instead:
 
 - [x] `reports::tax_report::push_income_rows` (`src/reports/tax_report.rs:930`). Reproduced: a fund
-  with `amit = true`, `amit_from = 2024-07-01` and one FY2023 trust distribution of $600 franked +
-  $400 unfranked with $257.14 of credits. `GET /portfolio/tax-summary` reports FY2023
+  with `amit = true`, `amit_from = 2024-07-01` and one FY2023 trust distribution of \$600 franked +
+  \$400 unfranked with \$257.14 of credits. `GET /portfolio/tax-summary` reports FY2023
   `dividends_assessable: 1000`, `franking_credits: 257.14`, and the annual tax report's own
   `tax_summary` block echoes `dividends_assessable = 1000` — while its `trust_income` **and**
-  `dividends` tables are both `[]`. The archived document states a $1,000 income total with nothing
+  `dividends` tables are both `[]`. The archived document states a \$1,000 income total with nothing
   behind it, in a report whose stated purpose is "enough detail to hand-check every figure against
   the source contract notes and statements".
 - [x] `reports::franking::db_franked_dividends` (`src/reports/franking.rs:334`). The same rows are
   invisible to the holding-period walk: `GET /reports/franking_at_risk` returns `[]` for that
   dividend, and its credits never join `attached_credits_by_year`, so they don't count toward the
-  A$5,000 small-shareholder threshold either — meaning in a year near the threshold the *other*
+  A\$5,000 small-shareholder threshold either — meaning in a year near the threshold the *other*
   dividends can be wrongly exempted from the at-risk test as well.
 
 **Fix.** Both call sites read the listing's `amit`/`amit_from` and filter through
@@ -3756,7 +3756,7 @@ distinctly):
 
 - `PUT /exchange_holidays/XASX/2025-06-05` → `204`. Every snapshot stays `stale: false`, and
   `GET /report_snapshots/series` keeps reporting `2025-06-05 = A$5,073.08`.
-- A manual `POST /report_snapshots/regenerate_all` over the same range answers **A$4,443.08** — the
+- A manual `POST /report_snapshots/regenerate_all` over the same range answers **A\$4,443.08** — the
   prior close, correctly — a 12.4% move on a figure nothing had flagged.
 - The reverse direction is worse in kind: deleting a seeded holiday makes that date a trading day, so
   the stored snapshot's valuation day no longer exists as a priced day at all. Deleting
@@ -3790,9 +3790,9 @@ at all, exactly the noise 0030 refused.
 Pinned by `entities::exchange_holiday::tests::a_holiday_write_stales_snapshots_from_its_date` (the
 three arms plus the name-only non-event, over snapshots either side of the holiday) and, end to end,
 `reports::snapshot::tests::db_an_exchange_holiday_write_stales_the_snapshots_it_re_values` — the
-reproduction above in miniature: two priced days, a generated snapshot at A$5,073.08, `PUT
+reproduction above in miniature: two priced days, a generated snapshot at A\$5,073.08, `PUT
 /exchange_holidays/XASX/2026-06-05` through the API, the snapshot now flagged stale, regeneration
-answering A$4,443.08 (the prior close), and then the reverse — `DELETE` of a seeded holiday stales
+answering A\$4,443.08 (the prior close), and then the reverse — `DELETE` of a seeded holiday stales
 the snapshot whose valuation day it was, whose regeneration is then blocked with "no stored price for
 2026-06-08". Both fail without the migration.
 
@@ -3881,14 +3881,14 @@ multiplied by are in the *historical* one, and the product is out by the split r
 
 Reproduced end to end against the running system (throwaway DB, real provider):
 
-- Buy 100 NVDA on 2024-06-04 at US$1,150; `ShareSplit` 10-for-1 on 2024-06-10 (the real one);
+- Buy 100 NVDA on 2024-06-04 at US\$1,150; `ShareSplit` 10-for-1 on 2024-06-10 (the real one);
   `POST /closing_prices/backfill` over 2024-06-05..2024-06-12; snapshots generated for each day.
-- Yahoo returns **120.888** for 2024-06-07. NVDA's actual close that day was **US$1,208.88**.
+- Yahoo returns **120.888** for 2024-06-07. NVDA's actual close that day was **US\$1,208.88**.
 - `GET /report_snapshots/series` then reads:
   `2024-06-07 = A$18,132.29`, `2024-06-10 = A$182,675.87` — a **tenfold step at the split date**,
   which is precisely what Q-14 says must not happen.
-- The pre-split figure is the wrong one: the holding was worth 100 × US$1,208.88 ÷ 0.6667 =
-  **A$181,322.93** on 2024-06-07, and the stored cost base for the same date is A$172,491.38 — so
+- The pre-split figure is the wrong one: the holding was worth 100 × US\$1,208.88 ÷ 0.6667 =
+  **A\$181,322.93** on 2024-06-07, and the stored cost base for the same date is A\$172,491.38 — so
   the `unrealised_gains` snapshot reports an **89.5% unrealised loss on a holding that was up**.
 
 - [x] Nothing about this is documented. `docs/API.md`'s [Closing prices](../docs/API.md#closing-prices)
@@ -4153,7 +4153,7 @@ note describes exactly this and had not been connected to a cause:
 - LAC was held 2021-03-25 → 2023-10-03 (the demerger's closing Sell), 1,049 units.
 - Its stored ok price history starts **2023-10-02** — one day before the demerger — at **10.13**,
   `origin: fetched`, `fetched_at: 2026-07-26`, i.e. whatever Yahoo serves today. The recorded ~2.46×
-  understatement puts the contemporaneous close near US$24.9, which is the pre-demerger level.
+  understatement puts the contemporaneous close near US\$24.9, which is the pre-demerger level.
 - The rest of the pre-demerger period is **187 errored rows** (2023-01-03..2023-09-29) and nothing at
   all before 2023-01-03, so those dates' snapshots are currently *blocked* rather than wrong. The
   exposure is latent: **the moment that history is backfilled, every day of it arrives adjusted**,
@@ -4383,12 +4383,12 @@ the marker, `/closing_prices/fetch` refuses one `422`, and `/closing_prices/back
 and unpriced days there, so both lists now report only holes **inside** the span the provider serves.
 
 **Verified on an upgraded scratch copy of the deployed database.** Migration 0037 applied clean.
-Before: the stored 2023-09-29 `portfolio_overview` valued LAC's 1,049 units at A$11,123.21 inside a
-A$495,429.52 total. `PUT /listings/7` with `unpriced_before: 2023-10-02` staled 1,128 snapshot dates
+Before: the stored 2023-09-29 `portfolio_overview` valued LAC's 1,049 units at A\$11,123.21 inside a
+A\$495,429.52 total. `PUT /listings/7` with `unpriced_before: 2023-10-02` staled 1,128 snapshot dates
 (the prefix) and left 1,047 alone; regenerating 2023-09-29 gave `holding_excluded: true`,
 `excluded_holdings: [{listing_id: 7, ticker: "LAC", reason: "no price is obtainable for LAC before
-2023-10-02 …"}]`, the LAC row unvalued carrying that reason, and a total of **A$484,306.31** — smaller
-by exactly the A$11,123.21 that was another company's price. 2023-10-02 onward still values LAC
+2023-10-02 …"}]`, the LAC row unvalued carrying that reason, and a total of **A\$484,306.31** — smaller
+by exactly the A\$11,123.21 that was another company's price. 2023-10-02 onward still values LAC
 normally, so the series steps once, where its own history begins. `/closing_prices/fetch` and
 `/backfill` over the span answered 422 naming the marker, and `GET /reports/health` no longer lists
 LAC at all.
@@ -4596,10 +4596,10 @@ per-unit reduction into the replacement Buy's cost base; regenerating the statem
 then writes the row against the replacement parcel too, applying the reduction twice.
 `UnitsCarriedIntoReplacement` guards only the opposite ordering, so no write-time check refuses the
 state. Sibling of the next section — two faces of the same missing date/provenance bound.)
-- [x] Reproduce: parcel of 1000 units / $10,000 cost; FY2025 AMMA statement ($1/unit, year end
+- [x] Reproduce: parcel of 1000 units / \$10,000 cost; FY2025 AMMA statement (\$1/unit, year end
   2025-06-30) entered and adjustments generated; transfer dated 2025-05-01 → the replacement Buy
-  carries $9,000 while `open_parcels::load` on the same date says $10,000; regenerating the
-  statement's adjustments reduces the replacement to $8,000 — the reduction applied twice
+  carries \$9,000 while `open_parcels::load` on the same date says \$10,000; regenerating the
+  statement's adjustments reduces the replacement to \$8,000 — the reduction applied twice
 - [x] Fix: bound the AMIT events `carried_cost_base` folds in by the operation's date the way ROC
   events already are, or refuse the back-dated operation the way the opposite ordering already is —
   decide together with the sibling section
@@ -4682,7 +4682,7 @@ after month end, so the gap always exists for current-month events. This is the 
 failure the ESS-vest path refuses with a 422. `fx_coverage` flags the row as `missing_rate`, but
 the tax path itself stays silent. First of the fx-default family named in the preamble.)
 - [x] Reproduce: a ScripForScrip action with `scrip_cash_per_unit` on a USD listing, exchanged
-  before the month's rate is imported → realised gains price US$100,000 of cash as A$100,000
+  before the month's rate is imported → realised gains price US\$100,000 of cash as A\$100,000
 - [x] Fix (family-wide shape): refuse the operation 422 when the listing is non-AUD and the month's
   rate is missing (the ess_vest treatment), or take an explicit `fx_rate` in a body — same decision
   for all four family sections
@@ -4700,7 +4700,7 @@ financial outcome depends on ephemeral request data with no provenance. The esca
 month's RBA rates — the action itself is recordable immediately, only the exchange waits —
 documented in API.md's scrip-exchange section. Tests:
 `api_a_foreign_cash_component_with_no_month_rate_is_refused_naming_the_month`,
-`a_foreign_cash_component_converts_at_the_imported_month_rate` (US$1,000 → A$2,000 at 0.5),
+`a_foreign_cash_component_converts_at_the_imported_month_rate` (US\$1,000 → A\$2,000 at 0.5),
 `an_all_scrip_exchange_of_a_foreign_listing_needs_no_rate`.
 
 ## A foreign-currency rights sale defaults fx to parity and no report ever flags it (code review 2026-08-25)
@@ -4765,12 +4765,12 @@ before fixing (the U lesson). Fx-default family.)
 **Resolution (2026-08-25, `1341068`): the plausible verdict re-derived to confirmed before
 fixing.** A temporary derivation test, run before any fix and then removed, proved the whole chain:
 an exercise of a USD issue with fx omitted in a missing-rate month stored `fx_rate: 1` and
-`reports::open_parcels` answered the US$450 parcel's `remaining_cost_base` as A$450 —
+`reports::open_parcels` answered the US\$450 parcel's `remaining_cost_base` as A\$450 —
 `FxOverride::Fallback(1)` reachable exactly as claimed. The fix mirrors the family rule (resolve or
 `ExerciseError::MissingFxRate` → 422); a nil-cost exercise (`exercise_price × units + rights_cost
 == 0`) binds 1 harmlessly. Tests:
 `api_a_foreign_exercise_with_fx_omitted_in_a_missing_month_is_refused_naming_the_month`,
-`a_foreign_exercise_resolves_the_imported_month_rate_when_fx_omitted` (open parcels cost A$900 at
+`a_foreign_exercise_resolves_the_imported_month_rate_when_fx_omitted` (open parcels cost A\$900 at
 0.5), `a_stated_fx_rate_is_stored_even_when_the_month_is_missing`,
 `a_nil_cost_foreign_exercise_needs_no_rate`. docs/API.md: the exercise section's fx_rate semantics
 and 422 list; and `src/web/config.js`'s Exercise and Sell-rights forms no longer pre-fill fx `1` —
@@ -4841,9 +4841,9 @@ all AMIT rows before any ROC rows — kind order, dates ignored, then merely sor
 while `net_capital_gain`'s E10/G1 walk (net_capital_gain.rs:529) applies the same events in date
 order. The two halves of one archived Annual Tax Report can disagree about which event exhausted
 the cost base and by how much.)
-- [x] Reproduce: base $100, ROC $60 (2023-09), AMIT $60 (year end 2024-06-30) → the printed
+- [x] Reproduce: base \$100, ROC \$60 (2023-09), AMIT \$60 (year end 2024-06-30) → the printed
   per-parcel worksheet flags the 2023 ROC row as capped (AMIT fully absorbed) while the same
-  report's CGT summary shows `cgt_event_e10_gain` = $20 attributed to the AMIT event —
+  report's CGT summary shows `cgt_event_e10_gain` = \$20 attributed to the AMIT event —
   contradictory attribution inside one archived PDF
 - [x] Fix: `adjustment_detail` applies events in the same date order as the E10/G1 walk — one
   ordering rule, not two
@@ -4863,7 +4863,7 @@ its income year (s 104-107B, docs/ato/amit-cost-base-adjustments.md). The reprod
 before the fix ("the earlier payment is not the capped row"). Tests:
 `capped_flags_apply_events_in_the_walks_date_order_across_kinds` (domain) and
 `api_worksheet_capped_flags_and_cgt_summary_attribute_the_excess_to_the_same_event` (tax_report —
-FY2024 `cgt_event_e10_gain` $20/G1 0 and the FY2025 worksheet's `capped` on the AMIT row, in one
+FY2024 `cgt_event_e10_gain` \$20/G1 0 and the FY2025 worksheet's `capped` on the AMIT row, in one
 API-driven scenario); the existing itemised-rows-sum consistency tests pin that totals are
 order-independent. docs/API.md's disposals section documents the printed order.
 
@@ -5017,10 +5017,10 @@ first, per the U lesson.)
 a return of capital with record date 25 Sep and payment 1 Nov, and the whole parcel transferred to a
 second holding account on 3 Oct (inside the window) produced **both**:
 
-1. a phantom **$50 C2 gain** on the transfer's closing Sell, as this section predicted; and
+1. a phantom **\$50 C2 gain** on the transfer's closing Sell, as this section predicted; and
 2. **no G1 reduction at all** on the replacement parcel — not the double count the section guessed
-   at. The cost base stayed $1000 instead of $950, so the error is wrong in two years: $50 assessable
-   now that never arose, and $50 of cost base that will understate a later disposal's gain.
+   at. The cost base stayed \$1000 instead of \$950, so the error is wrong in two years: \$50 assessable
+   now that never arose, and \$50 of cost base that will understate a later disposal's gain.
 
 Both are triggered by the **record date**: with none recorded the same scenario was already correct
 (entitlement falls back to the payment date, and the C2 branch needs a `record_date` to fire at all),
@@ -5048,7 +5048,7 @@ demerger does too, deliberately narrowly: see the follow-up section in TODO.md f
 which has a transfer's continuity but cannot be told from its spun-off sibling by `ParcelRow` alone.
 
 Tests: `net_capital_gain::db_a_transfer_inside_the_roc_window_is_not_a_c2_disposal` (the
-reproduction, now asserting the $50 G1 reduction lands on the replacement and no C2 arises),
+reproduction, now asserting the \$50 G1 reduction lands on the replacement and no C2 arises),
 `db_c2_reaches_the_sold_units_of_a_parcel_and_not_the_transferred_ones` (30 units really sold, 40
 transferred and 30 still held out of one parcel — C2 on the 30 only, G1 across the other 70), and
 `corporate_action::per_unit_reduction_dates_a_replacement_parcels_entitlement_from_the_register`
@@ -5075,9 +5075,9 @@ did before `RolloverOrigin`. A scrip-for-scrip exchange is correctly ex-entitlem
   (`per_unit_reduction_dates_a_replacement_parcels_entitlement_from_the_register`)
 
 **Confirmed and fixed.** The reproduction — `entities::demerger::tests`'s
-`a_head_parcel_keeps_its_entitlement_to_a_return_of_capital_across_the_demerger` — reported a $0
-return-of-capital reduction against a head replacement parcel entitled to $50, so the head parcel's
-cost base stayed $50 too high and would understate a later disposal's gain — the same shape as the
+`a_head_parcel_keeps_its_entitlement_to_a_return_of_capital_across_the_demerger` — reported a \$0
+return-of-capital reduction against a head replacement parcel entitled to \$50, so the head parcel's
+cost base stayed \$50 too high and would understate a later disposal's gain — the same shape as the
 transfer defect, one operation over.
 
 `ParcelRow` gained `demerger_head_listing_id`, the listing its `demerger_action_id`'s action was
@@ -5110,9 +5110,9 @@ register-continuous replacement parcel — a transfer, or a demerger's head parc
 is exact only while the *whole* chain stayed on one register. Buy on listing 1 in 2019, scrip-exchange
 into listing 2 in 2023, transfer holding accounts in 2025: the replacement carries a 2019 deemed date,
 so a return of capital on listing 2 with a record date in 2022 and payment in 2026 is treated as
-entitled — a $100 cost-base reduction on 2,000 units that the exchange itself had correctly refused
-before the transfer. The transfer reinstates it. Confirmed against `db_open_parcels`: $0 after the
-exchange, $100.00 after the transfer. The exact answer is the *source* parcel's `registered_from`,
+entitled — a \$100 cost-base reduction on 2,000 units that the exchange itself had correctly refused
+before the transfer. The transfer reinstates it. Confirmed against `db_open_parcels`: \$0 after the
+exchange, \$100.00 after the transfer. The exact answer is the *source* parcel's `registered_from`,
 which is a walk back up the rollover chain — `domain::rollover::source_ancestors` already walks one,
 bounded by `MAX_ROLLOVER_DEPTH` — and so is not something a single row can answer, which is why it is
 recorded rather than folded into the head-parcel fix. Documented on `ParcelRow::rollover`.)
@@ -5124,13 +5124,13 @@ recorded rather than folded into the head-parcel fix. Documented on `ParcelRow::
   the transfer's place)
 
 **Confirmed and fixed.** Two reproductions in `domain::rollover::tests`, sharing one setup
-(`exchanged_across_a_return_of_capital_record_date`: a 2,000-unit $2,000 parcel of listing 1, a
-$0.05/unit return of capital on listing 2 with record date 2022-06-25 and payment 2026-08-01, and a
+(`exchanged_across_a_return_of_capital_record_date`: a 2,000-unit \$2,000 parcel of listing 1, a
+\$0.05/unit return of capital on listing 2 with record date 2022-06-25 and payment 2026-08-01, and a
 2023-03-01 scrip exchange onto listing 2 between them). After the exchange the replacement parcel is
-correctly ex-entitlement — $0 reduction, $2,000 cost base. A 2025 transfer of it between the
-taxpayer's own accounts turned that into a $100.00 reduction and a $1,900 cost base
+correctly ex-entitlement — \$0 reduction, \$2,000 cost base. A 2025 transfer of it between the
+taxpayer's own accounts turned that into a \$100.00 reduction and a \$1,900 cost base
 (`a_transfer_does_not_reinstate_the_entitlement_an_earlier_exchange_denied`), and a 2025 demerger of
-listing 2 in the transfer's place did the same to its head parcel — $100.00 off $1,600
+listing 2 in the transfer's place did the same to its head parcel — \$100.00 off \$1,600
 (`a_demergers_head_parcel_does_not_reinstate_it_either`). Both now assert the reduction stays nil.
 
 **Where the walk belongs: a column in the SELECT list**, beside `demerger_head_listing_id` — the
@@ -5287,7 +5287,7 @@ decomposition exists that moves no invariant.
   supporting pieces: a `Summaries` type alias for the shared map, and `year_entry`, which replaces
   the five copies of `map.entry(ty).or_insert_with(|| zero_summary(ty))`.
 
-  `accumulate_ess` deliberately keeps *two* loops: the per-year $1,000 taxed-upfront reduction reads
+  `accumulate_ess` deliberately keeps *two* loops: the per-year \$1,000 taxed-upfront reduction reads
   `ess_eligible_by_year`, which the row loop builds and which now never escapes the function — the
   encapsulation the split bought. Every comment moved with its code, the ones describing a whole
   pass becoming that function's doc comment. Proof is the unchanged suite: 91 tax-summary tests and

@@ -57,7 +57,7 @@ three follow-up sections recorded from observations made while fixing, all three
 the phantom C2 gain and turned up a second defect beside it — the lost G1 reduction, both fixed
 together — the demerger head-parcel question it left in its place, which reproduced likewise, and the
 rollover-chain question *that* left, where a transfer or demerger after an earlier scrip exchange
-reinstated the entitlement the exchange had denied — reproduced at $100 on 2,000 units and closed by
+reinstated the entitlement the exchange had denied — reproduced at \$100 on 2,000 units and closed by
 a recursive register walk in `ParcelRow`'s SELECT list.
 
 ## SCENARIOS A–AA all driven, and Section S. Settlement, holidays, and dates
@@ -137,7 +137,7 @@ is later moved (V-07), and a back-dated fact re-chains every later year's carrie
 (V-10), whose unmarked restatement is the documented A-15 limitation rather than a new finding.
 
 The five findings were: a misspelt request-body field dropped so the record took its default — an
-AMMA statement losing A$7,142 under a `204` — now `deny_unknown_fields` on every HTTP body with a
+AMMA statement losing A\$7,142 under a `204` — now `deny_unknown_fields` on every HTTP body with a
 test that walks the extractors to keep it true (`5e6246b`, archived in
 [`DONE/infra.md`](infra.md)); a DRP reinvestment entered behind a later one reading its residual
 forward in time, now refused as undo already was (`b08f891`) and a reinvestment into an
@@ -259,7 +259,7 @@ UI-shaped, and every chain's arithmetic re-derived by hand rather than read for 
 chains came back correct: the takeover chain's cost base and discount clock across three consecutive
 rollovers (Z-02), four years of USD RSU vests through a transfer, a sell-to-cover and a currency move
 (Z-03), the estate's four asset kinds each taking the right discount clock (Z-04), four currencies
-over three accounts with the Division 115 FITO apportionment and the A$1,000 cap (Z-06), the wash sale
+over three accounts with the Division 115 FITO apportionment and the A\$1,000 cap (Z-06), the wash sale
 flagged across both the FY and the holding-account boundary (Z-07), the two buy-backs either side of
 the 25 October 2022 law change (Z-09), the suspended fund's carried-forward prices and eventual G3
 (Z-10), and one corrected AMMA propagating coherently through nine reports and stopping there (Z-12).

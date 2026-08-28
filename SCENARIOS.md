@@ -309,7 +309,7 @@ reader answers the question for itself. What each group turned on:
   other-method gains are non-discountable; and `capital_losses_applied` stays
   informational, because those losses were applied at the trust's own level and
   cannot flow to a member (F-11). Foreign tax credits join the FITO line and
-  cap at the A$1,000 de-minimis with the excess on its own line, the documented
+  cap at the A\$1,000 de-minimis with the excess on its own line, the documented
   limitation behaving as documented (F-12). Both doors into entering the
   attribution as ordinary income are shut with 422s that name the AMMA
   statement instead (F-21, F-22), and the cash-only row that remains is
@@ -362,7 +362,7 @@ cross-checks what was keyed. What each group turned on:
   keeps running (G-12).
 - **What the credits are measured against (G-06, G-07, G-11, G-15, G-22).**
   The small-shareholder threshold is the year's *attached* credits, income
-  plus AMMA, and the boundary is exact: $4,999 exempts, $5,000 does not
+  plus AMMA, and the boundary is exact: \$4,999 exempts, \$5,000 does not
   (G-06, G-07). A partial sale between the ex-date and the payment date denies
   the disqualified units' proportional share, 6,000 × 400/1,000 (G-11), and
   the what-if run before that sale predicts the same figure the recorded sale
@@ -373,7 +373,7 @@ cross-checks what was keyed. What each group turned on:
   new year (G-18); a trust distribution is assessed on present entitlement, so
   a 30 June entitlement paid 15 July belongs to the year just ended (G-19),
   and `entitlement_date` on a non-trust row is refused (G-21). A foreign
-  dividend's withholding joins the FITO line under the A$1,000 de-minimis
+  dividend's withholding joins the FITO line under the A\$1,000 de-minimis
   (G-16), and a foreign-currency row whose rate month was never imported fails
   the whole report loudly with a `500` rather than converting at a guess —
   exactly as `docs/API.md`'s FX precedence rule states (G-17). The per-share
@@ -398,7 +398,7 @@ doubt: interest and expenses are flat per-year totals with no parcels, no
 clocks and no cost base, and the tax summary already had the lines right.
 Every scenario about where a figure lands came back correct — the Australian
 gross at 10L with its TFN amount on the combined withholding line (H-01), a
-foreign-source row routed to 20E with its withholding under the A$1,000 FITO
+foreign-source row routed to 20E with its withholding under the A\$1,000 FITO
 de-minimis (H-02), the classification guard refusing foreign tax on an
 Australian row and a TFN amount on a foreign one, in both directions and
 naming the field to correct (H-03), a non-AUD amount converted at the ATO rate
@@ -420,7 +420,7 @@ H-09), and the apportionment provenance beside it (`gross_amount`,
 income row's own `amount_per_security` pair is (H-06). Two of the findings are
 about the rule the model can't see: interest is assessed on the date it is
 *credited* and the row carries one date labelled "Date paid" (H-05); borrowing
-expenses over $100 and prepayments outside the 12-month rule are deducted over
+expenses over \$100 and prepayments outside the 12-month rule are deducted over
 several years and the row carries one financial year (H-08). One is the
 familiar duplicate-detection gap, now for interest and expenses (standing
 probe 6). The last is a print-surface one: a deduction attributed to a listing
@@ -499,7 +499,7 @@ An ESS interest is two facts joined at one date: the assessable **discount** in
 the year of the taxing point, and a CGT parcel **re-acquired** that day at
 market value. Both halves are right where they were probed. The discount is
 assessed in the taxing point's financial year and reported at Item 12 by label,
-net of one $1,000 taxed-upfront reduction per year across every statement, with
+net of one \$1,000 taxed-upfront reduction per year across every statement, with
 the TFN amount joining the withholding line and the foreign-source memo carried
 without being added on top (J-01, J-03, J-09, J-14). The parcel takes the
 market value as its whole cost base with no brokerage and no deemed acquisition
@@ -516,7 +516,7 @@ statement-AUD overrides on a foreign-currency grant are reported verbatim and
 drive the reduction from the AUD figure (J-08). The 30-day rule's own worked
 example is now reproduced in `ato_examples.rs` (J-04): entering the *amended*
 statement, taxing point moved to the disposal and the discount re-measured at
-the proceeds, produces the ATO's $1,518 in FY2020 and no capital gain at all —
+the proceeds, produces the ATO's \$1,518 in FY2020 and no capital gain at all —
 `docs/ato/OVERVIEW.md` claimed that test existed before it did.
 
 The eight findings divide into three groups. The first is what a statement row
@@ -536,8 +536,8 @@ The third is what nothing says: no surface mentions the 30-day rule, so the
 natural entry of a within-30-days sale books the discount in the wrong year and
 invents a capital gain (J-04); a duplicated statement — the shape an *amended*
 statement produces — is caught by no health check, though every other
-income-bearing table has one (J-11); the $1,000 reduction is applied
-unconditionally with no way to record failing the ≤A$180,000 income test and no
+income-bearing table has one (J-11); the \$1,000 reduction is applied
+unconditionally with no way to record failing the ≤A\$180,000 income test and no
 statement of that condition on the printed document (J-02); and the documented
 workaround for a dividend equivalent reports remuneration as an unfranked
 dividend at 11S (J-10).
@@ -550,7 +550,7 @@ dividend at 11S (J-10).
 | An ESS statement has no write-time checks on what it may say | J-01, J-09, J-11 | fixed 2026-08-18 (`4b77972`) — archived in [`DONE/reviews.md`](DONE/reviews.md) |
 | Nothing on the product side mentions the ESS 30-day rule | J-04 | fixed 2026-08-18 (`af4d0bc`) — advisory alert + docs; archived in [`DONE/reviews.md`](DONE/reviews.md) |
 | A duplicated ESS statement is caught by nothing | J-11 | fixed 2026-08-18 (`f248321`) — archived in [`DONE/reviews.md`](DONE/reviews.md) |
-| The $1,000 taxed-upfront reduction is always applied, with no way to record failing the income test | J-02 | fixed 2026-08-18 (`3d858f8`) — per-year flag + printed footnote; archived in [`DONE/reviews.md`](DONE/reviews.md) |
+| The \$1,000 taxed-upfront reduction is always applied, with no way to record failing the income test | J-02 | fixed 2026-08-18 (`3d858f8`) — per-year flag + printed footnote; archived in [`DONE/reviews.md`](DONE/reviews.md) |
 | The documented dividend-equivalent workaround reports remuneration as a dividend | J-10 | fixed 2026-08-18 (`1d76d3f`) — `income_type` enum; archived in [`DONE/reviews.md`](DONE/reviews.md) |
 
 ### Section K findings
@@ -598,7 +598,7 @@ month in question is the **deceased's** acquisition month, routinely decades
 before anything the RBA import covers, so the missing-rate case is the normal
 one; separately, LPR expenditure incurred after the death is folded into the
 same single-rate conversion and translates at that same long-past month
-(A$1,500 where per-element translation gives A$3,000). And what nothing says: a
+(A\$1,500 where per-element translation gives A\$3,000). And what nothing says: a
 duplicated inheritance is caught by no health check though every other
 statement-shaped table now has one, and the `cost_base` figure — the one number
 the whole parcel rests on — has no hint, no documentation of QC 66053's
@@ -646,9 +646,9 @@ the documented workaround reports them at **11S** with a franking status
 attached — J-10 exactly, one income type later. What the documentation says:
 "chain splits/forks, wrapping … are not modelled" understates the system three
 times over, because the ordinary entry path already reproduces the ATO's own
-worked figures for an initial-allocation airdrop (Josh: nil cost base, $4,000
-gain, $2,000 after the discount), for a chain split (Alex; and Ming's abandoned
-original as a `WorthlessShares` C2 recognise, an $8,300 loss to the dollar) and
+worked figures for an initial-allocation airdrop (Josh: nil cost base, \$4,000
+gain, \$2,000 after the discount), for a chain split (Alex; and Ming's abandoned
+original as a `WorthlessShares` C2 recognise, an \$8,300 loss to the dollar) and
 for wrapping (which *is* a swap, so calling it unmodelled invites the reading
 that no CGT event arises) — and none of those ATO pages is mirrored in
 `docs/ato/` at all. What nothing says: a trading fee billed in crypto is
@@ -690,7 +690,7 @@ March-less rate month rests on the trade's own `fx_rate`, never on February's
 published rate (M-07). Three currencies in one year net to one AUD figure
 (M-15); a non-AUD parcel's AMIT reduction converts at the acquisition month
 exactly as documented (M-10); the FITO de-minimis caps a year's offset at
-A$1,000 and surfaces the excess (M-11); and the period-performance report
+A\$1,000 and surfaces the excess (M-11); and the period-performance report
 attributes a held-through holding's whole movement to FX, naming the two rates,
 while a holding opened and closed inside the window shows zero FX — the
 documented approximation, with the total still exact (M-16). Three new
@@ -699,8 +699,8 @@ regression tests cover the three of those that had none.
 Eight findings. **What the printed document says**: the annual tax report
 prints a disposal's buy-side rate as the rate actually applied — a spot
 override included — and its sell-side rate as the ATO monthly rate regardless,
-so a Sell carrying a spot override prints proceeds of A$40,000 beside a rate
-that computes A$29,411, and a Sell resting on its own fallback prints no rate
+so a Sell carrying a spot override prints proceeds of A\$40,000 beside a rate
+that computes A\$29,411, and a Sell resting on its own fallback prints no rate
 at all beside a figure derived from one. **What a failure says**: a missing ATO
 rate reaches the client as a bare `500` with an empty body, where snapshot
 generation answers the same gap with a `422` naming the currency and month —
@@ -711,7 +711,7 @@ per-trade fallback is unlisted. **What nothing refuses**: a listing's
 `currency` is freely editable once it has trades, income and prices — where
 `ticker` and `exchange_mic` need the rename path — and changing it silently
 re-denominates every stored closing price (the same stored 200 valued at
-A$298.51 as USD and A$333.33 as EUR) without marking one snapshot stale; and a
+A\$298.51 as USD and A\$333.33 as EUR) without marking one snapshot stale; and a
 trade may be recorded in a currency other than its listing's, the rule ESS
 statements, inheritances, return-of-capital actions and DRP reinvestments all
 now enforce for the same reason. **What cannot be corrected**: a stored RBA
@@ -768,8 +768,8 @@ Eleven of the seventeen came back correct outright, and the netting arithmetic w
 six too — each of those surfaced one of the three findings below, all of them about what a surface
 *says* or what an input is allowed to be, none about a figure the netting walk computes. The correct
 ones include the scenarios that matter most: `O-01` and `O-13` (losses applied to non-discountable
-gains first and *before* the discount — the ATO-optimal order that turns a naive $7,500 net capital
-gain into $5,000), `O-02` (current-year plus brought-forward losses in one year), `O-05` (an
+gains first and *before* the discount — the ATO-optimal order that turns a naive \$7,500 net capital
+gain into \$5,000), `O-02` (current-year plus brought-forward losses in one year), `O-05` (an
 AMMA-only year, its discount gains grossed up ×2 before the loss and halved after), `O-06` (a G1
 excess as a non-discountable gain beside a discountable parcel gain and a loss), `O-07` (an E10
 excess, discountable on the holding period as at the statement's year end — probed either side of
@@ -798,7 +798,7 @@ naming its scenario ids:
 Seven of the twelve came back correct outright, and the three that carry the most arithmetic were
 among them. `P-01`/`P-07` built a year holding franked + unfranked + CFI + LIC + TFN dividends, a
 trust distribution, a foreign company's dividend in USD, a full AMMA statement, Australian and
-foreign interest, an ESS statement with its $1,000 taxed-upfront reduction, and an expense — and
+foreign interest, an ESS statement with its \$1,000 taxed-upfront reduction, and an expense — and
 every line reconciled across the three surfaces the scenario names: the tax summary's totals, the
 annual tax report's per-record income tables, and the CSV export, field for field including the
 grossed-up and apportioned figures. `P-03` put income on 30 June and 1 July and each landed in its
@@ -807,8 +807,8 @@ asked for its AMMA statement, while a year it was not held stayed silent. `P-06`
 off-market buy-back and a rights sale through one year: the buy-back's capital proceeds came out as
 market value less the dividend with the dividend on its own income row, the rights sale was its own
 disposal at a nil cost base, and the demerger's closing Sell was correctly *not* a disposal. `P-09`
-back-dated a return of capital after generating the document and the printed gain moved from $500 to
-$600 with the reduction itemised beneath the cost base. `P-10`'s 300-row disposal schedule returned
+back-dated a return of capital after generating the document and the printed gain moved from \$500 to
+\$600 with the reduction itemised beneath the cost base. `P-10`'s 300-row disposal schedule returned
 all 300 rows, and the print renderer has no pager to truncate them. `P-11` resolved each ticker as at
 its own taxable event's date across a rename.
 
@@ -872,8 +872,8 @@ All ten scenarios behaved as designed on their own terms — the three rename sh
 collision rolling back whole on both unique indexes, the newest-only undo scoped to the listing in
 the path, the `PUT` refusal naming `/rename` while a name-only `PUT` still passes, a straddling
 backfill split at the effective date (`FB` before 2022-06-09, `META` from it) with the documented
-`symbol` override recovering the retired span, a demerger of a renamed listing splitting A$2,000
-into A$1,400 head + A$600 demerged with the chain intact, `price_symbol` applying to the current
+`symbol` override recovering the retired span, a demerger of a renamed listing splitting A\$2,000
+into A\$1,400 head + A\$600 demerged with the chain intact, `price_symbol` applying to the current
 identity span only, the live-exchange settlement limitation reproduced to the day (2024-04-03
 recomputed to 2024-04-02 on a re-save after the exchange moved), and the timeless ticker uniqueness
 holding. Row history recorded every leg.
@@ -1077,7 +1077,7 @@ The other three are *silence*, and in each the project already held the rule in 
 `#[serde(deny_unknown_fields)]` was already on the two bodies that are not HTTP — `infra/config.rs`
 and `scheduler::JobParams` — with the reasoning written out beside it, and T-10 had already made a
 misspelt **query** parameter a 422 naming it; meanwhile a misspelt **body** field was dropped and the
-record took its default, so an AMMA statement lost A$7,142 of franked distribution and credits under
+record took its default, so an AMMA statement lost A\$7,142 of franked distribution and credits under
 a `204` (V-a). Every user-entered fact table had a `duplicate_*` health check except `trades`, the
 row a bulk import is likeliest to key twice — two identical Buys carrying the same broker contract
 note reference were both accepted in silence while two identical income rows were flagged at once
@@ -1337,7 +1337,7 @@ listing per-parcel quantities in one unit basis under a total in another (Y-c, `
 Summary money columns missing from `COLUMN_KINDS` so the screen printed `1234567.8912` where its own
 CSV printed `1234567.89` (Y-d, `c3e288a`), the `#/e/<custom-slug>` routes rendering a raw JavaScript
 TypeError (Y-f, `464f83d`), and — the most serious — a **no-op edit** of an income row silently
-writing an `entitlement_date` that then stopped tracking the pay date, leaving A$9,000 in the wrong
+writing an `entitlement_date` that then stopped tracking the pay date, leaving A\$9,000 in the wrong
 financial year (Y-e, `673d194`). The seventh was found while fixing the fourth: the health banner
 writes money into sentences, which `COLUMN_KINDS` does not govern (Y-g, `a5d24d4`).
 
@@ -1359,8 +1359,8 @@ browser (`scripts/ui-drive.js`) where the scenario is UI-shaped. Each chain's ar
 re-derived by hand and compared against the report rather than read for plausibility.
 
 **Six chains came back correct, and the correctness is structural rather than lucky.** The takeover
-chain holds end to end: a partial-rollover scrip-for-scrip apportioned 10% of a A$10,009.95 cost base
-to the cash side by market value, the demerger split the remaining A$9,008.955 exactly 70/30 with no
+chain holds end to end: a partial-rollover scrip-for-scrip apportioned 10% of a A\$10,009.95 cost base
+to the cash side by market value, the demerger split the remaining A\$9,008.955 exactly 70/30 with no
 remainder, a 1-for-10 consolidation left the cost base untouched, and the original 2018 acquisition
 date survived all three rollovers so the 2025 sale was still discountable (Z-02). Sixteen quarterly
 USD RSU vests, a mid-stream transfer to a personal broker, a sell-to-cover 12 days after a vest and a
@@ -1371,7 +1371,7 @@ asset kinds each took the right clock: the pre-CGT parcel under `MarketValueAtDe
 discountable when sold two months after death, while the post-CGT parcel ran from the deceased's 2010
 acquisition, and the crypto's wallet-to-wallet move disposed of only the network fee (Z-04). Four
 currencies over three accounts apportioned the AMMA's Part C capital-gains FITO by the Division 115
-rule — `600 × 2500/4500 = 333.33` — and capped the year at the A$1,000 de-minimis with the excess
+rule — `600 × 2500/4500 = 333.33` — and capped the year at the A\$1,000 de-minimis with the excess
 reported separately (Z-06). The 20 June loss and 3 July re-buy were flagged **across both** the
 financial-year boundary and the holding-account boundary (Z-07). The two buy-backs either side of the
 25 October 2022 law change computed capital proceeds as `max(price, market value) − dividend` = 12.00
@@ -1503,8 +1503,8 @@ partial one is wrong) before being logged.
 by re-deriving rather than by reading.** AA-a's indexation factor for a
 September 1985 quarter cost is **1.730**, not the 1.731 the finding claimed —
 1.731 comes from the superseded 1989-90-base CPI series the ATO marks as no
-longer usable for tax purposes — so the reproduction's advantage is A$2,700,
-not A$2,690. (The 2.46× crossover held exactly.) And AA-e's write-up said a
+longer usable for tax purposes — so the reproduction's advantage is A\$2,700,
+not A\$2,690. (The 2.46× crossover held exactly.) And AA-e's write-up said a
 joint holding's `amount_per_security` *and* `securities_held` are keyed to your
 own half; only `securities_held` is, because the check multiplies the two, so
 documenting the write-up's version would have told users to halve the rate and
@@ -1919,9 +1919,9 @@ that changed?
 - **G-04** LIC capital gain deduction on a dividend.
 - **G-05** Dividend paid on shares bought 40 days before the ex-date and sold
   10 days after (the 45-day rule fails).
-- **G-06** The same, but total franking credits for the year are under $5,000
+- **G-06** The same, but total franking credits for the year are under \$5,000
   (small-shareholder exemption).
-- **G-07** Franking credits of exactly $5,000; of $5,001.
+- **G-07** Franking credits of exactly \$5,000; of \$5,001.
 - **G-08** The 45-day count excluding the acquisition and disposal days, at the
   boundary (exactly 45 days at risk; exactly 44).
 - **G-09** Preference shares requiring 90 days (is the distinction modelled?).
@@ -1999,8 +1999,8 @@ that changed?
 
 ## J. Employee share schemes
 
-- **J-01** Taxed-upfront eligible scheme with the $1,000 reduction applied.
-- **J-02** Taxed-upfront where total adjusted taxable income exceeds $180,000
+- **J-01** Taxed-upfront eligible scheme with the \$1,000 reduction applied.
+- **J-02** Taxed-upfront where total adjusted taxable income exceeds \$180,000
   (the user's responsibility — verify the documentation and that the tool
   doesn't silently claim the reduction is correct).
 - **J-03** Tax-deferred scheme vesting, with the ESS discount at the deferred
@@ -2090,7 +2090,7 @@ that changed?
   scope) on a large USD disposal.
 - **M-10** A non-AUD parcel receiving a non-AUD AMIT reduction (the documented
   acquisition-month FX asymmetry).
-- **M-11** FITO where total foreign tax is under $1,000; over $1,000 requiring
+- **M-11** FITO where total foreign tax is under \$1,000; over \$1,000 requiring
   the offset limit.
 - **M-12** Foreign tax on a discountable foreign capital gain requiring
   apportionment.
@@ -2308,7 +2308,7 @@ The realistic pattern: a user enters history months later, out of order.
 - **W-03** A cent-rounding difference accumulating across 200 DRP parcels.
 - **W-04** A money value that would lose precision through a `REAL` round-trip
   (a migration scenario).
-- **W-05** A holding worth $10M and one worth $0.01 in the same report.
+- **W-05** A holding worth \$10M and one worth \$0.01 in the same report.
 - **W-06** A split ratio producing a repeating decimal per-unit cost base.
 - **W-07** Sum-of-parts vs total: parcel gains summing to the reported total
   exactly, at 4 and 2 decimal display precision.
