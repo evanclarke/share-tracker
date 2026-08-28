@@ -416,14 +416,12 @@ pub async fn db_transfer(
     // (SCENARIOS U-a).
     let sell_id = sell::upsert_sell_in_tx(
         &mut tx,
-        None,
-        &sell_body,
-        trade::Settlement::stated(body.date),
-        None,
-        None,
-        None,
-        Some(id),
-        None,
+        sell::SellWrite {
+            id: None,
+            body: &sell_body,
+            settlement: trade::Settlement::stated(body.date),
+            provenance: Some(sell::SellProvenance::Transfer(id)),
+        },
     )
     .await?;
 
@@ -637,14 +635,12 @@ async fn write_fee_sale(
     // As for the transfer-out Sell above: the database assigns the id.
     let fee_sale_id = sell::upsert_sell_in_tx(
         &mut *conn,
-        None,
-        &fee_body,
-        trade::Settlement::stated(body.date),
-        None,
-        None,
-        None,
-        None,
-        None,
+        sell::SellWrite {
+            id: None,
+            body: &fee_body,
+            settlement: trade::Settlement::stated(body.date),
+            provenance: None,
+        },
     )
     .await?;
     sqlx::query("UPDATE transfers SET fee_sale_trade_id = ? WHERE id = ?")

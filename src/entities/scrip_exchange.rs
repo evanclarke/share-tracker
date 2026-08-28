@@ -267,14 +267,12 @@ pub async fn db_exchange(pool: &SqlitePool, action_id: i64) -> Result<Exchange, 
     // (SCENARIOS U-a).
     let sell_id = sell::upsert_sell_in_tx(
         &mut tx,
-        None,
-        &sell_body,
-        trade::Settlement::stated(action.date),
-        None,
-        Some(action_id),
-        None,
-        None,
-        None,
+        sell::SellWrite {
+            id: None,
+            body: &sell_body,
+            settlement: trade::Settlement::stated(action.date),
+            provenance: Some(sell::SellProvenance::ScripAction(action_id)),
+        },
     )
     .await?;
 

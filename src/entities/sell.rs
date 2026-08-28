@@ -335,9 +335,10 @@ struct SellDeleteRow {
 
 /// The provenance links a trade may carry that make it an immutable
 /// action-derived Sell. Read by [`db_upsert_sell`] and mapped by column name
-/// via `FromRow`.
+/// via `FromRow` — the read side of [`SellProvenance`], which is what the
+/// write side states.
 #[derive(sqlx::FromRow)]
-struct SellProvenance {
+struct SellProvenanceRow {
     /// What the id actually holds. `PUT /sells/:id` writes Sells, so anything
     /// else is refused outright — the rule that needs no maintaining, as
     /// against the provenance column list below, which only ever names the
@@ -471,7 +472,7 @@ pub async fn db_upsert_sell(pool: &SqlitePool, id: i64, body: &SellBody) -> Resu
     // carries linked rows — a dividend income row, or the group's replacement
     // Buys). The upsert below never sets any provenance column, so a normal
     // Sell can't become one either.
-    let existing: Option<SellProvenance> = sqlx::query_as(
+    let existing: Option<SellProvenanceRow> = sqlx::query_as(
         "SELECT trade_type, buyback_action_id, scrip_action_id, demerger_action_id, transfer_id, \
                 worthless_action_id \
          FROM trades WHERE id = ?",
@@ -517,14 +518,12 @@ pub async fn db_upsert_sell(pool: &SqlitePool, id: i64, body: &SellBody) -> Resu
 
     upsert_sell_in_tx(
         &mut tx,
-        Some(id),
-        body,
-        settlement,
-        None,
-        None,
-        None,
-        None,
-        None,
+        SellWrite {
+            id: Some(id),
+            body,
+            settlement,
+            provenance: None,
+        },
     )
     .await?;
 
@@ -545,6 +544,81 @@ pub async fn db_upsert_sell(pool: &SqlitePool, id: i64, body: &SellBody) -> Resu
 
     tx.commit().await?;
     Ok(())
+}
+
+/// Which operation created a server-created Sell: the `trades` column linking
+/// it back to the row that did, so the group can be found, frozen and deleted
+/// as one. The twin of [`domain::rollover::Provenance`](crate::domain::rollover::Provenance),
+/// which does the same job for the replacement *Buys* — this side has two more
+/// variants, since a buy-back participation and a worthless-shares recognise
+/// close parcels without substituting any.
+///
+/// A Sell belongs to exactly one operation, which is why this is an enum: as
+/// five separate `Option<i64>` parameters, a caller setting two of them (or
+/// putting its `Some` one position out — every call site passed four `None`s
+/// around it) was representable, and would have stamped the row as an
+/// operation that never created it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SellProvenance {
+    BuybackAction(i64),
+    ScripAction(i64),
+    DemergerAction(i64),
+    Transfer(i64),
+    WorthlessAction(i64),
+}
+
+/// The five provenance columns as the INSERT binds them: one operation's id in
+/// its own column, NULL in the other four.
+#[derive(Debug, Clone, Copy, Default)]
+struct ProvenanceColumns {
+    buyback_action_id: Option<i64>,
+    scrip_action_id: Option<i64>,
+    demerger_action_id: Option<i64>,
+    transfer_id: Option<i64>,
+    worthless_action_id: Option<i64>,
+}
+
+impl SellProvenance {
+    fn columns(self) -> ProvenanceColumns {
+        let mut columns = ProvenanceColumns::default();
+        match self {
+            SellProvenance::BuybackAction(id) => columns.buyback_action_id = Some(id),
+            SellProvenance::ScripAction(id) => columns.scrip_action_id = Some(id),
+            SellProvenance::DemergerAction(id) => columns.demerger_action_id = Some(id),
+            SellProvenance::Transfer(id) => columns.transfer_id = Some(id),
+            SellProvenance::WorthlessAction(id) => columns.worthless_action_id = Some(id),
+        }
+        columns
+    }
+
+    /// Whether the operation's closing Sell mechanically closes the **whole**
+    /// holding, across every account — which is what exempts it from the
+    /// same-account rule an ordinary sale obeys (see the check's own comment).
+    fn closes_whole_holding(self) -> bool {
+        matches!(
+            self,
+            SellProvenance::ScripAction(_)
+                | SellProvenance::DemergerAction(_)
+                | SellProvenance::WorthlessAction(_)
+        )
+    }
+}
+
+/// One Sell to write: the row, how its settlement date was arrived at, and
+/// which operation (if any) created it. A parameters struct in the shape
+/// `trade::AmountsCheck`/`trade::StatementTotalCheck` already use, so the
+/// five provenance columns are named at the call site instead of being four
+/// `None`s and a `Some` in a nine-argument list.
+pub(crate) struct SellWrite<'a> {
+    /// `Some` only on the client-supplied-id path (`PUT /sells/{id}`,
+    /// deliberately still an upsert); every server-created Sell passes `None`
+    /// so the database assigns the id — see [`upsert_sell_in_tx`].
+    pub id: Option<i64>,
+    pub body: &'a SellBody,
+    pub settlement: trade::Settlement,
+    /// `None` for a client-entered Sell and for the transfer's network-fee
+    /// disposal, which is an ordinary sale carrying no group provenance.
+    pub provenance: Option<SellProvenance>,
 }
 
 /// The transactional core of a Sell upsert: write the Sell trade row and
@@ -568,18 +642,17 @@ pub async fn db_upsert_sell(pool: &SqlitePool, id: i64, body: &SellBody) -> Resu
 /// share sale, became the LAC demerger's 2023 closing Sell). Binding NULL to
 /// an `INTEGER PRIMARY KEY AUTOINCREMENT` column is exactly omitting it, so
 /// one statement serves both paths; the id actually written is returned.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn upsert_sell_in_tx(
     tx: &mut sqlx::SqliteConnection,
-    id: Option<i64>,
-    body: &SellBody,
-    settlement: trade::Settlement,
-    buyback_action_id: Option<i64>,
-    scrip_action_id: Option<i64>,
-    demerger_action_id: Option<i64>,
-    transfer_id: Option<i64>,
-    worthless_action_id: Option<i64>,
+    write: SellWrite<'_>,
 ) -> Result<i64, SellError> {
+    let SellWrite {
+        id,
+        body,
+        settlement,
+        provenance,
+    } = write;
+    let columns = provenance.map(SellProvenance::columns).unwrap_or_default();
     // Every allocation must be a positive draw on its parcel — a negative one
     // would pass the sum and capacity checks while quietly shifting capacity
     // between parcels — and together they must account for the whole sale,
@@ -689,12 +762,12 @@ pub(crate) async fn upsert_sell_in_tx(
     .bind(OptMoney(body.spot_fx_rate))
     .bind(&body.contract_note_ref)
     .bind(OptMoney(body.statement_total))
-    .bind(buyback_action_id)
-    .bind(scrip_action_id)
-    .bind(demerger_action_id)
+    .bind(columns.buyback_action_id)
+    .bind(columns.scrip_action_id)
+    .bind(columns.demerger_action_id)
     .bind(body.holding_account_id)
-    .bind(transfer_id)
-    .bind(worthless_action_id)
+    .bind(columns.transfer_id)
+    .bind(columns.worthless_action_id)
     .execute(&mut *tx)
     .await?;
     // Read straight off the statement that wrote the row, on this very
@@ -745,9 +818,7 @@ pub(crate) async fn upsert_sell_in_tx(
         // account; a worthless recognise has no replacements — the loss rows
         // identify the closing Sell's account, totals unchanged).
         let purchase_account: i64 = purchase_row.try_get("holding_account_id")?;
-        if scrip_action_id.is_none()
-            && demerger_action_id.is_none()
-            && worthless_action_id.is_none()
+        if !provenance.is_some_and(SellProvenance::closes_whole_holding)
             && purchase_account != body.holding_account_id
         {
             return Err(SellError::PurchaseInDifferentAccount);

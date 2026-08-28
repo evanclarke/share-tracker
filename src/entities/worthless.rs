@@ -240,14 +240,12 @@ pub async fn db_recognise(pool: &SqlitePool, action_id: i64) -> Result<Recognise
     // (SCENARIOS U-a).
     let sell_id = sell::upsert_sell_in_tx(
         &mut tx,
-        None,
-        &sell_body,
-        trade::Settlement::stated(action.date),
-        None,
-        None,
-        None,
-        None,
-        Some(action_id),
+        sell::SellWrite {
+            id: None,
+            body: &sell_body,
+            settlement: trade::Settlement::stated(action.date),
+            provenance: Some(sell::SellProvenance::WorthlessAction(action_id)),
+        },
     )
     .await?;
 

@@ -263,14 +263,12 @@ pub async fn db_participate(
     // (SCENARIOS U-a).
     let sell_id = sell::upsert_sell_in_tx(
         &mut tx,
-        None,
-        &sell_body,
-        trade::Settlement::stated(body.date),
-        Some(action_id),
-        None,
-        None,
-        None,
-        None,
+        sell::SellWrite {
+            id: None,
+            body: &sell_body,
+            settlement: trade::Settlement::stated(body.date),
+            provenance: Some(sell::SellProvenance::BuybackAction(action_id)),
+        },
     )
     .await?;
 

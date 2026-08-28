@@ -190,9 +190,31 @@ decomposition exists that moves no invariant.
   tests, fmt and `clippy -D warnings` clean. Note `clippy::cognitive_complexity` is unmoved at 29,
   which is the expected result and the audit's own point: the negation chains were breadth, and
   breadth is what was removed.
-- [ ] Give `entities::sell::upsert_sell_in_tx` (`src/entities/sell.rs:572`) a parameters struct — 9
+- [x] Give `entities::sell::upsert_sell_in_tx` (`src/entities/sell.rs:572`) a parameters struct — 9
   parameters, the widest signature in the tree (only 6 production functions exceed 6). The
   neighbouring `checks.rs` already uses this shape (`AmountsCheck`, `StatementTotalCheck`)
+
+  **Done 2026-08-28.** Two parameters now — the connection and a `SellWrite { id, body, settlement,
+  provenance }` — and `#[allow(clippy::too_many_arguments)]` is gone with them; the only remaining
+  allows in the tree are all inside `#[cfg(test)]` modules.
+
+  The five `Option<i64>` provenance parameters became **one `SellProvenance` enum**
+  (`BuybackAction`/`ScripAction`/`DemergerAction`/`Transfer`/`WorthlessAction`), the twin of the
+  existing `domain::rollover::Provenance` on the replacement-Buy side. That is the part worth having:
+  a Sell belongs to exactly one operation, but as five positional `Option`s every call site read
+  `None, None, Some(action_id), None, None` and a `Some` one position out would have stamped the row
+  as an operation that never created it — silently, since all five are the same type. It is now
+  unrepresentable. `SellProvenance::columns` maps the variant to the five columns the INSERT binds,
+  in one place, and `closes_whole_holding` names the rule the same-account check was spelling as
+  three `.is_none()`s (scrip/demerger/worthless close the whole holding across every account, so
+  they are exempt). The pre-existing `FromRow` struct of the same name — the *read* side, which
+  refuses an edit to an action-derived Sell — is now `SellProvenanceRow`, matching `SellDeleteRow`
+  beside it.
+
+  Behaviour-preserving, so the existing suite is the proof — all seven call sites (plain
+  `PUT /sells/{id}`, buy-back participation, scrip exchange, demerger, transfer-out, the transfer's
+  network-fee disposal, worthless-shares) are covered by their own operation tests: 2,338 total,
+  fmt and `clippy -D warnings` clean.
 - [ ] Decide whether to gate complexity in CI. `clippy::cognitive_complexity` is nursery-level and
   currently flags 16 functions at its default threshold of 25 — 5 of them test functions in
   `doc_checks.rs` plus `row_history.rs:1623`, which are assertion sequences rather than logic.
