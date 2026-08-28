@@ -3298,6 +3298,31 @@ fn franking_credit_ceiling_documented() {
     assert!(include_str!("../docs/ato/OVERVIEW.md").contains("allocating-franking-credits.md"));
 }
 
+/// Docs-sync pin for the annual tax report's **non-AMMA foreign income
+/// subtotal**. The behaviour is pinned by `reports::tax_report`'s own three
+/// tests; this is the documentation half, and it is what a reader needs to
+/// trust a printed subtotal: which of the table's four kinds it adds, where
+/// the two it leaves out are reported instead, and that it is struck at the
+/// cent (so it adds up down the printed column, and ties to the two
+/// tax-summary lines only to that rounding).
+#[test]
+fn non_amma_foreign_income_subtotal_documented() {
+    assert!(API_MD.contains("**`non_amma_foreign_income`**, that table's **non-AMMA subtotal**"));
+    assert!(
+        API_MD.contains("the tax summary's `foreign_source_income` + `foreign_interest_income`")
+    );
+    // Why each excluded kind is out — the double-count each would cause.
+    assert!(API_MD.contains("counting either would report the same dollars twice"));
+    // …and the rounding rule, stated with what it costs.
+    assert!(API_MD.contains(
+        "The subtotal is **summed at the cent**, like every total this document prints beside \
+         the figures it totals"
+    ));
+    assert!(API_MD.contains("with two deliberate exceptions"));
+    // README's feature list says the report carries it.
+    assert!(README_MD.contains("subtotalled excluding the AMMA attribution"));
+}
+
 /// Docs-sync pin for the conduit-foreign-income entry convention (SCENARIOS
 /// G-03). The field was previously excluded from every total with nothing
 /// stating why, which is right only if the figure is a memo *within*

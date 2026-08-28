@@ -1047,14 +1047,92 @@ pub struct OtherIncomeRow {
     pub amount_aud: Decimal,
 }
 
+/// What produced a [`ForeignIncomeRow`] — and, with it, where the amount is
+/// reported. Typed rather than free text because [`ForeignIncomeSubtotal`] is
+/// defined by it: which rows a subtotal may add is a tax question, not a
+/// string comparison. The serialized names are the labels the printed table's
+/// *Kind* column shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum ForeignIncomeKind {
+    /// An [income](crate::entities::income) row's `foreign_source_income` —
+    /// a foreign company's dividend or a trust's foreign-source component.
+    /// Sums to the tax summary's `foreign_source_income`.
+    #[serde(rename = "Dividend/trust foreign income")]
+    DividendOrTrust,
+    /// An [AMMA statement](crate::entities::amma)'s attributed foreign income.
+    /// Sums to the tax summary's `amma_foreign_income`.
+    #[serde(rename = "AMMA foreign income")]
+    Amma,
+    /// A `foreign_source` interest-income row. Sums to the tax summary's
+    /// `foreign_interest_income`.
+    #[serde(rename = "Foreign interest")]
+    Interest,
+    /// The foreign-source part of an ESS discount — a **memo**: it is already
+    /// inside the year's ESS discount at item 12, and is printed here only so
+    /// the item 12A figure is visible beside the year's other foreign amounts.
+    #[serde(rename = "ESS foreign-source discount (memo)")]
+    EssMemo,
+}
+
+impl ForeignIncomeKind {
+    /// Whether the row is counted in [`ForeignIncomeSubtotal`] — see there for
+    /// why each of the other two is out.
+    fn in_non_amma_subtotal(self) -> bool {
+        matches!(self, Self::DividendOrTrust | Self::Interest)
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct ForeignIncomeRow {
-    pub kind: String,
+    pub kind: ForeignIncomeKind,
     pub listing_id: Option<i64>,
     pub ticker: Option<String>,
     pub date: NaiveDate,
     pub amount_aud: Decimal,
     pub foreign_tax_paid_aud: Decimal,
+}
+
+/// The foreign-income table's **non-AMMA** subtotal: the year's foreign income
+/// (and the foreign tax paid on it) that the taxpayer holds directly, rather
+/// than through an AMIT's attribution.
+///
+/// The table deliberately gathers every foreign amount the year produced, but
+/// its rows are reported in three different places, so the whole column adds
+/// up to nothing anyone transcribes. Two of the four kinds are out:
+///
+/// * [`ForeignIncomeKind::Amma`] — the trust's own attribution, printed
+///   component by component in the AMMA table above and carried on the tax
+///   summary's own `amma_foreign_income` line. Its foreign tax likewise
+///   reaches the FITO line as an AMMA credit, not as tax the taxpayer paid.
+/// * [`ForeignIncomeKind::EssMemo`] — a memo already inside the ESS discount
+///   at item 12 (`ess_foreign_source_discount`, item 12A); adding it here
+///   would count the same dollars twice.
+///
+/// What is left is `foreign_source_income + foreign_interest_income` — the
+/// question 20 gross the return takes, with the AMMA rows out of the way.
+///
+/// **Summed at the cent**, the rule every total this document prints beside
+/// the figures it totals follows (SCENARIOS W-f, [`tax_summary`]'s own total
+/// column): the subtotal has to be what a reader gets adding the printed
+/// column. The rows themselves stay exact and still sum exactly to their two
+/// tax-summary lines, so the subtotal can sit up to a cent from the exact sum
+/// of those lines — the accepted price of a printed working that adds up.
+#[derive(Debug, Default, Serialize)]
+pub struct ForeignIncomeSubtotal {
+    pub amount_aud: Decimal,
+    pub foreign_tax_paid_aud: Decimal,
+}
+
+impl ForeignIncomeSubtotal {
+    fn of(rows: &[ForeignIncomeRow]) -> Self {
+        rows.iter()
+            .filter(|r| r.kind.in_non_amma_subtotal())
+            .fold(Self::default(), |mut acc, r| {
+                acc.amount_aud += to_cents(r.amount_aud);
+                acc.foreign_tax_paid_aud += to_cents(r.foreign_tax_paid_aud);
+                acc
+            })
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -1127,12 +1205,22 @@ pub struct IncomeSections {
     /// but, unlike `employment_income`, inside the year's assessable income.
     pub other_income: Vec<OtherIncomeRow>,
     pub foreign_income: Vec<ForeignIncomeRow>,
+    /// `foreign_income`'s non-AMMA subtotal — see [`ForeignIncomeSubtotal`].
+    pub non_amma_foreign_income: ForeignIncomeSubtotal,
     pub interest: Vec<InterestIncomeRow>,
     pub ess: Vec<EssIncomeRow>,
     pub deductions: Vec<DeductionRow>,
 }
 
 impl IncomeSections {
+    /// Everything that can only be done once every row is in: the sections
+    /// read chronologically, and the foreign-income subtotal is struck over
+    /// the rows the four pushes left behind.
+    fn finalise(&mut self) {
+        self.sort();
+        self.non_amma_foreign_income = ForeignIncomeSubtotal::of(&self.foreign_income);
+    }
+
     /// Every section reads chronologically.
     fn sort(&mut self) {
         self.trust_income.sort_by_key(|r| r.date_paid);
@@ -1205,7 +1293,7 @@ async fn income_section(
     push_interest_rows(&mut *conn, &ctx, &mut out).await?;
     push_ess_rows(&mut *conn, &ctx, &mut out).await?;
     push_deduction_rows(&mut *conn, &ctx, &mut out).await?;
-    out.sort();
+    out.finalise();
     Ok(out)
 }
 
@@ -1339,7 +1427,7 @@ async fn push_income_rows(
         }
         if foreign > Decimal::ZERO || foreign_tax > Decimal::ZERO {
             out.foreign_income.push(ForeignIncomeRow {
-                kind: "Dividend/trust foreign income".to_string(),
+                kind: ForeignIncomeKind::DividendOrTrust,
                 listing_id: Some(listing_id),
                 ticker: Some(ctx.ticker_as_at(listing_id, assessed)),
                 date: assessed,
@@ -1384,7 +1472,7 @@ async fn push_amma_rows(
         out.amma_statements.push(statement);
         if foreign_income > Decimal::ZERO || foreign_tax > Decimal::ZERO {
             out.foreign_income.push(ForeignIncomeRow {
-                kind: "AMMA foreign income".to_string(),
+                kind: ForeignIncomeKind::Amma,
                 listing_id: Some(listing_id),
                 ticker: Some(ctx.ticker_as_at(listing_id, d)),
                 date: d,
@@ -1471,7 +1559,7 @@ async fn push_interest_rows(
         });
         if foreign_source {
             out.foreign_income.push(ForeignIncomeRow {
-                kind: "Foreign interest".to_string(),
+                kind: ForeignIncomeKind::Interest,
                 listing_id: None,
                 ticker: None,
                 date: date_paid,
@@ -1536,7 +1624,7 @@ async fn push_ess_rows(
         });
         if foreign > Decimal::ZERO {
             out.foreign_income.push(ForeignIncomeRow {
-                kind: "ESS foreign-source discount (memo)".to_string(),
+                kind: ForeignIncomeKind::EssMemo,
                 listing_id: Some(listing_id),
                 ticker: Some(ctx.ticker_as_at(listing_id, taxing_point)),
                 date: taxing_point,
@@ -2275,6 +2363,192 @@ mod tests {
         assert_eq!(
             report.income.foreign_income[0].ticker.as_deref(),
             Some("ICE")
+        );
+    }
+
+    /// The Foreign income table gathers rows reported in three different
+    /// places, so its printed subtotal is the **non-AMMA** one: the question
+    /// 20 gross the return takes. The AMMA row is the trust's own attribution
+    /// (its own tax-summary line, and its components printed in the AMMA
+    /// table), and the ESS row is a memo already inside the item 12 discount —
+    /// counting either would double-count the same dollars.
+    #[tokio::test]
+    async fn non_amma_foreign_income_subtotal_excludes_the_amma_and_ess_rows() {
+        let pool = test_support::test_pool().await;
+        test_support::listing(1).ticker("ICE").insert(&pool).await;
+        test_support::listing(2)
+            .ticker("VDHG")
+            .amit(true)
+            .insert(&pool)
+            .await;
+        // A foreign company's dividend: 20E gross with its foreign tax.
+        test_support::income(1, 1, ymd(2024, 3, 31))
+            .with(|i| {
+                i.foreign_source_income = dec("100");
+                i.foreign_tax_paid = dec("15");
+            })
+            .insert(&pool)
+            .await;
+        // An AMIT's attributed foreign income — out of the subtotal.
+        test_support::amma(1, 2)
+            .with(|a| {
+                a.foreign_income = dec("70");
+                a.foreign_tax_credits = dec("9");
+            })
+            .insert(&pool)
+            .await;
+        // A foreign broker's cash-sweep interest: in the subtotal.
+        interest_income::db_upsert(
+            &pool,
+            &interest_income::InterestIncome {
+                id: 1,
+                date_paid: ymd(2024, 3, 31),
+                amount: dec("40"),
+                tfn_withholding_tax: Decimal::ZERO,
+                foreign_source: true,
+                foreign_tax_paid: dec("6"),
+                currency: "AUD".to_string(),
+                source: Some("US broker sweep".to_string()),
+                holding_account_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        // The ESS memo — out of the subtotal.
+        test_support::ess_statement(1, 1, ymd(2024, 3, 31))
+            .with(|e| {
+                e.deferral_discount = dec("500");
+                e.foreign_source_discount = dec("500");
+            })
+            .insert(&pool)
+            .await;
+
+        let report = db_tax_report(&pool, 2024).await.unwrap();
+        let kinds: Vec<ForeignIncomeKind> = report
+            .income
+            .foreign_income
+            .iter()
+            .map(|r| r.kind)
+            .collect();
+        assert_eq!(kinds.len(), 4, "all four kinds still print: {kinds:?}");
+        let subtotal = &report.income.non_amma_foreign_income;
+        assert_eq!(
+            subtotal.amount_aud,
+            dec("140"),
+            "100 dividend + 40 interest"
+        );
+        assert_eq!(
+            subtotal.foreign_tax_paid_aud,
+            dec("21"),
+            "15 dividend + 6 interest, and neither AMMA credit"
+        );
+
+        // …and the two lines it is the drilldown for say the same thing.
+        let summary_rows = crate::reports::tax_summary::db_tax_summary(&pool)
+            .await
+            .unwrap();
+        let summary = summary_rows.iter().find(|s| s.tax_year == 2024).unwrap();
+        assert_eq!(
+            subtotal.amount_aud,
+            summary.foreign_source_income + summary.foreign_interest_income
+        );
+        assert_eq!(summary.amma_foreign_income, dec("70"));
+    }
+
+    /// The subtotal is the sum of the rows **as printed** — every total this
+    /// document prints beside the figures it totals is (SCENARIOS W-f), since
+    /// a printed column has to add up on the page. Two rows landing on a half
+    /// cent are what tells the two rules apart: added as printed they make
+    /// 30.02, added exactly 30.01.
+    #[tokio::test]
+    async fn non_amma_foreign_income_subtotal_adds_the_rows_as_printed() {
+        let pool = test_support::test_pool().await;
+        test_support::listing(1)
+            .ticker("ICE")
+            .currency("USD")
+            .insert(&pool)
+            .await;
+        // A rate of 2 USD per AUD is not a rate anyone will see; it is chosen
+        // so both conversions land exactly on a half cent.
+        rba_fx_rate::db_import_rate(&pool, "USD", "2024-03", dec("2"))
+            .await
+            .unwrap();
+        test_support::income(1, 1, ymd(2024, 3, 31))
+            .with(|i| {
+                i.currency = "USD".to_string();
+                i.foreign_source_income = dec("20.01");
+            })
+            .insert(&pool)
+            .await;
+        interest_income::db_upsert(
+            &pool,
+            &interest_income::InterestIncome {
+                id: 1,
+                date_paid: ymd(2024, 3, 31),
+                amount: dec("40.01"),
+                tfn_withholding_tax: Decimal::ZERO,
+                foreign_source: true,
+                foreign_tax_paid: Decimal::ZERO,
+                currency: "USD".to_string(),
+                source: None,
+                holding_account_id: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let report = db_tax_report(&pool, 2024).await.unwrap();
+        let amounts: Vec<Decimal> = report
+            .income
+            .foreign_income
+            .iter()
+            .map(|r| r.amount_aud)
+            .collect();
+        // The rows themselves stay exact, so each still sums to its own
+        // tax-summary line.
+        assert_eq!(amounts, vec![dec("10.005"), dec("20.005")]);
+        assert_eq!(
+            report.income.non_amma_foreign_income.amount_aud,
+            dec("30.02"),
+            "10.01 + 20.01, the figures the document prints"
+        );
+        let summary_rows = crate::reports::tax_summary::db_tax_summary(&pool)
+            .await
+            .unwrap();
+        let summary = summary_rows.iter().find(|s| s.tax_year == 2024).unwrap();
+        assert_eq!(
+            crate::infra::decimal::to_cents(
+                summary.foreign_source_income + summary.foreign_interest_income
+            ),
+            dec("30.01"),
+            "the exact lines round to a cent less — the accepted price of a \
+             column that adds up"
+        );
+    }
+
+    /// A year with no foreign amounts at all prints a nil subtotal rather than
+    /// leaving the field absent — the archived document states the answer.
+    #[tokio::test]
+    async fn non_amma_foreign_income_subtotal_is_nil_when_the_year_has_none() {
+        let pool = test_support::test_pool().await;
+        test_support::listing(1).ticker("T1").insert(&pool).await;
+        test_support::income(1, 1, ymd(2024, 3, 31))
+            .with(|i| {
+                i.franked_amount = dec("70");
+                i.franking_credits = dec("30");
+            })
+            .insert(&pool)
+            .await;
+
+        let report = db_tax_report(&pool, 2024).await.unwrap();
+        assert!(report.income.foreign_income.is_empty());
+        assert_eq!(
+            report.income.non_amma_foreign_income.amount_aud,
+            Decimal::ZERO
+        );
+        assert_eq!(
+            report.income.non_amma_foreign_income.foreign_tax_paid_aud,
+            Decimal::ZERO
         );
     }
 

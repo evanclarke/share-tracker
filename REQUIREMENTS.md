@@ -1388,7 +1388,9 @@ Resolution: a rename becomes an explicit, dated, audited event, not a bare field
     E10/G1 gain lines
   - **Income** — Trust income (non-AMIT trust income rows + AMMA statement component detail),
     Dividend income (each row with its franking entitlement/denial status), Foreign income
-    (foreign-source income/interest/AMMA foreign income with the FITO de-minimis working) —
+    (foreign-source income/interest/AMMA foreign income with the FITO de-minimis working,
+    subtotalled **excluding** the AMMA rows and the ESS memo — question 20's gross is what the
+    return takes, and the AMMA attribution is reported on its own line) —
     plus Interest, ESS, and Deductions, needed so the final tax summary section is fully
     reconcilable from the document alone
   - **Overall tax summary** — the existing `TaxYearSummary` fields for the year, each paired
