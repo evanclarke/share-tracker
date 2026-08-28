@@ -1,11 +1,13 @@
 //! Tests pinning documentation-only requirements (a TODO item is only done when
 //! a test exists for it — CLAUDE.md). Each test asserts its required text —
-//! typically a Known-limitations entry in `docs/API.md`, its README surfacing,
-//! and the cited ATO mirror — is present, so the documented scope cut can't
-//! silently vanish.
+//! typically a Known-limitations entry in `docs/API.md`, its user-facing
+//! surfacing — `docs/FEATURES.md` for a feature or a scope cut, `README.md` for
+//! anything about building, configuring or operating the server — and the cited
+//! ATO mirror — is present, so the documented scope cut can't silently vanish.
 
 const API_MD: &str = include_str!("../docs/API.md");
 const README_MD: &str = include_str!("../README.md");
+const FEATURES_MD: &str = include_str!("../docs/FEATURES.md");
 const SCHEMA_MD: &str = include_str!("../docs/SCHEMA.md");
 const DENY_TOML: &str = include_str!("../deny.toml");
 const REQUIREMENTS_MD: &str = include_str!("../REQUIREMENTS.md");
@@ -339,7 +341,7 @@ fn a_parcel_entered_behind_a_ratio_that_already_fits_documented() {
 /// Docs-sync pin for the append-only audit trail (2026-07-13 improvement
 /// review): the schema documents the table, its scope decision (which tables
 /// are audited and why the rest are not), and the keep-forever retention
-/// decision; the API documents the inspection endpoint; the README surfaces
+/// decision; the API documents the inspection endpoint; the features doc surfaces
 /// the feature and cites the ATO record-keeping guidance it aligns with.
 #[test]
 fn row_history_audit_trail_documented() {
@@ -376,11 +378,11 @@ fn row_history_audit_trail_documented() {
     ));
     assert!(API_MD.contains("cannot say is *when* the id was taken again"));
     assert!(API_MD.contains("`tax_year_settings` is the one audited table exempt"));
-    // README: the feature line, the browse mode, and the ATO citation.
-    assert!(README_MD.contains("**browses the recent changes across every audited table**"));
-    assert!(README_MD.contains("which record's history each entry actually is"));
-    assert!(README_MD.contains("**Append-only audit trail**"));
-    assert!(README_MD.contains("docs/ato/cgt-keeping-records-shares.md"));
+    // Features doc: the feature line, the browse mode, and the ATO citation.
+    assert!(FEATURES_MD.contains("**browses the recent changes across every audited table**"));
+    assert!(FEATURES_MD.contains("which record's history each entry actually is"));
+    assert!(FEATURES_MD.contains("### Append-only audit trail"));
+    assert!(FEATURES_MD.contains("docs/ato/cgt-keeping-records-shares.md"));
     assert!(
         include_str!("../docs/ato/cgt-keeping-records-shares.md")
             .contains("keeping-records-of-shares-and-units"),
@@ -448,7 +450,7 @@ fn linked_attachments_documented() {
 /// the bulk regeneration controls (REQUIREMENTS 2026-07-16): the schema
 /// documents the `provisional` column, the API documents the flag in
 /// responses, the two regeneration endpoints, the import true-up, the
-/// valuation-only FX fallback rule, and the 422 wording; the README surfaces
+/// valuation-only FX fallback rule, and the 422 wording; the features doc surfaces
 /// the provisional-then-finalised behaviour and both self-healing windows.
 #[test]
 fn provisional_snapshots_and_catchup_documented() {
@@ -468,11 +470,11 @@ fn provisional_snapshots_and_catchup_documented() {
     assert!(API_MD.contains("`fx_provisional: true`"));
     // The 422 catalogue reflects the bounded fallback.
     assert!(API_MD.contains("an FX-rate gap too old for the 2-month valuation fallback"));
-    // README: provisional-then-finalised snapshots and the two lookbacks.
-    assert!(README_MD.contains("flagged **provisional**"));
-    assert!(README_MD.contains("finalised automatically"));
-    assert!(README_MD.contains("self-heals the last 14 calendar days"));
-    assert!(README_MD.contains("backfills missing dates over a 14-day window"));
+    // Features doc: provisional-then-finalised snapshots and the two lookbacks.
+    assert!(FEATURES_MD.contains("flagged **provisional**"));
+    assert!(FEATURES_MD.contains("finalised automatically"));
+    assert!(FEATURES_MD.contains("self-heals the last 14 calendar days"));
+    assert!(FEATURES_MD.contains("backfills missing dates over a 14-day window"));
 }
 
 /// Docs-sync pin for the unpriced-listing fact (SCENARIOS Q-02): the cost of
@@ -506,10 +508,10 @@ fn unpriced_listing_and_carried_forward_price_documented() {
              provider-fetched ok price on or after it"
     ));
     assert!(API_MD.contains("that falls on or after its listing's `unpriced_from`"));
-    // README: the feature, and the flag on the snapshot series.
-    assert!(README_MD.contains("**unpriced from**"));
-    assert!(README_MD.contains("carry the last stored close forward"));
-    assert!(README_MD.contains("**carried-forward price** flag"));
+    // Features doc: the feature, and the flag on the snapshot series.
+    assert!(FEATURES_MD.contains("**unpriced from**"));
+    assert!(FEATURES_MD.contains("carry the last stored close forward"));
+    assert!(FEATURES_MD.contains("**carried-forward price** flag"));
 }
 
 /// Docs-sync pin for the mirror fact (migration 0037): a security whose
@@ -547,16 +549,16 @@ fn unpriced_before_and_excluded_holdings_documented() {
     assert!(API_MD.contains("that falls before its listing's `unpriced_before`"));
     // Health goes quiet over the span at both ends.
     assert!(API_MD.contains("**inside the span its provider serves it**"));
-    // README: the feature, and the flag on the snapshot series.
-    assert!(README_MD.contains("**unpriced before**"));
-    assert!(README_MD.contains("**excluded** from that date's portfolio totals"));
-    assert!(README_MD.contains("**excluded holding** flag"));
+    // Features doc: the feature, and the flag on the snapshot series.
+    assert!(FEATURES_MD.contains("**unpriced before**"));
+    assert!(FEATURES_MD.contains("**excluded** from that date's portfolio totals"));
+    assert!(FEATURES_MD.contains("**excluded holding** flag"));
 }
 
 /// Docs-sync pin for the swapped-demerger health check: the API documents the
 /// field list, all three clauses of the predicate and what each rules out, the
 /// legitimate-shape question, and — honestly — that it would have been silent
-/// on the live data before the borrowed prices were cleared; the README
+/// on the live data before the borrowed prices were cleared; the features doc
 /// surfaces the feature.
 #[test]
 fn demerger_head_not_continuing_check_documented() {
@@ -583,13 +585,13 @@ fn demerger_head_not_continuing_check_documented() {
     // What it would not have caught, stated rather than overclaimed.
     assert!(API_MD.contains("this check would have stayed **silent**"));
     assert!(API_MD.contains("the two are **complements**"));
-    assert!(README_MD.contains("**demerger recorded the wrong way round**"));
+    assert!(FEATURES_MD.contains("**demerger recorded the wrong way round**"));
 }
 
 /// Docs-sync pin for the identical-price-series health check: the API
 /// documents the field list, the run predicate and its threshold, the two
 /// reasons a genuine pair cannot trip it, the per-origin split, and that
-/// nothing silences it but fixing the data; the README surfaces the feature.
+/// nothing silences it but fixing the data; the features doc surfaces the feature.
 #[test]
 fn duplicate_price_series_check_documented() {
     assert!(API_MD.contains("`duplicate_price_series`"));
@@ -604,7 +606,7 @@ fn duplicate_price_series_check_documented() {
     // The split, and that only fixing the data clears it.
     assert!(API_MD.contains("`fetched_days` / `manual_days` split each side's rows in the run"));
     assert!(API_MD.contains("**Non-blocking, and there is no way to silence it**"));
-    assert!(README_MD.contains("**one price series between them**"));
+    assert!(FEATURES_MD.contains("**one price series between them**"));
 }
 
 /// Docs-sync pin for the duplicate-trade health check (SCENARIOS V-c): the
@@ -612,7 +614,7 @@ fn duplicate_price_series_check_documented() {
 /// chosen over the figure-based one the rest of the family uses, the scope of
 /// the key (per listing, not per holding account), the blank/whitespace rule,
 /// that derived trades fall out of it, and — stated rather than glossed — the
-/// one thing it cannot catch; the README surfaces the feature and the same
+/// one thing it cannot catch; the features doc surfaces the feature and the same
 /// limitation. The banner sentence names it too, since the strip is where a
 /// user meets it.
 #[test]
@@ -636,15 +638,15 @@ fn duplicate_trades_check_documented() {
     assert!(API_MD.contains("is no reference at all and never groups"));
     assert!(API_MD.contains("fall out of this check by construction"));
     assert!(API_MD.contains("**Non-blocking, and there is no way to silence it**"));
-    // The banner sentence, and the README feature line.
+    // The banner sentence, and the features doc entry.
     assert!(API_MD.contains("two trades sharing one broker contract note reference"));
-    assert!(README_MD.contains("**duplicated trade**"));
-    assert!(README_MD.contains("**no false positives**"));
+    assert!(FEATURES_MD.contains("**duplicated trade**"));
+    assert!(FEATURES_MD.contains("**no false positives**"));
 }
 
 /// Docs-sync pin for date-ranged bulk regeneration (REQUIREMENTS 2026-07-25):
 /// the API documents the new default-range endpoint, `regenerate_all`'s
-/// range/backfill semantics and its 422, and the README surfaces that
+/// range/backfill semantics and its 422, and the features doc surfaces that
 /// regenerate-all is date-ranged and defaults to the whole history.
 #[test]
 fn regenerate_all_date_range_documented() {
@@ -652,13 +654,13 @@ fn regenerate_all_date_range_documented() {
     assert!(API_MD.contains("a backfill for dates that never had a snapshot"));
     assert!(API_MD.contains("clamped up to the first-ever-held date"));
     assert!(API_MD.contains("returns `422` if its resolved `from` is after its `to`"));
-    assert!(README_MD.contains("date-ranged regenerate-all action"));
+    assert!(FEATURES_MD.contains("date-ranged regenerate-all action"));
 }
 
 /// Docs-sync pin for the AMIT cash-only income rows (REQUIREMENTS
 /// 2026-06-12): the Income section documents the cash-only rule and its 422s,
 /// the Tax summary section documents the exclusion, the cross-check report
-/// has its own section, and the README surfaces both features.
+/// has its own section, and the features doc surfaces both features.
 #[test]
 fn amit_cash_only_rows_documented() {
     // Income section: the cash-only rule and the write-time validation.
@@ -669,16 +671,16 @@ fn amit_cash_only_rows_documented() {
     // The cross-check report's own section.
     assert!(API_MD.contains("### AMIT cash cross-check"));
     assert!(API_MD.contains("GET /reports/amit_cash_cross_check"));
-    // README features.
-    assert!(README_MD.contains("cash-only income rows"));
-    assert!(README_MD.contains("**AMIT cash cross-check**"));
+    // features doc entries.
+    assert!(FEATURES_MD.contains("cash-only income rows"));
+    assert!(FEATURES_MD.contains("### AMIT cash cross-check"));
 }
 
 /// Docs-sync pin for AMIT adjustment cross-check and generation
 /// (REQUIREMENTS 2026-08-13): the API documents the generation endpoint with
 /// each of its refusals, the cross-check report, the write-time duplicate
 /// rejection, and the annual tax report's now-four-part completeness; the
-/// schema records the UNIQUE index that backs the invariant; the README
+/// schema records the UNIQUE index that backs the invariant; the features doc
 /// surfaces the feature and the completeness wording.
 #[test]
 fn amit_adjustment_generation_and_cross_check_documented() {
@@ -745,9 +747,9 @@ fn amit_adjustment_generation_and_cross_check_documented() {
     assert!(API_MD.contains("`amit_adjustment_alerts`"));
     assert!(API_MD.contains("`complete` is true only when all five are empty"));
     assert!(API_MD.contains("**`completeness`** — non-blocking (never rejects the request)"));
-    // README: the feature line and the completeness wording.
-    assert!(README_MD.contains("**AMIT adjustment generation and cross-check**"));
-    assert!(README_MD.contains("per-parcel AMIT adjustments reconcile to it"));
+    // Features doc: the feature line and the completeness wording.
+    assert!(FEATURES_MD.contains("### AMIT adjustment generation and cross-check"));
+    assert!(FEATURES_MD.contains("per-parcel AMIT adjustments reconcile to it"));
 }
 
 /// Docs-sync pin for SCENARIOS F-05: which parcels a statement's per-unit
@@ -777,7 +779,7 @@ fn amma_coverage_is_documented_as_per_holding_account() {
     assert!(API_MD.contains("Coverage is asked **per holding account**"));
     assert!(API_MD.contains("one record per affected (listing, year, account) triple"));
     assert!(API_MD.contains("It is asked **per holding account** (each row carries its"));
-    assert!(README_MD.contains("per holding account"));
+    assert!(FEATURES_MD.contains("per holding account"));
 }
 
 /// Docs-sync pin for SCENARIOS G-11/G-20: what anchors the franking
@@ -799,7 +801,7 @@ fn the_franking_windows_anchor_and_its_untested_rows_are_documented() {
     assert!(API_MD.contains("an *empty* report can be read as an all-clear"));
     assert!(API_MD.contains("`ex_date_recorded` (false when that is the payment-date fallback)"));
     assert!(
-        README_MD.contains(
+        FEATURES_MD.contains(
             "an empty report really does mean every credit the walk can test is claimable"
         )
     );
@@ -874,9 +876,9 @@ fn known_limitations_document_gifts_at_market_value() {
         include_str!("../docs/ato/capital-proceeds-market-value-substitution.md")
             .contains("QC 66021")
     );
-    // Surfaced in the README too.
-    assert!(README_MD.contains("gifts / off-market related-party transfers"));
-    assert!(README_MD.contains("market-value substitution"));
+    // Surfaced in the features doc too.
+    assert!(FEATURES_MD.contains("gifts / off-market related-party transfers"));
+    assert!(FEATURES_MD.contains("market-value substitution"));
 }
 
 /// Docs-sync pin for the DRP partial-participation scope cut (SCENARIOS
@@ -908,8 +910,8 @@ fn known_limitations_document_the_partial_drp_workaround() {
         limitations.contains("`amount_per_security` / `securities_held` cross-check off both rows")
     );
     assert!(limitations.contains("duplicate-income warning"));
-    // Surfaced in the README's DRP feature line.
-    assert!(README_MD.contains("**Partial** participation is out of scope"));
+    // Surfaced in the features doc's DRP entry.
+    assert!(FEATURES_MD.contains("**Partial** participation is out of scope"));
 }
 
 #[test]
@@ -925,8 +927,8 @@ fn known_limitations_document_pre_cgt_holdings() {
     assert!(limitations.contains("enforced at write time 2026-07-13"));
     assert!(limitations.contains("**cannot be entered**"));
     assert!(README_MD.contains("pre-CGT holdings"));
-    assert!(README_MD.contains("acquired before 20 September 1985"));
-    assert!(README_MD.contains("rejected at write time"));
+    assert!(FEATURES_MD.contains("acquired before 20 September 1985"));
+    assert!(FEATURES_MD.contains("rejected at write time"));
 }
 
 /// Known-limitation pin (REQUIREMENTS 2026-06-12): dividend equivalents on
@@ -959,10 +961,10 @@ fn known_limitations_document_rsu_dividend_equivalents() {
     // Cites the mirrored ATO ruling (TD 2017/26).
     assert!(limitations.contains("docs/ato/ess-dividend-equivalents.md"));
     assert!(include_str!("../docs/ato/ess-dividend-equivalents.md").contains("TD 2017/26"));
-    // Surfaced in the README too.
-    assert!(README_MD.contains("dividend equivalents on unvested RSU grants"));
-    assert!(README_MD.contains("ordinary income when paid"));
-    assert!(README_MD.contains("recordable as an income row of type `EmploymentIncome`"));
+    // Surfaced in the features doc too.
+    assert!(FEATURES_MD.contains("dividend equivalents on unvested RSU grants"));
+    assert!(FEATURES_MD.contains("ordinary income when paid"));
+    assert!(FEATURES_MD.contains("recordable as an income row of type `EmploymentIncome`"));
 }
 
 /// Docs-sync pin for the per-year ESS reduction eligibility flag (SCENARIOS
@@ -1001,9 +1003,9 @@ fn per_year_ess_reduction_eligibility_documented() {
         SCHEMA_MD
             .contains("for tax_year_settings, whose identity is the financial year, that year")
     );
-    // README surfaces it where the ESS feature is described.
-    assert!(README_MD.contains("**Tax Year Settings**"));
-    assert!(README_MD.contains("recorded per financial year"));
+    // the features doc surfaces it where the ESS feature is described.
+    assert!(FEATURES_MD.contains("**Tax Year Settings**"));
+    assert!(FEATURES_MD.contains("recorded per financial year"));
 }
 
 /// Known-limitation pin (SCENARIOS J-04, 2026-08-18): the ESS 30-day rule is
@@ -1029,8 +1031,8 @@ fn known_limitations_document_the_ess_30_day_rule() {
     // Cites the mirrored ATO guidance, which carries its QC header.
     assert!(limitations.contains("docs/ato/ess-30-day-rule.md"));
     assert!(include_str!("../docs/ato/ess-30-day-rule.md").contains("QC 23058"));
-    // Surfaced in the README's health-monitoring feature line.
-    assert!(README_MD.contains("**ESS sale inside the 30-day rule's window**"));
+    // Surfaced in the features doc's health-monitoring entry.
+    assert!(FEATURES_MD.contains("**ESS sale inside the 30-day rule's window**"));
 }
 
 /// Doc pin (SCENARIOS AA-03): the gift entry convention is only safe if what
@@ -1038,7 +1040,7 @@ fn known_limitations_document_the_ess_30_day_rule() {
 /// substitution rule, the fabricated capital loss, the health check that names
 /// it, and both exclusions (the operation-written closing Sells, and the free
 /// right whose lapse is nil against nil) belong where a reader meets them —
-/// the Health field list, the Gifts limitation, and the README's feature line.
+/// the Health field list, the Gifts limitation, and the features doc's entry.
 #[test]
 fn nil_proceeds_disposals_are_documented_with_the_market_value_rule() {
     assert!(
@@ -1062,8 +1064,8 @@ fn nil_proceeds_disposals_are_documented_with_the_market_value_rule() {
         "Entering the nil consideration actually *received* instead is accepted in full and \
          fabricates a capital loss the size of the whole cost base"
     ));
-    // Surfaced in the README's health-monitoring feature line.
-    assert!(README_MD.contains("**disposal recorded at nil proceeds**"));
+    // Surfaced in the features doc's health-monitoring entry.
+    assert!(FEATURES_MD.contains("**disposal recorded at nil proceeds**"));
 }
 
 /// Doc pin (SCENARIOS S-08): a trade dated on a day its exchange did not
@@ -1108,8 +1110,8 @@ fn trading_day_rule_and_its_exemptions_are_documented() {
     ));
     // The column comment carries the same rule.
     assert!(SCHEMA_MD.contains("It must also be a day the listing's own exchange traded"));
-    // Surfaced in the README's health-monitoring feature line.
-    assert!(README_MD.contains("**trade dated on a day its exchange was shut**"));
+    // Surfaced in the features doc's health-monitoring entry.
+    assert!(FEATURES_MD.contains("**trade dated on a day its exchange was shut**"));
 }
 
 /// Doc pin (SCENARIOS S-05): the settlement-holiday-coverage report answers
@@ -1148,9 +1150,9 @@ fn settlement_coverage_documents_both_questions_it_answers() {
     assert!(SCHEMA_MD.contains(
         "supplied, it is stored as given and need only not precede date (422 otherwise), because an explicit value is a deliberate override"
     ));
-    // Surfaced in the README's feature line.
+    // Surfaced in the features doc's entry.
     assert!(
-        README_MD.contains(
+        FEATURES_MD.contains(
             "every stored settlement **date** is put to the listing's own trading calendar"
         )
     );
@@ -1186,7 +1188,7 @@ fn settlement_recompute_job_documented() {
         SCHEMA_MD.contains("settlement_date_source TEXT (0041)  computed | stated | unrecorded")
     );
     // The README says the same in its feature line and its schedule note.
-    assert!(README_MD.contains(
+    assert!(FEATURES_MD.contains(
         "the unscheduled `settlement-recompute` job re-derives the settlement dates that were \
          computed while it was missing"
     ));
@@ -1240,8 +1242,8 @@ fn rollover_consistency_cross_check_documented() {
     // The tax report reads it unfiltered, and says why.
     assert!(API_MD.contains("`rollover_alerts`"));
     assert!(API_MD.contains("this year\'s disposals are costed on"));
-    // README feature line.
-    assert!(README_MD.contains("**Rollover consistency cross-check**"));
+    // features doc entry.
+    assert!(FEATURES_MD.contains("### Rollover consistency cross-check"));
     // The second fault it reports (SCENARIOS V-d): an operation that consumed
     // the whole holding but left a parcel behind, the `kind` that exists only
     // for it, and the write-time refusal that stops any new one appearing.
@@ -1252,7 +1254,7 @@ fn rollover_consistency_cross_check_documented() {
             .contains("**Entering a parcel behind an operation that consumed the whole holding.**")
     );
     assert!(API_MD.contains("delete that operation, enter the parcel, then run it again"));
-    assert!(README_MD.contains("**unconsumed**"));
+    assert!(FEATURES_MD.contains("**unconsumed**"));
 }
 
 /// Known-limitation pin (SCENARIOS M-12, decided 2026-08-19): the FITO line
@@ -1292,9 +1294,9 @@ fn known_limitations_document_foreign_tax_on_a_direct_disposal() {
     assert!(mirror.contains("**Only the trust path is recordable**"));
     // The tax-summary section says so where the AMMA apportionment is defined.
     assert!(API_MD.contains("**The trust path is the only capital-gains route to this line**"));
-    // Surfaced in the README's scope-cut list.
+    // Surfaced in the features doc's scope-cut list.
     assert!(
-        README_MD.contains("**foreign tax on a capital gain you realise yourself** has no field")
+        FEATURES_MD.contains("**foreign tax on a capital gain you realise yourself** has no field")
     );
 }
 
@@ -1330,7 +1332,7 @@ fn as_at_price_symbol_resolution_documented() {
     assert!(API_MD.contains("applies only to dates in the listing's current identity"));
     // The collection window and the snapshot catch-up window are one length.
     assert!(API_MD.contains("same length as the [report-snapshot](#report-snapshots) catch-up"));
-    assert!(README_MD.contains("under the symbol in force on each date"));
+    assert!(FEATURES_MD.contains("under the symbol in force on each date"));
 }
 
 /// Known-limitation pin (REQUIREMENTS "Ticker and exchange-code changes",
@@ -1405,7 +1407,7 @@ fn known_limitations_document_a_reissued_ticker_cannot_be_recorded() {
 /// 2026-07-26): a rename is an explicit, dated, audited event once a listing
 /// has history — the rename action, the provider-symbol override, and the
 /// as-at ticker resolution used by the tax report and activity ledger are
-/// all documented in the Listings section, and the feature is in README.
+/// all documented in the Listings section, and the feature is in the features doc.
 #[test]
 fn listing_rename_action_documented() {
     assert!(API_MD.contains("POST /listings/:id/rename"));
@@ -1413,7 +1415,7 @@ fn listing_rename_action_documented() {
     assert!(API_MD.contains("DELETE /listings/:id/renames/:rename_id"));
     assert!(API_MD.contains("price_symbol"));
     assert!(API_MD.contains("resolves **as at its own date**"));
-    assert!(README_MD.contains("Ticker and exchange-code renames"));
+    assert!(FEATURES_MD.contains("Ticker and exchange-code renames"));
 }
 
 /// What the activity ledger resolves as at a date (SCENARIOS R-07,
@@ -1486,9 +1488,9 @@ fn docs_document_foreign_interest_source_classification() {
     let labels = include_str!("../docs/ato/tax-return-labels-2026.md");
     assert!(labels.contains("| 10L | Gross interest"));
     assert!(labels.contains("| 20E | Assessable foreign source income"));
-    // Surfaced in the README too.
-    assert!(README_MD.contains("**foreign-source** row"));
-    assert!(README_MD.contains("20E assessable foreign source income"));
+    // Surfaced in the features doc too.
+    assert!(FEATURES_MD.contains("**foreign-source** row"));
+    assert!(FEATURES_MD.contains("20E assessable foreign source income"));
 }
 
 /// Docs-sync pin for the collectables / personal-use-asset scope decision
@@ -1614,8 +1616,8 @@ fn known_limitations_document_indexation_method() {
     // The two figures the whole method turns on, in the mirror itself.
     assert!(cpi_mirror.contains("| 1985 | – | – | 39.7 | 40.5 |"));
     assert!(cpi_mirror.contains("| 1999 | 67.8 | 68.1 | 68.7 | n/a (see Note 1) |"));
-    assert!(README_MD.contains("indexation method"));
-    assert!(README_MD.contains("50% discount is applied throughout"));
+    assert!(FEATURES_MD.contains("indexation method"));
+    assert!(FEATURES_MD.contains("50% discount is applied throughout"));
 }
 
 /// Docs-sync pin for the indexation cross-check report (SCENARIOS AA-a): the
@@ -1680,8 +1682,8 @@ fn known_limitations_document_the_joint_ownership_entry_convention() {
     // Same convention as the inherited-parcel split, and the same cost.
     assert!(limitations.contains("the convention *Inherited parcels* below already prescribes"));
     assert!(limitations.contains("will not tie back to the registry's holding statement"));
-    // The README carries the joint-holding half of the scope cut.
-    assert!(README_MD.contains("500 units of a 1,000-unit joint holding"));
+    // The features doc carries the joint-holding half of the scope cut.
+    assert!(FEATURES_MD.contains("500 units of a 1,000-unit joint holding"));
 }
 
 /// Docs-sync pin for the second-taxpayer remedy (SCENARIOS AA-e, scenario
@@ -1713,7 +1715,7 @@ fn known_limitations_document_the_second_taxpayer_remedy() {
     );
     // The README carries the same scope cut beside the other named ones.
     assert!(README_MD.contains("**one taxpayer per database**"));
-    assert!(README_MD.contains("never a second holding account"));
+    assert!(FEATURES_MD.contains("never a second holding account"));
     // Both flags the remedy needs are in the README's options table.
     assert!(README_MD.contains("| `--db` |"));
     assert!(README_MD.contains("| `--port` |"));
@@ -1797,16 +1799,16 @@ fn known_limitations_document_the_division_775_forex_omission() {
     // Cites the mirrored ATO guidance (QC 18322).
     assert!(limitations.contains("docs/ato/forex-common-transactions.md"));
     assert!(include_str!("../docs/ato/forex-common-transactions.md").contains("QC 18322"));
-    // The README carries the no-entry-path scope cut too.
-    assert!(README_MD.contains("**foreign-currency cash balances**"));
-    assert!(README_MD.contains("**no entry path at all**"));
+    // The features doc carries the no-entry-path scope cut too.
+    assert!(FEATURES_MD.contains("**foreign-currency cash balances**"));
+    assert!(FEATURES_MD.contains("**no entry path at all**"));
 }
 
 /// Docs-sync pin for the capital-account assumption (SCENARIOS AA-c): every
 /// figure this system produces assumes a share **investor** holding CGT assets,
 /// never a **share trader** whose shares are trading stock (QC 66047). Nothing
 /// stored distinguishes the two, so there is no refusal and no flag to pin —
-/// the assumption itself is the deliverable, in `docs/API.md`, in the README's
+/// the assumption itself is the deliverable, in `docs/API.md`, in the features doc's
 /// scope-cut paragraph, and cross-referenced against *Taxpayer entity type*,
 /// which is the other axis (which taxpayer, and the rate) and does not cover it.
 #[test]
@@ -1831,10 +1833,10 @@ fn known_limitations_document_the_investor_not_share_trader_assumption() {
         "your shares are treated like trading stock in the ordinary course of a business"
     ));
     assert!(mirror.contains("**CGT event K4**"));
-    // The README carries the same scope cut beside the other named ones.
-    assert!(README_MD.contains("share **investor** holding CGT assets on capital account"));
-    assert!(README_MD.contains("**share trader** carrying on a business"));
-    assert!(README_MD.contains("nothing here can tell the two apart"));
+    // The features doc carries the same scope cut beside the other named ones.
+    assert!(FEATURES_MD.contains("share **investor** holding CGT assets on capital account"));
+    assert!(FEATURES_MD.contains("**share trader** carrying on a business"));
+    assert!(FEATURES_MD.contains("nothing here can tell the two apart"));
 }
 
 /// Docs-sync pin for the FX spot-rate override (REQUIREMENTS 2026-06-12, QC
@@ -1842,7 +1844,7 @@ fn known_limitations_document_the_investor_not_share_trader_assumption() {
 /// spot override first, monthly RBA rate as the ATO-published convenience
 /// default, `fx_rate` fallback, loud failure — and says when the ATO expects
 /// a spot rate; the Trades section documents the field and its 422s; the
-/// README surfaces the override; and the cited ATO mirrors carry their QC
+/// the features doc surfaces the override; and the cited ATO mirrors carry their QC
 /// headers.
 #[test]
 fn fx_spot_rate_override_documented() {
@@ -1866,9 +1868,9 @@ fn fx_spot_rate_override_documented() {
     assert!(include_str!("../docs/ato/forex-average-rates.md").contains("QC 18020"));
     assert!(API_MD.contains("docs/ato/forex-common-transactions.md"));
     assert!(include_str!("../docs/ato/forex-common-transactions.md").contains("QC 18322"));
-    // README features bullet.
-    assert!(README_MD.contains("transaction-date spot-rate override"));
-    assert!(README_MD.contains("QC 18020"));
+    // features doc entry.
+    assert!(FEATURES_MD.contains("transaction-date spot-rate override"));
+    assert!(FEATURES_MD.contains("QC 18020"));
 }
 
 /// Doc-only resolution pin for cost-base FX timing (2026-07-12 review,
@@ -1881,7 +1883,7 @@ fn fx_spot_rate_override_documented() {
 /// its reduction converts at the acquisition month), and when it bites (a
 /// non-AUD holding with non-AUD reductions — none in practice); cites the
 /// QC 18322 mirror; is cross-linked from the FX-conversion section; and the
-/// README surfaces it.
+/// the features doc surfaces it.
 #[test]
 fn known_limitations_document_cost_base_fx_timing() {
     let limitations = known_limitations();
@@ -1907,9 +1909,9 @@ fn known_limitations_document_cost_base_fx_timing() {
         "including the AMIT/return-of-capital reductions that arose in later rate months \
          (see [Known limitations](#known-limitations))"
     ));
-    // Surfaced in the README too.
-    assert!(README_MD.contains("cost-base reductions convert at the acquisition-month rate"));
-    assert!(README_MD.contains("s 960-50 translation timing"));
+    // Surfaced in the features doc too.
+    assert!(FEATURES_MD.contains("cost-base reductions convert at the acquisition-month rate"));
+    assert!(FEATURES_MD.contains("s 960-50 translation timing"));
 }
 
 /// Docs pin for the brokerage-currency invariant (SCENARIOS B-02, decided
@@ -1920,7 +1922,7 @@ fn known_limitations_document_cost_base_fx_timing() {
 /// the strict s 960-50 per-leg translation is not modelled — lives only in the
 /// docs. The Known-limitations entry states the rule, the workaround and the
 /// citation; the Trades section explains what the field means for the cost
-/// base; the schema records the constraint; and the README surfaces it.
+/// base; the schema records the constraint; and the features doc surfaces it.
 #[test]
 fn known_limitations_document_the_brokerage_currency_invariant() {
     let limitations = known_limitations();
@@ -1941,8 +1943,8 @@ fn known_limitations_document_the_brokerage_currency_invariant() {
     ));
     // The schema carries the constraint on the column itself.
     assert!(SCHEMA_MD.contains("write-time validated to equal `currency` (422 otherwise)"));
-    // Surfaced in the README too.
-    assert!(README_MD.contains("**brokerage is billed in the trade's own currency**"));
+    // Surfaced in the features doc too.
+    assert!(FEATURES_MD.contains("**brokerage is billed in the trade's own currency**"));
 
     // SCENARIOS L-08: the crypto shape of the same rule, and which of its
     // three cases is a second CGT event.
@@ -2151,8 +2153,8 @@ fn known_limitations_document_the_crypto_entry_paths() {
     assert!(td.contains("TD 2014/25"));
     assert!(td.contains("income years starting 1 July 2021"));
 
-    // Surfaced in the README's crypto feature line.
-    assert!(README_MD.contains("have no operation of their own"));
+    // Surfaced in the features doc's crypto entry.
+    assert!(FEATURES_MD.contains("have no operation of their own"));
 
     // …and every new mirror is reachable from the ATO index.
     const ATO_OVERVIEW: &str = include_str!("../docs/ato/OVERVIEW.md");
@@ -2176,7 +2178,7 @@ fn known_limitations_document_the_crypto_entry_paths() {
 /// that outcomes are the taxpayer's manual adjustment, and the interaction
 /// with the spot-rate override (nil by construction under same-rate-month
 /// monthly rates; per-leg spot rates make the movement visible); cites the
-/// QC 17062 mirror; and the README surfaces it.
+/// QC 17062 mirror; and the features doc surfaces it.
 #[test]
 fn known_limitations_document_settlement_window_forex_k10_k11() {
     let limitations = known_limitations();
@@ -2200,8 +2202,8 @@ fn known_limitations_document_settlement_window_forex_k10_k11() {
     assert!(limitations.contains("Eleanor"));
     let mirror = include_str!("../docs/ato/forex-cgt-12-month-rule.md");
     assert!(mirror.contains("QC 17062"));
-    // Surfaced in the README too.
-    assert!(README_MD.contains("CGT events K10/K11"));
+    // Surfaced in the features doc too.
+    assert!(FEATURES_MD.contains("CGT events K10/K11"));
 }
 
 /// Docs-sync pin for hand-entered closing prices (2026-07-28): the API
@@ -2229,15 +2231,15 @@ fn manual_closing_prices_documented() {
     assert!(limitations.contains("**A manually entered price is one-way**"));
     assert!(limitations.contains("cannot be removed — only overwritten"));
     assert!(limitations.contains("Overwriting loses nothing"));
-    // README surfaces the feature.
-    assert!(README_MD.contains("**priced by hand**"));
+    // the features doc surfaces the feature.
+    assert!(FEATURES_MD.contains("**priced by hand**"));
 }
 
 /// Docs-sync pin for clearing a superseded price span (2026-08-21): the API
 /// documents the one relaxation of the ok-row delete rule and why it is
 /// narrow, the bulk clear and its listing-bounded span, and both refusals;
 /// the schema records the same two deletable kinds behind the table's single
-/// staleness trigger; the README names the span as the one place a stored
+/// staleness trigger; the features doc names the span as the one place a stored
 /// price may be deleted.
 #[test]
 fn clearing_superseded_closing_prices_documented() {
@@ -2270,14 +2272,14 @@ fn clearing_superseded_closing_prices_documented() {
     ));
     // SCHEMA.md: the two deletable kinds behind the single UPDATE trigger.
     assert!(SCHEMA_MD.contains("the only deletable rows are ones no stored figure was valued at"));
-    // README: the span is the one place a stored price may be deleted.
-    assert!(README_MD.contains("the one span in which a stored price may be **deleted**"));
+    // Features doc: the span is the one place a stored price may be deleted.
+    assert!(FEATURES_MD.contains("the one span in which a stored price may be **deleted**"));
 }
 
 /// Docs-sync pin for auditing closing prices (2026-07-28): the schema records
 /// why the table joined the audited set, the surrogate key it needed, and what
 /// the old composite key became; the API documents the `id` and points a
-/// history lookup at it; the README names hand-entered prices among the
+/// history lookup at it; the features doc names hand-entered prices among the
 /// audited facts.
 #[test]
 fn audited_closing_prices_documented() {
@@ -2290,8 +2292,8 @@ fn audited_closing_prices_documented() {
     assert!(API_MD.contains("`{\"table\": \"closing_prices\", \"row_id\": <id>}`"));
     assert!(API_MD.contains("one row's whole revision history sits under one id"));
     assert!(API_MD.contains("Its `id` is the `row_id` to ask for."));
-    // README: hand-entered prices are named among the audited facts.
-    assert!(README_MD.contains("hand-entered closing prices"));
+    // Features doc: hand-entered prices are named among the audited facts.
+    assert!(FEATURES_MD.contains("hand-entered closing prices"));
 }
 
 /// Docs-sync pin for auditing the exchange holiday calendar (migration 0039,
@@ -2299,7 +2301,7 @@ fn audited_closing_prices_documented() {
 /// set and why `exchanges` did not, plus the surrogate key it needed and what
 /// the old composite key became; the API documents the `id`, points a history
 /// lookup at it, and states that the audit trigger is deliberately not
-/// narrowed the way the staleness one is; and the README names the calendar
+/// narrowed the way the staleness one is; and the features doc names the calendar
 /// among the audited facts.
 #[test]
 fn audited_exchange_holidays_documented() {
@@ -2326,8 +2328,8 @@ fn audited_exchange_holidays_documented() {
         known_limitations()
             .contains("the calendar joined the audited tables on 2026-08-21 (migration 0039)")
     );
-    // README: the calendar is named among the audited facts.
-    assert!(README_MD.contains("the exchange holiday calendar every valuation reads"));
+    // Features doc: the calendar is named among the audited facts.
+    assert!(FEATURES_MD.contains("the exchange holiday calendar every valuation reads"));
 }
 
 /// Docs-sync pin for the fetched-symbol provenance (migration 0038, the
@@ -2464,7 +2466,7 @@ fn demerger_price_rebasing_documented() {
     assert!(SCHEMA_MD.contains("demerger_close_reason TEXT (nullable, 0036)"));
     assert!(SCHEMA_MD.contains("a strict SUPERSET of the quantity re-basing one"));
     // README: the user-visible sentence, and the repair job's widened scope.
-    assert!(README_MD.contains(
+    assert!(FEATURES_MD.contains(
         "A **demerger** restates the provider's series the same way while changing no unit count"
     ));
     assert!(README_MD.contains("or a demerger carrying a stated pre-demerger close is recorded."));
@@ -2750,22 +2752,22 @@ fn period_performance_panel_documented() {
     let limits = known_limitations();
     assert!(limits.contains("Period-performance FX attribution is approximate"));
     assert!(limits.contains("capital_growth + fx_movement + income"));
-    assert!(README_MD.contains("period performance"));
+    assert!(FEATURES_MD.contains("period performance"));
     assert!(README_MD.contains("capital growth"));
-    assert!(README_MD.contains("date-range presets"));
+    assert!(FEATURES_MD.contains("date-range presets"));
 }
 
 /// Docs-sync pin for the overview panel's 2Y/3Y presets, remembered range,
 /// and the per-holding "hide no-activity holdings" checkbox (REQUIREMENTS
-/// 2026-07-26): the README's preset list includes 2Y/3Y and the remembered-
+/// 2026-07-26): the features doc's preset list includes 2Y/3Y and the remembered-
 /// range/hide-inactive behaviour, and the API docs' Period performance
 /// section explains that `holdings` returns every holding unfiltered and the
 /// UI hides all-zero ones by default.
 #[test]
 fn overview_range_presets_and_activity_filter_documented() {
-    assert!(README_MD.contains("1M/3M/6M/1Y/2Y/3Y/FY-to-date/all"));
-    assert!(README_MD.contains("last-picked preset is remembered across reloads"));
-    assert!(README_MD.contains("hide holdings with no activity in this period"));
+    assert!(FEATURES_MD.contains("1M/3M/6M/1Y/2Y/3Y/FY-to-date/all"));
+    assert!(FEATURES_MD.contains("last-picked preset is remembered across reloads"));
+    assert!(FEATURES_MD.contains("hide holdings with no activity in this period"));
     assert!(API_MD.contains(
         "a row for **every** holding with any history up to either endpoint, including one fully closed well before `from`"
     ));
@@ -2774,7 +2776,7 @@ fn overview_range_presets_and_activity_filter_documented() {
 
 /// Docs-sync pin for the top menu bar + overview-first home screen
 /// (REQUIREMENTS 2026-07-25): the API docs name the menu bar, its four menus,
-/// `#/` as the home route, and the new `/static/nav.js` module; the README's
+/// `#/` as the home route, and the new `/static/nav.js` module; the features doc's
 /// Web UI bullet describes the menu bar, and the Portfolio overview bullet
 /// names the home screen and its shortcut buttons.
 #[test]
@@ -2785,8 +2787,8 @@ fn top_menu_bar_documented() {
         assert!(API_MD.contains(menu), "API.md should name the {menu} menu");
     }
     assert!(API_MD.contains("the app's home screen"));
-    assert!(README_MD.contains("top menu bar"));
-    assert!(README_MD.contains("New trade/income/sell/transfer shortcut buttons"));
+    assert!(FEATURES_MD.contains("top menu bar"));
+    assert!(FEATURES_MD.contains("New trade/income/sell/transfer shortcut buttons"));
 }
 
 /// Docs-sync pin for the uniform DELETE 404 contract (2026-07-29 Rust review):
@@ -2939,7 +2941,7 @@ fn rollover_assumed_scope_cut_documented() {
 /// via row history, snapshots don't cover tax reports), the mitigation, the
 /// A-40 exchange-holiday footnote — including its Q-05/Q-08 correction, that
 /// the calendar is a live valuation input and a holiday write now stales the
-/// snapshots it re-values — and the README's own scope-cuts summary.
+/// snapshots it re-values — and the features doc's own scope-cuts summary.
 #[test]
 fn closed_year_restatement_documented() {
     let limitations = known_limitations();
@@ -2963,7 +2965,7 @@ fn closed_year_restatement_documented() {
     // valuation, which the footnote used to deny (SCENARIOS Q-05/Q-08).
     assert!(limitations.contains("it was once described here as one, wrongly"));
     assert!(limitations.contains("marks those snapshots stale in the same transaction"));
-    assert!(README_MD.contains("**no financial year is ever closed**"));
+    assert!(FEATURES_MD.contains("**no financial year is ever closed**"));
 }
 
 /// Docs-sync pin for the as-at-date convention shared by every holdings
@@ -3035,7 +3037,7 @@ fn amit_return_of_capital_refusal_documented() {
 /// disclosed — `13X`/`13Y` appeared nowhere in the docs at all — so this pins
 /// the corrected routing in every place a user could read it: the tax
 /// summary's deduction paragraph and CSV label table, the annual tax report's
-/// `income` bullet, the README feature, and the mirrored ATO reference that
+/// `income` bullet, the features doc entry, and the mirrored ATO reference that
 /// carries the instruction text behind each label.
 #[test]
 fn investment_expense_deduction_destinations_documented() {
@@ -3070,7 +3072,7 @@ fn investment_expense_deduction_destinations_documented() {
     // The annual tax report prints each row's destination.
     assert!(API_MD.contains("`TrustDistributions`/`13Y`, `ForeignIncome`/`20M`, `ForeignDebt`/`D15`, or `DividendAndInterest`/`D7 / D8`"));
     assert!(
-        README_MD.contains(
+        FEATURES_MD.contains(
             "The same total is also cut by **the question each deduction is claimed at**"
         )
     );
@@ -3088,7 +3090,7 @@ fn investment_expense_deduction_destinations_documented() {
 /// converted part-way through a holding keeps its earlier years as ordinary
 /// trust income. The Listings section states the column, its 1 July rule and
 /// its reason; every reader that compares against it is named; the schema
-/// records the column; and the README surfaces the feature.
+/// records the column; and the features doc surfaces the feature.
 #[test]
 fn dated_amit_status_documented() {
     assert!(API_MD.contains("**A fund that *converted* to an AMIT.**"));
@@ -3117,7 +3119,7 @@ fn dated_amit_status_documented() {
          tested here and their credits count toward the year's A$5,000 total"
     ));
     assert!(SCHEMA_MD.contains("amit_from    TEXT (nullable)"));
-    assert!(README_MD.contains("A fund that **converted** to an AMIT records the 1 July"));
+    assert!(FEATURES_MD.contains("A fund that **converted** to an AMIT records the 1 July"));
 }
 
 /// Docs-sync pin for the write-time state check that bounds that open edit
@@ -3172,7 +3174,7 @@ fn reverse_proxy_base_path_documented() {
 fn authentication_documented() {
     // README: the Features bullet, the rewritten no-auth notes, the
     // dedicated section and its config/CLI-helper examples.
-    assert!(README_MD.contains("**Authentication (optional)**"));
+    assert!(FEATURES_MD.contains("### Authentication (optional)"));
     assert!(README_MD.contains("### Authentication"));
     assert!(README_MD.contains("unless [`[auth]`](#authentication) is configured"));
     assert!(README_MD.contains("share-tracker hash-password"));
@@ -3340,8 +3342,8 @@ fn foreign_income_totals_documented() {
          the figures it totals"
     ));
     assert!(API_MD.contains("with two deliberate exceptions"));
-    // README's feature list says the report carries them.
-    assert!(README_MD.contains("with non-AMMA and AMMA subtotals and a total"));
+    // the features doc says the report carries them.
+    assert!(FEATURES_MD.contains("with non-AMMA and AMMA subtotals and a total"));
 }
 
 /// Docs-sync pin for the conduit-foreign-income entry convention (SCENARIOS
@@ -3519,7 +3521,7 @@ fn multi_year_expense_apportionment_documented() {
             "**One row is one financial year — a multi-year expense is entered per year:**"
         )
     );
-    assert!(README_MD.contains("expense-time-apportionment.md"));
+    assert!(FEATURES_MD.contains("expense-time-apportionment.md"));
     let column = SCHEMA_MD
         .split("├── date_incurred         DATE")
         .nth(1)
@@ -3590,7 +3592,7 @@ fn inherited_cost_base_entry_conventions_documented() {
     let limits = known_limitations();
     assert!(limits.contains("indexation recalculated out"));
     assert!(limits.contains("apportioned to your own share"));
-    assert!(README_MD.contains("the cost base you enter is your own share of it"));
+    assert!(FEATURES_MD.contains("the cost base you enter is your own share of it"));
 }
 
 /// Docs-sync pin for the LPR-expenditure scope cut (SCENARIOS K-04). The
@@ -3615,7 +3617,7 @@ fn lpr_expenditure_on_a_foreign_parcel_documented() {
     // carries the cause.
     assert!(API_MD.contains("**LPR expenditure is only recordable on an AUD inheritance** (`422`"));
     assert!(API_MD.contains("a non-zero LPR expenditure is recorded on a non-AUD inheritance"));
-    assert!(README_MD.contains("AUD holdings only — see Known limitations"));
+    assert!(FEATURES_MD.contains("AUD holdings only — see Known limitations"));
 
     // SCHEMA.md's column carries the restriction too, so the data model states
     // it without the API doc.
@@ -3678,7 +3680,7 @@ fn presale_tools_read_candidates_as_at_the_request_date() {
 
 /// Docs-sync pin for the price-collection lookback window (SCENARIOS Q-01).
 /// The Jobs section stated a **7**-day window for `price-import` while the
-/// Closing prices section, the README and the code all said 14 — and 14 is
+/// Closing prices section, the features doc and the code all said 14 — and 14 is
 /// not an arbitrary figure: it is *the same constant* the report-snapshot
 /// catch-up window is defined as, because a date the snapshot job keeps
 /// retrying but collection no longer refills could never unblock itself. So
@@ -3724,9 +3726,9 @@ fn price_collection_lookback_window_documented_as_the_constant() {
         "the Jobs section states the `report-snapshot` window as {days} days"
     );
 
-    // README's Features list states both jobs' windows.
-    assert!(README_MD.contains(&format!("self-heals the {window}")));
-    assert!(README_MD.contains(&format!("backfills missing dates over a {days}-day window")));
+    // the features doc states both jobs' windows.
+    assert!(FEATURES_MD.contains(&format!("self-heals the {window}")));
+    assert!(FEATURES_MD.contains(&format!("backfills missing dates over a {days}-day window")));
 
     // The Known limitations entry states them as the one bounded window.
     assert!(known_limitations().contains(&format!(
@@ -4302,9 +4304,9 @@ fn distribution_calendar_documented() {
     assert!(SCHEMA_MD.contains("`distribution_events` (0048) is exempt on the same ground"));
     assert!(SCHEMA_MD.contains("`distribution_events` joined in 0048 with the table itself"));
 
-    // And the README feature, carrying the advisory framing.
-    assert!(README_MD.contains("- **Distribution calendar and the missing-dividend alert** —"));
-    assert!(README_MD.contains("**Advisory by decision**"));
+    // And the features doc entry, carrying the advisory framing.
+    assert!(FEATURES_MD.contains("### Distribution calendar and the missing-dividend alert"));
+    assert!(FEATURES_MD.contains("**Advisory by decision**"));
 }
 
 /// Docs-sync pin for the four corrections the 2026-08-28 review of the
