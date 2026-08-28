@@ -80,7 +80,7 @@ All assessable income characters are aggregated into a single amount, other than
 
 ### Capital gains
 
-Consistent with current reporting, information relating to capital gains tax (CGT) will be captured via the CGT Schedule on a separate class basis, where each class has a gross capital gain or loss of $10,000 or more. If there is a single class in the AMIT, the $10,000 threshold for a CGT schedule will apply to the AMIT as a whole.
+Consistent with current reporting, information relating to capital gains tax (CGT) will be captured via the CGT Schedule on a separate class basis, where each class has a gross capital gain or loss of \$10,000 or more. If there is a single class in the AMIT, the \$10,000 threshold for a CGT schedule will apply to the AMIT as a whole.
 
 ### Losses information
 

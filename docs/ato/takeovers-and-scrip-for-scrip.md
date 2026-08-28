@@ -42,20 +42,20 @@ does **not** apply.
 ### Example 26: Takeover
 
 > In October 2000, Desiree bought 500 shares in DEF Ltd. These shares are
-> currently worth $2 each. Their cost base is $1.50.
+> currently worth \$2 each. Their cost base is \$1.50.
 >
 > XYZ Ltd offers to acquire each share in DEF Ltd for one share in XYZ Ltd and
-> 75 cents cash. The shares in XYZ Ltd are valued at $1.25 each. Accepting the
-> offer, Desiree receives 500 shares in XYZ Ltd and $375 cash.
+> 75 cents cash. The shares in XYZ Ltd are valued at \$1.25 each. Accepting the
+> offer, Desiree receives 500 shares in XYZ Ltd and \$375 cash.
 >
-> The capital proceeds received for each share in DEF Ltd is $2 ($1.25 market
+> The capital proceeds received for each share in DEF Ltd is \$2 (\$1.25 market
 > value of each XYZ Ltd share plus 75 cents cash). Therefore, as the cost base
-> of each DEF Ltd share is $1.50, Desiree will make a capital gain of 50 cents
-> ($2 − $1.50) on each share, a total of $250.
+> of each DEF Ltd share is \$1.50, Desiree will make a capital gain of 50 cents
+> (\$2 − \$1.50) on each share, a total of \$250.
 >
 > The cost base of the newly acquired XYZ Ltd shares is the market value of
-> the shares in DEF Ltd ($2) less the cash amount received ($0.75) which
-> equals $1.25 each or a total of $625 (500 × $1.25).
+> the shares in DEF Ltd (\$2) less the cash amount received (\$0.75) which
+> equals \$1.25 each or a total of \$625 (500 × \$1.25).
 
 ## Scrip for scrip rollover
 
@@ -114,13 +114,13 @@ the replacement interest is its market value just after the acquisition.
 
 ### Example 27: Partial scrip for scrip rollover
 
-> Gunther owns 100 shares in Windsor Ltd, each with a cost base of $9. He
+> Gunther owns 100 shares in Windsor Ltd, each with a cost base of \$9. He
 > accepts a takeover offer from Regal Ltd, which provides for Gunther to
-> receive one Regal share plus $10 cash for each share in Windsor. Gunther
-> receives 100 shares in Regal and $1,000 cash. Just after Gunther is issued
-> shares in Regal, each share is worth $20.
+> receive one Regal share plus \$10 cash for each share in Windsor. Gunther
+> receives 100 shares in Regal and \$1,000 cash. Just after Gunther is issued
+> shares in Regal, each share is worth \$20.
 >
-> Gunther receives $10 cash for each of his Windsor shares and so has $1,000
+> Gunther receives \$10 cash for each of his Windsor shares and so has \$1,000
 > to which a rollover does not apply. It is reasonable to allocate a portion
 > of the cost base of the original shares having regard to the proportion that
 > the cash bears to the total proceeds:
@@ -128,26 +128,26 @@ the replacement interest is its market value just after the acquisition.
 > cash ÷ total proceeds × cost base of original share = proportion of cost
 > base for which cash was received
 >
-> $1,000 ÷ $3,000 × $900 = $300
+> \$1,000 ÷ \$3,000 × \$900 = \$300
 >
-> Gunther's capital gain: $1,000 (cash) − $300 (cost base) = $700.
+> Gunther's capital gain: \$1,000 (cash) − \$300 (cost base) = \$700.
 >
-> Cost base of each of his Regal shares: ($900 − $300) ÷ 100 = $6.
+> Cost base of each of his Regal shares: (\$900 − \$300) ÷ 100 = \$6.
 
 ### Example 28: Scrip for scrip rollover
 
 > Stephanie owns ordinary shares in Reef Ltd. On 28 February 2021, she
 > accepted a takeover offer from Starfish Ltd, under which she received one
 > ordinary share and one preference share for each Reef share. The market
-> value of the Starfish shares just after Stephanie acquired them was $20 for
-> each ordinary share and $10 for each preference share.
+> value of the Starfish shares just after Stephanie acquired them was \$20 for
+> each ordinary share and \$10 for each preference share.
 >
 > The cost base of each Reef share just before Stephanie ceased to own them
-> was $15. The offer satisfied all the requirements for a scrip-for-scrip
+> was \$15. The offer satisfied all the requirements for a scrip-for-scrip
 > rollover.
 >
 > If the rollover did not apply, Stephanie would have made a capital gain per
-> share of $30 (capital proceeds) − $15 (cost base) = $15.
+> share of \$30 (capital proceeds) − \$15 (cost base) = \$15.
 >
 > Scrip-for-scrip rollover allows Stephanie to disregard the capital gain. The
 > cost base of the Starfish shares is the cost base of the Reef Ltd shares.
@@ -156,8 +156,8 @@ the replacement interest is its market value just after the acquisition.
 > Stephanie apportions the cost base of the Reef Ltd share between the
 > ordinary share and the preference share by market value:
 >
-> - Cost base of ordinary share: $20 ÷ 30 × $15 = $10
-> - Cost base of preference share: $10 ÷ 30 × $15 = $5
+> - Cost base of ordinary share: \$20 ÷ 30 × \$15 = \$10
+> - Cost base of preference share: \$10 ÷ 30 × \$15 = \$5
 
 ## How this project models it
 
@@ -194,9 +194,9 @@ the example's `cash ÷ total proceeds` — and:
 - the closing Sell is priced at the cash per old unit, and the
   realised-gains and net-capital-gain reports assess its proceeds against
   the cash-apportioned cost-base share, with the discount classified by the
-  original parcel's holding period (Gunther: $1,000 − $300 = $700);
+  original parcel's holding period (Gunther: \$1,000 − \$300 = \$700);
 - the replacement parcels carry only the scrip side's share (Gunther:
-  $900 − $300 = $600, $6 per Regal share).
+  \$900 − \$300 = \$600, \$6 per Regal share).
 
 Out of scope (enter these manually or seek advice):
 

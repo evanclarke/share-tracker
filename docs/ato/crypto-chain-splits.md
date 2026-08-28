@@ -22,7 +22,7 @@ new crypto asset isn't treated as either:
 However, you will need to work out your capital gain or capital loss when you
 dispose of the new crypto asset you receive because of a chain split. **The
 cost base of a crypto asset you receive because of a chain split is zero
-($0).**
+(\$0).**
 
 You may be entitled to the **CGT discount** if you hold the new crypto asset
 for 12 months or more before disposing of it.
@@ -39,13 +39,13 @@ treated differently for tax purposes.
 > the 10 Bitcoin previously held. There were no immediate tax consequences for
 > him.
 >
-> On 2 March 2026, Alex sells 2 Bitcoin Cash for $1,260. Because the cost base
+> On 2 March 2026, Alex sells 2 Bitcoin Cash for \$1,260. Because the cost base
 > of the Bitcoin Cash is zero, he makes a total **discount capital gain of
-> $1,260** in the 2025–26 income year.
+> \$1,260** in the 2025–26 income year.
 >
 > As Alex had held the Bitcoin Cash for more than 12 months and assuming he
 > doesn't have any other capital gain or losses, he reports the capital gain
-> after discount of **$630** in his tax return for 2025–26. He will pay tax on
+> after discount of **\$630** in his tax return for 2025–26. He will pay tax on
 > the capital gain at his marginal income tax rate.
 
 ## Work out which is the new crypto asset
@@ -82,13 +82,13 @@ original.
 
 Where this is the case a **C2 CGT event** happens to the original asset.
 Therefore, each crypto asset you hold is a new asset with an acquisition date
-of the date of the chain split with a cost base of zero ($0).
+of the date of the chain split with a cost base of zero (\$0).
 
 > **Example: no continuing rights or relationships**
 >
 > Ming held 10 Bitcoin Cash as an investment just before a chain split on
 > 15 November 2018. Ming had acquired the Bitcoin Cash on 6 April 2018 with a
-> cost base of $8,300.
+> cost base of \$8,300.
 >
 > Following the chain split, Ming held 10 Bitcoin Cash ABC and 10 Bitcoin Cash
 > SV. Both projects had a change to the core consensus rules of the original
@@ -101,7 +101,7 @@ of the date of the chain split with a cost base of zero ($0).
 >
 > A **CGT event C2** happens to Ming's original Bitcoin Cash when the chain
 > split occurred on 15 November 2018. Ming calculates a **capital loss of
-> $8,300**, which is equal to the cost base of his original asset.
+> \$8,300**, which is equal to the cost base of his original asset.
 >
 > Ming's new 10 Bitcoin Cash ABC and 10 Bitcoin Cash SV both have an
 > acquisition date of 15 November 2018 and a cost base of zero.

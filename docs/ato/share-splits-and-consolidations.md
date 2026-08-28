@@ -42,18 +42,18 @@ larger (a *share split*) or smaller (a *share consolidation*) number of shares?
 
 ## Example 1 — share split (2-for-1)
 
-XYZ Ltd's share capital account of $100,000 consists of 100,000 shares. The
+XYZ Ltd's share capital account of \$100,000 consists of 100,000 shares. The
 company converts its share capital into 200,000 ordinary shares on 1 July 1992.
 The original shares are not cancelled or redeemed, the share capital account is
 unaltered, and each shareholder's proportion of equity is maintained.
 
 John acquired 2,000 ordinary shares in XYZ Ltd in September 1984 (pre-CGT) and
 3,000 ordinary shares on 30 April 1988. Before the conversion, the 1988 shares
-had a cost base of **$1.00 each**.
+had a cost base of **\$1.00 each**.
 
 On conversion, no CGT event happens to any of John's original shares. John now
 has **4,000** ordinary shares with an acquisition date before 20 September 1985,
-and **6,000** ordinary shares with a cost base of **$0.50 each** and an
+and **6,000** ordinary shares with a cost base of **\$0.50 each** and an
 acquisition date of **30 April 1988**.
 
 ## Example 2 — share consolidation (1-for-2)
@@ -61,7 +61,7 @@ acquisition date of **30 April 1988**.
 If XYZ Ltd instead converts its original share capital into 50,000 ordinary
 shares (all other facts unchanged), no CGT event happens to John's original
 shares. John would now have **1,000** ordinary shares with a pre-CGT
-acquisition date, and **1,500** ordinary shares with a cost base of **$2.00
+acquisition date, and **1,500** ordinary shares with a cost base of **\$2.00
 each** and an acquisition date of 30 April 1988.
 
 ## How this maps to this project

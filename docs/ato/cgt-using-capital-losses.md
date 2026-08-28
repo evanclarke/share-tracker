@@ -38,7 +38,7 @@ Capital losses from [collectables](https://www.ato.gov.au/individuals-and-famili
 
 If you don't have a capital gain from another collectable, you can carry forward the capital loss to deduct it against a gain from a collectable in a future year.
 
-A collectable is not subject to CGT if you acquired it for $500 or less (or acquired an interest in it when it had a market value of $500 or less). This means you ignore a capital gain or loss from the collectable.
+A collectable is not subject to CGT if you acquired it for \$500 or less (or acquired an interest in it when it had a market value of \$500 or less). This means you ignore a capital gain or loss from the collectable.
 
 ## Company capital losses
 

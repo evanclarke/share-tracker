@@ -37,7 +37,7 @@ trust income.
 If the trust is not a family trust, a beneficiary without a fixed entitlement
 to the franked distribution is generally not entitled to use the associated
 franking credits unless their total franking credits from all sources for a
-year is $5,000 or less.
+year is \$5,000 or less.
 
 ## Losses
 

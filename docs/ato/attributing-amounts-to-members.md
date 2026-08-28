@@ -70,7 +70,7 @@ Trustee C is the trustee of the AMIT C which is a withholding MIT. There are 100
 
 Table: Pre-AMMA actual payments in relation to the year
 
-| Component | First half distribution ($) | Second half distribution ($) | Total determined member components ($) |
+| Component | First half distribution (\$) | Second half distribution (\$) | Total determined member components (\$) |
 | --- | --- | --- | --- |
 | Interest (see note) | Nil | 2,000 | 2,000 |
 | Dividends (see note) | 8,000 | Nil | 8,000 |
@@ -79,11 +79,11 @@ Table: Pre-AMMA actual payments in relation to the year
 
 Note: the amount subject to a requirement to withhold under Subdivision 12-F.
 
-Trustee C therefore calculated the total deemed payments to be $40,000 as follows:
+Trustee C therefore calculated the total deemed payments to be \$40,000 as follows:
 
 Total determined member components − Total AMIT DIR payments = Deemed payment
 
-$50,000 − ($2,000 + $8,000) = $40,000
+\$50,000 − (\$2,000 + \$8,000) = \$40,000
 
 Further, Trustee C calculates the deemed payment to be comprised entirely of foreign source income.
 
@@ -95,7 +95,7 @@ Further TFN withholding tax is not payable in relation to the deemed payment, as
 
 Assume the same facts as in Example 1A.
 
-Member A (resident in New Zealand) held one unit and received the first half distribution of $250 ($25,000 ÷ 100 members of equal unit-holdings). Trustee C calculated that an AMIT dividend payment of $80 arose in relation to the payment and so withheld $12 from the distribution (that is, $80 × 15%).
+Member A (resident in New Zealand) held one unit and received the first half distribution of \$250 (\$25,000 ÷ 100 members of equal unit-holdings). Trustee C calculated that an AMIT dividend payment of \$80 arose in relation to the payment and so withheld \$12 from the distribution (that is, \$80 × 15%).
 
 **Member A then sold the unit to Member B** (an Australian resident) who received the distribution for the second half.
 
@@ -121,29 +121,29 @@ Table: Member A and Member B extracts
 | Assessable foreign source income | 200 | 200 |
 | Total distribution | 250 | 250 |
 
-Trustee C therefore calculates the total deemed payments to be $40,000 as follows:
+Trustee C therefore calculates the total deemed payments to be \$40,000 as follows:
 
 Total determined member components − Total AMIT DIR payments = Deemed payment
 
-$50,000 − ($2,000 + $8,000) = $40,000
+\$50,000 − (\$2,000 + \$8,000) = \$40,000
 
 Further, Trustee C calculates the deemed payment to be comprised entirely of foreign source income.
 
 Accordingly, Trustee C works out in relation to the deemed payment that there is a nil amount subject to non-resident withholding tax.
 
-Note that there is no requirement to reconcile the amount shown on each AMMA statement with amounts on which withholding tax has previously been calculated. For example, withholding tax on the interim distribution to Member A is based on the distribution comprising a nil amount of interest. Although the AMMA statement for Member A includes an amount of $10 as interest income, this does not result in a deemed payment of interest to Member A.
+Note that there is no requirement to reconcile the amount shown on each AMMA statement with amounts on which withholding tax has previously been calculated. For example, withholding tax on the interim distribution to Member A is based on the distribution comprising a nil amount of interest. Although the AMMA statement for Member A includes an amount of \$10 as interest income, this does not result in a deemed payment of interest to Member A.
 
 ### Example 2: calculating deemed payment at the fund level
 
 Trustee A is the trustee of the AMIT C which is a withholding MIT. There are 100 members of AMIT C who each hold the same number of units of the same class carrying equal entitlements to income and capital. Entity B is a foreign resident member of AMIT C.
 
-In a particular income year, AMIT C's total determined member components of a character relating to assessable income (unfranked dividends) is $50,000 and made total pre-AMMA actual payments of $20,000 prior to the issue of the AMMA.
+In a particular income year, AMIT C's total determined member components of a character relating to assessable income (unfranked dividends) is \$50,000 and made total pre-AMMA actual payments of \$20,000 prior to the issue of the AMMA.
 
-Trustee A works out the total deemed payment at the fund level by reducing the total determined member components of $50,000 by the total pre-AMMA actual payments of $20,000 (comprised entirely of unfranked dividends subject to non-resident withholding tax). The total deemed payment at the fund level is therefore $30,000.
+Trustee A works out the total deemed payment at the fund level by reducing the total determined member components of \$50,000 by the total pre-AMMA actual payments of \$20,000 (comprised entirely of unfranked dividends subject to non-resident withholding tax). The total deemed payment at the fund level is therefore \$30,000.
 
-Trustee A then determines that the amount of the deemed payment taken to have been made to Entity B on a fair and reasonable basis is $300 ($30,000 ÷ 100 members of equal unit-holdings).
+Trustee A then determines that the amount of the deemed payment taken to have been made to Entity B on a fair and reasonable basis is \$300 (\$30,000 ÷ 100 members of equal unit-holdings).
 
-Trustee A issues an AMMA statement to Entity B for the amount of $500 ($50,000 ÷ 100 members of equal unit-holdings) and pays an amount to the Commissioner which is equal to the amount that Trustee A would have been required to withhold if the deemed payment of $300 had been an actual payment.
+Trustee A issues an AMMA statement to Entity B for the amount of \$500 (\$50,000 ÷ 100 members of equal unit-holdings) and pays an amount to the Commissioner which is equal to the amount that Trustee A would have been required to withhold if the deemed payment of \$300 had been an actual payment.
 
 ### Example 3: attributing deemed payments on a fair and reasonable basis
 
@@ -152,19 +152,19 @@ During the 2017 income year, AMIT D (which has 100 members and is a withholding 
 - At 31 December 2016 – 10,000 units held by Entity E, an Australian resident.
 - At 30 June 2017 – 10,000 units held by Entity F (40%) and Entity G (60%), both foreign residents.
 
-At 31 December 2016, AMIT D calculated components of an assessable income character of $50,000. At 30 June 2017, AMIT D had total determined member components of $80,000 (that is, a further $30,000 in the second half of the year). There were no pre-AMMA actual payments made for the income year. The total deemed payments at the fund level is therefore $80,000.
+At 31 December 2016, AMIT D calculated components of an assessable income character of \$50,000. At 30 June 2017, AMIT D had total determined member components of \$80,000 (that is, a further \$30,000 in the second half of the year). There were no pre-AMMA actual payments made for the income year. The total deemed payments at the fund level is therefore \$80,000.
 
 Investors are aware that tax is allocated based on estimated assessable income attributable to unitholders at a particular date. Therefore, it is fair and reasonable for the trustee of AMIT D to determine that the amount of the deemed payment taken to have been made to its unitholders is as follows:
 
-- **A deemed payment of $50,000 is referable to Entity E as he was the sole unitholder as at 31 December 2016. AMIT D issues an AMMA statement to Entity E for the amount of $50,000** and no withholding was required as Entity E is an Australian resident.
-- A deemed payment of $12,000 is referable to Entity F as she was the unitholder of 40% of the 10,000 units as at 30 June 2017. AMIT D issues an AMMA statement to Entity F for the amount of $12,000 and pays an amount to the Commissioner which is equal to the amount that AMIT D would have been required to withhold if the deemed payment had been an actual payment.
-- A deemed payment of $18,000 is referable to Entity G as he was the unitholder of 60% of the 10,000 units as at 30 June 2017. AMIT D issues an AMMA statement to Entity G for the amount of $18,000 and pays an amount to the Commissioner which is equal to the amount that AMIT D would have been required to withhold if the deemed payment had been an actual payment.
+- **A deemed payment of \$50,000 is referable to Entity E as he was the sole unitholder as at 31 December 2016. AMIT D issues an AMMA statement to Entity E for the amount of \$50,000** and no withholding was required as Entity E is an Australian resident.
+- A deemed payment of \$12,000 is referable to Entity F as she was the unitholder of 40% of the 10,000 units as at 30 June 2017. AMIT D issues an AMMA statement to Entity F for the amount of \$12,000 and pays an amount to the Commissioner which is equal to the amount that AMIT D would have been required to withhold if the deemed payment had been an actual payment.
+- A deemed payment of \$18,000 is referable to Entity G as he was the unitholder of 60% of the 10,000 units as at 30 June 2017. AMIT D issues an AMMA statement to Entity G for the amount of \$18,000 and pays an amount to the Commissioner which is equal to the amount that AMIT D would have been required to withhold if the deemed payment had been an actual payment.
 
 ### Example 4: fair and reasonable to comply with the Constitution of the trust
 
 Assume the same facts as in Example 2, but instead assume that the constitution of AMIT D provides that any deemed fund payments under section 12A-205(2) of Schedule 1 to the *Tax Administration Act 1953* is to be treated as being referable to the unitholders existing at the final record date of the income year to which the payment relates.
 
-It would be fair and reasonable for the trustee of AMIT D to determine that the amount of the total deemed payments of $80,000 is allocated in Entity F's AMMA statement as $32,000 and in Entity G's AMMA statement as $48,000. The allocation is based on the respective entitlements of Entity F and Entity G as at the final record date of the income year. **No part of the deemed fund payment is allocated to Entity E as he was not a unitholder at the final record date of the income year.**
+It would be fair and reasonable for the trustee of AMIT D to determine that the amount of the total deemed payments of \$80,000 is allocated in Entity F's AMMA statement as \$32,000 and in Entity G's AMMA statement as \$48,000. The allocation is based on the respective entitlements of Entity F and Entity G as at the final record date of the income year. **No part of the deemed fund payment is allocated to Entity E as he was not a unitholder at the final record date of the income year.**
 
 For more information, see *Withholding for MITs*.
 

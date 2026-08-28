@@ -18,9 +18,9 @@ You make a capital gain if the amount of the non-assessable payment is more than
 
 ### Example 45: Non-assessable payments
 
-Rob bought 1,500 shares in RAP Ltd on 1 July 1994 for $5 each, including brokerage and stamp duty. On 30 November 2007, as part of a shareholder-approved scheme for the reduction of RAP Ltd's share capital, he received a non-assessable payment of 50 cents per share. Just before Rob received the payment, the cost base of each share (without indexation) was $5.
+Rob bought 1,500 shares in RAP Ltd on 1 July 1994 for \$5 each, including brokerage and stamp duty. On 30 November 2007, as part of a shareholder-approved scheme for the reduction of RAP Ltd's share capital, he received a non-assessable payment of 50 cents per share. Just before Rob received the payment, the cost base of each share (without indexation) was \$5.
 
-As the amount of the payment is not more than the cost base (without indexation), he reduces the cost base of each share at 30 November 2007 by the amount of the payment to $4.50 ($5.00 – 50 cents). As Rob has chosen not to index the cost base, he can claim the CGT discount if he disposes of the shares in the future.
+As the amount of the payment is not more than the cost base (without indexation), he reduces the cost base of each share at 30 November 2007 by the amount of the payment to \$4.50 (\$5.00 – 50 cents). As Rob has chosen not to index the cost base, he can claim the CGT discount if he disposes of the shares in the future.
 
 ## Non-assessable payments from a unit trust (CGT event E4 or E10)
 

@@ -76,10 +76,10 @@ the user-supplied declaration/cancellation date as the event date.)
 On 31 March 2026, the administrators of Company Ltd made a written declaration
 that they had reasonable grounds to believe there was no likelihood that
 shareholders would receive any distribution. Dave owned 1,000 Company Ltd
-shares, acquired in March 2013 for **$1.70 each including brokerage**. He chose
+shares, acquired in March 2013 for **\$1.70 each including brokerage**. He chose
 to claim the capital loss in his 2025–26 return.
 
-The reduced cost base — and Dave's capital loss — is **1,000 × $1.70 = $1,700**.
+The reduced cost base — and Dave's capital loss — is **1,000 × \$1.70 = \$1,700**.
 That loss is taken into account in working out his net capital gain or loss for
 2025–26.
 

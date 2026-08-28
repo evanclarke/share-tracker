@@ -115,20 +115,20 @@ The cost base and reduced cost base don’t include any costs you can claim as a
 
 #### Example: effect of capital works deduction on reduced cost base
 
-Danuta acquired a new income-producing asset on 28 September 2012 for $100,000.
+Danuta acquired a new income-producing asset on 28 September 2012 for \$100,000.
 
-She sold it for $90,000 in November 2024
+She sold it for \$90,000 in November 2024
 
-While she owned it, she claimed capital works deductions of $7,500 for expenditure incurred by the previous owner.
+While she owned it, she claimed capital works deductions of \$7,500 for expenditure incurred by the previous owner.
 
 Her capital loss is worked out as follows:
 
-| Cost base | $100,000 |
+| Cost base | \$100,000 |
 | --- | --- |
-| less capital works deductions | $7,500 |
-| **Reduced cost base** | $92,500 |
-| less capital proceeds | $90,000 |
-| **Capital loss** | $2,500 |
+| less capital works deductions | \$7,500 |
+| **Reduced cost base** | \$92,500 |
+| less capital proceeds | \$90,000 |
+| **Capital loss** | \$2,500 |
 
 In some cases, a deduction you have claimed on a CGT asset can be partly or wholly 'reversed'. This happens when the value of part or all of the deduction may be declared as income in the year the CGT event happens.
 
@@ -156,11 +156,11 @@ You don't include expenditure you subsequently recoup in the cost base and reduc
 
 #### Example: recouped expenditure
 
-Amid bought a building in 2003 for $200,000 and incurred $10,000 in legal costs associated with the purchase.
+Amid bought a building in 2003 for \$200,000 and incurred \$10,000 in legal costs associated with the purchase.
 
-As part of the settlement, the vendor agreed to pay $4,000 of the legal costs. Amid did not claim any part of the $6,000 he paid in legal costs as a tax deduction.
+As part of the settlement, the vendor agreed to pay \$4,000 of the legal costs. Amid did not claim any part of the \$6,000 he paid in legal costs as a tax deduction.
 
-Amid later sells the building. As he received reimbursement of $4,000 of the legal costs, he includes only the $6,000 he incurred in the cost base when working out his capital gain.
+Amid later sells the building. As he received reimbursement of \$4,000 of the legal costs, he includes only the \$6,000 he incurred in the cost base when working out his capital gain.
 
 ### Expenditure not attributable to asset
 

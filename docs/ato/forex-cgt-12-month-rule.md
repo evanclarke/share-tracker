@@ -42,12 +42,12 @@ income and forex realisation losses are allowable as a deduction.
 
 ### Example: An investor acquires a capital gains tax (CGT) asset
 
-On 1 August 2003, Art Ltd purchases a painting for US$500,000. The exchange rate on this
-date is A$1.00 = US$0.50. Art Ltd pays for the painting on 1 June 2004. The exchange
-rate at this time is A$1.00 = US$0.80. Art Ltd does not make an election out of the
+On 1 August 2003, Art Ltd purchases a painting for US\$500,000. The exchange rate on this
+date is A\$1.00 = US\$0.50. Art Ltd pays for the painting on 1 June 2004. The exchange
+rate at this time is A\$1.00 = US\$0.80. Art Ltd does not make an election out of the
 12 month rule; therefore, the 12 month rule will apply.
 
-Art Ltd will make a forex realisation gain of A$375,000 when it pays for the painting on
+Art Ltd will make a forex realisation gain of A\$375,000 when it pays for the painting on
 1 June 2004. As Art Ltd pays for the painting within 12 months of acquiring it, the
 forex realisation gain **reduces the cost base of the painting** by an amount equal to
 the gain — subsection 775-70(1) item 2. Any capital gain or loss on a subsequent
@@ -57,17 +57,17 @@ disposal of the painting will then be calculated from this reduced cost base.
 
 ### Example: An investor disposes of foreign shares
 
-Eleanor acquired shares in January 2003. She disposes of her US shares for US$1,200 on
-1 July 2005 when the exchange rate is A$1.00 = US$0.50. Eleanor receives payment on
-settlement on 1 August 2005 when the exchange rate is A$1.00 = US$0.60. Eleanor has not
+Eleanor acquired shares in January 2003. She disposes of her US shares for US\$1,200 on
+1 July 2005 when the exchange rate is A\$1.00 = US\$0.50. Eleanor receives payment on
+settlement on 1 August 2005 when the exchange rate is A\$1.00 = US\$0.60. Eleanor has not
 previously made an election out of the 12 month rule; therefore, the 12 month rule will
 apply.
 
-Eleanor will make a forex realisation loss of A$400 when she receives payment on
+Eleanor will make a forex realisation loss of A\$400 when she receives payment on
 1 August 2005. As Eleanor receives payment within 12 months of disposal of the shares,
 the forex realisation loss will be a **capital loss** for the purposes of the CGT
 provisions — subsection 775-75(1) item 1 and section 104-265, **CGT event K11**.
 
 (The capital proceeds for the disposal itself are still translated at the disposal
-date — US$1,200 / 0.50 = A$2,400; the settlement-window movement is the separate K11
-capital loss of A$400, being A$2,400 − US$1,200 / 0.60 = A$2,000.)
+date — US\$1,200 / 0.50 = A\$2,400; the settlement-window movement is the separate K11
+capital loss of A\$400, being A\$2,400 − US\$1,200 / 0.60 = A\$2,000.)

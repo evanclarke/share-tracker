@@ -63,10 +63,10 @@ project, which models post-CGT holdings only.)
 
 ### Example 35: Fully paid bonus shares
 
-> Chris bought 100 shares in MAC Ltd for $1 each on 1 June 1985. He bought 300
-> more shares for $1 each on 27 May 1986. On 15 November 1986, MAC Ltd issued
+> Chris bought 100 shares in MAC Ltd for \$1 each on 1 June 1985. He bought 300
+> more shares for \$1 each on 27 May 1986. On 15 November 1986, MAC Ltd issued
 > Chris with 400 bonus shares from its capital profits reserve, fully paid to
-> $1. Chris did not pay anything to acquire the bonus shares and no part of the
+> \$1. Chris did not pay anything to acquire the bonus shares and no part of the
 > value of the bonus shares was assessed as a dividend.
 >
 > For CGT purposes, the acquisition date of 100 of the bonus shares is
@@ -75,7 +75,7 @@ project, which models post-CGT holdings only.)
 > The acquisition date of the other 300 bonus shares is 27 May 1986. Their
 > cost base is worked out by spreading the cost of the 300 shares Chris bought
 > on that date over both those original shares and the remaining 300 bonus
-> shares. As the 300 original shares cost $300, **the cost base of each share
+> shares. As the 300 original shares cost \$300, **the cost base of each share
 > will now be 50 cents**.
 
 ### Example 36: Partly paid bonus shares
@@ -84,7 +84,7 @@ project, which models post-CGT holdings only.)
 > 200 shares in PUP Ltd, which he bought on 31 January 1985.
 >
 > On 1 January 1987, both MAC Ltd and PUP Ltd made their shareholders a
-> one-for-one bonus share offer of $1 shares partly paid to 50 cents. Klaus
+> one-for-one bonus share offer of \$1 shares partly paid to 50 cents. Klaus
 > elected to accept the offer and acquired 200 new partly paid shares in each
 > company. No part of the value of the bonus shares was taxed as a dividend.
 >
@@ -128,18 +128,18 @@ calculated as if the amount was not taxed as a dividend.
 ### Example 37: Cost base of bonus shares
 
 > Mark owns 1,000 shares in RIM Ltd, which he bought on 30 September 1984 for
-> $1 each.
+> \$1 each.
 >
 > On 1 February 1997, the company issued him with 500 bonus shares partly paid
-> to 50 cents. The paid-up value of bonus shares ($250) is an assessable
+> to 50 cents. The paid-up value of bonus shares (\$250) is an assessable
 > dividend to Mark.
 >
 > On 1 May 1997, the company made a call for the 50 cents outstanding on each
 > bonus share, which Mark paid on 1 July 1997.
 >
-> The total cost base of the bonus shares is $500, consisting of the $250
+> The total cost base of the bonus shares is \$500, consisting of the \$250
 > dividend received on the issue of the bonus shares on 1 February 1997 plus
-> the $250 call payment made on 1 July 1997.
+> the \$250 call payment made on 1 July 1997.
 >
 > The bonus shares were acquired on 1 February 1997.
 
@@ -150,7 +150,7 @@ calculated as if the amount was not taxed as a dividend.
   units held receive `bonus_units` additional units. Per parcel this is the
   quantity re-base `(held + bonus) / held` with total cost base and the
   original acquisition date preserved — exactly the ATO apportionment above
-  (Example 35: 300 @ $1 + 300 bonus → 50c each), and the same mechanics as a
+  (Example 35: 300 @ \$1 + 300 bonus → 50c each), and the same mechanics as a
   `ShareSplit` (TD 2000/10, [`share-splits-and-consolidations.md`](share-splits-and-consolidations.md)),
   so the two action types share the quantity re-basing machinery.
 - **Dividend-assessed bonus shares** (shares chosen in lieu of a dividend —

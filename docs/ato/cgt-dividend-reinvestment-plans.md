@@ -24,12 +24,12 @@ Natalie owns 1,440 shares in a company.
 
 In November 2025, the company declared a dividend of 25 cents per share. Natalie was offered the choice of:
 
-- taking the dividend as a cash payment of $360 (1,440 × 25 cents)
-- reinvesting the dividend to acquire 45 more shares at $8 per share ($360 ÷ $8).
+- taking the dividend as a cash payment of \$360 (1,440 × 25 cents)
+- reinvesting the dividend to acquire 45 more shares at \$8 per share (\$360 ÷ \$8).
 
 Natalie decided to participate in the dividend reinvestment plan and received 45 new shares on 20 December 2025.
 
 Natalie must treat the transaction as though she received the dividend in cash and used it to buy more shares. This means:
 
-- she must declare the $360 dividend as assessable dividend income in her 2025–26 tax return
-- for CGT purposes, she acquired the 45 new shares for $360 on 20 December 2025.
+- she must declare the \$360 dividend as assessable dividend income in her 2025–26 tax return
+- for CGT purposes, she acquired the 45 new shares for \$360 on 20 December 2025.

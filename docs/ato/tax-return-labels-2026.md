@@ -52,7 +52,7 @@ carry this mapping as their second header row; the full per-column table is in
 | 12D | Discount from taxed upfront schemes — eligible for reduction |
 | 12E | Discount from taxed upfront schemes — not eligible for reduction |
 | 12F | Discount from deferral schemes |
-| 12B | Total assessable discount amount = D + E + F, less the up-to-$1,000 taxed-upfront reduction where the ≤$180,000 income test is met |
+| 12B | Total assessable discount amount = D + E + F, less the up-to-\$1,000 taxed-upfront reduction where the ≤\$180,000 income test is met |
 | 12C | TFN amounts withheld from discounts |
 | 12A | Foreign-source discounts for which a foreign income tax offset is claimed (memo for question 20) |
 
@@ -86,7 +86,7 @@ The pre-1 July 2009 cessation label (G on earlier forms) no longer appears on th
 | --- | --- |
 | 20E | Assessable foreign source income (gross) |
 | 20M | Other net foreign source income (the net amount of 20E income after expenses) |
-| 20O | Foreign income tax offset — up to $1,000 without the offset-limit calculation, confirming the FITO de-minimis in `fito-limit.md` (show cents) |
+| 20O | Foreign income tax offset — up to \$1,000 without the offset-limit calculation, confirming the FITO de-minimis in `fito-limit.md` (show cents) |
 
 ## Deductions D7 / D8 / D15
 
@@ -121,7 +121,7 @@ question 13's Part C says so by treating debt deductions as claimed at X/Y —
 
 > If you incurred debt deductions, the thin capitalisation rules may affect the amount you can deduct
 > at labels **X** and **Y**. For example, debt deductions such as interest and borrowing costs, in
-> deriving assessable income from a trust or partnership, of more than $2,000,000 …
+> deriving assessable income from a trust or partnership, of more than \$2,000,000 …
 
 **Foreign-source income → netted into 20M, except debt deductions, which go to D15.** Question 20
 Part E (*other foreign source income*, which is where a foreign company's dividends are shown),

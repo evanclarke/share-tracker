@@ -87,7 +87,7 @@ If your managed fund distribution includes a capital gains component, how you co
 
 If your only capital gains are from managed funds or [trusts](https://www.ato.gov.au/myTax25Trusts) and shown at the **Managed fund and trust distributions** section and:
 
-- your current year capital gains are $10,000 or less, you **don't need** to complete the [Capital gains or losses](https://www.ato.gov.au/mytax25CGT) section
+- your current year capital gains are \$10,000 or less, you **don't need** to complete the [Capital gains or losses](https://www.ato.gov.au/mytax25CGT) section
   - myTax will prompt you to complete the **Capital gains or losses** section
   - myTax will complete **Total current year capital gains** and **Net capital gain** in the **Capital gains or losses** section from information shown in the **Managed fund and trust distributions** section
   - you'll need to complete the Capital gains tax schedule.

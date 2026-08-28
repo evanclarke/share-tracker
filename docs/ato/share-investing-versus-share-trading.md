@@ -97,7 +97,7 @@ invest a substantial amount of capital and not be considered a share trader.
 George is an accountant. He has:
 
 - bought 200,000 shares in 20 blue chip companies over several years
-- a total portfolio of $1.5 million.
+- a total portfolio of \$1.5 million.
 
 George bought the shares because of consistently high dividends, although he does
 invest in a small amount of growth stocks. George monitors his share portfolio daily
@@ -105,7 +105,7 @@ and analyses daily developments in equity markets using financial newspapers and
 stock market reports, and subscribes to news from online investment analysts.
 
 In the last income year, he sells 20,000 of his shares over a number of occasions for
-a gain of $50,000. He didn't sell his shares unless their price appreciated markedly.
+a gain of \$50,000. He didn't sell his shares unless their price appreciated markedly.
 
 Although George has made a large gain on the sale of shares, and has invested a
 significant amount of capital, he isn't carrying on a business of share trading. He

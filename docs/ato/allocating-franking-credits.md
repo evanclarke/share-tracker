@@ -22,7 +22,7 @@ If you are a base rate entity, your corporate tax rate for imputation purposes i
 
 You are a base rate entity for an income year if either of the following apply:
 
-- your aggregated turnover for the previous year was less than $25 million for the 2017–18 income year or less than $50 million from the 2018–19 income year, and 80% or less of your assessable income was base rate entity passive income
+- your aggregated turnover for the previous year was less than \$25 million for the 2017–18 income year or less than \$50 million from the 2018–19 income year, and 80% or less of your assessable income was base rate entity passive income
 - the entity didn't exist in the previous income year.
 
 Otherwise, your corporate tax rate for imputation purposes is 30%.
@@ -43,18 +43,18 @@ Start of example
 
 ### Example 1: Franking a distribution at 27.5% tax rate
 
-Pederman Plastics is carrying on a business, and in the 2018–19 income year it has an aggregated turnover of $18 million. Assessable income is $20 million, which includes $2 million of base rate entity passive income.
+Pederman Plastics is carrying on a business, and in the 2018–19 income year it has an aggregated turnover of \$18 million. Assessable income is \$20 million, which includes \$2 million of base rate entity passive income.
 
 When franking its distributions for the 2019–20 income year, Pederman Plastics assumes aggregated turnover will be the same in 2019–20 as it was in 2018–19.
 
-Pederman Plastics' 2018–19 aggregated turnover was under $50 million, and only 10% of assessable income was base rate entity passive income. This means the corporate tax rate for imputation purposes for the 2019–20 income year is 27.5%, and Pederman Plastics will frank its 2019–20 distributions based on this rate.
+Pederman Plastics' 2018–19 aggregated turnover was under \$50 million, and only 10% of assessable income was base rate entity passive income. This means the corporate tax rate for imputation purposes for the 2019–20 income year is 27.5%, and Pederman Plastics will frank its 2019–20 distributions based on this rate.
 
-Pederman Plastics wants to distribute $100,000 profit to its shareholders.
+Pederman Plastics wants to distribute \$100,000 profit to its shareholders.
 
 The maximum franking credit it can attach to that distribution (based on the above formulas) is calculated as follows:
 
 - applicable gross up rate = (100% − 27.5%) ÷ 27.5% = 2.6364
-- maximum franking credit = $100,000 × (1 ÷ 2.6364) = $37,930.51.
+- maximum franking credit = \$100,000 × (1 ÷ 2.6364) = \$37,930.51.
 
 End of example
 
@@ -62,18 +62,18 @@ Start of example
 
 ### Example 2: Franking a distribution at 30% tax rate
 
-Dillmore Manufacture has an aggregated turnover of $52 million in the 2018–19 income year.
+Dillmore Manufacture has an aggregated turnover of \$52 million in the 2018–19 income year.
 
-Even though Dillmore Manufacture's 2019–20 first quarter sales decline and it only expects a $45 million aggregated turnover in 2019–20, it assumes aggregated turnover for 2019–20 will be $52 million when working out corporate tax rate for imputation purposes.
+Even though Dillmore Manufacture's 2019–20 first quarter sales decline and it only expects a \$45 million aggregated turnover in 2019–20, it assumes aggregated turnover for 2019–20 will be \$52 million when working out corporate tax rate for imputation purposes.
 
-As the prior year aggregated turnover was over $50 million, the 2019–20 corporate tax rate for imputation purposes is 30%. Dillmore Manufacture will frank its distributions based on this rate.
+As the prior year aggregated turnover was over \$50 million, the 2019–20 corporate tax rate for imputation purposes is 30%. Dillmore Manufacture will frank its distributions based on this rate.
 
-Dillmore Manufacture wants to distribute $100,000 profit to its shareholders.
+Dillmore Manufacture wants to distribute \$100,000 profit to its shareholders.
 
 The maximum franking credit it can attach to that distribution (based on the above formulas) is calculated as follows:
 
 - applicable gross up rate = (100% − 30%) ÷ 30% = 2.3333
-- maximum franking credit = $100,000 × (1 ÷ 2.3333) = $42,857.75.
+- maximum franking credit = \$100,000 × (1 ÷ 2.3333) = \$42,857.75.
 
 End of example
 
@@ -81,7 +81,7 @@ End of example
 
 For the 2016–17 income year, your corporate tax rate for imputation purposes is 27.5% if either of the following apply:
 
-- your 2015–16 aggregated turnover was less than $10 million, and you are carrying on a business
+- your 2015–16 aggregated turnover was less than \$10 million, and you are carrying on a business
 - this is the first year you are in business.
 
 Otherwise, your corporate tax rate for imputation purposes is 30%.
@@ -105,11 +105,11 @@ Start of example
 
 ### Example: Identifying the franking percentage for a distribution
 
-On 30 June 2018, Marlyn Pty Ltd distributes $11,667 to its shareholders. Marlyn Pty Ltd allocates franking credits of only $3,000 to the distribution, rather than the $5,000 maximum allowable in their circumstances.
+On 30 June 2018, Marlyn Pty Ltd distributes \$11,667 to its shareholders. Marlyn Pty Ltd allocates franking credits of only \$3,000 to the distribution, rather than the \$5,000 maximum allowable in their circumstances.
 
 The franking percentage for this distribution is calculated as follows:
 
-($3,000 ÷ $5,000) × 100% = 60%.
+(\$3,000 ÷ \$5,000) × 100% = 60%.
 
 End of example
 
@@ -137,8 +137,8 @@ never a claimable figure for this system's taxpayer, whatever a mis-keyed row sa
 The ceiling itself follows from the two formulas: with a gross-up rate of
 (100% − rate) ÷ rate, the maximum credit is the frankable distribution × rate ÷ (100% − rate). At
 the standard 30% rate that is **franked amount × 30/70** — the ratio in the fully franked worked
-example in [`you-and-your-shares-dividends.md`](you-and-your-shares-dividends.md) ($700 franked →
-$300 credit). Every base-rate-entity rate the page lists (27.5%, 26%, 25%) gives a *smaller*
+example in [`you-and-your-shares-dividends.md`](you-and-your-shares-dividends.md) (\$700 franked →
+\$300 credit). Every base-rate-entity rate the page lists (27.5%, 26%, 25%) gives a *smaller*
 maximum, and a partly franked distribution a smaller one again, so 30/70 is the single ceiling that
 holds for every company distribution — which is what `entities::income::db_upsert` enforces.
 

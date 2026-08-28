@@ -37,24 +37,24 @@ Capital gains (not question 13 Partnerships and trusts).
 - **Step 2 — Gross up any discounted capital gain.** A distributed gain the fund has already
   discounted is grossed up by **multiplying by 2**; the grossed-up amount is the capital gain
   from the fund.
-  - *Example 21*: Tim receives a discounted capital gain of $400 → grosses up to $800 ($400 × 2).
+  - *Example 21*: Tim receives a discounted capital gain of \$400 → grosses up to \$800 (\$400 × 2).
 - **Step 3 — Total current-year capital gains (label 18H).** Add all fund gains (grossed up where
   necessary) and gains from other assets; write the total at label H. Capital losses are **not**
   deducted before label H.
-  - *Example 22*: Tim's fund also distributes a $100 'other'-method gain → 18H is $900
-    ($800 + $100).
+  - *Example 22*: Tim's fund also distributes a \$100 'other'-method gain → 18H is \$900
+    (\$800 + \$100).
 - **Step 4 — Apply capital losses against capital gains.** "If you make capital losses this year,
   deduct them from the amount you wrote at label H. If you have unapplied net capital losses from
   earlier income years, deduct them from the amount remaining after you deduct capital losses made
   this year. Deduct both types of losses in the manner that gives you the greatest benefit" —
   usually against 'other'/indexation gains first, then discount gains.
-  - *Example 23*: Tim has a $200 capital loss selling another CGT asset → $900 − $200 = $700,
-    applied against the 'other' gain first, leaving the whole $700 discountable.
+  - *Example 23*: Tim has a \$200 capital loss selling another CGT asset → \$900 − \$200 = \$700,
+    applied against the 'other' gain first, leaving the whole \$700 discountable.
 - **Step 5 — Apply the CGT discount.** Remaining grossed-up discount gains are reduced by 50%.
   The discount is never applied to indexation/'other'-method gains.
-  - *Example 24*: $700 × 50% = $350.
+  - *Example 24*: \$700 × 50% = \$350.
 - **Step 6 — Net capital gain (label 18A).** The remainder after steps 1–5.
-  - *Example 25*: Tim writes $350 at question 18 – label A.
+  - *Example 25*: Tim writes \$350 at question 18 – label A.
 
   (Examples 21–25 are one continuous worked example, reproduced in
   `src/ato_examples.rs` as `pig_managed_funds_examples_21_25_tim_*`. The same
@@ -91,35 +91,35 @@ they are reflected within the AMIT cost base net amount. See LCR 2015/11.
 
 ### Example 26: receiving a non-assessable amount from a managed fund (Bob)
 
-Bob's OZ Investments Fund statement shows his distribution included: $100 discount-method gain
-(grossed-up $200), $75 indexation-method gain, $28 'other'-method gain, and a $105 tax-deferred
-amount. His units' cost base is $1,200 (reduced cost base $1,050). He has no other gains or losses.
+Bob's OZ Investments Fund statement shows his distribution included: \$100 discount-method gain
+(grossed-up \$200), \$75 indexation-method gain, \$28 'other'-method gain, and a \$105 tax-deferred
+amount. His units' cost base is \$1,200 (reduced cost base \$1,050). He has no other gains or losses.
 
-- Total current-year gains: $200 + $75 + $28 = **$303 at 18H**
-- No losses; the discount reduces the grossed-up gain back to $100 → **$203 at 18A**
-- (Non-AMIT) the $105 tax-deferred amount reduces cost base $1,200 → $1,095 and reduced cost base
-  $1,050 → $945. If the fund is an AMIT, the AMIT cost base net amount governs instead.
+- Total current-year gains: \$200 + \$75 + \$28 = **\$303 at 18H**
+- No losses; the discount reduces the grossed-up gain back to \$100 → **\$203 at 18A**
+- (Non-AMIT) the \$105 tax-deferred amount reduces cost base \$1,200 → \$1,095 and reduced cost base
+  \$1,050 → \$945. If the fund is an AMIT, the AMIT cost base net amount governs instead.
 
 ### Example 27: a capital loss greater than the indexation + 'other' gains (Ilena)
 
-Ilena's XYZ Managed Fund statement shows: $65 discounted capital gain, $50 'other'-method gain,
-$40 indexation-method gain (plus a $30 tax-deferred and $35 tax-free amount). She has no other
-capital gain but made a **$100 capital loss of her own** selling shares during the year. Her
-units' cost base is $5,000 (reduced cost base $4,700).
+Ilena's XYZ Managed Fund statement shows: \$65 discounted capital gain, \$50 'other'-method gain,
+\$40 indexation-method gain (plus a \$30 tax-deferred and \$35 tax-free amount). She has no other
+capital gain but made a **\$100 capital loss of her own** selling shares during the year. Her
+units' cost base is \$5,000 (reduced cost base \$4,700).
 
-- Gross up the discounted gain: $65 × 2 = $130
-- Total current-year gains: $130 + $50 + $40 = **$220 at 18H**
-- Apply her own $100 loss, best-first: $90 against the indexation + 'other' gains ($90 → $0),
-  the remaining $10 against the grossed-up discount gain ($130 → $120)
-- Apply the 50% discount: $120 × 50% = $60
-- Net capital gain: $0 + $60 = **$60 at 18A**
-- (Non-AMIT) the tax-deferred amount reduces the cost base $5,000 → $4,970; tax-deferred +
-  tax-free reduce the reduced cost base $4,700 → $4,635.
+- Gross up the discounted gain: \$65 × 2 = \$130
+- Total current-year gains: \$130 + \$50 + \$40 = **\$220 at 18H**
+- Apply her own \$100 loss, best-first: \$90 against the indexation + 'other' gains (\$90 → \$0),
+  the remaining \$10 against the grossed-up discount gain (\$130 → \$120)
+- Apply the 50% discount: \$120 × 50% = \$60
+- Net capital gain: \$0 + \$60 = **\$60 at 18A**
+- (Non-AMIT) the tax-deferred amount reduces the cost base \$5,000 → \$4,970; tax-deferred +
+  tax-free reduce the reduced cost base \$4,700 → \$4,635.
 
 ### Example 28: notified of an AMIT cost base net adjustment (Miriam)
 
-Miriam's AMIT units have a cost base of $55 each. The fund attributes $13 of assessable income
-per unit but pays only $3 cash: increase $13 vs reduction $3 → a $10 shortfall AMIT cost base net
-amount, **increasing** her cost base to $65 (protecting the retained amount from double taxation
-on later sale). In the alternative (attributes $3, pays $13 cash), the $10 excess **reduces** the
-cost base to $45.
+Miriam's AMIT units have a cost base of \$55 each. The fund attributes \$13 of assessable income
+per unit but pays only \$3 cash: increase \$13 vs reduction \$3 → a \$10 shortfall AMIT cost base net
+amount, **increasing** her cost base to \$65 (protecting the retained amount from double taxation
+on later sale). In the alternative (attributes \$3, pays \$13 cash), the \$10 excess **reduces** the
+cost base to \$45.

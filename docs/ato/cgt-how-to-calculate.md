@@ -25,9 +25,9 @@ Some assets, such as your home, are [exempt from CGT](https://www.ato.gov.au/ind
 
 ### Example: CGT with discount
 
-Justin, an Australian resident, buys a block of land. He owns it for 18 months and sells it, making a profit of $10,000. He has no capital losses.
+Justin, an Australian resident, buys a block of land. He owns it for 18 months and sells it, making a profit of \$10,000. He has no capital losses.
 
-Justin is entitled to the 50% CGT discount for the land. He will declare a capital gain of $5,000 in his tax return.
+Justin is entitled to the 50% CGT discount for the land. He will declare a capital gain of \$5,000 in his tax return.
 
 ## Calculate your CGT
 
@@ -87,23 +87,23 @@ If the remaining amount after step 5 is:
 
 ##### Example: working out CGT for a single asset
 
-Rhi buys an investment property for $500,000 and sells it 5 years later for $600,000.
+Rhi buys an investment property for \$500,000 and sells it 5 years later for \$600,000.
 
 She has no other capital gains or losses.
 
 Using the steps above, Rhi works out her capital gain as follows.
 
-1. The capital proceeds from the CGT event are $600,000.
-  - purchase costs of $500,000 + $15,000 stamp duty + $1,200 conveyancing fees
-  - sale costs of $1,300 conveyancing fees + $12,500 agent's commission.
+1. The capital proceeds from the CGT event are \$600,000.
+  - purchase costs of \$500,000 + \$15,000 stamp duty + \$1,200 conveyancing fees
+  - sale costs of \$1,300 conveyancing fees + \$12,500 agent's commission.
 
 2. 
-3. Rhi’s capital gain on the investment property is $600,000 − $530,000 = $70,000.
+3. Rhi’s capital gain on the investment property is \$600,000 − \$530,000 = \$70,000.
 4. Rhi has no other capital gains or losses, so she skips to step 7.
 5. This step is not applicable.
 6. This step is not applicable.
-7. Rhi can use the CGT discount to reduce her capital gain because she is an Australian resident and owned the asset for at least 12 months. The CGT discount is $70,000 × 50% = $35,000.
-8. Rhi reports a net capital gain of $35,000 and a capital gain of $70,000 at question **18** – labels **A** and **H** respectively in the supplementary section of her tax return. She will pay tax on the net capital gain at her marginal income tax rate.
+7. Rhi can use the CGT discount to reduce her capital gain because she is an Australian resident and owned the asset for at least 12 months. The CGT discount is \$70,000 × 50% = \$35,000.
+8. Rhi reports a net capital gain of \$35,000 and a capital gain of \$70,000 at question **18** – labels **A** and **H** respectively in the supplementary section of her tax return. She will pay tax on the net capital gain at her marginal income tax rate.
 
 The capital gain for the property happens on the date of the sale contract, not the date of settlement. For example, if contracts are exchanged on 4 June 2026 and settlement happens on 6 July 2026, Rhi must report her capital gain in her tax return for the financial year ending 30 June 2026.
 
@@ -111,16 +111,16 @@ The capital gain for the property happens on the date of the sale contract, not 
 
 Take the same facts as above, except that in addition to the investment property, Rhi also sells some shares in the same financial year, as follows:
 
-- Rhi bought 1,000 shares at $10 each for a total of $10,000, including stamp duty and brokerage costs.
-- Rhi sells the shares (at a loss) for $5,500. There are no brokerage costs on the sale of the shares.
+- Rhi bought 1,000 shares at \$10 each for a total of \$10,000, including stamp duty and brokerage costs.
+- Rhi sells the shares (at a loss) for \$5,500. There are no brokerage costs on the sale of the shares.
 
 Using the steps above, Rhi works out her net capital gain or loss as follows:
 
-1. The capital proceeds from the sale of the shares are $5,500.
-2. The reduced cost base is $10,000. This includes stamp duty and brokerage, which are costs Rhi had to acquire the asset.
-3. Rhi’s capital loss on the shares is $5,500 − $10,000 = ($4,500).
-4. Rhi also had a capital gain of $70,000 on her investment property (see previous example).
-5. Rhi's has a net capital gain calculated as $70,000 (gain from property) − $4,500 (losses from share) = $65,500
+1. The capital proceeds from the sale of the shares are \$5,500.
+2. The reduced cost base is \$10,000. This includes stamp duty and brokerage, which are costs Rhi had to acquire the asset.
+3. Rhi’s capital loss on the shares is \$5,500 − \$10,000 = (\$4,500).
+4. Rhi also had a capital gain of \$70,000 on her investment property (see previous example).
+5. Rhi's has a net capital gain calculated as \$70,000 (gain from property) − \$4,500 (losses from share) = \$65,500
 6. Rhi has a capital gain so she continues to step 7.
-7. Rhi can use the CGT discount to reduce the remaining capital gain on her investment property, calculated $65,500 × 50% = $32,750.
-8. Rhi reports a net capital gain of $32,750 and a capital gain of $70,000 at question **18** – labels **A** and **H** respectively in the supplementary section of her tax return. She will pay tax on the net capital gain at her marginal income tax rate.
+7. Rhi can use the CGT discount to reduce the remaining capital gain on her investment property, calculated \$65,500 × 50% = \$32,750.
+8. Rhi reports a net capital gain of \$32,750 and a capital gain of \$70,000 at question **18** – labels **A** and **H** respectively in the supplementary section of her tax return. She will pay tax on the net capital gain at her marginal income tax rate.

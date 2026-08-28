@@ -119,17 +119,17 @@ Shanti owns 2,000 shares in ZAC Ltd. She bought 1,000 shares on 1 June 1985
 and 1,000 shares on 1 December 1996.
 
 On 1 July 1998, ZAC Ltd granted each of its shareholders one right for each
-four shares owned to acquire shares in the company for $1.80 each. Shanti
+four shares owned to acquire shares in the company for \$1.80 each. Shanti
 therefore received 500 rights in total. At that time, shares in ZAC Ltd were
-worth $2. Each right was therefore worth 20 cents.
+worth \$2. Each right was therefore worth 20 cents.
 
 Shanti decided that she did not wish to buy any more shares in ZAC Ltd, so she
-sold all her rights for 20 cents each, a total amount of $100. Only those
+sold all her rights for 20 cents each, a total amount of \$100. Only those
 rights issued for the shares she bought on 1 December 1996 are subject to CGT.
-As Shanti did not pay anything for the rights, she has made a **$50 taxable
+As Shanti did not pay anything for the rights, she has made a **\$50 taxable
 capital gain** on their sale.
 
-The $50 Shanti received on the sale of her rights for the shares she bought on
+The \$50 Shanti received on the sale of her rights for the shares she bought on
 1 June 1985 is not subject to CGT, as those rights are taken to have been
 acquired at the same time as the shares, that is, before 20 September 1985.
 
@@ -146,12 +146,12 @@ the rights are subject to CGT and are **acquired at the time of the exercise**.
 
 When Shanti exercised the rights issued for the shares she bought on
 1 December 1996, the **cost base of the 250 shares she acquired is the amount
-she paid to exercise each right ($1.80 for each share)**.
+she paid to exercise each right (\$1.80 for each share)**.
 
 When Shanti exercised the rights for the shares she bought before 20 September
 1985, Shanti's cost base for each of the 250 shares she acquired includes not
-only the exercise price of the right ($1.80) but also the market value of the
-right at that time (20 cents). The cost base of each share is therefore $2.
+only the exercise price of the right (\$1.80) but also the market value of the
+right at that time (20 cents). The cost base of each share is therefore \$2.
 
 ## CGT discount on shares or units acquired from exercise of rights or options
 
@@ -204,7 +204,7 @@ right takes its **original parcel's acquisition date** for the 12-month
 discount (free rights are deemed acquired with the original shares, per this
 page), a **nil cost base** for rights issued free, or the carried amount paid
 to acquire the rights for purchased rights (so nil proceeds on a paid right —
-a lapse — realises a capital loss). Example 39's post-CGT half (the $50 gain)
+a lapse — realises a capital loss). Example 39's post-CGT half (the \$50 gain)
 is reproduced in `src/ato_examples.rs`. A **retail premium** under a
 renounceable offer is the same disposal with the premium as proceeds (TR
 2017/4 — see [`retail-premiums.md`](retail-premiums.md)).

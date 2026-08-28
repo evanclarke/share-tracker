@@ -75,15 +75,15 @@ dollars**.
 
 > **Example: market value of new asset determines old asset's disposal proceeds**
 >
-> Katrina acquires 100 Coin A for $15,000 on 5 July 2025.
+> Katrina acquires 100 Coin A for \$15,000 on 5 July 2025.
 >
 > Katrina decides to exchange 20 Coin A for 100 Coin B through a reputable
 > digital asset exchange on 15 November 2025.
 >
 > Using the exchange rates shown on the digital asset exchange at the time of
-> the transaction, the market value of 100 Coin B was $6,000.
+> the transaction, the market value of 100 Coin B was \$6,000.
 >
-> Therefore, Katrina's capital proceeds are **$6,000** for the disposal of
+> Therefore, Katrina's capital proceeds are **\$6,000** for the disposal of
 > 20 Coin A. Katrina uses this amount to work out her capital gain for the
 > CGT event.
 
@@ -95,7 +95,7 @@ disposing of to work out the capital proceeds.
 
 > **Example: market value of old crypto asset determines its disposal proceeds**
 >
-> Katrina acquires 100 Coin A for $15,000 on 5 July 2025.
+> Katrina acquires 100 Coin A for \$15,000 on 5 July 2025.
 >
 > Katrina decides to exchange 20 Coin A for a new coin, Coin D, before it is
 > listed on a digital exchange. Katrina acquires 100 Coin D in the exchange on
@@ -104,9 +104,9 @@ disposing of to work out the capital proceeds.
 > At the time of the transaction, Coin D doesn't have a market value. Katrina
 > uses the market value of Coin A on the digital asset exchange at the time of
 > the transaction. The market value of 20 Coin A at the time of exchange was
-> $5,000.
+> \$5,000.
 >
-> Therefore, Katrina's capital proceeds are **$5,000** for the disposal of
+> Therefore, Katrina's capital proceeds are **\$5,000** for the disposal of
 > Coin A.
 
 ## Transferring crypto between wallets you own (and network fees)

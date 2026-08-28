@@ -70,21 +70,21 @@ a class ruling setting out the tax consequences for shareholders.
 ## Example: off-market buy-back
 
 Ranjini bought 10,000 shares in a company that was not a listed public
-company at a cost of $6 per share, including brokerage.
+company at a cost of \$6 per share, including brokerage.
 
 A few years later, the company wrote to its shareholders offering to buy back
-10% of their shares for $9.60 each. The buy-back price included a **franked
-dividend of $1.40 per share**, with each dividend to carry a **franking
-credit of $0.60**.
+10% of their shares for \$9.60 each. The buy-back price included a **franked
+dividend of \$1.40 per share**, with each dividend to carry a **franking
+credit of \$0.60**.
 
 Ranjini applied to participate in the buy-back to sell 1,000 of her shares.
 The company approved the buy-back on the same terms as its earlier letter of
 offer.
 
 The **market value** of the company's shares at the time of the buy-back,
-assuming the buy-back had not been proposed, was **$10.20**.
+assuming the buy-back had not been proposed, was **\$10.20**.
 
-Ranjini received a cheque for $9,600 (1,000 shares × $9.60 = $9,600).
+Ranjini received a cheque for \$9,600 (1,000 shares × \$9.60 = \$9,600).
 
 Ranjini must work out her capital gain using the market value of the shares
 because:
@@ -97,14 +97,14 @@ Ranjini works out her capital gain as follows:
 
 | Step | Amount |
 | --- | --- |
-| Market value of shares: $10.20 × 1,000 | $10,200 |
-| Dividend: $1.40 × 1,000 | $1,400 |
-| Capital proceeds: $10,200 − $1,400 | $8,800 |
-| Cost base: $6.00 × 1,000 | $6,000 |
-| Capital gain (before applying any discount): $8,800 − $6,000 | **$2,800** |
+| Market value of shares: \$10.20 × 1,000 | \$10,200 |
+| Dividend: \$1.40 × 1,000 | \$1,400 |
+| Capital proceeds: \$10,200 − \$1,400 | \$8,800 |
+| Cost base: \$6.00 × 1,000 | \$6,000 |
+| Capital gain (before applying any discount): \$8,800 − \$6,000 | **\$2,800** |
 
-Ranjini must report her capital gain as well as her **dividend of $1,400 and
-franking credit of $600** in her tax return.
+Ranjini must report her capital gain as well as her **dividend of \$1,400 and
+franking credit of \$600** in her tax return.
 
 ## Further references
 

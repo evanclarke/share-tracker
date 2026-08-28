@@ -74,14 +74,14 @@ translating the cost of the acquisition of trading stock for income tax purposes
 Peter, an accruals-based taxpayer, is a consultant engineer. He provides professional
 services to clients in Australia as well as New York. Fees for the New York based
 clients are written in US dollars at the end of each month, and payment is required
-within 30 days. The fees are around US$80,000 each month. It would be a reasonable
+within 30 days. The fees are around US\$80,000 each month. It would be a reasonable
 approximation for Peter to translate the US dollar amounts into Australian dollars
 using an exchange rate based on a yearly or monthly average.
 
 ### Example 5
 
 Peter (from example 4 above) had also bought an office building in New York for
-US$3 million during the income year. In this case, **it would not be a reasonable
+US\$3 million during the income year. In this case, **it would not be a reasonable
 approximation to translate the purchase price of the office building using an average
 yearly rate**.
 

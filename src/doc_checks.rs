@@ -5,6 +5,17 @@
 //! anything about building, configuring or operating the server — and the cited
 //! ATO mirror — is present, so the documented scope cut can't silently vanish.
 
+/// A mirrored ATO page as the page itself reads.
+///
+/// The mirrors escape `$` as `\$` so GitHub does not take a pair of dollar
+/// amounts on one line for a LaTeX span (see `docs/ato/OVERVIEW.md`). Undo that
+/// here rather than in the needles, so every citation below stays written
+/// exactly as the ATO publishes it — which is what makes it comparable against
+/// the live page when a mirror is re-audited.
+fn ato(s: &str) -> String {
+    s.replace("\\$", "$")
+}
+
 const API_MD: &str = include_str!("../docs/API.md");
 const README_MD: &str = include_str!("../README.md");
 const FEATURES_MD: &str = include_str!("../docs/FEATURES.md");
@@ -3422,7 +3433,8 @@ fn interest_credited_date_convention_documented() {
     // The quote is line-wrapped and blockquoted in the mirror, so compare with
     // the `>` markers and the wrapping collapsed away.
     let flat = |s: &str| {
-        s.replace('>', " ")
+        ato(s)
+            .replace('>', " ")
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" ")
@@ -3479,7 +3491,8 @@ fn multi_year_expense_apportionment_documented() {
     const APPORTIONMENT: &str = include_str!("../docs/ato/expense-time-apportionment.md");
     const ATO_OVERVIEW: &str = include_str!("../docs/ato/OVERVIEW.md");
     let flat = |s: &str| {
-        s.replace('>', " ")
+        ato(s)
+            .replace('>', " ")
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" ")
@@ -3544,7 +3557,8 @@ fn inherited_cost_base_entry_conventions_documented() {
     const INHERITED_COST_BASE: &str = include_str!("../docs/ato/inherited-assets-cost-base.md");
     const ATO_OVERVIEW: &str = include_str!("../docs/ato/OVERVIEW.md");
     let flat = |s: &str| {
-        s.replace('>', " ")
+        ato(s)
+            .replace('>', " ")
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" ")
@@ -3887,7 +3901,7 @@ fn amma_coverage_rule_is_documented_with_its_ato_authority() {
     // Example 3: sold out before year end, statement still issued — so a
     // mid-year disposal alone can never suppress the check.
     assert!(
-        ATTRIBUTING
+        ato(ATTRIBUTING)
             .contains("AMIT D issues an AMMA statement to Entity E for the amount of $50,000")
     );
     // Example 4: nothing attributed to a member who held at no record date.

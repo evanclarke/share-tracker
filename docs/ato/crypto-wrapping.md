@@ -36,14 +36,14 @@ the market value of the wrapped token at the time of the exchange.**
 
 > **Example: CGT treatment when exchanging wrapped tokens**
 >
-> Kal bought 1 BTC for $165,000 and then wrapped it through a smart contract
+> Kal bought 1 BTC for \$165,000 and then wrapped it through a smart contract
 > for 1 WBTC a few months later.
 >
-> The market value of BTC at the time of exchange was $180,000. A CGT event
+> The market value of BTC at the time of exchange was \$180,000. A CGT event
 > happens when the BTC is wrapped through that smart contract. Kal will have a
-> **capital gain of $15,000** due to exchanging BTC for WBTC.
+> **capital gain of \$15,000** due to exchanging BTC for WBTC.
 >
-> The 1 WBTC Kal now holds has a market value acquisition amount of **$180,000**
+> The 1 WBTC Kal now holds has a market value acquisition amount of **\$180,000**
 > (the market value of BTC at time of wrapping) that will form part of its cost
 > base when it is later sold or otherwise disposed of.
 
@@ -58,11 +58,11 @@ similarly to interest income.
 
 > **Example: crypto asset reward from DeFi platform**
 >
-> Craig 'lends' 100 stablecoin tokens valued at $10 per token through the DeFi
+> Craig 'lends' 100 stablecoin tokens valued at \$10 per token through the DeFi
 > platform Compound Finance. The DeFi platform pays a rate of return of 1% in
 > the form of newly issued stablecoin tokens.
 >
 > Craig will need to declare the market value of the newly issued tokens he
 > earns as assessable income in his tax return. The income amount Craig
-> declares is $10. The cost base of the newly issued tokens is their market
+> declares is \$10. The cost base of the newly issued tokens is their market
 > value at the time Craig acquires them.

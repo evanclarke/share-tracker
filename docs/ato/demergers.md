@@ -95,31 +95,31 @@ the original and new interests.
 > date of the demerger.
 >
 > Anita owned 280 BHP Billiton shares (all post-CGT) with a cost base of
-> $2,500 immediately before the demerger. Under the demerger, Anita received
+> \$2,500 immediately before the demerger. Under the demerger, Anita received
 > 56 BHP Steel shares.
 >
 > - **Step 1** — total cost base of the BHP Billiton shares immediately before
->   the demerger: $2,500.
+>   the demerger: \$2,500.
 > - **Step 2** — BHP Billiton advised shareholders to apportion 94.937% of the
 >   total cost base to BHP Billiton shares and 5.063% to BHP Steel shares:
->   (a) BHP Billiton: 94.937% × $2,500 = $2,373.43;
->   (b) BHP Steel: 5.063% × $2,500 = $126.58.
-> - **Step 3** — $2,373.43 ÷ 280 = $8.48 per BHP Billiton share.
-> - **Step 4** — $126.58 ÷ 56 = $2.26 per BHP Steel share.
+>   (a) BHP Billiton: 94.937% × \$2,500 = \$2,373.43;
+>   (b) BHP Steel: 5.063% × \$2,500 = \$126.58.
+> - **Step 3** — \$2,373.43 ÷ 280 = \$8.48 per BHP Billiton share.
+> - **Step 4** — \$126.58 ÷ 56 = \$2.26 per BHP Steel share.
 
 (The ATO's example presents cent-rounded figures; the unrounded apportionment
-is $2,373.425 and $126.575, which sum exactly to the $2,500 step 1 amount.)
+is \$2,373.425 and \$126.575, which sum exactly to the \$2,500 step 1 amount.)
 
 ### Example 31: With pre-CGT interests
 
 > Anita owned 400 BHP Billiton shares immediately before the demerger: 120
-> pre-CGT shares and 280 post-CGT shares (cost base $2,500). If she chooses a
+> pre-CGT shares and 280 post-CGT shares (cost base \$2,500). If she chooses a
 > rollover, the 24 BHP Steel shares received for the 120 pre-CGT shares are
 > pre-CGT and need no cost-base calculation; the remaining 280 post-CGT shares
 > and their 56 BHP Steel shares are worked out as in Example 30. If she does
 > not choose a rollover, the 24 BHP Steel shares are post-CGT shares acquired
-> on the demerger date with a cost base of $3.45 per share (the capital return
-> of $0.69 per share × 5). In either case there is no change to the pre-CGT
+> on the demerger date with a cost base of \$3.45 per share (the capital return
+> of \$0.69 per share × 5). In either case there is no change to the pre-CGT
 > status of the 120 BHP Billiton shares.
 
 ### Using the discount method if you sell your shares after the demerger
@@ -141,7 +141,7 @@ However, you calculate the 12 months from the date of demerger if you did not
 choose the rollover and you received new interests which relate to pre-CGT
 interests in the head entity, or you acquired your new interests without a CGT
 event happening to your original interests (Example 33: BHP Steel shares with
-a $3.45 cost base, relating to pre-CGT BHP Billiton shares without rollover,
+a \$3.45 cost base, relating to pre-CGT BHP Billiton shares without rollover,
 are discountable only when disposed of more than 12 months after the demerger
 date itself).
 

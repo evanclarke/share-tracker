@@ -42,30 +42,30 @@ Company C derives the following capital gains and losses on disposals of assets 
 
 | Capital gains or losses | Amount |
 | --- | --- |
-| Domestic capital gain on land | $100,000 |
-| Foreign capital gain on asset B (no foreign tax paid) | $50,000 |
-| Foreign capital gains on asset C (on which foreign income tax of $2,000 is paid) | $20,000 |
-| Domestic capital loss on asset A | $160,000 |
-| **Net capital gain** | **$10,000** |
+| Domestic capital gain on land | \$100,000 |
+| Foreign capital gain on asset B (no foreign tax paid) | \$50,000 |
+| Foreign capital gains on asset C (on which foreign income tax of \$2,000 is paid) | \$20,000 |
+| Domestic capital loss on asset A | \$160,000 |
+| **Net capital gain** | **\$10,000** |
 
 As the foreign income tax offset can only apply where foreign income tax has been paid on an amount
 included in the taxpayer's assessable income, company C chooses to offset its domestic capital loss
-on asset A of $160,000 against: firstly, the domestic gain on land of $100,000; then $50,000 against
+on asset A of \$160,000 against: firstly, the domestic gain on land of \$100,000; then \$50,000 against
 the foreign capital gain on asset B on which no foreign income tax has been paid; lastly, the
-balance of $10,000 against the foreign capital gain on asset C.
+balance of \$10,000 against the foreign capital gain on asset C.
 
-Therefore, the net capital gain of $10,000 relates to the foreign capital gain on asset C. As this
+Therefore, the net capital gain of \$10,000 relates to the foreign capital gain on asset C. As this
 is the amount included in assessable income on which foreign income tax has been paid, the
-proportionate share of tax paid of **$1,000** (that is, (10,000 ÷ 20,000) × 2,000) counts towards
+proportionate share of tax paid of **\$1,000** (that is, (10,000 ÷ 20,000) × 2,000) counts towards
 company C's foreign income tax offset.
 
 ### Example 12: no foreign income tax offset — foreign income not included in assessable income
 
 Leslie is an Australian-resident taxpayer. On the sale of an asset, Leslie makes a foreign source
-capital gain of $10,000, on which she paid foreign income tax of $2,000. Leslie also realises a
-capital loss of $10,000 on the disposal of an Australian asset.
+capital gain of \$10,000, on which she paid foreign income tax of \$2,000. Leslie also realises a
+capital loss of \$10,000 on the disposal of an Australian asset.
 
-The loss of $10,000 is offset against the foreign gain of $10,000, which results in no net capital
+The loss of \$10,000 is offset against the foreign gain of \$10,000, which results in no net capital
 gain being included in Leslie's assessable income. As her assessable income does not include an
 amount on which foreign income tax has been paid, she is not eligible for a foreign income tax
 offset for the foreign income tax paid on the foreign source capital gain.
@@ -111,5 +111,5 @@ first against domestic gains to maximise the foreign-taxed component of the net 
 no-net-gain case (Example 12, where the offset falls to nil). The net-capital-gain report applies
 one fixed loss-netting order and does not track which gains carry foreign tax through it, so a
 taxpayer with foreign-taxed gains **and** capital losses in the same year must check the outcome
-themselves. The A$1,000 de-minimis ([`fito-limit.md`](fito-limit.md)) bounds the exposure: below it
+themselves. The A\$1,000 de-minimis ([`fito-limit.md`](fito-limit.md)) bounds the exposure: below it
 no limit calculation is required at all.

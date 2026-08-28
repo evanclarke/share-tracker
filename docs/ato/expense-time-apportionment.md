@@ -18,8 +18,8 @@ entered as one row per year (see *Why this matters for this project*).
 > You may be able to claim expenses for taking out a loan to buy shares that
 > are expected to produce dividend income. The expenses may include
 > establishment fees, legal expenses and stamp duty on the loan. If your
-> expenses total more than $100, apportion them over 5 years or the loan term,
-> whichever is shorter. If your expenses are $100 or less, you can claim a
+> expenses total more than \$100, apportion them over 5 years or the loan term,
+> whichever is shorter. If your expenses are \$100 or less, you can claim a
 > deduction for the full amount in the year you incur them.
 
 (Statutory rule: s 25-25 ITAA 1997.) Note that this is the *cost of taking out
@@ -76,24 +76,24 @@ purely as a passive investment."
 ### Example: eligible service period of more than 12 months
 
 > On 1 January 2026, Martin, a senior clerk employed by a legal firm, paid
-> $1,250 for a subscription for a monthly professional journal. The
+> \$1,250 for a subscription for a monthly professional journal. The
 > subscription is for 1 January 2026 to 31 January 2027 (396 days). As the
 > eligible service period is more than 12 months, Martin must apportion his
 > deduction over the income years 2025–26 and 2026–27. Martin's deductions are:
 >
-> - 2025–26 (1 January 2026 to 30 June 2026): $1,250 × (182 ÷ 396) = $572
-> - 2026–27 (1 July 2026 to 31 January 2027): $1,250 × (215 ÷ 396) = $678
+> - 2025–26 (1 January 2026 to 30 June 2026): \$1,250 × (182 ÷ 396) = \$572
+> - 2026–27 (1 July 2026 to 31 January 2027): \$1,250 × (215 ÷ 396) = \$678
 >
 > The total deduction allowed proportionately over the income years 2025–26 and
-> 2026–27 is $1,250.
+> 2026–27 is \$1,250.
 
 *(The ATO rolls this example's dates forward each year — the 2025 edition ran
-1 January 2025 to 31 January 2026 over 397 days, giving $573 / $677. The rule
+1 January 2025 to 31 January 2026 over 397 days, giving \$573 / \$677. The rule
 and the formula are the same; only the day counts move.)*
 
 ### Example: the 12-month rule satisfied (immediately deductible)
 
-> On 1 June 2026 Jasmin, an employed solicitor, paid $1,750 for a subscription
+> On 1 June 2026 Jasmin, an employed solicitor, paid \$1,750 for a subscription
 > for a monthly professional journal for 1 June 2026 to 31 May 2027. The
 > provision of the journal is the 'service to be done under the agreement'. The
 > period of subscription is wholly within a 12-month period ending before the
@@ -110,8 +110,8 @@ month's loan interest, and any prepayment *inside* the 12-month rule, which is
 immediately deductible exactly as the model already treats it.
 
 It is wrong for the two rules above if a multi-year expense is entered as a
-single row: a $2,000 loan establishment fee keyed once claims the whole $2,000
-in the first year instead of $400 in each of five, and a prepayment failing the
+single row: a \$2,000 loan establishment fee keyed once claims the whole \$2,000
+in the first year instead of \$400 in each of five, and a prepayment failing the
 12-month rule claims the whole amount a year early.
 
 Neither `gross_amount` nor `deductible_percentage` helps — they record the

@@ -56,16 +56,16 @@ Remember, if you index the cost base you cannot apply the CGT discount.
 
 ### Example: indexing the cost base (Val)
 
-Val bought an investment property for $150,000 under a contract dated
+Val bought an investment property for \$150,000 under a contract dated
 24 June 1991. She paid:
 
-- a deposit of $15,000 on 24 June 1991
-- the balance of $135,000 on settlement on 5 August 1991
-- stamp duty of $5,000 on 20 July 1991
-- solicitor's fees of $2,000 on 5 August 1991 as part of settlement.
+- a deposit of \$15,000 on 24 June 1991
+- the balance of \$135,000 on settlement on 5 August 1991
+- stamp duty of \$5,000 on 20 July 1991
+- solicitor's fees of \$2,000 on 5 August 1991 as part of settlement.
 
 Val sold the property on 15 October 2024 (the day contracts were exchanged)
-for $600,000. She incurred costs of $1,500 in solicitor's fees and $15,000 in
+for \$600,000. She incurred costs of \$1,500 in solicitor's fees and \$15,000 in
 agent's commission.
 
 The costs of buying the property were incurred before 21 September 1999, so
@@ -78,16 +78,16 @@ The indexation factors are 68.7 ÷ 59.0 = **1.164** and 68.7 ÷ 59.3 = **1.159**
 
 | Cost | Indexed |
 |------|---------|
-| Deposit $15,000 × 1.164 | $17,460 |
-| Balance $135,000 × 1.164 | $157,140 |
-| Stamp duty $5,000 × 1.159 | $5,795 |
-| Solicitor's fees (purchase) $2,000 × 1.159 | $2,318 |
+| Deposit \$15,000 × 1.164 | \$17,460 |
+| Balance \$135,000 × 1.164 | \$157,140 |
+| Stamp duty \$5,000 × 1.159 | \$5,795 |
+| Solicitor's fees (purchase) \$2,000 × 1.159 | \$2,318 |
 
-Val's total cost base is **$199,213**: indexed costs $182,713 + $1,500
-solicitor's fees (sale) + $15,000 agent's commission (neither eligible for
+Val's total cost base is **\$199,213**: indexed costs \$182,713 + \$1,500
+solicitor's fees (sale) + \$15,000 agent's commission (neither eligible for
 indexation).
 
-Using indexation, Val's capital gain is $600,000 − $199,213 = **$400,787**.
+Using indexation, Val's capital gain is \$600,000 − \$199,213 = **\$400,787**.
 
 Val is eligible to use the CGT discount instead of indexation. Unless she has
 significant capital losses to apply, she will get a better result by using the

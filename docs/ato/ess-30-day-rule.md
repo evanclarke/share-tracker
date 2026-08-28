@@ -25,12 +25,12 @@ three years and the shares will be forfeited if he ceases employment within thre
 On 23 June 2019, Wyatt is still employed with Pepper Pines Ltd. At this time, his shares
 are no longer at risk of forfeiture and no longer subject to disposal restrictions. At
 this stage, the deferred taxing point is 23 June 2019. The market value of the shares on
-23 June 2019 is $1,400 and the cost base of the shares is nil. Therefore, the discount
-on Wyatt's shares is $1,400. On 14 July 2019 Pepper Pines Ltd gives Wyatt an ESS
+23 June 2019 is \$1,400 and the cost base of the shares is nil. Therefore, the discount
+on Wyatt's shares is \$1,400. On 14 July 2019 Pepper Pines Ltd gives Wyatt an ESS
 statement on that basis.
 
 On 20 July 2019, Wyatt sells the 400 shares he acquired under the tax-deferred scheme,
-for a total of $1,518. He sells his shares on market and Pepper Pines Ltd is aware of
+for a total of \$1,518. He sells his shares on market and Pepper Pines Ltd is aware of
 the sale. **As the sale is within 30 days of the deferred taxing point, the taxing point
 now becomes 20 July 2019 in accordance with the 30-day rule.**
 
@@ -38,8 +38,8 @@ Pepper Pines Ltd must now give Wyatt an amended ESS statement within 30 days of 
 aware of the disposal, resulting in a change to the taxing point and discount.
 
 **The market value of the shares on 20 July 2019 is the amount Wyatt received from
-selling the shares, $1,518. As Wyatt paid nothing for the shares and incurred no costs,
-the cost base of the shares is nil. Therefore, the discount on the shares is $1,518.**
+selling the shares, \$1,518. As Wyatt paid nothing for the shares and incurred no costs,
+the cost base of the shares is nil. Therefore, the discount on the shares is \$1,518.**
 
 **Due to the 30-day rule, Wyatt must include his discount on his 2020 tax return, not
 his 2019 tax return.**
@@ -50,8 +50,8 @@ Pepper Pines Ltd gives Wyatt an ESS statement for the 2020 financial year, inclu
 discount received from tax-deferred schemes.
 
 Wyatt has no other ESS events in the 2020 financial year. When Wyatt completes his 2020
-tax return, he writes $1,518 at F item 12 'Discount from deferral schemes'. As Wyatt has
-no other ESS interests, he also writes $1,518 at B item 12 'Total assessable discount
+tax return, he writes \$1,518 at F item 12 'Discount from deferral schemes'. As Wyatt has
+no other ESS interests, he also writes \$1,518 at B item 12 'Total assessable discount
 amount'.
 
 ### Timeline of events
@@ -59,8 +59,8 @@ amount'.
 | Date | Event |
 | --- | --- |
 | 23 June 2016 | Wyatt acquires 400 shares under a tax-deferred scheme. |
-| 23 June 2019 | The deferred taxing point occurs. The market value of the shares is $1,400. Wyatt's discount is $1,400 (his cost base is nil). |
+| 23 June 2019 | The deferred taxing point occurs. The market value of the shares is \$1,400. Wyatt's discount is \$1,400 (his cost base is nil). |
 | 14 July 2019 | Pepper Pines Ltd gives Wyatt his ESS statement for the 2019 financial year. |
-| 20 July 2019 | Wyatt sells the 400 shares for $1,518 (within 30 days of the deferred taxing point). This is now the deferred taxing point. Wyatt's discount is now $1,518 (his cost base is nil). |
+| 20 July 2019 | Wyatt sells the 400 shares for \$1,518 (within 30 days of the deferred taxing point). This is now the deferred taxing point. Wyatt's discount is now \$1,518 (his cost base is nil). |
 | 30 July 2019 | Pepper Pines Ltd gives Wyatt an amended ESS statement for the 2019 financial year. |
 | 12 July 2020 | Pepper Pines Ltd gives Wyatt his ESS statement for the 2020 financial year. |

@@ -111,7 +111,7 @@ The amount at item 20**E** must be greater than or equal to the sum of the amoun
 
 1. **Item 20O: Foreign income tax offset**
 
-For many small investors the $1000 de minimis rule will apply and they will not need to do any calculations to work out their Foreign income tax offset (FITO) entitlement. However, as the trustee won't know whether an investor can use the de minimis rule, trustees may wish to refer investors to the [Guide to foreign income tax offset rules 2023](https://www.ato.gov.au/forms-and-instructions/foreign-income-tax-offset-rules-guide-2023).
+For many small investors the \$1000 de minimis rule will apply and they will not need to do any calculations to work out their Foreign income tax offset (FITO) entitlement. However, as the trustee won't know whether an investor can use the de minimis rule, trustees may wish to refer investors to the [Guide to foreign income tax offset rules 2023](https://www.ato.gov.au/forms-and-instructions/foreign-income-tax-offset-rules-guide-2023).
 
 If a trustee has paid foreign income tax on income or capital gains to overseas tax authorities, then the trustee needs to provide the following additional information in case the investor has to calculate their FITO entitlement:
 
@@ -161,7 +161,7 @@ These four capital gains items (**Capital gains discount** and **Capital gains o
 
 1. **Net capital gain**
 
-This item is the sum of the Attribution column **(AMMA statement)** and the Taxable amount column **(SDS)** of **Table 2 – Capital gains**. This item represents the total net capital gain included in the investor's share of net income (or, for an AMIT or attribution CCIV sub-fund trust, their member components of those characters). In our example, this is $155, which is taken into account at item **18A** on the *Tax return for individuals (supplementary section)* 2023 in part B.
+This item is the sum of the Attribution column **(AMMA statement)** and the Taxable amount column **(SDS)** of **Table 2 – Capital gains**. This item represents the total net capital gain included in the investor's share of net income (or, for an AMIT or attribution CCIV sub-fund trust, their member components of those characters). In our example, this is \$155, which is taken into account at item **18A** on the *Tax return for individuals (supplementary section)* 2023 in part B.
 
 This item also includes the investor's share of income categorised as NCMI income and Excluded from NCMI income.
 

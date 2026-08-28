@@ -65,7 +65,7 @@ later disposes** of the asset, using the cost base rules below.
 > - disregarded any capital gain or loss on the transfer of the assets
 > - sold the shares to pay Maria's outstanding debts
 > - transferred the land to Maria's beneficiary, Antonio, and paid the
->   conveyancing fee of $5,000 upon payment of all debts and tax.
+>   conveyancing fee of \$5,000 upon payment of all debts and tax.
 >
 > The shares were not transferred to a beneficiary. Therefore, the executor
 > must include any capital gain or loss on this disposal in the tax return for
@@ -75,7 +75,7 @@ later disposes** of the asset, using the cost base rules below.
 > transfer is disregarded by the LPR.
 >
 > The first element of Antonio's cost base is Maria's cost base on the date of
-> her death. Antonio can include the $5,000 the executor spent on the
+> her death. Antonio can include the \$5,000 the executor spent on the
 > conveyancing in his cost base.
 
 ## Legal costs incurred by a legal personal representative

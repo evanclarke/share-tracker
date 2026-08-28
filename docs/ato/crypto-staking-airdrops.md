@@ -85,7 +85,7 @@ If you receive tokens distributed in an initial airdrop **you don't derive
 ordinary income or make a capital gain at the time you receive them**.
 
 Where the project issues these tokens for free (without any payment made for
-the tokens), they have a **cost base of zero ($0)**. These tokens don't have a
+the tokens), they have a **cost base of zero (\$0)**. These tokens don't have a
 market value at the time of the initial airdrop because they haven't previously
 been traded.
 
@@ -107,8 +107,8 @@ A CGT event happens when you dispose of the tokens. If you hold your tokens for
 > Josh doesn't derive ordinary income or make a capital gain on receipt of the
 > 800 CX.
 >
-> On 25 May 2026, Josh sold the 800 CX for $4,000. Because the cost base of the
-> CX tokens was zero, Josh makes a total capital gain of **$4,000** in the
+> On 25 May 2026, Josh sold the 800 CX for \$4,000. Because the cost base of the
+> CX tokens was zero, Josh makes a total capital gain of **\$4,000** in the
 > 2025–26 income year from the sale of the CX.
 >
 > Josh is also eligible to reduce his total capital gain using the **CGT
@@ -120,10 +120,10 @@ A CGT event happens when you dispose of the tokens. If you hold your tokens for
 > TXP distributed the new HXP to participants who paid an amount for the new
 > token.
 >
-> Calista pays $1 for each token and receives an initial allocation of 1,000
+> Calista pays \$1 for each token and receives an initial allocation of 1,000
 > HXP tokens. Calista doesn't derive ordinary income or make a capital gain on
 > receiving the 1,000 HXP.
 >
-> Calista later sells the 1,000 HXP for $4,000. Because the cost base of the CX
-> was $1,000, Calista makes a capital gain of **$3,000** from the sale of the
+> Calista later sells the 1,000 HXP for \$4,000. Because the cost base of the CX
+> was \$1,000, Calista makes a capital gain of **\$3,000** from the sale of the
 > HXP.

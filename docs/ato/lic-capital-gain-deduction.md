@@ -18,11 +18,11 @@ An individual can deduct 50% of the attributable part advised by the LIC.
 
 ### Example: Resident individual
 
-Ben, an Australian resident, is a shareholder in XYZ Ltd, a LIC. On 21 February 2025, Ben received a fully franked dividend from XYZ Ltd of $70, with an eligible capital gain amount (attributable part) of $50. Ben includes the following amounts in his 2024–25 tax return at the following questions:
+Ben, an Australian resident, is a shareholder in XYZ Ltd, a LIC. On 21 February 2025, Ben received a fully franked dividend from XYZ Ltd of \$70, with an eligible capital gain amount (attributable part) of \$50. Ben includes the following amounts in his 2024–25 tax return at the following questions:
 
-- Dividends – Franked amount: $70.
-- Dividends – Franking credit: $30.
-- Dividend deductions: $25 (50% deduction for LIC capital gain).
+- Dividends – Franked amount: \$70.
+- Dividends – Franking credit: \$30.
+- Dividend deductions: \$25 (50% deduction for LIC capital gain).
 
 Note: Ben will be entitled to a franking tax offset equal to his franking credit if he satisfies the [holding period rule](https://www.ato.gov.au/forms-and-instructions/you-and-your-shares-2025/franking-tax-offsets-and-franking-credits/franking-tax-offsets#Holdingperiodrule).
 
@@ -46,12 +46,12 @@ A beneficiary or partner that is a complying superannuation entity or life insur
 
 ### Example: Beneficiary of a trust or partner in partnership
 
-The Robbie Partnership received from a LIC a $210 fully franked dividend that included an attributable part of $180. The partnership has 3 equal partners – Joe Robbie, Robbie Limited, and the Robbie Superannuation Fund (a complying superannuation entity).
+The Robbie Partnership received from a LIC a \$210 fully franked dividend that included an attributable part of \$180. The partnership has 3 equal partners – Joe Robbie, Robbie Limited, and the Robbie Superannuation Fund (a complying superannuation entity).
 
-The partnership claimed a deduction of $90 in respect of the attributable part in working out its net income of $12,000 (including the $210 dividend). Each partner's share of the net income is $4,000 and their reduction amount is $30 (one-third of $90).
+The partnership claimed a deduction of \$90 in respect of the attributable part in working out its net income of \$12,000 (including the \$210 dividend). Each partner's share of the net income is \$4,000 and their reduction amount is \$30 (one-third of \$90).
 
-Each partner includes $4,000 in their assessable income. The partners must also include the following additional amounts in their assessable income:
+Each partner includes \$4,000 in their assessable income. The partners must also include the following additional amounts in their assessable income:
 
-- Joe Robbie, $0 (Joe is an individual partner in the partnership)
-- Robbie Limited, $30 (the reduction amount)
-- Robbie Superannuation Fund, $10 (one-third of the reduction amount).
+- Joe Robbie, \$0 (Joe is an individual partner in the partnership)
+- Robbie Limited, \$30 (the reduction amount)
+- Robbie Superannuation Fund, \$10 (one-third of the reduction amount).

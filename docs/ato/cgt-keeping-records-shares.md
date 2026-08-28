@@ -32,16 +32,16 @@ Share transactions through the Australian Stock Exchange are recorded in the Cle
 
 Boris is an investor. He:
 
-- bought 1,000 shares in a company in 2023 for $5 each
-- bought 3,000 shares in the same company in 2024 for $10 each
-- sold 1,500 of the shares in 2025 for $8 each.
+- bought 1,000 shares in a company in 2023 for \$5 each
+- bought 3,000 shares in the same company in 2024 for \$10 each
+- sold 1,500 of the shares in 2025 for \$8 each.
 
 Boris must decide which of his shares in the company he is selling and which he is retaining.
 
 He decides to sell 1,500 of the shares he bought in 2024 in order to claim a capital loss in the 2025 income year. As a result, Boris will still have:
 
-- 1,000 shares with an acquisition cost of $5
-- 1,500 shares with an acquisition cost of $10.
+- 1,000 shares with an acquisition cost of \$5
+- 1,500 shares with an acquisition cost of \$10.
 
 If Boris later decides to sell more of his shares in the company, he can choose which of his remaining shares he is selling.
 

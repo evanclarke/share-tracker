@@ -43,7 +43,7 @@ interest-producing and share investments, claim the related decline in value **o
 Deductions for some expenses (such as interest and borrowing costs) may be affected by the **thin
 capitalisation rules** if they relate to certain overseas investments, or to Australian
 investments held by a foreign resident. These rules may apply when total debt deductions exceed
-$2 million for the year.
+\$2 million for the year.
 
 ## What you can't claim as a dividend deduction
 
