@@ -222,15 +222,56 @@ where
     Ok(())
 }
 
+/// The `<CcyNtry>` child fields collected while one entry is open, ready to
+/// become a [`Currency`] at its End tag.
+#[derive(Default)]
+struct CcyNtry {
+    name: Option<String>,
+    ccy: Option<String>,
+    nbr: Option<String>,
+    minor: Option<String>,
+}
+
+impl CcyNtry {
+    /// The finished entry as a currency row, or `None` where it names none to
+    /// record: an entry with no `<Ccy>` (e.g. ANTARCTICA), or one whose code
+    /// has already been seen — a code appears once per country (EUR many
+    /// times), so the first occurrence wins and the rest are deduplicated.
+    ///
+    /// `<CcyMnrUnts>` of `N.A.` (gold, no currency) becomes `None` minor
+    /// units; a malformed one fails loudly rather than being silently dropped.
+    fn into_currency(self, seen: &mut HashSet<String>) -> Result<Option<Currency>, ImportError> {
+        let Some(code) = self.ccy.filter(|c| !c.is_empty()) else {
+            return Ok(None);
+        };
+        if !seen.insert(code.clone()) {
+            return Ok(None);
+        }
+        let minor_units = match self.minor.as_deref() {
+            None | Some("") | Some("N.A.") => None,
+            Some(s) => Some(s.parse::<i64>().map_err(|e| {
+                ImportError::Parse(format!("invalid minor units {s:?} for {code}: {e}"))
+            })?),
+        };
+        Ok(Some(Currency {
+            code,
+            kind: CurrencyKind::Fiat,
+            numeric_code: self.nbr.filter(|c| !c.is_empty()),
+            name: self.name.unwrap_or_default(),
+            short_name: None,
+            minor_units,
+            source: CurrencySource::Iso4217,
+        }))
+    }
+}
+
 /// Parse the SIX Group ISO 4217 "List One" XML into fiat currency rows.
 ///
 /// The document is `<ISO_4217><CcyTbl><CcyNtry>…`; each `<CcyNtry>` carries
 /// `<CtryNm>` (country/entity), `<CcyNm>` (currency name), `<Ccy>` (alpha code),
-/// `<CcyNbr>` (numeric code) and `<CcyMnrUnts>` (minor units). Entries with no
-/// `<Ccy>` (e.g. ANTARCTICA) are skipped, and `<CcyMnrUnts>` of `N.A.` (gold, no
-/// currency) becomes `None`. A code appears once per country (EUR many times), so
-/// the first occurrence wins and the rest are deduplicated. A malformed minor-unit
-/// value fails loudly rather than being silently dropped.
+/// `<CcyNbr>` (numeric code) and `<CcyMnrUnts>` (minor units). This function is
+/// the SAX walk that collects those fields into a [`CcyNtry`]; which finished
+/// entries become rows, and how, is [`CcyNtry::into_currency`].
 pub fn parse_iso4217(content: &str) -> Result<Vec<Currency>, ImportError> {
     let mut reader = Reader::from_str(content);
     let mut out = Vec::new();
@@ -242,12 +283,7 @@ pub fn parse_iso4217(content: &str) -> Result<Vec<Currency>, ImportError> {
     // reference (`&amp;`) is its own GeneralRef event splitting the Text around
     // it, so a field is only complete at its End tag.
     let mut pending = String::new();
-    let (mut name, mut ccy, mut nbr, mut minor) = (
-        None::<String>,
-        None::<String>,
-        None::<String>,
-        None::<String>,
-    );
+    let mut entry = CcyNtry::default();
 
     loop {
         match reader.read_event() {
@@ -259,7 +295,7 @@ pub fn parse_iso4217(content: &str) -> Result<Vec<Currency>, ImportError> {
                 if tag == b"CcyNtry" {
                     in_entry = true;
                     cur_tag = None;
-                    (name, ccy, nbr, minor) = (None, None, None, None);
+                    entry = CcyNtry::default();
                 } else if in_entry {
                     cur_tag = Some(tag.to_vec());
                     pending.clear();
@@ -284,34 +320,16 @@ pub fn parse_iso4217(content: &str) -> Result<Vec<Currency>, ImportError> {
                 if tag == b"CcyNtry" {
                     in_entry = false;
                     cur_tag = None;
-                    if let Some(code) = ccy.take().filter(|c| !c.is_empty())
-                        && seen.insert(code.clone())
-                    {
-                        let minor_units = match minor.take().as_deref() {
-                            None | Some("") | Some("N.A.") => None,
-                            Some(s) => Some(s.parse::<i64>().map_err(|e| {
-                                ImportError::Parse(format!(
-                                    "invalid minor units {s:?} for {code}: {e}"
-                                ))
-                            })?),
-                        };
-                        out.push(Currency {
-                            code,
-                            kind: CurrencyKind::Fiat,
-                            numeric_code: nbr.take().filter(|c| !c.is_empty()),
-                            name: name.take().unwrap_or_default(),
-                            short_name: None,
-                            minor_units,
-                            source: CurrencySource::Iso4217,
-                        });
+                    if let Some(currency) = std::mem::take(&mut entry).into_currency(&mut seen)? {
+                        out.push(currency);
                     }
                 } else if cur_tag.as_deref() == Some(tag) {
                     let text = pending.trim().to_string();
                     match tag {
-                        b"CcyNm" => name = Some(text),
-                        b"Ccy" => ccy = Some(text),
-                        b"CcyNbr" => nbr = Some(text),
-                        b"CcyMnrUnts" => minor = Some(text),
+                        b"CcyNm" => entry.name = Some(text),
+                        b"Ccy" => entry.ccy = Some(text),
+                        b"CcyNbr" => entry.nbr = Some(text),
+                        b"CcyMnrUnts" => entry.minor = Some(text),
                         _ => {}
                     }
                     cur_tag = None;

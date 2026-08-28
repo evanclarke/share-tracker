@@ -82,7 +82,7 @@ decomposition exists that moves no invariant.
   pass becoming that function's doc comment. Proof is the unchanged suite: 91 tax-summary tests and
   the 38 `ato_examples` acceptance tests (which assert the ATO's own stated figures end to end via
   HTTP), 2,336 total, plus fmt and `clippy -D warnings` clean.
-- [ ] Extract the two nesting outliers, each one contained inner block (these are the only two
+- [x] Extract the two nesting outliers, each one contained inner block (these are the only two
   production functions nested deeper than 6):
   - `entities::currencies::parse_iso4217` (`src/entities/currencies.rs:234`, nest 8, CCN 19) — the
     depth is the standard `loop { match event { … } }` SAX shape, which should stay; the extractable
@@ -90,6 +90,30 @@ decomposition exists that moves no invariant.
   - `reports::valuation::valuations_of_markets` (`src/reports/valuation.rs:220`, nest 7, CCN 16) —
     the per-market guard sequence is readable as is; the depth comes from the `_ if unpriced` arm's
     nested `match` on the carry-forward lookup, which lifts out as a `carry_forward_price` helper
+
+  **Done 2026-08-28.** Both are now nested no deeper than 6, so no production function in the tree
+  is. Neither cut moves an invariant, and the audit's judgement that the surrounding shapes should
+  stay was upheld — the SAX event loop and the per-market guard sequence are untouched.
+
+  - `parse_iso4217` (nest 8 → 6, CCN 19 → 17, 98 → 75 NLOC). The four in-flight `Option<String>`
+    field variables became a `CcyNtry` struct, so the entry reset is one `CcyNtry::default()` rather
+    than a four-tuple, and the End arm's body is `CcyNtry::into_currency(seen)` (CCN 4) — the
+    minor-unit parse and the dedup-and-build. What the extraction buys beyond depth is that the
+    entry-level rules now have somewhere to be stated: which entries are skipped (no `<Ccy>`, or a
+    code already seen), and that `N.A.` means no minor units while a malformed value fails loudly,
+    were three sentences in the *function's* doc comment describing something two nesting levels
+    down; they are `into_currency`'s doc comment now, and `parse_iso4217`'s says only what the walk
+    itself does
+  - `valuations_of_markets` (nest 7 → 6, 141 → 131 NLOC; CCN stays 16 — the arm's two-way branch
+    remains at the call site, which is the point: the *blocker* it pushes belongs with every other
+    blocker in the loop). The `_ if unpriced` arm's inner `match` on the carry-forward lookup is now
+    `carry_forward_price(conn, market, valuation_day)`, returning `Option<Decimal>`; the SCENARIOS
+    Q-02 rationale stays on the arm, and the reason `None` is a safety net rather than a live path
+    (`db_upsert` guarantees an earlier ok price) moved onto the helper, which is what guarantees it
+
+  Both are behaviour-preserving, so the existing suite is the proof: the currency-import parse tests
+  (incl. the minor-units/dedup/missing-code and entity-reference cases) and the valuation,
+  snapshot and period-performance tests, 2,336 total, with fmt and `clippy -D warnings` clean.
 - [ ] Review `entities::rights_sale::db_sell_rights` (`src/entities/rights_sale.rs:314`, CCN 47,
   nest 6, 176 NLOC) — the highest-CCN function that is *not* flat, so unlike the guard chains its
   branch count is not explained by breadth. Decide whether the record-date anchoring walk separates

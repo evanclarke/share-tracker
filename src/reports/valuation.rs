@@ -212,6 +212,28 @@ pub async fn stored_valuations_on(
     valuations_of_markets(conn, &markets, date, now).await
 }
 
+/// The close carried forward for a listing the provider has stopped quoting:
+/// its last stored ok price on or before `valuation_day`, never reaching back
+/// past `unpriced_before` (the day the series began).
+///
+/// `closing_price::db_upsert` guarantees an earlier ok price exists whenever
+/// `unpriced_from` is set, so `None` is a safety net, not a live path — the
+/// caller turns it into a blocker naming the listing.
+async fn carry_forward_price(
+    conn: &mut sqlx::SqliteConnection,
+    market: &Market,
+    valuation_day: NaiveDate,
+) -> Result<Option<Decimal>, sqlx::Error> {
+    Ok(closing_price::db_latest_ok_price_on_or_before(
+        conn,
+        market.listing.id,
+        valuation_day,
+        market.listing.unpriced_before,
+    )
+    .await?
+    .map(|(_, price)| price))
+}
+
 /// [`stored_valuations_on`] over market contexts the caller already loaded
 /// (via [`held_markets_on`], for this same `date`) — so a caller that needs
 /// the held set for its own purposes first (the period-performance report,
@@ -279,31 +301,21 @@ pub(crate) async fn valuations_of_markets(
             // From `unpriced_from` on there is no close to wait for, so the
             // last stored ok one is carried forward rather than blocking the
             // whole portfolio's date on a security nobody will quote again
-            // (SCENARIOS Q-02). `db_upsert` guarantees an earlier ok price
-            // exists, so the `None` arm is a safety net, not a live path.
-            _ if unpriced => {
-                match closing_price::db_latest_ok_price_on_or_before(
-                    &mut *conn,
-                    market.listing.id,
-                    valuation_day,
-                    market.listing.unpriced_before,
-                )
-                .await?
-                {
-                    Some((_, price)) => Some((price, true)),
-                    None => {
-                        blockers.push(format!(
-                            "{ticker}: no stored price at or before {valuation_day} to carry \
+            // (SCENARIOS Q-02).
+            _ if unpriced => match carry_forward_price(&mut *conn, market, valuation_day).await? {
+                Some(price) => Some((price, true)),
+                None => {
+                    blockers.push(format!(
+                        "{ticker}: no stored price at or before {valuation_day} to carry \
                              forward — the listing is unpriced from {}; enter one price by hand",
-                            market
-                                .listing
-                                .unpriced_from
-                                .expect("unpriced implies a date")
-                        ));
-                        None
-                    }
+                        market
+                            .listing
+                            .unpriced_from
+                            .expect("unpriced implies a date")
+                    ));
+                    None
                 }
-            }
+            },
             Some(row) => {
                 blockers.push(format!(
                     "{ticker}: the stored price for {valuation_day} is errored ({}) — re-fetch it",
