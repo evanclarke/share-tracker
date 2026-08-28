@@ -313,25 +313,24 @@ function cfiFootnote(inc) {
     + 'Australian resident.');
 }
 
-// The foreign-income table gathers every foreign amount the year produced,
-// but its rows are reported in three different places, so the column as a
-// whole adds up to nothing anyone transcribes. The subtotal the reader needs
-// is the non-AMMA one — the question 20 gross the return takes — so it is
-// printed under the table with a note saying what the two excluded kinds are
-// and where they are reported instead. The server strikes it (rounded to the
-// cent, so the printed column adds up); this only renders it.
-function foreignIncomeSubtotal(inc) {
+// The foreign-income table's three printed lines: what the taxpayer holds
+// directly (question 20's gross), what an AMIT attributed, and the two
+// together. The server strikes them, rounded to the cent so the printed column
+// adds up; this only renders them. The ESS memo row is in none of the three —
+// its amount is already inside the item 12 discount, and its own Kind cell
+// says it is a memo.
+function foreignIncomeTotals(inc) {
   if (!inc.foreign_income || inc.foreign_income.length === 0) return null;
-  const s = inc.non_amma_foreign_income || {};
+  const t = inc.foreign_income_totals || {};
+  function line(cls, label, part) {
+    const s = part || {};
+    return el('p', { class: cls }, label + ': ' + moneyText(s.amount_aud || 0)
+      + ', foreign tax paid ' + moneyText(s.foreign_tax_paid_aud || 0));
+  }
   return el('div', null, [
-    el('p', { class: 'subtotal' }, 'Subtotal excluding AMMA attribution: foreign income '
-      + moneyText(s.amount_aud || 0) + ', foreign tax paid ' + moneyText(s.foreign_tax_paid_aud || 0)),
-    el('p', { class: 'hint' },
-      'The subtotal covers the dividend/trust and foreign interest rows only \u2014 question 20\u2019s '
-      + 'gross foreign source income. AMMA foreign income is the trust\u2019s own attribution, shown '
-      + 'component by component in the AMMA statement table above and carried on its own summary '
-      + 'line, and the ESS foreign-source discount is a memo already inside the employee share '
-      + 'scheme discount at item 12; adding either here would count the same dollars twice.'),
+    line('subtotal', 'Subtotal, non-AMMA', t.non_amma),
+    line('subtotal', 'Subtotal, AMMA', t.amma),
+    line('total', 'Total foreign income', t.total),
   ]);
 }
 
@@ -404,7 +403,7 @@ function incomeSection(inc, summaryLines) {
           + 'tokens themselves are a parcel costed at that same value.') : null,
     el('h4', null, 'Foreign income'),
     genericTable(inc.foreign_income, ['kind', 'ticker', 'date', 'amount_aud', 'foreign_tax_paid_aud']),
-    foreignIncomeSubtotal(inc),
+    foreignIncomeTotals(inc),
     el('h4', null, 'Interest income'),
     genericTable(inc.interest, ['date_paid', 'source', 'amount_aud', 'foreign_source', 'foreign_tax_paid_aud', 'tfn_withholding_tax_aud']),
     el('h4', null, 'Employee share scheme income'),

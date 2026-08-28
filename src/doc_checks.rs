@@ -3298,29 +3298,31 @@ fn franking_credit_ceiling_documented() {
     assert!(include_str!("../docs/ato/OVERVIEW.md").contains("allocating-franking-credits.md"));
 }
 
-/// Docs-sync pin for the annual tax report's **non-AMMA foreign income
-/// subtotal**. The behaviour is pinned by `reports::tax_report`'s own three
-/// tests; this is the documentation half, and it is what a reader needs to
-/// trust a printed subtotal: which of the table's four kinds it adds, where
-/// the two it leaves out are reported instead, and that it is struck at the
-/// cent (so it adds up down the printed column, and ties to the two
-/// tax-summary lines only to that rounding).
+/// Docs-sync pin for the annual tax report's **foreign income totals** — the
+/// three lines printed under that table. The behaviour is pinned by
+/// `reports::tax_report`'s own three tests; this is the documentation half,
+/// and it is what a reader needs to trust the printed figures: which rows each
+/// line adds, why the ESS memo is in none of them (so the total need not equal
+/// the column as printed), and that they are struck at the cent — so each adds
+/// up down the page, and ties to its tax-summary lines only to that rounding.
 #[test]
-fn non_amma_foreign_income_subtotal_documented() {
-    assert!(API_MD.contains("**`non_amma_foreign_income`**, that table's **non-AMMA subtotal**"));
+fn foreign_income_totals_documented() {
+    assert!(
+        API_MD.contains("**`foreign_income_totals`**, the three lines printed under that table")
+    );
     assert!(
         API_MD.contains("the tax summary's `foreign_source_income` + `foreign_interest_income`")
     );
-    // Why each excluded kind is out — the double-count each would cause.
-    assert!(API_MD.contains("counting either would report the same dollars twice"));
+    // Why the memo is in none of them — the double-count it would cause.
+    assert!(API_MD.contains("totalling it here would report the same dollars twice"));
     // …and the rounding rule, stated with what it costs.
     assert!(API_MD.contains(
-        "The subtotal is **summed at the cent**, like every total this document prints beside \
+        "All three are **summed at the cent**, like every total this document prints beside \
          the figures it totals"
     ));
     assert!(API_MD.contains("with two deliberate exceptions"));
-    // README's feature list says the report carries it.
-    assert!(README_MD.contains("subtotalled excluding the AMMA attribution"));
+    // README's feature list says the report carries them.
+    assert!(README_MD.contains("with non-AMMA and AMMA subtotals and a total"));
 }
 
 /// Docs-sync pin for the conduit-foreign-income entry convention (SCENARIOS

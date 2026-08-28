@@ -11,7 +11,7 @@ A section records one finding, and its heading names where it came from — a RE
 [SCENARIOS.md](SCENARIOS.md) section, or a dated review pass.
 
 **Open: nothing.** Every section recorded so far is closed and archived — the last was the
-annual tax report's non-AMMA foreign income subtotal (a REQUIREMENTS entry, closed 2026-08-28 and
+annual tax report's foreign income totals (a REQUIREMENTS entry, closed 2026-08-28 and
 moved to [`DONE/reporting.md`](DONE/reporting.md)), and before it the
 2026-08-28 cyclomatic complexity audit, whose six items (the `tax_summary` split, the two nesting
 outliers, the `rights_sale` anchoring walk, the `corporate_action` presence flags, the

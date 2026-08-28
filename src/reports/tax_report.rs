@@ -1048,7 +1048,7 @@ pub struct OtherIncomeRow {
 }
 
 /// What produced a [`ForeignIncomeRow`] — and, with it, where the amount is
-/// reported. Typed rather than free text because [`ForeignIncomeSubtotal`] is
+/// reported. Typed rather than free text because [`ForeignIncomeTotals`] is
 /// defined by it: which rows a subtotal may add is a tax question, not a
 /// string comparison. The serialized names are the labels the printed table's
 /// *Kind* column shows.
@@ -1074,14 +1074,6 @@ pub enum ForeignIncomeKind {
     EssMemo,
 }
 
-impl ForeignIncomeKind {
-    /// Whether the row is counted in [`ForeignIncomeSubtotal`] — see there for
-    /// why each of the other two is out.
-    fn in_non_amma_subtotal(self) -> bool {
-        matches!(self, Self::DividendOrTrust | Self::Interest)
-    }
-}
-
 #[derive(Debug, Serialize)]
 pub struct ForeignIncomeRow {
     pub kind: ForeignIncomeKind,
@@ -1092,31 +1084,15 @@ pub struct ForeignIncomeRow {
     pub foreign_tax_paid_aud: Decimal,
 }
 
-/// The foreign-income table's **non-AMMA** subtotal: the year's foreign income
-/// (and the foreign tax paid on it) that the taxpayer holds directly, rather
-/// than through an AMIT's attribution.
-///
-/// The table deliberately gathers every foreign amount the year produced, but
-/// its rows are reported in three different places, so the whole column adds
-/// up to nothing anyone transcribes. Two of the four kinds are out:
-///
-/// * [`ForeignIncomeKind::Amma`] — the trust's own attribution, printed
-///   component by component in the AMMA table above and carried on the tax
-///   summary's own `amma_foreign_income` line. Its foreign tax likewise
-///   reaches the FITO line as an AMMA credit, not as tax the taxpayer paid.
-/// * [`ForeignIncomeKind::EssMemo`] — a memo already inside the ESS discount
-///   at item 12 (`ess_foreign_source_discount`, item 12A); adding it here
-///   would count the same dollars twice.
-///
-/// What is left is `foreign_source_income + foreign_interest_income` — the
-/// question 20 gross the return takes, with the AMMA rows out of the way.
+/// One line of the foreign-income table's printed totals: an amount and the
+/// foreign tax paid on it.
 ///
 /// **Summed at the cent**, the rule every total this document prints beside
 /// the figures it totals follows (SCENARIOS W-f, [`tax_summary`]'s own total
-/// column): the subtotal has to be what a reader gets adding the printed
-/// column. The rows themselves stay exact and still sum exactly to their two
-/// tax-summary lines, so the subtotal can sit up to a cent from the exact sum
-/// of those lines — the accepted price of a printed working that adds up.
+/// column): a line has to be what a reader gets adding the printed column.
+/// The rows themselves stay exact and still sum exactly to their tax-summary
+/// lines, so a line here can sit up to a cent from the exact sum of those —
+/// the accepted price of a printed working that adds up.
 #[derive(Debug, Default, Serialize)]
 pub struct ForeignIncomeSubtotal {
     pub amount_aud: Decimal,
@@ -1124,14 +1100,50 @@ pub struct ForeignIncomeSubtotal {
 }
 
 impl ForeignIncomeSubtotal {
+    fn add(&mut self, row: &ForeignIncomeRow) {
+        self.amount_aud += to_cents(row.amount_aud);
+        self.foreign_tax_paid_aud += to_cents(row.foreign_tax_paid_aud);
+    }
+
+    fn plus(&self, other: &Self) -> Self {
+        Self {
+            amount_aud: self.amount_aud + other.amount_aud,
+            foreign_tax_paid_aud: self.foreign_tax_paid_aud + other.foreign_tax_paid_aud,
+        }
+    }
+}
+
+/// The three lines printed under the foreign-income table: what the taxpayer
+/// holds **directly** (`non_amma` — question 20's gross, the tax summary's
+/// `foreign_source_income` + `foreign_interest_income`), what an AMIT
+/// **attributed** (`amma` — its own `amma_foreign_income` line, its foreign
+/// tax a FITO credit rather than tax the taxpayer paid), and the two together.
+///
+/// [`ForeignIncomeKind::EssMemo`] rows are in none of the three: the amount is
+/// already inside the year's ESS discount at item 12, so totalling it here
+/// would report the same dollars twice. That is why `total` need not equal the
+/// column as printed — the memo row is marked as one in its own *Kind* cell.
+#[derive(Debug, Default, Serialize)]
+pub struct ForeignIncomeTotals {
+    pub non_amma: ForeignIncomeSubtotal,
+    pub amma: ForeignIncomeSubtotal,
+    pub total: ForeignIncomeSubtotal,
+}
+
+impl ForeignIncomeTotals {
     fn of(rows: &[ForeignIncomeRow]) -> Self {
-        rows.iter()
-            .filter(|r| r.kind.in_non_amma_subtotal())
-            .fold(Self::default(), |mut acc, r| {
-                acc.amount_aud += to_cents(r.amount_aud);
-                acc.foreign_tax_paid_aud += to_cents(r.foreign_tax_paid_aud);
-                acc
-            })
+        let mut totals = Self::default();
+        for row in rows {
+            match row.kind {
+                ForeignIncomeKind::DividendOrTrust | ForeignIncomeKind::Interest => {
+                    totals.non_amma.add(row)
+                }
+                ForeignIncomeKind::Amma => totals.amma.add(row),
+                ForeignIncomeKind::EssMemo => {}
+            }
+        }
+        totals.total = totals.non_amma.plus(&totals.amma);
+        totals
     }
 }
 
@@ -1205,8 +1217,8 @@ pub struct IncomeSections {
     /// but, unlike `employment_income`, inside the year's assessable income.
     pub other_income: Vec<OtherIncomeRow>,
     pub foreign_income: Vec<ForeignIncomeRow>,
-    /// `foreign_income`'s non-AMMA subtotal — see [`ForeignIncomeSubtotal`].
-    pub non_amma_foreign_income: ForeignIncomeSubtotal,
+    /// `foreign_income`'s printed totals — see [`ForeignIncomeTotals`].
+    pub foreign_income_totals: ForeignIncomeTotals,
     pub interest: Vec<InterestIncomeRow>,
     pub ess: Vec<EssIncomeRow>,
     pub deductions: Vec<DeductionRow>,
@@ -1214,11 +1226,11 @@ pub struct IncomeSections {
 
 impl IncomeSections {
     /// Everything that can only be done once every row is in: the sections
-    /// read chronologically, and the foreign-income subtotal is struck over
-    /// the rows the four pushes left behind.
+    /// read chronologically, and the foreign-income totals are struck over the
+    /// rows the four pushes left behind.
     fn finalise(&mut self) {
         self.sort();
-        self.non_amma_foreign_income = ForeignIncomeSubtotal::of(&self.foreign_income);
+        self.foreign_income_totals = ForeignIncomeTotals::of(&self.foreign_income);
     }
 
     /// Every section reads chronologically.
@@ -2366,14 +2378,13 @@ mod tests {
         );
     }
 
-    /// The Foreign income table gathers rows reported in three different
-    /// places, so its printed subtotal is the **non-AMMA** one: the question
-    /// 20 gross the return takes. The AMMA row is the trust's own attribution
-    /// (its own tax-summary line, and its components printed in the AMMA
-    /// table), and the ESS row is a memo already inside the item 12 discount —
-    /// counting either would double-count the same dollars.
+    /// The Foreign income table prints three lines: what the taxpayer holds
+    /// directly (question 20's gross), what the AMIT attributed (its own
+    /// tax-summary line, its components in the AMMA table), and the two
+    /// together. The ESS row is in none of them — a memo already inside the
+    /// item 12 discount, so totalling it would report the same dollars twice.
     #[tokio::test]
-    async fn non_amma_foreign_income_subtotal_excludes_the_amma_and_ess_rows() {
+    async fn foreign_income_totals_split_amma_from_the_rest_and_drop_the_ess_memo() {
         let pool = test_support::test_pool().await;
         test_support::listing(1).ticker("ICE").insert(&pool).await;
         test_support::listing(2)
@@ -2431,37 +2442,43 @@ mod tests {
             .map(|r| r.kind)
             .collect();
         assert_eq!(kinds.len(), 4, "all four kinds still print: {kinds:?}");
-        let subtotal = &report.income.non_amma_foreign_income;
+        let totals = &report.income.foreign_income_totals;
         assert_eq!(
-            subtotal.amount_aud,
+            totals.non_amma.amount_aud,
             dec("140"),
             "100 dividend + 40 interest"
         );
         assert_eq!(
-            subtotal.foreign_tax_paid_aud,
+            totals.non_amma.foreign_tax_paid_aud,
             dec("21"),
             "15 dividend + 6 interest, and neither AMMA credit"
         );
+        assert_eq!(totals.amma.amount_aud, dec("70"));
+        assert_eq!(totals.amma.foreign_tax_paid_aud, dec("9"));
+        // The ESS memo's 500 is in neither subtotal and so in no total: the
+        // two subtotals are the whole of it.
+        assert_eq!(totals.total.amount_aud, dec("210"));
+        assert_eq!(totals.total.foreign_tax_paid_aud, dec("30"));
 
-        // …and the two lines it is the drilldown for say the same thing.
+        // …and the line each subtotal is the drilldown for says the same.
         let summary_rows = crate::reports::tax_summary::db_tax_summary(&pool)
             .await
             .unwrap();
         let summary = summary_rows.iter().find(|s| s.tax_year == 2024).unwrap();
         assert_eq!(
-            subtotal.amount_aud,
+            totals.non_amma.amount_aud,
             summary.foreign_source_income + summary.foreign_interest_income
         );
-        assert_eq!(summary.amma_foreign_income, dec("70"));
+        assert_eq!(totals.amma.amount_aud, summary.amma_foreign_income);
     }
 
-    /// The subtotal is the sum of the rows **as printed** — every total this
-    /// document prints beside the figures it totals is (SCENARIOS W-f), since
-    /// a printed column has to add up on the page. Two rows landing on a half
-    /// cent are what tells the two rules apart: added as printed they make
-    /// 30.02, added exactly 30.01.
+    /// Each printed line is the sum of the rows **as printed** — every total
+    /// this document prints beside the figures it totals is (SCENARIOS W-f),
+    /// since a printed column has to add up on the page. Two rows landing on a
+    /// half cent are what tells the two rules apart: added as printed they
+    /// make 30.02, added exactly 30.01.
     #[tokio::test]
-    async fn non_amma_foreign_income_subtotal_adds_the_rows_as_printed() {
+    async fn foreign_income_totals_add_the_rows_as_printed() {
         let pool = test_support::test_pool().await;
         test_support::listing(1)
             .ticker("ICE")
@@ -2508,9 +2525,14 @@ mod tests {
         // tax-summary line.
         assert_eq!(amounts, vec![dec("10.005"), dec("20.005")]);
         assert_eq!(
-            report.income.non_amma_foreign_income.amount_aud,
+            report.income.foreign_income_totals.non_amma.amount_aud,
             dec("30.02"),
             "10.01 + 20.01, the figures the document prints"
+        );
+        assert_eq!(
+            report.income.foreign_income_totals.total.amount_aud,
+            dec("30.02"),
+            "no AMMA rows this year, so the total is the non-AMMA subtotal"
         );
         let summary_rows = crate::reports::tax_summary::db_tax_summary(&pool)
             .await
@@ -2526,10 +2548,10 @@ mod tests {
         );
     }
 
-    /// A year with no foreign amounts at all prints a nil subtotal rather than
+    /// A year with no foreign amounts at all carries nil totals rather than
     /// leaving the field absent — the archived document states the answer.
     #[tokio::test]
-    async fn non_amma_foreign_income_subtotal_is_nil_when_the_year_has_none() {
+    async fn foreign_income_totals_are_nil_when_the_year_has_none() {
         let pool = test_support::test_pool().await;
         test_support::listing(1).ticker("T1").insert(&pool).await;
         test_support::income(1, 1, ymd(2024, 3, 31))
@@ -2542,14 +2564,11 @@ mod tests {
 
         let report = db_tax_report(&pool, 2024).await.unwrap();
         assert!(report.income.foreign_income.is_empty());
-        assert_eq!(
-            report.income.non_amma_foreign_income.amount_aud,
-            Decimal::ZERO
-        );
-        assert_eq!(
-            report.income.non_amma_foreign_income.foreign_tax_paid_aud,
-            Decimal::ZERO
-        );
+        let totals = &report.income.foreign_income_totals;
+        for part in [&totals.non_amma, &totals.amma, &totals.total] {
+            assert_eq!(part.amount_aud, Decimal::ZERO);
+            assert_eq!(part.foreign_tax_paid_aud, Decimal::ZERO);
+        }
     }
 
     /// The archived document is the copy an accountant reads, so a dividend

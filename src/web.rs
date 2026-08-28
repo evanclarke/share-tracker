@@ -2134,13 +2134,14 @@ mod tests {
         // destinations span four of them.
         assert!(js.contains("ato_label: 'ATO label'"));
         assert!(js.contains("deductionDestinationFootnote(inc)"));
-        // The Foreign income table's non-AMMA subtotal — the question 20
-        // gross, struck under a table whose rows are reported in three
-        // different places — with the note saying what it leaves out and why.
-        assert!(js.contains("foreignIncomeSubtotal(inc)"));
-        assert!(js.contains("non_amma_foreign_income"));
-        assert!(js.contains("Subtotal excluding AMMA attribution"));
-        assert!(js.contains("adding either here would count the same dollars twice"));
+        // The Foreign income table's three printed lines: the question 20
+        // gross the taxpayer holds directly, the AMIT's attribution, and the
+        // two together.
+        assert!(js.contains("foreignIncomeTotals(inc)"));
+        assert!(js.contains("foreign_income_totals"));
+        assert!(js.contains("'Subtotal, non-AMMA'"));
+        assert!(js.contains("'Subtotal, AMMA'"));
+        assert!(js.contains("'Total foreign income'"));
         for label in ["13Y", "20M", "D15", "D7/D8"] {
             assert!(js.contains(label), "the deductions footnote names {label}");
         }

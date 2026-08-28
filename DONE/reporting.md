@@ -2058,39 +2058,39 @@ and matching cannot key on `ex_date`, since 13 of the live database's 47 income 
   an alert *not* firing does not prove, all pinned by
   `doc_checks::distribution_calendar_documented`
 
-## REQUIREMENTS: annual tax report — non-AMMA foreign income subtotal (2026-08-28)
+## REQUIREMENTS: annual tax report — foreign income totals (2026-08-28)
 
 The Foreign income table gathers every foreign amount the year produced, but its four kinds are
 reported in three different places, so the column as a whole totals to nothing anyone transcribes.
-Asked for: the subtotal a reader actually needs — question 20's gross foreign source income, with
-the AMMA attribution out of the way.
+Asked for: the subtotals a reader actually needs, printed under the table without a paragraph
+explaining them.
 
-- [x] `income.non_amma_foreign_income` on the annual tax report: the amount and the foreign tax of
-  the dividend/trust and interest rows alone — the tax summary's `foreign_source_income` +
-  `foreign_interest_income`
-  — the two excluded kinds are excluded for a reason each, stated on the type: an **AMMA** row is
-  the trust's own attribution (its components print in the AMMA table, it is carried on the
-  summary's own `amma_foreign_income` line, and its foreign tax reaches FITO as an AMMA credit),
-  and the **ESS** row is a memo already inside the item 12 discount — either would report the same
-  dollars twice
+- [x] `income.foreign_income_totals` on the annual tax report — three lines, each an amount and the
+  foreign tax paid on it: `non_amma` (the dividend/trust and interest rows — question 20's gross,
+  the tax summary's `foreign_source_income` + `foreign_interest_income`), `amma` (the AMIT's
+  attribution — its own `amma_foreign_income` line, its foreign tax a FITO credit rather than tax
+  the taxpayer paid), and `total`, the two together
+  — the ESS row is in none of the three: its amount is already inside the item 12 discount, so
+  totalling it would report the same dollars twice. That is the one thing the printed page does not
+  say in words — the row's own *Kind* cell names it a memo, and the reason lives in `docs/API.md`
+  and on the type
 - [x] `ForeignIncomeRow.kind` typed as `ForeignIncomeKind` rather than free text, its serialized
   names unchanged (`#[serde(rename)]`), so the printed *Kind* column and the JSON read exactly as
   before
-  — which rows a subtotal may add is a tax question, not a string comparison; the enum is what makes
-  `in_non_amma_subtotal` answer it
+  — which line a row belongs to is a tax question, not a string comparison; the enum is what makes
+  `ForeignIncomeTotals::of` answer it in a `match` the compiler checks
 - [x] **Summed at the cent** — the rule every total this document prints beside the figures it
-  totals follows (SCENARIOS W-f, `tax_summary`'s own total column), so the subtotal is what a reader
-  gets adding the printed column
-  — the rows themselves stay exact and still sum exactly to their two summary lines, so the subtotal
-  can sit up to a cent from the exact sum of those lines. Pinned by
-  `non_amma_foreign_income_subtotal_adds_the_rows_as_printed`, whose two rows land on a half cent:
-  added as printed they make 30.02, added exactly 30.01
-- [x] Printed under the table in the web document with the note saying what it leaves out and where
-  those are reported instead (`foreignIncomeSubtotal` in `taxreport.js`, pinned in
-  `web::tests::annual_tax_report_ui_present`)
+  totals follows (SCENARIOS W-f, `tax_summary`'s own total column), so each line is what a reader
+  gets adding the rows it covers
+  — the rows themselves stay exact and still sum exactly to their summary lines, so a line can sit
+  up to a cent from the exact sum of those. Pinned by `foreign_income_totals_add_the_rows_as_printed`,
+  whose two rows land on a half cent: added as printed they make 30.02, added exactly 30.01
+- [x] Printed under the table in the web document as three plain lines — two `subtotal`, one
+  `total`, the same classes the disposal schedule uses (`foreignIncomeTotals` in `taxreport.js`,
+  pinned in `web::tests::annual_tax_report_ui_present`)
 - [x] Docs: the `income` bullet in `docs/API.md` (incl. the second deliberate exception to "every
-  AUD figure sums exactly to its tax-summary line" — a total of rows, struck at the cent), README
-  Features, REQUIREMENTS; pinned by `doc_checks::non_amma_foreign_income_subtotal_documented`
+  AUD figure sums exactly to its tax-summary line" — totals of rows, struck at the cent), README
+  Features, REQUIREMENTS; pinned by `doc_checks::foreign_income_totals_documented`
   — verified end to end as well as by unit test: a seeded year carrying all four kinds prints
-  100.00 + 40.01 under a subtotal of 140.01, foreign tax 21.00, with the AMMA and ESS rows in the
-  table and out of the total
+  100.00 + 40.01 under a non-AMMA subtotal of 140.01, the AMMA row's 70.00 under its own, and 210.01
+  as the total, with the ESS memo in the table and in none of the three
