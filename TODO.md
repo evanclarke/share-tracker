@@ -150,13 +150,46 @@ decomposition exists that moves no invariant.
   itself still bites afterwards so the fix can't be read as having loosened it. The rest is
   behaviour-preserving, so the file's other 27 tests are the proof: 2,337 total, fmt and
   `clippy -D warnings` clean.
-- [ ] Consider a `Presence` flags struct for `entities::corporate_action::model::kind`
+- [x] Consider a `Presence` flags struct for `entities::corporate_action::model::kind`
   (`src/entities/corporate_action/model.rs:498`, CCN 129 — the codebase maximum, 3.5× the next).
   The one-arm-per-action-type table itself should **not** be broken up. But 84 of its ~129 decision
   points are `&&`/`||` in the repeated "every other type's fields absent" negation chains; naming
   the presence flags in a small struct with an `only(&[…])` helper would collapse the repetition
   without moving the table or its comments. Judgement call — leave it alone if the rewrite reads
   worse than what it replaces, and record that verdict here
+
+  **Verdict 2026-08-28: done — the rewrite reads better, and it reads better for a reason worth
+  recording.** `kind` is CCN 49 / 141 NLOC, down from 129 / 176, with `Presence::of` (22) and
+  `Presence::only` (1) beside it; the codebase maximum is now `trade::db::db_upsert` (57), one of
+  the flat guard chains this audit ruled should stay. The table and every one of its comments are
+  untouched, exactly as the item required — what changed is only how each arm's guard is *stated*.
+
+  `Presence` is a bit per payload group over a `u16` (`PAYMENT`, `RECORD`, `SPLIT`, `BONUS`,
+  `RIGHTS`, `BUYBACK`, `SCRIP`, `DEMERGER`, `WORTHLESS`, `CURRENCY`), built once by `of` — which is
+  where the nine `let` bindings and their comments moved, unchanged — and read by
+  `only(allowed) = self.0 & !allowed == 0`. So `ActionType::ShareSplit if present.only(SPLIT)`
+  replaces nine negations, and the arms that differ say so in one token:
+  `only(PAYMENT | RECORD | CURRENCY)` for ReturnOfCapital, `only(RIGHTS | CURRENCY)` for
+  RightsIssue, `only(BUYBACK | CURRENCY)` for BuyBack.
+
+  Two things make it more than a shortening. First, the rule is now stated as a **permission** where
+  it was a list of denials: the `currency` rule in particular was written inversely — `currency`
+  is required by three types, so the other five each carried a `self.currency.is_none()` — and the
+  three-versus-five split was only visible by diffing the arms. Second, a mask has no per-arm list to
+  forget: a new group added to `of` is refused by every arm that does not name it, whereas a new
+  flag previously had to be negated in seven places and a missed one would *silently accept* a stray
+  column. That is the failure this whole guard exists to prevent (a stored action that reads as one
+  thing and was entered as another), so making it unreachable by construction is the argument for
+  the rewrite.
+
+  Pinned by `each_action_type_refuses_every_other_types_columns` in `model.rs` — the whole 8 × 10
+  matrix rather than the spot checks that existed before: each type's own minimal payload is
+  asserted to be *accepted* (so a rejection is the stray column, not a broken base case), then one
+  representative column of every group it may not carry is asserted to make `kind` refuse. It fails
+  with "ShareSplit should refuse a stray currency" if a single arm's allowance is loosened. 2,338
+  tests, fmt and `clippy -D warnings` clean. Note `clippy::cognitive_complexity` is unmoved at 29,
+  which is the expected result and the audit's own point: the negation chains were breadth, and
+  breadth is what was removed.
 - [ ] Give `entities::sell::upsert_sell_in_tx` (`src/entities/sell.rs:572`) a parameters struct — 9
   parameters, the widest signature in the tree (only 6 production functions exceed 6). The
   neighbouring `checks.rs` already uses this shape (`AmountsCheck`, `StatementTotalCheck`)

@@ -465,6 +465,103 @@ pub struct CorporateActionBody {
     worthless_event: Option<WorthlessEvent>,
 }
 
+/// Which payload *groups* a submitted row has any column of — one bit per
+/// group, so an arm of [`CorporateActionBody::kind`] states what it allows
+/// rather than negating each of the other seven.
+///
+/// The rule every arm applies is the same: a row carries **exactly its own**
+/// action type's payload. A column belonging to another type is refused, never
+/// ignored — quietly dropping it would store an action that reads as one thing
+/// and was entered as another. Two groups are shared rather than owned by one
+/// type, and they are the only thing that varies between arms: `currency`,
+/// which ReturnOfCapital, RightsIssue and BuyBack require and the other five
+/// forbid, and `record_date`, which ReturnOfCapital alone may carry.
+#[derive(Clone, Copy)]
+struct Presence(u16);
+
+impl Presence {
+    const PAYMENT: u16 = 1 << 0;
+    const RECORD: u16 = 1 << 1;
+    const SPLIT: u16 = 1 << 2;
+    const BONUS: u16 = 1 << 3;
+    const RIGHTS: u16 = 1 << 4;
+    const BUYBACK: u16 = 1 << 5;
+    const SCRIP: u16 = 1 << 6;
+    const DEMERGER: u16 = 1 << 7;
+    const WORTHLESS: u16 = 1 << 8;
+    const CURRENCY: u16 = 1 << 9;
+
+    /// Every column of the row, gathered into its group. This is the one place
+    /// a payload column is assigned to a type, so a column added here is
+    /// forbidden by every arm that does not name its group.
+    fn of(body: &CorporateActionBody) -> Self {
+        let bit = |present: bool, group: u16| if present { group } else { 0 };
+        Self(
+            bit(body.amount_per_unit.is_some(), Self::PAYMENT)
+                | bit(body.record_date.is_some(), Self::RECORD)
+                | bit(
+                    body.split_new_units.is_some() || body.split_old_units.is_some(),
+                    Self::SPLIT,
+                )
+                | bit(
+                    body.bonus_units.is_some() || body.bonus_held_units.is_some(),
+                    Self::BONUS,
+                )
+                | bit(
+                    body.rights_units.is_some()
+                        || body.rights_held_units.is_some()
+                        || body.exercise_price.is_some()
+                        // Folded in here so a stray renounceable flag is
+                        // refused by every arm that does not allow `RIGHTS` —
+                        // no arm needs its own test.
+                        || body.renounceable.is_some(),
+                    Self::RIGHTS,
+                )
+                | bit(
+                    body.buyback_price.is_some()
+                        || body.buyback_dividend.is_some()
+                        || body.buyback_franking_credit.is_some()
+                        || body.buyback_market_value.is_some(),
+                    Self::BUYBACK,
+                )
+                | bit(
+                    body.scrip_listing_id.is_some()
+                        || body.scrip_new_units.is_some()
+                        || body.scrip_old_units.is_some()
+                        || body.scrip_cash_per_unit.is_some()
+                        || body.scrip_market_value.is_some()
+                        || body.scrip_cash_currency.is_some(),
+                    Self::SCRIP,
+                )
+                | bit(
+                    body.demerger_listing_id.is_some()
+                        || body.demerger_new_units.is_some()
+                        || body.demerger_held_units.is_some()
+                        || body.demerger_cost_base_pct.is_some()
+                        // The stated close is part of the Demerger payload, so
+                        // folding it in here is what makes every arm that does
+                        // not allow `DEMERGER` reject a stray one — no arm
+                        // needs its own test.
+                        || body.demerger_close_date.is_some()
+                        || body.demerger_close_price.is_some()
+                        || body.demerger_close_sourced_from.is_some()
+                        || body.demerger_close_reason.is_some(),
+                    Self::DEMERGER,
+                )
+                | bit(body.worthless_event.is_some(), Self::WORTHLESS)
+                | bit(body.currency.is_some(), Self::CURRENCY),
+        )
+    }
+
+    /// True when the row carries no group outside `allowed`. Stated as a
+    /// permission rather than as a list of denials, which is what makes a new
+    /// group forbidden everywhere it is not named: there is no per-arm list
+    /// for it to be missing from.
+    fn only(self, allowed: u16) -> bool {
+        self.0 & !allowed == 0
+    }
+}
+
 impl CorporateActionBody {
     /// Each action type carries exactly its own payload (mirrors the table
     /// CHECKs, plus positivity): ReturnOfCapital needs a positive payment and
@@ -479,9 +576,11 @@ impl CorporateActionBody {
     /// a currency (dividend/franking-credit components default to 0; the
     /// dividend may not exceed the price — it is part of it — and a credit
     /// needs a dividend to attach to; market value, when given, is positive)
-    /// — each with every other type's fields absent (`None` otherwise;
-    /// `currency` is shared by ReturnOfCapital, RightsIssue, and BuyBack but
-    /// forbidden for the ratio-only types). A zero/negative payment would
+    /// — each with every other type's fields absent (`None` otherwise), which
+    /// each arm states as the groups it allows via [`Presence::only`] rather
+    /// than by negating the other seven; `currency` is shared by
+    /// ReturnOfCapital, RightsIssue, and BuyBack but forbidden for the
+    /// ratio-only types. A zero/negative payment would
     /// silently *increase* cost bases; a zero/negative ratio would zero out
     /// or invert holdings or entitlements. ScripForScrip needs a positive
     /// exchange ratio and a replacement listing different from the original —
@@ -496,37 +595,6 @@ impl CorporateActionBody {
     /// WorthlessShares needs only the `worthless_event` discriminator (the CGT
     /// event basis), with every numeric/listing payload absent.
     pub(crate) fn kind(self) -> Option<ActionKind> {
-        let payment = self.amount_per_unit.is_some();
-        let split = self.split_new_units.is_some() || self.split_old_units.is_some();
-        let bonus = self.bonus_units.is_some() || self.bonus_held_units.is_some();
-        let rights = self.rights_units.is_some()
-            || self.rights_held_units.is_some()
-            || self.exercise_price.is_some()
-            // Folded in here so every *other* type's `!rights` guard rejects a
-            // stray renounceable flag — no arm needs its own test.
-            || self.renounceable.is_some();
-        let buyback = self.buyback_price.is_some()
-            || self.buyback_dividend.is_some()
-            || self.buyback_franking_credit.is_some()
-            || self.buyback_market_value.is_some();
-        let scrip = self.scrip_listing_id.is_some()
-            || self.scrip_new_units.is_some()
-            || self.scrip_old_units.is_some()
-            || self.scrip_cash_per_unit.is_some()
-            || self.scrip_market_value.is_some()
-            || self.scrip_cash_currency.is_some();
-        let demerger = self.demerger_listing_id.is_some()
-            || self.demerger_new_units.is_some()
-            || self.demerger_held_units.is_some()
-            || self.demerger_cost_base_pct.is_some()
-            // The stated close is part of the Demerger payload, so folding it
-            // in here is what makes every *other* type's `!demerger` guard
-            // reject a stray one — no arm needs its own test.
-            || self.demerger_close_date.is_some()
-            || self.demerger_close_price.is_some()
-            || self.demerger_close_sourced_from.is_some()
-            || self.demerger_close_reason.is_some();
-        let worthless = self.worthless_event.is_some();
         // Entitlement can never be fixed after the payment it entitles the
         // holder to, so a record date past the payment date is rejected rather
         // than silently ignored (CHECK-enforced too, 0023).
@@ -534,7 +602,7 @@ impl CorporateActionBody {
             Some(rd) if rd > self.date => return None,
             other => other,
         };
-        let record = record_date.is_some();
+        let present = Presence::of(&self);
         let positive = |d: Option<Decimal>| d.filter(|v| *v > Decimal::ZERO);
         // Provenance text that is present but blank records nothing, so it is
         // refused rather than stored — the rule `PUT /closing_prices/…` already
@@ -545,7 +613,7 @@ impl CorporateActionBody {
         };
         match self.action_type {
             ActionType::ReturnOfCapital
-                if !split && !bonus && !rights && !buyback && !scrip && !demerger && !worthless =>
+                if present.only(Presence::PAYMENT | Presence::RECORD | Presence::CURRENCY) =>
             {
                 Some(ActionKind::ReturnOfCapital {
                     amount_per_unit: positive(self.amount_per_unit)?,
@@ -553,48 +621,19 @@ impl CorporateActionBody {
                     record_date,
                 })
             }
-            ActionType::ShareSplit
-                if !payment
-                    && !record
-                    && !bonus
-                    && !rights
-                    && !buyback
-                    && !scrip
-                    && !demerger
-                    && !worthless
-                    && self.currency.is_none() =>
-            {
+            ActionType::ShareSplit if present.only(Presence::SPLIT) => {
                 Some(ActionKind::ShareSplit {
                     split_new_units: positive(self.split_new_units)?,
                     split_old_units: positive(self.split_old_units)?,
                 })
             }
-            ActionType::BonusIssue
-                if !payment
-                    && !record
-                    && !split
-                    && !rights
-                    && !buyback
-                    && !scrip
-                    && !demerger
-                    && !worthless
-                    && self.currency.is_none() =>
-            {
+            ActionType::BonusIssue if present.only(Presence::BONUS) => {
                 Some(ActionKind::BonusIssue {
                     bonus_units: positive(self.bonus_units)?,
                     bonus_held_units: positive(self.bonus_held_units)?,
                 })
             }
-            ActionType::RightsIssue
-                if !payment
-                    && !record
-                    && !split
-                    && !bonus
-                    && !buyback
-                    && !scrip
-                    && !demerger
-                    && !worthless =>
-            {
+            ActionType::RightsIssue if present.only(Presence::RIGHTS | Presence::CURRENCY) => {
                 Some(ActionKind::RightsIssue {
                     rights_units: positive(self.rights_units)?,
                     rights_held_units: positive(self.rights_held_units)?,
@@ -608,17 +647,7 @@ impl CorporateActionBody {
                     renounceable: self.renounceable?,
                 })
             }
-            ActionType::ScripForScrip
-                if !payment
-                    && !record
-                    && !split
-                    && !bonus
-                    && !rights
-                    && !buyback
-                    && !demerger
-                    && !worthless
-                    && self.currency.is_none() =>
-            {
+            ActionType::ScripForScrip if present.only(Presence::SCRIP) => {
                 let scrip_listing_id = self.scrip_listing_id.filter(|&l| l != self.listing_id)?;
                 // The cash component is all-or-none: cash per old unit, the
                 // replacement unit's market value (the apportionment needs
@@ -647,17 +676,7 @@ impl CorporateActionBody {
                     scrip_cash_currency,
                 })
             }
-            ActionType::Demerger
-                if !payment
-                    && !record
-                    && !split
-                    && !bonus
-                    && !rights
-                    && !buyback
-                    && !scrip
-                    && !worthless
-                    && self.currency.is_none() =>
-            {
+            ActionType::Demerger if present.only(Presence::DEMERGER) => {
                 let demerger_listing_id =
                     self.demerger_listing_id.filter(|&l| l != self.listing_id)?;
                 let demerger_cost_base_pct = self
@@ -709,16 +728,7 @@ impl CorporateActionBody {
                     demerger_close_reason,
                 })
             }
-            ActionType::BuyBack
-                if !payment
-                    && !record
-                    && !split
-                    && !bonus
-                    && !rights
-                    && !scrip
-                    && !demerger
-                    && !worthless =>
-            {
+            ActionType::BuyBack if present.only(Presence::BUYBACK | Presence::CURRENCY) => {
                 let buyback_price = positive(self.buyback_price)?;
                 let buyback_dividend = self.buyback_dividend.unwrap_or(Decimal::ZERO);
                 if buyback_dividend < Decimal::ZERO || buyback_dividend > buyback_price {
@@ -752,22 +762,139 @@ impl CorporateActionBody {
                     currency: self.currency?,
                 })
             }
-            ActionType::WorthlessShares
-                if !payment
-                    && !record
-                    && !split
-                    && !bonus
-                    && !rights
-                    && !buyback
-                    && !scrip
-                    && !demerger
-                    && self.currency.is_none() =>
-            {
+            ActionType::WorthlessShares if present.only(Presence::WORTHLESS) => {
                 Some(ActionKind::WorthlessShares {
                     worthless_event: self.worthless_event?,
                 })
             }
             _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    /// One representative column of each payload group, keyed by the
+    /// [`Presence`] bit that group is. Naming a *column* is the point: what
+    /// `Presence::only` refuses is a stray column, and a group is present as
+    /// soon as any one of its columns is.
+    const GROUP_COLUMNS: [(u16, &str, &str); 10] = [
+        (Presence::PAYMENT, "amount_per_unit", r#""0.50""#),
+        (Presence::RECORD, "record_date", r#""2024-11-01""#),
+        (Presence::SPLIT, "split_new_units", r#""2""#),
+        (Presence::BONUS, "bonus_units", r#""1""#),
+        (Presence::RIGHTS, "renounceable", "true"),
+        (Presence::BUYBACK, "buyback_market_value", r#""10.20""#),
+        (Presence::SCRIP, "scrip_new_units", r#""2""#),
+        (Presence::DEMERGER, "demerger_cost_base_pct", r#""40""#),
+        (Presence::WORTHLESS, "worthless_event", r#""G3Declaration""#),
+        (Presence::CURRENCY, "currency", r#""AUD""#),
+    ];
+
+    /// A minimal valid payload for each action type, with the groups that type
+    /// is allowed to carry. The allowance is what [`Presence::only`] states at
+    /// each arm; the payload proves the arm is reachable in the first place, so
+    /// a rejection below is the stray column and not a broken base case.
+    fn valid_payloads() -> Vec<(&'static str, u16, Value)> {
+        vec![
+            (
+                "ReturnOfCapital",
+                Presence::PAYMENT | Presence::RECORD | Presence::CURRENCY,
+                json!({"amount_per_unit": "0.50", "currency": "AUD"}),
+            ),
+            (
+                "ShareSplit",
+                Presence::SPLIT,
+                json!({"split_new_units": "2", "split_old_units": "1"}),
+            ),
+            (
+                "BonusIssue",
+                Presence::BONUS,
+                json!({"bonus_units": "1", "bonus_held_units": "10"}),
+            ),
+            (
+                "RightsIssue",
+                Presence::RIGHTS | Presence::CURRENCY,
+                json!({
+                    "rights_units": "1",
+                    "rights_held_units": "4",
+                    "exercise_price": "1.80",
+                    "currency": "AUD",
+                    "renounceable": true,
+                }),
+            ),
+            (
+                "ScripForScrip",
+                Presence::SCRIP,
+                json!({
+                    "scrip_listing_id": 2,
+                    "scrip_new_units": "2",
+                    "scrip_old_units": "1",
+                }),
+            ),
+            (
+                "Demerger",
+                Presence::DEMERGER,
+                json!({
+                    "demerger_listing_id": 2,
+                    "demerger_new_units": "1",
+                    "demerger_held_units": "5",
+                    "demerger_cost_base_pct": "40",
+                }),
+            ),
+            (
+                "BuyBack",
+                Presence::BUYBACK | Presence::CURRENCY,
+                json!({"buyback_price": "9.60", "currency": "AUD"}),
+            ),
+            (
+                "WorthlessShares",
+                Presence::WORTHLESS,
+                json!({"worthless_event": "C2Cancellation"}),
+            ),
+        ]
+    }
+
+    fn body(action_type: &str, payload: &Value) -> CorporateActionBody {
+        let mut v = json!({"action_type": action_type, "listing_id": 1, "date": "2024-11-30"});
+        let map = v.as_object_mut().unwrap();
+        for (k, val) in payload.as_object().unwrap() {
+            map.insert(k.clone(), val.clone());
+        }
+        serde_json::from_value(v).unwrap()
+    }
+
+    /// Every action type carries exactly its own payload: one column of any
+    /// group it is not allowed makes the row unrepresentable as an
+    /// [`ActionKind`], so it is refused rather than stored with the stray
+    /// column silently dropped. The whole 8 × 10 matrix, not a spot check —
+    /// this is the rule `Presence::only` exists to state, and the arms differ
+    /// only in the two shared groups (`currency`, `record_date`).
+    #[test]
+    fn each_action_type_refuses_every_other_types_columns() {
+        for (action_type, allowed, payload) in valid_payloads() {
+            assert!(
+                body(action_type, &payload).kind().is_some(),
+                "{action_type}'s own payload should be accepted"
+            );
+            for (group, column, value) in GROUP_COLUMNS {
+                if allowed & group != 0 {
+                    continue;
+                }
+                let mut with_stray = payload.clone();
+                let stray: Value = serde_json::from_str(value).unwrap();
+                with_stray
+                    .as_object_mut()
+                    .unwrap()
+                    .insert(column.to_string(), stray);
+                assert!(
+                    body(action_type, &with_stray).kind().is_none(),
+                    "{action_type} should refuse a stray {column}"
+                );
+            }
         }
     }
 }
