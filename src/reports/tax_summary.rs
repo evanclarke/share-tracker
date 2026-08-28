@@ -14,7 +14,7 @@ use chrono::{Datelike, NaiveDate};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, Row, SqlitePool};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaxYearSummary {
@@ -555,6 +555,25 @@ pub async fn db_tax_summary(pool: &SqlitePool) -> Result<Vec<TaxYearSummary>, sq
 /// annual tax report) folding a single year's summary into a wider
 /// single-snapshot read transaction instead of re-running this whole
 /// multi-year aggregation on its own transaction.
+/// The per-financial-year accumulator each pass below folds into, keyed by the
+/// calendar year of the year's 30 June end (`domain::tax_year`).
+type Summaries = HashMap<i32, TaxYearSummary>;
+
+/// A year's summary row, created zeroed on first use — an expense, ESS
+/// statement or AMMA statement in a year with no income still creates that
+/// year's row, so its figures are visible rather than dropped.
+fn year_entry(map: &mut Summaries, tax_year: i32) -> &mut TaxYearSummary {
+    map.entry(tax_year)
+        .or_insert_with(|| zero_summary(tax_year))
+}
+
+/// Every assessable-income, deduction and offset line, per Australian
+/// financial year.
+///
+/// One read transaction, then one pass per kind of record: each `accumulate_*`
+/// folds its own rows into the shared per-year map and touches no other pass's
+/// lines, so they compose in any order — the two `apply_*` adjustments and the
+/// totalling pass are the ordered part, and run once every line is aggregated.
 pub(crate) async fn db_tax_summary_on(
     tx: &mut sqlx::SqliteConnection,
 ) -> Result<Vec<TaxYearSummary>, sqlx::Error> {
@@ -656,9 +675,37 @@ pub(crate) async fn db_tax_summary_on(
     // in-memory pass, not more queries.
     let walks = franking::HoldingWalks::load(tx).await?;
 
-    let mut map: HashMap<i32, TaxYearSummary> = HashMap::new();
+    let mut map: Summaries = HashMap::new();
 
-    for income in &income_rows {
+    accumulate_income(&mut map, &income_rows, &fx)?;
+    accumulate_interest(&mut map, &interest_rows, &fx)?;
+    accumulate_amma(&mut map, &amma_rows, &fx)?;
+    accumulate_ess(&mut map, &ess_rows, &ess_ineligible_years, &fx)?;
+    accumulate_expenses(&mut map, &expense_rows, &routing, &fx)?;
+
+    apply_franking_denials(
+        &mut map,
+        &franked_dividends,
+        &attached_credits_by_year,
+        &walks,
+    );
+    apply_fito_de_minimis(&mut map);
+    total_assessable_income(&mut map);
+
+    let mut result: Vec<TaxYearSummary> = map.into_values().collect();
+    result.sort_by_key(|s| s.tax_year);
+    Ok(result)
+}
+
+/// Distribution and dividend rows, each attributed to its year of assessment.
+/// Rows on a listing that was an AMIT for that year never reach here — the
+/// caller's query drops them.
+fn accumulate_income(
+    map: &mut Summaries,
+    income_rows: &[&Income],
+    fx: &FxRates,
+) -> Result<(), sqlx::Error> {
+    for income in income_rows {
         // `Income::assessment_date`: trust income is assessed in the year of
         // *present entitlement*, not of payment (ATO QC 23087,
         // docs/ato/trust-income-timing.md) — a June trust distribution paid in
@@ -670,7 +717,7 @@ pub(crate) async fn db_tax_summary_on(
         // Amounts are denominated in the record's currency; convert to AUD via the
         // ATO rate for the month of the assessment date (the entitlement date when
         // it governs, otherwise date_paid) before aggregating.
-        let aud = |amount: Decimal| aud_value(&fx, amount, &income.currency, assessed);
+        let aud = |amount: Decimal| aud_value(fx, amount, &income.currency, assessed);
         let franked = aud(income.franked_amount)?;
         let unfranked = aud(income.unfranked_amount)?;
         let foreign_income = aud(income.foreign_source_income)?;
@@ -681,9 +728,7 @@ pub(crate) async fn db_tax_summary_on(
         // itself (`Income::lic_capital_gain_deduction`, the shared halving).
         let lic = aud(income.lic_capital_gain_deduction())?;
 
-        let s = map
-            .entry(tax_year)
-            .or_insert_with(|| zero_summary(tax_year));
+        let s = year_entry(map, tax_year);
         // An employment-income row is remuneration, not a payment of the
         // holding (TD 2017/26, SCENARIOS J-10): it belongs at item 1/2, not at
         // 11S, so it reports on its own informational line and joins no
@@ -710,8 +755,8 @@ pub(crate) async fn db_tax_summary_on(
         // two the `11U / 13Q` credits line has always covered
         // (`docs/ato/amma-statement-guidance-notes.md` Part B items 13U/13C,
         // `docs/ato/tax-return-labels-2026.md`; SCENARIOS Z-f). Rows on an
-        // AMIT listing never reach here — the query above drops them for the
-        // years the listing was an AMIT — so this is the ordinary
+        // AMIT listing never reach here — the caller's query drops them for
+        // the years the listing was an AMIT — so this is the ordinary
         // (pre-`amit_from`, or never-AMIT) trust case. The dollars only move
         // line to line: `gross_assessable_investment_income` below adds the
         // same amounts either way.
@@ -727,27 +772,32 @@ pub(crate) async fn db_tax_summary_on(
         s.foreign_tax_offsets += foreign_tax;
         s.tfn_withholding_tax += tfn_wht;
     }
+    Ok(())
+}
 
-    // Interest (docs/ato/tax-return-labels-2026.md): assessed when
-    // paid/credited. An Australian-source row's gross amount (question 10,
-    // 10L) is its own line, its TFN amount withheld (10M) joining the
-    // combined withholding line; a foreign-source row (a foreign broker's
-    // cash / money-market fund) is instead assessable foreign source income
-    // (question 20, 20E), its foreign tax withheld joining the FITO line —
-    // write-time validation keeps each withholding kind on the matching
-    // source (`entities::interest_income`).
-    for row in &interest_rows {
+/// Interest (docs/ato/tax-return-labels-2026.md): assessed when
+/// paid/credited. An Australian-source row's gross amount (question 10,
+/// 10L) is its own line, its TFN amount withheld (10M) joining the
+/// combined withholding line; a foreign-source row (a foreign broker's
+/// cash / money-market fund) is instead assessable foreign source income
+/// (question 20, 20E), its foreign tax withheld joining the FITO line —
+/// write-time validation keeps each withholding kind on the matching
+/// source (`entities::interest_income`).
+fn accumulate_interest(
+    map: &mut Summaries,
+    interest_rows: &[sqlx::sqlite::SqliteRow],
+    fx: &FxRates,
+) -> Result<(), sqlx::Error> {
+    for row in interest_rows {
         let date_paid: NaiveDate = row.try_get("date_paid")?;
         let tax_year = tax_year_for(date_paid);
         let currency: String = row.try_get("currency")?;
         let foreign_source: bool = row.try_get("foreign_source")?;
-        let amount = aud_field(&fx, row, "amount", &currency, date_paid)?;
-        let tfn_wht = aud_field(&fx, row, "tfn_withholding_tax", &currency, date_paid)?;
-        let foreign_tax = aud_field(&fx, row, "foreign_tax_paid", &currency, date_paid)?;
+        let amount = aud_field(fx, row, "amount", &currency, date_paid)?;
+        let tfn_wht = aud_field(fx, row, "tfn_withholding_tax", &currency, date_paid)?;
+        let foreign_tax = aud_field(fx, row, "foreign_tax_paid", &currency, date_paid)?;
 
-        let s = map
-            .entry(tax_year)
-            .or_insert_with(|| zero_summary(tax_year));
+        let s = year_entry(map, tax_year);
         if foreign_source {
             s.foreign_interest_income += amount;
             s.foreign_tax_offsets += foreign_tax;
@@ -756,8 +806,17 @@ pub(crate) async fn db_tax_summary_on(
         }
         s.tfn_withholding_tax += tfn_wht;
     }
+    Ok(())
+}
 
-    for row in &amma_rows {
+/// AMMA attribution statements — an AMIT's only assessable record, attributed
+/// to the year its `tax_year_end_date` closes.
+fn accumulate_amma(
+    map: &mut Summaries,
+    amma_rows: &[sqlx::sqlite::SqliteRow],
+    fx: &FxRates,
+) -> Result<(), sqlx::Error> {
+    for row in amma_rows {
         let tax_year_end_date: NaiveDate = row.try_get("tax_year_end_date")?;
         let tax_year = tax_year_end_date.year();
 
@@ -765,25 +824,22 @@ pub(crate) async fn db_tax_summary_on(
         // statement's only period anchor) before aggregating.
         let currency: String = row.try_get("currency")?;
         let d = tax_year_end_date;
-        let interest = aud_field(&fx, row, "australian_interest", &currency, d)?;
-        let div_unfranked = aud_field(&fx, row, "australian_dividends_unfranked", &currency, d)?;
-        let franked_div = aud_field(&fx, row, "franked_dividends", &currency, d)?;
-        let fc = aud_field(&fx, row, "franking_credits", &currency, d)?;
-        let rent = aud_field(&fx, row, "net_rent", &currency, d)?;
-        let foreign_inc = aud_field(&fx, row, "foreign_income", &currency, d)?;
-        let foreign_tax = aud_field(&fx, row, "foreign_tax_credits", &currency, d)?;
-        let foreign_tax_cg =
-            aud_field(&fx, row, "foreign_tax_credits_capital_gains", &currency, d)?;
-        let other = aud_field(&fx, row, "other_income", &currency, d)?;
-        let cgt_disc = aud_field(&fx, row, "cgt_discount_gains", &currency, d)?;
-        let cgt_idx = aud_field(&fx, row, "cgt_indexation_gains", &currency, d)?;
-        let cgt_other = aud_field(&fx, row, "cgt_other_gains", &currency, d)?;
-        let cap_losses = aud_field(&fx, row, "capital_losses_applied", &currency, d)?;
-        let tfn_wht = aud_field(&fx, row, "tfn_withholding_tax", &currency, d)?;
+        let interest = aud_field(fx, row, "australian_interest", &currency, d)?;
+        let div_unfranked = aud_field(fx, row, "australian_dividends_unfranked", &currency, d)?;
+        let franked_div = aud_field(fx, row, "franked_dividends", &currency, d)?;
+        let fc = aud_field(fx, row, "franking_credits", &currency, d)?;
+        let rent = aud_field(fx, row, "net_rent", &currency, d)?;
+        let foreign_inc = aud_field(fx, row, "foreign_income", &currency, d)?;
+        let foreign_tax = aud_field(fx, row, "foreign_tax_credits", &currency, d)?;
+        let foreign_tax_cg = aud_field(fx, row, "foreign_tax_credits_capital_gains", &currency, d)?;
+        let other = aud_field(fx, row, "other_income", &currency, d)?;
+        let cgt_disc = aud_field(fx, row, "cgt_discount_gains", &currency, d)?;
+        let cgt_idx = aud_field(fx, row, "cgt_indexation_gains", &currency, d)?;
+        let cgt_other = aud_field(fx, row, "cgt_other_gains", &currency, d)?;
+        let cap_losses = aud_field(fx, row, "capital_losses_applied", &currency, d)?;
+        let tfn_wht = aud_field(fx, row, "tfn_withholding_tax", &currency, d)?;
 
-        let s = map
-            .entry(tax_year)
-            .or_insert_with(|| zero_summary(tax_year));
+        let s = year_entry(map, tax_year);
         s.amma_australian_interest += interest;
         s.amma_dividends_unfranked += div_unfranked;
         s.amma_franked_dividends += franked_div;
@@ -813,14 +869,24 @@ pub(crate) async fn db_tax_summary_on(
         // per-distribution ex-date, which an annual AMMA statement doesn't
         // carry.
     }
+    Ok(())
+}
 
-    // ESS discounts (docs/ato/employee-share-schemes.md): the assessable
-    // discount (labels D + E + F + G) is declared in the year of the taxing
-    // point, separately from dividend/trust income; the taxed-upfront-eligible
-    // (D) total is reducible by up to A$1,000 per year. Accumulate the raw
-    // discount and the eligible total here, then net the reduction below.
+/// ESS discounts (docs/ato/employee-share-schemes.md): the assessable
+/// discount (labels D + E + F + G) is declared in the year of the taxing
+/// point, separately from dividend/trust income; the taxed-upfront-eligible
+/// (D) total is reducible by up to A$1,000 per year. The raw discount and the
+/// eligible total accumulate first, then the reduction is netted per year —
+/// which is why the two passes stay in one function: `ess_eligible_by_year` is
+/// the second's only input and never escapes.
+fn accumulate_ess(
+    map: &mut Summaries,
+    ess_rows: &[sqlx::sqlite::SqliteRow],
+    ess_ineligible_years: &HashSet<i32>,
+    fx: &FxRates,
+) -> Result<(), sqlx::Error> {
     let mut ess_eligible_by_year: HashMap<i32, Decimal> = HashMap::new();
-    for row in &ess_rows {
+    for row in ess_rows {
         let taxing_point: NaiveDate = row.try_get("taxing_point_date")?;
         let tax_year = tax_year_for(taxing_point);
 
@@ -833,16 +899,14 @@ pub(crate) async fn db_tax_summary_on(
         // `fx_rate` when the month has no RBA rate, the same rate its vest
         // parcel carries.
         let over = ess_fx_override(row)?;
-        let eligible = aud_label(&fx, row, "taxed_upfront_eligible", &currency, d, over)?;
-        let not_eligible = aud_label(&fx, row, "taxed_upfront_not_eligible", &currency, d, over)?;
-        let deferral = aud_label(&fx, row, "deferral_discount", &currency, d, over)?;
-        let pre_2009 = aud_label(&fx, row, "pre_2009_cessation_discount", &currency, d, over)?;
-        let foreign = aud_label(&fx, row, "foreign_source_discount", &currency, d, over)?;
-        let tfn = aud_field_with(&fx, row, "tfn_withholding", &currency, d, over)?;
+        let eligible = aud_label(fx, row, "taxed_upfront_eligible", &currency, d, over)?;
+        let not_eligible = aud_label(fx, row, "taxed_upfront_not_eligible", &currency, d, over)?;
+        let deferral = aud_label(fx, row, "deferral_discount", &currency, d, over)?;
+        let pre_2009 = aud_label(fx, row, "pre_2009_cessation_discount", &currency, d, over)?;
+        let foreign = aud_label(fx, row, "foreign_source_discount", &currency, d, over)?;
+        let tfn = aud_field_with(fx, row, "tfn_withholding", &currency, d, over)?;
 
-        let s = map
-            .entry(tax_year)
-            .or_insert_with(|| zero_summary(tax_year));
+        let s = year_entry(map, tax_year);
         // Raw discount; the $1,000 reduction is subtracted per year below.
         s.ess_discount_assessable += eligible + not_eligible + deferral + pre_2009;
         s.ess_foreign_source_discount += foreign;
@@ -868,15 +932,23 @@ pub(crate) async fn db_tax_summary_on(
             s.ess_discount_assessable -= reduction;
         }
     }
+    Ok(())
+}
 
-    // Deductible investment expenses (docs/ato/investment-income-deductions.md,
-    // dividend-income-deductions.md): the cost of earning assessable investment
-    // income, recorded as the post-apportionment deductible amount. Total by
-    // expense type per Australian financial year; a non-AUD amount converts to
-    // AUD via the ATO rate for the month incurred (fails loudly with no rate). An
-    // expense in a year with no income still creates that year's row so the
-    // deduction is visible.
-    for row in &expense_rows {
+/// Deductible investment expenses (docs/ato/investment-income-deductions.md,
+/// dividend-income-deductions.md): the cost of earning assessable investment
+/// income, recorded as the post-apportionment deductible amount. Total by
+/// expense type per Australian financial year; a non-AUD amount converts to
+/// AUD via the ATO rate for the month incurred (fails loudly with no rate). An
+/// expense in a year with no income still creates that year's row so the
+/// deduction is visible.
+fn accumulate_expenses(
+    map: &mut Summaries,
+    expense_rows: &[sqlx::sqlite::SqliteRow],
+    routing: &DeductionRouting,
+    fx: &FxRates,
+) -> Result<(), sqlx::Error> {
+    for row in expense_rows {
         let date_incurred: NaiveDate = row.try_get("date_incurred")?;
         let tax_year = tax_year_for(date_incurred);
         let currency: String = row.try_get("currency")?;
@@ -889,7 +961,7 @@ pub(crate) async fn db_tax_summary_on(
         // disposal schedule rounds at the parcel row (SCENARIOS W-d). Both
         // cuts are then sums of the same rounded amounts, and `deductions_total`
         // is the sum of either group by construction.
-        let amount = to_cents(aud_field(&fx, row, "amount", &currency, date_incurred)?);
+        let amount = to_cents(aud_field(fx, row, "amount", &currency, date_incurred)?);
         let expense_type: String = row.try_get("expense_type")?;
         let listing_id: Option<i64> = row.try_get("listing_id")?;
         let kind = match expense_type.as_str() {
@@ -914,9 +986,7 @@ pub(crate) async fn db_tax_summary_on(
         // sum to `deductions_total` independently.
         let destination = routing.destination(listing_id, kind, tax_year);
 
-        let s = map
-            .entry(tax_year)
-            .or_insert_with(|| zero_summary(tax_year));
+        let s = year_entry(map, tax_year);
         let line = match kind {
             ExpenseType::LoanInterest => &mut s.deductions_loan_interest,
             ExpenseType::ManagementFee => &mut s.deductions_management_fee,
@@ -935,12 +1005,20 @@ pub(crate) async fn db_tax_summary_on(
         *destination_line += amount;
         s.deductions_total += amount;
     }
+    Ok(())
+}
 
-    // Franking-credit entitlement (docs/ato/you-and-your-shares-dividends.md): in a
-    // year with A$5,000 or more of attached credits the small-shareholder
-    // exemption doesn't apply, so each dividend's shares must pass the at-risk
-    // holding-period test; the credits on units that fail it are denied.
-    for div in &franked_dividends {
+/// Franking-credit entitlement (docs/ato/you-and-your-shares-dividends.md): in a
+/// year with A$5,000 or more of attached credits the small-shareholder
+/// exemption doesn't apply, so each dividend's shares must pass the at-risk
+/// holding-period test; the credits on units that fail it are denied.
+fn apply_franking_denials(
+    map: &mut Summaries,
+    franked_dividends: &[franking::FrankedDividend],
+    attached_credits_by_year: &HashMap<i32, Decimal>,
+    walks: &franking::HoldingWalks,
+) {
+    for div in franked_dividends {
         let attached = attached_credits_by_year[&div.tax_year];
         if attached < franking::small_shareholder_threshold_aud() {
             continue;
@@ -955,10 +1033,12 @@ pub(crate) async fn db_tax_summary_on(
             s.franking_credits_denied += denied;
         }
     }
+}
 
-    // FITO de-minimis (docs/ato/fito-limit.md): a year's foreign tax offset over
-    // A$1,000 needs the offset-limit calculation, which is outside this
-    // system's data — cap the claimable offset and surface the excess.
+/// FITO de-minimis (docs/ato/fito-limit.md): a year's foreign tax offset over
+/// A$1,000 needs the offset-limit calculation, which is outside this
+/// system's data — cap the claimable offset and surface the excess.
+fn apply_fito_de_minimis(map: &mut Summaries) {
     for s in map.values_mut() {
         let limit = fito_de_minimis_aud();
         if s.foreign_tax_offsets > limit {
@@ -966,28 +1046,30 @@ pub(crate) async fn db_tax_summary_on(
             s.foreign_tax_offsets = limit;
         }
     }
+}
 
-    // Gross assessable investment income (the report's existing assessable income
-    // lines) and the net position after the investment-expense deductions. Done
-    // last so every income, AMMA and deduction line is already aggregated.
-    //
-    // **Summed at the cent** (SCENARIOS W-f): this column is printed beside
-    // the eleven it totals — on the tax-summary screen, in
-    // `tax-summary.csv`, and in the annual tax report's tax-summary section —
-    // and every one of those surfaces shows money to the cent, so the total
-    // has to be the sum of the figures *as shown* or the printed column does
-    // not add up. `to_cents` is the one rounding rule, shared with the
-    // exports' `Cents` rendering, so the total is exactly the sum of the
-    // cells beside it.
-    //
-    // The income lines themselves are deliberately **not** rounded: unlike
-    // the net-capital-gain worksheet's inputs, each is the total of the
-    // annual tax report's own per-record income rows, which
-    // `docs/API.md` promises sum to it exactly (that report's income section
-    // is a drilldown into this line, not a second computation of it). The
-    // deduction lines are the exception, and are already at the cent — their
-    // rounding happens at the expense row above, forced by the two cuts that
-    // must agree with one another.
+/// Gross assessable investment income (the report's existing assessable income
+/// lines) and the net position after the investment-expense deductions. Run
+/// last so every income, AMMA and deduction line is already aggregated.
+///
+/// **Summed at the cent** (SCENARIOS W-f): this column is printed beside
+/// the eleven it totals — on the tax-summary screen, in
+/// `tax-summary.csv`, and in the annual tax report's tax-summary section —
+/// and every one of those surfaces shows money to the cent, so the total
+/// has to be the sum of the figures *as shown* or the printed column does
+/// not add up. `to_cents` is the one rounding rule, shared with the
+/// exports' `Cents` rendering, so the total is exactly the sum of the
+/// cells beside it.
+///
+/// The income lines themselves are deliberately **not** rounded: unlike
+/// the net-capital-gain worksheet's inputs, each is the total of the
+/// annual tax report's own per-record income rows, which
+/// `docs/API.md` promises sum to it exactly (that report's income section
+/// is a drilldown into this line, not a second computation of it). The
+/// deduction lines are the exception, and are already at the cent — their
+/// rounding happens at the expense row above, forced by the two cuts that
+/// must agree with one another.
+fn total_assessable_income(map: &mut Summaries) {
     for s in map.values_mut() {
         s.gross_assessable_investment_income = to_cents(s.dividends_assessable)
             + to_cents(s.interest_income)
@@ -1005,10 +1087,6 @@ pub(crate) async fn db_tax_summary_on(
         s.net_assessable_investment_income =
             s.gross_assessable_investment_income - s.deductions_total;
     }
-
-    let mut result: Vec<TaxYearSummary> = map.into_values().collect();
-    result.sort_by_key(|s| s.tax_year);
-    Ok(result)
 }
 
 async fn tax_summary_handler(

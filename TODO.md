@@ -52,13 +52,36 @@ Dispersing those guards into helpers would scatter a correctness argument that c
 to bottom. The items below are only the cases where the complexity is *accidental* — where a
 decomposition exists that moves no invariant.
 
-- [ ] Split `reports::tax_summary::db_tax_summary_on` (`src/reports/tax_summary.rs:558`, CCN 84 —
+- [x] Split `reports::tax_summary::db_tax_summary_on` (`src/reports/tax_summary.rs:558`, CCN 84 —
   second-highest in the codebase, 276 NLOC). Strongest and lowest-risk candidate: after the input
   loads it is four *independent* accumulation loops (income `:661`, interest `:739`, AMMA `:760`,
   ESS `:823`), each folding a different row type into the same `HashMap<i32, TaxYearSummary>` and
   interacting with each other only through that map. Each becomes an `accumulate_*(&mut map, &rows,
   &fx, …)` free function with no shared mutable state beyond the map and no invariant spanning the
   cut. Behaviour-preserving, so the existing tax-summary and `ato_examples` tests are the proof
+
+  **Done 2026-08-28.** `db_tax_summary_on` is CCN 20 / 80 NLOC, down from 84 / 276; nothing in the
+  file is above CCN 18. The audit's count of four loops was low — there were **six** row-driven
+  accumulations and two whole-map post-passes, all eight now named:
+
+  - `accumulate_income` (12), `accumulate_interest` (9), `accumulate_amma` (18), `accumulate_ess`
+    (14), `accumulate_expenses` (10) — one per kind of record, each folding only its own rows in
+  - `apply_franking_denials`, `apply_fito_de_minimis`, `total_assessable_income` — the ordered part,
+    which is now visible *as* the ordered part rather than being three more loops in a run of eight
+
+  What made the cut safe is that the five `accumulate_*` passes touch disjoint summary lines and
+  compose in any order, so no invariant spans a boundary; the three `apply_*`/total passes are the
+  ones that must run after everything is aggregated, and the orchestrator's doc comment now says so
+  — a sequencing constraint that was previously implicit in the order of a 276-line body. Two
+  supporting pieces: a `Summaries` type alias for the shared map, and `year_entry`, which replaces
+  the five copies of `map.entry(ty).or_insert_with(|| zero_summary(ty))`.
+
+  `accumulate_ess` deliberately keeps *two* loops: the per-year $1,000 taxed-upfront reduction reads
+  `ess_eligible_by_year`, which the row loop builds and which now never escapes the function — the
+  encapsulation the split bought. Every comment moved with its code, the ones describing a whole
+  pass becoming that function's doc comment. Proof is the unchanged suite: 91 tax-summary tests and
+  the 38 `ato_examples` acceptance tests (which assert the ATO's own stated figures end to end via
+  HTTP), 2,336 total, plus fmt and `clippy -D warnings` clean.
 - [ ] Extract the two nesting outliers, each one contained inner block (these are the only two
   production functions nested deeper than 6):
   - `entities::currencies::parse_iso4217` (`src/entities/currencies.rs:234`, nest 8, CCN 19) — the
