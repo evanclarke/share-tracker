@@ -31,7 +31,7 @@ croner = "3.0.1"
 csv = "1"
 # 0.41+: RUSTSEC-2026-0194 / the NsReader namespace-allocation advisory are
 # fixed there (cargo deny check advisories pins this floor).
-quick-xml = "0.41"
+quick-xml = "0.42"
 sha2 = "0.11"
 # Derives Display/Error/From for the per-operation error enums, so a wrapped
 # sqlx::Error keeps its own message and stays reachable through source().
@@ -53,7 +53,7 @@ subtle = "2"
 # connection with no status at all (SCENARIOS W-b); CatchPanicLayer turns it
 # into the logged, empty-bodied 500 `ApiError::Internal` already answers with.
 # Already in the tree as a transitive dependency of reqwest.
-tower-http = { version = "0.6", default-features = false, features = ["catch-panic"] }
+tower-http = { version = "0.7", default-features = false, features = ["catch-panic"] }
 
 [dev-dependencies]
 http-body-util = "0.1"
