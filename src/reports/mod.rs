@@ -41,6 +41,10 @@ pub mod tax_summary;
 pub mod unrealised_gains;
 pub mod valuation;
 pub mod wash_sales;
+/// The weekly portfolio summary email's content. A read-only composition of
+/// the reports above with no routes of its own — the `weekly-summary` job is
+/// its only caller, so it is not merged into `router` below.
+pub mod weekly_summary;
 
 /// A listing's ticker for a rejection or detail message — the error-bodies
 /// contract (API.md) names entities by ticker/name, never by raw foreign-key

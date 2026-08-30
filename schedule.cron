@@ -49,3 +49,30 @@
 # provisional window dates; a blocked date is skipped (reported) and retried
 # on later runs.
 0 9 * * *      UTC   report-snapshot
+
+# Price-change alerts, one line per market close, each just after that market's
+# price-import above so the close it assesses has been stored. A held listing
+# whose latest stored close moved more than the configured threshold (`[email]`
+# price_alert_pct, default 5%) from the previous stored close is emailed.
+#
+# Every run walks every held listing, because a listing's market is a property
+# of the listing and not of the line that woke the job — so the three runs
+# re-find each other's movers. That is why an alerted move is recorded
+# (`price_alerts`) and never re-sent: without it an ASX mover would be emailed
+# again at the New York close and again at the crypto cut-off.
+#
+# 15 minutes after each price-import rather than immediately: the import fetches
+# one provider call per held listing, and an alert run that overtook it would
+# assess yesterday's close and then suppress today's when it landed.
+45 17 * * 1-5   Australia/Sydney   price-alert
+45 17 * * 1-5   America/New_York   price-alert
+15 8  * * *     UTC                price-alert
+
+# The weekly portfolio summary: the Portfolio Overview's headline, its
+# market-value/unrealised-gain series and its per-holding contributions, for the
+# week just closed. Saturday 08:00 local — after Friday's last close has been
+# priced and snapshotted (the report-snapshot run above lands ~19:00-20:00
+# Sydney), and on a morning the reader has time to read it. Local server time
+# rather than a market's zone: this one is about when the *reader* is up, not
+# about a market's margin.
+0 8 * * 6   weekly-summary

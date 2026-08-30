@@ -170,6 +170,13 @@ where
 /// schedule file. The price source is injected (not constructed here) so the
 /// live `YahooFetcher` only ever reaches the registry from `main`; tests pass a
 /// stub and never touch the network.
+/// `notifier` is the outbound-email transport plus the price-alert threshold,
+/// `None` when the config file has no `[email]` table. It is injected for the
+/// same reason the price fetcher is: the live SMTP transport is built only in
+/// `main`, so no test path can reach a mail server. Both email jobs stay
+/// registered either way — with no notifier each records a run that succeeded
+/// while sending nothing, rather than a weekly failure on a deployment that
+/// never asked for mail.
 pub fn registry(
     pool: SqlitePool,
     db_path: String,
@@ -177,6 +184,7 @@ pub fn registry(
     backup_command: Option<String>,
     fetcher: crate::entities::closing_price::SharedFetcher,
     distribution_fetcher: crate::entities::distribution_event::SharedDistributionFetcher,
+    notifier: Option<crate::infra::email::Notifier>,
 ) -> JobRegistry {
     let mut jobs: HashMap<String, Arc<RegisteredJob>> = HashMap::new();
 
@@ -337,6 +345,42 @@ pub fn registry(
                 crate::reports::snapshot::run_snapshot_job(&pool, chrono::Utc::now())
                     .await
                     .map(|()| None)
+            }
+        }
+    });
+
+    // The two email jobs. Each takes its own clone of the notifier, so a
+    // deployment with no `[email]` table hands both a `None` and neither
+    // fails — see the parameter's own note above.
+    register(&mut jobs, "weekly-summary", {
+        let (pool, notifier) = (pool.clone(), notifier.clone());
+        move |_| {
+            let (pool, notifier) = (pool.clone(), notifier.clone());
+            async move {
+                // Returns the note directly: a run with no transport, or with
+                // fewer than two stored snapshots in the window, succeeded
+                // while doing less than the whole of its work (SCENARIOS T-09).
+                crate::reports::weekly_summary::run_weekly_summary(
+                    &pool,
+                    notifier.as_ref(),
+                    chrono::Utc::now(),
+                )
+                .await
+            }
+        }
+    });
+
+    register(&mut jobs, "price-alert", {
+        let (pool, notifier) = (pool.clone(), notifier.clone());
+        move |_| {
+            let (pool, notifier) = (pool.clone(), notifier.clone());
+            async move {
+                crate::entities::price_alert::run_alert(
+                    &pool,
+                    notifier.as_ref(),
+                    chrono::Utc::now(),
+                )
+                .await
             }
         }
     });

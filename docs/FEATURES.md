@@ -11,6 +11,7 @@ The detail behind [the README's feature summary](../README.md#features). Every e
 - [Reports](#reports)
 - [Prices and foreign exchange](#prices-and-foreign-exchange)
 - [Cross-checks and alerts](#cross-checks-and-alerts)
+- [Emailed reports](#emailed-reports)
 - [The application itself](#the-application-itself)
 - [Deliberate scope cuts](#deliberate-scope-cuts)
 
@@ -305,6 +306,47 @@ What it names, each one a mistake that is individually plausible and silently wr
 - **disposal recorded at nil proceeds** (a Sell at a zero price, or a disposal of rights that were *paid for* at nothing per right — the shape a **gift** takes when what was entered is what was actually received, which is nothing: under the market-value substitution rule the proceeds are the asset's **market value** at the time of the event, so entering the nothing fabricates a capital loss the size of the whole cost base, nets it against the year's gains and carries it forward until it is absorbed, and every figure downstream is individually valid; flagged rather than refused, because a crypto burn, an abandonment or paid-for rights left to lapse each realise a real loss at genuinely nil proceeds and no stored fact says which this is — while the Sells an *operation* writes at nil proceeds, a worthless-shares recognise above all, are never flagged, and neither is a free right that lapses, which is nil against nil and fabricates nothing)
 
 The web UI shows a cross-view warning banner (linking to the Jobs page) whenever data goes stale, a job fails, or a job's schedule stops moving, and the Jobs screen carries a **next run** column so it can answer whether a job is still scheduled and when it is due — a broken price source is visible from any screen, not only when the Jobs page is opened (see [Health](API.md#health))
+
+## Emailed reports
+
+The server watches the portfolio all week; these are the two things it says without being asked.
+Both are **optional and off by default** — with no `[email]` table in the
+[configuration file](../README.md#emailed-reports) the server sends nothing and behaves exactly as
+it did before, and each job records a run that succeeded carrying a note saying so rather than
+failing weekly on a deployment that never wanted mail. Mail goes out over SMTP (implicit TLS,
+STARTTLS or unencrypted), as `multipart/alternative` — an HTML part laid out like the screen the
+figures come from, and a plain-text part saying the same thing.
+
+### Weekly portfolio summary
+
+The [Portfolio Overview](#portfolio-overview) screen's two panels for the week just closed, emailed
+after the week's last close: the period headline (opening and closing market value, the return and
+its split into capital growth, FX movement and income, purchases, sale proceeds, and the realised
+capital gain cross-check); market value and unrealised gain over time, one row per stored snapshot
+date; and the per-holding contributions table, each row carrying the security's opening and closing
+**unit price** and the move between them — the figures the screen draws as a sparkline. Every
+advisory flag the reports carry is stated in the message.
+
+The window is the **stored [report snapshots](#daily-report-snapshots)**, resolved exactly as the
+screen resolves a range preset, so the email and the screen state the same figures for the same
+week — which matters, because the first thing you do with a surprising email is open the app and
+compare. Fewer than two stored snapshots in the week sends nothing and says why.
+
+### Price-change alerts
+
+After each market close, any held listing whose latest stored closing price moved at least a
+configured percentage (default **5%**) from the previous stored close — a fall as much as a rise,
+in the listing's own quote currency rather than AUD, so an FX movement is never folded into a price
+change.
+
+Two consequences of running after every close, over a portfolio spanning three markets. Each move
+is **alerted exactly once**: every run walks every held listing (a listing's market is a property of
+the listing, not of the schedule line), so an alerted move is recorded and never re-sent — and the
+record is written only after the send succeeds, so a mail outage leaves the move to the next run
+rather than swallowing it. And a pair straddling a **split, consolidation or demerger restatement**
+is skipped rather than alerted: the two prices are quoted in different units, and a 1-for-2
+consolidation would otherwise report a 50% crash that never happened. The skipped comparison is
+reported as the run's note rather than left silent.
 
 ## The application itself
 

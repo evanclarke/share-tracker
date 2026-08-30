@@ -78,6 +78,10 @@ detail on every one** — what it computes, which ATO rule it follows, and where
   reports that name what looks wrong without ever refusing a write: missing FX rates, unreconciled
   AMIT adjustments, rollovers that no longer add up, wash sales, franking credits about to fail the
   45-day rule, distributions that were never entered, and jobs that have stopped running.
+- **[Emailed reports](docs/FEATURES.md#emailed-reports)** — optional, off until you configure SMTP:
+  a weekly summary of the Portfolio Overview's week (the period headline, the value series, and the
+  per-holding contributions), and a price-change alert after each market close when a holding moves
+  more than a configured percentage. See [Emailed reports](#emailed-reports) to turn them on.
 - **[The application itself](docs/FEATURES.md#the-application-itself)** — a no-build-step web UI
   served from the same binary, an append-only audit trail of every edit and deletion, and optional
   single-credential authentication.
@@ -150,6 +154,11 @@ schedule = "/usr/local/etc/share-tracker.cron"
 # [auth]                       # see "Authentication" below; off by default
 # username = "evan"
 # password_hash = "$argon2id$v=19$m=19456,t=2,p=1$..."
+
+# [email]                      # see "Emailed reports" below; off by default
+# smtp_host = "smtp.example.com"
+# from = "share-tracker@example.com"
+# to = ["you@example.com"]
 ```
 
 An unknown key or invalid TOML aborts startup with the reason — a typo never silently falls back to a default (starting against the wrong database is worse than not starting). The full annotated example lives at [`pkg/freebsd/share-tracker.toml.sample`](pkg/freebsd/share-tracker.toml.sample).
@@ -176,6 +185,29 @@ share-tracker gen-token       # prints a random 64-hex-char bearer token
 There is deliberately no `--auth-*` CLI flag for either value — config file only, for the same reason. Once `[auth]` is set, every route needs a session (sign in at `/login`; the session cookie lasts 30 days and survives a restart, but changing the password invalidates every existing session, since the session-signing key is derived from the password hash) or, for scripts that call the API without a browser, `Authorization: Bearer <api_token>` — the mechanism `pkg/freebsd/update.sh` and `smoke-test.sh` use once a token is configured. `POST /logout` clears the browser's cookie but cannot revoke a copied-out cookie value before its own expiry, there being no server-side session store to revoke it in (see [Known limitations](docs/API.md#known-limitations)). Full endpoint documentation: [Authentication](docs/API.md#authentication).
 
 `[auth]` has no lockout counter of its own — failed logins are throttled only by Argon2's own ~30 ms/attempt cost, which is deliberate for a single-credential hobbyist deployment but scales with however many source IPs an attacker uses. If the server is reachable from the internet, rate-limit `/login` at the proxy rather than in the app — see the `limit_req` example in the next section.
+
+### Emailed reports
+
+Off by default: with no `[email]` table the server sends nothing and behaves exactly as it did before this existed. To turn on the weekly portfolio summary and the per-close price-change alert (see [Emailed reports](docs/FEATURES.md#emailed-reports) for what each says), add the table:
+
+```toml
+[email]
+smtp_host = "smtp.example.com"
+# encryption = "implicit"   # implicit TLS on submissions/465 (default), "starttls" (587), or "none"
+# smtp_port = 465           # defaults to the conventional port for `encryption`
+username = "share-tracker@example.com"   # both or neither
+password = "..."
+from = "share-tracker@example.com"
+to = ["you@example.com"]                 # one or more
+# subject_prefix = "[share-tracker]"     # prepended to every subject, so mail filters on one string
+# price_alert_pct = "5"                  # the alert threshold, in percent
+```
+
+`price_alert_pct` is written as a **string** (or a whole number), never as a decimal number: money and quantities never cross a float anywhere in this program, and a TOML float cannot represent every threshold exactly. There are no `--email-*` CLI flags, for the same reason `[auth]` has none — an SMTP password on argv is visible to anyone on the host via `ps`.
+
+Every value is validated at **startup**, not at send time: a malformed address, an empty `to`, a username without a password, an unknown encryption mode or a non-positive threshold aborts the server naming the field. A weekly job is the worst possible place to discover a typo — the failure would surface a week late, to nobody, in a log.
+
+Both jobs stay registered and scheduled whether or not the table is present. With no transport configured each records a run that **succeeded carrying a note** saying nothing was sent (visible on the Jobs screen), rather than a weekly failure on a deployment that never asked for mail. Their schedule lines are `weekly-summary` and the three `price-alert` entries in the cron file below; run either on demand with `POST /jobs/weekly-summary` / `POST /jobs/price-alert`.
 
 ### Behind a reverse proxy
 
@@ -241,7 +273,7 @@ The proxy must not rewrite the response body; no `sub_filter` is needed or wante
 
 ### Scheduled maintenance
 
-Recurring maintenance jobs — the database backup, the RBA FX rate import, the ISO MIC registry import, the currencies import, the closing-price collection, and the daily report snapshot — are scheduled from a cron file rather than hard-coded intervals. Each line is a 5-field Vixie cron expression (`min hour dom mon dow`), optionally followed by an IANA timezone (e.g. `America/New_York`), then the job name; `#` starts a comment. Without a timezone the expression is in local server time; with one, it fires on that zone's wall clock — the price imports use this so each run keeps a fixed margin over its market's close regardless of DST transitions at either end. The built-in default is embedded in the binary (`schedule.cron`); pass `--schedule <path>` to use your own file instead:
+Recurring maintenance jobs — the database backup, the RBA FX rate import, the ISO MIC registry import, the currencies import, the closing-price collection, the daily report snapshot, and the two [emailed reports](#emailed-reports) — are scheduled from a cron file rather than hard-coded intervals. Each line is a 5-field Vixie cron expression (`min hour dom mon dow`), optionally followed by an IANA timezone (e.g. `America/New_York`), then the job name; `#` starts a comment. Without a timezone the expression is in local server time; with one, it fires on that zone's wall clock — the price imports use this so each run keeps a fixed margin over its market's close regardless of DST transitions at either end. The built-in default is embedded in the binary (`schedule.cron`); pass `--schedule <path>` to use your own file instead:
 
 ```
 0 0 * * 0   backup          # weekly, Sunday 00:00
@@ -252,6 +284,10 @@ Recurring maintenance jobs — the database backup, the RBA FX rate import, the 
 30 17 * * 1-5   America/New_York   price-import  # after the 16:00 NYSE close
 0  8  * * *     UTC                price-import  # crypto, ~8h after the UTC cut-off
 0 9 * * *      UTC   report-snapshot # daily, once the day's last close has been imported
+45 17 * * 1-5   Australia/Sydney   price-alert   # 15 min after each market's price-import
+45 17 * * 1-5   America/New_York   price-alert
+15 8  * * *     UTC                price-alert
+0 8 * * 6   weekly-summary  # Saturday 08:00 local, after the week's last close is snapshotted
 ```
 
 A schedule line naming an unknown job or an unknown timezone is rejected at startup. A job that *expects* a schedule but has no line is allowed and logged as a `WARN` at startup (it will then only run via its endpoint) — and that warning now means one thing only, that a line has been lost.

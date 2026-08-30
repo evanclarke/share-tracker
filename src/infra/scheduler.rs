@@ -26,6 +26,12 @@ mod run;
 mod schedule;
 
 pub use http::router;
+/// What one run of a job returns. Named outside the scheduler by the two email
+/// jobs, whose bodies live with the reports they compose
+/// (`reports::weekly_summary`, `entities::price_alert`) rather than inline in
+/// the registry — a job whose work is a whole report is too big to be an
+/// argument to `register`.
+pub use registry::JobOutcome;
 pub use registry::{JobRegistry, registry};
 pub use schedule::spawn;
 
@@ -87,6 +93,7 @@ mod tests {
                 None,
                 stub_fetcher(),
                 stub_distributions(),
+                None,
             ),
             pool,
             dir,
@@ -795,6 +802,7 @@ mod tests {
             None,
             stub_fetcher(),
             stub_distributions(),
+            None,
         );
         let app = ApiClient::over(router().with_state(pool).layer(Extension(reg)));
 
@@ -832,6 +840,7 @@ mod tests {
             None,
             stub_fetcher(),
             stub_distributions(),
+            None,
         );
         let app = ApiClient::over(router().with_state(pool).layer(Extension(reg)));
 
@@ -860,6 +869,7 @@ mod tests {
             None,
             stub_fetcher(),
             stub_distributions(),
+            None,
         );
         let app = ApiClient::over(router().with_state(pool.clone()).layer(Extension(reg)));
 
@@ -935,6 +945,7 @@ mod tests {
             None,
             stub_fetcher(),
             stub_distributions(),
+            None,
         );
 
         let job = reg.get("backup").unwrap();
@@ -974,6 +985,7 @@ mod tests {
             Some(command),
             stub_fetcher(),
             stub_distributions(),
+            None,
         );
 
         let job = reg.get("backup").unwrap();
@@ -1008,6 +1020,7 @@ mod tests {
             Some(command),
             stub_fetcher(),
             stub_distributions(),
+            None,
         );
         (reg, pool, dir, log)
     }
@@ -1200,6 +1213,7 @@ mod tests {
             None,
             stub_fetcher(),
             stub_distributions(),
+            None,
         );
         let app = ApiClient::over(router().with_state(pool).layer(Extension(reg)));
 
@@ -1225,6 +1239,7 @@ mod tests {
             None,
             stub_fetcher(),
             stub_distributions(),
+            None,
         );
         let app = ApiClient::over(router().with_state(pool).layer(Extension(reg)));
 
@@ -1298,6 +1313,7 @@ mod tests {
             None,
             stub_fetcher(),
             stub_distributions(),
+            None,
         );
         let app = ApiClient::over(router().with_state(pool.clone()).layer(Extension(reg)));
 
@@ -1340,6 +1356,7 @@ mod tests {
             None,
             stub_fetcher(),
             stub_distributions(),
+            None,
         );
         let app = ApiClient::over(router().with_state(pool).layer(Extension(reg)));
 

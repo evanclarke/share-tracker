@@ -30,6 +30,10 @@ pub mod listing;
 pub mod listing_rename;
 pub mod mic_registry;
 pub mod parcel_allocation;
+/// The price-change alert's send log and detection walk. Deliberately routeless
+/// — it is the `price-alert` job's own state, not an entity the UI edits (see
+/// the module docs), so it has no `.merge` line below.
+pub mod price_alert;
 pub mod rba_fx_rate;
 pub mod rights_exercise;
 pub mod rights_sale;

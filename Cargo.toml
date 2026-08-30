@@ -28,6 +28,19 @@ reqwest = "0.13.4"
 # build machine (brew install protobuf / apt protobuf-compiler — see ci.yml).
 yfinance-rs = "0.9"
 croner = "3.0.1"
+# infra::email: the SMTP client behind the two scheduled report emails. Default
+# features off: `builder` (the MIME message), `smtp-transport` +
+# `tokio1-rustls-tls` (an async, rustls-encrypted client — rustls and `ring` are
+# already in the tree via reqwest, so this adds no new TLS stack), and
+# `hostname` for the EHLO name and Message-ID domain. Deliberately not
+# `native-tls` (lettre's default), which would pull a second TLS
+# implementation in beside the one reqwest already uses.
+lettre = { version = "0.11", default-features = false, features = [
+    "builder",
+    "smtp-transport",
+    "tokio1-rustls-tls",
+    "hostname",
+] }
 csv = "1"
 # 0.41+: RUSTSEC-2026-0194 / the NsReader namespace-allocation advisory are
 # fixed there (cargo deny check advisories pins this floor).

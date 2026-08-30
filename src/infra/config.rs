@@ -7,6 +7,7 @@
 //! startup: this is a financial-records server, and silently falling back to a
 //! default database because of a typo is worse than not starting.
 
+use rust_decimal::Decimal;
 use serde::Deserialize;
 
 /// Where the config file is looked for when `--config` is not given.
@@ -14,6 +15,10 @@ pub const DEFAULT_CONFIG_PATH: &str = "/usr/local/etc/share-tracker.toml";
 pub const DEFAULT_DB: &str = "share-tracker.db";
 pub const DEFAULT_HOST: &str = "127.0.0.1";
 pub const DEFAULT_PORT: u16 = 3000;
+/// The price-change threshold the alert email uses when `[email]` names none:
+/// a 5% move in one close is unusual enough to be worth reading about and
+/// common enough that the alert proves itself working.
+pub const DEFAULT_PRICE_ALERT_PCT: &str = "5";
 
 /// The config file's schema. Every field is optional — the file only states
 /// what it wants to change. `deny_unknown_fields` makes a misspelt key an
@@ -29,6 +34,71 @@ pub struct ConfigFile {
     pub base_path: Option<String>,
     pub schedule: Option<String>,
     pub auth: Option<AuthConfig>,
+    pub email: Option<EmailConfig>,
+}
+
+/// The optional `[email]` table: where the two scheduled report emails are
+/// sent from and to, and how the SMTP connection is made (see
+/// `infra::email`). Absent — the default — there is no mailer at all and both
+/// jobs record a run that sent nothing.
+///
+/// Config-file only, for the same reason `[auth]` is: an SMTP password on the
+/// command line is visible to anyone on the host via `ps`.
+#[derive(Debug, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EmailConfig {
+    pub smtp_host: String,
+    /// Defaults to the conventional port for `encryption` — 465 implicit,
+    /// 587 STARTTLS, 25 unencrypted.
+    pub smtp_port: Option<u16>,
+    /// `implicit` (the default), `starttls`, or `none`.
+    pub encryption: Option<String>,
+    /// Both or neither: a username with no password cannot authenticate, and
+    /// resolution rejects the half-filled pair rather than connecting
+    /// anonymously and failing weekly.
+    pub username: Option<String>,
+    pub password: Option<String>,
+    pub from: String,
+    /// At least one recipient — an empty list is a configured mailer that can
+    /// never deliver, which resolution rejects.
+    pub to: Vec<String>,
+    /// Prepended to every subject, e.g. `[share-tracker]`, so the mail can be
+    /// filtered on one string.
+    pub subject_prefix: Option<String>,
+    /// The price-alert threshold in percent; defaults to
+    /// [`DEFAULT_PRICE_ALERT_PCT`].
+    ///
+    /// Read as a **string or an integer**, never a TOML float: a float would
+    /// cross `f64` on its way to `Decimal`, and `2.5` is exact there only by
+    /// luck — `0.1` is not. The money rules forbid `f64` anywhere near a
+    /// figure that is compared against a stored price, and this one is.
+    #[serde(default, deserialize_with = "percent")]
+    pub price_alert_pct: Option<Decimal>,
+}
+
+/// Read a percentage written as a TOML string (`"2.5"`) or integer (`5`),
+/// rejecting a float with a message saying which forms are accepted — see
+/// [`EmailConfig::price_alert_pct`] for why a float is not one of them.
+fn percent<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<Decimal>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Raw {
+        Int(i64),
+        Text(String),
+    }
+    let raw = Option::<Raw>::deserialize(deserializer).map_err(|_| {
+        serde::de::Error::custom(
+            "price_alert_pct must be written as a string (\"2.5\") or a whole number (5), never \
+             as a decimal number — a TOML float cannot represent every threshold exactly",
+        )
+    })?;
+    match raw {
+        None => Ok(None),
+        Some(Raw::Int(n)) => Ok(Some(Decimal::from(n))),
+        Some(Raw::Text(text)) => text.trim().parse::<Decimal>().map(Some).map_err(|e| {
+            serde::de::Error::custom(format!("invalid price_alert_pct {text:?}: {e}"))
+        }),
+    }
 }
 
 /// The optional `[auth]` table: a single shared credential gating the whole
@@ -70,6 +140,11 @@ pub struct Settings {
     /// see `infra::auth`. `Some` only when `[auth]` is present in the config
     /// file; there is no CLI flag for it.
     pub auth: Option<super::auth::Auth>,
+    /// `None` (the default) means no email is sent: both scheduled email jobs
+    /// stay registered and record a run that did nothing, rather than failing
+    /// weekly on a deployment that never asked for mail. `Some` only when
+    /// `[email]` is present in the config file; there are no CLI flags for it.
+    pub email: Option<super::email::EmailSettings>,
 }
 
 impl Settings {
@@ -79,6 +154,7 @@ impl Settings {
     /// deployment config, and serving the whole app at a subtly wrong path is
     /// worse than not starting (the same reasoning as `deny_unknown_fields`).
     pub fn resolve(args: super::args::Args, file: ConfigFile) -> Result<Settings, String> {
+        let email = file.email.map(resolve_email).transpose()?;
         let auth = file
             .auth
             .map(|a| {
@@ -102,8 +178,73 @@ impl Settings {
             base_path: normalise_base_path(args.base_path.or(file.base_path).as_deref())?,
             schedule: args.schedule.or(file.schedule),
             auth,
+            email,
         })
     }
+}
+
+/// Validate the `[email]` table into the settings the mailer is built from.
+///
+/// Everything that can be wrong with it is caught here, at startup: an
+/// unparseable address, an empty recipient list, a half-filled credential
+/// pair, an unknown encryption mode, a non-positive threshold. A weekly job is
+/// the worst place to discover any of them — the failure surfaces a week late,
+/// to nobody, in a log.
+fn resolve_email(config: EmailConfig) -> Result<super::email::EmailSettings, String> {
+    use super::email::{EmailSettings, Encryption};
+
+    let mailbox = |raw: &str, field: &str| {
+        raw.parse::<lettre::message::Mailbox>()
+            .map_err(|e| format!("invalid email {field} {raw:?}: {e}"))
+    };
+    let encryption = match &config.encryption {
+        Some(raw) => Encryption::parse(raw)?,
+        None => Encryption::Implicit,
+    };
+    let credentials = match (config.username, config.password) {
+        (Some(username), Some(password)) => Some((username, password)),
+        (None, None) => None,
+        // Half a credential pair never authenticates. Rejecting is the same
+        // call `deny_unknown_fields` makes: a config that cannot do what it
+        // plainly means to do must not start.
+        (Some(_), None) => {
+            return Err("email username is set without a password".to_string());
+        }
+        (None, Some(_)) => {
+            return Err("email password is set without a username".to_string());
+        }
+    };
+    if config.to.is_empty() {
+        return Err("email to is empty: name at least one recipient".to_string());
+    }
+    let to = config
+        .to
+        .iter()
+        .map(|raw| mailbox(raw, "to"))
+        .collect::<Result<Vec<_>, _>>()?;
+    let price_alert_pct = config.price_alert_pct.unwrap_or_else(|| {
+        DEFAULT_PRICE_ALERT_PCT
+            .parse()
+            .expect("the built-in default threshold parses")
+    });
+    if price_alert_pct <= Decimal::ZERO {
+        return Err(format!(
+            "invalid price_alert_pct {price_alert_pct}: the threshold must be greater than zero \
+             (a zero or negative one would alert on every close)"
+        ));
+    }
+    Ok(EmailSettings {
+        smtp_host: config.smtp_host,
+        smtp_port: config
+            .smtp_port
+            .unwrap_or_else(|| encryption.default_port()),
+        encryption,
+        credentials,
+        from: mailbox(&config.from, "from")?,
+        to,
+        subject_prefix: config.subject_prefix,
+        price_alert_pct,
+    })
 }
 
 /// Normalise a configured reverse-proxy path prefix to the one form the rest of
@@ -184,6 +325,7 @@ mod tests {
                 base_path: String::new(),
                 schedule: None,
                 auth: None,
+                email: None,
             }
         );
         // The default host must parse to a bindable address (the server has no
@@ -456,5 +598,221 @@ mod tests {
             SAMPLE.contains("# [auth]"),
             "sample should document the [auth] table as a commented-out example"
         );
+        // …and [email] for the same reason: with no table the server sends
+        // nothing, which is the right default, so the sample documents the
+        // settings without turning mail on for a host that never asked.
+        assert!(sample.email.is_none());
+        assert!(
+            SAMPLE.contains("# [email]"),
+            "sample should document the [email] table as a commented-out example"
+        );
+        // Every [email] key appears in the commented example, so a renamed or
+        // added setting breaks the build rather than the deployment. Read off
+        // the struct's own field list would be ideal; short of that, this is
+        // the list the resolver reads.
+        for key in [
+            "smtp_host",
+            "smtp_port",
+            "encryption",
+            "username",
+            "password",
+            "from",
+            "to",
+            "subject_prefix",
+            "price_alert_pct",
+        ] {
+            assert!(
+                SAMPLE.contains(&format!("# {key} = ")),
+                "sample should document the [email] setting {key}"
+            );
+        }
+    }
+
+    // ---- [email] -------------------------------------------------------
+
+    fn email_settings(table: &str) -> Result<crate::infra::email::EmailSettings, String> {
+        Settings::resolve(Args::parse_from(["share-tracker"]), parse(table))
+            .map(|s| s.email.expect("an [email] table resolves"))
+    }
+
+    const MINIMAL_EMAIL: &str = r#"
+        [email]
+        smtp_host = "smtp.example.com"
+        from = "share-tracker@example.com"
+        to = ["you@example.com"]
+    "#;
+
+    #[test]
+    fn a_minimal_email_table_takes_the_documented_defaults() {
+        let email = email_settings(MINIMAL_EMAIL).expect("resolves");
+        assert_eq!(email.smtp_host, "smtp.example.com");
+        // Implicit TLS on submissions, and the 5% threshold — the two defaults
+        // the sample and the README both state.
+        assert_eq!(email.encryption, crate::infra::email::Encryption::Implicit);
+        assert_eq!(email.smtp_port, 465);
+        assert_eq!(email.price_alert_pct, Decimal::from(5));
+        assert_eq!(email.credentials, None);
+        assert_eq!(email.subject_prefix, None);
+        assert_eq!(email.to.len(), 1);
+    }
+
+    #[test]
+    fn the_port_follows_the_encryption_mode_unless_it_is_named() {
+        for (mode, port) in [("implicit", 465), ("starttls", 587), ("none", 25)] {
+            let email = email_settings(&format!(
+                "{MINIMAL_EMAIL}
+encryption = \"{mode}\"
+"
+            ))
+            .expect("resolves");
+            assert_eq!(email.smtp_port, port, "{mode}");
+        }
+        let email = email_settings(&format!(
+            "{MINIMAL_EMAIL}
+smtp_port = 2525
+"
+        ))
+        .expect("resolves");
+        assert_eq!(email.smtp_port, 2525);
+    }
+
+    #[test]
+    fn an_unknown_encryption_mode_fails_startup_naming_it() {
+        let err = email_settings(&format!(
+            "{MINIMAL_EMAIL}
+encryption = \"tsl\"
+"
+        ))
+        .expect_err("a typo is rejected");
+        assert!(err.contains("tsl"), "{err}");
+        assert!(err.contains("starttls"), "lists the valid modes: {err}");
+    }
+
+    #[test]
+    fn a_malformed_address_fails_startup_naming_the_field() {
+        let err = email_settings(
+            r#"
+            [email]
+            smtp_host = "smtp.example.com"
+            from = "not an address"
+            to = ["you@example.com"]
+            "#,
+        )
+        .expect_err("an unparseable from is rejected");
+        assert!(err.contains("from"), "{err}");
+        assert!(err.contains("not an address"), "names the value: {err}");
+
+        let err = email_settings(
+            r#"
+            [email]
+            smtp_host = "smtp.example.com"
+            from = "share-tracker@example.com"
+            to = ["you@example.com", "@nope"]
+            "#,
+        )
+        .expect_err("an unparseable recipient is rejected");
+        assert!(err.contains("to"), "{err}");
+    }
+
+    #[test]
+    fn an_empty_recipient_list_fails_startup() {
+        // A configured mailer that can never deliver is a typo, not a
+        // deployment that wants no email — that one leaves [email] out.
+        let err = email_settings(
+            r#"
+            [email]
+            smtp_host = "smtp.example.com"
+            from = "share-tracker@example.com"
+            to = []
+            "#,
+        )
+        .expect_err("no recipient is rejected");
+        assert!(err.contains("recipient"), "{err}");
+    }
+
+    #[test]
+    fn half_a_credential_pair_fails_startup() {
+        for (half, expected) in [
+            ("username = \"me\"", "password"),
+            ("password = \"hunter2\"", "username"),
+        ] {
+            let err = email_settings(&format!(
+                "{MINIMAL_EMAIL}
+{half}
+"
+            ))
+            .expect_err("half a credential pair never authenticates");
+            assert!(err.contains(expected), "{err}");
+        }
+        let email = email_settings(&format!(
+            "{MINIMAL_EMAIL}
+username = \"me\"
+password = \"hunter2\"
+"
+        ))
+        .expect("both halves resolve");
+        assert_eq!(
+            email.credentials,
+            Some(("me".to_string(), "hunter2".to_string()))
+        );
+    }
+
+    #[test]
+    fn the_alert_threshold_reads_a_string_or_a_whole_number_but_never_a_float() {
+        for (written, expected) in [("\"2.5\"", "2.5"), ("5", "5"), ("\"0.25\"", "0.25")] {
+            let email = email_settings(&format!(
+                "{MINIMAL_EMAIL}
+price_alert_pct = {written}
+"
+            ))
+            .expect("resolves");
+            assert_eq!(
+                email.price_alert_pct,
+                expected.parse::<Decimal>().unwrap(),
+                "{written}"
+            );
+        }
+        // A TOML float would cross f64 on its way to Decimal, which the money
+        // rules forbid anywhere near a figure compared against a stored price.
+        let err = toml::from_str::<ConfigFile>(&format!(
+            "{MINIMAL_EMAIL}
+price_alert_pct = 2.5
+"
+        ))
+        .expect_err("a float threshold is rejected")
+        .to_string();
+        assert!(err.contains("price_alert_pct"), "{err}");
+        assert!(err.contains("string"), "says how to write it: {err}");
+    }
+
+    #[test]
+    fn a_non_positive_threshold_fails_startup() {
+        for written in ["\"0\"", "\"-5\""] {
+            let err = email_settings(&format!(
+                "{MINIMAL_EMAIL}
+price_alert_pct = {written}
+"
+            ))
+            .expect_err("a threshold that alerts on everything is rejected");
+            assert!(err.contains("price_alert_pct"), "{written}: {err}");
+        }
+    }
+
+    #[test]
+    fn no_email_table_leaves_settings_email_none() {
+        let settings = Settings::resolve(Args::parse_from(["share-tracker"]), parse("port = 8080"))
+            .expect("resolves");
+        assert!(settings.email.is_none());
+    }
+
+    #[test]
+    fn the_email_table_rejects_unknown_keys() {
+        let err = toml::from_str::<ConfigFile>(&format!(
+            "{MINIMAL_EMAIL}
+smpt_port = 465
+"
+        ))
+        .unwrap_err();
+        assert!(err.to_string().contains("smpt_port"), "{err}");
     }
 }

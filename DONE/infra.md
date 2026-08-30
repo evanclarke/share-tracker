@@ -1685,3 +1685,61 @@ timeout can be proof against every pathological case.
       parcels), says what happens when a write waits past the timeout, and states the bulk-loop
       lockout with its measurement. README's snapshot bullet gains the same clause. No schema change,
       so `docs/SCHEMA.md` is untouched.
+
+## Emailed portfolio reports — weekly summary and price-change alerts (2026-08-30)
+
+From REQUIREMENTS' ["Emailed portfolio reports"](../REQUIREMENTS.md#emailed-portfolio-reports--weekly-summary-and-price-change-alerts-2026-08-30).
+
+Transport and configuration:
+
+- [x] `lettre` dependency, minimal features (`builder`, `smtp-transport`, `tokio1-rustls-tls`,
+      `hostname`), with the justification comment every dependency in `Cargo.toml` carries
+- [x] `infra::email`: the `Email` message, the `Mailer` trait and `SharedMailer` (the injection
+      point, so no test path can reach an SMTP server), the live `SmtpMailer`, and the shared
+      money/percentage formatting the two bodies render through
+- [x] `[email]` config table with startup validation — addresses parse, `to` is non-empty, the
+      encryption mode is one of the three, `price_alert_pct` is a positive decimal. A bad value
+      aborts startup naming the field
+- [x] `price_alert_pct` is read as a string or an integer, never a TOML float: a float threshold
+      would cross `f64`, which the money rules forbid anywhere near a stored or compared figure
+- [x] The `[email]` table documented, commented out, in `pkg/freebsd/share-tracker.toml.sample`
+      (the shipped-sample test asserts each setting appears)
+
+Weekly summary:
+
+- [x] `reports::weekly_summary`: resolve the window against the stored snapshot series exactly
+      as the Overview screen does, compose the headline, the dated market-value/unrealised-gain
+      series, and the per-holding contributions (with each security's opening and closing unit
+      price), and render both message parts
+- [x] Every advisory flag surfaced in the message: `provisional`, `price_carried_forward`,
+      `holding_excluded`
+- [x] A window with fewer than two stored snapshots sends nothing and returns the run note
+
+Price alerts:
+
+- [x] Migration `0049_price_alerts.sql`: the send log, keyed `(listing_id, price_date)`, with
+      its snapshot-staleness classification stated in the migration and recorded in
+      `reports::snapshot`'s exempt list
+- [x] `entities::price_alert`: the table's reads and writes, and the detection walk over each
+      held listing's two most recent ok closes
+- [x] A pair straddling a price-basis event (split, consolidation, demerger restatement) is
+      skipped and carried as the run's note, never alerted
+
+Scheduling and wiring:
+
+- [x] `weekly-summary` and `price-alert` registered in `infra::scheduler::registry`, both
+      noting rather than failing when no `[email]` is configured
+- [x] `schedule.cron` lines: the weekly summary after the week's last close, and one
+      `price-alert` line per market just after its `price-import`
+- [x] Docs per the standard sync rule: `docs/API.md` (Jobs), `docs/SCHEMA.md` (the new table and
+      its Relationships entry), `docs/FEATURES.md` and `README.md` (the feature and its
+      configuration)
+
+Closed 2026-08-30. Verified end-to-end against a local SMTP sink (`scripts/`-free, a throwaway
+Python listener): a real `multipart/alternative` message delivered for both jobs, the alerted move
+suppressed on the next run, a pair straddling a recorded consolidation skipped with the reason in
+the run's note, and both jobs rendering on the Jobs screen with their descriptions and next-run
+times. That drive found two defects no test had: the message announced itself `text/html` while
+carrying a MIME multipart body (every client would have shown the raw part boundaries), now pinned
+by `the_message_is_a_multipart_alternative_carrying_both_parts`; and a zero change rendered `+0.00`,
+claiming a rise — every FX-movement figure in an AUD-only portfolio is that case.

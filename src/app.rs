@@ -125,6 +125,7 @@ mod tests {
             None,
             fetcher.clone(),
             crate::entities::distribution_event::test_support::DistributionStub::default().shared(),
+            None,
         );
         ApiClient::over(super::router(
             "/share_tracker",

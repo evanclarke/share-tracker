@@ -1783,3 +1783,76 @@ Amended the same day, after seeing it:
   colours are measured against, and every row's line starts at the same height so the column
   can be scanned. The largest move away from the opening price reaches the edge; a one-sided
   window therefore uses half the height, which is the price of a visible reference
+
+## Emailed portfolio reports — weekly summary and price-change alerts (2026-08-30)
+
+The server watches the portfolio all week and says nothing. Every figure it computes has to be
+gone and looked at: the Portfolio Overview screen is where the week's movement lives, and a
+holding that dropped 8% at Friday's close is only visible to someone who opens the app. Two
+scheduled emails, both built from figures the server already produces, so nothing has to be
+recomputed a second way.
+
+Email is **optional and off by default**: absent an `[email]` table in the config file the
+server behaves exactly as it does today. Both jobs stay registered and scheduled either way —
+a run with no transport configured is a success carrying a note saying nothing was sent, the
+same convention `currency-import` uses for its credential-gated half. Silently doing nothing,
+or failing every week, would both be worse.
+
+### Transport
+
+- SMTP, via `lettre` — self-contained, so no MTA has to be configured on the host. Implicit
+  TLS (submissions, port 465) by default; STARTTLS and unencrypted are selectable for a relay
+  that needs them
+- Configured in one `[email]` table: `smtp_host`, `smtp_port`, `encryption`, optional
+  `username`/`password`, `from`, `to` (one or more), optional `subject_prefix`
+- Every value is validated at **startup**, not at send time: a malformed address or an
+  unknown encryption mode aborts the server the way a bad `base_path` does. A weekly job is
+  the worst possible place to discover a typo — the failure would surface a week late, to
+  nobody, in a log
+- No CLI flags, for the same reason `[auth]` has none: an SMTP password on argv is visible to
+  anyone on the host via `ps`
+- Each message is `multipart/alternative` — an HTML part laid out like the screen it comes
+  from, and a plain-text part that says the same thing. Not an inline SVG chart: Gmail and
+  Outlook strip SVG, so the graph's information travels as the dated table behind it
+
+### Weekly summary (`weekly-summary`, Saturday 08:00 local)
+
+The Portfolio Overview's two panels, for the week just closed:
+
+- The window is the **stored report snapshots**, resolved exactly as the screen resolves it —
+  `to` is the last snapshot on or before the run date, `from` the first on or after seven days
+  before it. Figures the email states are therefore the figures the screen states for the same
+  window, because they are the same stored rows
+- **Headline**: `POST /portfolio/period-performance` over that window — opening and closing
+  market value, period return and return %, capital growth, FX movement, income, purchases,
+  sale proceeds, and the realised capital gain cross-check
+- **Market value and unrealised gain over time**: the window's snapshot series, one row per
+  stored date, plus the change across the window
+- **Per-holding contributions**: one row per holding with activity in the window (the screen's
+  own default), each with the security's opening and closing **unit price** and the move
+  between them — the sparkline's information, stated as figures
+- Every advisory flag the underlying reports carry is surfaced in the email, per the standing
+  rule that a caller of a fallback must say so: `provisional`, `price_carried_forward`,
+  `holding_excluded`
+- A window with fewer than two stored snapshots sends nothing and notes why: there is no
+  movement to report, and an email stating a zero week would be wrong rather than empty
+
+### Price-change alert (`price-alert`, after each market close)
+
+- After each close, a held listing whose latest stored closing price moved more than
+  `price_alert_pct` (default **5%**) from the previous stored close is emailed as an alert —
+  ticker, name, both dates and prices, the change and the percentage
+- Scheduled per market, on its own lines just after the `price-import` runs, so each market's
+  close is assessed with that market's prices freshly stored. A separate job rather than a tail
+  on `price-import`: a mail outage must not fail a price import, and the two want their own
+  status on the Jobs screen
+- **Each move is alerted once.** Three runs a day over a portfolio spanning three markets would
+  otherwise re-send every ASX mover at the New York close and again at the crypto cut-off. A
+  `price_alerts` table records what was sent, keyed `(listing_id, price_date)` — the send log
+  *is* the deduplication, and it is also the answer to "did it actually send"
+- A pair straddling a **share split, consolidation, or demerger restatement** is skipped, not
+  alerted: the two prices are quoted in different units, and a 1-for-2 consolidation would
+  otherwise page the reader about a 50% crash that never happened. The skip is logged and
+  carried as the run's note, so a suppressed comparison is visible rather than silent
+- The threshold compares the **absolute** move: a fall is as much an alert as a rise
+- A run finding no mover sends nothing and succeeds. Not sending is the ordinary outcome

@@ -154,7 +154,10 @@ mod model;
 mod yahoo;
 
 pub use collection::{COLLECTION_LOOKBACK_DAYS, run_collection};
-pub use db::{db_get_one, db_latest_ok_price_on_or_before, db_rebase_listing_prices, run_rebase};
+pub use db::{
+    db_get_one, db_latest_ok_price_on_or_before, db_price_basis_events, db_rebase_listing_prices,
+    run_rebase,
+};
 /// Shared with the distribution calendar so both provider paths draw the one
 /// distinction that matters about a failed fetch — did the provider *positively
 /// answer* that it serves no such series, or did the call merely not succeed?

@@ -1266,7 +1266,7 @@ mod tests {
     /// an omission. The snapshotted reports are the price-dependent three
     /// ([`SnapshotReport`]); a table only the live-computed CGT reports or the
     /// (un-snapshotted) tax summary read is therefore exempt.
-    const STALENESS_EXEMPT_TABLES: [(&str, &str); 22] = [
+    const STALENESS_EXEMPT_TABLES: [(&str, &str); 23] = [
         (
             "attachments",
             "documents are provenance, not financial facts; no snapshotted report reads them \
@@ -1352,6 +1352,13 @@ mod tests {
         (
             "mic_registry",
             "the import-managed ISO 10383 validation list; no report reads it",
+        ),
+        (
+            "price_alerts",
+            "the price-change alert send log: written only by the `price-alert` job, read only \
+             by it, and holding no figure any snapshotted report computes with — the three \
+             snapshotted reports value from `closing_prices`, which an alert merely observes \
+             (0049_price_alerts.sql)",
         ),
         (
             "report_snapshots",

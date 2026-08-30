@@ -4590,3 +4590,82 @@ fn every_markdown_link_resolves() {
         offenders.join("\n")
     );
 }
+
+/// Docs-sync pin for the emailed reports (REQUIREMENTS "Emailed portfolio
+/// reports — weekly summary and price-change alerts", 2026-08-30). Four
+/// documents have to agree about a feature that is optional, off by default,
+/// and whose whole surface is two scheduled jobs and a config table — the case
+/// where a reader has nothing to click on and the docs are all there is.
+#[test]
+fn the_emailed_reports_are_documented_where_each_reader_looks() {
+    // The API doc: its own section, plus both jobs in the registered-jobs list
+    // the Jobs section maintains.
+    assert!(
+        API_MD.contains("## Emailed reports"),
+        "docs/API.md should have an Emailed reports section"
+    );
+    for job in ["weekly-summary", "price-alert"] {
+        assert!(
+            API_MD.contains(&format!("`{job}`")),
+            "docs/API.md should name the {job} job"
+        );
+    }
+    // The two behaviours a reader cannot infer and would otherwise file as
+    // bugs: an alert that fires once however many runs re-find it, and a
+    // split-straddling pair that is deliberately not alerted.
+    assert!(
+        API_MD.contains("alerted exactly once"),
+        "docs/API.md should state that a move is alerted once"
+    );
+    assert!(
+        API_MD.contains("50% crash that never happened"),
+        "docs/API.md should state why a split-straddling pair is skipped"
+    );
+
+    // The schema doc: the send log, and both classifications a new table has to
+    // carry (audit trail, snapshot staleness).
+    assert!(
+        SCHEMA_MD.contains("price_alerts"),
+        "docs/SCHEMA.md should document the price_alerts table"
+    );
+    assert!(
+        SCHEMA_MD.contains("`price_alerts` (0049) is exempt"),
+        "docs/SCHEMA.md should record why price_alerts stales no snapshot"
+    );
+    assert!(
+        SCHEMA_MD.contains("`price_alerts` (0049) stays **out**"),
+        "docs/SCHEMA.md should record why price_alerts is not audited"
+    );
+
+    // The feature doc and the README's summary of it.
+    assert!(
+        FEATURES_MD.contains("## Emailed reports"),
+        "docs/FEATURES.md should have an Emailed reports section"
+    );
+    assert!(
+        README_MD.contains("### Emailed reports"),
+        "README should document how to configure the email transport"
+    );
+    // Off by default is the fact every one of them has to state: a reader who
+    // skims must not come away thinking the server has started mailing them.
+    for (doc, name) in [
+        (API_MD, "docs/API.md"),
+        (FEATURES_MD, "docs/FEATURES.md"),
+        (README_MD, "README.md"),
+    ] {
+        assert!(
+            doc.contains("off by default"),
+            "{name} should say email is off by default"
+        );
+    }
+    // The threshold's default and its no-float spelling, which the sample
+    // config, the README and the code all have to agree on.
+    assert!(
+        README_MD.contains("price_alert_pct"),
+        "README should document the alert threshold setting"
+    );
+    assert!(
+        REQUIREMENTS_MD.contains("## Emailed portfolio reports"),
+        "REQUIREMENTS should carry the entry these documents implement"
+    );
+}

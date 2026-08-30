@@ -107,6 +107,26 @@ async fn main() {
     // same question twice in a window.
     let distribution_fetcher: entities::distribution_event::SharedDistributionFetcher =
         std::sync::Arc::new(entities::distribution_event::YahooDistributionFetcher::default());
+    // The outbound-email transport, built here and nowhere else (the same rule
+    // the price fetcher follows), so no test path can reach a mail server. The
+    // settings have already been validated by `Settings::resolve`; what can
+    // still fail here is the relay builder itself, and it fails startup rather
+    // than a weekly job.
+    let notifier = settings.email.as_ref().map(|email| {
+        let mailer = infra::email::SmtpMailer::new(email).unwrap_or_else(|e| {
+            eprintln!("{e}");
+            std::process::exit(1);
+        });
+        infra::email::Notifier {
+            mailer: std::sync::Arc::new(mailer),
+            price_alert_pct: email.price_alert_pct,
+        }
+    });
+    if notifier.is_none() {
+        tracing::info!(
+            "no [email] configured; the weekly-summary and price-alert jobs will send nothing"
+        );
+    }
     let registry = scheduler::registry(
         pool.clone(),
         settings.db.clone(),
@@ -114,6 +134,7 @@ async fn main() {
         settings.backup_command.clone(),
         fetcher.clone(),
         distribution_fetcher,
+        notifier,
     );
     scheduler::spawn(registry.clone(), pool.clone(), &schedule)
         .await

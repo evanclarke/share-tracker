@@ -765,6 +765,13 @@ mod tests {
              reads run inside it via the _on helpers",
         ),
         (
+            "reports/weekly_summary.rs",
+            "every figure comes from `period_performance::compute` and the two \
+             `reports::snapshot` series reads, each holding whatever consistency its own \
+             result needs; the only reads made here are the two identity lookups (a \
+             listing's ticker, an account's name) that no figure depends on",
+        ),
+        (
             "reports/valuation.rs",
             "connection-taking helpers composed into the callers' own transactions \
              (snapshot generation's write_tx, period performance's read transaction); \
