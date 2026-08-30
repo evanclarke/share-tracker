@@ -23,7 +23,9 @@ import {
   buildFieldInput, readFieldValue, wireGstBrokerage, allocationEditor,
 } from './forms.js';
 import { ENTITIES, REPORTS, ACTIONS } from './config.js';
-import { seriesChart, presetRange, sliceSeries, SERIES_FIELDS, seriesField } from './chart.js';
+import {
+  seriesChart, presetRange, sliceSeries, sparkline, SERIES_FIELDS, seriesField,
+} from './chart.js';
 import { buildNav, setActiveNav } from './nav.js';
 import { viewTaxReport } from './taxreport.js';
 
@@ -60,6 +62,11 @@ const PAGE_SIZE = 50;
 // about the cell's text, so filtering and sorting are unaffected; `opts.links`
 // ({col: row => href}) overrides the derived set outright, for a table that
 // needs some other drill-down or none at all.
+// `opts.cells` ({col: row => Node}) renders that column's cell body itself,
+// for a column carrying a drawing rather than a value — the per-holding
+// market-value sparkline beside the Portfolio Overview's contributions rows.
+// Such a column is neither sortable nor filtered: there is nothing to order a
+// picture by, and the row holds no text there to match on.
 // `opts.expand`, if given, is a synchronous `row => childSpec`
 // (`{ rows, cols, opts }`, or a falsy value/empty `rows` for a childless row):
 // a leading toggle column shows ▸/▾ for a row with children, and an expanded
@@ -74,6 +81,7 @@ function filterableTable(rows, cols, opts) {
   const actions = opts.actions;
   const expand = opts.expand;
   const labels = opts.labels || {};
+  const cells = opts.cells || {};
   const links = opts.links || columnLinks(cols, opts.selfRoute);
   // Display kinds are derived from the column names alone (COLUMN_KINDS), so
   // every caller of filterableTable gets money rounding / rate precision with
@@ -90,13 +98,15 @@ function filterableTable(rows, cols, opts) {
   // right-alignment and numeric (not lexicographic) sorting. A labelled
   // foreign-key column displays names, so it is never numeric.
   const numeric = {};
-  cols.forEach(function (c) { numeric[c] = !labels[c] && rows.some(function (r) { return looksNumeric(r[c]); }); });
+  cols.forEach(function (c) {
+    numeric[c] = !labels[c] && !cells[c] && rows.some(function (r) { return looksNumeric(r[c]); });
+  });
 
   // Every table opens newest-first on its own date column, derived from the
   // column names (`defaultSortColumn`) so no caller wires an order and a new
   // table inherits one. A table with no date column keeps the order the
   // server sent it in.
-  let sortCol = defaultSortColumn(cols);
+  let sortCol = defaultSortColumn(cols.filter(function (c) { return !cells[c]; }));
   let sortDir = sortCol ? -1 : 1; // 1 = ascending, -1 = descending
   // Where the sort key ties, the rows keep their given order — reversed
   // under a descending sort, so descending is the exact reverse of ascending
@@ -139,7 +149,10 @@ function filterableTable(rows, cols, opts) {
   // `colHeadCells` holds only the real sortable columns — the click handler's
   // indicator loop must iterate this, not `headCells` below, which gains a
   // non-sortable expand/Actions th with no `_ind`/`_col` of its own.
-  const colHeadCells = cols.map(function (c) {
+  const colHeadCells = [];
+  const headCells = cols.map(function (c) {
+    // A cell-rendered column heads a plain, click-less th (see opts.cells).
+    if (cells[c]) return el('th', null, columnLabel(c));
     // The opening sort shows its indicator from the start — an order nothing
     // in the header admitted to would read as the server's own.
     const indicator = el('span', { class: 'sort-ind' },
@@ -154,14 +167,15 @@ function filterableTable(rows, cols, opts) {
       });
       renderBody();
     });
+    colHeadCells.push(th);
     return th;
   });
-  const headCells = colHeadCells.slice();
   if (expand) headCells.unshift(el('th', { class: 'expand-col' }, ''));
   if (actions) headCells.push(el('th', null, 'Actions'));
 
   // Filter row: one input per column, AND-combined.
   const filterCells = cols.map(function (c) {
+    if (cells[c]) return el('th', { class: 'filter-cell' });
     const input = el('input', {
       type: 'search', class: 'table-filter', placeholder: 'Filter ' + columnLabel(c) + '…',
       oninput: function () {
@@ -250,6 +264,7 @@ function filterableTable(rows, cols, opts) {
     pageRows.forEach(function (row) {
       const tds = cols.map(function (c) {
         const v = row[c];
+        if (cells[c]) return el('td', { class: 'render-cell' }, cells[c](row));
         if (statusField && c === statusField) {
           return el('td', null, el('span', { class: 'badge ' + cellText(v) }, cellText(v)));
         }
@@ -380,7 +395,9 @@ async function dataTable(rows, cfg) {
   let cols = cfg.columns || Object.keys(rows[0]);
   if (expandCfg && expandCfg.key) cols = cols.filter(function (c) { return c !== expandCfg.key; });
   const labels = await columnLabelMaps(cols.concat(expandColumns(expandCfg)));
-  const opts = { statusField: cfg.statusField, labels: labels, selfRoute: cfg.selfRoute };
+  const opts = {
+    statusField: cfg.statusField, labels: labels, selfRoute: cfg.selfRoute, cells: cfg.cells,
+  };
   if (expandCfg) opts.expand = buildExpand(expandCfg, labels, cfg.context, cfg.selfRoute);
   // The Actions column appears only where some row actually has an action:
   // a report answering rows of more than one shape (Row History, whose browse
@@ -2134,6 +2151,12 @@ const RANGE_PRESETS = [
 ];
 const RANGE_PREF_KEY = 'share-tracker.overview.range';
 const HIDE_INACTIVE_PREF_KEY = 'share-tracker.overview.hideInactive';
+// Whether the per-holding contributions section is expanded. Remembered for
+// the same reason the range and the hide-inactive tick are: the whole summary
+// is rebuilt on every range change (and on every reload), so without this the
+// section a reader deliberately opened collapses under them the moment they
+// switch window — the one thing they opened it to compare across.
+const CONTRIB_OPEN_PREF_KEY = 'share-tracker.overview.contributionsOpen';
 // Which of chart.js's SERIES_FIELDS the graph plots, remembered the same way
 // (one series at a time — see chart.js for why they can't share an axis).
 const SERIES_PREF_KEY = 'share-tracker.overview.series';
@@ -2166,7 +2189,19 @@ function statItem(label, valueEl) {
 // reports::period_performance) shown above the chart so it's visible without
 // scrolling, and a `detail` (the per-currency FX line and the collapsed
 // per-holding contributions) shown below the range control.
-async function renderPeriodSummary(r) {
+// `trends` is the matching `GET /report_snapshots/holding-series` response
+// for the same window — one unit-price point per stored snapshot per holding,
+// drawn as a sparkline beside that holding's contributions row. Per unit
+// rather than per holding value, so a purchase inside the window cannot draw
+// a rise the security did not have.
+//
+// `dates` is every snapshot date in the window, in order (the panel's own
+// series, sliced to the same range). It is what gives each line its x axis:
+// a holding is plotted in the slots it was actually held for and the rest of
+// the window reads as a gap, so one month of a one-year window draws a
+// month-wide line where that month falls — never a full-width line that
+// silently restates a month as a year.
+async function renderPeriodSummary(r, trends, dates) {
   const headlineParts = [];
   if (r.provisional) {
     headlineParts.push(el('p', { class: 'hint warn' },
@@ -2212,6 +2247,37 @@ async function renderPeriodSummary(r) {
   // hides those by default so real movers aren't buried in zero-rows;
   // unticking shows the full set. Remembered across reloads like the range
   // preset.
+  // The sparkline data, keyed the way a contributions row identifies itself
+  // (listing × holding account). A holding the window stored no points for —
+  // one closed before it, or held on days no snapshot exists — simply has no
+  // line; its row still carries every figure.
+  const trendPoints = new Map();
+  (trends || []).forEach(function (t) {
+    trendPoints.set(t.listing_id + ':' + t.holding_account_id, t.points);
+  });
+  // The AUD price per unit, displayed at the precision COLUMN_KINDS gives
+  // that column rather than at a second opinion of it — the sparkline's own
+  // cell is a drawing, so nothing else in the table formats this figure.
+  function priceText(v) {
+    const nd = numericDisplay(v, columnKinds(['unit_price']).unit_price);
+    return nd ? nd.text : cellText(v);
+  }
+  function trendCell(row) {
+    const points = trendPoints.get(row.listing_id + ':' + row.holding_account_id) || [];
+    if (points.length === 0) return el('span', { class: 'spark-none' }, '—');
+    // One slot per snapshot date in the window, the holding's price in the
+    // slots it was held for and null in the rest — see the `dates` note above.
+    const byDate = new Map();
+    points.forEach(function (p) { byDate.set(p.snapshot_date, p.unit_price); });
+    const grid = (dates && dates.length) ? dates : points.map(function (p) { return p.snapshot_date; });
+    const values = grid.map(function (d) { return byDate.has(d) ? byDate.get(d) : null; });
+    const first = points[0], last = points[points.length - 1];
+    return sparkline(values,
+      'Unit price ' + first.snapshot_date + ' ' + priceText(first.unit_price)
+      + ' → ' + last.snapshot_date + ' ' + priceText(last.unit_price)
+      + ' (held ' + points.length + ' of the window\'s ' + grid.length + ' snapshots)');
+  }
+
   const contribHolder = el('div');
   const hideInp = el('input', { type: 'checkbox', id: 'hide-inactive-holdings' });
   hideInp.checked = loadPref(HIDE_INACTIVE_PREF_KEY, 'true') !== 'false';
@@ -2228,8 +2294,10 @@ async function renderPeriodSummary(r) {
     contribHolder.appendChild(await dataTable(rows, {
       columns: [
         'listing_id', 'holding_account_id', 'opening_market_value', 'closing_market_value',
+        'unit_price_trend',
         'purchases', 'sale_proceeds', 'income', 'capital_growth', 'fx_movement', 'total_return',
       ],
+      cells: { unit_price_trend: trendCell },
     }));
     if (hiddenCount > 0) {
       contribHolder.appendChild(el('p', { class: 'hint' },
@@ -2242,14 +2310,18 @@ async function renderPeriodSummary(r) {
   });
   await renderContrib();
 
-  detailParts.push(el('details', null, [
+  const contribDetails = el('details', { open: loadPref(CONTRIB_OPEN_PREF_KEY, 'false') === 'true' }, [
     el('summary', null, 'Per-holding contributions'),
     el('div', { class: 'toggle-row' }, [
       hideInp,
       el('label', { for: 'hide-inactive-holdings' }, 'Hide holdings with no activity in this period'),
     ]),
     contribHolder,
-  ]));
+  ]);
+  contribDetails.addEventListener('toggle', function () {
+    savePref(CONTRIB_OPEN_PREF_KEY, contribDetails.open ? 'true' : 'false');
+  });
+  detailParts.push(contribDetails);
 
   return { headline: el('div', null, headlineParts), detail: el('div', null, detailParts) };
 }
@@ -2427,10 +2499,16 @@ async function performancePanel() {
         return;
       }
       try {
-        const result = await api('POST', '/portfolio/period-performance', {
-          from: resolved.from, to: resolved.to,
-        });
-        const summary = await renderPeriodSummary(result);
+        // Both reads are of the same window and both are stored-snapshot
+        // reads, so they go out together rather than one after the other.
+        const [result, trends] = await Promise.all([
+          api('POST', '/portfolio/period-performance', { from: resolved.from, to: resolved.to }),
+          api('GET', '/report_snapshots/holding-series?from='
+            + encodeURIComponent(resolved.from) + '&to=' + encodeURIComponent(resolved.to)),
+        ]);
+        const summary = await renderPeriodSummary(result, trends,
+          sliceSeries(series, resolved.from, resolved.to)
+            .map(function (p) { return p.snapshot_date; }));
         statsHolder.appendChild(summary.headline);
         detailHolder.appendChild(summary.detail);
       } catch (e) {

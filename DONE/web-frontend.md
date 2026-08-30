@@ -657,3 +657,89 @@ outside a `filterableTable` cell.
 
 **Chosen: option 1.** This is the second hole found in one rule in one pass, which is the argument
 for pinning the call-site convention rather than fixing six call sites and hoping.
+
+## Portfolio Overview: a per-holding trend sparkline in the contributions table (2026-08-30)
+
+From the REQUIREMENTS entry of the same name. The period summary's per-holding contributions
+rows are all endpoints and totals, so a steady climb and a spike that gave it all back read
+identically; each row now carries a sparkline of that holding's market value across the same
+window, drawn beside the figures that quantify it.
+
+- [x] `GET /report_snapshots/holding-series` (`reports::snapshot::db_holding_series`) — the
+  stored `unrealised_gains` snapshots split per holding (listing × holding account) instead of
+  summed, oldest first, bounded by optional `?from=`/`?to=` (both ends inclusive). It follows
+  the narrowed series' conventions for the same reasons: a date a holding has no row on is not
+  a point, and neither is a row the snapshot left unvalued — a zero would draw a fall to
+  nothing that never happened — and a holding with no point inside the window is not returned
+  at all. Only the plotted figure is carried; the contributions row beside the line already
+  holds every money column. Tests:
+  `snapshot::tests::holding_series_splits_the_stored_snapshots_per_holding`,
+  `holding_series_skips_an_unvalued_row_rather_than_plotting_a_zero`, and the endpoint in
+  `api_generate_list_get_and_series`
+- [x] `chart.js` gains `sparkline` over the pure `sparklinePoints` — the graph's own
+  market-value line at cell size (104×24, same accent token, no axis or markers), scaled to
+  its plotted extremes rather than anchored at zero, flat series on the middle line, a
+  non-numeric value dropped rather than plotted as a zero. Seven unit tests in `chart.test.js`
+- [x] `filterableTable` gains `opts.cells` (`{col: row => Node}`): a column carrying a drawing
+  rather than a value, which renders its own cell body and is neither sortable nor filtered.
+  The sparkline column is the first user; `dataTable` passes `cfg.cells` through. Pinned by
+  `web::tests::per_holding_contribution_sparklines_present`, and
+  `tables_open_newest_first_on_their_own_date_column` now pins that such a column is excluded
+  from the derived default sort
+- [x] The panel fetches the window's points **once**, beside its period-performance POST
+  (`Promise.all`), not once per row — so switching range costs one extra request, and changing
+  it re-draws every line with the summary
+- [x] Docs: `docs/API.md` (endpoint row, the conventions paragraph, the period-performance
+  contributions paragraph, the web-frontend overview sentence), `docs/FEATURES.md`'s Portfolio
+  Overview bullet, and CLAUDE.md's `chart.js` / `filterableTable` descriptions
+
+Amended the same day, from the REQUIREMENTS entry's own follow-up:
+
+- [x] The line is **coloured against the window's opening value** — green above it, red below,
+  the graph's own accent for a series that never leaves it. `sparklineSegments` (pure,
+  unit-tested) cuts the plotted points into runs at the **crossing itself**, interpolating the
+  x/y where the line meets that level rather than breaking at whichever sample came next, and
+  neighbouring runs share that point so the line is unbroken. A sample sitting exactly on the
+  level is a boundary, not a side of its own — which is why the opening point takes the colour
+  of wherever the line goes next instead of leaving a fleck at the left edge. Eight
+  `chart.test.js` tests; `--ok`/`--danger` tokens, so both palettes are covered by the
+  existing structural colour tests
+- [x] The per-holding contributions `<details>` remembers whether it is expanded
+  (`share-tracker.overview.contributionsOpen`), like the range preset and the hide-inactive
+  tick. The summary is rebuilt on every range change, so without it a section the reader opened
+  collapsed under the very comparison they opened it for. Pinned in
+  `portfolio_overview_range_presets_and_activity_filter_present`
+
+- [x] The plotted figure is the stored row's AUD `current_price` — the **unit price**, not the
+  holding's market value, which a purchase inside the window raises on a day the security did
+  not move at all. Two accounts holding the same listing therefore draw the same line, which is
+  right: the position's size is the row's business, not the line's. A split or consolidation
+  steps the line (each snapshot is read in the unit basis it was generated in) — documented in
+  `docs/API.md` alongside the excluded-holding step, not engineered around
+
+- [x] The x axis is the **window**, not the holding: `sparklinePoints` places a point by its
+  slot among the window's snapshot dates (the panel's own series, sliced to the same range and
+  passed to `renderPeriodSummary`), so a line covers only the dates the holding was held for.
+  `sparklineGaps` (pure, unit-tested) returns the unheld stretches as spans on the middle line,
+  drawn as a faint `--grid` dashed rule that reaches back to the last held slot and on to the
+  next so it meets the line; `sparklineSegments` ends a run at a gap, so a holding sold and
+  bought back is two lines rather than one drawn across the months between, and a lone day of
+  ownership — a run of one point, which a polyline cannot draw — is marked with a dot
+- [x] Each line is scaled **about its own opening price**, which therefore plots on the middle
+  line (the largest move away from it reaching the edge), rather than about its min/max. Found
+  by using it: a partly-held line started wherever its price happened to fall in its own scale,
+  so it floated above or below the dashed rule instead of continuing out of it. Three things
+  line up now — the line starts where the dashes leave off, the middle line is visibly the
+  level the colours are read against, and every row's line starts at the same height, which is
+  what makes the column scannable. It costs half the height on a one-sided window; that is the
+  price of a reference the reader can see. The junction is exact, measured in the rendered DOM:
+  the leading rule ends at `50.76,12` and the line's first run starts at `50.76,12`
+
+Verified live (headless Chrome over the `showcase` fixture, `scripts/ui-drive.js`): four
+holdings, each line matching the shape of the main graph, at All (159 snapshots), 3M (93) and
+1M (32) — the lines follow the selected range with the summary. With the colours in: BHP green
+throughout, WES red, CBA crossing sixteen times, each polyline's class matching. The section
+stayed open across a range change *and* a reload, in both colour schemes. With a CBA parcel
+bought 2026-06-01 and sold 2026-06-30 in a second account: 29 points of the window's 159, drawn
+as a short June-width line with a dashed rule either side of it (`gaps=2`), against `gaps=0` on
+the four holdings held throughout.

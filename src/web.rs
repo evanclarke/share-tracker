@@ -1600,6 +1600,64 @@ mod tests {
         assert!(js.contains("share-tracker.overview.hideInactive"));
         assert!(js.contains("holdingHasActivity"));
         assert!(js.contains("Hide holdings with no activity in this period"));
+        // Whether that section is expanded is remembered too: the summary is
+        // rebuilt on every range change, so a section the reader opened would
+        // otherwise collapse under the very comparison they opened it for.
+        assert!(js.contains("share-tracker.overview.contributionsOpen"));
+        assert!(
+            js.contains("savePref(CONTRIB_OPEN_PREF_KEY, contribDetails.open ? 'true' : 'false')")
+        );
+    }
+
+    /// Each per-holding contributions row carries a sparkline of the
+    /// security's **unit price** across the window the panel is showing — the
+    /// row's figures say how far the holding moved, the line says how the
+    /// security itself did, so a purchase inside the window cannot draw a
+    /// rise that never happened.
+    #[tokio::test]
+    async fn per_holding_contribution_sparklines_present() {
+        let js = app_js_body().await;
+        let css = STYLE_CSS;
+        // The points come from the stored snapshots, split per holding and
+        // bounded to the same window the period summary was run over — one
+        // request beside the period-performance one, not one per row.
+        assert!(js.contains("/report_snapshots/holding-series?from="));
+        assert!(js.contains("renderPeriodSummary(result, trends,"));
+        // Drawn by chart.js's `sparkline` into a filterableTable cell the
+        // caller renders itself (`cells`), keyed the way a contributions row
+        // identifies itself.
+        assert!(js.contains("unit_price_trend"));
+        assert!(js.contains("cells: { unit_price_trend: trendCell }"));
+        // Plotted over every snapshot date in the window, holding its price
+        // only in the slots it was held for, so a holding that existed for one
+        // month of a year draws a month-wide line where that month falls and
+        // the rest of the window is a faint dashed rule rather than blank.
+        assert!(js.contains("export function sparklineGaps("));
+        assert!(js.contains("byDate.has(d) ? byDate.get(d) : null"));
+        assert!(css.contains(
+            ".sparkline line.spark-gap { stroke: var(--grid); stroke-width: 1; stroke-dasharray: 2 2; }"
+        ));
+        // Plotted per unit, from the point's own `unit_price`.
+        assert!(js.contains("byDate.set(p.snapshot_date, p.unit_price)"));
+        assert!(js.contains("export function sparkline("));
+        assert!(js.contains("export function sparklinePoints("));
+        // A cell-rendered column is neither sortable nor filtered: there is
+        // nothing to order a drawing by.
+        assert!(js.contains("if (cells[c]) return el('th', null, columnLabel(c));"));
+        assert!(js.contains("if (cells[c]) return el('th', { class: 'filter-cell' });"));
+        // The line is the graph's own market-value line at cell size, so a
+        // series that never leaves its opening level takes the same accent
+        // token; above and below that level it is coloured against it — cut
+        // into runs at the crossing itself, not at whichever sample came
+        // next, so the colour changes where the holding regained or lost the
+        // value it opened at.
+        assert!(js.contains("export function sparklineSegments("));
+        assert!(js.contains("sparklineSegments(points, points[0].value)"));
+        assert!(css.contains(
+            ".sparkline polyline { fill: none; stroke: var(--accent); stroke-width: 1.5; }"
+        ));
+        assert!(css.contains(".sparkline polyline.spark-up { stroke: var(--ok); }"));
+        assert!(css.contains(".sparkline polyline.spark-down { stroke: var(--danger); }"));
     }
 
     #[tokio::test]
@@ -2044,7 +2102,11 @@ mod tests {
         // Derived in filterableTable itself — the one renderer every table in
         // the app goes through — and descending, not the ascending direction
         // a header click starts from.
-        assert!(js.contains("let sortCol = defaultSortColumn(cols);"));
+        // A cell-rendered column (opts.cells) is excluded from the choice —
+        // it holds a drawing, not a value, so it can head no sort.
+        assert!(js.contains(
+            "let sortCol = defaultSortColumn(cols.filter(function (c) { return !cells[c]; }));"
+        ));
         assert!(js.contains("let sortDir = sortCol ? -1 : 1;"));
         // The opening order shows its own indicator, rather than looking like
         // the order the server sent.

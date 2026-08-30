@@ -498,6 +498,29 @@ input[type=checkbox] { width: auto; }
 
 .legend-mv { color: var(--accent); }
 .legend-ug { color: var(--ok); }
+
+/* The per-holding market-value sparkline in the Portfolio Overview's
+   contributions table (chart.js `sparkline`): the graph's own market-value
+   line at cell size, so the two read as one drawing — same accent, no axis.
+   `.render-cell` is any filterableTable cell whose body the caller draws
+   (opts.cells); it keeps the row's height from following the SVG's baseline. */
+td.render-cell { padding: 2px 10px; line-height: 0; }
+.sparkline { display: block; overflow: visible; }
+/* Coloured against the window's opening value: above it reads as the app's
+   good news, below it as its bad news, and a series that never leaves that
+   level takes the graph's own line colour rather than claiming either. */
+.sparkline polyline { fill: none; stroke: var(--accent); stroke-width: 1.5; }
+.sparkline polyline.spark-up { stroke: var(--ok); }
+.sparkline polyline.spark-down { stroke: var(--danger); }
+.sparkline circle { fill: var(--accent); }
+.sparkline circle.spark-up { fill: var(--ok); }
+.sparkline circle.spark-down { fill: var(--danger); }
+/* The stretches of the window the holding was not held for: a faint dashed
+   rule on the middle line, in the graph's own gridline colour, so the ground
+   the line does not cover reads as "nothing held here" rather than as an
+   empty cell. */
+.sparkline line.spark-gap { stroke: var(--grid); stroke-width: 1; stroke-dasharray: 2 2; }
+.spark-none { color: var(--muted); font-size: 12px; line-height: 1.4; }
 .badge.stale { background: var(--warn-soft); color: var(--warn); }
 .badge.provisional { background: var(--accent-soft); color: var(--accent); }
 .badge.carried { background: var(--warn-soft); color: var(--warn); }

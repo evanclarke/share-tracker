@@ -896,7 +896,9 @@ const COLUMN_KINDS = (function () {
   // AUD via plain Decimal division, which doesn't terminate cleanly), never
   // statement-entered, so it carries none of the 'rate' bucket's
   // reconciliation concern.
-  set('rate4', ['avg_cost_base_per_unit', 'average_price', 'current_price']);
+  // `unit_price` is the same figure under another name: the per-holding
+  // sparkline series' copy of a stored snapshot row's `current_price`.
+  set('rate4', ['avg_cost_base_per_unit', 'average_price', 'current_price', 'unit_price']);
   set('quantity', [
     'quantity', 'quantity_allocated', 'securities_held', 'units_held', 'units',
     'original_quantity', 'remaining_quantity', 'quantity_held', 'cgt_discount_eligible_quantity',

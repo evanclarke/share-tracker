@@ -20,7 +20,7 @@ Split into topical files (mirrors the `docs/ato/` pattern of many small files
 | [`DONE/reporting.md`](DONE/reporting.md) | Portfolio/gains/tax reports, snapshots, performance metrics, tax-return export | 42 |
 | [`DONE/tax-domain.md`](DONE/tax-domain.md) | ATO-cited CGT/tax calculation rules — discount, cost base, corporate actions, FITO, franking | 50 |
 | [`DONE/crypto.md`](DONE/crypto.md) | Crypto-asset holdings and wallet-to-wallet transfers | 2 |
-| [`DONE/web-frontend.md`](DONE/web-frontend.md) | Web UI screens, config-driven refactors, readability/UX fixes | 21 |
+| [`DONE/web-frontend.md`](DONE/web-frontend.md) | Web UI screens, config-driven refactors, readability/UX fixes | 22 |
 | [`DONE/reviews.md`](DONE/reviews.md) | Code/design review findings and their resolutions | 109 |
 | [`DONE/verification-passes.md`](DONE/verification-passes.md) | The pass-by-pass narrative of driving SCENARIOS.md, moved off the top of TODO.md — a summary of SCENARIOS.md's own findings blocks, not the maintained record | 11 |
 

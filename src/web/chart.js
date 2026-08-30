@@ -339,3 +339,249 @@ export function sliceSeries(series, from, to) {
     return p.snapshot_date >= from && p.snapshot_date <= to;
   });
 }
+
+// ---- sparklines -----------------------------------------------------------
+//
+// The miniature trend line beside each Portfolio Overview per-holding
+// contributions row: the security's own price per unit across the window the
+// panel is showing, drawn at cell size with no axis, gridlines or point
+// markers. The row's money columns already say by how much the *holding*
+// moved; the line is there for the *shape* of the move — a steady climb and a
+// spike that gave it all back read identically as a period return — and it is
+// per unit precisely so that money added to the holding cannot draw a rise
+// the security did not have.
+//
+// The same drawing as `seriesChart`'s line reduced to its polyline, with one
+// addition the big graph has no need of: the line is coloured against **where
+// the window opened**, green above that level and red below it, so which side
+// of its own starting price a holding is on reads without checking the
+// figures beside it.
+export const SPARK_WIDTH = 104;
+export const SPARK_HEIGHT = 24;
+// Half the line's stroke plus the end marker's radius, so neither is clipped
+// at the plotted extremes.
+export const SPARK_PAD = 3;
+
+// The plotted points for `values` drawn at `w`×`h`, as `{x, y, value, i}`.
+//
+// `values` is one entry per snapshot date **in the window**, in date order —
+// the holding's unit price that date, or `null`/`''` for a date it held
+// nothing. That is what places the line: x comes from an entry's slot in the
+// window (`i`), not from its position among the plotted points, so a holding
+// held for one month of a one-year window draws a short line a month wide,
+// where the window's own dates put it, instead of a full-width line that
+// silently restates a month as a year. `sparklineGaps` decorates the rest.
+//
+// The y scale is centred on the **opening** value — the price on the first
+// date the holding was held in this window — which therefore always plots on
+// the middle line, with the largest move away from it (up or down) reaching
+// SPARK_PAD from the edge. Three things line up because of that, and none of
+// them do under a plain min..max scale:
+//
+//   * the line starts exactly where `sparklineGaps`' dashed no-holding rule
+//     runs, so a holding held for part of the window reads as one continuous
+//     drawing instead of a line floating above or below the dashes;
+//   * the middle line *is* the level the colours are measured against, so
+//     above-the-middle green and below-the-middle red need no explaining;
+//   * every row's line starts at the same height, which is what makes the
+//     column scannable — who is up and who is down, at a glance, without
+//     reading each line's own scale.
+//
+// It costs vertical resolution on a one-sided window (a line that only ever
+// rose uses the top half), which is the price of a reference the reader can
+// actually see. Like the main plot's y axis (`yBounds`) it does not anchor at
+// zero, which would flatten the very shape the line exists to show. A flat
+// series — or a single point — sits on the middle line, its own opening value
+// being all there is. Pure (no DOM), unit-tested by chart.test.js.
+export function sparklinePoints(values, w, h) {
+  const n = (values || []).length;
+  if (n === 0) return [];
+  const points = [];
+  values.forEach(function (v, i) {
+    // `Number(null)` and `Number('')` are both 0, so an unheld date is
+    // recognised *before* the conversion, never after it — the same trap
+    // `yBounds` guards against, and here a spurious zero would draw a fall to
+    // nothing on a date the holding did not exist.
+    if (v == null || v === '') return;
+    const num = Number(v);
+    if (!Number.isFinite(num)) return;
+    points.push({ x: slotX(i, n, w), y: 0, value: num, i: i });
+  });
+  if (points.length === 0) return [];
+  const baseline = points[0].value;
+  let reach = 0;
+  points.forEach(function (p) {
+    const d = Math.abs(p.value - baseline);
+    if (d > reach) reach = d;
+  });
+  const mid = h / 2, half = mid - SPARK_PAD;
+  points.forEach(function (p) {
+    p.y = reach === 0 ? mid : mid - ((p.value - baseline) / reach) * half;
+  });
+  return points;
+}
+
+// Where slot `i` of `n` sits across the width, inside the padding. A
+// single-slot window puts it mid-cell rather than dividing by zero.
+function slotX(i, n, w) {
+  return n > 1 ? SPARK_PAD + i * ((w - 2 * SPARK_PAD) / (n - 1)) : w / 2;
+}
+
+// The stretches of the window the holding was **not** held for, as
+// `{x1, x2, y}` spans on the middle line — drawn as a faint dashed rule, so
+// the part of the window a short line does not cover reads as "nothing held
+// here" rather than as blank cell. A span reaches back to the last held slot
+// and on to the next one, so the dashes meet the line instead of floating
+// short of it. Pure (no DOM), unit-tested.
+export function sparklineGaps(values, w, h) {
+  const n = (values || []).length;
+  if (n === 0) return [];
+  const held = values.map(function (v) {
+    return v != null && v !== '' && Number.isFinite(Number(v));
+  });
+  const gaps = [];
+  let i = 0;
+  while (i < n) {
+    if (held[i]) {
+      i++;
+      continue;
+    }
+    let j = i;
+    while (j + 1 < n && !held[j + 1]) j++;
+    gaps.push({
+      x1: slotX(i > 0 ? i - 1 : i, n, w),
+      x2: slotX(j + 1 < n ? j + 1 : j, n, w),
+      y: h / 2,
+    });
+    i = j + 1;
+  }
+  return gaps;
+}
+
+// The plotted points cut into runs of one colour each, measured against
+// `baseline` — the window's **opening** value: `up` where the holding is
+// worth more than it opened, `down` where it is worth less, `flat` for a
+// series that never leaves that level.
+//
+// A run that crosses the baseline is split at the crossing itself — the x/y
+// where the line meets that level, interpolated between the two points — so
+// the colour changes exactly where the holding regained or lost its opening
+// value, not at whichever sample happened to come next. Neighbouring runs
+// share that crossing point, which is what keeps the line unbroken.
+//
+// A run also ends wherever the window did **not** hold the security: two
+// points in non-adjacent slots are two stretches of ownership, never one line
+// drawn straight across the months between them (`sparklineGaps` is what
+// covers that ground).
+//
+// A point sitting *exactly* on the baseline is a boundary, not a side of its
+// own: it joins the run its neighbour is on (the opening point always does,
+// which is why the first colour is the second point's side rather than a
+// third 'flat' fleck at the left edge). Pure (no DOM), unit-tested.
+export function sparklineSegments(points, baseline) {
+  if (!points || points.length === 0) return [];
+  function side(v) {
+    if (v > baseline) return 'up';
+    if (v < baseline) return 'down';
+    return null;
+  }
+  const runs = [];
+  function push(dir, p, startNew) {
+    const last = runs[runs.length - 1];
+    if (!startNew && last && last.dir === dir) {
+      const end = last.points[last.points.length - 1];
+      if (end.x !== p.x || end.y !== p.y) last.points.push(p);
+      return;
+    }
+    runs.push({ dir: dir, points: [p] });
+  }
+  let cut = true; // the next push starts a run of its own (a gap, or the first)
+  for (let k = 0; k < points.length - 1; k++) {
+    const p = points[k], q = points[k + 1];
+    if (q.i !== p.i + 1) {
+      push(side(p.value) || 'flat', p, cut);
+      cut = true;
+      continue;
+    }
+    const dp = side(p.value), dq = side(q.value);
+    if (dp && dq && dp !== dq) {
+      const t = (baseline - p.value) / (q.value - p.value);
+      const cross = { x: p.x + (q.x - p.x) * t, y: p.y + (q.y - p.y) * t, value: baseline, i: p.i };
+      push(dp, p, cut);
+      cut = false;
+      push(dp, cross);
+      push(dq, cross);
+      push(dq, q);
+    } else {
+      const dir = dp || dq || 'flat';
+      push(dir, p, cut);
+      cut = false;
+      push(dir, q);
+    }
+  }
+  // A stretch of exactly one point — the whole series, or one left standing
+  // after a gap — is still ownership, and still gets its dot.
+  const last = points[points.length - 1];
+  const lastRun = runs[runs.length - 1];
+  const drawn = lastRun && lastRun.points[lastRun.points.length - 1];
+  if (!drawn || drawn.x !== last.x || drawn.y !== last.y) {
+    push(side(last.value) || 'flat', last, true);
+  }
+  return runs;
+}
+
+// A run's points as a polyline `points` attribute. Two decimal places is well
+// under a device pixel at this size, and keeps the attribute short enough to
+// read in a DOM dump.
+function pointsAttr(points) {
+  return points.map(function (p) {
+    return round2(p.x) + ',' + round2(p.y);
+  }).join(' ');
+}
+
+function round2(v) {
+  return Math.round(v * 100) / 100;
+}
+
+// The sparkline itself: one polyline per coloured run, plus a dot on the
+// latest point (which is also what makes a single-point series visible at
+// all), coloured by the side the line ends on. `title` is the hover text the
+// caller composes — the cell is too small to carry the dates and figures the
+// line is drawn from.
+export function sparkline(values, title) {
+  const w = SPARK_WIDTH, h = SPARK_HEIGHT;
+  const svg = svgEl('svg', {
+    class: 'sparkline', width: w, height: h, viewBox: '0 0 ' + w + ' ' + h,
+    role: 'img', 'aria-label': title || 'Unit price trend',
+  });
+  if (title) {
+    const t = svgEl('title');
+    t.textContent = title;
+    svg.appendChild(t);
+  }
+  const points = sparklinePoints(values, w, h);
+  if (points.length === 0) return svg;
+  // Under the line: what the window holds no position for.
+  sparklineGaps(values, w, h).forEach(function (g) {
+    svg.appendChild(svgEl('line', {
+      class: 'spark-gap', x1: round2(g.x1), y1: round2(g.y), x2: round2(g.x2), y2: round2(g.y),
+    }));
+  });
+  // The first *held* value is the reference the colours are read against.
+  const runs = sparklineSegments(points, points[0].value);
+  runs.forEach(function (run) {
+    svg.appendChild(svgEl('polyline', { class: 'spark-' + run.dir, points: pointsAttr(run.points) }));
+    // A one-point run is a single day of ownership between two gaps: a
+    // polyline of one point draws nothing at all, so mark it.
+    if (run.points.length === 1) {
+      svg.appendChild(svgEl('circle', {
+        class: 'spark-' + run.dir, cx: round2(run.points[0].x), cy: round2(run.points[0].y), r: 1.5,
+      }));
+    }
+  });
+  const last = points[points.length - 1];
+  svg.appendChild(svgEl('circle', {
+    class: 'spark-' + runs[runs.length - 1].dir, cx: round2(last.x), cy: round2(last.y), r: 2,
+  }));
+  return svg;
+}

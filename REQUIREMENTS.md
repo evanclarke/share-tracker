@@ -1725,3 +1725,61 @@ Deliberately out of scope, and why:
 - **Treating the feed as a source of amounts for income rows.** A distribution's franking,
   foreign-source and cost-base components come from the registry statement and nowhere else. The
   calendar answers "was there one" and "does the total look right", never "what was in it"
+
+## Portfolio Overview: a per-holding trend sparkline in the contributions table (2026-08-30)
+
+The Portfolio Overview's period summary lists a per-holding contributions row — opening and
+closing market value, purchases, sale proceeds, income, capital growth, FX movement, total
+return — for the selected range. Every figure is an endpoint or a total: two holdings that
+climbed steadily and spiked-then-gave-it-all-back over the same window read identically.
+
+- Add a **sparkline** column to the per-holding contributions table: that holding's market
+  value across the same window the panel is showing, drawn beside its figures
+- The points come from the stored [report snapshots](docs/API.md#report-snapshots) — the same
+  daily results the panel's own graph plots — split per holding (listing × holding account)
+  rather than summed. A new `GET /report_snapshots/holding-series` serves them, bounded by
+  `?from=`/`?to=` so a window's request carries only that window's points, and the panel makes
+  **one** request beside its period-performance one rather than one per row
+- Scaled to its own plotted extremes, never anchored at zero — the same rule the main graph's
+  y axis follows, and for the same reason: anchoring flattens the shape the line exists to show
+- A date a holding has no snapshot row on is a **gap**, not a zero: it was not held then, or
+  the row was left unvalued. A window with fewer than two points for a holding shows a dash
+- Drawn as inline SVG in the same accent as the graph's own market-value line (no chart
+  library — the no-build-step rule holds), through a generic cell-renderer hook on the shared
+  `filterableTable` (`opts.cells`) rather than a bespoke table: a column carrying a drawing is
+  neither sortable nor filtered
+- No schema change: the endpoint is a second read of `report_snapshots`, which already stores
+  every per-holding row
+- Docs per the standard sync rule: `docs/API.md` (the new endpoint, its conventions, and the
+  contributions-table paragraph) and `docs/FEATURES.md`'s Portfolio Overview bullet
+
+Amended the same day, after seeing it:
+
+- Colour the line against **where the window opened**: green where the holding is worth more
+  than it was at the start of the range, red where it is worth less. The colour must change at
+  the crossing itself — the point where the line meets that level — not at whichever snapshot
+  came next, and the runs must share the crossing so the line stays unbroken. A series that
+  never leaves its opening level claims neither colour and keeps the graph's own
+- Remember whether the per-holding contributions section is **expanded**, the same way the
+  range preset and the hide-inactive tick already are. The whole summary is rebuilt on every
+  range change, so a section opened deliberately collapses the moment the reader switches
+  window — the one thing they opened it to compare across
+- Plot the security's **unit price**, not the holding's market value. A purchase inside the
+  window raises market value on a day the security did not move at all, so a line drawn from
+  it masks a bad holding behind money added to it. The row's own opening/closing market value
+  columns carry the position's size; the line is about the security. Consequence to document
+  rather than engineer around: a share split or consolidation **steps** the line on its date,
+  the price either side of it being quoted in different units
+- Draw the line only over the part of the window the holding was **held** for. The x axis is
+  the whole window — one slot per snapshot date in it — so a holding bought in June and sold
+  in July is a short line where those weeks fall in a one-year window, not a full-width line
+  that silently restates two months as a year. The stretches it did not exist for carry a
+  faint light-grey dashed rule on the middle line instead. A holding sold and bought back
+  inside the window is two lines with that rule between them, never one line drawn straight
+  across the months in between
+- Scale each line **about its opening price** rather than about its own min/max, so that price
+  plots on the middle line: a partly-held line then starts exactly where the dashed rule
+  leaves off instead of floating above or below it, the middle line is visibly the level the
+  colours are measured against, and every row's line starts at the same height so the column
+  can be scanned. The largest move away from the opening price reaches the edge; a one-sided
+  window therefore uses half the height, which is the price of a visible reference

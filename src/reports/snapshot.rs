@@ -84,7 +84,7 @@ use chrono::{DateTime, Duration, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{QueryBuilder, Row, SqlitePool, sqlite::SqliteRow};
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::entities::closing_price::{self, Market};
 use crate::reports::{performance, portfolio, unrealised_gains, valuation};
@@ -201,6 +201,33 @@ pub struct SeriesPoint {
     pub market_value: Decimal,
     pub total_cost_base: Decimal,
     pub unrealised_gain: Decimal,
+}
+
+/// One point of a per-holding trend line: the security's AUD price per unit
+/// on that snapshot date (the stored row's `current_price`).
+///
+/// Per **unit**, deliberately not the holding's market value: a purchase
+/// raises market value on a day the security did not move at all, so a line
+/// drawn from it hides a falling holding behind money added to it — which is
+/// the one thing this line exists to show. The row's own
+/// `opening_market_value`/`closing_market_value` columns carry the position's
+/// size beside it.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct HoldingSeriesPoint {
+    pub snapshot_date: NaiveDate,
+    pub unit_price: Decimal,
+}
+
+/// One holding's (listing × holding account) unit-price trend over the stored
+/// snapshots — the per-holding sparklines beside the Portfolio Overview's
+/// contributions table. Deliberately just the plotted figure: the
+/// contributions row itself carries every money column the reader can read,
+/// and the line is there for the *shape* of the window.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct HoldingSeries {
+    pub listing_id: i64,
+    pub holding_account_id: i64,
+    pub points: Vec<HoldingSeriesPoint>,
 }
 
 /// Why a snapshot could not be generated. `Unprocessable` carries the human
@@ -382,6 +409,76 @@ pub async fn db_series(
         series.push(point);
     }
     Ok(series)
+}
+
+/// The same stored snapshots split **per holding** (listing × holding
+/// account) rather than summed: one unit-price trend line each, oldest first,
+/// for the sparkline beside each Portfolio Overview contributions row.
+/// `from`/`to` bound the snapshot dates read (both inclusive, absent meaning
+/// unbounded) so a window's request carries only that window's points.
+///
+/// The plotted figure is the row's AUD `current_price` — per unit, so money
+/// added to a holding cannot draw a rise the security did not have (see
+/// `HoldingSeriesPoint`). One consequence of reading each snapshot in the
+/// unit basis it was generated in: a [share split or consolidation](
+/// `crate::entities::corporate_action`) **steps** the line on its date, the
+/// price before and after being quoted in different units. That is a change
+/// in the unit, not in value — the same kind of step the portfolio series
+/// carries where an excluded holding's price series begins.
+///
+/// Two conventions, both shared with the narrowed `db_series`: a date a
+/// holding has no row on is **not a point** (it was not held then, or was
+/// held and excluded because no price was obtainable), and neither is a row
+/// left unvalued — the gap in the line is the signal, where a zero would draw
+/// a fall to nothing that never happened. A holding whose points a window
+/// leaves empty is not returned at all.
+pub async fn db_holding_series(
+    pool: &SqlitePool,
+    from: Option<NaiveDate>,
+    to: Option<NaiveDate>,
+) -> Result<Vec<HoldingSeries>, sqlx::Error> {
+    let mut qb = QueryBuilder::new(
+        "SELECT snapshot_date, rows_json FROM report_snapshots \
+         WHERE report = 'unrealised_gains'",
+    );
+    if let Some(from) = from {
+        qb.push(" AND snapshot_date >= ").push_bind(from);
+    }
+    if let Some(to) = to {
+        qb.push(" AND snapshot_date <= ").push_bind(to);
+    }
+    qb.push(" ORDER BY snapshot_date");
+    let rows = qb.build().fetch_all(pool).await?;
+
+    // Keyed order, so the response is stable run to run (listing, then
+    // account) rather than however the first snapshot happened to list them.
+    let mut by_holding: BTreeMap<(i64, i64), Vec<HoldingSeriesPoint>> = BTreeMap::new();
+    for row in &rows {
+        let snapshot_date: NaiveDate = row.try_get("snapshot_date")?;
+        let rows_json: String = row.try_get("rows_json")?;
+        let gains: Vec<unrealised_gains::UnrealisedGain> = serde_json::from_str(&rows_json)
+            .map_err(|e| sqlx::Error::Decode(format!("malformed rows_json: {e}").into()))?;
+        for g in gains {
+            let Some(unit_price) = g.current_price else {
+                continue;
+            };
+            by_holding
+                .entry((g.listing_id, g.holding_account_id))
+                .or_default()
+                .push(HoldingSeriesPoint {
+                    snapshot_date,
+                    unit_price,
+                });
+        }
+    }
+    Ok(by_holding
+        .into_iter()
+        .map(|((listing_id, holding_account_id), points)| HoldingSeries {
+            listing_id,
+            holding_account_id,
+            points,
+        })
+        .collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -904,6 +1001,15 @@ struct SeriesParams {
     listing_id: Option<i64>,
 }
 
+/// `GET /report_snapshots/holding-series` query: the snapshot dates to read,
+/// both ends inclusive; absent means every stored snapshot.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HoldingSeriesParams {
+    from: Option<NaiveDate>,
+    to: Option<NaiveDate>,
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct GenerateBody {
@@ -926,6 +1032,16 @@ async fn series(
     Query(params): Query<SeriesParams>,
 ) -> Result<Json<Vec<SeriesPoint>>, ApiError> {
     db_series(&pool, params.listing_id)
+        .await
+        .map(Json)
+        .map_err(ApiError::from)
+}
+
+async fn holding_series(
+    State(pool): State<SqlitePool>,
+    Query(params): Query<HoldingSeriesParams>,
+) -> Result<Json<Vec<HoldingSeries>>, ApiError> {
+    db_holding_series(&pool, params.from, params.to)
         .await
         .map(Json)
         .map_err(ApiError::from)
@@ -1021,6 +1137,7 @@ pub fn router() -> Router<SqlitePool> {
     Router::new()
         .route("/report_snapshots", get(list))
         .route("/report_snapshots/series", get(series))
+        .route("/report_snapshots/holding-series", get(holding_series))
         .route("/report_snapshots/generate", post(generate_handler))
         .route(
             "/report_snapshots/regenerate_all",
@@ -2419,6 +2536,126 @@ mod tests {
         );
     }
 
+    /// The per-holding series behind the Portfolio Overview's contributions
+    /// sparklines: the same stored snapshots split per listing × holding
+    /// account rather than summed, bounded to the requested window, with a
+    /// date a holding was not held on left out of its line entirely. The
+    /// plotted figure is the AUD price **per unit**, so two accounts holding
+    /// the same listing draw the same line — the position's size is the row's
+    /// business, not the line's.
+    #[tokio::test]
+    async fn holding_series_splits_the_stored_snapshots_per_holding() {
+        let pool = test_pool().await;
+        sqlx::query("INSERT INTO holding_accounts (id, name) VALUES (2, 'Second')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        insert_listing(&pool, 1, "BHP", Some("XASX"), "AUD").await;
+        insert_listing(&pool, 2, "CBA", Some("XASX"), "AUD").await;
+        // BHP is held throughout, in two accounts; CBA is only bought on the
+        // second day, so the first snapshot has no row for it at all.
+        insert_buy(&pool, 1, 1, ymd(2024, 1, 16), "100", "10", "AUD").await;
+        test_support::buy(2, 1)
+            .date(ymd(2024, 1, 16))
+            .settlement(ymd(2024, 1, 16))
+            .qty("10".parse().unwrap())
+            .price("10".parse().unwrap())
+            .account(2)
+            .insert(&pool)
+            .await;
+        insert_buy(&pool, 3, 2, ymd(2026, 6, 5), "50", "100", "AUD").await;
+        for (date, bhp, cba) in [
+            (ymd(2026, 6, 3), "60.00", "100.00"),
+            (ymd(2026, 6, 4), "64.91", "100.00"),
+            (ymd(2026, 6, 5), "62.48", "104.00"),
+        ] {
+            store_price(&pool, 1, date, bhp).await;
+            store_price(&pool, 2, date, cba).await;
+            generate(&pool, date, utc(2026, 6, 8, 5, 0)).await.unwrap();
+        }
+
+        let series = db_holding_series(&pool, None, None).await.unwrap();
+        let keys: Vec<(i64, i64)> = series
+            .iter()
+            .map(|h| (h.listing_id, h.holding_account_id))
+            .collect();
+        assert_eq!(
+            keys,
+            vec![(1, 1), (1, 2), (2, 1)],
+            "one line per listing × holding account, in key order"
+        );
+        assert_eq!(
+            series[0]
+                .points
+                .iter()
+                .map(|p| (p.snapshot_date, p.unit_price.to_string()))
+                .collect::<Vec<_>>(),
+            vec![
+                (ymd(2026, 6, 3), "60.00".to_string()),
+                (ymd(2026, 6, 4), "64.91".to_string()),
+                (ymd(2026, 6, 5), "62.48".to_string()),
+            ],
+            "oldest first, the price per unit rather than this account's holding"
+        );
+        assert_eq!(
+            series[1].points[2].unit_price,
+            "62.48".parse().unwrap(),
+            "the other account's 10 units draw the same line, not a tenth of it"
+        );
+        assert_eq!(
+            series[2]
+                .points
+                .iter()
+                .map(|p| p.snapshot_date)
+                .collect::<Vec<_>>(),
+            vec![ymd(2026, 6, 5)],
+            "a date the holding did not exist on is not a point"
+        );
+
+        // The window bounds the snapshot dates read, both ends inclusive, so
+        // a range request carries only that range's points. CBA's line is
+        // absent altogether — it has no point inside the window.
+        let windowed = db_holding_series(&pool, Some(ymd(2026, 6, 3)), Some(ymd(2026, 6, 4)))
+            .await
+            .unwrap();
+        assert_eq!(
+            windowed
+                .iter()
+                .map(|h| (h.listing_id, h.points.len()))
+                .collect::<Vec<_>>(),
+            vec![(1, 2), (1, 2)]
+        );
+    }
+
+    /// A row the snapshot could not price is a **gap** in that holding's
+    /// line, not a fall to zero.
+    #[tokio::test]
+    async fn holding_series_skips_an_unpriced_row_rather_than_plotting_a_zero() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BHP", Some("XASX"), "AUD").await;
+        insert_buy(&pool, 1, 1, ymd(2024, 1, 16), "100", "10", "AUD").await;
+        store_price(&pool, 1, ymd(2026, 6, 4), "64.91").await;
+        generate(&pool, ymd(2026, 6, 4), utc(2026, 6, 8, 5, 0))
+            .await
+            .unwrap();
+        // Rewrite the stored row as an unpriced one (no price obtainable),
+        // which is what a live report answers when a fetch fails.
+        sqlx::query(
+            "UPDATE report_snapshots SET rows_json = replace(rows_json, '\"current_price\":\"64.91\"', '\"current_price\":null')              WHERE report = 'unrealised_gains'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        assert!(
+            db_holding_series(&pool, None, None)
+                .await
+                .unwrap()
+                .is_empty(),
+            "an unpriced row leaves a gap, never a zero point"
+        );
+    }
+
     /// Nothing held is a job no-op, and on-demand generation refuses a date
     /// whose close is not final yet (prices cannot exist for it).
     #[tokio::test]
@@ -2512,6 +2749,27 @@ mod tests {
             points[0]["provisional"], false,
             "flag present on series points"
         );
+
+        // The per-holding series behind the overview's contributions
+        // sparklines: one line per listing × holding account, bounded by
+        // the same window the panel ran its period summary over.
+        let resp = app.get("/report_snapshots/holding-series").await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let holdings = body_json(resp).await;
+        assert_eq!(holdings.as_array().unwrap().len(), 1);
+        assert_eq!(holdings[0]["listing_id"], 1);
+        assert_eq!(holdings[0]["holding_account_id"], 1);
+        assert_eq!(holdings[0]["points"][0]["snapshot_date"], "2026-06-04");
+        assert_eq!(holdings[0]["points"][0]["unit_price"], "64.91");
+        assert_eq!(holdings[0]["points"][1]["unit_price"], "62.48");
+
+        let resp = app
+            .get("/report_snapshots/holding-series?from=2026-06-05&to=2026-06-05")
+            .await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let holdings = body_json(resp).await;
+        assert_eq!(holdings[0]["points"].as_array().unwrap().len(), 1);
+        assert_eq!(holdings[0]["points"][0]["snapshot_date"], "2026-06-05");
 
         // Unknown report or date → 404.
         for uri in [

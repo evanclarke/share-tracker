@@ -11,6 +11,7 @@ import {
   presetRange, sliceSeries, yBounds, seriesField, pointNotes, tickLabel, chartWidth,
   weekTicks, isoDate, WEEK_MS, MIN_LABEL_GAP, MIN_GRID_GAP,
   SERIES_FIELDS, CHART_WIDTH_FALLBACK, CHART_WIDTH_MIN,
+  sparklinePoints, sparklineSegments, sparklineGaps, SPARK_WIDTH, SPARK_HEIGHT, SPARK_PAD,
 } from './chart.js';
 import { groupThousands } from './util.js';
 
@@ -279,4 +280,195 @@ test('weekTicks: a span under two weeks names both ends rather than one lone dat
 test('isoDate: round-trips the plot\'s own UTC date parse', () => {
   assert.equal(isoDate(Date.UTC(2024, 9, 2)), '2024-10-02');
   assert.equal(isoDate(new Date('2025-01-01T00:00:00Z').getTime()), '2025-01-01');
+});
+
+// ---- sparklinePoints ------------------------------------------------------
+//
+// `values` is one entry per snapshot date in the window — the price that
+// date, or null for a date the holding did not exist.
+
+test('sparklinePoints: spreads the window\'s slots across the width inside the padding', () => {
+  const p = sparklinePoints(['1', '2', '3'], SPARK_WIDTH, SPARK_HEIGHT);
+  assert.equal(p.length, 3);
+  assert.equal(p[0].x, SPARK_PAD);
+  assert.equal(p[2].x, SPARK_WIDTH - SPARK_PAD);
+  assert.equal(p[1].x, (SPARK_PAD + SPARK_WIDTH - SPARK_PAD) / 2);
+});
+
+test('sparklinePoints: an unheld date keeps its slot — the line covers only the held part', () => {
+  // Held for the middle third of the window: the line must start a third in
+  // and end two thirds in, not stretch across the whole cell.
+  const values = [null, null, '10', '11', '12', null, null, null, null];
+  const p = sparklinePoints(values, SPARK_WIDTH, SPARK_HEIGHT);
+  const span = SPARK_WIDTH - 2 * SPARK_PAD, slot = span / (values.length - 1);
+  assert.deepEqual(p.map(function (q) { return q.i; }), [2, 3, 4]);
+  assert.equal(p[0].x, SPARK_PAD + 2 * slot);
+  assert.equal(p[2].x, SPARK_PAD + 4 * slot);
+});
+
+test('sparklinePoints: the opening value plots on the middle line', () => {
+  // Which is where sparklineGaps' dashed no-holding rule runs, so a line that
+  // covers part of the window continues from the dashes rather than floating
+  // above or below them — and every row's line starts at the same height.
+  const mid = SPARK_HEIGHT / 2;
+  assert.equal(sparklinePoints(['100', '300'], SPARK_WIDTH, SPARK_HEIGHT)[0].y, mid);
+  assert.equal(sparklinePoints(['100', '20'], SPARK_WIDTH, SPARK_HEIGHT)[0].y, mid);
+  assert.equal(sparklineGaps([null, '100'], SPARK_WIDTH, SPARK_HEIGHT)[0].y, mid);
+});
+
+test('sparklinePoints: the furthest move from the opening value reaches the edge', () => {
+  // SVG y grows downward, so a rise is a smaller y. The other side scales
+  // against the same reach: 200 is half of 300's +200, so it sits halfway
+  // between the middle line and the top.
+  const mid = SPARK_HEIGHT / 2, half = mid - SPARK_PAD;
+  const p = sparklinePoints(['100', '300', '200'], SPARK_WIDTH, SPARK_HEIGHT);
+  assert.equal(p[1].y, SPARK_PAD);
+  assert.equal(p[2].y, mid - half / 2);
+  assert.deepEqual(p.map(function (q) { return q.value; }), [100, 300, 200]);
+});
+
+test('sparklinePoints: a fall reaches the bottom edge, a smaller rise scales against it', () => {
+  const mid = SPARK_HEIGHT / 2, half = mid - SPARK_PAD;
+  const p = sparklinePoints(['100', '50', '125'], SPARK_WIDTH, SPARK_HEIGHT);
+  assert.equal(p[1].y, SPARK_HEIGHT - SPARK_PAD, 'the -50 is the furthest move');
+  assert.equal(p[2].y, mid - half / 2, '+25 is half of it, on the other side');
+});
+
+test('sparklinePoints: the scale ignores the unheld dates entirely', () => {
+  // The nulls must not drag the axis to zero — that is the trap `Number(null)`
+  // sets, and a zero here would draw a fall to nothing on a date the holding
+  // did not exist. The opening value is the *first held* one, not slot 0.
+  const p = sparklinePoints([null, '1000', '1001', null], SPARK_WIDTH, SPARK_HEIGHT);
+  assert.equal(p[0].y, SPARK_HEIGHT / 2);
+  assert.equal(p[1].y, SPARK_PAD);
+});
+
+test('sparklinePoints: does not anchor at zero — a small move fills the half', () => {
+  // 1000 → 1001 must read as a rise to the top, not as a flat line along the
+  // middle of a 0..1001 axis.
+  const p = sparklinePoints(['1000', '1001'], SPARK_WIDTH, SPARK_HEIGHT);
+  assert.equal(p[0].y, SPARK_HEIGHT / 2);
+  assert.equal(p[1].y, SPARK_PAD);
+});
+
+test('sparklinePoints: a flat series sits on the middle line', () => {
+  const p = sparklinePoints(['50', '50', '50'], SPARK_WIDTH, SPARK_HEIGHT);
+  p.forEach(function (pt) { assert.equal(pt.y, SPARK_HEIGHT / 2); });
+});
+
+test('sparklinePoints: a single-slot window sits mid-cell (the dot is what shows it)', () => {
+  assert.deepEqual(sparklinePoints(['50'], SPARK_WIDTH, SPARK_HEIGHT),
+    [{ x: SPARK_WIDTH / 2, y: SPARK_HEIGHT / 2, value: 50, i: 0 }]);
+});
+
+test('sparklinePoints: a non-numeric value is an unheld slot, never a zero', () => {
+  const p = sparklinePoints(['100', 'n/a', '200'], SPARK_WIDTH, SPARK_HEIGHT);
+  assert.deepEqual(p.map(function (q) { return q.i; }), [0, 2]);
+});
+
+test('sparklinePoints: an empty or missing series, or one held on no date, draws no line', () => {
+  assert.deepEqual(sparklinePoints([], SPARK_WIDTH, SPARK_HEIGHT), []);
+  assert.deepEqual(sparklinePoints(null, SPARK_WIDTH, SPARK_HEIGHT), []);
+  assert.deepEqual(sparklinePoints([null, null], SPARK_WIDTH, SPARK_HEIGHT), []);
+});
+
+// ---- sparklineGaps --------------------------------------------------------
+
+test('sparklineGaps: the unheld ends of the window are dashed on the middle line', () => {
+  const values = [null, null, '10', '11', null];
+  const g = sparklineGaps(values, SPARK_WIDTH, SPARK_HEIGHT);
+  const span = SPARK_WIDTH - 2 * SPARK_PAD, slot = span / (values.length - 1);
+  assert.equal(g.length, 2);
+  // Leading: from the left edge to the first held slot, so the dashes meet
+  // the line rather than floating short of it.
+  assert.deepEqual(g[0], { x1: SPARK_PAD, x2: SPARK_PAD + 2 * slot, y: SPARK_HEIGHT / 2 });
+  // Trailing: from the last held slot to the right edge.
+  assert.deepEqual(g[1],
+    { x1: SPARK_PAD + 3 * slot, x2: SPARK_WIDTH - SPARK_PAD, y: SPARK_HEIGHT / 2 });
+});
+
+test('sparklineGaps: a holding sold and bought back leaves a gap in the middle', () => {
+  const values = ['10', null, null, '12'];
+  const g = sparklineGaps(values, SPARK_WIDTH, SPARK_HEIGHT);
+  const slot = (SPARK_WIDTH - 2 * SPARK_PAD) / 3;
+  assert.equal(g.length, 1);
+  assert.deepEqual(g[0], { x1: SPARK_PAD, x2: SPARK_PAD + 3 * slot, y: SPARK_HEIGHT / 2 });
+});
+
+test('sparklineGaps: a window held throughout has none', () => {
+  assert.deepEqual(sparklineGaps(['10', '11', '12'], SPARK_WIDTH, SPARK_HEIGHT), []);
+  assert.deepEqual(sparklineGaps([], SPARK_WIDTH, SPARK_HEIGHT), []);
+});
+
+// ---- sparklineSegments ----------------------------------------------------
+
+// The plotted points of `values`, cut into coloured runs against the first of
+// them — exactly what `sparkline` draws.
+function runs(values) {
+  const points = sparklinePoints(values, SPARK_WIDTH, SPARK_HEIGHT);
+  return sparklineSegments(points, points[0].value);
+}
+
+test('sparklineSegments: a holding above where it opened is one up run', () => {
+  assert.deepEqual(runs(['100', '110', '130']).map(function (r) { return r.dir; }), ['up']);
+});
+
+test('sparklineSegments: a holding below where it opened is one down run', () => {
+  assert.deepEqual(runs(['100', '90', '80']).map(function (r) { return r.dir; }), ['down']);
+});
+
+test('sparklineSegments: a series that never leaves its opening level claims neither', () => {
+  assert.deepEqual(runs(['100', '100', '100']).map(function (r) { return r.dir; }), ['flat']);
+  assert.deepEqual(runs(['100']).map(function (r) { return r.dir; }), ['flat']);
+});
+
+test('sparklineSegments: crossing the opening level cuts the line at the crossing', () => {
+  // 100 → 120 → 80: the colour must change where the line meets 100 again,
+  // halfway between the second and third points, not at the third point.
+  const r = runs(['100', '120', '80']);
+  assert.deepEqual(r.map(function (x) { return x.dir; }), ['up', 'down']);
+  const points = sparklinePoints(['100', '120', '80'], SPARK_WIDTH, SPARK_HEIGHT);
+  const cross = {
+    x: (points[1].x + points[2].x) / 2, y: (points[1].y + points[2].y) / 2,
+    value: 100, i: points[1].i,
+  };
+  assert.deepEqual(r[0].points[r[0].points.length - 1], cross);
+  // Both runs carry the crossing, which is what keeps the line unbroken.
+  assert.deepEqual(r[1].points[0], cross);
+});
+
+test('sparklineSegments: a point exactly on the opening level joins its neighbour\'s run', () => {
+  // No third colour for a boundary sample — and the opening point itself is
+  // always one, so the first run is coloured by where the line goes next.
+  const r = runs(['100', '120', '100', '80']);
+  assert.deepEqual(r.map(function (x) { return x.dir; }), ['up', 'down']);
+  assert.equal(r[0].points[0].value, 100, 'the opening point starts the up run');
+  assert.equal(r[1].points[0].value, 100, 'and the return to it starts the down run');
+});
+
+test('sparklineSegments: a line crossing back and forth alternates its runs', () => {
+  assert.deepEqual(runs(['100', '120', '80', '110']).map(function (r) { return r.dir; }),
+    ['up', 'down', 'up']);
+});
+
+test('sparklineSegments: an unheld stretch ends the run — never a line drawn across it', () => {
+  // Sold at 120, bought back higher: two stretches of ownership, not one line
+  // running straight through the months in between.
+  const r = runs(['100', '120', null, null, '130', '140']);
+  assert.deepEqual(r.map(function (x) { return x.dir; }), ['up', 'up']);
+  assert.deepEqual(r[0].points.map(function (p) { return p.i; }), [0, 1]);
+  assert.deepEqual(r[1].points.map(function (p) { return p.i; }), [4, 5]);
+});
+
+test('sparklineSegments: a lone day of ownership after a gap is still a run of its own', () => {
+  // A polyline of one point draws nothing, so `sparkline` marks it with a dot
+  // — but it has to be a run first.
+  const r = runs(['100', null, '130']);
+  assert.deepEqual(r.map(function (x) { return x.points.length; }), [1, 1]);
+  assert.deepEqual(r.map(function (x) { return x.dir; }), ['flat', 'up']);
+});
+
+test('sparklineSegments: no points, no runs', () => {
+  assert.deepEqual(sparklineSegments([], 0), []);
+  assert.deepEqual(sparklineSegments(null, 0), []);
 });
