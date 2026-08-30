@@ -278,7 +278,7 @@ pub fn parse_iso4217(content: &str) -> Result<Vec<Currency>, ImportError> {
     let mut seen = HashSet::new();
 
     let mut in_entry = false;
-    let mut cur_tag: Option<Vec<u8>> = None;
+    let mut cur_tag: Option<String> = None;
     // A field's text accumulates across events: since quick-xml 0.38 an entity
     // reference (`&amp;`) is its own GeneralRef event splitting the Text around
     // it, so a field is only complete at its End tag.
@@ -292,23 +292,23 @@ pub fn parse_iso4217(content: &str) -> Result<Vec<Currency>, ImportError> {
             Ok(Event::Start(e)) => {
                 let qname = e.name();
                 let tag = qname.as_ref();
-                if tag == b"CcyNtry" {
+                if tag == "CcyNtry" {
                     in_entry = true;
                     cur_tag = None;
                     entry = CcyNtry::default();
                 } else if in_entry {
-                    cur_tag = Some(tag.to_vec());
+                    cur_tag = Some(tag.to_string());
                     pending.clear();
                 }
             }
             Ok(Event::Text(t)) if in_entry && cur_tag.is_some() => {
-                pending.push_str(
-                    &t.xml10_content()
-                        .map_err(|e| ImportError::Parse(e.to_string()))?,
-                );
+                // Since quick-xml 0.42 an event's content is already `&str`
+                // (the reader validates UTF-8 on the way in), so unescaping no
+                // longer decodes and cannot fail on encoding.
+                pending.push_str(&t.xml10_content());
             }
             Ok(Event::GeneralRef(r)) if in_entry && cur_tag.is_some() => {
-                let entity = r.decode().map_err(|e| ImportError::Parse(e.to_string()))?;
+                let entity: &str = &r;
                 let raw = format!("&{entity};");
                 let resolved = quick_xml::escape::unescape(&raw)
                     .map_err(|e| ImportError::Parse(format!("unresolvable reference: {e}")))?;
@@ -317,7 +317,7 @@ pub fn parse_iso4217(content: &str) -> Result<Vec<Currency>, ImportError> {
             Ok(Event::End(e)) => {
                 let qname = e.name();
                 let tag = qname.as_ref();
-                if tag == b"CcyNtry" {
+                if tag == "CcyNtry" {
                     in_entry = false;
                     cur_tag = None;
                     if let Some(currency) = std::mem::take(&mut entry).into_currency(&mut seen)? {
@@ -326,10 +326,10 @@ pub fn parse_iso4217(content: &str) -> Result<Vec<Currency>, ImportError> {
                 } else if cur_tag.as_deref() == Some(tag) {
                     let text = pending.trim().to_string();
                     match tag {
-                        b"CcyNm" => entry.name = Some(text),
-                        b"Ccy" => entry.ccy = Some(text),
-                        b"CcyNbr" => entry.nbr = Some(text),
-                        b"CcyMnrUnts" => entry.minor = Some(text),
+                        "CcyNm" => entry.name = Some(text),
+                        "Ccy" => entry.ccy = Some(text),
+                        "CcyNbr" => entry.nbr = Some(text),
+                        "CcyMnrUnts" => entry.minor = Some(text),
                         _ => {}
                     }
                     cur_tag = None;
