@@ -27,7 +27,7 @@ reqwest = "0.13.4"
 # cookie/crumb workarounds for us; NOTE: its build.rs needs `protoc` on the
 # build machine (brew install protobuf / apt protobuf-compiler — see ci.yml).
 yfinance-rs = "0.9"
-croner = "3.0.1"
+croner = "4.0.0"
 # infra::email: the SMTP client behind the two scheduled report emails. Default
 # features off: `builder` (the MIME message), `smtp-transport` +
 # `tokio1-rustls-tls` (an async, rustls-encrypted client — rustls and `ring` are
