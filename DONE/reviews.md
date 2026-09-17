@@ -6250,3 +6250,61 @@ unredacted), `doc_checks::backup_command_credential_redaction_documented` and
 `doc_checks::freebsd_packaging::update_script_keeps_the_api_token_out_of_curl_argv`. Gates: `cargo fmt
 --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` (2,440 passed) and
 `node --test 'src/web/*.test.js'` (159 passed) all clean.
+
+## The outbound reference-data fetches have no timeout or response-size cap (2026-09-17 review, security)
+
+(2026-09-17 review's security pass. Three sibling feed fetches build a client with no timeout and
+read the body unbounded; a stalled or very large response parks the request task and buffers the
+whole body.)
+
+- [x] Reproduced by reading `src/entities/currencies.rs:509-523` (`reqwest::Client::new()` then
+  `resp.text()`), `src/entities/mic_registry.rs:211-218` and `src/entities/rba_fx_rate.rs:372-379`
+  (both `reqwest::get` then `resp.text()`); a grep for `.timeout(` finds no request timeout anywhere
+  in the tree
+- [x] Reachable pre-auth when `[auth]` is unset, through the documented manual trigger
+  (`POST /{currencies,mic_registry,rba_fx_rates}/import` with an empty body)
+- [x] Mitigating facts, verified: the URLs are `const` (no user-supplied URL, so no SSRF target
+  control), TLS is reqwest's default rustls with `rustls-platform-verifier` (no
+  `danger_accept_invalid_certs`), and this tree's reqwest has no compression features enabled, so
+  there is no decompression-bomb path
+- [x] Fix: one shared `reqwest::Client::builder().timeout(..).build()` per fetch, with a
+  size-bounded body read
+- [x] Tests: a fetch against a stalled/bounded stub asserting the timeout path surfaces as the
+  documented `502`
+- [x] Docs sync: none
+
+**Closed 2026-09-17.** `infra::fetch` (which already owned `cause_chain`) now owns the one bounded
+fetch every feed goes through. `reqwest::Client::builder().timeout(FEED_TIMEOUT)` bounds the
+transport, `tokio::time::timeout(FEED_TIMEOUT, …)` bounds the whole call, and the body is capped at
+`MAX_FEED_BYTES` three ways — a `Content-Length` pre-check before any body byte, an accumulating
+`chunk()` read that refuses the chunk which would cross the cap (rather than buffering it), and a
+final guard at the seam. Both constants carry their justification: 30 s because the feeds are small
+static documents from a fixed publisher and a stalled fetch must not park the request task and the
+scheduler's per-job lock; 16 MiB because the largest real feed (the DTIF token registry) is a few MiB,
+so this leaves growth headroom while bounding buffering. All three entities fetch through the shared
+`fetch_feed`; the lossy decode tolerance is preserved via `String::from_utf8_lossy` (the cap, not the
+decode, is what changed).
+
+The timeout and cap are testable without a socket: `infra::fetch` gained a `FeedFetcher` seam (boxed
+future, `SharedFeedFetcher = Arc<dyn FeedFetcher>`, exactly as `PriceFetcher` is injected), each
+entity's `router()` is now `router_with(Arc::new(LiveFeedFetcher))` over a private `router_with` that
+installs the transport as an axum `Extension`, and the handler passes it to `run_import_with` — so a
+test drives a stalled or oversized stub in-process through `ApiClient`. No port is bound: the stall is
+a future that sleeps four times the deadline and `tokio::time::pause()` makes the real
+`tokio::time::timeout` fire instantly. `app::router`'s signature is unchanged, and no test drives an
+empty-body import through `ApiClient::full`, so no test path can reach the live transport (every
+pre-existing import test sends a body).
+
+Tests: `infra::fetch::tests::the_body_cap_refuses_the_chunk_that_would_cross_it`,
+`an_over_length_body_is_refused_at_the_seam`, `a_stalled_fetch_is_cut_off_by_the_deadline`, and one
+route-level `502` case per feed —
+`entities::currencies::tests::a_stalled_feed_fetch_answers_the_documented_502`,
+`entities::currencies::tests::an_over_length_feed_body_answers_the_documented_502`,
+`entities::mic_registry::tests::a_stalled_feed_fetch_answers_the_documented_502` and
+`entities::rba_fx_rate::tests::a_stalled_feed_fetch_answers_the_documented_502`. Each was verified to
+fail without the fix (removing the deadline made the stalled routes answer `422`; neutering the cap
+checks failed the cap and seam cases). Gates: `cargo fmt --check`, `cargo clippy --all-targets -- -D
+warnings`, `cargo test` (2,447 passed) and `node --test 'src/web/*.test.js'` (159 passed) all clean.
+One residual is stated: the reqwest client's own `.timeout()` option is covered by construction and
+reading only, not by a socket-level test, by design given the no-network/no-port test constraints —
+the seam deadline that actually produces the `502` is what the tests exercise.

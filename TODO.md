@@ -38,28 +38,6 @@ what has been verified is SCENARIOS.md's
 [Verification status](SCENARIOS.md#verification-status) table and its per-section findings blocks;
 the maintained record of what was built and decided is the `DONE/*.md` archive.
 
-## The outbound reference-data fetches have no timeout or response-size cap (2026-09-17 review, security)
-
-(2026-09-17 review's security pass. Three sibling feed fetches build a client with no timeout and
-read the body unbounded; a stalled or very large response parks the request task and buffers the
-whole body.)
-
-- [ ] Reproduced by reading `src/entities/currencies.rs:509-523` (`reqwest::Client::new()` then
-  `resp.text()`), `src/entities/mic_registry.rs:211-218` and `src/entities/rba_fx_rate.rs:372-379`
-  (both `reqwest::get` then `resp.text()`); a grep for `.timeout(` finds no request timeout anywhere
-  in the tree
-- [ ] Reachable pre-auth when `[auth]` is unset, through the documented manual trigger
-  (`POST /{currencies,mic_registry,rba_fx_rates}/import` with an empty body)
-- [ ] Mitigating facts, verified: the URLs are `const` (no user-supplied URL, so no SSRF target
-  control), TLS is reqwest's default rustls with `rustls-platform-verifier` (no
-  `danger_accept_invalid_certs`), and this tree's reqwest has no compression features enabled, so
-  there is no decompression-bomb path
-- [ ] Fix: one shared `reqwest::Client::builder().timeout(..).build()` per fetch, with a
-  size-bounded body read
-- [ ] Tests: a fetch against a stalled/bounded stub asserting the timeout path surfaces as the
-  documented `502`
-- [ ] Docs sync: none
-
 ## A missing FX rate answers an empty 500 on three paths where the same data answers 422 elsewhere, and one tax-report path converts at parity (2026-09-17 review, financial correctness)
 
 (2026-09-17 review. The `ApiError::from(sqlx::Error)` arm recovers the boxed `FxError` from a decode

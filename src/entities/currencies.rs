@@ -12,11 +12,11 @@
 //! arbitrary-precision Decimal and are never rounded to a currency's minor unit.
 
 use crate::infra::db::write_tx;
-use crate::infra::fetch::cause_chain;
+use crate::infra::fetch::{FeedFetcher, LiveFeedFetcher, SharedFeedFetcher, fetch_feed};
 use crate::infra::http::{self, ApiError, CrudEntity};
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{Extension, State},
     routing::{get, post},
 };
 use quick_xml::events::Event;
@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::SqlitePool;
 use std::collections::HashSet;
+use std::sync::Arc;
 
 /// SIX Group "List One" — the official machine-readable ISO 4217 currency list.
 /// SIX is the ISO 4217 Maintenance Agency (on behalf of the SNV) and publishes
@@ -174,11 +175,19 @@ impl CrudEntity for Currency {
 }
 
 pub fn router() -> Router<SqlitePool> {
+    router_with(Arc::new(LiveFeedFetcher))
+}
+
+/// [`router`] over a caller-supplied transport. The production `router` is the
+/// live one; the tests inject a stalled/oversized stub so the timeout and
+/// size-cap paths are exercised with no socket in play.
+fn router_with(fetcher: SharedFeedFetcher) -> Router<SqlitePool> {
     Router::new()
         .route("/currencies", get(http::list_handler::<Currency>))
         .route("/currencies/{code}", get(http::get_handler::<Currency>))
         // Manual trigger for retries / missed runs. Read-only for clients otherwise.
         .route("/currencies/import", post(import))
+        .layer(Extension(fetcher))
 }
 
 #[cfg(test)]
@@ -494,9 +503,18 @@ fn dtif_credentials() -> Option<(String, String)> {
 /// fiat import). Returns the per-feed summary — including, when the token feed
 /// was passed over, the fact that it was.
 pub async fn run_import(pool: &SqlitePool) -> Result<ImportSummary, ImportError> {
-    let fiat = fetch(ISO_4217_URL, None).await?;
+    run_import_with(pool, &LiveFeedFetcher).await
+}
+
+/// [`run_import`] through a caller-supplied transport — the handler passes the
+/// `Extension`'s fetcher, so a test can drive the timeout and size-cap paths.
+async fn run_import_with(
+    pool: &SqlitePool,
+    fetcher: &dyn FeedFetcher,
+) -> Result<ImportSummary, ImportError> {
+    let fiat = fetch(fetcher, ISO_4217_URL, None).await?;
     let tokens = match dtif_credentials() {
-        Some((user, pass)) => Some(fetch(ISO_24165_URL, Some((&user, &pass))).await?),
+        Some((user, pass)) => Some(fetch(fetcher, ISO_24165_URL, Some((&user, &pass))).await?),
         None => {
             tracing::warn!("{TOKEN_FEED_NOT_CONFIGURED}");
             None
@@ -505,21 +523,17 @@ pub async fn run_import(pool: &SqlitePool) -> Result<ImportSummary, ImportError>
     import_feeds(pool, &fiat, tokens.as_deref()).await
 }
 
-/// GET a feed URL, optionally with HTTP Basic auth (the DTIF download requires it).
-async fn fetch(url: &str, basic_auth: Option<(&str, &str)>) -> Result<String, ImportError> {
-    let mut req = reqwest::Client::new().get(url);
-    if let Some((user, pass)) = basic_auth {
-        req = req.basic_auth(user, Some(pass));
-    }
-    let resp = req
-        .send()
+/// GET a feed URL, optionally with HTTP Basic auth (the DTIF download requires
+/// it), through the shared bounded fetch — one deadline and one body cap for
+/// every feed (see [`crate::infra::fetch`]).
+async fn fetch(
+    fetcher: &dyn FeedFetcher,
+    url: &str,
+    basic_auth: Option<(&str, &str)>,
+) -> Result<String, ImportError> {
+    fetch_feed(fetcher, url, basic_auth)
         .await
-        .map_err(|e| ImportError::Fetch(cause_chain(&e)))?
-        .error_for_status()
-        .map_err(|e| ImportError::Fetch(cause_chain(&e)))?;
-    resp.text()
-        .await
-        .map_err(|e| ImportError::Fetch(cause_chain(&e)))
+        .map_err(|e| ImportError::Fetch(e.to_string()))
 }
 
 /// Manually trigger the import. With a non-empty request body, imports that body
@@ -529,10 +543,11 @@ async fn fetch(url: &str, basic_auth: Option<(&str, &str)>) -> Result<String, Im
 /// per-feed [`ImportSummary`] — a pasted body reporting only the feed it is.
 async fn import(
     State(pool): State<SqlitePool>,
+    Extension(fetcher): Extension<SharedFeedFetcher>,
     body: String,
 ) -> Result<Json<ImportSummary>, ApiError> {
     let result = if body.trim().is_empty() {
-        run_import(&pool).await
+        run_import_with(&pool, fetcher.as_ref()).await
     } else {
         import_from_content(&pool, &body).await
     };
@@ -922,7 +937,9 @@ mod tests {
     #[tokio::test]
     async fn an_unreachable_feed_reports_the_feed_and_the_reason() {
         let url = crate::test_support::unreachable_url("list-one.xml");
-        let error = fetch(&url, None).await.expect_err("nothing is listening");
+        let error = fetch(&LiveFeedFetcher, &url, None)
+            .await
+            .expect_err("nothing is listening");
         let recorded = error.to_string();
 
         assert!(
@@ -937,6 +954,47 @@ mod tests {
         assert!(
             !recorded.starts_with("Fetch("),
             "recorded as a Rust Debug string: {recorded}"
+        );
+    }
+
+    /// The 2026-09-17 security finding end to end on this route: a stalled
+    /// upstream answers the documented `502` rather than parking the request
+    /// task. The stalled stub is the injection; the deadline under test is the
+    /// one [`crate::infra::fetch::fetch_feed`] applies to every feed.
+    ///
+    /// The clock is paused so the stub's four-times-the-deadline sleep costs no
+    /// real time — and so that, with the deadline removed, the stub completes
+    /// and this fails on the parser's status instead of hanging.
+    #[tokio::test]
+    async fn a_stalled_feed_fetch_answers_the_documented_502() {
+        use crate::infra::fetch::test_support::StalledFeedFetcher;
+
+        let pool = test_pool().await;
+        tokio::time::pause();
+        let app = ApiClient::over(router_with(StalledFeedFetcher::shared()).with_state(pool));
+
+        let resp = app.post_empty("/currencies/import").await;
+        assert_eq!(resp.status, StatusCode::BAD_GATEWAY, "{}", resp.text());
+        assert_eq!(
+            resp.text(),
+            "could not fetch the currency feed from its source"
+        );
+    }
+
+    /// The other half of the finding: a body over the cap answers the same
+    /// documented `502` rather than being buffered whole.
+    #[tokio::test]
+    async fn an_over_length_feed_body_answers_the_documented_502() {
+        use crate::infra::fetch::test_support::OversizedFeedFetcher;
+
+        let pool = test_pool().await;
+        let app = ApiClient::over(router_with(OversizedFeedFetcher::shared()).with_state(pool));
+
+        let resp = app.post_empty("/currencies/import").await;
+        assert_eq!(resp.status, StatusCode::BAD_GATEWAY, "{}", resp.text());
+        assert_eq!(
+            resp.text(),
+            "could not fetch the currency feed from its source"
         );
     }
 

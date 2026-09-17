@@ -1,14 +1,15 @@
 use crate::infra::db::write_tx;
-use crate::infra::fetch::cause_chain;
+use crate::infra::fetch::{FeedFetcher, LiveFeedFetcher, SharedFeedFetcher, fetch_feed};
 use crate::infra::http::{self, ApiError, CrudEntity};
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{Extension, State},
     routing::{get, post},
 };
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
+use std::sync::Arc;
 
 /// Source of the ISO 10383 Market Identifier Code registry: the official
 /// ISO20022 published list. It carries no trading currency, timezone, or
@@ -90,11 +91,19 @@ impl CrudEntity for MicEntry {
 }
 
 pub fn router() -> Router<SqlitePool> {
+    router_with(Arc::new(LiveFeedFetcher))
+}
+
+/// [`router`] over a caller-supplied transport. The production `router` is the
+/// live one; the tests inject a stalled stub so the timeout path is exercised
+/// with no socket in play.
+fn router_with(fetcher: SharedFeedFetcher) -> Router<SqlitePool> {
     Router::new()
         .route("/mic_registry", get(http::list_handler::<MicEntry>))
         .route("/mic_registry/{mic}", get(http::get_handler::<MicEntry>))
         // Manual trigger for retries / missed runs. Read-only for clients otherwise.
         .route("/mic_registry/import", post(import))
+        .layer(Extension(fetcher))
 }
 
 #[cfg(test)]
@@ -234,19 +243,25 @@ pub async fn import_from_content(
 
 /// Fetch the published registry from ISO and import it.
 pub async fn run_import(pool: &SqlitePool) -> Result<ImportSummary, ImportError> {
-    let content = fetch_registry(MIC_REGISTRY_URL).await?;
+    run_import_with(pool, &LiveFeedFetcher).await
+}
+
+/// [`run_import`] through a caller-supplied transport — the handler passes the
+/// `Extension`'s fetcher, so a test can drive the timeout path.
+async fn run_import_with(
+    pool: &SqlitePool,
+    fetcher: &dyn FeedFetcher,
+) -> Result<ImportSummary, ImportError> {
+    let content = fetch(fetcher, MIC_REGISTRY_URL).await?;
     import_from_content(pool, &content).await
 }
 
-async fn fetch_registry(url: &str) -> Result<String, ImportError> {
-    let resp = reqwest::get(url)
+/// The shared bounded fetch, mapped into this entity's error type — one
+/// deadline and one body cap for every feed (see [`crate::infra::fetch`]).
+async fn fetch(fetcher: &dyn FeedFetcher, url: &str) -> Result<String, ImportError> {
+    fetch_feed(fetcher, url, None)
         .await
-        .map_err(|e| ImportError::Fetch(cause_chain(&e)))?
-        .error_for_status()
-        .map_err(|e| ImportError::Fetch(cause_chain(&e)))?;
-    resp.text()
-        .await
-        .map_err(|e| ImportError::Fetch(cause_chain(&e)))
+        .map_err(|e| ImportError::Fetch(e.to_string()))
 }
 
 /// Manually trigger the import. With a non-empty request body, imports that body
@@ -254,10 +269,11 @@ async fn fetch_registry(url: &str) -> Result<String, ImportError> {
 /// with an empty body, fetches from ISO. Both share `import_from_content`.
 async fn import(
     State(pool): State<SqlitePool>,
+    Extension(fetcher): Extension<SharedFeedFetcher>,
     body: String,
 ) -> Result<Json<ImportSummary>, ApiError> {
     let result = if body.trim().is_empty() {
-        run_import(&pool).await
+        run_import_with(&pool, fetcher.as_ref()).await
     } else {
         import_from_content(&pool, &body).await
     };
@@ -523,7 +539,7 @@ mod tests {
     #[tokio::test]
     async fn an_unreachable_feed_reports_the_feed_and_the_reason() {
         let url = crate::test_support::unreachable_url("ISO10383_MIC.csv");
-        let error = fetch_registry(&url)
+        let error = fetch(&LiveFeedFetcher, &url)
             .await
             .expect_err("nothing is listening");
         let recorded = error.to_string();
@@ -540,6 +556,30 @@ mod tests {
         assert!(
             !recorded.starts_with("Fetch("),
             "recorded as a Rust Debug string: {recorded}"
+        );
+    }
+
+    /// The 2026-09-17 security finding end to end on this route: a stalled
+    /// upstream answers the documented `502` rather than parking the request
+    /// task. The stalled stub is the injection; the deadline under test is the
+    /// one [`crate::infra::fetch::fetch_feed`] applies to every feed.
+    ///
+    /// The clock is paused so the stub's four-times-the-deadline sleep costs no
+    /// real time — and so that, with the deadline removed, the stub completes
+    /// and this fails on the parser's status instead of hanging.
+    #[tokio::test]
+    async fn a_stalled_feed_fetch_answers_the_documented_502() {
+        use crate::infra::fetch::test_support::StalledFeedFetcher;
+
+        let pool = test_pool().await;
+        tokio::time::pause();
+        let app = ApiClient::over(router_with(StalledFeedFetcher::shared()).with_state(pool));
+
+        let resp = app.post_empty("/mic_registry/import").await;
+        assert_eq!(resp.status, StatusCode::BAD_GATEWAY, "{}", resp.text());
+        assert_eq!(
+            resp.text(),
+            "could not fetch the MIC registry feed from its source"
         );
     }
 }
