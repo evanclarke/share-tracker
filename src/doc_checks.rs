@@ -1883,16 +1883,17 @@ fn fx_spot_rate_override_documented() {
 }
 
 /// Doc-only resolution pin for cost-base FX timing (2026-07-12 review,
-/// decided 2026-07-13 as a documented limitation): `CostBase::into_aud_with`
-/// converts the whole breakdown — including AMIT (E10) and return-of-capital
-/// (G1) reductions from later rate months — at the parcel's acquisition-month
-/// rate, a deliberate simplification of the s 960-50(6) per-transaction
-/// translation timing. The Known-limitations entry states the rule, the
-/// g1_gains asymmetry (a payment's excess converts at the payment month while
-/// its reduction converts at the acquisition month), and when it bites (a
-/// non-AUD holding with non-AUD reductions — none in practice); cites the
-/// QC 18322 mirror; is cross-linked from the FX-conversion section; and the
-/// the features doc surfaces it.
+/// decided 2026-07-13 as a documented limitation; the G1 half revised
+/// 2026-09-17): `CostBase::into_aud_with` converts the whole breakdown —
+/// including AMIT (E10) and return-of-capital (G1) reductions from later rate
+/// months — at the parcel's acquisition-month rate, a deliberate
+/// simplification of the s 960-50(6) per-transaction translation timing. The
+/// Known-limitations entry states the rule, the G1 excess's two-date
+/// translation (the payment at the payment month, the cost base it overran at
+/// the acquisition month) against the E10 excess's remaining buy-month
+/// conversion, and when it bites (a non-AUD holding with non-AUD reductions —
+/// none in practice); cites the QC 18322 mirror; is cross-linked from the
+/// FX-conversion section; and the features doc surfaces it.
 #[test]
 fn known_limitations_document_cost_base_fx_timing() {
     let limitations = known_limitations();
@@ -1905,7 +1906,7 @@ fn known_limitations_document_cost_base_fx_timing() {
     assert!(limitations.contains("s 960-50(6) translation rules"));
     assert!(limitations.contains("docs/ato/forex-common-transactions.md"));
     assert!(include_str!("../docs/ato/forex-common-transactions.md").contains("QC 18322"));
-    // The g1_gains asymmetry, both halves.
+    // The G1 excess's two-date translation, both halves.
     assert!(limitations.contains("converts at the **payment month**"));
     assert!(limitations.contains("converts at the **acquisition month**"));
     // When it bites.

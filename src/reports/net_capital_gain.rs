@@ -406,10 +406,14 @@ struct EventGain {
 /// - **G1** falls in the payment's income year, covers only the units still
 ///   held at the payment date (units sold earlier were not held for it; the
 ///   whole-parcel totals here keep any division until that final pro-rating),
-///   is converted at the payment month's ATO rate (no manual fallback — a
-///   non-AUD payment with no rate fails loudly), and is discount-eligible when
-///   the units were held more than 12 months at the payment date. G1 can never
-///   produce a capital loss.
+///   and is discount-eligible when the units were held more than 12 months at
+///   the payment date. The gain is a *difference* between two amounts arising
+///   on two dates, so each is translated at its own: the payment at the payment
+///   month's ATO rate (no manual fallback — a non-AUD payment with no rate
+///   fails loudly), and the cost base it overran at the parcel's
+///   acquisition-month rate with the parcel's own override, exactly as the
+///   cost base itself was converted. G1 can never produce a capital loss, so an
+///   excess that does not survive the two translations is floored at nil.
 /// - **C2** falls in the payment's income year too, covers the units entitled
 ///   at the payment's **record date** but sold before the payment date, is the
 ///   whole payment on those units (the right to receive has a nil cost base
@@ -619,6 +623,10 @@ async fn non_disposal_gains(
                     continue;
                 }
                 let excess = amount - remaining;
+                // The native cost base these units still carried when the event
+                // ran past it — the second element of a G1 excess, which is
+                // translated at its own date rather than the payment's (below).
+                let exhausted = remaining;
                 remaining = Decimal::ZERO;
                 match event {
                     Reduction::Amit(e) => out.push(EventGain {
@@ -635,14 +643,40 @@ async fn non_disposal_gains(
                             e.tax_year_end_date,
                         ),
                     }),
-                    Reduction::Roc { date, currency, .. } => out.push(EventGain {
-                        kind: CgtEventKind::G1,
-                        tax_year: tax_year_for(*date),
-                        amount: fx.to_aud(excess, currency, *date, FxOverride::None)?,
-                        discount_eligible: crate::domain::cgt_discount::discount_eligible(
-                            acquired, *date,
-                        ),
-                    }),
+                    Reduction::Roc { date, currency, .. } => {
+                        // A G1 gain is the difference between two amounts
+                        // arising on two different dates, so each is translated
+                        // at its own: the payment at the payment date, the cost
+                        // base it overran at the parcel's acquisition-month
+                        // rate — with the parcel's own override, the same rate
+                        // `CostBase::into_aud_with` converted that cost base
+                        // with. Converting the native excess in one step
+                        // translated the cost-base element at the payment's
+                        // rate, overstating the gain whenever the AUD had
+                        // strengthened since acquisition (and understating it
+                        // when the AUD had weakened); an AUD parcel collapses to
+                        // parity whichever way it is done.
+                        let payment = fx.to_aud(amount, currency, *date, FxOverride::None)?;
+                        let cost_base = if exhausted == Decimal::ZERO {
+                            // An earlier event already exhausted the cost base:
+                            // the whole payment is the gain, and there is no
+                            // cost-base figure whose rate could be missing.
+                            Decimal::ZERO
+                        } else {
+                            fx.to_aud(exhausted, &parcel.currency, acquired, parcel.fx_override())?
+                        };
+                        out.push(EventGain {
+                            kind: CgtEventKind::G1,
+                            tax_year: tax_year_for(*date),
+                            // Floored at nil: G1 can never produce a capital
+                            // loss, so an excess whose AUD value does not
+                            // survive the two translations is no gain.
+                            amount: (payment - cost_base).max(Decimal::ZERO),
+                            discount_eligible: crate::domain::cgt_discount::discount_eligible(
+                                acquired, *date,
+                            ),
+                        });
+                    }
                 }
             }
         }
@@ -2522,6 +2556,21 @@ mod tests {
         amount: &str,
         record_date: Option<NaiveDate>,
     ) {
+        apply_roc_full(pool, id, listing_id, date, amount, "AUD", record_date).await;
+    }
+
+    /// The return-of-capital fixture with every field spelled out, including
+    /// the payment's currency — which must be the parcel's own
+    /// (`RocEvent::per_unit_for` refuses a mismatch).
+    async fn apply_roc_full(
+        pool: &SqlitePool,
+        id: i64,
+        listing_id: i64,
+        date: NaiveDate,
+        amount: &str,
+        currency: &str,
+        record_date: Option<NaiveDate>,
+    ) {
         corporate_action::db_upsert(
             pool,
             &corporate_action::CorporateAction {
@@ -2530,7 +2579,7 @@ mod tests {
                 date,
                 kind: corporate_action::ActionKind::ReturnOfCapital {
                     amount_per_unit: amount.parse().unwrap(),
-                    currency: "AUD".to_string(),
+                    currency: currency.to_string(),
                     record_date,
                 },
             },
@@ -3147,6 +3196,165 @@ mod tests {
                 && y.cgt_event_g1_gain == Decimal::ZERO
                 && y.capital_losses == Decimal::ZERO),
             "payment not more than cost base → no gain, and never a loss"
+        );
+    }
+
+    /// A G1 excess is the difference between the payment and the cost base it
+    /// overran — two amounts arising on two dates — so each is translated at
+    /// its own date's rate. Translating the native excess in one step charged
+    /// the cost-base element at the payment's rate, which is wrong whenever the
+    /// rate moved in between (2026-09-17 review, financial correctness).
+    #[tokio::test]
+    async fn db_g1_excess_translates_the_payment_and_the_cost_base_at_their_own_dates() {
+        let pool = test_pool().await;
+        insert_usd_listing(&pool, 1, "VAF").await;
+        // A$1 = 1.5 USD at acquisition, A$1 = 2.0 USD at the payment.
+        rba_fx_rate::db_import_rate(&pool, "USD", "2023-01", "1.5".parse().unwrap())
+            .await
+            .unwrap();
+        rba_fx_rate::db_import_rate(&pool, "USD", "2025-07", "2.0".parse().unwrap())
+            .await
+            .unwrap();
+        // USD 600 cost base (100 @ USD 6), acquired January 2023.
+        test_support::trade(1, 1, trade::TradeType::Buy)
+            .date(NaiveDate::from_ymd_opt(2023, 1, 10).unwrap())
+            .qty(Decimal::from(100))
+            .price(Decimal::from(6))
+            .insert(&pool)
+            .await;
+        // USD 1,000 return of capital (USD 10/unit) paid July 2025.
+        apply_roc_full(
+            &pool,
+            1,
+            1,
+            NaiveDate::from_ymd_opt(2025, 7, 1).unwrap(),
+            "10",
+            "USD",
+            None,
+        )
+        .await;
+
+        let r = db_net_capital_gain(&pool).await.unwrap();
+        let row = row_for(&r, 2026); // July 2025 falls in FY2026
+        // 1000/2.0 − 600/1.5 = 500 − 400 = 100. Charging the cost base the
+        // payment's rate instead reports the native (1000 − 600)/2.0 = 200.
+        assert_eq!(row.cgt_event_g1_gain, Decimal::from(100));
+        // Held > 12 months at the payment date → discount-eligible → 50.
+        assert_eq!(row.discount_eligible_gains, Decimal::from(100));
+        assert_eq!(row.net_capital_gain, Decimal::from(50));
+    }
+
+    /// The AUD control for the test above: with no currency to translate, the
+    /// two dates collapse to parity and the excess is the native one.
+    #[tokio::test]
+    async fn db_g1_excess_is_unchanged_for_an_aud_parcel() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "RAP").await;
+        insert_trade(
+            &pool,
+            1,
+            trade::TradeType::Buy,
+            1,
+            NaiveDate::from_ymd_opt(2023, 1, 10).unwrap(),
+            Decimal::from(100),
+            Decimal::from(6),
+        )
+        .await;
+        apply_roc(
+            &pool,
+            1,
+            1,
+            NaiveDate::from_ymd_opt(2025, 7, 1).unwrap(),
+            "10",
+        )
+        .await;
+
+        let r = db_net_capital_gain(&pool).await.unwrap();
+        let row = row_for(&r, 2026);
+        assert_eq!(row.cgt_event_g1_gain, Decimal::from(400));
+    }
+
+    /// The cost-base element of a G1 excess converts at the **parcel's** rate,
+    /// so a deliberate `spot_fx_rate` override reaches it: the cost base the
+    /// excess is measured against was converted with that override, and the
+    /// walk must not contradict it by re-deriving at the ATO rate.
+    #[tokio::test]
+    async fn db_g1_excess_cost_base_uses_the_parcels_spot_override() {
+        let pool = test_pool().await;
+        insert_usd_listing(&pool, 1, "VAF").await;
+        // The January ATO rate is 1.5; the parcel carries a 1.6 spot override,
+        // which is the rate its cost base converts with.
+        rba_fx_rate::db_import_rate(&pool, "USD", "2023-01", "1.5".parse().unwrap())
+            .await
+            .unwrap();
+        rba_fx_rate::db_import_rate(&pool, "USD", "2025-07", "2.0".parse().unwrap())
+            .await
+            .unwrap();
+        test_support::trade(1, 1, trade::TradeType::Buy)
+            .date(NaiveDate::from_ymd_opt(2023, 1, 10).unwrap())
+            .qty(Decimal::from(100))
+            .price(Decimal::from(6))
+            .spot_fx_rate("1.6".parse().unwrap())
+            .insert(&pool)
+            .await;
+        apply_roc_full(
+            &pool,
+            1,
+            1,
+            NaiveDate::from_ymd_opt(2025, 7, 1).unwrap(),
+            "10",
+            "USD",
+            None,
+        )
+        .await;
+
+        let r = db_net_capital_gain(&pool).await.unwrap();
+        let row = row_for(&r, 2026);
+        // 1000/2.0 − 600/1.6 = 500 − 375 = 125. Dropping the override and
+        // converting at the ATO 1.5 would report 100.
+        assert_eq!(row.cgt_event_g1_gain, Decimal::from(125));
+    }
+
+    /// G1 can never produce a capital loss: when the AUD has appreciated enough
+    /// that the payment's AUD value falls below the cost base's, the excess is
+    /// floored at nil rather than booked as a negative gain against other
+    /// years' gains.
+    #[tokio::test]
+    async fn db_g1_excess_is_floored_at_nil_when_the_aud_value_inverts() {
+        let pool = test_pool().await;
+        insert_usd_listing(&pool, 1, "VAF").await;
+        // A$1 = 1.0 USD at acquisition (cost base A$600), A$1 = 2.0 USD at the
+        // payment (USD 1,000 → A$500): the payment overran the cost base in its
+        // own currency but is worth less in AUD.
+        rba_fx_rate::db_import_rate(&pool, "USD", "2023-01", "1.0".parse().unwrap())
+            .await
+            .unwrap();
+        rba_fx_rate::db_import_rate(&pool, "USD", "2025-07", "2.0".parse().unwrap())
+            .await
+            .unwrap();
+        test_support::trade(1, 1, trade::TradeType::Buy)
+            .date(NaiveDate::from_ymd_opt(2023, 1, 10).unwrap())
+            .qty(Decimal::from(100))
+            .price(Decimal::from(6))
+            .insert(&pool)
+            .await;
+        apply_roc_full(
+            &pool,
+            1,
+            1,
+            NaiveDate::from_ymd_opt(2025, 7, 1).unwrap(),
+            "10",
+            "USD",
+            None,
+        )
+        .await;
+
+        let r = db_net_capital_gain(&pool).await.unwrap();
+        assert!(
+            r.iter().all(|y| y.cgt_event_g1_gain == Decimal::ZERO
+                && y.capital_losses == Decimal::ZERO
+                && y.net_capital_gain == Decimal::ZERO),
+            "a payment worth less in AUD than the cost base is no G1 gain: {r:?}"
         );
     }
 

@@ -5470,3 +5470,52 @@ then 31 in `util.js`'s `decParts`, exact decimal arithmetic). The long flat enti
 (`trade/db.rs:316` CCN 57, `corporate_action/db.rs:447`, `income.rs:672`, `sell.rs:572`) and the
 per-owner dispatch in `reports::attachments::db_attachments` (`:48`, CCN 35, zero boolean operators
 — six `else if` arms, one per owner FK) were each read and judged correct as they stand.
+
+## The G1 excess converts a native net, so its cost-base element is translated at the event rate (2026-09-17 review, financial correctness)
+
+(The 2026-09-17 review's financial-correctness pass, reproduced by reading
+`src/reports/net_capital_gain.rs:607-646`. `remaining` is a native-currency cost-base balance, built
+at `:564` and drawn down by native amounts, so the excess at `:621` is the difference between a
+*payment* and a *cost base* — two amounts that must each be translated at their own date. The
+adjacent E10 branch (`:627-632`) converts at the acquisition date and the C2 branch (`:610`) at the
+event's own date; only G1 mixes the two.)
+
+- [x] Reproduced, with figures: a USD parcel whose initial cost is USD 600 acquired 2023-01 (A$1 =
+  1.5 USD) and whose return of capital is USD 1,000 paid 2025-07 (A$1 = 2.0 USD) reports a G1 gain
+  of `(1000 − 600) / 2.0 = A$200`. The correct figure is `1000/2.0 − 600/1.5 = A$100` — overstated
+  100% (understated when the AUD strengthened over the same period). AUD parcels are unaffected,
+  since both dates collapse to parity
+- [x] The same line passes `FxOverride::None`, so it also drops the parcel's `spot_fx_rate` override
+  that the cost base was converted with (`CostBase::into_aud_with`), making a deliberately overridden
+  parcel inconsistent with itself
+- [x] Fix: convert each element at its own date — the payment at the event date, the remaining native
+  cost base at the acquisition-month rate with the parcel's own override — or reuse the
+  already-converted `CostBase` components instead of re-deriving from a native remainder
+- [x] Tests: a non-AUD parcel whose return of capital exceeds its remaining cost base, with the two
+  rates chosen so the two methods differ (the review's 600/1000/1.5/2.0 figures), an AUD control, and
+  a case carrying a `spot_fx_rate` override
+- [x] Docs sync: none — `docs/API.md` documents the G1 figure as an AUD gain, which the fix restores
+
+**Closed 2026-09-17.** `non_disposal_gains`' G1 branch now converts its two elements separately:
+the payment at the payment date (`FxOverride::None`, unchanged) and the native cost base it overran
+at the parcel's acquisition month with `parcel.fx_override()` — the same rate
+`CostBase::into_aud_with` translated that cost base with. The difference is floored at nil, since
+G1 can never produce a capital loss: the review's own formula can go negative in the opposite
+direction (when the AUD appreciates far enough that the payment is worth less in AUD than the cost
+base), and a negative "gain" would silently reduce another year's assessable gains. The E10 branch
+is deliberately untouched — the review found only G1 mixing the two dates. Tests in
+`reports::net_capital_gain::tests`:
+`db_g1_excess_translates_the_payment_and_the_cost_base_at_their_own_dates` (the review's figures,
+A$100 not A$200), `db_g1_excess_is_unchanged_for_an_aud_parcel` (the control),
+`db_g1_excess_cost_base_uses_the_parcels_spot_override` (A$125, not the A$100 the ignored override
+would give) and `db_g1_excess_is_floored_at_nil_when_the_aud_value_inverts`; the fixture helper
+`apply_roc_full` gained the payment's currency, with `apply_roc_with_record` delegating to it.
+The item's "Docs sync: none" was too narrow: `docs/API.md`'s net-capital-gain G1 paragraph and its
+**Cost-base FX timing** known limitation both described the whole excess as converting at the
+payment month, and the C2 paragraph called its own rate "like G1", so all three were corrected —
+the G1 excess now reads as a two-date translation and the limitation's remaining asymmetry is the
+untouched E10 excess — with the doc-string and comments of
+`doc_checks::known_limitations_document_cost_base_fx_timing` updated to match (its assertions
+already held the new wording).
+Gates: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` (2,393
+passed) and `node --test 'src/web/*.test.js'` (149 passed) all clean.

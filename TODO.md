@@ -11,8 +11,9 @@ A section records one finding, and its heading names where it came from — a RE
 [SCENARIOS.md](SCENARIOS.md) section, or a dated review pass.
 
 **Open: the 2026-09-17 code review pass.** Its findings are the sections below, most-urgent first.
-Two are financial-correctness defects in the CGT arithmetic (the G1 excess's FX date, and the single
-end-floor in the cost-base pipeline); then an availability panic and two write-time validation
+One of its two financial-correctness defects in the CGT arithmetic remains (the single end-floor in
+the cost-base pipeline) — the other, the G1 excess's FX date, was fixed on 2026-09-17 and moved to
+[`DONE/reviews.md`](DONE/reviews.md); next are an availability panic and two write-time validation
 holes, a packaging permission, tax-document/label inconsistencies, two frontend state bugs, and a
 tail of low-severity concurrency, hygiene, documentation and test-gap items. The pass verified the
 three gates green (`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`
@@ -36,31 +37,6 @@ close before that audit (the distribution calendar and the 2026-08-25 code revie
 what has been verified is SCENARIOS.md's
 [Verification status](SCENARIOS.md#verification-status) table and its per-section findings blocks;
 the maintained record of what was built and decided is the `DONE/*.md` archive.
-
-## The G1 excess converts a native net, so its cost-base element is translated at the event rate (2026-09-17 review, financial correctness)
-
-(The 2026-09-17 review's financial-correctness pass, reproduced by reading
-`src/reports/net_capital_gain.rs:607-646`. `remaining` is a native-currency cost-base balance, built
-at `:564` and drawn down by native amounts, so the excess at `:621` is the difference between a
-*payment* and a *cost base* — two amounts that must each be translated at their own date. The
-adjacent E10 branch (`:627-632`) converts at the acquisition date and the C2 branch (`:610`) at the
-event's own date; only G1 mixes the two.)
-
-- [ ] Reproduced, with figures: a USD parcel whose initial cost is USD 600 acquired 2023-01 (A$1 =
-  1.5 USD) and whose return of capital is USD 1,000 paid 2025-07 (A$1 = 2.0 USD) reports a G1 gain
-  of `(1000 − 600) / 2.0 = A$200`. The correct figure is `1000/2.0 − 600/1.5 = A$100` — overstated
-  100% (understated when the AUD strengthened over the same period). AUD parcels are unaffected,
-  since both dates collapse to parity
-- [ ] The same line passes `FxOverride::None`, so it also drops the parcel's `spot_fx_rate` override
-  that the cost base was converted with (`CostBase::into_aud_with`), making a deliberately overridden
-  parcel inconsistent with itself
-- [ ] Fix: convert each element at its own date — the payment at the event date, the remaining native
-  cost base at the acquisition-month rate with the parcel's own override — or reuse the
-  already-converted `CostBase` components instead of re-deriving from a native remainder
-- [ ] Tests: a non-AUD parcel whose return of capital exceeds its remaining cost base, with the two
-  rates chosen so the two methods differ (the review's 600/1000/1.5/2.0 figures), an AUD control, and
-  a case carrying a `spot_fx_rate` override
-- [ ] Docs sync: none — `docs/API.md` documents the G1 figure as an AUD gain, which the fix restores
 
 ## The adjusted-cost-base pipeline floors once, so a later AMIT increase cannot restore an exhausted cost base (2026-09-17 review, financial correctness)
 
