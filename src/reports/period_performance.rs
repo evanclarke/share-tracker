@@ -146,39 +146,38 @@ pub struct PeriodPerformance {
 
 /// Why a period performance figure could not be computed. `Unprocessable`
 /// carries the human detail (invalid range, a blocked valuation) and maps to
-/// HTTP 422; anything else is a 500.
+/// HTTP 422; `Failed` is a report-side fault with no database error behind it
+/// (mapped to 500) and `Db` keeps the database failure so `ApiError::from`
+/// can classify it — including a boxed `FxError`, which becomes the same
+/// `422` naming the currency and month that `/portfolio/performance` answers
+/// (SCENARIOS M-04).
 #[derive(thiserror::Error, Debug)]
 pub enum PeriodError {
     #[error("{0}")]
     Unprocessable(String),
     #[error("{0}")]
-    Db(String),
-}
-
-/// The `Db` arm keeps the message rather than the `sqlx::Error` itself: the
-/// same variant also carries failures with no `sqlx::Error` behind them (a
-/// `ValuationError::Db`, an `FxError::Db`).
-impl From<sqlx::Error> for PeriodError {
-    fn from(e: sqlx::Error) -> Self {
-        PeriodError::Db(e.to_string())
-    }
+    Failed(String),
+    #[error("period performance read failed: {0}")]
+    Db(#[from] sqlx::Error),
 }
 
 impl From<valuation::ValuationError> for PeriodError {
     fn from(e: valuation::ValuationError) -> Self {
         match e {
             valuation::ValuationError::Unprocessable(msg) => PeriodError::Unprocessable(msg),
-            valuation::ValuationError::Db(msg) => PeriodError::Db(msg),
+            valuation::ValuationError::Failed(msg) => PeriodError::Failed(msg),
+            valuation::ValuationError::Db(err) => PeriodError::Db(err),
         }
     }
 }
 
 impl From<FxError> for PeriodError {
     fn from(e: FxError) -> Self {
-        match e {
-            FxError::MissingRate { .. } => PeriodError::Unprocessable(e.to_string()),
-            FxError::Db(inner) => PeriodError::Db(inner.to_string()),
-        }
+        // `impl From<FxError> for sqlx::Error` boxes a missing rate into a
+        // decode error; carrying it in `Db` rather than its message is what
+        // lets `ApiError::from` recover the `FxError` and answer a `422`
+        // instead of an empty-bodied `500` (SCENARIOS M-04).
+        PeriodError::Db(e.into())
     }
 }
 
@@ -186,7 +185,8 @@ impl From<PeriodError> for ApiError {
     fn from(e: PeriodError) -> Self {
         match e {
             PeriodError::Unprocessable(msg) => ApiError::Unprocessable(msg),
-            PeriodError::Db(msg) => ApiError::internal(msg),
+            PeriodError::Failed(msg) => ApiError::internal(msg),
+            PeriodError::Db(err) => err.into(),
         }
     }
 }
@@ -1009,5 +1009,108 @@ mod tests {
             .post("/portfolio/period-performance", &body)
             .await;
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    /// SCENARIOS M-04. One missing `(currency, month)` — a USD distribution in
+    /// a month with no imported ATO rate — must answer the *same* `422` naming
+    /// the currency and month on every report path that converts it, never an
+    /// empty-bodied `500`.
+    /// `/portfolio/performance` is the reference (it always classified the
+    /// boxed `FxError`); `/portfolio/period-performance` and
+    /// `/report_snapshots/generate` used to stringify it in their report error
+    /// enums and answer the `500`, losing it before `ApiError::from` could
+    /// downcast it. The snapshot path is also the `reports::valuation`
+    /// module's only HTTP surface — valuation has no endpoint of its own — and
+    /// the tax summary and annual report are the strict-FX reports the same
+    /// record reaches. The valuation months do carry a rate, so this isolates
+    /// the strict income conversion rather than the valuation fallback's
+    /// two-month lookback.
+    #[tokio::test]
+    async fn a_missing_rate_answers_the_same_422_on_every_report_path() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BTC", "USD").await;
+        test_support::buy(1, 1)
+            .date(ymd(2026, 5, 4))
+            .qty(dec("100"))
+            .price(dec("10"))
+            .currency("USD")
+            .insert(&pool)
+            .await;
+        // Income carries no per-record fallback (`FxOverride::None`), so its
+        // 2026-05 USD amount is a genuinely required conversion.
+        test_support::income(1, 1, ymd(2026, 5, 10))
+            .with(|i| {
+                i.currency = "USD".to_string();
+                i.franked_amount = Decimal::ZERO;
+                i.unfranked_amount = dec("100");
+                i.franking_credits = Decimal::ZERO;
+            })
+            .insert(&pool)
+            .await;
+        let from = ymd(2026, 6, 1);
+        let to = ymd(2026, 7, 1);
+        store_price(&pool, 1, from, "12").await;
+        store_price(&pool, 1, to, "15").await;
+        // Only the valuation month resolves; the missing month is the
+        // income's own.
+        insert_fx_rate(&pool, "USD", "2026-06", "2").await;
+
+        let c = ApiClient::full(&pool);
+        let responses = [
+            (
+                "/portfolio/performance",
+                c.post(
+                    "/portfolio/performance",
+                    &serde_json::json!({ "as_of_date": to }),
+                )
+                .await,
+            ),
+            (
+                "/portfolio/period-performance",
+                c.post(
+                    "/portfolio/period-performance",
+                    &serde_json::json!({ "from": from, "to": to }),
+                )
+                .await,
+            ),
+            (
+                "/report_snapshots/generate",
+                c.post(
+                    "/report_snapshots/generate",
+                    &serde_json::json!({ "date": from }),
+                )
+                .await,
+            ),
+            (
+                "/portfolio/tax-summary",
+                c.get("/portfolio/tax-summary").await,
+            ),
+            (
+                "/reports/tax-report",
+                c.post(
+                    "/reports/tax-report",
+                    &serde_json::json!({ "tax_year": 2026 }),
+                )
+                .await,
+            ),
+        ];
+        let mut first: Option<(&str, String)> = None;
+        for (path, resp) in responses {
+            let (status, body) = resp.status_and_body();
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{path}: {body}");
+            match &first {
+                None => first = Some((path, body.to_string())),
+                Some((first_path, first_body)) => {
+                    assert_eq!(
+                        body, first_body,
+                        "{path} must answer the same body as {first_path}"
+                    );
+                }
+            }
+        }
+        let (_, body) = first.expect("at least one response");
+        assert!(body.contains("USD"), "{body}");
+        assert!(body.contains("2026-05"), "{body}");
+        assert!(body.contains("/rba_fx_rates/import"), "{body}");
     }
 }

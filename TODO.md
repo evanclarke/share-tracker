@@ -38,30 +38,6 @@ what has been verified is SCENARIOS.md's
 [Verification status](SCENARIOS.md#verification-status) table and its per-section findings blocks;
 the maintained record of what was built and decided is the `DONE/*.md` archive.
 
-## A missing FX rate answers an empty 500 on three paths where the same data answers 422 elsewhere, and one tax-report path converts at parity (2026-09-17 review, financial correctness)
-
-(2026-09-17 review. The `ApiError::from(sqlx::Error)` arm recovers the boxed `FxError` from a decode
-error to answer a documented `422` naming the currency and month; three callers stringify the error
-first and lose it, and one converts rather than failing.)
-
-- [ ] Reproduced by reading: `src/reports/period_performance.rs:161-165`,
-  `src/reports/snapshot.rs:248-252` and `src/reports/valuation.rs:47-51` stringify `sqlx::Error`, so
-  the `FxError` that `infra::fx` carries through `sqlx::Error::Decode` and that `ApiError::from`
-  downcasts (`fx.rs:95-102`, `http.rs:601-619`) never reaches the classifier. The same missing
-  (currency, month) answers `422` from `/portfolio/performance` and an empty-bodied `500` from
-  `/portfolio/period-performance` — against SCENARIOS M-04's intent
-- [ ] `src/reports/tax_report.rs:739-742` does `.unwrap_or(Decimal::ONE)` on a required rate, so a
-  failed resolution silently converts at parity and `:769-771` then divides the itemised adjustments
-  by it. The comment calls it unreachable, but the same read's other failures are swallowed too
-  (`.ok()` at `:745`, `.unwrap_or(p.cost_base)` at `:765`, `.unwrap_or_default()` at `:730`), so the
-  claim is not enforced
-- [ ] Fix: propagate the `FxError` rather than stringifying (the report enums whose `Db` arm is a
-  `String` need to keep the source recoverable), and replace the parity fallback with a propagated
-  error
-- [ ] Tests: one missing-rate case asserted to answer the same `422` body on all four endpoints, and
-  a tax-report case with an unimported rate asserting a failure rather than a parity figure
-- [ ] Docs sync: `docs/API.md`'s Response codes section if any status changes
-
 ## AMMA and E10 financial-year buckets use `.year()` rather than `tax_year_for` (2026-09-17 review, financial correctness)
 
 (2026-09-17 review. `domain::tax_year.rs`'s `tax_year_for` is documented as *the* Australian

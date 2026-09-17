@@ -232,30 +232,27 @@ pub struct HoldingSeries {
 
 /// Why a snapshot could not be generated. `Unprocessable` carries the human
 /// detail (which listing's price is missing/errored, an unconvertible
-/// currency, a close that is not final yet) and maps to HTTP 422; anything
-/// else is a 500.
+/// currency, a close that is not final yet) and maps to HTTP 422; `Failed` is
+/// a generation-side fault with no database error behind it (mapped to 500)
+/// and `Db` keeps the database failure so `ApiError::from` can classify it —
+/// including a boxed `FxError`, which becomes the `422` naming the currency
+/// and month that the valuation path already answers (SCENARIOS M-04).
 #[derive(thiserror::Error, Debug)]
 pub enum GenerateError {
     #[error("{0}")]
     Unprocessable(String),
     #[error("{0}")]
-    Db(String),
-}
-
-/// The `Db` arm keeps the message rather than the `sqlx::Error` itself: the
-/// same variant also carries generation failures with no `sqlx::Error` behind
-/// them (a missing price row, a `ValuationError::Db`).
-impl From<sqlx::Error> for GenerateError {
-    fn from(e: sqlx::Error) -> Self {
-        GenerateError::Db(e.to_string())
-    }
+    Failed(String),
+    #[error("snapshot read failed: {0}")]
+    Db(#[from] sqlx::Error),
 }
 
 impl From<valuation::ValuationError> for GenerateError {
     fn from(e: valuation::ValuationError) -> Self {
         match e {
             valuation::ValuationError::Unprocessable(msg) => GenerateError::Unprocessable(msg),
-            valuation::ValuationError::Db(msg) => GenerateError::Db(msg),
+            valuation::ValuationError::Failed(msg) => GenerateError::Failed(msg),
+            valuation::ValuationError::Db(err) => GenerateError::Db(err),
         }
     }
 }
@@ -499,9 +496,9 @@ pub async fn latest_snapshot_date(
     for m in &markets {
         let latest = m
             .latest_complete_trading_day(now)
-            .map_err(GenerateError::Db)?
+            .map_err(GenerateError::Failed)?
             .ok_or_else(|| {
-                GenerateError::Db(format!(
+                GenerateError::Failed(format!(
                     "listing {} has no trading day in the past year",
                     m.listing.ticker
                 ))
@@ -686,7 +683,7 @@ pub async fn generate(
     let to_json = |kind: ReportKind, value: serde_json::Result<String>| {
         value
             .map(|json| (kind, json))
-            .map_err(|e| GenerateError::Db(e.to_string()))
+            .map_err(|e| GenerateError::Failed(e.to_string()))
     };
     let payloads = [
         to_json(
@@ -698,8 +695,8 @@ pub async fn generate(
     ];
 
     let generated_at = Utc::now().to_rfc3339();
-    let excluded_json =
-        serde_json::to_string(&excluded_holdings).map_err(|e| GenerateError::Db(e.to_string()))?;
+    let excluded_json = serde_json::to_string(&excluded_holdings)
+        .map_err(|e| GenerateError::Failed(e.to_string()))?;
     for (kind, rows_json) in &payloads {
         sqlx::query(
             "INSERT INTO report_snapshots \
@@ -840,7 +837,7 @@ pub async fn run_snapshot_job(pool: &SqlitePool, now: DateTime<Utc>) -> Result<(
         match generate(pool, date, now).await {
             Ok(_) => generated.push(date),
             Err(GenerateError::Unprocessable(msg)) => blockers.push(format!("{date}: {msg}")),
-            Err(GenerateError::Db(msg)) => return Err(format!("snapshot for {date}: {msg}")),
+            Err(e) => return Err(format!("snapshot for {date}: {e}")),
         }
     }
 
@@ -1081,7 +1078,8 @@ impl From<GenerateError> for ApiError {
     fn from(e: GenerateError) -> Self {
         match e {
             GenerateError::Unprocessable(msg) => ApiError::Unprocessable(msg),
-            GenerateError::Db(msg) => ApiError::internal(msg),
+            GenerateError::Failed(msg) => ApiError::internal(msg),
+            GenerateError::Db(err) => err.into(),
         }
     }
 }

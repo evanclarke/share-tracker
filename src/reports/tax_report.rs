@@ -705,10 +705,15 @@ async fn load_disposal_inputs(
 /// this allocation, so the totals can never disagree (a test pins it).
 /// Rights-sale disposals (no Buy/DRP cost-base pipeline of their own — the
 /// rights cost is a flat figure, not itemised) get a row with no adjustments.
+///
+/// Fails with the same `sqlx::Error` (carrying the boxed `FxError`) the rest
+/// of the report produces when a required conversion cannot be resolved, so a
+/// missing ATO rate answers a `422` naming the currency and month rather than
+/// printing an adjustment list divided at parity.
 fn disposal_parcel_rows(
     disposal: &realised_gains::RealisedGainLoss,
     inputs: &DisposalInputs,
-) -> Vec<DisposalParcelRow> {
+) -> Result<Vec<DisposalParcelRow>, sqlx::Error> {
     disposal
         .parcels
         .iter()
@@ -728,12 +733,13 @@ fn disposal_parcel_rows(
             // `adjustment_detail` the exact same inputs `realised_gains` used
             // for this allocation's `p.cost_base` (as-acquired units, the
             // parcel's cumulative AMIT total, the listing's ROC/split events,
-            // `up_to` = the sale date) — a test pins the two to agree. Any FX
-            // failure here is unreachable in practice: `realised_gains`
-            // already resolved the same rate to produce `p.cost_base`, so a
-            // resolution failure would have surfaced there first; the
-            // fallback to `p.cost_base` just keeps this presentation-only
-            // detail from panicking if that invariant is ever violated.
+            // `up_to` = the sale date) — a test pins the two to agree. Every
+            // figure here is **required**, so each failure propagates: a
+            // swallowed one would print a disposal with no itemised
+            // adjustments (overstating the tax) or convert at a fallback
+            // rate. `realised_gains` already resolved the same rates to
+            // produce `p.cost_base`, so a failure is unreachable in practice
+            // — this only turns an invariant violation loud instead of wrong.
             let (adjustments, initial_cost_base_aud) = match (disposal.source, buy) {
                 (DisposalSource::Sell, Some(buy_row)) => {
                     let splits = inputs
@@ -761,43 +767,37 @@ fn disposal_parcel_rows(
                         roc,
                         splits,
                         cost_base::Held::DisposedOn(disposal.sale_date),
-                    )
-                    .unwrap_or_default();
-                    let native = cost_base::adjusted_cost_base(
+                    )?;
+                    // The **costed units'** share of the initial cost base,
+                    // not the whole parcel's: this row describes the units the
+                    // sale allocated, and the itemised adjustments below it are
+                    // stated for those same units
+                    // (`cost_base::adjustment_detail`). Printing the whole
+                    // parcel's figure left a partial disposal irreconcilable on
+                    // the page — 500 units at $10 printing an initial cost base
+                    // of 10,000.00 above an adjusted 5,000.00 with no
+                    // adjustment row between them to explain the 5,000
+                    // (SCENARIOS AA-f).
+                    let aud_initial = cost_base::adjusted_cost_base(
                         &buy_row.parcel(),
                         units_acquired,
                         amit,
                         roc,
                         splits,
                         cost_base::Held::DisposedOn(disposal.sale_date),
-                    );
-                    let rate = inputs
-                        .fx
-                        .resolve_rate(&buy_row.currency, buy_row.acquired(), buy_row.fx_override())
-                        .unwrap_or(Decimal::ONE);
-                    let aud_initial = native
-                        .ok()
-                        .and_then(|cb| {
-                            cb.into_aud_with(
-                                &inputs.fx,
-                                &buy_row.currency,
-                                buy_row.acquired(),
-                                buy_row.fx_override(),
-                            )
-                            .ok()
-                        })
-                        // The **costed units'** share of the initial cost
-                        // base, not the whole parcel's: this row describes
-                        // the units the sale allocated, and the itemised
-                        // adjustments below it are stated for those same
-                        // units (`cost_base::adjustment_detail`). Printing
-                        // the whole parcel's figure left a partial disposal
-                        // irreconcilable on the page — 500 units at $10
-                        // printing an initial cost base of 10,000.00 above an
-                        // adjusted 5,000.00 with no adjustment row between
-                        // them to explain the 5,000 (SCENARIOS AA-f).
-                        .map(|cb| cb.costed_initial_cost)
-                        .unwrap_or(p.cost_base);
+                    )?
+                    .into_aud_with(
+                        &inputs.fx,
+                        &buy_row.currency,
+                        buy_row.acquired(),
+                        buy_row.fx_override(),
+                    )?
+                    .costed_initial_cost;
+                    let rate = inputs.fx.resolve_rate(
+                        &buy_row.currency,
+                        buy_row.acquired(),
+                        buy_row.fx_override(),
+                    )?;
                     let aud_rows: Vec<CostBaseAdjustment> = rows
                         .into_iter()
                         .map(|mut r| {
@@ -810,6 +810,11 @@ fn disposal_parcel_rows(
                         .collect();
                     (aud_rows, aud_initial)
                 }
+                // A rights sale has no Buy/DRP parcel to itemise — its taxable
+                // cost is `realised_gains`' own flat AUD figure, and no
+                // adjustment rows describe it — and an allocation with no Buy
+                // row has no pipeline inputs at all. `p.cost_base` is the
+                // already-converted figure for both, kept deliberately.
                 _ => (Vec::new(), p.cost_base),
             };
 
@@ -834,6 +839,13 @@ fn disposal_parcel_rows(
             // irreconcilable — proceeds of A$40,000 beside a rate computing
             // A$29,411 (SCENARIOS M-01). Mirrors `buy_rate` below, and a test
             // pins each against the figure it sits next to.
+            //
+            // Both memo rates are **optional** display columns (the row
+            // carries `Option<Decimal>` and nothing sums them), so a
+            // resolution failure leaves the column absent rather than failing
+            // the report; the required conversions above — the itemised
+            // adjustments, the initial cost base and the rate dividing them —
+            // have already propagated any genuine gap.
             let sell_rate = match disposal.source {
                 DisposalSource::Sell => sale_trade.and_then(|st| {
                     inputs
@@ -906,7 +918,7 @@ fn disposal_parcel_rows(
             // Once, here, so every figure printed *and* every figure summed
             // into a subtotal is the same rounded one (SCENARIOS W-d).
             row.round_money_to_cents();
-            row
+            Ok(row)
         })
         .collect()
 }
@@ -948,7 +960,7 @@ async fn disposals_section(
         by_listing
             .entry(d.listing_id)
             .or_default()
-            .extend(disposal_parcel_rows(d, &inputs));
+            .extend(disposal_parcel_rows(d, &inputs)?);
     }
 
     let mut totals = DisposalTotals::default();
@@ -5368,5 +5380,131 @@ mod tests {
             json_dec(&fy2024["cgt_summary"]["cgt_event_e10_gain"]),
             Decimal::ZERO
         );
+    }
+
+    /// SCENARIOS M-04/M-07. A required conversion the tax report cannot make
+    /// fails the whole document rather than printing a figure converted at
+    /// parity. The disposal worksheet's rate used to be
+    /// `.unwrap_or(Decimal::ONE)` — and its initial cost base and itemised
+    /// adjustments each swallowed their own failure — so a gap could have
+    /// divided the archived adjustments at 1:1. Income has no per-record
+    /// fallback, so a USD distribution in a month with no imported ATO rate is
+    /// a genuinely required conversion (a trade always carries its own
+    /// `fx_rate`, which is why the worksheet's own propagation is defensive).
+    #[tokio::test]
+    async fn a_missing_rate_fails_the_tax_report_rather_than_converting_at_parity() {
+        let pool = test_support::test_pool().await;
+        test_support::listing(1)
+            .ticker("AAPL")
+            .name("Apple")
+            .mic("XNYS")
+            .currency("USD")
+            .insert(&pool)
+            .await;
+        test_support::income(1, 1, ymd(2026, 5, 10))
+            .with(|i| {
+                i.currency = "USD".to_string();
+                i.franked_amount = Decimal::ZERO;
+                i.unfranked_amount = dec("100");
+                i.franking_credits = Decimal::ZERO;
+            })
+            .insert(&pool)
+            .await;
+
+        let err = db_tax_report(&pool, 2026).await.unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                ApiError::Unprocessable(body)
+                    if body.contains("USD") && body.contains("2026-05")
+            ),
+            "{err:?}"
+        );
+
+        // Importing the month's rate unblocks the document.
+        rba_fx_rate::db_import_rate(&pool, "USD", "2026-05", "0.66".parse().unwrap())
+            .await
+            .unwrap();
+        let report = db_tax_report(&pool, 2026).await.unwrap();
+        assert_eq!(report.meta.tax_year, 2026);
+    }
+
+    /// The disposal worksheet's required conversions **propagate** their
+    /// failure. It used to `.unwrap_or_default()` the itemised adjustments
+    /// (printing a disposal with no reductions at all, overstating the tax),
+    /// `.ok()`/`.unwrap_or(p.cost_base)` the AUD initial cost base, and
+    /// `.unwrap_or(Decimal::ONE)` the rate. A return-of-capital payment
+    /// recorded in a currency the parcel does not hold is the cost-base
+    /// pipeline's one reachable failure (`RocEvent::per_unit_for`'s currency
+    /// guard — a `corporate_actions` write refuses the pair, so this pins the
+    /// invariant at the module boundary). The old shape returned rows; the
+    /// fixed one hands the failure on.
+    #[test]
+    fn a_failed_disposal_conversion_propagates_instead_of_a_parity_row() {
+        let parcel = ParcelRow {
+            id: 1,
+            listing_id: 1,
+            holding_account_id: 1,
+            date: ymd(2026, 1, 5),
+            quantity: dec("100"),
+            average_price: dec("10"),
+            brokerage: Decimal::ZERO,
+            gst_on_brokerage: Decimal::ZERO,
+            currency: "USD".to_string(),
+            fx_rate: Decimal::ONE,
+            spot_fx_rate: None,
+            deemed_acquisition_date: None,
+            scrip_action_id: None,
+            demerger_action_id: None,
+            transfer_id: None,
+            demerger_head_listing_id: None,
+            registered_from: None,
+        };
+        let inputs = DisposalInputs {
+            buys: HashMap::from([(1, parcel)]),
+            trades: HashMap::new(),
+            rights_sales: HashMap::new(),
+            amit_events: HashMap::new(),
+            roc_events: HashMap::from([(
+                1,
+                vec![RocEvent {
+                    date: ymd(2026, 3, 1),
+                    amount_per_unit: dec("1"),
+                    currency: "AUD".to_string(),
+                    record_date: None,
+                }],
+            )]),
+            split_events: HashMap::new(),
+            fee_sale_ids: HashSet::new(),
+            fx: FxRates::default(),
+        };
+        let disposal = realised_gains::RealisedGainLoss {
+            source: DisposalSource::Sell,
+            sale_trade_id: 2,
+            listing_id: 1,
+            holding_account_id: 1,
+            sale_date: ymd(2026, 6, 1),
+            proceeds: dec("2000"),
+            cost_base: dec("1000"),
+            capital_gain_loss: dec("1000"),
+            discount_eligible_gain: Decimal::ZERO,
+            non_discountable_gain: dec("1000"),
+            capital_loss: Decimal::ZERO,
+            parcels: vec![realised_gains::ParcelDetail {
+                purchase_trade_id: 1,
+                acquisition_date: ymd(2026, 1, 5),
+                units: dec("100"),
+                cost_base: dec("1000"),
+                proceeds: dec("2000"),
+                capital_gain_loss: dec("1000"),
+                discount_eligible: false,
+                indexation_eligible: false,
+                indexed_cost_base: None,
+            }],
+            taxpayer_basis: crate::reports::TAXPAYER_BASIS.to_string(),
+        };
+
+        let err = disposal_parcel_rows(&disposal, &inputs).unwrap_err();
+        assert!(matches!(err, sqlx::Error::Decode(_)), "{err:?}");
     }
 }

@@ -32,22 +32,28 @@ use crate::infra::fx::FxRates;
 
 /// Why valuation could not proceed for one or more held listings.
 /// `Unprocessable` carries the joined per-listing blockers (missing/errored
-/// price, a close not final yet, no FX rate available) and maps to HTTP 422.
+/// price, a close not final yet, no FX rate available) and maps to HTTP 422;
+/// `Failed` is a valuation-side fault with no database error behind it and
+/// `Db` keeps the database failure (and any boxed `FxError` it carries) for
+/// the classifier.
 #[derive(thiserror::Error, Debug)]
 pub enum ValuationError {
     #[error("{0}")]
     Unprocessable(String),
+    /// A valuation-side failure with no `sqlx::Error` behind it — the
+    /// report's own "listing disappeared between two reads" case. Maps to
+    /// HTTP 500.
     #[error("{0}")]
-    Db(String),
-}
-
-/// The `Db` arm keeps the message rather than the `sqlx::Error` itself: the
-/// same variant also carries the report's own "listing disappeared" style
-/// failures, which have no `sqlx::Error` behind them.
-impl From<sqlx::Error> for ValuationError {
-    fn from(e: sqlx::Error) -> Self {
-        ValuationError::Db(e.to_string())
-    }
+    Failed(String),
+    /// A database failure, kept as the `sqlx::Error` itself rather than its
+    /// `to_string()`. A missing ATO rate travels through report code boxed
+    /// inside `sqlx::Error::Decode` (see `impl From<FxError> for
+    /// sqlx::Error`), and `ApiError::from` downcasts that box to answer a
+    /// `422` naming the currency and month (SCENARIOS M-04). Stringifying
+    /// here would lose the boxed `FxError` and turn that answer into an
+    /// empty-bodied `500`.
+    #[error("valuation read failed: {0}")]
+    Db(#[from] sqlx::Error),
 }
 
 /// One listing's resolved valuation at a date: its stored native-currency
@@ -146,7 +152,7 @@ pub async fn held_markets_on(
         markets.push(
             closing_price::load_market_on(&mut *conn, id)
                 .await?
-                .ok_or_else(|| ValuationError::Db(format!("listing {id} disappeared")))?,
+                .ok_or_else(|| ValuationError::Failed(format!("listing {id} disappeared")))?,
         );
     }
     Ok(markets)
@@ -277,7 +283,7 @@ pub(crate) async fn valuations_of_markets(
         }
         let final_day = market
             .latest_complete_trading_day(now)
-            .map_err(ValuationError::Db)?;
+            .map_err(ValuationError::Failed)?;
         if final_day.is_none_or(|f| valuation_day > f) {
             blockers.push(format!(
                 "{ticker}: the close of {valuation_day} is not final yet"

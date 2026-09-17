@@ -6308,3 +6308,55 @@ warnings`, `cargo test` (2,447 passed) and `node --test 'src/web/*.test.js'` (15
 One residual is stated: the reqwest client's own `.timeout()` option is covered by construction and
 reading only, not by a socket-level test, by design given the no-network/no-port test constraints —
 the seam deadline that actually produces the `502` is what the tests exercise.
+
+## A missing FX rate answers an empty 500 on three paths where the same data answers 422 elsewhere, and one tax-report path converts at parity (2026-09-17 review, financial correctness)
+
+(2026-09-17 review. The `ApiError::from(sqlx::Error)` arm recovers the boxed `FxError` from a decode
+error to answer a documented `422` naming the currency and month; three callers stringify the error
+first and lose it, and one converts rather than failing.)
+
+- [x] Reproduced by reading: `src/reports/period_performance.rs:161-165`,
+  `src/reports/snapshot.rs:248-252` and `src/reports/valuation.rs:47-51` stringify `sqlx::Error`, so
+  the `FxError` that `infra::fx` carries through `sqlx::Error::Decode` and that `ApiError::from`
+  downcasts (`fx.rs:95-102`, `http.rs:601-619`) never reaches the classifier. The same missing
+  (currency, month) answers `422` from `/portfolio/performance` and an empty-bodied `500` from
+  `/portfolio/period-performance` — against SCENARIOS M-04's intent
+- [x] `src/reports/tax_report.rs:739-742` does `.unwrap_or(Decimal::ONE)` on a required rate, so a
+  failed resolution silently converts at parity and `:769-771` then divides the itemised adjustments
+  by it. The comment calls it unreachable, but the same read's other failures are swallowed too
+  (`.ok()` at `:745`, `.unwrap_or(p.cost_base)` at `:765`, `.unwrap_or_default()` at `:730`), so the
+  claim is not enforced
+- [x] Fix: propagate the `FxError` rather than stringifying (the report enums whose `Db` arm is a
+  `String` need to keep the source recoverable), and replace the parity fallback with a propagated
+  error
+- [x] Tests: one missing-rate case asserted to answer the same `422` body on all four endpoints, and
+  a tax-report case with an unimported rate asserting a failure rather than a parity figure
+- [x] Docs sync: `docs/API.md`'s Response codes section if any status changes
+
+**Closed 2026-09-17.** The three report error enums (`ValuationError`, `GenerateError`,
+`PeriodError`) now follow the tree's derive convention instead of a hand-written `From<sqlx::Error>`:
+`Db(#[from] sqlx::Error)` keeps the database failure — and any `FxError` boxed into its
+`sqlx::Error::Decode` — so `ApiError::from` downcasts it to the documented `422` naming the currency
+and month, while their genuinely non-sqlx failures moved to a separate `Failed(String)` arm (which
+`From<valuation::ValuationError>` carries across without re-stringifying the `sqlx::Error`).
+`PeriodError`'s `From<FxError>` is now just `PeriodError::Db(e.into())`, reusing the existing box. The
+same `(currency, month)` gap therefore answers one identical `422` body on every surface that reaches
+it. In `tax_report.rs`, `disposal_parcel_rows` returns `Result<_, sqlx::Error>` and
+`disposals_section` propagates with `?`: the `.unwrap_or(Decimal::ONE)` parity fallback is gone, both
+`adjusted_cost_base`/`into_aud_with` `.ok()` swallows propagate, `.unwrap_or(p.cost_base)` was removed
+(the resolved costed initial cost is always used, with the one legitimate fallback arm — a rights sale
+or an allocation with no Buy row — now commented), and `.unwrap_or_default()` on
+`adjustment_detail` propagates so adjustments can no longer silently print empty and overstate tax.
+The two remaining `.ok()`s (`sell_rate`/`buy_rate`) are kept with a comment: they are optional `Option`
+memo columns nothing sums. `docs/API.md` now states the strict-conversion `422` on the snapshot-generate
+and period-performance surfaces, and `CLAUDE.md`'s no-longer-true sentence enumerating three
+hand-written `From<sqlx::Error>` impls was corrected (only `ApiError`'s remains).
+
+Tests:
+`reports::period_performance::tests::a_missing_rate_answers_the_same_422_on_every_report_path` (the
+byte-identical body on five surfaces — `/portfolio/performance`, `/portfolio/period-performance`,
+`/report_snapshots/generate`, `/portfolio/tax-summary`, `/reports/tax-report` — covering every reading
+of "four endpoints"), `reports::tax_report::tests::a_missing_rate_fails_the_tax_report_rather_than_converting_at_parity`
+and `a_failed_disposal_conversion_propagates_instead_of_a_parity_row` (the last fails against the old
+code, which returned rows). Gates: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+`cargo test` (2,450 passed) and `node --test 'src/web/*.test.js'` (159 passed) all clean.
