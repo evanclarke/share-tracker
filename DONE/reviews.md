@@ -5854,3 +5854,50 @@ full). The report-level assertion pins the true invariant —
 section's loosely worded "can never be positive", since a genuine unused loss *is* reported as a
 positive carried-forward amount. Gates: `cargo fmt --check`, `cargo clippy --all-targets -- -D
 warnings` and `cargo test` (2,416 passed, `cargo test ato_examples` 38 passed) all clean.
+
+## The figure labelled 13C excludes the attached franking credits its label includes (2026-09-17 review, financial correctness)
+
+(2026-09-17 review, verified against the project's own ATO mirror. The label map in
+`src/reports/tax_summary.rs:329/333` labels `trust_franked_distributions` and
+`amma_franked_dividends` as 13C, but the accumulators at `:765` and `:845` add only the franked
+distribution — the attached credits are accumulated separately into `franking_credits` (11U/13Q).
+`docs/ato/tax-return-labels-2026.md:66` defines 13C as "Franked distributions from trusts,
+**including** the share of attached franking credits".)
+
+- [x] Reproduced by reading the mapping: a trust franked distribution of $700 with $300 of attached
+  credits reports 13C = 700 (it should be 1,000) while 13Q correctly reports 300. The figure reaches
+  the tax-summary CSV's ATO-label row and the annual tax report's printed tax-summary section
+  (`src/reports/tax_report.rs:1809-1824`), both of which a return is transcribed from
+- [x] Fix: either add the attached credits to the two 13C accumulators (keeping 13Q as the offset
+  entitlement, which the mirror notes "may differ from the grossed-up credit inside 13C where trust
+  deductions were allocated to it"), or relabel the column — the two must agree
+- [x] Tests: a trust year with franked distributions and attached credits asserting the 13C figure
+  the ATO label implies, plus a case where a trust deduction makes 13Q differ from the credit inside
+  13C
+- [x] Docs sync: `docs/API.md`'s tax summary section for whichever resolution is chosen
+
+**Closed 2026-09-17.** Chose to add the credits, not relabel: the ATO's own wording for 13C
+("write this amount at label C, together with any share of franking credits referrable to those
+franked distributions", `docs/ato/tax-return-labels-2026.md`) makes the grossed-up figure the label's
+definition, and a relabel would have left no surface carrying the 13C figure a return is transcribed
+from. Both 13C accumulators now add the attached credit — `trust_franked_distributions` for a
+non-AMIT trust row and `amma_franked_dividends` for the AMMA route — while `franking_credits` stays
+the 11U/13Q offset entitlement, which the mirror notes may legitimately differ from the credit inside
+13C. One consequence was handled deliberately rather than left to drift:
+`gross_assessable_investment_income` now includes those trust/AMMA attached credits (the label folds
+them into that income line) while the company route's 11U credit stays out of it, so the "identical
+distribution entered as a trust row or a company dividend gives one identical gross total" property
+holds only for credit-free facts — documented on the accumulator, `docs/API.md`, and the test that
+pins it. The annual tax report's reconciliation assertion was extended so a trust row's
+`franked_amount_aud + franking_credits_aud` is asserted to equal its 13C line.
+
+Tests: `reports::tax_summary::tests::db_trust_13c_includes_the_attached_franking_credits` ($700 + $300
+⇒ 13C 1,000, 13Q 300, and the same 1,000 in the CSV's ATO-label row and the annual report's printed
+tax-summary line), `db_amma_13c_includes_the_attached_franking_credits` (the AMMA route) and
+`db_trust_13q_differs_from_the_credit_inside_13c` (13C 18,666 against a denied 13Q of 0, with a 13Y
+trust deduction recorded — the code's only mechanism for the two to differ, since nothing stores the
+*trust's* own allocated deduction that would reduce 13C's credit; noted here as the limit of what the
+model represents). `doc_checks::tax_summary_13c_includes_attached_credits_documented` pins the mirror
+and the API wording. Gates: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+`cargo test` (2,420 passed) and `cargo test ato_examples` (38 passed) all clean, plus
+`node --test 'src/web/*.test.js'` (149 passed).

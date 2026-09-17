@@ -3381,6 +3381,43 @@ fn foreign_income_totals_documented() {
     assert!(FEATURES_MD.contains("with non-AMMA and AMMA subtotals and a total"));
 }
 
+/// Docs-sync pin for the **13C figure** (2026-09-17 review). The ATO label
+/// *franked distributions from trusts* includes the share of attached franking
+/// credits, so `trust_franked_distributions` / `amma_franked_dividends` report
+/// the **grossed-up** figure while `franking_credits` stays the 13Q offset
+/// entitlement. The behaviour is pinned by `reports::tax_summary`'s own tests;
+/// this is the documentation half — the mirror that defines the label, and
+/// `docs/API.md`'s tax-summary section stating the resolution.
+#[test]
+fn tax_summary_13c_includes_attached_credits_documented() {
+    // The definition the fix follows, in the project's own ATO mirror.
+    let mirror = ato(include_str!("../docs/ato/tax-return-labels-2026.md"));
+    assert!(mirror.contains(
+        "| 13C | Franked distributions from trusts, **including** the share of attached \
+         franking credits |"
+    ));
+    assert!(mirror.contains(
+        "| 13Q | Share of franking credit from franked dividends (the offset entitlement; \
+         may differ from the grossed-up credit inside 13C where trust deductions were \
+         allocated to it) |"
+    ));
+    // docs/API.md: the two 13C columns are the grossed-up figure …
+    assert!(API_MD.contains("**plus the franking credits attached to it**"));
+    assert!(API_MD.contains(
+        "13C **includes** the attached franking credits, so this column is the statement's \
+         franked-distribution component **plus its `franking_credits`**"
+    ));
+    // … the credit stays the 13Q offset line and may differ from the credit in
+    // 13C, and the gross total's stated composition follows the labels.
+    assert!(API_MD.contains("the two may differ"));
+    assert!(API_MD.contains("carries the trust/AMMA 13C gross-up but not the company 11U credit"));
+    assert!(
+        API_MD.contains(
+            "the two 13C lines carry the franking credits attached to their distributions"
+        )
+    );
+}
+
 /// Docs-sync pin for the conduit-foreign-income entry convention (SCENARIOS
 /// G-03). The field was previously excluded from every total with nothing
 /// stating why, which is right only if the figure is a memo *within*

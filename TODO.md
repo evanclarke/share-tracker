@@ -38,27 +38,6 @@ what has been verified is SCENARIOS.md's
 [Verification status](SCENARIOS.md#verification-status) table and its per-section findings blocks;
 the maintained record of what was built and decided is the `DONE/*.md` archive.
 
-## The figure labelled 13C excludes the attached franking credits its label includes (2026-09-17 review, financial correctness)
-
-(2026-09-17 review, verified against the project's own ATO mirror. The label map in
-`src/reports/tax_summary.rs:329/333` labels `trust_franked_distributions` and
-`amma_franked_dividends` as 13C, but the accumulators at `:765` and `:845` add only the franked
-distribution — the attached credits are accumulated separately into `franking_credits` (11U/13Q).
-`docs/ato/tax-return-labels-2026.md:66` defines 13C as "Franked distributions from trusts,
-**including** the share of attached franking credits".)
-
-- [ ] Reproduced by reading the mapping: a trust franked distribution of $700 with $300 of attached
-  credits reports 13C = 700 (it should be 1,000) while 13Q correctly reports 300. The figure reaches
-  the tax-summary CSV's ATO-label row and the annual tax report's printed tax-summary section
-  (`src/reports/tax_report.rs:1809-1824`), both of which a return is transcribed from
-- [ ] Fix: either add the attached credits to the two 13C accumulators (keeping 13Q as the offset
-  entitlement, which the mirror notes "may differ from the grossed-up credit inside 13C where trust
-  deductions were allocated to it"), or relabel the column — the two must agree
-- [ ] Tests: a trust year with franked distributions and attached credits asserting the 13C figure
-  the ATO label implies, plus a case where a trust deduction makes 13Q differ from the credit inside
-  13C
-- [ ] Docs sync: `docs/API.md`'s tax summary section for whichever resolution is chosen
-
 ## The annual report's sections do not reconcile to the tax summary (2026-09-17 review, financial correctness)
 
 (2026-09-17 review. `reports::tax_report` documents that its rows sum to their tax-summary lines and

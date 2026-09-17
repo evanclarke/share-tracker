@@ -967,6 +967,10 @@ pub struct TrustIncomeRow {
     pub ticker: String,
     pub date_paid: NaiveDate,
     pub entitlement_date: Option<NaiveDate>,
+    /// The row's franked-distribution component. The tax summary's **13C**
+    /// line is this **plus** [`Self::franking_credits_aud`] — the ATO label
+    /// includes the share of attached franking credits — while the credits
+    /// alone are the `franking_credits` (11U / 13Q) offset line.
     pub franked_amount_aud: Decimal,
     pub unfranked_amount_aud: Decimal,
     /// Memo only — the part of `unfranked_amount_aud` the trust declared to be
@@ -3143,10 +3147,19 @@ mod tests {
         assert_eq!(row.franking_credits_aud, dec("257.14"));
         // The document's stated invariant: every income figure sums to its
         // tax-summary line — and for a trust row that line is the question-13
-        // pair, never the company-dividend one (SCENARIOS Z-f).
+        // pair, never the company-dividend one (SCENARIOS Z-f). 13C is the
+        // **grossed-up** figure the label defines (franked distributions
+        // *including* the share of attached franking credits), so the row's
+        // franked amount and its credits together sum to that line; the
+        // credits are also the 13Q line on their own.
         assert_eq!(
-            row.franked_amount_aud,
+            row.franked_amount_aud + row.franking_credits_aud,
             summary(&before, "trust_franked_distributions")
+        );
+        assert_eq!(
+            summary(&before, "trust_franked_distributions"),
+            dec("857.14"),
+            "600 franked + 257.14 attached credits"
         );
         assert_eq!(
             row.unfranked_amount_aud,
