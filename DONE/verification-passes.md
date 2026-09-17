@@ -338,3 +338,39 @@ already wrong (a crypto network-fee Sell reported as "entered directly"), replac
 rule plus a `PRAGMA foreign_key_list` guard; AA-b made `renounceable` a **required** field rather than
 a defaulted one, because a default would have left the same silent assumption for every new entry; and
 AA-b's second item pulled the shared clause out so the two refusals read as one rule in two places.
+
+## The 2026-09-17 code review pass
+
+The pass that produced the 28 sections previously listed at the top of
+[TODO.md](../TODO.md), all now closed and archived in
+[`DONE/reviews.md`](reviews.md) (two before the rest: the G1 excess's FX date and the cost-base
+pipeline's single end-floor). It verified the three gates green (`cargo fmt --check`,
+`cargo clippy --all-targets -- -D warnings`, `cargo test` 2389 passed / 6.09 s,
+`node --test 'src/web/*.test.js'` 149 passed), verified the documented `GET` → edit → `PUT` round
+trip byte-exact end to end, and probed a running server against a throwaway database (~120 requests)
+— the write-time invariant layer, the error bodies, the body limit, and 60-way concurrent read/write
+(30/30 `200`, 30/30 `204`, zero `SQLITE_BUSY`) all held. Its findings were therefore all in corners
+the suite at the time could not reach, not in the surfaces it already pinned.
+
+Closing the remaining 26 sections took the suite from 2,389 to 2,477 tests and added migration 0050
+(a DELETE staleness trigger on `closing_prices`) and 0051 (CHECK constraints on the three remaining
+free-text enum columns). The fixes that changed behaviour rather than coverage are worth naming: the
+settlement write path now validates `settlement_days` and steps dates with a checked add; the
+closing-price delete guard runs inside its own write transaction; a negative AMMA component is
+refused; a trust's attached franking credits are folded into the 13C figure and the annual report's
+three escaping columns reconcile; the missing-rate `FxError` stays downcastable to the documented
+`422` instead of becoming an empty `500`, and the tax-report worksheet apportions a rollover's scrip
+cash; every AMMA/E10 financial year goes through `tax_year_for`; an excluded holding is a gap in the
+snapshot series rather than a zero; the three published feeds share one timeout- and size-bounded
+fetch; the price-alert scan reads on one snapshot with its at-least-once contract documented; the
+API token no longer rides `curl`'s argv and a URL credential is redacted out of the backup job's
+error; the web app guards every paint against a superseded navigation, reports a failed reload, sorts
+numeric columns through exact decimals, associates every hand-built form label, and caches the
+shared table's filter/sort derivation.
+
+One item was closed **N/A** rather than applied: the stale comment inside the already-applied
+migration `0045_autoincrement_audited_ids.sql`. sqlx checksums an applied migration's whole text
+(SHA-384, comments included) and `sqlx::migrate!().run()` fails with `VersionMismatch` when that
+checksum changes, so editing it would stop `infra::db::init` against every database where 0045 has
+already run. The section's own archive note in [`DONE/reviews.md`](reviews.md) records the
+correction instead, and names the tests that supersede the comment's stale claim.

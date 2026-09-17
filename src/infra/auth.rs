@@ -236,7 +236,12 @@ fn hex_encode(bytes: &[u8]) -> String {
 }
 
 fn hex_decode(s: &str) -> Option<Vec<u8>> {
-    if !s.len().is_multiple_of(2) {
+    // Bytewise `&s[i..i + 2]` slicing is only sound on an ASCII string: these
+    // lengths are *bytes*, so an even-byte-length non-ASCII string (an emoji
+    // is four bytes) would split a multi-byte char and panic. Callers today
+    // pass header values already filtered by `HeaderValue::to_str()`, but the
+    // invariant belongs here rather than two modules away.
+    if !s.is_ascii() || !s.len().is_multiple_of(2) {
         return None;
     }
     (0..s.len())
@@ -577,6 +582,15 @@ mod tests {
         assert_eq!(hex_decode(&hex_encode(&bytes)).unwrap(), bytes);
         assert_eq!(hex_decode("abc"), None); // odd length
         assert_eq!(hex_decode("zz"), None); // not hex
+    }
+
+    /// A non-ASCII string of even *byte* length must be rejected, not panic on
+    /// a char-boundary slice: "😀" is four bytes, so `&s[0..2]` would split it.
+    #[test]
+    fn hex_decode_rejects_non_ascii_instead_of_panicking() {
+        assert_eq!(hex_decode("😀"), None);
+        assert_eq!(hex_decode("😀ab"), None);
+        assert_eq!(hex_decode("é"), None); // two bytes, even length
     }
 
     #[test]

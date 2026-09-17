@@ -6816,3 +6816,32 @@ Tests: `infra::config::tests::base_path_rejects_relative_segments` covers `/..`,
 `unusable_base_path_is_rejected_naming_the_value`, `cli_base_path_overrides_config_file`,
 `a_bad_base_path_fails_resolution`) still passing. Gates: `cargo fmt --check`, `cargo clippy
 --all-targets -- -D warnings` and `cargo test` (2,476 passed) all clean.
+
+## A char-boundary slice in `hex_decode` could panic on non-ASCII input (unreachable from HTTP) (2026-09-17 review, nit)
+
+(2026-09-17 review. Defensive only: the review verified the function is not reachable with non-ASCII
+input, so this is hardening rather than a live bug.)
+
+- [x] `src/infra/auth.rs:238-246` slices `&s[i..i + 2]` after checking only that the *byte* length is
+  even, so a non-ASCII string of even byte length (an emoji is four bytes) would panic on a char
+  boundary
+- [x] Verified unreachable from HTTP: `session_cookie` (`:306-312`) goes through
+  `HeaderValue::to_str()`, which rejects every non-visible-ASCII byte, and the only other caller is a
+  test. So there is no reproducible defect to fix first
+- [x] Fix: an `s.is_ascii()` guard (or decode bytewise) so the invariant is local rather than
+  dependent on a caller two modules away
+- [x] Tests: a unit case passing a non-ASCII even-byte string asserting an error rather than a panic
+- [x] Docs sync: none
+
+**Closed 2026-09-17.** Chose the guard over a bytewise rewrite: `hex_decode` now returns `None` when
+`s` is not ASCII, alongside the existing odd-byte-length and non-hex failures, so the bytewise
+`&s[i..i + 2]` slice is sound by its own precondition rather than by a caller two modules away. The
+comment records why the guard exists (the lengths are bytes, and an even-byte-length non-ASCII string
+would split a multi-byte char) and that callers already filter through `HeaderValue::to_str()`, so it
+documents the invariant instead of implying a live bug. No docs change was needed.
+
+Tests: `infra::auth::tests::hex_decode_rejects_non_ascii_instead_of_panicking` — `"😀"` (four bytes),
+`"😀ab"` (six) and `"é"` (two, even) all answer `None`, any of which previously panicked — with the
+existing `hex_round_trips` (including its odd-length and non-hex cases) still passing. Gates:
+`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` (2,477 passed) all
+clean.
