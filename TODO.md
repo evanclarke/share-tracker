@@ -38,33 +38,6 @@ what has been verified is SCENARIOS.md's
 [Verification status](SCENARIOS.md#verification-status) table and its per-section findings blocks;
 the maintained record of what was built and decided is the `DONE/*.md` archive.
 
-## Credential and log hygiene: the bearer token in `curl`'s argv, the login username in a log line, and the backup command in a job error (2026-09-17 review, security)
-
-(2026-09-17 review's security pass; three low-severity hygiene findings, grouped because each is a
-"the value is fine, the place it is written is not" issue.)
-
-- [ ] `pkg/freebsd/update.sh:121-123` builds `AUTH_HEADER="Authorization: Bearer $CONF_TOKEN"` and
-  passes it as a `curl` argument, so the token is visible in `ps` to any local user for up to the
-  `-m 900` timeout — exactly the exposure the README's own rationale refuses `--auth-*` flags for.
-  The quoting is correct (one argv element); it is argv itself that leaks. Fix: `curl --config` a
-  `0600` tempfile (`trap`-removed), or an env var sourced from one
-- [ ] `src/infra/auth.rs:417` logs `username = %form.username` on a failed login reached by the
-  **pre-auth** `POST /login`, and the default `fmt` subscriber writes `%` fields verbatim, so
-  `username=evil%0A…` appends attacker-chosen lines to the log. No secret is exposed and the app is
-  unaffected, but a log reader can be shown a fake failure or have a real one buried. Fix:
-  `?form.username`. Worth the same treatment on the feed parse-error fields
-  (`currencies.rs:546`, `mic_registry.rs:241`, `rba_fx_rate.rs:409`)
-- [ ] `POST /jobs/{name}` returns the job's raw error text in the response body
-  (`src/infra/http.rs:182-187`, `src/infra/scheduler/http.rs:142-147`) and stores it in
-  `job_runs.error`. Deliberate — it is the operator's own diagnostic — but for `backup` it includes
-  the full substituted `backup_command` (`src/infra/db.rs:274-280`), so a credential embedded in a
-  hook (`curl https://user:pass@…`) lands in the response and in the Jobs screen. Fix: redact or
-  truncate the command in the error, or document "no credentials in `backup_command`"
-- [ ] Tests: a log-capture test asserting a control character in a failed-login username does not
-  split the line (the `tracing-test` harness is already a dev-dependency); a unit test on whatever
-  redaction the backup error gains
-- [ ] Docs sync: the README's Off-machine copies section if a redaction rule is documented instead
-
 ## The outbound reference-data fetches have no timeout or response-size cap (2026-09-17 review, security)
 
 (2026-09-17 review's security pass. Three sibling feed fetches build a client with no timeout and

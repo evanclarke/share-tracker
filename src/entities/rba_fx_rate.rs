@@ -350,8 +350,8 @@ pub async fn import_from_content(
                 // Logged as well as returned: a *scheduled* run's response
                 // goes nowhere, so the log line is where the operator sees it.
                 tracing::warn!(
-                    currency = %conflict.currency,
-                    month = %conflict.month,
+                    currency = ?conflict.currency,
+                    month = ?conflict.month,
                     stored = %conflict.stored,
                     feed = %conflict.feed,
                     "RBA FX feed disagrees with the stored rate; left unchanged"
@@ -406,7 +406,7 @@ impl From<ImportError> for ApiError {
     fn from(e: ImportError) -> Self {
         match e {
             ImportError::Parse(msg) => {
-                tracing::warn!(%msg, "RBA FX rate import rejected malformed feed");
+                tracing::warn!(?msg, "RBA FX rate import rejected malformed feed");
                 ApiError::unprocessable(format!("the RBA FX rate feed is malformed: {msg}"))
             }
             // The upstream fetch error is logged when the response is built.

@@ -27,6 +27,17 @@
 # Set in the body, not only the shebang: `sh update.sh` ignores shebang flags.
 set -eu
 
+# The one temp file this script may create: curl's private `--config` holding
+# the API token, because curl's command line is readable by every local user in
+# `ps` for as long as the request runs. Removed however the script exits.
+CURL_CONFIG=""
+cleanup_curl_config() {
+  if [ -n "$CURL_CONFIG" ]; then
+    rm -f "$CURL_CONFIG"
+  fi
+}
+trap cleanup_curl_config EXIT
+
 REPO="evanclarke/share-tracker"
 
 NO_BACKUP=0
@@ -114,12 +125,25 @@ pre_upgrade_backup() {
   # talk to it over loopback like everything else on this host does.
   [ "$HOST" = "0.0.0.0" ] && HOST="127.0.0.1"
 
+  # The token must not be a curl argv element: argv is world-readable in `ps`
+  # for as long as the request runs (up to -m 900 below), which is exactly the
+  # exposure the README refuses --auth-* flags for. It goes in a 0600
+  # --config file instead, removed by the EXIT trap.
+  if [ -n "$AUTH_HEADER" ]; then
+    CURL_CONFIG=$(mktemp "${TMPDIR:-/tmp}/share-tracker-curl.XXXXXX") || {
+      echo "could not create a private config file for the API token" >&2
+      exit 1
+    }
+    chmod 600 "$CURL_CONFIG"
+    printf 'header = "%s"\n' "$AUTH_HEADER" > "$CURL_CONFIG"
+  fi
+
   echo "taking pre-upgrade backup (suffix pre-$WANT) via http://$HOST:$PORT ..."
   # Built as positional params (POSIX sh has no arrays) so the optional
-  # -H "Authorization: Bearer ..." pair is passed as one argument to curl
-  # rather than risking it being re-split by the shell.
+  # --config "$CURL_CONFIG" pair is passed as one argument to curl rather than
+  # risking it being re-split by the shell.
   set -- curl -fsS -m 900 -X POST
-  [ -n "$AUTH_HEADER" ] && set -- "$@" -H "$AUTH_HEADER"
+  [ -n "$CURL_CONFIG" ] && set -- "$@" --config "$CURL_CONFIG"
   set -- "$@" "http://$HOST:$PORT/jobs/backup?suffix=pre-$WANT&skip_command=true"
   if ! "$@" >/dev/null; then
     echo "pre-upgrade backup failed; aborting upgrade (database untouched)." >&2

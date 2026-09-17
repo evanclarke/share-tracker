@@ -6193,3 +6193,60 @@ Tests: `entities::mic_registry::tests::db_check_constraint_rejects_an_unknown_st
 survive, the exact six-trigger set is back, an UPDATE still lands in `row_history`, and each CHECK
 refuses an out-of-set value). Gates: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
 `cargo test` (2,435 passed) and `node --test 'src/web/*.test.js'` (159 passed) all clean.
+
+## Credential and log hygiene: the bearer token in `curl`'s argv, the login username in a log line, and the backup command in a job error (2026-09-17 review, security)
+
+(2026-09-17 review's security pass; three low-severity hygiene findings, grouped because each is a
+"the value is fine, the place it is written is not" issue.)
+
+- [x] `pkg/freebsd/update.sh:121-123` builds `AUTH_HEADER="Authorization: Bearer $CONF_TOKEN"` and
+  passes it as a `curl` argument, so the token is visible in `ps` to any local user for up to the
+  `-m 900` timeout — exactly the exposure the README's own rationale refuses `--auth-*` flags for.
+  The quoting is correct (one argv element); it is argv itself that leaks. Fix: `curl --config` a
+  `0600` tempfile (`trap`-removed), or an env var sourced from one
+- [x] `src/infra/auth.rs:417` logs `username = %form.username` on a failed login reached by the
+  **pre-auth** `POST /login`, and the default `fmt` subscriber writes `%` fields verbatim, so
+  `username=evil%0A…` appends attacker-chosen lines to the log. No secret is exposed and the app is
+  unaffected, but a log reader can be shown a fake failure or have a real one buried. Fix:
+  `?form.username`. Worth the same treatment on the feed parse-error fields
+  (`currencies.rs:546`, `mic_registry.rs:241`, `rba_fx_rate.rs:409`)
+- [x] `POST /jobs/{name}` returns the job's raw error text in the response body
+  (`src/infra/http.rs:182-187`, `src/infra/scheduler/http.rs:142-147`) and stores it in
+  `job_runs.error`. Deliberate — it is the operator's own diagnostic — but for `backup` it includes
+  the full substituted `backup_command` (`src/infra/db.rs:274-280`), so a credential embedded in a
+  hook (`curl https://user:pass@…`) lands in the response and in the Jobs screen. Fix: redact or
+  truncate the command in the error, or document "no credentials in `backup_command`"
+- [x] Tests: a log-capture test asserting a control character in a failed-login username does not
+  split the line (the `tracing-test` harness is already a dev-dependency); a unit test on whatever
+  redaction the backup error gains
+- [x] Docs sync: the README's Off-machine copies section if a redaction rule is documented instead
+
+**Closed 2026-09-17.** All three fixed. `pkg/freebsd/update.sh` writes the `Authorization` header into
+a `0600` `mktemp` file and passes it with `curl --config`, removed by a top-level `EXIT` trap, so the
+token is no longer an argv element while the URL (not a secret) stays one; the no-token path adds no
+`--config`, and the `[auth]`-configured-but-tokenless diagnostic still keys off `AUTH_HEADER`.
+`login_submit` logs the username with `?` (Debug quoting) on both the succeeded and the failed paths —
+the failed one is the pre-auth `POST /login`, where the value is entirely attacker-chosen — and the
+same `%`→`?` treatment was applied to the other attacker-reachable log fields the section named
+(`currencies`, `mic_registry`, `rba_fx_rate`) plus two the scan turned up (the FX-rate correction's
+currency/month and a closing-price listing ticker). Fields left as `%` are ones whose text is not
+attacker-chosen (the scheduler's registry-key job name, operator-authored config warnings, internal
+error/panic diagnostics) — recorded in the report rather than changed. For the backup error,
+`redact_url_credentials` masks the userinfo of every URL in the substituted command
+(`https://***@host/…`) before it is logged or carried in `BackupError::Command`, which is what the
+`500` body of `POST /jobs/backup` and `job_runs.error` hold; the **executed** command is the
+unredacted one, and the function is URL-only by design (a `--user` argument or an environment
+variable is not detected, which the README's auth guidance covers by pointing at a key file or
+`--netrc-file`). The README (Off-machine copies) and `docs/API.md` document the redaction rule, with
+`doc_checks` pins for both it and the `update.sh` shape.
+
+Tests:
+`infra::auth::tests::a_control_character_in_a_failed_login_username_cannot_split_the_log_line` (a
+`tracing_test` capture asserting exactly one `login failed` line carrying the Debug-quoted username
+and no forged line — verified to fail against a `%` field),
+`infra::db::tests::redact_url_credentials_masks_userinfo_and_keeps_the_rest`,
+`infra::db::tests::backup_command_error_redacts_url_credentials` (with the executed command pinned
+unredacted), `doc_checks::backup_command_credential_redaction_documented` and
+`doc_checks::freebsd_packaging::update_script_keeps_the_api_token_out_of_curl_argv`. Gates: `cargo fmt
+--check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` (2,440 passed) and
+`node --test 'src/web/*.test.js'` (159 passed) all clean.

@@ -265,6 +265,9 @@ pub fn validate_backup_suffix(suffix: &str) -> Result<(), String> {
 /// (renamed `<name>.bad`) so it can never be mistaken for a good backup.
 /// `Command` marks a configured `backup_command` that failed to run or exited
 /// non-zero; the backup itself is already complete and verified by that point.
+/// Its `command` has already had any URL credential masked (see
+/// [`run_backup_command`]), since this error's `Display` is what the `500` body
+/// of `POST /jobs/backup` and `job_runs.error` carry.
 #[derive(thiserror::Error, Debug)]
 pub enum BackupError {
     #[error("backup failed: {0}")]
@@ -382,6 +385,13 @@ async fn backup_to(pool: &SqlitePool, dest: &str) -> Result<bool, BackupError> {
 /// configured string can use ordinary shell syntax (multiple args, pipes,
 /// redirection); stdout/stderr are captured and only surfaced in logs, keeping
 /// the job's own INFO/ERROR lines the single place to look.
+///
+/// The command text is the operator's own diagnostic — a failure's error is the
+/// `500` body of `POST /jobs/backup`, the `error` column of `job_runs`, and the
+/// Jobs screen — so it is kept, but with any URL's userinfo masked
+/// ([`redact_url_credentials`]): a hook like `curl https://user:pass@…` must not
+/// carry the password into the response, the database, or a log line. The
+/// **executed** command is the unredacted one: the mask is for the report only.
 async fn run_backup_command(command: &str, dest: &str) -> Result<(), BackupError> {
     // Absolute so the hook works regardless of the server's working directory
     // (dest may be a relative path when no --backup-dir is configured).
@@ -389,33 +399,79 @@ async fn run_backup_command(command: &str, dest: &str) -> Result<(), BackupError
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| dest.to_string());
     let substituted = command.replace("{BACKUP_FILE}", &abs_dest);
+    // What is logged and recorded, never what is run: the operator's hook must
+    // receive the credential it was configured with.
+    let redacted = redact_url_credentials(&substituted);
 
-    tracing::info!(command = %substituted, "running post-backup command");
+    tracing::info!(command = %redacted, "running post-backup command");
     let output = tokio::process::Command::new("sh")
         .arg("-c")
         .arg(&substituted)
         .output()
         .await
         .map_err(|e| BackupError::Command {
-            command: substituted.clone(),
+            command: redacted.clone(),
             reason: format!("failed to spawn: {e}"),
         })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         tracing::error!(
-            command = %substituted,
+            command = %redacted,
             status = %output.status,
             stderr,
             "post-backup command failed"
         );
         return Err(BackupError::Command {
-            command: substituted,
+            command: redacted,
             reason: format!("exited with {}: {stderr}", output.status),
         });
     }
-    tracing::info!(command = %substituted, "post-backup command succeeded");
+    tracing::info!(command = %redacted, "post-backup command succeeded");
     Ok(())
+}
+
+/// Mask the userinfo of every URL in a command: `https://user:pass@host/…`
+/// becomes `https://***@host/…`. Used on the post-backup command before it is
+/// logged or recorded, since a failed backup's error text is returned in the
+/// `500` body of `POST /jobs/backup` and shown on the Jobs screen. The rest of
+/// the command — the host, path and arguments the operator needs to diagnose
+/// the failure — is left exactly as configured.
+///
+/// Deliberately URL-only: a credential passed some other way (a `--user`
+/// argument, an environment variable) is not detected. The README names auth
+/// mechanisms that read a key file (an rclone config, an SSH key,
+/// `--netrc-file`) instead.
+fn redact_url_credentials(command: &str) -> String {
+    /// What a masked userinfo becomes. Not empty: the mask must read as
+    /// redaction rather than a degenerate empty userinfo.
+    const MASK: &str = "***";
+    let mut out = String::with_capacity(command.len());
+    let mut rest = command;
+    while let Some(sep) = rest.find("://") {
+        // Keep the scheme and its separator, then look at the authority. A URL
+        // inside a shell word ends at whitespace or at any character that
+        // terminates the word (or the command) in `sh`.
+        let authority_start = sep + 3;
+        out.push_str(&rest[..authority_start]);
+        let tail = &rest[authority_start..];
+        let end = tail
+            .find(|c: char| c.is_whitespace() || "/?#\"'`;&|<>(){}\\".contains(c))
+            .unwrap_or(tail.len());
+        let (authority, remainder) = tail.split_at(end);
+        // The *last* `@` of the authority: an unencoded `@` inside a password
+        // (`user:p@ss@host`) must not leave a fragment of it behind.
+        match authority.rfind('@') {
+            Some(at) => {
+                out.push_str(MASK);
+                out.push_str(&authority[at..]);
+            }
+            None => out.push_str(authority),
+        }
+        rest = remainder;
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Check that a freshly written backup is a restorable copy: it must open, pass
@@ -3161,6 +3217,89 @@ mod tests {
         assert!(
             Path::new(seen.trim()).is_absolute(),
             "expected an absolute path, got {seen:?}"
+        );
+    }
+
+    /// The redaction applied to a post-backup command before it is logged or
+    /// recorded as the run's error: a URL's userinfo is masked, and nothing
+    /// else is touched — the command is the operator's own diagnostic.
+    #[test]
+    fn redact_url_credentials_masks_userinfo_and_keeps_the_rest() {
+        // The README's own hook examples carry no credentials.
+        assert_eq!(
+            redact_url_credentials("scp {BACKUP_FILE} user@host:/backups/"),
+            "scp {BACKUP_FILE} user@host:/backups/"
+        );
+        assert_eq!(
+            redact_url_credentials("rclone copy {BACKUP_FILE} remote:share-tracker-backups/"),
+            "rclone copy {BACKUP_FILE} remote:share-tracker-backups/"
+        );
+        // A URL credential is masked; everything around it is kept.
+        assert_eq!(
+            redact_url_credentials("curl -T {BACKUP_FILE} https://user:pass@host/backups/"),
+            "curl -T {BACKUP_FILE} https://***@host/backups/"
+        );
+        // Every URL in the command is masked, not just the first.
+        assert_eq!(
+            redact_url_credentials("curl https://a:b@one/x https://c:d@two/y"),
+            "curl https://***@one/x https://***@two/y"
+        );
+        // An unencoded `@` in the password: masking runs to the last one, so
+        // no fragment of the credential is left behind.
+        assert_eq!(
+            redact_url_credentials("curl https://user:p@ss@host/x"),
+            "curl https://***@host/x"
+        );
+        // A URL with no userinfo, and one ended by a shell operator, are fine.
+        assert_eq!(
+            redact_url_credentials("curl https://host/path"),
+            "curl https://host/path"
+        );
+        assert_eq!(
+            redact_url_credentials("curl https://user:pass@host/x && echo done"),
+            "curl https://***@host/x && echo done"
+        );
+    }
+
+    /// A failing hook's full text is the value of `POST /jobs/backup`'s `500`
+    /// body, `job_runs.error`, and the Jobs screen — so a credential embedded
+    /// in a URL must not survive into the error or the log line. It must still
+    /// reach the hook itself, though: the command that runs is the configured
+    /// one, and only the report is masked.
+    #[tracing_test::traced_test]
+    #[tokio::test]
+    async fn backup_command_error_redacts_url_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let seen = dir.path().join("url-seen.txt");
+        // The hook records the URL it was actually handed, then fails, so the
+        // test pins both halves: the redacted report and the real execution.
+        let command = format!(
+            "printf '%s' 'https://backup-user:sup3r-s3cret@example.invalid/offsite.db' > {}; \
+             false",
+            seen.to_string_lossy()
+        );
+        let err = run_backup_command(&command, "/nonexistent/backup.db")
+            .await
+            .unwrap_err();
+        let BackupError::Command { command, .. } = err else {
+            panic!("expected a Command error, got {err:?}");
+        };
+        assert!(
+            command.contains("https://***@example.invalid/offsite.db"),
+            "the URL's userinfo must be masked: {command}"
+        );
+        assert!(
+            !command.contains("sup3r-s3cret") && !command.contains("backup-user"),
+            "no part of the credential may survive into the error: {command}"
+        );
+        // The log carries the same masked text as the recorded error.
+        assert!(!logs_contain("sup3r-s3cret"));
+        assert!(logs_contain("https://***@example.invalid/offsite.db"));
+        // …while the hook received the credential it was configured with.
+        let executed = std::fs::read_to_string(&seen).unwrap();
+        assert_eq!(
+            executed, "https://backup-user:sup3r-s3cret@example.invalid/offsite.db",
+            "redaction must not change what actually runs"
         );
     }
 }

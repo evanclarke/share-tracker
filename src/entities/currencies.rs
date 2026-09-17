@@ -543,7 +543,7 @@ impl From<ImportError> for ApiError {
     fn from(e: ImportError) -> Self {
         match e {
             ImportError::Parse(msg) => {
-                tracing::warn!(%msg, "currency import rejected malformed feed");
+                tracing::warn!(?msg, "currency import rejected malformed feed");
                 ApiError::unprocessable(format!("the currency feed is malformed: {msg}"))
             }
             // The upstream fetch error is logged when the response is built.

@@ -2075,6 +2075,20 @@ fn backup_pipeline_documented() {
     ));
 }
 
+/// The post-backup command's text is what a failed `backup` run records as its
+/// error — the `500` body of `POST /jobs/backup` and the `error` column of
+/// `job_runs` — so a credential embedded in a URL must be masked before it is
+/// recorded. The README (where the hook is configured) and the jobs API both
+/// say so, and both name what the redaction deliberately does not cover.
+#[test]
+fn backup_command_credential_redaction_documented() {
+    assert!(README_MD.contains("the userinfo of any URL in the command is masked"));
+    assert!(README_MD.contains("`curl https://***@host/…`"));
+    assert!(README_MD.contains("Credentials passed any other way (a `--user` argument"));
+    assert!(API_MD.contains("the userinfo of any URL in it is masked before it is recorded"));
+    assert!(API_MD.contains("`https://***@host/…`"));
+}
+
 /// Docs-sync pin for the `?suffix=` param on `POST /jobs/:name` (the
 /// update.sh pre-upgrade backup): the jobs API documents its allowed
 /// characters and the `422` it produces when invalid, that a suffixed backup
@@ -4049,6 +4063,7 @@ mod freebsd_packaging {
     const RELEASE_YML: &str = include_str!("../.github/workflows/release.yml");
     const BUILD_SH: &str = include_str!("../pkg/freebsd/build-pkg.sh");
     const SMOKE_SH: &str = include_str!("../pkg/freebsd/smoke-test.sh");
+    const UPDATE_SH: &str = include_str!("../pkg/freebsd/update.sh");
     const MANIFEST: &str = include_str!("../pkg/freebsd/manifest.ucl");
     const PLIST: &str = include_str!("../pkg/freebsd/plist");
     const RC_SCRIPT: &str = include_str!("../pkg/freebsd/share_tracker");
@@ -4366,6 +4381,34 @@ mod freebsd_packaging {
         assert_eq!(README_MD.matches("group or other bits are set").count(), 2);
         assert!(API_MD.contains("group or other bits are set"));
         assert!(API_MD.contains("never changes the mode itself"));
+    }
+
+    /// The pre-upgrade backup's bearer token must never be a `curl` argv
+    /// element: command lines are world-readable in `ps` for as long as the
+    /// request runs (up to the `-m 900` timeout), which is exactly the exposure
+    /// the README's Authentication section refuses `--auth-*` CLI flags for.
+    /// The token goes in a `0600` `--config` file instead, and the script's
+    /// `EXIT` trap removes it however it ends. The release VM runs the script;
+    /// the suite does not, so this is a textual pin like the rest of the
+    /// packaging module.
+    #[test]
+    fn update_script_keeps_the_api_token_out_of_curl_argv() {
+        // A private config file the token is written to, at mode 0600.
+        assert!(UPDATE_SH.contains("CURL_CONFIG=\"\""));
+        assert!(UPDATE_SH.contains("trap cleanup_curl_config EXIT"));
+        assert!(UPDATE_SH.contains("chmod 600 \"$CURL_CONFIG\""));
+        assert!(UPDATE_SH.contains("mktemp"));
+        assert!(UPDATE_SH.contains(r#"printf 'header = "%s"\n' "$AUTH_HEADER" > "$CURL_CONFIG""#));
+        // curl reads it via --config, as one argument (POSIX sh has no arrays).
+        assert!(UPDATE_SH.contains("set -- \"$@\" --config \"$CURL_CONFIG\""));
+        // …and the token never rides in an argv element.
+        assert!(
+            !UPDATE_SH.contains(" -H "),
+            "the bearer token must not be passed to curl with -H"
+        );
+        // The failure diagnosis still keys off whether a token was found.
+        assert!(UPDATE_SH.contains("[ -z \"$AUTH_HEADER\" ]"));
+        assert!(UPDATE_SH.contains("update.sh needs curl to trigger the pre-upgrade backup"));
     }
 }
 

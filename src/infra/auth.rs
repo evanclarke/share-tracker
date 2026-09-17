@@ -397,7 +397,10 @@ fn render_login(base_path: &str, error: Option<&str>) -> Html<String> {
 
 async fn login_submit(auth: Auth, base_path: String, form: LoginForm) -> Response {
     if auth.verify_password(&form.username, &form.password) {
-        tracing::info!(username = %form.username, "login succeeded");
+        // `?` (Debug quoting) rather than `%`: the username is request text,
+        // and the default `fmt` subscriber writes a `%` field verbatim, so a
+        // control character in it would split the log line.
+        tracing::info!(username = ?form.username, "login succeeded");
         let cookie = build_set_cookie(&auth, &base_path, Some(auth.mint_cookie()));
         (
             StatusCode::SEE_OTHER,
@@ -414,7 +417,12 @@ async fn login_submit(auth: Auth, base_path: String, form: LoginForm) -> Respons
         // and behind the documented reverse-proxy deployment the peer is
         // always 127.0.0.1 regardless — the attempted username is the more
         // useful signal here.
-        tracing::warn!(username = %form.username, "login failed: wrong username or password");
+        //
+        // `?` (Debug quoting) rather than `%`: this is the **pre-auth**
+        // `POST /login` and the username is entirely attacker-chosen, so a
+        // `%` field written verbatim would let `username=evil%0A…` append
+        // lines to the log.
+        tracing::warn!(username = ?form.username, "login failed: wrong username or password");
         render_login(&base_path, Some("Incorrect username or password.")).into_response()
     }
 }
@@ -595,6 +603,55 @@ mod tests {
         // API level in `api_tests`); nothing server-side changes as a result,
         // so the same cookie must still verify.
         assert!(a.verify_cookie(&cookie));
+    }
+
+    /// The failed-login username is entirely attacker-chosen on the pre-auth
+    /// `POST /login`, and the default `fmt` subscriber writes a `%` field
+    /// verbatim — so a value carrying a newline (`username=evil%0A…`) could
+    /// append attacker-chosen lines to the log. Debug quoting (`?`) escapes
+    /// the control character and keeps the attempt on one line.
+    #[tracing_test::traced_test]
+    #[tokio::test]
+    async fn a_control_character_in_a_failed_login_username_cannot_split_the_log_line() {
+        let response = login_submit(
+            auth(),
+            String::new(),
+            LoginForm {
+                username: "evil\nforged login succeeded".to_string(),
+                password: "wrong".to_string(),
+            },
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        logs_assert(|lines: &[&str]| {
+            let failed: Vec<&str> = lines
+                .iter()
+                .copied()
+                .filter(|line| line.contains("login failed"))
+                .collect();
+            match failed.as_slice() {
+                [line] => {
+                    if !line.contains(r#"username="evil\nforged login succeeded""#) {
+                        return Err(format!(
+                            "the attempted username must be Debug-quoted so a control \
+                             character cannot split the line; got: {line}"
+                        ));
+                    }
+                }
+                other => {
+                    return Err(format!(
+                        "expected exactly one login-failed line, got {}: {other:?}",
+                        other.len()
+                    ));
+                }
+            }
+            if let Some(forged) = lines.iter().find(|line| line.starts_with("forged")) {
+                return Err(format!(
+                    "the username's newline forged a log line: {forged:?}"
+                ));
+            }
+            Ok(())
+        });
     }
 }
 

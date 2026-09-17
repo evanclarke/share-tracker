@@ -625,7 +625,10 @@ fn missing_rate_unprocessable(err: &crate::infra::fx::FxError) -> Option<ApiErro
     let crate::infra::fx::FxError::MissingRate { currency, month } = err else {
         return None;
     };
-    tracing::warn!(%currency, %month, "report blocked by a missing ATO FX rate");
+    // `?` (Debug quoting) rather than `%`: the currency code is stored
+    // request/feed text, so a control character in it must not be able to
+    // split the log line.
+    tracing::warn!(?currency, %month, "report blocked by a missing ATO FX rate");
     Some(ApiError::Unprocessable(format!(
         "{err} — import that month's rates with POST /rba_fx_rates/import"
     )))

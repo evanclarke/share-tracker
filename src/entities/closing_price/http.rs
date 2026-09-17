@@ -378,7 +378,7 @@ async fn clear_unpriced_before(
         } => {
             tracing::info!(
                 listing_id = body.listing_id,
-                ticker = %listing.ticker,
+                ticker = ?listing.ticker,
                 %unpriced_before,
                 deleted,
                 "cleared superseded closing prices"
