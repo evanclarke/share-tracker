@@ -6616,3 +6616,64 @@ set (the page is not a cache input), plus `debounce`'s trailing-edge behaviour �
 `web::tests::table_view_derivation_is_cached_and_the_pager_reuses_it` for the call-site wiring. Gates:
 `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` (2,465 passed) and
 `node --test 'src/web/*.test.js'` (174 passed) all clean.
+
+## Frontend robustness nits: no loading state, an unguarded decode, an undisconnected observer, an unencoded query value, and a duplicated helper (2026-09-17 review, web frontend)
+
+(2026-09-17 review; small, independent fixes in `src/web/`, grouped because each is a few lines.
+The pass verified no XSS path exists — every `innerHTML` assignment is a clear, `el()`'s `children`
+goes through `append` (which never parses markup), and the one unescaped sink is unused.)
+
+- [x] `src/web/app.js:2771-2773` awaits a report `GET` before painting anything, so `#app` is blank
+  (topbar only) until it lands, with no spinner and no error state. The overview deliberately paints
+  its shell first; nothing else does. Fix: a shared pending/error state in the report view
+- [x] `src/web/app.js:2827` calls `decodeURIComponent(args[i])` unguarded, so a hand-edited `%` in
+  the hash turns the whole screen into a `URI malformed` error via `render()`'s catch. Fix: a safe
+  decode helper
+- [x] `src/web/app.js:2391-2395` creates a `ResizeObserver` per panel render and never disconnects
+  it. Not a true leak (the observed holder is discarded, so the cycle is collectable), but it is the
+  only listener in the app with no teardown. Fix: hold it and `disconnect()` when the view is
+  replaced
+- [x] `src/web/app.js:1090` interpolates `ownerField` from the hash into the attachments query
+  string unencoded, so a hand-edited hash can add query parameters (the server refuses `422`; no
+  security impact). Fix: `encodeURIComponent(ownerField)`
+- [x] `moneyEl` is duplicated verbatim (`src/web/app.js:2177-2180` and
+  `src/web/taxreport.js:28-31`) — identical today, and unshared, unlike `moneyText`. Fix: one
+  `moneyEl` in `util.js` beside `moneyText`
+- [x] `src/web/chart.js:293-297` uses `setUTCMonth`, so a "1M" preset from the 31st overshoots
+  (31 Mar − 1 month → 2 Mar, not 29 Feb); a preset can therefore start a few days late on month-end
+  dates. Fix: clamp to the target month's last day
+- [x] `src/web/app.js:437` dereferences `entity.keyFields`/`entity.fields` in the empty-rows
+  fallback, absent on a columns-less entity, so a new readonly entity without `columns` and with an
+  empty table would throw a `TypeError` instead of "No records yet." (Unreachable today — the only
+  four columns-less entities are `custom` and redirected at `:2963`.) Fix: guard the fallback
+- [x] `src/web/util.js:16`'s `html:` attribute is the one unescaped HTML entry point in the helper
+  and has **no call sites** anywhere in the bundle. Fix: delete it, or comment that it is unused —
+  removing the only latent XSS footgun
+- [x] Tests: a `src/web/*.test.js` unit test for whichever of these is extracted as a pure helper
+  (the month clamp and the safe decode are the natural ones); the rest are served-bundle assertions
+  in the `web.rs` style
+- [x] Docs sync: none
+
+**Closed 2026-09-17.** All nine handled. `viewReport`'s GET branch now paints a shared
+`reportLoading()` shell first (cleared when `render(rows)` runs) and replaces it with a shared
+`reportError(e)` on rejection, both behind `isCurrentNavigation(seq)`, so a report no longer leaves
+`#app` blank. `util.js` gained the pure `safeDecodeURIComponent` (the text unchanged on a `URIError`)
+and `app.js`'s deep-link prefill uses it, so a hand-edited `%` no longer turns the screen into a `URI
+malformed` error. For the observer, `util.js` gained a small `teardownRegistry()` factory plus
+`onViewTeardown(fn)`, run by `setMain` before it clears `#app`; `rangedChart` holds its observer and
+registers its `disconnect()`, so the app's only listener without teardown now has one (and a throwing
+teardown cannot strand the rest). `ownerField` is `encodeURIComponent`-ed into the attachments query.
+`moneyEl` is defined once in `util.js` beside `moneyText` and imported by `app.js`/`taxreport.js`.
+`chart.js`'s range step clamps to the target month's last day, so a "1M" preset from 31 March lands on
+the prior month end. The empty-rows fallback guards absent `keyFields`/`fields`. And `el()`'s `html:`
+attribute was **removed** — a grep across all seven served modules found no call site, so the only
+latent XSS entry point in the helper is gone and the comment records that `el()` has no markup entry
+point.
+
+Tests: four `src/web/chart.test.js` cases for `addMonths`/`presetRange` (month-end clamp, mid-month
+unchanged, the Feb-29 leap rule, and the "1M" preset landing on the prior month end) and four
+`src/web/util.test.js` cases for `safeDecodeURIComponent` and `teardownRegistry`, plus seven
+served-bundle assertions in `web.rs` (paint-before-fetch pending state, safe deep-link decode,
+observer teardown registration, encoded owner field, single `moneyEl`, the columns-less-entity guard,
+and the absence of the `html:` attribute). Gates: `cargo fmt --check`, `cargo clippy --all-targets --
+-D warnings`, `cargo test` (2,472 passed) and `node --test 'src/web/*.test.js'` (182 passed) all clean.

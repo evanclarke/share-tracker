@@ -13,7 +13,6 @@ export function el(tag, attrs, children) {
       const v = attrs[k];
       if (v == null || v === false) continue;
       if (k === 'class') n.className = v;
-      else if (k === 'html') n.innerHTML = v;
       else if (k.slice(0, 2) === 'on' && typeof v === 'function') n.addEventListener(k.slice(2), v);
       else if (v === true) n.setAttribute(k, '');
       else n.setAttribute(k, v);
@@ -22,8 +21,10 @@ export function el(tag, attrs, children) {
   if (children != null) {
     // `append` (not `appendChild`) so a non-Node child is inserted as a Text
     // node by the DOM itself: per spec `append` takes (Node or DOMString) and
-    // never parses markup, so a string child can only ever become text — the
-    // `html` attribute above is this helper's one deliberate HTML entry point.
+    // never parses markup, so a string child can only ever become text. `el()`
+    // deliberately has no markup entry point at all — the one it used to carry
+    // (`html:`) had no call site and was removed rather than left as a latent
+    // XSS footgun.
     (Array.isArray(children) ? children : [children]).forEach(function (c) {
       if (c == null) return;
       n.append(c instanceof Node ? c : String(c));
@@ -127,8 +128,48 @@ export function toast(msg, isError) {
   if (!life.persist) item._timer = setTimeout(dismiss, life.ms);
 }
 
+// ---- view teardown -----------------------------------------------------
+//
+// A view can own a resource the DOM does not release when `setMain` swaps the
+// screen out — the one today is the chart's `ResizeObserver` (app.js's
+// `rangedChart`). `setMain` is the single place that replaces `#app`'s
+// contents, so it is also the one place that can guarantee a replaced view's
+// resource is released: a view registers a teardown through `onViewTeardown`
+// and `setMain` runs the registry before discarding the outgoing nodes.
+// Without it the observer was created per render and simply dropped, with
+// nothing able to disconnect it — not a true leak (the observed holder and the
+// observer form a collectable cycle), but the only listener in the app with no
+// teardown.
+//
+// A factory, like `renderGeneration` below, so the run-once-and-clear contract
+// is unit-tested without a DOM (src/web/util.test.js); the application uses the
+// one instance below.
+export function teardownRegistry() {
+  let pending = [];
+  return {
+    add: function (fn) { pending.push(fn); },
+    run: function () {
+      const fns = pending;
+      pending = [];
+      fns.forEach(function (fn) {
+        // One failing teardown must not strand the rest — a stale observer is
+        // a much smaller problem than a half-swapped screen.
+        try { fn(); } catch (e) { /* reported by the browser's console, not here */ }
+      });
+    },
+  };
+}
+
+const viewTeardowns = teardownRegistry();
+
+// Register `fn` to run when the next view replaces this one (see `setMain`).
+export function onViewTeardown(fn) { viewTeardowns.add(fn); }
+
 export function setMain(node) {
   const app = document.getElementById('app');
+  // Release whatever the outgoing view registered before its nodes go — see
+  // `onViewTeardown`.
+  viewTeardowns.run();
   app.innerHTML = '';
   app.appendChild(node);
 }
@@ -515,6 +556,18 @@ export function moneyText(value) {
   return nd ? nd.text : cellText(value);
 }
 
+// The element form of `moneyText` above: a `<span>` carrying the same rounded,
+// thousands-grouped text, with the full value on `title` when rounding dropped
+// precision. This is filterableTable's money-cell formatting in element form,
+// for a hand-built figure outside a table — the Portfolio Overview's stat grid
+// (app.js) and the Annual Tax Report's money cells (taxreport.js). It used to
+// exist verbatim in both modules; a hand-built money figure now uses this
+// rather than formatting money itself.
+export function moneyEl(value) {
+  const nd = numericDisplay(value, 'money');
+  return el('span', { title: nd ? nd.tip : null }, nd ? nd.text : cellText(value));
+}
+
 // ---- API client -------------------------------------------------------
 
 // A hash-route segment about to be interpolated into an API path. Route
@@ -526,6 +579,21 @@ export function moneyText(value) {
 // links to. Query-string values are already encoded at their call site.
 export function pathSeg(value) {
   return encodeURIComponent(String(value));
+}
+
+// The decode twin of `pathSeg` above for a value read back out of a hash route
+// (a report's positional deep-link args). `decodeURIComponent` *throws* on a
+// malformed escape — a hand-edited `%`, or a truncated `%E0%A4` — and an
+// uncaught `URIError` from inside a view turns the whole screen into
+// "URI malformed" via the router's catch. This returns the text unchanged when
+// it cannot be decoded, so the literal value reaches the report and is answered
+// with the report's own validation rather than the decoder's exception.
+export function safeDecodeURIComponent(value) {
+  try {
+    return decodeURIComponent(String(value));
+  } catch (e) {
+    return String(value);
+  }
 }
 
 // The reverse-proxy path prefix the server is mounted under, read from the

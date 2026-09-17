@@ -8,7 +8,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  presetRange, sliceSeries, yBounds, seriesField, pointNotes, tickLabel, chartWidth,
+  presetRange, addMonths, sliceSeries, yBounds, seriesField, pointNotes, tickLabel, chartWidth,
   weekTicks, isoDate, WEEK_MS, MIN_LABEL_GAP, MIN_GRID_GAP,
   SERIES_FIELDS, CHART_WIDTH_FALLBACK, CHART_WIDTH_MIN,
   sparklinePoints, sparklineSegments, sparklineGaps, SPARK_WIDTH, SPARK_HEIGHT, SPARK_PAD,
@@ -70,6 +70,43 @@ test('presetRange: unknown preset falls back to "all"', () => {
 test('presetRange: null for an empty or missing series', () => {
   assert.equal(presetRange([], '1m'), null);
   assert.equal(presetRange(null, '1m'), null);
+});
+
+// ---- addMonths --------------------------------------------------------------
+// The month step behind the month-based presets. A bare `setUTCMonth` overflows
+// a day the target month lacks (31 March at "-1" lands on 2/3 March, because
+// there is no 31 February), so a "1M" preset from a month-end date started two
+// or three days late. The day is clamped to the target month's last day.
+
+test('addMonths: a month-end date clamps to the target month\'s last day', () => {
+  // 31 Mar − 1 month is 28 Feb in a non-leap year, 29 Feb in a leap year —
+  // never 2/3 March.
+  assert.equal(addMonths('2026-03-31', -1), '2026-02-28');
+  assert.equal(addMonths('2024-03-31', -1), '2024-02-29');
+  // The short months in each direction.
+  assert.equal(addMonths('2026-01-31', 1), '2026-02-28');
+  assert.equal(addMonths('2026-03-31', 0), '2026-03-31');
+  assert.equal(addMonths('2025-12-31', 1), '2026-01-31');
+  assert.equal(addMonths('2026-03-31', -2), '2026-01-31');
+  assert.equal(addMonths('2026-05-31', 1), '2026-06-30');
+  assert.equal(addMonths('2026-08-31', 1), '2026-09-30');
+  assert.equal(addMonths('2026-10-31', 1), '2026-11-30');
+});
+
+test('addMonths: an ordinary mid-month day is unchanged by the clamp', () => {
+  assert.equal(addMonths('2026-07-25', -1), '2026-06-25');
+  assert.equal(addMonths('2026-07-25', -12), '2025-07-25');
+  assert.equal(addMonths('2026-01-15', 2), '2026-03-15');
+});
+
+test('addMonths: day 29 clamps only where February is not a leap month', () => {
+  assert.equal(addMonths('2024-02-29', 12), '2025-02-28'); // 2025 is not a leap year
+  assert.equal(addMonths('2024-01-29', 1), '2024-02-29'); // 2024 is
+});
+
+test('presetRange: a "1M" preset over a month-end snapshot lands on the prior month end', () => {
+  const s = series(['2020-01-01', '2026-03-31']);
+  assert.deepEqual(presetRange(s, '1m'), { from: '2026-02-28', to: '2026-03-31' });
 });
 
 // ---- sliceSeries ------------------------------------------------------------

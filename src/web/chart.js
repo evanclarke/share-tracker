@@ -289,10 +289,24 @@ export function seriesChart(points, fieldKey, measuredWidth) {
 
 // 'YYYY-MM-DD' `n` months on from `dateStr` (n may be negative), via UTC
 // calendar arithmetic — matches the plain-date snapshot_date strings, no
-// timezone involved.
-function addMonths(dateStr, n) {
+// timezone involved. The day is clamped to the target month's last day: a bare
+// `setUTCMonth` overflows a day the target month does not have (31 March at
+// "-1" lands on 2/3 March, because there is no 31 February), which made a "1M"
+// preset from a month-end date start two or three days late. Clamping gives
+// 29 Feb in a leap year, 28 Feb otherwise, 30 April, and so on.
+//
+// Pure, and exported so chart.test.js can pin the clamp (the DOM helpers below
+// need a browser and are pinned by the served-bundle assertions in web.rs).
+export function addMonths(dateStr, n) {
   const d = new Date(dateStr + 'T00:00:00Z');
+  const day = d.getUTCDate();
+  // Step to the first of the month before shifting it, so setting the month
+  // cannot overflow into the next one, then clamp the original day to the
+  // target month's length.
+  d.setUTCDate(1);
   d.setUTCMonth(d.getUTCMonth() + n);
+  const lastDay = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0)).getUTCDate();
+  d.setUTCDate(Math.min(day, lastDay));
   return d.toISOString().slice(0, 10);
 }
 

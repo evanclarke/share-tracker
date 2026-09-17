@@ -13,9 +13,10 @@
 //
 import {
   el, toastIfCurrent, setMainIfCurrent, beginNavigation, navigationToken,
-  isCurrentNavigation, reload, looksNumeric, isTimestamp, fmtLocalTimestamp, utcTooltip,
-  cellText, numericDisplay, decCompare, moneyText, columnKinds, columnLabel, columnLabelMaps,
-  fkLabelMaps, api, apiUrl, pathSeg, nextId, loadOptions, listingNamer, describeTrade, tradeOrigin,
+  isCurrentNavigation, onViewTeardown, reload, looksNumeric, isTimestamp, fmtLocalTimestamp, utcTooltip,
+  cellText, numericDisplay, decCompare, moneyText, moneyEl, columnKinds, columnLabel, columnLabelMaps,
+  fkLabelMaps, api, apiUrl, pathSeg, safeDecodeURIComponent, nextId, loadOptions, listingNamer,
+  describeTrade, tradeOrigin,
   columnLinks, listingLinkFrom, defaultSortColumn,
   tableViewCache, debounce,
   periodReturnPct, holdingHasActivity, loadPref, savePref, initTheme,
@@ -476,7 +477,15 @@ async function viewEntityList(entity, seq = navigationToken()) {
       el('button', { class: 'primary' }, '+ New ' + entity.title.replace(/s$/, ''))));
   }
 
-  const cols = entity.columns || (rows[0] ? Object.keys(rows[0]) : entity.keyFields.concat(entity.fields).map(function (f) { return f.name; }));
+  // A columns-less entity (no `columns` in config.js) with an *empty* table
+  // has no first row to derive the columns from, so the fallback reads the
+  // configured fields — but `keyFields`/`fields` are themselves absent on a
+  // readonly entity that declares neither, and dereferencing them threw a
+  // TypeError before the empty table could say "No records yet." Guarding the
+  // pair keeps the empty state the empty state.
+  const cols = entity.columns || (rows[0]
+    ? Object.keys(rows[0])
+    : ((entity.keyFields || []).concat(entity.fields || [])).map(function (f) { return f.name; }));
   let table;
   if (rows.length === 0) {
     table = el('div', { class: 'empty' }, 'No records yet.');
@@ -1131,8 +1140,13 @@ async function viewAttachments(ownerField, ownerId, seq = navigationToken()) {
   // unchanged — a linked row is labelled with its owning record, downloads
   // from here, and is deleted from that record's own Attachments view.
   const isTrade = ownerField === 'trade_id';
-  const rows = await api('GET', '/attachments?' + ownerField + '=' + encodeURIComponent(ownerId)
-    + (isTrade ? '&include_linked=true' : ''));
+  // Both halves of the query are encoded: `ownerField` is the parameter *name*
+  // and comes straight from the hash, so a hand-edited value such as
+  // `trade_id&include_linked=true` would otherwise splice extra query
+  // parameters into the request (the server refuses it, but the SPA should
+  // never build the URL). `ownerId` is the value, encoded as before.
+  const rows = await api('GET', '/attachments?' + encodeURIComponent(ownerField)
+    + '=' + encodeURIComponent(ownerId) + (isTrade ? '&include_linked=true' : ''));
   // Name the owning activity (e.g. "DRP 45 XASX:VDHG on 2024-12-20"), not a
   // bare "trade #5"; the id stays as secondary detail.
   const ownerSpec = ATTACH_OWNER[ownerField];
@@ -2219,16 +2233,10 @@ const SERIES_PREF_KEY = 'share-tracker.overview.series';
 const LISTING_RANGE_PREF_KEY = 'share-tracker.activity.range';
 const LISTING_SERIES_PREF_KEY = 'share-tracker.activity.series';
 
-// A period figure formatted through the shared money display rules
-// (COLUMN_KINDS 'money': round to 2 dp + thousands grouping, full value on
-// hover when rounding drops precision) — the panel below is a hand-built
-// stat grid, not a filterableTable, so it calls numericDisplay directly
-// rather than formatting money itself.
-function moneyEl(value) {
-  const nd = numericDisplay(value, 'money');
-  return el('span', { title: nd ? nd.tip : null }, nd ? nd.text : cellText(value));
-}
-
+// The stat grid below is hand-built, not a filterableTable, so its money
+// figures are built through util.js's shared `moneyEl` — the element form of
+// the same money display rules (round to 2 dp + thousands grouping, full value
+// on hover) — rather than through a table's COLUMN_KINDS map.
 function statItem(label, valueEl) {
   return el('div', { class: 'stat' }, [
     el('div', { class: 'stat-label' }, label),
@@ -2438,10 +2446,19 @@ function rangedChart(series, opts) {
   // width, which is invisible.
   // Width only: a redraw changes the holder's height (a taller plot, a
   // wrapped legend), which would otherwise feed back into the observer.
+  //
+  // Held rather than fire-and-forget, and torn down through util.js's shared
+  // view-teardown registry: `setMain` swaps the whole screen out, so an
+  // observer created per panel render with nothing able to `disconnect()` it
+  // was the one listener in the app with no teardown. The registry runs it as
+  // the outgoing view is replaced.
+  let chartObserver = null;
   if (typeof ResizeObserver === 'function') {
-    new ResizeObserver(function () {
+    chartObserver = new ResizeObserver(function () {
       if (shownTo !== null && Math.abs(chartHolder.clientWidth - drawnWidth) >= 16) drawChart();
-    }).observe(chartHolder);
+    });
+    chartObserver.observe(chartHolder);
+    onViewTeardown(function () { chartObserver.disconnect(); });
   }
 
   async function applyRange(from, to) {
@@ -2607,6 +2624,20 @@ async function listingChartPanel(listingId) {
   ]);
   await chart.start();
   return panel;
+}
+
+// The report view's pending and error placeholders — one definition each, so
+// every report path that paints before its data lands (currently the GET
+// branch below; `render` swaps the pending line for the rows) reads them the
+// same way and the error shape stays the router's own `.error` block. The GET
+// branch used to await its response before painting anything, leaving `#app`
+// blank (topbar only) with no spinner and, on a rejection, only the router's
+// outer catch.
+function reportLoading() {
+  return el('p', { class: 'loading' }, 'Loading…');
+}
+function reportError(e) {
+  return el('div', { class: 'error' }, e.message);
 }
 
 // `args` are the extra hash path segments (`#/r/<slug>/a/b`): a deep link
@@ -2819,8 +2850,25 @@ async function viewReport(report, args, seq = navigationToken()) {
   }
 
   if (report.method === 'GET') {
-    await render(await api('GET', report.api));
+    // Paint the shell *before* the request goes out — header, shortcuts, the
+    // still-loading performance panel and a pending line in the result slot —
+    // so `#app` is never blank (topbar only) while the GET is in flight. The
+    // overview's panel has always painted this way; the report body now
+    // matches it. `render` clears the pending line when the rows land, and a
+    // rejection replaces it with the error state rather than leaving a screen
+    // the reader has to guess about.
+    result.appendChild(reportLoading());
     setMainIfCurrent(seq, el('div', null, [header, shortcuts, panel, result]));
+    try {
+      await render(await api('GET', report.api));
+    } catch (e) {
+      // Only if this navigation is still the newest: a superseded view's
+      // failure must not write into the screen the reader has since opened.
+      if (isCurrentNavigation(seq)) {
+        result.innerHTML = '';
+        result.appendChild(reportError(e));
+      }
+    }
     // Resolve only once the screen is actually complete: the panel paints
     // when it lands, but a caller awaiting this view is entitled to a
     // finished one.
@@ -2874,7 +2922,10 @@ async function viewReport(report, args, seq = navigationToken()) {
       report.params.forEach(function (f, i) {
         if (args[i] == null || args[i] === '') return;
         const inp = fieldOwner(f).querySelector('[name="' + f.name + '"]');
-        if (inp) inp.value = decodeURIComponent(args[i]);
+        // `safeDecodeURIComponent`, never a bare `decodeURIComponent`: a
+        // hand-edited `%` in the hash would otherwise raise a `URIError` out
+        // of this view and turn the whole screen into "URI malformed".
+        if (inp) inp.value = safeDecodeURIComponent(args[i]);
       });
     }
     async function runReport() {

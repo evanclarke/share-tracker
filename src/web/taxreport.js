@@ -14,22 +14,18 @@
 // helpers every other screen uses, so figures read identically to the rest
 // of the app.
 import {
-  el, toastIfCurrent, setMainIfCurrent, navigationToken, api, numericDisplay, moneyText, cellText,
-  fmtLocalTimestamp, columnLabel, decStrEq,
+  el, toastIfCurrent, setMainIfCurrent, navigationToken, api, moneyEl, moneyText,
+  cellText, fmtLocalTimestamp, columnLabel, decStrEq,
 } from './util.js';
 import { setActiveNav } from './nav.js';
 
-// `moneyText` (util.js) is the prose form of the rounding `moneyEl`/`moneyTd`
-// apply below — a plain string for the subtotal/total lines and the alert
-// messages, which have no cell to hang a per-figure tooltip on. Never use
-// cellText directly on a money amount: the underlying Decimal is
-// exact-arithmetic, so a subtotal or a halved discount routinely carries
-// three or more decimal places (e.g. "592.33850") that read as noise once
-// printed.
-function moneyEl(value) {
-  const nd = numericDisplay(value, 'money');
-  return el('span', { title: nd ? nd.tip : null }, nd ? nd.text : cellText(value));
-}
+// `moneyEl`/`moneyText` (util.js) are the element and prose forms of the money
+// display rules — `moneyEl` for a cell (with the full value on hover when
+// rounding dropped precision), `moneyText` for the subtotal/total lines and
+// the alert messages, which are plain strings with no cell to hang a tooltip
+// on. Never use cellText directly on a money amount: the underlying Decimal is
+// exact-arithmetic, so a subtotal or a halved discount routinely carries three
+// or more decimal places (e.g. "592.33850") that read as noise once printed.
 function moneyTd(value, extraClass) {
   return el('td', { class: ['num', extraClass].filter(Boolean).join(' ') }, moneyEl(value));
 }

@@ -20,11 +20,12 @@ import {
   tableViewCache, debounce,
   tradeOrigin,
   periodReturnPct,
-  holdingHasActivity, loadPref, savePref, pathSeg, basePath, apiUrl, authEnabled,
+  holdingHasActivity, loadPref, savePref, pathSeg, safeDecodeURIComponent, basePath, apiUrl,
+  authEnabled,
   cellText, adjustmentPreviewText, allocationSummary, toastLifetime, moneyText,
   resolveTheme, otherTheme, themeToggleLabel, applyTheme, currentTheme, toggleTheme,
   THEME_PREF_KEY,
-  renderGeneration, beginNavigation, navigationToken, isCurrentNavigation,
+  renderGeneration, teardownRegistry, beginNavigation, navigationToken, isCurrentNavigation,
   setMainIfCurrent, toastIfCurrent, reload, rejectionText,
 } from './util.js';
 
@@ -598,6 +599,25 @@ test('pathSeg over a composite key encodes the parts, not the separators', () =>
   assert.equal(['a/b', 'c'].map(pathSeg).join('/'), 'a%2Fb/c');
 });
 
+// ---- safeDecodeURIComponent ---------------------------------------------
+test('safeDecodeURIComponent decodes a well-formed escape like decodeURIComponent', () => {
+  assert.equal(safeDecodeURIComponent('XASX%3AVAS'), 'XASX:VAS');
+  assert.equal(safeDecodeURIComponent('a%20b'), 'a b');
+  assert.equal(safeDecodeURIComponent('5'), '5'); // a real route arg is a no-op
+});
+
+test('safeDecodeURIComponent returns the text instead of throwing on a malformed escape', () => {
+  // A hand-edited hash: `%` with nothing valid after it. A bare
+  // decodeURIComponent raises URIError, which used to escape the report view
+  // and turn the whole screen into "URI malformed".
+  assert.doesNotThrow(() => safeDecodeURIComponent('100%'));
+  assert.equal(safeDecodeURIComponent('100%'), '100%');
+  // A truncated multi-byte escape is the same failure.
+  assert.equal(safeDecodeURIComponent('%E0%A4'), '%E0%A4');
+  // And a value that is not a string at all is stringified, not a TypeError.
+  assert.equal(safeDecodeURIComponent(42), '42');
+});
+
 // ---- basePath / apiUrl --------------------------------------------------
 // The reverse-proxy prefix is read from the shell's <meta name="base-path">.
 // Node has no DOM, so these pin the no-document path: the app must behave
@@ -928,6 +948,33 @@ test('the app-wide guard lets the current navigation paint', () => {
   }
   assert.equal(app.innerHTML, '');
   assert.equal(app.appended, 'new node');
+});
+
+// ---- teardownRegistry: releasing a replaced view's resources ---------
+// `setMain` swaps the whole screen out; a view that owns a listener the DOM
+// does not release (the chart's ResizeObserver) registers its teardown here.
+// A factory like `renderGeneration`, so the run-once-and-clear contract is
+// pinned without a browser.
+test('teardownRegistry: run calls every registered teardown once, then clears', () => {
+  const reg = teardownRegistry();
+  const ran = [];
+  reg.add(() => ran.push('observer'));
+  reg.add(() => ran.push('timer'));
+  reg.run();
+  assert.deepEqual(ran, ['observer', 'timer']);
+  // Cleared: the next view's setMain must not re-run the outgoing view's
+  // teardowns.
+  reg.run();
+  assert.deepEqual(ran, ['observer', 'timer']);
+});
+
+test('teardownRegistry: a throwing teardown does not strand the rest', () => {
+  const reg = teardownRegistry();
+  const ran = [];
+  reg.add(() => { throw new Error('already gone'); });
+  reg.add(() => ran.push('disconnected'));
+  assert.doesNotThrow(() => reg.run());
+  assert.deepEqual(ran, ['disconnected']);
 });
 
 // ---- reload: the fire-and-forget view reload helper ---------------------

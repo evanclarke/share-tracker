@@ -4281,4 +4281,167 @@ mod tests {
         assert!(!flagged("push('paid ' + d.amount_aud + ' AUD');")); // a different column
         assert!(!flagged("// push('rows of ' + d.amount + ' AUD');")); // prose about the rule
     }
+
+    // ---- frontend robustness nits (2026-09-17 review) ----------------------
+    //
+    // Six small independent fixes in `src/web/`, each pinned by the served
+    // bundle because none of them is a pure helper: the report view's
+    // pending/error state, the guarded deep-link decode, the chart observer's
+    // teardown, the encoded attachments query, the shared `moneyEl`, the
+    // empty-entity-list guard, and the removed `html:` entry point in `el()`.
+    // The two that *are* pure helpers — the month clamp and the safe decode —
+    // are also unit-tested directly in `src/web/*.test.js`.
+
+    /// The served source of one module, by its route. Panics on a route that is
+    /// not on the allowlist, which `js_test_files_are_not_served_and_every_module_is`
+    /// would have failed on first.
+    fn module_source(route: &str) -> &'static str {
+        for (path, source) in JS_MODULES {
+            if path == route {
+                return source;
+            }
+        }
+        panic!("{route} is not served by JS_MODULES");
+    }
+
+    /// A `GET` report used to await its response before painting anything, so
+    /// `#app` was blank (topbar only) until it landed — no spinner, and on a
+    /// rejection only the router's catch. The shell now paints first, with a
+    /// pending line the render clears, and a failure replaces it with the error
+    /// state (what the overview's own performance panel has always done).
+    #[tokio::test]
+    async fn get_report_paints_a_pending_state_before_its_request() {
+        let app = module_source("/static/app.js");
+        // One shared definition of each state, so every report path that paints
+        // before its data lands reads them the same way.
+        assert!(app.contains("function reportLoading()"));
+        assert!(app.contains("class: 'loading'"));
+        assert!(app.contains("function reportError("));
+        assert!(app.contains("class: 'error'"));
+
+        let branch = app
+            .split("report.method === 'GET'")
+            .nth(1)
+            .expect("app.js must have a GET report branch");
+        let paint = branch
+            .find("setMainIfCurrent(seq")
+            .expect("the GET branch must paint the shell");
+        let fetch = branch
+            .find("await api('GET', report.api)")
+            .expect("the GET branch must fetch the report");
+        assert!(
+            paint < fetch,
+            "the report shell must paint before its GET goes out, or #app is blank \
+             while the request is in flight"
+        );
+        assert!(
+            branch.contains("result.appendChild(reportLoading())"),
+            "no pending state"
+        );
+        assert!(
+            branch.contains("result.appendChild(reportError(e))"),
+            "no error state"
+        );
+        assert!(
+            branch.contains("isCurrentNavigation(seq)"),
+            "the error state must not be written by a superseded navigation"
+        );
+    }
+
+    /// A hand-edited `%` in a report deep link used to raise `URIError` out of
+    /// the view (`decodeURIComponent` is unguarded), turning the whole screen
+    /// into "URI malformed" via the router's catch. The route arg now goes
+    /// through util.js's safe decode.
+    #[tokio::test]
+    async fn report_deep_link_args_decode_without_throwing() {
+        let app = module_source("/static/app.js");
+        assert!(app.contains("safeDecodeURIComponent(args[i])"));
+        assert!(
+            !app.contains("decodeURIComponent(args[i])"),
+            "an unguarded decodeURIComponent on a hash arg throws on a malformed escape"
+        );
+        assert!(
+            module_source("/static/util.js").contains("export function safeDecodeURIComponent(")
+        );
+    }
+
+    /// The chart's `ResizeObserver` was created per panel render and discarded,
+    /// so nothing could ever `disconnect()` it — the only listener in the app
+    /// with no teardown. It is now held and registered with util.js's shared
+    /// view-teardown registry, which `setMain` runs as it replaces the screen.
+    #[tokio::test]
+    async fn chart_observer_is_disconnected_when_the_view_is_replaced() {
+        let app = module_source("/static/app.js");
+        assert!(app.contains("chartObserver = new ResizeObserver("));
+        assert!(app.contains("chartObserver.observe(chartHolder)"));
+        assert!(app.contains("onViewTeardown(function () { chartObserver.disconnect(); })"));
+        let util = module_source("/static/util.js");
+        assert!(util.contains("export function onViewTeardown("));
+        assert!(
+            util.contains("viewTeardowns.run();"),
+            "setMain is the one place a view is replaced, so it must run the outgoing \
+             view's teardowns"
+        );
+    }
+
+    /// `ownerField` comes straight from the hash route, and it is the query
+    /// parameter *name*: unencoded, a hand-edited value such as
+    /// `trade_id&include_linked=true` splices extra query parameters into the
+    /// attachments request.
+    #[tokio::test]
+    async fn attachments_owner_field_is_query_encoded() {
+        let app = module_source("/static/app.js");
+        assert!(app.contains("'/attachments?' + encodeURIComponent(ownerField)"));
+        assert!(
+            !app.contains("'/attachments?' + ownerField +"),
+            "the hash-supplied parameter name must be encoded, not spliced in"
+        );
+    }
+
+    /// `moneyEl` lived verbatim in both `app.js` and `taxreport.js`; it now
+    /// lives once in `util.js` beside `moneyText`, and both modules import it
+    /// rather than defining their own.
+    #[tokio::test]
+    async fn money_el_is_defined_once_in_util() {
+        assert!(module_source("/static/util.js").contains("export function moneyEl("));
+        for path in ["/static/app.js", "/static/taxreport.js"] {
+            let source = module_source(path);
+            assert!(
+                !source.contains("function moneyEl("),
+                "{path} defines its own moneyEl — use util.js's shared one"
+            );
+            assert!(
+                source.contains("moneyEl,"),
+                "{path} must import moneyEl from util.js"
+            );
+        }
+    }
+
+    /// The empty-rows fallback in `viewEntityList` read `entity.keyFields` /
+    /// `entity.fields`, which are absent on a columns-less readonly entity. The
+    /// empty table's own "No records yet." must not be pre-empted by a
+    /// `TypeError` from the column derivation above it.
+    #[tokio::test]
+    async fn empty_entity_list_guard_survives_a_columns_less_entity() {
+        let app = module_source("/static/app.js");
+        assert!(app.contains("(entity.keyFields || []).concat(entity.fields || [])"));
+        assert!(
+            !app.contains("entity.keyFields.concat(entity.fields)"),
+            "the empty-rows fallback dereferences keyFields/fields unguarded"
+        );
+    }
+
+    /// `el()`'s `html:` attribute was the one unescaped HTML entry point in the
+    /// helper and had no call site anywhere in the bundle, so it was deleted
+    /// rather than left as a latent XSS footgun. `children` still goes through
+    /// `append`, which never parses markup.
+    #[tokio::test]
+    async fn el_has_no_html_attribute() {
+        let js = app_js_body().await;
+        assert!(
+            !js.contains("k === 'html'"),
+            "el() must not carry an unescaped HTML entry point"
+        );
+        assert!(!js.contains("n.innerHTML = v"));
+    }
 }

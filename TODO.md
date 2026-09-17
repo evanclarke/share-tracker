@@ -38,43 +38,6 @@ what has been verified is SCENARIOS.md's
 [Verification status](SCENARIOS.md#verification-status) table and its per-section findings blocks;
 the maintained record of what was built and decided is the `DONE/*.md` archive.
 
-## Frontend robustness nits: no loading state, an unguarded decode, an undisconnected observer, an unencoded query value, and a duplicated helper (2026-09-17 review, web frontend)
-
-(2026-09-17 review; small, independent fixes in `src/web/`, grouped because each is a few lines.
-The pass verified no XSS path exists — every `innerHTML` assignment is a clear, `el()`'s `children`
-goes through `append` (which never parses markup), and the one unescaped sink is unused.)
-
-- [ ] `src/web/app.js:2771-2773` awaits a report `GET` before painting anything, so `#app` is blank
-  (topbar only) until it lands, with no spinner and no error state. The overview deliberately paints
-  its shell first; nothing else does. Fix: a shared pending/error state in the report view
-- [ ] `src/web/app.js:2827` calls `decodeURIComponent(args[i])` unguarded, so a hand-edited `%` in
-  the hash turns the whole screen into a `URI malformed` error via `render()`'s catch. Fix: a safe
-  decode helper
-- [ ] `src/web/app.js:2391-2395` creates a `ResizeObserver` per panel render and never disconnects
-  it. Not a true leak (the observed holder is discarded, so the cycle is collectable), but it is the
-  only listener in the app with no teardown. Fix: hold it and `disconnect()` when the view is
-  replaced
-- [ ] `src/web/app.js:1090` interpolates `ownerField` from the hash into the attachments query
-  string unencoded, so a hand-edited hash can add query parameters (the server refuses `422`; no
-  security impact). Fix: `encodeURIComponent(ownerField)`
-- [ ] `moneyEl` is duplicated verbatim (`src/web/app.js:2177-2180` and
-  `src/web/taxreport.js:28-31`) — identical today, and unshared, unlike `moneyText`. Fix: one
-  `moneyEl` in `util.js` beside `moneyText`
-- [ ] `src/web/chart.js:293-297` uses `setUTCMonth`, so a "1M" preset from the 31st overshoots
-  (31 Mar − 1 month → 2 Mar, not 29 Feb); a preset can therefore start a few days late on month-end
-  dates. Fix: clamp to the target month's last day
-- [ ] `src/web/app.js:437` dereferences `entity.keyFields`/`entity.fields` in the empty-rows
-  fallback, absent on a columns-less entity, so a new readonly entity without `columns` and with an
-  empty table would throw a `TypeError` instead of "No records yet." (Unreachable today — the only
-  four columns-less entities are `custom` and redirected at `:2963`.) Fix: guard the fallback
-- [ ] `src/web/util.js:16`'s `html:` attribute is the one unescaped HTML entry point in the helper
-  and has **no call sites** anywhere in the bundle. Fix: delete it, or comment that it is unused —
-  removing the only latent XSS footgun
-- [ ] Tests: a `src/web/*.test.js` unit test for whichever of these is extracted as a pure helper
-  (the month clamp and the safe decode are the natural ones); the rest are served-bundle assertions
-  in the `web.rs` style
-- [ ] Docs sync: none
-
 ## Documentation drift found by the 2026-09-17 pass (2026-09-17 review, docs)
 
 (2026-09-17 review, verified by reading each file. The project's rule is that a user-visible or
