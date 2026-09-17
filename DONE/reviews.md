@@ -5581,3 +5581,52 @@ archived document's own figures: worksheet rows 200/−150 with only the first c
 base 150, gain 50, and a single FY2023 E10 gain of 100). Gates: `cargo fmt --check`,
 `cargo clippy --all-targets -- -D warnings` and `cargo test` (2,396 passed) all clean, plus
 `node --test 'src/web/*.test.js'` (149 passed).
+
+## An unvalidated `settlement_days` overflows `NaiveDate` and panics the request (2026-09-17 review, integrity + availability)
+
+(2026-09-17 review, reproduced against a running server. `exchange::db_upsert` is a bare upsert that
+binds every field with no check at all, and `add_business_days`
+(`src/entities/trade/settlement.rs:32-39`) advances one calendar day per iteration with
+`result += chrono::Duration::days(1)`, which panics on overflow. `NaiveDate`'s range ends at year
+262143, so a large T+n walks ~95 million days and then panics.)
+
+- [x] Reproduced end to end: `PUT /exchanges/XASX` with `settlement_days: 100000000` returns `204`;
+  the next trade write returns `500` after **10.1 s** on a worker thread, with
+  `panicked at src/entities/trade/settlement.rs:33:9: 'NaiveDate + TimeDelta' overflowed` in the log.
+  `CatchPanicLayer` kept the server alive (`/reports/health` still `200`), so the damage is a burned
+  worker, a slow empty 500 the user cannot diagnose, and one more instance of the "a panic is still a
+  bug, not a supported outcome" case the layer's own docs describe (SCENARIOS W-b)
+- [x] Smaller bad values are silently wrong rather than fatal: `settlement_days: -1` makes every
+  auto-computed settlement the trade date itself — recorded `computed`, so the `settlement-recompute`
+  job re-affirms it for ever — and `99999` stores a year-2410 settlement date. Both stored `204`
+- [x] Fix: validate `settlement_days` at write time (non-negative, and bounded to a sane maximum that
+  cannot exceed the seeded holiday coverage), and make `add_business_days` total — use a checked date
+  step and return an error rather than panicking on an out-of-range target
+- [x] Tests: a `PUT /exchanges` refusing a negative and an absurd `settlement_days` `422`; an
+  `add_business_days` unit case at the top of the date range asserting an error, not a panic
+- [x] Docs sync: `docs/API.md`'s Exchanges section lists the 422 conditions — add the new one
+
+**Closed 2026-09-17.** `exchange::db_upsert` now validates `settlement_days` before the INSERT:
+below zero is refused, and above `exchange::MAX_SETTLEMENT_DAYS` (365 — one year of business days,
+deliberately generous against real T+2 but still inside the nine-year 2019–2027 horizon the seeded
+holiday calendars cover, which is what `add_business_days` walks T+n over) is refused as the typo it
+is. Both are `UpsertError` variants converted to a `422` that names the field, and the offending
+value is never stored. The maximum's reasoning lives on the constant, so the bound and its
+justification cannot drift apart. `add_business_days` is total: the unchecked
+`result += chrono::Duration::days(1)` became `checked_add_days(Days::new(1))` returning the new
+`trade::SettlementError::DateOverflow { date, business_days }`, threaded through
+`auto_settlement_date(_on)` and `Settlement::resolve` (and wrapped by `SellError::Settlement`). A row
+that predates the write-time bound can still carry an absurd value, so that path answers a `422`
+naming `settlement_days` and the `PUT /exchanges/:mic` that corrects it rather than panicking a
+worker into an empty `500`. `docs/API.md`'s Exchanges paragraph and `docs/SCHEMA.md`'s
+`settlement_days` line both gained the bound.
+
+Tests: `entities::exchange::tests::api_settlement_days_out_of_range_returns_422` (−1, −2, 99999 and
+100000000 all `422` naming the field with nothing stored, then a valid `2` as `204`),
+`entities::exchange::tests::api_settlement_days_at_the_maximum_is_accepted` (the inclusive bound),
+`entities::exchange::tests::db_upsert_rejects_out_of_range_settlement_days` (the DB-level write path,
+nothing persisted) and
+`entities::trade::tests::add_business_days_at_the_end_of_the_date_range_is_an_error_not_a_panic`
+(`NaiveDate::MAX` + 1 business day is an `Err`, T+0 at `NaiveDate::MAX` is still `Ok`). Gates:
+`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` (2,400 passed) all
+clean, plus `node --test 'src/web/*.test.js'` (149 passed).

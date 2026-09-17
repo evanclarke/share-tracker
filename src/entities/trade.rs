@@ -46,6 +46,10 @@ pub(crate) use checks::{
     resolve_brokerage, spot_fx_rate_detail, statement_total_detail, validate_spot_fx_rate,
 };
 pub(crate) use settlement::Settlement;
+/// Why a settlement date could not be derived (a checked date step that left
+/// `NaiveDate`'s range, or a lookup failure). Named by the Sell path, which
+/// wraps it in its own error enum, and by the tests below.
+pub(crate) use settlement::SettlementError;
 /// Reached by name only from tests — the write paths go through
 /// [`Settlement::resolve`], which is where the omitted-means-computed rule
 /// lives — so the re-export is test-gated.
@@ -924,13 +928,13 @@ mod tests {
         // skipping Sat 2024-01-20 and Sun 2024-01-21.
         let thursday = NaiveDate::from_ymd_opt(2024, 1, 18).unwrap();
         assert_eq!(
-            add_business_days(thursday, 2, &none),
+            add_business_days(thursday, 2, &none).unwrap(),
             NaiveDate::from_ymd_opt(2024, 1, 22).unwrap()
         );
         // 2024-01-15 is a Monday; T+2 stays within the week (Wednesday).
         let monday = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
         assert_eq!(
-            add_business_days(monday, 2, &none),
+            add_business_days(monday, 2, &none).unwrap(),
             NaiveDate::from_ymd_opt(2024, 1, 17).unwrap()
         );
     }
@@ -948,13 +952,30 @@ mod tests {
         // skip the weekend, Mon 30 = 2 → settles 2024-12-30.
         let tuesday = NaiveDate::from_ymd_opt(2024, 12, 24).unwrap();
         assert_eq!(
-            add_business_days(tuesday, 2, &holidays),
+            add_business_days(tuesday, 2, &holidays).unwrap(),
             NaiveDate::from_ymd_opt(2024, 12, 30).unwrap()
         );
         // Without the holiday set it would settle on Boxing Day (Thu 26).
         assert_eq!(
-            add_business_days(tuesday, 2, &HashSet::new()),
+            add_business_days(tuesday, 2, &HashSet::new()).unwrap(),
             NaiveDate::from_ymd_opt(2024, 12, 26).unwrap()
+        );
+    }
+
+    /// The old unchecked `result += Duration::days(1)` panicked with
+    /// `'NaiveDate + TimeDelta' overflowed` once the step left `NaiveDate`'s
+    /// range (the 2026-09-17 review's 10-second empty `500`). The step is
+    /// checked now, so the same call answers an error. `NaiveDate::MAX` is
+    /// 262143-12-31, so the very first business-day step is already off the end.
+    #[test]
+    fn add_business_days_at_the_end_of_the_date_range_is_an_error_not_a_panic() {
+        let err = add_business_days(NaiveDate::MAX, 1, &HashSet::new()).unwrap_err();
+        assert!(matches!(err, SettlementError::DateOverflow { .. }));
+        // The last representable day is a valid *input*: a T+0 window is that
+        // day itself, not an overflow.
+        assert_eq!(
+            add_business_days(NaiveDate::MAX, 0, &HashSet::new()).unwrap(),
+            NaiveDate::MAX
         );
     }
 

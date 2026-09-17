@@ -9,9 +9,52 @@
 
 use super::model::SettlementDateSource;
 use crate::infra::db::write_tx;
-use chrono::{Datelike, NaiveDate};
+use crate::infra::http::ApiError;
+use chrono::{Datelike, Days, NaiveDate};
 use sqlx::SqlitePool;
 use std::collections::HashSet;
+
+/// Why a settlement date could not be derived.
+///
+/// Split from `sqlx::Error` because the failure that motivated it is not a
+/// database fault at all: a checked date step that runs off the end of
+/// `NaiveDate`'s range. That was a panic before (the `+=` on the date), which
+/// burned a request worker for 10 seconds and answered an empty `500`
+/// (`TODO.md`, 2026-09-17 review) — a panic is a bug, not an outcome.
+#[derive(thiserror::Error, Debug)]
+pub enum SettlementError {
+    /// Reading the listing's exchange or holiday calendar failed.
+    #[error("settlement-date lookup failed: {0}")]
+    Db(#[from] sqlx::Error),
+    /// The date step left `NaiveDate`'s range (the last representable day is
+    /// 262143-12-31). Unreachable through the write paths now that
+    /// [`crate::entities::exchange::MAX_SETTLEMENT_DAYS`] bounds what an
+    /// exchange may store, but a row written before that bound — or edited in
+    /// the database directly — can still carry one, and the
+    /// `settlement-recompute` job re-derives those. Returned rather than
+    /// panicked so the request fails with a diagnosable `422` naming the
+    /// offending field.
+    #[error(
+        "advancing {date} by {business_days} business days runs past the end of the supported \
+         date range"
+    )]
+    DateOverflow { date: NaiveDate, business_days: i64 },
+}
+
+impl From<SettlementError> for ApiError {
+    fn from(e: SettlementError) -> Self {
+        match e {
+            // The value is not in this request — it is the listing's exchange's
+            // stored `settlement_days`, which every trade on that listing reads
+            // — so the body names the field and the endpoint that fixes it.
+            SettlementError::DateOverflow { .. } => ApiError::unprocessable(
+                "settlement_days is too large to compute a settlement date — correct it with \
+                 PUT /exchanges/:mic (T+n is a market's settlement period, a handful of days)",
+            ),
+            SettlementError::Db(err) => err.into(),
+        }
+    }
+}
 
 /// Advance `date` by `business_days` trading days, skipping Saturdays, Sundays
 /// and the exchange's public `holidays`.
@@ -21,22 +64,34 @@ use std::collections::HashSet;
 /// land on a public holiday rolls forward to the next trading day. Pass the
 /// exchange's holiday set (see `exchange_holiday::exchange_holidays_for_listing`);
 /// an empty set degrades to weekend-only skipping.
+///
+/// The step is **checked**: `NaiveDate` ends at 262143-12-31, and the old
+/// unchecked `result += Duration::days(1)` panicked on overflow. The write path
+/// bounds `settlement_days` (`exchange::MAX_SETTLEMENT_DAYS`) so a value
+/// entered through the API can never get close, but this stays total for the
+/// rows that predate that bound — it returns [`SettlementError::DateOverflow`]
+/// instead.
 pub(crate) fn add_business_days(
     date: NaiveDate,
     business_days: i64,
     holidays: &HashSet<NaiveDate>,
-) -> NaiveDate {
+) -> Result<NaiveDate, SettlementError> {
     use chrono::Weekday;
     let mut result = date;
     let mut remaining = business_days;
     while remaining > 0 {
-        result += chrono::Duration::days(1);
+        result = result
+            .checked_add_days(Days::new(1))
+            .ok_or(SettlementError::DateOverflow {
+                date,
+                business_days,
+            })?;
         let is_weekend = matches!(result.weekday(), Weekday::Sat | Weekday::Sun);
         if !is_weekend && !holidays.contains(&result) {
             remaining -= 1;
         }
     }
-    result
+    Ok(result)
 }
 
 /// Warn when an auto-computed settlement window falls outside the seeded
@@ -127,7 +182,7 @@ impl Settlement {
         listing_id: i64,
         date: NaiveDate,
         supplied: Option<NaiveDate>,
-    ) -> Result<Self, sqlx::Error> {
+    ) -> Result<Self, SettlementError> {
         let Some(supplied) = supplied else {
             return Ok(Settlement {
                 date: auto_settlement_date(pool, trade_id, listing_id, date).await?,
@@ -161,7 +216,7 @@ pub(crate) async fn auto_settlement_date(
     trade_id: i64,
     listing_id: i64,
     date: NaiveDate,
-) -> Result<NaiveDate, sqlx::Error> {
+) -> Result<NaiveDate, SettlementError> {
     let mut conn = pool.acquire().await?;
     auto_settlement_date_on(&mut conn, trade_id, listing_id, date).await
 }
@@ -174,14 +229,14 @@ pub(crate) async fn auto_settlement_date_on(
     trade_id: i64,
     listing_id: i64,
     date: NaiveDate,
-) -> Result<NaiveDate, sqlx::Error> {
+) -> Result<NaiveDate, SettlementError> {
     let Some(days) = settlement_days_for_listing(&mut *conn, listing_id).await? else {
         return Ok(date);
     };
     let holidays =
         crate::entities::exchange_holiday::exchange_holidays_for_listing(&mut *conn, listing_id)
             .await?;
-    let settlement = add_business_days(date, days, &holidays);
+    let settlement = add_business_days(date, days, &holidays)?;
     warn_if_outside_holiday_coverage(trade_id, date, settlement, &holidays);
     Ok(settlement)
 }

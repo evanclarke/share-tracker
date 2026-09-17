@@ -38,30 +38,6 @@ what has been verified is SCENARIOS.md's
 [Verification status](SCENARIOS.md#verification-status) table and its per-section findings blocks;
 the maintained record of what was built and decided is the `DONE/*.md` archive.
 
-## An unvalidated `settlement_days` overflows `NaiveDate` and panics the request (2026-09-17 review, integrity + availability)
-
-(2026-09-17 review, reproduced against a running server. `exchange::db_upsert` is a bare upsert that
-binds every field with no check at all, and `add_business_days`
-(`src/entities/trade/settlement.rs:32-39`) advances one calendar day per iteration with
-`result += chrono::Duration::days(1)`, which panics on overflow. `NaiveDate`'s range ends at year
-262143, so a large T+n walks ~95 million days and then panics.)
-
-- [ ] Reproduced end to end: `PUT /exchanges/XASX` with `settlement_days: 100000000` returns `204`;
-  the next trade write returns `500` after **10.1 s** on a worker thread, with
-  `panicked at src/entities/trade/settlement.rs:33:9: 'NaiveDate + TimeDelta' overflowed` in the log.
-  `CatchPanicLayer` kept the server alive (`/reports/health` still `200`), so the damage is a burned
-  worker, a slow empty 500 the user cannot diagnose, and one more instance of the "a panic is still a
-  bug, not a supported outcome" case the layer's own docs describe (SCENARIOS W-b)
-- [ ] Smaller bad values are silently wrong rather than fatal: `settlement_days: -1` makes every
-  auto-computed settlement the trade date itself — recorded `computed`, so the `settlement-recompute`
-  job re-affirms it for ever — and `99999` stores a year-2410 settlement date. Both stored `204`
-- [ ] Fix: validate `settlement_days` at write time (non-negative, and bounded to a sane maximum that
-  cannot exceed the seeded holiday coverage), and make `add_business_days` total — use a checked date
-  step and return an error rather than panicking on an out-of-range target
-- [ ] Tests: a `PUT /exchanges` refusing a negative and an absurd `settlement_days` `422`; an
-  `add_business_days` unit case at the top of the date range asserting an error, not a panic
-- [ ] Docs sync: `docs/API.md`'s Exchanges section lists the 422 conditions — add the new one
-
 ## Reference-data writes accept a blank ticker, a malformed `close_time`, and an unknown exchange timezone (2026-09-17 review, integrity)
 
 (2026-09-17 review, reproduced against a running server. Neither `listing::db_upsert` nor

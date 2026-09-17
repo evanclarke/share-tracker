@@ -9,7 +9,7 @@ exchanges
 ├── country      TEXT
 ├── currency     TEXT FK→currencies.code   Default trading currency
 ├── timezone     TEXT             IANA timezone string
-├── settlement_days INTEGER      T+N settlement (e.g. 2 for ASX)
+├── settlement_days INTEGER      T+N settlement (e.g. 2 for ASX); validated at write time, non-negative and ≤ 365 (one year of business days — the longest window still inside the seeded holiday calendar's horizon)
 └── close_time   TEXT             'HH:MM' local end of the regular session; a day's closing price is only collected after it (default 16:00)
 
 exchange_holidays             Full-closure non-trading days per exchange (settlement skips them; valuation reads the calendar live — see the staleness triggers below). Audited (0039)

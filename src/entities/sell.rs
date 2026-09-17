@@ -216,6 +216,12 @@ pub enum SellError {
     /// non-trading date).
     #[error("the Sell is dated on a non-trading day: {0}")]
     NonTradingDay(String),
+    /// The Sell's settlement date could not be derived: the listing's
+    /// exchange stores a `settlement_days` the checked date step cannot reach
+    /// across. Mapped to `422` naming the field to correct (see
+    /// `trade::SettlementError`).
+    #[error("the settlement date could not be derived: {0}")]
+    Settlement(#[from] trade::SettlementError),
 }
 
 impl From<SellError> for ApiError {
@@ -295,6 +301,7 @@ impl From<SellError> for ApiError {
                  date is the CGT event date, so it sets the financial year and the discount \
                  clock; enter the day the sale actually executed"
             )),
+            SellError::Settlement(err) => err.into(),
             SellError::Db(err) => err.into(),
         }
     }
