@@ -191,6 +191,50 @@ export function toastIfCurrent(token, msg, isError) {
   if (isCurrentNavigation(token)) toast(msg, isError);
 }
 
+// ---- fire-and-forget view reloads --------------------------------------
+//
+// A view re-entered by one of its own actions — a DELETE reloading the list it
+// was clicked from, a job's "Run now" repainting the table, a re-fetch
+// repainting Closing Prices — is started and not awaited: the click handler
+// has nothing left to do with the result. But the view awaits its own fetches,
+// so a failing one has no handler at all. The Closing Prices "Discard" is the
+// reproduction: the DELETE succeeds and toasts, then the reload's `GET`
+// rejects, the discarded row stays on screen, nothing tells the user, and the
+// only trace is a console "Uncaught (in promise)".
+//
+// `reload` is the one place that shape is allowed. It runs the view under the
+// navigation token its caller holds — `seq` is both the guard for the error
+// toast and the token handed on to the view, so a reload started by a view the
+// reader has since navigated away from can neither paint nor toast — and it
+// routes a rejection through `toastIfCurrent`, so the failure is handled *and*
+// reported. Its promise never rejects, so a call site needs no `catch` of its
+// own. Every fire-and-forget view call goes through it; `web.rs`'s
+// `no_view_reload_is_fire_and_forget` fails on a bare `view*(` call.
+//
+// Deliberately *no* global `unhandledrejection` net as well: it carries no
+// navigation token, so toasting from it would raise a superseded navigation's
+// error over the screen the reader has since opened — exactly the race the
+// guard above removes — and the browser already logs the bare rejection. The
+// call-site scan is the stronger guarantee, and the one remaining
+// fire-and-forget call (`refreshHealthBanner`, which repaints the chrome in
+// parallel with the view) catches its own failure already.
+export function reload(seq, fn) {
+  // `arguments` rather than a rest parameter, matching this module's
+  // function-style (no arrows, rest or spread anywhere in `src/web/`).
+  const args = Array.prototype.slice.call(arguments, 2);
+  return Promise.resolve()
+    .then(function () { return fn.apply(null, args); })
+    .catch(function (e) { toastIfCurrent(seq, rejectionText(e), true); });
+}
+
+// The text a rejected reload reports: an Error's own `message`, and any other
+// rejection (a string, a bare object, null) stringified — so the toast always
+// carries something, and reading `message` off a null rejection can never
+// throw a second error out of the catch.
+export function rejectionText(e) {
+  return e && e.message ? String(e.message) : String(e);
+}
+
 // ---- persisted UI preferences -----------------------------------------
 
 // Small localStorage wrapper for remembering a UI choice across reloads

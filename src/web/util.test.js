@@ -24,7 +24,7 @@ import {
   resolveTheme, otherTheme, themeToggleLabel, applyTheme, currentTheme, toggleTheme,
   THEME_PREF_KEY,
   renderGeneration, beginNavigation, navigationToken, isCurrentNavigation,
-  setMainIfCurrent, toastIfCurrent,
+  setMainIfCurrent, toastIfCurrent, reload, rejectionText,
 } from './util.js';
 
 // ---- roundDecimalStr ----------------------------------------------------
@@ -887,3 +887,113 @@ test('the app-wide guard lets the current navigation paint', () => {
   assert.equal(app.innerHTML, '');
   assert.equal(app.appended, 'new node');
 });
+
+// ---- reload: the fire-and-forget view reload helper ---------------------
+// A view re-entered by one of its own actions is started and not awaited, but
+// it awaits its own fetches, so a failing one has no handler (the Closing
+// Prices Discard: the DELETE succeeds and toasts, then the reload's `GET`
+// rejects and nothing tells the user). `reload` is the one place that shape is
+// allowed: it runs the view and routes a rejection to `toastIfCurrent`.
+//
+// Node has no DOM, and `reload`'s failure path ends in `toast`/`el`, so the
+// helper below installs the smallest stand-in for the two calls those make
+// (`document.createElement` and `getElementById('toast')`) plus a `Node` class
+// for `el`'s `c instanceof Node` check. Each appended toast item records its
+// message in `dataset.msg`, which is what the tests read.
+function installToastDom() {
+  class FakeNode {}
+  const make = (tag) => Object.assign(new FakeNode(), {
+    tag,
+    className: '', innerHTML: '', dataset: {}, hidden: false,
+    scrollTop: 0, scrollHeight: 0, children: [], firstChild: null, parentNode: null,
+    setAttribute() {},
+    addEventListener() {},
+    append(c) {
+      const n = c instanceof FakeNode ? c : String(c);
+      this.children.push(n);
+      this.firstChild = this.children[0];
+      if (n instanceof FakeNode) n.parentNode = this;
+    },
+    appendChild(c) { this.append(c); },
+    remove() {
+      if (!this.parentNode) return;
+      const i = this.parentNode.children.indexOf(this);
+      if (i !== -1) this.parentNode.children.splice(i, 1);
+      this.parentNode.firstChild = this.parentNode.children[0] || null;
+    },
+  });
+  const toastBox = make('div');
+  const realNode = globalThis.Node;
+  const realDocument = globalThis.document;
+  globalThis.Node = FakeNode;
+  globalThis.document = {
+    createElement: make,
+    getElementById: (id) => (id === 'toast' ? toastBox : null),
+  };
+  return {
+    messages: () => toastBox.children.map((item) => item.dataset.msg),
+    restore() {
+      if (realNode === undefined) delete globalThis.Node; else globalThis.Node = realNode;
+      if (realDocument === undefined) delete globalThis.document; else globalThis.document = realDocument;
+    },
+  };
+}
+
+test('rejectionText: an Error reports its own message', () => {
+  assert.equal(rejectionText(new Error('HTTP 422: nope')), 'HTTP 422: nope');
+});
+
+test('rejectionText: a non-Error rejection never throws and still reads', () => {
+  assert.equal(rejectionText('boom'), 'boom');
+  assert.equal(rejectionText({ code: 500 }), '[object Object]');
+  // The catch must not itself throw on a null/undefined rejection.
+  assert.equal(rejectionText(null), 'null');
+  assert.equal(rejectionText(undefined), 'undefined');
+});
+
+test('reload: a rejecting view reports through the guard instead of escaping', async () => {
+  const dom = installToastDom();
+  try {
+    const token = beginNavigation();
+    let called = null;
+    // The promise resolves rather than rejecting: the call site has no catch.
+    await assert.doesNotReject(() => reload(
+      token,
+      async function (a, b) { called = a + b; throw new Error('HTTP 500: boom'); },
+      'x', 'y',
+    ));
+    assert.equal(called, 'xy', 'the view ran with the args it was handed');
+    assert.deepEqual(dom.messages(), ['HTTP 500: boom']);
+  } finally {
+    dom.restore();
+  }
+});
+
+test('reload: a rejection after the reader navigated on neither paints nor toasts', async () => {
+  const dom = installToastDom();
+  try {
+    const superseded = beginNavigation();
+    beginNavigation(); // the reader moved on before the reload's GET failed
+    await assert.doesNotReject(() => reload(
+      superseded,
+      async function () { throw new Error('stale'); },
+    ));
+    assert.deepEqual(dom.messages(), []);
+  } finally {
+    dom.restore();
+  }
+});
+
+test('reload: a successful view resolves without a toast', async () => {
+  const dom = installToastDom();
+  try {
+    const token = beginNavigation();
+    let ran = false;
+    await reload(token, async function () { ran = true; });
+    assert.equal(ran, true);
+    assert.deepEqual(dom.messages(), []);
+  } finally {
+    dom.restore();
+  }
+});
+

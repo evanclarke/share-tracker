@@ -6003,3 +6003,45 @@ removed guard (neutering `isCurrent` fails four Node cases; reverting one paint 
 Gates: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` (2,423 passed)
 and `node --test 'src/web/*.test.js'` (154 passed) all clean; `scripts/ui-check.sh --seed demo`
 rendered the overview, trades, snapshots, tax-report, prices and jobs routes after the change.
+
+## Fire-and-forget view reloads are unhandled promise rejections (2026-09-17 review, web frontend)
+
+(2026-09-17 review. Views reload themselves after an action without awaiting or catching the result,
+and there is no global `unhandledrejection` handler.)
+
+- [x] Reproduced by reading the call sites: `src/web/app.js:460`, `:495` (entity list reload after
+  DELETE), `:674`, `:798`, `:1038`, `:1127`/`:1149`/`:1183` (`refresh()`), `:1622`,
+  `:1733`/`:1756`/`:1788`/`:1831`/`:1871`, `:2000`/`:2039`/`:2081`. On Closing Prices, "Discard"
+  succeeds and toasts, then `viewClosingPrices()` (`:1756`) rejects on its `GET` — the discarded row
+  stays on screen, nothing tells the user, and the only trace is a console "Uncaught (in promise)"
+- [x] Fix: one shared `reload(fn, …args)` that catches and toasts, used by every call site, and/or a
+  global `window.addEventListener('unhandledrejection', …)` as the net
+- [x] Tests: a `web.rs` assertion that no bare `view*(` call is invoked as fire-and-forget (or that
+  the global handler is installed), in the served-bundle style
+- [x] Docs sync: none
+
+**Closed 2026-09-17.** Chose the shared helper only, with a stated reason for no global net:
+`util.js` gained `reload(seq, fn, …args)`, which runs the view and hooks a `.catch` that reports
+through `toastIfCurrent(seq, rejectionText(e), true)`, so the failure is handled *and* survives the
+navigation guard, and its promise never rejects so no call site needs its own `catch`. The token is
+the first parameter (rather than the bare `reload(fn, …args)` the section sketched) so it matches the
+`setMainIfCurrent(token, …)`/`toastIfCurrent(token, …)` convention and is load-bearing: it is both the
+toast guard and the token handed to the view, so a reload started by a view the reader has navigated
+away from can neither repaint nor toast — which is exactly why a global `unhandledrejection` net was
+rejected: it carries no navigation token and would raise a superseded navigation's error over the
+screen the reader has since opened. `rejectionText(e)` is the pure companion (an Error's `message`,
+anything else stringified, so a null rejection cannot throw out of the catch). All 15 fire-and-forget
+view call sites in `app.js` now go through `reload`, including the Closing Prices "Discard" reload
+that was the reproduction; `refreshHealthBanner` already caught its own failure and is unchanged.
+
+Tests: `web::tests::no_view_reload_is_fire_and_forget` (scans every served module for a `view*(` call
+that is neither awaited nor passed to `reload`, empty-offender plus positive bundle assertions, and
+verified to fail against a reverted call site) with its self-test
+`the_view_reload_scan_separates_guarded_calls_from_bare_ones` (fires on the bare shapes and stays
+quiet on `await`, `return await`, `reload(seq, viewX, seq)`, declarations, references, unrelated
+identifiers and comment prose), plus five `src/web/util.test.js` cases for `rejectionText` and
+`reload` (successful view silent, rejecting view toasts through the guard, a rejection after the
+reader navigated on neither paints nor toasts, and a non-Error rejection). Gates: `cargo fmt
+--check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` (2,425 passed) and
+`node --test 'src/web/*.test.js'` (159 passed) all clean; `scripts/ui-check.sh --seed demo` rendered
+the prices, jobs and snapshots routes.

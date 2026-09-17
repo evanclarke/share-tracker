@@ -471,6 +471,165 @@ mod tests {
         ));
     }
 
+    /// One fire-and-forget view call site: the served module, the 1-based
+    /// line, and that line's source text.
+    struct BareViewReload {
+        module: &'static str,
+        line: usize,
+        source_line: String,
+    }
+
+    /// Every place `source` calls a `view*(...)` without awaiting it — the
+    /// shape that leaves a rejected `GET` with no handler at all. The call is
+    /// guarded when it is `await`ed (`await viewX(…)`, including the router's
+    /// `return await viewX(…)`, which is what lets its `catch` paint the error
+    /// page) or handed to `util.js`'s `reload(...)` as a bare reference, which
+    /// has no `(` and so never matches.
+    ///
+    /// A declaration (`async function viewX(…)`) is not a call, and neither is
+    /// a method call (`cfg.viewX(…)`) or the tail of a longer identifier
+    /// (`previewReport(…)`). A whole-line comment is skipped, so prose about
+    /// the rule is not a breach of it.
+    fn bare_view_reload(module: &'static str, source: &str) -> Vec<BareViewReload> {
+        let mut hits = Vec::new();
+        for (i, line) in source.lines().enumerate() {
+            if line.trim_start().starts_with("//") {
+                continue;
+            }
+            let mut from = 0;
+            while let Some(found) = line[from..].find("view") {
+                let start = from + found;
+                from = start + "view".len();
+                // The name is `view` followed by an identifier body; it must
+                // continue with an uppercase letter (`viewEntityList`, not
+                // `viewBox` or `view-desc`) and end in a call.
+                let rest = &line[from..];
+                let mut name_len = 0;
+                for c in rest.chars() {
+                    if c.is_ascii_alphanumeric() || c == '_' || c == '$' {
+                        name_len += c.len_utf8();
+                    } else {
+                        break;
+                    }
+                }
+                let name = &rest[..name_len];
+                if !name.starts_with(|c: char| c.is_ascii_uppercase()) {
+                    continue;
+                }
+                if rest.as_bytes()[name_len..].first() != Some(&b'(') {
+                    continue;
+                }
+                let before = line[..start].chars().next_back().unwrap_or(' ');
+                if before.is_ascii_alphanumeric() || matches!(before, '_' | '$' | '.') {
+                    continue;
+                }
+                let head = line[..start].trim_end();
+                if head.ends_with("function") || head.ends_with("await") {
+                    continue;
+                }
+                hits.push(BareViewReload {
+                    module,
+                    line: i + 1,
+                    source_line: line.trim().to_string(),
+                });
+            }
+        }
+        hits
+    }
+
+    /// A view re-entered by one of its own actions — a DELETE reloading the
+    /// list, a job's "Run now" repainting the table, a re-fetch repainting
+    /// Closing Prices — is started and not awaited, and the view awaits its own
+    /// fetches, so a failing one has no handler. Closing Prices is the
+    /// reproduction: "Discard" succeeds and toasts, then the reload's `GET`
+    /// rejects, the discarded row stays on screen, nothing tells the user, and
+    /// the only trace is a console "Uncaught (in promise)".
+    ///
+    /// `util.js`'s `reload(seq, fn, …args)` is the fix: it runs the view under
+    /// the caller's navigation token and routes a rejection to
+    /// `toastIfCurrent`, so it is both handled and shown (and a superseded
+    /// navigation's failure still cannot land over the newer screen). This
+    /// scans every served module, so a new bare call site fails here.
+    #[tokio::test]
+    async fn no_view_reload_is_fire_and_forget() {
+        let mut offenders = Vec::new();
+        for (path, source) in JS_MODULES {
+            for hit in bare_view_reload(path, source) {
+                offenders.push(format!(
+                    "{} line {}: `{}`",
+                    hit.module, hit.line, hit.source_line
+                ));
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "a view that reloads itself after an action must go through `reload(seq, fn, …args)` \
+             (src/web/util.js): the view awaits its own fetches, so a bare call leaves a rejected \
+             `GET` as an unhandled promise rejection — nothing repaints and nothing tells the user \
+             (the Closing Prices Discard):\n{}",
+            offenders.join("\n")
+        );
+
+        let js = app_js_body().await;
+        // The one shared helper, called with the navigation token it guards
+        // and paints under, and the shape every call site uses.
+        assert!(js.contains("export function reload(seq, fn)"));
+        assert!(
+            js.contains(".catch(function (e) { toastIfCurrent(seq, rejectionText(e), true); });")
+        );
+        assert!(js.contains("reload(seq, viewEntityList, entity, seq);"));
+        assert!(js.contains("reload(seq, viewSellsList, seq);"));
+        assert!(js.contains("reload(seq, viewAttachments, ownerField, ownerId, seq);"));
+        assert!(js.contains("reload(seq, viewJobs, seq);"));
+        assert!(js.contains("reload(seq, viewClosingPrices, seq);"));
+        assert!(js.contains("reload(seq, viewSnapshots, seq);"));
+    }
+
+    /// The scan above is only worth having if it fires on the shape it is there
+    /// for and stays quiet on the shapes it is not, so both are pinned here
+    /// rather than resting on the tree happening to be clean.
+    #[test]
+    fn the_view_reload_scan_separates_guarded_calls_from_bare_ones() {
+        let flagged = |src: &str| !bare_view_reload("/static/probe.js", src).is_empty();
+
+        // Bare calls: the pre-fix shape, and the regression a new action adds.
+        assert!(flagged("viewClosingPrices(seq);"));
+        assert!(flagged(
+            "try { viewJobs(seq); } finally { btn.disabled = false; }"
+        ));
+        assert!(flagged(
+            "function refresh() { viewAttachments(field, id, seq); }"
+        ));
+        // `return viewX()` is not awaited — the router's caller ignores the
+        // promise, so a rejection from it is unhandled too.
+        assert!(flagged("return viewSnapshots(seq);"));
+
+        // Guarded: awaited, or handed to the helper as a bare reference.
+        assert!(!flagged("await viewClosingPrices(seq);"));
+        assert!(!flagged("return await viewEntityList(entity, seq);"));
+        assert!(!flagged("reload(seq, viewClosingPrices, seq);"));
+        assert!(!flagged(
+            "function refresh() { reload(seq, viewAttachments, field, id, seq); }"
+        ));
+        // A declaration is not a call, and neither is a passed reference.
+        assert!(!flagged(
+            "async function viewEntityList(entity, seq = navigationToken()) {"
+        ));
+        assert!(!flagged(
+            "export async function viewTaxReport(seq = navigationToken()) {"
+        ));
+        assert!(!flagged("const views = [viewReport, viewEntityList];"));
+        // Nor a method call, a longer identifier ending in `…view…`, or the
+        // SVG `viewBox` attribute.
+        assert!(!flagged("cfg.viewReport(report);"));
+        assert!(!flagged("previewReport(rows);"));
+        assert!(!flagged("viewBox: '0 0 ' + W + ' ' + H,"));
+        // Nor is prose about the rule.
+        assert!(!flagged(
+            "// viewClosingPrices(seq) used to reject with no handler"
+        ));
+    }
+
     #[tokio::test]
     async fn exchange_management_ui_present() {
         let js = app_js_body().await;

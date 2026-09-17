@@ -13,7 +13,7 @@
 //
 import {
   el, toastIfCurrent, setMainIfCurrent, beginNavigation, navigationToken,
-  isCurrentNavigation, looksNumeric, isTimestamp, fmtLocalTimestamp, utcTooltip,
+  isCurrentNavigation, reload, looksNumeric, isTimestamp, fmtLocalTimestamp, utcTooltip,
   cellText, numericDisplay, moneyText, columnKinds, columnLabel, columnLabelMaps,
   fkLabelMaps, api, apiUrl, pathSeg, nextId, loadOptions, listingNamer, describeTrade, tradeOrigin,
   columnLinks, listingLinkFrom, defaultSortColumn,
@@ -463,7 +463,7 @@ async function viewEntityList(entity, seq = navigationToken()) {
               try {
                 await api('DELETE', a.del);
                 toastIfCurrent(seq, a.label + ': done.');
-                viewEntityList(entity, seq);
+                reload(seq, viewEntityList, entity, seq);
               } catch (e) {
                 toastIfCurrent(seq, e.message, true);
               }
@@ -498,7 +498,7 @@ async function deleteEntity(entity, keyPath, row, seq = navigationToken()) {
   try {
     await api('DELETE', entity.api + '/' + keyPath);
     toastIfCurrent(seq, 'Deleted.');
-    viewEntityList(entity, seq);
+    reload(seq, viewEntityList, entity, seq);
   } catch (e) {
     toastIfCurrent(seq, e.message, true);
   }
@@ -679,7 +679,7 @@ async function viewSellsList(seq = navigationToken()) {
             class: 'link small danger',
             onclick: async function () {
               if (!confirm('Delete this Sell and its allocations?')) return;
-              try { await api('DELETE', '/sells/' + row.id); toastIfCurrent(seq, 'Deleted.'); viewSellsList(seq); }
+              try { await api('DELETE', '/sells/' + row.id); toastIfCurrent(seq, 'Deleted.'); reload(seq, viewSellsList, seq); }
               catch (e) { toastIfCurrent(seq, e.message, true); }
             },
           }, 'Delete'),
@@ -803,7 +803,7 @@ async function viewTransfersList(seq = navigationToken()) {
             class: 'link small danger',
             onclick: async function () {
               if (!confirm('Delete this transfer and restore the pre-transfer holding?')) return;
-              try { await api('DELETE', '/transfers/' + row.id); toastIfCurrent(seq, 'Deleted.'); viewTransfersList(seq); }
+              try { await api('DELETE', '/transfers/' + row.id); toastIfCurrent(seq, 'Deleted.'); reload(seq, viewTransfersList, seq); }
               catch (e) { toastIfCurrent(seq, e.message, true); }
             },
           }, 'Delete'),
@@ -1043,7 +1043,7 @@ async function viewListingRenames(listingId, seq = navigationToken()) {
             try {
               await api('DELETE', '/listings/' + pathSeg(listingId) + '/renames/' + row.id);
               toastIfCurrent(seq, 'Rename undone.');
-              viewListingRenames(listingId, seq);
+              reload(seq, viewListingRenames, listingId, seq);
             } catch (e) {
               toastIfCurrent(seq, e.message, true);
             }
@@ -1132,7 +1132,7 @@ async function viewAttachments(ownerField, ownerId, seq = navigationToken()) {
     .concat(anyLinked ? ['attached_to'] : []);
 
   const container = el('div');
-  function refresh() { viewAttachments(ownerField, ownerId, seq); }
+  function refresh() { reload(seq, viewAttachments, ownerField, ownerId, seq); }
 
   let table;
   if (rows.length === 0) {
@@ -1633,7 +1633,7 @@ async function viewJobs(seq = navigationToken()) {
           toastIfCurrent(seq, e.message, true);
         } finally {
           // Reload so the table reflects the freshly recorded last run.
-          viewJobs(seq);
+          reload(seq, viewJobs, seq);
         }
       });
       return el('td', { class: 'actions' }, btn);
@@ -1744,7 +1744,7 @@ async function viewClosingPrices(seq = navigationToken()) {
         } catch (e) {
           toastIfCurrent(seq, e.message, true);
         }
-        viewClosingPrices(seq);
+        reload(seq, viewClosingPrices, seq);
       });
       // An errored day no re-fetch can ever fix — before the security's first
       // trading day, or a permanent hole in the provider's series — is
@@ -1767,7 +1767,7 @@ async function viewClosingPrices(seq = navigationToken()) {
           } catch (e) {
             toastIfCurrent(seq, e.message, true);
           }
-          viewClosingPrices(seq);
+          reload(seq, viewClosingPrices, seq);
         });
         const cell = el('td', { class: 'actions' }, row.origin === 'manual' ? [del] : [btn, del]);
         return cell;
@@ -1799,7 +1799,7 @@ async function viewClosingPrices(seq = navigationToken()) {
       });
       toastIfCurrent(seq, 'Backfill: ' + s.fetched_ok + ' fetched, ' + s.already_stored + ' already stored, '
         + s.errored + ' errored (' + s.trading_days + ' trading days).', s.errored > 0);
-      viewClosingPrices(seq);
+      reload(seq, viewClosingPrices, seq);
     } catch (e) {
       toastIfCurrent(seq, e.message, true);
     }
@@ -1842,7 +1842,7 @@ async function viewClosingPrices(seq = navigationToken()) {
         price: mPriceInp.value, sourced_from: mSourcedInp.value, reason: mReasonInp.value,
       });
       toastIfCurrent(seq, 'Stored ' + mPriceInp.value + ' for ' + mDateInp.value + '.');
-      viewClosingPrices(seq);
+      reload(seq, viewClosingPrices, seq);
     } catch (e) {
       toastIfCurrent(seq, e.message, true);
     }
@@ -1882,7 +1882,7 @@ async function viewClosingPrices(seq = navigationToken()) {
         const r = await api('POST', '/closing_prices/clear_unpriced_before',
           { listing_id: Number(cListingSel.value) });
         toastIfCurrent(seq, 'Cleared ' + r.deleted + ' stored price(s) dated before ' + r.unpriced_before + '.');
-        viewClosingPrices(seq);
+        reload(seq, viewClosingPrices, seq);
       } catch (e) {
         toastIfCurrent(seq, e.message, true);
       }
@@ -2011,7 +2011,7 @@ async function viewSnapshots(seq = navigationToken()) {
       const body = dateInp.value ? { date: dateInp.value } : {};
       const stored = await api('POST', '/report_snapshots/generate', body);
       toastIfCurrent(seq, 'Stored ' + stored.length + ' snapshot(s) for ' + stored[0].snapshot_date + '.');
-      viewSnapshots(seq);
+      reload(seq, viewSnapshots, seq);
     } catch (e) {
       toastIfCurrent(seq, e.message, true);
     }
@@ -2050,7 +2050,7 @@ async function viewSnapshots(seq = navigationToken()) {
       } catch (e) {
         toastIfCurrent(seq, e.message, true);
       }
-      viewSnapshots(seq);
+      reload(seq, viewSnapshots, seq);
     });
     return btn;
   }
@@ -2092,7 +2092,7 @@ async function viewSnapshots(seq = navigationToken()) {
         } catch (e) {
           toastIfCurrent(seq, e.message, true);
         }
-        viewSnapshots(seq);
+        reload(seq, viewSnapshots, seq);
       });
       return el('td', { class: 'actions' }, [view, ' ', regen]);
     },

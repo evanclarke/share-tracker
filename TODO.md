@@ -38,22 +38,6 @@ what has been verified is SCENARIOS.md's
 [Verification status](SCENARIOS.md#verification-status) table and its per-section findings blocks;
 the maintained record of what was built and decided is the `DONE/*.md` archive.
 
-## Fire-and-forget view reloads are unhandled promise rejections (2026-09-17 review, web frontend)
-
-(2026-09-17 review. Views reload themselves after an action without awaiting or catching the result,
-and there is no global `unhandledrejection` handler.)
-
-- [ ] Reproduced by reading the call sites: `src/web/app.js:460`, `:495` (entity list reload after
-  DELETE), `:674`, `:798`, `:1038`, `:1127`/`:1149`/`:1183` (`refresh()`), `:1622`,
-  `:1733`/`:1756`/`:1788`/`:1831`/`:1871`, `:2000`/`:2039`/`:2081`. On Closing Prices, "Discard"
-  succeeds and toasts, then `viewClosingPrices()` (`:1756`) rejects on its `GET` — the discarded row
-  stays on screen, nothing tells the user, and the only trace is a console "Uncaught (in promise)"
-- [ ] Fix: one shared `reload(fn, …args)` that catches and toasts, used by every call site, and/or a
-  global `window.addEventListener('unhandledrejection', …)` as the net
-- [ ] Tests: a `web.rs` assertion that no bare `view*(` call is invoked as fire-and-forget (or that
-  the global handler is installed), in the served-bundle style
-- [ ] Docs sync: none
-
 ## Settlement resolution reads the stored trade outside the write transaction (2026-09-17 review, integrity)
 
 (2026-09-17 review. `settlement_date_source` is decided from a read on the pool and then written by a
