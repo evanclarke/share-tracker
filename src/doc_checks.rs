@@ -550,6 +550,11 @@ fn unpriced_before_and_excluded_holdings_documented() {
     assert!(API_MD.contains("**no figure is invented**"));
     assert!(API_MD.contains("**omits a real holding**"));
     assert!(API_MD.contains("**Excluded holdings:**"));
+    // The 2026-09-17 review's fix: an excluded holding's cost base leaves the
+    // total with the market value it cannot be matched against, and the
+    // narrowed series has no point for the row the run left unvalued.
+    assert!(API_MD.contains("**market value and cost base both leave the total**"));
+    assert!(API_MD.contains("no **valued** row on is **not a point**"));
     // The unbounded-true-up trap, and the all-excluded blocker.
     assert!(API_MD.contains("an excluded holding never clears"));
     assert!(API_MD.contains("is **blocked**, not stored empty"));

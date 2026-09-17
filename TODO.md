@@ -38,26 +38,6 @@ what has been verified is SCENARIOS.md's
 [Verification status](SCENARIOS.md#verification-status) table and its per-section findings blocks;
 the maintained record of what was built and decided is the `DONE/*.md` archive.
 
-## The snapshot series plots zero for an excluded holding and clears its flag (2026-09-17 review, financial correctness)
-
-(2026-09-17 review. A holding excluded from a date's valuation — no obtainable price, or before its
-`unpriced_before` — is supposed to be a *gap* in the series, and the doc comment says so; one
-builder emits zero instead.)
-
-- [ ] Reproduced by reading `src/reports/snapshot.rs:393-401`: `market_value.unwrap_or(Decimal::ZERO)`
-  with `holding_excluded = false`. An excluded listing still has a stored row (`market_value` null,
-  `price_unavailable` set), so the `rows.is_empty()` check does not catch it, and the Listing
-  Activity graph draws a fall to zero for a value that is merely unknown. `db_holding_series`
-  (`:462-464`) already does it correctly
-- [ ] The full series has the same shape: the excluded holding's cost base is folded into
-  `total_cost_base` while its market value is omitted, so the reported total mixes a cost in with no
-  matching value
-- [ ] Fix: skip the row (leaving the gap the doc promises) or emit it with `holding_excluded` set,
-  matching `db_holding_series`; exclude its cost base from the total
-- [ ] Tests: an excluded holding in a window asserting a gap (not a zero) and a total that omits both
-  its value and its cost base
-- [ ] Docs sync: `docs/API.md`'s report snapshots section if the emitted shape changes
-
 ## The annual report's worksheet ignores the scrip-cash apportionment, and the E10/G1 walk divides per unit (2026-09-17 review, financial correctness)
 
 (2026-09-17 review; two presentation/precision defects in the tax-report path, neither reaching an

@@ -379,10 +379,17 @@ pub async fn db_series(
         };
         if let Some(listing_id) = listing {
             // The narrowed series: this listing's rows alone, and the flags
-            // those rows carry rather than the portfolio's (see above).
+            // those rows carry rather than the portfolio's (see above). An
+            // *excluded* holding still has a stored row here — `market_value`
+            // null, `price_unavailable` set — so the `is_empty` test alone does
+            // not catch it: it is skipped on the same "was this row valued"
+            // guard `db_holding_series` makes, leaving the gap the doc above
+            // promises rather than a zero point. A subset sum cannot carry the
+            // portfolio's stepped-total flag, so `holding_excluded` stays
+            // unset and the missing point *is* the signal.
             let rows: Vec<&unrealised_gains::UnrealisedGain> = gains
                 .iter()
-                .filter(|g| g.listing_id == listing_id)
+                .filter(|g| g.listing_id == listing_id && g.market_value.is_some())
                 .collect();
             if rows.is_empty() {
                 continue;
@@ -398,7 +405,17 @@ pub async fn db_series(
             }
         } else {
             for g in &gains {
-                point.market_value += g.market_value.unwrap_or(Decimal::ZERO);
+                // The portfolio series keeps its point (the flag and list
+                // above say a holding is missing, and the graph steps where
+                // that holding's own series begins), but an unvalued row's
+                // cost base must not be folded in against the market value
+                // that was left out: dropping the whole row is what keeps the
+                // stored total smaller than the portfolio by *exactly* the
+                // excluded holdings.
+                let Some(market_value) = g.market_value else {
+                    continue;
+                };
+                point.market_value += market_value;
                 point.total_cost_base += g.total_cost_base;
                 point.unrealised_gain += g.unrealised_gain_loss.unwrap_or(Decimal::ZERO);
             }
@@ -2211,6 +2228,87 @@ mod tests {
         let series = db_series(&pool, None).await.unwrap();
         assert_eq!(series[1].market_value, "7493.00".parse().unwrap()); // + 50 × 24.90
         assert!(series[1].excluded_holdings.0.is_empty());
+    }
+
+    /// An excluded holding is a **gap** in its own (narrowed) series, never a
+    /// zero point, and it is left out of the portfolio series' **cost base**
+    /// as well as its market value — the two halves of the same defect. The
+    /// stored snapshot still carries a row for the holding (`market_value`
+    /// null, `price_unavailable` set), so the narrowed builder's old
+    /// `rows.is_empty()` test let it through as an unvalued row and summed a
+    /// zero, drawing a fall to nothing; the total meanwhile folded its cost
+    /// base in against a value it had omitted. `db_holding_series` makes the
+    /// same `continue` on an unvalued row, and the doc above promises the gap.
+    #[tokio::test]
+    async fn db_a_narrowed_series_gaps_an_excluded_holding_and_the_total_drops_its_cost_base() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BHP", Some("XASX"), "AUD").await;
+        insert_listing(&pool, 2, "LAC", Some("XASX"), "AUD").await;
+        insert_buy(&pool, 1, 1, ymd(2024, 1, 16), "100", "10", "AUD").await;
+        insert_buy(&pool, 2, 2, ymd(2024, 1, 16), "50", "20", "AUD").await;
+        store_price(&pool, 1, ymd(2026, 6, 3), "62.48").await;
+        store_price(&pool, 1, ymd(2026, 6, 4), "63.00").await;
+        // LAC's provider series begins on the 4th, so the 3rd excludes it.
+        store_price(&pool, 2, ymd(2026, 6, 4), "24.90").await;
+        let marked = test_support::listing(2)
+            .ticker("LAC")
+            .name("LAC")
+            .unpriced_before(ymd(2026, 6, 4))
+            .build();
+        listing::db_upsert(&pool, &marked).await.unwrap();
+
+        let now = friday_evening_sydney();
+        generate(&pool, ymd(2026, 6, 3), now).await.unwrap();
+        generate(&pool, ymd(2026, 6, 4), now).await.unwrap();
+
+        // The date's stored row really is unvalued — the shape the builder
+        // has to recognise, not an absent row.
+        let snap = db_get(&pool, ReportKind::UnrealisedGains, ymd(2026, 6, 3))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(snap.holding_excluded);
+        let gains: Vec<unrealised_gains::UnrealisedGain> =
+            serde_json::from_value(snap.rows).unwrap();
+        let lac_row = gains.iter().find(|g| g.listing_id == 2).unwrap();
+        assert_eq!(lac_row.market_value, None);
+        assert!(lac_row.price_unavailable.is_some());
+
+        // The portfolio series: the 3rd omits LAC's value **and** its cost
+        // base (BHP's 1000 alone, not 2000), and the 4th folds both back in.
+        let series = db_series(&pool, None).await.unwrap();
+        assert_eq!(series[0].snapshot_date, ymd(2026, 6, 3));
+        assert!(series[0].holding_excluded);
+        assert_eq!(series[0].market_value, "6248.00".parse().unwrap()); // BHP alone
+        assert_eq!(
+            series[0].total_cost_base,
+            "1000".parse().unwrap(),
+            "the excluded holding's cost base leaves the total with its value"
+        );
+        assert_eq!(series[0].unrealised_gain, "5248.00".parse().unwrap());
+        assert_eq!(series[1].market_value, "7545.00".parse().unwrap()); // + 50 × 24.90
+        assert_eq!(series[1].total_cost_base, "2000".parse().unwrap());
+
+        // LAC's own line: one point, on the day it was valued — the excluded
+        // day is a gap, not a zero point carrying its cost base alone.
+        let lac = db_series(&pool, Some(2)).await.unwrap();
+        assert_eq!(
+            lac.len(),
+            1,
+            "the excluded day is a gap, not a zero: {lac:?}"
+        );
+        assert_eq!(lac[0].snapshot_date, ymd(2026, 6, 4));
+        assert_eq!(lac[0].market_value, "1245.00".parse().unwrap());
+        assert_eq!(lac[0].total_cost_base, "1000".parse().unwrap());
+        assert_eq!(lac[0].unrealised_gain, "245.00".parse().unwrap());
+        assert!(!lac[0].holding_excluded);
+        assert!(lac[0].excluded_holdings.0.is_empty());
+
+        // BHP was never excluded: both dates are still points on its line.
+        let bhp = db_series(&pool, Some(1)).await.unwrap();
+        assert_eq!(bhp.len(), 2);
+        assert_eq!(bhp[0].market_value, "6248.00".parse().unwrap());
+        assert_eq!(bhp[1].market_value, "6300.00".parse().unwrap());
     }
 
     /// The unbounded-loop trap the flag exists to avoid. An excluded holding
