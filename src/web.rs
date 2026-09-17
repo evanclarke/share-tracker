@@ -2975,7 +2975,7 @@ mod tests {
         // shows as `running`, not as `ok` and not as `failed`, and `never`
         // still means the job has no recorded run (SCENARIOS T-11).
         assert!(js.contains("j.last_status == null ? 'never' : j.last_status"));
-        assert!(js.contains("status: r.status"));
+        assert!(js.contains("status: run.status"));
         let css = super::STYLE_CSS;
         assert!(
             css.contains(".badge.running"),
@@ -2999,10 +2999,29 @@ mod tests {
         // skipped the credential-gated ISO 24165 half stops reading as a
         // complete run (SCENARIOS T-09).
         assert!(js.contains("note: j.last_note || ''"));
-        assert!(js.contains("note: r.note || ''"));
+        assert!(js.contains("note: run.note || ''"));
+        // The screen's reading order is pinned rather than left to drift: each
+        // job row reads identity → outcome → the two times that qualify it →
+        // the reason a time may be missing → what went wrong → what was
+        // qualified. Status is second so the answer to "is anything wrong" is
+        // at the left edge, where a state column sits on every other screen
+        // (mic_registry's `status`), rather than behind the timestamps; and
+        // the prose Description is deliberately not a column at all — it ate
+        // the width the status and times need, so it rides the Job cell's
+        // tooltip (`row.description`). `next_run` after `last_run` is also
+        // what makes the table open newest-run-first, since
+        // `defaultSortColumn` takes the first date-shaped column.
         assert!(
-            js.contains("'status', 'note', 'error'"),
-            "the note belongs on both the jobs table and its run-history expansion"
+            js.contains(
+                "const cols = ['job', 'status', 'last_run', 'next_run', 'trigger', 'error', 'note'];"
+            ),
+            "the Jobs table's column order is the screen's reading order — keep the \
+             outcome beside the identity and the failure text beside the outcome"
+        );
+        assert!(
+            js.contains("title = row.description"),
+            "the description is no longer a column: it must reach the reader as the \
+             Job cell's tooltip"
         );
     }
 

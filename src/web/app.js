@@ -90,6 +90,13 @@ const FILTER_DEBOUNCE_MS = 150;
 // with a two-level breakdown (year → disposal → parcel) nests by recursion.
 // An "Expand all"/"Collapse all" pair sits above the table whenever any
 // caller supplies `expand`.
+// A row may carry a `description` string beside its columns — prose saying
+// what the row *is*, too long to spend a column on (the Jobs screen's
+// `JOB_DESC`). It is not a column: it becomes the tooltip of the cell whose
+// text is the row's own value, so a reader hovering the job's name is told
+// what the job does without the table losing a third of its width to a
+// paragraph. A column with a tooltip of its own (an fk's raw id, a rounded
+// money figure's full value) keeps that instead.
 function filterableTable(rows, cols, opts) {
   opts = opts || {};
   const statusField = opts.statusField;
@@ -311,13 +318,18 @@ function filterableTable(rows, cols, opts) {
         }
         const text = displayText(row, c);
         // A labelled fk cell keeps its raw id reachable on the tooltip; a
-        // money cell rounded for display keeps its full value there.
+        // money cell rounded for display keeps its full value there. A row may
+        // also carry a `description` — prose that says what the row *is* and
+        // that would cost the table a column of its own if it were shown (the
+        // Jobs screen's `JOB_DESC`) — which falls through to the cell of a
+        // value with no tooltip of its own, so it reads on hover instead.
         let title = null;
         if (labels[c] && text !== cellText(v)) {
           title = 'id ' + cellText(v);
         } else {
           const nd = numericDisplay(v, kinds[c]);
           if (nd && nd.tip) title = nd.tip;
+          else if (row.description && text === cellText(v)) title = row.description;
         }
         // A linked cell (opts.links) wraps that same display text in an
         // anchor — never the status-badge or timestamp cells above, which
@@ -1618,6 +1630,10 @@ async function viewJobs(seq = navigationToken()) {
   const rows = jobs.map(function (j) {
     return {
       job: j.name,
+      // Tooltip-only, never a column: the paragraph saying what the job does
+      // was eating the middle of the table. `filterableTable` reads this field
+      // and hangs it on the Job cell (see its `row.description` branch), so it
+      // is deliberately not in `cols` below.
       description: JOB_DESC[j.name] || '',
       // A manual-only job is a one-off repair with no schedule line at all, so
       // 'never' in the status column is expected rather than a missed run.
@@ -1646,7 +1662,24 @@ async function viewJobs(seq = navigationToken()) {
       _runs: j.runs || [],
     };
   });
-  const cols = ['job', 'description', 'trigger', 'next_run', 'last_run', 'status', 'note', 'error'];
+  // Column order is the screen's reading order, left to right: identity, then
+  // the outcome, then the two times that qualify it, the reason there may be
+  // none (`trigger` explains a blank `next_run`), the failure text, and the
+  // note that stops an `ok` reading as a complete run. Status sits second
+  // because a state column does wherever this app has one (mic_registry's
+  // `status`, the closing prices list's beside the price they qualify) — the
+  // operator's question is "is anything wrong", and an outcome behind the
+  // timestamps is the wrong end to sweep from.
+  //
+  // The paragraph-length JOB_DESC text is deliberately *not* a column: it ate
+  // the middle of the table and pushed the status/times off the visible width.
+  // It rides on the job-name cell's tooltip instead (see the `row.description`
+  // branch in `filterableTable`), which is why the row object still carries it.
+  // Keeping `next_run` after `last_run` also decides the opening sort —
+  // `defaultSortColumn` takes the first date-shaped column, so the table opens
+  // newest-run-first and the never-run jobs, whose blank key has no date order,
+  // fall to the bottom instead of sitting at the top for no reason.
+  const cols = ['job', 'status', 'last_run', 'next_run', 'trigger', 'error', 'note'];
   const table = filterableTable(rows, cols, {
     statusField: 'status',
     // Expand a job to its stored run history (the server keeps a bounded
@@ -1654,20 +1687,25 @@ async function viewJobs(seq = navigationToken()) {
     // failure that later succeeded — is diagnosable from here.
     expand: function (row) {
       if (!row._runs.length) return null;
-      const runs = row._runs.map(function (r) {
+      // The failure text rides immediately beside the status it explains,
+      // rather than out at the far end of the row: an operator who expands a
+      // job is reading what went wrong, and this table carries no Actions
+      // column competing for the width (the parent table's own error/note stay
+      // last, where they read as the tail of its status).
+      const runs = row._runs.map(function (run) {
         return {
-          started_at: r.started_at,
+          started_at: run.started_at,
           // Null for a run that started and never finished; the status column
           // beside it is what says so.
-          finished_at: r.finished_at || '',
-          status: r.status,
-          note: r.note || '',
-          error: r.error || '',
+          finished_at: run.finished_at || '',
+          status: run.status,
+          error: run.error || '',
+          note: run.note || '',
         };
       });
       return {
         rows: runs,
-        cols: ['started_at', 'finished_at', 'status', 'note', 'error'],
+        cols: ['started_at', 'finished_at', 'status', 'error', 'note'],
         opts: { statusField: 'status' },
       };
     },
