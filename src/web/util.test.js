@@ -11,12 +11,13 @@
 // src/web.rs, and a Rust test there pins that no `*.test.js` file is listed
 // (and that every non-test module is).
 //
-import { test } from 'node:test';
+import { test, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   roundDecimalStr, groupThousands, padMinDp, decStrEq, numericDisplay,
   addDecimalStrings, decParts, decCompare, mulToCents, frankingCreditFor, decEq,
   looksNumeric, columnKinds, columnLabel, columnLinks, listingLinkFrom, defaultSortColumn,
+  tableViewCache, debounce,
   tradeOrigin,
   periodReturnPct,
   holdingHasActivity, loadPref, savePref, pathSeg, basePath, apiUrl, authEnabled,
@@ -1035,6 +1036,142 @@ test('reload: a successful view resolves without a toast', async () => {
     assert.deepEqual(dom.messages(), []);
   } finally {
     dom.restore();
+  }
+});
+
+// ---- tableViewCache: the shared table's memoized derivation -------------
+//
+// `filterableTable` (app.js) hands its filter+sort derivation to
+// `tableViewCache` and keys it on (rows, sort column, direction, filters) —
+// never the page. The contract pinned here is what keeps a pager click from
+// re-walking the whole result set (the 2026-09-17 review's ~25-51 ms per
+// click on a 40k-row list) while never serving a stale view of different rows.
+
+// A stand-in for the table's derivation: it counts calls and sorts/filters a
+// tiny row set, so the tests see exactly what `filterableTable` sees — the
+// identical computed array on reuse, a fresh one on recompute.
+function countingDerive() {
+  const calls = { n: 0 };
+  function derive(rows, sortCol, sortDir, filters) {
+    calls.n += 1;
+    const active = Object.keys(filters);
+    let out = active.length
+      ? rows.filter(function (r) {
+        return active.every(function (c) {
+          return String(r[c]).toLowerCase().indexOf(filters[c]) !== -1;
+        });
+      })
+      : rows;
+    if (sortCol != null) {
+      out = out.slice().sort(function (a, b) {
+        return String(a[sortCol]).localeCompare(String(b[sortCol])) * sortDir;
+      });
+    }
+    return out;
+  }
+  return { calls: calls, derive: derive };
+}
+
+test('tableViewCache reuses the computed set for a repeated (column, direction, filter)', () => {
+  const rows = [{ a: 'b' }, { a: 'a' }];
+  const d = countingDerive();
+  const view = tableViewCache(d.derive);
+  const filters = { a: 'a' };
+  const first = view(rows, 'a', 1, filters);
+  const second = view(rows, 'a', 1, filters);
+  assert.equal(d.calls.n, 1);
+  // The very same computed set, not a copy of it.
+  assert.equal(first, second);
+});
+
+test('tableViewCache recomputes when the filter, column or direction changes', () => {
+  const rows = [{ a: 'b', b: 'x' }, { a: 'a', b: 'y' }];
+  const d = countingDerive();
+  const view = tableViewCache(d.derive);
+  view(rows, 'a', 1, { a: 'a' });
+  assert.equal(d.calls.n, 1);
+  view(rows, 'a', 1, { a: 'b' }); // changed filter
+  assert.equal(d.calls.n, 2);
+  view(rows, 'b', 1, { a: 'b' }); // changed column
+  assert.equal(d.calls.n, 3);
+  view(rows, 'b', -1, { a: 'b' }); // changed direction
+  assert.equal(d.calls.n, 4);
+  view(rows, 'b', -1, {}); // cleared filter
+  assert.equal(d.calls.n, 5);
+});
+
+test('tableViewCache keys the filters order-independently', () => {
+  const rows = [{ a: 'a', b: 'b' }];
+  const d = countingDerive();
+  const view = tableViewCache(d.derive);
+  view(rows, 'a', 1, { a: 'a', b: 'b' });
+  view(rows, 'a', 1, { b: 'b', a: 'a' });
+  assert.equal(d.calls.n, 1);
+});
+
+test('tableViewCache recomputes when the underlying rows change', () => {
+  const d = countingDerive();
+  const view = tableViewCache(d.derive);
+  const filters = {};
+  view([{ a: 'a' }], 'a', 1, filters);
+  view([{ a: 'b' }], 'a', 1, filters);
+  assert.equal(d.calls.n, 2);
+});
+
+test('paging reuses the computed set — the page is not a cache input', () => {
+  const rows = [{ a: 'a' }, { a: 'b' }, { a: 'c' }];
+  const d = countingDerive();
+  const view = tableViewCache(d.derive);
+  const filters = {};
+  const PAGE_SIZE = 1;
+  // Model the call site: renderBody derives the set once, then slices the
+  // current page out of it; the pager only moves `page` and renders again.
+  let page = 0;
+  function render() {
+    const vr = view(rows, 'a', 1, filters);
+    return vr.slice(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE);
+  }
+  assert.deepEqual(render(), [{ a: 'a' }]);
+  page = 1;
+  assert.deepEqual(render(), [{ a: 'b' }]);
+  page = 2;
+  assert.deepEqual(render(), [{ a: 'c' }]);
+  assert.equal(d.calls.n, 1); // one derivation across three page renders
+});
+
+// ---- debounce: the filter input's trailing-edge coalescer ----------------
+test('debounce fires once after a burst, with the trailing arguments', () => {
+  mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    const calls = [];
+    const input = { name: 'filter' };
+    const fn = debounce(function (v) { calls.push([this.name, v]); }, 100);
+    fn.call(input, 'a');
+    fn.call(input, 'ab');
+    fn.call(input, 'abc');
+    assert.deepEqual(calls, []); // nothing on the leading edge
+    mock.timers.tick(99);
+    assert.deepEqual(calls, []);
+    mock.timers.tick(1);
+    assert.deepEqual(calls, [['filter', 'abc']]); // only the last call's value
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test('debounce fires again for a later burst', () => {
+  mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    const calls = [];
+    const fn = debounce(function (v) { calls.push(v); }, 50);
+    fn(1);
+    mock.timers.tick(50);
+    assert.deepEqual(calls, [1]);
+    fn(2);
+    mock.timers.tick(50);
+    assert.deepEqual(calls, [1, 2]);
+  } finally {
+    mock.timers.reset();
   }
 });
 

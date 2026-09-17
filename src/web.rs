@@ -3670,6 +3670,38 @@ mod tests {
         assert!(css.contains(".pager-info"));
     }
 
+    /// The shared table's filtered + sorted set is derived once per
+    /// (rows, column, direction, filter) state and reused. The 2026-09-17
+    /// review measured a 40k-row sort at ~25-51 ms and found it re-run on
+    /// every render — including a pager click, which cannot change the set at
+    /// all — and on every filter keystroke, which is what made typing in the
+    /// Closing Prices filter visibly stutter. `util.js`'s `tableViewCache`
+    /// (the memoized derivation) and `debounce` (the filter input's trailing
+    /// edge) are the fix, and their reuse/recompute contract is unit-tested in
+    /// `util.test.js`; these pins are the call-site wiring in the served
+    /// bundle, which a refactor could leave behind while the helpers stayed
+    /// correct.
+    #[tokio::test]
+    async fn table_view_derivation_is_cached_and_the_pager_reuses_it() {
+        let js = app_js_body().await;
+        assert!(js.contains("export function tableViewCache(derive)"));
+        assert!(js.contains("export function debounce(fn, ms)"));
+        // filterableTable wraps its filter+sort derivation in the cache, keyed
+        // on the state that determines the set — never on the page.
+        assert!(js.contains(
+            "const cachedView = tableViewCache(function (rows, sortCol, sortDir, filters) {"
+        ));
+        assert!(js.contains("return cachedView(rows, sortCol, sortDir, filters);"));
+        // A filter keystroke is debounced, so a burst derives once.
+        assert!(js.contains("const FILTER_DEBOUNCE_MS = "));
+        assert!(js.contains("oninput: debounce(function () {"));
+        assert!(js.contains("applyFilter(c, this.value.trim().toLowerCase());"));
+        // A pager click only moves the page and repaints: it invalidates
+        // nothing and re-runs no sort.
+        assert!(js.contains("if (page > 0) { page--; renderBody(); }"));
+        assert!(js.contains("page++; renderBody();"));
+    }
+
     #[tokio::test]
     async fn column_headings_are_human_friendly() {
         let js = app_js_body().await;

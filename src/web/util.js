@@ -878,6 +878,80 @@ export function defaultSortColumn(cols) {
   return null;
 }
 
+// ---- table view derivation ----------------------------------------------
+//
+// `filterableTable` (app.js) derives its shown rows in two steps: which
+// columns are numeric (once, when the table is built) and the filtered +
+// sorted result set (on every render). The second is a whole-set walk — the
+// Closing Prices screen hands the shared table its full stored price history
+// (~25k rows when the 2026-09-17 review measured it), where a 40k-row
+// string-column sort took ~51 ms and a numeric one ~25 ms — and it used to
+// re-run on *every* render, including a pager click, which cannot change the
+// set at all. `tableViewCache` memoizes that derivation on the only inputs
+// that determine it: the rows, the sort column, the sort direction, and the
+// active filters. A repeat request — a page change, an expand/collapse
+// toggle, a re-render of the same state — reuses the computed set; a changed
+// column, direction, filter or row array recomputes.
+//
+// Pure (no DOM, no timers), so the reuse/recompute contract is unit-tested
+// (src/web/util.test.js) rather than only pinned by string in the served
+// bundle.
+
+// The lowercased-substring filters, AND-combined, as a stable cache key: the
+// columns are sorted so the key does not depend on the order the reader
+// happened to fill them in, and JSON quoting keeps a filter value containing
+// the separators distinguishable from the columns around it.
+function tableViewKey(sortCol, sortDir, filters) {
+  const active = Object.keys(filters).sort();
+  return JSON.stringify([
+    sortCol == null ? null : sortCol,
+    sortDir,
+    active.map(function (c) { return [c, filters[c]]; }),
+  ]);
+}
+
+// Memoize `derive(rows, sortCol, sortDir, filters)` behind a one-slot cache —
+// all a table needs, since a reader changes one of the three at a time — and
+// keep the invalidation rule in one place: any change to the state key or to
+// the row array derives again from the rows actually in hand, so a stale view
+// of different rows can never be served. `rows` is matched by reference, which
+// is what a caller swapping in a freshly fetched row array changes.
+export function tableViewCache(derive) {
+  let have = false;
+  let cachedRows = null;
+  let cachedKey = null;
+  let cached = null;
+  return function (rows, sortCol, sortDir, filters) {
+    const key = tableViewKey(sortCol, sortDir, filters);
+    if (have && rows === cachedRows && key === cachedKey) return cached;
+    cached = derive(rows, sortCol, sortDir, filters);
+    cachedRows = rows;
+    cachedKey = key;
+    have = true;
+    return cached;
+  };
+}
+
+// Collapse a burst of calls into one, `ms` after the last — the filter input
+// is the caller, where each keystroke would otherwise re-filter and re-sort
+// the whole result set on the main thread. The trailing call's arguments and
+// `this` win, and the pending timer is cleared on every call so only the
+// trailing edge fires. `setTimeout` is the environment's own (the browser's;
+// the unit test drives it through Node's mock timers), so this depends on
+// nothing beyond the global.
+export function debounce(fn, ms) {
+  let timer = null;
+  return function () {
+    const self = this;
+    const args = arguments;
+    if (timer !== null) clearTimeout(timer);
+    timer = setTimeout(function () {
+      timer = null;
+      fn.apply(self, args);
+    }, ms);
+  };
+}
+
 // Display kind per numeric column, looked up by name across every table.
 // 'money' rounds to 2 dp + thousands grouping; 'rate' / 'quantity' keep the
 // entered precision; 'rate4' is a derived-or-entered average price rounded

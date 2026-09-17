@@ -17,6 +17,7 @@ import {
   cellText, numericDisplay, decCompare, moneyText, columnKinds, columnLabel, columnLabelMaps,
   fkLabelMaps, api, apiUrl, pathSeg, nextId, loadOptions, listingNamer, describeTrade, tradeOrigin,
   columnLinks, listingLinkFrom, defaultSortColumn,
+  tableViewCache, debounce,
   periodReturnPct, holdingHasActivity, loadPref, savePref, initTheme,
 } from './util.js';
 import {
@@ -43,6 +44,13 @@ ACTIONS.forEach(function (a) { actionBySlug[a.slug] = a; });
 // larger filtered result set is paged so only one page is in the DOM at once.
 const PAGE_SIZE = 50;
 
+// Filter-keystroke debounce: a burst of typing coalesces into one
+// re-derivation of the table's filtered + sorted set. Long enough to swallow a
+// fast typist's keystrokes — each of which re-sorted the whole result set on
+// the main thread (a 40k-row sort measured ~25-51 ms) — and short enough that
+// the table still visibly follows the typing.
+const FILTER_DEBOUNCE_MS = 150;
+
 // Every data table in the app — entity lists, the Sells list, and report
 // tables — goes through this one renderer so they are uniformly filterable,
 // sortable, and paginated. Each column has its own filter input (substring
@@ -51,7 +59,11 @@ const PAGE_SIZE = 50;
 // to sort it (toggling ascending/descending). Filtering and sorting apply to
 // the whole result set; only the current page's slice (PAGE_SIZE rows) is put
 // in the DOM, with a prev/next pager + "showing m–n of total" count that
-// appears only when the filtered total exceeds one page. `opts.actions`, if
+// appears only when the filtered total exceeds one page. That whole-set
+// derivation is memoized on (rows, sort column, direction, filters) — never on
+// the page — so a pager click reuses it, and the filter inputs are debounced,
+// so a burst of typing derives once (see `tableViewCache`/`debounce` in
+// util.js). `opts.actions`, if
 // given, renders a trailing non-sortable, non-filtered Actions cell per row;
 // `opts.statusField` renders that column as a status badge; `opts.labels`
 // ({col: {id → label}}, from fkLabelMaps) shows the label instead of the raw
@@ -175,17 +187,22 @@ function filterableTable(rows, cols, opts) {
   if (expand) headCells.unshift(el('th', { class: 'expand-col' }, ''));
   if (actions) headCells.push(el('th', null, 'Actions'));
 
-  // Filter row: one input per column, AND-combined.
+  // Filter row: one input per column, AND-combined. Each input is debounced
+  // (util.js's `debounce`), so a burst of keystrokes lands as one
+  // re-derivation of the table rather than one per keystroke; the trailing
+  // keystroke still derives exactly once, from the value the input holds then.
+  const applyFilter = function (c, v) {
+    if (v === '') delete filters[c]; else filters[c] = v;
+    page = 0; // a changed filter re-pages from the first page
+    renderBody();
+  };
   const filterCells = cols.map(function (c) {
     if (cells[c]) return el('th', { class: 'filter-cell' });
     const input = el('input', {
       type: 'search', class: 'table-filter', placeholder: 'Filter ' + columnLabel(c) + '…',
-      oninput: function () {
-        const v = this.value.trim().toLowerCase();
-        if (v === '') delete filters[c]; else filters[c] = v;
-        page = 0; // a changed filter re-pages from the first page
-        renderBody();
-      },
+      oninput: debounce(function () {
+        applyFilter(c, this.value.trim().toLowerCase());
+      }, FILTER_DEBOUNCE_MS),
     });
     return el('th', { class: 'filter-cell' }, input);
   });
@@ -213,7 +230,14 @@ function filterableTable(rows, cols, opts) {
 
   // The whole filtered/sorted result set, paged only at render time so the
   // count and sort order always reflect the full set, never the visible page.
-  function visibleRows() {
+  // The derivation is memoized (util.js's `tableViewCache`) on the rows, the
+  // sort column, the direction, and the filters — deliberately *not* the page,
+  // which cannot change the set it slices. A pager click (or an expand toggle,
+  // or any other re-render of the same state) therefore reuses the computed
+  // set instead of re-filtering and re-sorting every row, which on a 25k-row
+  // list was the measured stutter. A changed filter/column/direction or a new
+  // row array recomputes, so the cache can never show another state's rows.
+  const cachedView = tableViewCache(function (rows, sortCol, sortDir, filters) {
     let out = rows;
     const active = Object.keys(filters);
     if (active.length) {
@@ -239,6 +263,10 @@ function filterableTable(rows, cols, opts) {
       });
     }
     return out;
+  });
+
+  function visibleRows() {
+    return cachedView(rows, sortCol, sortDir, filters);
   }
 
   // Show the pager (and set its count) only when the filtered total spills

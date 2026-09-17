@@ -38,22 +38,6 @@ what has been verified is SCENARIOS.md's
 [Verification status](SCENARIOS.md#verification-status) table and its per-section findings blocks;
 the maintained record of what was built and decided is the `DONE/*.md` archive.
 
-## `filterableTable` re-filters and re-sorts the whole unpaginated set on every interaction (2026-09-17 review, web frontend)
-
-(2026-09-17 review, measured. Every data table renders through `filterableTable`, which sorts and
-filters the entire result set on the main thread.)
-
-- [ ] Reproduced by reading `src/web/app.js:214-233` (called from `renderBody` at `:245-247`), with
-  `numeric` recomputed by a `rows.some` per column at `:100-103`, and measured on this machine: a
-  40k-row string-column sort is ~51 ms and a numeric one ~25 ms, per filter keystroke and per pager
-  click. The Closing Prices list returns every stored price row (20 listings × 5 years ≈ 25k rows at
-  the time of measurement), so typing in its filter visibly stutters
-- [ ] Fix: debounce the filter input and/or cache the sorted view keyed by (column, direction,
-  filter); the pager needs no re-sort at all
-- [ ] Tests: a `src/web/*.test.js` unit test on whichever caching/derivation is extracted (the
-  project's existing pattern for pure frontend helpers)
-- [ ] Docs sync: none
-
 ## Frontend robustness nits: no loading state, an unguarded decode, an undisconnected observer, an unencoded query value, and a duplicated helper (2026-09-17 review, web frontend)
 
 (2026-09-17 review; small, independent fixes in `src/web/`, grouped because each is a few lines.

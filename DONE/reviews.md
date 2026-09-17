@@ -6577,3 +6577,42 @@ demo` pass confirmed every rendered `for="f_…"` had a matching `id="f_…"` in
 closing-prices, snapshots, unrealised-gains, sell and transfer views. Gates: `cargo fmt --check`,
 `cargo clippy --all-targets -- -D warnings`, `cargo test` (2,464 passed) and
 `node --test 'src/web/*.test.js'` (167 passed) all clean.
+
+## `filterableTable` re-filters and re-sorts the whole unpaginated set on every interaction (2026-09-17 review, web frontend)
+
+(2026-09-17 review, measured. Every data table renders through `filterableTable`, which sorts and
+filters the entire result set on the main thread.)
+
+- [x] Reproduced by reading `src/web/app.js:214-233` (called from `renderBody` at `:245-247`), with
+  `numeric` recomputed by a `rows.some` per column at `:100-103`, and measured on this machine: a
+  40k-row string-column sort is ~51 ms and a numeric one ~25 ms, per filter keystroke and per pager
+  click. The Closing Prices list returns every stored price row (20 listings × 5 years ≈ 25k rows at
+  the time of measurement), so typing in its filter visibly stutters
+- [x] Fix: debounce the filter input and/or cache the sorted view keyed by (column, direction,
+  filter); the pager needs no re-sort at all
+- [x] Tests: a `src/web/*.test.js` unit test on whichever caching/derivation is extracted (the
+  project's existing pattern for pure frontend helpers)
+- [x] Docs sync: none
+
+**Closed 2026-09-17.** Both halves of the fix. `util.js` gained the pure `tableViewCache(derive)`, a
+one-slot memoizer keyed on `(rows array identity, sort column, sort direction, active filters)` — the
+filters as a JSON-quoted, column-sorted list so the key does not depend on the order the reader filled
+columns in — and `debounce(fn, ms)`. `filterableTable` wraps its filter+sort derivation in the cache
+and debounces each filter input (150 ms trailing), so a burst of keystrokes derives once; a page click
+only moves `page` and re-slices the already-computed set, so it never re-enters the derivation. A
+single-slot cache keeps the invalidation rule in one place: any change to the state key or to the row
+array (matched by reference, which is what swapping in a freshly fetched array changes) recomputes
+from the rows actually in hand, so a stale view can never be served. Every documented table behaviour
+is untouched — the derivation body is unchanged (newest-first `defaultSortColumn`, the exact
+`decCompare`, the `given.get(a) - given.get(b)` tie-break multiplied by `sortDir`, the 50-row pager and
+its "showing m–n of total", AND-combined substring filters, and `opts.cells` columns still excluded
+from sorting/filtering and from the default-sort choice), with the existing `web.rs` string pins still
+passing.
+
+Tests: seven `src/web/util.test.js` cases — `tableViewCache` reuse for a repeated
+(column, direction, filter) request, recompute on a changed filter/column/direction, an
+order-independent filter key, recompute on a changed row array, and that paging reuses the computed
+set (the page is not a cache input), plus `debounce`'s trailing-edge behaviour — and
+`web::tests::table_view_derivation_is_cached_and_the_pager_reuses_it` for the call-site wiring. Gates:
+`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` (2,465 passed) and
+`node --test 'src/web/*.test.js'` (174 passed) all clean.
