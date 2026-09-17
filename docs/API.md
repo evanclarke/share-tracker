@@ -64,6 +64,8 @@ The session cookie is self-contained (its own signature and expiry, checked agai
 - changing `[auth].password_hash` invalidates every previously issued session at once (the derived key changes with it) — the intended way to force everyone signed out;
 - `POST /logout` **cannot revoke a specific cookie** — it only tells the browser to stop sending it. A copied-out cookie value stays valid until its own 30-day expiry regardless of logging out. See [Known limitations](#known-limitations).
 
+**The config file is itself a secret and must stay owner-only** (`chmod 600`). `[auth].password_hash` is the direct input to the session-signing key, so any local user who can read `/usr/local/etc/share-tracker.toml` can mint a valid `st_session` cookie for any expiry without ever knowing the password, and `[auth].api_token` is full read/write API access. The FreeBSD package installs the config `0600` owned by the service user the server runs as (a root-owned `0600` file would be unreadable to the server) and re-tightens an existing copy and its ownership on upgrade, and makes its `/var/db/share-tracker` data directory (the database and the backups beside it) `0700`; the server logs a startup `WARN` naming a config file it loads whose group or other bits are set, but never changes the mode itself.
+
 No CSRF token is issued or required: the cookie's `SameSite=Lax` withholds it from cross-site `POST`/`PUT`/`DELETE` requests, which covers every state-changing route in this API (`GET` routes are read-only).
 
 ## Exchanges

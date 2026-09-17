@@ -38,37 +38,6 @@ what has been verified is SCENARIOS.md's
 [Verification status](SCENARIOS.md#verification-status) table and its per-section findings blocks;
 the maintained record of what was built and decided is the `DONE/*.md` archive.
 
-## The config file holding every secret is installed world-readable (2026-09-17 review, security)
-
-(2026-09-17 review, verified by reading the packaging scripts and the auth code. Earlier review
-passes covered CI pinning and the argv/secret rules; this one covers the file the secrets actually
-live in.)
-
-- [ ] Reproduced: `pkg/freebsd/build-pkg.sh:33` installs the sample
-  `-m 0644 pkg/freebsd/share-tracker.toml.sample`, and the post-install in
-  `pkg/freebsd/manifest.ucl` copies it to the live `/usr/local/etc/share-tracker.toml` with `cp -p`,
-  preserving `0644`. Nothing in the config reader (`src/infra/config.rs`) checks or tightens the
-  mode, and neither the README's Authentication section nor `docs/API.md` mentions permissions
-- [ ] What that exposes is not just the SMTP password: `[auth].api_token` is full read/write API
-  access, and `[auth].password_hash` is the *input* to the session-signing key —
-  `Auth::new` computes `derive_signing_key(&password_hash)`
-  (`src/infra/auth.rs:110`, `:215-220`), an HMAC-SHA256 keyed by the PHC string itself. Any local
-  user who reads the file can therefore mint a valid `st_session` cookie for any expiry without ever
-  knowing the password, and can read the database and the backups beside it (created at the process
-  umask — `0644` at the conventional `022`; `/var/db/share-tracker` is created by a bare `mkdir -p`,
-  so `0755`)
-- [ ] This is inconsistent with the project's own care elsewhere: the log file is installed `640`
-  (`pkg/freebsd/newsyslog.conf`), and `--auth-*`/`--email-*` CLI flags are refused precisely because
-  "a secret on the command line is visible to anyone on the host via `ps`" (`src/infra/args.rs`,
-  README Authentication)
-- [ ] Fix: `install -m 0600` for the sample, an explicit `chmod 600` on the live file in post-install
-  when it exists, `chmod 700 /var/db/share-tracker` (or a documented `umask 077` in the rc script),
-  and a startup `WARN` in `config::read` when `metadata.permissions().mode() & 0o077 != 0`
-- [ ] Tests: a unit test on the mode-warning helper (the read path's warning is the testable half);
-  the packaging half is verified by inspection, as the other packaging claims in `doc_checks` are
-- [ ] Docs sync: a permissions note in the README's Configuration file / Authentication sections and
-  in `docs/API.md`'s Authentication section
-
 ## The closing-price delete guard is read outside its transaction, and the table has no DELETE staleness trigger (2026-09-17 review, integrity)
 
 (2026-09-17 review, reproduced by reading the handler and the migration set. The handler reads the

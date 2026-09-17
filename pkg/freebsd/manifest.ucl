@@ -38,11 +38,27 @@ if ! pw usershow share_tracker >/dev/null 2>&1; then
 fi
 mkdir -p /var/db/share-tracker/backups
 chown -R share_tracker:share_tracker /var/db/share-tracker
+# 0700, not the mkdir default 0755: the database and the backups beside it
+# hold every record, and the directory mode is what makes them unreachable
+# whatever mode each file was created with. 0700 also tightens the directory
+# on an upgrade (a umask in the rc script would affect only files the running
+# server creates, and would leave an already-0755 directory traversable).
+chmod 700 /var/db/share-tracker
 for f in share-tracker.toml share-tracker.cron newsyslog.conf.d/share-tracker.conf; do
   if [ ! -f "/usr/local/etc/$f" ]; then
     cp -p "/usr/local/etc/$f.sample" "/usr/local/etc/$f"
   fi
 done
+# The copy above runs only on first install, so an upgrade must tighten a live
+# config the earlier package installed 0644 — it holds [auth].password_hash
+# (the session-signing key's input) and [auth].api_token. The server runs as
+# the service user (rc.subr su), so the 0600 file has to be owned by it: the
+# cp -p above leaves it root-owned and 0600 root-owned is unreadable by the
+# server. update.sh reads it as root, which still can.
+if [ -f /usr/local/etc/share-tracker.toml ]; then
+  chown share_tracker:share_tracker /usr/local/etc/share-tracker.toml
+  chmod 600 /usr/local/etc/share-tracker.toml
+fi
 EOD
   pre-deinstall: <<EOD
 for f in share-tracker.toml share-tracker.cron newsyslog.conf.d/share-tracker.conf; do

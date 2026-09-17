@@ -30,7 +30,10 @@ mkdir -p "$STAGE/usr/local/bin" "$STAGE/usr/local/etc/rc.d" \
   "$STAGE/usr/local/etc/newsyslog.conf.d"
 install -m 0755 "$CARGO_TARGET_DIR/release/share-tracker" "$STAGE/usr/local/bin/"
 install -m 0755 pkg/freebsd/share_tracker "$STAGE/usr/local/etc/rc.d/"
-install -m 0644 pkg/freebsd/share-tracker.toml.sample "$STAGE/usr/local/etc/"
+# 0600, not 0644: the config file holds [auth].password_hash — the input to the
+# session-signing key — and [auth].api_token, so it must not be readable by
+# anyone but the service user. The other samples stay world-readable.
+install -m 0600 pkg/freebsd/share-tracker.toml.sample "$STAGE/usr/local/etc/"
 # The default cron schedule ships as an editable @sample config file; the
 # sample share-tracker.toml points `schedule` at the installed copy.
 install -m 0644 schedule.cron "$STAGE/usr/local/etc/share-tracker.cron.sample"

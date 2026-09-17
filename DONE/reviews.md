@@ -5691,3 +5691,56 @@ with a valid rename still `201`),
 `entities::exchange::tests::db_upsert_rejects_malformed_close_time_and_unknown_timezone` (the
 DB-level write path). Gates: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and
 `cargo test` (2,406 passed) all clean, plus `node --test 'src/web/*.test.js'` (149 passed).
+
+## The config file holding every secret is installed world-readable (2026-09-17 review, security)
+
+(2026-09-17 review, verified by reading the packaging scripts and the auth code. Earlier review
+passes covered CI pinning and the argv/secret rules; this one covers the file the secrets actually
+live in.)
+
+- [x] Reproduced: `pkg/freebsd/build-pkg.sh:33` installs the sample
+  `-m 0644 pkg/freebsd/share-tracker.toml.sample`, and the post-install in
+  `pkg/freebsd/manifest.ucl` copies it to the live `/usr/local/etc/share-tracker.toml` with `cp -p`,
+  preserving `0644`. Nothing in the config reader (`src/infra/config.rs`) checks or tightens the
+  mode, and neither the README's Authentication section nor `docs/API.md` mentions permissions
+- [x] What that exposes is not just the SMTP password: `[auth].api_token` is full read/write API
+  access, and `[auth].password_hash` is the *input* to the session-signing key —
+  `Auth::new` computes `derive_signing_key(&password_hash)`
+  (`src/infra/auth.rs:110`, `:215-220`), an HMAC-SHA256 keyed by the PHC string itself. Any local
+  user who reads the file can therefore mint a valid `st_session` cookie for any expiry without ever
+  knowing the password, and can read the database and the backups beside it (created at the process
+  umask — `0644` at the conventional `022`; `/var/db/share-tracker` is created by a bare `mkdir -p`,
+  so `0755`)
+- [x] This is inconsistent with the project's own care elsewhere: the log file is installed `640`
+  (`pkg/freebsd/newsyslog.conf`), and `--auth-*`/`--email-*` CLI flags are refused precisely because
+  "a secret on the command line is visible to anyone on the host via `ps`" (`src/infra/args.rs`,
+  README Authentication)
+- [x] Fix: `install -m 0600` for the sample, an explicit `chmod 600` on the live file in post-install
+  when it exists, `chmod 700 /var/db/share-tracker` (or a documented `umask 077` in the rc script),
+  and a startup `WARN` in `config::read` when `metadata.permissions().mode() & 0o077 != 0`
+- [x] Tests: a unit test on the mode-warning helper (the read path's warning is the testable half);
+  the packaging half is verified by inspection, as the other packaging claims in `doc_checks` are
+- [x] Docs sync: a permissions note in the README's Configuration file / Authentication sections and
+  in `docs/API.md`'s Authentication section
+
+**Closed 2026-09-17.** The packaging installs the sample `0600` (`pkg/freebsd/build-pkg.sh`), and the
+post-install now tightens the live config — `chown share_tracker:share_tracker` then `chmod 600`
+when it exists — because the first-install `cp -p` runs only once and left an earlier package's
+`0644` copy in place on upgrade. The `chown` is part of the fix rather than decoration: `cp -p`
+leaves the copy root-owned, while the rc script's rc.subr `su`s to the service user, and a `0600`
+root-owned file is unreadable by the server. `/var/db/share-tracker` (the database and the backups
+beside it) is `chmod 700`d in place rather than governed by a `umask 077` in the rc script, because
+the directory mode is what makes the files unreachable whatever mode each was created with, and
+because it also tightens a `0755` directory an earlier package created. `infra::config::read` warns
+at startup through the new pure `mode_warning(path, mode)` helper whenever `mode & 0o077 != 0`,
+naming the file, the offending mode and `chmod 600`; the server deliberately never rewrites the mode
+itself. `docs/API.md`'s and the README's Configuration-file and Authentication sections all carry
+the note (the file is a secret, and why, and that the server warns but does not tighten).
+
+Tests: `infra::config::tests::a_world_accessible_config_warns_but_a_tight_one_does_not` (tight
+`0600`/`0400`/`0700` silent; `0640`/`0644`/`0604`/`0660`/`0777`/`0407`/`0664` all warn naming the
+path, mode and fix; a `0o100_600` file-type bit does not count), plus the packaging/doc pins
+`doc_checks::freebsd_packaging::the_config_file_and_data_directory_are_installed_owner_only` and
+`doc_checks::freebsd_packaging::config_file_permissions_documented`. Gates: `cargo fmt --check`,
+`cargo clippy --all-targets -- -D warnings` and `cargo test` (2,409 passed) all clean, plus
+`node --test 'src/web/*.test.js'` (149 passed).

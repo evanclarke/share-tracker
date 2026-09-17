@@ -3935,7 +3935,7 @@ fn amma_coverage_rule_is_documented_with_its_ato_authority() {
 /// every file the plist packages is staged, and the rc script drives the
 /// config file the package installs.
 mod freebsd_packaging {
-    use super::README_MD;
+    use super::{API_MD, README_MD};
 
     const RELEASE_YML: &str = include_str!("../.github/workflows/release.yml");
     const BUILD_SH: &str = include_str!("../pkg/freebsd/build-pkg.sh");
@@ -4201,6 +4201,62 @@ mod freebsd_packaging {
         assert!(README_MD.contains("**CLI flag > config-file value > built-in default**"));
         assert!(README_MD.contains("## Releases and versioning"));
         assert!(README_MD.contains("**Cutting a release = bumping `version` in `Cargo.toml`**"));
+    }
+
+    /// The config file is the deployment's whole secret store: `[auth]`'s
+    /// `password_hash` is the input the session-signing key is derived from
+    /// (so any local user who can read it can mint a session cookie for any
+    /// expiry) and `api_token` is full read/write API access. The package
+    /// therefore installs the sample `0600`, makes the data directory (the
+    /// database and the backups beside it) `0700`, and re-tightens a live
+    /// config on upgrade — the first-install copy must never be the only thing
+    /// that sets the mode, because it does not run on upgrade. The runtime half
+    /// (a startup `WARN` on a loose mode) is `infra::config`'s own test; this
+    /// is the packaging half, which the release VM runs but the suite cannot.
+    #[test]
+    fn the_config_file_and_data_directory_are_installed_owner_only() {
+        assert!(BUILD_SH.contains("install -m 0600 pkg/freebsd/share-tracker.toml.sample"));
+        // The data directory is tightened in place, so an upgrade fixes a
+        // directory the older package created 0755.
+        assert!(MANIFEST.contains("chmod 700 /var/db/share-tracker"));
+        // The live config is tightened only when it exists (first install has
+        // just copied it) and only for the table-holding file. chown is part of
+        // the fix, not decoration: the server runs as the service user, and a
+        // 0600 root-owned file would be unreadable by it.
+        assert!(
+            MANIFEST
+                .contains("chown share_tracker:share_tracker /usr/local/etc/share-tracker.toml")
+        );
+        assert!(MANIFEST.contains("chmod 600 /usr/local/etc/share-tracker.toml"));
+        assert!(MANIFEST.contains("if [ -f /usr/local/etc/share-tracker.toml ]"));
+        // The other two samples stay readable — they hold no secret.
+        assert!(!BUILD_SH.contains("install -m 0600 pkg/freebsd/newsyslog.conf"));
+        assert!(!BUILD_SH.contains("install -m 0600 schedule.cron"));
+    }
+
+    /// The permissions note is reader-facing in three places, because each is
+    /// where someone configuring authentication looks: the README's
+    /// Configuration file and Authentication sections, and `docs/API.md`'s
+    /// Authentication section. All three say the same two things — the file is
+    /// a secret (the password hash is the signing key's input) and the server
+    /// warns but does not tighten it.
+    #[test]
+    fn config_file_permissions_documented() {
+        // The README's Configuration file section: what the mode must be and
+        // why, plus what the package does about it.
+        assert!(README_MD.contains("**The file is a secret and must stay owner-only**"));
+        assert!(README_MD.contains("It holds `[auth].password_hash` and `[auth].api_token`"));
+        // The README's Authentication section: the credential consequence.
+        assert!(README_MD.contains("`password_hash` is the *input to the session-signing key*"));
+        assert!(README_MD.contains("without ever knowing the password"));
+        // API.md's Authentication section.
+        assert!(API_MD.contains("**The config file is itself a secret and must stay owner-only**"));
+        assert!(API_MD.contains("can mint a valid `st_session` cookie for any expiry"));
+        // The startup WARN is stated in all three, so the behaviour is not a
+        // surprise when it fires.
+        assert_eq!(README_MD.matches("group or other bits are set").count(), 2);
+        assert!(API_MD.contains("group or other bits are set"));
+        assert!(API_MD.contains("never changes the mode itself"));
     }
 }
 

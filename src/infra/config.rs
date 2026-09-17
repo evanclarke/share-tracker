@@ -290,9 +290,41 @@ pub fn load(explicit: Option<&str>) -> Result<ConfigFile, String> {
 }
 
 fn read(path: &str) -> Result<ConfigFile, String> {
+    use std::os::unix::fs::PermissionsExt;
+
     let text = std::fs::read_to_string(path)
         .map_err(|e| format!("failed to read config file {path}: {e}"))?;
+    let warning = std::fs::metadata(path)
+        .ok()
+        .and_then(|metadata| mode_warning(path, metadata.permissions().mode()));
+    if let Some(warning) = warning {
+        tracing::warn!("{warning}");
+    }
     toml::from_str(&text).map_err(|e| format!("invalid config file {path}: {e}"))
+}
+
+/// The warning to log for a config file whose mode grants the group or other
+/// class any access, `None` when it is owner-only.
+///
+/// The file holds every secret the deployment has: `[auth].password_hash` is
+/// the direct input to the session-signing key (`infra::auth` derives it from
+/// the PHC string), so any local user who can read the file can mint a valid
+/// `st_session` cookie for any expiry without knowing the password, and
+/// `[auth].api_token` is full read/write API access. The check is split out of
+/// [`read`] so it is unit-testable without a file on disk; the packaging half
+/// (installing the sample `0600` and tightening the live copy) lives in
+/// `pkg/freebsd/` and is pinned by `doc_checks::freebsd_packaging`. The server
+/// warns but never changes the mode itself — silently rewriting a file the
+/// operator owns is worse than telling them.
+fn mode_warning(path: &str, mode: u32) -> Option<String> {
+    if mode & 0o077 == 0 {
+        return None;
+    }
+    Some(format!(
+        "config file {path} is readable or writable by users other than its owner (mode {:04o}); \
+         it holds [auth] secrets — chmod 600 {path}",
+        mode & 0o7777
+    ))
 }
 
 #[cfg(test)]
@@ -557,6 +589,37 @@ mod tests {
         std::fs::write(&path, "not toml at all [").expect("write");
         let err = load(Some(path.to_str().expect("utf-8 path"))).unwrap_err();
         assert!(err.contains("config.toml"), "names the file: {err}");
+    }
+
+    #[test]
+    fn a_world_accessible_config_warns_but_a_tight_one_does_not() {
+        // Owner-only modes are the point: nothing is said.
+        for mode in [0o600, 0o400, 0o700] {
+            assert_eq!(
+                mode_warning("/usr/local/etc/share-tracker.toml", mode),
+                None,
+                "{mode:04o} must not warn"
+            );
+        }
+        // Any group or other access warns, naming the file, the offending mode
+        // and the fix — the file holds the password hash the session-signing
+        // key is derived from and the API token.
+        for mode in [0o640, 0o644, 0o604, 0o660, 0o777, 0o407, 0o664] {
+            let warning = mode_warning("/usr/local/etc/share-tracker.toml", mode)
+                .unwrap_or_else(|| panic!("{mode:04o} must warn"));
+            assert!(
+                warning.contains("/usr/local/etc/share-tracker.toml"),
+                "names the file: {warning}"
+            );
+            assert!(
+                warning.contains(&format!("{mode:04o}")),
+                "names the mode: {warning}"
+            );
+            assert!(warning.contains("chmod 600"), "says the fix: {warning}");
+        }
+        // Only the low twelve bits are the mode; the file-type bits above them
+        // must not read as group/other access.
+        assert_eq!(mode_warning("c.toml", 0o100_600), None);
     }
 
     #[test]
