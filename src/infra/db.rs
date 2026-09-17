@@ -1131,6 +1131,31 @@ mod tests {
         }
     }
 
+    /// [`connect_options`]'s `.foreign_keys(true)` is the only thing making
+    /// every `REFERENCES` clause in the schema a real constraint — without it
+    /// SQLite enforces none of them and a write naming a row that does not
+    /// exist simply lands. Nothing else reads that back, so this pins the
+    /// pragma on the connections [`init`] hands out, both pool kinds, exactly
+    /// as the busy-timeout test above pins its own connect-time pragma.
+    #[tokio::test]
+    async fn foreign_keys_are_in_force_on_every_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("fk.db").to_string_lossy().to_string();
+
+        for path in [file.as_str(), ":memory:"] {
+            let pool = init(path).await.unwrap();
+            let on: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(
+                on, 1,
+                "{path}: foreign keys are not in force — every FK constraint in \
+                 the schema is unenforced on this connection"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn init_memory_pool() {
         let pool = init(":memory:").await.unwrap();
@@ -1477,6 +1502,48 @@ mod tests {
             .execute(pool)
             .await
             .unwrap();
+    }
+
+    /// Every column of `table` in declaration order — the half of a rebuild a
+    /// hand-written `CREATE TABLE` can silently drop.
+    async fn table_columns(pool: &SqlitePool, table: &str) -> Vec<String> {
+        sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "SELECT name FROM pragma_table_info('{table}') ORDER BY cid"
+        )))
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    /// Every trigger on `table`, by name. A rename-pattern rebuild drops each
+    /// one and has to re-create it, so comparing the two sets is what says the
+    /// audit trail and staleness triggers came back.
+    async fn table_triggers(pool: &SqlitePool, table: &str) -> Vec<String> {
+        sqlx::query_scalar(
+            "SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = ? ORDER BY name",
+        )
+        .bind(table)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    /// Every row of `table`, rendered by SQLite's own `quote()` (so a TEXT, an
+    /// INTEGER, a BLOB and a NULL each compare exactly, with no coercion) and
+    /// joined into one string per row, oldest id first.
+    async fn table_rows(pool: &SqlitePool, table: &str) -> Vec<String> {
+        let columns = table_columns(pool, table).await;
+        let projection = columns
+            .iter()
+            .map(|c| format!("quote(\"{c}\")"))
+            .collect::<Vec<_>>()
+            .join(" || '|' || ");
+        sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "SELECT {projection} FROM \"{table}\" ORDER BY id"
+        )))
+        .fetch_all(pool)
+        .await
+        .unwrap()
     }
 
     /// 0020 rebuilds `closing_prices` via the rename pattern to add the
@@ -2250,6 +2317,122 @@ mod tests {
         );
     }
 
+    /// 0029 rebuilds `income` through the rename pattern to widen its
+    /// `income_type` CHECK to `OtherIncome` (0028's enum extension point). It
+    /// is the first rebuild of a table another table foreign-keys into, and
+    /// the one place a column or a row can silently disappear from a
+    /// hand-written `CREATE TABLE` + `INSERT … SELECT`. So it is applied here
+    /// to income that predates it, and every column and every row (its id and
+    /// values included) must come through byte-identical, the audit and
+    /// staleness triggers must come back, and `attachments`' foreign key must
+    /// still name `income` rather than the dropped `income_old`.
+    #[tokio::test]
+    async fn migration_0029_preserves_every_income_row_and_column() {
+        let pool = pool_migrated_below(29).await;
+        sqlx::query(
+            "INSERT INTO listings (id, exchange_mic, ticker, name, security_type, currency) \
+             VALUES (1, 'XASX', 'BHP', 'BHP Group', 'Share', 'AUD')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        // Explicit ids out of order, and a row of each kind the old CHECK
+        // admitted — including a trust row carrying the two conditional
+        // columns.
+        for (id, income_type, trust, entitlement, deferred) in [
+            (3, "Dividend", 0, None, None),
+            (11, "EmploymentIncome", 0, None, None),
+            (4, "Dividend", 1, Some("2025-06-30"), Some("12.345")),
+        ] {
+            sqlx::query(
+                "INSERT INTO income (id, listing_id, date_paid, unfranked_amount, \
+                                     franked_amount, franking_credits, trust_income, \
+                                     entitlement_date, tax_deferred_amount, income_type) \
+                 VALUES (?, 1, '2025-03-14', '5.50', '70.00', '30.00', ?, ?, ?, ?)",
+            )
+            .bind(id)
+            .bind(trust)
+            .bind(entitlement)
+            .bind(deferred)
+            .bind(income_type)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let columns_before = table_columns(&pool, "income").await;
+        let rows_before = table_rows(&pool, "income").await;
+        assert_eq!(columns_before.len(), 22, "setup: the 0029-era income shape");
+        assert_eq!(rows_before.len(), 3, "setup: three income rows");
+
+        apply_migration(&pool, 29).await;
+
+        assert_eq!(
+            table_columns(&pool, "income").await,
+            columns_before,
+            "the rebuild must carry every column the old income table had"
+        );
+        assert_eq!(
+            table_rows(&pool, "income").await,
+            rows_before,
+            "no income row is lost or altered by the rebuild"
+        );
+        let ids: Vec<i64> = sqlx::query_scalar("SELECT id FROM income ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            ids,
+            [3, 4, 11],
+            "ids are copied explicitly, so the audit trail keyed on them survives"
+        );
+
+        // Every object the dropped table took with it is re-created: the audit
+        // pair and the three snapshot-staleness triggers.
+        assert_eq!(
+            table_triggers(&pool, "income").await,
+            [
+                "income_row_history_delete",
+                "income_row_history_update",
+                "income_stale_snapshots_delete",
+                "income_stale_snapshots_insert",
+                "income_stale_snapshots_update",
+            ]
+        );
+
+        // `attachments.income_id` still points at the rebuilt table, not at the
+        // `income_old` the rename would leave it on with foreign keys enabled.
+        let referenced: Vec<String> =
+            sqlx::query_scalar("SELECT \"table\" FROM pragma_foreign_key_list('attachments')")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert!(
+            referenced.iter().any(|t| t == "income"),
+            "attachments must still reference income: {referenced:?}"
+        );
+
+        // The point of the rebuild: `OtherIncome` is admitted now, and a value
+        // outside the widened set still is not.
+        sqlx::query(
+            "INSERT INTO income (id, listing_id, date_paid, unfranked_amount, income_type) \
+             VALUES (20, 1, '2025-07-01', '9.99', 'OtherIncome')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert!(
+            sqlx::query(
+                "INSERT INTO income (id, listing_id, date_paid, income_type) \
+                 VALUES (21, 1, '2025-07-02', 'Bogus')"
+            )
+            .execute(&pool)
+            .await
+            .is_err(),
+            "the widened CHECK still constrains the column"
+        );
+    }
+
     /// 0047 adds `corporate_actions.renounceable` (SCENARIOS AA-b). What needs
     /// pinning is the meaning it gives existing rows: every rights issue
     /// recorded before it was a **renounceable** offer — that is what the whole
@@ -2487,6 +2670,272 @@ mod tests {
             assert!(
                 sqlx::query(bad).execute(&pool).await.is_err(),
                 "the CHECK must refuse: {bad}"
+            );
+        }
+    }
+
+    /// 0045 rebuilds **17** audited tables to give them `AUTOINCREMENT` ids —
+    /// the largest rename-pattern rebuild in the tree. A rebuild is where a
+    /// column or a row silently disappears from a hand-written `CREATE TABLE`
+    /// + `INSERT … SELECT`, and `migrations_do_not_drop_tables_or_columns`
+    /// sees neither. So this seeds data in every one of the 17 tables it
+    /// touches, applies it, and pins that each comes back with exactly the
+    /// columns and rows it had (ids and values byte-identical), its full
+    /// trigger set, and an `AUTOINCREMENT` primary key whose sequence is at
+    /// least the largest live id. The counts in `REBUILT` are the 0044 state
+    /// the migration copies from.
+    #[tokio::test]
+    async fn migration_0045_preserves_every_row_and_column_of_the_rebuilt_tables() {
+        // (table, columns, rows) as migration 0045 must leave them.
+        const REBUILT: [(&str, usize, usize); 17] = [
+            ("trades", 30, 3),
+            ("parcel_allocations", 4, 1),
+            ("income", 22, 1),
+            ("interest_income", 9, 1),
+            ("amma_statements", 24, 1),
+            ("amit_adjustments", 4, 1),
+            ("ess_statements", 19, 1),
+            ("transfers", 6, 1),
+            ("corporate_actions", 33, 2),
+            ("inheritances", 12, 1),
+            ("rights_sales", 8, 1),
+            ("rights_sale_allocations", 4, 1),
+            ("investment_expenses", 10, 1),
+            ("drp_enrolments", 6, 1),
+            ("attachments", 13, 1),
+            ("listings", 13, 2),
+            ("listing_renames", 10, 1),
+        ];
+
+        let pool = pool_migrated_below(45).await;
+        // A second holding account: a transfer needs two distinct ones.
+        sqlx::query("INSERT INTO holding_accounts (id, name) VALUES (2, 'Second')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        for (id, ticker, name) in [(1, "BHP", "BHP Group"), (2, "CBA", "Commonwealth Bank")] {
+            sqlx::query(
+                "INSERT INTO listings (id, exchange_mic, ticker, name, security_type, currency) \
+                 VALUES (?, 'XASX', ?, ?, 'Share', 'AUD')",
+            )
+            .bind(id)
+            .bind(ticker)
+            .bind(name)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        // One row per table, in foreign-key order.
+        for (id, trade_type, listing_id, date, price, quantity) in [
+            (1, "Buy", 1, "2024-01-05", "60.00", "100"),
+            (2, "Sell", 1, "2025-02-05", "65.00", "40"),
+            (3, "Buy", 2, "2024-03-01", "100.00", "10"),
+        ] {
+            sqlx::query(
+                "INSERT INTO trades (id, trade_type, date, settlement_date, listing_id, \
+                                     average_price, quantity, currency, brokerage_currency) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, 'AUD', 'AUD')",
+            )
+            .bind(id)
+            .bind(trade_type)
+            .bind(date)
+            .bind(date)
+            .bind(listing_id)
+            .bind(price)
+            .bind(quantity)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO parcel_allocations (id, sale_trade_id, purchase_trade_id, quantity_allocated) \
+             VALUES (1, 2, 1, '40')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO income (id, listing_id, date_paid, unfranked_amount) \
+             VALUES (1, 1, '2025-03-14', '5.50')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO interest_income (id, date_paid, amount) VALUES (1, '2025-04-30', '12.34')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO amma_statements (id, listing_id, tax_year_end_date, date_received) \
+             VALUES (1, 1, '2025-06-30', '2025-08-01')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO amit_adjustments (id, amma_statement_id, trade_id, quantity) \
+             VALUES (1, 1, 3, '100')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO ess_statements (id, listing_id, taxing_point_date) \
+             VALUES (1, 1, '2024-09-01')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO transfers (id, listing_id, date, from_account_id, to_account_id) \
+             VALUES (1, 1, '2025-05-01', 1, 2)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO corporate_actions \
+                 (id, action_type, listing_id, date, amount_per_unit, currency) \
+             VALUES (1, 'ReturnOfCapital', 1, '2025-06-01', '0.25', 'AUD')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO corporate_actions \
+                 (id, action_type, listing_id, date, rights_units, rights_held_units, \
+                  exercise_price, currency) \
+             VALUES (2, 'RightsIssue', 1, '2025-06-15', '10', '5', '12.00', 'AUD')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO inheritances \
+                 (id, listing_id, quantity, date_of_death, cost_base_rule, cost_base) \
+             VALUES (1, 1, '50', '2024-01-01', 'MarketValueAtDeath', '1000.00')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO rights_sales (id, rights_action_id, date, units) \
+             VALUES (1, 2, '2025-09-01', '10')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO rights_sale_allocations (id, rights_sale_id, purchase_trade_id, units) \
+             VALUES (1, 1, 1, '10')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO investment_expenses (id, date_incurred, expense_type) \
+             VALUES (1, '2025-05-15', 'ManagementFee')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO drp_enrolments (id, listing_id, enrolment_date) \
+             VALUES (1, 1, '2024-07-01')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO attachments \
+                 (id, trade_id, filename, content_type, byte_size, checksum, uploaded_at, content) \
+             VALUES (1, 1, 'contract.pdf', 'application/pdf', 5, 'abc', \
+                     '2025-01-06T00:00:00Z', X'68656C6C6F')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO listing_renames \
+                 (id, listing_id, effective_date, old_ticker, new_ticker) \
+             VALUES (1, 1, '2024-06-01', 'OLD', 'BHP')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let mut before = Vec::new();
+        for (table, columns, rows) in REBUILT {
+            let before_columns = table_columns(&pool, table).await;
+            let before_rows = table_rows(&pool, table).await;
+            let before_triggers = table_triggers(&pool, table).await;
+            assert_eq!(before_columns.len(), columns, "{table}: setup column count");
+            assert_eq!(before_rows.len(), rows, "{table}: setup row count");
+            assert!(
+                !before_triggers.is_empty(),
+                "{table}: audited tables carry a trigger set"
+            );
+            before.push((before_columns, before_rows, before_triggers));
+        }
+
+        apply_migration(&pool, 45).await;
+
+        for (i, entry) in REBUILT.iter().enumerate() {
+            let (table, columns, rows) = *entry;
+            let (before_columns, before_rows, before_triggers) = &before[i];
+            let after_columns = table_columns(&pool, table).await;
+            let after_rows = table_rows(&pool, table).await;
+            assert_eq!(
+                after_columns.len(),
+                columns,
+                "{table}: the rebuild changed the column count"
+            );
+            assert_eq!(
+                &after_columns, before_columns,
+                "{table}: the rebuild lost, added or renamed a column"
+            );
+            assert_eq!(
+                after_rows.len(),
+                rows,
+                "{table}: the rebuild changed the row count"
+            );
+            assert_eq!(
+                &after_rows, before_rows,
+                "{table}: a row was lost or altered by the rebuild"
+            );
+            assert_eq!(
+                &table_triggers(&pool, table).await,
+                before_triggers,
+                "{table}: a trigger did not come back"
+            );
+
+            let ddl: String = sqlx::query_scalar(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+            )
+            .bind(table)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert!(
+                ddl.contains("INTEGER PRIMARY KEY AUTOINCREMENT"),
+                "{table}: the rebuilt id is not AUTOINCREMENT"
+            );
+            let seq: i64 = sqlx::query_scalar("SELECT seq FROM sqlite_sequence WHERE name = ?")
+                .bind(table)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            let max_id: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                "SELECT MAX(id) FROM \"{table}\""
+            )))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert!(
+                seq >= max_id,
+                "{table}: sqlite_sequence is {seq}, below the largest live id {max_id}"
             );
         }
     }

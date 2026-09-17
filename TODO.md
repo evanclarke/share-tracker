@@ -38,32 +38,6 @@ what has been verified is SCENARIOS.md's
 [Verification status](SCENARIOS.md#verification-status) table and its per-section findings blocks;
 the maintained record of what was built and decided is the `DONE/*.md` archive.
 
-## Two integrity assertions are missing: no data-preservation test for the table-rebuild migrations, and no read-back of `PRAGMA foreign_keys` (2026-09-17 review, test gaps)
-
-(2026-09-17 review, from the schema replay. Both are safety nets for invariants the project relies
-on but does not currently assert; the review verified the *current* state is correct in both cases,
-so these are regressions waiting to happen rather than existing defects.)
-
-- [ ] `pool_migrated_below(N)` data-preservation tests exist for migrations 20/21/25/34/38/39/40/47
-  (`src/infra/db.rs`), but none for the two full table rebuilds, 0029 and 0045.
-  `migrations_do_not_drop_tables_or_columns` only forbids `DROP COLUMN` and a non-`_old` `DROP
-  TABLE`, so it cannot see a column silently omitted from a rename pattern's new `CREATE TABLE` +
-  `INSERT … SELECT`. The review replayed 0001–0044 and diffed against the final schema: no column and
-  no table was lost, and only `corporate_actions.renounceable` (0047) was added. Fix: add
-  `migration_0045_…`/`migration_0029_…` row-and-column-count tests in the style of
-  `migration_0039_keeps_every_holiday_and_audits_the_calendar`
-- [ ] `src/infra/db.rs`'s `.foreign_keys(true)` is the only thing making every FK constraint real —
-  the review verified it holds on the replayed schema and both real databases (`foreign_key_check`
-  clean) — but nothing reads `PRAGMA foreign_keys` back on a pooled connection, unlike the sibling
-  `the_chosen_busy_timeout_is_in_force_on_every_connection`. A one-line assertion matching that
-  precedent is cheap
-- [ ] Note (not a defect): 0029 and 0045 correctly carry `-- no-transaction` and
-  `PRAGMA foreign_keys = OFF`, which is load-bearing — with FKs on, `RENAME TO x_old` rewrites other
-  tables' FK clauses to point at `x_old`, and `PRAGMA foreign_keys` is a no-op inside a transaction.
-  `src/reports/row_history.rs:2150-2156` pins it for 0029
-- [ ] Tests: the two preservation tests and the pragma read-back above
-- [ ] Docs sync: none
-
 ## `base_path` accepts `.` and `..` segments, producing a prefix no browser can reach (2026-09-17 review, config)
 
 (2026-09-17 review, reproduced against a running server. `normalise_base_path` validates each

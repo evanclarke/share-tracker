@@ -6730,3 +6730,56 @@ every legitimate test addition. The fourth bullet (the `migrations/0045` comment
 recorded above; no migration file was touched. Gates: `cargo fmt --check`, `cargo clippy
 --all-targets -- -D warnings`, `cargo test` (2,472 passed) and `node --test 'src/web/*.test.js'`
 (182 passed) all clean.
+
+## Two integrity assertions are missing: no data-preservation test for the table-rebuild migrations, and no read-back of `PRAGMA foreign_keys` (2026-09-17 review, test gaps)
+
+(2026-09-17 review, from the schema replay. Both are safety nets for invariants the project relies
+on but does not currently assert; the review verified the *current* state is correct in both cases,
+so these are regressions waiting to happen rather than existing defects.)
+
+- [x] `pool_migrated_below(N)` data-preservation tests exist for migrations 20/21/25/34/38/39/40/47
+  (`src/infra/db.rs`), but none for the two full table rebuilds, 0029 and 0045.
+  `migrations_do_not_drop_tables_or_columns` only forbids `DROP COLUMN` and a non-`_old` `DROP
+  TABLE`, so it cannot see a column silently omitted from a rename pattern's new `CREATE TABLE` +
+  `INSERT … SELECT`. The review replayed 0001–0044 and diffed against the final schema: no column and
+  no table was lost, and only `corporate_actions.renounceable` (0047) was added. Fix: add
+  `migration_0045_…`/`migration_0029_…` row-and-column-count tests in the style of
+  `migration_0039_keeps_every_holiday_and_audits_the_calendar`
+- [x] `src/infra/db.rs`'s `.foreign_keys(true)` is the only thing making every FK constraint real —
+  the review verified it holds on the replayed schema and both real databases (`foreign_key_check`
+  clean) — but nothing reads `PRAGMA foreign_keys` back on a pooled connection, unlike the sibling
+  `the_chosen_busy_timeout_is_in_force_on_every_connection`. A one-line assertion matching that
+  precedent is cheap
+- [x] Note (not a defect): 0029 and 0045 correctly carry `-- no-transaction` and
+  `PRAGMA foreign_keys = OFF`, which is load-bearing — with FKs on, `RENAME TO x_old` rewrites other
+  tables' FK clauses to point at `x_old`, and `PRAGMA foreign_keys` is a no-op inside a transaction.
+  `src/reports/row_history.rs:2150-2156` pins it for 0029
+- [x] Tests: the two preservation tests and the pragma read-back above
+- [x] Docs sync: none
+
+**Closed 2026-09-17.** `infra::db::tests::foreign_keys_are_in_force_on_every_connection` sits beside
+the busy-timeout precedent and reads `PRAGMA foreign_keys` back on both pool kinds `init` hands out (a
+file database and `:memory:`), asserting `1` — the pragma is the only thing making any `REFERENCES`
+clause real. Two preservation tests were added, both built on `pool_migrated_below` (never
+`test_pool`, since they test the migration machinery itself), with three test-only helpers next to it:
+`table_columns` (`pragma_table_info`), `table_triggers` (`sqlite_master`) and `table_rows` (rendering
+every cell through SQLite's own `quote()`, so TEXT, INTEGER, BLOB and NULL compare exactly with no
+coercion).
+`infra::db::tests::migration_0029_preserves_every_income_row_and_column` seeds `income` rows (in
+explicit out-of-order ids, including a trust row carrying the conditional columns) before 0029 and
+asserts the 22-column list is identical either side, the rows are byte-identical with their ids, all
+five triggers (audit, staleness and indexes') are back, `attachments`' foreign key still names
+`income` rather than the dropped `income_old`, and `OtherIncome` now inserts while an unknown type is
+still refused. `infra::db::tests::migration_0045_preserves_every_row_and_column_of_the_rebuilt_tables`
+seeds a real row (FK-ordered) into each of the 17 audited tables 0045 rebuilds and pins each table's
+column list and quoted row set before and after, its trigger-name set, that the DDL carries
+`INTEGER PRIMARY KEY AUTOINCREMENT`, and that `sqlite_sequence.seq >= MAX(id)`. Rather than
+transcribing 17 literal column-name lists, each table pins its column *count* plus the equality of
+the pre- and post-migration lists (the pre-migration list is the source of truth), which catches the
+omitted-column/omitted-row failure without a second hand-maintained copy. The section's third bullet
+was verified and left as a note: both migrations still carry `-- no-transaction` and
+`PRAGMA foreign_keys = OFF`, pinned by `row_history`'s own test. No migration file was touched (they
+are checksummed), so the broken-copy mutation experiment was not run; the comparison is structural.
+Gates: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` (2,475 passed)
+and `node --test 'src/web/*.test.js'` (182 passed) all clean, with
+`cached_schema_matches_the_migrated_schema` still passing.
