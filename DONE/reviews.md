@@ -5744,3 +5744,58 @@ path, mode and fix; a `0o100_600` file-type bit does not count), plus the packag
 `doc_checks::freebsd_packaging::config_file_permissions_documented`. Gates: `cargo fmt --check`,
 `cargo clippy --all-targets -- -D warnings` and `cargo test` (2,409 passed) all clean, plus
 `node --test 'src/web/*.test.js'` (149 passed).
+
+## The closing-price delete guard is read outside its transaction, and the table has no DELETE staleness trigger (2026-09-17 review, integrity)
+
+(2026-09-17 review, reproduced by reading the handler and the migration set. The handler reads the
+row and the listing's marker on the pool, decides, then deletes in a separate statement;
+`closing_prices` carries only `closing_prices_stale_snapshots_update`, with no DELETE counterpart —
+verified across all 49 migrations — though its two *audit* triggers do have both variants, so the
+asymmetry is specific to staleness.)
+
+- [x] Reproduced by statement sequence: `delete_one`
+  (`src/entities/closing_price/http.rs:312-330`) calls `db_get_one(&pool, …)` (`:312`) and
+  `listing::db_get(&pool, …)` (`:315`) — a different connection from the one the delete will use —
+  then decides at `:319` and calls `db_delete(&pool, …)` (`:329`), which is an unguarded
+  single-statement `DELETE` (`src/entities/closing_price/db.rs:429-440`)
+- [x] Failure: the row is read as `status = 'error'` so the guard approves; a concurrent manual `PUT`
+  or re-fetch stores an **ok** price for the same `(listing_id, price_date)` through `db_store`'s
+  upsert; the delete then removes a price that snapshots were valued at. Nothing stales them,
+  because there is no DELETE staleness trigger, so the snapshot keeps `stale = 0` and keeps a figure
+  derived from a price row that no longer exists — permanently mis-flagged. The `unpriced_before`
+  branch has the same window (the marker can be cleared between the read and the delete)
+- [x] The sequential behaviour *is* pinned (`src/entities/closing_price/tests/delete.rs`); the race
+  is not
+- [x] Fix: run the handler in `infra::db::write_tx` and re-read the row and marker on that
+  connection, or push the guard into the `DELETE` itself
+  (`… AND (status <> 'ok' OR price_date < (SELECT unpriced_before FROM listings WHERE id = ?))`).
+  `db_delete` has exactly one caller, so either shape is contained
+- [x] Tests: a concurrent test in the style of
+  `reports::open_parcels::tests::a_read_never_sees_half_of_a_multi_parcel_sell`, driving a manual
+  price write between the guard read and the delete
+- [x] Docs sync: none
+
+**Closed 2026-09-17.** Both halves are fixed. `closing_price::http::delete_one` now opens
+`infra::db::write_tx` first and re-reads the row and the listing's `unpriced_before` marker on that
+same connection before deciding, so the whole guard-plus-delete is one `BEGIN IMMEDIATE` and a
+concurrent manual `PUT`/re-fetch either lands before it (and the guard sees it) or waits for it (and
+is stored normally). The `write_tx`+re-read shape was chosen over pushing the guard into the
+`DELETE`: it closes the `ok`-status window and the marker window uniformly, and the `422` body still
+quotes the row the guard actually saw rather than deciding the wording from a stale pool read.
+`closing_price::db::db_delete`/`db_store` became executor-generic so the handler and the tests can
+run them on a transaction. Migration `0050_closing_price_stale_snapshots_delete.sql` adds the missing
+`closing_prices_stale_snapshots_delete` trigger (`WHEN OLD.status = 'ok'`, staling every snapshot
+dated on or after `OLD.price_date`), so the flag now follows the fact rather than depending on the
+guard being airtight; the errored-row arm stales nothing, exactly as the UPDATE arm is narrowed.
+`reports::snapshot`'s classification list gained the `delete` trigger, `docs/SCHEMA.md` and
+`docs/API.md` carry the new trigger, and the migration count in `CLAUDE.md`/`test_support` moved
+49→50.
+
+Tests: `entities::closing_price::tests::delete::a_delete_cannot_race_a_concurrent_manual_price_write`
+(a deterministic interleave — a manual ok price stored on a held `BEGIN IMMEDIATE`, invisible to a
+pool reader; the handler must block on the write lock and then answer `422` with the ok row still
+present — verified to fail against the old read-on-pool shape) and
+`reports::snapshot::tests::db_deleting_a_stored_price_stales_on_or_after_snapshots` (the trigger
+itself), with `db_clearing_the_superseded_prices_changes_no_stored_snapshot` updated to expect the
+now-staled flag. Gates: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and
+`cargo test` (2,411 passed) all clean.

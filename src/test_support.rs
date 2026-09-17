@@ -24,7 +24,7 @@ use tower::ServiceExt;
 
 /// Fresh in-memory database with migrations and seed data applied.
 ///
-/// The 49 migration files are replayed **once** per test process, into a
+/// The 50 migration files are replayed **once** per test process, into a
 /// template database that is then dumped to a single SQL script (see
 /// [`schema_template`]); every call after the first builds its database from
 /// that script instead. Applying the migrations costs ~89 ms against the
@@ -783,6 +783,13 @@ impl ClosingPriceBuilder {
         self
     }
 
+    /// The row as built, without writing it — for a caller that must write it
+    /// on its own connection (`closing_price::db_store` is executor-generic),
+    /// e.g. a concurrency test holding a write transaction open.
+    pub fn build(self) -> closing_price::ClosingPrice {
+        self.p
+    }
+
     pub async fn insert(self, pool: &SqlitePool) {
         closing_price::db_store(pool, &self.p).await.unwrap();
     }
@@ -1258,7 +1265,7 @@ mod tests {
     use serde_json::json;
 
     /// The cached schema `test_pool` builds every database from must be the
-    /// database the 49 migrations produce — not approximately, exactly.
+    /// database the 50 migrations produce — not approximately, exactly.
     ///
     /// So this builds one of each and compares the **whole** of `sqlite_master`:
     /// every table, index, trigger and view, by name and by definition
@@ -1348,7 +1355,7 @@ mod tests {
         let from_migrations: Vec<(i64, String, bool, String)> =
             sqlx::query_as(recorded).fetch_all(&migrated).await.unwrap();
         assert_eq!(from_cache, from_migrations, "_sqlx_migrations differs");
-        assert_eq!(from_cache.len(), 49, "every migration is recorded");
+        assert_eq!(from_cache.len(), 50, "every migration is recorded");
 
         // Spelled out separately because it is the one piece of state a
         // schema-only cache would silently lose, and two tests in

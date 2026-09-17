@@ -204,7 +204,7 @@ use collection::fetch_and_store;
 #[cfg(test)]
 pub(crate) use db::db_store;
 #[cfg(test)]
-pub use db::{ClearOutcome, db_clear_unpriced_before, db_list};
+pub use db::{ClearOutcome, db_clear_unpriced_before, db_delete, db_list};
 #[cfg(test)]
 pub use fetcher::{
     FetchFuture, FetchedClose, LatestQuote, PriceFetcher, QuoteFuture, QuotesFuture,

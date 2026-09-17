@@ -38,36 +38,6 @@ what has been verified is SCENARIOS.md's
 [Verification status](SCENARIOS.md#verification-status) table and its per-section findings blocks;
 the maintained record of what was built and decided is the `DONE/*.md` archive.
 
-## The closing-price delete guard is read outside its transaction, and the table has no DELETE staleness trigger (2026-09-17 review, integrity)
-
-(2026-09-17 review, reproduced by reading the handler and the migration set. The handler reads the
-row and the listing's marker on the pool, decides, then deletes in a separate statement;
-`closing_prices` carries only `closing_prices_stale_snapshots_update`, with no DELETE counterpart —
-verified across all 49 migrations — though its two *audit* triggers do have both variants, so the
-asymmetry is specific to staleness.)
-
-- [ ] Reproduced by statement sequence: `delete_one`
-  (`src/entities/closing_price/http.rs:312-330`) calls `db_get_one(&pool, …)` (`:312`) and
-  `listing::db_get(&pool, …)` (`:315`) — a different connection from the one the delete will use —
-  then decides at `:319` and calls `db_delete(&pool, …)` (`:329`), which is an unguarded
-  single-statement `DELETE` (`src/entities/closing_price/db.rs:429-440`)
-- [ ] Failure: the row is read as `status = 'error'` so the guard approves; a concurrent manual `PUT`
-  or re-fetch stores an **ok** price for the same `(listing_id, price_date)` through `db_store`'s
-  upsert; the delete then removes a price that snapshots were valued at. Nothing stales them,
-  because there is no DELETE staleness trigger, so the snapshot keeps `stale = 0` and keeps a figure
-  derived from a price row that no longer exists — permanently mis-flagged. The `unpriced_before`
-  branch has the same window (the marker can be cleared between the read and the delete)
-- [ ] The sequential behaviour *is* pinned (`src/entities/closing_price/tests/delete.rs`); the race
-  is not
-- [ ] Fix: run the handler in `infra::db::write_tx` and re-read the row and marker on that
-  connection, or push the guard into the `DELETE` itself
-  (`… AND (status <> 'ok' OR price_date < (SELECT unpriced_before FROM listings WHERE id = ?))`).
-  `db_delete` has exactly one caller, so either shape is contained
-- [ ] Tests: a concurrent test in the style of
-  `reports::open_parcels::tests::a_read_never_sees_half_of_a_multi_parcel_sell`, driving a manual
-  price write between the guard read and the delete
-- [ ] Docs sync: none
-
 ## Negative AMMA components are accepted, producing a negative FITO and a fictitious carried-forward loss (2026-09-17 review, financial correctness)
 
 (2026-09-17 review. `amma::db_upsert` (`src/entities/amma.rs:250-269`) validates the 30-June year

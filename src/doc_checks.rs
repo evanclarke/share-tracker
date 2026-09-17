@@ -2248,9 +2248,9 @@ fn manual_closing_prices_documented() {
 /// Docs-sync pin for clearing a superseded price span (2026-08-21): the API
 /// documents the one relaxation of the ok-row delete rule and why it is
 /// narrow, the bulk clear and its listing-bounded span, and both refusals;
-/// the schema records the same two deletable kinds behind the table's single
-/// staleness trigger; the features doc names the span as the one place a stored
-/// price may be deleted.
+/// the schema records the same two deletable kinds behind the table's UPDATE
+/// and (0050) DELETE staleness triggers; the features doc names the span as the
+/// one place a stored price may be deleted.
 #[test]
 fn clearing_superseded_closing_prices_documented() {
     let closing_prices = API_MD
@@ -2280,8 +2280,9 @@ fn clearing_superseded_closing_prices_documented() {
     assert!(API_MD.contains(
         "clearing a superseded price span on a listing that declares no `unpriced_before`"
     ));
-    // SCHEMA.md: the two deletable kinds behind the single UPDATE trigger.
+    // SCHEMA.md: the two deletable kinds, behind the UPDATE and DELETE triggers.
     assert!(SCHEMA_MD.contains("the only deletable rows are ones no stored figure was valued at"));
+    assert!(SCHEMA_MD.contains("since 0050, its `AFTER DELETE` counterpart"));
     // Features doc: the span is the one place a stored price may be deleted.
     assert!(FEATURES_MD.contains("the one span in which a stored price may be **deleted**"));
 }

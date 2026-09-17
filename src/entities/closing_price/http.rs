@@ -8,6 +8,7 @@ use super::fetcher::SharedFetcher;
 use super::market::{Market, load_market};
 use super::model::{ClosingPrice, MANUAL_SOURCE, PriceOrigin, PriceStatus, UNASSIGNED_ID};
 use crate::entities::listing;
+use crate::infra::db::write_tx;
 use crate::infra::http::ApiError;
 use axum::{
     Extension, Json, Router,
@@ -309,10 +310,19 @@ async fn delete_one(
     State(pool): State<SqlitePool>,
     Path((listing_id, price_date)): Path<(i64, NaiveDate)>,
 ) -> Result<StatusCode, ApiError> {
-    let row = db_get_one(&pool, listing_id, price_date)
+    // The guard and the delete share one connection inside one write
+    // transaction. Read on the pool and deleted in a separate statement, a
+    // concurrent manual `PUT` or re-fetch could store an ok price for this
+    // (listing, date) in the window between the two, and the delete then
+    // removed a price snapshots had been valued at — permanently mis-flagged
+    // fresh, because nothing staled them there (2026-09-17 review). A
+    // concurrent writer now waits for this `BEGIN IMMEDIATE` and finds the
+    // row gone, or lands after the delete and is stored normally.
+    let mut tx = write_tx(&pool).await?;
+    let row = db_get_one(&mut *tx, listing_id, price_date)
         .await?
         .ok_or_else(|| ApiError::not_found("no stored price for that listing and date"))?;
-    let superseded = listing::db_get(&pool, listing_id)
+    let superseded = listing::db_get(&mut *tx, listing_id)
         .await?
         .and_then(|l| l.unpriced_before)
         .is_some_and(|before| price_date < before);
@@ -326,7 +336,8 @@ async fn delete_one(
              deleting it"
         )));
     }
-    db_delete(&pool, listing_id, price_date).await?;
+    db_delete(&mut *tx, listing_id, price_date).await?;
+    tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

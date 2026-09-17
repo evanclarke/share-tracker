@@ -128,7 +128,13 @@ pub(super) async fn db_ok_dates(
 /// span every version of it. A replacing write is an UPDATE, so the superseded
 /// row (a manual price's own `sourced_from`/`reason` included) is recorded in
 /// `row_history` by the 0021 trigger rather than lost.
-pub(crate) async fn db_store(pool: &SqlitePool, row: &ClosingPrice) -> Result<(), sqlx::Error> {
+/// Executor-generic so a caller can write on its own connection — the tests
+/// driving the delete guard's race store a manual price on a transaction they
+/// hold open, exactly as `put_manual` writes through the pool.
+pub(crate) async fn db_store<'e, E>(executor: E, row: &ClosingPrice) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
     sqlx::query(
         "INSERT INTO closing_prices \
              (listing_id, price_date, price, price_as_observed, source, fetched_at, \
@@ -158,7 +164,7 @@ pub(crate) async fn db_store(pool: &SqlitePool, row: &ClosingPrice) -> Result<()
     .bind(row.origin)
     .bind(&row.sourced_from)
     .bind(&row.reason)
-    .execute(pool)
+    .execute(executor)
     .await?;
     Ok(())
 }
@@ -406,8 +412,9 @@ pub async fn run_rebase(pool: &SqlitePool) -> Result<(), String> {
 }
 
 /// Delete one stored row, reporting whether one was there. Callers must have
-/// established that the row is one of the two kinds no snapshot was ever
-/// valued at (the handler rejects any other):
+/// established **on the same connection, inside the same write transaction**
+/// that the row is one of the two kinds no snapshot was ever valued at (the
+/// handler rejects any other):
 ///
 /// * an **errored** row — `reports::valuation` blocks the date outright;
 /// * an ok row dated **before the listing's `unpriced_before`** — the marker
@@ -416,25 +423,39 @@ pub async fn run_rebase(pool: &SqlitePool) -> Result<(), String> {
 ///   `unpriced_from` carry-forward is floored at the marker
 ///   ([`db_latest_ok_price_on_or_before`]).
 ///
-/// Either way removing the row cannot invalidate a stored snapshot figure:
-/// no stored figure was computed from it. That is what lets `closing_prices`
-/// keep its single `..._stale_snapshots_update` trigger (0001_schema.sql)
-/// with no DELETE counterpart, unlike the fact tables. Setting or moving the
-/// marker is itself what stales the affected snapshots (0037's
+/// Executor-generic so the handler can run it on the transaction whose
+/// `BEGIN IMMEDIATE` it read the guard under — that is what keeps a
+/// concurrent manual `PUT` or re-fetch from storing an ok price between the
+/// read and the delete and having it removed (2026-09-17 review).
+///
+/// Removing such a row cannot invalidate a stored snapshot figure *by the
+/// guard's own reasoning*: no stored figure was computed from it. That
+/// reasoning is deliberately no longer load-bearing, though —
+/// `closing_prices_stale_snapshots_delete` (migration 0050) stales every
+/// snapshot dated on or after an ok row's `price_date` when it goes, so the
+/// flag follows the fact even if a future guard is wrong. It is the DELETE
+/// counterpart of the `..._update` trigger (0001, re-created by 0034), the
+/// pair the fact tables carry. Setting or moving the `unpriced_before` marker
+/// is itself what stales the affected snapshots (0037's
 /// `listings_stale_snapshots_update` stales the prefix before the later of
 /// the old and new dates), so a span whose rows are then cleared has already
-/// been regenerated without them, and clearing or moving the marker back
-/// later stales the prefix again — regeneration then reports the dates
-/// blocked for want of a price, which is the truth once the rows are gone.
-pub async fn db_delete(
-    pool: &SqlitePool,
+/// been regenerated without them, and the delete stales that prefix once more
+/// — an idempotent regeneration of the same excluded totals. Clearing or
+/// moving the marker back later stales the prefix again — regeneration then
+/// reports the dates blocked for want of a price, which is the truth once the
+/// rows are gone.
+pub async fn db_delete<'e, E>(
+    executor: E,
     listing_id: i64,
     price_date: NaiveDate,
-) -> Result<bool, sqlx::Error> {
+) -> Result<bool, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
     let result = sqlx::query("DELETE FROM closing_prices WHERE listing_id = ? AND price_date = ?")
         .bind(listing_id)
         .bind(price_date)
-        .execute(pool)
+        .execute(executor)
         .await?;
     Ok(result.rows_affected() > 0)
 }

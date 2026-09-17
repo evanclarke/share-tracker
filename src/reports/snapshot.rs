@@ -1223,15 +1223,16 @@ mod tests {
         ),
         (
             "closing_prices",
-            &["update"],
-            "UPDATE only, and only on an ok price changing: an INSERT prices a date that was \
-             blocked for valuation and so has no snapshot to stale, and the deletes the API \
-             allows are of rows no stored figure was valued at — an errored row, whose date \
-             valuation blocks outright, and an ok row inside the listing's `unpriced_before` \
-             span, where the marker supersedes the stored rows and the holding is excluded \
-             from the date's totals rather than priced (setting or moving that marker is \
-             itself what stales those snapshots, via `listings`) \
-             (0001_schema.sql; `entities::closing_price::db_delete`)",
+            &["update", "delete"],
+            "no INSERT arm: an INSERT prices a date that was blocked for valuation and so has \
+             no snapshot to stale. UPDATE stales the suffix from the row's `price_date` when an \
+             ok figure changes (or becomes errored); DELETE does the same when an ok row goes, \
+             so the flag follows the fact rather than resting on the delete guard's reasoning \
+             that the rows it lets through were never valued at — the guard once read on the \
+             pool and deleted in a separate statement, so a concurrent manual write could land \
+             in the window and be removed with nothing staled (0001_schema.sql, \
+             `entities::closing_price::db_delete`; 0050_closing_price_stale_snapshots_delete.sql, \
+             2026-09-17 review)",
         ),
         (
             "listings",
@@ -1708,6 +1709,44 @@ mod tests {
             gains[0].market_value,
             Some("6000.00".parse().unwrap()),
             "regenerated at the hand-entered price"
+        );
+    }
+
+    /// Deleting a stored ok price stales the snapshots that were valued at it
+    /// — the `AFTER DELETE` arm the table lacked until 0050. The API's delete
+    /// guard refuses an ok row outside a listing's `unpriced_before` span, so
+    /// the trigger is exercised directly, which is the point: it is the
+    /// backstop that keeps the flag following the fact even if a delete ever
+    /// reaches a valued row again (2026-09-17 review). The snapshot at the
+    /// row's date is staled; an earlier one, which was not valued at it, is
+    /// untouched.
+    #[tokio::test]
+    async fn db_deleting_a_stored_price_stales_on_or_after_snapshots() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BHP", Some("XASX"), "AUD").await;
+        insert_buy(&pool, 1, 1, ymd(2024, 1, 16), "100", "10", "AUD").await;
+        store_price(&pool, 1, ymd(2026, 6, 3), "64.91").await; // Wednesday
+        store_price(&pool, 1, ymd(2026, 6, 5), "62.48").await; // Friday
+        let now = friday_evening_sydney();
+        generate(&pool, ymd(2026, 6, 3), now).await.unwrap();
+        generate(&pool, ymd(2026, 6, 5), now).await.unwrap();
+        assert_eq!(stale_flags(&pool, ymd(2026, 6, 5)).await, vec![false; 3]);
+
+        assert!(
+            closing_price::db_delete(&pool, 1, ymd(2026, 6, 5))
+                .await
+                .unwrap(),
+            "the ok row is there to delete"
+        );
+        assert_eq!(
+            stale_flags(&pool, ymd(2026, 6, 5)).await,
+            vec![true; 3],
+            "every snapshot valued at the deleted price is stale"
+        );
+        assert_eq!(
+            stale_flags(&pool, ymd(2026, 6, 3)).await,
+            vec![false; 3],
+            "an earlier snapshot was not valued at the deleted row"
         );
     }
 
@@ -2264,14 +2303,16 @@ mod tests {
         assert_eq!(series[0].market_value, "7493.00".parse().unwrap()); // 6248 + 50 × 24.90
     }
 
-    /// Why deleting a superseded price needs no staleness handling of its
-    /// own. Setting the marker is what stales the prefix; regeneration then
-    /// leaves the holding out, so the rows the marker supersedes are read by
-    /// nothing and clearing them moves no stored figure and stales nothing.
-    /// The case that must not be missed is the marker being cleared
-    /// afterwards: the prefix stales again, and regeneration reports the date
-    /// blocked for want of a price — the truth once the rows are gone, and
-    /// not a silently wrong total.
+    /// Clearing a superseded span moves no stored figure: setting the marker
+    /// is what stales the prefix, and regeneration leaves the holding out, so
+    /// the rows the marker supersedes are read by nothing. The delete stales
+    /// that prefix once more all the same — the `AFTER DELETE` arm (migration
+    /// 0050) fires on any ok row that goes away, deliberately a blanket
+    /// backstop rather than a re-argument of the guard — and regeneration then
+    /// reproduces the same excluded totals. The case that must not be missed
+    /// is the marker being cleared afterwards: the prefix stales again, and
+    /// regeneration reports the date blocked for want of a price — the truth
+    /// once the rows are gone, and not a silently wrong total.
     #[tokio::test]
     async fn db_clearing_the_superseded_prices_changes_no_stored_snapshot() {
         let pool = test_pool().await;
@@ -2304,8 +2345,9 @@ mod tests {
         ));
         assert_eq!(
             stale_flags(&pool, ymd(2026, 6, 3)).await,
-            vec![false; 3],
-            "no stored figure was valued at the cleared row, so none is stale"
+            vec![true; 3],
+            "the DELETE arm stales the snapshots from the cleared row's date, even though the \
+             marker had already excluded the holding from them"
         );
         generate(&pool, ymd(2026, 6, 3), now).await.unwrap();
         assert_eq!(
