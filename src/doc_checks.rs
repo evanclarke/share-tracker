@@ -793,6 +793,30 @@ fn amma_coverage_is_documented_as_per_holding_account() {
     assert!(FEATURES_MD.contains("per holding account"));
 }
 
+/// Docs-sync pin for the 2026-09-17 review's negative-AMMA-component refusal:
+/// the AMMA statements section states the non-negativity rule and its one
+/// signed exception, the global `422` catalogue lists the refusal naming the
+/// field, and the ATO mirror the rule rests on really says it.
+#[test]
+fn amma_components_are_documented_as_non_negative() {
+    assert!(API_MD.contains("**Every attributed component is a non-negative amount.**"));
+    assert!(API_MD.contains(
+        "An AMIT or attribution CCIV sub-fund trust attribution amount cannot be a negative"
+    ));
+    assert!(API_MD.contains("**`cost_base_adjustment` is deliberately exempt from the rule**"));
+    // The global 422 catalogue carries it too, naming the field.
+    assert!(API_MD.contains(
+        "or any of whose components is negative — `units_held` or any money field but the \
+         signed `cost_base_adjustment`"
+    ));
+    // The mirror the rule quotes.
+    assert!(
+        ato(include_str!("../docs/ato/amma-statement-guidance-notes.md")).contains(
+            "An AMIT or attribution CCIV sub-fund trust attribution amount cannot be a negative."
+        )
+    );
+}
+
 /// Docs-sync pin for SCENARIOS G-11/G-20: what anchors the franking
 /// holding-period window, and that a dividend with no such date is reported
 /// rather than passing quietly — the promise that makes an empty franking

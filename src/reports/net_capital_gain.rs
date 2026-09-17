@@ -2126,6 +2126,76 @@ mod tests {
         assert_eq!(r[0].capital_loss_carried_forward, Decimal::ZERO);
     }
 
+    /// The 2026-09-17 review's reproduction, pinned at the report level: with
+    /// `cgt_other_gains = −100` stated alone, `net_other` stayed at zero but
+    /// `capital_loss_carried_forward` came out **+100** — a fictitious loss
+    /// balance that netted the next year's real $100 gain to zero and
+    /// understated 18A. The write is now refused (`entities::amma`), so no
+    /// year can carry forward a loss it never had: 18V is a loss balance, and
+    /// it can never exceed the losses actually available (brought forward plus
+    /// the year's own) — with none recorded, the balance is nil.
+    #[tokio::test]
+    async fn db_a_negative_amma_gain_cannot_create_a_carried_forward_loss() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "VAF").await;
+
+        // The reproduction: a −100 "other gain" stated by itself.
+        let mut a = make_amma(1, 1, NaiveDate::from_ymd_opt(2025, 6, 30).unwrap());
+        a.cgt_other_gains = Decimal::from(-100);
+        let err = amma::db_upsert(&pool, &a).await.unwrap_err();
+        assert!(
+            matches!(err, amma::UpsertError::NegativeAmount("cgt_other_gains")),
+            "the negative component is refused, naming the field: {err:?}"
+        );
+
+        // The next year's real $100 non-discountable gain: 100 units bought at
+        // $10 and sold at $11.
+        insert_trade(
+            &pool,
+            1,
+            trade::TradeType::Buy,
+            1,
+            NaiveDate::from_ymd_opt(2026, 1, 2).unwrap(),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
+        insert_trade(
+            &pool,
+            2,
+            trade::TradeType::Sell,
+            1,
+            NaiveDate::from_ymd_opt(2026, 5, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(11),
+        )
+        .await;
+        allocate(&pool, 1, 2, 1, Decimal::from(100)).await;
+
+        let years = db_net_capital_gain(&pool).await.unwrap();
+        for y in &years {
+            assert!(
+                y.capital_loss_carried_forward <= y.capital_loss_brought_forward + y.capital_losses,
+                "FY{} carries forward {} but only {} of losses were available",
+                y.tax_year,
+                y.capital_loss_carried_forward,
+                y.capital_loss_brought_forward + y.capital_losses,
+            );
+            assert_eq!(
+                y.capital_loss_carried_forward,
+                Decimal::ZERO,
+                "FY{} reports a carried-forward loss with no loss recorded",
+                y.tax_year,
+            );
+        }
+
+        // The real gain is reported in full, not netted to zero by a loss that
+        // was never made.
+        let gain = row_for(&years, 2026);
+        assert_eq!(gain.capital_loss_brought_forward, Decimal::ZERO);
+        assert_eq!(gain.net_capital_gain, Decimal::from(100));
+    }
+
     #[tokio::test]
     async fn db_realised_and_amma_combined_in_one_year() {
         let pool = test_pool().await;

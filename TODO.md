@@ -38,30 +38,6 @@ what has been verified is SCENARIOS.md's
 [Verification status](SCENARIOS.md#verification-status) table and its per-section findings blocks;
 the maintained record of what was built and decided is the `DONE/*.md` archive.
 
-## Negative AMMA components are accepted, producing a negative FITO and a fictitious carried-forward loss (2026-09-17 review, financial correctness)
-
-(2026-09-17 review. `amma::db_upsert` (`src/entities/amma.rs:250-269`) validates the 30-June year
-end and the FITO-needs-gains pairing, but no component's sign, and there is no CHECK in the schema.
-The sibling income entities refuse negatives explicitly — `income.rs` ("`unfranked_amount` cannot be
-negative — income figures are the statement's own positive (or zero) amounts"),
-`interest_income.rs`, `investment_expense.rs` — so this is an asymmetry, not a deliberate liberty.)
-
-- [ ] Reproduced by reading the arithmetic: with `cgt_discount_gains = 5000`,
-  `cgt_other_gains = −6000` and `foreign_tax_credits_capital_gains = 100`,
-  `tax_summary.rs:455-468` computes a negative `claimable` FITO (assessable −1000, grossed up 4000)
-  and `:863` adds it, so the year's 20O is −25 and
-  `foreign_tax_offsets_cgt_discount_reduction` exceeds the tax actually paid — the de-minimis cap at
-  `:1044` can never fire on a negative
-- [ ] Reproduced by reading the arithmetic: `cgt_other_gains = −100` alone leaves `net_other = 0` but
-  makes `capital_loss_carried_forward` **+100** (`net_capital_gain.rs:889-896`), so the next year's
-  real $100 gain is netted to zero and 18A understated
-- [ ] Fix: refuse a negative AMMA component (and a negative `cost_base_adjustment`'s counterpart
-  components, which the ATO mirror also treats as attribution amounts) at write time with `422`,
-  naming the field, as the sibling income entities do
-- [ ] Tests: each AMMA component refused `422` when negative; a positive/zero statement still `204`;
-  a report-level assertion that `capital_loss_carried_forward` can never be positive
-- [ ] Docs sync: `docs/API.md`'s AMMA statements section and its 422 catalogue
-
 ## The figure labelled 13C excludes the attached franking credits its label includes (2026-09-17 review, financial correctness)
 
 (2026-09-17 review, verified against the project's own ATO mirror. The label map in

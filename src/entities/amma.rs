@@ -178,6 +178,24 @@ pub enum UpsertError {
     /// [`trade`](crate::entities::trade) to a parcel's price. Mapped to `422`.
     #[error("the AMMA statement is in {statement} but its listing is quoted in {listing}")]
     CurrencyNotListings { statement: String, listing: String },
+    /// A negative component (carries the field name). Every figure an AMMA
+    /// attributes is the fund's own member component, and the guidance notes
+    /// state the rule outright: "An AMIT or attribution CCIV sub-fund trust
+    /// attribution amount cannot be a negative"
+    /// (`docs/ato/amma-statement-guidance-notes.md`, Part B). A negative would
+    /// silently reduce the year's assessable income, and a negative
+    /// `cgt_other_gains` is worse than that: `reports::net_capital_gain` reads
+    /// it straight into the year's non-discountable gain bucket, where a
+    /// negative bucket leaves `net_other` at zero but manufactures a
+    /// *carried-forward capital loss* — so a later year's real gain is netted
+    /// to nothing and label 18A is understated with no figure ever looking
+    /// wrong. `cost_base_adjustment` is deliberately exempt from this sweep:
+    /// it is the AMIT cost base net amount, signed by design — a positive
+    /// value reduces the cost base and a negative one increases it (an upward
+    /// adjustment, `docs/ato/amit-cost-base-adjustments.md`, CGT event E10).
+    /// Mapped to `422`.
+    #[error("{0} cannot be negative")]
+    NegativeAmount(&'static str),
     #[error("AMMA statement write failed: {0}")]
     Db(#[from] sqlx::Error),
 }
@@ -205,6 +223,13 @@ impl From<UpsertError> for ApiError {
                      wrong listing was picked)"
                 ))
             }
+            UpsertError::NegativeAmount(field) => ApiError::unprocessable(format!(
+                "{field} cannot be negative — an AMMA statement's figures are the fund's own \
+                 attributed amounts, which are never below zero, and a negative capital gain \
+                 would become a fictitious carried-forward loss that nets away a later year's \
+                 real gain. The one signed field is cost_base_adjustment, the AMIT cost base \
+                 net amount, where a negative value is the upward (shortfall) adjustment"
+            )),
             UpsertError::Db(err) => err.into(),
         }
     }
@@ -248,6 +273,49 @@ pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<AmmaStatement>,
 }
 
 pub async fn db_upsert(pool: &SqlitePool, stmt: &AmmaStatement) -> Result<(), UpsertError> {
+    // No component of the statement may be negative: every figure is the
+    // fund's own attributed amount, and the ATO's AMMA guidance notes state
+    // the rule outright — "An AMIT or attribution CCIV sub-fund trust
+    // attribution amount cannot be a negative"
+    // (`docs/ato/amma-statement-guidance-notes.md`, Part B). Checked before
+    // the other rules so a negative figure gets the message naming its field.
+    //
+    // `cost_base_adjustment` is deliberately *not* in this sweep: it is the
+    // AMIT cost base net amount, signed by design — positive reduces the cost
+    // base, negative increases it (an upward adjustment under Subdivision
+    // 276-H, `docs/ato/amit-cost-base-adjustments.md`, CGT event E10).
+    // `units_held` is not an attribution amount either, but a negative unit
+    // count is likewise unrepresentable, and the sibling income path refuses
+    // its own quantity (`securities_held`) the same way.
+    for (field, value) in [
+        ("units_held", stmt.units_held),
+        ("australian_interest", stmt.australian_interest),
+        (
+            "australian_dividends_unfranked",
+            stmt.australian_dividends_unfranked,
+        ),
+        ("franked_dividends", stmt.franked_dividends),
+        ("franking_credits", stmt.franking_credits),
+        ("net_rent", stmt.net_rent),
+        ("foreign_income", stmt.foreign_income),
+        ("foreign_tax_credits", stmt.foreign_tax_credits),
+        (
+            "foreign_tax_credits_capital_gains",
+            stmt.foreign_tax_credits_capital_gains,
+        ),
+        ("other_income", stmt.other_income),
+        ("cgt_discount_gains", stmt.cgt_discount_gains),
+        ("cgt_indexation_gains", stmt.cgt_indexation_gains),
+        ("cgt_other_gains", stmt.cgt_other_gains),
+        ("capital_losses_applied", stmt.capital_losses_applied),
+        ("tax_deferred_amount", stmt.tax_deferred_amount),
+        ("tax_free_amount", stmt.tax_free_amount),
+        ("tfn_withholding_tax", stmt.tfn_withholding_tax),
+    ] {
+        if value < Decimal::ZERO {
+            return Err(UpsertError::NegativeAmount(field));
+        }
+    }
     // The FY-end date must actually be a financial-year end: reports bucket the
     // statement by this date's calendar year, which matches domain::tax_year's
     // rule only for January–June dates — in practice, 30 June.
@@ -576,6 +644,140 @@ mod tests {
             db_upsert(&pool, &stmt).await.unwrap();
         }
         assert_eq!(db_list(&pool).await.unwrap().len(), 2);
+    }
+
+    /// No component of an AMMA statement may be negative: every figure is the
+    /// fund's own attributed amount, and the guidance notes state it outright
+    /// — "An AMIT or attribution CCIV sub-fund trust attribution amount cannot
+    /// be a negative" (`docs/ato/amma-statement-guidance-notes.md`, Part B).
+    /// Refused `422` naming the field, with nothing stored (2026-09-17 review:
+    /// negatives were accepted, and a negative `cgt_other_gains` produced a
+    /// fictitious carried-forward capital loss while a negative gain with a
+    /// positive `foreign_tax_credits_capital_gains` produced a negative FITO).
+    /// The one signed field, `cost_base_adjustment`, is covered separately.
+    #[tokio::test]
+    async fn api_negative_component_returns_422_naming_the_field() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        for field in [
+            "units_held",
+            "australian_interest",
+            "australian_dividends_unfranked",
+            "franked_dividends",
+            "franking_credits",
+            "net_rent",
+            "foreign_income",
+            "foreign_tax_credits",
+            "foreign_tax_credits_capital_gains",
+            "other_income",
+            "cgt_discount_gains",
+            "cgt_indexation_gains",
+            "cgt_other_gains",
+            "capital_losses_applied",
+            "tax_deferred_amount",
+            "tax_free_amount",
+            "tfn_withholding_tax",
+        ] {
+            let mut body = serde_json::json!({
+                "listing_id": 1,
+                "tax_year_end_date": "2024-06-30",
+                "date_received": "2024-08-15",
+            });
+            body[field] = serde_json::json!("-1");
+            let resp = client(&pool).put("/amma_statements/1", &body).await;
+            assert_eq!(
+                resp.status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "negative {field} must be rejected"
+            );
+            let detail = resp.text().to_string();
+            assert!(
+                detail.contains(field) && detail.contains("cannot be negative"),
+                "negative {field}: detail must name the field, got: {detail}"
+            );
+            assert!(
+                db_get(&pool, 1).await.unwrap().is_none(),
+                "negative {field}: nothing persisted"
+            );
+        }
+    }
+
+    /// The counterpart to the refusal: a statement whose components are all
+    /// positive or zero is still accepted, and round-trips unchanged.
+    #[tokio::test]
+    async fn api_positive_and_zero_components_are_accepted() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        let body = serde_json::json!({
+            "listing_id": 1,
+            "tax_year_end_date": "2024-06-30",
+            "units_held": "1000",
+            "date_received": "2024-08-15",
+            "australian_interest": "12.50",
+            "australian_dividends_unfranked": "5.25",
+            "franked_dividends": "8.00",
+            "franking_credits": "3.43",
+            "net_rent": "1.00",
+            "foreign_income": "2.00",
+            "foreign_tax_credits": "0.50",
+            "foreign_tax_credits_capital_gains": "0.25",
+            "other_income": "0.10",
+            "cgt_discount_gains": "100",
+            "cgt_indexation_gains": "10",
+            "cgt_other_gains": "20",
+            "capital_losses_applied": "5",
+            "tax_deferred_amount": "2.30",
+            "tax_free_amount": "1.10",
+            "cost_base_adjustment": "0",
+            "tfn_withholding_tax": "0.75",
+        });
+        client(&pool)
+            .put("/amma_statements/1", &body)
+            .await
+            .expect_status(StatusCode::NO_CONTENT);
+        let got = db_get(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(got.australian_interest, dec("12.50"));
+        assert_eq!(got.cgt_other_gains, dec("20"));
+        assert_eq!(got.tfn_withholding_tax, dec("0.75"));
+        assert_eq!(got.cost_base_adjustment, Decimal::ZERO);
+
+        // An all-zero statement is equally valid.
+        let zero = serde_json::json!({
+            "listing_id": 1,
+            "tax_year_end_date": "2025-06-30",
+            "date_received": "2025-08-15",
+        });
+        client(&pool)
+            .put("/amma_statements/2", &zero)
+            .await
+            .expect_status(StatusCode::NO_CONTENT);
+        let got = db_get(&pool, 2).await.unwrap().unwrap();
+        assert_eq!(got.units_held, Decimal::ZERO);
+        assert_eq!(got.cost_base_adjustment, Decimal::ZERO);
+    }
+
+    /// `cost_base_adjustment` is the AMIT cost base net amount, signed by
+    /// design: a negative value is the **upward** (shortfall) adjustment that
+    /// increases the cost base (`docs/ato/amit-cost-base-adjustments.md`,
+    /// Subdivision 276-H, CGT event E10; ATO worked example 28 in
+    /// `src/ato_examples.rs`). It must survive the negative-component sweep.
+    #[tokio::test]
+    async fn api_negative_cost_base_adjustment_is_still_accepted() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        let body = serde_json::json!({
+            "listing_id": 1,
+            "tax_year_end_date": "2024-06-30",
+            "units_held": "1",
+            "date_received": "2024-08-15",
+            "cost_base_adjustment": "-10",
+        });
+        client(&pool)
+            .put("/amma_statements/1", &body)
+            .await
+            .expect_status(StatusCode::NO_CONTENT);
+        let got = db_get(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(got.cost_base_adjustment, dec("-10"));
     }
 
     #[tokio::test]

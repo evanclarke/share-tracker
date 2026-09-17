@@ -5799,3 +5799,58 @@ present — verified to fail against the old read-on-pool shape) and
 itself), with `db_clearing_the_superseded_prices_changes_no_stored_snapshot` updated to expect the
 now-staled flag. Gates: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and
 `cargo test` (2,411 passed) all clean.
+
+## Negative AMMA components are accepted, producing a negative FITO and a fictitious carried-forward loss (2026-09-17 review, financial correctness)
+
+(2026-09-17 review. `amma::db_upsert` (`src/entities/amma.rs:250-269`) validates the 30-June year
+end and the FITO-needs-gains pairing, but no component's sign, and there is no CHECK in the schema.
+The sibling income entities refuse negatives explicitly — `income.rs` ("`unfranked_amount` cannot be
+negative — income figures are the statement's own positive (or zero) amounts"),
+`interest_income.rs`, `investment_expense.rs` — so this is an asymmetry, not a deliberate liberty.)
+
+- [x] Reproduced by reading the arithmetic: with `cgt_discount_gains = 5000`,
+  `cgt_other_gains = −6000` and `foreign_tax_credits_capital_gains = 100`,
+  `tax_summary.rs:455-468` computes a negative `claimable` FITO (assessable −1000, grossed up 4000)
+  and `:863` adds it, so the year's 20O is −25 and
+  `foreign_tax_offsets_cgt_discount_reduction` exceeds the tax actually paid — the de-minimis cap at
+  `:1044` can never fire on a negative
+- [x] Reproduced by reading the arithmetic: `cgt_other_gains = −100` alone leaves `net_other = 0` but
+  makes `capital_loss_carried_forward` **+100** (`net_capital_gain.rs:889-896`), so the next year's
+  real $100 gain is netted to zero and 18A understated
+- [x] Fix: refuse a negative AMMA component (and a negative `cost_base_adjustment`'s counterpart
+  components, which the ATO mirror also treats as attribution amounts) at write time with `422`,
+  naming the field, as the sibling income entities do
+- [x] Tests: each AMMA component refused `422` when negative; a positive/zero statement still `204`;
+  a report-level assertion that `capital_loss_carried_forward` can never be positive
+- [x] Docs sync: `docs/API.md`'s AMMA statements section and its 422 catalogue
+
+**Closed 2026-09-17.** `amma::db_upsert` now sweeps every attribution component for a negative before
+its other rules and refuses with the new `UpsertError::NegativeAmount(field)`, answered `422` naming
+the field: `units_held`, `australian_interest`, `australian_dividends_unfranked`,
+`franked_dividends`, `franking_credits`, `net_rent`, `foreign_income`, `foreign_tax_credits`,
+`foreign_tax_credits_capital_gains`, `other_income`, `cgt_discount_gains`, `cgt_indexation_gains`,
+`cgt_other_gains`, `capital_losses_applied`, `tax_deferred_amount`, `tax_free_amount` and
+`tfn_withholding_tax` — the blanket rule the ATO's AMMA guidance notes state ("An AMIT or attribution
+CCIV sub-fund trust attribution amount cannot be a negative", Part B), and the very components the
+same mirror names as the cost base net amount's counterpart amounts. `cost_base_adjustment` is
+deliberately *not* in the sweep: it is the AMIT cost base net amount itself, signed by design
+(positive reduces the cost base, negative is the upward/shortfall adjustment under Subdivision 276-H,
+CGT event E10), which `docs/ato/amit-cost-base-adjustments.md` states and
+`ato_examples::pig_managed_funds_example_28_miriam_amit_cost_base_net_amount` exercises with `-10` —
+so a negative FITO and the fictitious carried-forward loss can no longer be constructed from a
+statement, while legitimate signed adjustments still write. No schema CHECK was added: the section
+asked for write-time refusal, which is where the project's rule puts the invariant, and no migration
+was needed. `docs/API.md`'s AMMA section and 422 catalogue carry the rule; `doc_checks` pins the
+wording and the mirror sentence.
+
+Tests: `entities::amma::tests::api_negative_component_returns_422_naming_the_field` (all 17 fields,
+each `422` naming it with nothing stored),
+`entities::amma::tests::api_positive_and_zero_components_are_accepted` (both round-trip),
+`entities::amma::tests::api_negative_cost_base_adjustment_is_still_accepted` (the signed field) and
+`reports::net_capital_gain::tests::db_a_negative_amma_gain_cannot_create_a_carried_forward_loss` (the
+review's figures: no year has a fabricated balance and the next year's real $100 gain is reported in
+full). The report-level assertion pins the true invariant —
+`capital_loss_carried_forward ≤ capital_loss_brought_forward + capital_losses` — rather than the
+section's loosely worded "can never be positive", since a genuine unused loss *is* reported as a
+positive carried-forward amount. Gates: `cargo fmt --check`, `cargo clippy --all-targets -- -D
+warnings` and `cargo test` (2,416 passed, `cargo test ato_examples` 38 passed) all clean.
