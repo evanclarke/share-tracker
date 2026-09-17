@@ -18,7 +18,14 @@ mod settlement;
 /// the non-test build warning-free.
 #[cfg(test)]
 pub use db::UpsertError;
-pub use db::{DeleteOutcome, db_delete, db_get, db_list, db_upsert};
+/// `db_upsert` writes a row's settlement provenance exactly as given, which
+/// only the tests (and the fixture builders) need: the HTTP path resolves the
+/// body's date on the write's own transaction
+/// ([`db_upsert_resolving_settlement`]), so the raw writer is test-gated to
+/// keep the non-test build warning-free.
+#[cfg(test)]
+pub use db::db_upsert;
+pub use db::{DeleteOutcome, db_delete, db_get, db_list, db_upsert_resolving_settlement};
 // The Sell path shares this DB-level rule, as it shares `check_amounts`.
 pub(crate) use db::listing_currency_mismatch;
 pub use http::router;
@@ -51,7 +58,7 @@ pub(crate) use settlement::Settlement;
 /// wraps it in its own error enum, and by the tests below.
 pub(crate) use settlement::SettlementError;
 /// Reached by name only from tests — the write paths go through
-/// [`Settlement::resolve`], which is where the omitted-means-computed rule
+/// [`Settlement::resolve_on`], which is where the omitted-means-computed rule
 /// lives — so the re-export is test-gated.
 #[cfg(test)]
 pub(crate) use settlement::auto_settlement_date;
@@ -1346,6 +1353,157 @@ mod tests {
         app.put_ok("/trades/1", &body).await;
         let after: Trade = app.get_json("/trades/1").await;
         assert_eq!(after.settlement_date_source, SettlementDateSource::Stated);
+    }
+
+    /// `Settlement::resolve_on` classifies against the row **the caller's own
+    /// connection** sees, which is what lets the write paths resolve on their
+    /// write transaction (2026-09-17 review).
+    ///
+    /// The probe is an uncommitted UPDATE on the transaction the resolution
+    /// runs on: the supplied date still matches the pool's committed row
+    /// (2024-01-17), but the transaction's own view has moved it to
+    /// 2024-01-18. Read on the pool — what the old `Settlement::resolve` did
+    /// before `write_tx` — the dates match and the stale `computed` source is
+    /// kept; read here, the supplied date differs from the stored one and is
+    /// the taxpayer's statement, which is the answer the row it lands on
+    /// warrants.
+    #[tokio::test]
+    async fn settlement_resolution_classifies_the_row_on_its_own_connection() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        test_support::buy(1, 1)
+            .date(ymd(2024, 1, 15))
+            .settlement(ymd(2024, 1, 17))
+            .settlement_source(SettlementDateSource::Computed)
+            .insert(&pool)
+            .await;
+
+        let mut tx = crate::infra::db::write_tx(&pool).await.unwrap();
+        sqlx::query("UPDATE trades SET settlement_date = '2024-01-18' WHERE id = 1")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+
+        let resolved =
+            Settlement::resolve_on(&mut tx, 1, 1, ymd(2024, 1, 15), Some(ymd(2024, 1, 17)))
+                .await
+                .unwrap();
+        assert_eq!(resolved.date, ymd(2024, 1, 17));
+        assert_eq!(
+            resolved.source,
+            SettlementDateSource::Stated,
+            "the transaction's stored date has moved, so the re-supplied one is a statement"
+        );
+
+        // The probe was the transaction's own view, not the pool's.
+        tx.rollback().await.unwrap();
+        let stored = db_get(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(stored.settlement_date, ymd(2024, 1, 17));
+        assert_eq!(
+            stored.settlement_date_source,
+            SettlementDateSource::Computed
+        );
+    }
+
+    /// A `PUT` of a stated settlement date races a recompute that has already
+    /// moved the stored date: the row the PUT lands on is not the row it
+    /// classified from, so it must not stamp the date it writes as `computed`.
+    ///
+    /// The interleave is made deterministic rather than sampled. A recompute's
+    /// write is held open on another connection — `BEGIN IMMEDIATE`, so the
+    /// moved date is invisible to any pool reader and the PUT's own
+    /// `write_tx` cannot begin until it commits. Resolved on the pool before
+    /// `write_tx` (what the handler did until the 2026-09-17 review), the PUT
+    /// read the pre-recompute row, where its supplied 2024-01-17 equalled the
+    /// stored one, and so kept `computed`; that stamp is what lets the
+    /// `settlement-recompute` job silently re-derive a date the user asserted.
+    /// Resolved on the write's own transaction, the stored row already holds
+    /// the recompute's 2024-01-18, the supplied date differs from it, and the
+    /// date is recorded `stated`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_recompute_interleaved_with_a_stated_date_write_cannot_mis_stamp_the_source() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let dir = tempfile::tempdir().unwrap();
+        let pool = test_support::race_pool(&dir).await;
+        test_support::listing(1).mic("XASX").insert(&pool).await;
+        // The row the PUT's GET was taken from: a computed settlement date.
+        test_support::buy(1, 1)
+            .date(ymd(2024, 1, 15))
+            .settlement(ymd(2024, 1, 17))
+            .settlement_source(SettlementDateSource::Computed)
+            .insert(&pool)
+            .await;
+
+        // The recompute, in flight: it moves the stored date one day. Held
+        // uncommitted, so a pool reader still sees the old date — the state the
+        // old handler decided on.
+        let mut recompute = crate::infra::db::write_tx(&pool).await.unwrap();
+        sqlx::query("UPDATE trades SET settlement_date = '2024-01-18' WHERE id = 1")
+            .execute(&mut *recompute)
+            .await
+            .unwrap();
+
+        // The PUT replaying the GET's stated date.
+        let body = serde_json::json!({
+            "trade_type": "Buy",
+            "date": "2024-01-15",
+            "listing_id": 1,
+            "settlement_date": "2024-01-17",
+            "average_price": "100.0",
+            "quantity": "10.0",
+            "currency": "AUD",
+            "brokerage": "0",
+            "gst_on_brokerage": "0",
+            "brokerage_currency": "AUD",
+            "fx_rate": "1.0"
+        });
+        let app = client(&pool);
+        let running = Arc::new(AtomicBool::new(false));
+        let putting = {
+            let app = app.clone();
+            let running = running.clone();
+            tokio::spawn(async move {
+                running.store(true, Ordering::SeqCst);
+                app.put("/trades/1", &body).await
+            })
+        };
+        // A condition, not a guessed duration: the PUT is under way. It cannot
+        // finish — it is blocked on the write lock, either before or (under the
+        // old shape) after its pooled resolve — so the grace period only
+        // guarantees the old handler's read happened first.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !running.load(Ordering::SeqCst) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the PUT never started"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(
+            !putting.is_finished(),
+            "the PUT waits for the write lock rather than deciding on a stale read"
+        );
+
+        recompute.commit().await.unwrap();
+        let resp = putting.await.expect("the PUT task does not panic");
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
+
+        let stored = db_get(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(
+            stored.settlement_date,
+            ymd(2024, 1, 17),
+            "the PUT wrote the date it stated"
+        );
+        assert_eq!(
+            stored.settlement_date_source,
+            SettlementDateSource::Stated,
+            "the row the PUT landed on held the recompute's date, so the supplied one is a \
+             statement — stamping it `computed` would let the settlement-recompute job \
+             silently re-derive a date the user asserted"
+        );
     }
 
     #[tokio::test]

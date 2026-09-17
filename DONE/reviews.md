@@ -6045,3 +6045,49 @@ reader navigated on neither paints nor toasts, and a non-Error rejection). Gates
 --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` (2,425 passed) and
 `node --test 'src/web/*.test.js'` (159 passed) all clean; `scripts/ui-check.sh --seed demo` rendered
 the prices, jobs and snapshots routes.
+
+## Settlement resolution reads the stored trade outside the write transaction (2026-09-17 review, integrity)
+
+(2026-09-17 review. `settlement_date_source` is decided from a read on the pool and then written by a
+transaction begun later, so a concurrent write can make the stamp describe a row state that no longer
+holds.)
+
+- [x] Reproduced by statement sequence: `src/entities/trade/http.rs:69-70` resolves on the pool, and
+  `src/entities/trade/db.rs:344` begins the write transaction afterwards; the Sell path is the same
+  shape (`src/entities/sell.rs:464-466` → `:468`). The classifying read is
+  `src/entities/trade/settlement.rs:137-150`
+- [x] Failure: a `PUT` replaying a `GET` body (what the web edit form sends) classifies the source
+  from the stored row; a concurrent recompute or another `PUT` changes the row before the write
+  lands, so the row is stamped with a source that does not describe how the date it wrote was
+  arrived at. The blast radius is provenance only — no tax figure reads `settlement_date` — but
+  `settlement_date_source` is exactly what governs whether the `settlement-recompute` job may
+  rewrite the date, so a user-asserted date can be silently re-derived or a wrong computed one never
+  repaired
+- [x] Fix: resolve on the transaction's own connection — `auto_settlement_date_on(conn, …)` already
+  exists, so add a `resolve_on(conn, …)` and call it after `write_tx`
+- [x] Tests: a DB-level test resolving inside the transaction, plus a concurrent test that a
+  recompute interleaved with a stated-date write cannot mis-stamp the source
+- [x] Docs sync: none
+
+**Closed 2026-09-17.** `Settlement::resolve` became `Settlement::resolve_on(conn: &mut
+SqliteConnection, …)`, running on the caller's own connection and delegating to the existing
+`auto_settlement_date_on`; the pool-based `auto_settlement_date` is now test-only. Both write paths
+call it **after** their `write_tx`: `PUT /trades/{id}` through the new
+`db_upsert_resolving_settlement(pool, trade, supplied)`, and the Sell path
+(`sell::db_upsert_sell`) on its own transaction. `db_upsert_in_tx`'s `SettlementWrite` parameter
+distinguishes the body path (`Some(supplied)`, resolved on the transaction) from the test/fixture
+writer (`None`, the row's own fields as given), and the handler's supplied date is still validated
+before the transaction by passing it as the placeholder the figure checks see (the trade date when
+one will be computed) — so the sequential behaviour, the `422` for a settlement date before the trade
+date, and `SettlementError`'s own `422` mapping are all unchanged. The plain `db_upsert` is now
+`#[cfg(test)]`, since the handler no longer calls it. No docs change was needed: the internal
+resolution point moved, while the documented `computed`/`stated`/`unrecorded` behaviour is unchanged.
+
+Tests: `entities::trade::tests::settlement_resolution_classifies_the_row_on_its_own_connection` (an
+uncommitted UPDATE on the transaction is visible to `resolve_on` while the pool still holds the old
+row), `entities::trade::tests::a_recompute_interleaved_with_a_stated_date_write_cannot_mis_stamp_the_source`
+and `entities::sell::tests::a_recompute_interleaved_with_a_sell_write_cannot_mis_stamp_the_source`
+(deterministic interleaves holding the recompute's `write_tx`; both verified to fail with
+`Computed` against the old resolve-on-pool shape). Gates: `cargo fmt --check`, `cargo clippy
+--all-targets -- -D warnings`, `cargo test` (2,428 passed) and `node --test 'src/web/*.test.js'`
+(159 passed) all clean.

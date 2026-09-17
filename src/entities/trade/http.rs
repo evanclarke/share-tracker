@@ -4,8 +4,8 @@
 //! invariants (allocations, residual chain) always hold.
 
 use super::{
-    DeleteOutcome, Settlement, Trade, TradeBody, TradeType, db_delete, db_get, db_list, db_upsert,
-    resolve_brokerage,
+    DeleteOutcome, Trade, TradeBody, TradeType, db_delete, db_get, db_list,
+    db_upsert_resolving_settlement, model::SettlementDateSource, resolve_brokerage,
 };
 use crate::infra::http::ApiError;
 use axum::{
@@ -65,9 +65,14 @@ async fn upsert(
     // Which of the two wrote the stored settlement date is recorded with it:
     // a supplied value is the taxpayer's own assertion and is never rewritten,
     // a computed one is re-derived by the `settlement-recompute` job once the
-    // calendar it was computed against is completed (SCENARIOS S-04/S-05).
-    let settlement =
-        Settlement::resolve(&pool, id, body.listing_id, body.date, body.settlement_date).await?;
+    // calendar it was computed against is completed (SCENARIOS S-04/S-05). The
+    // decision is made inside the write's own transaction
+    // (`db_upsert_resolving_settlement`), not here, so a concurrent write
+    // cannot change the stored row between the classifying read and the write.
+    // The two fields below are only the placeholder that lets the
+    // pre-transaction figure checks validate a supplied date (and passes on
+    // the trade date when one will be computed).
+    let settlement_date = body.settlement_date.unwrap_or(body.date);
     // A GST-inclusive brokerage entry is split here, at the API boundary, so
     // the stored columns (and `Trade` itself) are always ex-GST + GST.
     let (brokerage, gst_on_brokerage) = resolve_brokerage(
@@ -79,8 +84,8 @@ async fn upsert(
         id,
         trade_type: body.trade_type,
         date: body.date,
-        settlement_date: settlement.date,
-        settlement_date_source: settlement.source,
+        settlement_date,
+        settlement_date_source: SettlementDateSource::Stated,
         listing_id: body.listing_id,
         average_price: body.average_price,
         quantity: body.quantity,
@@ -107,7 +112,7 @@ async fn upsert(
         ess_statement_id: None,
         inheritance_id: None,
     };
-    db_upsert(&pool, &trade).await?;
+    db_upsert_resolving_settlement(&pool, &trade, body.settlement_date).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

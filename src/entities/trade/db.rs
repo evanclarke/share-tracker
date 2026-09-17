@@ -8,9 +8,11 @@ use super::checks::{
     statement_total_detail, validate_spot_fx_rate,
 };
 use super::model::Trade;
+use super::{Settlement, SettlementError};
 use crate::infra::db::write_tx;
 use crate::infra::decimal::{Money, OptMoney, parse_dec};
 use crate::infra::http::{self, ApiError, CrudEntity};
+use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use sqlx::{Row, SqlitePool};
 
@@ -258,6 +260,16 @@ pub enum UpsertError {
     /// by `reports::health`'s non-blocking `non_trading_day_trades` alert.
     #[error("the trade is dated on a non-trading day: {0}")]
     NonTradingDay(String),
+    /// The settlement date could not be resolved on the write's own
+    /// transaction (see [`Settlement::resolve_on`]): a checked business-day
+    /// step that left `NaiveDate`'s range
+    /// ([`SettlementError::DateOverflow`]), or a lookup failure. It carries
+    /// [`SettlementError`] rather than flattening it so the `422` its
+    /// `From<SettlementError> for ApiError` maps to — the one the handler
+    /// answered with before the resolution moved inside the transaction — is
+    /// unchanged.
+    #[error("settlement-date resolution failed: {0}")]
+    Settlement(#[from] SettlementError),
 }
 
 /// The stored row an edit is checked against: the four fields whose *change*
@@ -313,7 +325,64 @@ pub(crate) async fn listing_currency_mismatch(
     Ok(listing.filter(|l| l != currency))
 }
 
+/// How [`db_upsert_in_tx`] settles the row's `settlement_date` and
+/// `settlement_date_source`.
+///
+/// `None` writes the row's own two fields as given — the test/fixture writer
+/// ([`db_upsert`]). `Some(supplied)` is a `PUT /trades/{id}` body's
+/// `settlement_date`: `Some(d)` is the taxpayer's stated value, `None` asks
+/// for T+n, resolved on the write's own transaction
+/// ([`Settlement::resolve_on`]).
+type SettlementWrite = Option<Option<NaiveDate>>;
+
+/// Create or update a trade, writing the row's own `settlement_date` and
+/// `settlement_date_source` exactly as given.
+///
+/// Test-only: fixtures and the tests that need a specific provenance state
+/// call it directly (and the derived operations that have already decided a
+/// settlement date write through it). The non-test write path
+/// (`PUT /trades/{id}`) goes through [`db_upsert_resolving_settlement`], which
+/// resolves the body's settlement date on the transaction that writes it.
+///
+/// Validated and written in one transaction (symmetric with the Sell-side
+/// invariants in `sell::db_upsert_sell`): an edit may not shrink a Buy/DRP's
+/// quantity below what its dependants rely on — the quantity already allocated
+/// to Sells, or any linked AMIT adjustment's covered quantity.
+#[cfg(test)]
 pub async fn db_upsert(pool: &SqlitePool, trade: &Trade) -> Result<(), UpsertError> {
+    db_upsert_in_tx(pool, trade, None).await
+}
+
+/// Create or update a trade from a `PUT /trades/{id}` body. `supplied` is the
+/// body's `settlement_date` — `Some(d)` the taxpayer's own value, `None`
+/// omitted (compute T+n) — resolved on the write's **own** transaction, after
+/// `write_tx`, so the row it classifies is the row the write lands on.
+///
+/// Resolving on the pool first (what the handler did until the 2026-09-17
+/// review) left a window: a concurrent recompute or another `PUT` could change
+/// the stored row between the classifying read and the write, and the row was
+/// stamped with a source that did not describe how the date it wrote was
+/// arrived at — the very flag that decides whether the `settlement-recompute`
+/// job may rewrite the date, so a user-asserted date could be silently
+/// re-derived or a wrong computed one never repaired.
+///
+/// `trade.settlement_date` / `trade.settlement_date_source` are ignored in
+/// this mode: they only need to be a placeholder for the pre-transaction
+/// [`check_amounts`] pass, which validates the supplied date (or the trade
+/// date when one is computed).
+pub async fn db_upsert_resolving_settlement(
+    pool: &SqlitePool,
+    trade: &Trade,
+    supplied: Option<NaiveDate>,
+) -> Result<(), UpsertError> {
+    db_upsert_in_tx(pool, trade, Some(supplied)).await
+}
+
+async fn db_upsert_in_tx(
+    pool: &SqlitePool,
+    trade: &Trade,
+    settlement_write: SettlementWrite,
+) -> Result<(), UpsertError> {
     // Degenerate figures (zero/negative quantity, negative costs, …) corrupt
     // every downstream report without failing anything — rejected before
     // anything else runs.
@@ -342,6 +411,22 @@ pub async fn db_upsert(pool: &SqlitePool, trade: &Trade) -> Result<(), UpsertErr
     validate_spot_fx_rate(&trade.currency, trade.spot_fx_rate).map_err(UpsertError::SpotFxRate)?;
 
     let mut tx = write_tx(pool).await?;
+
+    // The settlement date is resolved on this transaction — the row the write
+    // lands on is the row the classification read (see
+    // [`Settlement::resolve_on`]). With no supplied value (the test/fixture
+    // writer) the caller has already decided, so the row's own fields are the
+    // answer.
+    let settlement = match settlement_write {
+        None => Settlement {
+            date: trade.settlement_date,
+            source: trade.settlement_date_source,
+        },
+        Some(supplied) => {
+            Settlement::resolve_on(&mut tx, trade.id, trade.listing_id, trade.date, supplied)
+                .await?
+        }
+    };
 
     // A rights-exercise, buy-back participation, scrip-for-scrip exchange,
     // or demerger trade is immutable here: it was created against its
@@ -585,8 +670,8 @@ pub async fn db_upsert(pool: &SqlitePool, trade: &Trade) -> Result<(), UpsertErr
     .bind(trade.id)
     .bind(trade.trade_type)
     .bind(trade.date)
-    .bind(trade.settlement_date)
-    .bind(trade.settlement_date_source)
+    .bind(settlement.date)
+    .bind(settlement.source)
     .bind(trade.listing_id)
     .bind(Money(trade.average_price))
     .bind(Money(trade.quantity))
@@ -919,6 +1004,10 @@ impl From<UpsertError> for ApiError {
                 "this parcel anchors a rights sale and cannot be edited — delete the rights \
                  sale, edit, then re-enter it",
             ),
+            // The resolution moved inside the transaction, but its outcome is
+            // unchanged: `SettlementError`'s own mapping still answers the
+            // `422` (or the DB failure's `500`) the handler gave before.
+            UpsertError::Settlement(err) => err.into(),
             UpsertError::Db(err) => err.into(),
         }
     }

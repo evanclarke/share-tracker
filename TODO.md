@@ -38,29 +38,6 @@ what has been verified is SCENARIOS.md's
 [Verification status](SCENARIOS.md#verification-status) table and its per-section findings blocks;
 the maintained record of what was built and decided is the `DONE/*.md` archive.
 
-## Settlement resolution reads the stored trade outside the write transaction (2026-09-17 review, integrity)
-
-(2026-09-17 review. `settlement_date_source` is decided from a read on the pool and then written by a
-transaction begun later, so a concurrent write can make the stamp describe a row state that no longer
-holds.)
-
-- [ ] Reproduced by statement sequence: `src/entities/trade/http.rs:69-70` resolves on the pool, and
-  `src/entities/trade/db.rs:344` begins the write transaction afterwards; the Sell path is the same
-  shape (`src/entities/sell.rs:464-466` → `:468`). The classifying read is
-  `src/entities/trade/settlement.rs:137-150`
-- [ ] Failure: a `PUT` replaying a `GET` body (what the web edit form sends) classifies the source
-  from the stored row; a concurrent recompute or another `PUT` changes the row before the write
-  lands, so the row is stamped with a source that does not describe how the date it wrote was
-  arrived at. The blast radius is provenance only — no tax figure reads `settlement_date` — but
-  `settlement_date_source` is exactly what governs whether the `settlement-recompute` job may
-  rewrite the date, so a user-asserted date can be silently re-derived or a wrong computed one never
-  repaired
-- [ ] Fix: resolve on the transaction's own connection — `auto_settlement_date_on(conn, …)` already
-  exists, so add a `resolve_on(conn, …)` and call it after `write_tx`
-- [ ] Tests: a DB-level test resolving inside the transaction, plus a concurrent test that a
-  recompute interleaved with a stated-date write cannot mis-stamp the source
-- [ ] Docs sync: none
-
 ## The price-alert scan reads without a snapshot, and its send and send-log are not atomic (2026-09-17 review, integrity)
 
 (2026-09-17 review of the `price-alert` job added in v0.23.0. Two related properties, both

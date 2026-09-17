@@ -163,8 +163,19 @@ impl Settlement {
 
     /// Resolve a trade or Sell write's settlement date: the `supplied` value
     /// stated as given, else T+n computed over the exchange's calendar
-    /// ([`auto_settlement_date`]). The one place that rule lives, so the trade
-    /// and Sell endpoints cannot classify the same body differently.
+    /// ([`auto_settlement_date_on`]). The one place that rule lives, so the
+    /// trade and Sell endpoints cannot classify the same body differently.
+    ///
+    /// Runs on the **caller's own connection** — the write path's transaction,
+    /// which is the whole point: the classifying read and the row the write
+    /// lands on are then the same state. Read on the pool *before* `write_tx`
+    /// (what both write paths did until the 2026-09-17 review), a concurrent
+    /// recompute or another `PUT` could change the stored row in the window
+    /// between the read and the write, and the row was stamped with a source
+    /// that did not describe how the date it wrote was arrived at. That stamp
+    /// is exactly what governs whether the `settlement-recompute` job may
+    /// rewrite the date, so a user-asserted date could be silently re-derived
+    /// or a wrong computed one never repaired.
     ///
     /// With one qualification, which is what keeps the provenance meaningful:
     /// **re-supplying the date already stored changes nothing**. A `GET` body
@@ -176,8 +187,8 @@ impl Settlement {
     /// supplied date equal to the stored one keeps the recorded source, and
     /// only a *different* supplied date (or a trade being created) is
     /// [`SettlementDateSource::Stated`].
-    pub(crate) async fn resolve(
-        pool: &SqlitePool,
+    pub(crate) async fn resolve_on(
+        conn: &mut sqlx::SqliteConnection,
         trade_id: i64,
         listing_id: i64,
         date: NaiveDate,
@@ -185,7 +196,7 @@ impl Settlement {
     ) -> Result<Self, SettlementError> {
         let Some(supplied) = supplied else {
             return Ok(Settlement {
-                date: auto_settlement_date(pool, trade_id, listing_id, date).await?,
+                date: auto_settlement_date_on(&mut *conn, trade_id, listing_id, date).await?,
                 source: SettlementDateSource::Computed,
             });
         };
@@ -194,7 +205,7 @@ impl Settlement {
              FROM trades WHERE id = ?",
         )
         .bind(trade_id)
-        .fetch_optional(pool)
+        .fetch_optional(&mut *conn)
         .await?;
         Ok(match stored {
             Some(stored) if stored.settlement_date == supplied => Settlement {
@@ -206,11 +217,17 @@ impl Settlement {
     }
 }
 
-/// Auto-populate a settlement date for a trade with none supplied. An
-/// exchange-listed security settles T+n business days after the trade date,
-/// skipping weekends and the exchange's seeded holidays (warning when the
-/// window leaves seeded coverage). An exchange-less (Crypto) listing settles
-/// same-day — no T+n, no holiday calendar, no coverage warning.
+/// Auto-populate a settlement date for a trade with none supplied, on a
+/// pooled connection. An exchange-listed security settles T+n business days
+/// after the trade date, skipping weekends and the exchange's seeded holidays
+/// (warning when the window leaves seeded coverage). An exchange-less (Crypto)
+/// listing settles same-day — no T+n, no holiday calendar, no coverage
+/// warning.
+///
+/// Test-only: both write paths resolve through [`Settlement::resolve_on`] on
+/// their own transaction now, so nothing in the non-test build reaches the
+/// pooled form. It stays as the name the settlement tests call.
+#[cfg(test)]
 pub(crate) async fn auto_settlement_date(
     pool: &SqlitePool,
     trade_id: i64,

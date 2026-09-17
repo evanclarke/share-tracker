@@ -462,17 +462,25 @@ pub async fn db_delete_sell(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome,
 /// not-over-allocated Buy/DRP. A buy-back participation Sell is immutable
 /// here — delete it via `DELETE /sells/:id` and re-participate instead.
 pub async fn db_upsert_sell(pool: &SqlitePool, id: i64, body: &SellBody) -> Result<(), SellError> {
-    // Reference data (exchanges/listings) is not touched here, so resolving the
-    // settlement date outside the write transaction is a consistent read.
+    let mut tx = write_tx(pool).await?;
+
     // Recorded with the date, as on the trade path: a supplied value is the
     // taxpayer's assertion and is never rewritten; a computed one is
     // re-derived by the `settlement-recompute` job once the calendar it was
-    // computed against is completed (SCENARIOS S-04/S-05).
-    let settlement =
-        trade::Settlement::resolve(pool, id, body.listing_id, body.date, body.settlement_date)
-            .await?;
-
-    let mut tx = write_tx(pool).await?;
+    // computed against is completed (SCENARIOS S-04/S-05). Resolved on this
+    // transaction — the same connection the write runs on — rather than on the
+    // pool before it (2026-09-17 review): the classifying read and the row the
+    // write lands on must be one state, or a concurrent recompute or another
+    // `PUT` can leave the row stamped with a source that does not describe how
+    // the date it wrote was arrived at.
+    let settlement = trade::Settlement::resolve_on(
+        &mut tx,
+        id,
+        body.listing_id,
+        body.date,
+        body.settlement_date,
+    )
+    .await?;
 
     // A buy-back participation, scrip-for-scrip exchange, or demerger Sell is
     // immutable here: its figures derive from its action's terms (and it
@@ -1003,6 +1011,99 @@ mod tests {
 
         assert!(trade_exists(&pool, 2).await);
         assert_eq!(count_allocations(&pool, 2).await, 1);
+    }
+
+    /// The Sell half of the settlement-resolution race (the trade path's
+    /// `a_recompute_interleaved_with_a_stated_date_write_cannot_mis_stamp_the_source`):
+    /// `db_upsert_sell` resolves on its own write transaction, so a recompute
+    /// that has already moved the stored row cannot leave a re-supplied
+    /// settlement date stamped `computed` — the flag that lets the
+    /// `settlement-recompute` job silently rewrite a date the user asserted.
+    ///
+    /// The recompute's write is held open on another connection
+    /// (`BEGIN IMMEDIATE`, so the moved date is invisible to a pool reader and
+    /// the Sell's `write_tx` cannot begin until it commits). Resolved on the
+    /// pool first — what this path did until the 2026-09-17 review — the Sell
+    /// read the pre-recompute row, where its re-supplied 2024-06-05 equalled
+    /// the stored one, and kept `computed`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_recompute_interleaved_with_a_sell_write_cannot_mis_stamp_the_source() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let dir = tempfile::tempdir().unwrap();
+        let pool = test_support::race_pool(&dir).await;
+        insert_listing(&pool, 1).await;
+        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+
+        let allocation = || AllocationInput {
+            purchase_trade_id: 1,
+            quantity_allocated: Decimal::from(100),
+        };
+        // The Sell as written with no date supplied: 2024-06-03 (Monday) + T+2
+        // = 2024-06-05, recorded computed.
+        db_upsert_sell(&pool, 2, &sell_body(Decimal::from(100), vec![allocation()]))
+            .await
+            .unwrap();
+        let stated = NaiveDate::from_ymd_opt(2024, 6, 5).unwrap();
+        let stored = trade::db_get(&pool, 2).await.unwrap().unwrap();
+        assert_eq!(stored.settlement_date, stated);
+        assert_eq!(
+            stored.settlement_date_source,
+            trade::SettlementDateSource::Computed
+        );
+
+        // The recompute, in flight: it moves the stored date one day.
+        let mut recompute = write_tx(&pool).await.unwrap();
+        sqlx::query("UPDATE trades SET settlement_date = '2024-06-06' WHERE id = 2")
+            .execute(&mut *recompute)
+            .await
+            .unwrap();
+
+        // The replay re-supplies the date the row held before the recompute.
+        let mut replay = sell_body(Decimal::from(100), vec![allocation()]);
+        replay.settlement_date = Some(stated);
+        let running = Arc::new(AtomicBool::new(false));
+        let writing = {
+            let pool = pool.clone();
+            let running = running.clone();
+            tokio::spawn(async move {
+                running.store(true, Ordering::SeqCst);
+                db_upsert_sell(&pool, 2, &replay).await
+            })
+        };
+        // A condition, then a grace period in which the write can do nothing
+        // but wait for the lock (or, under the old shape, has already resolved
+        // against the pool's pre-recompute row).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !running.load(Ordering::SeqCst) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the Sell write never started"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(
+            !writing.is_finished(),
+            "the Sell write waits for the write lock rather than deciding on a stale read"
+        );
+
+        recompute.commit().await.unwrap();
+        writing
+            .await
+            .expect("the Sell write task does not panic")
+            .expect("the replay is a valid Sell");
+
+        let stored = trade::db_get(&pool, 2).await.unwrap().unwrap();
+        assert_eq!(stored.settlement_date, stated);
+        assert_eq!(
+            stored.settlement_date_source,
+            trade::SettlementDateSource::Stated,
+            "the row the Sell landed on held the recompute's date, so the supplied one is a \
+             statement — stamping it `computed` would let the settlement-recompute job \
+             silently re-derive a date the user asserted"
+        );
     }
 
     #[tokio::test]
