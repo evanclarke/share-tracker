@@ -5519,3 +5519,65 @@ untouched E10 excess — with the doc-string and comments of
 already held the new wording).
 Gates: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` (2,393
 passed) and `node --test 'src/web/*.test.js'` (149 passed) all clean.
+
+## The adjusted-cost-base pipeline floors once, so a later AMIT increase cannot restore an exhausted cost base (2026-09-17 review, financial correctness)
+
+(The 2026-09-17 review's financial-correctness pass. `domain::cost_base::adjusted_cost_base` subtracts
+a *summed* `amit_reduction` and `roc_reduction` and floors once at `src/domain/cost_base.rs:803`,
+whereas both sibling walks floor **per event** — `adjustment_detail` at `:990-996` and the
+net-capital-gain E10/G1 walk at `:616-622`. The comment at `:979-984` asserts the two are equivalent
+"since every step only ever subtracts a non-negative amount", which is false exactly when an AMIT
+adjustment is negative (an upward adjustment) — supported and tested here, and the ATO rule
+(`docs/ato/amit-cost-base-adjustments.md`: the cost base "can be adjusted both upward and
+downward"), with nothing anywhere rejecting a negative `cost_base_adjustment`.)
+
+- [x] Reproduced, with figures: 100 units at $1 ($100 pool). AMMA FY2024 +$2.00/unit (a $200
+  downward adjustment, which floors the base to nil and books a $100 E10 gain); AMMA FY2025
+  −$1.50/unit (a $150 upward adjustment); then a sale of all 100 units for $200. Correct sequence:
+  base 100 → E10 gain $100, base floored to 0 → FY2025 increase restores it to 150 → sale gain $50 —
+  **total assessable $150**. Actual: `amit_reduction = 200 − 150 = 50`, so the cost base is $50 and
+  the sale gain is $150 — **total assessable $250**, with the FY2024 E10 gain taxed twice. A 50-unit
+  partial sale reports $25 where $75 is right
+- [x] The same discrepancy is visible inside one archived annual tax report: its worksheet
+  (`adjustment_detail`) reconciles to 150 while its disposal cost base (`adjusted`) says 50
+- [x] Fix: floor per `(date, rank)` event inside the pipeline, exactly as `adjustment_detail` and the
+  net-capital-gain walk already do, so a later increase restores a base an earlier reduction
+  exhausted
+- [x] Tests: the review's four-event scenario asserting both the disposal cost base and the total
+  assessable amount, plus a mirrored assertion that the pipeline's `adjusted` and the worksheet's
+  final `adjustment_detail` balance agree whenever an upward adjustment follows a capped one
+- [x] Docs sync: correct the `:979-984` comment, which currently states the equivalence the fix
+  disproves
+
+**Closed 2026-09-17.** `adjusted_cost_base` and `adjustment_detail` now share one private
+`reduction_walk`: the AMIT and return-of-capital rows are assembled once, sorted into the `(date,
+rank)` order the net-capital-gain report's E10/G1 walk applies the same events in, and applied **one
+at a time with the balance floored at nil after each** — so a negative (upward) AMIT adjustment adds
+to the balance and restores a base an earlier statement exhausted. `adjusted_cost_base` takes both
+the closing balance and the per-kind totals from that walk (the totals are the rows' own sums, which
+makes the long-documented "rows sum exactly to the reported reductions" contract true by
+construction rather than by recomputing the same figures a second way), and `adjustment_detail` is
+now a one-line wrapper returning the rows.
+
+Two helpers the per-event walk supersedes were removed rather than left to drift: `amit_reduction_for`
+(whose only caller was the pipeline) and `corporate_action::per_unit_reduction` (the walk needs each
+payment's own figure, never their sum) — the latter's five tests were rewritten against
+`RocEvent::per_unit_for`, the method both the walk and the tests exercise. `CostBaseAdjustment::capped`
+is now `amount > before` rather than `before <= 0 || amount > before`, so the restoring row prints
+without the worksheet's capped marker: an upward adjustment creates no excess gain even at a nil
+balance. The `:979-984` comment asserting the disproved equivalence is gone, replaced by
+`reduction_walk`'s doc and the module doc's step 2/3 paragraph, which state the per-event floor and
+why netting the reductions is not equivalent.
+
+Tests: `domain::cost_base::tests::an_upward_amit_adjustment_restores_a_cost_base_an_earlier_one_exhausted`
+(the $100 base, $200 reduction, $150 restoration: `adjusted` 150 whole-parcel and 75 for a 50-unit
+partial sale — not the netted 25 — plus the capped/uncapped flags and the worksheet's own row walk
+balancing to the pipeline's `adjusted`);
+`reports::net_capital_gain::tests::db_an_upward_amit_adjustment_restores_the_disposal_cost_base`
+(the disposal cost base 150, the sale gain 50 and the FY2024 E10 gain 100 reported once — $150 gross
+assessable, not $250); and
+`reports::tax_report::tests::api_worksheet_prints_the_base_an_upward_amit_adjustment_restores` (the
+archived document's own figures: worksheet rows 200/−150 with only the first capped, disposal cost
+base 150, gain 50, and a single FY2023 E10 gain of 100). Gates: `cargo fmt --check`,
+`cargo clippy --all-targets -- -D warnings` and `cargo test` (2,396 passed) all clean, plus
+`node --test 'src/web/*.test.js'` (149 passed).

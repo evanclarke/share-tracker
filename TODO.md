@@ -11,8 +11,8 @@ A section records one finding, and its heading names where it came from — a RE
 [SCENARIOS.md](SCENARIOS.md) section, or a dated review pass.
 
 **Open: the 2026-09-17 code review pass.** Its findings are the sections below, most-urgent first.
-One of its two financial-correctness defects in the CGT arithmetic remains (the single end-floor in
-the cost-base pipeline) — the other, the G1 excess's FX date, was fixed on 2026-09-17 and moved to
+Both of its financial-correctness defects in the CGT arithmetic — the G1 excess's FX date and the
+cost-base pipeline's single end-floor — were fixed on 2026-09-17 and moved to
 [`DONE/reviews.md`](DONE/reviews.md); next are an availability panic and two write-time validation
 holes, a packaging permission, tax-document/label inconsistencies, two frontend state bugs, and a
 tail of low-severity concurrency, hygiene, documentation and test-gap items. The pass verified the
@@ -37,35 +37,6 @@ close before that audit (the distribution calendar and the 2026-08-25 code revie
 what has been verified is SCENARIOS.md's
 [Verification status](SCENARIOS.md#verification-status) table and its per-section findings blocks;
 the maintained record of what was built and decided is the `DONE/*.md` archive.
-
-## The adjusted-cost-base pipeline floors once, so a later AMIT increase cannot restore an exhausted cost base (2026-09-17 review, financial correctness)
-
-(The 2026-09-17 review's financial-correctness pass. `domain::cost_base::adjusted_cost_base` subtracts
-a *summed* `amit_reduction` and `roc_reduction` and floors once at `src/domain/cost_base.rs:803`,
-whereas both sibling walks floor **per event** — `adjustment_detail` at `:990-996` and the
-net-capital-gain E10/G1 walk at `:616-622`. The comment at `:979-984` asserts the two are equivalent
-"since every step only ever subtracts a non-negative amount", which is false exactly when an AMIT
-adjustment is negative (an upward adjustment) — supported and tested here, and the ATO rule
-(`docs/ato/amit-cost-base-adjustments.md`: the cost base "can be adjusted both upward and
-downward"), with nothing anywhere rejecting a negative `cost_base_adjustment`.)
-
-- [ ] Reproduced, with figures: 100 units at $1 ($100 pool). AMMA FY2024 +$2.00/unit (a $200
-  downward adjustment, which floors the base to nil and books a $100 E10 gain); AMMA FY2025
-  −$1.50/unit (a $150 upward adjustment); then a sale of all 100 units for $200. Correct sequence:
-  base 100 → E10 gain $100, base floored to 0 → FY2025 increase restores it to 150 → sale gain $50 —
-  **total assessable $150**. Actual: `amit_reduction = 200 − 150 = 50`, so the cost base is $50 and
-  the sale gain is $150 — **total assessable $250**, with the FY2024 E10 gain taxed twice. A 50-unit
-  partial sale reports $25 where $75 is right
-- [ ] The same discrepancy is visible inside one archived annual tax report: its worksheet
-  (`adjustment_detail`) reconciles to 150 while its disposal cost base (`adjusted`) says 50
-- [ ] Fix: floor per `(date, rank)` event inside the pipeline, exactly as `adjustment_detail` and the
-  net-capital-gain walk already do, so a later increase restores a base an earlier reduction
-  exhausted
-- [ ] Tests: the review's four-event scenario asserting both the disposal cost base and the total
-  assessable amount, plus a mirrored assertion that the pipeline's `adjusted` and the worksheet's
-  final `adjustment_detail` balance agree whenever an upward adjustment follows a capped one
-- [ ] Docs sync: correct the `:979-984` comment, which currently states the equivalence the fix
-  disproves
 
 ## An unvalidated `settlement_days` overflows `NaiveDate` and panics the request (2026-09-17 review, integrity + availability)
 

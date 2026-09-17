@@ -10,13 +10,23 @@
 //!    AMMA statement's downward adjustment can only take the cost base to
 //!    nil, never negative; the excess is a capital gain reported by the
 //!    net-capital-gain report (`docs/ato/amit-cost-base-adjustments.md`).
-//!    Applied **per unit to the units the statement covers**
+//!    The cost base "can be adjusted both upward and downward", so a
+//!    statement's net amount may equally be *negative* — an upward
+//!    adjustment, which adds to the balance (see step 2/3's shared floor
+//!    below). Applied **per unit to the units the statement covers**
 //!    ([`AmitReductionEvent::per_unit_for`]), not pooled across the parcel.
 //! 3. **Return-of-capital payments** (CGT event G1) received while the costed
 //!    units were held — from acquisition up to `up_to` — reduce the cost base
 //!    per as-acquired unit, again flooring at nil with the excess a capital
 //!    gain in the net-capital-gain report
 //!    (`docs/ato/cgt-non-assessable-payments.md`).
+//!
+//!    Steps 2 and 3 are applied **in the `(date, rank)` order the events
+//!    arise in, each flooring at nil as it lands** ([`reduction_walk`]), not
+//!    as one accumulated subtraction afterwards. An upward AMIT adjustment
+//!    can therefore restore a cost base an earlier reduction had exhausted —
+//!    netting the reductions first would lose that restoration and tax the
+//!    earlier E10 excess a second time on the eventual disposal.
 //! 4. **Split re-basing** — a share split/consolidation or non-assessable
 //!    bonus issue scales unit counts but never the parcel's total cost base
 //!    or acquisition date (TD 2000/10,
@@ -43,7 +53,7 @@ use rust_decimal::Decimal;
 use serde::Serialize;
 
 use crate::domain::rollover;
-use crate::entities::corporate_action::{RocEvent, RolloverOrigin, SplitEvent, per_unit_reduction};
+use crate::entities::corporate_action::{RocEvent, RolloverOrigin, SplitEvent};
 use crate::infra::decimal::{Money, OptMoney, mul_div};
 use crate::infra::fx;
 
@@ -675,23 +685,6 @@ impl AmitReductionEvent {
     }
 }
 
-/// The AMIT cost-base reduction (CGT event E10) reaching `units` as-acquired
-/// units of a `parcel_quantity`-unit parcel — [`AmitReductionEvent::per_unit_for`]
-/// summed over the parcel's statements. Every caller of [`adjusted_cost_base`]
-/// gets this for free; it is public for the net-capital-gain report's own E10
-/// walk, which needs the per-statement figures rather than the total.
-pub fn amit_reduction_for(
-    events: &[AmitReductionEvent],
-    parcel_quantity: Decimal,
-    units: Decimal,
-    disposed_on: Option<NaiveDate>,
-) -> Decimal {
-    events
-        .iter()
-        .map(|e| e.reduction_for_units(parcel_quantity, units, disposed_on))
-        .sum()
-}
-
 /// The cost-base breakdown of some or all of a parcel's units, produced by
 /// [`adjusted_cost_base`]. Native currency until [`CostBase::into_aud_with`].
 #[derive(Debug, Clone, Copy)]
@@ -716,9 +709,12 @@ pub struct CostBase {
     pub roc_reduction: Decimal,
     /// Adjusted cost base of the costed units: their share of the initial
     /// cost base, less the AMIT and return-of-capital reductions reaching
-    /// them, floored at nil (CGT events E10 and G1 both floor at nil — any
+    /// them, applied one event at a time in the order they arose and floored
+    /// at nil at each step (CGT events E10 and G1 both floor at nil — any
     /// excess is a capital gain in the net-capital-gain report, never a
-    /// negative cost base).
+    /// negative cost base). A *negative* (upward) AMIT adjustment adds back
+    /// rather than subtracting, so it can restore a base an earlier reduction
+    /// exhausted; see [`reduction_walk`].
     pub adjusted: Decimal,
 }
 
@@ -784,31 +780,24 @@ pub fn adjusted_cost_base(
     } else {
         Decimal::ZERO
     };
-    let amit_reduction =
-        amit_reduction_for(amit_events, parcel.quantity, units, held.disposed_on());
-    let roc_per_unit = per_unit_reduction(
-        roc_events,
-        splits,
-        parcel.currency,
-        parcel.trade_date,
-        parcel.rollover,
-        held.up_to(),
-    )?;
-    let roc_reduction = roc_per_unit * units;
-    let adjusted = if parcel.quantity > Decimal::ZERO {
-        // Both reductions are already stated for the costed units, so they
-        // come off that share of the initial cost base directly — no second
-        // pro-rating, and one floor covers both (each subtraction only ever
-        // moves the balance the same way an earlier floor would have).
-        (costed_initial_cost - amit_reduction - roc_reduction).max(Decimal::ZERO)
-    } else {
-        Decimal::ZERO
+    // One walk produces both the itemised rows and the balance they leave, so
+    // the cost base a disposal is costed from and the worksheet printed beside
+    // it can never describe different applications of the same events. The
+    // reductions' *totals* are the rows' own sums for the same reason: both
+    // report the full amount each event takes off, even where an event runs
+    // past nil and the cost base itself floors instead.
+    let (rows, adjusted) = reduction_walk(parcel, units, amit_events, roc_events, splits, held)?;
+    let reduction_of = |kind: AdjustmentKind| -> Decimal {
+        rows.iter()
+            .filter(|row| row.kind == kind)
+            .map(|row| row.amount)
+            .sum()
     };
     Ok(CostBase {
         initial_cost,
         costed_initial_cost,
-        amit_reduction,
-        roc_reduction,
+        amit_reduction: reduction_of(AdjustmentKind::AmitCostBase),
+        roc_reduction: reduction_of(AdjustmentKind::ReturnOfCapital),
         adjusted,
     })
 }
@@ -853,29 +842,29 @@ pub struct CostBaseAdjustment {
     /// [`AdjustmentKind::AmitCostBase`] rows) or `roc_reduction` (the
     /// [`AdjustmentKind::ReturnOfCapital`] rows).
     pub amount: Decimal,
-    /// This row is the one that first drives the running balance to nil, or
-    /// falls after that point (CGT event E10/G1) — the excess is a capital
-    /// gain in the net-capital-gain report, not reflected in the cost base.
+    /// This row ran the running balance past nil (CGT event E10/G1) — the
+    /// excess is a capital gain in the net-capital-gain report, not reflected
+    /// in the cost base, so the row's full `amount` is larger than the value
+    /// it actually took off. False for a *negative* (upward) adjustment, which
+    /// at a nil balance adds to the base rather than running past it.
     pub capped: bool,
 }
 
 /// The itemised detail behind [`adjusted_cost_base`]'s AMIT and
 /// return-of-capital reductions, plus informational split-rebase rows, for
-/// `units` as-acquired units of `parcel`. Mirrors `adjusted_cost_base`'s
-/// walk (steps 2–4 of the module doc) so the two can never disagree — a test
-/// pins the rows summing to the same function's netted totals.
+/// `units` as-acquired units of `parcel` — [`reduction_walk`]'s rows.
 ///
 /// `amit_events` are the same [`AmitReductionEvent`]s `adjusted_cost_base`
 /// takes (`entities::amit_adjustment::db_cost_base_reduction_events`), in
 /// `tax_year_end_date` order. `roc_events`, `splits` and `held` are its other
 /// inputs unchanged. Every row describes the **costed units**, so the rows sum
-/// to the same reductions that function reports for them.
+/// to exactly the reductions that function reports for them.
 ///
 /// Rows come back — and their `capped` flags are computed — in the **date
 /// order the events arise in**, the same `(date, rank)` order the
 /// net-capital-gain report's E10/G1 walk applies these events in, so the two
 /// halves of one archived Annual Tax Report agree on which event exhausted
-/// the cost base (see the walk comment inside).
+/// the cost base.
 pub fn adjustment_detail(
     parcel: &Parcel<'_>,
     units: Decimal,
@@ -884,6 +873,44 @@ pub fn adjustment_detail(
     splits: &[SplitEvent],
     held: Held,
 ) -> Result<Vec<CostBaseAdjustment>, sqlx::Error> {
+    Ok(reduction_walk(parcel, units, amit_events, roc_events, splits, held)?.0)
+}
+
+/// Steps 2–4 of the pipeline (see the module doc) in one place: the reductions
+/// reaching `units` as-acquired units of `parcel`, in the `(date, rank)` order
+/// they arise in, applied **one at a time with a floor at nil after each**,
+/// plus the balance they leave — the `adjusted` figure [`adjusted_cost_base`]
+/// reports and the closing balance [`adjustment_detail`]'s printed rows are
+/// reconciled against.
+///
+/// One walk serves both callers, so the cost base a disposal is costed from
+/// and the worksheet printed beside it can never apply the same events
+/// differently. The order is also the events' own law: a payment reduces "the
+/// cost base of the shares at the time of the payment"
+/// (`docs/ato/cgt-non-assessable-payments.md`) and an AMIT net amount applies
+/// just before the end of its income year (s 104-107B,
+/// `docs/ato/amit-cost-base-adjustments.md`), so each reduction meets the
+/// balance as the events before it left it. It is the same `(date, rank)`
+/// order the net-capital-gain report's E10/G1 walk applies these events in
+/// (`Reduction::date`/`rank`), so the two halves of one archived Annual Tax
+/// Report agree on which event exhausted the cost base.
+///
+/// The floor is applied **per event**, not once to the netted total, and the
+/// two are not equivalent: an AMIT adjustment may be negative — an *upward*
+/// adjustment, since the cost base "can be adjusted both upward and downward"
+/// (`docs/ato/amit-cost-base-adjustments.md`) — and a later increase then
+/// restores a base an earlier reduction exhausted. Netting the reductions
+/// first loses that restoration and taxes the earlier CGT event E10 excess a
+/// second time on the eventual disposal (2026-09-17 review); the
+/// [`CostBaseAdjustment::capped`] flags name the rows that ran past nil.
+fn reduction_walk(
+    parcel: &Parcel<'_>,
+    units: Decimal,
+    amit_events: &[AmitReductionEvent],
+    roc_events: &[RocEvent],
+    splits: &[SplitEvent],
+    held: Held,
+) -> Result<(Vec<CostBaseAdjustment>, Decimal), sqlx::Error> {
     let mut rows = Vec::new();
 
     // AMIT reductions (CGT event E10) on the costed units.
@@ -908,9 +935,9 @@ pub fn adjustment_detail(
     // Return-of-capital payments (CGT event G1), on the costed units too.
     for e in roc_events {
         // Applicability, the currency guard and the split re-basing are the
-        // payment's own (`RocEvent::per_unit_for`) — the same call
-        // `per_unit_reduction` sums, so the itemised rows can't describe a
-        // different set of payments than the totals were computed from.
+        // payment's own (`RocEvent::per_unit_for`) — the one rule for which
+        // payments reach these units, so the itemised rows can't describe a
+        // different set of payments than the running balance applies.
         let Some(per_unit) = e.per_unit_for(
             splits,
             parcel.currency,
@@ -962,26 +989,15 @@ pub fn adjustment_detail(
             .then(kind_rank(a.kind).cmp(&kind_rank(b.kind)))
     });
 
-    // One ordering rule, not two: the `capped` flags come from walking the
-    // sorted rows — the **date order the reductions arise in** (an AMMA
-    // statement at its `tax_year_end_date`, a payment at its payment date,
-    // AMIT first on a tie), exactly the `(date, rank)` order the
-    // net-capital-gain report's E10/G1 walk applies the same events in
-    // (`Reduction::date`/`rank`) — so the worksheet and the CGT summary of
-    // one archived Annual Tax Report agree on which event exhausted the cost
-    // base. Chronology is also the events' own law: a payment reduces "the
-    // cost base of the shares at the time of the payment"
-    // (`docs/ato/cgt-non-assessable-payments.md`) and an AMIT net amount
-    // applies just before the end of its income year (s 104-107B,
-    // `docs/ato/amit-cost-base-adjustments.md`), so each row meets the
-    // balance as the events before it left it.
-    //
     // The running balance starts from the costed units' share of the initial
-    // cost base — the same [`prorated_initial_cost`] pool `adjusted_cost_base`
-    // draws both reduction kinds out of — and floors at nil exactly like that
-    // function's single `.max(0)`: flooring after each step never loses value
-    // versus one accumulated subtraction, since every step only ever
-    // subtracts a non-negative amount.
+    // cost base — the same [`prorated_initial_cost`] pool every reduction is
+    // taken out of — and floors at nil after **each** row, in the order the
+    // rows were just sorted into. A negative amount (an upward AMIT
+    // adjustment) adds to the balance rather than subtracting from it, so it
+    // can carry a base floored by an earlier row back up. A row is `capped`
+    // when it runs the balance past nil — the excess is a CGT event E10/G1
+    // capital gain, not cost base; a negative row creates no excess even at a
+    // nil balance, so `amount > before` is the whole test.
     let mut running = if parcel.quantity > Decimal::ZERO {
         prorated_initial_cost(parcel.initial_cost(), units, parcel.quantity)
     } else {
@@ -993,9 +1009,9 @@ pub fn adjustment_detail(
         }
         let before = running;
         running = (running - row.amount).max(Decimal::ZERO);
-        row.capped = before <= Decimal::ZERO || row.amount > before;
+        row.capped = row.amount > before;
     }
-    Ok(rows)
+    Ok((rows, running))
 }
 
 /// Stable tie-break for same-date rows: AMIT, then return of capital, then
@@ -1843,8 +1859,8 @@ mod tests {
         // the statement, and so must this flag.
         assert!(!rows[0].capped, "the earlier payment is not the capped row");
         assert!(rows[1].capped, "the later statement exhausted the balance");
-        // The netted totals are order-independent and unchanged, and the
-        // rows still sum to them.
+        // Each row reports its own full amount, and the pipeline's totals are
+        // those rows' sums.
         let cb = adjusted_cost_base(
             &p,
             Decimal::from(100),
@@ -1857,6 +1873,78 @@ mod tests {
         assert_eq!(rows[0].amount, cb.roc_reduction);
         assert_eq!(rows[1].amount, cb.amit_reduction);
         assert_eq!(cb.adjusted, Decimal::ZERO);
+    }
+
+    /// 2026-09-17 review, financial correctness. The floor is applied **per
+    /// event**, so an AMIT adjustment that is *negative* — an upward
+    /// adjustment, which `docs/ato/amit-cost-base-adjustments.md` allows — can
+    /// carry a cost base an earlier statement exhausted back up. Netting the
+    /// reductions first is not equivalent, and reported $25 for a 50-unit
+    /// parcel here instead of $75: the FY2024 E10 excess of $100 had already
+    /// been taxed as a capital gain, and the netted figure taxed it again on
+    /// the disposal.
+    #[test]
+    fn an_upward_amit_adjustment_restores_a_cost_base_an_earlier_one_exhausted() {
+        // 100 units at $1: a $100 pool. FY2024 reduces $2.00/unit ($200 → nil
+        // base, $100 past it); FY2025 increases it by $1.50/unit ($150).
+        let events = [whole(1, 2024, "2.00", 100), whole(2, 2025, "-1.50", 100)];
+        let p = parcel(100, 1);
+        let sale = date(2025, 9, 1);
+
+        // The whole parcel: 100 − 200 floors at 0, then +150.
+        let whole_parcel = adjusted_cost_base(
+            &p,
+            Decimal::from(100),
+            &events,
+            &[],
+            &[],
+            Held::DisposedOn(sale),
+        )
+        .unwrap();
+        // The reductions are still the *full* amounts the events state.
+        assert_eq!(whole_parcel.amit_reduction, Decimal::from(50)); // 200 − 150
+        assert_eq!(whole_parcel.adjusted, Decimal::from(150));
+
+        // Half the parcel: the same walk over the costed units' $50 share.
+        let half = adjusted_cost_base(
+            &p,
+            Decimal::from(50),
+            &events,
+            &[],
+            &[],
+            Held::DisposedOn(sale),
+        )
+        .unwrap();
+        assert_eq!(half.costed_initial_cost, Decimal::from(50));
+        assert_eq!(half.adjusted, Decimal::from(75), "not the netted 25");
+
+        // The worksheet's rows are that same walk: the downward row is the one
+        // that ran the balance past nil, the upward row beside it is not, and
+        // the balance the rows leave is the pipeline's `adjusted` exactly.
+        let rows = adjustment_detail(
+            &p,
+            Decimal::from(100),
+            &events,
+            &[],
+            &[],
+            Held::DisposedOn(sale),
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].capped, "FY2024's $200 ran the $100 base past nil");
+        assert!(!rows[1].capped, "an upward adjustment creates no excess");
+        let mut walked = whole_parcel.costed_initial_cost;
+        let mut netted = walked;
+        for row in &rows {
+            walked = (walked - row.amount).max(Decimal::ZERO);
+            netted -= row.amount;
+        }
+        assert_eq!(walked, whole_parcel.adjusted);
+        assert_ne!(
+            netted.max(Decimal::ZERO),
+            whole_parcel.adjusted,
+            "one netted subtraction is the behaviour this walk replaced"
+        );
     }
 
     /// A split effective **on** the parcel's own trade date never re-based

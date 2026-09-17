@@ -2488,6 +2488,85 @@ mod tests {
         assert_eq!(r[1].net_capital_gain, Decimal::from(15));
     }
 
+    /// 2026-09-17 review, financial correctness: the disposal cost base is the
+    /// balance the events leave, not the net of their reductions. An AMIT
+    /// adjustment may be *negative* — an upward adjustment — and it restores a
+    /// cost base an earlier statement's E10 excess already exhausted, so the
+    /// earlier excess is not taxed a second time on the eventual disposal.
+    ///
+    /// Buy 100 @ $1 ($100 pool); FY2024 reduces $2.00/unit ($200 → base nil,
+    /// $100 E10 gain); FY2025 *increases* it by $1.50/unit ($150 → base back
+    /// to $150); then a sale of all 100 units for $200, whose gain is $50. The
+    /// two gross amounts together are $150. Netting the reductions first left
+    /// a $50 cost base and a $150 sale gain — $250, with the FY2024 E10 gain
+    /// taxed twice.
+    #[tokio::test]
+    async fn db_an_upward_amit_adjustment_restores_the_disposal_cost_base() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "VAF").await;
+        insert_trade(
+            &pool,
+            1,
+            trade::TradeType::Buy,
+            1,
+            NaiveDate::from_ymd_opt(2022, 1, 10).unwrap(),
+            Decimal::from(100),
+            Decimal::from(1),
+        )
+        .await;
+        // FY2024: reduce $2.00/unit × 100 = $200 against the $100 base → nil
+        // base, $100 past it (CGT event E10, that year).
+        let mut a1 = make_amma(1, 1, NaiveDate::from_ymd_opt(2024, 6, 30).unwrap());
+        a1.cost_base_adjustment = Decimal::from(2);
+        amma::db_upsert(&pool, &a1).await.unwrap();
+        link_adjustment(&pool, 1, 1, 1, Decimal::from(100)).await;
+        // FY2025: increase $1.50/unit × 100 = $150 → the base comes back to
+        // $150, and no further E10 gain arises.
+        let mut a2 = make_amma(2, 1, NaiveDate::from_ymd_opt(2025, 6, 30).unwrap());
+        a2.cost_base_adjustment = "-1.50".parse().unwrap();
+        amma::db_upsert(&pool, &a2).await.unwrap();
+        link_adjustment(&pool, 2, 2, 1, Decimal::from(100)).await;
+
+        // All 100 units sold for $200, after both statement year ends.
+        insert_trade(
+            &pool,
+            3,
+            trade::TradeType::Sell,
+            1,
+            NaiveDate::from_ymd_opt(2025, 9, 1).unwrap(),
+            Decimal::from(100),
+            Decimal::from(2),
+        )
+        .await;
+        allocate(&pool, 1, 3, 1, Decimal::from(100)).await;
+
+        let realised = crate::reports::realised_gains::db_realised_gains(&pool)
+            .await
+            .unwrap();
+        assert_eq!(realised.len(), 1);
+        assert_eq!(realised[0].cost_base, Decimal::from(150));
+        assert_eq!(realised[0].capital_gain_loss, Decimal::from(50));
+
+        let r = db_net_capital_gain(&pool).await.unwrap();
+        // The FY2024 excess is the year's E10 gain, reported once.
+        assert_eq!(row_for(&r, 2024).cgt_event_e10_gain, Decimal::from(100));
+        // Held > 12 months at that year end → discount-eligible → $50.
+        assert_eq!(row_for(&r, 2024).net_capital_gain, Decimal::from(50));
+        // The FY2025 increase adds no gain of its own.
+        assert_eq!(row_for(&r, 2025).cgt_event_e10_gain, Decimal::ZERO);
+
+        // Gross assessable across the two disposals: the $100 E10 gain plus
+        // the $50 sale gain — $150, no part of the excess counted twice.
+        assert_eq!(
+            row_for(&r, 2024).cgt_event_e10_gain + realised[0].capital_gain_loss,
+            Decimal::from(150),
+        );
+        // The sale's own gain is the $50 the restored base implies, halved by
+        // the discount.
+        assert_eq!(row_for(&r, 2026).discount_eligible_gains, Decimal::from(50));
+        assert_eq!(row_for(&r, 2026).net_capital_gain, Decimal::from(25));
+    }
+
     /// SCENARIOS B-24: the E10 walk reduces by the *year-end* unit basis, so a
     /// split between acquisition and the statement's year end doubles the
     /// reduction the fund's per-unit figure represents — and with it the

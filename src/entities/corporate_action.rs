@@ -137,7 +137,7 @@ pub use adjustments::{
     PriceBasisEvent, RocEvent, RolloverOrigin, SplitEvent, as_acquired_quantity,
     checked_as_acquired_quantity, contemporaneous_price, db_demerger_price_statements,
     db_payment_currency_conflict, db_return_of_capital_events, db_share_split_events,
-    db_splits_for_listing, per_unit_reduction, sold_in_acquired_units, split_adjusted_quantity,
+    db_splits_for_listing, sold_in_acquired_units, split_adjusted_quantity,
 };
 pub use db::{db_get_tx, rebased_quantity_beyond_range};
 pub use http::router;
@@ -1315,9 +1315,12 @@ mod tests {
         );
     }
 
+    /// Every payment is judged on its own, so a parcel acquired between two
+    /// payments carries only the later one's reduction — `domain::cost_base`'s
+    /// walk sums these per-event figures, and this is the bound it sums under.
     #[test]
-    fn per_unit_reduction_sums_events_from_acquisition() {
-        let events = vec![
+    fn per_unit_for_applies_each_payment_from_its_own_acquisition_bound() {
+        let events = [
             RocEvent {
                 date: d(2024, 1, 1),
                 amount_per_unit: "0.10".parse().unwrap(),
@@ -1337,12 +1340,17 @@ mod tests {
                 record_date: None,
             },
         ];
+        let per_unit = |i: usize, acquired| {
+            events[i]
+                .per_unit_for(&[], "AUD", acquired, None, None)
+                .expect("same currency")
+        };
         // Acquired between the first and second events: the first doesn't apply.
-        let pu = per_unit_reduction(&events, &[], "AUD", d(2024, 3, 1), None, None).unwrap();
-        assert_eq!(pu, "0.60".parse::<Decimal>().unwrap());
+        assert_eq!(per_unit(0, d(2024, 3, 1)), None);
+        assert_eq!(per_unit(1, d(2024, 3, 1)), Some("0.20".parse().unwrap()));
+        assert_eq!(per_unit(2, d(2024, 3, 1)), Some("0.40".parse().unwrap()));
         // Acquired on the event date: held on the payment date, so it applies.
-        let pu = per_unit_reduction(&events, &[], "AUD", d(2024, 6, 1), None, None).unwrap();
-        assert_eq!(pu, "0.60".parse::<Decimal>().unwrap());
+        assert_eq!(per_unit(1, d(2024, 6, 1)), Some("0.20".parse().unwrap()));
     }
 
     /// A rollover replacement parcel's entitlement is decided by when its
@@ -1356,24 +1364,29 @@ mod tests {
     /// **scrip exchange** does not: those units are of a listing the taxpayer
     /// was not on the register of when the record date passed.
     #[test]
-    fn per_unit_reduction_dates_a_replacement_parcels_entitlement_from_the_register() {
-        let events = vec![RocEvent {
+    fn per_unit_for_dates_a_replacement_parcels_entitlement_from_the_register() {
+        let event = RocEvent {
             date: d(2023, 11, 1),
             amount_per_unit: "0.50".parse().unwrap(),
             currency: "AUD".into(),
             record_date: Some(d(2023, 9, 25)),
-        }];
+        };
         // Units bought 10 Jan, rolled over 3 Oct — inside the window.
         let operation = d(2023, 10, 3);
         let acquired = d(2023, 1, 10);
+        let per_unit = |event: &RocEvent, rollover| {
+            event
+                .per_unit_for(&[], "AUD", operation, Some(rollover), None)
+                .expect("same currency")
+        };
 
         let transfer = RolloverOrigin {
             on: operation,
             registered_from: acquired,
         };
         assert_eq!(
-            per_unit_reduction(&events, &[], "AUD", operation, Some(transfer), None).unwrap(),
-            "0.50".parse::<Decimal>().unwrap()
+            per_unit(&event, transfer),
+            Some("0.50".parse::<Decimal>().unwrap())
         );
 
         // A scrip exchange's replacement: registered only from the operation.
@@ -1381,36 +1394,20 @@ mod tests {
             on: operation,
             registered_from: operation,
         };
-        assert_eq!(
-            per_unit_reduction(&events, &[], "AUD", operation, Some(scrip), None).unwrap(),
-            Decimal::ZERO
-        );
+        assert_eq!(per_unit(&event, scrip), None);
 
         // Either way, a payment on or before the operation date is already in
         // the carried cost base and must not reduce it twice (SCENARIOS N-06).
-        let already_carried = vec![RocEvent {
+        let already_carried = RocEvent {
             date: operation,
-            amount_per_unit: "0.50".parse().unwrap(),
-            currency: "AUD".into(),
-            record_date: Some(d(2023, 9, 25)),
-        }];
-        assert_eq!(
-            per_unit_reduction(
-                &already_carried,
-                &[],
-                "AUD",
-                operation,
-                Some(transfer),
-                None
-            )
-            .unwrap(),
-            Decimal::ZERO
-        );
+            ..event
+        };
+        assert_eq!(per_unit(&already_carried, transfer), None);
     }
 
     #[test]
-    fn per_unit_reduction_bounds_at_sale_date() {
-        let events = vec![
+    fn per_unit_for_bounds_a_payment_at_the_sale_date() {
+        let events = [
             RocEvent {
                 date: d(2024, 6, 1),
                 amount_per_unit: "0.20".parse().unwrap(),
@@ -1424,47 +1421,33 @@ mod tests {
                 record_date: None,
             },
         ];
-        // Sold between the events: only the payment received while held applies.
-        let pu = per_unit_reduction(
-            &events,
-            &[],
-            "AUD",
-            d(2024, 1, 1),
-            None,
-            Some(d(2024, 9, 1)),
-        )
-        .unwrap();
-        assert_eq!(pu, "0.20".parse::<Decimal>().unwrap());
+        let per_unit = |i: usize, up_to| {
+            events[i]
+                .per_unit_for(&[], "AUD", d(2024, 1, 1), None, up_to)
+                .expect("same currency")
+        };
+        // Sold between the payments: only the one received while held applies.
+        assert_eq!(
+            per_unit(0, Some(d(2024, 9, 1))),
+            Some("0.20".parse::<Decimal>().unwrap())
+        );
+        assert_eq!(per_unit(1, Some(d(2024, 9, 1))), None);
         // Sold on the payment date: still held at the payment, so it applies.
-        let pu = per_unit_reduction(
-            &events,
-            &[],
-            "AUD",
-            d(2024, 1, 1),
-            None,
-            Some(d(2025, 1, 1)),
-        )
-        .unwrap();
-        assert_eq!(pu, "0.60".parse::<Decimal>().unwrap());
+        assert_eq!(
+            per_unit(1, Some(d(2025, 1, 1))),
+            Some("0.40".parse::<Decimal>().unwrap())
+        );
         // Sold before any payment: unaffected.
-        let pu = per_unit_reduction(
-            &events,
-            &[],
-            "AUD",
-            d(2024, 1, 1),
-            None,
-            Some(d(2024, 5, 1)),
-        )
-        .unwrap();
-        assert_eq!(pu, Decimal::ZERO);
+        assert_eq!(per_unit(0, Some(d(2024, 5, 1))), None);
+        assert_eq!(per_unit(1, Some(d(2024, 5, 1))), None);
     }
 
     /// A payment after a split is per *post-split* unit: each as-acquired unit
     /// became `new/old` units, so the per-as-acquired-unit reduction scales by
     /// the split ratio.
     #[test]
-    fn per_unit_reduction_scales_payments_across_a_split() {
-        let events = vec![
+    fn per_unit_for_scales_a_payment_across_a_split() {
+        let events = [
             // Before the split: per as-acquired unit as-is.
             RocEvent {
                 date: d(2024, 3, 1),
@@ -1481,37 +1464,58 @@ mod tests {
             },
         ];
         let splits = vec![split_event(d(2024, 6, 1), "2", "1")];
-        let pu = per_unit_reduction(&events, &splits, "AUD", d(2024, 1, 1), None, None).unwrap();
-        // 0.30 + 0.20 × 2 = 0.70 per as-acquired unit.
-        assert_eq!(pu, "0.70".parse::<Decimal>().unwrap());
+        let per_unit = |i: usize, acquired| {
+            events[i]
+                .per_unit_for(&splits, "AUD", acquired, None, None)
+                .expect("same currency")
+        };
+        // 0.30 + 0.20 × 2 = 0.70 per as-acquired unit across the two payments.
+        assert_eq!(
+            per_unit(0, d(2024, 1, 1)),
+            Some("0.30".parse::<Decimal>().unwrap())
+        );
+        assert_eq!(
+            per_unit(1, d(2024, 1, 1)),
+            Some("0.40".parse::<Decimal>().unwrap())
+        );
 
         // A parcel acquired after the split holds post-split units already:
         // the later payment applies unscaled.
-        let pu = per_unit_reduction(&events, &splits, "AUD", d(2024, 7, 1), None, None).unwrap();
-        assert_eq!(pu, "0.20".parse::<Decimal>().unwrap());
+        assert_eq!(
+            per_unit(1, d(2024, 7, 1)),
+            Some("0.20".parse::<Decimal>().unwrap())
+        );
     }
 
     #[test]
-    fn per_unit_reduction_rejects_currency_mismatch() {
-        let events = vec![RocEvent {
+    fn per_unit_for_rejects_a_currency_mismatch() {
+        let payment = RocEvent {
             date: d(2024, 6, 1),
             amount_per_unit: "0.20".parse().unwrap(),
             currency: "USD".into(),
             record_date: None,
-        }];
+        };
         // Never net amounts across currencies: fail loudly, don't skip or zero.
-        assert!(per_unit_reduction(&events, &[], "AUD", d(2024, 1, 1), None, None).is_err());
-        // An out-of-range event in another currency is not an error — it doesn't
-        // participate in the calculation at all.
-        assert!(per_unit_reduction(&events, &[], "AUD", d(2024, 7, 1), None, None).is_ok());
+        assert!(
+            payment
+                .per_unit_for(&[], "AUD", d(2024, 1, 1), None, None)
+                .is_err()
+        );
+        // An out-of-range payment in another currency is not an error — it
+        // doesn't participate in the calculation at all.
+        assert!(
+            payment
+                .per_unit_for(&[], "AUD", d(2024, 7, 1), None, None)
+                .is_ok()
+        );
     }
 
     /// The window, the currency guard and the split re-basing above are all
-    /// `RocEvent::per_unit_for`'s, reached through `per_unit_reduction`. What
-    /// only the method itself exposes is the `Option`: a payment that doesn't
-    /// reach the units *declines* rather than reducing them by nil — which is
-    /// what lets `domain::cost_base::adjustment_detail` leave the payment out
-    /// of the itemised breakdown entirely instead of printing a zero row.
+    /// `RocEvent::per_unit_for`'s. What only the method itself exposes is the
+    /// `Option`: a payment that doesn't reach the units *declines* rather than
+    /// reducing them by nil — which is what lets `domain::cost_base`'s
+    /// reduction walk leave the payment out of the itemised breakdown entirely
+    /// instead of printing a zero row.
     #[test]
     fn per_unit_for_declines_a_payment_outside_the_holding_period() {
         let payment = RocEvent {

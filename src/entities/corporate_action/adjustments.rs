@@ -109,10 +109,11 @@ impl RocEvent {
     /// Fails loudly when the payment's currency differs from the parcel's —
     /// amounts in different currencies must never be netted against each
     /// other. This is the whole of a payment's relationship to a parcel:
-    /// [`per_unit_reduction`] sums it, `domain::cost_base::adjustment_detail`
-    /// itemises it, and the net-capital-gain report's G1 walk scales it to the
-    /// whole parcel — none of them restates the window, the guard, or the
-    /// re-basing.
+    /// `domain::cost_base`'s reduction walk applies it (summing the per-event
+    /// figures itself, so a payment's amount can floor the cost base at nil
+    /// exactly where it lands), the annual tax report itemises it, and the
+    /// net-capital-gain report's G1 walk scales it to the whole parcel — none
+    /// of them restates the window, the guard, or the re-basing.
     pub fn per_unit_for(
         &self,
         splits: &[SplitEvent],
@@ -555,36 +556,6 @@ pub fn sold_in_acquired_units(
         .into_iter()
         .map(|(date, qty)| as_acquired_quantity(qty, splits, acquired, date))
         .sum()
-}
-
-/// Cumulative return-of-capital cost-base reduction per *as-acquired* unit for
-/// a unit acquired on `acquired` and still held at `up_to` (or held today when
-/// `None`): the sum of `amount_per_unit` over the listing's payments the unit
-/// was both entitled to and still held for. A unit sold before a payment was
-/// not held for it, so the realised report bounds `up_to` at the sale date; the
-/// open-holdings reports pass `None` (an unsold unit was held for every
-/// payment since acquisition).
-///
-/// Which payments apply (entitlement at the record date, or the payment date
-/// when none is recorded), what a rollover replacement parcel's `rolled_over_on`
-/// date already accounts for, how a split re-bases each one, and the loud
-/// failure on a currency mismatch are all [`RocEvent::per_unit_for`]'s — this is
-/// only the sum over the listing's payments.
-pub fn per_unit_reduction(
-    events: &[RocEvent],
-    splits: &[SplitEvent],
-    trade_currency: &str,
-    acquired: NaiveDate,
-    rollover: Option<RolloverOrigin>,
-    up_to: Option<NaiveDate>,
-) -> Result<Decimal, sqlx::Error> {
-    let mut total = Decimal::ZERO;
-    for e in events {
-        if let Some(per_unit) = e.per_unit_for(splits, trade_currency, acquired, rollover, up_to)? {
-            total += per_unit;
-        }
-    }
-    Ok(total)
 }
 
 // ---------------------------------------------------------------------------

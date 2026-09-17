@@ -4975,4 +4975,123 @@ mod tests {
             "worksheet order and capped flags must match the E10/G1 walk's date order"
         );
     }
+
+    /// 2026-09-17 review, financial correctness: an upward (negative) AMIT
+    /// adjustment restores a cost base an earlier statement's E10 excess
+    /// exhausted, and the archived document says so on both halves.
+    ///
+    /// $100 cost base; the FY2023 statement reduces $2.00/unit ($200 → the
+    /// base floors at nil and $100 is an E10 gain that year); the FY2024
+    /// statement *increases* it by $1.50/unit ($150 → the base comes back to
+    /// $150); then the parcel is sold for $200 in FY2025. The worksheet's own
+    /// disposal row must read 150 (not the 50 a single netted subtraction
+    /// left, which taxed the FY2023 excess again), its gain $50, and the CGT
+    /// summary must keep the excess a single FY2023 E10 gain.
+    #[tokio::test]
+    async fn api_worksheet_prints_the_base_an_upward_amit_adjustment_restores() {
+        let pool = test_support::test_pool().await;
+        test_support::listing(1)
+            .ticker("AMT")
+            .name("AMT")
+            .amit(true)
+            .amit_from(ymd(2022, 7, 1))
+            .insert(&pool)
+            .await;
+        test_support::buy(10, 1)
+            .date(ymd(2022, 7, 4))
+            .qty(dec("100"))
+            .price(dec("1"))
+            .insert(&pool)
+            .await;
+        // FY2023: reduce $2.00/unit × 100 = $200 against the $100 base.
+        test_support::amma(1, 1)
+            .units(dec("100"))
+            .cost_base_adjustment(dec("2"))
+            .with(|a| a.tax_year_end_date = ymd(2023, 6, 30))
+            .insert(&pool)
+            .await;
+        // FY2024: increase $1.50/unit × 100 = $150.
+        test_support::amma(2, 1)
+            .units(dec("100"))
+            .cost_base_adjustment(dec("-1.50"))
+            .insert(&pool)
+            .await;
+        for statement_id in [1, 2] {
+            crate::entities::amit_adjustment_generation::db_generate(
+                &pool,
+                statement_id,
+                &crate::entities::amit_adjustment_generation::GenerateBody::default(),
+            )
+            .await
+            .unwrap();
+        }
+        // Dispose of the whole parcel in FY2025 (after both year ends).
+        test_support::sell(11, 1)
+            .date(ymd(2024, 8, 1))
+            .qty(dec("100"))
+            .price(dec("2"))
+            .insert(&pool)
+            .await;
+        test_support::allocate(&pool, 10, 11, 10, dec("100")).await;
+
+        let client = test_support::ApiClient::full(&pool);
+        let fy2025: serde_json::Value = client
+            .post_json(
+                "/reports/tax-report",
+                &serde_json::json!({"tax_year": 2025}),
+            )
+            .await;
+        let parcel = fy2025["disposals"]["listings"][0]["parcels"][0].clone();
+        assert_eq!(json_dec(&parcel["initial_cost_base_aud"]), dec("100"));
+        let adjustments = parcel["adjustments"].as_array().expect("adjustments");
+        assert_eq!(
+            adjustments
+                .iter()
+                .map(|a| (
+                    a["kind"].as_str().expect("a kind").to_string(),
+                    json_dec(&a["amount"]),
+                    a["capped"].as_bool().expect("a capped flag"),
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("AmitCostBase".to_string(), dec("200"), true),
+                // The upward row adds to the balance: nothing was capped by it.
+                ("AmitCostBase".to_string(), dec("-150"), false),
+            ],
+            "the worksheet must print the full amounts with the restoring row uncapped"
+        );
+        assert_eq!(
+            json_dec(&parcel["adjusted_cost_base_aud"]),
+            dec("150"),
+            "the events leave $150, not the $50 a netted subtraction reports"
+        );
+        assert_eq!(
+            json_dec(&parcel["gain_loss_aud"]),
+            dec("50"),
+            "$200 proceeds against the restored $150 base"
+        );
+
+        // The CGT half of the same document: the excess stays one FY2023 E10
+        // gain, and the FY2024 increase raises no gain of its own.
+        let fy2023: serde_json::Value = client
+            .post_json(
+                "/reports/tax-report",
+                &serde_json::json!({"tax_year": 2023}),
+            )
+            .await;
+        assert_eq!(
+            json_dec(&fy2023["cgt_summary"]["cgt_event_e10_gain"]),
+            dec("100")
+        );
+        let fy2024: serde_json::Value = client
+            .post_json(
+                "/reports/tax-report",
+                &serde_json::json!({"tax_year": 2024}),
+            )
+            .await;
+        assert_eq!(
+            json_dec(&fy2024["cgt_summary"]["cgt_event_e10_gain"]),
+            Decimal::ZERO
+        );
+    }
 }
