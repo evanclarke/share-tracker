@@ -23,6 +23,8 @@ import {
   cellText, adjustmentPreviewText, allocationSummary, toastLifetime, moneyText,
   resolveTheme, otherTheme, themeToggleLabel, applyTheme, currentTheme, toggleTheme,
   THEME_PREF_KEY,
+  renderGeneration, beginNavigation, navigationToken, isCurrentNavigation,
+  setMainIfCurrent, toastIfCurrent,
 } from './util.js';
 
 // ---- roundDecimalStr ----------------------------------------------------
@@ -816,4 +818,72 @@ test('an error toast never auto-hides — it persists until dismissed', () => {
   assert.equal(toastLifetime(true).persist, true);
   // Not "a longer timeout": there must be no duration at all to schedule.
   assert.equal(toastLifetime(true).ms, 0);
+});
+
+// ---- renderGeneration: the stale-render guard ---------------------------
+// The hash router awaits a view's fetches before painting; clicking a second
+// view while the first is in flight must leave the *second* one in charge.
+// `renderGeneration` is the counter that says which navigation a paint belongs
+// to (SCENARIOS: the Trades-then-Snapshots race).
+test('renderGeneration: begin hands out a fresh token and supersedes the last', () => {
+  const gen = renderGeneration();
+  assert.equal(gen.token(), 0); // nothing dispatched yet
+  const first = gen.begin();
+  assert.equal(gen.token(), first);
+  assert.equal(gen.isCurrent(first), true);
+  const second = gen.begin();
+  assert.notEqual(second, first, 'each navigation gets its own token');
+  assert.equal(gen.isCurrent(second), true);
+  assert.equal(gen.isCurrent(first), false, 'the superseded navigation is no longer current');
+});
+
+test('renderGeneration: a slow view cannot paint over the navigation that replaced it', () => {
+  const gen = renderGeneration();
+  const painted = [];
+  // The shape of every view's paint: the node is only put on screen when the
+  // token it carries is still the newest navigation.
+  function paint(token, view) { if (gen.isCurrent(token)) painted.push(view); }
+  const trades = gen.begin(); // the big GET that resolves last
+  const snapshots = gen.begin(); // clicked while Trades was still in flight
+  paint(snapshots, 'snapshots');
+  paint(trades, 'trades'); // its await finally resolves — dropped
+  assert.deepEqual(painted, ['snapshots']);
+});
+
+test('renderGeneration: one instance per counter, never shared module state', () => {
+  const a = renderGeneration();
+  const b = renderGeneration();
+  const fromA = a.begin();
+  assert.equal(a.isCurrent(fromA), true);
+  assert.equal(b.isCurrent(fromA), false, 'b has its own generation');
+  assert.equal(b.token(), 0);
+});
+
+test('the app-wide guard drops a superseded paint and toast, touching no DOM', () => {
+  // Node has no `document`: `setMain`/`toast` would throw if the guard let the
+  // stale call through, so returning cleanly is the proof it was dropped.
+  const superseded = beginNavigation();
+  const newest = beginNavigation();
+  assert.equal(isCurrentNavigation(superseded), false);
+  assert.equal(isCurrentNavigation(newest), true);
+  assert.doesNotThrow(() => setMainIfCurrent(superseded, { stale: true }));
+  assert.doesNotThrow(() => toastIfCurrent(superseded, 'stale error', true));
+  assert.equal(navigationToken(), newest);
+});
+
+test('the app-wide guard lets the current navigation paint', () => {
+  // A minimal `#app` stand-in, so the positive half is pinned too: the
+  // wrapper forwards to `setMain` rather than being a no-op.
+  const token = beginNavigation();
+  const app = { innerHTML: 'old', appended: null, appendChild(n) { this.appended = n; } };
+  const realDocument = globalThis.document;
+  globalThis.document = { getElementById: (id) => (id === 'app' ? app : null) };
+  try {
+    setMainIfCurrent(token, 'new node');
+  } finally {
+    if (realDocument === undefined) delete globalThis.document;
+    else globalThis.document = realDocument;
+  }
+  assert.equal(app.innerHTML, '');
+  assert.equal(app.appended, 'new node');
 });

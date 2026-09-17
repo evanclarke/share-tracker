@@ -38,22 +38,6 @@ what has been verified is SCENARIOS.md's
 [Verification status](SCENARIOS.md#verification-status) table and its per-section findings blocks;
 the maintained record of what was built and decided is the `DONE/*.md` archive.
 
-## The hash router has no stale-render guard, so a slow view can overwrite a newer one (2026-09-17 review, web frontend)
-
-(2026-09-17 review. `render()` (`src/web/app.js:2940`) dispatches on the hash, awaits the view's
-fetches, and paints with `setMain`; nothing ties the paint to the navigation that requested it.)
-
-- [ ] Reproduced by reading the dispatch (2949–2992) against `setMain` (487/628/2773): clicking
-  "Trades" (a large `GET`) and then immediately "Snapshots" leaves whichever `await` resolves last
-  in charge, so the URL and the nav highlight say Snapshots while the Trades table — or a stale error
-  page — is on screen. A stale `toast(e.message, true)` can equally fire over the new screen
-- [ ] Fix: a module-level `renderSeq` incremented in `render()`, checked after every `await` before
-  any `setMain`/`toast`, or a `setMainIfCurrent(seq, node)` that every view paints through
-- [ ] Tests: a `web.rs`-style assertion that the sequence guard exists and is checked before each
-  paint (the served-bundle convention this project uses for UI behaviour, there being no browser
-  harness), or a `src/web/*.test.js` unit test of the guard as a pure function
-- [ ] Docs sync: none
-
 ## Fire-and-forget view reloads are unhandled promise rejections (2026-09-17 review, web frontend)
 
 (2026-09-17 review. Views reload themselves after an action without awaiting or catching the result,

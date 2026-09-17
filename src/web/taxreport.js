@@ -14,7 +14,8 @@
 // helpers every other screen uses, so figures read identically to the rest
 // of the app.
 import {
-  el, toast, setMain, api, numericDisplay, moneyText, cellText, fmtLocalTimestamp, columnLabel,
+  el, toastIfCurrent, setMainIfCurrent, navigationToken, api, numericDisplay, moneyText, cellText,
+  fmtLocalTimestamp, columnLabel,
 } from './util.js';
 import { setActiveNav } from './nav.js';
 
@@ -472,7 +473,11 @@ function renderReport(report) {
   return wrap;
 }
 
-export async function viewTaxReport() {
+// `seq` is the navigation token the router dispatched this view with (see
+// util.js's stale-render guard): its `GET .../years` is one of the awaits a
+// reader can navigate away from, and the paint and toasts below must not land
+// on the screen they moved on to.
+export async function viewTaxReport(seq = navigationToken()) {
   setActiveNav('r:tax-report');
   const years = await api('GET', '/reports/tax-report/years');
   const header = el('div', null, [
@@ -507,7 +512,7 @@ export async function viewTaxReport() {
   const result = el('div');
 
   generateBtn.addEventListener('click', async function () {
-    if (!years.length) { toast('No tax year has any recorded data yet.', true); return; }
+    if (!years.length) { toastIfCurrent(seq, 'No tax year has any recorded data yet.', true); return; }
     try {
       const report = await api('POST', '/reports/tax-report', { tax_year: Number(yearSelect.value) });
       result.innerHTML = '';
@@ -515,10 +520,10 @@ export async function viewTaxReport() {
       printBtn.hidden = false;
       printHint.hidden = false;
     } catch (e) {
-      toast(e.message, true);
+      toastIfCurrent(seq, e.message, true);
     }
   });
   printBtn.addEventListener('click', function () { window.print(); });
 
-  setMain(el('div', null, [header, toolbar, result]));
+  setMainIfCurrent(seq, el('div', null, [header, toolbar, result]));
 }

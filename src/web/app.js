@@ -12,7 +12,8 @@
 // utilities in util.js.
 //
 import {
-  el, toast, setMain, looksNumeric, isTimestamp, fmtLocalTimestamp, utcTooltip,
+  el, toastIfCurrent, setMainIfCurrent, beginNavigation, navigationToken,
+  isCurrentNavigation, looksNumeric, isTimestamp, fmtLocalTimestamp, utcTooltip,
   cellText, numericDisplay, moneyText, columnKinds, columnLabel, columnLabelMaps,
   fkLabelMaps, api, apiUrl, pathSeg, nextId, loadOptions, listingNamer, describeTrade, tradeOrigin,
   columnLinks, listingLinkFrom, defaultSortColumn,
@@ -413,7 +414,12 @@ async function dataTable(rows, cfg) {
 }
 
 // ---- entity list view -------------------------------------------------
-async function viewEntityList(entity) {
+// `seq` is the navigation token this view paints under (see `util.js`'s
+// stale-render guard): the router passes the one it began the navigation
+// with, while a view that re-enters itself after a row action takes the
+// navigation in flight, so a slower fetch resolving after the reader has
+// navigated on can neither paint nor toast.
+async function viewEntityList(entity, seq = navigationToken()) {
   setActiveNav(entity.slug);
   let rows = await api('GET', entity.api);
   if (entity.listFilter) rows = rows.filter(entity.listFilter);
@@ -456,10 +462,10 @@ async function viewEntityList(entity) {
               if (!confirm(a.confirm)) return;
               try {
                 await api('DELETE', a.del);
-                toast(a.label + ': done.');
-                viewEntityList(entity);
+                toastIfCurrent(seq, a.label + ': done.');
+                viewEntityList(entity, seq);
               } catch (e) {
-                toast(e.message, true);
+                toastIfCurrent(seq, e.message, true);
               }
             },
           }, a.label));
@@ -477,29 +483,29 @@ async function viewEntityList(entity) {
       }
       td.appendChild(el('button', {
         class: 'link small danger',
-        onclick: function () { deleteEntity(entity, keyPath, row); },
+        onclick: function () { deleteEntity(entity, keyPath, row, seq); },
       }, 'Delete'));
       return td;
     };
     table = filterableTable(rows, cols, { actions: actions, labels: labels });
   }
 
-  setMain(el('div', null, [header, toolbar, table]));
+  setMainIfCurrent(seq, el('div', null, [header, toolbar, table]));
 }
 
-async function deleteEntity(entity, keyPath, row) {
+async function deleteEntity(entity, keyPath, row, seq = navigationToken()) {
   if (!confirm('Delete this ' + entity.title.replace(/s$/, '') + '?')) return;
   try {
     await api('DELETE', entity.api + '/' + keyPath);
-    toast('Deleted.');
-    viewEntityList(entity);
+    toastIfCurrent(seq, 'Deleted.');
+    viewEntityList(entity, seq);
   } catch (e) {
-    toast(e.message, true);
+    toastIfCurrent(seq, e.message, true);
   }
 }
 
 // ---- entity form view -------------------------------------------------
-async function viewEntityForm(entity, keyParts) {
+async function viewEntityForm(entity, keyParts, seq = navigationToken()) {
   setActiveNav(entity.slug);
   const editing = keyParts != null;
   // Each key part is encoded, not the joined string: the '/' between the parts
@@ -581,9 +587,11 @@ async function viewEntityForm(entity, keyParts) {
   // Entity-specific form behaviour beyond what the field configs express
   // (e.g. the trades form's GST-inclusive brokerage toggle). A hook may
   // return submit-time extensions: transformBody(body) maps UI-only
-  // controls onto the entity body before the PUT, and afterSave(idPath)
+  // controls onto the entity body before the PUT, and afterSave(idPath, seq)
   // chains a follow-up call, returning the success toast text (null = the
-  // default 'Saved.', '' = it already toasted, e.g. its own failure).
+  // default 'Saved.', '' = it already toasted, e.g. its own failure). It
+  // receives this view's navigation token so a toast after its own awaits
+  // goes through the stale-render guard too.
   const wired = entity.wireForm ? entity.wireForm(form, existing) : null;
 
   const actions = el('div', { class: 'form-actions' });
@@ -612,15 +620,15 @@ async function viewEntityForm(entity, keyParts) {
       });
       if (wired && wired.transformBody) wired.transformBody(body);
       await api('PUT', entity.api + '/' + keyVals.join('/'), body);
-      const msg = wired && wired.afterSave ? await wired.afterSave(keyVals.join('/')) : null;
-      if (msg !== '') toast(msg || 'Saved.');
+      const msg = wired && wired.afterSave ? await wired.afterSave(keyVals.join('/'), seq) : null;
+      if (msg !== '') toastIfCurrent(seq, msg || 'Saved.');
       location.hash = '#/e/' + entity.slug;
     } catch (e) {
-      toast(e.message, true);
+      toastIfCurrent(seq, e.message, true);
     }
   });
 
-  setMain(el('div', null, [
+  setMainIfCurrent(seq, el('div', null, [
     el('h2', null, (editing ? 'Edit ' : 'New ') + entity.title.replace(/s$/, '')),
     el('p', { class: 'view-desc' }, entity.desc),
     el('div', { class: 'card' }, form),
@@ -647,7 +655,7 @@ const SELL_FIELDS = entityBySlug.trades.fields
     return over ? Object.assign({}, f, over) : f;
   });
 
-async function viewSellsList() {
+async function viewSellsList(seq = navigationToken()) {
   setActiveNav('sells');
   const sells = (await api('GET', '/trades')).filter(function (t) { return t.trade_type === 'Sell'; });
   // Transfer-out and other operation-created Sells are labelled like the
@@ -671,15 +679,15 @@ async function viewSellsList() {
             class: 'link small danger',
             onclick: async function () {
               if (!confirm('Delete this Sell and its allocations?')) return;
-              try { await api('DELETE', '/sells/' + row.id); toast('Deleted.'); viewSellsList(); }
-              catch (e) { toast(e.message, true); }
+              try { await api('DELETE', '/sells/' + row.id); toastIfCurrent(seq, 'Deleted.'); viewSellsList(seq); }
+              catch (e) { toastIfCurrent(seq, e.message, true); }
             },
           }, 'Delete'),
         ]);
       },
     });
   }
-  setMain(el('div', null, [
+  setMainIfCurrent(seq, el('div', null, [
     el('h2', null, 'Sells'),
     el('p', { class: 'view-desc' }, 'Sell trades, each persisted atomically with parcel allocations that must sum exactly to the sell quantity.'),
     sellForesightLinks(),
@@ -702,7 +710,7 @@ function sellForesightLinks() {
   ]);
 }
 
-async function viewSellForm(id) {
+async function viewSellForm(id, seq = navigationToken()) {
   setActiveNav('sells');
   const editing = id != null;
   const existing = editing ? await api('GET', '/trades/' + pathSeg(id)) : null;
@@ -754,14 +762,14 @@ async function viewSellForm(id) {
       body.allocations = allocEditor.read();
       const sellId = editing ? Number(id) : await nextId('/trades');
       await api('PUT', '/sells/' + sellId, body);
-      toast('Sell saved.');
+      toastIfCurrent(seq, 'Sell saved.');
       location.hash = '#/sells';
     } catch (e) {
-      toast(e.message, true);
+      toastIfCurrent(seq, e.message, true);
     }
   });
 
-  setMain(el('div', null, [
+  setMainIfCurrent(seq, el('div', null, [
     el('h2', null, editing ? 'Edit Sell' : 'New Sell'),
     sellForesightLinks(),
     el('div', { class: 'card' }, form),
@@ -776,7 +784,7 @@ async function viewSellForm(id) {
 // parcel's remaining cost base and acquisition date); DELETE removes the
 // whole group and restores the pre-transfer holding. A transfer is
 // immutable — delete and re-transfer to change it.
-async function viewTransfersList() {
+async function viewTransfersList(seq = navigationToken()) {
   setActiveNav('transfers');
   const rows = await api('GET', '/transfers');
   const cols = ['id', 'listing_id', 'date', 'from_account_id', 'to_account_id'];
@@ -795,22 +803,22 @@ async function viewTransfersList() {
             class: 'link small danger',
             onclick: async function () {
               if (!confirm('Delete this transfer and restore the pre-transfer holding?')) return;
-              try { await api('DELETE', '/transfers/' + row.id); toast('Deleted.'); viewTransfersList(); }
-              catch (e) { toast(e.message, true); }
+              try { await api('DELETE', '/transfers/' + row.id); toastIfCurrent(seq, 'Deleted.'); viewTransfersList(seq); }
+              catch (e) { toastIfCurrent(seq, e.message, true); }
             },
           }, 'Delete'),
         ]);
       },
     });
   }
-  setMain(el('div', null, [
+  setMainIfCurrent(seq, el('div', null, [
     el('h2', null, 'Transfers'),
     el('p', { class: 'view-desc' }, entityBySlug.transfers.desc + ' Each parcel keeps its cost base and acquisition date; deleting a transfer restores the pre-transfer holding.'),
     toolbar, table,
   ]));
 }
 
-async function viewTransferForm() {
+async function viewTransferForm(seq = navigationToken()) {
   setActiveNav('transfers');
   const form = el('form');
   const fields = [
@@ -892,15 +900,15 @@ async function viewTransferForm() {
       const acctName = function (id) { return acct[id] || ('account ' + id); };
       const feeNote = result && result.fee_sale
         ? ' Network fee disposed as sell #' + result.fee_sale.id + ' (a CGT event).' : '';
-      toast('Transferred ' + n + ' parcel(s) of ' + listingName(body.listing_id)
+      toastIfCurrent(seq, 'Transferred ' + n + ' parcel(s) of ' + listingName(body.listing_id)
         + ' from ' + acctName(body.from_account_id) + ' to ' + acctName(body.to_account_id)
         + ' (transfer-out sell #' + (result && result.sell ? result.sell.id : '?') + ').' + feeNote);
       location.hash = '#/transfers';
     } catch (e) {
-      toast(e.message, true);
+      toastIfCurrent(seq, e.message, true);
     }
   });
-  setMain(el('div', null, [
+  setMainIfCurrent(seq, el('div', null, [
     el('h2', null, 'New Transfer'),
     el('p', { class: 'view-desc' }, 'Moves units between two holding accounts of the same owner — not a CGT event: nothing appears in the gains reports and each moved parcel keeps its cost base and acquisition date. An optional crypto network fee, paid in the transferred crypto, is the exception: those units are disposed of at market value and do surface a capital gain/loss.'),
     el('div', { class: 'card' }, form),
@@ -913,7 +921,7 @@ async function viewTransferForm() {
 // allocations), POST the body to the action endpoint, toast the result, and
 // return to the owner's list. Null field values are omitted so server-side
 // defaults apply; the no-field confirm-only actions POST without a body.
-async function viewAction(action, id) {
+async function viewAction(action, id, seq = navigationToken()) {
   setActiveNav(action.nav);
   const owner = await api('GET', action.ownerApi + '/' + pathSeg(id));
   // Action descriptions name the listings they touch rather than printing
@@ -982,13 +990,13 @@ async function viewAction(action, id) {
       // Answering false cancels the submit, leaving the form as it was.
       if (action.confirm && !await action.confirm(action.post(id), body)) return;
       const result = await api('POST', action.post(id), body);
-      toast(action.toast(result, listingName, owner));
+      toastIfCurrent(seq, action.toast(result, listingName, owner));
       location.hash = action.cancel;
     } catch (e) {
-      toast(e.message, true);
+      toastIfCurrent(seq, e.message, true);
     }
   });
-  setMain(el('div', null, [
+  setMainIfCurrent(seq, el('div', null, [
     el('h2', null, action.title(id, owner, listingName)),
     el('p', { class: 'view-desc' }, action.desc(owner, listingName)),
     el('div', { class: 'card' }, form),
@@ -1006,7 +1014,7 @@ async function viewAction(action, id) {
 // offered on the newest row alone rather than on every row where it would
 // only produce a refusal. The chain is read-only otherwise — a rename is
 // recorded by the Rename action, never edited.
-async function viewListingRenames(listingId) {
+async function viewListingRenames(listingId, seq = navigationToken()) {
   setActiveNav('listings');
   const rows = await api('GET', '/listings/' + pathSeg(listingId) + '/renames');
   const listingName = await listingNamer();
@@ -1034,10 +1042,10 @@ async function viewListingRenames(listingId) {
               + ', with the name and price symbol it had before.')) return;
             try {
               await api('DELETE', '/listings/' + pathSeg(listingId) + '/renames/' + row.id);
-              toast('Rename undone.');
-              viewListingRenames(listingId);
+              toastIfCurrent(seq, 'Rename undone.');
+              viewListingRenames(listingId, seq);
             } catch (e) {
-              toast(e.message, true);
+              toastIfCurrent(seq, e.message, true);
             }
           },
         }, 'Undo'));
@@ -1046,7 +1054,7 @@ async function viewListingRenames(listingId) {
     });
   }
 
-  setMain(el('div', null, [
+  setMainIfCurrent(seq, el('div', null, [
     el('h2', null, 'Rename history — ' + listingName(listingId)),
     el('p', { class: 'view-desc' },
       'Every recorded ticker or exchange change for this listing, newest first. A rename is the '
@@ -1079,7 +1087,7 @@ const ATTACH_OWNER = {
   corporate_action_id: { noun: 'corporate action', api: '/corporate_actions', name: function (o, listing) { return o.action_type + ' ' + listing(o.listing_id) + ' on ' + o.date; } },
 };
 
-async function viewAttachments(ownerField, ownerId) {
+async function viewAttachments(ownerField, ownerId, seq = navigationToken()) {
   // A trade's view also lists the documents of the record the trade was
   // created from (a DRP trade's funding distribution, a buy-back Sell's
   // dividend income row, an ESS vest Buy's annual statement): the server
@@ -1124,7 +1132,7 @@ async function viewAttachments(ownerField, ownerId) {
     .concat(anyLinked ? ['attached_to'] : []);
 
   const container = el('div');
-  function refresh() { viewAttachments(ownerField, ownerId); }
+  function refresh() { viewAttachments(ownerField, ownerId, seq); }
 
   let table;
   if (rows.length === 0) {
@@ -1146,8 +1154,8 @@ async function viewAttachments(ownerField, ownerId) {
             class: 'link small danger',
             onclick: async function () {
               if (!confirm('Delete this attachment?')) return;
-              try { await api('DELETE', '/attachments/' + row.id); toast('Deleted.'); refresh(); }
-              catch (e) { toast(e.message, true); }
+              try { await api('DELETE', '/attachments/' + row.id); toastIfCurrent(seq, 'Deleted.'); refresh(); }
+              catch (e) { toastIfCurrent(seq, e.message, true); }
             },
           }, 'Delete'));
         }
@@ -1168,7 +1176,7 @@ async function viewAttachments(ownerField, ownerId) {
   ]);
   uploadForm.addEventListener('submit', async function (ev) {
     ev.preventDefault();
-    if (!fileInput.files || fileInput.files.length === 0) { toast('Choose a file first.', true); return; }
+    if (!fileInput.files || fileInput.files.length === 0) { toastIfCurrent(seq, 'Choose a file first.', true); return; }
     try {
       const fd = new FormData();
       fd.append(ownerField, String(ownerId));
@@ -1179,10 +1187,10 @@ async function viewAttachments(ownerField, ownerId) {
         try { detail = (await res.text()).trim(); } catch (e) { /* ignore */ }
         throw new Error('HTTP ' + res.status + (detail ? ': ' + detail : ''));
       }
-      toast('Uploaded.');
+      toastIfCurrent(seq, 'Uploaded.');
       refresh();
     } catch (e) {
-      toast(e.message, true);
+      toastIfCurrent(seq, e.message, true);
     }
   });
 
@@ -1192,7 +1200,7 @@ async function viewAttachments(ownerField, ownerId) {
     + (anyLinked ? ' Rows marked (linked) belong to the record this trade was created from; uploads here attach to the trade, and a linked document is deleted from its own record\'s view.' : '')));
   container.appendChild(uploadForm);
   container.appendChild(table);
-  setMain(container);
+  setMainIfCurrent(seq, container);
 }
 
 // ---- health banner ------------------------------------------------------
@@ -1245,10 +1253,14 @@ async function viewAttachments(ownerField, ownerId) {
 // Refreshed on every
 // route render, so fixing the cause clears it on the next navigation. A
 // failing health fetch hides the banner rather than breaking the app.
-async function refreshHealthBanner() {
+async function refreshHealthBanner(seq = navigationToken()) {
   const banner = document.getElementById('health-banner');
   try {
     const h = await api('GET', '/reports/health');
+    // The banner is chrome, not a view, but it is still painted by a
+    // navigation: a superseded navigation's health fetch must not overwrite
+    // the banner the reader's newer screen has already refreshed.
+    if (!isCurrentNavigation(seq)) return;
     const problems = [];
     if (h.prices_stale) {
       problems.push('Closing prices are stale — latest is ' + h.latest_price_date
@@ -1525,7 +1537,9 @@ async function refreshHealthBanner() {
     }
     banner.hidden = false;
   } catch (e) {
-    banner.hidden = true;
+    // Same guard as the success path: a failing fetch hides the banner rather
+    // than breaking the app, but only for the navigation that asked for it.
+    if (isCurrentNavigation(seq)) banner.hidden = true;
   }
 }
 
@@ -1544,7 +1558,7 @@ const JOB_DESC = {
   'distribution-import': 'Refresh the distribution calendar: the provider\u2019s dividend history over the span each listing was held, one call per listing. It never deletes, so a provider that drops history cannot retire a distribution the books may have missed — and it feeds the two advisory health alerts (a known ex-date with no income row, and an entered distribution whose gross does not match). Advisory only: no tax figure is computed from it.',
 };
 
-async function viewJobs() {
+async function viewJobs(seq = navigationToken()) {
   setActiveNav('jobs');
   // GET /jobs returns each registered job with how it is triggered
   // ('scheduled' / 'manual_only'), when the running scheduler says it is next
@@ -1614,18 +1628,18 @@ async function viewJobs() {
         btn.textContent = 'Running…';
         try {
           await api('POST', '/jobs/' + row.job);
-          toast("Job '" + row.job + "' completed.");
+          toastIfCurrent(seq, "Job '" + row.job + "' completed.");
         } catch (e) {
-          toast(e.message, true);
+          toastIfCurrent(seq, e.message, true);
         } finally {
           // Reload so the table reflects the freshly recorded last run.
-          viewJobs();
+          viewJobs(seq);
         }
       });
       return el('td', { class: 'actions' }, btn);
     },
   });
-  setMain(el('div', null, [
+  setMainIfCurrent(seq, el('div', null, [
     el('h2', null, 'Jobs'),
     el('p', { class: 'view-desc' }, 'Trigger maintenance jobs on demand, and see when each is next due and when it last ran (and any error). A run that succeeded while doing less than the whole of its work \u2014 the currency import without DTIF credentials, which imports the ISO 4217 fiat list and skips the ISO 24165 digital tokens \u2014 stays ok and says so in the Note column, so a half-import does not read as a complete one. Expand a job to see its recent run history. A job marked scheduled also runs automatically on its cron schedule, so running it here is for retries or missed runs; one marked manual only is a one-off repair that has no schedule and runs only from here \u2014 it showing never is expected, not a missed run.'),
     table,
@@ -1645,7 +1659,7 @@ function isoDateMinusDays(dateStr, days) {
   return d.toISOString().slice(0, 10);
 }
 
-async function viewClosingPrices() {
+async function viewClosingPrices(seq = navigationToken()) {
   setActiveNav('closing_prices');
   const listings = await api('GET', '/listings');
   const byId = {};
@@ -1725,12 +1739,12 @@ async function viewClosingPrices() {
         try {
           const stored = await api('POST', '/closing_prices/fetch',
             { listing_id: row._listing_id, price_date: row.date });
-          if (stored.status === 'ok') toast('Stored ' + stored.price + ' for ' + row.date + '.');
-          else toast('Fetch failed again: ' + stored.error, true);
+          if (stored.status === 'ok') toastIfCurrent(seq, 'Stored ' + stored.price + ' for ' + row.date + '.');
+          else toastIfCurrent(seq, 'Fetch failed again: ' + stored.error, true);
         } catch (e) {
-          toast(e.message, true);
+          toastIfCurrent(seq, e.message, true);
         }
-        viewClosingPrices();
+        viewClosingPrices(seq);
       });
       // An errored day no re-fetch can ever fix — before the security's first
       // trading day, or a permanent hole in the provider's series — is
@@ -1749,11 +1763,11 @@ async function viewClosingPrices() {
           del.disabled = true;
           try {
             await api('DELETE', '/closing_prices/' + row._listing_id + '/' + row.date);
-            toast('Discarded the stored row for ' + row.date + '.');
+            toastIfCurrent(seq, 'Discarded the stored row for ' + row.date + '.');
           } catch (e) {
-            toast(e.message, true);
+            toastIfCurrent(seq, e.message, true);
           }
-          viewClosingPrices();
+          viewClosingPrices(seq);
         });
         const cell = el('td', { class: 'actions' }, row.origin === 'manual' ? [del] : [btn, del]);
         return cell;
@@ -1783,11 +1797,11 @@ async function viewClosingPrices() {
       const s = await api('POST', '/closing_prices/backfill', {
         listing_id: Number(listingSel.value), from: fromInp.value, to: toInp.value,
       });
-      toast('Backfill: ' + s.fetched_ok + ' fetched, ' + s.already_stored + ' already stored, '
+      toastIfCurrent(seq, 'Backfill: ' + s.fetched_ok + ' fetched, ' + s.already_stored + ' already stored, '
         + s.errored + ' errored (' + s.trading_days + ' trading days).', s.errored > 0);
-      viewClosingPrices();
+      viewClosingPrices(seq);
     } catch (e) {
-      toast(e.message, true);
+      toastIfCurrent(seq, e.message, true);
     }
   });
 
@@ -1827,10 +1841,10 @@ async function viewClosingPrices() {
       await api('PUT', '/closing_prices/' + Number(mListingSel.value) + '/' + mDateInp.value, {
         price: mPriceInp.value, sourced_from: mSourcedInp.value, reason: mReasonInp.value,
       });
-      toast('Stored ' + mPriceInp.value + ' for ' + mDateInp.value + '.');
-      viewClosingPrices();
+      toastIfCurrent(seq, 'Stored ' + mPriceInp.value + ' for ' + mDateInp.value + '.');
+      viewClosingPrices(seq);
     } catch (e) {
-      toast(e.message, true);
+      toastIfCurrent(seq, e.message, true);
     }
   });
 
@@ -1867,10 +1881,10 @@ async function viewClosingPrices() {
       try {
         const r = await api('POST', '/closing_prices/clear_unpriced_before',
           { listing_id: Number(cListingSel.value) });
-        toast('Cleared ' + r.deleted + ' stored price(s) dated before ' + r.unpriced_before + '.');
-        viewClosingPrices();
+        toastIfCurrent(seq, 'Cleared ' + r.deleted + ' stored price(s) dated before ' + r.unpriced_before + '.');
+        viewClosingPrices(seq);
       } catch (e) {
-        toast(e.message, true);
+        toastIfCurrent(seq, e.message, true);
       }
     });
   }
@@ -1937,7 +1951,7 @@ async function viewClosingPrices() {
     },
   ) : null;
 
-  setMain(el('div', null, [
+  setMainIfCurrent(seq, el('div', null, [
     el('h2', null, 'Closing Prices'),
     el('p', { class: 'view-desc' },
       'Daily closing prices per held listing, in the listing\'s quote currency, collected by the '
@@ -1974,7 +1988,7 @@ async function viewClosingPrices() {
 // Portfolio Overview screen (`performancePanel`, below) — this is the
 // operational maintenance screen, not where anyone looks to see how the
 // portfolio is doing.
-async function viewSnapshots() {
+async function viewSnapshots(seq = navigationToken()) {
   setActiveNav('r:snapshots');
   const metas = await api('GET', '/report_snapshots');
   const defaultRange = await api('GET', '/report_snapshots/regenerate_range');
@@ -1996,10 +2010,10 @@ async function viewSnapshots() {
     try {
       const body = dateInp.value ? { date: dateInp.value } : {};
       const stored = await api('POST', '/report_snapshots/generate', body);
-      toast('Stored ' + stored.length + ' snapshot(s) for ' + stored[0].snapshot_date + '.');
-      viewSnapshots();
+      toastIfCurrent(seq, 'Stored ' + stored.length + ' snapshot(s) for ' + stored[0].snapshot_date + '.');
+      viewSnapshots(seq);
     } catch (e) {
-      toast(e.message, true);
+      toastIfCurrent(seq, e.message, true);
     }
   });
 
@@ -2032,11 +2046,11 @@ async function viewSnapshots() {
           const more = summary.blocked.length > 5 ? '; … and ' + (summary.blocked.length - 5) + ' more' : '';
           msg += ' Blocked: ' + shown + more;
         }
-        toast(msg, summary.blocked.length > 0);
+        toastIfCurrent(seq, msg, summary.blocked.length > 0);
       } catch (e) {
-        toast(e.message, true);
+        toastIfCurrent(seq, e.message, true);
       }
-      viewSnapshots();
+      viewSnapshots(seq);
     });
     return btn;
   }
@@ -2074,17 +2088,17 @@ async function viewSnapshots() {
         regen.textContent = 'Generating…';
         try {
           await api('POST', '/report_snapshots/generate', { date: row.date });
-          toast('Regenerated ' + row.date + '.');
+          toastIfCurrent(seq, 'Regenerated ' + row.date + '.');
         } catch (e) {
-          toast(e.message, true);
+          toastIfCurrent(seq, e.message, true);
         }
-        viewSnapshots();
+        viewSnapshots(seq);
       });
       return el('td', { class: 'actions' }, [view, ' ', regen]);
     },
   });
 
-  setMain(el('div', null, [
+  setMainIfCurrent(seq, el('div', null, [
     el('h2', null, 'Snapshots'),
     el('p', { class: 'view-desc' },
       'Daily stored results of the price-dependent reports, valued at the stored closing prices '
@@ -2109,7 +2123,7 @@ async function viewSnapshots() {
   ]));
 }
 
-async function viewSnapshotDetail(report, date) {
+async function viewSnapshotDetail(report, date, seq = navigationToken()) {
   setActiveNav('r:snapshots');
   const snap = await api('GET', '/report_snapshots/' + pathSeg(report) + '/' + pathSeg(date));
   const header = el('div', null, [
@@ -2136,7 +2150,7 @@ async function viewSnapshotDetail(report, date) {
       + (snap.excluded_holdings || []).map(function (x) { return x.reason; }).join(' ')
       + ' Move “Unpriced before” back on the listing (and enter the price by hand) if the figure can be obtained after all — that marks these snapshots stale so they regenerate with the holding back in.'));
   }
-  setMain(el('div', null, [header, await dataTable(snap.rows)]));
+  setMainIfCurrent(seq, el('div', null, [header, await dataTable(snap.rows)]));
 }
 
 // ---- reports ----------------------------------------------------------
@@ -2563,7 +2577,7 @@ async function listingChartPanel(listingId) {
 // into a parameterised report, positionally prefilling its `params` and
 // running it on load. The Row History browse table links to itself this
 // way, to drill from a trail entry into that row's own history.
-async function viewReport(report, args) {
+async function viewReport(report, args, seq = navigationToken()) {
   setActiveNav('r:' + report.slug);
   const header = el('div', null, [
     el('h2', null, report.title),
@@ -2770,7 +2784,7 @@ async function viewReport(report, args) {
 
   if (report.method === 'GET') {
     await render(await api('GET', report.api));
-    setMain(el('div', null, [header, shortcuts, panel, result]));
+    setMainIfCurrent(seq, el('div', null, [header, shortcuts, panel, result]));
     // Resolve only once the screen is actually complete: the panel paints
     // when it lands, but a caller awaiting this view is entitled to a
     // finished one.
@@ -2837,7 +2851,7 @@ async function viewReport(report, args) {
       try {
         await render(await api('POST', report.api, body));
       } catch (e) {
-        toast(e.message, true);
+        toastIfCurrent(seq, e.message, true);
       }
     }
     form.addEventListener('submit', function (ev) {
@@ -2850,7 +2864,7 @@ async function viewReport(report, args) {
         runReport();
       });
     }
-    setMain(el('div', null, [header, shortcuts, panel, form, result]));
+    setMainIfCurrent(seq, el('div', null, [header, shortcuts, panel, form, result]));
     // `autoRun` (config.js) is for a params report whose fields are *all*
     // optional — Row History, which opens on the browse page and narrows from
     // there. A report with a required input still waits for the form.
@@ -2900,7 +2914,7 @@ async function viewReport(report, args) {
     try {
       await render(await api('POST', report.api, buildBody()));
     } catch (e) {
-      toast(e.message, true);
+      toastIfCurrent(seq, e.message, true);
     }
   });
   // The override inputs are the one thing here that needs the listing list,
@@ -2924,12 +2938,12 @@ async function viewReport(report, args) {
   // and the (empty) holdings section are on screen while the panel, the
   // valuation and the override inputs are all still in flight, instead of
   // after them one at a time.
-  setMain(el('div', null, [header, shortcuts, panel, el('h3', null, 'Holdings'), result, priceForm]));
+  setMainIfCurrent(seq, el('div', null, [header, shortcuts, panel, el('h3', null, 'Holdings'), result, priceForm]));
   // Run live on first load so the valuation is shown without manual entry.
   const firstRun = api('POST', report.api, buildBody())
     .then(render)
     .catch(function (e) {
-      toast(e.message, true);
+      toastIfCurrent(seq, e.message, true);
     });
   // Independent requests, so they overlap rather than stack; the view is
   // finished only when all three have landed.
@@ -2937,8 +2951,13 @@ async function viewReport(report, args) {
 }
 
 // ---- router -----------------------------------------------------------
+// One navigation per hash change, and every view it dispatches carries the
+// token this call begins: the views paint and toast through the stale-render
+// guard (util.js), so a slow fetch from a view the reader has navigated away
+// from can neither overwrite the newer screen nor toast over it.
 async function render() {
-  refreshHealthBanner(); // deliberately not awaited: the view renders in parallel
+  const seq = beginNavigation();
+  refreshHealthBanner(seq); // deliberately not awaited: the view renders in parallel
   const hash = (location.hash || '').replace(/^#/, '');
   const parts = hash.split('/').filter(Boolean);
   try {
@@ -2946,7 +2965,7 @@ async function render() {
     // directly (not a redirect) so it's a real, stable URL for the brand
     // link. `#/r/overview` keeps working unchanged (linked from the Reports
     // menu) and resolves to the same view via the `parts[0] === 'r'` branch.
-    if (parts.length === 0) return await viewReport(reportBySlug.overview);
+    if (parts.length === 0) return await viewReport(reportBySlug.overview, null, seq);
     if (parts[0] === 'e') {
       const entity = entityBySlug[parts[1]];
       if (!entity) throw new Error('Unknown view');
@@ -2961,39 +2980,39 @@ async function render() {
       // it fires re-enters render(), which resolves the custom route and
       // stops — this branch is not reached a second time.
       if (entity.custom) return location.replace('#/' + entity.custom);
-      if (parts[2] === 'new') return await viewEntityForm(entity, null);
-      if (parts[2] === 'edit') return await viewEntityForm(entity, parts.slice(3));
-      return await viewEntityList(entity);
+      if (parts[2] === 'new') return await viewEntityForm(entity, null, seq);
+      if (parts[2] === 'edit') return await viewEntityForm(entity, parts.slice(3), seq);
+      return await viewEntityList(entity, seq);
     }
     if (parts[0] === 'sells') {
-      if (parts[1] === 'new') return await viewSellForm(null);
-      if (parts[1] === 'edit') return await viewSellForm(parts[2]);
-      return await viewSellsList();
+      if (parts[1] === 'new') return await viewSellForm(null, seq);
+      if (parts[1] === 'edit') return await viewSellForm(parts[2], seq);
+      return await viewSellsList(seq);
     }
     if (parts[0] === 'transfers') {
-      if (parts[1] === 'new') return await viewTransferForm();
-      return await viewTransfersList();
+      if (parts[1] === 'new') return await viewTransferForm(seq);
+      return await viewTransfersList(seq);
     }
-    if (actionBySlug[parts[0]]) return await viewAction(actionBySlug[parts[0]], parts[1]);
+    if (actionBySlug[parts[0]]) return await viewAction(actionBySlug[parts[0]], parts[1], seq);
     // #/renames/:listing_id — the rename chain, distinct from the
     // #/rename/:listing_id action that records one.
-    if (parts[0] === 'renames') return await viewListingRenames(parts[1]);
-    if (parts[0] === 'attachments') return await viewAttachments(parts[1], parts[2]);
-    if (parts[0] === 'jobs') return await viewJobs();
-    if (parts[0] === 'prices') return await viewClosingPrices();
+    if (parts[0] === 'renames') return await viewListingRenames(parts[1], seq);
+    if (parts[0] === 'attachments') return await viewAttachments(parts[1], parts[2], seq);
+    if (parts[0] === 'jobs') return await viewJobs(seq);
+    if (parts[0] === 'prices') return await viewClosingPrices(seq);
     if (parts[0] === 'r') {
       const report = reportBySlug[parts[1]];
       if (!report) throw new Error('Unknown report');
       if (report.custom === 'snapshots') {
-        if (parts[2] && parts[3]) return await viewSnapshotDetail(parts[2], parts[3]);
-        return await viewSnapshots();
+        if (parts[2] && parts[3]) return await viewSnapshotDetail(parts[2], parts[3], seq);
+        return await viewSnapshots(seq);
       }
-      if (report.custom === 'tax-report') return await viewTaxReport();
-      return await viewReport(report, parts.slice(2));
+      if (report.custom === 'tax-report') return await viewTaxReport(seq);
+      return await viewReport(report, parts.slice(2), seq);
     }
     throw new Error('Not found');
   } catch (e) {
-    setMain(el('div', { class: 'error' }, e.message));
+    setMainIfCurrent(seq, el('div', { class: 'error' }, e.message));
   }
 }
 

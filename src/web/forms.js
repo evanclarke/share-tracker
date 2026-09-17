@@ -6,7 +6,7 @@
 // shared parcel-allocation editor.
 //
 import {
-  el, api, toast, loadOptions, listingNamer, describeTrade,
+  el, api, toastIfCurrent, loadOptions, listingNamer, describeTrade,
   addDecimalStrings, decParts, mulToCents, frankingCreditFor, decEq, allocationSummary,
   confirmGeneratedAdjustments,
 } from './util.js';
@@ -300,7 +300,7 @@ export function wireIncomeEntry(form, existing) {
       // behind by switching modes.
       if (mode !== 'Trust') { body.entitlement_date = null; body.tax_deferred_amount = null; }
     },
-    afterSave: async function (id) {
+    afterSave: async function (id, seq) {
       if (!drpFlag || !drpFlag.checked) return null;
       const body = { reinvestment_price: priceInput.value.trim() };
       if (drpUnitsInput.value.trim() !== '') body.units = drpUnitsInput.value.trim();
@@ -311,7 +311,7 @@ export function wireIncomeEntry(form, existing) {
         const listingName = await listingNamer();
         return trade ? 'Saved and reinvested into ' + describeTrade(trade, listingName) + ' (trade #' + trade.id + ').' : 'Saved and reinvested.';
       } catch (e) {
-        toast('Income saved, but the reinvestment failed — ' + e.message + '. Retry from the row’s Reinvest action.', true);
+        toastIfCurrent(seq, 'Income saved, but the reinvestment failed — ' + e.message + '. Retry from the row’s Reinvest action.', true);
         return '';
       }
     },
@@ -348,7 +348,7 @@ export function wireAmmaEntry(form, existing) {
   applyGen();
 
   return {
-    afterSave: async function (id) {
+    afterSave: async function (id, seq) {
       if (!genFlag.checked) return null;
       const path = '/amma_statements/' + id + '/generate_adjustments';
       const body = { replace: replaceFlag.checked };
@@ -361,7 +361,7 @@ export function wireAmmaEntry(form, existing) {
           + result.units_adjusted + ' unit(s)'
           + (decEq(result.difference, '0') ? '.' : ' — ' + result.difference + ' against the statement’s units held.');
       } catch (e) {
-        toast('AMMA statement saved, but generating the AMIT adjustments failed — ' + e.message
+        toastIfCurrent(seq, 'AMMA statement saved, but generating the AMIT adjustments failed — ' + e.message
           + '. Retry from the row’s Generate adjustments action.', true);
         return '';
       }

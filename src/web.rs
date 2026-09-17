@@ -339,6 +339,138 @@ mod tests {
         assert!(js.contains("fetch(apiUrl(path)"));
     }
 
+    /// One bare paint/toast call site: the served module, the 1-based line,
+    /// and that line's source text.
+    struct BarePaint {
+        module: &'static str,
+        line: usize,
+        source_line: String,
+    }
+
+    /// Every place `source` calls `setMain(...)`/`toast(...)` **directly**,
+    /// rather than through `util.js`'s stale-render guard. A call is bare when
+    /// the name stands alone: `setMainIfCurrent(`/`toastIfCurrent(` carry on
+    /// past the name, and a method call (`action.toast(…)`, an ACTIONS config
+    /// entry's message builder) is not the function at all.
+    ///
+    /// A whole-line comment is skipped: prose about the rule (`// toast(…) used
+    /// to fire over the new screen`) is not a breach of it.
+    fn bare_paint_or_toast(module: &'static str, source: &str) -> Vec<BarePaint> {
+        let mut hits = Vec::new();
+        for (i, line) in source.lines().enumerate() {
+            if line.trim_start().starts_with("//") {
+                continue;
+            }
+            for call in ["setMain(", "toast("] {
+                for (at, _) in line.match_indices(call) {
+                    let before = line[..at].chars().next_back().unwrap_or(' ');
+                    if before.is_ascii_alphanumeric() || matches!(before, '_' | '$' | '.') {
+                        continue;
+                    }
+                    hits.push(BarePaint {
+                        module,
+                        line: i + 1,
+                        source_line: line.trim().to_string(),
+                    });
+                }
+            }
+        }
+        hits
+    }
+
+    /// The hash router dispatches a view per navigation, the view awaits its
+    /// own fetches, and nothing in the view knows whether the reader has moved
+    /// on meanwhile: a slow `GET` (Trades) that resolves after a newer one
+    /// (Snapshots) was dispatched would paint over it, leaving the URL and the
+    /// nav highlight saying one view while the older table — or its error page
+    /// — was on screen, and a stale error toast could fire over the new screen
+    /// on its own.
+    ///
+    /// `util.js`'s guard is the fix, and this is the call-site half of it: the
+    /// router bumps the generation (`beginNavigation`), each view carries the
+    /// token it was dispatched with (`navigationToken` for a view re-entered
+    /// by one of its own actions), and no served module paints or toasts
+    /// except through the guarded wrappers. A new view that calls `setMain` or
+    /// `toast` directly reintroduces the race and fails here. `util.js` itself
+    /// is exempt: it is where the guard's two wrappers live.
+    #[tokio::test]
+    async fn every_paint_and_toast_goes_through_the_stale_render_guard() {
+        let mut offenders = Vec::new();
+        for (path, source) in JS_MODULES {
+            if path == "/static/util.js" {
+                continue; // the guard's home: the wrappers call setMain/toast
+            }
+            for hit in bare_paint_or_toast(path, source) {
+                offenders.push(format!(
+                    "{} line {}: `{}`",
+                    hit.module, hit.line, hit.source_line
+                ));
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "a view must paint and toast through the stale-render guard, or a slow fetch it \
+             is awaiting can overwrite the screen the reader has since opened: call \
+             `setMainIfCurrent(seq, node)` / `toastIfCurrent(seq, msg, isError)` with the \
+             navigation token the view carries, never `setMain`/`toast` directly \
+             (src/web/util.js):\n{}",
+            offenders.join("\n")
+        );
+
+        let js = app_js_body().await;
+        // The router begins one navigation per hash change and holds the token
+        // the dispatch below carries.
+        assert!(js.contains("const seq = beginNavigation();"));
+        assert!(js.contains("refreshHealthBanner(seq)"));
+        assert!(js.contains("return await viewReport(reportBySlug.overview, null, seq);"));
+        assert!(js.contains("return await viewEntityList(entity, seq);"));
+        assert!(js.contains("return await viewReport(report, parts.slice(2), seq);"));
+        assert!(js.contains("return await viewTaxReport(seq);"));
+        // Its error page is a paint like any other: the catch paints through
+        // the guard too, so a stale failure cannot land on the newer screen.
+        assert!(js.contains("setMainIfCurrent(seq, el('div', { class: 'error' }, e.message));"));
+        // Both guarded wrappers check the generation before touching the DOM,
+        // and a re-entered view takes the navigation in flight.
+        assert!(js.contains("export function renderGeneration("));
+        assert!(js.contains("export function beginNavigation("));
+        assert!(js.contains("export function isCurrentNavigation("));
+        assert!(js.contains("if (isCurrentNavigation(token)) setMain(node);"));
+        assert!(js.contains("if (isCurrentNavigation(token)) toast(msg, isError);"));
+        assert!(js.contains("seq = navigationToken()"));
+    }
+
+    /// The scan above is only worth having if it fires on the shape it is
+    /// there for and stays quiet on the shapes it is not, so both are pinned
+    /// here rather than resting on the tree happening to be clean.
+    #[test]
+    fn the_stale_render_scan_separates_guarded_calls_from_bare_ones() {
+        let flagged = |src: &str| !bare_paint_or_toast("/static/probe.js", src).is_empty();
+
+        // Bare calls: the pre-guard shape, and the regression a new view
+        // would reintroduce.
+        assert!(flagged("setMain(el('div', null, [header]));"));
+        assert!(flagged("toast(e.message, true);"));
+        assert!(flagged(
+            "if (ok) toast('Stored.'); else toast('Failed.', true);"
+        ));
+
+        // Guarded calls are not bare calls.
+        assert!(!flagged(
+            "setMainIfCurrent(seq, el('div', null, [header]));"
+        ));
+        assert!(!flagged("toastIfCurrent(seq, e.message, true);"));
+        assert!(!flagged("const seq = beginNavigation();"));
+        assert!(!flagged("const seq = navigationToken();"));
+        // A method call on an ACTIONS config entry is not `toast` itself.
+        assert!(!flagged(
+            "toastIfCurrent(seq, action.toast(result, name, owner));"
+        ));
+        // Nor is prose about the rule.
+        assert!(!flagged(
+            "// toast(e.message, true) used to fire over the new screen"
+        ));
+    }
+
     #[tokio::test]
     async fn exchange_management_ui_present() {
         let js = app_js_body().await;
@@ -1915,8 +2047,10 @@ mod tests {
     async fn overview_is_the_home_screen() {
         let js = app_js_body().await;
         // An empty hash renders the overview report directly rather than
-        // redirecting via location.hash, so `#/` is a stable home URL.
-        assert!(js.contains("return await viewReport(reportBySlug.overview)"));
+        // redirecting via location.hash, so `#/` is a stable home URL. The
+        // navigation token rides along as the third argument, so the view
+        // paints through the stale-render guard.
+        assert!(js.contains("return await viewReport(reportBySlug.overview, null, seq)"));
         assert!(!js.contains("location.hash = '#/r/overview'"));
     }
 
@@ -2666,8 +2800,9 @@ mod tests {
         assert!(js.contains("Open Sells"));
         assert!(js.contains("'#/e/rights_sales'"));
         assert!(js.contains("Open Rights Sales"));
-        // …and refreshes on every route render so it appears on the main views.
-        assert!(js.contains("refreshHealthBanner(); // deliberately not awaited"));
+        // …and refreshes on every route render so it appears on the main views
+        // (with the navigation token, so a superseded render cannot repaint it).
+        assert!(js.contains("refreshHealthBanner(seq); // deliberately not awaited"));
         // The strip's host element ships in the page shell with its styles.
         let index = body_string(get("/").await).await;
         assert!(index.contains("id=\"health-banner\""));

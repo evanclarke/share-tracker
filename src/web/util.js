@@ -66,7 +66,9 @@ export function el(tag, attrs, children) {
 //    carrying `role="alert"` is announced; a success item gets the polite
 //    `role="status"` instead, since it is not worth interrupting for.
 //
-// The signature stays `toast(msg, isError)` — ~25 call sites, none changed.
+// The signature stays `toast(msg, isError)`; views now reach it through
+// `toastIfCurrent` below, which adds the stale-render guard without changing
+// the two tiers or how a message is drawn.
 
 // How long a toast of each tier lives. Pure, and separate from the DOM work,
 // so the "an error toast never auto-hides" rule is one testable expression
@@ -129,6 +131,64 @@ export function setMain(node) {
   const app = document.getElementById('app');
   app.innerHTML = '';
   app.appendChild(node);
+}
+
+// ---- stale-render guard ------------------------------------------------
+//
+// The hash router dispatches one view per navigation and each view awaits its
+// own fetches; nothing in the view itself knows whether the reader has moved
+// on while it waited. This is the generation counter that ties a paint — or a
+// toast — back to the navigation that asked for it: `app.js`'s router calls
+// `beginNavigation()` once per hash change, the view captures the token it
+// returned, and every paint and toast goes through
+// `setMainIfCurrent`/`toastIfCurrent`. A slow `GET` that resolves after the
+// reader has clicked on can then neither overwrite the newer screen (the URL
+// and the nav highlight would say one view while the older one's table, or
+// its error page, sat on screen) nor raise its stale error over it.
+//
+// A factory rather than module state, and free of the DOM, so the rule is
+// unit-tested with its own counter instance (`src/web/util.test.js`); the
+// application uses the one instance the wrappers below are bound to.
+export function renderGeneration() {
+  let token = 0;
+  return {
+    // Start a navigation and return its token.
+    begin: function () { token += 1; return token; },
+    // The token of the navigation in flight — what a view that re-enters
+    // itself (a list reloading after a DELETE) captures, before its first
+    // `await`.
+    token: function () { return token; },
+    // Whether `t` still names the newest navigation.
+    isCurrent: function (t) { return t === token; },
+  };
+}
+
+// The application's one generation counter: the router bumps it, every view
+// carries the token it was dispatched with.
+const renders = renderGeneration();
+
+// Start a navigation and return its token — the value every paint and toast
+// of that navigation must carry.
+export function beginNavigation() { return renders.begin(); }
+
+// The token of the navigation in flight, for a view re-entered by one of its
+// own actions (a delete reloading its list) rather than by the router.
+export function navigationToken() { return renders.token(); }
+
+// Whether `token` still names the newest navigation.
+export function isCurrentNavigation(token) { return renders.isCurrent(token); }
+
+// Paint only if the navigation that asked for this node is still the newest
+// one; a superseded view's paint is dropped rather than overwriting the screen
+// the reader has since opened.
+export function setMainIfCurrent(token, node) {
+  if (isCurrentNavigation(token)) setMain(node);
+}
+
+// The same guard for a toast: a superseded view's error must not appear over
+// the screen the reader has since opened.
+export function toastIfCurrent(token, msg, isError) {
+  if (isCurrentNavigation(token)) toast(msg, isError);
 }
 
 // ---- persisted UI preferences -----------------------------------------

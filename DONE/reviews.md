@@ -5958,3 +5958,48 @@ capital-gains foreign tax (500 + the claimable share, not 500) and a gain-and-lo
 status column. Gates: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`
 (2,421 passed) and `cargo test ato_examples` (38 passed) all clean, plus
 `node --test 'src/web/*.test.js'` (149 passed).
+
+## The hash router has no stale-render guard, so a slow view can overwrite a newer one (2026-09-17 review, web frontend)
+
+(2026-09-17 review. `render()` (`src/web/app.js:2940`) dispatches on the hash, awaits the view's
+fetches, and paints with `setMain`; nothing ties the paint to the navigation that requested it.)
+
+- [x] Reproduced by reading the dispatch (2949–2992) against `setMain` (487/628/2773): clicking
+  "Trades" (a large `GET`) and then immediately "Snapshots" leaves whichever `await` resolves last
+  in charge, so the URL and the nav highlight say Snapshots while the Trades table — or a stale error
+  page — is on screen. A stale `toast(e.message, true)` can equally fire over the new screen
+- [x] Fix: a module-level `renderSeq` incremented in `render()`, checked after every `await` before
+  any `setMain`/`toast`, or a `setMainIfCurrent(seq, node)` that every view paints through
+- [x] Tests: a `web.rs`-style assertion that the sequence guard exists and is checked before each
+  paint (the served-bundle convention this project uses for UI behaviour, there being no browser
+  harness), or a `src/web/*.test.js` unit test of the guard as a pure function
+- [x] Docs sync: none
+
+**Closed 2026-09-17.** `util.js` gained a DOM-free `renderGeneration()` factory (`begin`/`token`/
+`isCurrent`) that is unit-testable with its own counter instance, one application-wide instance of it,
+and the guarded wrappers `beginNavigation()`, `navigationToken()`, `isCurrentNavigation()`,
+`setMainIfCurrent(token, node)` and `toastIfCurrent(token, msg, isError)`. The router calls
+`beginNavigation()` once per hash change and threads that token through every dispatch, so the
+**setMainIfCurrent** shape (the section's second option) is what every paint uses; all 19 paints and
+every toast now go through it, including the router's error-page catch. The guard covers more than
+`app.js`'s dispatch, because leaving the rest unguarded would make the "neither paint nor toast"
+property false: `taxreport.js`'s view (dispatched by `render()` and painting after awaits),
+`forms.js`'s two `afterSave` hooks (which toast after their own awaits), and
+`refreshHealthBanner`'s success and failure writes. A view re-entering itself after an action (a list
+reloading after a DELETE) captures `navigationToken()` before its first `await` and passes it on, so
+its own reload stays current while a slow `GET` from a superseded navigation is dropped. The
+`#/e/<custom>` redirect and the deliberately-unawaited detached-node/override fills were left alone:
+they write into detached nodes or `location.replace`, which cannot overwrite a newer screen.
+
+Tests: five `node --test` unit cases in `src/web/util.test.js` (`renderGeneration` hands out fresh
+tokens, a slow view cannot paint over the navigation that replaced it — the Trades-then-Snapshots
+race — one instance per counter, the app-wide guard drops a superseded paint and toast touching no
+DOM, and it lets the current navigation paint), plus
+`web::tests::every_paint_and_toast_goes_through_the_stale_render_guard` (a served-bundle scan over
+every module but `util.js` for a bare `setMain(`/`toast(`, pinning the router's bump, the dispatch's
+token, the guarded error paint and both wrappers' `isCurrentNavigation` check) with its self-test
+`the_stale_render_scan_separates_guarded_calls_from_bare_ones`. Both were verified to fail against a
+removed guard (neutering `isCurrent` fails four Node cases; reverting one paint fails the Rust scan).
+Gates: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` (2,423 passed)
+and `node --test 'src/web/*.test.js'` (154 passed) all clean; `scripts/ui-check.sh --seed demo`
+rendered the overview, trades, snapshots, tax-report, prices and jobs routes after the change.
