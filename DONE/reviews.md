@@ -5630,3 +5630,64 @@ nothing persisted) and
 (`NaiveDate::MAX` + 1 business day is an `Err`, T+0 at `NaiveDate::MAX` is still `Ok`). Gates:
 `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` (2,400 passed) all
 clean, plus `node --test 'src/web/*.test.js'` (149 passed).
+
+## Reference-data writes accept a blank ticker, a malformed `close_time`, and an unknown exchange timezone (2026-09-17 review, integrity)
+
+(2026-09-17 review, reproduced against a running server. Neither `listing::db_upsert` nor
+`exchange::db_upsert` performs any write-time validation; the only constraints are the DB's own
+(`ticker TEXT NOT NULL`, which the empty string satisfies). This is the same root cause as the
+`settlement_days` panic above, split out because these three are silent data defects rather than a
+crash. It also runs against the project's own rule that invariants are enforced at write time and
+that blank-free text fields are checked — `income`, `investment_expense` and a manual closing price
+all refuse a blank or negative value in the same situation.)
+
+- [x] Reproduced: `PUT /listings/:id` with `ticker: ""` returns `204` and stores it; so does
+  `POST /listings/:id/rename` (returning `201` and recording a blank `new_ticker` in the audited
+  rename chain) — two doors, not one. Blank `name` and `isin` are likewise accepted
+- [x] The impact is not cosmetic: an empty ticker resolves the provider symbol to `.AX`, and the
+  stored price row then reports `the symbol may be wrong, renamed, or delisted; set price_symbol on
+  the listing or backfill with an explicit symbol` — a diagnosis that sends the reader hunting for a
+  rename that never happened, while the real cause is the blank ticker. Nothing rejects it, `health`
+  does not flag it, and it is not a documented limitation
+- [x] Reproduced: `PUT /exchanges/XASX` with `close_time: "nonsense"` or `"99:99"` returns `204`
+  (the docs call the field `HH:MM` local), and `timezone: "Mars/Olympus"` returns `204` — a field
+  that drives market-close logic, where a bad value is only discovered downstream
+- [x] Note the web edit form masks the ticker case (HTML `required` plus `readFieldValue`'s trim →
+  the server sees a missing field and `422`s), but the API is the documented interface, and the
+  rename path is reachable from it
+- [x] Fix: a blank check on `ticker`/`name` in `listing::db_upsert` and in the rename path's own
+  validation; an `HH:MM` range check on `close_time` and an IANA parse on `timezone` in
+  `exchange::db_upsert`; each refusing `422` naming the field, as the sibling entities already do
+- [x] Tests: the two blank-ticker doors refused `422`; `close_time` and `timezone` refused `422`;
+  a valid write of each still `204`
+- [x] Docs sync: `docs/API.md`'s Listings and Exchanges sections (the 422 catalogues) and, if the
+  blank-ticker case stays permitted anywhere, the Known limitations list
+
+**Closed 2026-09-17.** Both doors onto the ticker now refuse a blank one: `listing::db_upsert`
+checks the trimmed `ticker` and `name` before it opens its transaction, and `db_rename` applies the
+same rule (plus a *supplied* blank `name`, which would overwrite the listing's name with nothing; an
+omitted `name` still keeps the current value and is not re-validated) — so the audited rename chain
+can no longer record a blank `new_ticker`. Blank and whitespace-only count as blank; a real value is
+stored verbatim. `UpsertError::BlankTicker`/`BlankName` and `RenameError::BlankTicker`/`BlankName`
+share the two `422` bodies (`listing::BLANK_TICKER`/`BLANK_NAME`), both naming the field.
+`exchange::db_upsert` gained the other two checks: `close_time` must be canonical `HH:MM` in range
+(`NaiveTime`'s parse accepts `9:30`, so the check pins the documented spelling with a format
+round-trip) and `timezone` must parse as an IANA zone through `chrono_tz::Tz` — the two fields
+market-close logic reads downstream. All four are `422` naming the field with nothing stored.
+`isin` is deliberately left unvalidated: the items name only `ticker`/`name`, an absent ISIN is
+ordinary and informational, and no calculation keys on it — recorded in `docs/API.md`'s Listings
+section rather than as a Known limitation, since the blank-ticker case the item made conditional is
+now refused everywhere. `docs/API.md`'s Listings, Exchanges, rename and overall 422-response
+sections all carry the new conditions.
+
+Tests: `entities::listing::tests::db_blank_ticker_and_name_are_refused` and
+`entities::listing::tests::api_blank_ticker_and_name_are_refused_422` (the `PUT` door),
+`entities::listing_rename::tests::db_rename_refuses_a_blank_ticker_and_blank_name` and
+`entities::listing_rename::tests::api_rename_with_a_blank_ticker_or_name_is_422` (the rename door,
+with a valid rename still `201`),
+`entities::exchange::tests::api_malformed_close_time_and_unknown_timezone_are_refused_422`
+(`nonsense`, `99:99`, `24:00`, `16:60`, `9:30`, `1600` and `""`; `Mars/Olympus`, `Not/AZone` and
+`""`; then a valid `16:10`/`Australia/Sydney` as `204` and a round trip) and
+`entities::exchange::tests::db_upsert_rejects_malformed_close_time_and_unknown_timezone` (the
+DB-level write path). Gates: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and
+`cargo test` (2,406 passed) all clean, plus `node --test 'src/web/*.test.js'` (149 passed).

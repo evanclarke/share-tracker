@@ -136,6 +136,17 @@ pub enum RenameError {
     /// (the same rule `listing::db_upsert` enforces).
     #[error("a Crypto listing's ticker must be a recognised digital-token code")]
     UnrecognisedDigitalToken,
+    /// The new `ticker` is blank once trimmed. A rename is the second door onto
+    /// the field: `listing::db_upsert` refuses a blank one on a bare `PUT`, so
+    /// this path must too — otherwise a listing with history could still be
+    /// renamed to nothing (2026-09-17 review). Mapped to `422`.
+    #[error("ticker cannot be blank")]
+    BlankTicker,
+    /// A *supplied* `name` is blank once trimmed: the rename would overwrite
+    /// the listing's name with nothing. An omitted `name` still keeps the
+    /// current value, which is not re-validated. Mapped to `422`.
+    #[error("name cannot be blank")]
+    BlankName,
     /// The rename would move a Crypto listing onto an exchange — the pairing
     /// `listing::db_upsert` refuses, met here because a rename may change
     /// `exchange_mic` (SCENARIOS L-09).
@@ -212,6 +223,8 @@ impl From<RenameError> for ApiError {
             RenameError::UnrecognisedDigitalToken => {
                 ApiError::unprocessable(listing::UNRECOGNISED_DIGITAL_TOKEN)
             }
+            RenameError::BlankTicker => ApiError::unprocessable(listing::BLANK_TICKER),
+            RenameError::BlankName => ApiError::unprocessable(listing::BLANK_NAME),
             RenameError::CryptoWithExchange => {
                 ApiError::unprocessable(listing::CRYPTO_WITH_EXCHANGE)
             }
@@ -309,6 +322,19 @@ pub async fn db_rename(
     .fetch_optional(&mut *tx)
     .await?;
     let current = current.ok_or(RenameError::ListingNotFound)?;
+
+    // The second door onto `ticker` — and onto `name`, which a rename may
+    // overwrite. `listing::db_upsert` refuses a blank one on a bare `PUT`, and
+    // a listing with history can only be renamed, so without the check here a
+    // blank ticker or name could still be written (2026-09-17 review).
+    // Whitespace-only counts as blank. A *supplied* name is checked; an omitted
+    // one keeps the current value, which is not re-validated.
+    if body.ticker.trim().is_empty() {
+        return Err(RenameError::BlankTicker);
+    }
+    if body.name.as_deref().is_some_and(|n| n.trim().is_empty()) {
+        return Err(RenameError::BlankName);
+    }
 
     let new_exchange_mic = body.exchange_mic.clone().or(current.exchange_mic.clone());
     let new_name = body.name.clone().unwrap_or(current.name.clone());
@@ -887,6 +913,56 @@ mod tests {
         ));
     }
 
+    /// 2026-09-17 review: the rename is the **second door** onto `ticker`.
+    /// `listing::db_upsert` refuses a blank one on a bare `PUT`, but a rename
+    /// writes the ticker itself — so without the check here a listing with
+    /// history could still be renamed to nothing, recording a blank
+    /// `new_ticker` in the audited chain. A *supplied* blank `name` is the same
+    /// defect through the same door. Both are refused, and neither the listing
+    /// nor the chain moves.
+    #[tokio::test]
+    async fn db_rename_refuses_a_blank_ticker_and_blank_name() {
+        let pool = test_pool().await;
+        test_support::listing(1)
+            .ticker("LAAC")
+            .name("Lithium Americas")
+            .mic("XNYS")
+            .insert(&pool)
+            .await;
+
+        for blank in ["", "   "] {
+            assert!(
+                matches!(
+                    db_rename(&pool, 1, &body("2024-06-01", blank))
+                        .await
+                        .unwrap_err(),
+                    RenameError::BlankTicker
+                ),
+                "blank ticker {blank:?} must be refused"
+            );
+        }
+        let mut blank_name = body("2024-06-01", "LAR");
+        blank_name.name = Some("  ".to_string());
+        assert!(matches!(
+            db_rename(&pool, 1, &blank_name).await.unwrap_err(),
+            RenameError::BlankName
+        ));
+
+        let got = listing::db_get(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(got.ticker, "LAAC");
+        assert_eq!(got.name, "Lithium Americas");
+        assert!(db_list_for_listing(&pool, 1).await.unwrap().is_empty());
+
+        // A real rename still works unchanged.
+        db_rename(&pool, 1, &body("2024-06-01", "LAR"))
+            .await
+            .unwrap();
+        assert_eq!(
+            listing::db_get(&pool, 1).await.unwrap().unwrap().ticker,
+            "LAR"
+        );
+    }
+
     #[tokio::test]
     async fn db_rename_out_of_order_effective_date_is_rejected() {
         let pool = test_pool().await;
@@ -1232,6 +1308,64 @@ mod tests {
             "body was: {body}"
         );
         assert!(!body.contains("UNIQUE"), "body was: {body}");
+    }
+
+    /// The blank-ticker/name refusal at the HTTP surface — the second door the
+    /// 2026-09-17 review named: `422` naming the field, nothing written, and a
+    /// real rename still answers the documented `201`.
+    #[tokio::test]
+    async fn api_rename_with_a_blank_ticker_or_name_is_422() {
+        let pool = test_pool().await;
+        test_support::listing(1)
+            .ticker("LAAC")
+            .name("Lithium Americas")
+            .mic("XNYS")
+            .insert(&pool)
+            .await;
+
+        let resp = client(&pool)
+            .post(
+                "/listings/1/rename",
+                &serde_json::json!({ "effective_date": "2024-06-01", "ticker": "  " }),
+            )
+            .await;
+        let (status, detail) = resp.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            detail.contains("ticker") && detail.contains("cannot be blank"),
+            "{detail}"
+        );
+
+        let resp = client(&pool)
+            .post(
+                "/listings/1/rename",
+                &serde_json::json!({
+                    "effective_date": "2024-06-01", "ticker": "LAR", "name": ""
+                }),
+            )
+            .await;
+        let (status, detail) = resp.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            detail.contains("name") && detail.contains("cannot be blank"),
+            "{detail}"
+        );
+
+        // Refused before any write: the listing and the chain are untouched.
+        let got = listing::db_get(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(got.ticker, "LAAC");
+        assert_eq!(got.name, "Lithium Americas");
+        assert!(db_list_for_listing(&pool, 1).await.unwrap().is_empty());
+
+        let resp = client(&pool)
+            .post(
+                "/listings/1/rename",
+                &serde_json::json!({ "effective_date": "2024-06-01", "ticker": "LAR" }),
+            )
+            .await;
+        assert_eq!(resp.status, StatusCode::CREATED);
+        let created: ListingRename = resp.json();
+        assert_eq!(created.new_ticker, "LAR");
     }
 
     #[tokio::test]

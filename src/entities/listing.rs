@@ -139,6 +139,19 @@ pub(crate) const CRYPTO_WITH_EXCHANGE: &str = "a Crypto listing has no exchange 
 pub(crate) const EXCHANGE_REQUIRED: &str = "this listing needs an exchange — only a Crypto listing is exchange-less, so set \
      exchange_mic to the venue's MIC (or make it a Crypto listing)";
 
+/// The `422` body for a blank `ticker` (whitespace-only counts as blank).
+/// Shared with `entities::listing_rename`, which is the second door onto the
+/// field — a rename may change it on a listing that already has history.
+pub(crate) const BLANK_TICKER: &str = "ticker cannot be blank — it identifies the security and, with the exchange, is what \
+     the price provider's symbol is derived from: a blank ticker resolves to the bare exchange suffix (`.AX`), \
+     so collection asks for a symbol that does not exist and reports it as the wrong symbol rather than a \
+     missing ticker. Enter the security's real ticker";
+
+/// The `422` body for a blank `name`. Shared with `entities::listing_rename`,
+/// whose optional `name` can overwrite the listing's own.
+pub(crate) const BLANK_NAME: &str = "name cannot be blank — it is what every screen, report and export labels the security \
+     by, so a stored blank leaves the row unnamed. Enter the security's name";
+
 /// Why a listing upsert was refused.
 #[derive(thiserror::Error, Debug)]
 pub enum UpsertError {
@@ -226,6 +239,19 @@ pub enum UpsertError {
     /// (SCENARIOS L-09).
     #[error("a Crypto listing was given an exchange")]
     CryptoWithExchange,
+    /// The trimmed `ticker` is empty. The ticker identifies the security and,
+    /// with the exchange, is what [price collection](crate::entities::closing_price)
+    /// derives the provider symbol from — a blank one resolves to the bare
+    /// exchange suffix (`.AX`), so the stored row sends collection after a
+    /// symbol that does not exist and the resulting diagnosis points at a
+    /// rename that never happened (2026-09-17 review). Mapped to `422`.
+    #[error("ticker cannot be blank")]
+    BlankTicker,
+    /// The trimmed `name` is empty: `name` is what every screen, report and
+    /// export labels the security by, so a stored blank leaves the row
+    /// unnamed. Mapped to `422`.
+    #[error("name cannot be blank")]
+    BlankName,
     /// A non-`Crypto` listing was written with no `exchange_mic`. The other
     /// half of the same CHECK, and the other half of SCENARIOS L-09.
     #[error("a non-Crypto listing was written without an exchange")]
@@ -250,6 +276,8 @@ impl From<UpsertError> for ApiError {
             ),
             UpsertError::CryptoWithExchange => ApiError::unprocessable(CRYPTO_WITH_EXCHANGE),
             UpsertError::ExchangeRequired => ApiError::unprocessable(EXCHANGE_REQUIRED),
+            UpsertError::BlankTicker => ApiError::unprocessable(BLANK_TICKER),
+            UpsertError::BlankName => ApiError::unprocessable(BLANK_NAME),
             UpsertError::CurrencyChangeWithHistory { from, to } => {
                 ApiError::unprocessable(format!(
                     "this listing's currency cannot change from {from} to {to} once it has recorded \
@@ -352,6 +380,21 @@ where
 }
 
 pub async fn db_upsert(pool: &SqlitePool, listing: &Listing) -> Result<(), UpsertError> {
+    // A blank ticker or name is refused before the transaction is even opened:
+    // it is a pure check on the request, and neither value is inert. The
+    // ticker (with the exchange) resolves the provider symbol — a stored blank
+    // becomes the bare exchange suffix (`.AX`), which price collection then
+    // diagnoses as a wrong symbol rather than a missing ticker — and `name` is
+    // what every screen and report labels the security by (2026-09-17 review).
+    // Whitespace-only counts as blank, the rule `PUT /closing_prices/…` applies
+    // to its own provenance text.
+    if listing.ticker.trim().is_empty() {
+        return Err(UpsertError::BlankTicker);
+    }
+    if listing.name.trim().is_empty() {
+        return Err(UpsertError::BlankName);
+    }
+
     let mut tx = write_tx(pool).await?;
 
     // An identity change (ticker or exchange) on a listing that already has
@@ -608,6 +651,36 @@ mod tests {
     async fn db_get_missing_returns_none() {
         let pool = test_pool().await;
         assert!(db_get(&pool, 999).await.unwrap().is_none());
+    }
+
+    /// 2026-09-17 review: `ticker TEXT NOT NULL` is satisfied by the empty
+    /// string, so a blank `ticker` or `name` used to store silently. Neither is
+    /// inert — a blank ticker resolves the price provider's symbol to the bare
+    /// exchange suffix (`.AX`), and `name` is what every screen and report
+    /// labels the security by — so both are refused at the one write path, with
+    /// nothing persisted. Whitespace-only counts as blank; a real value is
+    /// stored verbatim.
+    #[tokio::test]
+    async fn db_blank_ticker_and_name_are_refused() {
+        let pool = test_pool().await;
+        let mut blank_ticker = xtest();
+        blank_ticker.ticker = "   ".to_string();
+        assert!(matches!(
+            db_upsert(&pool, &blank_ticker).await.unwrap_err(),
+            UpsertError::BlankTicker
+        ));
+        let mut blank_name = xtest();
+        blank_name.name = String::new();
+        assert!(matches!(
+            db_upsert(&pool, &blank_name).await.unwrap_err(),
+            UpsertError::BlankName
+        ));
+        assert!(db_get(&pool, 1).await.unwrap().is_none());
+
+        db_upsert(&pool, &xtest()).await.unwrap();
+        let got = db_get(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(got.ticker, "VAS");
+        assert_eq!(got.name, "Vanguard Australian Shares ETF");
     }
 
     /// SCENARIOS F-23: the AMIT status is dated, and the date is a whole-year
@@ -1315,6 +1388,50 @@ mod tests {
         let resp = client(&pool).put("/listings/1", &body).await;
         assert_eq!(resp.status, StatusCode::NO_CONTENT);
         assert!(db_get(&pool, 1).await.unwrap().is_some());
+    }
+
+    /// The blank-ticker/name refusal as the web UI sees it: `422` naming the
+    /// field, with nothing stored, while a real listing still writes as before.
+    /// This is the first of the two doors onto `ticker` (the rename endpoint is
+    /// the second).
+    #[tokio::test]
+    async fn api_blank_ticker_and_name_are_refused_422() {
+        let pool = test_pool().await;
+        let client = client(&pool);
+        let body = |ticker: &str, name: &str| {
+            serde_json::json!({
+                "exchange_mic": "XASX", "ticker": ticker, "name": name, "isin": null,
+                "security_type": "ETF", "currency": "AUD", "amit": false,
+            })
+        };
+
+        for (ticker, name, field) in [
+            ("", "Vanguard", "ticker"),
+            ("   ", "Vanguard", "ticker"),
+            ("VAS", "", "name"),
+            ("VAS", "  ", "name"),
+        ] {
+            let resp = client.put("/listings/1", &body(ticker, name)).await;
+            let (status, detail) = resp.status_and_body();
+            assert_eq!(
+                status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "ticker {ticker:?} / name {name:?} must be refused 422"
+            );
+            assert!(
+                detail.contains(field),
+                "the 422 must name {field}, got: {detail}"
+            );
+            assert!(
+                db_get(&pool, 1).await.unwrap().is_none(),
+                "ticker {ticker:?} / name {name:?} must not be stored"
+            );
+        }
+
+        client.put_ok("/listings/1", &body("VAS", "Vanguard")).await;
+        let got = db_get(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(got.ticker, "VAS");
+        assert_eq!(got.name, "Vanguard");
     }
 
     #[tokio::test]

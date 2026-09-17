@@ -5,6 +5,7 @@ use axum::{
     http::StatusCode,
     routing::get,
 };
+use chrono::NaiveTime;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
@@ -66,6 +67,20 @@ pub enum UpsertError {
     /// value). Mapped to `422`.
     #[error("settlement_days {value} is above the maximum of {max}")]
     SettlementDaysAboveMax { value: i64, max: i64 },
+    /// `close_time` is not an `HH:MM` local time in range (carries the rejected
+    /// value). The price-import job only collects a day's close once this time
+    /// has passed in the exchange's `timezone`, and
+    /// `closing_price::market::Market::latest_complete_trading_day` parses it
+    /// with `%H:%M` — so a malformed value is a defect discovered downstream,
+    /// not at the write. Mapped to `422`.
+    #[error("close_time {0:?} is not HH:MM")]
+    MalformedCloseTime(String),
+    /// `timezone` is not a recognised IANA zone name (carries the rejected
+    /// value). It is the local clock `close_time` is measured against, so an
+    /// unknown zone breaks every market-close decision for the exchange and
+    /// surfaces only as a downstream parse failure. Mapped to `422`.
+    #[error("timezone {0:?} is not a recognised IANA zone")]
+    UnknownTimezone(String),
 }
 
 impl From<UpsertError> for ApiError {
@@ -79,6 +94,17 @@ impl From<UpsertError> for ApiError {
                 "settlement_days {value} is above the maximum of {max} — T+n is a market's \
                  settlement period (ASX and NYSE are T+2), and a window longer than one year of \
                  business days cannot be covered by the seeded holiday calendar"
+            )),
+            UpsertError::MalformedCloseTime(value) => ApiError::unprocessable(format!(
+                "close_time {value:?} is not an HH:MM local time — enter the end of the regular \
+                 session as a two-digit 24-hour hour and minute (e.g. 16:00) in the exchange's \
+                 own timezone, which is when closing-price collection considers the day's close \
+                 final"
+            )),
+            UpsertError::UnknownTimezone(value) => ApiError::unprocessable(format!(
+                "timezone {value:?} is not a recognised IANA zone name — enter the exchange's own \
+                 zone (e.g. Australia/Sydney, America/New_York), which is the local clock \
+                 close_time is measured against"
             )),
             // An unknown currency (FK) surfaces as 422 with the offending
             // constraint named.
@@ -137,6 +163,17 @@ pub async fn db_upsert(pool: &SqlitePool, exchange: &Exchange) -> Result<(), Ups
             max: MAX_SETTLEMENT_DAYS,
         });
     }
+    // `close_time` and `timezone` are the other two fields a downstream
+    // calculation reads and cannot cope with a bad value of: `close_time` is
+    // parsed as `%H:%M` by `Market::latest_complete_trading_day`, and the
+    // timezone is parsed by `Market::tz`. Both are validated here, at the one
+    // write path, rather than discovered later (2026-09-17 review).
+    if !is_hh_mm(&exchange.close_time) {
+        return Err(UpsertError::MalformedCloseTime(exchange.close_time.clone()));
+    }
+    if exchange.timezone.parse::<chrono_tz::Tz>().is_err() {
+        return Err(UpsertError::UnknownTimezone(exchange.timezone.clone()));
+    }
     sqlx::query(
         "INSERT INTO exchanges (mic, name, country, currency, timezone, settlement_days, close_time) \
          VALUES (?, ?, ?, ?, ?, ?, ?) \
@@ -158,6 +195,17 @@ pub async fn db_upsert(pool: &SqlitePool, exchange: &Exchange) -> Result<(), Ups
     .execute(pool)
     .await?;
     Ok(())
+}
+
+/// Is `s` an `HH:MM` local time — exactly two digits, a colon, two digits, in
+/// range? `NaiveTime`'s own parse accepts a one- or two-digit hour (`9:30`,
+/// `16:00`), while the documented spelling and the stored form are strictly
+/// `HH:MM`, so the canonical round trip is what pins it: anything that does not
+/// format back to the input is refused.
+fn is_hh_mm(s: &str) -> bool {
+    NaiveTime::parse_from_str(s, "%H:%M")
+        .map(|t| t.format("%H:%M").to_string() == s)
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -405,6 +453,108 @@ mod tests {
             UpsertError::SettlementDaysAboveMax { .. }
         ));
         assert!(db_get(&pool, "XTES").await.unwrap().is_none());
+    }
+
+    /// The 2026-09-17 review reproduced this end to end: `PUT /exchanges/XASX`
+    /// with `close_time: "nonsense"` or `"99:99"` returned `204` — the docs
+    /// call the field `HH:MM` local — and so did `timezone: "Mars/Olympus"`.
+    /// Both drive market-close logic and a bad value surfaced only downstream,
+    /// so each is refused `422` naming the field, with nothing stored, while a
+    /// real pair still answers the documented `204` and round-trips.
+    #[tokio::test]
+    async fn api_malformed_close_time_and_unknown_timezone_are_refused_422() {
+        let pool = test_pool().await;
+        for close_time in ["nonsense", "99:99", "24:00", "16:60", "9:30", "1600", ""] {
+            let body = serde_json::json!({
+                "name": "Test Exchange",
+                "country": "Testland",
+                "currency": "AUD",
+                "timezone": "UTC",
+                "settlement_days": 2,
+                "close_time": close_time
+            });
+            let resp = client(&pool).put("/exchanges/XTES", &body).await;
+            let (status, detail) = resp.status_and_body();
+            assert_eq!(
+                status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "close_time {close_time:?} must be refused 422"
+            );
+            assert!(
+                detail.contains("close_time"),
+                "the 422 must name the field, got: {detail}"
+            );
+            assert!(
+                db_get(&pool, "XTES").await.unwrap().is_none(),
+                "close_time {close_time:?} must not be stored"
+            );
+        }
+        for timezone in ["Mars/Olympus", "Not/AZone", ""] {
+            let body = serde_json::json!({
+                "name": "Test Exchange",
+                "country": "Testland",
+                "currency": "AUD",
+                "timezone": timezone,
+                "settlement_days": 2,
+                "close_time": "16:00"
+            });
+            let resp = client(&pool).put("/exchanges/XTES", &body).await;
+            let (status, detail) = resp.status_and_body();
+            assert_eq!(
+                status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "timezone {timezone:?} must be refused 422"
+            );
+            assert!(
+                detail.contains("timezone"),
+                "the 422 must name the field, got: {detail}"
+            );
+            assert!(
+                db_get(&pool, "XTES").await.unwrap().is_none(),
+                "timezone {timezone:?} must not be stored"
+            );
+        }
+
+        let body = serde_json::json!({
+            "name": "Test Exchange",
+            "country": "Testland",
+            "currency": "AUD",
+            "timezone": "Australia/Sydney",
+            "settlement_days": 2,
+            "close_time": "16:10"
+        });
+        client(&pool).put_ok("/exchanges/XTES", &body).await;
+        let got = db_get(&pool, "XTES").await.unwrap().unwrap();
+        assert_eq!(got.close_time, "16:10");
+        assert_eq!(got.timezone, "Australia/Sydney");
+    }
+
+    /// The two checks live in [`db_upsert`] — the one write path — so a direct
+    /// call is refused too and persists nothing.
+    #[tokio::test]
+    async fn db_upsert_rejects_malformed_close_time_and_unknown_timezone() {
+        let pool = test_pool().await;
+        let mut ex = xtest();
+        ex.close_time = "nonsense".to_string();
+        assert!(matches!(
+            db_upsert(&pool, &ex).await.unwrap_err(),
+            UpsertError::MalformedCloseTime(v) if v == "nonsense"
+        ));
+        ex.close_time = "16:00".to_string();
+        ex.timezone = "Mars/Olympus".to_string();
+        assert!(matches!(
+            db_upsert(&pool, &ex).await.unwrap_err(),
+            UpsertError::UnknownTimezone(v) if v == "Mars/Olympus"
+        ));
+        assert!(db_get(&pool, "XTES").await.unwrap().is_none());
+
+        // The ordinary seeded shapes are accepted: a real zone and `HH:MM`.
+        ex.timezone = "UTC".to_string();
+        db_upsert(&pool, &ex).await.unwrap();
+        assert_eq!(
+            db_get(&pool, "XTES").await.unwrap().unwrap().close_time,
+            "16:00"
+        );
     }
 
     #[tokio::test]

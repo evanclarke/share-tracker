@@ -38,38 +38,6 @@ what has been verified is SCENARIOS.md's
 [Verification status](SCENARIOS.md#verification-status) table and its per-section findings blocks;
 the maintained record of what was built and decided is the `DONE/*.md` archive.
 
-## Reference-data writes accept a blank ticker, a malformed `close_time`, and an unknown exchange timezone (2026-09-17 review, integrity)
-
-(2026-09-17 review, reproduced against a running server. Neither `listing::db_upsert` nor
-`exchange::db_upsert` performs any write-time validation; the only constraints are the DB's own
-(`ticker TEXT NOT NULL`, which the empty string satisfies). This is the same root cause as the
-`settlement_days` panic above, split out because these three are silent data defects rather than a
-crash. It also runs against the project's own rule that invariants are enforced at write time and
-that blank-free text fields are checked — `income`, `investment_expense` and a manual closing price
-all refuse a blank or negative value in the same situation.)
-
-- [ ] Reproduced: `PUT /listings/:id` with `ticker: ""` returns `204` and stores it; so does
-  `POST /listings/:id/rename` (returning `201` and recording a blank `new_ticker` in the audited
-  rename chain) — two doors, not one. Blank `name` and `isin` are likewise accepted
-- [ ] The impact is not cosmetic: an empty ticker resolves the provider symbol to `.AX`, and the
-  stored price row then reports `the symbol may be wrong, renamed, or delisted; set price_symbol on
-  the listing or backfill with an explicit symbol` — a diagnosis that sends the reader hunting for a
-  rename that never happened, while the real cause is the blank ticker. Nothing rejects it, `health`
-  does not flag it, and it is not a documented limitation
-- [ ] Reproduced: `PUT /exchanges/XASX` with `close_time: "nonsense"` or `"99:99"` returns `204`
-  (the docs call the field `HH:MM` local), and `timezone: "Mars/Olympus"` returns `204` — a field
-  that drives market-close logic, where a bad value is only discovered downstream
-- [ ] Note the web edit form masks the ticker case (HTML `required` plus `readFieldValue`'s trim →
-  the server sees a missing field and `422`s), but the API is the documented interface, and the
-  rename path is reachable from it
-- [ ] Fix: a blank check on `ticker`/`name` in `listing::db_upsert` and in the rename path's own
-  validation; an `HH:MM` range check on `close_time` and an IANA parse on `timezone` in
-  `exchange::db_upsert`; each refusing `422` naming the field, as the sibling entities already do
-- [ ] Tests: the two blank-ticker doors refused `422`; `close_time` and `timezone` refused `422`;
-  a valid write of each still `204`
-- [ ] Docs sync: `docs/API.md`'s Listings and Exchanges sections (the 422 catalogues) and, if the
-  blank-ticker case stays permitted anywhere, the Known limitations list
-
 ## The config file holding every secret is installed world-readable (2026-09-17 review, security)
 
 (2026-09-17 review, verified by reading the packaging scripts and the auth code. Earlier review
