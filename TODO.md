@@ -38,29 +38,6 @@ what has been verified is SCENARIOS.md's
 [Verification status](SCENARIOS.md#verification-status) table and its per-section findings blocks;
 the maintained record of what was built and decided is the `DONE/*.md` archive.
 
-## The price-alert scan reads without a snapshot, and its send and send-log are not atomic (2026-09-17 review, integrity)
-
-(2026-09-17 review of the `price-alert` job added in v0.23.0. Two related properties, both
-low-severity: neither corrupts a stored financial figure.)
-
-- [ ] Reproduced by reading `src/entities/price_alert.rs:192-257`: `db_held_listing_ids(pool)`, then
-  per listing `db_latest_two_closes(pool)`, `db_listing_identity(pool)`, `db_price_basis_events(conn)`
-  and `db_already_alerted(pool)` — each its own implicit snapshot while a price import or corporate
-  action can land. This is the one multi-query read in the tree not on one `pool.begin()`, and the
-  `deferred_begin` discipline test (`src/infra/db.rs`, `DEFERRED_BEGIN_ALLOWED`) does not see it
-  because that scan walks `src/reports/` only. The recorded row states the exact pair compared, so
-  the failure mode is a misleading or skipped alert
-- [ ] Reproduced by reading `:343-351`: `mailer.send(...)` then `db_record(...)` (`:155-182`,
-  `ON CONFLICT(listing_id, price_date) DO NOTHING`). A process death or a failed insert between them
-  leaves no row, so the next run re-identifies the same move and re-sends — at-least-once
-  notification. `migrations/0049_price_alerts.sql:73-75` documents only the send-failure direction
-- [ ] Fix: hold the scan's reads on one `pool.begin()` as the reports do; and either document the
-  at-least-once property or make the pair atomic (insert-then-delete-on-send-failure flips the
-  failure to a silently-swallowed alert, which is probably worse — decide deliberately)
-- [ ] Tests: a scan read inside one snapshot; a `db_record` failure leaving no row and the next run
-  re-alerting (the documented contract, pinned so it stays a decision)
-- [ ] Docs sync: `docs/API.md`'s Emailed reports / Jobs section for the at-least-once wording
-
 ## Enum-shaped columns stored as free text with no CHECK (2026-09-17 review, integrity)
 
 (2026-09-17 review, from the schema replay. The project's rule is that a field holding a limited set

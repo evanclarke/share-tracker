@@ -1,16 +1,31 @@
 //! Price-change alerts: a held listing whose latest stored close moved more
-//! than the configured threshold from the previous stored close, emailed once
-//! per move.
+//! than the configured threshold from the previous stored close, emailed at
+//! least once per move (see the contract below).
 //!
 //! The `price-alert` job runs just after each market's `price-import` (see
 //! `schedule.cron`). It walks **every** held listing on every run, because a
 //! listing's market is a property of the listing and not of the cron line that
 //! woke the job — so the three daily runs would each re-find the same movers.
-//! [`price_alerts`](../../migrations/0049_price_alerts.sql) is what makes a
-//! move alert exactly once: an alerted move is recorded, keyed
-//! `(listing_id, price_date)`, and a recorded move is never re-sent. The send
-//! log *is* the suppression, so "did it send, and what did it say" has one
+//! [`price_alerts`](../../migrations/0049_price_alerts.sql) is what keeps a
+//! move from being re-sent by every later run: an alerted move is recorded,
+//! keyed `(listing_id, price_date)`, and a recorded move is never re-sent. The
+//! send log *is* the suppression, so "did it send, and what did it say" has one
 //! answer rather than two that can drift.
+//!
+//! The notification contract is **at-least-once**, deliberately. The message
+//! goes out first and the row is written only after it is accepted, so a
+//! process death or a failed insert between the two leaves no row and the next
+//! run re-sends the move. The alternative — record first, delete on a failed
+//! send — would flip the failure into a silently swallowed alert, which is
+//! worse: a duplicate email is visible and harmless, an alert a reader never
+//! got is invisible and is the whole reason the job exists.
+//!
+//! The scan itself is one multi-query read and holds all of its inputs on one
+//! `pool.begin()` read transaction, exactly as the reports do: the held set,
+//! each listing's two closes, its identity, its price-basis events and its
+//! send-log check all come from one snapshot, so a price import or a corporate
+//! action landing mid-walk can never leave the recorded pair differing from the
+//! pair that was compared (2026-09-17 review).
 //!
 //! Two things the walk deliberately does not do:
 //!
@@ -29,7 +44,7 @@
 //! job's own operational state, written by one job and read by that job alone.
 //! The emails are the surface it exists for.
 
-use crate::entities::closing_price::{db_held_listing_ids, db_price_basis_events};
+use crate::entities::closing_price::{db_held_listing_ids_on, db_price_basis_events};
 use crate::infra::db::write_tx;
 use crate::infra::decimal::{Money, row_dec};
 use crate::infra::email::{self, Document, Notifier, Section, Table};
@@ -97,9 +112,10 @@ pub struct Scan {
     pub skipped: Vec<String>,
 }
 
-/// A listing's two most recent stored ok closes, newest first.
-async fn db_latest_two_closes(
-    pool: &SqlitePool,
+/// A listing's two most recent stored ok closes, newest first, on the caller's
+/// own connection — the scan's single read transaction.
+async fn db_latest_two_closes_on(
+    conn: &mut sqlx::SqliteConnection,
     listing_id: i64,
 ) -> Result<Vec<(NaiveDate, Decimal)>, sqlx::Error> {
     let rows = sqlx::query(
@@ -108,21 +124,22 @@ async fn db_latest_two_closes(
          ORDER BY price_date DESC LIMIT 2",
     )
     .bind(listing_id)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await?;
     rows.iter()
         .map(|row| Ok((row.try_get("price_date")?, row_dec(row, "price")?)))
         .collect()
 }
 
-/// The listing's display identity for the email.
-async fn db_listing_identity(
-    pool: &SqlitePool,
+/// The listing's display identity for the email, on the caller's own
+/// connection.
+async fn db_listing_identity_on(
+    conn: &mut sqlx::SqliteConnection,
     listing_id: i64,
 ) -> Result<Option<(String, String, String)>, sqlx::Error> {
     let row = sqlx::query("SELECT ticker, name, currency FROM listings WHERE id = ?")
         .bind(listing_id)
-        .fetch_optional(pool)
+        .fetch_optional(&mut *conn)
         .await?;
     row.map(|row| {
         Ok((
@@ -134,9 +151,10 @@ async fn db_listing_identity(
     .transpose()
 }
 
-/// Whether this listing's close has already been alerted on.
-pub async fn db_already_alerted(
-    pool: &SqlitePool,
+/// Whether this listing's close has already been alerted on, on the caller's
+/// own connection.
+async fn db_already_alerted_on(
+    conn: &mut sqlx::SqliteConnection,
     listing_id: i64,
     price_date: NaiveDate,
 ) -> Result<bool, sqlx::Error> {
@@ -144,14 +162,28 @@ pub async fn db_already_alerted(
         sqlx::query_scalar("SELECT id FROM price_alerts WHERE listing_id = ? AND price_date = ?")
             .bind(listing_id)
             .bind(price_date)
-            .fetch_optional(pool)
+            .fetch_optional(&mut *conn)
             .await?;
     Ok(found.is_some())
 }
 
+/// [`db_already_alerted_on`] on the pool — the tests' own convenience form; the
+/// scan itself checks inside its read transaction.
+#[cfg(test)]
+pub async fn db_already_alerted(
+    pool: &SqlitePool,
+    listing_id: i64,
+    price_date: NaiveDate,
+) -> Result<bool, sqlx::Error> {
+    let mut conn = pool.acquire().await?;
+    db_already_alerted_on(&mut conn, listing_id, price_date).await
+}
+
 /// Record every alert the message that just went out carried, in one
-/// transaction. Written **after** the send, so a failed send leaves no row and
-/// the next run retries the move rather than silently swallowing it.
+/// transaction. Written **after** the send, so a failed send (or a failure of
+/// this insert itself) leaves no row and the next run retries the move rather
+/// than silently swallowing it — the deliberate **at-least-once** contract (see
+/// the module docs): a duplicate email beats an alert nobody got.
 pub async fn db_record(
     pool: &SqlitePool,
     movers: &[Mover],
@@ -189,23 +221,33 @@ pub async fn db_record(
 /// this close has already been alerted. The one pass-over that *is* reported is
 /// a pair straddling a price-basis event: there the reader would have expected
 /// an alert and must be told why there is none.
+///
+/// Every read runs on one `pool.begin()` read transaction — the reports'
+/// single-snapshot pattern. It is a deferred `BEGIN` and not
+/// `infra::db::write_tx` because the walk only ever reads: a read-only
+/// transaction that never upgrades can never hit the failed-upgrade
+/// `SQLITE_BUSY` `write_tx` exists to avoid. Threading the connection through
+/// the `_on` helpers is what puts the held set, each listing's closes, its
+/// identity, its price-basis events and its send-log check all on that one
+/// snapshot.
 pub async fn scan(
     pool: &SqlitePool,
     threshold_pct: Decimal,
     as_of: NaiveDate,
 ) -> Result<Scan, sqlx::Error> {
     let mut scan = Scan::default();
-    let mut conn = pool.acquire().await?;
-    let listing_ids = db_held_listing_ids(pool, Some(as_of)).await?;
+    let mut tx = pool.begin().await?;
+    let listing_ids = db_held_listing_ids_on(&mut tx, Some(as_of)).await?;
 
     for listing_id in listing_ids {
-        let closes = db_latest_two_closes(pool, listing_id).await?;
+        let closes = db_latest_two_closes_on(&mut tx, listing_id).await?;
         let [(price_date, price), (previous_date, previous_price)] = closes.as_slice() else {
             continue; // never priced, or priced once — nothing to compare
         };
         let (price_date, price) = (*price_date, *price);
         let (previous_date, previous_price) = (*previous_date, *previous_price);
-        let Some((ticker, name, currency)) = db_listing_identity(pool, listing_id).await? else {
+        let Some((ticker, name, currency)) = db_listing_identity_on(&mut tx, listing_id).await?
+        else {
             continue; // deleted between the held read and this one
         };
 
@@ -213,7 +255,7 @@ pub async fn scan(
         // the listing between them. `db_price_basis_events` is the same event
         // set the stored prices are normalised over, so asking it is asking
         // exactly the right question.
-        let events = db_price_basis_events(&mut conn, listing_id).await?;
+        let events = db_price_basis_events(&mut tx, listing_id).await?;
         if let Some(event) = events
             .iter()
             .find(|e| e.date > previous_date && e.date <= price_date)
@@ -233,7 +275,7 @@ pub async fn scan(
         if change_pct.abs() < threshold_pct {
             continue;
         }
-        if db_already_alerted(pool, listing_id, price_date).await? {
+        if db_already_alerted_on(&mut tx, listing_id, price_date).await? {
             continue;
         }
         scan.movers.push(Mover {
@@ -248,6 +290,9 @@ pub async fn scan(
             change_pct,
         });
     }
+    // Read-only: end the snapshot rather than hold the connection. `commit` on
+    // a transaction that wrote nothing is a no-op, and matches the reports.
+    tx.commit().await?;
 
     // Biggest move first, by size rather than direction: an 11% fall leads an
     // 6% rise, which is the order the reader wants to scan.
@@ -611,6 +656,127 @@ mod tests {
         assert!(order[2].starts_with("AAA"), "{order:?}"); // +6%
     }
 
+    /// The scan is one multi-query read, so every input it compares comes from
+    /// one snapshot. A writer commits a whole state per transaction — every
+    /// held listing's latest close moves 6% with no price-basis event, or no
+    /// listing's does and a 1-for-2 consolidation stands between the two closes
+    /// — while the scan runs. The assertion holds for every interleaving: a
+    /// scan sees all of a state or none of it, never half. Putting the read
+    /// back on per-query pool snapshots is what this fails on — a commit
+    /// landing between two listings' reads leaves some alerted and some
+    /// skipped.
+    ///
+    /// Written as an invariant over *every* interleaving rather than a pinned
+    /// ordering, and it needs [`crate::test_support::race_pool`] for that: a
+    /// `:memory:` database is shared-cache, where a reader simply blocks on the
+    /// open writer and the interleave under test cannot arise at all.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_scan_reads_every_listing_from_one_snapshot() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        const LISTINGS: i64 = 20;
+        let dir = tempfile::tempdir().unwrap();
+        let pool = crate::test_support::race_pool(&dir).await;
+        for id in 1..=LISTINGS {
+            held_listing(&pool, id, &format!("L{id:02}")).await;
+            close(&pool, id, ymd(2026, 3, 2), "100").await;
+            // Seeded in the moving state, which the writer's first round
+            // reproduces: an untransitioned third state would let a scan before
+            // the first commit read a pair inside the threshold, which is
+            // neither of the two states this invariant is about.
+            close(&pool, id, ymd(2026, 3, 3), "106").await;
+        }
+
+        let done = Arc::new(AtomicBool::new(false));
+        let writing = {
+            let pool = pool.clone();
+            let done = done.clone();
+            tokio::spawn(async move {
+                for round in 0..60 {
+                    let moving = round % 2 == 0;
+                    let mut tx = write_tx(&pool).await.expect("the writer begins");
+                    sqlx::query("DELETE FROM corporate_actions")
+                        .execute(&mut *tx)
+                        .await
+                        .expect("the events clear");
+                    if moving {
+                        sqlx::query(
+                            "UPDATE closing_prices SET price = '106' \
+                             WHERE price_date = '2026-03-03'",
+                        )
+                        .execute(&mut *tx)
+                        .await
+                        .expect("the closes move");
+                    } else {
+                        for id in 1..=LISTINGS {
+                            sqlx::query(
+                                "INSERT INTO corporate_actions \
+                                     (action_type, listing_id, date, split_new_units, split_old_units) \
+                                 VALUES ('ShareSplit', ?, '2026-03-03', '1', '2')",
+                            )
+                            .bind(id)
+                            .execute(&mut *tx)
+                            .await
+                            .expect("the consolidation records");
+                        }
+                        sqlx::query(
+                            "UPDATE closing_prices SET price = '53' \
+                             WHERE price_date = '2026-03-03'",
+                        )
+                        .execute(&mut *tx)
+                        .await
+                        .expect("the restated closes store");
+                    }
+                    tx.commit().await.expect("the state lands whole");
+                }
+                done.store(true, Ordering::SeqCst);
+            })
+        };
+
+        let reading = {
+            let pool = pool.clone();
+            let done = done.clone();
+            tokio::spawn(async move {
+                // A deadline as well as the flag: if the writer panics the flag
+                // is never set, and this must end so the join below surfaces
+                // that panic rather than hang the suite.
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                let mut reads = 0u32;
+                while !done.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+                    let scan = scan(&pool, dec("5"), ymd(2026, 3, 3))
+                        .await
+                        .expect("the scan reads");
+                    let movers = scan.movers.len() as i64;
+                    let skipped = scan.skipped.len() as i64;
+                    assert!(
+                        movers == 0 || movers == LISTINGS,
+                        "a scan saw {movers} of {LISTINGS} listings move and {skipped} skipped \
+                         — its reads straddled two snapshots"
+                    );
+                    assert_eq!(
+                        movers + skipped,
+                        LISTINGS,
+                        "every listing is either a mover or a reported skip"
+                    );
+                    for mover in &scan.movers {
+                        assert_eq!(
+                            (mover.previous_price, mover.price),
+                            (dec("100"), dec("106")),
+                            "a mover's pair comes from the one state its snapshot held"
+                        );
+                    }
+                    reads += 1;
+                }
+                reads
+            })
+        };
+
+        writing.await.expect("the writer runs to completion");
+        let reads = reading.await.expect("the reader runs to completion");
+        assert!(reads > 0, "the scan must have run while the writer wrote");
+    }
+
     #[tokio::test]
     async fn a_failed_send_records_nothing_so_the_move_is_retried() {
         let pool = test_pool().await;
@@ -642,6 +808,80 @@ mod tests {
         .await
         .expect("the run succeeds");
         assert_eq!(outbox.sent().len(), 1);
+    }
+
+    /// The documented contract is **at-least-once**, pinned so it stays a
+    /// decision: the message goes out first and the row is written only after
+    /// the relay accepted it, so a failure of that write leaves the move
+    /// unrecorded and the next run re-sends it.
+    ///
+    /// The record write is forced to fail with a trigger that refuses every
+    /// insert — it fires after the send has already happened, which is exactly
+    /// the ordering the contract rests on. Reversed (record first, send after),
+    /// this first run would send nothing and the alert would be swallowed; the
+    /// duplicate the second run produces is the visible, harmless failure the
+    /// order deliberately prefers.
+    #[tokio::test]
+    async fn a_failed_record_after_a_successful_send_re_alerts_next_run() {
+        let pool = test_pool().await;
+        held_listing(&pool, 1, "AAA").await;
+        close(&pool, 1, ymd(2026, 3, 2), "100").await;
+        close(&pool, 1, ymd(2026, 3, 3), "108").await;
+
+        sqlx::query(
+            "CREATE TRIGGER refuse_price_alerts BEFORE INSERT ON price_alerts \
+             BEGIN SELECT RAISE(ABORT, 'send log unavailable'); END",
+        )
+        .execute(&pool)
+        .await
+        .expect("the test installs its refusal");
+
+        let outbox = Outbox::new();
+        let err = run_alert(
+            &pool,
+            Some(&outbox.notifier(dec("5"))),
+            now_on(ymd(2026, 3, 3)),
+        )
+        .await
+        .expect_err("a failed record fails the run");
+        assert!(err.contains("send log unavailable"), "{err}");
+        assert_eq!(
+            outbox.sent().len(),
+            1,
+            "the email went out before the record was attempted"
+        );
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM price_alerts")
+            .fetch_one(&pool)
+            .await
+            .expect("the send log is readable");
+        assert_eq!(rows, 0, "a failed record leaves no row");
+        assert!(
+            !db_already_alerted(&pool, 1, ymd(2026, 3, 3)).await.unwrap(),
+            "an unrecorded move stays alertable"
+        );
+
+        // The next run re-sends it: at-least-once, not exactly-once.
+        sqlx::query("DROP TRIGGER refuse_price_alerts")
+            .execute(&pool)
+            .await
+            .expect("the refusal lifts");
+        run_alert(
+            &pool,
+            Some(&outbox.notifier(dec("5"))),
+            now_on(ymd(2026, 3, 3)),
+        )
+        .await
+        .expect("the run succeeds");
+        assert_eq!(
+            outbox.sent().len(),
+            2,
+            "the move is re-sent — the duplicate at-least-once allows"
+        );
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM price_alerts")
+            .fetch_one(&pool)
+            .await
+            .expect("the send log is readable");
+        assert_eq!(rows, 1, "and now it is recorded, so it is not sent again");
     }
 
     #[tokio::test]

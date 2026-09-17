@@ -6091,3 +6091,53 @@ and `entities::sell::tests::a_recompute_interleaved_with_a_sell_write_cannot_mis
 `Computed` against the old resolve-on-pool shape). Gates: `cargo fmt --check`, `cargo clippy
 --all-targets -- -D warnings`, `cargo test` (2,428 passed) and `node --test 'src/web/*.test.js'`
 (159 passed) all clean.
+
+## The price-alert scan reads without a snapshot, and its send and send-log are not atomic (2026-09-17 review, integrity)
+
+(2026-09-17 review of the `price-alert` job added in v0.23.0. Two related properties, both
+low-severity: neither corrupts a stored financial figure.)
+
+- [x] Reproduced by reading `src/entities/price_alert.rs:192-257`: `db_held_listing_ids(pool)`, then
+  per listing `db_latest_two_closes(pool)`, `db_listing_identity(pool)`, `db_price_basis_events(conn)`
+  and `db_already_alerted(pool)` — each its own implicit snapshot while a price import or corporate
+  action can land. This is the one multi-query read in the tree not on one `pool.begin()`, and the
+  `deferred_begin` discipline test (`src/infra/db.rs`, `DEFERRED_BEGIN_ALLOWED`) does not see it
+  because that scan walks `src/reports/` only. The recorded row states the exact pair compared, so
+  the failure mode is a misleading or skipped alert
+- [x] Reproduced by reading `:343-351`: `mailer.send(...)` then `db_record(...)` (`:155-182`,
+  `ON CONFLICT(listing_id, price_date) DO NOTHING`). A process death or a failed insert between them
+  leaves no row, so the next run re-identifies the same move and re-sends — at-least-once
+  notification. `migrations/0049_price_alerts.sql:73-75` documents only the send-failure direction
+- [x] Fix: hold the scan's reads on one `pool.begin()` as the reports do; and either document the
+  at-least-once property or make the pair atomic (insert-then-delete-on-send-failure flips the
+  failure to a silently-swallowed alert, which is probably worse — decide deliberately)
+- [x] Tests: a scan read inside one snapshot; a `db_record` failure leaving no row and the next run
+  re-alerting (the documented contract, pinned so it stays a decision)
+- [x] Docs sync: `docs/API.md`'s Emailed reports / Jobs section for the at-least-once wording
+
+**Closed 2026-09-17.** `price_alert::scan` now holds every input on one `pool.begin()` read
+transaction — the held set, each listing's two closes, its identity, its price-basis events and its
+send-log check all come from one snapshot — with the helpers threaded as `_on(conn, …)` and the
+pool-based `db_already_alerted` kept `#[cfg(test)]`. It is a deferred `BEGIN` and not `write_tx`
+deliberately: the walk only ever reads, so it can never hit the failed-upgrade `SQLITE_BUSY` that
+`write_tx` exists to avoid; `infra::db`'s `DEFERRED_BEGIN_ALLOWED` classifies the file as a read-only
+multi-query reader (the scan walks all of `src`, not just `src/reports/`, so the classification was
+required — the TODO note claiming otherwise was stale). The send/send-log pair was **documented as
+at-least-once** rather than made atomic: the row is written only after the relay accepts the message,
+so a death or a failed insert between them leaves no row and the next run re-sends, while
+record-first-delete-on-failure would flip those same failures into a silently swallowed alert — a
+duplicate email is visible and harmless, an alert nobody got is invisible and is the whole reason the
+job exists. The module docs, `docs/API.md`'s Emailed reports/Jobs section, `docs/FEATURES.md` and the
+web UI's job description all state the contract; `doc_checks`' pin moved from "alerted exactly once"
+to "alerted at least once". `migrations/0049` was deliberately left untouched (sqlx checksums an
+applied migration's whole contents, so editing its comment would break startup against an existing
+database).
+
+Tests: `entities::price_alert::tests::a_scan_reads_every_listing_from_one_snapshot` (a writer commits
+whole states — every listing moving with no basis event, or none moving behind a 1-for-2
+consolidation — while scans run, asserting each scan sees all or none of a state; verified to fail
+with "a scan saw 6 of 20 listings move and 14 skipped" against the old per-query reads) and
+`a_failed_record_after_a_successful_send_re_alerts_next_run` (a trigger refuses every `price_alerts`
+insert: the message goes out, no row exists, and the next run re-sends before recording — it fails on
+reversed ordering). Gates: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+`cargo test` (2,430 passed) and `node --test 'src/web/*.test.js'` (159 passed) all clean.

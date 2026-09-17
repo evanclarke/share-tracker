@@ -4777,11 +4777,17 @@ fn the_emailed_reports_are_documented_where_each_reader_looks() {
         );
     }
     // The two behaviours a reader cannot infer and would otherwise file as
-    // bugs: an alert that fires once however many runs re-find it, and a
-    // split-straddling pair that is deliberately not alerted.
+    // bugs: a move that is not re-sent by every later run (the send log is the
+    // suppression, and the contract is deliberately at-least-once rather than
+    // exactly-once), and a split-straddling pair that is deliberately not
+    // alerted.
     assert!(
-        API_MD.contains("alerted exactly once"),
-        "docs/API.md should state that a move is alerted once"
+        API_MD.contains("alerted at least once"),
+        "docs/API.md should state that a move is alerted at least once"
+    );
+    assert!(
+        API_MD.contains("at-least-once"),
+        "docs/API.md should name the price alert's at-least-once contract"
     );
     assert!(
         API_MD.contains("50% crash that never happened"),

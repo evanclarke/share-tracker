@@ -709,6 +709,11 @@ mod tests {
         // This module's own tests drive a deferred BEGIN deliberately, to pin
         // the failure `write_tx` exists to avoid.
         "infra/db.rs",
+        // The price-alert scan: one multi-query read over the held listings,
+        // their closes, identities, price-basis events and the send log, held
+        // on one snapshot exactly as a report holds its inputs. Read-only — the
+        // send log write is a separate `write_tx` after the send.
+        "entities/price_alert.rs",
         // Read-only reports, one transaction each, no writes.
         "reports/activity.rs",
         "reports/amit_adjustment_cross_check.rs",

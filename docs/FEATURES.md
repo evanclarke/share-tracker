@@ -340,13 +340,13 @@ in the listing's own quote currency rather than AUD, so an FX movement is never 
 change.
 
 Two consequences of running after every close, over a portfolio spanning three markets. Each move
-is **alerted exactly once**: every run walks every held listing (a listing's market is a property of
+is **alerted at least once**: every run walks every held listing (a listing's market is a property of
 the listing, not of the schedule line), so an alerted move is recorded and never re-sent — and the
-record is written only after the send succeeds, so a mail outage leaves the move to the next run
-rather than swallowing it. And a pair straddling a **split, consolidation or demerger restatement**
-is skipped rather than alerted: the two prices are quoted in different units, and a 1-for-2
-consolidation would otherwise report a 50% crash that never happened. The skipped comparison is
-reported as the run's note rather than left silent.
+record is written only after the send succeeds, so a mail outage, or a failure of that record write
+itself, leaves the move to the next run rather than swallowing it. And a pair straddling a **split,
+consolidation or demerger restatement** is skipped rather than alerted: the two prices are quoted in
+different units, and a 1-for-2 consolidation would otherwise report a 50% crash that never happened.
+The skipped comparison is reported as the run's note rather than left silent.
 
 ## The application itself
 
