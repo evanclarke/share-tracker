@@ -38,33 +38,6 @@ what has been verified is SCENARIOS.md's
 [Verification status](SCENARIOS.md#verification-status) table and its per-section findings blocks;
 the maintained record of what was built and decided is the `DONE/*.md` archive.
 
-## Documentation drift found by the 2026-09-17 pass (2026-09-17 review, docs)
-
-(2026-09-17 review, verified by reading each file. The project's rule is that a user-visible or
-structural change updates its documentation in the same task; these four were missed.)
-
-- [ ] `CLAUDE.md`'s `src/infra/` module map lists `args`, `db`, `logging`, `decimal`, `fx`, `http` and
-  `scheduler`, but omits `auth.rs` (+ `auth/`), `config.rs`, `date.rs`, `email.rs` and `fetch.rs` —
-  including the whole authentication subsystem and the outbound-email subsystem added in v0.23.0. A
-  reader of the module map would not know they exist
-- [ ] `CLAUDE.md`'s `cargo test` bullet says "~1955 tests, ~4s as of 2026-08-22"; the suite is now
-  2389 tests in 6.09 s. (The three build settings it names are all still in effect, re-verified: the
-  `.cargo/config.toml` SQLite flag, the dev-profile dependency opt-level, and the cached test schema)
-- [ ] `src/reports/row_history.rs:37-42` says "Five joined later" and lists five tables; the live
-  audited set is 23 and includes `distribution_events` (migration 0048), the sixth joiner. The
-  `AUDITED_TABLES` const, the migration CHECK, the triggers and the UI picker are all correct — only
-  the comment is stale
-- [ ] `migrations/0045_autoincrement_audited_ids.sql:25-30` still claims nine call sites compute
-  `SELECT COALESCE(MAX(id), 0) + 1` and that reworking them "is still open (TODO, SCENARIOS U-a)".
-  That is no longer true: the only occurrence of `COALESCE(MAX(id` left in `src/` is the SCHEMA.md
-  quotation in `doc_checks.rs:424`, server-created rows omit the id and read
-  `last_insert_rowid()`, and `a_server_assigned_insert_never_takes_a_deleted_trades_id` plus
-  `every_audited_tables_id_is_autoincrement` pin it. Correct the comment to state the work is done
-- [ ] Tests: none needed for a pure comment/doc correction, except that the `CLAUDE.md` edits are
-  verified by eye (nothing in `doc_checks` reads it) — if any of these becomes a pinned requirement,
-  add the assertion then
-- [ ] Docs sync: the files above
-
 ## Two integrity assertions are missing: no data-preservation test for the table-rebuild migrations, and no read-back of `PRAGMA foreign_keys` (2026-09-17 review, test gaps)
 
 (2026-09-17 review, from the schema replay. Both are safety nets for invariants the project relies

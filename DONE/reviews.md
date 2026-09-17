@@ -6677,3 +6677,56 @@ served-bundle assertions in `web.rs` (paint-before-fetch pending state, safe dee
 observer teardown registration, encoded owner field, single `moneyEl`, the columns-less-entity guard,
 and the absence of the `html:` attribute). Gates: `cargo fmt --check`, `cargo clippy --all-targets --
 -D warnings`, `cargo test` (2,472 passed) and `node --test 'src/web/*.test.js'` (182 passed) all clean.
+
+## Documentation drift found by the 2026-09-17 pass (2026-09-17 review, docs)
+
+(2026-09-17 review, verified by reading each file. The project's rule is that a user-visible or
+structural change updates its documentation in the same task; these four were missed.)
+
+- [x] `CLAUDE.md`'s `src/infra/` module map lists `args`, `db`, `logging`, `decimal`, `fx`, `http` and
+  `scheduler`, but omits `auth.rs` (+ `auth/`), `config.rs`, `date.rs`, `email.rs` and `fetch.rs` —
+  including the whole authentication subsystem and the outbound-email subsystem added in v0.23.0. A
+  reader of the module map would not know they exist
+- [x] `CLAUDE.md`'s `cargo test` bullet says "~1955 tests, ~4s as of 2026-08-22"; the suite is now
+  2389 tests in 6.09 s. (The three build settings it names are all still in effect, re-verified: the
+  `.cargo/config.toml` SQLite flag, the dev-profile dependency opt-level, and the cached test schema)
+- [x] `src/reports/row_history.rs:37-42` says "Five joined later" and lists five tables; the live
+  audited set is 23 and includes `distribution_events` (migration 0048), the sixth joiner. The
+  `AUDITED_TABLES` const, the migration CHECK, the triggers and the UI picker are all correct — only
+  the comment is stale
+- [ ] `migrations/0045_autoincrement_audited_ids.sql:25-30` still claims nine call sites compute
+  `SELECT COALESCE(MAX(id), 0) + 1` and that reworking them "is still open (TODO, SCENARIOS U-a)".
+  That is no longer true: the only occurrence of `COALESCE(MAX(id` left in `src/` is the SCHEMA.md
+  quotation in `doc_checks.rs:424`, server-created rows omit the id and read
+  `last_insert_rowid()`, and `a_server_assigned_insert_never_takes_a_deleted_trades_id` plus
+  `every_audited_tables_id_is_autoincrement` pin it. Correct the comment to state the work is done
+  — **N/A: the file is an already-applied migration and must not be edited.** sqlx checksums a
+  migration's whole text (SHA-384, comments included), and `sqlx::migrate!().run()` fails with
+  `MigrateError::VersionMismatch` when an applied migration's checksum changes, so correcting the
+  comment would stop `infra::db::init` from starting against any database where 0045 has already run
+  (including a live deployment and its backups). Every migration in this repository has only ever
+  been touched by the commit that added it. The stale sentence is therefore recorded here as
+  superseded by the code and tests the bullet itself names
+  (`a_server_assigned_insert_never_takes_a_deleted_trades_id`,
+  `every_audited_tables_id_is_autoincrement`) rather than corrected in place
+- [x] Tests: none needed for a pure comment/doc correction, except that the `CLAUDE.md` edits are
+  verified by eye (nothing in `doc_checks` reads it) — if any of these becomes a pinned requirement,
+  add the assertion then
+- [x] Docs sync: the files above
+
+**Closed 2026-09-17.** `CLAUDE.md`'s `src/infra/` module map gained entries for `config.rs`, `date.rs`,
+`fetch.rs` (documented as the bounded feed-fetch layer, not just an error renderer), `email.rs` and
+`auth.rs` (+ `auth/login.html`), each describing the file's actual role, with every pre-existing
+bullet intact. Its `cargo test` bullet now states the measured figures (2,472 tests, ~6.8 s as of
+2026-09-17) and the three build settings were re-verified as still in effect (the
+`.cargo/config.toml` SQLite flag, `[profile.dev.package."*"]`'s `opt-level = 2`, and
+`test_support::test_pool`'s cached schema); the migration-file count it names is still 51.
+`reports::row_history`'s comment, which said "Five joined later" and listed five, was corrected to
+**six** joiners — the list now also names `distribution_events` (0048) — after verifying against the
+live schema that `AUDITED_TABLES` has 23 entries, the migration 0048 `row_history` CHECK lists the
+same 23, and 17 were in 0013. No new pin was added: the audited-table list is already pinned to the
+migration CHECK/triggers and the UI picker, and a text pin on the `cargo test` count would fail on
+every legitimate test addition. The fourth bullet (the `migrations/0045` comment) is closed **N/A** as
+recorded above; no migration file was touched. Gates: `cargo fmt --check`, `cargo clippy
+--all-targets -- -D warnings`, `cargo test` (2,472 passed) and `node --test 'src/web/*.test.js'`
+(182 passed) all clean.

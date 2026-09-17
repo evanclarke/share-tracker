@@ -34,12 +34,14 @@ use sqlx::{Row, SqlitePool};
 /// The audited tables, exactly as migration 0013 enumerates them in the
 /// `row_history.table_name` CHECK and its per-table trigger pairs — a test
 /// pins the three lists to each other, and the web UI's table picker is
-/// asserted against this list too. Five joined later: `listing_renames`
+/// asserted against this list too. Six joined later: `listing_renames`
 /// (0018), `closing_prices` (0021, once 0020 made a price hand-enterable),
 /// `tax_year_settings` (0027), `rba_fx_rates` (0031, once a stored rate
-/// became correctable) and `exchange_holidays` (0039, once the calendar was
+/// became correctable), `exchange_holidays` (0039, once the calendar was
 /// shown to be read *live* by valuation rather than only consumed at trade
-/// write time) — each migration rebuilding `row_history` to extend the CHECK.
+/// write time) and `distribution_events` (0048, the externally fetched
+/// distribution calendar the health alerts compare recorded income against)
+/// — each migration rebuilding `row_history` to extend the CHECK.
 pub const AUDITED_TABLES: [&str; 23] = [
     "trades",
     "parcel_allocations",
