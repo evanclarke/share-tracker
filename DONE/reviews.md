@@ -6445,3 +6445,55 @@ unvalued, the narrowed line has one point rather than a zero, the portfolio tota
 cost base — 1000 of BHP alone, not 2000 — and the later date folds both back in; verified to fail
 against the old builder). Gates: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
 `cargo test` (2,458 passed) and `node --test 'src/web/*.test.js'` (159 passed) all clean.
+
+## The annual report's worksheet ignores the scrip-cash apportionment, and the E10/G1 walk divides per unit (2026-09-17 review, financial correctness)
+
+(2026-09-17 review; two presentation/precision defects in the tax-report path, neither reaching an
+ATO label.)
+
+- [x] Reproduced by reading `src/reports/tax_report.rs:743-776` against `:851`: the worksheet's
+  `initial_cost_base_aud` and `adjustments` come from the raw pipeline while
+  `adjusted_cost_base_aud` is the realised-gains figure with the partial-rollover scrip cash
+  apportioned (`reports/realised_gains.rs:523-527`). A scrip exchange with a cash component therefore
+  prints `Initial 10,000 − adjustments 0 = Adjusted 2,000`, with 8,000 unexplained — contradicting
+  the identity the same module documents at `:468-476`. The gain and 18A are unaffected
+- [x] Reproduced by reading `src/reports/net_capital_gain.rs:564`: the E10/G1 walk re-implements step
+  1 as `initial_cost() / trade_qty` × units where the shared pipeline multiplies first
+  (`domain/cost_base.rs:754-758`), which differs in the last place; the `amount <= remaining` floor
+  decision is then taken on the slightly different figure. It is also a second implementation of the
+  pipeline the project's rules say must not be re-implemented
+- [x] Fix: derive the worksheet's initial and adjustment figures from the same apportioned source the
+  adjusted figure uses, so the printed identity holds; and have the E10/G1 walk call the pipeline's
+  own pro-rating helper rather than dividing per unit
+- [x] Tests: a partial-rollover scrip exchange with cash asserting
+  `initial − Σ adjustments = adjusted` on the printed rows; a case where divide-first and
+  multiply-first differ in the last place asserting the pipeline's answer
+- [x] Docs sync: `docs/API.md`'s annual tax report section if any printed column changes
+
+**Closed 2026-09-17.** The worksheet now apportions: `load_disposal_inputs` reads a Sale's scrip-cash
+terms from the same `trades JOIN corporate_actions ON ca.id = t.scrip_action_id` join
+`reports::realised_gains` uses and turns them into the same `(numerator, denominator)` pair through
+the now-shared `realised_gains::scrip_cash_apportionment` (extracted from `SellInfo` into a
+`pub(crate)` free function the method delegates to). In the `Sell` arm, `initial_cost_base_aud` and
+every itemised adjustment's `amount`/`per_unit` are scaled by that fraction with `mul_div`, exactly as
+`adjusted_cost_base_aud` already was — so `initial − Σ adjustments = adjusted` holds on the printed
+rows and the 8,000 that was unexplained is accounted for. The lookup is inside the `Sell` arm only, so
+a rights sale's id can never collide with a trade id; `adjusted_cost_base_aud` and therefore the gain
+and 18A are untouched (presentation-only). Independently cent-rounding the apportioned figures can in
+principle differ by a cent from `adjusted + Σ` for a non-terminating cash fraction with adjustments, so
+the figures are kept faithful to the pipeline rather than derived backwards; the test pins an exact
+1/5 fraction. For the walk, `net_capital_gain`'s `cohort_initial_cost` calls the pipeline's own
+`cost_base::prorated_initial_cost` (made `pub`, documented as the walk's step-1 source) instead of
+`initial_cost() / quantity × units`, so the figure the `amount <= remaining` floor is decided on is
+byte-identical to the one the pipeline's own walk starts from and the pipeline is no longer
+re-implemented. `docs/API.md`'s annual tax report `disposals` section documents the apportionment with
+a 2026-09-17 changed-note, pinned by a `doc_checks` assertion.
+
+Tests:
+`reports::tax_report::tests::api_a_scrip_cash_apportionment_reconciles_the_worksheets_cost_base_columns`
+(asserting the identity on the printed rows; verified to fail with `left: 10000, right: 2000` against
+the un-apportioned code) and
+`reports::net_capital_gain::tests::e10_g1_walk_step_one_is_the_pipelines_pro_rate_not_a_divide_per_unit`
+(verified to fail `…334` vs `…333` against the divide-first form). Gates: `cargo fmt --check`,
+`cargo clippy --all-targets -- -D warnings`, `cargo test` (2,461 passed) and `cargo test ato_examples`
+(38 passed) all clean.

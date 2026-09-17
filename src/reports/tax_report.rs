@@ -48,7 +48,7 @@ use crate::entities::income::{Income, IncomeType};
 use crate::entities::investment_expense::ExpenseType;
 use crate::entities::listing;
 use crate::entities::trade::Trade;
-use crate::infra::decimal::{parse_dec, to_cents};
+use crate::infra::decimal::{OptMoney, mul_div, parse_dec, to_cents};
 use crate::infra::fx::FxRates;
 use crate::infra::http::ApiError;
 use crate::reports::realised_gains::DisposalSource;
@@ -488,7 +488,14 @@ pub struct DisposalParcelRow {
     /// much as on a whole-parcel one (SCENARIOS AA-f; the identity holds
     /// exactly except where an adjustment is `capped`, where CGT event
     /// E10/G1 floors the balance at nil and the excess is a capital gain in
-    /// the net-capital-gain report instead).
+    /// the net-capital-gain report instead). On a **partial-rollover scrip
+    /// closing Sell** this figure — and each itemised row under it — is
+    /// apportioned by the cash side's market-value share of the reduced cost
+    /// base, the same fraction `realised_gains` applied to
+    /// `adjusted_cost_base_aud` (read through
+    /// `realised_gains::scrip_cash_apportionment`), so the
+    /// scrip side's carried-over share never appears as an unexplained gap
+    /// between the two cost-base columns.
     pub initial_cost_base_aud: Decimal,
     pub cost_base_per_unit_aud: Decimal,
 
@@ -630,8 +637,35 @@ struct DisposalInputs {
     amit_events: HashMap<i64, Vec<cost_base::AmitReductionEvent>>,
     roc_events: HashMap<i64, Vec<RocEvent>>,
     split_events: HashMap<i64, Vec<SplitEvent>>,
+    /// Each partial-rollover scrip closing Sell's cash-side apportionment
+    /// `(numerator, denominator)` — keyed by the **Sell trade id**, and never
+    /// looked up for a rights sale (whose `sale_trade_id` is a `rights_sales`
+    /// id, a different id space). `realised_gains` applied this fraction to
+    /// the adjusted cost base this worksheet prints, so the initial cost base
+    /// and itemised adjustment rows above it are scaled by the identical one —
+    /// otherwise the document's own `initial − Σ adjustments = adjusted`
+    /// identity has the whole scrip carry-over unexplained. Read from the same
+    /// `trades ⋈ corporate_actions` join and through the same
+    /// [`realised_gains::scrip_cash_apportionment`] helper, so the two can
+    /// never disagree.
+    scrip_cash: HashMap<i64, (Decimal, Decimal)>,
     fee_sale_ids: HashSet<i64>,
     fx: FxRates,
+}
+
+/// One partial-rollover scrip closing Sell's cash terms, as `realised_gains`
+/// reads them — the action's per-unit cash, market value and exchange ratio.
+#[derive(FromRow)]
+struct SaleScripCash {
+    id: i64,
+    #[sqlx(try_from = "OptMoney")]
+    scrip_cash_per_unit: Option<Decimal>,
+    #[sqlx(try_from = "OptMoney")]
+    scrip_market_value: Option<Decimal>,
+    #[sqlx(try_from = "OptMoney")]
+    scrip_new_units: Option<Decimal>,
+    #[sqlx(try_from = "OptMoney")]
+    scrip_old_units: Option<Decimal>,
 }
 
 async fn load_disposal_inputs(
@@ -687,6 +721,32 @@ async fn load_disposal_inputs(
         crate::entities::corporate_action::db_return_of_capital_events(&mut *conn).await?;
     let split_events = crate::entities::corporate_action::db_share_split_events(&mut *conn).await?;
 
+    // A partial-rollover scrip closing Sell's cash terms, from the same join
+    // `realised_gains` reads them off, through the same helper: the worksheet
+    // scales the parcel's initial cost base and each itemised adjustment row
+    // by this fraction, so the identity `initial − Σ adjustments = adjusted`
+    // holds against the adjusted figure that report already apportioned.
+    let scrip_cash_rows: Vec<SaleScripCash> = sqlx::query_as(
+        "SELECT t.id, ca.scrip_cash_per_unit, ca.scrip_market_value, \
+                ca.scrip_new_units, ca.scrip_old_units \
+         FROM trades t JOIN corporate_actions ca ON ca.id = t.scrip_action_id \
+         WHERE t.trade_type = 'Sell' AND ca.scrip_cash_per_unit IS NOT NULL",
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut scrip_cash = HashMap::new();
+    for row in scrip_cash_rows {
+        if let Some(apportionment) = realised_gains::scrip_cash_apportionment(
+            row.id,
+            row.scrip_cash_per_unit,
+            row.scrip_market_value,
+            row.scrip_new_units,
+            row.scrip_old_units,
+        )? {
+            scrip_cash.insert(row.id, apportionment);
+        }
+    }
+
     Ok(DisposalInputs {
         buys: buys.into_iter().map(|b| (b.id, b)).collect(),
         trades: all_trades.into_iter().map(|t| (t.id, t)).collect(),
@@ -694,6 +754,7 @@ async fn load_disposal_inputs(
         amit_events,
         roc_events,
         split_events,
+        scrip_cash,
         fee_sale_ids,
         fx,
     })
@@ -798,6 +859,22 @@ fn disposal_parcel_rows(
                         buy_row.acquired(),
                         buy_row.fx_override(),
                     )?;
+                    // A partial-rollover scrip closing Sell realises only the
+                    // cash side's market-value share of each parcel's reduced
+                    // cost base; the scrip side carried the rest into the
+                    // replacement parcels. `realised_gains` scaled the adjusted
+                    // figure (`p.cost_base`) by that fraction, so the initial
+                    // cost base and every itemised adjustment row above it are
+                    // scaled by the identical one — read from the same join
+                    // through the same helper — or the document prints
+                    // `Initial 10,000 − adjustments 0 = Adjusted 2,000` with
+                    // the scrip carry-over unexplained, contradicting the
+                    // identity this module documents
+                    // (`initial − Σ adjustments = adjusted`). For an ordinary
+                    // Sell the lookup finds nothing and both figures are
+                    // untouched; a rights sale never reaches this arm, so its
+                    // `rights_sales` id can never be mistaken for a trade's.
+                    let apportionment = inputs.scrip_cash.get(&disposal.sale_trade_id);
                     let aud_rows: Vec<CostBaseAdjustment> = rows
                         .into_iter()
                         .map(|mut r| {
@@ -805,9 +882,17 @@ fn disposal_parcel_rows(
                                 r.amount /= rate;
                                 r.per_unit = r.per_unit.map(|pu| pu / rate);
                             }
+                            if let Some((num, den)) = apportionment {
+                                r.amount = mul_div(&[r.amount, *num], *den);
+                                r.per_unit = r.per_unit.map(|pu| mul_div(&[pu, *num], *den));
+                            }
                             r
                         })
                         .collect();
+                    let aud_initial = match apportionment {
+                        Some((num, den)) => mul_div(&[aud_initial, *num], *den),
+                        None => aud_initial,
+                    };
                     (aud_rows, aud_initial)
                 }
                 // A rights sale has no Buy/DRP parcel to itemise — its taxable
@@ -5143,6 +5228,137 @@ mod tests {
         }
     }
 
+    /// A **partial-rollover scrip-for-scrip exchange with a cash component**
+    /// apportions the consumed parcel's reduced cost base between the cash side
+    /// (realised now) and the scrip side (rolled over into the replacement
+    /// parcels). The worksheet's `adjusted_cost_base_aud` is the
+    /// [realised-gains](super::realised_gains) figure, which already carries
+    /// that apportionment (`SellInfo::scrip_cash_apportionment`) — so the
+    /// `initial_cost_base_aud` printed above it and every itemised adjustment
+    /// row between them must be apportioned by the same fraction, or the two
+    /// cost-base columns cannot be reconciled against each other or against the
+    /// units beside them. Before the fix it printed initial 10,000.00 −
+    /// adjustment 1,000.00 = adjusted 1,800.00, leaving the scrip side's 7,200
+    /// carried over unexplained (SCENARIOS AA-f; `docs/API.md`'s *Annual tax
+    /// report*).
+    ///
+    /// 1,000 WDR units at $10 (A$10,000) take a $1/unit return of capital
+    /// (CGT event G1 → $9,000 reduced cost base) before a takeover offers $5
+    /// cash plus one $20 RGL share per WDR share. The cash side's share is
+    /// `cash×old / (cash×old + mv×new)` = 5,000 / 25,000 = 1/5, so the
+    /// worksheet prints initial 10,000/5 = 2,000, a 1,000/5 = 200 adjustment,
+    /// and adjusted 9,000/5 = 1,800 — the identity holding exactly.
+    #[tokio::test]
+    async fn api_a_scrip_cash_apportionment_reconciles_the_worksheets_cost_base_columns() {
+        use crate::entities::corporate_action;
+
+        let pool = test_support::test_pool().await;
+        test_support::listing(1)
+            .ticker("WDR")
+            .name("Windsor")
+            .insert(&pool)
+            .await;
+        test_support::listing(2)
+            .ticker("RGL")
+            .name("Regal")
+            .insert(&pool)
+            .await;
+        // 1,000 Windsor shares at $10, acquired well before the exchange.
+        test_support::buy(1, 1)
+            .date(ymd(2023, 1, 17))
+            .qty(dec("1000"))
+            .price(dec("10"))
+            .insert(&pool)
+            .await;
+        // A $1/unit return of capital before the takeover: $1,000 off the
+        // parcel's cost base (CGT event G1).
+        corporate_action::db_upsert(
+            &pool,
+            &corporate_action::CorporateAction {
+                id: 1,
+                listing_id: 1,
+                date: ymd(2024, 3, 1),
+                kind: corporate_action::ActionKind::ReturnOfCapital {
+                    amount_per_unit: dec("1"),
+                    currency: "AUD".to_string(),
+                    record_date: None,
+                },
+            },
+        )
+        .await
+        .unwrap();
+        // The takeover: $5 cash plus one $20 Regal share per Windsor share.
+        let client = test_support::ApiClient::full(&pool);
+        client
+            .put_ok(
+                "/corporate_actions/2",
+                &serde_json::json!({
+                    "action_type": "ScripForScrip",
+                    "listing_id": 1,
+                    "date": "2024-07-10",
+                    "scrip_listing_id": 2,
+                    "scrip_new_units": "1",
+                    "scrip_old_units": "1",
+                    "scrip_cash_per_unit": "5",
+                    "scrip_market_value": "20",
+                    "scrip_cash_currency": "AUD",
+                }),
+            )
+            .await;
+        client
+            .post("/corporate_actions/2/exchange", &serde_json::json!({}))
+            .await
+            .expect_status(StatusCode::CREATED);
+
+        // FY2025: the exchange (2024-07-10) is the only disposal in it.
+        let body: serde_json::Value = client
+            .post_json(
+                "/reports/tax-report",
+                &serde_json::json!({"tax_year": 2025}),
+            )
+            .await;
+        let groups = body["disposals"]["listings"]
+            .as_array()
+            .expect("the closing Sell's listing group")
+            .clone();
+        assert_eq!(groups.len(), 1, "{groups:?}");
+        assert_eq!(groups[0]["ticker"], serde_json::json!("WDR"));
+        let parcel = groups[0]["parcels"][0].clone();
+
+        assert_eq!(parcel["units"], serde_json::json!("1000"));
+        // Apportioned to the cash side's 1/5 share of the reduced cost base.
+        assert_eq!(
+            json_dec(&parcel["initial_cost_base_aud"]),
+            dec("2000"),
+            "the initial cost base carries the same scrip-cash apportionment as the adjusted one"
+        );
+        let adjustments = parcel["adjustments"].as_array().expect("adjustments");
+        assert_eq!(
+            adjustments
+                .iter()
+                .map(|a| (
+                    a["kind"].as_str().expect("a kind").to_string(),
+                    json_dec(&a["per_unit"]),
+                    json_dec(&a["amount"]),
+                ))
+                .collect::<Vec<_>>(),
+            vec![("ReturnOfCapital".to_string(), dec("0.2"), dec("200"))],
+            "the itemised row is apportioned too, or it explains a gap that isn't there"
+        );
+        assert_eq!(json_dec(&parcel["adjusted_cost_base_aud"]), dec("1800"));
+        // The realised gain is unchanged by this presentation fix: 1,000 × $5
+        // cash − $1,800 apportioned cost base = $3,200.
+        assert_eq!(json_dec(&parcel["gain_loss_aud"]), dec("3200"));
+
+        // The identity over the figures as printed.
+        let summed: Decimal = adjustments.iter().map(|a| json_dec(&a["amount"])).sum();
+        assert_eq!(
+            json_dec(&parcel["initial_cost_base_aud"]) - summed,
+            json_dec(&parcel["adjusted_cost_base_aud"]),
+            "the itemised rows must account for the whole gap after the apportionment"
+        );
+    }
+
     /// 2026-08-25 code review: the worksheet's `capped` flags used to apply
     /// all AMIT rows before any ROC rows (kind order), while the CGT
     /// summary's E10/G1 walk applies the same events in date order — so the
@@ -5475,6 +5691,7 @@ mod tests {
                 }],
             )]),
             split_events: HashMap::new(),
+            scrip_cash: HashMap::new(),
             fee_sale_ids: HashSet::new(),
             fx: FxRates::default(),
         };

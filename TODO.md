@@ -38,30 +38,6 @@ what has been verified is SCENARIOS.md's
 [Verification status](SCENARIOS.md#verification-status) table and its per-section findings blocks;
 the maintained record of what was built and decided is the `DONE/*.md` archive.
 
-## The annual report's worksheet ignores the scrip-cash apportionment, and the E10/G1 walk divides per unit (2026-09-17 review, financial correctness)
-
-(2026-09-17 review; two presentation/precision defects in the tax-report path, neither reaching an
-ATO label.)
-
-- [ ] Reproduced by reading `src/reports/tax_report.rs:743-776` against `:851`: the worksheet's
-  `initial_cost_base_aud` and `adjustments` come from the raw pipeline while
-  `adjusted_cost_base_aud` is the realised-gains figure with the partial-rollover scrip cash
-  apportioned (`reports/realised_gains.rs:523-527`). A scrip exchange with a cash component therefore
-  prints `Initial 10,000 − adjustments 0 = Adjusted 2,000`, with 8,000 unexplained — contradicting
-  the identity the same module documents at `:468-476`. The gain and 18A are unaffected
-- [ ] Reproduced by reading `src/reports/net_capital_gain.rs:564`: the E10/G1 walk re-implements step
-  1 as `initial_cost() / trade_qty` × units where the shared pipeline multiplies first
-  (`domain/cost_base.rs:754-758`), which differs in the last place; the `amount <= remaining` floor
-  decision is then taken on the slightly different figure. It is also a second implementation of the
-  pipeline the project's rules say must not be re-implemented
-- [ ] Fix: derive the worksheet's initial and adjustment figures from the same apportioned source the
-  adjusted figure uses, so the printed identity holds; and have the E10/G1 walk call the pipeline's
-  own pro-rating helper rather than dividing per unit
-- [ ] Tests: a partial-rollover scrip exchange with cash asserting
-  `initial − Σ adjustments = adjusted` on the printed rows; a case where divide-first and
-  multiply-first differ in the last place asserting the pipeline's answer
-- [ ] Docs sync: `docs/API.md`'s annual tax report section if any printed column changes
-
 ## Numeric table sorting and two money tests coerce decimal strings through `Number()` (2026-09-17 review, web frontend)
 
 (2026-09-17 review. The frontend's exact decimal arithmetic is BigInt-on-string throughout, and this

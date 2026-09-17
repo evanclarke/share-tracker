@@ -168,42 +168,62 @@ impl SellInfo {
     /// Set on a partial-rollover scrip-for-scrip closing Sell (its action has
     /// a cash component): the `(numerator, denominator)` of the cash side's
     /// market-value share of each allocated parcel's reduced cost base —
-    /// cash×old / (cash×old + mv×new), per
-    /// `docs/ato/takeovers-and-scrip-for-scrip.md` Example 27. The scrip
-    /// side's share rolled over into the replacement parcels at exchange
-    /// time, so only this share is realised against the cash proceeds. Kept
-    /// as a pair and multiplied before dividing so exact fractions (e.g.
-    /// Gunther's 1/3) don't round twice. `None` for ordinary Sells.
-    ///
-    /// A cash component with any of its companion terms missing is a corrupt
-    /// action row — `corporate_actions` CHECKs `scrip_market_value` and
-    /// `scrip_cash_per_unit` present together, and a ScripForScrip action
-    /// always carries its exchange ratio — so it is an error, never a
-    /// silently un-apportioned (and so overstated) cost base.
+    /// [`scrip_cash_apportionment`], which the Annual Tax Report's worksheet
+    /// shares. `None` for ordinary Sells.
     fn scrip_cash_apportionment(&self) -> Result<Option<(Decimal, Decimal)>, sqlx::Error> {
-        let Some(cash) = self.scrip_cash_per_unit else {
-            return Ok(None);
-        };
-        let missing = |col: &str| {
-            sqlx::Error::Decode(
-                format!(
-                    "scrip action of sell {} has a cash component but no {col}",
-                    self.id
-                )
-                .into(),
-            )
-        };
-        let mv = self
-            .scrip_market_value
-            .ok_or_else(|| missing("scrip_market_value"))?;
-        let new = self
-            .scrip_new_units
-            .ok_or_else(|| missing("scrip_new_units"))?;
-        let old = self
-            .scrip_old_units
-            .ok_or_else(|| missing("scrip_old_units"))?;
-        Ok(Some((cash * old, cash * old + mv * new)))
+        scrip_cash_apportionment(
+            self.id,
+            self.scrip_cash_per_unit,
+            self.scrip_market_value,
+            self.scrip_new_units,
+            self.scrip_old_units,
+        )
     }
+}
+
+/// The `(numerator, denominator)` of a partial-rollover scrip closing Sell's
+/// cash-side market-value share of each allocated parcel's reduced cost base —
+/// `cash×old / (cash×old + mv×new)`, per
+/// `docs/ato/takeovers-and-scrip-for-scrip.md` Example 27. The scrip side's
+/// share rolled over into the replacement parcels at exchange time, so only
+/// this share is realised against the cash proceeds. Kept as a pair and
+/// multiplied before dividing so exact fractions (e.g. Gunther's 1/3) don't
+/// round twice. `None` when the action carries no cash component (an ordinary
+/// Sell, or an all-scrip rollover whose gain is disregarded).
+///
+/// A cash component with any of its companion terms missing is a corrupt
+/// action row — `corporate_actions` CHECKs `scrip_market_value` and
+/// `scrip_cash_per_unit` present together, and a ScripForScrip action always
+/// carries its exchange ratio — so it is an error, never a silently
+/// un-apportioned (and so overstated) cost base.
+///
+/// Free rather than a [`SellInfo`] method because the Annual Tax Report's
+/// worksheet scales the parcel's initial cost base and each itemised
+/// adjustment row by the identical fraction — the one `realised_gains` applied
+/// to the adjusted figure printed beside them — so its
+/// `initial − Σ adjustments = adjusted` identity survives a partial-rollover
+/// scrip exchange. Reading the terms from the same
+/// `trades ⋈ corporate_actions` join through this one function is what keeps
+/// the two apportionments from ever diverging.
+pub(crate) fn scrip_cash_apportionment(
+    sale_id: i64,
+    scrip_cash_per_unit: Option<Decimal>,
+    scrip_market_value: Option<Decimal>,
+    scrip_new_units: Option<Decimal>,
+    scrip_old_units: Option<Decimal>,
+) -> Result<Option<(Decimal, Decimal)>, sqlx::Error> {
+    let Some(cash) = scrip_cash_per_unit else {
+        return Ok(None);
+    };
+    let missing = |col: &str| {
+        sqlx::Error::Decode(
+            format!("scrip action of sell {sale_id} has a cash component but no {col}").into(),
+        )
+    };
+    let mv = scrip_market_value.ok_or_else(|| missing("scrip_market_value"))?;
+    let new = scrip_new_units.ok_or_else(|| missing("scrip_new_units"))?;
+    let old = scrip_old_units.ok_or_else(|| missing("scrip_old_units"))?;
+    Ok(Some((cash * old, cash * old + mv * new)))
 }
 
 /// One parcel-allocation row: `quantity_allocated` units of the sale (in the

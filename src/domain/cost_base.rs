@@ -721,9 +721,14 @@ pub struct CostBase {
 /// Step 1's pro-rate: the `units`-unit share of a `quantity`-unit parcel's
 /// whole-parcel initial cost base. The one implementation both
 /// [`adjusted_cost_base`] and [`adjustment_detail`] start their walks from,
-/// so the totals and the itemised rows can never disagree about it.
+/// so the totals and the itemised rows can never disagree about it — and the
+/// one the net-capital-gain report's E10/G1 excess walk starts each cohort's
+/// chain from (`reports::net_capital_gain::cohort_initial_cost`), rather than
+/// dividing the parcel's initial cost per unit and multiplying it back up,
+/// which rounds twice and can flip that walk's `amount <= remaining` floor
+/// decision in the last place.
 ///
-/// `quantity` is non-zero — both callers guard — and the two cases are
+/// `quantity` is non-zero — every caller guards — and the two cases are
 /// tried in this order:
 ///
 /// 1. **`units == quantity`** — the overwhelmingly common one (a parcel still
@@ -747,7 +752,7 @@ pub struct CostBase {
 /// figure is the cost base, so an unrepresentable one has no lesser answer to
 /// give. It panics, and `app::router`'s panic layer turns that into a logged
 /// `500` rather than a dropped connection.
-fn prorated_initial_cost(initial_cost: Decimal, units: Decimal, quantity: Decimal) -> Decimal {
+pub fn prorated_initial_cost(initial_cost: Decimal, units: Decimal, quantity: Decimal) -> Decimal {
     if units == quantity {
         return initial_cost;
     }

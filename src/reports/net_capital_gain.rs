@@ -565,7 +565,6 @@ async fn non_disposal_gains(
             continue;
         }
         let acquired = parcel.acquired();
-        let per_unit_cost = parcel.parcel().initial_cost() / trade_qty;
 
         // One chain per group of units that share an event history, rather
         // than one whole-parcel chain: a reduction reaching only some of the
@@ -582,7 +581,7 @@ async fn non_disposal_gains(
             sold.get(&trade_id).map_or(&[][..], |v| v),
             splits_of(&splits, parcel.listing_id),
         ) {
-            let mut remaining = per_unit_cost * units;
+            let mut remaining = cohort_initial_cost(&parcel.parcel(), units);
             for event in events.iter() {
                 // A payment these units were entitled to at its record date but
                 // no longer held at its payment date reduces nothing — it ends
@@ -686,6 +685,23 @@ async fn non_disposal_gains(
         }
     }
     Ok(out)
+}
+
+/// Step 1 of the E10/G1 excess walk for one cohort: its share of the parcel's
+/// whole-parcel initial cost base, taken through the cost-base pipeline's own
+/// pro-rate ([`cost_base::prorated_initial_cost`]) — the exact figure
+/// [`cost_base::adjusted_cost_base`] starts the cost base this walk mirrors
+/// from. Deliberately *not* re-derived as `initial_cost / quantity × units`:
+/// that order rounds the non-terminating quotient first and scales the error
+/// back up, differing in the last decimal place, and the `amount <= remaining`
+/// floor decision below is taken on this figure — so a second implementation
+/// here could attribute an E10/G1 excess to a different event than the cost
+/// base the realised report used, and is the pipeline re-implementation the
+/// project's rules forbid.
+///
+/// `parcel.quantity` is non-zero: the caller guards it.
+fn cohort_initial_cost(parcel: &cost_base::Parcel<'_>, units: Decimal) -> Decimal {
+    cost_base::prorated_initial_cost(parcel.initial_cost(), units, parcel.quantity)
 }
 
 /// This listing's split/consolidation events, or an empty slice.
@@ -1421,7 +1437,7 @@ async fn what_if_handler(
 mod tests {
     use super::*;
     use crate::entities::{amma, cgt_settings, corporate_action, rba_fx_rate, trade};
-    use crate::test_support::{self, ApiClient, allocate, test_pool};
+    use crate::test_support::{self, ApiClient, allocate, dec, test_pool};
     use axum::http::StatusCode;
 
     /// Client over this module's own routes.
@@ -1512,6 +1528,52 @@ mod tests {
                 a.date_received = year_end + chrono::Duration::days(60);
             })
             .build()
+    }
+
+    /// The E10/G1 excess walk's step 1 is the cost-base pipeline's own
+    /// pro-rate, not a per-unit division multiplied back up: `39.95 × 2 / 3`
+    /// ends `…333` where `39.95 / 3 × 2` ends `…334`, and the walk's
+    /// `amount <= remaining` floor decision is taken on this figure — so the
+    /// divide-first form could attribute an E10/G1 excess to a different event
+    /// than the cost base `cost_base::adjusted_cost_base` handed the realised
+    /// report for the same units (SCENARIOS W-b; the project's rule that the
+    /// pipeline is not re-implemented inline).
+    #[test]
+    fn e10_g1_walk_step_one_is_the_pipelines_pro_rate_not_a_divide_per_unit() {
+        let parcel = cost_base::Parcel {
+            quantity: dec("3"),
+            average_price: dec("10"),
+            brokerage: dec("9.95"),
+            gst_on_brokerage: Decimal::ZERO,
+            currency: "AUD",
+            trade_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            rollover: None,
+        };
+        let units = dec("2");
+
+        // What the walk's step 1 now is (`cohort_initial_cost`, which calls
+        // `cost_base::prorated_initial_cost`) …
+        let walk_step_one = cohort_initial_cost(&parcel, units);
+        // … must be the pipeline's own costed initial cost for those units.
+        let pipeline = cost_base::adjusted_cost_base(
+            &parcel,
+            units,
+            &[],
+            &[],
+            &[],
+            cost_base::Held::AsAt(None),
+        )
+        .unwrap()
+        .costed_initial_cost;
+        assert_eq!(walk_step_one, pipeline);
+        assert_eq!(walk_step_one, dec("26.633333333333333333333333333"));
+
+        // The divide-first form the walk used to re-implement differs in the
+        // last place — so this test genuinely fails if the walk goes back to
+        // it (the helper would stop matching the pipeline).
+        let divide_first = parcel.initial_cost() / parcel.quantity * units;
+        assert_ne!(walk_step_one, divide_first);
+        assert_eq!(divide_first, dec("26.633333333333333333333333334"));
     }
 
     #[tokio::test]

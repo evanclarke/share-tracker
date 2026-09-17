@@ -136,6 +136,25 @@ fn cent_rounded_tax_report_disposals_documented() {
     ));
 }
 
+/// Docs-sync pin for the annual tax report's **scrip-cash apportionment**: on
+/// a partial-rollover scrip-for-scrip closing Sell the schedule's initial cost
+/// base and every itemised adjustment row are scaled by the cash side's
+/// market-value share of the reduced cost base — the same fraction the
+/// realised report applied to the adjusted figure beside them — so the
+/// document's own `initial − Σ adjustments = adjusted` identity still holds
+/// and the scrip side's carried-over share is no unexplained gap. The
+/// behaviour is pinned by `reports::tax_report::tests::
+/// api_a_scrip_cash_apportionment_reconciles_the_worksheets_cost_base_columns`;
+/// this is the documentation half.
+#[test]
+fn tax_report_scrip_cash_apportionment_documented() {
+    assert!(API_MD.contains(
+        "**On a partial-rollover scrip-for-scrip closing Sell** the initial cost base and every \
+         itemised adjustment row are apportioned by the cash side's market-value share of the \
+         reduced cost base"
+    ));
+}
+
 /// Docs-sync pin for the worksheet columns derived from cent-rounded inputs
 /// (SCENARIOS W-f): the two reports whose columns are arithmetically related
 /// to one another say so — the net-capital-gain worksheet rounds its *input*
