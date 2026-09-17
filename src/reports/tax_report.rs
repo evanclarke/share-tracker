@@ -1099,9 +1099,12 @@ pub struct TrustIncomeRow {
     pub ticker: String,
     pub date_paid: NaiveDate,
     pub entitlement_date: Option<NaiveDate>,
-    /// The row's franked-distribution component. The tax summary's **13C**
-    /// line is this **plus** [`Self::franking_credits_aud`] — the ATO label
-    /// includes the share of attached franking credits — while the credits
+    /// The row's franked-distribution component — the statement's own
+    /// "franked distributions from trusts" figure, which **already includes**
+    /// the share of attached franking credits (the ATO's AMMA/SDS example puts
+    /// the cash-plus-credit *Attribution* at label C, and the guidance notes
+    /// say the credit is "included in" the component). The tax summary's
+    /// **13C** line is therefore this figure as entered; the claimable credits
     /// alone are the `franking_credits` (11U / 13Q) offset line.
     pub franked_amount_aud: Decimal,
     pub unfranked_amount_aud: Decimal,
@@ -1115,11 +1118,11 @@ pub struct TrustIncomeRow {
     pub tax_deferred_amount: Option<Decimal>,
     /// The row's **claimable** franking credits — the `franking_credits`
     /// (11U / 13Q) offset line, reduced by the at-risk walk's denial exactly
-    /// as the tax summary reduces it. 13C, by contrast, includes the
-    /// *attached* credits however the walk resolved, so [`Self::franked_amount_aud`]
-    /// plus this figure plus [`Self::franking_credits_denied_aud`] reconstructs
-    /// the 13C line (a denied credit stays inside 13C but is not claimable —
-    /// `docs/API.md`'s trust-distribution note).
+    /// as the tax summary reduces it. 13C, by contrast, is
+    /// [`Self::franked_amount_aud`], the statement's component, which already
+    /// includes the *attached* credits however the walk resolved — so the
+    /// credit sits inside 13C and beside it at 13Q, and the two are not added
+    /// together (`docs/API.md`'s trust-distribution note).
     pub franking_credits_aud: Decimal,
     /// `entitled`, `denied`, or `exempt_small_shareholder` — from
     /// [`franking_at_risk`]; `entitled` when the row isn't in its alert list.
@@ -1130,10 +1133,12 @@ pub struct TrustIncomeRow {
     pub franking_status: String,
     /// The attached credits the walk denied, AUD — zero when the row passed,
     /// was exempt, or carries no credits. Carried on the row (and so in the
-    /// JSON drilldown) beside [`Self::franking_status`] so a hand-check can
-    /// reconstruct what 13C includes but 13Q does not: `franked_amount_aud` +
-    /// `franking_credits_aud` + this figure is the 13C line. Not printed as a
-    /// column of its own, matching [`DividendIncomeRow::franking_credits_denied_aud`].
+    /// JSON drilldown) beside [`Self::franking_status`] so a hand-check can see
+    /// how much of the credit already inside 13C is not claimable at 13Q
+    /// (`docs/API.md`'s trust-distribution note); it is part of
+    /// [`Self::franked_amount_aud`], so it is not added to the 13C line. Not
+    /// printed as a column of its own, matching
+    /// [`DividendIncomeRow::franking_credits_denied_aud`].
     pub franking_credits_denied_aud: Decimal,
 }
 
@@ -2451,7 +2456,10 @@ mod tests {
             .with(|i| {
                 i.trust_income = true;
                 i.entitlement_date = Some(ymd(2024, 6, 30));
-                i.franked_amount = dec("14000");
+                // The statement's "franked distributions from trusts" figure:
+                // 20,000, which already includes the 6,000 attached credit
+                // printed beside it (a 30% franked distribution).
+                i.franked_amount = dec("20000");
                 i.franking_credits = dec("6000");
             })
             .insert(&pool)
@@ -2547,9 +2555,9 @@ mod tests {
         assert_eq!(deductions_total, summary.deductions_total);
 
         // (a) The trust row prints the *claimable* credit — nil — and names the
-        // denial, so 13C still reconstructs exactly: 14,000 franked + 0
-        // claimable + 6,000 denied is the summary's grossed-up 13C line, while
-        // the credits column alone sums to the summary's 13Q.
+        // denial; 13C is the statement's franked-distributions figure as
+        // entered (the 6,000 credit is already inside it, so it is not added
+        // again), while the credits column alone sums to the summary's 13Q.
         let trust = report
             .income
             .trust_income
@@ -2571,7 +2579,7 @@ mod tests {
             .income
             .trust_income
             .iter()
-            .map(|r| r.franked_amount_aud + r.franking_credits_aud + r.franking_credits_denied_aud)
+            .map(|r| r.franked_amount_aud)
             .sum();
         assert_eq!(trust_13c, summary.trust_franked_distributions);
         assert_eq!(summary.trust_franked_distributions, dec("20000"));
@@ -3466,10 +3474,13 @@ mod tests {
             .insert(&pool)
             .await;
         // FY2023, an ordinary trust distribution with its franking credits.
+        // The franked amount is the statement's "franked distributions from
+        // trusts" figure (857.14), which already includes the 257.14 attached
+        // credit printed beside it.
         test_support::income(1, 1, ymd(2023, 2, 15))
             .with(|i| {
                 i.trust_income = true;
-                i.franked_amount = dec("600");
+                i.franked_amount = dec("857.14");
                 i.unfranked_amount = dec("400");
                 i.franking_credits = dec("257.14");
             })
@@ -3501,24 +3512,23 @@ mod tests {
         assert_eq!(before.income.trust_income.len(), 1);
         let row = &before.income.trust_income[0];
         assert_eq!(row.income_id, 1);
-        assert_eq!(row.franked_amount_aud, dec("600"));
+        assert_eq!(row.franked_amount_aud, dec("857.14"));
         assert_eq!(row.unfranked_amount_aud, dec("400"));
         assert_eq!(row.franking_credits_aud, dec("257.14"));
         // The document's stated invariant: every income figure sums to its
         // tax-summary line — and for a trust row that line is the question-13
         // pair, never the company-dividend one (SCENARIOS Z-f). 13C is the
-        // **grossed-up** figure the label defines (franked distributions
-        // *including* the share of attached franking credits), so the row's
-        // franked amount and its credits together sum to that line; the
-        // credits are also the 13Q line on their own.
+        // statement's "franked distributions from trusts" figure as entered,
+        // which already includes the attached credits — the 257.14 sits inside
+        // the 857.14 and is not added to it; it is also the 13Q line on its own.
         assert_eq!(
-            row.franked_amount_aud + row.franking_credits_aud,
+            row.franked_amount_aud,
             summary(&before, "trust_franked_distributions")
         );
         assert_eq!(
             summary(&before, "trust_franked_distributions"),
             dec("857.14"),
-            "600 franked + 257.14 attached credits"
+            "the statement's component, 857.14, with its 257.14 credit inside"
         );
         assert_eq!(
             row.unfranked_amount_aud,

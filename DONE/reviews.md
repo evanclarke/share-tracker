@@ -5902,6 +5902,50 @@ and the API wording. Gates: `cargo fmt --check`, `cargo clippy --all-targets -- 
 `cargo test` (2,420 passed) and `cargo test ato_examples` (38 passed) all clean, plus
 `node --test 'src/web/*.test.js'` (149 passed).
 
+**Superseded 2026-09-18** — see the next section. The premise here was wrong: the statement's
+"franked distributions from trusts" figure already includes the attached credit, so adding the
+credit again double-counted it. The accumulators were reverted, and the 1,000 / 18,666 figures
+below are not the correct outputs.
+
+## The 13C gross-up fix double-counted the credit the component already contained (2026-09-18 review, financial correctness)
+
+(2026-09-18 review, prompted by the actual VDHG FY2026 AMMA statement. The section above added the
+attached franking credit to both 13C accumulators on the reading that the entered `franked_amount` /
+`franked_dividends` was the *cash* franked distribution. It is not: the statement's "franked
+distributions from trusts" figure is the ATO's *Attribution* — cash **plus** the attached credit —
+so the label's "including the share of attached franking credits" describes what that figure already
+contains.)
+
+The VDHG FY2026 AMMA statement's Part A prints "Franked distributions from trusts — 13C — \$7,351.64"
+and "Share of franking credits from franked dividends — 13Q — \$2,337.61", and its Part B prints the
+*Franked Distributions* row with 2,337.61 under *Tax Paid/Offsets* and 7,351.64 under *Attribution*.
+The ATO's own AMMA/SDS example shows the same layout — a franked row of cash \$70 / credit \$30 /
+*Attribution* \$100, with label C mapped to the \$100 — and the AMMA guidance notes say "the share of
+franking credits **included in** the Franked distributions from trusts component will be the Franking
+credits (grossed-up) amount" (`docs/ato/amma-statement-guidance-notes.md`, Part B item 13C).
+Independent fund-manager guides carry the same instruction: State Street's "locate any franked
+distributions on your AMMA statements identified with the label 13C and enter in the tax return at
+Item 13, box label 'C'", and Perpetual's "the amount shown in the 'Attributable amount' column is
+equal to the Part B item 13C amount". Adding the credit again overstates 13C by the whole credit —
+9,689.25 against the statement's 7,351.64.
+
+- [x] Fix: both 13C accumulators report the entered figure unchanged (`trust_franked_distributions`
+  for a non-AMIT trust row, `amma_franked_dividends` for the AMMA route), with `franking_credits`
+  remaining the 13Q offset entitlement. The AMMA's `foreign_income` had always been treated this way
+  (the app never adds `foreign_tax_credits` to it), which is the internal-consistency check that
+  exposed the asymmetry
+- [x] Tests: `db_trust_13c_is_the_statements_franked_distribution_component` (1,000 entered ⇒ 13C
+  1,000, 13Q 300, gross 1,000 — not 1,300) and
+  `db_amma_13c_is_the_statements_franked_distribution_component` (the real VDHG figures: 7,351.64
+  and 2,337.61 ⇒ 13C 7,351.64), plus the corrected expectations in the AMMA-component,
+  converted-fund, AMIT-exclusion, gross-assessable and annual-report reconciliation tests
+- [x] Docs sync: `docs/API.md`'s tax-summary rows and trust-distribution note, the `tax_report` row
+  docs, and `doc_checks::tax_summary_13c_includes_attached_credits_documented` (repinned to the
+  corrected wording)
+
+**Closed 2026-09-18.** Reverted 6d210b4's accumulator change and the docs/tests that followed it;
+the earlier section's reasoning is kept above as the record of the misreading.
+
 ## The annual report's sections do not reconcile to the tax summary (2026-09-17 review, financial correctness)
 
 (2026-09-17 review. `reports::tax_report` documents that its rows sum to their tax-summary lines and

@@ -3419,16 +3419,22 @@ fn foreign_income_totals_documented() {
     assert!(FEATURES_MD.contains("with non-AMMA and AMMA subtotals and a total"));
 }
 
-/// Docs-sync pin for the **13C figure** (2026-09-17 review). The ATO label
-/// *franked distributions from trusts* includes the share of attached franking
-/// credits, so `trust_franked_distributions` / `amma_franked_dividends` report
-/// the **grossed-up** figure while `franking_credits` stays the 13Q offset
-/// entitlement. The behaviour is pinned by `reports::tax_summary`'s own tests;
-/// this is the documentation half — the mirror that defines the label, and
-/// `docs/API.md`'s tax-summary section stating the resolution.
+/// Docs-sync pin for the **13C figure** (2026-09-17 review; the review's own
+/// fix corrected 2026-09-18). The ATO label *franked distributions from trusts,
+/// including the share of attached franking credits* states what the figure
+/// **already contains**: the ATO's own AMMA/SDS example puts the cash-plus-credit
+/// *Attribution* at label C, and its guidance notes say the credit is "included
+/// in" the Franked distributions from trusts component. So
+/// `trust_franked_distributions` / `amma_franked_dividends` report the
+/// statement's franked-distributions figure **as entered** — not that figure
+/// plus the separately printed `franking_credits` (13Q) line, which would
+/// double-count the gross-up. The behaviour is pinned by
+/// `reports::tax_summary`'s own tests; this is the documentation half — the
+/// mirror that defines the label, and `docs/API.md`'s tax-summary section
+/// stating the resolution.
 #[test]
 fn tax_summary_13c_includes_attached_credits_documented() {
-    // The definition the fix follows, in the project's own ATO mirror.
+    // The definition the rule follows, in the project's own ATO mirror.
     let mirror = ato(include_str!("../docs/ato/tax-return-labels-2026.md"));
     assert!(mirror.contains(
         "| 13C | Franked distributions from trusts, **including** the share of attached \
@@ -3439,16 +3445,21 @@ fn tax_summary_13c_includes_attached_credits_documented() {
          may differ from the grossed-up credit inside 13C where trust deductions were \
          allocated to it) |"
     ));
-    // docs/API.md: the two 13C columns are the grossed-up figure …
-    assert!(API_MD.contains("**plus the franking credits attached to it**"));
+    // docs/API.md: the figure is reported as the statement states it — the
+    // label describes what it contains, it is not grossed up a second time …
+    assert!(
+        API_MD.contains("states what the figure **already contains**, not a second line to add")
+    );
     assert!(API_MD.contains(
-        "13C **includes** the attached franking credits, so this column is the statement's \
-         franked-distribution component **plus its `franking_credits`**"
+        "reported at 13C **unchanged** — adding the separately printed credit again would \
+         double-count the gross-up"
+    ));
+    assert!(API_MD.contains(
+        "already includes** the attached franking credits, so it is reported as entered"
     ));
     // … the credit stays the 13Q offset line and may differ from the credit in
     // 13C, and the gross total's stated composition follows the labels.
     assert!(API_MD.contains("the two may differ"));
-    assert!(API_MD.contains("carries the trust/AMMA 13C gross-up but not the company 11U credit"));
     assert!(
         API_MD.contains(
             "the two 13C lines carry the franking credits attached to their distributions"

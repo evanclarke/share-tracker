@@ -266,7 +266,7 @@ export const ENTITIES = [
       dt('date_received', 'Date received', { required: true }),
       dec('australian_interest', 'Australian interest'),
       dec('australian_dividends_unfranked', 'Australian dividends (unfranked)'),
-      dec('franked_dividends', 'Franked dividends'),
+      dec('franked_dividends', 'Franked dividends', { hint: "The statement's Part A label 13C, or the Part B Franked Distributions attribution — enter it exactly as printed. It already INCLUDES the attached franking credits printed beside it, so do not add them again; the separate credit belongs in Franking credits (13Q)." }),
       dec('franking_credits', 'Franking credits'),
       dec('net_rent', 'Net rent'),
       dec('foreign_income', 'Foreign income'),

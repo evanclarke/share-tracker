@@ -73,25 +73,38 @@ pub struct TaxYearSummary {
     pub trust_income_unfranked: Decimal,
     /// Franked distributions from a **non-AMIT trust** (question 13 label
     /// **C**): the `franked_amount` of income records marked `trust_income`,
-    /// on a listing that is not an AMIT for that year, **plus the attached
-    /// franking credits**. 13C is defined as *franked distributions from
-    /// trusts, including the share of attached franking credits*
-    /// (`docs/ato/tax-return-labels-2026.md`), so the grossed-up figure is
-    /// what this line reports. The same destination `amma_franked_dividends`
-    /// already carries. The offset entitlement stays on `franking_credits`,
-    /// labelled `11U / 13Q` for both routes, and may differ from the credit
-    /// inside this line (a denied credit, or the trust's own deductions
-    /// reducing its grossed-up amount — `docs/ato/amma-statement-guidance-notes.md`
-    /// Part B item 13Q).
+    /// on a listing that is not an AMIT for that year.
+    ///
+    /// 13C is defined as *franked distributions from trusts, including the
+    /// share of attached franking credits* (`docs/ato/tax-return-labels-2026.md`),
+    /// and the statement's own "franked distributions from trusts" component
+    /// **already includes** those credits: the ATO's AMMA/SDS example puts the
+    /// cash-plus-credit *Attribution* at label C, and its guidance notes say
+    /// "the share of franking credits **included in** the Franked
+    /// distributions from trusts component will be the Franking credits
+    /// (grossed-up) amount" (`docs/ato/amma-statement-guidance-notes.md`,
+    /// Part B item 13C). So this line reports the franked-distributions figure
+    /// **as the statement states it**, not that figure plus the separately
+    /// printed credit line — adding `franking_credits` again would count the
+    /// gross-up twice and overstate 13C by the whole credit. The same
+    /// destination `amma_franked_dividends` already carries.
+    ///
+    /// The offset entitlement stays on `franking_credits` (`11U / 13Q` for
+    /// both routes) and may differ from the credit inside this line (a denied
+    /// credit, or the trust's own deductions reducing its grossed-up amount —
+    /// `docs/ato/amma-statement-guidance-notes.md`, Part B item 13Q).
     pub trust_franked_distributions: Decimal,
     /// AMMA attributed Australian interest.
     pub amma_australian_interest: Decimal,
     /// AMMA attributed Australian dividends (unfranked).
     pub amma_dividends_unfranked: Decimal,
-    /// AMMA attributed franked dividends, **including the statement's
-    /// attached franking credits** — the 13C figure the label defines. The
-    /// statement's `franking_credits` is also reported on `franking_credits`
-    /// (11U / 13Q), its offset entitlement.
+    /// AMMA attributed franked dividends — the statement's own "franked
+    /// distributions from trusts" figure (Part A label **13C**, the Part B
+    /// *Attribution* column), which already **includes** the attached franking
+    /// credits (see [`Self::trust_franked_distributions`] for the ATO
+    /// authority). It is therefore entered and reported exactly as the
+    /// statement states it; the statement's separate credit is reported on
+    /// `franking_credits` (`11U / 13Q`), not added in here as well.
     pub amma_franked_dividends: Decimal,
     /// AMMA attributed net rent.
     pub amma_net_rent: Decimal,
@@ -122,11 +135,11 @@ pub struct TaxYearSummary {
     /// made before it — `reports::franking_at_risk` lists those as
     /// `untested_no_ex_date` rather than leaving the gap silent.
     ///
-    /// This is the **offset entitlement** (11U / 13Q), not a duplicate of the
-    /// grossed-up credits folded into the 13C lines (`trust_franked_distributions`
-    /// / `amma_franked_dividends`): the ATO labels put the attached credit
-    /// inside 13C and the allowable credit at 13Q, and the two may differ — a
-    /// denied credit here, or a trust's own deductions reducing 13C's credit.
+    /// This is the **offset entitlement** (11U / 13Q), not a second copy of
+    /// the credit already inside the 13C lines (`trust_franked_distributions`
+    /// / `amma_franked_dividends`): the ATO puts the attached credit inside the
+    /// 13C component and the allowable credit at 13Q, and the two may differ —
+    /// a denied credit here, or a trust's own deductions reducing 13C's credit.
     pub franking_credits: Decimal,
     /// Franking credits attached but denied by the holding-period rule (the
     /// amount excluded from `franking_credits`).
@@ -345,42 +358,42 @@ pub(crate) const CSV_ATO_LABELS: &[&str] = &[
     "20E + 20M",               // foreign_source_income
     "D8",                      // lic_capital_gain_deduction (claimed at D8)
     "13U",                     // trust_income_unfranked (non-AMIT trust distribution)
-    "13C",                     // trust_franked_distributions (franked + attached credits)
-    "13U",                     // amma_australian_interest
-    "13U",                     // amma_dividends_unfranked
-    "13C",                     // amma_franked_dividends (franked + attached credits)
-    "13U",                     // amma_net_rent
-    "20E + 20M",               // amma_foreign_income
-    "13U",                     // amma_other_income
-    "18 (working)",            // amma_cgt_discount_gains
-    "18 (working)",            // amma_cgt_indexation_gains
-    "18 (working)",            // amma_cgt_other_gains
-    "",                        // amma_capital_losses_applied (trust-level, informational)
-    "11U / 13Q",               // franking_credits
-    "",                        // franking_credits_denied (informational)
-    "20O",                     // foreign_tax_offsets
-    "",                        // foreign_tax_offset_excess (informational)
-    "",                        // foreign_tax_offsets_cgt_discount_reduction (informational)
-    "10M / 11V / 13R / 12C",   // tfn_withholding_tax
-    "12B",                     // ess_discount_assessable
-    "",                        // ess_taxed_upfront_reduction (inside 12B vs 12D)
-    "12A",                     // ess_foreign_source_discount
-    "",                        // employment_income (1/2, prefilled by the employer — informational)
-    "24",                      // other_income (staking rewards / established-token airdrops)
-    "",                        // gross_assessable_investment_income (derived)
-    "",                        // deductions_loan_interest (by kind: see the destination lines)
-    "",                        // deductions_management_fee
-    "",                        // deductions_advice_fee
-    "",                        // deductions_account_keeping_fee
-    "",                        // deductions_subscription
-    "",                        // deductions_other
-    "13Y",                     // deductions_trust_distributions
-    "20M",                     // deductions_foreign_income (netted into 20M)
-    "D15",                     // deductions_foreign_debt (label J)
-    "D7 / D8",                 // deductions_dividend_and_interest
-    "",                        // deductions_total (the two cuts' shared total)
-    "",                        // net_assessable_investment_income (derived)
-    "",                        // taxpayer_basis
+    "13C",          // trust_franked_distributions (statement's component, credits included)
+    "13U",          // amma_australian_interest
+    "13U",          // amma_dividends_unfranked
+    "13C",          // amma_franked_dividends (statement's component, credits included)
+    "13U",          // amma_net_rent
+    "20E + 20M",    // amma_foreign_income
+    "13U",          // amma_other_income
+    "18 (working)", // amma_cgt_discount_gains
+    "18 (working)", // amma_cgt_indexation_gains
+    "18 (working)", // amma_cgt_other_gains
+    "",             // amma_capital_losses_applied (trust-level, informational)
+    "11U / 13Q",    // franking_credits
+    "",             // franking_credits_denied (informational)
+    "20O",          // foreign_tax_offsets
+    "",             // foreign_tax_offset_excess (informational)
+    "",             // foreign_tax_offsets_cgt_discount_reduction (informational)
+    "10M / 11V / 13R / 12C", // tfn_withholding_tax
+    "12B",          // ess_discount_assessable
+    "",             // ess_taxed_upfront_reduction (inside 12B vs 12D)
+    "12A",          // ess_foreign_source_discount
+    "",             // employment_income (1/2, prefilled by the employer — informational)
+    "24",           // other_income (staking rewards / established-token airdrops)
+    "",             // gross_assessable_investment_income (derived)
+    "",             // deductions_loan_interest (by kind: see the destination lines)
+    "",             // deductions_management_fee
+    "",             // deductions_advice_fee
+    "",             // deductions_account_keeping_fee
+    "",             // deductions_subscription
+    "",             // deductions_other
+    "13Y",          // deductions_trust_distributions
+    "20M",          // deductions_foreign_income (netted into 20M)
+    "D15",          // deductions_foreign_debt (label J)
+    "D7 / D8",      // deductions_dividend_and_interest
+    "",             // deductions_total (the two cuts' shared total)
+    "",             // net_assessable_investment_income (derived)
+    "",             // taxpayer_basis
 ];
 
 fn zero_summary(tax_year: i32) -> TaxYearSummary {
@@ -787,11 +800,16 @@ fn accumulate_income(
             s.trust_income_unfranked += unfranked;
             // 13C is the franked distribution **including** the share of
             // attached franking credits (the ATO's own wording for the label),
-            // so the grossed-up figure is the component plus its credits —
-            // the offset entitlement stays on `franking_credits` (11U / 13Q)
-            // and may differ from this credit (a denied credit, or a trust's
-            // own deductions reducing the grossed-up amount).
-            s.trust_franked_distributions += franked + fc;
+            // and the statement's "franked distributions from trusts" figure
+            // entered here *is* that grossed-up component — the ATO puts the
+            // cash-plus-credit attribution at label C and says the credits are
+            // "included in" the component (`docs/ato/amma-statement-guidance-notes.md`,
+            // Part B item 13C). So the entered figure is reported as-is; adding
+            // `fc` again would count the gross-up twice. The offset
+            // entitlement stays on `franking_credits` (11U / 13Q) and may
+            // differ from this credit (a denied credit, or a trust's own
+            // deductions reducing the grossed-up amount).
+            s.trust_franked_distributions += franked;
         } else {
             s.dividends_assessable += franked + unfranked;
         }
@@ -874,10 +892,12 @@ fn accumulate_amma(
         let s = year_entry(map, tax_year);
         s.amma_australian_interest += interest;
         s.amma_dividends_unfranked += div_unfranked;
-        // 13C includes the attached (grossed-up) credits, exactly as the
-        // non-AMIT trust route above does; the AMMA statement's franking
-        // credit on its own stays the 13Q offset entitlement.
-        s.amma_franked_dividends += franked_div + fc;
+        // 13C, exactly as the non-AMIT trust route above: the statement's
+        // "franked distributions from trusts" figure already includes the
+        // attached (grossed-up) credits, so it is reported as entered. The
+        // statement's franking credit on its own stays the 13Q offset
+        // entitlement; adding it here too would double the gross-up.
+        s.amma_franked_dividends += franked_div;
         s.amma_net_rent += rent;
         s.amma_foreign_income += foreign_inc;
         s.amma_other_income += other;
@@ -1523,13 +1543,6 @@ mod tests {
     /// not added or removed. The identical distribution entered as a trust
     /// row and as a company dividend gives two different sets of lines and
     /// one identical `gross_assessable_investment_income`.
-    ///
-    /// The facts here carry **no** franking credits, which is what makes the
-    /// two totals equal: the 13C label folds a trust distribution's attached
-    /// credits into the trust line, while the company route reports its credit
-    /// only at 11U, so a credit-carrying distribution entered either way
-    /// deliberately differs (see
-    /// [`Self::db_trust_13c_includes_the_attached_franking_credits`]).
     #[tokio::test]
     async fn db_the_question_13_split_leaves_the_gross_assessable_total_unchanged() {
         let march = NaiveDate::from_ymd_opt(2024, 3, 15).unwrap();
@@ -1633,32 +1646,39 @@ mod tests {
     }
 
     /// 13C is *franked distributions from trusts, **including** the share of
-    /// attached franking credits* (`docs/ato/tax-return-labels-2026.md`), so
-    /// the accumulator must report the **grossed-up** figure: a $700 franked
-    /// distribution with a $300 attached credit is 13C = 1,000 — not 700 with
-    /// the credit only beside it. The $300 offset entitlement stays on
-    /// `franking_credits` (`11U / 13Q`), so nothing is counted twice. Both
-    /// surfaces a return is transcribed from — the CSV's ATO-label row and the
-    /// annual tax report's printed tax-summary section — carry the same 1,000.
+    /// attached franking credits* (`docs/ato/tax-return-labels-2026.md`) — and
+    /// the statement's own "franked distributions from trusts" figure **is**
+    /// that grossed-up component: the ATO's AMMA/SDS example puts the
+    /// cash-plus-credit *Attribution* at label C, and its guidance notes say
+    /// the credit is "included in" the component
+    /// (`docs/ato/amma-statement-guidance-notes.md`, Part B item 13C). So the
+    /// entered `franked_amount` is reported at 13C **unchanged**; adding the
+    /// separately printed credit line a second time would count the gross-up
+    /// twice and overstate 13C by the whole credit. The $300 offset
+    /// entitlement stays on `franking_credits` (`11U / 13Q`). Both surfaces a
+    /// return is transcribed from — the CSV's ATO-label row and the annual tax
+    /// report's printed tax-summary section — carry the same 1,000.
     #[tokio::test]
-    async fn db_trust_13c_includes_the_attached_franking_credits() {
+    async fn db_trust_13c_is_the_statements_franked_distribution_component() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
         let mut dist = make_income(1, 1, ymd(2024, 3, 15));
         dist.trust_income = true;
-        dist.franked_amount = Decimal::from(700);
+        // The statement's "franked distributions from trusts" figure, which
+        // already includes the $300 attached credit printed beside it.
+        dist.franked_amount = Decimal::from(1000);
         dist.franking_credits = Decimal::from(300);
         income::db_upsert(&pool, &dist).await.unwrap();
 
         let s = &db_tax_summary(&pool).await.unwrap()[0];
         assert_eq!(s.tax_year, 2024);
-        // The label's own figure: the franked distribution plus its credits.
+        // The label's own figure, exactly as the statement states it.
         assert_eq!(s.trust_franked_distributions, Decimal::from(1000));
         // …and the offset entitlement, on its own line, undiminished.
         assert_eq!(s.franking_credits, Decimal::from(300));
         assert_eq!(s.franking_credits_denied, Decimal::ZERO);
-        // 13C's own definition folds the credits in, so the gross assessable
-        // total carries them (there is no separate gross-up line to add).
+        // The credit is already inside 13C, so the gross total is 1,000 — not
+        // 1,300, which is what adding the credit line again would produce.
         assert_eq!(s.gross_assessable_investment_income, Decimal::from(1000));
         assert_eq!(s.net_assessable_investment_income, Decimal::from(1000));
 
@@ -1702,22 +1722,33 @@ mod tests {
     }
 
     /// The AMMA route carries the same 13C definition as the non-AMIT trust
-    /// one: the statement's franked-dividend component **plus** its attached
-    /// franking credits, with the statement's credit also reported on the 13Q
-    /// offset line.
+    /// one, and the same trap: the statement's "franked distributions from
+    /// trusts" figure (Part A label **13C**, the Part B *Attribution* column)
+    /// already **includes** the attached franking credits, so it is reported
+    /// exactly as entered and the statement's separate credit line is **not**
+    /// added again. The figures here are the real VDHG FY2026 statement — a
+    /// 13C of 7,351.64 whose $2,337.61 credit sits inside it and beside it at
+    /// 13Q; the regression this pins reported 9,689.25 (7,351.64 + 2,337.61),
+    /// double-counting the gross-up by the whole credit.
     #[tokio::test]
-    async fn db_amma_13c_includes_the_attached_franking_credits() {
+    async fn db_amma_13c_is_the_statements_franked_distribution_component() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        let mut a = make_amma(1, 1, ymd(2024, 6, 30));
-        a.franked_dividends = Decimal::from(700);
-        a.franking_credits = Decimal::from(300);
+        let mut a = make_amma(1, 1, ymd(2026, 6, 30));
+        a.franked_dividends = "7351.64".parse::<Decimal>().unwrap();
+        a.franking_credits = "2337.61".parse::<Decimal>().unwrap();
         amma::db_upsert(&pool, &a).await.unwrap();
 
         let s = &db_tax_summary(&pool).await.unwrap()[0];
-        assert_eq!(s.amma_franked_dividends, Decimal::from(1000));
-        assert_eq!(s.franking_credits, Decimal::from(300));
-        assert_eq!(s.gross_assessable_investment_income, Decimal::from(1000));
+        assert_eq!(
+            s.amma_franked_dividends,
+            "7351.64".parse::<Decimal>().unwrap()
+        );
+        assert_eq!(s.franking_credits, "2337.61".parse::<Decimal>().unwrap());
+        assert_eq!(
+            s.gross_assessable_investment_income,
+            "7351.64".parse::<Decimal>().unwrap()
+        );
     }
 
     /// The ATO's own reason 13Q and the credit inside 13C may differ
@@ -1736,12 +1767,14 @@ mod tests {
         // distribution's shares never qualify for the credit.
         insert_trade(&pool, 1, 1, trade::TradeType::Buy, ymd(2025, 3, 3), 1000).await;
         insert_trade(&pool, 2, 1, trade::TradeType::Sell, ymd(2025, 4, 10), 1000).await;
-        // Franked 13,066 carrying 5,600 — over the A$5,000 small-shareholder
-        // threshold, so the walk runs and denies the whole credit.
+        // The statement's franked-distributions component, 18,666, which
+        // already includes the 5,600 credit printed beside it — over the
+        // A$5,000 small-shareholder threshold, so the walk runs and denies the
+        // whole credit.
         let mut dist = make_income(1, 1, ymd(2025, 4, 8));
         dist.trust_income = true;
         dist.ex_date = Some(ymd(2025, 3, 14));
-        dist.franked_amount = Decimal::from(13066);
+        dist.franked_amount = Decimal::from(18666);
         dist.franking_credits = Decimal::from(5600);
         income::db_upsert(&pool, &dist).await.unwrap();
         // A deductible expense of earning the distribution: claimed at 13Y,
@@ -1866,8 +1899,9 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].tax_year, 2024);
         assert_eq!(result[0].amma_australian_interest, Decimal::from(10));
-        // 13C is the franked distribution **including** its attached credits.
-        assert_eq!(result[0].amma_franked_dividends, Decimal::from(28)); // 20 + 8
+        // 13C is the statement's franked-distributions figure as entered — the
+        // 8 credit is already inside it and is not added again.
+        assert_eq!(result[0].amma_franked_dividends, Decimal::from(20));
         assert_eq!(result[0].franking_credits, Decimal::from(8));
         assert_eq!(result[0].amma_foreign_income, Decimal::from(5));
         assert_eq!(result[0].foreign_tax_offsets, Decimal::from(2));
@@ -2059,12 +2093,13 @@ mod tests {
         let fy24 = result.iter().find(|s| s.tax_year == 2024).expect("FY2024");
         // Ordinary trust income of the pre-conversion year: question 13, on
         // the same two lines the AMIT years' AMMA components report at, never
-        // the company-dividend line (SCENARIOS Z-f). 13C is the grossed-up
-        // figure — the 200 franked plus its 85 attached credits.
-        assert_eq!(fy24.trust_franked_distributions, Decimal::from(285));
+        // the company-dividend line (SCENARIOS Z-f). 13C is the statement's
+        // franked-distributions figure as entered — the 200 already includes
+        // its 85 attached credits, which are not added a second time.
+        assert_eq!(fy24.trust_franked_distributions, Decimal::from(200));
         assert_eq!(fy24.trust_income_unfranked, Decimal::from(300));
         assert_eq!(fy24.dividends_assessable, Decimal::ZERO);
-        assert_eq!(fy24.gross_assessable_investment_income, Decimal::from(585));
+        assert_eq!(fy24.gross_assessable_investment_income, Decimal::from(500));
         assert_eq!(fy24.franking_credits, Decimal::from(85));
         let fy25 = result.iter().find(|s| s.tax_year == 2025).expect("FY2025");
         assert_eq!(fy25.dividends_assessable, Decimal::ZERO);
@@ -2121,14 +2156,15 @@ mod tests {
         assert_eq!(s.franking_credits, Decimal::from(150)); // 30 + 120
         assert_eq!(s.foreign_tax_offsets, Decimal::from(6)); // AMMA only
         assert_eq!(s.tfn_withholding_tax, Decimal::ZERO);
-        // The AMMA attribution is unchanged by the exclusion — except that 13C
-        // carries its attached credits (300 + 120), as the label defines.
-        assert_eq!(s.amma_franked_dividends, Decimal::from(420));
+        // The AMMA attribution is unchanged by the exclusion — 13C is the
+        // statement's franked-distributions figure as entered, with its 120
+        // attached credit already inside it.
+        assert_eq!(s.amma_franked_dividends, Decimal::from(300));
         assert_eq!(s.amma_foreign_income, Decimal::from(40));
         // Gross assessable = dividend + AMMA components, no cash.
         assert_eq!(
             s.gross_assessable_investment_income,
-            Decimal::from(70 + 420 + 40)
+            Decimal::from(70 + 300 + 40)
         );
     }
 
@@ -3532,11 +3568,11 @@ mod tests {
     }
 
     /// Gross assessable investment income includes the foreign-source income and
-    /// the AMMA income components — the 13C line carrying its attached franking
-    /// credits, since the label folds them in — but not conduit foreign income
-    /// (NANE), the ESS discount, or capital gains. (The company route's credit
-    /// stays out; `db_deductions_net_gross_assessable_investment_income` pins
-    /// that side.)
+    /// the AMMA income components — the 13C line being the statement's
+    /// franked-distributions figure, whose attached credits are already inside
+    /// it — but not conduit foreign income (NANE), the ESS discount, or capital
+    /// gains. (The company route's credit stays out;
+    /// `db_deductions_net_gross_assessable_investment_income` pins that side.)
     #[tokio::test]
     async fn db_gross_assessable_spans_income_and_amma_excludes_nane_and_cgt() {
         let pool = test_pool().await;
@@ -3549,24 +3585,24 @@ mod tests {
         let mut a = make_amma(1, 1, NaiveDate::from_ymd_opt(2024, 6, 30).unwrap());
         a.australian_interest = Decimal::from(10);
         a.franked_dividends = Decimal::from(20);
-        a.franking_credits = Decimal::from(8);
+        a.franking_credits = Decimal::from(8); // already inside the 20
         a.foreign_income = Decimal::from(5);
         a.other_income = Decimal::from(3);
         a.cgt_discount_gains = Decimal::from(1000); // a capital gain, excluded
         amma::db_upsert(&pool, &a).await.unwrap();
 
         let result = db_tax_summary(&pool).await.unwrap();
-        // 100 + 50 + 10 + (20 + 8 in the 13C line) + 5 + 3 = 196 (conduit and
-        // CGT excluded).
+        // 100 + 50 + 10 + 20 + 5 + 3 = 188 (conduit, the credit already inside
+        // 13C, and CGT all excluded).
         assert_eq!(
             result[0].gross_assessable_investment_income,
-            Decimal::from(196)
+            Decimal::from(188)
         );
-        assert_eq!(result[0].amma_franked_dividends, Decimal::from(28));
+        assert_eq!(result[0].amma_franked_dividends, Decimal::from(20));
         // No deductions → net equals gross.
         assert_eq!(
             result[0].net_assessable_investment_income,
-            Decimal::from(196)
+            Decimal::from(188)
         );
         assert_eq!(result[0].deductions_total, Decimal::ZERO);
     }
