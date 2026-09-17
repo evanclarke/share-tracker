@@ -339,6 +339,173 @@ mod tests {
         assert!(js.contains("fetch(apiUrl(path)"));
     }
 
+    /// One hand-built label whose control it does not name: the served module,
+    /// the 1-based line, and that line's source text.
+    struct UnassociatedLabel {
+        module: &'static str,
+        line: usize,
+        source_line: String,
+    }
+
+    /// Every `el('label', …)` in `source` that neither names its control by
+    /// `for` nor nests one. `buildFieldInput` writes `el('label', { for: id },
+    /// …)`; a hand-built form gets the same pairing from forms.js's
+    /// `labelledField`/`labelControl`. A label whose children array nests the
+    /// control (`el('label', null, [ … control … ])`) is associated too — the
+    /// tax report's year picker is the one such call in the tree. Anything
+    /// else is the shape the review found: `el('label', null, 'Listing')` with
+    /// the control as a following sibling, leaving the control with no
+    /// accessible name and the label inert. A whole-line comment is skipped:
+    /// prose about the shape is not the shape.
+    fn unassociated_labels(module: &'static str, source: &str) -> Vec<UnassociatedLabel> {
+        let mut hits = Vec::new();
+        for (i, line) in source.lines().enumerate() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("//") {
+                continue;
+            }
+            for open in ["el('label'", "el(\"label\""] {
+                for (at, _) in line.match_indices(open) {
+                    let rest = &line[at + open.len()..];
+                    // `, { for: … }` names the control; `, null, [` nests it.
+                    if rest.starts_with(", { for:") || rest.starts_with(", null, [") {
+                        continue;
+                    }
+                    hits.push(UnassociatedLabel {
+                        module,
+                        line: i + 1,
+                        source_line: trimmed.to_string(),
+                    });
+                }
+            }
+        }
+        hits
+    }
+
+    /// The review finding behind this scan: `buildFieldInput` associates its
+    /// label and control, but every hand-built form wrote `el('label', null,
+    /// 'Listing')` with the control as a sibling, so the control had no
+    /// accessible name and clicking the label did nothing. Each hand-built
+    /// form now pairs them through forms.js's `fieldId`/`labelControl`/
+    /// `labelledField`, which derive the control's `id` and the label's
+    /// matching `for` from one value. This scans the whole served bundle for
+    /// the unassociated shape (a new one is caught at the source), then pins
+    /// every call site by name so a form cannot quietly drop back to a bare
+    /// label. Ids are unique within a rendered view: the repeated rows derive
+    /// theirs from a per-row key (see the anti-collision assertions below).
+    #[tokio::test]
+    async fn every_hand_built_form_label_names_its_control() {
+        let mut offenders = Vec::new();
+        for (path, source) in JS_MODULES {
+            for hit in unassociated_labels(path, source) {
+                offenders.push(format!(
+                    "{} line {}: `{}`",
+                    hit.module, hit.line, hit.source_line
+                ));
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "a hand-built label must name its control: build the field with forms.js's \
+             `labelledField(name, text, control[, index])` (or `labelControl` for a row \
+             holding more than one control), which sets the control's id and the label's \
+             matching for from one derived value — never `el('label', null, 'Text')` with \
+             the control as a following sibling, which leaves the control with no \
+             accessible name:\n{}",
+            offenders.join("\n")
+        );
+
+        let js = app_js_body().await;
+        // The pairing itself: one derived id, written to the control and read
+        // by the label, so the two cannot name different ids.
+        assert!(js.contains("export function fieldId(name, index)"));
+        assert!(js.contains("control.setAttribute('id', id);"));
+        assert!(js.contains("return el('label', { for: id }, text);"));
+
+        // The allocation editor's repeated rows (Sell, Transfer twice,
+        // Participate, Sell-rights): one id per row, from the module-level row
+        // counter, so two editors on one form and rows added later never
+        // collide.
+        assert!(js.contains("const rowId = ++allocRowSeq;"));
+        assert!(
+            js.contains("labelledField('alloc_purchase', labels.parcelLabel, purchaseSel, rowId)")
+        );
+        assert!(js.contains("labelledField('alloc_qty', labels.qtyLabel, qtyInput, rowId)"));
+
+        // Closing Prices: Backfill, Manual price, Clear superseded.
+        assert!(js.contains("labelledField('backfill_listing', 'Listing', listingSel)"));
+        assert!(js.contains("labelledField('backfill_from', 'From', fromInp)"));
+        assert!(js.contains("labelledField('backfill_to', 'To', toInp)"));
+        assert!(js.contains("labelledField('manual_listing', 'Listing', mListingSel)"));
+        assert!(js.contains("labelledField('manual_date', 'Date', mDateInp)"));
+        assert!(js.contains("labelledField('manual_price', 'Price', mPriceInp)"));
+        assert!(js.contains("labelledField('manual_sourced_from', 'Sourced from', mSourcedInp)"));
+        assert!(js.contains("labelledField('manual_reason', 'Reason', mReasonInp)"));
+        assert!(js.contains("labelledField('clear_listing', 'Listing', cListingSel)"));
+
+        // Snapshots: the on-demand date, and the regenerate-all range's two
+        // dates in one inline row (so `labelControl` for each).
+        assert!(js.contains("labelledField('snapshot_date', 'Snapshot date', dateInp)"));
+        assert!(js.contains(
+            "labelControl('snapshot_range_from', 'Regenerate-all range from', rangeFromInp)"
+        ));
+        assert!(js.contains("labelControl('snapshot_range_to', 'to', rangeToInp)"));
+
+        // The chart's custom from/to, named after the screen's own series
+        // select so the overview's and the listing screen's ids differ.
+        assert!(js.contains("labelledField(opts.selectId + '_from', 'From', fromInp)"));
+        assert!(js.contains("labelledField(opts.selectId + '_to', 'To', toInp)"));
+
+        // Report params: the as-of date, and the per-listing price overrides
+        // (one input per listing, keyed by the listing id).
+        assert!(js.contains("labelledField('as_of_date', 'As-of date', asOfInp)"));
+        assert!(js.contains("labelledField('price_override', overrideLabel, priceInp, l.id)"));
+        assert!(js.contains("const overrideLabel = l.id + ': ' + l.ticker + ' (' + (l.exchange_mic || 'Crypto') + ')';"));
+
+        // Not named by the review but the same defect: the attachment
+        // screen's upload file input.
+        assert!(js.contains("labelledField('attachment_file', 'Add a file', fileInput)"));
+    }
+
+    /// The scan above is only worth having if it fires on the shape it is
+    /// there for and stays quiet on the associated shapes, so both are pinned
+    /// here rather than resting on the tree happening to be clean.
+    #[test]
+    fn the_label_association_scan_separates_associated_labels_from_bare_ones() {
+        let flagged = |src: &str| !unassociated_labels("/static/probe.js", src).is_empty();
+
+        // The shape the review found: a bare label with its control as the
+        // following sibling, and the same with an attrs object that names no
+        // control.
+        assert!(flagged(
+            "backfillForm.appendChild(el('div', { class: 'field' }, [el('label', null, 'Listing'), listingSel]));"
+        ));
+        assert!(flagged(
+            "form.appendChild(el('div', { class: 'field' }, [el('label', { class: 'x' }, 'From'), fromInp]));"
+        ));
+        assert!(flagged(
+            "genForm.appendChild(el('label', null, 'Snapshot date'));"
+        ));
+
+        // buildFieldInput's own label and the shared hand-built pairing name
+        // their control by `for`.
+        assert!(!flagged(
+            "wrap.appendChild(el('label', { for: id }, f.label + (f.required ? ' *' : '')));"
+        ));
+        assert!(!flagged(
+            "return el('div', { class: 'field' }, [el('label', { for: id }, text), control]);"
+        ));
+        // Nesting the control is an association too (the tax report's picker).
+        assert!(!flagged(
+            "const toolbar = el('div', null, [el('label', null, ['Tax year ', yearSelect])]);"
+        ));
+        // A different element's call, and prose about the rule, are not labels.
+        assert!(!flagged("row.appendChild(el('option', null, 'x'));"));
+        assert!(!flagged(
+            "// el('label', null, 'From') leaves the control unnamed"
+        ));
+    }
+
     /// One bare paint/toast call site: the served module, the 1-based line,
     /// and that line's source text.
     struct BarePaint {

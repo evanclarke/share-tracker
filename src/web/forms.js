@@ -69,6 +69,35 @@ export function readFieldValue(f, formEl) {
   return raw;
 }
 
+// ---- shared label/control pairing --------------------------------------
+// `buildFieldInput` above pairs its label and control; a hand-built form goes
+// through these for the same association, so every control has an accessible
+// name and clicking its label focuses the control. The id is derived once and
+// used for both the control's `id` and the label's `for`, so the two cannot
+// drift apart. `index` is a repeated rendering's own key (the allocation
+// editor's row counter, a listing id for the per-listing override inputs): it
+// keeps every id unique within the rendered view, where the same field is
+// rendered once per row.
+export function fieldId(name, index) {
+  return 'f_' + name + (index == null ? '' : '_' + index);
+}
+
+// The `<label for>` naming `control`, with the control's id set from the same
+// value. A row placing more than one control inline (the snapshot range's two
+// dates) composes its labels from this; a single-control field uses
+// `labelledField`.
+export function labelControl(name, text, control, index) {
+  const id = fieldId(name, index);
+  control.setAttribute('id', id);
+  return el('label', { for: id }, text);
+}
+
+// A `.field` div holding one labelled control — the hand-built equivalent of
+// `buildFieldInput`'s wrapper.
+export function labelledField(name, text, control, index) {
+  return el('div', { class: 'field' }, [labelControl(name, text, control, index), control]);
+}
+
 // ---- GST-inclusive brokerage wiring ------------------------------------
 // Shared by the Buy/DRP trade form and the Sell form: ticking "Brokerage
 // includes GST" hides the GST field (the server derives GST as 1/11 of the
@@ -390,6 +419,10 @@ export function wireAmmaEntry(form, existing) {
 // moves whole or partial parcels and its Sell quantity *is* the allocations'
 // own sum (`entities::transfer`), so there is no target to be short of; the
 // line reports the running total alone.
+//
+// `allocRowSeq` numbers the rows across every editor and render on the page,
+// so the per-row `id`s never collide (see `addRow`).
+let allocRowSeq = 0;
 export function allocationEditor(parcelOptions, existingAllocs, labels) {
   labels = Object.assign({
     heading: 'Parcel allocations',
@@ -412,12 +445,18 @@ export function allocationEditor(parcelOptions, existingAllocs, labels) {
     if (keepValue != null && keepValue !== '') sel.value = String(keepValue);
   }
   function addRow(alloc) {
+    // A per-row id, from a module-level counter that is never reset: the
+    // Transfer form renders this editor twice (the parcels moved and the
+    // network fee) and rows can be added later, so a counter local to one
+    // editor would hand the second editor's first row the same ids as the
+    // first editor's — ids that must be unique in the whole rendered view.
+    const rowId = ++allocRowSeq;
     const purchaseSel = el('select', { name: 'alloc_purchase' });
     populateSelect(purchaseSel, alloc ? alloc.purchase_trade_id : null);
     const qtyInput = el('input', { type: 'text', inputmode: 'decimal', name: 'alloc_qty', value: alloc ? String(alloc.quantity_allocated) : '' });
     const row = el('div', { class: 'alloc-row' }, [
-      el('div', { class: 'field' }, [el('label', null, labels.parcelLabel), purchaseSel]),
-      el('div', { class: 'field' }, [el('label', null, labels.qtyLabel), qtyInput]),
+      labelledField('alloc_purchase', labels.parcelLabel, purchaseSel, rowId),
+      labelledField('alloc_qty', labels.qtyLabel, qtyInput, rowId),
       el('button', { type: 'button', class: 'small danger', onclick: function () { list.removeChild(row); refreshTotal(); } }, 'Remove'),
     ]);
     list.appendChild(row);

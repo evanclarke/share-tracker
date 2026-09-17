@@ -6535,3 +6535,45 @@ against zero` and `decCompare returns null for cells with no numeric value, neve
 (scoped per module, since `util.js`'s own comment quotes the old float form as the bug it documents).
 Gates: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` (2,462 passed)
 and `node --test 'src/web/*.test.js'` (163 passed) all clean.
+
+## Bespoke form labels are not associated with their controls (2026-09-17 review, web frontend)
+
+(2026-09-17 review. `buildFieldInput` associates its label and control correctly; the hand-built
+forms do not, so those controls have no accessible name and clicking the label does nothing.)
+
+- [x] Reproduced by reading `src/web/forms.js:419-420` (the allocation parcel/quantity rows) and
+  `src/web/app.js:1774-1776` (Backfill listing/from/to), `:1816-1820` (Manual price), `:1857` (Clear
+  superseded), `:1988` (snapshot date), `:2878-2879` (as-of date), `:2913-2916` (price-override
+  inputs)
+- [x] Fix: give each control an `id` and its label a matching `for` (or nest the control inside the
+  label), as `buildFieldInput` already does
+- [x] Tests: a served-bundle assertion that each hand-built form's labels carry a `for` naming an
+  input the same view creates — or extract the label/control pairing into a shared helper and unit
+  test that
+- [x] Docs sync: none
+
+**Closed 2026-09-17.** `forms.js` gained the shared pairing helpers — `fieldId(name, index)`,
+`labelControl(name, text, control, index)` (sets the control's `id` and returns the `<label for>`
+from the same value, so they cannot drift) and `labelledField` (the hand-built equivalent of
+`buildFieldInput`'s `.field` wrapper) — and every hand-built label/control pair was converted. Beyond
+the sites the review named (the allocation editor's parcel/quantity rows, Backfill's listing/from/to,
+Manual price, Clear superseded, the snapshot date, the as-of date and the per-listing price
+overrides), the scan found three more and fixed them: the attachments "Add a file" input, the
+snapshot **Regenerate-all range** (one label sat in front of two date inputs, so neither was
+associated — now one label per control from the same id) and the `rangedChart` custom range (From/To,
+shared by Portfolio Overview and Listing Activity). Ids are unique per rendered view: the allocation
+editor uses a module-level `allocRowSeq` counter that is never reset (the Transfer form renders the
+editor twice, so a per-editor counter would collide), price overrides key by listing id, and the
+chart/snapshot ranges by their own stable keys. The income/AMMA/DRP hand-built fields were already
+associated and were left alone, as were the "Hide holdings…"/"Series" labels and the Annual Tax
+Report's tax-year picker (its control is nested inside the label, which is a valid association).
+
+Tests: four `src/web/forms.test.js` cases for `fieldId`/`labelControl`/`labelledField` (including
+repeated renderings staying distinct and each repeated row keeping its own id), plus
+`web::tests::every_hand_built_form_label_names_its_control` (a served-bundle scan for an unassociated
+label with per-call-site pins) and its self-test
+`the_label_association_scan_separates_associated_labels_from_bare_ones`. A `scripts/ui-check.sh --seed
+demo` pass confirmed every rendered `for="f_…"` had a matching `id="f_…"` in the same page on the
+closing-prices, snapshots, unrealised-gains, sell and transfer views. Gates: `cargo fmt --check`,
+`cargo clippy --all-targets -- -D warnings`, `cargo test` (2,464 passed) and
+`node --test 'src/web/*.test.js'` (167 passed) all clean.

@@ -22,6 +22,7 @@ import {
 import {
   field, dt, fk,
   buildFieldInput, readFieldValue, wireGstBrokerage, allocationEditor,
+  labelledField, labelControl,
 } from './forms.js';
 import { ENTITIES, REPORTS, ACTIONS } from './config.js';
 import {
@@ -1177,7 +1178,7 @@ async function viewAttachments(ownerField, ownerId, seq = navigationToken()) {
   // 25 MB cap.
   const fileInput = el('input', { type: 'file', name: 'file', required: true, accept: '.pdf,.png,.jpg,.jpeg,.txt' });
   const uploadForm = el('form', { class: 'card' }, [
-    el('div', { class: 'field' }, [el('label', null, 'Add a file'), fileInput]),
+    labelledField('attachment_file', 'Add a file', fileInput),
     el('p', { class: 'hint' }, 'Accepted: PDF, PNG, JPEG, TXT. Max 25 MB. Stored in the database.'),
     el('div', { class: 'form-actions' }, [el('button', { type: 'submit', class: 'primary' }, 'Upload')]),
   ]);
@@ -1792,9 +1793,9 @@ async function viewClosingPrices(seq = navigationToken()) {
   }));
   const fromInp = el('input', { type: 'date', required: true });
   const toInp = el('input', { type: 'date', required: true });
-  backfillForm.appendChild(el('div', { class: 'field' }, [el('label', null, 'Listing'), listingSel]));
-  backfillForm.appendChild(el('div', { class: 'field' }, [el('label', null, 'From'), fromInp]));
-  backfillForm.appendChild(el('div', { class: 'field' }, [el('label', null, 'To'), toInp]));
+  backfillForm.appendChild(labelledField('backfill_listing', 'Listing', listingSel));
+  backfillForm.appendChild(labelledField('backfill_from', 'From', fromInp));
+  backfillForm.appendChild(labelledField('backfill_to', 'To', toInp));
   backfillForm.appendChild(el('div', { class: 'form-actions' }, [
     el('button', { type: 'submit', class: 'primary' }, 'Backfill'),
   ]));
@@ -1834,11 +1835,11 @@ async function viewClosingPrices(seq = navigationToken()) {
   const mReasonInp = el('input', {
     type: 'text', required: true, placeholder: 'e.g. provider serves no candle since the delisting',
   });
-  manualForm.appendChild(el('div', { class: 'field' }, [el('label', null, 'Listing'), mListingSel]));
-  manualForm.appendChild(el('div', { class: 'field' }, [el('label', null, 'Date'), mDateInp]));
-  manualForm.appendChild(el('div', { class: 'field' }, [el('label', null, 'Price'), mPriceInp]));
-  manualForm.appendChild(el('div', { class: 'field' }, [el('label', null, 'Sourced from'), mSourcedInp]));
-  manualForm.appendChild(el('div', { class: 'field' }, [el('label', null, 'Reason'), mReasonInp]));
+  manualForm.appendChild(labelledField('manual_listing', 'Listing', mListingSel));
+  manualForm.appendChild(labelledField('manual_date', 'Date', mDateInp));
+  manualForm.appendChild(labelledField('manual_price', 'Price', mPriceInp));
+  manualForm.appendChild(labelledField('manual_sourced_from', 'Sourced from', mSourcedInp));
+  manualForm.appendChild(labelledField('manual_reason', 'Reason', mReasonInp));
   manualForm.appendChild(el('div', { class: 'form-actions' }, [
     el('button', { type: 'submit', class: 'primary' }, 'Store price'),
   ]));
@@ -1875,7 +1876,7 @@ async function viewClosingPrices(seq = navigationToken()) {
       return el('option', { value: l.id },
         l.id + ': ' + l.ticker + ' (unpriced before ' + l.unpriced_before + ')');
     }));
-    clearForm.appendChild(el('div', { class: 'field' }, [el('label', null, 'Listing'), cListingSel]));
+    clearForm.appendChild(labelledField('clear_listing', 'Listing', cListingSel));
     clearForm.appendChild(el('div', { class: 'form-actions' }, [
       el('button', { type: 'submit', class: 'primary' }, 'Clear span'),
     ]));
@@ -2006,7 +2007,7 @@ async function viewSnapshots(seq = navigationToken()) {
   const genForm = el('form', { class: 'card' });
   const dateInp = el('input', { type: 'date' });
   genForm.appendChild(el('h3', null, 'Generate / regenerate'));
-  genForm.appendChild(el('div', { class: 'field' }, [el('label', null, 'Snapshot date'), dateInp]));
+  genForm.appendChild(labelledField('snapshot_date', 'Snapshot date', dateInp));
   genForm.appendChild(el('p', { class: 'hint' },
     'Blank = the latest date with final prices for every held listing. Every held listing needs an ok stored closing price on (or walked back to) the date — backfill prices first for past dates.'));
   genForm.appendChild(el('div', { class: 'form-actions' }, [
@@ -2032,8 +2033,8 @@ async function viewSnapshots(seq = navigationToken()) {
   const rangeFromInp = el('input', { type: 'date', value: defaultRange.from || '' });
   const rangeToInp = el('input', { type: 'date', value: defaultRange.to || '' });
   genForm.appendChild(el('div', { class: 'field' }, [
-    el('label', null, 'Regenerate-all range'),
-    rangeFromInp, ' to ', rangeToInp,
+    labelControl('snapshot_range_from', 'Regenerate-all range from', rangeFromInp), rangeFromInp,
+    labelControl('snapshot_range_to', 'to', rangeToInp), rangeToInp,
   ]));
   genForm.appendChild(el('p', { class: 'hint' },
     'Defaults to the first-ever holding through the latest date with final prices. Every date in range is regenerated, including one with no stored snapshot yet; a date with nothing held is skipped, and a date whose prices aren’t backfilled is reported blocked.'));
@@ -2450,8 +2451,8 @@ function rangedChart(series, opts) {
 
   const rangeForm = el('form', { class: 'range-control' });
   rangeForm.appendChild(el('div', { class: 'form-actions' }, presetButtons));
-  rangeForm.appendChild(el('div', { class: 'field' }, [el('label', null, 'From'), fromInp]));
-  rangeForm.appendChild(el('div', { class: 'field' }, [el('label', null, 'To'), toInp]));
+  rangeForm.appendChild(labelledField(opts.selectId + '_from', 'From', fromInp));
+  rangeForm.appendChild(labelledField(opts.selectId + '_to', 'To', toInp));
   rangeForm.appendChild(el('button', { type: 'submit', class: 'small' }, 'Apply'));
   rangeForm.addEventListener('submit', function (ev) {
     ev.preventDefault();
@@ -2895,10 +2896,8 @@ async function viewReport(report, args, seq = navigationToken()) {
   ]);
   priceForm.appendChild(priceDetails);
   if (report.asOfDate) {
-    priceForm.appendChild(el('div', { class: 'field' }, [
-      el('label', null, 'As-of date'),
-      el('input', { type: 'date', name: 'as_of_date' }),
-    ]));
+    const asOfInp = el('input', { type: 'date', name: 'as_of_date' });
+    priceForm.appendChild(labelledField('as_of_date', 'As-of date', asOfInp));
   }
   priceForm.appendChild(el('div', { class: 'form-actions' }, [
     el('button', { type: 'submit', class: 'primary' }, 'Run report'),
@@ -2931,10 +2930,11 @@ async function viewReport(report, args, seq = navigationToken()) {
   // request in front of the valuation that could not change its answer.
   const overridesReady = api('GET', '/listings').then(function (listings) {
     listings.forEach(function (l) {
-      priceDetails.appendChild(el('div', { class: 'field' }, [
-        el('label', null, l.id + ': ' + l.ticker + ' (' + (l.exchange_mic || 'Crypto') + ')'),
-        el('input', { type: 'text', inputmode: 'decimal', 'data-listing': l.id }),
-      ]));
+      const overrideLabel = l.id + ': ' + l.ticker + ' (' + (l.exchange_mic || 'Crypto') + ')';
+      const priceInp = el('input', { type: 'text', inputmode: 'decimal', 'data-listing': l.id });
+      // Keyed by listing id: one override input is rendered per listing, so a
+      // fixed id would repeat across rows.
+      priceDetails.appendChild(labelledField('price_override', overrideLabel, priceInp, l.id));
     });
   }).catch(function (e) {
     priceDetails.appendChild(el('p', { class: 'hint warn' },

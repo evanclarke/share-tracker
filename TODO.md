@@ -38,22 +38,6 @@ what has been verified is SCENARIOS.md's
 [Verification status](SCENARIOS.md#verification-status) table and its per-section findings blocks;
 the maintained record of what was built and decided is the `DONE/*.md` archive.
 
-## Bespoke form labels are not associated with their controls (2026-09-17 review, web frontend)
-
-(2026-09-17 review. `buildFieldInput` associates its label and control correctly; the hand-built
-forms do not, so those controls have no accessible name and clicking the label does nothing.)
-
-- [ ] Reproduced by reading `src/web/forms.js:419-420` (the allocation parcel/quantity rows) and
-  `src/web/app.js:1774-1776` (Backfill listing/from/to), `:1816-1820` (Manual price), `:1857` (Clear
-  superseded), `:1988` (snapshot date), `:2878-2879` (as-of date), `:2913-2916` (price-override
-  inputs)
-- [ ] Fix: give each control an `id` and its label a matching `for` (or nest the control inside the
-  label), as `buildFieldInput` already does
-- [ ] Tests: a served-bundle assertion that each hand-built form's labels carry a `for` naming an
-  input the same view creates — or extract the label/control pairing into a shared helper and unit
-  test that
-- [ ] Docs sync: none
-
 ## `filterableTable` re-filters and re-sorts the whole unpaginated set on every interaction (2026-09-17 review, web frontend)
 
 (2026-09-17 review, measured. Every data table renders through `filterableTable`, which sorts and
