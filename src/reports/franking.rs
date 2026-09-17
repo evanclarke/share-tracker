@@ -23,7 +23,7 @@ use crate::entities::listing;
 use crate::entities::trade::TradeType;
 use crate::infra::decimal::{mul_div, parse_dec};
 use crate::infra::fx::{FxOverride, FxRates};
-use chrono::{Datelike, Duration, NaiveDate};
+use chrono::{Duration, NaiveDate};
 use rust_decimal::Decimal;
 use sqlx::{FromRow, Row, SqliteConnection};
 use std::collections::HashMap;
@@ -392,8 +392,11 @@ pub async fn db_franked_dividends(
         let currency: String = row.try_get("currency")?;
         let credits = parse_dec("franking_credits", row.try_get("franking_credits")?)?;
         let credits_aud = fx.to_aud(credits, &currency, tax_year_end_date, FxOverride::None)?;
+        // The statement's FY by the one shared rule: a 30 June end is
+        // unchanged, and a row a hand-entered database holds at another date
+        // still counts toward the year `tax_year_for` gives.
         *attached_by_year
-            .entry(tax_year_end_date.year())
+            .entry(tax_year_for(tax_year_end_date))
             .or_default() += credits_aud;
     }
 
@@ -480,6 +483,34 @@ mod tests {
         assert_eq!(dividends[0].credits_aud, Decimal::from(300));
         assert_eq!(attached_by_year.get(&2024), Some(&Decimal::from(300)));
         assert_eq!(attached_by_year.get(&2025), None);
+    }
+
+    /// An AMMA statement at a year end other than 30 June — the write path
+    /// refuses one, so it is written straight into `amma_statements` — counts
+    /// its attached credits toward the FY `domain::tax_year::tax_year_for`
+    /// names, the same bucket the tax summary attributes them to.
+    #[tokio::test]
+    async fn db_amma_credits_follow_tax_year_for_a_non_june_year_end() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, false).await;
+        let year_end = d("2024-12-31");
+        let a = test_support::amma(1, 1)
+            .with(|a| {
+                a.tax_year_end_date = year_end;
+                a.date_received = year_end + chrono::Duration::days(60);
+                a.franking_credits = Decimal::from(800);
+            })
+            .build();
+        test_support::insert_amma_bypassing_checks(&pool, &a).await;
+
+        let mut tx = pool.begin().await.unwrap();
+        let fx = FxRates::load(&mut *tx).await.unwrap();
+        let (_, attached_by_year) = db_franked_dividends(&mut tx, &fx).await.unwrap();
+        tx.commit().await.unwrap();
+
+        assert_eq!(tax_year_for(year_end), 2025);
+        assert_eq!(attached_by_year.get(&2025), Some(&Decimal::from(800)));
+        assert_eq!(attached_by_year.get(&2024), None);
     }
 
     #[tokio::test]

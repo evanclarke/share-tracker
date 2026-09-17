@@ -26,6 +26,7 @@
 //! holding unvalued with the reason, never a silent zero).
 
 use crate::domain::listing_identity::RenameHistory;
+use crate::domain::tax_year::tax_year_for;
 use crate::entities::closing_price::{self, SharedFetcher};
 use crate::entities::corporate_action::{ActionKind, CorporateAction, WorthlessEvent};
 use crate::entities::drp_enrolment::DrpEnrolment;
@@ -39,7 +40,7 @@ use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
 use crate::reports::portfolio::{self, HoldingOverview};
 use axum::{Extension, Json, Router, extract::State, routing::post};
-use chrono::{Datelike, NaiveDate};
+use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
@@ -442,8 +443,10 @@ impl Sources {
             id: a.id,
             event: "AMMA statement".to_string(),
             detail: format!(
+                // The FY the statement is attributed to, by the one shared
+                // rule — the same bucket its figures land in everywhere else.
                 "FY{} attribution over {} unit(s); cost base adjustment {} {} per unit",
-                a.tax_year_end_date.year(),
+                tax_year_for(a.tax_year_end_date),
                 a.units_held,
                 a.cost_base_adjustment,
                 a.currency
@@ -1307,6 +1310,36 @@ mod tests {
                 .iter()
                 .all(|e| e.event == "Buy" || e.quantity.is_none())
         );
+    }
+
+    /// The AMMA row's FY label is `domain::tax_year::tax_year_for`'s reading of
+    /// its year end, like every other FY-keyed surface: a hand-entered row at a
+    /// non-30-June year end (the write path refuses one, so it is written
+    /// straight into `amma_statements`) is labelled with the FY the rule names,
+    /// not its calendar year.
+    #[tokio::test]
+    async fn db_amma_row_labels_the_tax_year_for_a_non_june_year_end() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "VAF").await;
+        let year_end = ymd(2024, 12, 31);
+        assert_eq!(tax_year_for(year_end), 2025);
+        let a = test_support::amma(1, 1)
+            .cost_base_adjustment(dec("0.05"))
+            .with(|a| {
+                a.tax_year_end_date = year_end;
+                a.date_received = ymd(2025, 3, 1);
+            })
+            .build();
+        test_support::insert_amma_bypassing_checks(&pool, &a).await;
+
+        let events = events(&pool, 1).await;
+        let amma = events
+            .iter()
+            .find(|e| e.event == "AMMA statement")
+            .expect("the AMMA statement row is in the ledger");
+        assert_eq!(amma.date, year_end);
+        assert!(amma.detail.contains("FY2025"), "{}", amma.detail);
+        assert!(!amma.detail.contains("FY2024"), "{}", amma.detail);
     }
 
     /// A same-dated split orders before the day's trades: the trade is

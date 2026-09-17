@@ -38,7 +38,7 @@ use crate::entities::corporate_action::{self, SplitEvent};
 use crate::infra::decimal::row_dec;
 use crate::infra::http::ApiError;
 use axum::{Json, Router, extract::State, routing::get};
-use chrono::{Datelike, NaiveDate};
+use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
@@ -350,7 +350,13 @@ fn problems_for(
     // (SCENARIOS F-04, F-17, F-25). So the acceptable band is
     // `units_held ..= units_held + disposed during the year`: below it a
     // parcel is missing, above it one is duplicated or covered for too much.
-    let year_start = NaiveDate::from_ymd_opt(year_end.year() - 1, 7, 1).expect("valid FY start");
+    // The FY the statement is reported in, by the one shared rule: its start
+    // is the 1 July before that FY's 30 June end. A 30 June `year_end` is
+    // unchanged; a row a hand-entered database holds at another date gets the
+    // year `tax_year_for` names on the alert, not a window derived from its
+    // calendar year.
+    let year_start =
+        NaiveDate::from_ymd_opt(tax_year_for(year_end) - 1, 7, 1).expect("valid FY start");
     let disposed_in_year = disposed_between(adjustments, splits, sold, year_start, year_end);
     if units_adjusted < units_held {
         let difference = units_adjusted - units_held;
@@ -1463,6 +1469,56 @@ mod tests {
         );
         assert!(
             alerts[0].problems[1].contains("was fully sold before"),
+            "{:?}",
+            alerts[0].problems
+        );
+    }
+
+    /// The coverage band's year is the FY `domain::tax_year::tax_year_for`
+    /// names, not the calendar year of the statement's `tax_year_end_date`: a
+    /// hand-entered AMMA row at a non-30-June year end (the write path refuses
+    /// one, so it is written straight into `amma_statements`) must not widen
+    /// the band by a parcel sold before that FY began. Under the old
+    /// `year_end.year()` window the Feb 2024 disposal fell inside the window
+    /// and the over-covered statement reconciled instead of being flagged.
+    #[tokio::test]
+    async fn db_a_non_june_year_end_uses_the_tax_year_for_coverage_window() {
+        let pool = test_pool().await;
+        amit_listing(&pool, 1, "HNDQ").await;
+        test_support::buy(1, 1)
+            .date(ymd(2022, 2, 1))
+            .qty(dec("509"))
+            .insert(&pool)
+            .await;
+        // Sold in FY2024 — before the 1 July 2024 start of the FY the
+        // 31 Dec 2024 statement's year end belongs to.
+        test_support::sell(2, 1)
+            .date(ymd(2024, 2, 1))
+            .qty(dec("509"))
+            .insert(&pool)
+            .await;
+        allocate(&pool, 1, 2, 1, dec("509")).await;
+        let year_end = ymd(2024, 12, 31);
+        assert_eq!(tax_year_for(year_end), 2025);
+        let a = test_support::amma(1, 1)
+            .units(dec("0"))
+            .cost_base_adjustment(dec("0.05"))
+            .with(|a| {
+                a.tax_year_end_date = year_end;
+                a.date_received = year_end + chrono::Duration::days(60);
+            })
+            .build();
+        test_support::insert_amma_bypassing_checks(&pool, &a).await;
+        test_support::amit_adjustment(&pool, 1, 1, 1, dec("509")).await;
+
+        let alerts = db_amit_adjustment_alerts(&pool).await.unwrap();
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].tax_year, 2025);
+        assert!(
+            alerts[0].problems.iter().any(|p| {
+                p.contains("exceed the statement's units held 0")
+                    && p.contains("0 unit(s) disposed of during the year")
+            }),
             "{:?}",
             alerts[0].problems
         );

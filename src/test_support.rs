@@ -13,6 +13,7 @@ use crate::entities::{
     amit_adjustment, amma, closing_price, ess_statement, income, listing, parcel_allocation, trade,
 };
 use crate::infra::db;
+use crate::infra::decimal::Money;
 use axum::body::{Body, Bytes};
 use axum::http::{HeaderMap, Request, StatusCode};
 use chrono::NaiveDate;
@@ -701,6 +702,59 @@ pub async fn insert_parcel_bypassing_checks(
     .bind(listing_id)
     .bind(price)
     .bind(quantity)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+/// An AMMA statement written **straight into `amma_statements`**, bypassing
+/// `amma::db_upsert` and therefore its write-time check that
+/// `tax_year_end_date` is a 30 June financial-year end.
+///
+/// The one thing it is for: standing up the row a hand-entered or imported
+/// database can hold at a year end other than 30 June — which the writer now
+/// refuses — so the reports' FY bucketing can be pinned to
+/// [`crate::domain::tax_year::tax_year_for`] rather than to the calendar year
+/// of the year-end date. Every FY-keyed report reads that one rule, so a
+/// December year end must land the statement's figures in the following FY.
+/// Use [`amma`] for everything else; a fixture that skips the invariants is a
+/// fixture that can lie.
+pub async fn insert_amma_bypassing_checks(pool: &SqlitePool, a: &amma::AmmaStatement) {
+    sqlx::query(
+        "INSERT INTO amma_statements \
+         (id, listing_id, tax_year_end_date, units_held, date_received, \
+          australian_interest, australian_dividends_unfranked, franked_dividends, \
+          franking_credits, net_rent, foreign_income, foreign_tax_credits, \
+          foreign_tax_credits_capital_gains, other_income, \
+          cgt_discount_gains, cgt_indexation_gains, cgt_other_gains, capital_losses_applied, \
+          tax_deferred_amount, tax_free_amount, cost_base_adjustment, tfn_withholding_tax, \
+          currency, holding_account_id) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(a.id)
+    .bind(a.listing_id)
+    .bind(a.tax_year_end_date)
+    .bind(Money(a.units_held))
+    .bind(a.date_received)
+    .bind(Money(a.australian_interest))
+    .bind(Money(a.australian_dividends_unfranked))
+    .bind(Money(a.franked_dividends))
+    .bind(Money(a.franking_credits))
+    .bind(Money(a.net_rent))
+    .bind(Money(a.foreign_income))
+    .bind(Money(a.foreign_tax_credits))
+    .bind(Money(a.foreign_tax_credits_capital_gains))
+    .bind(Money(a.other_income))
+    .bind(Money(a.cgt_discount_gains))
+    .bind(Money(a.cgt_indexation_gains))
+    .bind(Money(a.cgt_other_gains))
+    .bind(Money(a.capital_losses_applied))
+    .bind(Money(a.tax_deferred_amount))
+    .bind(Money(a.tax_free_amount))
+    .bind(Money(a.cost_base_adjustment))
+    .bind(Money(a.tfn_withholding_tax))
+    .bind(&a.currency)
+    .bind(a.holding_account_id)
     .execute(pool)
     .await
     .unwrap();

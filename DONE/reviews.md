@@ -6360,3 +6360,48 @@ of "four endpoints"), `reports::tax_report::tests::a_missing_rate_fails_the_tax_
 and `a_failed_disposal_conversion_propagates_instead_of_a_parity_row` (the last fails against the old
 code, which returned rows). Gates: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
 `cargo test` (2,450 passed) and `node --test 'src/web/*.test.js'` (159 passed) all clean.
+
+## AMMA and E10 financial-year buckets use `.year()` rather than `tax_year_for` (2026-09-17 review, financial correctness)
+
+(2026-09-17 review. `domain::tax_year.rs`'s `tax_year_for` is documented as *the* Australian
+financial-year bucketing rule and is the only `month() >= 7` in `src` — but a handful of AMMA/E10
+buckets take the calendar year of a June date directly, which is equivalent only because
+`amma::db_upsert` forces a 30 June year end.)
+
+- [x] Reproduced by reading `src/reports/net_capital_gain.rs:626` and `:764`,
+  `src/reports/tax_summary.rs:821`, `src/reports/franking.rs:396`, `src/reports/activity.rs:446`
+- [x] The equivalence rests on a write-time check, not on the type: a hand-entered or imported row
+  with a different year end would file those gains one FY early, while G1/C2 and realised gains —
+  which do use `tax_year_for` — file the same facts in the other year
+- [x] Fix: use `tax_year_for` at each site (it returns the calendar year of the 30 June end, so a
+  30-June input is unchanged), or state the invariant in the type by storing a `TaxYear` rather than
+  a date wherever a statement year is used
+- [x] Tests: an AMMA row with a non-30-June year end (written directly at the DB level, since the
+  write path refuses it) asserting the bucket `tax_year_for` gives, pinning the two paths together
+- [x] Docs sync: none
+
+**Closed 2026-09-17.** Every named site now buckets through `tax_year_for` — the E10 gain and AMMA
+gross bucket in `net_capital_gain`, `tax_summary`'s AMMA component bucket, `franking`'s
+attached-credits bucket and `activity`'s AMMA ledger label — and the scan for other hand-derived FY
+buckets found two more that were fixed: `amit_cash_cross_check`'s `(listing, account, FY)` coverage
+key (which had been diverging from the `tax_year_for` used for the cash rows it compares against) and
+`amit_adjustment_cross_check`'s coverage-band start (`year_end.year() - 1, 7, 1` is now derived from
+`tax_year_for(year_end)`). Sites left alone are genuinely not FY bucketing and are named: the
+`TaxYear` newtype in `tax_report` (already built from `tax_year_for`), the health report's
+prior-month arithmetic, FX-coverage `YYYY-MM` formatting, exchange-holiday calendar-year bounds,
+indexation's quarter end, the FX prior-month walk and `tax_year` itself. A 30-June input is
+unchanged by the switch, so no stored figure moves; the divergence only existed for a row written
+directly into the database. `test_support` gained `insert_amma_bypassing_checks`, a direct DB write
+of an AMMA row (binding its decimals through `Money`) for the tests that need a year end the write
+path refuses.
+
+Tests: `reports::net_capital_gain::tests::db_amma_bucket_follows_tax_year_for_a_non_june_year_end`
+and `db_e10_bucket_follows_tax_year_for_a_non_june_year_end`,
+`reports::tax_summary::tests::db_amma_bucket_follows_tax_year_for_a_non_june_year_end`,
+`reports::franking::tests::db_amma_credits_follow_tax_year_for_a_non_june_year_end`,
+`reports::amit_cash_cross_check::tests::db_amma_at_a_non_june_year_end_covers_by_tax_year_for`,
+`reports::amit_adjustment_cross_check::tests::db_a_non_june_year_end_uses_the_tax_year_for_coverage_window`
+and `reports::activity::tests::db_amma_row_labels_the_tax_year_for_a_non_june_year_end`. Each writes
+a `2024-12-31` year end and asserts the report puts it in FY2025, so the old `.year()` reading fails.
+Gates: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` (2,457 passed)
+and `node --test 'src/web/*.test.js'` (159 passed) all clean.

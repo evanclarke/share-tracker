@@ -10,7 +10,7 @@ use crate::infra::http::ApiError;
 use crate::reports::export::{self, Cents};
 use crate::reports::franking;
 use axum::{Json, Router, extract::State, response::Response, routing::get};
-use chrono::{Datelike, NaiveDate};
+use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, Row, SqlitePool};
@@ -847,7 +847,10 @@ fn accumulate_amma(
 ) -> Result<(), sqlx::Error> {
     for row in amma_rows {
         let tax_year_end_date: NaiveDate = row.try_get("tax_year_end_date")?;
-        let tax_year = tax_year_end_date.year();
+        // The statement's FY by the one shared rule: a 30 June end is
+        // unchanged, and a row a hand-entered database holds at another date
+        // buckets with the rest of that FY's income (`tax_year_for`).
+        let tax_year = tax_year_for(tax_year_end_date);
 
         // Convert to AUD via the ATO rate for the month of tax_year_end_date (the
         // statement's only period anchor) before aggregating.
@@ -1870,6 +1873,32 @@ mod tests {
         assert_eq!(result[0].foreign_tax_offsets, Decimal::from(2));
         assert_eq!(result[0].amma_cgt_discount_gains, Decimal::from(50));
         assert_eq!(result[0].tfn_withholding_tax, Decimal::from(3));
+    }
+
+    /// A hand-entered AMMA row at a year end other than 30 June (the write
+    /// path refuses one, so it goes straight into `amma_statements`) is
+    /// bucketed by `domain::tax_year::tax_year_for`, not by its year end's
+    /// calendar year: its components must land in the FY the rule names.
+    #[tokio::test]
+    async fn db_amma_bucket_follows_tax_year_for_a_non_june_year_end() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        let year_end = NaiveDate::from_ymd_opt(2024, 12, 31).unwrap();
+        let mut a = make_amma(1, 1, year_end);
+        a.australian_interest = Decimal::from(10);
+        a.franking_credits = Decimal::from(8);
+        test_support::insert_amma_bypassing_checks(&pool, &a).await;
+
+        let result = db_tax_summary(&pool).await.unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result[0].tax_year,
+            tax_year_for(year_end),
+            "a December year end must be bucketed by `tax_year_for`, not by its calendar year"
+        );
+        assert_eq!(result[0].tax_year, 2025);
+        assert_eq!(result[0].amma_australian_interest, Decimal::from(10));
+        assert_eq!(result[0].franking_credits, Decimal::from(8));
     }
 
     #[tokio::test]

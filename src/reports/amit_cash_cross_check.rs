@@ -4,7 +4,7 @@ use crate::entities::listing;
 use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
 use axum::{Json, Router, extract::State, routing::get};
-use chrono::{Datelike, NaiveDate};
+use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, Row, SqlitePool};
@@ -74,16 +74,17 @@ pub async fn db_amit_cash_alerts(pool: &SqlitePool) -> Result<Vec<AmitCashAlert>
     tx.commit().await?;
 
     // (listing, account, FY) triples covered by an AMMA statement — the
-    // statement's year is the calendar year of its tax_year_end_date, as the
-    // tax summary reads it, and its account is the holder account the
-    // registry issued it for. A statement in another account attributes that
-    // account's units, not these, so it covers nothing here.
+    // statement's year is `tax_year_for`'s reading of its `tax_year_end_date`,
+    // exactly what the tax summary buckets it by, and its account is the
+    // holder account the registry issued it for. A statement in another
+    // account attributes that account's units, not these, so it covers
+    // nothing here.
     let mut covered = HashSet::new();
     for row in &amma_rows {
         let listing_id: i64 = row.try_get("listing_id")?;
         let holding_account_id: i64 = row.try_get("holding_account_id")?;
         let year_end: NaiveDate = row.try_get("tax_year_end_date")?;
-        covered.insert((listing_id, holding_account_id, year_end.year()));
+        covered.insert((listing_id, holding_account_id, tax_year_for(year_end)));
     }
 
     // Aggregate the cash rows per (ticker, listing, FY, account); BTreeMap
@@ -256,6 +257,31 @@ mod tests {
         insert_cash(&pool, 1, 1, ymd(2024, 10, 16)).await;
         insert_amma(&pool, 1, 1, ymd(2025, 6, 30)).await;
         assert!(db_amit_cash_alerts(&pool).await.unwrap().is_empty());
+    }
+
+    /// A hand-entered AMMA row at a year end other than 30 June — the write
+    /// path refuses one, so it is written straight into `amma_statements` —
+    /// covers the cash year `domain::tax_year::tax_year_for` names, the same
+    /// bucket the tax summary files the statement in. December in FY2025 must
+    /// cover the FY2025 cash, not be read as its calendar year FY2024.
+    #[tokio::test]
+    async fn db_amma_at_a_non_june_year_end_covers_by_tax_year_for() {
+        let pool = test_pool().await;
+        insert_amit_listing(&pool, 1, "VDHG").await;
+        insert_cash(&pool, 1, 1, ymd(2024, 10, 16)).await;
+        let year_end = ymd(2024, 12, 31);
+        assert_eq!(tax_year_for(year_end), 2025);
+        let a = test_support::amma(1, 1)
+            .with(|a| {
+                a.tax_year_end_date = year_end;
+                a.date_received = year_end + chrono::Duration::days(60);
+            })
+            .build();
+        test_support::insert_amma_bypassing_checks(&pool, &a).await;
+        assert!(
+            db_amit_cash_alerts(&pool).await.unwrap().is_empty(),
+            "the December statement must cover the FY2025 cash `tax_year_for` attributes it to"
+        );
     }
 
     /// An AMMA for a *different* year doesn't cover the cash year.

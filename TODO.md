@@ -38,25 +38,6 @@ what has been verified is SCENARIOS.md's
 [Verification status](SCENARIOS.md#verification-status) table and its per-section findings blocks;
 the maintained record of what was built and decided is the `DONE/*.md` archive.
 
-## AMMA and E10 financial-year buckets use `.year()` rather than `tax_year_for` (2026-09-17 review, financial correctness)
-
-(2026-09-17 review. `domain::tax_year.rs`'s `tax_year_for` is documented as *the* Australian
-financial-year bucketing rule and is the only `month() >= 7` in `src` — but a handful of AMMA/E10
-buckets take the calendar year of a June date directly, which is equivalent only because
-`amma::db_upsert` forces a 30 June year end.)
-
-- [ ] Reproduced by reading `src/reports/net_capital_gain.rs:626` and `:764`,
-  `src/reports/tax_summary.rs:821`, `src/reports/franking.rs:396`, `src/reports/activity.rs:446`
-- [ ] The equivalence rests on a write-time check, not on the type: a hand-entered or imported row
-  with a different year end would file those gains one FY early, while G1/C2 and realised gains —
-  which do use `tax_year_for` — file the same facts in the other year
-- [ ] Fix: use `tax_year_for` at each site (it returns the calendar year of the 30 June end, so a
-  30-June input is unchanged), or state the invariant in the type by storing a `TaxYear` rather than
-  a date wherever a statement year is used
-- [ ] Tests: an AMMA row with a non-30-June year end (written directly at the DB level, since the
-  write path refuses it) asserting the bucket `tax_year_for` gives, pinning the two paths together
-- [ ] Docs sync: none
-
 ## The snapshot series plots zero for an excluded holding and clears its flag (2026-09-17 review, financial correctness)
 
 (2026-09-17 review. A holding excluded from a date's valuation — no obtainable price, or before its

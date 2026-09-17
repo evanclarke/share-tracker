@@ -56,7 +56,7 @@ use axum::{
     response::Response,
     routing::{get, post},
 };
-use chrono::{Datelike, NaiveDate};
+use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, Row, SqlitePool};
@@ -631,7 +631,11 @@ async fn non_disposal_gains(
                 match event {
                     Reduction::Amit(e) => out.push(EventGain {
                         kind: CgtEventKind::E10,
-                        tax_year: e.tax_year_end_date.year(),
+                        // The statement's FY by the one shared rule: its year
+                        // end is 30 June through the write path, but a row a
+                        // hand-entered database holds at another date must
+                        // still bucket where `tax_year_for` puts it.
+                        tax_year: tax_year_for(e.tax_year_end_date),
                         amount: fx.to_aud(
                             excess,
                             &parcel.currency,
@@ -795,7 +799,11 @@ async fn gross_buckets(
         let indexation = aud_field(fx, row, "cgt_indexation_gains", &currency, d)?;
         let other = aud_field(fx, row, "cgt_other_gains", &currency, d)?;
 
-        let b = buckets.entry(year_end.year()).or_default();
+        // The statement's FY by the one shared rule (see `tax_year_for`): a
+        // 30 June end is unchanged, and a row a hand-entered database holds at
+        // another date still lands with the G1/C2 and realised gains on the
+        // same fact.
+        let b = buckets.entry(tax_year_for(year_end)).or_default();
         let grossed_up = discount_net * Decimal::from(2);
         b.discount_eligible += grossed_up;
         b.amma_discount_grossed_up += grossed_up;
@@ -2059,6 +2067,69 @@ mod tests {
         assert_eq!(r[0].discount_eligible_gains, Decimal::from(200));
         assert_eq!(r[0].cgt_discount, Decimal::from(100));
         assert_eq!(r[0].net_capital_gain, Decimal::from(100));
+    }
+
+    /// A hand-entered AMMA row at a year end other than 30 June — which
+    /// `amma::db_upsert` refuses (`entities::amma`), so it goes straight into
+    /// `amma_statements` — still buckets its CGT components by
+    /// `domain::tax_year::tax_year_for`, the same rule the realised gains use,
+    /// so both paths file the same fact in the same FY. Under the old
+    /// `.year()` reading a December year end filed the statement one FY early.
+    #[tokio::test]
+    async fn db_amma_bucket_follows_tax_year_for_a_non_june_year_end() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "VAF").await;
+        let year_end = NaiveDate::from_ymd_opt(2024, 12, 31).unwrap();
+        assert_eq!(tax_year_for(year_end), 2025);
+        let mut a = make_amma(1, 1, year_end);
+        a.cgt_discount_gains = Decimal::from(100);
+        test_support::insert_amma_bypassing_checks(&pool, &a).await;
+
+        let r = db_net_capital_gain(&pool).await.unwrap();
+        assert_eq!(
+            tax_years(&r),
+            vec![2025],
+            "a December year end must land in the FY `tax_year_for` names, not in \
+             {year_end}'s calendar year"
+        );
+        assert_eq!(r[0].discount_eligible_gains, Decimal::from(200));
+        assert_eq!(r[0].cgt_discount, Decimal::from(100));
+        assert_eq!(r[0].net_capital_gain, Decimal::from(100));
+    }
+
+    /// The E10 gain an over-large AMIT cost-base reduction produces is bucketed
+    /// by the same rule as the statement's attributed components: E10 shares
+    /// the AMMA row's year end, so a row written straight into
+    /// `amma_statements` at a non-30-June date must land the excess in the FY
+    /// `tax_year_for` gives.
+    #[tokio::test]
+    async fn db_e10_bucket_follows_tax_year_for_a_non_june_year_end() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "VAF").await;
+        // Buy 100 @ $1 → cost base $100; held to the 31 Dec 2024 year end.
+        insert_trade(
+            &pool,
+            1,
+            trade::TradeType::Buy,
+            1,
+            NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
+            Decimal::from(100),
+            Decimal::from(1),
+        )
+        .await;
+        let year_end = NaiveDate::from_ymd_opt(2024, 12, 31).unwrap();
+        assert_eq!(tax_year_for(year_end), 2025);
+        // $1.50/unit × 100 = $150 reduction against a $100 base → $50 excess.
+        let mut a = make_amma(1, 1, year_end);
+        a.cost_base_adjustment = "1.50".parse().unwrap();
+        test_support::insert_amma_bypassing_checks(&pool, &a).await;
+        link_adjustment(&pool, 1, 1, 1, Decimal::from(100)).await;
+
+        let r = db_net_capital_gain(&pool).await.unwrap();
+        assert_eq!(tax_years(&r), vec![2025]);
+        assert_eq!(r[0].cgt_event_e10_gain, Decimal::from(50));
+        // Held ≤ 12 months at the year end → non-discountable, fully assessable.
+        assert_eq!(r[0].other_gains, Decimal::from(50));
     }
 
     #[tokio::test]

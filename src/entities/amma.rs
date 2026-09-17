@@ -316,9 +316,12 @@ pub async fn db_upsert(pool: &SqlitePool, stmt: &AmmaStatement) -> Result<(), Up
             return Err(UpsertError::NegativeAmount(field));
         }
     }
-    // The FY-end date must actually be a financial-year end: reports bucket the
-    // statement by this date's calendar year, which matches domain::tax_year's
-    // rule only for January–June dates — in practice, 30 June.
+    // An AMMA statement is an annual attribution over an income year, and this
+    // model has only the one FY-end shape: 30 June. Every reader buckets the
+    // statement with `domain::tax_year::tax_year_for`, so a hand-entered row
+    // at another date would still land in a coherent FY — but the statement
+    // itself would be for a period the AMIT regime does not report, so the
+    // write path refuses it.
     if (stmt.tax_year_end_date.month(), stmt.tax_year_end_date.day()) != (6, 30) {
         return Err(UpsertError::NotFinancialYearEnd(stmt.tax_year_end_date));
     }
@@ -600,10 +603,14 @@ mod tests {
         assert_eq!(resp.status, StatusCode::NOT_FOUND);
     }
 
-    /// `tax_year_end_date` must be a 30 June FY end: reports bucket the statement
-    /// by that date's calendar year, so e.g. 2024-12-31 would silently land in
-    /// FY2024 while `domain::tax_year::tax_year_for` puts December in FY2025
-    /// (2026-07-12 review: the 30 June assumption was never validated).
+    /// `tax_year_end_date` must be a 30 June FY end: an AMMA attribution is an
+    /// annual statement over an income year, and this model carries only the
+    /// 30 June shape. Readers bucket it with `domain::tax_year::tax_year_for`,
+    /// so a 2024-12-31 row would land in FY2025 — coherent with the rest of
+    /// that FY — but would claim a period the regime does not report, so the
+    /// write path refuses it (2026-07-12 review: the 30 June assumption was
+    /// never validated; 2026-09-17 review: the bucketing no longer rests on
+    /// this check).
     #[tokio::test]
     async fn api_non_june_30_year_end_returns_422() {
         let pool = test_pool().await;
