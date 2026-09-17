@@ -9,6 +9,15 @@
 //! feature. Distinct from the multi-year [`super::tax_summary`] screen, which
 //! is unchanged and stays as the all-years/spreadsheet path.
 //!
+//! The one exception is the disposal schedule's `cgt_discount_amount_aud` /
+//! `gain_after_discount_aud`: a **presentation-only, per-parcel notional**
+//! working that halves each discount-eligible parcel before the year's losses
+//! are netted (see [`DisposalParcelRow::cgt_discount_amount_aud`]). It is
+//! printed under a label saying so and is consumed by no ATO label — the
+//! return's own concession is struck on the **net** gain in the CGT summary —
+//! but it is not an existing pipeline's figure, so the "nothing new" rule
+//! carries this stated exception rather than pretending otherwise.
+//!
 //! The disposal schedule's money figures are **rounded to the cent** here,
 //! and every subtotal and grand total is the sum of those rounded figures
 //! (see [`DisposalParcelRow::round_money_to_cents`], SCENARIOS W-d) — this is
@@ -418,7 +427,13 @@ pub struct DisposalTotals {
     pub proceeds_aud: Decimal,
     pub cost_base_aud: Decimal,
     pub gain_loss_aud: Decimal,
+    /// The sum of the parcels' [`DisposalParcelRow::cgt_discount_amount_aud`] —
+    /// a **notional** pre-netting working, not the year's CGT concession. See
+    /// that field: the ATO nets losses before halving, so the real concession
+    /// is `cgt_summary.cgt_concession_amount`.
     pub cgt_discount_amount_aud: Decimal,
+    /// The sum of the parcels' notional discounted gains — explicitly not label
+    /// 18A. See [`DisposalParcelRow::gain_after_discount_aud`].
     pub gain_after_discount_aud: Decimal,
 }
 
@@ -503,7 +518,27 @@ pub struct DisposalParcelRow {
     /// what the other lawful method would have cost. `None` unless
     /// `indexation_eligible`. Never summed into any total on this report.
     pub indexed_cost_base_aud: Option<Decimal>,
+    /// The parcel's own **notional** 50% concession: half the parcel's gain
+    /// where it is discount-eligible and in gain, else zero. This is the one
+    /// figure on the document that is not an existing report's — a
+    /// presentation-only per-parcel working, printed so the `discount_eligible`
+    /// flag beside it has a figure, and **not** the ATO's CGT concession.
+    ///
+    /// It applies the concession **before** the year's losses are netted,
+    /// which is the wrong order for the return: the ATO nets capital losses
+    /// first and halves only the remainder (`docs/ato/cgt-discount.md`,
+    /// `docs/ato/cgt-using-capital-losses.md`). A $200 eligible gain and a
+    /// $150 loss therefore leave this column at 100 − 150 = −50 while the
+    /// label 18A figure is (200 − 150) ÷ 2 = 25. The printed column is labelled
+    /// *notional, per parcel, before loss netting*, and the real concession is
+    /// struck on the net gain in the CGT summary
+    /// (`cgt_summary.cgt_concession_amount`); no ATO label consumes this
+    /// figure.
     pub cgt_discount_amount_aud: Decimal,
+    /// `gain_loss_aud − cgt_discount_amount_aud` — the same notional per-parcel
+    /// working, and explicitly **not** label 18A (see
+    /// [`Self::cgt_discount_amount_aud`]). Summed for the section's printed
+    /// total only, never reconciled to a tax figure.
     pub gain_after_discount_aud: Decimal,
 
     // FX detail — populated only for a non-AUD parcel.
@@ -981,7 +1016,28 @@ pub struct TrustIncomeRow {
     pub conduit_foreign_income_aud: Decimal,
     pub foreign_source_income_aud: Decimal,
     pub tax_deferred_amount: Option<Decimal>,
+    /// The row's **claimable** franking credits — the `franking_credits`
+    /// (11U / 13Q) offset line, reduced by the at-risk walk's denial exactly
+    /// as the tax summary reduces it. 13C, by contrast, includes the
+    /// *attached* credits however the walk resolved, so [`Self::franked_amount_aud`]
+    /// plus this figure plus [`Self::franking_credits_denied_aud`] reconstructs
+    /// the 13C line (a denied credit stays inside 13C but is not claimable —
+    /// `docs/API.md`'s trust-distribution note).
     pub franking_credits_aud: Decimal,
+    /// `entitled`, `denied`, or `exempt_small_shareholder` — from
+    /// [`franking_at_risk`]; `entitled` when the row isn't in its alert list.
+    /// The trust analogue of [`DividendIncomeRow::franking_status`]: the walk
+    /// covers trust distributions too (`franking::db_franked_dividends` has no
+    /// trust filter), so a denied credit must be visible on the row and not
+    /// only missing from a year total.
+    pub franking_status: String,
+    /// The attached credits the walk denied, AUD — zero when the row passed,
+    /// was exempt, or carries no credits. Carried on the row (and so in the
+    /// JSON drilldown) beside [`Self::franking_status`] so a hand-check can
+    /// reconstruct what 13C includes but 13Q does not: `franked_amount_aud` +
+    /// `franking_credits_aud` + this figure is the 13C line. Not printed as a
+    /// column of its own, matching [`DividendIncomeRow::franking_credits_denied_aud`].
+    pub franking_credits_denied_aud: Decimal,
 }
 
 #[derive(Debug, Serialize)]
@@ -1413,6 +1469,15 @@ async fn push_income_rows(
                 amount_aud: unfranked,
             });
         } else if trust_income {
+            // A trust distribution is holding-period tested exactly like a
+            // dividend (`franking::db_franked_dividends` has no trust filter),
+            // so the row carries the same denial the tax summary applies: the
+            // 11U/13Q credits column is the *claimable* figure, while the
+            // denied amount and the walk's status print beside it (13C keeps
+            // the attached credits either way). Before this the row passed the
+            // full credit through, so a $6,000-credit distribution with a
+            // disqualifying sale printed 6,000 against a summary 13Q of 0.
+            let alert = franking_alerts.get(&income_id);
             out.trust_income.push(TrustIncomeRow {
                 income_id,
                 listing_id,
@@ -1424,7 +1489,9 @@ async fn push_income_rows(
                 conduit_foreign_income_aud: cfi,
                 foreign_source_income_aud: foreign,
                 tax_deferred_amount: income.tax_deferred_amount,
-                franking_credits_aud: fc,
+                franking_credits_aud: fc - alert.map_or(Decimal::ZERO, |a| a.credits_denied),
+                franking_status: alert.map_or("entitled", |a| a.status.as_str()).to_string(),
+                franking_credits_denied_aud: alert.map_or(Decimal::ZERO, |a| a.credits_denied),
             });
         } else if !income.is_foreign_only() {
             // Item 11 (Dividends) is Australian-company dividends only — a
@@ -1494,15 +1561,33 @@ async fn push_amma_rows(
             statement.foreign_income_aud,
             statement.foreign_tax_credits_aud,
         );
+        // Part C's foreign tax on the statement's **capital gains** reaches
+        // 20O only in the share the Division 115 discount leaves assessable —
+        // the tax summary's own apportionment, called here rather than copied
+        // so the printed drilldown can never disagree with the line behind it
+        // (`docs/ato/fito-capital-gains-apportionment.md`, SCENARIOS M-12).
+        // It rides the AMMA row's foreign-tax column because that row *is*
+        // this report's drilldown for the statement's FITO; the statement's
+        // own grossed-up figure still prints in the AMMA component table.
+        let (claimable_capital_gains_tax, _reduced) =
+            tax_summary::apportion_capital_gains_foreign_tax(
+                statement.foreign_tax_credits_capital_gains_aud,
+                statement.cgt_discount_gains_aud,
+                statement.cgt_indexation_gains_aud,
+                statement.cgt_other_gains_aud,
+            );
         out.amma_statements.push(statement);
-        if foreign_income > Decimal::ZERO || foreign_tax > Decimal::ZERO {
+        if foreign_income > Decimal::ZERO
+            || foreign_tax > Decimal::ZERO
+            || claimable_capital_gains_tax > Decimal::ZERO
+        {
             out.foreign_income.push(ForeignIncomeRow {
                 kind: ForeignIncomeKind::Amma,
                 listing_id: Some(listing_id),
                 ticker: Some(ctx.ticker_as_at(listing_id, d)),
                 date: d,
                 amount_aud: foreign_income,
-                foreign_tax_paid_aud: foreign_tax,
+                foreign_tax_paid_aud: foreign_tax + claimable_capital_gains_tax,
             });
         }
     }
@@ -2184,6 +2269,16 @@ mod tests {
     /// Every AUD figure in the income section's per-record rows must sum to
     /// exactly the year's `TaxYearSummary` line — the income section is a
     /// drilldown into that total, never a second computation of it.
+    ///
+    /// The facts also cover the three columns the 2026-09-17 review found
+    /// escaping that contract: (a) a trust distribution whose franking credit
+    /// the at-risk walk denies, which the row must print as the *claimable*
+    /// credit with the denial named beside it; (b) an AMMA statement carrying
+    /// Part C capital-gains foreign tax, whose claimable share the summary
+    /// apportions for the Division 115 discount and which the report's foreign
+    /// total must include; and (c) a year with both a discount-eligible gain
+    /// and a loss, where the disposal schedule's notional per-parcel discount
+    /// is not label 18A because the ATO nets losses first.
     #[tokio::test]
     async fn income_sections_sum_to_tax_year_summary() {
         let pool = test_support::test_pool().await;
@@ -2235,6 +2330,87 @@ mod tests {
         .await
         .unwrap();
 
+        // (a) A trust distribution whose franking credit the 45-day walk
+        // denies: 1,000 units bought 3 June 2024, entitled at the 30 June
+        // year end, and sold 8 July — 34 at-risk days — so the walk denies the
+        // whole 6,000. The sale falls in FY2025, leaving FY2024's disposal
+        // schedule untouched. The dividend and trust routes must both print
+        // the *claimable* credit; before the fix the trust row passed the full
+        // 6,000 through against a summary 13Q of nil.
+        test_support::buy(3, 1)
+            .date(ymd(2024, 6, 3))
+            .qty(dec("1000"))
+            .price(Decimal::ONE)
+            .insert(&pool)
+            .await;
+        test_support::sell(4, 1)
+            .date(ymd(2024, 7, 8))
+            .qty(dec("1000"))
+            .price(Decimal::ONE)
+            .insert(&pool)
+            .await;
+        test_support::allocate(&pool, 1, 4, 3, dec("1000")).await;
+        test_support::income(3, 1, ymd(2024, 7, 20))
+            .with(|i| {
+                i.trust_income = true;
+                i.entitlement_date = Some(ymd(2024, 6, 30));
+                i.franked_amount = dec("14000");
+                i.franking_credits = dec("6000");
+            })
+            .insert(&pool)
+            .await;
+
+        // (b) An AMIT statement whose Part C capital-gains foreign tax the
+        // summary apportions for the Division 115 discount: 300 of tax on a
+        // 300 discount-method gain (grossed up to 600) is half claimable, so
+        // the report's AMMA foreign tax is the statement's 500 plus 150, and
+        // both subtotals reconcile to the summary's 20O line.
+        listing_amit(&pool, 2, "VDHG").await;
+        test_support::amma(1, 2)
+            .units(dec("1000"))
+            .with(|a| {
+                a.foreign_income = dec("1000");
+                a.foreign_tax_credits = dec("500");
+                a.cgt_discount_gains = dec("300");
+                a.foreign_tax_credits_capital_gains = dec("300");
+            })
+            .insert(&pool)
+            .await;
+
+        // (c) A year with both a discount-eligible gain and a capital loss —
+        // FY2025, so the AMMA's grossed-up discount gain above cannot muddy
+        // the arithmetic. $200 of gain held over 12 months halves per parcel
+        // to 100; the $150 loss is not discountable, so the schedule's
+        // *notional* column sums to −50 while the ATO order (net, then halve)
+        // gives label 18A = 25.
+        test_support::listing(3)
+            .ticker("CGT")
+            .name("Capital Gains Co")
+            .insert(&pool)
+            .await;
+        for id in [5, 7] {
+            test_support::buy(id, 3)
+                .date(ymd(2023, 1, 10))
+                .qty(dec("100"))
+                .price(dec("10"))
+                .insert(&pool)
+                .await;
+        }
+        test_support::sell(6, 3)
+            .date(ymd(2024, 9, 2))
+            .qty(dec("100"))
+            .price(dec("12"))
+            .insert(&pool)
+            .await;
+        test_support::allocate(&pool, 2, 6, 5, dec("100")).await;
+        test_support::sell(8, 3)
+            .date(ymd(2024, 10, 1))
+            .qty(dec("100"))
+            .price(dec("8.5"))
+            .insert(&pool)
+            .await;
+        test_support::allocate(&pool, 3, 8, 7, dec("100")).await;
+
         let summary_rows = crate::reports::tax_summary::db_tax_summary(&pool)
             .await
             .unwrap();
@@ -2272,6 +2448,92 @@ mod tests {
         assert_eq!(interest_total, summary.interest_income);
         let deductions_total: Decimal = report.income.deductions.iter().map(|r| r.amount_aud).sum();
         assert_eq!(deductions_total, summary.deductions_total);
+
+        // (a) The trust row prints the *claimable* credit — nil — and names the
+        // denial, so 13C still reconstructs exactly: 14,000 franked + 0
+        // claimable + 6,000 denied is the summary's grossed-up 13C line, while
+        // the credits column alone sums to the summary's 13Q.
+        let trust = report
+            .income
+            .trust_income
+            .iter()
+            .find(|r| r.income_id == 3)
+            .expect("the denied trust row");
+        assert_eq!(trust.franking_credits_aud, Decimal::ZERO, "13Q of nil");
+        assert_eq!(trust.franking_status, "denied");
+        assert_eq!(trust.franking_credits_denied_aud, dec("6000"));
+        assert_eq!(summary.franking_credits_denied, dec("6000"));
+        let trust_credits: Decimal = report
+            .income
+            .trust_income
+            .iter()
+            .map(|r| r.franking_credits_aud)
+            .sum();
+        assert_eq!(trust_credits, summary.franking_credits);
+        let trust_13c: Decimal = report
+            .income
+            .trust_income
+            .iter()
+            .map(|r| r.franked_amount_aud + r.franking_credits_aud + r.franking_credits_denied_aud)
+            .sum();
+        assert_eq!(trust_13c, summary.trust_franked_distributions);
+        assert_eq!(summary.trust_franked_distributions, dec("20000"));
+
+        // (b) The AMMA row's foreign tax is the statement's own credits plus
+        // the claimable share of its Part C capital-gains tax, apportioned by
+        // the summary's own rule — so the printed row and both subtotals
+        // reconcile to the 20O line, where the report formerly showed 500.
+        let amma_row = report
+            .income
+            .foreign_income
+            .iter()
+            .find(|r| r.kind == ForeignIncomeKind::Amma)
+            .expect("the AMMA foreign-income row");
+        assert_eq!(amma_row.amount_aud, dec("1000"));
+        assert_eq!(amma_row.foreign_tax_paid_aud, dec("650"));
+        let (claimable, reduced) = crate::reports::tax_summary::apportion_capital_gains_foreign_tax(
+            dec("300"),
+            dec("300"),
+            Decimal::ZERO,
+            Decimal::ZERO,
+        );
+        assert_eq!((claimable, reduced), (dec("150"), dec("150")));
+        assert_eq!(
+            report
+                .income
+                .foreign_income_totals
+                .amma
+                .foreign_tax_paid_aud,
+            dec("500") + claimable
+        );
+        assert_eq!(
+            report
+                .income
+                .foreign_income_totals
+                .total
+                .foreign_tax_paid_aud,
+            summary.foreign_tax_offsets,
+            "the foreign-income total ties to the summary's 20O line"
+        );
+        assert_eq!(summary.foreign_tax_offsets, dec("650"));
+
+        // (c) FY2025 has both a discount-eligible gain and a loss: the
+        // schedule prints the parcel gross working, whose *notional*
+        // per-parcel discount sums to −50, while label 18A follows the ATO
+        // order — net the 150 loss, then halve the 50 left.
+        let report25 = db_tax_report(&pool, 2025).await.unwrap();
+        let cgt = report25
+            .cgt_summary
+            .as_ref()
+            .expect("the year has gain/loss activity");
+        assert_eq!(report25.disposals.totals.gain_loss_aud, dec("50"));
+        assert_eq!(
+            report25.disposals.totals.gain_after_discount_aud,
+            dec("-50"),
+            "the per-parcel notional column halves before netting"
+        );
+        assert_eq!(cgt.cgt_concession_amount, dec("25"));
+        assert_eq!(cgt.net_capital_gain, dec("25"), "label 18A");
     }
 
     /// SCENARIOS W-f, the drilldown under the rounding. The tax summary's

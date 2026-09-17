@@ -470,7 +470,12 @@ fn fito_de_minimis_aud() -> Decimal {
 /// it splits across the three methods. Nil tax — or nil gains, which
 /// `amma::db_upsert` refuses to pair with a capital-gains tax figure — leaves
 /// nothing to apportion.
-fn apportion_capital_gains_foreign_tax(
+///
+/// `pub(crate)` because the annual tax report's per-record foreign-income
+/// detail must strike the same claimable figure the summary's `20O` line does
+/// — a second copy of this arithmetic there would be a tax-rule divergence,
+/// which is exactly what this module exists to prevent.
+pub(crate) fn apportion_capital_gains_foreign_tax(
     foreign_tax: Decimal,
     discount_gains: Decimal,
     indexation_gains: Decimal,

@@ -3418,6 +3418,53 @@ fn tax_summary_13c_includes_attached_credits_documented() {
     );
 }
 
+/// Docs-sync pin for the annual tax report's three reconciliations with the
+/// tax summary (2026-09-17 review): a trust row's denied franking credit, the
+/// AMMA capital-gains foreign tax inside the foreign-income total, and the
+/// disposal schedule's notional per-parcel discount. The behaviour is pinned
+/// by `reports::tax_report`'s own tests; this is the documentation half — the
+/// API section must say which resolution was chosen for the disposal column
+/// and why, and that the other two figures agree with the summary lines
+/// behind them.
+#[test]
+fn annual_tax_report_reconciliations_documented() {
+    // The disposal schedule's resolution: the column is labelled a notional
+    // pre-netting working, and the docs state the order it departs from.
+    assert!(API_MD.contains(
+        "**The `gain_after_discount_aud` column is a notional per-parcel working, and is not \
+         label 18A.**"
+    ));
+    assert!(
+        API_MD.contains(
+            "the ATO nets the year's gains and losses first and halves only the remainder"
+        )
+    );
+    assert!(API_MD.contains("no ATO label consumes the schedule's figure"));
+    assert!(API_MD.contains("stated exception to this report's \"computes nothing new\" rule"));
+    // The ATO rule it departs from is mirrored, and says losses come first.
+    let discount = ato(include_str!("../docs/ato/cgt-discount.md"));
+    assert!(
+        discount.contains(
+            "you must subtract these from your capital gains before applying the discount"
+        )
+    );
+    // A trust row carries the same entitlement status/denial as a dividend.
+    assert!(API_MD.contains(
+        "and `franking_credits_denied_aud`, because the 45-day walk and its denial cover trust \
+         distributions exactly as they cover dividends"
+    ));
+    // The AMMA row's foreign tax includes the apportioned capital-gains tax.
+    assert!(API_MD.contains(
+        "the claimable share of its Part C capital-gains foreign tax, apportioned for the \
+         Division 115 discount"
+    ));
+    // …under the rule mirrored for exactly that apportionment.
+    let fito = ato(include_str!(
+        "../docs/ato/fito-capital-gains-apportionment.md"
+    ));
+    assert!(fito.contains("must be apportioned accordingly"));
+}
+
 /// Docs-sync pin for the conduit-foreign-income entry convention (SCENARIOS
 /// G-03). The field was previously excluded from every total with nothing
 /// stating why, which is right only if the figure is a memo *within*

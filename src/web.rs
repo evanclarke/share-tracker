@@ -2188,6 +2188,21 @@ mod tests {
         assert!(js.contains("Trading activity"));
         assert!(js.contains("Gain / loss summary"));
         assert!(js.contains("Overall tax summary"));
+        // The disposal schedule's per-parcel discount is struck before the
+        // year's losses are netted, so the column is labelled a notional
+        // working and the section says the ATO's own concession is the net
+        // gain's, in the CGT summary — the two figures must never read as if
+        // they should agree.
+        assert!(js.contains("Gain after discount (AUD, notional)"));
+        assert!(js.contains("notional gain after discount (before loss netting)"));
+        assert!(js.contains("not label 18A"));
+        // A trust distribution is holding-period tested like a dividend, so its
+        // row carries the same franking entitlement status the dividend table
+        // prints — a denied credit is visible on the row, never merely absent
+        // from a year total.
+        assert!(js.contains(
+            "genericTable(inc.trust_income, ['date_paid', 'ticker', 'entitlement_date', 'franked_amount_aud', 'unfranked_amount_aud', 'conduit_foreign_income_aud', 'foreign_source_income_aud', 'franking_credits_aud', 'franking_status', 'tax_deferred_amount'])"
+        ));
         // The Deductions table names the holding the expense was attributed to
         // (SCENARIOS H-07): without the column the archived PDF carries no
         // trace of the attribution, which is exactly what a rename or demerger

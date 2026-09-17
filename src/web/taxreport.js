@@ -166,7 +166,7 @@ function parcelRows(p) {
 
 const DISPOSAL_HEADERS = [
   'Acquired', 'Method', 'Units', 'Buy price', 'Initial cost base (AUD)', 'Adjusted cost base (AUD)',
-  'Sold', 'Sale price', 'Proceeds (AUD)', 'Gain / loss (AUD)', 'Discount eligible', 'Gain after discount (AUD)',
+  'Sold', 'Sale price', 'Proceeds (AUD)', 'Gain / loss (AUD)', 'Discount eligible', 'Gain after discount (AUD, notional)',
 ];
 
 function disposalsSection(d) {
@@ -185,7 +185,7 @@ function disposalsSection(d) {
       el('p', { class: 'subtotal' }, 'Subtotal: proceeds ' + moneyText(g.subtotal.proceeds_aud)
         + ', cost base ' + moneyText(g.subtotal.cost_base_aud)
         + ', gain/loss ' + moneyText(g.subtotal.gain_loss_aud)
-        + ', gain after discount ' + moneyText(g.subtotal.gain_after_discount_aud)),
+        + ', notional gain after discount (before loss netting) ' + moneyText(g.subtotal.gain_after_discount_aud)),
     ]);
   });
   return el('div', { class: 'doc-section' }, [
@@ -194,7 +194,17 @@ function disposalsSection(d) {
     el('p', { class: 'total' }, 'Total: proceeds ' + moneyText(d.totals.proceeds_aud)
       + ', cost base ' + moneyText(d.totals.cost_base_aud)
       + ', gain/loss ' + moneyText(d.totals.gain_loss_aud)
-      + ', gain after discount ' + moneyText(d.totals.gain_after_discount_aud)),
+      + ', notional gain after discount (before loss netting) ' + moneyText(d.totals.gain_after_discount_aud)),
+    // The per-parcel discount column is struck BEFORE the year's losses are
+    // netted, so it is a notional working and never label 18A. The ATO nets
+    // losses first and halves only the remainder, which is the CGT summary's
+    // own concession line below — say so on the archived page rather than
+    // leave two figures that look like they should agree.
+    el('p', { class: 'hint' },
+      'The "gain after discount" column applies each parcel\u2019s own 50% concession before the year\u2019s '
+      + 'capital losses are netted, so it is a notional per-parcel working and not label 18A. The ATO nets '
+      + 'the year\u2019s gains and losses first and strikes the concession on the net gain: that figure is the '
+      + 'CGT Concession Amount in the Gain / loss summary below.'),
   ]);
 }
 
@@ -373,7 +383,7 @@ function incomeSection(inc, summaryLines) {
   return el('div', { class: 'doc-section' }, [
     el('h3', null, 'Income'),
     el('h4', null, 'Trust income'),
-    genericTable(inc.trust_income, ['date_paid', 'ticker', 'entitlement_date', 'franked_amount_aud', 'unfranked_amount_aud', 'conduit_foreign_income_aud', 'foreign_source_income_aud', 'franking_credits_aud', 'tax_deferred_amount']),
+    genericTable(inc.trust_income, ['date_paid', 'ticker', 'entitlement_date', 'franked_amount_aud', 'unfranked_amount_aud', 'conduit_foreign_income_aud', 'foreign_source_income_aud', 'franking_credits_aud', 'franking_status', 'tax_deferred_amount']),
     inc.amma_statements.length ? el('p', { class: 'hint' }, 'AMMA statement components for the year:') : null,
     ammaStatementsTable(inc.amma_statements),
     el('h4', null, 'Dividend income'),

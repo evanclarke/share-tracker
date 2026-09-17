@@ -5901,3 +5901,60 @@ model represents). `doc_checks::tax_summary_13c_includes_attached_credits_docume
 and the API wording. Gates: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
 `cargo test` (2,420 passed) and `cargo test ato_examples` (38 passed) all clean, plus
 `node --test 'src/web/*.test.js'` (149 passed).
+
+## The annual report's sections do not reconcile to the tax summary (2026-09-17 review, financial correctness)
+
+(2026-09-17 review. `reports::tax_report` documents that its rows sum to their tax-summary lines and
+pins that with a test; three columns escape it. Each is a separate one-line fix, grouped here
+because they share one contract.)
+
+- [x] Reproduced: the trust-income rows print the franking credits the summary *denies* — the
+  dividend branch subtracts `credits_denied` at `src/reports/tax_report.rs:1442` while the trust
+  branch passes `fc` straight through at `:1423`. The 45-day walk and its denial cover trust rows too
+  (`reports/franking.rs:323-384` has no trust filter; the summary accumulates their credits at
+  `:771` and subtracts the denial at `:1032`), and `TrustIncomeRow` (`:964-981`) has no
+  status/denied column. A $6,000-credit trust distribution with a disqualifying sale prints 6,000
+  against a 13Q of 0
+- [x] Reproduced: the foreign-income total omits the AMMA capital-gains foreign tax that 20O
+  includes — `tax_report.rs:1489-1502` pushes only `foreign_tax_credits_aud`, while
+  `tax_summary.rs:861-864` adds the apportioned `foreign_tax_credits_capital_gains`. With
+  `foreign_tax_credits = 500` and a partly-discountable capital-gains foreign tax of 300, 20O shows
+  500 + the claimable share while the report's total shows 500
+- [x] Reproduced: the disposal schedule discounts **each parcel before losses are netted**
+  (`tax_report.rs:788-792`, summed by `DisposalTotals::add` at `:430-436`, printed at
+  `src/web/taxreport.js:189-198`) and contradicts the 18A figure the same document prints. A $200
+  eligible gain and a $150 loss print "gain after discount −50" where the ATO order (net, then
+  halve) gives 18A = 25. No ATO label consumes the schedule figure, so 18A itself is right — but the
+  archived document disagrees with itself, and the module doc's "computes nothing new" is untrue of
+  this column
+- [x] Fix: carry the denial into `TrustIncomeRow`; add the apportioned AMMA capital-gains foreign tax
+  to the foreign-income total; and either print per-disposal **gross** figures and strike the
+  concession on the net gain, or label the column explicitly as a notional pre-netting figure
+- [x] Tests: the existing reconciliation test extended to cover a denied trust credit, an AMMA with
+  capital-gains foreign tax, and a year with both a gain and a loss
+- [x] Docs sync: `docs/API.md`'s annual tax report section for the disposal-schedule resolution
+
+**Closed 2026-09-17.** All three columns now reconcile. `TrustIncomeRow` gained `franking_status` and
+`franking_credits_denied_aud` (the trust analogue of the dividend row's fields) and the trust branch
+prints `fc − credits_denied`, so a $6,000-credit distribution beside a disqualifying sale prints
+against the summary's 13Q of 0 while 13C still reconstructs as `franked + claimable + denied`; the
+web renderer's Trust income table gained the status column. The AMMA foreign-income row's foreign-tax
+figure is now the statement's `foreign_tax_credits` **plus** the claimable share of its Part C
+capital-gains foreign tax, struck by the tax summary's own `apportion_capital_gains_foreign_tax`
+(made `pub(crate)` rather than copied, so the drilldown can never diverge from the 20O line behind
+it). For the disposal schedule, the **notional-label** resolution was chosen over printing gross
+figures: the column keeps its per-parcel arithmetic and JSON shape (so the existing rounding and
+reconciliation assertions stand) but is headed *Gain after discount (AUD, notional)*, its
+subtotal/total prose says "before loss netting", the printed section carries a note that the ATO nets
+losses first and halves the remainder (that figure being the CGT summary's concession line), and the
+module doc now carries this as the stated exception to "computes nothing new" — no ATO label consumes
+it and 18A itself was already right.
+
+Tests: `reports::tax_report::tests::income_sections_sum_to_tax_year_summary` extended to cover the
+denied trust credit (13C 18,666 against a 13Q of 0 with the denial carried on the row), the AMMA
+capital-gains foreign tax (500 + the claimable share, not 500) and a gain-and-loss year (the notional
+−50 against 18A's 25), plus `doc_checks::annual_tax_report_reconciliations_documented` and the
+`web::tests::annual_tax_report_ui_present` bundle assertions for the notional label and the trust
+status column. Gates: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`
+(2,421 passed) and `cargo test ato_examples` (38 passed) all clean, plus
+`node --test 'src/web/*.test.js'` (149 passed).
