@@ -2415,6 +2415,44 @@ mod tests {
         assert!(config.contains("{ key: 'events', title: 'Activity' }"));
     }
 
+    /// A numeric column sorts through the exact decimal-string comparator
+    /// (util.js's `decCompare`), never through `Number()`. The API's money and
+    /// quantity values are decimal *strings*, and a float comparison loses
+    /// every digit past ~15 significant figures: two long 8-dp quantities that
+    /// differ only in their last digits came out equal, and the sort silently
+    /// left the server's order in place — a wrong order re-sorting could not
+    /// correct. The comparator's own behaviour is unit-tested in
+    /// `util.test.js`; these pin the call-site wiring, which is what a broken
+    /// refactor would leave behind while the helper stayed correct.
+    #[tokio::test]
+    async fn numeric_columns_sort_through_the_exact_decimal_comparator() {
+        let js = app_js_body().await;
+        // The comparator lives beside the other exact decimal arithmetic,
+        // signed (a numeric column can hold a capital loss)…
+        assert!(js.contains("export function decCompare(a, b)"));
+        assert!(js.contains("function signedDecParts(s)"));
+        // …and filterableTable sorts a numeric column through it. Scanned on
+        // `app.js` itself rather than the concatenated bundle: `util.js`'s own
+        // doc comment quotes the old float form as the bug it documents.
+        let app = body_string(get("/static/app.js").await).await;
+        assert!(app.contains("let cmp = numeric[sortCol] ? decCompare(av, bv) : null;"));
+        assert!(!app.contains("Number(av) - Number(bv)"));
+        // Cells with no numeric value (a numeric column's blank optionals)
+        // keep the display-text fallback, and the tie-break that makes a
+        // descending sort the exact reverse of the ascending one is untouched.
+        assert!(app.contains(
+            "if (cmp === null) cmp = displayText(a, sortCol).localeCompare(displayText(b, sortCol));"
+        ));
+        assert!(app.contains("if (cmp === 0) cmp = given.get(a) - given.get(b);"));
+        // The Annual Tax Report's two zero tests are the same exact
+        // decimal-string equality, never a float zero-test on a money value.
+        let tax = body_string(get("/static/taxreport.js").await).await;
+        assert!(tax.contains("!decStrEq(r.conduit_foreign_income_aud, '0')"));
+        assert!(tax.contains("decStrEq(line.value, '0')"));
+        assert!(!tax.contains("Number(r.conduit_foreign_income_aud)"));
+        assert!(!tax.contains("Number(line.value)"));
+    }
+
     #[tokio::test]
     async fn expandable_parcel_detail_ui_present() {
         let js = app_js_body().await;

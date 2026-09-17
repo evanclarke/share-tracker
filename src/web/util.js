@@ -1221,6 +1221,43 @@ export function decEq(a, b) {
   return pa.units * 10n ** (scale - BigInt(pa.dp)) === pb.units * 10n ** (scale - BigInt(pb.dp));
 }
 
+// decParts with a sign: "123.45" / "-123.45" → { units: ±12345n, dp: 2 }.
+// decParts is deliberately non-negative (the income form's own figures are),
+// but a table column's money can be negative — a capital loss, a negative
+// residual — so decCompare below pulls the sign off and parses the magnitude.
+function signedDecParts(s) {
+  s = String(s).trim();
+  if (s.charAt(0) !== '-') return decParts(s);
+  const mag = decParts(s.slice(1));
+  return mag ? { units: -mag.units, dp: mag.dp } : null;
+}
+
+// Exact ordering of two decimal strings, as -1 / 0 / 1 — the comparator a
+// table's numeric column sorts through (filterableTable, app.js).
+//
+// The API's money and quantity values are decimal *strings*, and comparing
+// them as floats (`Number(av) - Number(bv)`) loses every digit past ~15
+// significant figures: two long 8-dp quantities that differ only in their
+// last digits come out equal, so the sort falls back to server order — a
+// wrong order the reader cannot correct by re-sorting. Comparing through
+// decParts' BigInt units at a common scale is exact at any length.
+//
+// Returns null when either operand is not a decimal — an empty or absent
+// optional, a non-numeric string. Those cells have no numeric value to order
+// by, which is the caller's signal to fall back to its display-text
+// comparison; a blank must never sort as zero.
+export function decCompare(a, b) {
+  // The table's own "is this cell numeric" test, so the comparator takes over
+  // exactly the pairs the float comparison used to see and no others.
+  if (!looksNumeric(a) || !looksNumeric(b)) return null;
+  const pa = signedDecParts(a), pb = signedDecParts(b);
+  if (!pa || !pb) return null;
+  const scale = Math.max(pa.dp, pb.dp);
+  const ua = pa.units * 10n ** BigInt(scale - pa.dp);
+  const ub = pb.units * 10n ** BigInt(scale - pb.dp);
+  return ua < ub ? -1 : ua > ub ? 1 : 0;
+}
+
 // ---- allocation running total -------------------------------------------
 // The shared allocation editor's live "allocated vs required" line, kept pure
 // so `util.test.js` can pin it. `quantities` are the raw strings typed into

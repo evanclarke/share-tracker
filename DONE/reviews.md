@@ -6497,3 +6497,41 @@ the un-apportioned code) and
 (verified to fail `…334` vs `…333` against the divide-first form). Gates: `cargo fmt --check`,
 `cargo clippy --all-targets -- -D warnings`, `cargo test` (2,461 passed) and `cargo test ato_examples`
 (38 passed) all clean.
+
+## Numeric table sorting and two money tests coerce decimal strings through `Number()` (2026-09-17 review, web frontend)
+
+(2026-09-17 review. The frontend's exact decimal arithmetic is BigInt-on-string throughout, and this
+is the one place a money/quantity value leaves it.)
+
+- [x] Reproduced by reading `src/web/app.js:226`: `cmp = Number(av) - Number(bv)` for a numeric
+  column. Past ~15 significant digits two long 8-dp quantities compare equal and the sort falls back
+  to server order — a wrong order the user cannot correct by re-sorting
+- [x] `src/web/taxreport.js:307` (`Number(r.conduit_foreign_income_aud) !== 0`) and `:345`
+  (`Number(line.value) === 0`) test money for zero through a float. Not currently wrong (a float
+  zero-test only misfires below ~1e-308), but it is the same escape the rule forbids
+- [x] Fix: compare through the existing exact helpers (`decParts`/BigInt-scaled strings) and test
+  zero with `decStrEq(v, '0')`; add a sort comparator unit test in `src/web/*.test.js`
+- [x] Tests: a `src/web/app.js`-adjacent unit test (or an extracted pure comparator) asserting two
+  long 8-dp values that differ in the last digits order correctly
+- [x] Docs sync: none
+
+**Closed 2026-09-17.** `util.js` gained the pure `decCompare(a, b)` (with a `signedDecParts` helper,
+since `decParts` is deliberately non-negative and a table's money can be a loss): it keeps the
+table's own `looksNumeric` test so it takes over exactly the pairs the float comparison saw, scales
+both operands' BigInt units to a common `dp` and compares — exact at any length and scale, negatives
+included. `filterableTable` sorts a numeric column through it instead of `Number(av) - Number(bv)`,
+and the pre-existing tie-break (`cmp === 0` → the given/server order, then `× sortDir`) is literally
+unchanged, so a descending sort is still the exact reverse of the ascending one. A cell that is empty,
+absent or not a decimal returns `null` from the comparator, which is the caller's signal to keep the
+display-text comparison, so a blank still never sorts as zero. `taxreport.js`'s two money zero-tests
+now use `decStrEq(v, '0')` (both fields are non-null `Decimal`s serialised as strings, so behaviour is
+identical).
+
+Tests: four `src/web/util.test.js` cases — `decCompare orders long 8-dp quantities that differ only in
+the last digits` (asserting in its body that `Number()` would have called them equal), `decCompare is
+exact at any length, not just past the float cutoff`, `decCompare orders negative money, including
+against zero` and `decCompare returns null for cells with no numeric value, never zero` — plus
+`web::tests::numeric_columns_sort_through_the_exact_decimal_comparator` for the call-site wiring
+(scoped per module, since `util.js`'s own comment quotes the old float form as the bug it documents).
+Gates: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` (2,462 passed)
+and `node --test 'src/web/*.test.js'` (163 passed) all clean.

@@ -14,7 +14,7 @@
 import {
   el, toastIfCurrent, setMainIfCurrent, beginNavigation, navigationToken,
   isCurrentNavigation, reload, looksNumeric, isTimestamp, fmtLocalTimestamp, utcTooltip,
-  cellText, numericDisplay, moneyText, columnKinds, columnLabel, columnLabelMaps,
+  cellText, numericDisplay, decCompare, moneyText, columnKinds, columnLabel, columnLabelMaps,
   fkLabelMaps, api, apiUrl, pathSeg, nextId, loadOptions, listingNamer, describeTrade, tradeOrigin,
   columnLinks, listingLinkFrom, defaultSortColumn,
   periodReturnPct, holdingHasActivity, loadPref, savePref, initTheme,
@@ -223,9 +223,16 @@ function filterableTable(rows, cols, opts) {
     if (sortCol != null) {
       out = out.slice().sort(function (a, b) {
         const av = a[sortCol], bv = b[sortCol];
-        let cmp;
-        if (numeric[sortCol] && looksNumeric(av) && looksNumeric(bv)) cmp = Number(av) - Number(bv);
-        else cmp = displayText(a, sortCol).localeCompare(displayText(b, sortCol));
+        // A numeric column sorts through the exact decimal-string comparator
+        // (util.js's decCompare) — its money/quantity values are decimal
+        // strings, and Number() loses every digit past ~15 significant
+        // figures, silently tying two long 8-dp quantities and leaving the
+        // server's order in place. A cell that is empty, absent or not a
+        // decimal (a numeric column's optional blanks) has no numeric order,
+        // so it keeps the display-text comparison below rather than sorting
+        // as zero.
+        let cmp = numeric[sortCol] ? decCompare(av, bv) : null;
+        if (cmp === null) cmp = displayText(a, sortCol).localeCompare(displayText(b, sortCol));
         if (cmp === 0) cmp = given.get(a) - given.get(b);
         return cmp * sortDir;
       });

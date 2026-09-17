@@ -15,7 +15,7 @@
 // of the app.
 import {
   el, toastIfCurrent, setMainIfCurrent, navigationToken, api, numericDisplay, moneyText, cellText,
-  fmtLocalTimestamp, columnLabel,
+  fmtLocalTimestamp, columnLabel, decStrEq,
 } from './util.js';
 import { setActiveNav } from './nav.js';
 
@@ -312,10 +312,13 @@ function ammaStatementsTable(rows) {
 // own CFI line, never added to a total. Shown only when the year actually has
 // one, so the note doesn't clutter a report with no CFI in it. (For an
 // Australian resident an unfranked dividend declared to be CFI is assessable;
-// it is NANE only to a foreign resident.)
+// it is NANE only to a foreign resident.) The zero test is the exact
+// decimal-string one — the amount is a decimal *string* from the API, so it
+// is never coerced through `Number()`, the same rule the money arithmetic
+// follows everywhere else.
 function cfiFootnote(inc) {
   const any = ['dividends', 'trust_income'].some(function (k) {
-    return (inc[k] || []).some(function (r) { return Number(r.conduit_foreign_income_aud) !== 0; });
+    return (inc[k] || []).some(function (r) { return !decStrEq(r.conduit_foreign_income_aud, '0'); });
   });
   if (!any) return null;
   return el('p', { class: 'hint' },
@@ -351,9 +354,11 @@ function foreignIncomeTotals(inc) {
 // where `ess_taxed_upfront_reduction` would otherwise be a bare line with an
 // empty ATO label. Same call as `cfiFootnote`: print the condition only when a
 // reduction was actually applied, and say where to record the other answer.
+// Its zero test is `cfiFootnote`'s too: exact decimal-string equality, never a
+// float zero-test on a money value.
 function essReductionFootnote(lines) {
   const line = (lines || []).find(function (l) { return l.field === 'ess_taxed_upfront_reduction'; });
-  if (!line || Number(line.value) === 0) return null;
+  if (!line || decStrEq(line.value, '0')) return null;
   return el('p', { class: 'hint' },
     'The $1,000 taxed-upfront reduction shown in the summary assumes adjusted taxable income of '
     + '$180,000 or less for this year — a test outside this system\u2019s data. If the year exceeds it, '

@@ -15,7 +15,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   roundDecimalStr, groupThousands, padMinDp, decStrEq, numericDisplay,
-  addDecimalStrings, decParts, mulToCents, frankingCreditFor, decEq,
+  addDecimalStrings, decParts, decCompare, mulToCents, frankingCreditFor, decEq,
   looksNumeric, columnKinds, columnLabel, columnLinks, listingLinkFrom, defaultSortColumn,
   tradeOrigin,
   periodReturnPct,
@@ -184,6 +184,47 @@ test('decEq is numeric equality over the non-negative income figures', () => {
   assert.equal(decEq('1', '1.0000'), true);
   assert.equal(decEq('1', '1.01'), false);
   assert.equal(decEq('x', '1'), false);
+});
+
+// ---- decCompare ----------------------------------------------------------
+// The comparator a table's numeric column sorts through. The regression it
+// guards: the old sort did `Number(av) - Number(bv)`, which loses every digit
+// past ~15 significant figures.
+test('decCompare orders long 8-dp quantities that differ only in the last digits', () => {
+  // 13 integer digits + 8 decimals is 21 significant figures — a quantity a
+  // crypto holding can genuinely carry. As doubles these two are the *same*
+  // number, so the old comparator called them equal (asserted here as the
+  // reproduction) and the sort fell back to the order the server sent.
+  const a = '1234567890123.12345678';
+  const b = '1234567890123.12345679';
+  assert.equal(Number(a) - Number(b), 0); // the old `Number(av) - Number(bv)`
+  assert.equal(decCompare(a, b), -1);
+  assert.equal(decCompare(b, a), 1);
+  assert.equal(decCompare(a, a), 0);
+});
+
+test('decCompare is exact at any length, not just past the float cutoff', () => {
+  assert.equal(decCompare('2', '10'), -1); // not a lexicographic "10" < "2"
+  assert.equal(decCompare('1.5', '1.50'), 0); // equal values, different dp
+  assert.equal(decCompare('0.1', '0.09999999999999999999'), 1); // exact, where floats tie
+  assert.equal(decCompare('1000000000000000000000.5', '1000000000000000000000.4'), 1);
+});
+
+test('decCompare orders negative money, including against zero', () => {
+  assert.equal(decCompare('-2', '1'), -1);
+  assert.equal(decCompare('-1.5', '-1.50'), 0);
+  assert.equal(decCompare('-0.5', '-0.25'), -1);
+  assert.equal(decCompare('-0', '0'), 0); // signed zero is zero
+  assert.equal(decCompare('-100.00000001', '-100.00000002'), 1);
+});
+
+test('decCompare returns null for cells with no numeric value, never zero', () => {
+  // The caller's signal to keep its display-text order: empty, absent and
+  // non-numeric cells must not sort as if they were 0.
+  for (const bad of ['', '  ', ' 1', null, undefined, 'abc', '1e3', '1,000', true]) {
+    assert.equal(decCompare(bad, '0'), null, String(bad));
+    assert.equal(decCompare('0', bad), null, String(bad));
+  }
 });
 
 // ---- looksNumeric / columnKinds / columnLabel ----------------------------

@@ -38,23 +38,6 @@ what has been verified is SCENARIOS.md's
 [Verification status](SCENARIOS.md#verification-status) table and its per-section findings blocks;
 the maintained record of what was built and decided is the `DONE/*.md` archive.
 
-## Numeric table sorting and two money tests coerce decimal strings through `Number()` (2026-09-17 review, web frontend)
-
-(2026-09-17 review. The frontend's exact decimal arithmetic is BigInt-on-string throughout, and this
-is the one place a money/quantity value leaves it.)
-
-- [ ] Reproduced by reading `src/web/app.js:226`: `cmp = Number(av) - Number(bv)` for a numeric
-  column. Past ~15 significant digits two long 8-dp quantities compare equal and the sort falls back
-  to server order — a wrong order the user cannot correct by re-sorting
-- [ ] `src/web/taxreport.js:307` (`Number(r.conduit_foreign_income_aud) !== 0`) and `:345`
-  (`Number(line.value) === 0`) test money for zero through a float. Not currently wrong (a float
-  zero-test only misfires below ~1e-308), but it is the same escape the rule forbids
-- [ ] Fix: compare through the existing exact helpers (`decParts`/BigInt-scaled strings) and test
-  zero with `decStrEq(v, '0')`; add a sort comparator unit test in `src/web/*.test.js`
-- [ ] Tests: a `src/web/app.js`-adjacent unit test (or an extracted pure comparator) asserting two
-  long 8-dp values that differ in the last digits order correctly
-- [ ] Docs sync: none
-
 ## Bespoke form labels are not associated with their controls (2026-09-17 review, web frontend)
 
 (2026-09-17 review. `buildFieldInput` associates its label and control correctly; the hand-built
