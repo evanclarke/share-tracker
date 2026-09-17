@@ -255,9 +255,13 @@ fn resolve_email(config: EmailConfig) -> Result<super::email::EmailSettings, Str
 /// Each segment is restricted to unreserved URL characters (RFC 3986
 /// `A-Z a-z 0-9 - . _ ~`): a prefix is concatenated with API paths by the
 /// frontend and matched by axum's router, so a space, `?`, `#` or `%` in it
-/// would produce URLs that mean something other than intended. Rejecting is
-/// deliberate — the alternative is a server that starts and then serves a UI
-/// whose every request 404s.
+/// would produce URLs that mean something other than intended. The relative
+/// segments `.` and `..` are rejected for the same reason even though their
+/// characters are permitted: a browser or proxy resolves them away before the
+/// request is sent, so `/..` would be matched by the router only for a raw
+/// request while every browser-issued `GET /` 404s. Rejecting is deliberate —
+/// the alternative is a server that starts and then serves a UI whose every
+/// request 404s.
 pub fn normalise_base_path(raw: Option<&str>) -> Result<String, String> {
     let trimmed = raw.unwrap_or("").trim();
     let stripped = trimmed.trim_matches('/');
@@ -274,6 +278,13 @@ pub fn normalise_base_path(raw: Option<&str>) -> Result<String, String> {
         return Err(format!(
             "invalid base_path {trimmed:?}: expected a URL path prefix like \"/share_tracker\" \
              (path segments of letters, digits, '-', '.', '_' or '~')"
+        ));
+    }
+    if stripped.split('/').any(|seg| seg == "." || seg == "..") {
+        return Err(format!(
+            "invalid base_path {trimmed:?}: expected a URL path prefix like \"/share_tracker\", \
+             not one containing a '.' or '..' segment — a browser or proxy resolves those away \
+             before sending the request, so the prefix would be unreachable"
         ));
     }
     Ok(format!("/{stripped}"))
@@ -469,6 +480,22 @@ mod tests {
         // whose every request 404s.
         for raw in ["/share tracker", "/a?b", "/a#b", "/a%2fb", "/a//b"] {
             let err = normalise_base_path(Some(raw)).expect_err("an unusable prefix is rejected");
+            assert!(err.contains("base_path"), "{raw:?}: {err}");
+            assert!(
+                err.contains(raw.trim()),
+                "names the bad value — {raw:?}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn base_path_rejects_relative_segments() {
+        // `.` and `..` are made of permitted characters, but a browser or proxy
+        // resolves them away before the request is sent: `/..` would match the
+        // router only for a raw request, while every browser-issued `GET /`
+        // 404s. Better to refuse to start than to serve an unreachable prefix.
+        for raw in ["/..", "/.", "/apps/../share_tracker", "/a/./b", ".."] {
+            let err = normalise_base_path(Some(raw)).expect_err("a relative segment is rejected");
             assert!(err.contains("base_path"), "{raw:?}: {err}");
             assert!(
                 err.contains(raw.trim()),

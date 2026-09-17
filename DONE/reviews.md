@@ -6783,3 +6783,36 @@ are checksummed), so the broken-copy mutation experiment was not run; the compar
 Gates: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` (2,475 passed)
 and `node --test 'src/web/*.test.js'` (182 passed) all clean, with
 `cached_schema_matches_the_migrated_schema` still passing.
+
+## `base_path` accepts `.` and `..` segments, producing a prefix no browser can reach (2026-09-17 review, config)
+
+(2026-09-17 review, reproduced against a running server. `normalise_base_path` validates each
+segment's characters but does not exclude the two relative segments those characters permit.)
+
+- [x] Reproduced: `--base-path '/..'` starts the server cleanly (no error, no warning) and serves the
+  application at `/..` — reachable with a raw request (`curl --path-as-is`) but not from a browser or
+  a proxy, both of which normalise `/..` to `/`, so `GET /` answers `404`. An operator who types it
+  gets a server that reports healthy and serves nothing. `"."` behaves the same way
+- [x] This is the case the function's own neighbours argue against: `Auth::new` and
+  `normalise_base_path`'s siblings abort startup rather than "serving a login page that can never
+  succeed"
+- [x] Fix: reject a segment of `.` or `..` in `normalise_base_path` with the existing error shape
+- [x] Tests: `normalise_base_path` unit cases for `.`, `..` and a `..` inside an otherwise valid
+  prefix, each an `Err`
+- [x] Docs sync: none
+
+**Closed 2026-09-17.** `normalise_base_path` now rejects any `.` or `..` segment, immediately after its
+character check and with the same `invalid base_path {value:?}: expected …` shape — the character
+check keeps priority, so a genuinely invalid character still gets the original message. The new
+message says why the segments are refused even though their characters are permitted (a browser or
+proxy resolves them away before the request is sent, so `/..` would match the router only for a raw
+request while every browser-issued `GET /` 404s), and the function's doc comment carries the same
+rationale. Startup therefore aborts with a clear message instead of serving an unreachable prefix.
+
+Tests: `infra::config::tests::base_path_rejects_relative_segments` covers `/..`, `/.`,
+`/apps/../share_tracker` (a `..` inside an otherwise valid prefix), `/a/./b` and a bare `..`, each an
+`Err` naming `base_path` and the bad value, with the existing valid-case tests
+(`base_path_defaults_to_the_root`, `base_path_is_normalised_to_leading_slash_no_trailing_slash`,
+`unusable_base_path_is_rejected_naming_the_value`, `cli_base_path_overrides_config_file`,
+`a_bad_base_path_fails_resolution`) still passing. Gates: `cargo fmt --check`, `cargo clippy
+--all-targets -- -D warnings` and `cargo test` (2,476 passed) all clean.

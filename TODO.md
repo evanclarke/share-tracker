@@ -38,23 +38,6 @@ what has been verified is SCENARIOS.md's
 [Verification status](SCENARIOS.md#verification-status) table and its per-section findings blocks;
 the maintained record of what was built and decided is the `DONE/*.md` archive.
 
-## `base_path` accepts `.` and `..` segments, producing a prefix no browser can reach (2026-09-17 review, config)
-
-(2026-09-17 review, reproduced against a running server. `normalise_base_path` validates each
-segment's characters but does not exclude the two relative segments those characters permit.)
-
-- [ ] Reproduced: `--base-path '/..'` starts the server cleanly (no error, no warning) and serves the
-  application at `/..` — reachable with a raw request (`curl --path-as-is`) but not from a browser or
-  a proxy, both of which normalise `/..` to `/`, so `GET /` answers `404`. An operator who types it
-  gets a server that reports healthy and serves nothing. `"."` behaves the same way
-- [ ] This is the case the function's own neighbours argue against: `Auth::new` and
-  `normalise_base_path`'s siblings abort startup rather than "serving a login page that can never
-  succeed"
-- [ ] Fix: reject a segment of `.` or `..` in `normalise_base_path` with the existing error shape
-- [ ] Tests: `normalise_base_path` unit cases for `.`, `..` and a `..` inside an otherwise valid
-  prefix, each an `Err`
-- [ ] Docs sync: none
-
 ## A char-boundary slice in `hex_decode` could panic on non-ASCII input (unreachable from HTTP) (2026-09-17 review, nit)
 
 (2026-09-17 review. Defensive only: the review verified the function is not reachable with non-ASCII
