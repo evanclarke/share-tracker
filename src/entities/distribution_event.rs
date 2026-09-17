@@ -107,6 +107,16 @@ pub use yahoo::YahooDistributionFetcher;
 #[cfg(test)]
 pub mod test_support;
 
+/// The provider that produced a stored distribution row — a closed set, so an
+/// enum with a DB CHECK (0051) rather than free text. One value today: the
+/// only [`DistributionFetcher`] is the Yahoo adapter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[sqlx(rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
+pub enum DistributionSource {
+    Yahoo,
+}
+
 /// One known distribution: what the provider says a listing paid per unit, and
 /// the ex-date it paid it on.
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
@@ -143,8 +153,9 @@ pub struct DistributionEvent {
     #[sqlx(try_from = "Money")]
     pub amount_per_unit: Decimal,
     pub currency: String,
-    /// Provider that produced the row, e.g. `"yahoo"`.
-    pub source: String,
+    /// Provider that produced the row, e.g. `"yahoo"` — [`DistributionSource`],
+    /// the typed enum the schema CHECK (0051) constrains the column to.
+    pub source: DistributionSource,
     /// The provider symbol the row was fetched under, in the namespace of
     /// [`Self::source`]. Informational: no calculation reads it; it is
     /// provenance, served by `GET /distribution_events`, shown on the
@@ -215,8 +226,10 @@ pub type DistributionFuture<'a> =
 /// the security and would otherwise fail the weekly job forever; an outage is a
 /// reason to try again. See [`run_refresh`].
 pub trait DistributionFetcher: Send + Sync {
-    /// Identifier stored in each row's `source` column, e.g. `"yahoo"`.
-    fn source(&self) -> &'static str;
+    /// The provider as it is stored in each row's `source` column — the typed
+    /// enum the schema CHECK (0051) constrains the column to, so the slot a
+    /// fetch writes is always a value the database accepts.
+    fn source(&self) -> DistributionSource;
 
     /// The symbol this provider is asked for when quoting `market` as at
     /// `date` — recorded on every row stored, so `source` and
@@ -332,7 +345,7 @@ pub async fn db_store(
     listing_id: i64,
     event: &FetchedDistribution,
     listing_currency: &str,
-    source: &str,
+    source: DistributionSource,
     fetched_symbol: &str,
     fetched_at: &str,
 ) -> Result<(), StoreError> {

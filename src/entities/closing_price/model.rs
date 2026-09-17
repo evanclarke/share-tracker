@@ -27,9 +27,20 @@ pub enum PriceOrigin {
     Manual,
 }
 
-/// The `source` of a manually entered row — the provider slot, held in step
-/// with `origin = "manual"` by a schema CHECK (0020).
-pub const MANUAL_SOURCE: &str = "manual";
+/// The provider slot of a stored row: which provider produced it, or that it
+/// was entered by hand. A closed set — the DB CHECK added in 0051 pins it to
+/// `{'yahoo', 'manual'}` — and a typed enum here, so a typo cannot silently
+/// change the provenance a row records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[sqlx(rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
+pub enum PriceSource {
+    /// Fetched from the price provider (the only live provider is Yahoo).
+    Yahoo,
+    /// Entered by hand for a day the provider cannot serve — held in step with
+    /// `origin = "manual"` by a schema CHECK (0020, kept by 0051).
+    Manual,
+}
 
 /// The [`ClosingPrice::id`] of a row built to be written: the surrogate key is
 /// server-assigned, so [`db_store`] ignores the value and lets the database
@@ -62,9 +73,9 @@ pub struct ClosingPrice {
     /// row, and None exactly when the fetch failed.
     #[sqlx(try_from = "OptMoney")]
     pub price_as_observed: Option<Decimal>,
-    /// Provider that produced the row, e.g. "yahoo" — [`MANUAL_SOURCE`]
-    /// exactly when `origin` is `Manual`.
-    pub source: String,
+    /// Provider that produced the row — [`PriceSource::Yahoo`] for a fetched
+    /// row, [`PriceSource::Manual`] exactly when `origin` is `Manual`.
+    pub source: PriceSource,
     /// RFC 3339 UTC timestamp of the fetch that produced the row — for a
     /// manual row, of the entry that recorded it.
     pub fetched_at: String,

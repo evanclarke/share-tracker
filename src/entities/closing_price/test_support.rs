@@ -73,8 +73,8 @@ impl QuoteStub {
 }
 
 impl PriceFetcher for QuoteStub {
-    fn source(&self) -> &'static str {
-        "stub"
+    fn source(&self) -> PriceSource {
+        PriceSource::Yahoo
     }
 
     /// The same resolution the live fetcher does, so a stub's stored

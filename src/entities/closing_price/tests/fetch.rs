@@ -44,8 +44,8 @@ async fn api_backfill_fetches_only_missing_trading_days() {
     let rows = db_list(&pool, Some(1), None, None).await.unwrap();
     assert_eq!(rows.len(), 5);
     assert!(rows.iter().all(|r| r.status == PriceStatus::Ok));
-    // Wednesday kept its original fetch (source "stub" both ways, but the
-    // pre-stored price is unchanged).
+    // Wednesday kept its original fetch (the stub reports the provider's own
+    // source both ways, but the pre-stored price is unchanged).
     let wed = db_get_one(&pool, 1, ymd(2026, 6, 3))
         .await
         .unwrap()

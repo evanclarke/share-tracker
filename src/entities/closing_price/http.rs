@@ -6,7 +6,7 @@ use super::db::{
 };
 use super::fetcher::SharedFetcher;
 use super::market::{Market, load_market};
-use super::model::{ClosingPrice, MANUAL_SOURCE, PriceOrigin, PriceStatus, UNASSIGNED_ID};
+use super::model::{ClosingPrice, PriceOrigin, PriceSource, PriceStatus, UNASSIGNED_ID};
 use crate::entities::listing;
 use crate::infra::db::write_tx;
 use crate::infra::http::ApiError;
@@ -157,7 +157,7 @@ async fn put_manual(
         // operator states what the security traded at that day — so it is
         // recorded as its own observation and no re-basing ever touches it.
         price_as_observed: Some(body.price),
-        source: MANUAL_SOURCE.to_string(),
+        source: PriceSource::Manual,
         fetched_at: Utc::now().to_rfc3339(),
         // Nothing was fetched, so there is no symbol to record (CHECK-paired
         // with the origin, migration 0038).

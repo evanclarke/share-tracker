@@ -63,18 +63,19 @@ async fn report(State(pool): State<SqlitePool>) -> Result<Json<Vec<ExchangeMicSt
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entities::{exchange, mic_registry};
+    use crate::entities::exchange;
+    use crate::entities::mic_registry::{self, MicStatus};
     use crate::test_support::{ApiClient, test_pool};
     use axum::http::StatusCode;
 
-    fn mic(mic: &str, status: &str, expiry: Option<&str>) -> mic_registry::MicEntry {
+    fn mic(mic: &str, status: MicStatus, expiry: Option<&str>) -> mic_registry::MicEntry {
         mic_registry::MicEntry {
             mic: mic.to_string(),
             operating_mic: mic.to_string(),
             name: format!("{mic} Exchange"),
             country_code: "AU".to_string(),
             city: None,
-            status: status.to_string(),
+            status,
             expiry_date: expiry.map(str::to_string),
         }
     }
@@ -94,10 +95,10 @@ mod tests {
     async fn classifies_ok_expired_and_unknown() {
         let pool = test_pool().await;
         // XASX active, XNYS expired in the registry. Both are seed exchanges.
-        mic_registry::db_upsert(&pool, &mic("XASX", "ACTIVE", None))
+        mic_registry::db_upsert(&pool, &mic("XASX", MicStatus::Active, None))
             .await
             .unwrap();
-        mic_registry::db_upsert(&pool, &mic("XNYS", "EXPIRED", Some("2024-06-30")))
+        mic_registry::db_upsert(&pool, &mic("XNYS", MicStatus::Expired, Some("2024-06-30")))
             .await
             .unwrap();
         // A curated exchange whose MIC isn't in the registry at all.
@@ -155,7 +156,7 @@ mod tests {
     #[tokio::test]
     async fn api_returns_ok() {
         let pool = test_pool().await;
-        mic_registry::db_upsert(&pool, &mic("XASX", "ACTIVE", None))
+        mic_registry::db_upsert(&pool, &mic("XASX", MicStatus::Active, None))
             .await
             .unwrap();
         let resp = ApiClient::over(router().with_state(pool))

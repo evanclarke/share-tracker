@@ -5,7 +5,7 @@ use super::*;
 /// Store an errored row directly (as an earlier failed run would have).
 async fn seed_errored_price(pool: &SqlitePool, listing_id: i64, date: NaiveDate, msg: &str) {
     crate::test_support::closing_price(listing_id, date)
-        .source("stub")
+        .source(PriceSource::Yahoo)
         .fetched_at("2026-06-03T08:00:00Z")
         .errored(msg)
         .insert(pool)
@@ -34,7 +34,7 @@ async fn collection_stores_price_per_held_listing_and_skips_non_held() {
         .unwrap();
     assert_eq!(row.price, Some("62.48".parse().unwrap()));
     assert_eq!(row.status, PriceStatus::Ok);
-    assert_eq!(row.source, "stub");
+    assert_eq!(row.source, PriceSource::Yahoo);
     assert!(row.error.is_none());
     let rows = db_list(&pool, Some(2), None, None).await.unwrap();
     assert!(rows.is_empty(), "the non-held listing is not collected");

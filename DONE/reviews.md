@@ -6141,3 +6141,55 @@ with "a scan saw 6 of 20 listings move and 14 skipped" against the old per-query
 insert: the message goes out, no row exists, and the next run re-sends before recording — it fails on
 reversed ordering). Gates: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
 `cargo test` (2,430 passed) and `node --test 'src/web/*.test.js'` (159 passed) all clean.
+
+## Enum-shaped columns stored as free text with no CHECK (2026-09-17 review, integrity)
+
+(2026-09-17 review, from the schema replay. The project's rule is that a field holding a limited set
+of values is a CHECK-constrained column and a typed enum where parsed; three remain free text. Every
+user-facing enum is correctly constrained — these are the outliers, and the consequence is a silent
+typo rather than corruption.)
+
+- [x] `mic_registry.status` — no CHECK, and `src/entities/mic_registry.rs:31` declares
+  `pub status: String` while the doc comment at `:20` names the closed set `ACTIVE|UPDATED|EXPIRED`
+- [x] `distribution_events.source` — `migrations/0048_distribution_events.sql` has no CHECK at all,
+  and `src/entities/distribution_event.rs:147` is `pub source: String`, although the provider trait
+  (`fn source() -> &'static str`) makes it a one-value set today. `db_store` compares
+  `source <> excluded.source` to decide whether a re-fetch is a revision, so a typo silently changes
+  that decision
+- [x] `closing_prices.source` — the only constraint is
+  `CHECK ((source = 'manual') = (origin = 'manual'))`, so a *fetched* row's source is free text
+  ({yahoo, manual} live)
+- [x] Fix: a CHECK per column plus a typed enum in Rust, via a migration. Note both
+  `distribution_events` and `closing_prices` are audited, so a table rebuild must DROP and re-CREATE
+  both `*_row_history_*` triggers with the new column list (the 0029/0045 precedent), and
+  `closing_prices` must keep its staleness trigger re-created too
+- [x] Tests: a direct DB write of an out-of-set value rejected by each CHECK
+- [x] Docs sync: `docs/SCHEMA.md` for each column
+
+**Closed 2026-09-17.** Migration `0051_enum_check_constraints.sql` rebuilds the three tables by the
+RENAME `_old` + CREATE + `INSERT … SELECT` pattern of 0029/0045 (`-- no-transaction`,
+`PRAGMA foreign_keys = OFF`, `legacy_alter_table` around each rename), adding one CHECK per column
+and reseeding each audited table's AUTOINCREMENT sequence from the larger of the largest live id and
+the largest `row_id` its trail ever recorded, so a deleted id is never re-issued with its history.
+The value sets were verified against the code, not guessed: `mic_registry.status` is
+`ACTIVE|UPDATED|EXPIRED` (the ISO 10383 STATUS the doc comment names and the feed publishes),
+`distribution_events.source` is `'yahoo'` (the only `DistributionFetcher` implementor — the trait's
+`source()` now returns the typed enum), and `closing_prices.source` is `{'yahoo','manual'}`
+(`PriceFetcher::source()` and the manual-entry path; the existing
+`(source='manual')=(origin='manual')` CHECK is kept). All four `closing_prices` triggers (the 0034/0050
+staleness pair and the 0038 audit pair), both `distribution_events` audit triggers and every column
+list were re-created verbatim; the staleness pair is created *after* the copy so the migration's own
+INSERTs stale nothing. `mic_registry` was confirmed not audited (absent from `AUDITED_TABLES`, from
+`row_history`'s CHECK and from the trigger set), so it carries no trigger work. Rust gained the typed
+`MicStatus`, `DistributionSource` and `PriceSource` enums; `docs/SCHEMA.md` carries each CHECK and
+`CLAUDE.md`'s migration count moved 50→51. No web change was needed (no `sel()` picker copies any of
+the three).
+
+Tests: `entities::mic_registry::tests::db_check_constraint_rejects_an_unknown_status` and
+`parse_registry_rejects_an_unknown_status`,
+`entities::closing_price::tests::schema::db_check_constraint_rejects_an_unknown_source`,
+`entities::distribution_event::tests::db_check_constraint_rejects_an_unknown_source`, and
+`infra::db::tests::migration_0051_preserves_rows_and_constrains_the_enum_columns` (ids and rows
+survive, the exact six-trigger set is back, an UPDATE still lands in `row_history`, and each CHECK
+refuses an out-of-set value). Gates: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+`cargo test` (2,435 passed) and `node --test 'src/web/*.test.js'` (159 passed) all clean.

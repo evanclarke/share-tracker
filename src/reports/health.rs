@@ -3282,6 +3282,7 @@ pub fn router() -> Router<SqlitePool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entities::closing_price::PriceSource;
     use crate::entities::corporate_action;
     use crate::entities::holding_account;
     use crate::test_support::{self, ApiClient, dec, test_pool, ymd};
@@ -3302,7 +3303,7 @@ mod tests {
     async fn insert_ok_price(pool: &SqlitePool, listing_id: i64, date: &str) {
         test_support::closing_price(listing_id, date.parse().unwrap())
             .price("10.50")
-            .source("yahoo")
+            .source(PriceSource::Yahoo)
             .fetched_at("2026-07-01T00:00:00Z")
             .insert(pool)
             .await;
@@ -3310,7 +3311,7 @@ mod tests {
 
     async fn insert_error_price(pool: &SqlitePool, listing_id: i64, date: &str, error: &str) {
         test_support::closing_price(listing_id, date.parse().unwrap())
-            .source("yahoo")
+            .source(PriceSource::Yahoo)
             .fetched_at("2026-07-01T00:00:00Z")
             .errored(error)
             .insert(pool)
@@ -4136,7 +4137,7 @@ mod tests {
         for date in ["2023-09-29", "2023-10-02"] {
             test_support::closing_price(1, date.parse().unwrap())
                 .price("10.13")
-                .source("yahoo")
+                .source(PriceSource::Yahoo)
                 .fetched_at("2026-07-26T07:44:56Z")
                 .insert(&pool)
                 .await;
@@ -4144,14 +4145,14 @@ mod tests {
         // …one collected before it, which arrived contemporaneous…
         test_support::closing_price(1, "2023-09-28".parse().unwrap())
             .price("24.58")
-            .source("yahoo")
+            .source(PriceSource::Yahoo)
             .fetched_at("2023-09-28T21:00:00Z")
             .insert(&pool)
             .await;
         // …and one after it, which the provider never restated.
         test_support::closing_price(1, "2023-10-04".parse().unwrap())
             .price("11.72")
-            .source("yahoo")
+            .source(PriceSource::Yahoo)
             .fetched_at("2026-07-26T07:44:56Z")
             .insert(&pool)
             .await;
@@ -4223,7 +4224,7 @@ mod tests {
         for date in ["2022-09-20", "2023-10-02"] {
             test_support::closing_price(1, date.parse().unwrap())
                 .price("10.13")
-                .source("yahoo")
+                .source(PriceSource::Yahoo)
                 .fetched_at("2026-07-26T07:44:56Z")
                 .insert(&pool)
                 .await;
@@ -4272,7 +4273,7 @@ mod tests {
         test_support::listing(2).ticker("LAR").insert(&pool).await;
         test_support::closing_price(1, "2023-09-29".parse().unwrap())
             .price("24.58")
-            .source("yahoo")
+            .source(PriceSource::Yahoo)
             .fetched_at("2023-09-29T21:00:00Z")
             .insert(&pool)
             .await;
@@ -4294,7 +4295,7 @@ mod tests {
     async fn insert_fetched_price(pool: &SqlitePool, listing_id: i64, date: &str, price: &str) {
         test_support::closing_price(listing_id, date.parse().unwrap())
             .price(price)
-            .source("yahoo")
+            .source(PriceSource::Yahoo)
             .fetched_at("2026-07-26T07:44:56Z")
             .insert(pool)
             .await;
@@ -4510,7 +4511,7 @@ mod tests {
         for (date, price) in moving_series(ymd(2023, 8, 1), 30, 1685) {
             test_support::closing_price(2, date)
                 .price(&price)
-                .source("yahoo")
+                .source(PriceSource::Yahoo)
                 .fetched_at("2026-07-26T07:44:56Z")
                 .insert(&pool)
                 .await;
@@ -4586,12 +4587,12 @@ mod tests {
                 .await;
             } else {
                 // …the rest fetched, with no record of the symbol used.
-                row.source("yahoo").insert(&pool).await;
+                row.source(PriceSource::Yahoo).insert(&pool).await;
             }
             // The other listing's own series, all fetched.
             test_support::closing_price(2, *date)
                 .price(price)
-                .source("yahoo")
+                .source(PriceSource::Yahoo)
                 .insert(&pool)
                 .await;
         }
@@ -4600,14 +4601,14 @@ mod tests {
         for (listing_id, price) in [(1, "20.00"), (2, "6.00")] {
             test_support::closing_price(listing_id, ymd(2021, 6, 1))
                 .price(price)
-                .source("yahoo")
+                .source(PriceSource::Yahoo)
                 .insert(&pool)
                 .await;
         }
         for listing_id in [1, 2] {
             test_support::closing_price(listing_id, ymd(2021, 7, 1))
                 .price("4.12")
-                .source("yahoo")
+                .source(PriceSource::Yahoo)
                 .insert(&pool)
                 .await;
         }
@@ -4645,7 +4646,7 @@ mod tests {
             for listing_id in [1, 2] {
                 test_support::closing_price(listing_id, date)
                     .price(&price)
-                    .source("yahoo")
+                    .source(PriceSource::Yahoo)
                     .insert(&pool)
                     .await;
             }
@@ -4661,7 +4662,7 @@ mod tests {
         {
             test_support::closing_price(1, date)
                 .price(&price)
-                .source("yahoo")
+                .source(PriceSource::Yahoo)
                 .insert(&pool)
                 .await;
             let other = if index % 3 == 1 {
@@ -4671,7 +4672,7 @@ mod tests {
             };
             test_support::closing_price(2, date)
                 .price(&other)
-                .source("yahoo")
+                .source(PriceSource::Yahoo)
                 .insert(&pool)
                 .await;
         }
@@ -4696,13 +4697,13 @@ mod tests {
         for (date, price) in &series {
             test_support::closing_price(1, *date)
                 .price(price)
-                .source("yahoo")
+                .source(PriceSource::Yahoo)
                 .insert(&pool)
                 .await;
             if *date != gap {
                 test_support::closing_price(2, *date)
                     .price(price)
-                    .source("yahoo")
+                    .source(PriceSource::Yahoo)
                     .insert(&pool)
                     .await;
             }
@@ -4735,7 +4736,7 @@ mod tests {
             for listing_id in [1, 2] {
                 test_support::closing_price(listing_id, *date)
                     .price("1.00")
-                    .source("yahoo")
+                    .source(PriceSource::Yahoo)
                     .insert(&pool)
                     .await;
             }
@@ -4751,7 +4752,7 @@ mod tests {
         for listing_id in [1, 2] {
             test_support::closing_price(listing_id, dates[100])
                 .price("1.01")
-                .source("yahoo")
+                .source(PriceSource::Yahoo)
                 .insert(&pool)
                 .await;
         }
@@ -4774,7 +4775,7 @@ mod tests {
             for listing_id in [1, 2] {
                 test_support::closing_price(listing_id, date)
                     .price(&price)
-                    .source("yahoo")
+                    .source(PriceSource::Yahoo)
                     .insert(&pool)
                     .await;
             }

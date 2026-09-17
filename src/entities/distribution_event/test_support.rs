@@ -7,8 +7,8 @@
 //! database starts in.
 
 use super::{
-    DistributionFetcher, DistributionFuture, FetchedDistribution, FetchedDistributions,
-    SharedDistributionFetcher,
+    DistributionFetcher, DistributionFuture, DistributionSource, FetchedDistribution,
+    FetchedDistributions, SharedDistributionFetcher,
 };
 use crate::entities::closing_price::{FetchError, Market};
 use chrono::NaiveDate;
@@ -104,8 +104,8 @@ impl DistributionStub {
 }
 
 impl DistributionFetcher for DistributionStub {
-    fn source(&self) -> &'static str {
-        "stub"
+    fn source(&self) -> DistributionSource {
+        DistributionSource::Yahoo
     }
 
     /// The ticker in force on `date`, not the listing's current one — the

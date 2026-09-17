@@ -17,6 +17,32 @@ use sqlx::SqlitePool;
 const MIC_REGISTRY_URL: &str =
     "https://www.iso20022.org/sites/default/files/ISO10383_MIC/ISO10383_MIC.csv";
 
+/// The ISO STATUS of a MIC entry — a limited value set, so an enum with a DB
+/// CHECK (0051) rather than free text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[sqlx(rename_all = "UPPERCASE")]
+#[serde(rename_all = "UPPERCASE")]
+pub enum MicStatus {
+    Active,
+    Updated,
+    Expired,
+}
+
+impl MicStatus {
+    /// The feed's own STATUS string — the closed set the schema CHECK and the
+    /// typed enum agree on. `None` for anything else, so an unknown value in
+    /// the published registry fails the import loudly rather than being
+    /// stored and silently failing the CHECK.
+    fn from_iso(status: &str) -> Option<Self> {
+        match status {
+            "ACTIVE" => Some(Self::Active),
+            "UPDATED" => Some(Self::Updated),
+            "EXPIRED" => Some(Self::Expired),
+            _ => None,
+        }
+    }
+}
+
 /// One ISO 10383 MIC. `status` is the ISO STATUS (`ACTIVE` | `UPDATED` |
 /// `EXPIRED`); `expiry_date` is set only for expired entries. All fields are
 /// surfaced by the read endpoints; `status`/`expiry_date` additionally drive the
@@ -28,7 +54,7 @@ pub struct MicEntry {
     pub name: String,
     pub country_code: String,
     pub city: Option<String>,
-    pub status: String,
+    pub status: MicStatus,
     pub expiry_date: Option<String>, // 'YYYY-MM-DD', present only when EXPIRED
 }
 
@@ -106,7 +132,7 @@ where
     .bind(&entry.name)
     .bind(&entry.country_code)
     .bind(&entry.city)
-    .bind(&entry.status)
+    .bind(entry.status)
     .bind(&entry.expiry_date)
     .execute(executor)
     .await?;
@@ -167,13 +193,17 @@ pub fn parse_registry(content: &str) -> Result<Vec<MicEntry>, ImportError> {
                 Some(date.format("%Y-%m-%d").to_string())
             }
         };
+        let raw_status = field(&rec, i_status);
+        let status = MicStatus::from_iso(&raw_status).ok_or_else(|| {
+            ImportError::Parse(format!("unknown STATUS {raw_status:?} for {mic}"))
+        })?;
         out.push(MicEntry {
             mic,
             operating_mic: field(&rec, i_oper),
             name: field(&rec, i_name),
             country_code: field(&rec, i_country),
             city: opt(field(&rec, i_city)),
-            status: field(&rec, i_status),
+            status,
             expiry_date,
         });
     }
@@ -277,7 +307,7 @@ mod tests {
             name: "Test Exchange".to_string(),
             country_code: "AU".to_string(),
             city: Some("Sydney".to_string()),
-            status: "ACTIVE".to_string(),
+            status: MicStatus::Active,
             expiry_date: None,
         }
     }
@@ -298,16 +328,49 @@ mod tests {
         assert!(db_get(&pool, "XXXX").await.unwrap().is_none());
     }
 
+    /// `status` holds the ISO feed's closed set, so the CHECK added in 0051 —
+    /// and the `MicStatus` enum the import parses it into — refuse a value the
+    /// code cannot produce, while every value it does produce still writes.
+    #[tokio::test]
+    async fn db_check_constraint_rejects_an_unknown_status() {
+        let pool = test_pool().await;
+        let insert = |mic: &'static str, status: &'static str| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query(sqlx::AssertSqlSafe(format!(
+                    "INSERT INTO mic_registry \
+                         (mic, operating_mic, name, country_code, city, status, expiry_date) \
+                     VALUES ({mic}, {mic}, 'Test Exchange', 'AU', 'Sydney', {status}, NULL)"
+                )))
+                .execute(&pool)
+                .await
+            }
+        };
+        // A STATUS the ISO publication does not define is rejected.
+        assert!(insert("'XTES'", "'PENDING'").await.is_err());
+        // Every value of the closed set is accepted.
+        for (mic, status) in [
+            ("'XAAA'", "'ACTIVE'"),
+            ("'XBBB'", "'UPDATED'"),
+            ("'XCCC'", "'EXPIRED'"),
+        ] {
+            assert!(
+                insert(mic, status).await.is_ok(),
+                "{status} must be an accepted status"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn db_upsert_updates_existing_status() {
         let pool = test_pool().await;
         db_upsert(&pool, &sample_entry()).await.unwrap();
         let mut updated = sample_entry();
-        updated.status = "EXPIRED".to_string();
+        updated.status = MicStatus::Expired;
         updated.expiry_date = Some("2024-01-31".to_string());
         db_upsert(&pool, &updated).await.unwrap();
         let got = db_get(&pool, "XTES").await.unwrap().unwrap();
-        assert_eq!(got.status, "EXPIRED");
+        assert_eq!(got.status, MicStatus::Expired);
         assert_eq!(got.expiry_date, Some("2024-01-31".to_string()));
     }
 
@@ -323,7 +386,7 @@ mod tests {
         assert_eq!(nyse.name, "NEW YORK STOCK EXCHANGE");
         assert_eq!(nyse.country_code, "US");
         assert_eq!(nyse.city, Some("NEW YORK".to_string()));
-        assert_eq!(nyse.status, "ACTIVE");
+        assert_eq!(nyse.status, MicStatus::Active);
         assert_eq!(nyse.expiry_date, None);
 
         // Empty CITY becomes None.
@@ -332,7 +395,7 @@ mod tests {
 
         // EXPIRED entry keeps its normalised expiry date.
         let expired = &parsed[2];
-        assert_eq!(expired.status, "EXPIRED");
+        assert_eq!(expired.status, MicStatus::Expired);
         assert_eq!(expired.expiry_date, Some("2021-08-23".to_string()));
     }
 
@@ -354,6 +417,21 @@ mod tests {
             parse_registry(csv).unwrap_err(),
             ImportError::Parse(_)
         ));
+    }
+
+    /// The STATUS is parsed into [`MicStatus`], so a value outside the closed
+    /// set fails the import at parse time (naming the row) rather than being
+    /// stored and rejected by the schema CHECK.
+    #[test]
+    fn parse_registry_rejects_an_unknown_status() {
+        let csv = "\"MIC\",\"OPERATING MIC\",\"MARKET NAME-INSTITUTION DESCRIPTION\",\
+            \"ISO COUNTRY CODE (ISO 3166)\",\"CITY\",\"STATUS\",\"EXPIRY DATE\"\n\
+            \"XNYS\",\"XNYS\",\"NEW YORK STOCK EXCHANGE\",\"US\",\"NEW YORK\",\"PENDING\",\"\"\n";
+        let error = parse_registry(csv).unwrap_err();
+        assert!(
+            error.to_string().contains("PENDING"),
+            "the rejected STATUS is named: {error}"
+        );
     }
 
     // Import
@@ -383,7 +461,7 @@ mod tests {
         );
         import_from_content(&pool, &changed).await.unwrap();
         let nyse = db_get(&pool, "XNYS").await.unwrap().unwrap();
-        assert_eq!(nyse.status, "EXPIRED");
+        assert_eq!(nyse.status, MicStatus::Expired);
         assert_eq!(nyse.expiry_date, Some("2025-05-01".to_string()));
     }
 

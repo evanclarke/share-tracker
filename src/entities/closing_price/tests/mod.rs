@@ -169,8 +169,8 @@ impl StubFetcher {
 }
 
 impl PriceFetcher for StubFetcher {
-    fn source(&self) -> &'static str {
-        "stub"
+    fn source(&self) -> PriceSource {
+        PriceSource::Yahoo
     }
 
     fn symbol(&self, market: &Market, date: NaiveDate) -> Result<String, String> {
@@ -316,7 +316,7 @@ fn asx_lookback_window() -> Vec<NaiveDate> {
 /// Store an ok row directly (as an earlier successful run would have).
 async fn seed_ok_price(pool: &SqlitePool, listing_id: i64, date: NaiveDate) {
     crate::test_support::closing_price(listing_id, date)
-        .source("stub")
+        .source(PriceSource::Yahoo)
         .fetched_at("2026-06-01T00:00:00Z")
         .insert(pool)
         .await;

@@ -13,6 +13,7 @@ use super::fetcher::{
     clean_price,
 };
 use super::market::{Market, MarketIdentity};
+use super::model::PriceSource;
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use chrono_tz::Tz;
 use std::collections::{HashMap, HashSet};
@@ -90,8 +91,8 @@ pub(crate) fn classify_yahoo_failure(symbol: &str, error: yfinance_rs::YfError) 
 }
 
 impl PriceFetcher for YahooFetcher {
-    fn source(&self) -> &'static str {
-        "yahoo"
+    fn source(&self) -> PriceSource {
+        PriceSource::Yahoo
     }
 
     fn symbol(&self, market: &Market, date: NaiveDate) -> Result<String, String> {

@@ -2307,6 +2307,134 @@ mod tests {
         );
     }
 
+    /// 0051 rebuilds all three enum-shaped columns' tables to add a CHECK
+    /// (`closing_prices.source`, `distribution_events.source` and
+    /// `mic_registry.status`). A rebuild is exactly where rows, ids and
+    /// triggers go missing, so this exercises the copy step on data that
+    /// predates the migration: every row survives with its id and data, both
+    /// audited tables get their full trigger sets back, the trail still
+    /// records a write against a rebuilt table, and each new CHECK refuses an
+    /// out-of-set value.
+    #[tokio::test]
+    async fn migration_0051_preserves_rows_and_constrains_the_enum_columns() {
+        let pool = pool_migrated_below(51).await;
+        sqlx::query(
+            "INSERT INTO listings (id, exchange_mic, ticker, name, security_type, currency) \
+             VALUES (1, 'XASX', 'BHP', 'BHP Group', 'Share', 'AUD')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO closing_prices \
+                 (id, listing_id, price_date, price, price_as_observed, source, fetched_at, \
+                  fetched_symbol, status, error, origin, sourced_from, reason) \
+             VALUES (7, 1, '2026-06-04', '62.49', '62.49', 'yahoo', '2026-06-04T08:00:00Z', \
+                     'BHP.AX', 'ok', NULL, 'fetched', NULL, NULL)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO distribution_events \
+                 (id, listing_id, ex_date, amount_per_unit, currency, source, fetched_symbol, \
+                  fetched_at) \
+             VALUES (9, 1, '2024-07-01', '0.726547', 'AUD', 'yahoo', 'BHP.AX', \
+                     '2024-07-02T08:00:00Z')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO mic_registry \
+                 (mic, operating_mic, name, country_code, city, status, expiry_date) \
+             VALUES ('XASX', 'XASX', 'ASX', 'AU', 'Sydney', 'ACTIVE', NULL)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        apply_migration(&pool, 51).await;
+
+        // Every row survives with its id and every column intact. The ids are
+        // carried explicitly, which is what keeps each row's audit trail.
+        let price: (i64, String, String, String) =
+            sqlx::query_as("SELECT id, price, source, fetched_symbol FROM closing_prices")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            price,
+            (
+                7,
+                "62.49".to_string(),
+                "yahoo".to_string(),
+                "BHP.AX".to_string()
+            )
+        );
+        let event: (i64, String, String) =
+            sqlx::query_as("SELECT id, amount_per_unit, source FROM distribution_events")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(event, (9, "0.726547".to_string(), "yahoo".to_string()));
+        let mic: (String, String) = sqlx::query_as("SELECT mic, status FROM mic_registry")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(mic, ("XASX".to_string(), "ACTIVE".to_string()));
+
+        // Both audited tables carry their full trigger sets again, so a rebuild
+        // cannot silently switch the audit trail or snapshot staleness off.
+        let triggers: Vec<(String,)> = sqlx::query_as(
+            "SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name IN \
+             ('closing_prices', 'distribution_events') ORDER BY name",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            triggers
+                .iter()
+                .map(|t| t.0.as_str())
+                .collect::<Vec<_>>()
+                .as_slice(),
+            [
+                "closing_prices_row_history_delete",
+                "closing_prices_row_history_update",
+                "closing_prices_stale_snapshots_delete",
+                "closing_prices_stale_snapshots_update",
+                "distribution_events_row_history_delete",
+                "distribution_events_row_history_update",
+            ]
+        );
+
+        // The audit pair still records a write against the rebuilt table.
+        sqlx::query("UPDATE closing_prices SET price = '63.00' WHERE id = 7")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let recorded: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM row_history WHERE table_name = 'closing_prices' AND row_id = 7",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(recorded, 1, "the rebuilt table is still audited");
+
+        // And each new CHECK refuses a value outside its column's closed set.
+        for bad in [
+            "UPDATE closing_prices SET source = 'bloomberg' WHERE id = 7",
+            "UPDATE distribution_events SET source = 'bloomberg' WHERE id = 9",
+            "UPDATE mic_registry SET status = 'PENDING' WHERE mic = 'XASX'",
+        ] {
+            assert!(
+                sqlx::query(bad).execute(&pool).await.is_err(),
+                "the CHECK must refuse: {bad}"
+            );
+        }
+    }
+
     #[test]
     fn migrations_do_not_drop_tables_or_columns() {
         let migrations_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");

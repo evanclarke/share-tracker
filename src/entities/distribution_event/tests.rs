@@ -43,10 +43,36 @@ async fn a_refresh_stores_the_provider_events_for_a_held_listing() {
     assert_eq!(stored[0].ex_date, ymd(2025, 1, 2));
     assert_eq!(stored[0].amount_per_unit, dec("0.018741"));
     assert_eq!(stored[0].currency, "AUD");
-    assert_eq!(stored[0].source, "stub");
+    assert_eq!(stored[0].source, DistributionSource::Yahoo);
     assert_eq!(stored[0].fetched_symbol, "T1");
     assert!(stored[0].fetched_at.starts_with("2026-08-27T"));
     assert_eq!(stored[1].ex_date, ymd(2024, 7, 1));
+}
+
+/// The provider slot is a closed set (0051): a source the code cannot produce
+/// is rejected by the CHECK, so `db_store`'s `source <> excluded.source`
+/// revision guard can never be silently changed by a typo, while the value the
+/// provider does produce writes.
+#[tokio::test]
+async fn db_check_constraint_rejects_an_unknown_source() {
+    let pool = test_pool().await;
+    listing(1).insert(&pool).await;
+    let insert = |source: &'static str| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "INSERT INTO distribution_events \
+                     (listing_id, ex_date, amount_per_unit, currency, source, fetched_symbol, \
+                      fetched_at) \
+                 VALUES (1, '2024-07-01', '0.726547', 'AUD', {source}, 'T1', \
+                         '2024-07-02T08:00:00Z')"
+            )))
+            .execute(&pool)
+            .await
+        }
+    };
+    assert!(insert("'bloomberg'").await.is_err());
+    assert!(insert("'yahoo'").await.is_ok());
 }
 
 #[tokio::test]

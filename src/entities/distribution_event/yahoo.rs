@@ -48,7 +48,10 @@
 //! begin with, the request being wider than the window the job asked about
 //! (see [`place`]).
 
-use super::{DistributionFetcher, DistributionFuture, FetchedDistribution, FetchedDistributions};
+use super::{
+    DistributionFetcher, DistributionFuture, DistributionSource, FetchedDistribution,
+    FetchedDistributions,
+};
 use crate::entities::closing_price::{self, Market};
 use chrono::{Duration, NaiveDate};
 use rust_decimal::Decimal;
@@ -123,8 +126,8 @@ pub struct YahooDistributionFetcher {
 }
 
 impl DistributionFetcher for YahooDistributionFetcher {
-    fn source(&self) -> &'static str {
-        "yahoo"
+    fn source(&self) -> DistributionSource {
+        DistributionSource::Yahoo
     }
 
     fn symbol(&self, market: &Market, date: NaiveDate) -> Result<String, String> {

@@ -156,7 +156,7 @@ where
     .bind(row.price_date)
     .bind(OptMoney(row.price))
     .bind(OptMoney(row.price_as_observed))
-    .bind(&row.source)
+    .bind(row.source)
     .bind(&row.fetched_at)
     .bind(&row.fetched_symbol)
     .bind(row.status)

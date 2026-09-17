@@ -177,6 +177,12 @@ pub use market::{Market, NonTradingReason, load_market};
 /// paths reject a trade dated on a day its exchange was shut, and the
 /// settlement-coverage, health and valuation reports walk the same calendar.
 pub(crate) use market::{db_non_trading_day, load_market_on, non_trading_day};
+/// The stored provider enum is named outside `model` only by tests and by the
+/// test-only fixture (`PriceFetcher` implementations name it through
+/// `model`/`fetcher` directly), so the re-export is gated rather than dropped:
+/// an ungated one would warn in the non-test build.
+#[cfg(test)]
+pub use model::PriceSource;
 pub use model::{PriceOrigin, PriceStatus};
 pub use yahoo::YahooFetcher;
 pub(crate) use yahoo::classify_yahoo_failure;
@@ -214,7 +220,7 @@ pub use http::{BackfillSummary, ClearSummary};
 #[cfg(test)]
 pub use live::fetch_live_aud_prices;
 #[cfg(test)]
-pub use model::{ClosingPrice, MANUAL_SOURCE, UNASSIGNED_ID};
+pub use model::{ClosingPrice, UNASSIGNED_ID};
 /// Reached by name only from tests: the symbol resolution the live fetcher
 /// does (so a stub's stored `fetched_symbol` is the symbol a real fetch would
 /// have recorded), its provider-failure classification, and the by-symbol

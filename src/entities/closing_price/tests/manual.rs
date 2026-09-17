@@ -49,7 +49,7 @@ async fn api_manual_price_stores_the_price_with_its_provenance() {
     assert_eq!(row.price, Some("62.48".parse().unwrap()));
     assert_eq!(row.status, PriceStatus::Ok);
     assert_eq!(row.origin, PriceOrigin::Manual);
-    assert_eq!(row.source, "manual");
+    assert_eq!(row.source, PriceSource::Manual);
     assert_eq!(
         row.sourced_from.as_deref(),
         Some("asx.com.au closing report")

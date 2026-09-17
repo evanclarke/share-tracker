@@ -38,30 +38,6 @@ what has been verified is SCENARIOS.md's
 [Verification status](SCENARIOS.md#verification-status) table and its per-section findings blocks;
 the maintained record of what was built and decided is the `DONE/*.md` archive.
 
-## Enum-shaped columns stored as free text with no CHECK (2026-09-17 review, integrity)
-
-(2026-09-17 review, from the schema replay. The project's rule is that a field holding a limited set
-of values is a CHECK-constrained column and a typed enum where parsed; three remain free text. Every
-user-facing enum is correctly constrained — these are the outliers, and the consequence is a silent
-typo rather than corruption.)
-
-- [ ] `mic_registry.status` — no CHECK, and `src/entities/mic_registry.rs:31` declares
-  `pub status: String` while the doc comment at `:20` names the closed set `ACTIVE|UPDATED|EXPIRED`
-- [ ] `distribution_events.source` — `migrations/0048_distribution_events.sql` has no CHECK at all,
-  and `src/entities/distribution_event.rs:147` is `pub source: String`, although the provider trait
-  (`fn source() -> &'static str`) makes it a one-value set today. `db_store` compares
-  `source <> excluded.source` to decide whether a re-fetch is a revision, so a typo silently changes
-  that decision
-- [ ] `closing_prices.source` — the only constraint is
-  `CHECK ((source = 'manual') = (origin = 'manual'))`, so a *fetched* row's source is free text
-  ({yahoo, manual} live)
-- [ ] Fix: a CHECK per column plus a typed enum in Rust, via a migration. Note both
-  `distribution_events` and `closing_prices` are audited, so a table rebuild must DROP and re-CREATE
-  both `*_row_history_*` triggers with the new column list (the 0029/0045 precedent), and
-  `closing_prices` must keep its staleness trigger re-created too
-- [ ] Tests: a direct DB write of an out-of-set value rejected by each CHECK
-- [ ] Docs sync: `docs/SCHEMA.md` for each column
-
 ## Credential and log hygiene: the bearer token in `curl`'s argv, the login username in a log line, and the backup command in a job error (2026-09-17 review, security)
 
 (2026-09-17 review's security pass; three low-severity hygiene findings, grouped because each is a

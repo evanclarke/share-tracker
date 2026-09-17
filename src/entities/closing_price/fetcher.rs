@@ -8,6 +8,7 @@
 //! about any particular provider.
 
 use super::market::Market;
+use super::model::PriceSource;
 use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use std::{
@@ -99,8 +100,10 @@ pub type QuotesFuture<'a> =
 /// candle-timestamp→trading-date conversion (both are provider-specific); a
 /// failure is an error result, never a silent zero or a skipped row.
 pub trait PriceFetcher: Send + Sync {
-    /// Identifier stored in each row's `source` column, e.g. "yahoo".
-    fn source(&self) -> &'static str;
+    /// The provider as it is stored in each row's `source` column — the typed
+    /// enum the schema CHECK (0051) constrains the column to, so the slot a
+    /// fetch writes is always one of the values the database accepts.
+    fn source(&self) -> PriceSource;
 
     /// The symbol this provider is asked for when quoting `market` as at
     /// `date` — the listing's rename chain resolved into the provider's own
@@ -246,7 +249,7 @@ impl CachingFetcher {
 }
 
 impl PriceFetcher for CachingFetcher {
-    fn source(&self) -> &'static str {
+    fn source(&self) -> PriceSource {
         self.inner.source()
     }
 

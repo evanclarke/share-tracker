@@ -24,7 +24,7 @@ use tower::ServiceExt;
 
 /// Fresh in-memory database with migrations and seed data applied.
 ///
-/// The 50 migration files are replayed **once** per test process, into a
+/// The 51 migration files are replayed **once** per test process, into a
 /// template database that is then dumped to a single SQL script (see
 /// [`schema_template`]); every call after the first builds its database from
 /// that script instead. Applying the migrations costs ~89 ms against the
@@ -718,7 +718,7 @@ pub fn closing_price(listing_id: i64, price_date: NaiveDate) -> ClosingPriceBuil
             price_date,
             price: Some(Decimal::from(10)),
             price_as_observed: Some(Decimal::from(10)),
-            source: "test".to_string(),
+            source: closing_price::PriceSource::Yahoo,
             fetched_at: "2026-06-05T08:00:00Z".to_string(),
             fetched_symbol: None,
             status: closing_price::PriceStatus::Ok,
@@ -744,8 +744,8 @@ impl ClosingPriceBuilder {
         self
     }
 
-    pub fn source(mut self, source: &str) -> Self {
-        self.p.source = source.to_string();
+    pub fn source(mut self, source: closing_price::PriceSource) -> Self {
+        self.p.source = source;
         self
     }
 
@@ -774,7 +774,7 @@ impl ClosingPriceBuilder {
     /// A price entered by hand, with the provenance the schema requires: the
     /// `source` moves to `manual` in step with the origin (CHECK-paired).
     pub fn manual(mut self, sourced_from: &str, reason: &str) -> Self {
-        self.p.source = closing_price::MANUAL_SOURCE.to_string();
+        self.p.source = closing_price::PriceSource::Manual;
         self.p.origin = closing_price::PriceOrigin::Manual;
         // Nothing was fetched, so no symbol was used (CHECK-paired, 0038).
         self.p.fetched_symbol = None;
@@ -1265,7 +1265,7 @@ mod tests {
     use serde_json::json;
 
     /// The cached schema `test_pool` builds every database from must be the
-    /// database the 50 migrations produce — not approximately, exactly.
+    /// database the 51 migrations produce — not approximately, exactly.
     ///
     /// So this builds one of each and compares the **whole** of `sqlite_master`:
     /// every table, index, trigger and view, by name and by definition
@@ -1355,7 +1355,7 @@ mod tests {
         let from_migrations: Vec<(i64, String, bool, String)> =
             sqlx::query_as(recorded).fetch_all(&migrated).await.unwrap();
         assert_eq!(from_cache, from_migrations, "_sqlx_migrations differs");
-        assert_eq!(from_cache.len(), 50, "every migration is recorded");
+        assert_eq!(from_cache.len(), 51, "every migration is recorded");
 
         // Spelled out separately because it is the one piece of state a
         // schema-only cache would silently lose, and two tests in
