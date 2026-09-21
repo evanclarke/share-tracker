@@ -600,4 +600,22 @@ mod tests {
         assert_eq!(year["cgt_discount"], "5000");
         assert_eq!(year["net_capital_gain"], "5000");
     }
+
+    /// A CGT event dated on or after 1 July 2027 is refused rather than having
+    /// either method compared on it — the reform guard
+    /// (`domain::cgt_reform`) reaches this report through the shared
+    /// realised-gains read.
+    #[tokio::test]
+    async fn a_post_commencement_disposal_is_refused() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("REF").insert(&pool).await;
+        test_support::insert_parcel_bypassing_checks(&pool, 1, 1, ymd(2024, 1, 2), "100", "10")
+            .await;
+        test_support::insert_sell_bypassing_checks(&pool, 2, 1, ymd(2027, 7, 1), "100", "15").await;
+        test_support::allocate(&pool, 1, 2, 1, dec("100")).await;
+
+        let err = db_indexation_cross_check(&pool).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("2027-07-01"), "{msg}");
+    }
 }

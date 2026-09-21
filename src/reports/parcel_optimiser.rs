@@ -33,6 +33,7 @@
 //! it, as the realised report applies.
 
 use crate::domain::cgt_discount::discount_eligible;
+use crate::domain::cgt_reform;
 use crate::domain::contemplated_disposal;
 use crate::domain::cost_base::ParcelRow;
 use crate::domain::open_parcels;
@@ -336,6 +337,17 @@ pub fn disposal_figures(
     total_units: Decimal,
 ) -> Result<(Vec<HypotheticalAllocation>, DisposalTotals), sqlx::Error> {
     let sale_date = candidates.sale_date();
+    // The reform guard (`domain::cgt_reform`): a hypothetical disposal is a
+    // CGT event too, and its date is caller-supplied with no write-time ceiling
+    // behind it, so a post-1 July 2027 date must be refused here rather than
+    // answered with a 50 per cent discount. Guarding the shared seam covers
+    // both endpoints that reach it — the parcel optimiser and the pre-sale
+    // what-if.
+    cgt_reform::guard_discount_event(
+        "the hypothetical disposal",
+        sale_date,
+        "the hypothetical-disposal reports (parcel optimiser and pre-sale what-if)",
+    )?;
     let by_id: HashMap<i64, &CandidateParcel> = candidates
         .parcels()
         .iter()
@@ -1078,15 +1090,17 @@ mod tests {
         );
     }
 
-    /// A future-dated request is unchanged: every parcel open today is a
-    /// legitimate candidate for a sale contemplated later, and the answer
-    /// matches the same request run for today.
+    /// A later-dated request is unchanged: every parcel open on the date asked
+    /// for is a legitimate candidate, and the answer matches the same request
+    /// run for an earlier date. The request date's one ceiling is the CGT
+    /// reform's commencement (`domain::cgt_reform`) — a hypothetical disposal
+    /// on or after 1 July 2027 is refused — so the later leg here is the last
+    /// pre-commencement day, keeping the test clock-independent.
     #[tokio::test]
-    async fn api_future_dated_request_still_sees_every_open_parcel() {
+    async fn api_a_date_past_today_still_sees_every_open_parcel() {
         let pool = test_pool().await;
         as_at_fixture(&pool).await;
-        let today = crate::infra::date::today();
-        let later = today + chrono::Duration::days(400);
+        let later = crate::domain::cgt_reform::COMMENCEMENT - chrono::Duration::days(1);
         let run = async |date: NaiveDate| {
             let (status, body) = post_optimiser(
                 pool.clone(),
@@ -1100,10 +1114,10 @@ mod tests {
             assert_eq!(status, StatusCode::OK);
             serde_json::from_slice::<OptimiserResponse>(&body).unwrap()
         };
-        let now = run(today).await;
-        let future = run(later).await;
-        // All four parcels, both times — the whole 400 units held today.
-        for r in [&now, &future] {
+        let early = run(ymd(2025, 6, 30)).await;
+        let late = run(later).await;
+        // All four parcels, both times — the whole 400 units held.
+        for r in [&early, &late] {
             let ids: std::collections::BTreeSet<i64> = r
                 .allocations
                 .iter()
@@ -1118,7 +1132,7 @@ mod tests {
                 .map(|s| (s.totals.cost_base, s.totals.capital_gain_loss))
                 .collect::<Vec<_>>()
         };
-        assert_eq!(totals(&now), totals(&future));
+        assert_eq!(totals(&early), totals(&late));
     }
 
     // ---- API ---------------------------------------------------------------
@@ -1889,5 +1903,25 @@ mod tests {
         assert_eq!(what_if.hypothetical.cost_base, dec("2348.00"));
         assert_eq!(what_if.allocations.len(), 1);
         assert_eq!(what_if.allocations[0].cost_base, dec("2348.00"));
+    }
+
+    /// The hypothetical disposal's date is caller-supplied, with no write-time
+    /// ceiling behind it, so the shared guard (`domain::cgt_reform`) refuses a
+    /// date on or after 1 July 2027 rather than ranking strategies on a 50 per
+    /// cent discount the law has repealed.
+    #[tokio::test]
+    async fn a_post_commencement_hypothetical_disposal_is_refused() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "OPT").await;
+        insert_buy(&pool, 1, 1, ymd(2024, 1, 15), dec("100"), dec("10")).await;
+
+        let candidates = db_candidate_parcels(&pool, 1, None, ymd(2027, 7, 1))
+            .await
+            .unwrap();
+        let err = disposal_figures(&candidates, &[(1, dec("100"))], dec("1500"), dec("100"))
+            .expect_err("1 July 2027 is the reform's first day");
+        let msg = err.to_string();
+        assert!(msg.contains("2027-07-01"), "{msg}");
+        assert!(msg.contains("hypothetical-disposal"), "{msg}");
     }
 }

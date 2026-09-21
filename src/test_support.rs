@@ -707,6 +707,41 @@ pub async fn insert_parcel_bypassing_checks(
     .unwrap();
 }
 
+/// A Sell written **straight into `trades`**, bypassing `trade::db_upsert` and
+/// the shared `check_amounts` — including its `date <= today` ceiling.
+///
+/// The one thing it is for: standing up the CGT event
+/// `domain::cgt_reform`'s commencement guard exists to refuse — a disposal
+/// dated on or after 1 July 2027, which no write path can create until that
+/// date arrives. Pair it with [`insert_parcel_bypassing_checks`] and
+/// [`allocate`]. Use [`sell`] for everything else; a fixture that skips the
+/// invariants is a fixture that can lie.
+pub async fn insert_sell_bypassing_checks(
+    pool: &SqlitePool,
+    id: i64,
+    listing_id: i64,
+    date: NaiveDate,
+    quantity: &str,
+    price: &str,
+) {
+    sqlx::query(
+        "INSERT INTO trades \
+         (id, trade_type, date, settlement_date, settlement_date_source, listing_id, \
+          average_price, quantity, currency, brokerage, gst_on_brokerage, \
+          brokerage_currency, fx_rate, holding_account_id) \
+         VALUES (?, 'Sell', ?, ?, 'stated', ?, ?, ?, 'AUD', '0', '0', 'AUD', '1', 1)",
+    )
+    .bind(id)
+    .bind(date)
+    .bind(date)
+    .bind(listing_id)
+    .bind(price)
+    .bind(quantity)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
 /// An AMMA statement written **straight into `amma_statements`**, bypassing
 /// `amma::db_upsert` and therefore its write-time check that
 /// `tax_year_end_date` is a 30 June financial-year end.

@@ -5734,4 +5734,23 @@ mod tests {
         let err = disposal_parcel_rows(&disposal, &inputs).unwrap_err();
         assert!(matches!(err, sqlx::Error::Decode(_)), "{err:?}");
     }
+
+    /// A CGT event dated on or after 1 July 2027 is refused by the whole
+    /// document — the annual tax report reads every realised disposal through
+    /// the shared pipeline the reform guard (`domain::cgt_reform`) protects, so
+    /// its disposals schedule and CGT summary cannot be assessed under the
+    /// repealed discount.
+    #[tokio::test]
+    async fn a_post_commencement_disposal_is_refused() {
+        let pool = test_support::test_pool().await;
+        test_support::listing(1).ticker("REF").insert(&pool).await;
+        test_support::insert_parcel_bypassing_checks(&pool, 1, 1, ymd(2024, 1, 2), "100", "10")
+            .await;
+        test_support::insert_sell_bypassing_checks(&pool, 2, 1, ymd(2027, 7, 1), "100", "15").await;
+        test_support::allocate(&pool, 1, 2, 1, dec("100")).await;
+
+        let err = db_tax_report(&pool, 2026).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("2027-07-01"), "{msg}");
+    }
 }

@@ -1,4 +1,5 @@
 use crate::domain::cgt_discount;
+use crate::domain::cgt_reform;
 use crate::domain::cost_base::{self, ParcelRow};
 use crate::domain::indexation;
 use crate::entities::corporate_action::{RocEvent, SplitEvent};
@@ -439,6 +440,20 @@ fn cumulative_share(
 /// The gain/loss computation: a pure function over [`ReportData`], so the
 /// arithmetic is unit-testable without a database.
 fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sqlx::Error> {
+    // The reform guard (`domain::cgt_reform`): every Sell and rights sale is a
+    // CGT event, and one dated on or after 1 July 2027 must not reach the 50
+    // per cent discount classification below — the write-time date ceiling that
+    // normally keeps one out of the database is not this report's guarantee.
+    // Refusing the whole report is deliberate: a partial year assessed under
+    // repealed law would be the silent answer this guard exists to prevent.
+    cgt_reform::guard_discount_events(
+        data.sells
+            .values()
+            .map(|s| (s.date, "a Sell"))
+            .chain(data.rights_sales.iter().map(|s| (s.date, "a rights sale"))),
+        "reports::realised_gains",
+    )?;
+
     let mut sale_proceeds: HashMap<i64, Decimal> = HashMap::new();
     let mut sale_cost_base: HashMap<i64, Decimal> = HashMap::new();
     let mut sale_discount_gain: HashMap<i64, Decimal> = HashMap::new();
@@ -3733,5 +3748,82 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].cost_base, "10000000000".parse().unwrap());
         assert_eq!(rows[0].capital_loss, "10000000000".parse().unwrap());
+    }
+
+    // ---- the CGT reform commencement guard (`domain::cgt_reform`) ----------
+
+    /// The guard's boundary, on the data: a CGT event dated **30 June 2027** —
+    /// the day before `domain::cgt_reform::COMMENCEMENT` — is still assessed
+    /// under the 50 per cent discount, unchanged. The write path refuses a
+    /// trade dated after today, so the Sell goes straight into `trades`
+    /// (`test_support::insert_sell_bypassing_checks`).
+    #[tokio::test]
+    async fn db_a_cgt_event_the_day_before_commencement_still_discounts() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "REF").await;
+        // Bought 2024-01-02, sold 2027-06-30: held over 12 months, so the
+        // whole A$500 gain is discount-eligible under the old law.
+        test_support::insert_parcel_bypassing_checks(
+            &pool,
+            1,
+            1,
+            NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
+            "100",
+            "10",
+        )
+        .await;
+        test_support::insert_sell_bypassing_checks(
+            &pool,
+            2,
+            1,
+            NaiveDate::from_ymd_opt(2027, 6, 30).unwrap(),
+            "100",
+            "15",
+        )
+        .await;
+        allocate(&pool, 1, 2, 1, dec("100")).await;
+
+        let rows = db_realised_gains(&pool)
+            .await
+            .expect("30 June 2027 is old law");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].sale_date,
+            NaiveDate::from_ymd_opt(2027, 6, 30).unwrap()
+        );
+        assert_eq!(rows[0].discount_eligible_gain, dec("500"));
+    }
+
+    /// A CGT event dated on or after 1 July 2027 is refused rather than
+    /// assessed under the repealed 50 per cent discount, and the refusal names
+    /// the commencement date (the section's test requirement).
+    #[tokio::test]
+    async fn db_a_post_commencement_event_is_refused_naming_the_commencement_date() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "REF").await;
+        test_support::insert_parcel_bypassing_checks(
+            &pool,
+            1,
+            1,
+            NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
+            "100",
+            "10",
+        )
+        .await;
+        test_support::insert_sell_bypassing_checks(
+            &pool,
+            2,
+            1,
+            NaiveDate::from_ymd_opt(2027, 7, 1).unwrap(),
+            "100",
+            "15",
+        )
+        .await;
+        allocate(&pool, 1, 2, 1, dec("100")).await;
+
+        let err = db_realised_gains(&pool).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("2027-07-01"), "{msg}");
+        assert!(msg.contains("reports::realised_gains"), "{msg}");
     }
 }

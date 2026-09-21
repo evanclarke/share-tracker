@@ -41,6 +41,7 @@
 //! a capital loss forward (label 18V is reported until the loss is used, not
 //! only in years with a CGT event — see [`net_years`]).
 
+use crate::domain::cgt_reform;
 use crate::domain::cost_base::{self, ParcelRow};
 use crate::domain::open_parcels;
 use crate::domain::tax_year::tax_year_for;
@@ -607,6 +608,15 @@ async fn non_disposal_gains(
                     && disposal
                     && disposed_on.is_some_and(|d| d >= *record_date && d < *date)
                 {
+                    // The reform guard (`domain::cgt_reform`): E10/G1/C2 are
+                    // CGT events in their own right, and one dated on or after
+                    // 1 July 2027 must not reach the discount classification
+                    // below. Refuse before classifying this event.
+                    cgt_reform::guard_discount_event(
+                        "a CGT event C2",
+                        *date,
+                        "reports::net_capital_gain",
+                    )?;
                     out.push(EventGain {
                         kind: CgtEventKind::C2,
                         tax_year: tax_year_for(*date),
@@ -628,24 +638,33 @@ async fn non_disposal_gains(
                 let exhausted = remaining;
                 remaining = Decimal::ZERO;
                 match event {
-                    Reduction::Amit(e) => out.push(EventGain {
-                        kind: CgtEventKind::E10,
-                        // The statement's FY by the one shared rule: its year
-                        // end is 30 June through the write path, but a row a
-                        // hand-entered database holds at another date must
-                        // still bucket where `tax_year_for` puts it.
-                        tax_year: tax_year_for(e.tax_year_end_date),
-                        amount: fx.to_aud(
-                            excess,
-                            &parcel.currency,
-                            acquired,
-                            parcel.fx_override(),
-                        )?,
-                        discount_eligible: crate::domain::cgt_discount::discount_eligible(
-                            acquired,
+                    Reduction::Amit(e) => {
+                        // The reform guard: an E10 gain arises at the AMMA
+                        // statement's year end.
+                        cgt_reform::guard_discount_event(
+                            "a CGT event E10",
                             e.tax_year_end_date,
-                        ),
-                    }),
+                            "reports::net_capital_gain",
+                        )?;
+                        out.push(EventGain {
+                            kind: CgtEventKind::E10,
+                            // The statement's FY by the one shared rule: its year
+                            // end is 30 June through the write path, but a row a
+                            // hand-entered database holds at another date must
+                            // still bucket where `tax_year_for` puts it.
+                            tax_year: tax_year_for(e.tax_year_end_date),
+                            amount: fx.to_aud(
+                                excess,
+                                &parcel.currency,
+                                acquired,
+                                parcel.fx_override(),
+                            )?,
+                            discount_eligible: crate::domain::cgt_discount::discount_eligible(
+                                acquired,
+                                e.tax_year_end_date,
+                            ),
+                        });
+                    }
                     Reduction::Roc { date, currency, .. } => {
                         // A G1 gain is the difference between two amounts
                         // arising on two different dates, so each is translated
@@ -660,6 +679,12 @@ async fn non_disposal_gains(
                         // when the AUD had weakened); an AUD parcel collapses to
                         // parity whichever way it is done.
                         let payment = fx.to_aud(amount, currency, *date, FxOverride::None)?;
+                        // The reform guard: G1 happens on the payment date.
+                        cgt_reform::guard_discount_event(
+                            "a CGT event G1",
+                            *date,
+                            "reports::net_capital_gain",
+                        )?;
                         let cost_base = if exhausted == Decimal::ZERO {
                             // An earlier event already exhausted the cost base:
                             // the whole payment is the gain, and there is no
@@ -809,6 +834,15 @@ async fn gross_buckets(
         let year_end: NaiveDate = row.try_get("tax_year_end_date")?;
         let currency: String = row.try_get("currency")?;
         let d = year_end;
+        // The reform guard (`domain::cgt_reform`): a statement whose year end
+        // falls on or after 1 July 2027 attributes gains the new regime
+        // governs, and the app cannot yet separate the deferred component from
+        // the current one. Refuse before grossing anything up.
+        cgt_reform::guard_discount_event(
+            "an AMMA statement's year end",
+            year_end,
+            "reports::net_capital_gain",
+        )?;
         // AMMA discount-method gains are the already-halved "discounted capital gain"
         // line; gross up ×2 to the pre-discount gain before netting losses.
         let discount_net = aud_field(fx, row, "cgt_discount_gains", &currency, d)?;
@@ -5318,10 +5352,13 @@ mod tests {
         assert_eq!(r.allocations[0].purchase_trade_id, 1);
     }
 
-    /// A future-dated disposal is unchanged: every parcel open today is a
-    /// legitimate candidate for a sale contemplated later.
+    /// A later-dated disposal is unchanged: every parcel open on the date asked
+    /// for is a legitimate candidate. The request date's one ceiling is the CGT
+    /// reform's commencement (`domain::cgt_reform`) — a hypothetical disposal on
+    /// or after 1 July 2027 is refused — so the date here is the last
+    /// pre-commencement day, keeping the test clock-independent.
     #[tokio::test]
-    async fn api_what_if_dated_in_the_future_still_sees_every_open_parcel() {
+    async fn api_a_date_past_today_still_sees_every_open_parcel() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "VAS").await;
         insert_trade(
@@ -5334,7 +5371,7 @@ mod tests {
             Decimal::from(10),
         )
         .await;
-        let later = crate::infra::date::today() + chrono::Duration::days(400);
+        let later = crate::domain::cgt_reform::COMMENCEMENT - chrono::Duration::days(1);
 
         let (status, body) = post_what_if(
             pool,
@@ -5489,5 +5526,90 @@ mod tests {
         assert_eq!(y.other_gains, Decimal::from(3000));
         assert_eq!(y.discount_eligible_gains, Decimal::ZERO);
         assert_eq!(y.net_capital_gain, Decimal::from(3000));
+    }
+
+    // ---- the CGT reform commencement guard (`domain::cgt_reform`) ----------
+
+    /// A realised disposal dated on or after 1 July 2027 is refused (through
+    /// the shared realised-gains read), naming the commencement date.
+    #[tokio::test]
+    async fn db_a_post_commencement_disposal_is_refused() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "REF").await;
+        test_support::insert_parcel_bypassing_checks(
+            &pool,
+            1,
+            1,
+            NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
+            "100",
+            "10",
+        )
+        .await;
+        test_support::insert_sell_bypassing_checks(
+            &pool,
+            2,
+            1,
+            NaiveDate::from_ymd_opt(2027, 7, 1).unwrap(),
+            "100",
+            "15",
+        )
+        .await;
+        allocate(&pool, 1, 2, 1, dec("100")).await;
+
+        let err = db_net_capital_gain(&pool).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("2027-07-01"), "{msg}");
+    }
+
+    /// A non-disposal CGT event (an AMMA statement's year end, which carries
+    /// the E10 gain) dated on or after 1 July 2027 is refused by this report's
+    /// own guard, before anything is grossed up.
+    #[tokio::test]
+    async fn db_a_post_commencement_amma_year_end_is_refused() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AMT").await;
+        // A 2028 year end is a valid 30 June, so the write path accepts it —
+        // it simply cannot exist until that date arrives.
+        test_support::amma(1, 1)
+            .with(|a| {
+                a.tax_year_end_date = NaiveDate::from_ymd_opt(2028, 6, 30).unwrap();
+                a.date_received = NaiveDate::from_ymd_opt(2028, 8, 29).unwrap();
+            })
+            .insert(&pool)
+            .await;
+
+        let err = db_net_capital_gain(&pool).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("2028-06-30"), "{msg}");
+        assert!(msg.contains("2027-07-01"), "{msg}");
+    }
+
+    /// The pre-sale what-if takes its disposal date from the request, with no
+    /// write-time ceiling behind it, so the shared hypothetical-disposal guard
+    /// must refuse a post-commencement date here too.
+    #[tokio::test]
+    async fn api_a_post_commencement_what_if_is_refused() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "REF").await;
+        insert_trade(
+            &pool,
+            1,
+            trade::TradeType::Buy,
+            1,
+            NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
+
+        let (status, _body) = post_what_if(
+            pool,
+            serde_json::json!({
+                "listing_id": 1, "units": "100", "proceeds": "1500", "date": "2027-07-01",
+                "allocations": [{"purchase_trade_id": 1, "units": "100"}]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     }
 }

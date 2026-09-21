@@ -1720,6 +1720,109 @@ fn indexation_cross_check_is_documented() {
     assert!(SCHEMA_MD.contains("QC 104764"));
 }
 
+/// Docs-sync pin for the CGT reform's commencement guard and reference — the
+/// TODO section that lands *before* the reform (cost base indexation, the 30
+/// per cent minimum tax, the deemed reacquisition, the seven-step method
+/// statement and the out-of-model scope decisions are separate sections). It
+/// pins four things:
+///
+/// 1. the shared module holds the commencement date, the four gain categories
+///    and the reform predicates, each cited to EM Chapter 1
+///    (the behaviour is `domain::cgt_reform`'s own tests);
+/// 2. the two `NEEDS CLARIFICATION` decisions are resolved in writing — the
+///    commencement date is pinned against the Acts' own application rules
+///    (EM 1.214–1.219, not the machinery commencement table alone), and the
+///    reform's worked examples are deliberately deferred rather than pinned
+///    through the HTTP API (which refuses a future-dated trade) or a clock
+///    seam (which would weaken that write-time ceiling);
+/// 3. the user-facing docs state the reform's status; and
+/// 4. the closed section has been moved out of `TODO.md` into its archive
+///    (`DONE/tax-domain.md`), per `DONE.md`'s table.
+#[test]
+fn cgt_reform_commencement_guard_documented() {
+    // 1. The module, and its citations.
+    const MODULE: &str = include_str!("domain/cgt_reform.rs");
+    assert!(MODULE.contains("pub const COMMENCEMENT"));
+    assert!(MODULE.contains("NaiveDate::from_ymd_opt(2027, 7, 1)"));
+    assert!(MODULE.contains("pub enum GainCategory"));
+    assert!(MODULE.contains("DeferredNonResidential"));
+    assert!(MODULE.contains("DeferredResidential"));
+    assert!(MODULE.contains("NonResidential"));
+    // Every rule the module states carries its EM paragraph or section.
+    for citation in [
+        "EM 1.216", "EM 1.219", "EM 1.214", "EM 1.82", "s 102-6", "EM 1.83", "EM 1.86", "EM 1.88",
+        "EM 1.91", "EM 1.94", "EM 1.23",
+    ] {
+        assert!(MODULE.contains(citation), "the module cites {citation}");
+    }
+    assert!(MODULE.contains("guard_discount_events"));
+    assert!(MODULE.contains("guard_discount_event"));
+    assert!(MODULE.contains("impl From<CgtReformError> for sqlx::Error"));
+
+    // 2a. The commencement date, pinned against both mirrors' own statements:
+    // the ATO's summary says 1 July 2027; the EM's commencement table (a
+    // machinery "first 1 January/1 April/1 July/1 October after Royal Assent"
+    // rule) is not the app's date, the *application* rules are — Division 119
+    // from CGT events on/after 1 July 2027, everything else for the income year
+    // that includes it.
+    let ato_page = include_str!("../docs/ato/cgt-reform-boosting-home-ownership.md");
+    assert!(ato_page.contains("QC 107304"));
+    assert!(ato_page.contains("These changes, will apply from 1 July 2027:"));
+    assert!(ato_page.contains("cost base indexation and a 30% minimum tax rate on capital gains"));
+    let em = ato(include_str!("../docs/ato/cgt-reform-cgt-adjustments.md"));
+    assert!(em.contains(
+        "1.214 Schedule 1 to the Bill (excluding the provisions relating to the minimum tax) and \
+         the Imposition Bill commence on the first 1 January, 1 April, 1 July or 1 April to occur \
+         after the day the Bill receives Royal Assent."
+    ));
+    assert!(em.contains(
+        "1.216 Division 119 (minimum rate of tax on capital gains) applies to capital gains from \
+         CGT events happening on or after 1 July 2027."
+    ));
+    assert!(em.contains(
+        "1.219 All other amendments in this Schedule apply in relation to assessments for the \
+         income year that includes 1 July 2027 and for later income years."
+    ));
+    // The four categories' statutory names are the mirror's.
+    for category in [
+        "deferred non-residential capital gains",
+        "deferred residential capital gains",
+        "non-residential capital gains",
+        "residential capital gains",
+    ] {
+        assert!(em.contains(category), "the EM names {category}");
+    }
+    // The project note is explicit that none of the regime is implemented.
+    assert!(em.contains("Nothing in the new regime described above is implemented here"));
+
+    // 2b. The worked-example decision, stated in the Known-limitations entry.
+    let limitations = known_limitations();
+    assert!(limitations.contains("**CGT reform from 1 July 2027 — guarded, not implemented**"));
+    assert!(limitations.contains("**replaces the 50% CGT discount**"));
+    assert!(limitations.contains("**30 per cent minimum tax on capital gains**"));
+    assert!(limitations.contains("deliberately **not** reproduced as `src/ato_examples.rs`"));
+    assert!(limitations.contains("pinned at the **report level**"));
+    assert!(limitations.contains("rather than through a clock seam"));
+
+    // 3. The user-facing surfaces.
+    assert!(README_MD.contains("**CGT reform from 1 July 2027**"));
+    assert!(README_MD.contains("rather than assess it under repealed law"));
+    assert!(FEATURES_MD.contains("**CGT reform from 1 July 2027**"));
+    assert!(FEATURES_MD.contains("is **not implemented**"));
+    let overview = include_str!("../docs/ato/OVERVIEW.md");
+    assert!(overview.contains("**commencement guard**"));
+    assert!(overview.contains("`src/domain/cgt_reform.rs`"));
+    assert!(overview.contains("It is the citation for `src/domain/cgt_reform.rs`"));
+
+    // 4. The section has been archived. `every_markdown_link_resolves` keeps
+    // the moved text's own links honest; this pins the relocation itself.
+    const TODO_MD: &str = include_str!("../TODO.md");
+    const DONE_TAX_DOMAIN: &str = include_str!("../DONE/tax-domain.md");
+    let heading = "## CGT reform from 1 July 2027 — commencement guard and reference";
+    assert!(DONE_TAX_DOMAIN.contains(heading), "the section is archived");
+    assert!(!TODO_MD.contains(heading), "the section left TODO.md");
+}
+
 /// Docs-sync pin for the joint-ownership entry convention (SCENARIOS AA-e,
 /// scenario AA-06): a jointly held parcel is entered as *your own share* —
 /// half a 1,000-unit registry holding is a 500-unit Buy — and the statement's

@@ -3,6 +3,7 @@
 //! callers.
 
 pub mod cgt_discount;
+pub mod cgt_reform;
 pub mod contemplated_disposal;
 pub mod cost_base;
 pub mod deduction_destination;

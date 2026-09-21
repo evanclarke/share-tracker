@@ -105,9 +105,14 @@ The Government announced on 12 May 2026, as part of the 2026–27 Federal Budget
 replace the 50 per cent CGT discount for individuals, trusts and partnerships with **cost base
 indexation and a 30 per cent minimum tax rate on capital gains**, applying from 1 July 2027 to
 gains accruing after that date. Both Acts have passed and the ATO states the measures are now law.
-**None of this is modelled in the project** — every calculation here applies the law in force for
-the years it reports (the ATO's own alert on [`cgt-discount.md`](cgt-discount.md) says the changes
-"don't apply to Tax Time 2026"). These two mirrors are the reference for that future work.
+**None of the new regime is modelled in the project** — every calculation here applies the law in
+force for the years it reports (the ATO's own alert on [`cgt-discount.md`](cgt-discount.md) says the
+changes "don't apply to Tax Time 2026"). What the project does carry is the **commencement guard**:
+the single commencement date and the four gain categories are defined once in
+`src/domain/cgt_reform.rs`, and every report that applies the 50 per cent discount refuses a CGT
+event dated on or after 1 July 2027 — a logged `500` naming the date — rather than assessing it
+under repealed law. These two mirrors remain the reference for that implementation work, and the
+guard's own citation is recorded against them below.
 
 | File | What it covers |
 | --- | --- |
@@ -200,12 +205,19 @@ the years it reports (the ATO's own alert on [`cgt-discount.md`](cgt-discount.md
   `investment_expenses` entity, that brokerage is excluded (it is a cost-base element instead),
   and that the stored deductible amount is post-apportionment (the user's determination). The tax
   summary nets these against gross assessable investment income per financial year.
-- **CGT reform from 1 July 2027** (no open TODO item — reference captured 2026-09-21):
+- **CGT reform from 1 July 2027** (implementation opened 2026-09-21; the four gain categories and
+  the commencement guard landed, the reform itself not modelled):
   [`cgt-reform-boosting-home-ownership.md`](cgt-reform-boosting-home-ownership.md) and
   [`cgt-reform-cgt-adjustments.md`](cgt-reform-cgt-adjustments.md) mirror the enacted change
   from the 2026–27 Budget — cost base indexation in place of the 50% discount for individuals and
   trusts, a 30% minimum tax on capital gains, a deemed disposal/reacquisition on 30 June 2027
   bringing pre-CGT assets into the regime, and a seven-step net-capital-gain method statement.
   It applies to gains accruing on or after 1 July 2027, so it changes nothing in the years this
-  project reports and no work item is opened by it; it is filed here so that any future
-  implementation starts from the ATO's own statement of the rules rather than a summary.
+  project reports. It is the citation for `src/domain/cgt_reform.rs`, which defines the
+  commencement date (1 July 2027, EM 1.214–1.219) and the four gain categories (EM 1.82–1.93) once,
+  and for the guard every report that applies the discount now runs: a CGT event dated on or after
+  that date is refused loudly rather than assessed under repealed law (see
+  [`../API.md`](../API.md#known-limitations)). The remaining sections — indexation, the deemed
+  reacquisition and deferred gain, the seven-step method statement, the minimum tax, and the
+  out-of-model scope decisions — were opened as their own TODO sections so each closes and archives
+  independently.

@@ -2407,3 +2407,45 @@ record date fell in the held part of the year, so nothing was attributed.)
   payer since August 2020 should have 11–12) must not gate a tax figure in either direction — it
   would either add an expectation the recorded facts do not justify, or silently retire a real
   question. The calendar stays advisory, and this hole stays open by decision
+
+## CGT reform from 1 July 2027 — commencement guard and reference
+(ATO: `docs/ato/cgt-reform-boosting-home-ownership.md` (QC 107304) + `docs/ato/cgt-reform-cgt-adjustments.md` (EM Chapter 1), captured 2026-09-21. Schedule 1 to the Treasury Laws Amendment (Tax Reform No. 1) Act 2026 and the Income Tax Rates Amendment (Tax Reform No. 1) Act 2026 replace the 50 per cent CGT discount for Australian-resident individuals and trusts with **cost base indexation** and impose a **30 per cent minimum tax on capital gains** for CGT events on or after 1 July 2027, on gains accruing from that date; all pre-CGT assets cease to be pre-CGT; and the net-capital-gain method statement becomes seven steps over four gain categories. This section is the safety net that must land **before** the date passes; the five sections after it are the substance.)
+- [x] Add a shared reform module (`src/domain/cgt_reform.rs`) holding the commencement date (`1 July 2027`), the four gain categories and the reform predicates, each cited to EM Chapter 1 — one definition so no report can disagree about where the old law ends
+- [x] Guard every report that applies the discount, so the day the `date` ceiling stops protecting the app it refuses rather than assessing under repealed law: a CGT event dated on or after 1 July 2027 must not reach the 50 per cent path in `reports::realised_gains`, `reports::net_capital_gain`, `reports::tax_report` or `reports::indexation_cross_check` until the new regime lands. Fail loudly (a logged `500`, or a `422` naming the date on any write path); never a silent discount
+- [x] Tests: a CGT event dated 2027-06-30 still computes under the discount unchanged; a post-commencement event inserted directly (`test_pool` + raw insert, since the write path rejects future dates) is refused by each report's guard, with the refusal naming the commencement date
+- [x] NEEDS CLARIFICATION: pin the commencement date for the *app* against the Acts' own commencement table — Schedule 1 (except the minimum tax) and the Imposition Bill commence on the first 1 January/1 April/1 July/1 October after Royal Assent, and the amendments "largely apply in relation to assessments for the income year that includes 1 July 2027", while the ATO's page states 1 July 2027. Confirm whether any provision (the minimum tax's own commencement, the subitem-84 application rules) reaches a different date before hard-coding one
+- [x] NEEDS CLARIFICATION: decide how the reform's worked examples are pinned by tests. Examples 1.1, 1.6–1.19 are dated 2027–2035, and the write path rejects any trade after today (`AmountsError::FutureDate`), so they cannot be entered "purely via the HTTP API" (`src/ato_examples.rs` convention) until those dates arrive. Choose between a report-level test that builds parcels/prices directly, a clock seam, or deferring the acceptance tests — and state the choice, because it is a departure from the existing convention
+- [x] Docs sync: `docs/API.md` Known limitations + README/FEATURES state the reform's status (what is implemented, what is guarded), and `docs/ato/OVERVIEW.md`'s "How this maps" bullet gains the implementation sections here
+- [x] Docs sync: an implementation section's `## ` heading is moved to `DONE/tax-domain.md` (its subject file) when closed, per [DONE.md](../DONE.md)'s table — the six sections are separate so they close and archive independently
+
+Closed 2026-09-21. **The commencement date is pinned to 1 July 2027.** EM 1.214's
+"first 1 January, 1 April, 1 July or 1 October after Royal Assent" is the machinery commencement
+table, not the app's date; the app's date comes from the *application* rules and the ATO's own
+statement — Division 119 applies to CGT events happening on or after 1 July 2027 (EM 1.216), every
+other amendment applies in relation to assessments for the income year that includes 1 July 2027
+(EM 1.219, i.e. 1 July 2027 – 30 June 2028), and QC 107304 states the changes "will apply from
+1 July 2027". No provision reaches a different date for this app's single Australian-resident
+individual, and the constant, its citation and the boundary are pinned by
+`domain::cgt_reform`'s tests.
+
+**The reform's worked examples are deferred, by decision.** `src/ato_examples.rs` enters its facts
+purely through the HTTP API, and the shared `AmountsError::FutureDate` ceiling refuses any trade
+dated after today — so Examples 1.1 and 1.6–1.19 cannot be keyed until their own dates arrive. A
+clock seam was rejected because it would let the API accept a future-dated trade and so weaken the
+write-time invariant the guard exists to back up. The choice is to pin them at the **report level**
+(building parcels and prices directly) in the sections that implement the arithmetic each example
+exercises, and it is stated in `docs/API.md`'s Known limitations and pinned by
+`doc_checks::cgt_reform_commencement_guard_documented`.
+
+**What landed.** `domain::cgt_reform` holds `COMMENCEMENT`, the four `GainCategory` variants in
+statutory order, the `applies_to_event` / `discount_available` predicates, the guard functions and
+`CgtReformError` (bridged into report code as a `sqlx::Error::Decode`, so it reaches the HTTP layer
+as a logged `500`). `reports::realised_gains` refuses any Sell or rights sale dated on or after the
+commencement date; `reports::net_capital_gain` refuses a post-commencement AMMA statement year end
+and E10/G1/C2 event; `reports::parcel_optimiser`'s shared `disposal_figures` refuses a
+post-commencement hypothetical disposal, which covers the pre-sale what-if too. Because
+`reports::tax_report` and `reports::indexation_cross_check` read the realised rows through the same
+guarded function, all four named reports refuse. Tests: the 2027-06-30 boundary still discounts; a
+2027-07-01 event inserted straight into `trades`
+(`test_support::insert_sell_bypassing_checks`) is refused by each report, naming the commencement
+date.

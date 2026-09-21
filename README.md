@@ -89,7 +89,11 @@ detail on every one** — what it computes, which ATO rule it follows, and where
 **Not in scope**, deliberately: this assumes a share **investor** on capital account (not a trader),
 **one taxpayer per database**, and no pre-CGT holdings — among a dozen other decisions listed under
 [Deliberate scope cuts](docs/FEATURES.md#deliberate-scope-cuts) and, endpoint by endpoint, in
-[Known limitations](docs/API.md#known-limitations).
+[Known limitations](docs/API.md#known-limitations). The enacted **CGT reform from 1 July 2027** —
+cost base indexation and a 30 per cent minimum tax on capital gains, in place of the 50% discount
+for individuals and trusts — is not implemented either: every report computes the law in force for
+the years it covers, and a CGT event dated on or after 1 July 2027 makes the reports that apply the
+discount **refuse** (a logged `500` naming the date) rather than assess it under repealed law.
 
 ## Building and running
 
