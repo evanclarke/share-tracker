@@ -4925,6 +4925,53 @@ fn the_emailed_reports_are_documented_where_each_reader_looks() {
     );
 }
 
+/// Docs-sync pin for the 2026–27 Budget CGT reform (captured 2026-09-21). The
+/// reform replaces the 50 per cent CGT discount for Australian-resident
+/// individuals and trusts with cost base indexation and imposes a 30 per cent
+/// minimum tax on capital gains from 1 July 2027. Nothing in it is modelled
+/// here — the ATO's own alert on the discount page says the changes don't apply
+/// to Tax Time 2026 — so this pins only what a future implementation must start
+/// from: both ATO mirrors are present and indexed, the summary states the
+/// commencement and the two mechanisms, the explanatory memorandum states the
+/// deferral rule for assets held across 30 June 2027, and the existing discount
+/// mirror carries the alert that keeps the current rules current.
+#[test]
+fn cgt_reform_mirrors_document_the_2027_changes() {
+    // The ATO's own summary page (QC 107304): now law, applying from 1 July 2027.
+    let summary = include_str!("../docs/ato/cgt-reform-boosting-home-ownership.md");
+    assert!(summary.contains("QC 107304"));
+    assert!(summary.contains("These measures are now law"));
+    assert!(summary.contains("30% minimum tax rate on capital gains"));
+    assert!(summary.contains("only apply to gains that accrue after 1 July 2027"));
+
+    // The explanatory memorandum chapter, where the operative rules live.
+    let em = ato(include_str!("../docs/ato/cgt-reform-cgt-adjustments.md"));
+    assert!(em.contains("Chapter 1: CGT adjustments"));
+    assert!(em.contains("with cost base indexation from 1 July 2027"));
+    assert!(em.contains("30 per cent minimum tax on capital gains"));
+    assert!(em.contains("deemed to be sold just before 1 July 2027 and reacquired on 1 July 2027"));
+    assert!(em.contains("Division 119"));
+    assert!(em.contains("seven steps"));
+
+    // The discount mirror carries the alert that makes the ongoing calculation correct.
+    let discount = ato(include_str!("../docs/ato/cgt-discount.md"));
+    assert!(discount.contains("don't apply to Tax Time 2026"));
+    assert!(discount.contains("QC 66019"));
+
+    // …and both new mirrors are reachable from the ATO index's own section.
+    const ATO_OVERVIEW: &str = include_str!("../docs/ato/OVERVIEW.md");
+    assert!(ATO_OVERVIEW.contains("## CGT reform from 1 July 2027"));
+    for mirror in [
+        "cgt-reform-boosting-home-ownership.md",
+        "cgt-reform-cgt-adjustments.md",
+    ] {
+        assert!(
+            ATO_OVERVIEW.contains(mirror),
+            "OVERVIEW.md indexes {mirror}"
+        );
+    }
+}
+
 /// Pins the reviewed CodeQL false positive on `src/infra/auth.rs`.
 ///
 /// `rust/hard-coded-cryptographic-value` fires on the `password: "wrong"`

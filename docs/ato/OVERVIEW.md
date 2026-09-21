@@ -1,7 +1,8 @@
 # ATO Reference Documentation — Overview
 
 Local copies of Australian Taxation Office (ATO) guidance, retrieved **2026-06-01**
-(worked-example pages marked otherwise were retrieved 2026-06-06), to
+(worked-example pages marked otherwise were retrieved 2026-06-06; the CGT-reform pages in
+their own section below were retrieved 2026-09-21), to
 support correct implementation of the capital-gains, AMIT/AMMA, and income-attribution
 calculations in this project. Each file carries its source URL and retrieval date in a
 header block. **The live ATO site (ato.gov.au) is authoritative** — these copies are a
@@ -45,6 +46,15 @@ non-renounceable split the project relies on. Both were re-captured in full. The
 holds: when a task leans on a specific rule in a mirror, **re-fetch that page**, because
 a page that only *gains* prose compares clean on figures.
 
+**A whole new regime was added on 2026-09-21.** `cgt-discount.md` (QC 66019) had grown the
+ATO's *Recent capital gains tax changes* alert since its last capture — the 2026–27 Budget CGT
+changes **don't apply to Tax Time 2026** — and the ATO has since published its own summary of the
+enacted reform (QC 107304) with the explanatory memorandum behind it. Both are mirrored in the
+**CGT reform from 1 July 2027** section below. The alert matters to this project precisely because
+the law it *does* implement — the 50 per cent discount, losses netted first — is unchanged for every
+year the system reports; the reform material is reference for future work, and nothing in it is
+modelled yet.
+
 These pages were captured because several TODO items in
 [`../TODO.md`](../../TODO.md) need clarification on intended ATO behaviour before
 implementation — see "How this maps to open TODO items" at the end.
@@ -55,7 +65,7 @@ implementation — see "How this maps to open TODO items" at the end.
 | --- | --- |
 | [`share-investing-versus-share-trading.md`](share-investing-versus-share-trading.md) | **Share investing versus share trading** (QC 66047, retrieved 2026-08-24): the threshold question this whole system sits on — an **investor** holds shares as CGT assets (costs taken into account on sale, capital losses quarantined to capital gains), while a **share trader** carrying on a business holds them as **trading stock** (gains assessable as ordinary income, purchase price and transaction costs deductible in the year incurred, losses deductible against any income). The investor/trader table, the carrying-on-a-business factors (nature and purpose, repetition/volume/regularity, business-like organisation, capital invested), the shareholding-as-investor example (George), and both change-of-status paths — **CGT event K4** where an investor→trader change elects market value, and prior-year capital losses staying capital losses that can never become revenue losses. Only the **investor** column is modelled; the trading-stock column (Division 70's year-end opening/closing valuation, s 70-35/s 70-45) is not represented anywhere in the data model, and no stored fact distinguishes the two. Documented as the *Investor, not share trader* Known limitation in `docs/API.md`. |
 | [`cgt-how-to-calculate.md`](cgt-how-to-calculate.md) | The headline method: net capital gain = total capital gains − capital losses − CGT discount. Worked examples. Confirms tax is paid on **net** capital gains and only half the gain survives the 50% discount. |
-| [`cgt-discount.md`](cgt-discount.md) | The 50% CGT discount for Australian-resident individuals: the **12-month ownership** rule (acquisition to CGT event, exclusive of both days), what qualifies, and that the discount is applied **after** losses. |
+| [`cgt-discount.md`](cgt-discount.md) | The 50% CGT discount for Australian-resident individuals (QC 66019, re-fetched 2026-09-21): the **12-month ownership** rule (acquisition to CGT event, exclusive of both days), what qualifies, and that the discount is applied **after** losses. It now carries the ATO's **Recent capital gains tax changes** alert — the 2026–27 Budget CGT changes **don't apply to Tax Time 2026** — which is why the discount rules here remain the ones this project implements; the reform itself is mirrored in the next section. |
 | [`cgt-using-capital-losses.md`](cgt-using-capital-losses.md) | Order of offsetting: subtract capital losses **before** the discount; you choose which gains to apply losses to, and applying them to **non-discountable gains first** minimises tax. Current-year vs carried-forward losses; net capital losses carry forward indefinitely and can't offset ordinary income. |
 | [`capital-gains-question-18.md`](capital-gains-question-18.md) | **Question 18 Capital gains 2026 — the net-capital-gain method** (QC 106842, retrieved 2026-07-29): the individual return's own statement of the step order — current-year capital losses first (best applied to 'other'/indexation gains before discount gains), then **earlier-year** net capital losses, and **only then** the 50% discount — with the results at labels 18H / 18A / 18V. Worked examples (Kathleen, Examples 1–5) reproduced in `src/ato_examples.rs`; her collectables leg is not (quarantined losses are a Known limitation). The label *mapping* for the same question is in [`tax-return-labels-2026.md`](tax-return-labels-2026.md). |
 | [`cgt-cost-base.md`](cgt-cost-base.md) | The **five elements** of the cost base, the **reduced cost base** (used when there's a loss; no indexation; different third element), and what each element includes. Worked reduced-cost-base example. |
@@ -88,6 +98,21 @@ implementation — see "How this maps to open TODO items" at the end.
 | [`crypto-chain-splits.md`](crypto-chain-splits.md) | **Chain splits** (QC 69953, retrieved 2026-08-18): a new crypto asset received in a chain split is **neither ordinary income nor a capital gain on receipt**; its **cost base is zero**, it is acquired at the split, and the 50% discount applies after 12 months (Alex — reproduced in `src/ato_examples.rs`). Which asset is "new" turns on rights and relationships (Bree). Where **no** post-split asset continues the original, **CGT event C2** happens to it — a capital loss equal to its cost base (Ming — reproduced in `src/ato_examples.rs` via the `WorthlessShares` action's `C2Cancellation`). Entered as a nil-cost-base Buy dated the split. |
 | [`crypto-wrapping.md`](crypto-wrapping.md) | **Wrapping crypto tokens, and DeFi rewards** (QC 73649, retrieved 2026-08-18): wrapping or unwrapping **is a CGT event** — one crypto asset exchanged for another, capital proceeds equal to the wrapped token's market value at the exchange (Kal: 1 BTC at \$165,000 wrapped when BTC was worth \$180,000 → a \$15,000 gain and a \$180,000 cost base for the WBTC). Entered exactly as the crypto-to-crypto swap in `crypto-cgt.md`. DeFi rewards are assessable at their receipt-date market value, taxed like interest income (Craig). |
 | [`crypto-not-foreign-currency.md`](crypto-not-foreign-currency.md) | **Crypto is not foreign currency** (TD 2014/25, retrieved 2026-08-18): bitcoin is not a 'foreign currency' for **Division 775**, and Schedule 2 to the Treasury Laws Amendment (2022 Measures No. 4) Act 2023 excluded digital currency from the definition for income years starting 1 July 2021. So the documented Div 775 deferral for foreign-currency cash balances never reaches a crypto holding — a stablecoin is a CGT asset like any other crypto (SCENARIOS L-14). |
+
+## CGT reform from 1 July 2027 (2026–27 Budget; now law)
+
+The Government announced on 12 May 2026, as part of the 2026–27 Federal Budget, that it would
+replace the 50 per cent CGT discount for individuals, trusts and partnerships with **cost base
+indexation and a 30 per cent minimum tax rate on capital gains**, applying from 1 July 2027 to
+gains accruing after that date. Both Acts have passed and the ATO states the measures are now law.
+**None of this is modelled in the project** — every calculation here applies the law in force for
+the years it reports (the ATO's own alert on [`cgt-discount.md`](cgt-discount.md) says the changes
+"don't apply to Tax Time 2026"). These two mirrors are the reference for that future work.
+
+| File | What it covers |
+| --- | --- |
+| [`cgt-reform-boosting-home-ownership.md`](cgt-reform-boosting-home-ownership.md) | **Tax reform – Boosting home ownership – Reforming negative gearing and capital gains tax** (QC 107304, retrieved 2026-09-21): the ATO's own summary page. The measure was announced on 12 May 2026 as part of the 2026–27 Federal Budget and is **now law**; from 1 July 2027 it will *limit negative gearing for residential property investments to new builds* and *replace the 50% CGT discount for individuals, trusts and partnerships with cost base indexation and a 30% minimum tax rate on capital gains*. Properties held at announcement (7:30pm AEST 12 May 2026) are exempt from the negative gearing change, and the CGT reforms **only apply to gains that accrue after 1 July 2027**. The ATO page links the Budget Tax Explainer and both amending Acts; this project appends the operative ITAA 1997 references (s 110-36 indexation, s 119-10 minimum tax) and the sibling explanatory-memorandum mirror. |
+| [`cgt-reform-cgt-adjustments.md`](cgt-reform-cgt-adjustments.md) | **Explanatory Memorandum, Chapter 1 — CGT adjustments** (retrieved 2026-09-21): the detailed statement of the reform, and the file to read before touching any of it. **Cost base indexation** replaces the 50% discount for Australian-resident individuals (partners included) and trusts for CGT events on/after 1 July 2027 — each cost-base element except the third is indexed by the CPI factor (index number for the quarter of the CGT event ÷ that for the quarter the expenditure was incurred; a separate factor applies to the first element of shares and units), the **12-month ownership rule continues**, and indexation is unavailable to foreign or temporary residents present at any time in the testing period. **A 30 per cent minimum tax** (new Division 119) applies to the *minimum tax capital gain*, worked out by a seven-step *minimum tax gap amount* method statement, with an exemption for recipients of prescribed income support payments and no application to residents already taxed at 30 per cent or more. A CGT asset held before 1 July 2027 is **deemed disposed of just before, and reacquired on, 1 July 2027** (new Subdivision 112-E): the pre-2027 gain is **deferred** and taxed under the old law, the post-2027 gain under the new, both in the year of the real disposal — and **pre-CGT assets** enter the regime the same way. The net-capital-gain method statement becomes **seven steps** over four gain categories (deferred / non-deferred × residential / non-residential), with quarantined rental losses applied at the two new steps 3 and 4. **New residential dwellings** keep a 50% discount (new s 115-102) and **affordable housing** up to 60% (s 115-125), each by choice against indexation plus the minimum tax. Also covers the attributable-gain indexation reversal for beneficiaries who cannot index (Subdivision 115-C), the new trustee reporting requirement (s 115-235), and commencement/application/transitional rules. Worked examples 1.1–1.19 are mirrored verbatim. |
 
 ## AMIT / AMMA — attribution and cost-base adjustments
 
@@ -175,3 +200,12 @@ implementation — see "How this maps to open TODO items" at the end.
   `investment_expenses` entity, that brokerage is excluded (it is a cost-base element instead),
   and that the stored deductible amount is post-apportionment (the user's determination). The tax
   summary nets these against gross assessable investment income per financial year.
+- **CGT reform from 1 July 2027** (no open TODO item — reference captured 2026-09-21):
+  [`cgt-reform-boosting-home-ownership.md`](cgt-reform-boosting-home-ownership.md) and
+  [`cgt-reform-cgt-adjustments.md`](cgt-reform-cgt-adjustments.md) mirror the enacted change
+  from the 2026–27 Budget — cost base indexation in place of the 50% discount for individuals and
+  trusts, a 30% minimum tax on capital gains, a deemed disposal/reacquisition on 30 June 2027
+  bringing pre-CGT assets into the regime, and a seven-step net-capital-gain method statement.
+  It applies to gains accruing on or after 1 July 2027, so it changes nothing in the years this
+  project reports and no work item is opened by it; it is filed here so that any future
+  implementation starts from the ATO's own statement of the rules rather than a summary.
