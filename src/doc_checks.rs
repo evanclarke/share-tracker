@@ -1800,9 +1800,10 @@ fn cgt_reform_commencement_guard_documented() {
     // The entry now also records what the boundary split models, having
     // subsumed the earlier "guarded, not implemented" entry (2026-09-21).
     let limitations = known_limitations();
-    assert!(
-        limitations.contains("**CGT reform from 1 July 2027 — indexation and the 30 June 2027")
-    );
+    assert!(limitations.contains(
+        "**CGT reform from 1 July 2027 — indexation, the 30 June 2027 boundary split and the \
+         seven-step net-capital-gain method statement are modelled"
+    ));
     assert!(limitations.contains("**replaces the 50% CGT discount**"));
     assert!(limitations.contains("**30 per cent minimum tax on capital gains**"));
     assert!(limitations.contains("pinned at **report level**"));
@@ -5098,8 +5099,8 @@ fn cgt_reform_mirrors_document_the_2027_changes() {
     // The Known-limitations entry states what is modelled and what is refused.
     let limitations = known_limitations();
     assert!(limitations.contains(
-        "indexation and the 30 June 2027 boundary split are modelled; the minimum tax, the \
-         four-category statement and the out-of-model assets are not"
+        "indexation, the 30 June 2027 boundary split and the seven-step net-capital-gain method \
+         statement are modelled; the minimum tax and the out-of-model assets are not"
     ));
     // The boundary split, as implemented: the deferred component keeps the old
     // law's discount and the current one indexes from the quarter *beginning*
@@ -5109,9 +5110,14 @@ fn cgt_reform_mirrors_document_the_2027_changes() {
     // The residency answer moved from an assumption to a recorded fact.
     assert!(limitations.contains("recorded per-year answer"));
     assert!(limitations.contains("residency answer is year-granular"));
+    // The seven-step method statement is modelled and its always-nil arms are
+    // stated as a consequence of the data model, not left as an omission.
+    assert!(limitations.contains("seven-step net-capital-gain method statement"));
+    assert!(limitations.contains("structurally nil, not omitted"));
+    assert!(limitations.contains("neither a dwelling asset class"));
+    assert!(limitations.contains("EM Example 1.9's own arithmetic gap"));
     // What is still refused, and what is still out of model.
     assert!(limitations.contains("cost was **carried** from an earlier holding"));
-    assert!(limitations.contains("four-category seven-step method statement"));
     assert!(limitations.contains("30 per cent minimum tax** (Division 119)"));
     assert!(limitations.contains("s 112-185"));
     assert!(limitations.contains("partly paid shares and their calls have no data model"));
@@ -5139,6 +5145,26 @@ fn cgt_reform_mirrors_document_the_2027_changes() {
         );
     }
     assert!(API_MD.contains("`foreign_or_temporary_resident_at_some_time`"));
+    // The seven-step method statement's own record fields are documented,
+    // including the quarantined amount that is always nil and the CSV
+    // worksheet marker the categories report under.
+    for field in [
+        "deferred_non_residential_gains",
+        "deferred_residential_gains",
+        "non_residential_gains",
+        "residential_gains",
+        "net_deferred_non_residential_gain",
+        "net_deferred_residential_gain",
+        "net_non_residential_gain",
+        "net_residential_gain",
+        "quarantined_amount",
+    ] {
+        assert!(
+            API_MD.contains(field),
+            "API.md documents the method statement's field {field}"
+        );
+    }
+    assert!(API_MD.contains("`18H (category)`"));
     // The recorded residency answer has its own entity surface and schema row.
     assert!(SCHEMA_MD.contains("foreign_or_temporary_resident_at_some_time"));
     assert!(SCHEMA_MD.contains("0053"));

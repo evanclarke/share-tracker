@@ -175,7 +175,7 @@ function parcelRows(p) {
 
 const DISPOSAL_HEADERS = [
   'Acquired', 'Method', 'Units', 'Buy price', 'Initial cost base (AUD)', 'Adjusted cost base (AUD)',
-  'Sold', 'Sale price', 'Proceeds (AUD)', 'Gain / loss (AUD)', 'Discount eligible', 'Gain after discount (AUD, notional)',
+  'Sold', 'Sale price', 'Proceeds (AUD)', 'Gain / loss (AUD)', 'Discount eligible', 'Gain after notional concession (AUD)',
 ];
 
 function disposalsSection(d) {
@@ -194,7 +194,7 @@ function disposalsSection(d) {
       el('p', { class: 'subtotal' }, 'Subtotal: proceeds ' + moneyText(g.subtotal.proceeds_aud)
         + ', cost base ' + moneyText(g.subtotal.cost_base_aud)
         + ', gain/loss ' + moneyText(g.subtotal.gain_loss_aud)
-        + ', notional gain after discount (before loss netting) ' + moneyText(g.subtotal.gain_after_discount_aud)),
+        + ', notional gain after concession (before loss netting) ' + moneyText(g.subtotal.gain_after_discount_aud)),
     ]);
   });
   return el('div', { class: 'doc-section' }, [
@@ -203,17 +203,22 @@ function disposalsSection(d) {
     el('p', { class: 'total' }, 'Total: proceeds ' + moneyText(d.totals.proceeds_aud)
       + ', cost base ' + moneyText(d.totals.cost_base_aud)
       + ', gain/loss ' + moneyText(d.totals.gain_loss_aud)
-      + ', notional gain after discount (before loss netting) ' + moneyText(d.totals.gain_after_discount_aud)),
-    // The per-parcel discount column is struck BEFORE the year's losses are
-    // netted, so it is a notional working and never label 18A. The ATO nets
-    // losses first and halves only the remainder, which is the CGT summary's
-    // own concession line below — say so on the archived page rather than
-    // leave two figures that look like they should agree.
+      + ', notional gain after concession (before loss netting) ' + moneyText(d.totals.gain_after_discount_aud)),
+    // The per-parcel concession column is struck BEFORE the year's losses are
+    // netted, so it is a notional working and never label 18A. Since the
+    // reform it is also not a flat 50%: a parcel held across 30 June 2027
+    // keeps the old law's discount on its deferred pre-2027 component only and
+    // a post-2027 indexed gain gets none (the discount is repealed for it).
+    // The ATO nets losses first and halves only the remainder, which is the
+    // CGT summary's own concession line below — say so on the archived page
+    // rather than leave figures that look like they should agree.
     el('p', { class: 'hint' },
-      'The "gain after discount" column applies each parcel\u2019s own 50% concession before the year\u2019s '
-      + 'capital losses are netted, so it is a notional per-parcel working and not label 18A. The ATO nets '
-      + 'the year\u2019s gains and losses first and strikes the concession on the net gain: that figure is the '
-      + 'CGT Concession Amount in the Gain / loss summary below.'),
+      'The "gain after notional concession" column applies each parcel\u2019s own concession before the year\u2019s '
+      + 'capital losses are netted, so it is a notional per-parcel working and not label 18A. A parcel held across '
+      + '30 June 2027 keeps the old law\u2019s 50% on its deferred pre-2027 component only, and a post-1 July 2027 '
+      + 'indexed gain gets none (the discount is repealed for it). The ATO nets the year\u2019s gains and losses first '
+      + 'and strikes the concession on the net gain: that figure is the CGT Concession Amount in the Gain / loss '
+      + 'summary below.'),
   ]);
 }
 
@@ -227,14 +232,12 @@ function summaryRow(label, value, opts) {
   ]);
 }
 
-function cgtSummarySection(s) {
-  if (!s) {
-    return el('div', { class: 'doc-section' }, [
-      el('h3', null, 'Gain / loss summary'),
-      el('p', null, 'No capital gains or losses activity recorded for this year.'),
-    ]);
-  }
-  const rows = [
+// The ATO's own question-18 worksheet (Other method / Discount method) —
+// `docs/ato/personal-investors-guide-managed-fund-distributions.md`. The
+// layout for a year **before** the CGT reform, when the 50% discount and the
+// Other/Discount split are the whole method statement.
+function legacySummaryRows(s) {
+  return [
     summaryRow("Capital Gains on shares applicable for 'Other' method (short term gains)", null, { header: true }),
     summaryRow('Short Term Gains', s.short_term_gains, { indent: true }),
     summaryRow('less Capital losses available to be offset', s.losses_applied_other, { indent: true }),
@@ -247,6 +250,42 @@ function cgtSummarySection(s) {
     summaryRow('Net discount-eligible gain (after concession)', s.net_discount_eligible_gain, { indent: true, total: true }),
     summaryRow('Capital Gain', s.net_capital_gain, { total: true }),
   ];
+}
+
+// The reform's seven-step method statement (new s 102-5(1), EM 1.75–1.106),
+// printed for a year the reform governs (`s.reform`, from FY2028). Steps 1–2
+// consume the loss pool against the four categories in **statutory order**,
+// steps 3–4 apply the quarantined amount (structurally nil here — no
+// residential-dwelling income or deductions), step 5 is the concession and
+// step 7 the total. The two-method rows above are still the Division 115
+// discount/non-discount split, but they are not the statute's categories, so a
+// reform year prints this layout instead.
+function reformSummaryRows(s) {
+  return [
+    summaryRow('Method statement — capital gains by category', null, { header: true }),
+    summaryRow('Deferred non-residential capital gains', s.deferred_non_residential_gains, { indent: true }),
+    summaryRow('Deferred residential capital gains', s.deferred_residential_gains, { indent: true }),
+    summaryRow('Non-residential capital gains', s.non_residential_gains, { indent: true }),
+    summaryRow('Residential capital gains', s.residential_gains, { indent: true }),
+    summaryRow('Steps 1–2 — after current-year and carried-forward losses, applied in that order', null, { header: true }),
+    summaryRow('Deferred non-residential after losses', s.net_deferred_non_residential_gain, { indent: true }),
+    summaryRow('Deferred residential after losses', s.net_deferred_residential_gain, { indent: true }),
+    summaryRow('Non-residential after losses', s.net_non_residential_gain, { indent: true }),
+    summaryRow('Residential after losses', s.net_residential_gain, { indent: true }),
+    summaryRow('Steps 3–4 — less quarantined amounts', s.quarantined_amount, { indent: true }),
+    summaryRow('Step 5 — less CGT Concession Amount @ 50%', s.cgt_concession_amount, { indent: true }),
+    summaryRow('Step 7 — Capital Gain', s.net_capital_gain, { total: true }),
+  ];
+}
+
+function cgtSummarySection(s) {
+  if (!s) {
+    return el('div', { class: 'doc-section' }, [
+      el('h3', null, 'Gain / loss summary'),
+      el('p', null, 'No capital gains or losses activity recorded for this year.'),
+    ]);
+  }
+  const rows = s.reform ? reformSummaryRows(s) : legacySummaryRows(s);
   const lossRows = [
     summaryRow('Capital losses arising this year', s.capital_losses_this_year),
     summaryRow('Capital loss brought forward', s.capital_loss_brought_forward),
@@ -258,9 +297,15 @@ function cgtSummarySection(s) {
   return el('div', { class: 'doc-section' }, [
     el('h3', null, 'Gain / loss summary'),
     el('table', { class: 'doc-table summary-table' }, el('tbody', null, rows)),
+    s.reform ? el('p', { class: 'hint' },
+      'This year is assessed under the CGT reform in force from 1 July 2027: the seven-step method statement of '
+      + 's 102-5(1) over the four gain categories above, with losses applied in that statutory order and the '
+      + 'concession falling only on what remains discountable (a deferred pre-2027 gain the old law discounted). '
+      + 'A post-1 July 2027 indexed gain is never discounted. Steps 3–4 are nil: this database records no '
+      + 'residential-dwelling income or deductions.') : null,
     el('h4', null, 'Loss position'),
     el('table', { class: 'doc-table summary-table' }, el('tbody', null, lossRows)),
-  ]);
+  ].filter(Boolean));
 }
 
 // ---- income --------------------------------------------------------------

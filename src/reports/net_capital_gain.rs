@@ -220,21 +220,27 @@ pub fn router() -> Router<SqlitePool> {
         .route("/portfolio/net-capital-gain/what-if", post(what_if_handler))
 }
 
-/// CSV export columns — `NetCapitalGainYearCsv`'s fields in declaration order
-/// (a deliberately frozen subset of [`NetCapitalGainYear`]: the method
-/// statement's new per-category fields are not exported yet, so the header,
-/// its ATO labels and the annual tax report's layout keep their existing
-/// shape until the label-remapping pass). The
-/// csv writer rejects a record whose length differs from this header (see
+/// CSV export columns — `NetCapitalGainYearCsv`'s fields in declaration order,
+/// which is [`NetCapitalGainYear`]'s own order minus the nested `disposals`.
+/// The csv writer rejects a record whose length differs from this header (see
 /// `reports::export`), so a drift between the two fails loudly.
 const CSV_HEADER: &[&str] = &[
     "tax_year",
     "discount_eligible_gains",
     "other_gains",
+    "deferred_non_residential_gains",
+    "deferred_residential_gains",
+    "non_residential_gains",
+    "residential_gains",
+    "quarantined_amount",
     "capital_losses",
     "capital_loss_brought_forward",
     "net_discount_eligible_gain",
     "net_other_gain",
+    "net_deferred_non_residential_gain",
+    "net_deferred_residential_gain",
+    "net_non_residential_gain",
+    "net_residential_gain",
     "cgt_discount",
     "net_capital_gain",
     "capital_loss_carried_forward",
@@ -247,18 +253,42 @@ const CSV_HEADER: &[&str] = &[
 /// ATO tax-return label per `CSV_HEADER` column (same order), exported as the
 /// second header row. Labels are from the **2026** individual tax return
 /// (`docs/ato/tax-return-labels-2026.md` — re-verify when the form year
-/// changes; the first cell names the form year). `18H (component)` = the two
-/// gross-gain columns sum to label 18H; `18 (working)` = an intermediate step
-/// of question 18's calculation with no label of its own; empty =
-/// informational. The full mapping rationale is in `docs/API.md`.
+/// changes; the first cell names the form year, and the 2028 form is the first
+/// that can carry the reform's categories, so it must be re-checked when
+/// published).
+///
+/// The markers: `18H (component)` = the two gross-gain columns sum to label
+/// 18H; `18H (category)` = the reformed method statement's own four categories
+/// of that same total — an **alternative** breakdown, so a reader sums one set
+/// or the other, never both; `18 (working)` = an intermediate step of question
+/// 18's calculation with no label of its own; `18V (prior year)` = last year's
+/// label 18V; empty = informational. The full mapping rationale is in
+/// `docs/API.md`.
+///
+/// The four categories and their post-loss remainders report as worksheet
+/// working lines because the **2026** return is the only published mapping and
+/// it predates the reform: it has no line for a deferred or residential
+/// category. `discount_eligible_gains`/`other_gains` keep their 18H-component
+/// labels, which stay correct for a pre-reform year (its whole gain is the one
+/// non-residential category, so the two splits coincide) and are still the
+/// Division 115 discount/non-discount split for a reform one.
 const CSV_ATO_LABELS: &[&str] = &[
     export::ATO_LABELS_MARKER, // tax_year
     "18H (component)",         // discount_eligible_gains
     "18H (component)",         // other_gains
+    "18H (category)",          // deferred_non_residential_gains
+    "18H (category)",          // deferred_residential_gains
+    "18H (category)",          // non_residential_gains
+    "18H (category)",          // residential_gains
+    "18 (working)",            // quarantined_amount
     "18 (working)",            // capital_losses
     "18V (prior year)",        // capital_loss_brought_forward
     "18 (working)",            // net_discount_eligible_gain
     "18 (working)",            // net_other_gain
+    "18 (working)",            // net_deferred_non_residential_gain
+    "18 (working)",            // net_deferred_residential_gain
+    "18 (working)",            // net_non_residential_gain
+    "18 (working)",            // net_residential_gain
     "18 (working)",            // cgt_discount
     "18A",                     // net_capital_gain
     "18V",                     // capital_loss_carried_forward
@@ -1311,9 +1341,24 @@ fn net_years(
 /// second implementation of the netting rule. It is therefore at the cent
 /// and internally consistent for the same reason (SCENARIOS W-f): this is
 /// the layout that is *printed*, and its lines subtract from one another.
+///
+/// **Two presentations.** `reform` says which method statement governs the
+/// year ([`cgt_reform::governs_tax_year`]). A pre-reform year prints the
+/// two-method worksheet above (Other method / Discount method) — the ATO's
+/// own question-18 layout. A reform year prints the **seven-step** statement
+/// instead, from the four category fields below: steps 1–2 consume the loss
+/// pool against the categories in statutory order, steps 3–4 apply the
+/// (structurally nil) quarantined amount, step 5 is `cgt_concession_amount`,
+/// and step 7 is `net_capital_gain`. The two-method fields stay populated for
+/// both, since they remain the Division 115 discount/non-discount split, but
+/// a reform year's printed worksheet is the categories.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct CgtSummaryYear {
     pub tax_year: i32,
+    /// Whether the reform's seven-step method statement governs this year —
+    /// true from FY2028, the income year that includes 1 July 2027 (the
+    /// commencement is its first day, so no year mixes the two regimes).
+    pub reform: bool,
     /// "Capital Gains on shares applicable for 'Other' method (short term
     /// gains)" — `NetCapitalGainYear::other_gains` unchanged (there's no AMMA
     /// distribution split on this side: an AMMA's indexation/other-method
@@ -1337,6 +1382,25 @@ pub(crate) struct CgtSummaryYear {
     pub cgt_concession_amount: Decimal,
     /// "Capital Gain" — the final assessable net capital gain.
     pub net_capital_gain: Decimal,
+    /// The reform's four gross gain categories (EM 1.82), in statutory order:
+    /// the year's gains before steps 1–2 consume the loss pool. All nil but
+    /// `non_residential_gains` before the reform, when the whole year is the
+    /// one non-residential category; `deferred_*` and the residential pair
+    /// are nil for every year this data model can hold (s 102-6).
+    pub deferred_non_residential_gains: Decimal,
+    pub deferred_residential_gains: Decimal,
+    pub non_residential_gains: Decimal,
+    pub residential_gains: Decimal,
+    /// The same four categories after steps 1–4 (losses in statutory order,
+    /// then the quarantined amount). These are the lines step 5 discounts.
+    pub net_deferred_non_residential_gain: Decimal,
+    pub net_deferred_residential_gain: Decimal,
+    pub net_non_residential_gain: Decimal,
+    pub net_residential_gain: Decimal,
+    /// The year's current-year **quarantined amount** applied at steps 3–4 —
+    /// structurally nil here (this model records no residential-dwelling
+    /// income or deductions). Printed so the step is on the page.
+    pub quarantined_amount: Decimal,
     pub capital_losses_this_year: Decimal,
     pub capital_loss_brought_forward: Decimal,
     pub capital_loss_carried_forward: Decimal,
@@ -1417,6 +1481,7 @@ pub(crate) async fn db_cgt_summary_year(
         );
         CgtSummaryYear {
             tax_year: y.tax_year,
+            reform: cgt_reform::governs_tax_year(y.tax_year),
             short_term_gains: y.other_gains,
             long_term_gains: y.discount_eligible_gains - amma,
             amma_discount_gains_grossed_up: amma,
@@ -1426,6 +1491,15 @@ pub(crate) async fn db_cgt_summary_year(
             net_discount_eligible_gain: y.net_discount_eligible_gain,
             cgt_concession_amount: y.cgt_discount,
             net_capital_gain: y.net_capital_gain,
+            deferred_non_residential_gains: y.deferred_non_residential_gains,
+            deferred_residential_gains: y.deferred_residential_gains,
+            non_residential_gains: y.non_residential_gains,
+            residential_gains: y.residential_gains,
+            net_deferred_non_residential_gain: y.net_deferred_non_residential_gain,
+            net_deferred_residential_gain: y.net_deferred_residential_gain,
+            net_non_residential_gain: y.net_non_residential_gain,
+            net_residential_gain: y.net_residential_gain,
+            quarantined_amount: y.quarantined_amount,
             capital_losses_this_year: y.capital_losses,
             capital_loss_brought_forward: y.capital_loss_brought_forward,
             capital_loss_carried_forward: y.capital_loss_carried_forward,
@@ -1450,18 +1524,26 @@ async fn net_capital_gain_handler(
 /// `disposals`, with every money field typed [`Cents`] so the export reads to
 /// the cent like the screen it mirrors (the JSON report above keeps the exact
 /// figure). The `csv` crate rejects a struct with a nested sequence field
-/// (`Vec<RealisedGainLoss>`), so the JSON report's nested drilldown is dropped
-/// here; the export stays exactly the flat per-year record it was before the
-/// drilldown was added — same `CSV_HEADER`/`CSV_ATO_LABELS`, unchanged.
+/// (`Vec<RealisedGainLoss>`), so the JSON report's nested drilldown is the one
+/// field dropped here.
 #[derive(Serialize)]
 struct NetCapitalGainYearCsv {
     tax_year: i32,
     discount_eligible_gains: Cents,
     other_gains: Cents,
+    deferred_non_residential_gains: Cents,
+    deferred_residential_gains: Cents,
+    non_residential_gains: Cents,
+    residential_gains: Cents,
+    quarantined_amount: Cents,
     capital_losses: Cents,
     capital_loss_brought_forward: Cents,
     net_discount_eligible_gain: Cents,
     net_other_gain: Cents,
+    net_deferred_non_residential_gain: Cents,
+    net_deferred_residential_gain: Cents,
+    net_non_residential_gain: Cents,
+    net_residential_gain: Cents,
     cgt_discount: Cents,
     net_capital_gain: Cents,
     capital_loss_carried_forward: Cents,
@@ -1477,10 +1559,19 @@ impl From<&NetCapitalGainYear> for NetCapitalGainYearCsv {
             tax_year: y.tax_year,
             discount_eligible_gains: y.discount_eligible_gains.into(),
             other_gains: y.other_gains.into(),
+            deferred_non_residential_gains: y.deferred_non_residential_gains.into(),
+            deferred_residential_gains: y.deferred_residential_gains.into(),
+            non_residential_gains: y.non_residential_gains.into(),
+            residential_gains: y.residential_gains.into(),
+            quarantined_amount: y.quarantined_amount.into(),
             capital_losses: y.capital_losses.into(),
             capital_loss_brought_forward: y.capital_loss_brought_forward.into(),
             net_discount_eligible_gain: y.net_discount_eligible_gain.into(),
             net_other_gain: y.net_other_gain.into(),
+            net_deferred_non_residential_gain: y.net_deferred_non_residential_gain.into(),
+            net_deferred_residential_gain: y.net_deferred_residential_gain.into(),
+            net_non_residential_gain: y.net_non_residential_gain.into(),
+            net_residential_gain: y.net_residential_gain.into(),
             cgt_discount: y.cgt_discount.into(),
             net_capital_gain: y.net_capital_gain.into(),
             capital_loss_carried_forward: y.capital_loss_carried_forward.into(),
@@ -4374,18 +4465,27 @@ mod tests {
         let csv = resp.text().to_string();
         let mut lines = csv.lines();
         // Header names every NetCapitalGainYear field, in declaration order.
-        assert_eq!(lines.next().unwrap(), CSV_HEADER.join(","));
+        let header_line = lines.next().unwrap();
+        assert_eq!(header_line, CSV_HEADER.join(","));
+        let header: Vec<&str> = header_line.split(',').collect();
         // Second header row: the ATO tax-return label per column, first cell
         // naming the form year the mapping targets.
         let labels = lines.next().unwrap();
         assert_eq!(labels, CSV_ATO_LABELS.join(","));
         assert!(labels.starts_with(&format!("{},", export::ATO_LABELS_MARKER)));
-        let fields: Vec<&str> = lines.next().unwrap().split(',').collect();
-        assert_eq!(fields.len(), CSV_HEADER.len());
-        assert_eq!(fields[0], "2025"); // tax_year
-        assert_eq!(fields[1].parse::<Decimal>().unwrap(), Decimal::from(500)); // discount_eligible_gains
-        assert_eq!(fields[7].parse::<Decimal>().unwrap(), Decimal::from(250)); // cgt_discount
-        assert_eq!(fields[8].parse::<Decimal>().unwrap(), Decimal::from(250)); // net_capital_gain
+        let row: Vec<&str> = lines.next().unwrap().split(',').collect();
+        assert_eq!(row.len(), CSV_HEADER.len());
+        let at = |col: &str| row[header.iter().position(|c| *c == col).unwrap()];
+        assert_eq!(at("tax_year"), "2025");
+        assert_eq!(at("discount_eligible_gains"), "500.00");
+        assert_eq!(at("cgt_discount"), "250.00");
+        assert_eq!(at("net_capital_gain"), "250.00");
+        // The category columns are exported at the cent like every other money
+        // column, and a pre-reform year's whole gain is the one category.
+        assert_eq!(at("non_residential_gains"), "500.00");
+        assert_eq!(at("net_non_residential_gain"), "500.00");
+        assert_eq!(at("deferred_non_residential_gains"), "0.00");
+        assert_eq!(at("quarantined_amount"), "0.00");
         assert_eq!(lines.next(), None);
     }
 
@@ -4899,14 +4999,21 @@ mod tests {
             .expect_status(StatusCode::OK)
             .text()
             .to_string();
-        let mut lines = csv.lines().skip(2); // past both header rows
+        let mut lines = csv.lines();
+        let header: Vec<&str> = lines.next().unwrap().split(',').collect();
+        lines.next(); // the ATO label row
         let fields: Vec<&str> = lines.next().expect("a record row").split(',').collect();
         assert_eq!(fields.len(), CSV_HEADER.len());
-        assert_eq!(fields[0], current_tax_year().to_string()); // tax_year
+        let at = |col: &str| {
+            fields[header.iter().position(|c| *c == col).unwrap()]
+                .parse::<Decimal>()
+                .unwrap()
+        };
+        assert_eq!(at("tax_year"), Decimal::from(current_tax_year()));
         // capital_loss_brought_forward (18V prior year) and
         // capital_loss_carried_forward (18V) both carry the balance.
-        assert_eq!(fields[4].parse::<Decimal>().unwrap(), Decimal::from(12345));
-        assert_eq!(fields[9].parse::<Decimal>().unwrap(), Decimal::from(12345));
+        assert_eq!(at("capital_loss_brought_forward"), Decimal::from(12345));
+        assert_eq!(at("capital_loss_carried_forward"), Decimal::from(12345));
         assert_eq!(lines.next(), None);
     }
 
@@ -5014,10 +5121,105 @@ mod tests {
         // gain columns — both marked as its components.
         assert_eq!(label_of("discount_eligible_gains"), "18H (component)");
         assert_eq!(label_of("other_gains"), "18H (component)");
+        // The reformed method statement's four categories are the *alternative*
+        // breakdown of the same 18H total — marked `(category)` rather than
+        // `(component)` so a reader sums one set or the other, never both. For
+        // a pre-reform year the two coincide: the whole gain is the one
+        // non-residential category.
+        for category in [
+            "deferred_non_residential_gains",
+            "deferred_residential_gains",
+            "non_residential_gains",
+            "residential_gains",
+        ] {
+            assert_eq!(label_of(category), "18H (category)", "{category}");
+        }
+        // The category remainders and the quarantined amount are worksheet
+        // steps with no 2026 form label of their own.
+        for working in [
+            "quarantined_amount",
+            "net_deferred_non_residential_gain",
+            "net_deferred_residential_gain",
+            "net_non_residential_gain",
+            "net_residential_gain",
+        ] {
+            assert_eq!(label_of(working), "18 (working)", "{working}");
+        }
         // Informational columns report at no label.
         assert_eq!(label_of("cgt_event_e10_gain"), "");
         assert_eq!(label_of("cgt_event_g1_gain"), "");
         assert_eq!(label_of("taxpayer_basis"), "");
+    }
+
+    /// The CSV header is `NetCapitalGainYear`'s own field set minus the nested
+    /// `disposals`, so the four categories and their remainders are exported
+    /// (and a future report field cannot be added without being exported or
+    /// explicitly dropped). The export round-trips the category figures the
+    /// JSON report answers.
+    #[tokio::test]
+    async fn api_export_carries_the_method_statements_category_columns() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "VAS").await;
+        insert_trade(
+            &pool,
+            1,
+            trade::TradeType::Buy,
+            1,
+            NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
+        insert_trade(
+            &pool,
+            2,
+            trade::TradeType::Sell,
+            1,
+            NaiveDate::from_ymd_opt(2025, 6, 2).unwrap(),
+            Decimal::from(100),
+            Decimal::from(15),
+        )
+        .await;
+        allocate(&pool, 1, 2, 1, Decimal::from(100)).await;
+
+        // Every JSON field but `disposals` is a column, in declaration order.
+        let json = serde_json::to_value(&db_net_capital_gain(&pool).await.unwrap()[0]).unwrap();
+        let json_keys: Vec<&str> = json
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .filter(|k| *k != "disposals")
+            .collect();
+        assert_eq!(CSV_HEADER, json_keys.as_slice());
+
+        let csv = client(&pool)
+            .get("/portfolio/net-capital-gain/export")
+            .await
+            .expect_status(StatusCode::OK)
+            .text()
+            .to_string();
+        let mut lines = csv.lines();
+        let header: Vec<&str> = lines.next().unwrap().split(',').collect();
+        lines.next(); // the ATO label row
+        let row: Vec<&str> = lines.next().unwrap().split(',').collect();
+        let at = |col: &str| {
+            row[header.iter().position(|c| *c == col).unwrap()]
+                .parse::<Decimal>()
+                .unwrap()
+        };
+        // A pre-reform long-held gain: the whole thing is the one
+        // non-residential category, and the two 18H breakdowns agree.
+        assert_eq!(at("non_residential_gains"), dec("500"));
+        assert_eq!(at("net_non_residential_gain"), dec("500"));
+        assert_eq!(
+            at("discount_eligible_gains") + at("other_gains"),
+            at("non_residential_gains")
+                + at("deferred_non_residential_gains")
+                + at("deferred_residential_gains")
+                + at("residential_gains")
+        );
+        assert_eq!(at("quarantined_amount"), Decimal::ZERO);
     }
 
     /// A scrip-for-scrip rollover produces no net capital gain in the

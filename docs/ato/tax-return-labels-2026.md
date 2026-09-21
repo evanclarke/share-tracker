@@ -27,6 +27,25 @@ The two CSV exports (`/portfolio/tax-summary/export`, `/portfolio/net-capital-ga
 carry this mapping as their second header row; the full per-column table is in
 [`../API.md`](../API.md).
 
+## Standing maintenance trigger — re-verify at the 2028 form
+
+**The 2026 form is the only published mapping, and it predates the CGT reform that commences
+on 1 July 2027.** From tax year **2028** (the income year that includes 1 July 2027) the
+net-capital-gain report classifies the year's gains into the reform's four categories —
+deferred non-residential, deferred residential, non-residential and residential (new
+s 102-5(1), s 102-6; EM 1.75–1.106, mirrored in
+[`cgt-reform-cgt-adjustments.md`](cgt-reform-cgt-adjustments.md)) — and the 2026 form has no
+line for a category, so those columns report at the `18H (category)` worksheet marker while
+the two gross-gain columns keep `18H (component)`. The category remainders and the
+quarantined amount carry `18 (working)`.
+
+**When the 2028 individual return is published, re-fetch its question 18 instructions and
+re-map:** check whether 18H is split by category, whether any new label carries the deferred
+or residential arms, and whether the minimum tax (Division 119) adds a line. This is a
+standing maintenance trigger, not a closed task — a label that shifts is a code change to
+`CSV_ATO_LABELS` (`src/reports/net_capital_gain.rs`) and to the table in
+[`../API.md`](../API.md), never a silent drift.
+
 ## Question 10 — Gross interest
 
 | Label | Field |

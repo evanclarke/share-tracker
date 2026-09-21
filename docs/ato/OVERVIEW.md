@@ -116,15 +116,24 @@ law, still discounted — and its **current** post-2027 component, indexed from 
 `closing_prices` row and both components included in the year of the real disposal. The s 114-25
 **residency testing period** is a recorded per-financial-year answer
 (`tax_year_settings.foreign_or_temporary_resident_at_some_time`, migration 0053) rather than the
-resident-throughout assumption. What remains is the **commencement guard** plus what this project
+resident-throughout assumption. The reform's **seven-step net-capital-gain method statement**
+(EM 1.75–1.106, new s 102-5(1) and s 102-6) is `reports::net_capital_gain`'s year walk: from tax
+year **2028** — the income year that includes 1 July 2027, whose first day the commencement is, so
+no year mixes the two regimes — the year's gains are classified into the four categories
+(deferred/non-deferred × residential/non-residential), losses reduce them in that statutory order,
+the quarantined-amount steps 3–4 are structurally nil, and the 50% discount falls at step 5 only on
+a deferred gain the old law would have discounted. Because this project holds only shares, units and
+crypto, the residential categories and the quarantined amount are always nil (s 102-6); the four
+gross categories, their remainders and `quarantined_amount` ride on the net-capital-gain record and
+its CSV export. What remains is the **commencement guard** plus what this project
 states rather than computes: the single commencement date and the four gain categories are defined
 once in `src/domain/cgt_reform.rs`, a CGT event dated on or after 1 July 2027 that the app cannot
 assess — a carried-cost replacement parcel, a rights sale, an AMMA statement or a non-disposal CGT
 event — is refused (a logged `500` naming the date) rather than assessed under repealed law, and the
-seven-step method statement's categories, the 30 per cent minimum tax (Division 119) and the
-Ministerial apportioning method (s 112-185) are documented as not implemented. These mirrors remain
-the reference for the rest of the implementation work, and the implementation's own citations are
-recorded against them below.
+residential gain categories (and their quarantined-amount steps) and the 30 per cent minimum tax
+(Division 119) and the Ministerial apportioning method (s 112-185) remain unimplemented. These
+mirrors remain the reference for the rest of the implementation work, and the implementation's own
+citations are recorded against them below.
 
 | File | What it covers |
 | --- | --- |
@@ -218,8 +227,9 @@ recorded against them below.
   `investment_expenses` entity, that brokerage is excluded (it is a cost-base element instead),
   and that the stored deductible amount is post-apportionment (the user's determination). The tax
   summary nets these against gross assessable investment income per financial year.
-- **CGT reform from 1 July 2027** (implementation opened 2026-09-21; cost base indexation for
-  expenditure incurred on or after 1 July 2027 now modelled, the rest not):
+- **CGT reform from 1 July 2027** (implementation opened 2026-09-21; cost base indexation, the
+  30 June 2027 boundary split and the seven-step net-capital-gain method statement now modelled,
+  the minimum tax not):
   [`cgt-reform-boosting-home-ownership.md`](cgt-reform-boosting-home-ownership.md),
   [`cgt-reform-cgt-adjustments.md`](cgt-reform-cgt-adjustments.md) and
   [`cgt-reform-960-275-indexation-factor.md`](cgt-reform-960-275-indexation-factor.md) mirror the
@@ -233,6 +243,7 @@ recorded against them below.
   that date is refused loudly rather than assessed under repealed law (see
   [`../API.md`](../API.md#known-limitations)). The **indexation factor** (s 960-275(1B)/(1C), and
   the (5) rounding rule the enacted section supplies) is implemented by `domain::cgt_indexation`
-  over the `current_cpi_quarters` table; the remaining sections — the deemed reacquisition and
-  deferred gain, the seven-step method statement, the minimum tax, and the out-of-model scope
-  decisions — were opened as their own TODO sections so each closes and archives independently.
+  over the `current_cpi_quarters` table; the deemed reacquisition and deferred gain are
+  `src/domain/deferred_gain.rs`, and the seven-step method statement is `reports::net_capital_gain`'s
+  year walk. The remaining section — the 30 per cent minimum tax — is open as its own TODO section,
+  and the out-of-model scope decisions are recorded in `docs/API.md`'s Known limitations.

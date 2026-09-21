@@ -2686,14 +2686,28 @@ mod tests {
         assert!(js.contains("Trading activity"));
         assert!(js.contains("Gain / loss summary"));
         assert!(js.contains("Overall tax summary"));
-        // The disposal schedule's per-parcel discount is struck before the
+        // The disposal schedule's per-parcel concession is struck before the
         // year's losses are netted, so the column is labelled a notional
         // working and the section says the ATO's own concession is the net
         // gain's, in the CGT summary — the two figures must never read as if
-        // they should agree.
-        assert!(js.contains("Gain after discount (AUD, notional)"));
-        assert!(js.contains("notional gain after discount (before loss netting)"));
+        // they should agree. Since the reform the label says "notional
+        // concession" rather than "discount", because a post-2027 indexed gain
+        // gets none of it.
+        assert!(js.contains("Gain after notional concession (AUD)"));
+        assert!(js.contains("notional gain after concession (before loss netting)"));
         assert!(js.contains("not label 18A"));
+        assert!(js.contains("a post-1 July 2027"));
+        // The CGT summary prints the reform's seven-step method statement for a
+        // year the reform governs (`s.reform`, from FY2028) and the ATO's
+        // two-method question-18 worksheet before it — both layouts ship, and
+        // the category lines the statute names are the reform one's.
+        assert!(js.contains("s.reform ? reformSummaryRows(s) : legacySummaryRows(s)"));
+        assert!(js.contains("Deferred non-residential capital gains"));
+        assert!(js.contains("Deferred residential capital gains"));
+        assert!(js.contains("Non-residential capital gains"));
+        assert!(js.contains("Residential capital gains"));
+        assert!(js.contains("Step 5 — less CGT Concession Amount @ 50%"));
+        assert!(js.contains("Steps 3–4 — less quarantined amounts"));
         // A trust distribution is holding-period tested like a dividend, so its
         // row carries the same franking entitlement status the dividend table
         // prints — a denied credit is visible on the row, never merely absent

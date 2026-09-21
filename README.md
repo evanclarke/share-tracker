@@ -98,11 +98,17 @@ new law. A parcel **held across 30 June 2027** is split by Subdivision 112-E int
 pre-2027 gain (old law, still discounted) and its post-2027 component (indexed from the quarter
 beginning 1 July 2027), both assessed in the year of the real disposal from the listing's stored
 30 June 2027 closing price, and the s 114-25 residency testing period is a recorded per-year
-answer rather than an assumption. What remains — the seven-step net-capital-gain method statement,
-the 30 per cent minimum tax, the Ministerial apportioning method and a parcel whose cost was
-carried from an earlier holding — is not built, and a CGT event dated on or after 1 July 2027 that
-the app cannot honestly assess (a replacement parcel, a rights sale, an AMMA statement or a
-non-disposal CGT event) makes the reports **refuse** it (a logged `500` naming the date) rather
+answer rather than an assumption. From tax year **2028** — the income year that includes 1 July 2027,
+whose first day the commencement is, so no year mixes the two regimes — the year's net capital gain
+is computed under the reform's **seven-step method statement** over the four gain categories
+(deferred/non-deferred × residential/non-residential), with current-year and carried-forward losses
+applied in that statutory order and the 50% discount falling at step 5 only on a deferred gain the
+old law would have discounted. Every gain this database can hold is non-residential, so the two
+residential categories and the quarantined-amount steps are structurally nil rather than omitted.
+What remains — the 30 per cent minimum tax, the Ministerial apportioning method and a parcel whose
+cost was carried from an earlier holding — is not built, and a CGT event dated on or after 1 July
+2027 that the app cannot honestly assess (a replacement parcel, a rights sale, an AMMA statement or
+a non-disposal CGT event) makes the reports **refuse** it (a logged `500` naming the date) rather
 than assess it under repealed law. The reform's assets and situations this data model cannot hold —
 residential property and its two discounts, quarantined amounts / negative gearing, pre-CGT
 holdings and CGT event K6, a trustee's beneficiary reporting, and the residency arms — are recorded

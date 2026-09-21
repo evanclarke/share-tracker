@@ -567,7 +567,23 @@ export const REPORTS = [
   {
     slug: 'net-capital-gain', title: 'Net Capital Gain', api: '/portfolio/net-capital-gain', method: 'GET', export: true,
     menu: 'Reports', section: 'CGT & tax',
-    desc: 'Assessable net capital gain per financial year. Expand a year for its realised disposals, and a disposal for its per-parcel breakdown.',
+    desc: 'Assessable net capital gain per financial year, under the method statement that governs the year: the ATO question-18 two-method worksheet before 1 July 2027, and the reform\u2019s seven-step statement over the four gain categories (deferred/current \u00d7 residential/non-residential) from FY2028. Expand a year for its realised disposals, and a disposal for its per-parcel breakdown.',
+    // Explicit so the reformed statement's category columns are part of the
+    // screen deliberately, not only by the accident of being JSON keys: the
+    // four gross categories, their post-loss remainders and the (nil)
+    // quarantined amount sit beside the two-bucket summary, in
+    // `NetCapitalGainYear` declaration order (minus the `disposals` drilldown).
+    columns: [
+      'tax_year', 'discount_eligible_gains', 'other_gains',
+      'deferred_non_residential_gains', 'deferred_residential_gains', 'non_residential_gains',
+      'residential_gains', 'quarantined_amount',
+      'capital_losses', 'capital_loss_brought_forward',
+      'net_discount_eligible_gain', 'net_other_gain',
+      'net_deferred_non_residential_gain', 'net_deferred_residential_gain',
+      'net_non_residential_gain', 'net_residential_gain',
+      'cgt_discount', 'net_capital_gain', 'capital_loss_carried_forward',
+      'cgt_event_e10_gain', 'cgt_event_g1_gain', 'cgt_event_c2_gain', 'taxpayer_basis',
+    ],
     expand: {
       key: 'disposals',
       columns: ['source', 'sale_trade_id', 'listing_id', 'sale_date', 'proceeds', 'cost_base', 'capital_gain_loss', 'discount_eligible_gain', 'non_discountable_gain', 'capital_loss'],

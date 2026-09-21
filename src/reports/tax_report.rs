@@ -11,12 +11,17 @@
 //!
 //! The one exception is the disposal schedule's `cgt_discount_amount_aud` /
 //! `gain_after_discount_aud`: a **presentation-only, per-parcel notional**
-//! working that halves each discount-eligible parcel before the year's losses
-//! are netted (see [`DisposalParcelRow::cgt_discount_amount_aud`]). It is
-//! printed under a label saying so and is consumed by no ATO label — the
-//! return's own concession is struck on the **net** gain in the CGT summary —
-//! but it is not an existing pipeline's figure, so the "nothing new" rule
-//! carries this stated exception rather than pretending otherwise.
+//! working that discounts each parcel before the year's losses are netted (see
+//! [`DisposalParcelRow::cgt_discount_amount_aud`]). It is printed under a label
+//! saying so and is consumed by no ATO label — the return's own concession is
+//! struck on the **net** gain in the CGT summary — but it is not an existing
+//! pipeline's figure, so the "nothing new" rule carries this stated exception
+//! rather than pretending otherwise. Since the reform it is also **not a plain
+//! 50% of every eligible parcel**: a boundary-crossing parcel's concession is
+//! struck on its **deferred** pre-2027 component alone (s 112-160(4)) and a
+//! post-1 July 2027 indexed gain gets none at all, because the discount was
+//! repealed for it — the column's description changed while its arithmetic,
+//! which follows the split, did not.
 //!
 //! The disposal schedule's money figures are **rounded to the cent** here,
 //! and every subtotal and grand total is the sum of those rounded figures
@@ -525,7 +530,7 @@ pub struct DisposalParcelRow {
     /// what the other lawful method would have cost. `None` unless
     /// `indexation_eligible`. Never summed into any total on this report.
     pub indexed_cost_base_aud: Option<Decimal>,
-    /// The parcel's own **notional** 50% concession: half the parcel's gain
+    /// The parcel's own **notional** concession: half the parcel's gain
     /// where it is discount-eligible and in gain, else zero. This is the one
     /// figure on the document that is not an existing report's — a
     /// presentation-only per-parcel working, printed so the `discount_eligible`
@@ -541,11 +546,30 @@ pub struct DisposalParcelRow {
     /// struck on the net gain in the CGT summary
     /// (`cgt_summary.cgt_concession_amount`); no ATO label consumes this
     /// figure.
+    ///
+    /// **Since the reform it is not a flat 50% of every eligible parcel.** A
+    /// parcel **held across 30 June 2027** keeps the old law's discount
+    /// character on its **deferred** pre-2027 component alone (s 112-160(4)),
+    /// so this column halves that component and leaves the current, indexed
+    /// one whole; a wholly post-1 July 2027 gain is never eligible at all —
+    /// the discount is repealed for it — and contributes zero here. The
+    /// arithmetic follows the Subdivision 112-E split, so the column's
+    /// *description* is what the reform changed, not its computation.
     pub cgt_discount_amount_aud: Decimal,
     /// `gain_loss_aud − cgt_discount_amount_aud` — the same notional per-parcel
     /// working, and explicitly **not** label 18A (see
     /// [`Self::cgt_discount_amount_aud`]). Summed for the section's printed
     /// total only, never reconciled to a tax figure.
+    ///
+    /// On a **boundary-crossing** parcel the subtrahend is the old-law
+    /// concession on the deferred component alone, so this column is the
+    /// deferred piece after discount plus the whole indexed current piece —
+    /// the split's own arithmetic, not a fresh 50% of the row's gain. The
+    /// printed header calls it the *notional* figure for that reason. This is
+    /// the deliberate decision the reform's label pass records: the column is
+    /// kept (its value was already the split's) and **relabelled**, not
+    /// recomputed, since recomputing it as a flat halving would discount a
+    /// post-2027 indexed gain the statute never discounts.
     pub gain_after_discount_aud: Decimal,
     /// **Subdivision 112-E**: the costed units' market value at 30 June 2027,
     /// AUD — the deemed disposal's capital proceeds and the deemed
@@ -2414,6 +2438,8 @@ mod tests {
 
         let report = db_tax_report(&pool, 2024).await.unwrap();
         let summary = report.cgt_summary.expect("the year has recorded activity");
+        // A pre-reform year keeps the ATO's two-method question-18 layout.
+        assert!(!summary.reform);
         assert_eq!(summary.short_term_gains, expected.other_gains);
         assert_eq!(
             summary.long_term_gains + summary.amma_discount_gains_grossed_up,
@@ -5852,5 +5878,77 @@ mod tests {
         assert_eq!(json_dec(&parcel["gain_loss_aud"]), dec("485.60"));
         assert_eq!(json_dec(&parcel["gain_after_discount_aud"]), dec("385.60"));
         assert_eq!(parcel["discount_eligible"], serde_json::json!(true));
+    }
+
+    /// The reform's seven-step method statement reaches the printed CGT
+    /// summary: a year from FY2028 carries `reform: true` and the four
+    /// categories with their post-loss remainders, reconciling figure for
+    /// figure to the net-capital-gain report's own fields. The fixture is a
+    /// boundary-crossing parcel ($200 deferred discountable + $285.60 current),
+    /// a post-2027 $1,000 gain and a post-2027 $200 loss in the same year, so
+    /// the loss consumes the deferred category first (the reform's order).
+    #[tokio::test]
+    async fn api_a_reform_year_prints_the_seven_step_categories() {
+        let pool = test_support::test_pool().await;
+        test_support::listing(1).ticker("REF").insert(&pool).await;
+        test_support::insert_parcel_bypassing_checks(&pool, 1, 1, ymd(2024, 1, 2), "100", "10")
+            .await;
+        test_support::closing_price(1, ymd(2027, 6, 30))
+            .price("12")
+            .insert(&pool)
+            .await;
+        test_support::cpi_quarter(&pool, ymd(2027, 9, 30), dec("110.85")).await;
+        test_support::cpi_quarter(&pool, ymd(2028, 9, 30), dec("112.20")).await;
+        test_support::insert_sell_bypassing_checks(&pool, 2, 1, ymd(2028, 9, 20), "100", "15")
+            .await;
+        test_support::allocate(&pool, 1, 2, 1, dec("100")).await;
+        for (listing_id, ids, buy_date, buy_price, sell_price) in [
+            (2, (10, 11, 10), ymd(2028, 1, 5), "100", "110"),
+            (3, (20, 21, 20), ymd(2028, 2, 5), "100", "98"),
+        ] {
+            test_support::listing(listing_id)
+                .ticker(&format!("L{listing_id}"))
+                .insert(&pool)
+                .await;
+            test_support::insert_parcel_bypassing_checks(
+                &pool, ids.0, listing_id, buy_date, "100", buy_price,
+            )
+            .await;
+            test_support::insert_sell_bypassing_checks(
+                &pool,
+                ids.1,
+                listing_id,
+                ymd(2028, 9, 20),
+                "100",
+                sell_price,
+            )
+            .await;
+            test_support::allocate(&pool, ids.2, ids.1, ids.0, dec("100")).await;
+        }
+
+        let report = db_tax_report(&pool, 2029).await.unwrap();
+        let s = report.cgt_summary.expect("the year has recorded activity");
+        assert!(s.reform, "FY2029 is a reform year");
+        assert_eq!(s.deferred_non_residential_gains, dec("200"));
+        assert_eq!(s.non_residential_gains, dec("1285.60"));
+        assert_eq!(s.deferred_residential_gains, Decimal::ZERO);
+        assert_eq!(s.residential_gains, Decimal::ZERO);
+        // The loss pool consumes the deferred category first, so the current
+        // category keeps its whole $1,285.60 and no concession is struck.
+        assert_eq!(s.net_deferred_non_residential_gain, Decimal::ZERO);
+        assert_eq!(s.net_non_residential_gain, dec("1285.60"));
+        assert_eq!(s.net_deferred_residential_gain, Decimal::ZERO);
+        assert_eq!(s.net_residential_gain, Decimal::ZERO);
+        assert_eq!(s.quarantined_amount, Decimal::ZERO);
+        assert_eq!(s.cgt_concession_amount, Decimal::ZERO);
+        assert_eq!(s.net_capital_gain, dec("1285.60"));
+        // Every category figure is the net-capital-gain report's own.
+        let years = crate::reports::net_capital_gain::db_net_capital_gain(&pool)
+            .await
+            .unwrap();
+        let y = years.iter().find(|y| y.tax_year == 2029).unwrap();
+        assert_eq!(s.non_residential_gains, y.non_residential_gains);
+        assert_eq!(s.net_non_residential_gain, y.net_non_residential_gain);
+        assert_eq!(s.net_capital_gain, y.net_capital_gain);
     }
 }
