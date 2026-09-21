@@ -5149,6 +5149,168 @@ fn cgt_reform_mirrors_document_the_2027_changes() {
     // The ATO index's mapping says the boundary split is modelled.
     assert!(ATO_OVERVIEW.contains("src/domain/deferred_gain.rs"));
     assert!(ATO_OVERVIEW.contains("migration 0053"));
+
+    // The paragraphs the out-of-model scope entry cites are in the mirror:
+    // s 112-185's election (EM 1.110), pre-CGT assets entering the regime
+    // (EM 1.194), CGT event K6 (EM 1.205), the trustee reporting requirement
+    // (EM 1.158), the quarantined-amount definition (EM 1.100), Division 152's
+    // "no change" (EM 1.27) and trusts/partnerships in the indexation regime
+    // (EM 1.23).
+    assert!(em.contains(
+        "the taxpayer may instead choose to calculate the value using an apportioning method \
+         determined by the Minister"
+    ));
+    assert!(em.contains("bring pre-CGT assets into the CGT regime"));
+    assert!(em.contains("CGT event K6 is an exception to the general rule"));
+    assert!(em.contains(
+        "require a trustee of a trust estate to provide sufficient information to each beneficiary"
+    ));
+    assert!(em.contains("The term 'quarantined amount' is discussed in Chapter 2"));
+    assert!(em.contains(
+        "there will be no changes to the operation of the small business CGT concessions"
+    ));
+    assert!(em.contains(
+        "From 1 July 2027, Schedule 1 amends the tax law to repeal the 50 per cent CGT discount"
+    ));
+    // The ATO summary page carries the negative-gearing half the scope cut cites.
+    assert!(
+        summary
+            .contains("limit negative gearing for residential property investments to new builds")
+    );
+    // The ATO index names the out-of-model decisions as their own closed work.
+    assert!(ATO_OVERVIEW.contains("out-of-model scope"));
+}
+
+/// Docs-sync pin for the CGT reform's **out-of-model** scope decisions (the
+/// TODO section "assets and situations outside this data model", closed
+/// 2026-09-21). Each is N/A because the asset or taxpayer it governs cannot
+/// exist here, or a no-action because the reform leaves the rule alone, and
+/// each is recorded so a later reader finds a decision instead of an omission.
+/// This is the documentation half; the only behaviour any of them touches is
+/// the *unchanged* `422` a missing 30 June 2027 value still answers.
+#[test]
+fn cgt_reform_out_of_model_scope_decisions_documented() {
+    let limitations = known_limitations();
+    // The one grouped entry, cross-linked to both mirrors and the ATO index.
+    assert!(limitations.contains(
+        "CGT reform from 1 July 2027 — the assets and situations \
+         outside this data model are decided, not omissions"
+    ));
+    assert!(limitations.contains("docs/ato/cgt-reform-boosting-home-ownership.md"));
+    assert!(limitations.contains("docs/ato/cgt-reform-cgt-adjustments.md"));
+    assert!(
+        limitations.contains("ato/OVERVIEW.md#cgt-reform-from-1-july-2027-202627-budget-now-law")
+    );
+
+    // (a) s 112-185 — market value by default, the election the taxpayer's own.
+    assert!(limitations.contains(
+        "(a) s 112-185 — the Minister's optional apportioning method (N/A: the election is the \
+         taxpayer's own manual entry)"
+    ));
+    assert!(limitations.contains("EM 1.110 and 1.121–1.123"));
+    assert!(limitations.contains(
+        "the method is left to a legislative instrument the Minister may not have made yet"
+    ));
+    assert!(limitations.contains("election is recorded as the taxpayer's own manual entry"));
+    assert!(limitations.contains(
+        "refused with a `422` naming the listing and the day rather than defaulted to the cost \
+         base (that behaviour is unchanged)"
+    ));
+
+    // (b) Pre-CGT — the write-time refusal kept, and the gap admitted.
+    assert!(limitations.contains("(b) Pre-CGT assets (N/A: the write-time refusal is kept)"));
+    assert!(limitations.contains("entities::trade::checks::CGT_START"));
+    assert!(limitations.contains("AmountsError::PreCgtDate"));
+    assert!(limitations.contains(
+        "the reform's pre-CGT arms (EM 1.194–1.211, ss 112-175/112-180) are **unreachable**"
+    ));
+    assert!(limitations.contains("a pre-1985 holding is outside this system entirely"));
+    assert!(limitations.contains("would stop being a write-time floor"));
+    assert!(
+        limitations.contains("**date-bounded** rule on a parcel acquired before 20 September 1985")
+    );
+
+    // (c) New residential dwellings / affordable housing — no dwelling record.
+    assert!(limitations.contains(
+        "(c) New residential dwellings (new s 115-102) and affordable housing (s 115-125) \
+         (N/A: not a modelled asset class)"
+    ));
+    assert!(limitations.contains("with **no dwelling-use record**"));
+    assert!(limitations.contains("**Property is not modelled here at all**"));
+    assert!(limitations.contains("EM 1.134–1.150"));
+
+    // (d) Quarantined amounts / negative gearing — nothing to quarantine.
+    assert!(limitations.contains(
+        "(d) Quarantined amounts / negative gearing (Schedule 2 and the method statement's new \
+         steps 3–4) (N/A: nothing to quarantine)"
+    ));
+    assert!(
+        limitations.contains(
+            "the only rent it holds is `amma_net_rent`, a **trust-attributed** component"
+        )
+    );
+    assert!(limitations.contains("structurally present and always nil"));
+    assert!(limitations.contains("seven-step-method-statement section's to state"));
+    assert!(limitations.contains("EM 1.100–1.102"));
+
+    // (e) CGT event K6 — N/A, cross-referencing (b).
+    assert!(limitations.contains(
+        "(e) CGT event K6 and its deferred liability for pre-CGT shares/interests \
+         (EM 1.205–1.211) (N/A: cross-reference (b))"
+    ));
+    assert!(limitations.contains("EM 1.207–1.210"));
+
+    // (f) Trustee reporting (s 115-235) — an obligation on a trustee.
+    assert!(limitations.contains(
+        "(f) Trustee reporting of beneficiaries' attributable gains (s 115-235) \
+         (N/A: not this taxpayer)"
+    ));
+    assert!(limitations.contains("EM 1.158–1.169"));
+
+    // (g) Division 152 — expressly unchanged: no action, not a new limitation.
+    assert!(limitations.contains("(g) Small business CGT concessions (Division 152) (no action)"));
+    assert!(limitations.contains("Table 1.1's *Small business concessions — No change*"));
+    assert!(limitations.contains("Recorded as **no action**, not a new limitation"));
+
+    // (h) Trusts and partnerships — N/A by the existing Taxpayer entity type decision.
+    assert!(
+        limitations
+            .contains("(h) Trusts and partnerships as the taxpayer (N/A by an existing decision)")
+    );
+    assert!(limitations.contains("the 2026-06-07 *Taxpayer entity type* decision"));
+    assert!(limitations.contains("`reports::TAXPAYER_BASIS`"));
+    assert!(limitations.contains("EM 1.151–1.170"));
+
+    // (i) Residency — the resident-individual basis kept, the reform's other
+    // arms refused. The existing per-year exception STAYS and is not replaced.
+    assert!(limitations.contains(
+        "(i) Taxpayer residency (N/A: the resident-individual basis is kept; the reform's other \
+         residency arms are refused)"
+    ));
+    assert!(limitations.contains("`tax_year_settings.foreign_or_temporary_resident_at_some_time`"));
+    assert!(limitations.contains("**no per-year residency column is added**"));
+    assert!(
+        limitations.contains("**EM 1.119**'s switch-off of the deemed disposal and reacquisition")
+    );
+    assert!(limitations.contains("**refused rather than approximated**"));
+    assert!(limitations.contains("a residency-aware split in `domain::deferred_gain`"));
+
+    // The behaviour (a) leaves alone is still documented where it lives: a
+    // missing 30 June 2027 value is a 422, never a default (the entry above,
+    // unchanged by this scope record).
+    assert!(API_MD.contains(
+        "A missing 30 June 2027 price is a `422` naming the listing and the day, never a default."
+    ));
+
+    // The user-facing docs carry the same scope cut.
+    assert!(FEATURES_MD.contains("reform's **out-of-model assets and situations**"));
+    assert!(FEATURES_MD.contains("**quarantined amounts / negative gearing**"));
+    assert!(
+        FEATURES_MD.contains(
+            "The decisions, their citations and what would have to change are collected in"
+        )
+    );
+    assert!(README_MD.contains("residential property and its two discounts"));
 }
 
 /// Pins the reviewed CodeQL false positive on `src/infra/auth.rs`.

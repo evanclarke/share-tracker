@@ -103,7 +103,11 @@ the 30 per cent minimum tax, the Ministerial apportioning method and a parcel wh
 carried from an earlier holding — is not built, and a CGT event dated on or after 1 July 2027 that
 the app cannot honestly assess (a replacement parcel, a rights sale, an AMMA statement or a
 non-disposal CGT event) makes the reports **refuse** it (a logged `500` naming the date) rather
-than assess it under repealed law.
+than assess it under repealed law. The reform's assets and situations this data model cannot hold —
+residential property and its two discounts, quarantined amounts / negative gearing, pre-CGT
+holdings and CGT event K6, a trustee's beneficiary reporting, and the residency arms — are recorded
+as decided N/A scope cuts, with what would have to change, in
+[Known limitations](docs/API.md#known-limitations).
 
 ## Building and running
 
