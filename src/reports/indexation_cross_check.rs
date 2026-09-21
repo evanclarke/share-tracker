@@ -614,17 +614,40 @@ mod tests {
     /// reaches this report through the shared realised-gains read, because the
     /// disposal needs the Subdivision 112-E deferred-gain split.
     #[tokio::test]
-    async fn a_post_commencement_disposal_of_a_pre_reform_parcel_is_refused() {
+    async fn a_boundary_crossing_disposal_is_not_compared() {
         let pool = test_pool().await;
         test_support::listing(1).ticker("REF").insert(&pool).await;
+        // A parcel held across the boundary — the reform's own case, now split
+        // by Subdivision 112-E and assessed on the realised report.
         test_support::insert_parcel_bypassing_checks(&pool, 1, 1, ymd(2024, 1, 2), "100", "10")
             .await;
-        test_support::insert_sell_bypassing_checks(&pool, 2, 1, ymd(2027, 7, 1), "100", "15").await;
+        test_support::closing_price(1, ymd(2027, 6, 30))
+            .price("12")
+            .insert(&pool)
+            .await;
+        test_support::cpi_quarter(&pool, ymd(2027, 9, 30), dec("110.85")).await;
+        test_support::cpi_quarter(&pool, ymd(2028, 9, 30), dec("112.20")).await;
+        test_support::insert_sell_bypassing_checks(&pool, 2, 1, ymd(2028, 9, 20), "100", "15")
+            .await;
         test_support::allocate(&pool, 1, 2, 1, dec("100")).await;
 
-        let err = db_indexation_cross_check(&pool).await.unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("2027-07-01"), "{msg}");
+        // No row here: the pre-1999 election this report compares is removed
+        // for an event the reform governs (EM 1.53), whether the parcel was
+        // acquired before the commencement or after it.
+        let report = db_indexation_cross_check(&pool).await.unwrap();
+        assert!(report.comparisons.is_empty());
+        assert!(report.years.is_empty());
+
+        // The disposal is assessed — on the realised report, with both
+        // components of the split.
+        let realised = crate::reports::realised_gains::db_realised_gains(&pool)
+            .await
+            .unwrap();
+        assert_eq!(realised[0].parcels[0].deferred_gain_loss, Some(dec("200")));
+        assert_eq!(
+            realised[0].parcels[0].reacquired_cost_base,
+            Some(dec("1214.400"))
+        );
     }
 
     /// The report keeps the **pre-reform** election's scope only. A disposal

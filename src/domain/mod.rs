@@ -8,6 +8,7 @@ pub mod cgt_reform;
 pub mod contemplated_disposal;
 pub mod cost_base;
 pub mod deduction_destination;
+pub mod deferred_gain;
 pub mod franking_credit;
 pub mod indexation;
 pub mod listing_identity;

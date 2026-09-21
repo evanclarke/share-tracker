@@ -146,6 +146,18 @@ function parcelRows(p) {
       + moneyText(p.indexed_cost_base_aud) + ' AUD against the adjusted cost base shown; '
       + 'the 50% discount is applied here (see the Indexation Cross-Check report)');
   }
+  // Subdivision 112-E: a parcel held across 30 June 2027 is assessed as two
+  // components, and the columns above describe only the first of them — the
+  // cost base the units carried into the boundary. Naming the split here is
+  // what keeps the printed gain reconcilable against the columns beside it.
+  if (p.boundary_market_value_aud != null) {
+    notes.push('held across 30 June 2027 — Subdivision 112-E split: the cost base above is what the units '
+      + 'carried into the boundary, whose market value was ' + moneyText(p.boundary_market_value_aud) + ' AUD; '
+      + 'the post-2027 component is measured against the reacquired cost base '
+      + moneyText(p.reacquired_cost_base_aud) + ' AUD (indexed from the quarter beginning 1 July 2027), and '
+      + 'the deferred pre-2027 component is ' + moneyText(p.deferred_gain_loss_aud) + ' AUD — the gain and the '
+      + 'notional discount above are those two components together');
+  }
   if (p.buy_contract_note_ref) notes.push('buy note ' + p.buy_contract_note_ref);
   if (p.sale_contract_note_ref) notes.push('sale note ' + p.sale_contract_note_ref);
   if (p.currency !== 'AUD') {

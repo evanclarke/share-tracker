@@ -2674,6 +2674,78 @@ mod tests {
         }
     }
 
+    /// 0053 adds a column to an **audited** table. An existing row must keep
+    /// its figures and take the new column's default, the table's two
+    /// `row_history` triggers must come back **with the new column in their
+    /// `json_object`** (a column the trail drops is a version of the row that
+    /// can never be recovered), the trail must still record a write, and the
+    /// new CHECK must refuse a value outside its closed set.
+    #[tokio::test]
+    async fn migration_0053_adds_the_residency_column_and_re_creates_the_audit_triggers() {
+        let pool = pool_migrated_below(53).await;
+        sqlx::query(
+            "INSERT INTO tax_year_settings (tax_year, ess_taxed_upfront_reduction_eligible) \
+             VALUES (2026, 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        apply_migration(&pool, 53).await;
+
+        // The row survives, and the new column takes its default: the standing
+        // Australian-resident assumption, so no existing database's figures
+        // move.
+        let row: (i64, i64, i64) = sqlx::query_as(
+            "SELECT tax_year, ess_taxed_upfront_reduction_eligible, \
+                    foreign_or_temporary_resident_at_some_time \
+             FROM tax_year_settings",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row, (2026, 0, 0));
+
+        // Both triggers are back, and their recorded row carries the new key.
+        assert_eq!(
+            table_triggers(&pool, "tax_year_settings").await,
+            [
+                "tax_year_settings_row_history_delete",
+                "tax_year_settings_row_history_update",
+            ]
+        );
+        sqlx::query(
+            "UPDATE tax_year_settings SET foreign_or_temporary_resident_at_some_time = 1 \
+             WHERE tax_year = 2026",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let recorded: String = sqlx::query_scalar(
+            "SELECT old_row FROM row_history \
+             WHERE table_name = 'tax_year_settings' AND row_id = 2026",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            recorded.contains("foreign_or_temporary_resident_at_some_time"),
+            "the re-created trigger records the added column: {recorded}"
+        );
+
+        // And the new column's CHECK refuses a value outside its set.
+        assert!(
+            sqlx::query(
+                "UPDATE tax_year_settings SET foreign_or_temporary_resident_at_some_time = 2 \
+                 WHERE tax_year = 2026",
+            )
+            .execute(&pool)
+            .await
+            .is_err(),
+            "the CHECK must refuse a non-boolean"
+        );
+    }
+
     /// 0045 rebuilds **17** audited tables to give them `AUTOINCREMENT` ids —
     /// the largest rename-pattern rebuild in the tree. A rebuild is where a
     /// column or a row silently disappears from a hand-written `CREATE TABLE`

@@ -2,6 +2,7 @@ use crate::domain::cgt_discount;
 use crate::domain::cgt_indexation;
 use crate::domain::cgt_reform;
 use crate::domain::cost_base::{self, ParcelRow};
+use crate::domain::deferred_gain;
 use crate::domain::indexation;
 use crate::entities::corporate_action::{RocEvent, SplitEvent};
 use crate::infra::decimal::{Money, OptMoney, mul_div};
@@ -141,6 +142,35 @@ pub struct ParcelDetail {
     /// event happened in. `Some` exactly when `reform_indexation_factor` is,
     /// so the working the factor came from travels with it.
     pub reform_indexation_quarter_end: Option<NaiveDate>,
+    /// The costed units' market value at **30 June 2027**, AUD — the
+    /// Subdivision 112-E deemed disposal's capital proceeds and the deemed
+    /// reacquisition's cost base (`domain::deferred_gain`; s 112-155(2)/(3),
+    /// EM 1.117/1.121). `Some` exactly when this allocation drew on a parcel
+    /// **held across the boundary**, i.e. one whose cost was incurred before
+    /// 1 July 2027 and which this disposal reaches after it.
+    pub boundary_market_value: Option<Decimal>,
+    /// The cost base the costed units carried into 30 June 2027, AUD —
+    /// `boundary_market_value` less `deferred_gain_loss`. `Some` exactly when
+    /// `boundary_market_value` is.
+    pub boundary_cost_base: Option<Decimal>,
+    /// The **current** component's assessed cost base, AUD: the reacquired
+    /// market value indexed to the event quarter where the new law allows it,
+    /// else the unindexed reacquired figure less any post-boundary AMIT/ROC
+    /// reductions. `Some` exactly when `boundary_market_value` is, and
+    /// `proceeds − this` is the current component's gain or loss.
+    pub reacquired_cost_base: Option<Decimal>,
+    /// The **deferred** pre-2027 component of the disposal: the notional gain
+    /// (positive) or loss (negative) on the deemed disposal, disregarded there
+    /// and included in this disposal's year (s 112-160(1)–(3), EM 1.109/1.113).
+    /// `Some` exactly when `boundary_market_value` is.
+    pub deferred_gain_loss: Option<Decimal>,
+    /// Whether `deferred_gain_loss` keeps the old law's discount character —
+    /// true only where it is a gain and the units were *actually* owned for
+    /// more than 12 months at this disposal (s 112-160(4); the deemed sale is
+    /// disregarded for the 12-month rule, s 114-10(2), EM 1.56–1.57). Always
+    /// false where there is no deferred component, and never true of the
+    /// current component, which the reform indexes instead.
+    pub deferred_discount_eligible: bool,
 }
 
 // Per-sale identity: capital_gain_loss == discount_eligible_gain
@@ -331,6 +361,20 @@ struct ReportData {
     /// (`domain::cgt_indexation`). Its own table (`current_cpi_quarters`), on
     /// its own range, so a pre-reform cost can never read a modern index number.
     current_cpi: cgt_indexation::CurrentCpiQuarters,
+    /// The stored closing price of every listing on the Subdivision 112-E
+    /// boundary date (30 June 2027), in the listing's quote currency — the
+    /// market value each boundary-crossing allocation is split at
+    /// (`domain::deferred_gain`). A listing absent from the map has no recorded
+    /// value for that day, which the report refuses rather than defaulting to
+    /// the parcel's cost base (a default that would silently zero the deferred
+    /// gain).
+    boundary_prices: HashMap<i64, Decimal>,
+    /// Financial years recorded as containing a foreign or temporary
+    /// residency period (`tax_year_settings`), keyed by the calendar year of
+    /// the year's 30 June end — the s 114-25 testing-period answer
+    /// ([`cgt_indexation::residency_for_testing_period`]). Empty (the default)
+    /// means the app's standing Australian-resident assumption.
+    foreign_resident_years: std::collections::BTreeSet<i32>,
 }
 
 /// Reads the report's inputs on the caller's connection. Callers run this
@@ -407,6 +451,25 @@ async fn load_report_data(conn: &mut sqlx::SqliteConnection) -> Result<ReportDat
     let fx = FxRates::load(&mut *conn).await?;
     let cpi = indexation::CpiQuarters::load(&mut *conn).await?;
     let current_cpi = cgt_indexation::CurrentCpiQuarters::load(&mut *conn).await?;
+    // The Subdivision 112-E boundary values: the stored close of 30 June 2027
+    // per listing, in the listing's quote currency. Only the listings that
+    // actually reach a boundary-crossing disposal need one, and the report
+    // refuses (naming the listing and the day) rather than defaulting the
+    // missing value to the parcel's own cost base.
+    let boundary_rows: Vec<(i64, Money)> = sqlx::query_as(
+        "SELECT listing_id, price FROM closing_prices WHERE price_date = ? AND status = 'ok'",
+    )
+    .bind(cgt_reform::DEEMED_DISPOSAL)
+    .fetch_all(&mut *conn)
+    .await?;
+    let boundary_prices = boundary_rows
+        .into_iter()
+        .map(|(listing_id, price)| (listing_id, price.0))
+        .collect();
+    // The recorded s 114-25 exceptions, read in the same snapshot as
+    // everything else.
+    let foreign_resident_years =
+        crate::entities::tax_year_settings::db_foreign_resident_years(&mut *conn).await?;
 
     Ok(ReportData {
         sells: sells.into_iter().map(|s| (s.id, s)).collect(),
@@ -420,6 +483,8 @@ async fn load_report_data(conn: &mut sqlx::SqliteConnection) -> Result<ReportDat
         fx,
         cpi,
         current_cpi,
+        boundary_prices,
+        foreign_resident_years,
     })
 }
 
@@ -506,25 +571,97 @@ fn scale_cost_base(cost: &cost_base::CostBase, num: Decimal, den: Decimal) -> co
     }
 }
 
+/// The Subdivision 112-E split of one allocation that drew on a parcel held
+/// across 30 June 2027 — the figures [`deferred_gain::deferred_split`] takes,
+/// assembled from the report's own snapshot.
+///
+/// The boundary market value comes from the listing's stored closing price for
+/// [`cgt_reform::DEEMED_DISPOSAL`], in the unit basis in force that day (the
+/// price series is restated by every split that had happened by then, so the
+/// costed units are re-based to match). A listing with no recorded price for
+/// that day is refused by name rather than defaulted to the parcel's cost base,
+/// which would silently zero the deferred gain.
+///
+/// The boundary cost base is the shared pipeline run with
+/// [`cost_base::Held::AsAt`] at the deemed disposal date — *not* `DisposedOn`:
+/// the deemed disposal is a legal fiction, so an AMMA statement whose year ends
+/// on 30 June 2027 still reaches units that were held on that day — and
+/// `at_disposal` is the same walk at the real event, whose reduction totals the
+/// split differences into the post-boundary reductions.
+#[allow(clippy::too_many_arguments)]
+fn boundary_split(
+    data: &ReportData,
+    buy: &ParcelRow,
+    units_acquired: Decimal,
+    splits: &[SplitEvent],
+    at_disposal: &cost_base::CostBase,
+    proceeds: Decimal,
+    event: NaiveDate,
+    residency: cgt_indexation::Residency,
+) -> Result<deferred_gain::DeferredSplit, sqlx::Error> {
+    let Some(&price) = data.boundary_prices.get(&buy.listing_id) else {
+        return Err(cgt_reform::boundary_value_missing(buy.listing_id).into());
+    };
+    let units_at_boundary = crate::entities::corporate_action::split_adjusted_quantity(
+        units_acquired,
+        splits,
+        buy.date,
+        Some(cgt_reform::DEEMED_DISPOSAL),
+    );
+    // The deemed disposal is an event of the boundary day, so the market value
+    // converts at that month's ATO rate — the listing's currency is the
+    // parcel's, and there is no trade record to carry a manual fallback for a
+    // day nobody transacted (a missing rate fails loudly, as it should).
+    let market_value = data.fx.to_aud(
+        price * units_at_boundary,
+        &buy.currency,
+        cgt_reform::DEEMED_DISPOSAL,
+        FxOverride::None,
+    )?;
+    let at_boundary = cost_base::adjusted_cost_base(
+        &buy.parcel(),
+        units_acquired,
+        data.cba_reduction.get(&buy.id).map_or(&[][..], |v| v),
+        data.roc_events.get(&buy.listing_id).map_or(&[][..], |v| v),
+        splits,
+        cost_base::Held::AsAt(Some(cgt_reform::DEEMED_DISPOSAL)),
+    )?
+    .into_aud_with(&data.fx, &buy.currency, buy.acquired(), buy.fx_override())?;
+    Ok(deferred_gain::deferred_split(
+        market_value,
+        &at_boundary,
+        at_disposal,
+        proceeds,
+        buy.acquired(),
+        event,
+        &data.current_cpi,
+        residency,
+    ))
+}
+
 /// The gain/loss computation: a pure function over [`ReportData`], so the
 /// arithmetic is unit-testable without a database.
 fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sqlx::Error> {
     // The reform guard (`domain::cgt_reform`). A Sell on or after 1 July 2027
-    // is now assessed under the new law where the app can: every parcel it
-    // draws on must be a **plain** Buy/DRP whose own trade date is also the
-    // date its cost was incurred, and on or after the commencement. Anything
-    // else is refused rather than assessed under repealed law:
+    // is assessed under the new law:
     //
-    // * a parcel held across the boundary needs the Subdivision 112-E deemed
-    //   disposal/reacquisition split between a deferred old-law gain and a
-    //   post-2027 indexed one, which this app has not built; and
-    // * a replacement parcel (scrip exchange, demerger, transfer, inheritance)
-    //   carries a cost incurred earlier than its own trade date, so indexing
-    //   from that trade date would silently mis-index it.
+    // * a **plain** Buy/DRP whose own trade date is also the date its cost was
+    //   incurred and on or after the commencement indexes from that date
+    //   (`domain::cgt_indexation`); one held **across** the boundary is split
+    //   by Subdivision 112-E (`domain::deferred_gain`) into its deferred
+    //   pre-2027 component and its post-2027 component indexed from the quarter
+    //   beginning 1 July 2027 (EM 1.72); and
+    // * a parcel whose cost was **carried** from an earlier holding — a
+    //   replacement parcel (scrip exchange, demerger, transfer, inheritance),
+    //   or a partial-rollover closing Sell's cash side drawing on a
+    //   pre-commencement parcel — is refused rather than indexed from a trade
+    //   date that is not the date its cost was incurred. The split belongs to
+    //   the source parcel the rollover chain leads back to, which this app does
+    //   not walk.
     //
     // The earliest offending sale is named, so the refusal is deterministic
     // whatever order the allocations come back in.
-    let mut deferred: Option<(NaiveDate, NaiveDate)> = None;
+    let mut carried: Option<(NaiveDate, NaiveDate)> = None;
     for alloc in &data.allocations {
         let (Some(sale), Some(buy)) = (
             data.sells.get(&alloc.sale_trade_id),
@@ -535,13 +672,14 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
         if !cgt_reform::applies_to_event(sale.date) {
             continue;
         }
-        if (buy.date < cgt_reform::COMMENCEMENT || !plain_parcel(buy))
-            && deferred.is_none_or(|(date, _)| sale.date < date)
-        {
-            deferred = Some((sale.date, buy.acquired()));
+        let carried_cost = !plain_parcel(buy)
+            || (deferred_gain::held_at_boundary(buy.date)
+                && sale.scrip_cash_apportionment()?.is_some());
+        if carried_cost && carried.is_none_or(|(date, _)| sale.date < date) {
+            carried = Some((sale.date, buy.acquired()));
         }
     }
-    if let Some((event_date, acquisition_date)) = deferred {
+    if let Some((event_date, acquisition_date)) = carried {
         cgt_reform::guard_deferred_split(
             "a Sell",
             event_date,
@@ -664,12 +802,50 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
             None => alloc_cost_base.adjusted,
         };
 
-        // A CGT event on or after 1 July 2027 is assessed under the reform:
-        // index the cost base where the new law allows it. The pre-scan above
-        // has already refused any sale drawing on a parcel whose cost was not
-        // incurred at its own date, so `buy.date` is the expenditure date here.
+        // A CGT event on or after 1 July 2027 is assessed under the reform.
+        // The pre-scan above has already refused any sale drawing on a parcel
+        // whose cost was not incurred at its own date, so a plain parcel is the
+        // only shape that reaches here:
+        //
+        // * acquired on or after the commencement — index from its own
+        //   expenditure quarter (`domain::cgt_indexation`); or
+        // * held across the boundary — split it (Subdivision 112-E,
+        //   `domain::deferred_gain`): the deferred pre-2027 component assessed
+        //   under the old law, plus the current component measured from the
+        //   reacquired cost base and indexed from the quarter beginning
+        //   1 July 2027 (EM 1.72).
         let reform = cgt_reform::applies_to_event(sale.date);
-        let (alloc_cost, reform_factor) = if reform {
+        // s 114-25: the recorded residency answer for this disposal's testing
+        // period, which denies indexation (never the deferred component).
+        let residency = cgt_indexation::residency_for_testing_period(
+            &data.foreign_resident_years,
+            buy.acquired(),
+            sale.date,
+        );
+        let mut boundary: Option<deferred_gain::DeferredSplit> = None;
+        let (alloc_cost, reform_factor) = if reform && deferred_gain::held_at_boundary(buy.date) {
+            let split = boundary_split(
+                data,
+                buy,
+                qty_alloc_acquired,
+                splits,
+                &alloc_cost_base,
+                alloc_proceeds,
+                sale.date,
+                residency,
+            )?;
+            // The reported cost base is the **effective** one: the figure that
+            // makes `proceeds − cost_base` the two components' total. It is the
+            // reacquired base the current component was assessed against, less
+            // the deferred component — so the row keeps the report's identity
+            // (`capital_gain_loss = proceeds − cost_base`) while
+            // `boundary_market_value` / `deferred_gain_loss` beside it carry the
+            // working.
+            let effective = alloc_proceeds - split.total_gain_loss(alloc_proceeds);
+            let factor = split.current.factor();
+            boundary = Some(split);
+            (effective, factor)
+        } else if reform {
             // The cash apportionment scales the whole cost-base breakdown, so
             // the indexed figure is the same whether the indexation or the
             // apportionment is applied first (both are products).
@@ -684,7 +860,7 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
                 buy.acquired(),
                 sale.date,
                 &data.current_cpi,
-                cgt_indexation::ASSUMED_RESIDENCY,
+                residency,
             );
             (answer.cost_base_or(alloc_cost), answer.factor())
         } else {
@@ -726,11 +902,42 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
         // 12 months is non-discountable ("other" method); a negative result is
         // a capital loss (recorded as a positive amount). The net-capital-gain
         // report nets these buckets across sales and AMMA gains. A disposal the
-        // reform governs is **never** discount-eligible — the discount is
-        // repealed for it — so its gain, indexed or not, is non-discountable.
-        let discount_eligible =
-            !reform && cgt_discount::discount_eligible(buy.acquired(), sale.date);
-        if alloc_gain > Decimal::ZERO {
+        // reform governs is **never** discount-eligible on its post-2027
+        // component — the discount is repealed for it — so only the deferred
+        // pre-2027 component can enter the discount bucket, and it does so at
+        // the old law's character (s 112-160(4)).
+        //
+        // A boundary-crossing allocation classifies its **two components
+        // separately**, not their net: the deferred gain can be a discount
+        // capital gain while the current component is a loss, and netting them
+        // into one figure first would put that loss against the wrong bucket —
+        // the year's losses must meet the non-discountable gains before they
+        // reach a discount-eligible one.
+        let discount_eligible = match &boundary {
+            Some(split) => split.deferred_discount_eligible,
+            None => !reform && cgt_discount::discount_eligible(buy.acquired(), sale.date),
+        };
+        if let Some(split) = &boundary {
+            if split.deferred_gain() > Decimal::ZERO {
+                if split.deferred_discount_eligible {
+                    *sale_discount_gain.entry(sale_id).or_insert(Decimal::ZERO) +=
+                        split.deferred_gain();
+                } else {
+                    *sale_non_discount_gain
+                        .entry(sale_id)
+                        .or_insert(Decimal::ZERO) += split.deferred_gain();
+                }
+            }
+            *sale_loss.entry(sale_id).or_insert(Decimal::ZERO) += split.deferred_loss();
+            let current = split.current_gain_loss(alloc_proceeds);
+            if current > Decimal::ZERO {
+                *sale_non_discount_gain
+                    .entry(sale_id)
+                    .or_insert(Decimal::ZERO) += current;
+            } else if current < Decimal::ZERO {
+                *sale_loss.entry(sale_id).or_insert(Decimal::ZERO) += -current;
+            }
+        } else if alloc_gain > Decimal::ZERO {
             if discount_eligible {
                 *sale_discount_gain.entry(sale_id).or_insert(Decimal::ZERO) += alloc_gain;
             } else {
@@ -754,6 +961,13 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
             indexed_cost_base,
             reform_indexation_factor: reform_factor.map(|f| f.factor),
             reform_indexation_quarter_end: reform_factor.map(|f| f.event_quarter_end),
+            boundary_market_value: boundary.as_ref().map(|s| s.market_value),
+            boundary_cost_base: boundary.as_ref().map(|s| s.boundary_cost_base),
+            reacquired_cost_base: boundary.as_ref().map(|s| s.current_cost_base()),
+            deferred_gain_loss: boundary.as_ref().map(|s| s.deferred_gain_loss),
+            deferred_discount_eligible: boundary
+                .as_ref()
+                .is_some_and(|s| s.deferred_discount_eligible),
         });
     }
 
@@ -882,6 +1096,15 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
                 indexed_cost_base: None,
                 reform_indexation_factor: None,
                 reform_indexation_quarter_end: None,
+                // And no Subdivision 112-E split either: the rights are the
+                // asset disposed of, not the parcel that earned them, so the
+                // parcel's own 30 June 2027 value has no bearing on this row.
+                // A post-commencement rights sale is refused outright above.
+                boundary_market_value: None,
+                boundary_cost_base: None,
+                reacquired_cost_base: None,
+                deferred_gain_loss: None,
+                deferred_discount_eligible: false,
             });
         }
         parcels.sort_by(|a, b| {
@@ -3935,15 +4158,19 @@ mod tests {
         assert_eq!(rows[0].discount_eligible_gain, dec("500"));
     }
 
-    /// A CGT event dated on or after 1 July 2027 that disposes of a parcel held
-    /// **across** the boundary is refused: its pre-commencement gain is a
-    /// deferred component under Subdivision 112-E, and the report will not
-    /// assess the disposal under the repealed 50 per cent discount. The refusal
-    /// names both dates (the section's test requirement).
+    /// EM Example 1.10/1.11 (Jasper's and Otis's shares): a parcel held across
+    /// 30 June 2027 is split by Subdivision 112-E. Its deemed disposal is
+    /// measured at the boundary market value, and its deemed reacquisition is
+    /// that same value taken to have been incurred on 1 July 2027 — so the
+    /// **current** component indexes from the quarter *beginning* then
+    /// (EM 1.72), not from the parcel's own 2024 quarter, and the **deferred**
+    /// component keeps the old law's discount.
     #[tokio::test]
-    async fn db_a_post_commencement_event_on_a_pre_reform_parcel_needs_the_deferred_split() {
+    async fn db_em_example_1_11_splits_a_boundary_crossing_disposal() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "REF").await;
+        // The parcel's own cost was incurred in 2024; the boundary value is
+        // the stored close of 30 June 2027.
         test_support::insert_parcel_bypassing_checks(
             &pool,
             1,
@@ -3953,23 +4180,191 @@ mod tests {
             "10",
         )
         .await;
-        test_support::insert_sell_bypassing_checks(
-            &pool,
-            2,
-            1,
-            NaiveDate::from_ymd_opt(2027, 7, 1).unwrap(),
-            "100",
-            "15",
-        )
-        .await;
+        test_support::closing_price(1, ymd(2027, 6, 30))
+            .price("12")
+            .insert(&pool)
+            .await;
+        test_support::cpi_quarter(&pool, ymd(2027, 9, 30), dec("110.85")).await;
+        test_support::cpi_quarter(&pool, ymd(2028, 9, 30), dec("112.20")).await;
+        // Sold in the September 2028 quarter for A$1,500.
+        test_support::insert_sell_bypassing_checks(&pool, 2, 1, ymd(2028, 9, 20), "100", "15")
+            .await;
+        allocate(&pool, 1, 2, 1, dec("100")).await;
+
+        let rows = db_realised_gains(&pool).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        // Deferred: A$1,200 market value less the A$1,000 cost base.
+        // Current: A$1,500 proceeds less the A$1,200 reacquired base indexed
+        // at 112.20 ÷ 110.85 = 1.012 (A$1,214.40) — A$285.60.
+        assert_eq!(row.discount_eligible_gain, dec("200"));
+        assert_eq!(row.non_discountable_gain, dec("285.60"));
+        assert_eq!(row.capital_loss, Decimal::ZERO);
+        assert_eq!(row.capital_gain_loss, dec("485.60"));
+        // The identity every row keeps: the buckets sum to the total.
+        assert_eq!(
+            row.discount_eligible_gain + row.non_discountable_gain - row.capital_loss,
+            row.capital_gain_loss
+        );
+        // The row's cost base is the *effective* figure, so
+        // `proceeds − cost_base` is still the total gain.
+        assert_eq!(row.proceeds, dec("1500"));
+        assert_eq!(row.cost_base, dec("1014.40"));
+
+        let parcel = &row.parcels[0];
+        assert_eq!(parcel.boundary_market_value, Some(dec("1200")));
+        assert_eq!(parcel.boundary_cost_base, Some(dec("1000")));
+        assert_eq!(parcel.reacquired_cost_base, Some(dec("1214.400")));
+        assert_eq!(parcel.deferred_gain_loss, Some(dec("200")));
+        assert!(parcel.deferred_discount_eligible);
+        // The factor's denominator is the boundary's own quarter, which is the
+        // whole point of the split.
+        assert_eq!(parcel.reform_indexation_factor, Some(dec("1.012")));
+        assert_eq!(parcel.reform_indexation_quarter_end, Some(ymd(2028, 9, 30)));
+    }
+
+    /// The split's other half from the same example: a **loss** on one
+    /// component is not netted into the other's gain before classification.
+    /// The deferred gain is a discount capital gain; the current component is
+    /// a loss, and the year's losses must meet the non-discountable gains
+    /// first, so the two cannot be combined into one figure.
+    #[tokio::test]
+    async fn db_a_split_disposal_classifies_each_component_separately() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "SPLIT").await;
+        test_support::insert_parcel_bypassing_checks(&pool, 1, 1, ymd(2024, 1, 2), "100", "10")
+            .await;
+        // The boundary value is well above the sale: a deferred gain with a
+        // current loss.
+        test_support::closing_price(1, ymd(2027, 6, 30))
+            .price("20")
+            .insert(&pool)
+            .await;
+        test_support::cpi_quarter(&pool, ymd(2027, 9, 30), dec("110.85")).await;
+        test_support::cpi_quarter(&pool, ymd(2028, 9, 30), dec("112.20")).await;
+        test_support::insert_sell_bypassing_checks(&pool, 2, 1, ymd(2028, 9, 20), "100", "19")
+            .await;
+        allocate(&pool, 1, 2, 1, dec("100")).await;
+
+        let rows = db_realised_gains(&pool).await.unwrap();
+        let row = &rows[0];
+        // Deferred: A$2,000 − A$1,000 = A$1,000, discount-eligible.
+        assert_eq!(row.discount_eligible_gain, dec("1000"));
+        // Current: A$1,900 against the A$2,000 reacquired base — a loss, so
+        // the base is *not* indexed (EM 1.38) and the loss is A$100.
+        assert_eq!(row.non_discountable_gain, Decimal::ZERO);
+        assert_eq!(row.capital_loss, dec("100"));
+        assert_eq!(row.capital_gain_loss, dec("900"));
+        assert_eq!(
+            row.discount_eligible_gain + row.non_discountable_gain - row.capital_loss,
+            row.capital_gain_loss
+        );
+    }
+
+    /// The 12-month rule counts actual continuous ownership across the deemed
+    /// event (s 114-10(2), EM 1.56–1.57): a parcel bought on 1 August 2026 is
+    /// only 11 months in at the boundary, but 13 at a September 2027 sale, so
+    /// its deferred gain is a discount capital gain and its current component
+    /// is indexable. The deemed sale does not restart either clock.
+    #[tokio::test]
+    async fn db_the_deemed_event_does_not_restart_the_ownership_clock() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "CLOCK").await;
+        test_support::insert_parcel_bypassing_checks(&pool, 1, 1, ymd(2026, 8, 1), "100", "10")
+            .await;
+        test_support::closing_price(1, ymd(2027, 6, 30))
+            .price("12")
+            .insert(&pool)
+            .await;
+        test_support::cpi_quarter(&pool, ymd(2027, 9, 30), dec("110.85")).await;
+        test_support::insert_sell_bypassing_checks(&pool, 2, 1, ymd(2027, 9, 20), "100", "13")
+            .await;
+        allocate(&pool, 1, 2, 1, dec("100")).await;
+
+        let rows = db_realised_gains(&pool).await.unwrap();
+        let parcel = &rows[0].parcels[0];
+        assert!(parcel.deferred_discount_eligible);
+        assert_eq!(rows[0].discount_eligible_gain, dec("200"));
+        // The current component indexes from the boundary quarter, and the
+        // event is in that same quarter — so the factor is exactly 1.000 and
+        // the A$1,300 proceeds leave A$100.
+        assert_eq!(parcel.reform_indexation_factor, Some(Decimal::ONE));
+        assert_eq!(rows[0].non_discountable_gain, dec("100"));
+    }
+
+    /// The Subdivision 112-E split needs the asset's market value at 30 June
+    /// 2027, and a missing one is refused — naming the listing and the day —
+    /// rather than defaulted to the parcel's cost base, which would silently
+    /// zero the deferred gain. Through HTTP that refusal is a `422` the user
+    /// can act on (`PUT /closing_prices/:listing_id/:price_date`).
+    #[tokio::test]
+    async fn db_a_boundary_crossing_disposal_without_a_boundary_price_is_refused() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "NOVAL").await;
+        test_support::insert_parcel_bypassing_checks(&pool, 1, 1, ymd(2024, 1, 2), "100", "10")
+            .await;
+        test_support::cpi_quarter(&pool, ymd(2027, 9, 30), dec("110.85")).await;
+        test_support::insert_sell_bypassing_checks(&pool, 2, 1, ymd(2028, 9, 20), "100", "15")
+            .await;
         allocate(&pool, 1, 2, 1, dec("100")).await;
 
         let err = db_realised_gains(&pool).await.unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("2027-07-01"), "{msg}");
-        assert!(msg.contains("2024-01-02"), "{msg}");
-        assert!(msg.contains("reports::realised_gains"), "{msg}");
-        assert!(msg.contains("112-E"), "{msg}");
+        assert!(msg.contains("2027-06-30"), "{msg}");
+        assert!(msg.contains("listing 1"), "{msg}");
+        assert!(msg.contains("closing_prices"), "{msg}");
+
+        // And the same gap through the whole application is a 422, not a 500:
+        // it is the user's own recorded data that is missing.
+        let response = ApiClient::full(&pool)
+            .get("/portfolio/realised-gains")
+            .await;
+        let (status, body) = response.status_and_body();
+        assert_eq!(status, axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(body.contains("2027-06-30"), "{body}");
+    }
+
+    /// s 114-25 through the API: a financial year recorded as containing a
+    /// foreign or temporary residency period denies the reform's indexation for
+    /// a disposal whose testing period runs through it. The denial is reachable
+    /// because the answer is *recorded* (`tax_year_settings`), rather than
+    /// hard-wired to the Australian-resident assumption.
+    #[tokio::test]
+    async fn api_a_recorded_foreign_residency_denies_the_current_indexation() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "RESID").await;
+        test_support::insert_parcel_bypassing_checks(&pool, 1, 1, ymd(2024, 1, 2), "100", "10")
+            .await;
+        test_support::closing_price(1, ymd(2027, 6, 30))
+            .price("12")
+            .insert(&pool)
+            .await;
+        test_support::cpi_quarter(&pool, ymd(2027, 9, 30), dec("110.85")).await;
+        test_support::cpi_quarter(&pool, ymd(2028, 9, 30), dec("112.20")).await;
+        test_support::insert_sell_bypassing_checks(&pool, 2, 1, ymd(2028, 9, 20), "100", "15")
+            .await;
+        allocate(&pool, 1, 2, 1, dec("100")).await;
+
+        let client = crate::test_support::ApiClient::full(&pool);
+        // FY2029 (1 July 2028 – 30 June 2029) is the disposal's own year, and
+        // FY2028 is the year the testing period opens in.
+        client
+            .put_ok(
+                "/tax_year_settings/2029",
+                &serde_json::json!({"foreign_or_temporary_resident_at_some_time": true}),
+            )
+            .await;
+
+        let rows: Vec<RealisedGainLoss> = client.get_json("/portfolio/realised-gains").await;
+        let parcel = &rows[0].parcels[0];
+        // Indexation denied: the reacquired cost base stands unindexed at the
+        // A$1,200 market value, so the current component is A$300 and the
+        // factor's working is absent.
+        assert_eq!(parcel.reacquired_cost_base, Some(dec("1200")));
+        assert_eq!(parcel.reform_indexation_factor, None);
+        assert_eq!(rows[0].non_discountable_gain, dec("300"));
+        // The deferred component is old law and keeps its discount.
+        assert_eq!(rows[0].discount_eligible_gain, dec("200"));
     }
 
     /// A parcel acquired **on or after** 1 July 2027 and sold more than 12

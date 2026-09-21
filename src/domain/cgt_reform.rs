@@ -14,12 +14,18 @@
 //! **The reform is implemented in part.** Cost base indexation for an
 //! expenditure incurred on or after 1 July 2027 is `domain::cgt_indexation`,
 //! and a disposal that draws only on such parcels is assessed under it by
-//! `reports::realised_gains` (which flows into the net capital gain). What is
-//! *not* built, and what this module's guards therefore still refuse:
+//! `reports::realised_gains` (which flows into the net capital gain). The
+//! Subdivision 112-E deemed disposal and reacquisition at the boundary is
+//! `domain::deferred_gain`, and `reports::realised_gains` splits a disposal
+//! that draws on an asset held across 30 June 2027 into its deferred old-law
+//! component and its post-2027 component. What is *not* built, and what this
+//! module's guards therefore still refuse:
 //!
-//! - the Subdivision 112-E deemed disposal and reacquisition, which splits a
-//!   gain on an asset held across 30 June 2027 into a deferred old-law
-//!   component and a post-2027 indexed one ([`guard_deferred_split`]);
+//! - a parcel whose cost was **carried** (a rollover replacement, an
+//!   inheritance, a transfer-in) reaching a post-commencement disposal — its
+//!   cost was incurred earlier than its own trade date, so neither its own
+//!   quarter nor a plain boundary split costs it honestly
+//!   ([`guard_deferred_split`]);
 //! - the seven-step method statement (the existing loss chain already has the
 //!   right shape for the non-residential, non-deferred gains this app holds,
 //!   but the deferred categories do not exist yet);
@@ -57,6 +63,19 @@ use chrono::NaiveDate;
 /// trust arms are separate scope decisions), so this is one definite date
 /// rather than a provisional one.
 pub const COMMENCEMENT: NaiveDate = match NaiveDate::from_ymd_opt(2027, 7, 1) {
+    Some(d) => d,
+    None => unreachable!(),
+};
+
+/// The date the Subdivision 112-E deemed disposal is taken to happen: the last
+/// day of the income year before [`COMMENCEMENT`]. New s 112-155(2) deems an
+/// asset held immediately before 1 July 2027 to be disposed of "just before"
+/// that day and reacquired just after it (EM 1.117), so the deemed disposal's
+/// capital proceeds are the asset's market value at this date and the deemed
+/// reacquisition's cost base is that same value taken to have been incurred on
+/// [`COMMENCEMENT`] — the reason the indexation denominator for a
+/// boundary-crossing asset is the quarter *starting* 1 July 2027 (EM 1.72).
+pub const DEEMED_DISPOSAL: NaiveDate = match NaiveDate::from_ymd_opt(2027, 6, 30) {
     Some(d) => d,
     None => unreachable!(),
 };
@@ -162,14 +181,18 @@ pub enum CgtReformError {
         /// the event would have needed.
         categories: String,
     },
-    /// A CGT event on or after the commencement disposes of an asset that was
-    /// held immediately before 1 July 2027, so part of its gain accrued under
-    /// the old law. New Subdivision 112-E deems such an asset disposed of and
-    /// reacquired at market value on 1 July 2027: the notional old-law gain is
-    /// *deferred* and crystallised alongside a second, post-2027 gain computed
-    /// from the reacquired cost base (EM 1.107–1.131). Cost base indexation
-    /// reaches only the second component, so an event of this shape cannot be
-    /// assessed until the deferred-gain split exists.
+    /// A CGT event on or after the commencement disposes of an asset whose cost
+    /// was not incurred at a date the report can index or split honestly: a
+    /// parcel held immediately before 1 July 2027 whose cost was **carried**
+    /// forward from an earlier holding (a rollover replacement, an inherited
+    /// parcel, a transfer-in) rather than paid for at its own trade date, or a
+    /// partial-rollover closing Sell's cash side drawing on such a parcel.
+    ///
+    /// The plain boundary-crossing case *is* assessed — `domain::deferred_gain`
+    /// is the Subdivision 112-E split — but a carried cost needs the split run
+    /// on the source parcel each rollover chain leads back to, which this app
+    /// does not do. Refused rather than approximated from the replacement's own
+    /// trade date, which would silently mis-index it.
     #[error(
         "{what} dated {event_date} disposes of an asset held immediately before the CGT \
          reform commencement ({commencement}; acquired {acquisition_date}); the reform \
@@ -189,6 +212,26 @@ pub enum CgtReformError {
         commencement: NaiveDate,
         /// The report that refused.
         site: &'static str,
+    },
+    /// The Subdivision 112-E split needs the asset's market value at
+    /// [`DEEMED_DISPOSAL`] — the deemed disposal's capital proceeds and the
+    /// deemed reacquisition's cost base — and the listing has no stored closing
+    /// price for that day.
+    ///
+    /// Refused rather than defaulted: taking the parcel's own cost base as the
+    /// market value would silently zero the deferred gain, which is the one
+    /// error that would go unnoticed in a tax figure.
+    #[error(
+        "the CGT reform's Subdivision 112-E split needs listing {listing_id}'s market value at \
+         {boundary_date} (30 June 2027), and no closing price is recorded for that day — record \
+         one (PUT /closing_prices/{listing_id}/{boundary_date}) or backfill the listing's price \
+         series, then run the report again"
+    )]
+    BoundaryValueMissing {
+        /// The listing whose boundary value is missing.
+        listing_id: i64,
+        /// [`DEEMED_DISPOSAL`], carried explicitly so the message names the day.
+        boundary_date: NaiveDate,
     },
 }
 
@@ -267,6 +310,17 @@ pub fn guard_deferred_split(
     })
 }
 
+/// The refusal of a missing Subdivision 112-E boundary value (see
+/// [`CgtReformError::BoundaryValueMissing`]): `listing_id`'s market value at
+/// [`DEEMED_DISPOSAL`] is not recorded, and the split cannot be computed
+/// without it.
+pub fn boundary_value_missing(listing_id: i64) -> CgtReformError {
+    CgtReformError::BoundaryValueMissing {
+        listing_id,
+        boundary_date: DEEMED_DISPOSAL,
+    }
+}
+
 /// Surface the refusal through report code that returns `sqlx::Error` — the
 /// decode-error bridge [`crate::infra::fx::FxError`] uses, so the failure
 /// propagates to `ApiError::Internal` (a logged `500` naming the date) instead
@@ -302,6 +356,10 @@ mod tests {
         assert!(!discount_available(ymd(2028, 1, 1)));
         assert!(!applies_to_event(ymd(2027, 6, 30)));
         assert!(applies_to_event(ymd(2027, 7, 1)));
+        // The deemed disposal is the day before the commencement it precedes
+        // (EM 1.117), so the two constants can never drift apart.
+        assert_eq!(DEEMED_DISPOSAL, ymd(2027, 6, 30));
+        assert_eq!(DEEMED_DISPOSAL.succ_opt(), Some(COMMENCEMENT));
     }
 
     /// The guard passes a pre-commencement event and refuses a

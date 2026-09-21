@@ -608,6 +608,27 @@ impl From<sqlx::Error> for ApiError {
         {
             return response;
         }
+        // Likewise the CGT reform's Subdivision 112-E split: it needs the
+        // asset's market value at 30 June 2027, which is a gap in the user's
+        // own recorded data — a closing price they can enter — rather than an
+        // internal fault, and the refusal already names the listing and the
+        // day. Surfaced as the `422` it is; the reform's other refusals (an
+        // event this app cannot assess at all) stay the logged `500` they were.
+        if let sqlx::Error::Decode(source) = &err
+            && let Some(
+                cgt @ crate::domain::cgt_reform::CgtReformError::BoundaryValueMissing {
+                    listing_id,
+                    boundary_date,
+                },
+            ) = source.downcast_ref::<crate::domain::cgt_reform::CgtReformError>()
+        {
+            tracing::warn!(
+                listing_id,
+                %boundary_date,
+                "report blocked by a missing boundary price"
+            );
+            return ApiError::Unprocessable(cgt.to_string());
+        }
         ApiError::Internal(err.into())
     }
 }

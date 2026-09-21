@@ -2449,3 +2449,97 @@ guarded function, all four named reports refuse. Tests: the 2027-06-30 boundary 
 2027-07-01 event inserted straight into `trades`
 (`test_support::insert_sell_bypassing_checks`) is refused by each report, naming the commencement
 date.
+
+## CGT reform from 1 July 2027 — cost base indexation
+(EM 1.33–1.74, ss 110-36(1A) and 114-1/114-10/114-25, Subdivision 960-M. From 1 July 2027 an Australian-resident individual (partners included) or trust indexes each cost-base element except the third by the CPI movement since the expenditure was incurred, instead of taking the discount. The project already has the *frozen* pre-21-September-1999 indexation (`domain::indexation`, advisory only) — this is a different factor, a different CPI range, and it becomes *the* method rather than a comparison.)
+- [x] Extend the CPI reference data past the September 1999 freeze. `cpi_quarters` (migration `0046`) is seeded only to the freeze and its own CHECK (`quarter_end BETWEEN '1985-09-30' AND '1999-09-30'`) and header explicitly refuse a later quarter, because the old method may not use one; s 960-275(1B)/(1C) needs the CPI of the quarter of the *event*, which is after 1 July 2027. Decide the shape (widen `cpi_quarters` with its CHECK moved, or a second table for the current ABS series) and add the quarterly import: a `register` entry in `src/infra/scheduler/registry.rs` + a `schedule.cron` line, mirroring `rba-fx-import`. **Done as a second table**, `current_cpi_quarters` (migration `0052`): the frozen table's guarantee that no reader can find a later quarter is worth keeping intact, and the new table's range begins at the earliest quarter the new factor can name (ending 30 September 2027, EM 1.72). The `cpi-import` job (RBA G1 series `GCPIAG`, the ABS All groups CPI) is registered and scheduled monthly; it upserts the whole range on every run, so a re-based publication cannot leave a stored factor that is a ratio of two index bases
+- [x] Classify the CPI table(s) for snapshot staleness — `reports::snapshot`'s `STALENESS_EXEMPT_TABLES` currently exempts `cpi_quarters` on the ground that it has "no entity, no route, no import job" (0046), which stops being true once an import exists; and a new table needs its own entry and `docs/SCHEMA.md` row. **Done**: `current_cpi_quarters` has its own exemption with its own reason (its only readers are the live-computed CGT reports), `cpi_quarters`'s reason stays true (nothing writes it), and `every_table_is_classified_for_snapshot_staleness` passes
+- [x] NEEDS CLARIFICATION: the new factor's rounding rule. The EM states only the ratio (index number for the event quarter ÷ that for the expenditure quarter); the frozen factor is "limited to 3 decimal places, rounding the fourth decimal up from 5" (`domain::indexation::indexation_factor`, from the ATO's own 1.4125 → 1.413). Verify what the enacted s 960-275 says for the new subsections before implementing — do not assume the old rule carries over unstated. **Resolved from the enacted section** (mirrored at [`docs/ato/cgt-reform-960-275-indexation-factor.md`](../docs/ato/cgt-reform-960-275-indexation-factor.md)): subsection (5) — "You work out the \*indexation factor to 3 decimal places (rounding up if the fourth decimal place is 5 or more)" — is general, and the Bill inserted (1B)/(1C) without amending it, so the old rule does carry over. `domain::cgt_indexation::indexation_factor` implements it, with the section's own 1.4125 → 1.413 example as a test
+- [x] Add the post-2027 indexation engine as a **sibling** of `domain::indexation` (the frozen function hard-wires 68.7 as its numerator and must not be widened): factor = CPI(event quarter) ÷ CPI(expenditure quarter) per element except the third, with the separate first-element factor for a share or unit (s 960-275(1C)); `indexed_cost_base(cost, factor)`'s shape is reusable — index `costed_initial_cost`, apply the AMIT (E10) and ROC (G1) reductions at face value, floor at nil. **Done** as `src/domain/cgt_indexation.rs`, which reuses `domain::indexation::indexed_cost_base` for the reduction-and-floor step so the two methods cannot diverge there
+- [x] Index each element by its **own** expenditure quarter (EM 1.49 / s 114-1). A parcel today stores only the trade date, so price, brokerage and GST share the trade quarter — right for an ordinary purchase, but not for an element-1 amount paid later: **partly paid shares and their call payments have no data model** (documented out of scope in `docs/ato/bonus-shares.md` / `docs/ato/rights-issues.md`), so s 960-275(1C)'s case is unreachable until one exists. Decide whether to model a call payment (a new dated cost fact) or record the gap. **The gap is recorded, not modelled**: the app holds one expenditure date per parcel, so (1B) and (1C) coincide and only an amount paid later than the trade date — a call — would separate them. Modelling one is a new dated cost fact with its own write path and reports; until it exists s 960-275(1C) is unreachable, which the Known-limitations entry states
+- [x] NEEDS CLARIFICATION: the currency the factor applies to. `domain::cost_base`'s pipeline fuses conversion into one figure (`CostBase::into_aud_with`, the whole breakdown at the acquisition-month rate), so indexing the AUD cost base and indexing the native-currency cost before conversion give different answers for a non-AUD parcel. The cost base of a foreign-currency asset is its AUD value at acquisition (s 960-50, `docs/ato/forex-common-transactions.md`), which points at indexing the AUD figure — but confirm before implementing, and state the answer, because it is not observable from the current pipeline. **Answer: the AUD figure.** The elements of the cost base are AUD amounts translated when the expenditure is incurred (s 960-50), and the pipeline already produces exactly that figure, so `reform_indexation` indexes the converted `CostBase` and never a native-currency one; the module doc states it
+- [x] Index only expenditure incurred on or after 1 July 2027 for an asset held across the boundary, and — for an asset held on 30 June 2027 — only the period after the deemed reacquisition, whose denominator is the quarter starting 1 July 2027 (EM 1.72). **Done**, on both halves. The first is `reform_indexation`'s pre-commencement-expenditure refusal; the second is `domain::deferred_gain`, the Subdivision 112-E deemed-disposal/reacquisition split built for this item. A parcel held across the boundary is reacquired at its 30 June 2027 market value and the reacquired cost base is taken to have been incurred on **1 July 2027**, so its factor's denominator is the quarter *beginning* then — `deferred_gain::deferred_split` calls the engine with `COMMENCEMENT` as the expenditure date, and `db_em_example_1_11_splits_a_boundary_crossing_disposal` pins the September 2027 quarter against the parcel's own 2024 one. `reports::realised_gains` no longer refuses the disposal: it assesses both components and carries them into the year of the real disposal
+- [x] Apply the 12-month ownership rule to indexation: reuse `domain::cgt_discount::discount_eligible` as the single ownership test so a parcel's discount clock and indexation clock cannot disagree (`realised_gains.rs:582`/`:702`, `net_capital_gain.rs:614`/`:644`/`:678` are its call sites today), and let the deemed sale/reacquisition be disregarded for it (the sixth exception, EM 1.56/1.61 — Eva, Example 1.1). **Done**: `reform_indexation` takes the parcel's actual acquisition date and calls `discount_eligible`, so exactly-12-months misses and a day more qualifies — tested at the boundary (`the_ownership_rule_is_the_discount_clock`, `db_a_post_commencement_gain_held_under_twelve_months_is_not_indexed`)
+- [x] Never index a capital loss: the reduced cost base is not indexed (EM 1.38 — the loss methodology is unchanged), so branch on gain-vs-loss wherever indexation is applied, exactly as the advisory path does today. **Done**: `reform_indexation` branches on `proceeds <= cost.adjusted` and returns the unindexed figure, tested for a loss and for proceeds exactly equal to cost
+- [x] Apply the residency testing period (s 114-25): indexation is unavailable where the individual was a foreign or temporary resident at any time between 1 July 2027 (or acquisition, if later) and the event. **Done, with the answer recorded rather than assumed**: `tax_year_settings.foreign_or_temporary_resident_at_some_time` (migration `0053`, an audited table's new column, its two `*_row_history_*` triggers re-created) lets a financial year be marked as containing such a period, and `domain::cgt_indexation::residency_for_testing_period` folds the flagged years into the disposal's testing period. So the denial is reachable through the API — `api_a_recorded_foreign_residency_denies_the_current_indexation` records FY2029 and watches the current component fall back to the unindexed reacquired base while the deferred component keeps its discount. The answer is deliberately **year-granular**, and that approximation (a foreign period after the event date inside the event's own year also denies indexation) is stated in `docs/API.md`'s Known limitations. EM 1.119's switch-off of the deemed split itself for a foreign or temporary resident stays out of model, also stated there
+- [x] Retire or narrow the advisory comparison: `reports::indexation_cross_check` and the `indexation_eligible` / `indexed_cost_base` columns on `reports::realised_gains` answer "which method gives less" for parcels whose costs were incurred by 21 September 1999, an election the reform removes for individuals and trusts at events on or after 1 July 2027 (EM 1.53). Decide whether the report keeps its pre-commencement scope only, and say so in its docs. **Narrowed to that scope, and stated**: the report's module doc, `docs/API.md` and `a_post_reform_disposal_is_not_compared` all say a post-commencement disposal is no row of it, and the two parcel columns are empty on a reform event
+- [x] Tests: EM Example 1.6 (Marcus's ten quarterly instalments — representable as ten Buy trades, each indexed from its own quarter) and the 12-month boundary; a loss is not indexed; a foreign-resident period denies indexation. Example 1.7 (Peter's partly paid shares) is **N/A until a call-payment fact exists** — the transfer price half is ordinary, the call half is not representable. **Done**: `db_em_example_1_6_each_instalment_indexes_from_its_own_quarter` (ten parcels, each its own factor), the ownership boundary, the loss, and the residency denial; Example 1.7 stays N/A and is recorded
+- [x] Docs sync: `docs/API.md` (the reports' new/changed fields + Known limitations), `docs/SCHEMA.md` (CPI table + import), README/FEATURES, and the `docs/ato/OVERVIEW.md` mapping. **Done**, plus a new mirror of the enacted s 960-275; `doc_checks::cgt_reform_mirrors_document_the_2027_changes` pins the whole set
+
+
+Closed 2026-09-21, the same day as the section above it opened. The two items left open when cost
+base indexation itself landed — the deemed reacquisition's 1 July 2027 denominator and a *recorded*
+residency answer — both needed the next section's Subdivision 112-E split, so that split was built
+first and the section closed with it.
+
+**What landed.**
+
+- `domain::deferred_gain` is the Subdivision 112-E split, cited to EM 1.107–1.131. The deemed
+  disposal happens on `domain::cgt_reform::DEEMED_DISPOSAL` (30 June 2027) at the asset's market
+  value, and the reacquired cost base is that same value taken to have been incurred on
+  `COMMENCEMENT` (1 July 2027) — so `deferred_split` calls `cgt_indexation::reform_indexation` with
+  `COMMENCEMENT` as the expenditure date and the factor's denominator is the quarter **beginning**
+  then (EM 1.72), which is the item the previous section left open. The **deferred** component is
+  the market value less the cost base the units carried into the boundary, disregarded at the
+  deemed disposal and included in the year of the real one (s 112-160(1)–(3)); it keeps the old
+  law's discount character where the units were actually owned more than 12 months at the real
+  event, the deemed sale being the sixth exception to that rule (s 112-160(4), s 114-10(2),
+  EM 1.56–1.57). AMIT (E10) and return-of-capital (G1) events arising **after** the boundary reduce
+  the reacquired base at face value; the ones before it already shaped the boundary cost base.
+  `Held::AsAt(DEEMED_DISPOSAL)`, not `DisposedOn`, is the walk that produces it — the deemed
+  disposal is a legal fiction, so an AMMA statement whose year ends on 30 June 2027 still reaches
+  units held that day.
+- `reports::realised_gains` assesses a boundary-crossing disposal instead of refusing it. The two
+  components are classified **separately** into the existing buckets — a deferred gain by its
+  old-law discount character, the current gain never discounted, either component's loss as a loss
+  — because netting them into one figure first would put the year's losses against the wrong
+  bucket. The parcel rows carry the working (`boundary_market_value`, `boundary_cost_base`,
+  `reacquired_cost_base`, `deferred_gain_loss`, `deferred_discount_eligible`), the row's own
+  `cost_base` is the **effective** figure so `proceeds − cost_base` is still the total gain, and
+  both components flow through `reports::net_capital_gain` into the year of the real disposal. The
+  annual tax report prints them under its parcel row, with the notional discount struck on the
+  deferred gain alone.
+- **The 30 June 2027 value is the listing's stored `closing_prices` row for that day**, in the
+  boundary day's unit basis and converted to AUD at that month's rate. The project already had a
+  per-date value series, so no per-parcel valuation fact was needed, and a crypto holding is
+  covered by the same table (its prices are hand-entered). A **missing** value is refused rather
+  than defaulted — the refusal names the listing and the day and reaches HTTP as a `422`, whose
+  remedy is `PUT /closing_prices/:listing_id/2027-06-30` — because taking the parcel's cost base as
+  the market value would silently zero the deferred gain.
+- **The residency testing period is now a recorded fact**, not an assumption:
+  `tax_year_settings.foreign_or_temporary_resident_at_some_time` (migration `0053`, the audited
+  table's two `*_row_history_*` triggers dropped and re-created with the new column) feeds
+  `domain::cgt_indexation::residency_for_testing_period`, and a flagged year inside a disposal's
+  testing period denies the **current** component's indexation while the deferred component keeps
+  its discount. The answer is year-granular, and that approximation is stated rather than hidden.
+- Still refused, and documented as such: a parcel whose cost was **carried** from an earlier
+  holding (a scrip-exchange, demerger, transfer or inheritance replacement, and a partial-rollover
+  closing Sell's cash side drawing on a pre-commencement parcel) — the split belongs to the source
+  parcel each rollover chain leads back to, which this app does not walk — and a rights sale. The
+  two hypothetical-disposal reports keep refusing a post-commencement date.
+
+**Tests.** EM Example 1.11 (Otis) is reproduced at report level:
+`db_em_example_1_11_splits_a_boundary_crossing_disposal` (a A\$1,200 boundary value against a
+A\$1,000 cost base, the A\$200 deferred gain discount-eligible and the current A\$285.60 indexed at
+the September 2027 quarter's 1.012), with
+`db_a_split_disposal_classifies_each_component_separately`,
+`db_the_deemed_event_does_not_restart_the_ownership_clock`,
+`db_a_boundary_crossing_disposal_without_a_boundary_price_is_refused` and the API-level
+`api_a_recorded_foreign_residency_denies_the_current_indexation` beside it; `domain::deferred_gain`
+pins the arithmetic directly (the denominator, the ownership clock, the loss, the post-boundary
+reductions, the residency denial and the missing quarter). `reports::net_capital_gain` carries both
+components into the year, `reports::tax_report` prints the split and reconciles the parcel's
+cost-base columns, and `reports::indexation_cross_check` keeps a boundary-crossing disposal out of
+the removed pre-1999 election.
+
+**Docs.** `docs/API.md` (the realised-gains and net-capital-gain sections, the tax-year-settings
+entity, the annual tax report's disposal schedule and the 422 row, and a Known-limitations entry
+that now states what the split models as well as what it does not — subsuming the earlier
+"guarded, not implemented" entry), `docs/SCHEMA.md` (the residency column and its trigger
+re-creation), README/`docs/FEATURES.md`, and `docs/ato/OVERVIEW.md`'s mapping;
+`doc_checks::cgt_reform_mirrors_document_the_2027_changes` pins the set.
+
+**Deliberately not done here**, and left to the sections that follow: the four-category seven-step
+method statement (the deferred gains enter the existing two-bucket chain, which is the statute's
+order for the non-residential, non-deferred, unquarantined categories this app holds), the Minister
+s 112-185 apportioning method, the pre-CGT decision, and Division 119's minimum tax.

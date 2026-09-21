@@ -5533,32 +5533,57 @@ mod tests {
     /// A realised disposal dated on or after 1 July 2027 is refused (through
     /// the shared realised-gains read), naming the commencement date.
     #[tokio::test]
-    async fn db_a_post_commencement_disposal_is_refused() {
+    async fn db_a_boundary_crossing_disposal_carries_both_components() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "REF").await;
-        test_support::insert_parcel_bypassing_checks(
-            &pool,
-            1,
-            1,
-            NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
-            "100",
-            "10",
-        )
-        .await;
-        test_support::insert_sell_bypassing_checks(
-            &pool,
-            2,
-            1,
-            NaiveDate::from_ymd_opt(2027, 7, 1).unwrap(),
-            "100",
-            "15",
-        )
-        .await;
+        // A parcel held across the boundary: its deemed disposal is measured
+        // at the 30 June 2027 close and its current component indexes from the
+        // quarter beginning 1 July 2027 (EM 1.72).
+        test_support::insert_parcel_bypassing_checks(&pool, 1, 1, ymd(2024, 1, 2), "100", "10")
+            .await;
+        test_support::closing_price(1, ymd(2027, 6, 30))
+            .price("12")
+            .insert(&pool)
+            .await;
+        test_support::cpi_quarter(&pool, ymd(2027, 9, 30), dec("110.85")).await;
+        test_support::cpi_quarter(&pool, ymd(2028, 9, 30), dec("112.20")).await;
+        test_support::insert_sell_bypassing_checks(&pool, 2, 1, ymd(2028, 9, 20), "100", "15")
+            .await;
+        allocate(&pool, 1, 2, 1, dec("100")).await;
+
+        let years = db_net_capital_gain(&pool).await.unwrap();
+        let y = years.iter().find(|y| y.tax_year == 2029).expect("FY2029");
+        // The deferred A$200 gain is a discount capital gain (old law,
+        // s 112-160(4)) and is halved; the current A$285.60 is indexed and
+        // never discounted.
+        assert_eq!(y.discount_eligible_gains, dec("200"));
+        assert_eq!(y.other_gains, dec("285.60"));
+        assert_eq!(y.cgt_discount, dec("100"));
+        assert_eq!(y.net_capital_gain, dec("385.60"));
+        // Both components ride on the disposal's parcel rows too.
+        let parcel = &y.disposals[0].parcels[0];
+        assert_eq!(parcel.boundary_market_value, Some(dec("1200")));
+        assert_eq!(parcel.deferred_gain_loss, Some(dec("200")));
+    }
+
+    /// A boundary-crossing disposal with no recorded 30 June 2027 value is
+    /// refused by name (the Subdivision 112-E split cannot value the asset),
+    /// rather than defaulted to the parcel's cost base.
+    #[tokio::test]
+    async fn db_a_boundary_crossing_disposal_without_a_boundary_price_is_refused() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "NOVAL").await;
+        test_support::insert_parcel_bypassing_checks(&pool, 1, 1, ymd(2024, 1, 2), "100", "10")
+            .await;
+        test_support::cpi_quarter(&pool, ymd(2027, 9, 30), dec("110.85")).await;
+        test_support::insert_sell_bypassing_checks(&pool, 2, 1, ymd(2028, 9, 20), "100", "15")
+            .await;
         allocate(&pool, 1, 2, 1, dec("100")).await;
 
         let err = db_net_capital_gain(&pool).await.unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("2027-07-01"), "{msg}");
+        assert!(msg.contains("2027-06-30"), "{msg}");
+        assert!(msg.contains("listing 1"), "{msg}");
     }
 
     /// A disposal the reform governs **is** assessed, and its indexed gain

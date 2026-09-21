@@ -94,12 +94,16 @@ cost base indexation and a 30 per cent minimum tax on capital gains, in place of
 for individuals and trusts — is **partly implemented**: the cost base indexation of a parcel whose
 expenditure was incurred on or after 1 July 2027 is computed (the `cpi-import` job keeps the ABS
 quarterly CPI series current), so a disposal that draws only on such parcels is assessed under the
-new law. Everything the reform's deferred categories need — the 30 June 2027 deemed
-disposal/reacquisition and its deferred gain, the seven-step net-capital-gain method statement and
-the 30 per cent minimum tax — is not built, and a CGT event dated on or after 1 July 2027 that
-indexation cannot assess (a parcel held across the boundary, a replacement parcel, a rights sale,
-an AMMA statement or a non-disposal CGT event) makes the reports **refuse** it (a logged `500`
-naming the date) rather than assess it under repealed law.
+new law. A parcel **held across 30 June 2027** is split by Subdivision 112-E into its deferred
+pre-2027 gain (old law, still discounted) and its post-2027 component (indexed from the quarter
+beginning 1 July 2027), both assessed in the year of the real disposal from the listing's stored
+30 June 2027 closing price, and the s 114-25 residency testing period is a recorded per-year
+answer rather than an assumption. What remains — the seven-step net-capital-gain method statement,
+the 30 per cent minimum tax, the Ministerial apportioning method and a parcel whose cost was
+carried from an earlier holding — is not built, and a CGT event dated on or after 1 July 2027 that
+the app cannot honestly assess (a replacement parcel, a rights sale, an AMMA statement or a
+non-disposal CGT event) makes the reports **refuse** it (a logged `500` naming the date) rather
+than assess it under repealed law.
 
 ## Building and running
 

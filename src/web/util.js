@@ -1108,6 +1108,13 @@ const COLUMN_KINDS = (function () {
     'indexed_cost_base', 'discount_method_gain', 'indexation_method_gain',
     'indexation_advantage', 'discount_method_total', 'indexation_method_total',
     'indexation_advantage_total', 'capital_losses_realised',
+    // Subdivision 112-E (the 1 July 2027 boundary split, shown on the realised
+    // gains and net capital gain parcel rows): the units' market value at
+    // 30 June 2027, the cost base they carried into it, the reacquired base the
+    // current component is assessed against, and the deferred pre-2027
+    // component itself — all AUD, all money.
+    'boundary_market_value', 'boundary_cost_base', 'reacquired_cost_base',
+    'deferred_gain_loss',
     // Period-performance report: opening/closing values and the
     // capital/FX/income breakdown, all AUD.
     'opening_market_value', 'closing_market_value', 'purchases', 'sale_proceeds',

@@ -108,13 +108,22 @@ gains accruing after that date. Both Acts have passed and the ATO states the mea
 **Part of the new regime is now modelled**: the **cost base indexation** for an expenditure incurred
 on or after 1 July 2027 is `src/domain/cgt_indexation.rs`, read from the current ABS series
 (`current_cpi_quarters`, migration 0052, kept current by the `cpi-import` job), and a disposal that
-draws only on such parcels is assessed under it by the realised-gains report. Everything else is
-still the **commencement guard**: the single commencement date and the four gain categories are
-defined once in `src/domain/cgt_reform.rs`, and a CGT event dated on or after 1 July 2027 that
-indexation cannot assess — a parcel held across the boundary (Subdivision 112-E's deferred split), a
-carried-cost replacement parcel, a rights sale, an AMMA statement or a non-disposal CGT event — is
-refused (a logged `500` naming the date) rather than assessed under repealed law. These mirrors
-remain the reference for the rest of the implementation work, and the guard's own citation is
+draws only on such parcels is assessed under it by the realised-gains report. The **30 June 2027
+deemed disposal and reacquisition** (Subdivision 112-E) is `src/domain/deferred_gain.rs`: a parcel
+held across the boundary is split into its **deferred** pre-2027 component — assessed under the old
+law, still discounted — and its **current** post-2027 component, indexed from the quarter *beginning*
+1 July 2027 (EM 1.72), with the boundary market value taken from the listing's stored 30 June 2027
+`closing_prices` row and both components included in the year of the real disposal. The s 114-25
+**residency testing period** is a recorded per-financial-year answer
+(`tax_year_settings.foreign_or_temporary_resident_at_some_time`, migration 0053) rather than the
+resident-throughout assumption. What remains is the **commencement guard** plus what this project
+states rather than computes: the single commencement date and the four gain categories are defined
+once in `src/domain/cgt_reform.rs`, a CGT event dated on or after 1 July 2027 that the app cannot
+assess — a carried-cost replacement parcel, a rights sale, an AMMA statement or a non-disposal CGT
+event — is refused (a logged `500` naming the date) rather than assessed under repealed law, and the
+seven-step method statement's categories, the 30 per cent minimum tax (Division 119) and the
+Ministerial apportioning method (s 112-185) are documented as not implemented. These mirrors remain
+the reference for the rest of the implementation work, and the implementation's own citations are
 recorded against them below.
 
 | File | What it covers |

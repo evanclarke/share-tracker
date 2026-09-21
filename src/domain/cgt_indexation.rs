@@ -32,13 +32,16 @@
 //!    fact, which does not exist (see the *Partly paid shares* gap).
 //! 2. **Only expenditure incurred on or after 1 July 2027 is indexed**
 //!    (s 960-275(1B)(b)). An asset held across the boundary is dealt with by
-//!    the deemed disposal and reacquisition in Subdivision 112-E — its
-//!    pre-2027 gain is a *deferred* component assessed under the old law — and
-//!    the reacquired cost base is taken to have been incurred on 1 July 2027,
-//!    so the earliest denominator is the quarter ending 30 September 2027
-//!    (EM 1.72). This app has not built that split, so an allocation whose
-//!    expenditure predates the reform is not indexed here and the report that
-//!    would need the split refuses the event outright.
+//!    the deemed disposal and reacquisition in Subdivision 112-E
+//!    ([`crate::domain::deferred_gain`]): its pre-2027 gain is a *deferred*
+//!    component assessed under the old law, and the reacquired cost base is
+//!    taken to have been incurred on 1 July 2027, so the earliest denominator
+//!    is the quarter ending 30 September 2027 (EM 1.72). That is why the
+//!    boundary split calls this engine with
+//!    [`crate::domain::cgt_reform::COMMENCEMENT`] as the expenditure date
+//!    rather than the parcel's own trade date; an expenditure before it that
+//!    is *not* reacquired — nothing in this app reaches one — is refused with
+//!    [`NotIndexed::PreCommencementExpenditure`].
 //! 3. **The asset must have been owned for at least 12 months** (s 114-10(1)).
 //!    The one ownership test is [`crate::domain::cgt_discount::discount_eligible`],
 //!    so a parcel's discount clock and its indexation clock cannot disagree;
@@ -52,10 +55,10 @@
 //!    where the individual was a foreign or temporary resident at any time
 //!    between 1 July 2027 (or acquisition, if later) and the event. This app
 //!    models one Australian-resident individual ([`crate::reports::TAXPAYER_BASIS`]),
-//!    so production passes [`Residency::AustralianResidentThroughout`]; the
-//!    foreign/temporary answer exists so the rule is stated and testable rather
-//!    than omitted, and recording a real residency history is a separate scope
-//!    decision (`docs/API.md` Known limitations).
+//!    and records the exception per financial year in `tax_year_settings`, so
+//!    production derives the answer with [`residency_for_testing_period`]
+//!    rather than assuming it; a year recorded as foreign or temporary makes
+//!    the denial reachable through the API.
 //! 6. **The third element is never indexed** (s 960-275(4)). The app records no
 //!    costs of owning an asset, so the rule is structural: a [`CostBase`]
 //!    carries only the acquisition cost and the AMIT/return-of-capital
@@ -100,20 +103,56 @@ pub enum Residency {
     /// A foreign resident or temporary resident at some time inside it, which
     /// denies indexation for the whole disposal.
     ///
-    /// Test-only until the app records a residency history: production's one
-    /// taxpayer is the assumed resident ([`ASSUMED_RESIDENCY`]), so nothing in
-    /// the server can construct this answer — but the rule it states is still
-    /// live, and the test that a foreign or temporary period denies indexation
-    /// is what keeps it from being an omission.
-    #[cfg(test)]
+    /// Reached from the recorded per-year answer
+    /// ([`residency_for_testing_period`] over
+    /// `entities::tax_year_settings::db_foreign_resident_years`); the app's
+    /// default, where no year is recorded as foreign or temporary, is
+    /// [`ASSUMED_RESIDENCY`].
     ForeignOrTemporaryAtSomeTime,
 }
 
-/// The app's hard-wired residency assumption: one Australian-resident
-/// individual (`reports::TAXPAYER_BASIS`). Every production caller passes this,
-/// because the app records no residency history; the foreign/temporary arm is
-/// reachable only from a test until a per-period residency fact exists.
+/// The app's default residency answer: one Australian-resident individual
+/// (`reports::TAXPAYER_BASIS`), used wherever no year is recorded as foreign or
+/// temporary. Only an explicitly recorded exception changes a figure — the
+/// same "absent row = the standing assumption" rule `tax_year_settings`
+/// follows for the ESS income test.
 pub const ASSUMED_RESIDENCY: Residency = Residency::AustralianResidentThroughout;
+
+/// The s 114-25 answer for a disposal, from the recorded per-financial-year
+/// exceptions: indexation is unavailable where the individual was a foreign or
+/// temporary resident **at any time** between 1 July 2027 (or the day the
+/// asset was acquired, if later) and the day of the CGT event (s 114-25(1)/(2),
+/// EM 1.59, 1.62).
+///
+/// `foreign_years` is the set of financial years recorded as having contained
+/// such a period (`tax_year_settings.foreign_or_temporary_resident_at_some_time`),
+/// keyed by the calendar year of the year's 30 June end ([`tax_year_for`]).
+/// The testing period is the run of financial years from the one the period
+/// opens in through the one the event falls in, so any flagged year in that run
+/// denies indexation for the whole disposal.
+///
+/// **Deliberately year-granular.** The statute asks about a *period*, and a
+/// year-level answer is the granularity the app records: a foreign period
+/// inside the event's own financial year but *after* the event date denies
+/// indexation here where strictly it would not. That direction is the
+/// conservative one for an indexation benefit, and it is stated in
+/// `docs/API.md`'s Known limitations rather than left implicit.
+pub fn residency_for_testing_period(
+    foreign_years: &std::collections::BTreeSet<i32>,
+    acquired: NaiveDate,
+    event: NaiveDate,
+) -> Residency {
+    let start = acquired.max(crate::domain::cgt_reform::COMMENCEMENT);
+    let (first, last) = (
+        crate::domain::tax_year::tax_year_for(start),
+        crate::domain::tax_year::tax_year_for(event),
+    );
+    if foreign_years.range(first..=last).next().is_some() {
+        Residency::ForeignOrTemporaryAtSomeTime
+    } else {
+        ASSUMED_RESIDENCY
+    }
+}
 
 /// Why a disposal's cost base is not indexed under the reform. Each is a rule
 /// of the new law rather than a failure, and each is surfaced so a reader can
@@ -236,6 +275,16 @@ impl CurrentCpiQuarters {
     #[cfg(test)]
     pub fn len(&self) -> usize {
         self.quarters.len()
+    }
+
+    /// A table built from explicit quarters — the fixture shape a *sibling*
+    /// module's tests need, since the field is private to this one. Production
+    /// always loads the stored series ([`Self::load`]).
+    #[cfg(test)]
+    pub fn from_quarters(quarters: impl IntoIterator<Item = (NaiveDate, Decimal)>) -> Self {
+        Self {
+            quarters: quarters.into_iter().collect(),
+        }
     }
 }
 

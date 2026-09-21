@@ -1045,7 +1045,8 @@ fn per_year_ess_reduction_eligibility_documented() {
     assert!(API_MD.contains("PUT /tax_year_settings/2026"));
     assert!(API_MD.contains("**An absent row means every setting takes its default**"));
     assert!(API_MD.contains(
-        "a single global flag would strip the reduction from years that never crossed the threshold"
+        "a single global flag would strip the reduction from years that never crossed the income \
+         threshold"
     ));
     // The tax summary's own wording, and the printed document's footnote.
     assert!(API_MD.contains("reports its taxed-upfront discount **unreduced**"));
@@ -1796,19 +1797,23 @@ fn cgt_reform_commencement_guard_documented() {
     assert!(em.contains("Nothing in the new regime described above is implemented here"));
 
     // 2b. The worked-example decision, stated in the Known-limitations entry.
+    // The entry now also records what the boundary split models, having
+    // subsumed the earlier "guarded, not implemented" entry (2026-09-21).
     let limitations = known_limitations();
-    assert!(limitations.contains("**CGT reform from 1 July 2027 — guarded, not implemented**"));
+    assert!(
+        limitations.contains("**CGT reform from 1 July 2027 — indexation and the 30 June 2027")
+    );
     assert!(limitations.contains("**replaces the 50% CGT discount**"));
     assert!(limitations.contains("**30 per cent minimum tax on capital gains**"));
-    assert!(limitations.contains("deliberately **not** reproduced as `src/ato_examples.rs`"));
-    assert!(limitations.contains("pinned at the **report level**"));
+    assert!(limitations.contains("pinned at **report level**"));
     assert!(limitations.contains("rather than through a clock seam"));
+    assert!(limitations.contains("a [trade](#trades)'s `date` is bounded above by **today**"));
+    assert!(limitations.contains("refused with a logged `500` naming the dates"));
 
     // 3. The user-facing surfaces.
     assert!(README_MD.contains("**CGT reform from 1 July 2027**"));
-    assert!(README_MD.contains("rather than assess it under repealed law"));
-    assert!(FEATURES_MD.contains("**CGT reform from 1 July 2027**"));
-    assert!(FEATURES_MD.contains("is **not implemented**"));
+    assert!(README_MD.contains("than assess it under repealed law"));
+    assert!(FEATURES_MD.contains("### Cost base indexation from 1 July 2027"));
     let overview = include_str!("../docs/ato/OVERVIEW.md");
     assert!(overview.contains("**commencement guard**"));
     assert!(overview.contains("`src/domain/cgt_reform.rs`"));
@@ -5093,12 +5098,23 @@ fn cgt_reform_mirrors_document_the_2027_changes() {
     // The Known-limitations entry states what is modelled and what is refused.
     let limitations = known_limitations();
     assert!(limitations.contains(
-        "cost base indexation is modelled; everything the deferred categories need is refused"
+        "indexation and the 30 June 2027 boundary split are modelled; the minimum tax, the \
+         four-category statement and the out-of-model assets are not"
     ));
-    assert!(limitations.contains("Subdivision 112-E's deemed disposal and reacquisition"));
-    assert!(limitations.contains("30 per cent minimum tax (Division 119)"));
+    // The boundary split, as implemented: the deferred component keeps the old
+    // law's discount and the current one indexes from the quarter *beginning*
+    // 1 July 2027 (EM 1.72).
+    assert!(limitations.contains("split by Subdivision 112-E"));
+    assert!(limitations.contains("indexed from the quarter **beginning** 1 July 2027"));
+    // The residency answer moved from an assumption to a recorded fact.
+    assert!(limitations.contains("recorded per-year answer"));
+    assert!(limitations.contains("residency answer is year-granular"));
+    // What is still refused, and what is still out of model.
+    assert!(limitations.contains("cost was **carried** from an earlier holding"));
+    assert!(limitations.contains("four-category seven-step method statement"));
+    assert!(limitations.contains("30 per cent minimum tax** (Division 119)"));
+    assert!(limitations.contains("s 112-185"));
     assert!(limitations.contains("partly paid shares and their calls have no data model"));
-    assert!(limitations.contains("Residency is an assumption, not a recorded answer"));
     assert!(
         limitations.contains(
             "`cpi-import` job stores every quarter from the one ending 30 September 2027"
@@ -5106,12 +5122,33 @@ fn cgt_reform_mirrors_document_the_2027_changes() {
     );
     assert!(limitations.contains("docs/ato/cgt-reform-960-275-indexation-factor.md"));
 
-    // The report field the implementation adds is documented, and the
+    // The report fields the implementation adds are documented, and the
     // user-facing docs carry the same modelled/refused split.
     assert!(API_MD.contains("`reform_indexation_factor`"));
     assert!(API_MD.contains("reform_indexation_quarter_end"));
+    for field in [
+        "boundary_market_value",
+        "boundary_cost_base",
+        "reacquired_cost_base",
+        "deferred_gain_loss",
+        "deferred_discount_eligible",
+    ] {
+        assert!(
+            API_MD.contains(field),
+            "API.md documents the Subdivision 112-E field {field}"
+        );
+    }
+    assert!(API_MD.contains("`foreign_or_temporary_resident_at_some_time`"));
+    // The recorded residency answer has its own entity surface and schema row.
+    assert!(SCHEMA_MD.contains("foreign_or_temporary_resident_at_some_time"));
+    assert!(SCHEMA_MD.contains("0053"));
     assert!(FEATURES_MD.contains("Cost base indexation from 1 July 2027"));
+    assert!(FEATURES_MD.contains("held across 30 June 2027"));
     assert!(README_MD.contains("partly implemented"));
+    assert!(README_MD.contains("held across 30 June 2027"));
+    // The ATO index's mapping says the boundary split is modelled.
+    assert!(ATO_OVERVIEW.contains("src/domain/deferred_gain.rs"));
+    assert!(ATO_OVERVIEW.contains("migration 0053"));
 }
 
 /// Pins the reviewed CodeQL false positive on `src/infra/auth.rs`.

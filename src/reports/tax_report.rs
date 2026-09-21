@@ -547,6 +547,27 @@ pub struct DisposalParcelRow {
     /// [`Self::cgt_discount_amount_aud`]). Summed for the section's printed
     /// total only, never reconciled to a tax figure.
     pub gain_after_discount_aud: Decimal,
+    /// **Subdivision 112-E**: the costed units' market value at 30 June 2027,
+    /// AUD — the deemed disposal's capital proceeds and the deemed
+    /// reacquisition's cost base (s 112-155(2)/(3), EM 1.117/1.121). `Some`
+    /// exactly when the parcel was held **across the boundary**, i.e. its cost
+    /// was incurred before 1 July 2027 and the disposal reaches it after; the
+    /// cost-base columns above then describe the cost base the units carried
+    /// *into* the boundary (so `initial − Σ adjustments = adjusted` still holds
+    /// on the page, and `adjusted_cost_base_aud` is the boundary cost base this
+    /// market value is measured against), while `reacquired_cost_base_aud` and
+    /// `deferred_gain_loss_aud` beside it state the two components.
+    pub boundary_market_value_aud: Option<Decimal>,
+    /// The **current** component's assessed cost base, AUD: the reacquired
+    /// market value indexed to the sale's quarter where the reform allows it,
+    /// else the unindexed reacquired figure less post-boundary AMIT/ROC
+    /// reductions. `Some` exactly when `boundary_market_value_aud` is.
+    pub reacquired_cost_base_aud: Option<Decimal>,
+    /// The **deferred** pre-2027 component, AUD (positive = gain, negative =
+    /// loss) — the notional gain on the deemed disposal, disregarded there and
+    /// included in this disposal's year (s 112-160(1)–(3), EM 1.109/1.113).
+    /// `Some` exactly when `boundary_market_value_aud` is.
+    pub deferred_gain_loss_aud: Option<Decimal>,
 
     // FX detail — populated only for a non-AUD parcel.
     pub currency: String,
@@ -571,9 +592,10 @@ impl DisposalParcelRow {
     /// gain](super::net_capital_gain) reports the numbers come from are
     /// untouched and stay exact.
     ///
-    /// **Money, and so rounded:** the six AUD figures below plus each itemised
+    /// **Money, and so rounded:** the AUD figures below plus each itemised
     /// adjustment's `amount` — every figure the printed schedule shows as an
-    /// amount, and the five that are totalled.
+    /// amount, and the five that are totalled. The Subdivision 112-E split's
+    /// three optional AUD figures are rounded the same way when they apply.
     ///
     /// **Deliberately left verbatim**, because none is a derived AUD amount:
     /// - `cost_base_per_unit_aud`, `proceeds_per_unit_aud` and an adjustment's
@@ -598,6 +620,13 @@ impl DisposalParcelRow {
             &mut self.gain_after_discount_aud,
         ] {
             *figure = to_cents(*figure);
+        }
+        for figure in [
+            &mut self.boundary_market_value_aud,
+            &mut self.reacquired_cost_base_aud,
+            &mut self.deferred_gain_loss_aud,
+        ] {
+            *figure = figure.map(to_cents);
         }
         for adjustment in &mut self.adjustments {
             adjustment.amount = to_cents(adjustment.amount);
@@ -801,6 +830,18 @@ fn disposal_parcel_rows(
             // rate. `realised_gains` already resolved the same rates to
             // produce `p.cost_base`, so a failure is unreachable in practice
             // — this only turns an invariant violation loud instead of wrong.
+            //
+            // A parcel held **across the 1 July 2027 boundary** stops its
+            // walk at the boundary: its cost-base columns describe what the
+            // units carried into Subdivision 112-E's deemed disposal, and the
+            // reacquisition plus the current component are stated by the split
+            // columns below. `AsAt`, not `DisposedOn` — the deemed disposal is
+            // a legal fiction, and it is the same window the realised report
+            // costed the deferred component over.
+            let held = match p.boundary_market_value {
+                Some(_) => cost_base::Held::AsAt(Some(crate::domain::cgt_reform::DEEMED_DISPOSAL)),
+                None => cost_base::Held::DisposedOn(disposal.sale_date),
+            };
             let (adjustments, initial_cost_base_aud) = match (disposal.source, buy) {
                 (DisposalSource::Sell, Some(buy_row)) => {
                     let splits = inputs
@@ -827,7 +868,7 @@ fn disposal_parcel_rows(
                         amit,
                         roc,
                         splits,
-                        cost_base::Held::DisposedOn(disposal.sale_date),
+                        held,
                     )?;
                     // The **costed units'** share of the initial cost base,
                     // not the whole parcel's: this row describes the units the
@@ -845,7 +886,7 @@ fn disposal_parcel_rows(
                         amit,
                         roc,
                         splits,
-                        cost_base::Held::DisposedOn(disposal.sale_date),
+                        held,
                     )?
                     .into_aud_with(
                         &inputs.fx,
@@ -910,10 +951,25 @@ fn disposal_parcel_rows(
                 .map(|t| t.date)
                 .filter(|d| *d != p.acquisition_date);
 
-            let discount_amount = if p.discount_eligible && p.capital_gain_loss > Decimal::ZERO {
-                p.capital_gain_loss / Decimal::from(2)
-            } else {
-                Decimal::ZERO
+            // The Subdivision 112-E split's own cost base, where the parcel was
+            // held across the boundary: the cost-base columns describe what the
+            // units carried **into** 30 June 2027, so this is the boundary
+            // figure rather than `p.cost_base` (the realised report's *effective*
+            // figure, which nets the deferred component into the current one so
+            // `proceeds − cost_base` is the two components' total).
+            let adjusted_cost_base_aud = p.boundary_cost_base.unwrap_or(p.cost_base);
+
+            // A boundary-crossing parcel's discount is struck on its
+            // **deferred** component alone: only that component keeps the old
+            // law's discount character (s 112-160(4)), and the current one is
+            // indexed instead. Halving the row's *total* gain, which is what
+            // the one-branch form did, would discount the post-2027 gain too.
+            let discount_amount = match (p.deferred_discount_eligible, p.deferred_gain_loss) {
+                (true, Some(deferred)) if deferred > Decimal::ZERO => deferred / Decimal::from(2),
+                (false, None) if p.discount_eligible && p.capital_gain_loss > Decimal::ZERO => {
+                    p.capital_gain_loss / Decimal::from(2)
+                }
+                _ => Decimal::ZERO,
             };
             // The rate the *proceeds* were actually converted at, not the
             // month's published rate: `realised_gains` converts a Sell's
@@ -975,12 +1031,12 @@ fn disposal_parcel_rows(
                 buy_gst_on_brokerage: buy_trade.map(|t| t.gst_on_brokerage),
                 initial_cost_base_aud,
                 cost_base_per_unit_aud: if p.units > Decimal::ZERO {
-                    p.cost_base / p.units
+                    adjusted_cost_base_aud / p.units
                 } else {
                     Decimal::ZERO
                 },
                 adjustments,
-                adjusted_cost_base_aud: p.cost_base,
+                adjusted_cost_base_aud,
                 sale_date: disposal.sale_date,
                 sale_price: sale_trade.map(|t| t.average_price),
                 proceeds_aud: p.proceeds,
@@ -991,11 +1047,18 @@ fn disposal_parcel_rows(
                 },
                 gain_loss_aud: p.capital_gain_loss,
                 days_held: (disposal.sale_date - p.acquisition_date).num_days(),
-                discount_eligible: p.discount_eligible,
+                discount_eligible: if p.boundary_market_value.is_some() {
+                    p.deferred_discount_eligible
+                } else {
+                    p.discount_eligible
+                },
                 indexation_eligible: p.indexation_eligible,
                 indexed_cost_base_aud: p.indexed_cost_base,
                 cgt_discount_amount_aud: discount_amount,
                 gain_after_discount_aud: p.capital_gain_loss - discount_amount,
+                boundary_market_value_aud: p.boundary_market_value,
+                reacquired_cost_base_aud: p.reacquired_cost_base,
+                deferred_gain_loss_aud: p.deferred_gain_loss,
                 currency: currency.clone(),
                 buy_month_fx_rate: if currency == "AUD" { None } else { buy_rate },
                 sell_month_fx_rate: if currency == "AUD" { None } else { sell_rate },
@@ -5729,6 +5792,11 @@ mod tests {
                 indexed_cost_base: None,
                 reform_indexation_factor: None,
                 reform_indexation_quarter_end: None,
+                boundary_market_value: None,
+                boundary_cost_base: None,
+                reacquired_cost_base: None,
+                deferred_gain_loss: None,
+                deferred_discount_eligible: false,
             }],
             taxpayer_basis: crate::reports::TAXPAYER_BASIS.to_string(),
         };
@@ -5737,22 +5805,52 @@ mod tests {
         assert!(matches!(err, sqlx::Error::Decode(_)), "{err:?}");
     }
 
-    /// A CGT event dated on or after 1 July 2027 is refused by the whole
-    /// document — the annual tax report reads every realised disposal through
-    /// the shared pipeline the reform guard (`domain::cgt_reform`) protects, so
-    /// its disposals schedule and CGT summary cannot be assessed under the
-    /// repealed discount.
+    /// A disposal the reform governs reaches the document as its two
+    /// Subdivision 112-E components: the cost-base columns describe what the
+    /// units carried **into** 30 June 2027 (so the itemised adjustments still
+    /// reconcile the two cost-base columns, and the notional discount is
+    /// struck on the deferred gain alone), while the split's own three columns
+    /// state the deemed value, the reacquired base and the deferred component.
     #[tokio::test]
-    async fn a_post_commencement_disposal_is_refused() {
+    async fn api_a_boundary_crossing_disposal_prints_its_two_components() {
         let pool = test_support::test_pool().await;
         test_support::listing(1).ticker("REF").insert(&pool).await;
         test_support::insert_parcel_bypassing_checks(&pool, 1, 1, ymd(2024, 1, 2), "100", "10")
             .await;
-        test_support::insert_sell_bypassing_checks(&pool, 2, 1, ymd(2027, 7, 1), "100", "15").await;
+        test_support::closing_price(1, ymd(2027, 6, 30))
+            .price("12")
+            .insert(&pool)
+            .await;
+        test_support::cpi_quarter(&pool, ymd(2027, 9, 30), dec("110.85")).await;
+        test_support::cpi_quarter(&pool, ymd(2028, 9, 30), dec("112.20")).await;
+        test_support::insert_sell_bypassing_checks(&pool, 2, 1, ymd(2028, 9, 20), "100", "15")
+            .await;
         test_support::allocate(&pool, 1, 2, 1, dec("100")).await;
 
-        let err = db_tax_report(&pool, 2026).await.unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("2027-07-01"), "{msg}");
+        let body: serde_json::Value = test_support::ApiClient::full(&pool)
+            .post_json(
+                "/reports/tax-report",
+                &serde_json::json!({"tax_year": 2029}),
+            )
+            .await;
+        let parcel = &body["disposals"]["listings"][0]["parcels"][0];
+        // The cost-base columns are the pre-boundary walk: 1,000 initial, no
+        // adjustments, 1,000 adjusted (the deferred component's cost base).
+        assert_eq!(json_dec(&parcel["initial_cost_base_aud"]), dec("1000"));
+        assert_eq!(json_dec(&parcel["adjusted_cost_base_aud"]), dec("1000"));
+        assert_eq!(parcel["adjustments"].as_array().unwrap().len(), 0);
+        // The split's own columns.
+        assert_eq!(json_dec(&parcel["boundary_market_value_aud"]), dec("1200"));
+        assert_eq!(
+            json_dec(&parcel["reacquired_cost_base_aud"]),
+            dec("1214.40")
+        );
+        assert_eq!(json_dec(&parcel["deferred_gain_loss_aud"]), dec("200"));
+        // The notional discount falls on the **deferred** gain only.
+        assert_eq!(json_dec(&parcel["cgt_discount_amount_aud"]), dec("100"));
+        assert_eq!(json_dec(&parcel["proceeds_aud"]), dec("1500"));
+        assert_eq!(json_dec(&parcel["gain_loss_aud"]), dec("485.60"));
+        assert_eq!(json_dec(&parcel["gain_after_discount_aud"]), dec("385.60"));
+        assert_eq!(parcel["discount_eligible"], serde_json::json!(true));
     }
 }

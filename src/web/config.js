@@ -462,15 +462,19 @@ export const ENTITIES = [
   },
   {
     slug: 'tax_year_settings', title: 'Tax Year Settings', menu: 'Activity', api: '/tax_year_settings',
-    desc: 'Taxpayer facts answered year by year, rather than once. Only years that differ from the default need a row at all — an empty list means every year takes the default, which is what the system assumed before this screen existed.',
+    desc: 'Taxpayer facts answered year by year, rather than once. Only years that differ from the default need a row at all — an empty list means every year takes the default, which is what the system assumed before this screen existed: the $1,000 ESS reduction applies, and you were an Australian resident throughout.',
     keyFields: [int('tax_year', 'Financial year', { required: true, hint: 'By the calendar year of its 30 June end — FY2025/26 is 2026. From 1986 (CGT starts 20 September 1985).' })],
     fields: [
       bool('ess_taxed_upfront_reduction_eligible', '$1,000 ESS reduction: eligible', {
         default: true,
         hint: 'The $1,000 taxed-upfront ESS reduction applies only where your adjusted taxable income for the year was $180,000 or less — a test over income this tool cannot see, so it is recorded here. Untick to have the Tax Summary and the Annual Tax Report show the year’s taxed-upfront discount unreduced. Ticked (or no row at all) applies the reduction as before.',
       }),
+      bool('foreign_or_temporary_resident_at_some_time', 'Foreign or temporary resident at some time this year', {
+        default: false,
+        hint: 'From 1 July 2027 cost base indexation replaces the 50% CGT discount, and s 114-25 makes it unavailable where you were a foreign or temporary resident at any time between 1 July 2027 (or the asset’s acquisition, if later) and the disposal. Tick the years that contained such a period: a disposal whose testing period runs through a ticked year is not indexed, while its pre-2027 deferred gain is still discounted. Unticked (or no row at all) means Australian resident throughout. The answer is year-granular, so a foreign period later in the disposal’s own financial year also denies indexation — the conservative direction.',
+      }),
     ],
-    columns: ['tax_year', 'ess_taxed_upfront_reduction_eligible'],
+    columns: ['tax_year', 'ess_taxed_upfront_reduction_eligible', 'foreign_or_temporary_resident_at_some_time'],
   },
 ];
 
@@ -553,10 +557,10 @@ export const REPORTS = [
   {
     slug: 'realised-gains', title: 'Realised Gains', api: '/portfolio/realised-gains', method: 'GET',
     menu: 'Reports', section: 'CGT & tax',
-    desc: 'Per-disposal capital gain/loss split into CGT buckets — ordinary sales plus rights sales/lapses (source column). Expand a disposal for the individual parcels sold and each one’s own CGT outcome.',
+    desc: 'Per-disposal capital gain/loss split into CGT buckets — ordinary sales plus rights sales/lapses (source column). Expand a disposal for the individual parcels sold and each one’s own CGT outcome. A parcel held across 30 June 2027 also carries its Subdivision 112-E split: the market value at the boundary, the cost base it carried into it, the reacquired cost base the post-2027 component is indexed from, and the deferred pre-2027 gain the reform carries into the disposal’s year.',
     expand: {
       key: 'parcels',
-      columns: ['purchase_trade_id', 'acquisition_date', 'units', 'cost_base', 'proceeds', 'capital_gain_loss', 'discount_eligible', 'reform_indexation_quarter_end', 'reform_indexation_factor'],
+      columns: ['purchase_trade_id', 'acquisition_date', 'units', 'cost_base', 'proceeds', 'capital_gain_loss', 'discount_eligible', 'reform_indexation_quarter_end', 'reform_indexation_factor', 'boundary_market_value', 'boundary_cost_base', 'reacquired_cost_base', 'deferred_gain_loss', 'deferred_discount_eligible'],
     },
   },
   { slug: 'performance', title: 'Performance', api: '/portfolio/performance', method: 'POST', prices: true, asOfDate: true, menu: 'Reports', section: 'Portfolio', desc: 'Investment performance per holding and overall: total return, money-weighted return (% p.a.), trailing-12-month income yield.' },
@@ -569,7 +573,7 @@ export const REPORTS = [
       columns: ['source', 'sale_trade_id', 'listing_id', 'sale_date', 'proceeds', 'cost_base', 'capital_gain_loss', 'discount_eligible_gain', 'non_discountable_gain', 'capital_loss'],
       expand: {
         key: 'parcels',
-        columns: ['purchase_trade_id', 'acquisition_date', 'units', 'cost_base', 'proceeds', 'capital_gain_loss', 'discount_eligible', 'reform_indexation_quarter_end', 'reform_indexation_factor'],
+        columns: ['purchase_trade_id', 'acquisition_date', 'units', 'cost_base', 'proceeds', 'capital_gain_loss', 'discount_eligible', 'reform_indexation_quarter_end', 'reform_indexation_factor', 'boundary_market_value', 'boundary_cost_base', 'reacquired_cost_base', 'deferred_gain_loss', 'deferred_discount_eligible'],
       },
     },
   },
