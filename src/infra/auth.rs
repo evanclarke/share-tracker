@@ -632,6 +632,16 @@ mod tests {
             String::new(),
             LoginForm {
                 username: "evil\nforged login succeeded".to_string(),
+                // The credential is run through `Auth::verify_login` against the
+                // Argon2 hash, so it can only ever fail — "wrong" is a test input,
+                // not a credential. CodeQL's `rust/hard-coded-cryptographic-value`
+                // flags this literal as a hard-coded password and cannot see that
+                // the enclosing module is `#[cfg(test)]`; it is a reviewed false
+                // positive, dismissed as "used in tests" on the code-scanning
+                // alert. Rust has no inline `// codeql[...]` suppression to pin
+                // that with, so the reasoning lives here and
+                // `doc_checks::the_hard_coded_password_false_positive_is_documented`
+                // keeps it — and this literal — from being silently removed.
                 password: "wrong".to_string(),
             },
         )

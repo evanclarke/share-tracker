@@ -22,6 +22,11 @@ const FEATURES_MD: &str = include_str!("../docs/FEATURES.md");
 const SCHEMA_MD: &str = include_str!("../docs/SCHEMA.md");
 const DENY_TOML: &str = include_str!("../deny.toml");
 const REQUIREMENTS_MD: &str = include_str!("../REQUIREMENTS.md");
+// The auth module's own source, for the CodeQL false-positive pin below: Rust
+// has no inline `// codeql[...]` suppression, so the one place the reviewed
+// dismissal is recorded in the repo is that comment. `#[cfg(test)]` module, so
+// this costs the release binary nothing.
+const AUTH_RS: &str = include_str!("infra/auth.rs");
 
 /// The body of the `# Known limitations` section of `docs/API.md`.
 fn known_limitations() -> &'static str {
@@ -4917,5 +4922,41 @@ fn the_emailed_reports_are_documented_where_each_reader_looks() {
     assert!(
         REQUIREMENTS_MD.contains("## Emailed portfolio reports"),
         "REQUIREMENTS should carry the entry these documents implement"
+    );
+}
+
+/// Pins the reviewed CodeQL false positive on `src/infra/auth.rs`.
+///
+/// `rust/hard-coded-cryptographic-value` fires on the `password: "wrong"`
+/// literal in `a_control_character_in_a_failed_login_username_cannot_split_the_log_line`
+/// and reports it at `critical` (CWE-259/321/798). It is a false positive: the
+/// literal sits in a `#[cfg(test)]` module and is handed to `Auth::verify_login`,
+/// which hashes it and compares against the stored Argon2 hash, so it can only
+/// ever fail — and a login that fails *is* the test's precondition.
+///
+/// Rust has no inline `// codeql[...]` suppression to pin the dismissal with
+/// (CodeQL's `AlertSuppression.ql` implements it for C/C++, C#, Go, Java, JS,
+/// Python, Ruby and Swift, but not Rust), so the alert is dismissed on GitHub
+/// as "used in tests" and this test is what keeps the reviewed reasoning — and
+/// the literal the alert points at — in the tree. If the literal is removed,
+/// the alert is moot and this test should go with it; if the comment is
+/// reworded or deleted, re-review the dismissal before updating the needle.
+#[test]
+fn the_hard_coded_password_false_positive_is_documented() {
+    assert!(
+        AUTH_RS.contains("CodeQL's `rust/hard-coded-cryptographic-value`"),
+        "auth.rs records which CodeQL rule this literal trips"
+    );
+    assert!(
+        AUTH_RS.contains("it is a reviewed false\n                // positive"),
+        "auth.rs records that the alert is a reviewed false positive"
+    );
+    assert!(
+        AUTH_RS.contains("Rust has no inline `// codeql[...]` suppression"),
+        "auth.rs records why the dismissal is not pinned in the source"
+    );
+    assert!(
+        AUTH_RS.contains("                password: \"wrong\".to_string(),"),
+        "the flagged test literal is still there — if it is gone, the alert is moot"
     );
 }
