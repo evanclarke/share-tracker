@@ -105,8 +105,15 @@ is computed under the reform's **seven-step method statement** over the four gai
 applied in that statutory order and the 50% discount falling at step 5 only on a deferred gain the
 old law would have discounted. Every gain this database can hold is non-residential, so the two
 residential categories and the quarantined-amount steps are structurally nil rather than omitted.
-What remains — the 30 per cent minimum tax, the Ministerial apportioning method and a parcel whose
-cost was carried from an earlier holding — is not built, and a CGT event dated on or after 1 July
+The reform's **Division 119 30 per cent minimum tax** is surfaced alongside it: the year's minimum
+tax capital gain (the post-2027 non-residential gain left after the loss pool), the step-1 30%
+benchmark and the working around the s 119-10(2) **recorded** gap — the already-borne figure, the
+Rates Act s 12AA rate and the extra income tax — with the recorded s 119-15 income-support
+exemption, on the net-capital-gain report and the Annual Tax Report's CGT summary. The **gap itself
+is your own figure**, recorded per year in Tax Year Settings, because steps 2–4 need a basic income
+tax liability on a taxable income this tool does not compute. What remains — the minimum tax's steps
+2–4, the Ministerial apportioning method and a parcel whose cost was carried from an earlier holding
+— is not built, and a CGT event dated on or after 1 July
 2027 that the app cannot honestly assess (a replacement parcel, a rights sale, an AMMA statement or
 a non-disposal CGT event) makes the reports **refuse** it (a logged `500` naming the date) rather
 than assess it under repealed law. The reform's assets and situations this data model cannot hold —

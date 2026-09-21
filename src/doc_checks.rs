@@ -194,6 +194,9 @@ fn worksheet_derived_columns_documented() {
          derives the rest.**"
     ));
     assert!(API_MD.contains("100.01 − 50.01 is 50.00"));
+    // The Division 119 working's own two roundings, and the rate left exact.
+    assert!(API_MD.contains("The Division 119 working adds two roundings of its own"));
+    assert!(API_MD.contains("`minimum_tax_effective_rate` is a rate and stays unrounded"));
 }
 
 /// Docs-sync pin for the money/quantity encoding rule (SCENARIOS W-a): its own
@@ -1042,7 +1045,7 @@ fn known_limitations_document_rsu_dividend_equivalents() {
 fn per_year_ess_reduction_eligibility_documented() {
     // The entity section, its default, and the reason it is per year.
     assert!(API_MD.contains("## Tax year settings"));
-    assert!(API_MD.contains("PUT /tax_year_settings/2026"));
+    assert!(API_MD.contains("PUT /tax_year_settings/2028"));
     assert!(API_MD.contains("**An absent row means every setting takes its default**"));
     assert!(API_MD.contains(
         "a single global flag would strip the reduction from years that never crossed the income \
@@ -1801,8 +1804,9 @@ fn cgt_reform_commencement_guard_documented() {
     // subsumed the earlier "guarded, not implemented" entry (2026-09-21).
     let limitations = known_limitations();
     assert!(limitations.contains(
-        "**CGT reform from 1 July 2027 — indexation, the 30 June 2027 boundary split and the \
-         seven-step net-capital-gain method statement are modelled"
+        "**CGT reform from 1 July 2027 — indexation, the 30 June 2027 boundary split, the \
+         seven-step net-capital-gain method statement and the Division 119 minimum tax's covered \
+         gain and working are modelled"
     ));
     assert!(limitations.contains("**replaces the 50% CGT discount**"));
     assert!(limitations.contains("**30 per cent minimum tax on capital gains**"));
@@ -5099,8 +5103,9 @@ fn cgt_reform_mirrors_document_the_2027_changes() {
     // The Known-limitations entry states what is modelled and what is refused.
     let limitations = known_limitations();
     assert!(limitations.contains(
-        "indexation, the 30 June 2027 boundary split and the seven-step net-capital-gain method \
-         statement are modelled; the minimum tax and the out-of-model assets are not"
+        "indexation, the 30 June 2027 boundary split, the seven-step net-capital-gain method \
+         statement and the Division 119 minimum tax's covered gain and working are modelled; the \
+         minimum tax's steps 2–4 and the out-of-model assets are not"
     ));
     // The boundary split, as implemented: the deferred component keeps the old
     // law's discount and the current one indexes from the quarter *beginning*
@@ -5118,7 +5123,15 @@ fn cgt_reform_mirrors_document_the_2027_changes() {
     assert!(limitations.contains("EM Example 1.9's own arithmetic gap"));
     // What is still refused, and what is still out of model.
     assert!(limitations.contains("cost was **carried** from an earlier holding"));
-    assert!(limitations.contains("30 per cent minimum tax** (Division 119)"));
+    // Division 119 is partly implemented: the covered gain and the working
+    // around the *recorded* gap, with steps 2–4 the taxpayer's own figure.
+    assert!(limitations.contains("minimum tax's steps 2–4"));
+    assert!(limitations.contains("is **partly implemented**"));
+    assert!(limitations.contains("the **taxpayer's own figure**, entered per year"));
+    assert!(limitations.contains("**recorded, never inferred**"));
+    assert!(limitations.contains("`basic_income_tax_liability`"));
+    assert!(limitations.contains("**N/A, not done**"));
+    assert!(limitations.contains("`total_assessable_income` deliberately excludes capital gains"));
     assert!(limitations.contains("s 112-185"));
     assert!(limitations.contains("partly paid shares and their calls have no data model"));
     assert!(
@@ -5165,6 +5178,30 @@ fn cgt_reform_mirrors_document_the_2027_changes() {
         );
     }
     assert!(API_MD.contains("`18H (category)`"));
+    // The Division 119 minimum-tax fields are documented, with their own
+    // section heading, the CSV worksheet marker the money ones carry, and the
+    // two `tax_year_settings` columns they read.
+    for field in [
+        "minimum_tax_capital_gain",
+        "minimum_tax_benchmark",
+        "minimum_tax_gap_amount",
+        "minimum_tax_already_borne",
+        "minimum_tax_effective_rate",
+        "minimum_tax_extra_income_tax",
+        "minimum_tax_income_support_exempt",
+    ] {
+        assert!(
+            API_MD.contains(field),
+            "API.md documents the Division 119 field {field}"
+        );
+    }
+    assert!(API_MD.contains("#### Minimum tax (Division 119)"));
+    assert!(API_MD.contains("Division 119's minimum-tax working"));
+    assert!(API_MD.contains("**`minimum_tax_gap_amount`** (default absent"));
+    assert!(API_MD.contains("**`minimum_tax_income_support_exempt`** (default `false`"));
+    assert!(SCHEMA_MD.contains("minimum_tax_gap_amount"));
+    assert!(SCHEMA_MD.contains("minimum_tax_income_support_exempt"));
+    assert!(SCHEMA_MD.contains("0054"));
     // The recorded residency answer has its own entity surface and schema row.
     assert!(SCHEMA_MD.contains("foreign_or_temporary_resident_at_some_time"));
     assert!(SCHEMA_MD.contains("0053"));
@@ -5337,6 +5374,76 @@ fn cgt_reform_out_of_model_scope_decisions_documented() {
         )
     );
     assert!(README_MD.contains("residential property and its two discounts"));
+}
+
+/// Docs-sync pin for the Division 119 minimum-tax scope decision (the TODO
+/// section's `NEEDS CLARIFICATION`, resolved 2026-09-21 as option (c)): the app
+/// computes the **minimum tax capital gain** and the working it can derive
+/// around the s 119-10(2) gap, and the gap is the taxpayer's own **recorded**
+/// figure, because steps 2–4 need a basic income tax liability on a taxable
+/// income this project has never computed. The conditional option-(a) items — a
+/// non-investment taxable income column and a `basic_income_tax_liability`
+/// rate schedule — are **N/A, not done**. The behaviour itself is pinned by
+/// `reports::net_capital_gain`'s and `reports::tax_report`'s own Division 119
+/// tests; this is the documentation half.
+#[test]
+fn division_119_minimum_tax_scope_decision_documented() {
+    let limitations = known_limitations();
+    // The recorded-gap decision, in the reform Known-limitations entry.
+    assert!(limitations.contains("(e) *The Division 119 minimum tax*"));
+    assert!(limitations.contains("is **partly implemented**"));
+    assert!(limitations.contains(
+        "steps 2–4 need a **basic income tax liability on a taxable income this project has \
+         never computed**"
+    ));
+    assert!(limitations.contains("the **taxpayer's own figure**, entered per year"));
+    assert!(limitations.contains("`minimum_tax_gap_amount`, migration 0054"));
+    assert!(limitations.contains("**recorded, never inferred**"));
+    assert!(limitations.contains("excluded per EM 1.175"));
+    assert!(limitations.contains("Rates Act s 12AA rate (a rate, never cent-rounded)"));
+    assert!(limitations.contains("equates to the gap, EM 1.193"));
+    // The surface decision: the Division 119 fields ride the net-capital-gain
+    // record and the annual report, not `TaxYearSummary`.
+    assert!(limitations.contains("**not** the [tax summary](#tax-summary)"));
+    assert!(limitations.contains("`total_assessable_income` deliberately excludes capital gains"));
+    // Option (a) is N/A, not done.
+    assert!(limitations.contains("**option (a)** items"));
+    assert!(limitations.contains("`basic_income_tax_liability` function"));
+    assert!(limitations.contains("are **N/A, not done**"));
+    assert!(limitations.contains("the project owner chose option (c)"));
+
+    // The report section documents the same scope on its own field list.
+    assert!(API_MD.contains("#### Minimum tax (Division 119)"));
+    assert!(API_MD.contains(
+        "The gap itself is the taxpayer's own figure: steps 2–4 of the s 119-10(2) method \
+         statement need a **basic income tax liability on a taxable income this project has never \
+         computed**"
+    ));
+    assert!(API_MD.contains("**A rate, so it is never rounded to the cent.**"));
+    // The settings entity documents both columns and the negative-gap 422.
+    assert!(API_MD.contains("**`minimum_tax_gap_amount`** (default absent"));
+    assert!(API_MD.contains("**`minimum_tax_income_support_exempt`** (default `false`"));
+    assert!(API_MD.contains("**negative** entry is refused `422`"));
+    assert!(API_MD.contains("must not be negative"));
+    // The annual tax report prints the working table.
+    assert!(API_MD.contains("**Minimum tax (Division 119)** table from the same record"));
+    // The ATO index's mapping records Division 119 as partly modelled.
+    const ATO_OVERVIEW: &str = include_str!("../docs/ato/OVERVIEW.md");
+    assert!(ATO_OVERVIEW.contains(
+        "**Division 119 30 per cent minimum tax** (EM 1.171–1.193) is **partly modelled**"
+    ));
+    assert!(ATO_OVERVIEW.contains(
+        "`tax_year_settings.minimum_tax_gap_amount` / `minimum_tax_income_support_exempt` \
+         (migration 0054)"
+    ));
+    // The user-facing docs carry the same status shift.
+    assert!(FEATURES_MD.contains("Division 119 30 per cent minimum tax"));
+    assert!(
+        README_MD.contains("The reform's **Division 119 30 per cent minimum tax** is surfaced")
+    );
+    // The 2026 return predates the minimum tax, so its columns carry the
+    // worksheet marker and the mapping is a standing maintenance trigger.
+    assert!(API_MD.contains("The **2026** form predates the minimum tax"));
 }
 
 /// Pins the reviewed CodeQL false positive on `src/infra/auth.rs`.

@@ -125,15 +125,24 @@ the quarantined-amount steps 3–4 are structurally nil, and the 50% discount fa
 a deferred gain the old law would have discounted. Because this project holds only shares, units and
 crypto, the residential categories and the quarantined amount are always nil (s 102-6); the four
 gross categories, their remainders and `quarantined_amount` ride on the net-capital-gain record and
-its CSV export. What remains is the **commencement guard** plus what this project
-states rather than computes: the single commencement date and the four gain categories are defined
-once in `src/domain/cgt_reform.rs`, a CGT event dated on or after 1 July 2027 that the app cannot
-assess — a carried-cost replacement parcel, a rights sale, an AMMA statement or a non-disposal CGT
-event — is refused (a logged `500` naming the date) rather than assessed under repealed law, and the
-residential gain categories (and their quarantined-amount steps) and the 30 per cent minimum tax
-(Division 119) and the Ministerial apportioning method (s 112-185) remain unimplemented. These
-mirrors remain the reference for the rest of the implementation work, and the implementation's own
-citations are recorded against them below.
+its CSV export. The **Division 119 30 per cent minimum tax** (EM 1.171–1.193) is **partly modelled**:
+the report computes the year's **minimum tax capital gain** (the post-2027 non-residential gain left
+after the loss pool), the step-1 **benchmark**, and the working around the **recorded** s 119-10(2)
+gap — the steps 2–4 already-borne figure, the Rates Act s 12AA rate and the extra income tax — carried
+as `minimum_tax_capital_gain`, `minimum_tax_benchmark`, `minimum_tax_gap_amount`,
+`minimum_tax_already_borne`, `minimum_tax_effective_rate`, `minimum_tax_extra_income_tax` and
+`minimum_tax_income_support_exempt`, with the gap and the s 119-15 exemption recorded per year on
+`tax_year_settings.minimum_tax_gap_amount` / `minimum_tax_income_support_exempt` (migration 0054).
+The gap itself is the taxpayer's own figure, because steps 2–4 need a basic income tax liability on
+a taxable income this project does not compute. What remains is the **commencement guard** plus what
+this project states rather than computes: the single commencement date and the four gain categories
+are defined once in `src/domain/cgt_reform.rs`, a CGT event dated on or after 1 July 2027 that the
+app cannot assess — a carried-cost replacement parcel, a rights sale, an AMMA statement or a
+non-disposal CGT event — is refused (a logged `500` naming the date) rather than assessed under
+repealed law, and the residential gain categories (and their quarantined-amount steps), the minimum
+tax's uncomputed steps 2–4 and the Ministerial apportioning method (s 112-185) remain unimplemented.
+These mirrors remain the reference for the rest of the implementation work, and the implementation's
+own citations are recorded against them below.
 
 | File | What it covers |
 | --- | --- |
@@ -228,8 +237,8 @@ citations are recorded against them below.
   and that the stored deductible amount is post-apportionment (the user's determination). The tax
   summary nets these against gross assessable investment income per financial year.
 - **CGT reform from 1 July 2027** (implementation opened 2026-09-21; cost base indexation, the
-  30 June 2027 boundary split and the seven-step net-capital-gain method statement now modelled,
-  the minimum tax not):
+  30 June 2027 boundary split, the seven-step net-capital-gain method statement and the Division 119
+  minimum tax's covered gain and working now modelled, the minimum tax's steps 2–4 not):
   [`cgt-reform-boosting-home-ownership.md`](cgt-reform-boosting-home-ownership.md),
   [`cgt-reform-cgt-adjustments.md`](cgt-reform-cgt-adjustments.md) and
   [`cgt-reform-960-275-indexation-factor.md`](cgt-reform-960-275-indexation-factor.md) mirror the
@@ -237,7 +246,7 @@ citations are recorded against them below.
   individuals and trusts, a 30% minimum tax on capital gains, a deemed disposal/reacquisition on
   30 June 2027 bringing pre-CGT assets into the regime, and a seven-step net-capital-gain method
   statement. It applies to gains accruing on or after 1 July 2027, so it changes nothing in the
-  years this project reports. It is the citation for `src/domain/cgt_reform.rs`, which defines the
+  years before tax year 2028. It is the citation for `src/domain/cgt_reform.rs`, which defines the
   commencement date (1 July 2027, EM 1.214–1.219) and the four gain categories (EM 1.82–1.93) once,
   and for the guard every report that applies the discount now runs: a CGT event dated on or after
   that date is refused loudly rather than assessed under repealed law (see
@@ -245,5 +254,8 @@ citations are recorded against them below.
   the (5) rounding rule the enacted section supplies) is implemented by `domain::cgt_indexation`
   over the `current_cpi_quarters` table; the deemed reacquisition and deferred gain are
   `src/domain/deferred_gain.rs`, and the seven-step method statement is `reports::net_capital_gain`'s
-  year walk. The remaining section — the 30 per cent minimum tax — is open as its own TODO section,
-  and the out-of-model scope decisions are recorded in `docs/API.md`'s Known limitations.
+  year walk. The **Division 119 minimum tax** is `reports::net_capital_gain`'s
+  `minimum_tax_*` fields over the gap recorded on `tax_year_settings.minimum_tax_gap_amount` /
+  `minimum_tax_income_support_exempt` (0054): the covered gain and the working are computed, while
+  steps 2–4 — the gap — are the taxpayer's own figure, and the out-of-model scope decisions are
+  recorded in `docs/API.md`'s Known limitations.
