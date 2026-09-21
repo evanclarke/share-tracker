@@ -13,6 +13,11 @@ pub mod cgt_settings;
 pub mod closing_price;
 pub mod corporate_action;
 pub mod currencies;
+/// The current ABS quarterly CPI series and its import job. Deliberately
+/// routeless — feed-fed reference data the UI never edits, read directly by
+/// `domain::cgt_indexation` — so it has no `.merge` line below (the same
+/// position `price_alert` takes).
+pub mod current_cpi_quarters;
 pub mod demerger;
 pub mod distribution_event;
 pub mod drp_enrolment;

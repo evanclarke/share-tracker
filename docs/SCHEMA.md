@@ -75,6 +75,14 @@ cpi_quarters                  The frozen ATO quarterly CPI series behind the ind
                                    method reads on, its divisor 68.7 being the current-base September 1999
                                    figure. The superseded 1989-90-base series is deliberately not stored
 
+current_cpi_quarters          The current ABS quarterly CPI series behind the cost base indexation the CGT reform applies from 1 July 2027 (0052). Read by domain::cgt_indexation for the s 960-275(1B) factor (event quarter ÷ expenditure quarter, 3 decimal places by s 960-275(5)) on a disposal whose expenditure was incurred on or after 1 July 2027. Deliberately a second table, not a widening of cpi_quarters: that one's CHECK refuses a later quarter precisely so the frozen pre-1999 method cannot read one, while this one's range begins at the quarter ending 30 September 2027 — the earliest quarter the new factor can name, since s 960-275(1B)(b) reaches only post-commencement expenditure and Note 1 deems the reacquisition's expenditure incurred on 1 July 2027 (EM 1.72). Kept current by the scheduled cpi-import job, which fetches the RBA G1 "Consumer price index; All groups" series (the ABS series, source listed as ABS / RBA) and upserts every quarter from that date on each run, so a re-based publication replaces the whole range together and no stored factor is a ratio of two reference bases. Not audited (the only writer is the import, and a re-base is meant to replace rather than be restored); snapshot-staleness exempt — no snapshotted report reads it
+├── quarter_end   TEXT PK          'YYYY-MM-DD' end of the quarter the index number belongs to.
+│                                  CHECK: >= '2027-09-30' (the reform's first possible quarter)
+│                                  CHECK: substr(quarter_end, 6) IN ('03-31','06-30','09-30','12-31')
+└── cpi           TEXT (decimal)   All groups CPI, weighted average of 8 capital cities, verbatim as
+                                   published; only the ratio of two quarters is ever used, so the
+                                   RBA's own index reference base is immaterial
+
 currencies                    Recognised currencies: fiat (ISO 4217) + digital tokens (ISO 24165)
 ├── code          TEXT PK          ISO 4217 alpha code (fiat) or ISO 24165 DTI (token)
 ├── kind          TEXT             Fiat | DigitalToken
@@ -431,6 +439,8 @@ row_history                  Append-only audit trail of the financial fact table
 cpi_quarters — standalone (no foreign key in either direction): a published
                        reference series keyed on its own quarter-end date, read by the
                        indexation cross-check and nothing else
+current_cpi_quarters — likewise standalone: the current ABS series the 1 July 2027 cost
+                       base indexation reads, written only by the cpi-import job
 exchanges ──< exchange_holidays
 exchanges ──< listings ──< trades >──────────────< parcel_allocations
                                 \                         /

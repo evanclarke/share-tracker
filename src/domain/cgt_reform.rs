@@ -11,17 +11,29 @@
 //! individuals and trusts with **cost base indexation** and imposes a **30 per
 //! cent minimum tax on capital gains** (EM 1.23–1.24, Table 1.1).
 //!
-//! **None of the new regime is implemented.** A trade `date` is bounded above
-//! by today (`entities::trade::checks::AmountsError::FutureDate`), so no CGT
-//! event on or after [`COMMENCEMENT`] can be recorded — but that ceiling is
-//! the *only* thing keeping repealed law off the reports, and it disappears
-//! the day the date arrives. This module is the safety net that must therefore
-//! land first: every report that still applies the discount refuses a
-//! post-commencement event loudly ([`guard_discount_events`],
-//! [`guard_discount_event`]) instead of assessing it under repealed law, until
-//! the substantive sections (indexation, the deemed reacquisition, the
-//! seven-step method statement and the minimum tax) land. A refusal reaches the
-//! HTTP layer as a logged `500` naming the date; it is never a silent discount.
+//! **The reform is implemented in part.** Cost base indexation for an
+//! expenditure incurred on or after 1 July 2027 is `domain::cgt_indexation`,
+//! and a disposal that draws only on such parcels is assessed under it by
+//! `reports::realised_gains` (which flows into the net capital gain). What is
+//! *not* built, and what this module's guards therefore still refuse:
+//!
+//! - the Subdivision 112-E deemed disposal and reacquisition, which splits a
+//!   gain on an asset held across 30 June 2027 into a deferred old-law
+//!   component and a post-2027 indexed one ([`guard_deferred_split`]);
+//! - the seven-step method statement (the existing loss chain already has the
+//!   right shape for the non-residential, non-deferred gains this app holds,
+//!   but the deferred categories do not exist yet);
+//! - the 30 per cent minimum tax (Division 119); and
+//! - the reform's treatment of non-disposal CGT events (E10/G1/C2), AMMA
+//!   statements and rights sales, which [`guard_discount_events`] still
+//!   refuses wholesale.
+//!
+//! A trade `date` is bounded above by today
+//! (`entities::trade::checks::AmountsError::FutureDate`), so no CGT event on or
+//! after [`COMMENCEMENT`] can be recorded until that date arrives — but that
+//! ceiling is not a report's guarantee, so every report that would otherwise
+//! apply repealed law guards itself here. A refusal reaches the HTTP layer as a
+//! logged `500` naming the date; it is never a silent discount.
 
 use chrono::NaiveDate;
 
@@ -150,6 +162,34 @@ pub enum CgtReformError {
         /// the event would have needed.
         categories: String,
     },
+    /// A CGT event on or after the commencement disposes of an asset that was
+    /// held immediately before 1 July 2027, so part of its gain accrued under
+    /// the old law. New Subdivision 112-E deems such an asset disposed of and
+    /// reacquired at market value on 1 July 2027: the notional old-law gain is
+    /// *deferred* and crystallised alongside a second, post-2027 gain computed
+    /// from the reacquired cost base (EM 1.107–1.131). Cost base indexation
+    /// reaches only the second component, so an event of this shape cannot be
+    /// assessed until the deferred-gain split exists.
+    #[error(
+        "{what} dated {event_date} disposes of an asset held immediately before the CGT \
+         reform commencement ({commencement}; acquired {acquisition_date}); the reform \
+         defers the pre-commencement gain and indexes only the post-commencement component \
+         (Subdivision 112-E), a split this app does not compute, so {site} refuses to assess \
+         the disposal"
+    )]
+    DeferredSplitRequired {
+        /// What the dated fact is, e.g. "a Sell".
+        what: &'static str,
+        /// The CGT event's own date.
+        event_date: NaiveDate,
+        /// The parcel's CGT acquisition date, carried so the message names why
+        /// the split is needed.
+        acquisition_date: NaiveDate,
+        /// [`COMMENCEMENT`], carried explicitly so the message always names it.
+        commencement: NaiveDate,
+        /// The report that refused.
+        site: &'static str,
+    },
 }
 
 /// The four categories as one list, for [`CgtReformError::PostCommencementEvent`].
@@ -203,6 +243,28 @@ pub fn guard_discount_events(
         Some((event_date, what)) => Err(refuse(what, event_date, site)),
         None => Ok(()),
     }
+}
+
+/// Refuse a CGT event the reform governs whose assessment needs the
+/// Subdivision 112-E deferred-gain split (see
+/// [`CgtReformError::DeferredSplitRequired`]). `Ok(())` for a
+/// pre-commencement event, which the old law still governs.
+pub fn guard_deferred_split(
+    what: &'static str,
+    event_date: NaiveDate,
+    acquisition_date: NaiveDate,
+    site: &'static str,
+) -> Result<(), CgtReformError> {
+    if discount_available(event_date) {
+        return Ok(());
+    }
+    Err(CgtReformError::DeferredSplitRequired {
+        what,
+        event_date,
+        acquisition_date,
+        commencement: COMMENCEMENT,
+        site,
+    })
 }
 
 /// Surface the refusal through report code that returns `sqlx::Error` — the
@@ -303,5 +365,30 @@ mod tests {
             GainCategory::DeferredNonResidential.label(),
             "deferred non-residential capital gains"
         );
+    }
+
+    /// The deferred-split guard: a disposal on or after 1 July 2027 of an asset
+    /// acquired before it is refused, naming both dates and the provision whose
+    /// split is missing; a pre-commencement disposal passes.
+    #[test]
+    fn the_deferred_split_guard_refuses_a_boundary_crossing_disposal() {
+        let site = "reports::realised_gains";
+        assert!(guard_deferred_split("a Sell", ymd(2027, 6, 30), ymd(2019, 3, 1), site).is_ok());
+        let err =
+            guard_deferred_split("a Sell", ymd(2029, 9, 1), ymd(2019, 3, 1), site).unwrap_err();
+        assert_eq!(
+            err,
+            CgtReformError::DeferredSplitRequired {
+                what: "a Sell",
+                event_date: ymd(2029, 9, 1),
+                acquisition_date: ymd(2019, 3, 1),
+                commencement: COMMENCEMENT,
+                site,
+            }
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("2029-09-01"), "{msg}");
+        assert!(msg.contains("2019-03-01"), "{msg}");
+        assert!(msg.contains("112-E"), "{msg}");
     }
 }

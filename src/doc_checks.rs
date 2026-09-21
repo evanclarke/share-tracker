@@ -5028,16 +5028,17 @@ fn the_emailed_reports_are_documented_where_each_reader_looks() {
     );
 }
 
-/// Docs-sync pin for the 2026–27 Budget CGT reform (captured 2026-09-21). The
-/// reform replaces the 50 per cent CGT discount for Australian-resident
-/// individuals and trusts with cost base indexation and imposes a 30 per cent
-/// minimum tax on capital gains from 1 July 2027. Nothing in it is modelled
-/// here — the ATO's own alert on the discount page says the changes don't apply
-/// to Tax Time 2026 — so this pins only what a future implementation must start
-/// from: both ATO mirrors are present and indexed, the summary states the
-/// commencement and the two mechanisms, the explanatory memorandum states the
-/// deferral rule for assets held across 30 June 2027, and the existing discount
-/// mirror carries the alert that keeps the current rules current.
+/// Docs-sync pin for the 2026–27 Budget CGT reform (captured 2026-09-21;
+/// cost base indexation implemented 2026-09-21). The reform replaces the 50 per
+/// cent CGT discount for Australian-resident individuals and trusts with cost
+/// base indexation and imposes a 30 per cent minimum tax on capital gains from
+/// 1 July 2027. The **indexation half is now modelled** — `domain::cgt_indexation`
+/// over the `current_cpi_quarters` table the `cpi-import` job keeps current —
+/// while everything the deferred categories need is refused rather than
+/// approximated, so this pins three things: the ATO mirrors (including the
+/// enacted s 960-275, which supplies the rounding rule the EM leaves open) are
+/// present and indexed, the schema and Known-limitations entries say what is
+/// modelled and what is refused, and the user-facing docs carry the same split.
 #[test]
 fn cgt_reform_mirrors_document_the_2027_changes() {
     // The ATO's own summary page (QC 107304): now law, applying from 1 July 2027.
@@ -5056,23 +5057,61 @@ fn cgt_reform_mirrors_document_the_2027_changes() {
     assert!(em.contains("Division 119"));
     assert!(em.contains("seven steps"));
 
+    // The enacted s 960-275 mirror: the rounding rule the EM does not state,
+    // and the range the new factor can name.
+    let section = include_str!("../docs/ato/cgt-reform-960-275-indexation-factor.md");
+    assert!(section.contains("Retrieved:** 2026-09-21"));
+    assert!(section.contains("PAC%2F19970038%2F960-275"));
+    assert!(section.contains("to 3 decimal places (rounding up if the fourth decimal place is"));
+    assert!(section.contains("earliest quarter the"));
+    assert!(ato(section).contains("incurred on or after 1 July 2027"));
+
     // The discount mirror carries the alert that makes the ongoing calculation correct.
     let discount = ato(include_str!("../docs/ato/cgt-discount.md"));
     assert!(discount.contains("don't apply to Tax Time 2026"));
     assert!(discount.contains("QC 66019"));
 
-    // …and both new mirrors are reachable from the ATO index's own section.
+    // …and every new mirror is reachable from the ATO index's own section.
     const ATO_OVERVIEW: &str = include_str!("../docs/ato/OVERVIEW.md");
     assert!(ATO_OVERVIEW.contains("## CGT reform from 1 July 2027"));
     for mirror in [
         "cgt-reform-boosting-home-ownership.md",
         "cgt-reform-cgt-adjustments.md",
+        "cgt-reform-960-275-indexation-factor.md",
     ] {
         assert!(
             ATO_OVERVIEW.contains(mirror),
             "OVERVIEW.md indexes {mirror}"
         );
     }
+
+    // The schema documents the second CPI table, its range and its import.
+    assert!(SCHEMA_MD.contains("current_cpi_quarters"));
+    assert!(SCHEMA_MD.contains("CHECK: >= '2027-09-30'"));
+    assert!(SCHEMA_MD.contains("cpi-import job"));
+
+    // The Known-limitations entry states what is modelled and what is refused.
+    let limitations = known_limitations();
+    assert!(limitations.contains(
+        "cost base indexation is modelled; everything the deferred categories need is refused"
+    ));
+    assert!(limitations.contains("Subdivision 112-E's deemed disposal and reacquisition"));
+    assert!(limitations.contains("30 per cent minimum tax (Division 119)"));
+    assert!(limitations.contains("partly paid shares and their calls have no data model"));
+    assert!(limitations.contains("Residency is an assumption, not a recorded answer"));
+    assert!(
+        limitations.contains(
+            "`cpi-import` job stores every quarter from the one ending 30 September 2027"
+        )
+    );
+    assert!(limitations.contains("docs/ato/cgt-reform-960-275-indexation-factor.md"));
+
+    // The report field the implementation adds is documented, and the
+    // user-facing docs carry the same modelled/refused split.
+    assert!(API_MD.contains("`reform_indexation_factor`"));
+    assert!(API_MD.contains("reform_indexation_quarter_end"));
+    assert!(FEATURES_MD.contains("Cost base indexation from 1 July 2027"));
+    assert!(README_MD.contains("partly implemented"));
 }
 
 /// Pins the reviewed CodeQL false positive on `src/infra/auth.rs`.

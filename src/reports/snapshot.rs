@@ -1282,7 +1282,7 @@ mod tests {
     /// an omission. The snapshotted reports are the price-dependent three
     /// ([`SnapshotReport`]); a table only the live-computed CGT reports or the
     /// (un-snapshotted) tax summary read is therefore exempt.
-    const STALENESS_EXEMPT_TABLES: [(&str, &str); 23] = [
+    const STALENESS_EXEMPT_TABLES: [(&str, &str); 24] = [
         (
             "attachments",
             "documents are provenance, not financial facts; no snapshotted report reads them \
@@ -1299,6 +1299,13 @@ mod tests {
              entity, no route, no import job); the indexed cost base it feeds is advisory and \
              reaches only the live-computed realised-gains and indexation cross-check reports, \
              neither of which is snapshotted (0046_cpi_quarters.sql)",
+        ),
+        (
+            "current_cpi_quarters",
+            "the current ABS quarterly CPI series the 1 July 2027 indexation reads; its import \
+             job writes it, but its only readers are the live-computed CGT reports (realised \
+             gains and the net capital gain), never one of the three price-dependent snapshotted \
+             reports (0052_current_cpi_quarters.sql)",
         ),
         (
             "currencies",

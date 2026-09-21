@@ -8,6 +8,7 @@
 0 2 * * 1   rba-fx-import   # weekly, Monday 02:00
 0 3 1 * *   mic-import      # monthly, 1st at 03:00 (ISO publishes monthly)
 0 4 1 * *   currency-import # monthly, 1st at 04:00 (ISO 4217 + ISO 24165 / DTIF)
+30 5 1 * *  cpi-import      # monthly, 1st at 05:30 (ABS publishes CPI quarterly)
 
 # Distribution calendar: the provider's dividend history per held listing, read
 # by the health report's two advisory alerts (a known ex-date with units held

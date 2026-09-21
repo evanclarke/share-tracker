@@ -1611,6 +1611,7 @@ const JOB_DESC = {
   'rba-fx-import': 'Fetch the RBA F11 monthly FX rates and import any new months.',
   'mic-import': 'Fetch and refresh the ISO 10383 MIC registry.',
   'currency-import': 'Fetch ISO 4217 fiat and ISO 24165 token currencies.',
+  'cpi-import': 'Fetch the RBA G1 All groups CPI series and store every quarter from the one ending 30 September 2027 onward \u2014 the earliest quarter the CGT reform\u2019s cost base indexation can read. Zero rows before that quarter is published, which is a successful run.',
   'price-import': 'Store the closing price of every trading day in the last 7 whose row is missing or errored, for every held listing (days already stored ok are never re-fetched, so runs are idempotent and outages self-heal).',
   'price-rebase': 'Re-derive every stored closing price from the figure the provider served, over the share splits and bonus issues recorded since \u2014 a one-off repair for prices stored before that rule existed. Recording a split already does this for its own listing, so this normally changes nothing.',
   'settlement-recompute': 'Re-derive every auto-calculated settlement date from the exchange holiday calendar as it now stands \u2014 run it after seeding a missing holiday year, which otherwise clears the settlement holiday-coverage report without correcting the dates it flagged. A settlement date you entered yourself is never touched, and the job is idempotent.',

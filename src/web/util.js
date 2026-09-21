@@ -1134,7 +1134,9 @@ const COLUMN_KINDS = (function () {
     // Indexation cross-check: the published CPI for a quarter and the factor
     // derived from it (3 decimal places by the ATO's own rounding rule) —
     // both kept verbatim, like every other figure read off a published table.
-    'cpi', 'indexation_factor',
+    // `reform_indexation_factor` is the same figure under the 1 July 2027
+    // reform's s 960-275(1B)/(5) rule, shown on the CGT reports.
+    'cpi', 'indexation_factor', 'reform_indexation_factor',
   ]);
   // Average price figures — derived (avg_cost_base_per_unit, current_price)
   // or entered (average_price) — round to 4 dp for display; never

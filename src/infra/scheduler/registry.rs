@@ -385,6 +385,24 @@ pub fn registry(
         }
     });
 
+    register(&mut jobs, "cpi-import", {
+        let pool = pool.clone();
+        move |_| {
+            let pool = pool.clone();
+            async move {
+                let summary = crate::entities::current_cpi_quarters::run_import(&pool)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                // Zero rows is a legitimate run before the ABS publishes the
+                // quarter ending 30 September 2027 — the reform's earliest
+                // possible denominator (EM 1.72) — not a failure, so the run
+                // stays a success and the count says what it did.
+                tracing::info!(imported = summary.imported, "CPI import complete");
+                Ok(None)
+            }
+        }
+    });
+
     register(&mut jobs, "rba-fx-import", move |_| {
         let pool = pool.clone();
         async move {

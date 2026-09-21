@@ -65,6 +65,10 @@ Parcel-level CGT, and the corporate actions that re-shape a parcel without a sal
 
 Explicit parcel allocations link sell trades to the parcels they came from; cost bases are pro-rated and AMIT-reduced at the parcel level
 
+### Cost base indexation from 1 July 2027
+
+The CGT reform's cost base indexation, for a parcel whose expenditure was incurred on or after 1 July 2027: the cost base is indexed to the quarter the disposal happens in by that quarter's CPI over the expenditure quarter's (s 960-275(1B), worked out to 3 decimal places by s 960-275(5)), the 12-month ownership rule is the same test the discount clock uses, a capital loss is never indexed, and the indexed gain carries no discount (repealed for it). The quarterly ABS CPI series is kept current by the scheduled `cpi-import` job. What the reform's deferred categories need — the 30 June 2027 deemed reacquisition and its deferred gain, the seven-step net-capital-gain method statement, and the 30 per cent minimum tax — is not implemented, and a disposal dated on or after 1 July 2027 that indexation cannot assess is refused (a logged `500` naming the date) rather than assessed under repealed law; see [Known limitations](API.md#known-limitations)
+
 ### Return of capital (CGT event G1)
 
 Record a company's non-assessable payment as a corporate action; the per-unit amount reduces the cost base of every parcel held on the payment date across all reports, and a payment in excess of a parcel's cost base becomes a capital gain in the net capital gain report (the cost base floors at nil — G1 never produces a loss)
@@ -175,7 +179,7 @@ Investment performance (not tax) per holding and overall: total return (AUD and 
 
 ### Net capital gain report
 
-The overall CGT position per financial year: combines realised parcel gains with AMMA-attributed CGT gains and capital losses, applies losses ATO-optimally (non-discountable gains first), carries unused net capital losses forward across years (seeded by an enterable opening carried-forward loss), and applies the 50% discount to produce the assessable net capital gain; expandable in the web UI from a year down to its realised disposals and, within each, its individual parcels
+The overall CGT position per financial year: combines realised parcel gains with AMMA-attributed CGT gains and capital losses, applies losses ATO-optimally (non-discountable gains first), carries unused net capital losses forward across years (seeded by an enterable opening carried-forward loss), and applies the 50% discount to produce the assessable net capital gain; a disposal dated on or after 1 July 2027 arrives already indexed under the reform and is never discounted (its gain lands in the non-discountable bucket, which is the reformed method statement's result for the non-deferred, non-residential gains this app holds); expandable in the web UI from a year down to its realised disposals and, within each, its individual parcels
 
 ### Tax summary
 

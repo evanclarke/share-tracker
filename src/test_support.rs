@@ -25,7 +25,7 @@ use tower::ServiceExt;
 
 /// Fresh in-memory database with migrations and seed data applied.
 ///
-/// The 51 migration files are replayed **once** per test process, into a
+/// The 52 migration files are replayed **once** per test process, into a
 /// template database that is then dumped to a single SQL script (see
 /// [`schema_template`]); every call after the first builds its database from
 /// that script instead. Applying the migrations costs ~89 ms against the
@@ -1305,6 +1305,19 @@ pub async fn allocate(pool: &SqlitePool, id: i64, sale_id: i64, buy_id: i64, qty
     .unwrap();
 }
 
+/// Seed one quarter of the current ABS CPI series (`current_cpi_quarters`,
+/// 0052) that the reform's cost base indexation reads. The table has no write
+/// route — its only writer is the feed import job — so a test stands up the
+/// series it needs here, exactly as it does for the frozen `cpi_quarters`.
+pub async fn cpi_quarter(pool: &SqlitePool, quarter_end: NaiveDate, cpi: Decimal) {
+    sqlx::query("INSERT INTO current_cpi_quarters (quarter_end, cpi) VALUES (?, ?)")
+        .bind(quarter_end)
+        .bind(crate::infra::decimal::Money(cpi))
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
 /// Every `.rs` file under `src`, with its path relative to `src` using `/`
 /// separators (`reports/tax_summary.rs`) — the form the source-scanning tests
 /// write their allowlists in.
@@ -1354,7 +1367,7 @@ mod tests {
     use serde_json::json;
 
     /// The cached schema `test_pool` builds every database from must be the
-    /// database the 51 migrations produce — not approximately, exactly.
+    /// database the 52 migrations produce — not approximately, exactly.
     ///
     /// So this builds one of each and compares the **whole** of `sqlite_master`:
     /// every table, index, trigger and view, by name and by definition
@@ -1444,7 +1457,7 @@ mod tests {
         let from_migrations: Vec<(i64, String, bool, String)> =
             sqlx::query_as(recorded).fetch_all(&migrated).await.unwrap();
         assert_eq!(from_cache, from_migrations, "_sqlx_migrations differs");
-        assert_eq!(from_cache.len(), 51, "every migration is recorded");
+        assert_eq!(from_cache.len(), 52, "every migration is recorded");
 
         // Spelled out separately because it is the one piece of state a
         // schema-only cache would silently lose, and two tests in

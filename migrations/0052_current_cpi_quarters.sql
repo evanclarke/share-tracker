@@ -1,0 +1,74 @@
+-- The current ABS quarterly CPI series behind the cost base indexation that
+-- replaces the 50% CGT discount from 1 July 2027.
+--
+-- The CGT reform commencing 1 July 2027 indexes every element of a cost base
+-- except the third by the movement in the CPI (new s 110-36(1A), ss 114-1 and
+-- 114-10, Subdivision 960-M; EM 1.33–1.74). For an Australian-resident
+-- individual or trust, new s 960-275(1B) fixes the indexation factor for
+-- expenditure incurred on or after 1 July 2027 as:
+--
+--     index number for the quarter in which the CGT event happens
+--     ─────────────────────────────────────────────────────────────
+--     index number for the quarter in which the expenditure is incurred
+--
+-- and new s 960-275(1C) gives the same shape, from the quarter the amount was
+-- *paid*, for the first element of the cost base of a share or unit. The factor
+-- is worked out to 3 decimal places, rounding up if the fourth decimal place is
+-- 5 or more — s 960-275(5), which applies to every indexation factor the
+-- section states, the new subsections included (the Bill inserted (1B)/(1C)
+-- without touching that rule).
+--
+-- **A second table, deliberately not a widening of `cpi_quarters` (0046).**
+-- That table is the *frozen* ATO series for costs incurred by 21 September
+-- 1999: its CHECK refuses a later quarter and its own header explains why (the
+-- old method may not read one), and `domain::indexation` freezes every factor's
+-- numerator at the September 1999 CPI of 68.7. The two regimes read the same
+-- published series but for different purposes, on different ranges, with
+-- different numerators, so keeping them in one table would mean loosening the
+-- frozen table's guarantee to store rows its only reader must never use. Here
+-- the range starts at the *earliest* quarter the new factor can name: the
+-- quarter starting 1 July 2027 (ending 30 September 2027), which EM 1.72 fixes
+-- as the denominator for expenditure deemed incurred on reacquisition
+-- (paragraphs 112-155(2)(b), 112-165(2)(b), 112-175(2)(b)) — "not the quarter
+-- ending on 30 June 2027". A pre-commencement quarter can be neither a
+-- denominator (the subsection reaches only expenditure incurred on or after
+-- 1 July 2027) nor a numerator (only a CGT event on or after that day is
+-- governed by the reform), so the CHECK refuses one.
+--
+-- On the index reference base: the factor is a *ratio* of two index numbers
+-- from the same publication, so the base cancels and re-referencing the series
+-- does not change any factor as long as both quarters come from the same run.
+-- The import therefore upserts every row on every run (like `mic_registry`,
+-- not like the immutable `rba_fx_rates`) so a re-based series replaces the
+-- whole range together and no stored factor is ever a ratio of two bases.
+--
+-- The figures come from the RBA's statistical table G1 *Consumer Price
+-- Inflation* (series GCPIAG, "Consumer price index; All groups", source listed
+-- as ABS / RBA), which reproduces the ABS All Groups CPI — the series s
+-- 960-275 reads — at the same stable CSV location the F11 FX import already
+-- uses. Only the ratio is used, so the RBA's own index base is immaterial.
+--
+-- Snapshot staleness: exempt. A write to this table can invalidate no stored
+-- snapshot: the three snapshotted reports are the price-dependent ones
+-- (valuation, portfolio, unrealised gains), and this table feeds only the
+-- live-computed CGT reports (realised gains and the net capital gain). Recorded
+-- in reports::snapshot::STALENESS_EXEMPT_TABLES.
+--
+-- The audit trail: deliberately **not** audited, for the same reason as
+-- `cpi_quarters` (0046): row_history makes an UPDATE or DELETE of a financial
+-- fact the *user* entered recoverable, while this table holds published
+-- reference data whose only writer is the import job — and a re-based series
+-- is meant to be replaced wholesale, not restored to a previous base.
+
+CREATE TABLE current_cpi_quarters (
+    -- ISO 'YYYY-MM-DD' date of the quarter's end — a cost was incurred in the
+    -- quarter whose end date this row carries. Bounded below to the reform's
+    -- first possible quarter and to the four quarter-end dates, so a typo
+    -- cannot introduce a quarter the new factor has no index number for.
+    quarter_end TEXT PRIMARY KEY
+                CHECK (quarter_end >= '2027-09-30')
+                CHECK (substr(quarter_end, 6) IN ('03-31', '06-30', '09-30', '12-31')),
+    -- Decimal: All groups CPI, weighted average of 8 capital cities, as
+    -- published (the RBA's G1 table carries it to two decimal places).
+    cpi         TEXT NOT NULL
+);

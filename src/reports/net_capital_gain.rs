@@ -1471,7 +1471,7 @@ async fn what_if_handler(
 mod tests {
     use super::*;
     use crate::entities::{amma, cgt_settings, corporate_action, rba_fx_rate, trade};
-    use crate::test_support::{self, ApiClient, allocate, dec, test_pool};
+    use crate::test_support::{self, ApiClient, allocate, dec, test_pool, ymd};
     use axum::http::StatusCode;
 
     /// Client over this module's own routes.
@@ -5559,6 +5559,32 @@ mod tests {
         let err = db_net_capital_gain(&pool).await.unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("2027-07-01"), "{msg}");
+    }
+
+    /// A disposal the reform governs **is** assessed, and its indexed gain
+    /// reaches the year's net capital gain with no 50 per cent discount — the
+    /// reformed method statement's step 1/2 order for the non-residential,
+    /// non-deferred categories this app can hold, where the existing loss chain
+    /// is already the statute's shape.
+    #[tokio::test]
+    async fn db_a_post_reform_gain_flows_into_the_year_indexed_and_undiscounted() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "NEW").await;
+        test_support::cpi_quarter(&pool, ymd(2027, 9, 30), dec("110.85")).await;
+        test_support::cpi_quarter(&pool, ymd(2028, 9, 30), dec("112.20")).await;
+        test_support::insert_parcel_bypassing_checks(&pool, 1, 1, ymd(2027, 7, 5), "100", "100")
+            .await;
+        test_support::insert_sell_bypassing_checks(&pool, 2, 1, ymd(2028, 9, 20), "100", "150")
+            .await;
+        allocate(&pool, 1, 2, 1, dec("100")).await;
+
+        let years = db_net_capital_gain(&pool).await.unwrap();
+        let y = years.iter().find(|y| y.tax_year == 2029).expect("FY2029");
+        // A$15,000 proceeds less the A$10,120 indexed cost base.
+        assert_eq!(y.other_gains, Decimal::from(4880));
+        assert_eq!(y.discount_eligible_gains, Decimal::ZERO);
+        assert_eq!(y.cgt_discount, Decimal::ZERO);
+        assert_eq!(y.net_capital_gain, Decimal::from(4880));
     }
 
     /// A non-disposal CGT event (an AMMA statement's year end, which carries

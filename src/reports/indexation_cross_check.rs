@@ -69,6 +69,14 @@
 //!   1999, with the deceased's own indexed cost base carried over — and none
 //!   of them are modelled, so those parcels are left out rather than
 //!   compared on the wrong date.
+//! - The disposal is **before 1 July 2027**. This report is the *pre-reform*
+//!   election's comparison, and it keeps that scope only: for a CGT event on
+//!   or after 1 July 2027 the election is removed for individuals and trusts
+//!   (EM 1.53), indexation applies by force of new s 110-36(1A) rather than
+//!   by choice, and the figure the reform computes is on
+//!   [`crate::reports::realised_gains`] itself (the `reform_indexation_*`
+//!   columns) — never a comparison offered here. A post-commencement disposal
+//!   is therefore not a row of this report at all.
 //! - The allocation produced a **capital gain**. Indexation cannot be used on
 //!   a capital loss at all, so a loss allocation is not "the discount wins" —
 //!   there is no comparison to make, and none is shown. Loss allocations
@@ -601,12 +609,12 @@ mod tests {
         assert_eq!(year["net_capital_gain"], "5000");
     }
 
-    /// A CGT event dated on or after 1 July 2027 is refused rather than having
-    /// either method compared on it — the reform guard
-    /// (`domain::cgt_reform`) reaches this report through the shared
-    /// realised-gains read.
+    /// A CGT event dated on or after 1 July 2027 that disposes of a parcel held
+    /// across the boundary is refused — the reform guard (`domain::cgt_reform`)
+    /// reaches this report through the shared realised-gains read, because the
+    /// disposal needs the Subdivision 112-E deferred-gain split.
     #[tokio::test]
-    async fn a_post_commencement_disposal_is_refused() {
+    async fn a_post_commencement_disposal_of_a_pre_reform_parcel_is_refused() {
         let pool = test_pool().await;
         test_support::listing(1).ticker("REF").insert(&pool).await;
         test_support::insert_parcel_bypassing_checks(&pool, 1, 1, ymd(2024, 1, 2), "100", "10")
@@ -617,5 +625,38 @@ mod tests {
         let err = db_indexation_cross_check(&pool).await.unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("2027-07-01"), "{msg}");
+    }
+
+    /// The report keeps the **pre-reform** election's scope only. A disposal
+    /// the reform governs is assessed on the realised-gains report (indexed by
+    /// force of new s 110-36(1A), not by a choice), so it is no row here even
+    /// though it is a gain over 12 months old — the election this report exists
+    /// to compare has been removed for it (EM 1.53).
+    #[tokio::test]
+    async fn a_post_reform_disposal_is_not_compared() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("NEW").insert(&pool).await;
+        test_support::cpi_quarter(&pool, ymd(2027, 9, 30), dec("110.85")).await;
+        test_support::cpi_quarter(&pool, ymd(2028, 9, 30), dec("112.20")).await;
+        test_support::insert_parcel_bypassing_checks(&pool, 1, 1, ymd(2027, 7, 5), "100", "100")
+            .await;
+        test_support::insert_sell_bypassing_checks(&pool, 2, 1, ymd(2028, 9, 20), "100", "150")
+            .await;
+        test_support::allocate(&pool, 1, 2, 1, dec("100")).await;
+
+        let report = db_indexation_cross_check(&pool).await.unwrap();
+        assert!(report.comparisons.is_empty());
+        assert!(report.years.is_empty());
+
+        // The disposal is still assessed — the reform's figure lives on the
+        // realised-gains report, not here.
+        let realised = crate::reports::realised_gains::db_realised_gains(&pool)
+            .await
+            .unwrap();
+        assert_eq!(realised[0].cost_base, dec("10120.000"));
+        assert_eq!(
+            realised[0].parcels[0].reform_indexation_factor,
+            Some(dec("1.012"))
+        );
     }
 }

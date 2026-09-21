@@ -5727,6 +5727,8 @@ mod tests {
                 discount_eligible: false,
                 indexation_eligible: false,
                 indexed_cost_base: None,
+                reform_indexation_factor: None,
+                reform_indexation_quarter_end: None,
             }],
             taxpayer_basis: crate::reports::TAXPAYER_BASIS.to_string(),
         };

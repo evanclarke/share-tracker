@@ -1,4 +1,5 @@
 use crate::domain::cgt_discount;
+use crate::domain::cgt_indexation;
 use crate::domain::cgt_reform;
 use crate::domain::cost_base::{self, ParcelRow};
 use crate::domain::indexation;
@@ -40,15 +41,27 @@ pub struct RealisedGainLoss {
     /// brokerage), converted to AUD at the sale's ATO FX rate.
     pub proceeds: Decimal,
     /// Adjusted cost base of the sold parcels (AMIT-reduced, pro-rated to allocated
-    /// qty), converted to AUD at the purchase's ATO FX rate.
+    /// qty), converted to AUD at the purchase's ATO FX rate. For a disposal on
+    /// or after 1 July 2027 this is the cost base the reform uses: indexed to
+    /// the event quarter where `ParcelDetail::reform_indexation_factor` is set,
+    /// otherwise the same unindexed figure (the old-law 50% discount and its
+    /// indexation election both being repealed for such an event).
     pub cost_base: Decimal,
     /// proceeds − cost_base in AUD (positive = gain, negative = loss).
     pub capital_gain_loss: Decimal,
     /// Portion of the capital gain from parcels held strictly more than 12 months
     /// (eligible for the 50% CGT discount). Always ≥ 0; losses are excluded.
+    /// Always zero for a disposal on or after 1 July 2027, where the discount is
+    /// repealed (its gain is indexed instead — see
+    /// `ParcelDetail::reform_indexation_factor`).
     pub discount_eligible_gain: Decimal,
-    /// Gross positive gains from parcels held 12 months or less — the "other"
-    /// (non-discountable) method. Always ≥ 0; losses are excluded.
+    /// Gross positive gains that carry no 50% discount — the "other" method.
+    /// Always ≥ 0; losses are excluded. Holds a parcel held 12 months or less
+    /// **and** every gain of a disposal on or after 1 July 2027, where the
+    /// discount is repealed and no indexation is available (the reform's
+    /// non-discountable category; `reports::net_capital_gain` nets it the same
+    /// way, which is the reformed method statement's step 1/2 order for the
+    /// non-residential, non-deferred categories this app holds).
     pub non_discountable_gain: Decimal,
     /// Total capital losses from this sale's allocations (those whose proceeds fell
     /// below their cost base), as a positive amount. Always ≥ 0.
@@ -112,6 +125,22 @@ pub struct ParcelDetail {
     /// it (`reports::indexation_cross_check` is where the comparison is
     /// drawn).
     pub indexed_cost_base: Option<Decimal>,
+    /// The **reformed** indexation's factor for this allocation — the cost base
+    /// indexation that replaces the 50% discount for a CGT event on or after
+    /// 1 July 2027 (`domain::cgt_indexation`, new s 960-275(1B)). `Some`
+    /// exactly when the new law indexed this allocation's cost base, in which
+    /// case `cost_base` and `capital_gain_loss` above are the *indexed*
+    /// figures. `None` on a pre-commencement disposal (where the frozen
+    /// `indexation_eligible` pair above is the old election's advisory
+    /// comparison) and `None` on a post-commencement disposal the new law did
+    /// not index — a holding of 12 months or less, or a capital loss. The two
+    /// indexation pairs are mutually exclusive by construction: the old
+    /// election is removed for an event the reform governs (EM 1.53).
+    pub reform_indexation_factor: Option<Decimal>,
+    /// The quarter whose CPI is that factor's numerator — the quarter the CGT
+    /// event happened in. `Some` exactly when `reform_indexation_factor` is,
+    /// so the working the factor came from travels with it.
+    pub reform_indexation_quarter_end: Option<NaiveDate>,
 }
 
 // Per-sale identity: capital_gain_loss == discount_eligible_gain
@@ -297,6 +326,11 @@ struct ReportData {
     /// The frozen ATO quarterly CPI series, so the advisory indexed cost base
     /// beside each pre-22-September-1999 allocation's own is a map lookup too.
     cpi: indexation::CpiQuarters,
+    /// The current ABS quarterly CPI series, for the cost base indexation the
+    /// reform applies to a CGT event on or after 1 July 2027
+    /// (`domain::cgt_indexation`). Its own table (`current_cpi_quarters`), on
+    /// its own range, so a pre-reform cost can never read a modern index number.
+    current_cpi: cgt_indexation::CurrentCpiQuarters,
 }
 
 /// Reads the report's inputs on the caller's connection. Callers run this
@@ -372,6 +406,7 @@ async fn load_report_data(conn: &mut sqlx::SqliteConnection) -> Result<ReportDat
     let split_events = crate::entities::corporate_action::db_share_split_events(&mut *conn).await?;
     let fx = FxRates::load(&mut *conn).await?;
     let cpi = indexation::CpiQuarters::load(&mut *conn).await?;
+    let current_cpi = cgt_indexation::CurrentCpiQuarters::load(&mut *conn).await?;
 
     Ok(ReportData {
         sells: sells.into_iter().map(|s| (s.id, s)).collect(),
@@ -384,6 +419,7 @@ async fn load_report_data(conn: &mut sqlx::SqliteConnection) -> Result<ReportDat
         split_events,
         fx,
         cpi,
+        current_cpi,
     })
 }
 
@@ -437,20 +473,88 @@ fn cumulative_share(
     entitlement - taken_so_far
 }
 
+/// Whether a parcel's own trade date is also the date its **cost** was
+/// incurred: an ordinary Buy/DRP with nothing carried forward from an earlier
+/// parcel. A rollover replacement (scrip-for-scrip exchange, demerger,
+/// holding-account transfer) or an inheritance carries a cost incurred on the
+/// source parcel's or the deceased's date, which is not this row's own — so the
+/// reform's indexation, which runs from the date the expenditure was incurred
+/// (s 960-275(1B)(b)), must not read it. `reports::realised_gains` refuses a
+/// post-commencement sale drawing on such a parcel rather than indexing it from
+/// the wrong quarter.
+fn plain_parcel(buy: &ParcelRow) -> bool {
+    buy.deemed_acquisition_date.is_none()
+        && buy.scrip_action_id.is_none()
+        && buy.demerger_action_id.is_none()
+        && buy.transfer_id.is_none()
+}
+
+/// Scale every figure the indexation pipeline reads by `num/den` — the cash
+/// side's share of a partial-rollover scrip closing Sell. Scaling the whole
+/// breakdown (rather than only `.adjusted`) makes indexing and apportioning
+/// commute: `(costed_initial × factor − reductions) × ratio` is
+/// `(costed_initial × ratio) × factor − reductions × ratio`, up to the one
+/// rounding each product already carries.
+fn scale_cost_base(cost: &cost_base::CostBase, num: Decimal, den: Decimal) -> cost_base::CostBase {
+    let scale = |value: Decimal| mul_div(&[value, num], den);
+    cost_base::CostBase {
+        initial_cost: scale(cost.initial_cost),
+        costed_initial_cost: scale(cost.costed_initial_cost),
+        amit_reduction: scale(cost.amit_reduction),
+        roc_reduction: scale(cost.roc_reduction),
+        adjusted: scale(cost.adjusted),
+    }
+}
+
 /// The gain/loss computation: a pure function over [`ReportData`], so the
 /// arithmetic is unit-testable without a database.
 fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sqlx::Error> {
-    // The reform guard (`domain::cgt_reform`): every Sell and rights sale is a
-    // CGT event, and one dated on or after 1 July 2027 must not reach the 50
-    // per cent discount classification below — the write-time date ceiling that
-    // normally keeps one out of the database is not this report's guarantee.
-    // Refusing the whole report is deliberate: a partial year assessed under
-    // repealed law would be the silent answer this guard exists to prevent.
+    // The reform guard (`domain::cgt_reform`). A Sell on or after 1 July 2027
+    // is now assessed under the new law where the app can: every parcel it
+    // draws on must be a **plain** Buy/DRP whose own trade date is also the
+    // date its cost was incurred, and on or after the commencement. Anything
+    // else is refused rather than assessed under repealed law:
+    //
+    // * a parcel held across the boundary needs the Subdivision 112-E deemed
+    //   disposal/reacquisition split between a deferred old-law gain and a
+    //   post-2027 indexed one, which this app has not built; and
+    // * a replacement parcel (scrip exchange, demerger, transfer, inheritance)
+    //   carries a cost incurred earlier than its own trade date, so indexing
+    //   from that trade date would silently mis-index it.
+    //
+    // The earliest offending sale is named, so the refusal is deterministic
+    // whatever order the allocations come back in.
+    let mut deferred: Option<(NaiveDate, NaiveDate)> = None;
+    for alloc in &data.allocations {
+        let (Some(sale), Some(buy)) = (
+            data.sells.get(&alloc.sale_trade_id),
+            data.buys.get(&alloc.purchase_trade_id),
+        ) else {
+            continue;
+        };
+        if !cgt_reform::applies_to_event(sale.date) {
+            continue;
+        }
+        if (buy.date < cgt_reform::COMMENCEMENT || !plain_parcel(buy))
+            && deferred.is_none_or(|(date, _)| sale.date < date)
+        {
+            deferred = Some((sale.date, buy.acquired()));
+        }
+    }
+    if let Some((event_date, acquisition_date)) = deferred {
+        cgt_reform::guard_deferred_split(
+            "a Sell",
+            event_date,
+            acquisition_date,
+            "reports::realised_gains",
+        )?;
+    }
+    // A rights sale stays refused wholesale: what the reform would index is the
+    // *rights'* own cost base, whose incurrence date this action does not track
+    // (the anchoring parcel's date is the discount clock's), so there is no
+    // honest date to index from.
     cgt_reform::guard_discount_events(
-        data.sells
-            .values()
-            .map(|s| (s.date, "a Sell"))
-            .chain(data.rights_sales.iter().map(|s| (s.date, "a rights sale"))),
+        data.rights_sales.iter().map(|s| (s.date, "a rights sale")),
         "reports::realised_gains",
     )?;
 
@@ -548,7 +652,6 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
             cost_base::Held::DisposedOn(sale.date),
         )?
         .into_aud_with(&data.fx, &buy.currency, buy.acquired(), buy.fx_override())?;
-        let alloc_cost = alloc_cost_base.adjusted;
 
         // A partial-rollover scrip closing Sell realises only the cash
         // side's market-value share of the parcel's reduced cost base; the
@@ -557,20 +660,49 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
         // full reduced cost base).
         let cash_apportionment = sale.scrip_cash_apportionment()?;
         let alloc_cost = match cash_apportionment {
-            Some((num, den)) => mul_div(&[alloc_cost, num], den),
-            None => alloc_cost,
+            Some((num, den)) => mul_div(&[alloc_cost_base.adjusted, num], den),
+            None => alloc_cost_base.adjusted,
+        };
+
+        // A CGT event on or after 1 July 2027 is assessed under the reform:
+        // index the cost base where the new law allows it. The pre-scan above
+        // has already refused any sale drawing on a parcel whose cost was not
+        // incurred at its own date, so `buy.date` is the expenditure date here.
+        let reform = cgt_reform::applies_to_event(sale.date);
+        let (alloc_cost, reform_factor) = if reform {
+            // The cash apportionment scales the whole cost-base breakdown, so
+            // the indexed figure is the same whether the indexation or the
+            // apportionment is applied first (both are products).
+            let scaled = match cash_apportionment {
+                Some((num, den)) => scale_cost_base(&alloc_cost_base, num, den),
+                None => alloc_cost_base,
+            };
+            let answer = cgt_indexation::reform_indexation(
+                &scaled,
+                alloc_proceeds,
+                buy.date,
+                buy.acquired(),
+                sale.date,
+                &data.current_cpi,
+                cgt_indexation::ASSUMED_RESIDENCY,
+            );
+            (answer.cost_base_or(alloc_cost), answer.factor())
+        } else {
+            (alloc_cost, None)
         };
 
         let alloc_gain = alloc_proceeds - alloc_cost;
 
         // The advisory indexation figure (`domain::indexation`): what this
-        // allocation's cost base would have been under the indexation method,
+        // allocation's cost base would have been under the *pre-1999 election*,
         // for the cross-check report to set beside `alloc_cost`. Offered only
-        // where the method is actually available — the cost was incurred by
+        // where that method is actually available — the cost was incurred by
         // 21 September 1999 *and* the allocation produced a gain, since
-        // indexation can never be used on a capital loss. Nothing below sums
-        // it: every total this report reports is the discount method's.
-        let indexation = if alloc_gain > Decimal::ZERO {
+        // indexation can never be used on a capital loss — and never on an
+        // event the reform governs, where the election is removed (EM 1.53).
+        // Nothing below sums it: every total this report reports is the
+        // reformed (or, before the commencement, the discount) method's.
+        let indexation = if !reform && alloc_gain > Decimal::ZERO {
             data.cpi.indexation_for(buy.date)
         } else {
             None
@@ -593,8 +725,11 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
         // acquisition date) is discount-eligible; a gain from a parcel held ≤
         // 12 months is non-discountable ("other" method); a negative result is
         // a capital loss (recorded as a positive amount). The net-capital-gain
-        // report nets these buckets across sales and AMMA gains.
-        let discount_eligible = cgt_discount::discount_eligible(buy.acquired(), sale.date);
+        // report nets these buckets across sales and AMMA gains. A disposal the
+        // reform governs is **never** discount-eligible — the discount is
+        // repealed for it — so its gain, indexed or not, is non-discountable.
+        let discount_eligible =
+            !reform && cgt_discount::discount_eligible(buy.acquired(), sale.date);
         if alloc_gain > Decimal::ZERO {
             if discount_eligible {
                 *sale_discount_gain.entry(sale_id).or_insert(Decimal::ZERO) += alloc_gain;
@@ -617,6 +752,8 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
             discount_eligible,
             indexation_eligible: indexed_cost_base.is_some(),
             indexed_cost_base,
+            reform_indexation_factor: reform_factor.map(|f| f.factor),
+            reform_indexation_quarter_end: reform_factor.map(|f| f.event_quarter_end),
         });
     }
 
@@ -738,9 +875,13 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
                 // indexing nil gives nil — and the anchoring parcel's date is
                 // the discount clock's, not the date any cost of the rights
                 // was incurred. There is no honest figure to put here, so
-                // none is put.
+                // none is put. The reform's pair is empty for the same reason,
+                // and a post-commencement rights sale is refused outright
+                // above.
                 indexation_eligible: false,
                 indexed_cost_base: None,
+                reform_indexation_factor: None,
+                reform_indexation_quarter_end: None,
             });
         }
         parcels.sort_by(|a, b| {
@@ -787,7 +928,7 @@ async fn realised_gains_handler(
 mod tests {
     use super::*;
     use crate::entities::{corporate_action, listing, rba_fx_rate, trade};
-    use crate::test_support::{self, ApiClient, allocate, test_pool};
+    use crate::test_support::{self, ApiClient, allocate, test_pool, ymd};
     use axum::http::StatusCode;
 
     async fn insert_listing(pool: &SqlitePool, id: i64, ticker: &str) {
@@ -3794,11 +3935,13 @@ mod tests {
         assert_eq!(rows[0].discount_eligible_gain, dec("500"));
     }
 
-    /// A CGT event dated on or after 1 July 2027 is refused rather than
-    /// assessed under the repealed 50 per cent discount, and the refusal names
-    /// the commencement date (the section's test requirement).
+    /// A CGT event dated on or after 1 July 2027 that disposes of a parcel held
+    /// **across** the boundary is refused: its pre-commencement gain is a
+    /// deferred component under Subdivision 112-E, and the report will not
+    /// assess the disposal under the repealed 50 per cent discount. The refusal
+    /// names both dates (the section's test requirement).
     #[tokio::test]
-    async fn db_a_post_commencement_event_is_refused_naming_the_commencement_date() {
+    async fn db_a_post_commencement_event_on_a_pre_reform_parcel_needs_the_deferred_split() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "REF").await;
         test_support::insert_parcel_bypassing_checks(
@@ -3824,6 +3967,187 @@ mod tests {
         let err = db_realised_gains(&pool).await.unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("2027-07-01"), "{msg}");
+        assert!(msg.contains("2024-01-02"), "{msg}");
         assert!(msg.contains("reports::realised_gains"), "{msg}");
+        assert!(msg.contains("112-E"), "{msg}");
+    }
+
+    /// A parcel acquired **on or after** 1 July 2027 and sold more than 12
+    /// months later is assessed under the reform: the cost base is indexed from
+    /// the parcel's own expenditure quarter to the event quarter (s 960-275(1B),
+    /// s 960-275(5)), the gain is not discount-eligible, and the factor's
+    /// working rides on the parcel row.
+    #[tokio::test]
+    async fn db_a_post_reform_parcel_is_indexed_from_its_own_quarter() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "NEW").await;
+        // The quarter ending 30 September 2027 is the first the new factor can
+        // name (EM 1.72); the event falls in the September 2028 quarter.
+        test_support::cpi_quarter(&pool, ymd(2027, 9, 30), dec("110.85")).await;
+        test_support::cpi_quarter(&pool, ymd(2028, 9, 30), dec("112.20")).await;
+        test_support::insert_parcel_bypassing_checks(&pool, 1, 1, ymd(2027, 7, 5), "100", "100")
+            .await;
+        test_support::insert_sell_bypassing_checks(&pool, 2, 1, ymd(2028, 9, 20), "100", "150")
+            .await;
+        allocate(&pool, 1, 2, 1, dec("100")).await;
+
+        let rows = db_realised_gains(&pool).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        // 10,000 × (112.20 ÷ 110.85 = 1.012) = 10,120, so the A$15,000 gross
+        // falls to A$4,880 — the indexation the reform applies.
+        assert_eq!(row.cost_base, dec("10120.000"));
+        assert_eq!(row.capital_gain_loss, dec("4880.000"));
+        assert_eq!(row.discount_eligible_gain, Decimal::ZERO);
+        assert_eq!(row.non_discountable_gain, dec("4880.000"));
+        let parcel = &row.parcels[0];
+        assert_eq!(parcel.reform_indexation_factor, Some(dec("1.012")));
+        assert_eq!(parcel.reform_indexation_quarter_end, Some(ymd(2028, 9, 30)));
+        assert!(!parcel.discount_eligible);
+        // The pre-1999 election's advisory pair is empty for a reform event:
+        // the election itself is removed (EM 1.53).
+        assert!(!parcel.indexation_eligible);
+        assert_eq!(parcel.indexed_cost_base, None);
+    }
+
+    /// EM Example 1.6 (Marcus's purchase in ten quarterly instalments): each
+    /// instalment is its own amount of expenditure incurred when it is paid, so
+    /// it indexes from **its own** quarter — not from the asset's first quarter
+    /// and not from a single blended date. Ten plain Buy parcels are exactly
+    /// that representation, and each carries its own factor.
+    #[tokio::test]
+    async fn db_em_example_1_6_each_instalment_indexes_from_its_own_quarter() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "INST").await;
+        // All groups CPI, one point a quarter, so each instalment's factor is
+        // its own quarter's index number under the March 2031 event quarter.
+        for (i, quarter_end) in [
+            ymd(2027, 9, 30),
+            ymd(2027, 12, 31),
+            ymd(2028, 3, 31),
+            ymd(2028, 6, 30),
+            ymd(2028, 9, 30),
+            ymd(2028, 12, 31),
+            ymd(2029, 3, 31),
+            ymd(2029, 6, 30),
+            ymd(2029, 9, 30),
+            ymd(2029, 12, 31),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            test_support::cpi_quarter(&pool, quarter_end, dec(&format!("{}", 100 + i))).await;
+        }
+        test_support::cpi_quarter(&pool, ymd(2031, 3, 31), dec("115")).await;
+
+        // Ten A$10,000 instalments (100 units at A$100), the first paid on
+        // 1 July 2027 and each later one a quarter on (EM Example 1.6).
+        for i in 1..=10i64 {
+            let date = ymd(2027, 7, 1) + chrono::Months::new(3 * (i as u32 - 1));
+            test_support::insert_parcel_bypassing_checks(&pool, i, 1, date, "100", "100").await;
+        }
+        test_support::insert_sell_bypassing_checks(&pool, 20, 1, ymd(2031, 3, 15), "1000", "150")
+            .await;
+        for i in 1..=10i64 {
+            allocate(&pool, i, 20, i, dec("100")).await;
+        }
+
+        let rows = db_realised_gains(&pool).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.parcels.len(), 10);
+        for parcel in &row.parcels {
+            assert_eq!(parcel.reform_indexation_quarter_end, Some(ymd(2031, 3, 31)));
+            // Every instalment was held well over 12 months, so each indexes.
+            assert!(parcel.reform_indexation_factor.is_some());
+        }
+        let factor = |parcel: &ParcelDetail| parcel.reform_indexation_factor.unwrap();
+        let cost = |parcel: &ParcelDetail| parcel.cost_base;
+        // The first instalment's quarter is 100, the last's is 109; the event
+        // quarter is 115. First: 115/100 = 1.150 → A$11,500. Last:
+        // 115/109 = 1.055045… → 1.055 → A$10,550.
+        assert_eq!(factor(&row.parcels[0]), dec("1.150"));
+        assert_eq!(cost(&row.parcels[0]), dec("11500.00"));
+        assert_eq!(factor(&row.parcels[9]), dec("1.055"));
+        assert_eq!(cost(&row.parcels[9]), dec("10550.00"));
+        // And the factors genuinely differ, which is the whole point: a single
+        // blended date would give ten identical factors.
+        assert!(
+            row.parcels
+                .windows(2)
+                .any(|w| factor(&w[0]) != factor(&w[1]))
+        );
+    }
+
+    /// A post-commencement disposal that produced a **loss** takes the
+    /// unindexed reduced cost base: indexation never applies to a capital loss
+    /// (EM 1.38).
+    #[tokio::test]
+    async fn db_a_post_commencement_loss_is_not_indexed() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "LOSS").await;
+        test_support::cpi_quarter(&pool, ymd(2027, 9, 30), dec("110.85")).await;
+        test_support::cpi_quarter(&pool, ymd(2028, 9, 30), dec("112.20")).await;
+        test_support::insert_parcel_bypassing_checks(&pool, 1, 1, ymd(2027, 7, 5), "100", "10")
+            .await;
+        test_support::insert_sell_bypassing_checks(&pool, 2, 1, ymd(2028, 9, 20), "100", "9").await;
+        allocate(&pool, 1, 2, 1, dec("100")).await;
+
+        let rows = db_realised_gains(&pool).await.unwrap();
+        assert_eq!(rows[0].capital_loss, dec("100"));
+        assert_eq!(rows[0].parcels[0].cost_base, dec("1000"));
+        assert_eq!(rows[0].parcels[0].reform_indexation_factor, None);
+    }
+
+    /// A post-commencement parcel held 12 months or less is not indexed either —
+    /// the s 114-10(1) ownership rule — and carries no discount (repealed).
+    #[tokio::test]
+    async fn db_a_post_commencement_gain_held_under_twelve_months_is_not_indexed() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "SHORT").await;
+        test_support::cpi_quarter(&pool, ymd(2027, 9, 30), dec("110.85")).await;
+        test_support::cpi_quarter(&pool, ymd(2027, 12, 31), dec("111.40")).await;
+        test_support::insert_parcel_bypassing_checks(&pool, 1, 1, ymd(2027, 7, 5), "100", "10")
+            .await;
+        test_support::insert_sell_bypassing_checks(&pool, 2, 1, ymd(2027, 12, 20), "100", "15")
+            .await;
+        allocate(&pool, 1, 2, 1, dec("100")).await;
+
+        let rows = db_realised_gains(&pool).await.unwrap();
+        assert_eq!(rows[0].parcels[0].cost_base, dec("1000"));
+        assert_eq!(rows[0].parcels[0].reform_indexation_factor, None);
+        assert!(!rows[0].parcels[0].discount_eligible);
+        assert_eq!(rows[0].discount_eligible_gain, Decimal::ZERO);
+        assert_eq!(rows[0].non_discountable_gain, dec("500"));
+    }
+
+    /// A post-commencement sale that draws on a **replacement** parcel — here
+    /// one created by a holding-account transfer — is refused rather than
+    /// indexed from a trade date that is not the date its cost was incurred.
+    #[tokio::test]
+    async fn db_a_post_commencement_sale_of_a_carried_cost_parcel_is_refused() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "CARRY").await;
+        test_support::cpi_quarter(&pool, ymd(2027, 9, 30), dec("110.85")).await;
+        // A replacement parcel with a carried (deemed) acquisition date — an
+        // inheritance's shape — carries a cost incurred earlier than its own
+        // trade date, so its own date is not the expenditure date.
+        sqlx::query(
+            "INSERT INTO trades \
+             (id, trade_type, date, settlement_date, settlement_date_source, listing_id, \
+              average_price, quantity, currency, brokerage, gst_on_brokerage, \
+              brokerage_currency, fx_rate, holding_account_id, deemed_acquisition_date) \
+             VALUES (1, 'Buy', '2027-08-01', '2027-08-01', 'stated', 1, '10', '100', 'AUD', \
+                     '0', '0', 'AUD', '1', 1, '2024-01-02')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        test_support::insert_sell_bypassing_checks(&pool, 2, 1, ymd(2028, 9, 20), "100", "15")
+            .await;
+        allocate(&pool, 1, 2, 1, dec("100")).await;
+
+        let err = db_realised_gains(&pool).await.unwrap_err();
+        assert!(err.to_string().contains("112-E"), "{err}");
     }
 }

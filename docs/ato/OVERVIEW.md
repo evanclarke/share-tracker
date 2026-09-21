@@ -105,19 +105,23 @@ The Government announced on 12 May 2026, as part of the 2026–27 Federal Budget
 replace the 50 per cent CGT discount for individuals, trusts and partnerships with **cost base
 indexation and a 30 per cent minimum tax rate on capital gains**, applying from 1 July 2027 to
 gains accruing after that date. Both Acts have passed and the ATO states the measures are now law.
-**None of the new regime is modelled in the project** — every calculation here applies the law in
-force for the years it reports (the ATO's own alert on [`cgt-discount.md`](cgt-discount.md) says the
-changes "don't apply to Tax Time 2026"). What the project does carry is the **commencement guard**:
-the single commencement date and the four gain categories are defined once in
-`src/domain/cgt_reform.rs`, and every report that applies the 50 per cent discount refuses a CGT
-event dated on or after 1 July 2027 — a logged `500` naming the date — rather than assessing it
-under repealed law. These two mirrors remain the reference for that implementation work, and the
-guard's own citation is recorded against them below.
+**Part of the new regime is now modelled**: the **cost base indexation** for an expenditure incurred
+on or after 1 July 2027 is `src/domain/cgt_indexation.rs`, read from the current ABS series
+(`current_cpi_quarters`, migration 0052, kept current by the `cpi-import` job), and a disposal that
+draws only on such parcels is assessed under it by the realised-gains report. Everything else is
+still the **commencement guard**: the single commencement date and the four gain categories are
+defined once in `src/domain/cgt_reform.rs`, and a CGT event dated on or after 1 July 2027 that
+indexation cannot assess — a parcel held across the boundary (Subdivision 112-E's deferred split), a
+carried-cost replacement parcel, a rights sale, an AMMA statement or a non-disposal CGT event — is
+refused (a logged `500` naming the date) rather than assessed under repealed law. These mirrors
+remain the reference for the rest of the implementation work, and the guard's own citation is
+recorded against them below.
 
 | File | What it covers |
 | --- | --- |
 | [`cgt-reform-boosting-home-ownership.md`](cgt-reform-boosting-home-ownership.md) | **Tax reform – Boosting home ownership – Reforming negative gearing and capital gains tax** (QC 107304, retrieved 2026-09-21): the ATO's own summary page. The measure was announced on 12 May 2026 as part of the 2026–27 Federal Budget and is **now law**; from 1 July 2027 it will *limit negative gearing for residential property investments to new builds* and *replace the 50% CGT discount for individuals, trusts and partnerships with cost base indexation and a 30% minimum tax rate on capital gains*. Properties held at announcement (7:30pm AEST 12 May 2026) are exempt from the negative gearing change, and the CGT reforms **only apply to gains that accrue after 1 July 2027**. The ATO page links the Budget Tax Explainer and both amending Acts; this project appends the operative ITAA 1997 references (s 110-36 indexation, s 119-10 minimum tax) and the sibling explanatory-memorandum mirror. |
 | [`cgt-reform-cgt-adjustments.md`](cgt-reform-cgt-adjustments.md) | **Explanatory Memorandum, Chapter 1 — CGT adjustments** (retrieved 2026-09-21): the detailed statement of the reform, and the file to read before touching any of it. **Cost base indexation** replaces the 50% discount for Australian-resident individuals (partners included) and trusts for CGT events on/after 1 July 2027 — each cost-base element except the third is indexed by the CPI factor (index number for the quarter of the CGT event ÷ that for the quarter the expenditure was incurred; a separate factor applies to the first element of shares and units), the **12-month ownership rule continues**, and indexation is unavailable to foreign or temporary residents present at any time in the testing period. **A 30 per cent minimum tax** (new Division 119) applies to the *minimum tax capital gain*, worked out by a seven-step *minimum tax gap amount* method statement, with an exemption for recipients of prescribed income support payments and no application to residents already taxed at 30 per cent or more. A CGT asset held before 1 July 2027 is **deemed disposed of just before, and reacquired on, 1 July 2027** (new Subdivision 112-E): the pre-2027 gain is **deferred** and taxed under the old law, the post-2027 gain under the new, both in the year of the real disposal — and **pre-CGT assets** enter the regime the same way. The net-capital-gain method statement becomes **seven steps** over four gain categories (deferred / non-deferred × residential / non-residential), with quarantined rental losses applied at the two new steps 3 and 4. **New residential dwellings** keep a 50% discount (new s 115-102) and **affordable housing** up to 60% (s 115-125), each by choice against indexation plus the minimum tax. Also covers the attributable-gain indexation reversal for beneficiaries who cannot index (Subdivision 115-C), the new trustee reporting requirement (s 115-235), and commencement/application/transitional rules. Worked examples 1.1–1.19 are mirrored verbatim. |
+| [`cgt-reform-960-275-indexation-factor.md`](cgt-reform-960-275-indexation-factor.md) | **ITAA 1997 s 960-275, Indexation factor** (ATO Legal database print view, retrieved 2026-09-21): the enacted section's operative subsections (1B), (1C), (4) and (5), quoted verbatim. Read for the one question the EM leaves open — the rounding rule for the *new* factors. Subsection (5) is general ("You work out the indexation factor to 3 decimal places (rounding up if the fourth decimal place is 5 or more)") and the Bill inserted (1B)/(1C) without amending it, so the post-2027 factor takes the same 3-decimal rounding the frozen method's does; (1B)(b) and Note 1 fix the 1 July 2027 expenditure floor and the deemed-reacquisition denominator (EM 1.72), (1C) is the separate share/unit first-element factor, and (4) keeps the third element unindexed. Implemented by `domain::cgt_indexation`. |
 
 ## AMIT / AMMA — attribution and cost-base adjustments
 
@@ -205,19 +209,21 @@ guard's own citation is recorded against them below.
   `investment_expenses` entity, that brokerage is excluded (it is a cost-base element instead),
   and that the stored deductible amount is post-apportionment (the user's determination). The tax
   summary nets these against gross assessable investment income per financial year.
-- **CGT reform from 1 July 2027** (implementation opened 2026-09-21; the four gain categories and
-  the commencement guard landed, the reform itself not modelled):
-  [`cgt-reform-boosting-home-ownership.md`](cgt-reform-boosting-home-ownership.md) and
-  [`cgt-reform-cgt-adjustments.md`](cgt-reform-cgt-adjustments.md) mirror the enacted change
-  from the 2026–27 Budget — cost base indexation in place of the 50% discount for individuals and
-  trusts, a 30% minimum tax on capital gains, a deemed disposal/reacquisition on 30 June 2027
-  bringing pre-CGT assets into the regime, and a seven-step net-capital-gain method statement.
-  It applies to gains accruing on or after 1 July 2027, so it changes nothing in the years this
-  project reports. It is the citation for `src/domain/cgt_reform.rs`, which defines the
+- **CGT reform from 1 July 2027** (implementation opened 2026-09-21; cost base indexation for
+  expenditure incurred on or after 1 July 2027 now modelled, the rest not):
+  [`cgt-reform-boosting-home-ownership.md`](cgt-reform-boosting-home-ownership.md),
+  [`cgt-reform-cgt-adjustments.md`](cgt-reform-cgt-adjustments.md) and
+  [`cgt-reform-960-275-indexation-factor.md`](cgt-reform-960-275-indexation-factor.md) mirror the
+  enacted change from the 2026–27 Budget — cost base indexation in place of the 50% discount for
+  individuals and trusts, a 30% minimum tax on capital gains, a deemed disposal/reacquisition on
+  30 June 2027 bringing pre-CGT assets into the regime, and a seven-step net-capital-gain method
+  statement. It applies to gains accruing on or after 1 July 2027, so it changes nothing in the
+  years this project reports. It is the citation for `src/domain/cgt_reform.rs`, which defines the
   commencement date (1 July 2027, EM 1.214–1.219) and the four gain categories (EM 1.82–1.93) once,
   and for the guard every report that applies the discount now runs: a CGT event dated on or after
   that date is refused loudly rather than assessed under repealed law (see
-  [`../API.md`](../API.md#known-limitations)). The remaining sections — indexation, the deemed
-  reacquisition and deferred gain, the seven-step method statement, the minimum tax, and the
-  out-of-model scope decisions — were opened as their own TODO sections so each closes and archives
-  independently.
+  [`../API.md`](../API.md#known-limitations)). The **indexation factor** (s 960-275(1B)/(1C), and
+  the (5) rounding rule the enacted section supplies) is implemented by `domain::cgt_indexation`
+  over the `current_cpi_quarters` table; the remaining sections — the deemed reacquisition and
+  deferred gain, the seven-step method statement, the minimum tax, and the out-of-model scope
+  decisions — were opened as their own TODO sections so each closes and archives independently.
