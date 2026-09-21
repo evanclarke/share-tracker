@@ -5951,4 +5951,60 @@ mod tests {
         assert_eq!(s.net_non_residential_gain, y.net_non_residential_gain);
         assert_eq!(s.net_capital_gain, y.net_capital_gain);
     }
+
+    /// The Division 119 minimum tax reaches the printed CGT summary too — the
+    /// surface decision: it is a computation *of a CGT figure*, so it rides
+    /// `cgt_summary` (and the net-capital-gain report), never the tax summary,
+    /// whose `total_assessable_income` deliberately excludes capital gains.
+    /// The recorded gap is the taxpayer's own figure; the benchmark and the
+    /// s 12AA rate are derived around it (EM Example 1.17's figures).
+    #[tokio::test]
+    async fn api_the_cgt_summary_carries_the_division_119_working() {
+        let pool = test_support::test_pool().await;
+        test_support::listing(1).ticker("MT").insert(&pool).await;
+        test_support::insert_parcel_bypassing_checks(&pool, 1, 1, ymd(2028, 1, 5), "100", "100")
+            .await;
+        test_support::insert_sell_bypassing_checks(&pool, 2, 1, ymd(2028, 9, 20), "100", "600")
+            .await;
+        test_support::allocate(&pool, 1, 2, 1, dec("100")).await;
+        crate::entities::tax_year_settings::db_upsert(
+            &pool,
+            &crate::entities::tax_year_settings::TaxYearSettings {
+                tax_year: 2029,
+                ess_taxed_upfront_reduction_eligible: true,
+                foreign_or_temporary_resident_at_some_time: false,
+                minimum_tax_gap_amount: Some(dec("500")),
+                minimum_tax_income_support_exempt: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        let report = db_tax_report(&pool, 2029).await.unwrap();
+        let s = report.cgt_summary.expect("the year has recorded activity");
+        assert!(s.reform);
+        assert_eq!(s.minimum_tax_capital_gain, dec("50000"));
+        assert_eq!(s.minimum_tax_benchmark, dec("15000"));
+        assert_eq!(s.minimum_tax_gap_amount, dec("500"));
+        assert_eq!(s.minimum_tax_already_borne, dec("14500"));
+        assert_eq!(s.minimum_tax_effective_rate, dec("0.01"));
+        assert_eq!(s.minimum_tax_extra_income_tax, dec("500"));
+        assert!(!s.minimum_tax_income_support_exempt);
+
+        // Over HTTP, the surface the archived document is printed from.
+        let body: serde_json::Value = test_support::ApiClient::full(&pool)
+            .post_json(
+                "/reports/tax-report",
+                &serde_json::json!({"tax_year": 2029}),
+            )
+            .await;
+        assert_eq!(
+            json_dec(&body["cgt_summary"]["minimum_tax_gap_amount"]),
+            dec("500")
+        );
+        assert_eq!(
+            json_dec(&body["cgt_summary"]["minimum_tax_extra_income_tax"]),
+            dec("500")
+        );
+    }
 }

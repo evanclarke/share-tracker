@@ -3149,6 +3149,8 @@ mod tests {
                 tax_year: 2026,
                 ess_taxed_upfront_reduction_eligible: false,
                 foreign_or_temporary_resident_at_some_time: false,
+                minimum_tax_gap_amount: None,
+                minimum_tax_income_support_exempt: false,
             },
         )
         .await
@@ -3183,6 +3185,8 @@ mod tests {
                 tax_year: 2025,
                 ess_taxed_upfront_reduction_eligible: true,
                 foreign_or_temporary_resident_at_some_time: false,
+                minimum_tax_gap_amount: None,
+                minimum_tax_income_support_exempt: false,
             },
         )
         .await

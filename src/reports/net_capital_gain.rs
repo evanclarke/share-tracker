@@ -67,6 +67,25 @@
 //!    net capital gain. Any unused loss is carried forward into the next year
 //!    in the series.
 //!
+//! **Division 119's minimum tax surfaces here, not on the tax summary.** The
+//! reform also imposes a 30 per cent minimum tax on the year's *minimum tax
+//! capital gain* — the post-1 July 2027 non-residential gains remaining after
+//! the loss pool, i.e. `net_non_residential_gain` (s 119-5, EM 1.175/1.179).
+//! Its seven-step *minimum tax gap amount* (s 119-10(2)) needs a basic income
+//! tax liability on a taxable income this project has never computed, so the
+//! gap is a **recorded per-year taxpayer figure**
+//! ([`crate::entities::tax_year_settings`]) and the app surfaces only the
+//! working it can derive around it: the step-1 30 per cent benchmark, the
+//! steps 2–4 already-borne amount as `benchmark − gap`, and the Rates Act
+//! s 12AA rate. Those fields live on this year row (and in the annual tax
+//! report's `cgt_summary`) rather than on
+//! [`crate::reports::tax_summary::TaxYearSummary`], whose
+//! `total_assessable_income` deliberately excludes capital gains: the minimum
+//! tax is a computation *of a CGT figure*, it shares this walk's year series
+//! and its per-year settings read, and putting it on the tax summary would
+//! imply a taxable-income total that report does not hold. The decision is
+//! recorded here once.
+//!
 //! **The year record is a worksheet, so it is kept at the cent.** Its input
 //! figures (the gross gains, the year's losses, the brought-forward balance)
 //! are rounded to the cent — [`crate::infra::decimal::to_cents`], the one
@@ -84,6 +103,7 @@ use crate::domain::cost_base::{self, ParcelRow};
 use crate::domain::open_parcels;
 use crate::domain::tax_year::tax_year_for;
 use crate::entities::corporate_action::{self, RocEvent};
+use crate::entities::tax_year_settings::{self, MinimumTaxSettings};
 use crate::infra::decimal::{parse_dec, to_cents};
 use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
@@ -174,6 +194,54 @@ pub struct NetCapitalGainYear {
     /// year's losses and the brought-forward balance), carried forward into the
     /// next year in the series.
     pub capital_loss_carried_forward: Decimal,
+    /// Division 119's **minimum tax capital gain**: the covered capital gains
+    /// remaining after step 6 of the method statement (s 119-5, EM 1.179) —
+    /// the **post-1 July 2027 non-residential** gains left after the loss pool
+    /// has been applied, i.e. this year's `net_non_residential_gain`. The
+    /// deferred pre-2027 gains are **excluded** (EM 1.175), and the reform
+    /// applies only to CGT events on or after the commencement, so a pre-reform
+    /// year is nil. A minimum tax capital gain and a net capital gain can
+    /// differ: the former excludes the discounted deferred gains and the
+    /// step-5 concession.
+    pub minimum_tax_capital_gain: Decimal,
+    /// Step 1 of the s 119-10(2) method statement: the **30 per cent
+    /// benchmark** on the minimum tax capital gain, at the cent.
+    pub minimum_tax_benchmark: Decimal,
+    /// The **gap applied** for the year: the recorded
+    /// [`crate::entities::tax_year_settings::TaxYearSettings::minimum_tax_gap_amount`],
+    /// or nil where the year carries the s 119-15 income-support exemption.
+    /// Nil also means "already taxed at 30 per cent or more" (the EM's step 7:
+    /// a nil-or-negative step 5 result is no gap at all).
+    ///
+    /// The gap itself is the **taxpayer's own figure**, not computed here:
+    /// steps 2–4 need a basic income tax liability on a taxable income this
+    /// project has never computed (no marginal-rate schedule, no
+    /// salary/other-income model), so the app records the gap and derives the
+    /// working around it.
+    pub minimum_tax_gap_amount: Decimal,
+    /// Steps 2–4 of the s 119-10(2) method statement: the tax the gain already
+    /// bears as the top slice of taxable income, `benchmark − gap`. The
+    /// app cannot compute it directly (see `minimum_tax_gap_amount`), only as
+    /// the benchmark less the recorded gap; floored at nil, because the
+    /// statute's step 4 is never negative. Nil on a year with the s 119-15
+    /// exemption, where the whole working is switched off.
+    pub minimum_tax_already_borne: Decimal,
+    /// Rates Act **s 12AA**'s rate of extra income tax: the gap divided by the
+    /// minimum tax capital gain, per dollar. Nil when the gain is nil, when no
+    /// gap applies, and on an exempt year. A rate, so it is *not* rounded to
+    /// the cent.
+    pub minimum_tax_effective_rate: Decimal,
+    /// The **extra income tax**: the s 12AA rate applied to the minimum tax
+    /// capital gain. By the section's construction this equates to the gap (EM
+    /// 1.193), which is what makes the rate a working rather than a second
+    /// liability; surfaced at the cent so the printed working reaches it.
+    pub minimum_tax_extra_income_tax: Decimal,
+    /// Whether the year carries the recorded **s 119-15 income-support
+    /// exemption** (a prescribed payment received at some time in the year).
+    /// True switches the whole Division 119 working off — gap, already-borne,
+    /// rate and extra tax are all nil — while the benchmark remains a property
+    /// of the gain.
+    pub minimum_tax_income_support_exempt: bool,
     /// Informational: gross CGT event E10 gains included in this year (the excess of
     /// AMIT cost base reductions over a parcel's cost base). Already counted within
     /// `discount_eligible_gains` / `other_gains` above per the holding period at the
@@ -194,7 +262,8 @@ pub struct NetCapitalGainYear {
     pub cgt_event_c2_gain: Decimal,
     /// Informational: the taxpayer assumption behind the hard-wired rates
     /// (always [`crate::reports::TAXPAYER_BASIS`]) — the 50% discount applied
-    /// here is the Australian-resident-individual rate; other entity types are
+    /// to a pre-reform year and the post-reform indexation/minimum-tax basis
+    /// are the Australian-resident-individual ones; other entity types are
     /// not modelled.
     pub taxpayer_basis: String,
     /// This tax year's realised disposals (ordinary Sells and rights
@@ -244,6 +313,13 @@ const CSV_HEADER: &[&str] = &[
     "cgt_discount",
     "net_capital_gain",
     "capital_loss_carried_forward",
+    "minimum_tax_capital_gain",
+    "minimum_tax_benchmark",
+    "minimum_tax_gap_amount",
+    "minimum_tax_already_borne",
+    "minimum_tax_effective_rate",
+    "minimum_tax_extra_income_tax",
+    "minimum_tax_income_support_exempt",
     "cgt_event_e10_gain",
     "cgt_event_g1_gain",
     "cgt_event_c2_gain",
@@ -272,6 +348,11 @@ const CSV_HEADER: &[&str] = &[
 /// labels, which stay correct for a pre-reform year (its whole gain is the one
 /// non-residential category, so the two splits coincide) and are still the
 /// Division 115 discount/non-discount split for a reform one.
+///
+/// The Division 119 minimum-tax columns report at `18 (working)` for the same
+/// reason — the 2026 form predates the minimum tax, so none of its working
+/// (benchmark, gap, already-borne tax, s 12AA rate, extra tax) has a label of
+/// its own. The exemption flag is not money and reports at no label.
 const CSV_ATO_LABELS: &[&str] = &[
     export::ATO_LABELS_MARKER, // tax_year
     "18H (component)",         // discount_eligible_gains
@@ -292,6 +373,13 @@ const CSV_ATO_LABELS: &[&str] = &[
     "18 (working)",            // cgt_discount
     "18A",                     // net_capital_gain
     "18V",                     // capital_loss_carried_forward
+    "18 (working)",            // minimum_tax_capital_gain
+    "18 (working)",            // minimum_tax_benchmark
+    "18 (working)",            // minimum_tax_gap_amount
+    "18 (working)",            // minimum_tax_already_borne
+    "18 (working)",            // minimum_tax_effective_rate
+    "18 (working)",            // minimum_tax_extra_income_tax
+    "",                        // minimum_tax_income_support_exempt
     "",                        // cgt_event_e10_gain (informational)
     "",                        // cgt_event_g1_gain (informational)
     "",                        // cgt_event_c2_gain (informational)
@@ -909,6 +997,9 @@ pub async fn db_net_capital_gain(
     let fx = FxRates::load(&mut *tx).await?;
     let buckets = gross_buckets(&mut tx, &realised, &fx).await?;
     let opening = crate::entities::cgt_settings::db_opening_capital_loss(&mut *tx).await?;
+    // The Division 119 inputs for every recorded year, read on the same
+    // snapshot as the gains they apply to.
+    let minimum_tax = tax_year_settings::db_minimum_tax_settings(&mut *tx).await?;
     tx.commit().await?;
 
     // Group the already-fetched disposals by tax year so each year row can
@@ -924,7 +1015,7 @@ pub async fn db_net_capital_gain(
             .push(r);
     }
 
-    let mut years = net_years(buckets, opening, current_tax_year());
+    let mut years = net_years(buckets, opening, current_tax_year(), &minimum_tax);
     for year in &mut years {
         year.disposals = disposals_by_year.remove(&year.tax_year).unwrap_or_default();
     }
@@ -1140,11 +1231,14 @@ fn current_tax_year() -> i32 {
 /// *inputs* — the per-category gross gains and their discountable slices, the
 /// year's own losses, the brought-forward balance (which is the previous row's
 /// carried-forward output, so only the entered opening loss is rounded as an
-/// input), and the three informational CGT-event lines — are taken to the cent
+/// input), the year's recorded Division 119 gap, and the three informational
+/// CGT-event lines — are taken to the cent
 /// with [`crate::infra::decimal::to_cents`]. The rest are *derived* from those
 /// rounded inputs by exact arithmetic that cannot leave the cent
 /// (`+`, `−`, `min`), except the discount, which halves and so rounds once per
-/// category. The row is what the CSV export, the JSON report and the
+/// category, and the Division 119 working, whose step-1 benchmark and extra
+/// income tax each round once (the s 12AA rate itself is a rate and is not
+/// rounded). The row is what the CSV export, the JSON report and the
 /// annual tax report's `cgt_summary` all print, so a worksheet whose
 /// columns are rounded independently would print a working that does not
 /// reach its own result: `discount_eligible_gains` of 100.01 halves to
@@ -1153,6 +1247,11 @@ fn current_tax_year() -> i32 {
 /// all three surfaces on one set of figures; the cost is that a reported
 /// figure can move by up to a cent from the exact arithmetic, which is the
 /// accepted price of a document that adds up.
+///
+/// **`minimum_tax` is the recorded Division 119 input per year**, keyed by tax
+/// year (see the module doc for why the minimum tax surfaces here). A year
+/// absent from the map — and every year before the reform — takes
+/// [`MinimumTaxSettings::default`], so the Division 119 fields are nil for it.
 ///
 /// **A quiet year that carries a loss balance still gets a row.** Label 18V
 /// (*net capital losses carried forward to later income years*) is reported
@@ -1178,6 +1277,7 @@ fn net_years(
     mut buckets: HashMap<i32, GrossBuckets>,
     brought_forward: Decimal,
     through: i32,
+    minimum_tax: &HashMap<i32, MinimumTaxSettings>,
 ) -> Vec<NetCapitalGainYear> {
     let first = buckets.keys().copied().min().unwrap_or(through);
     let mut years: Vec<i32> = buckets.keys().copied().chain(first..=through).collect();
@@ -1194,6 +1294,7 @@ fn net_years(
     // row of zeros every year until it is used.
     let mut brought_forward = to_cents(brought_forward);
     let two = Decimal::from(2);
+    let thirty_percent = Decimal::new(3, 1);
     years
         .into_iter()
         .filter_map(|tax_year| {
@@ -1296,6 +1397,66 @@ fn net_years(
             let discount_eligible_gains = discountable.iter().copied().sum();
             let net_discount_eligible_gain = net_discountable.iter().copied().sum();
             let net_gross_total: Decimal = net_gross.iter().copied().sum();
+
+            // Division 119's minimum tax (new Div 119 of the ITAA 1997; EM
+            // 1.171–1.193). The **minimum tax capital gain** is the covered
+            // gains remaining after step 6 (s 119-5, EM 1.179) — this app's
+            // only covered category is the post-1 July 2027 non-residential
+            // one, whose step-1/2 remainder `net_gross[NonResidential]`
+            // already is. The **deferred** pre-2027 gains are excluded (EM
+            // 1.175), and Division 119 reaches only CGT events on or after the
+            // commencement, so a pre-reform year has none. The gap itself is
+            // the taxpayer's *recorded* figure: steps 2–4 need a basic income
+            // tax liability on a taxable income this project does not compute
+            // (see the module doc for why the fields surface here).
+            let reform = cgt_reform::governs_tax_year(tax_year);
+            let recorded = minimum_tax.get(&tax_year).copied().unwrap_or_default();
+            let minimum_tax_income_support_exempt = recorded.income_support_exempt;
+            let minimum_tax_capital_gain = if reform {
+                net_gross[GainCategory::NonResidential.index()]
+            } else {
+                Decimal::ZERO
+            };
+            // Step 1: the 30 per cent benchmark. The gain is at the cent, so
+            // the product can carry a third decimal place — rounded once here,
+            // like every printed money column.
+            let minimum_tax_benchmark = to_cents(minimum_tax_capital_gain * thirty_percent);
+            // Steps 2–4 and the Rates Act s 12AA rate. A pre-reform year and
+            // an exempt one have no working at all: the s 119-15 exemption
+            // switches the liability off (EM 1.186–1.190), so the gap, the
+            // already-borne figure, the rate and the extra tax are all nil
+            // while the step-1 benchmark stays a property of the gain.
+            //
+            // A recorded gap *above* the benchmark cannot arise under the
+            // statute — step 4's amount is never negative, so step 5 never
+            // exceeds step 1 — but the recorded figure is the taxpayer's own
+            // and is surfaced unchanged rather than clamped, with
+            // `already_borne` floored at nil so the printed working shows the
+            // inconsistency instead of hiding it. The rate divides by the
+            // gain, so it is nil when the gain is nil (no division by zero,
+            // and no minimum tax on no covered gain).
+            let (
+                minimum_tax_gap_amount,
+                minimum_tax_already_borne,
+                minimum_tax_effective_rate,
+                minimum_tax_extra_income_tax,
+            ) = if !reform || minimum_tax_income_support_exempt {
+                (Decimal::ZERO, Decimal::ZERO, Decimal::ZERO, Decimal::ZERO)
+            } else {
+                let gap = to_cents(recorded.gap_amount);
+                let already_borne = (minimum_tax_benchmark - gap).max(Decimal::ZERO);
+                let rate = if minimum_tax_capital_gain == Decimal::ZERO {
+                    Decimal::ZERO
+                } else {
+                    gap / minimum_tax_capital_gain
+                };
+                // The extra income tax is the rate applied to the gain;
+                // by s 12AA's construction that equates to the gap (EM
+                // 1.193), rounded once to the cent as a printed amount.
+                let extra = to_cents(rate * minimum_tax_capital_gain);
+                (gap, already_borne, rate, extra)
+            };
+
             let year = NetCapitalGainYear {
                 tax_year,
                 discount_eligible_gains,
@@ -1317,6 +1478,13 @@ fn net_years(
                 cgt_discount,
                 net_capital_gain: assessable.iter().copied().sum(),
                 capital_loss_carried_forward: available_losses,
+                minimum_tax_capital_gain,
+                minimum_tax_benchmark,
+                minimum_tax_gap_amount,
+                minimum_tax_already_borne,
+                minimum_tax_effective_rate,
+                minimum_tax_extra_income_tax,
+                minimum_tax_income_support_exempt,
                 cgt_event_e10_gain: to_cents(b.e10),
                 cgt_event_g1_gain: to_cents(b.g1),
                 cgt_event_c2_gain: to_cents(b.c2),
@@ -1401,6 +1569,24 @@ pub(crate) struct CgtSummaryYear {
     /// structurally nil here (this model records no residential-dwelling
     /// income or deductions). Printed so the step is on the page.
     pub quarantined_amount: Decimal,
+    /// Division 119's **minimum tax capital gain** — the post-1 July 2027
+    /// non-residential gains remaining after the loss pool (s 119-5), i.e.
+    /// `net_non_residential_gain`. Nil before the reform.
+    pub minimum_tax_capital_gain: Decimal,
+    /// Step 1: the 30 per cent benchmark on that gain.
+    pub minimum_tax_benchmark: Decimal,
+    /// The gap applied: the recorded minimum tax gap amount, nil where none is
+    /// recorded or the year carries the s 119-15 exemption.
+    pub minimum_tax_gap_amount: Decimal,
+    /// Steps 2–4: `benchmark − gap`, the tax the gain already bears as the top
+    /// slice, floored at nil. Nil on an exempt year.
+    pub minimum_tax_already_borne: Decimal,
+    /// Rates Act s 12AA's rate of extra income tax: gap ÷ gain.
+    pub minimum_tax_effective_rate: Decimal,
+    /// The extra income tax: the s 12AA rate applied to the gain (= the gap).
+    pub minimum_tax_extra_income_tax: Decimal,
+    /// Whether the recorded s 119-15 income-support exemption applies.
+    pub minimum_tax_income_support_exempt: bool,
     pub capital_losses_this_year: Decimal,
     pub capital_loss_brought_forward: Decimal,
     pub capital_loss_carried_forward: Decimal,
@@ -1431,10 +1617,15 @@ pub(crate) async fn db_cgt_years(
     let fx = FxRates::load(&mut *conn).await?;
     let buckets = gross_buckets(&mut *conn, &realised, &fx).await?;
     let opening = crate::entities::cgt_settings::db_opening_capital_loss(&mut *conn).await?;
-    Ok(net_years(buckets, opening, current_tax_year())
-        .into_iter()
-        .map(|y| y.tax_year)
-        .collect())
+    // The year list does not depend on the recorded Division 119 inputs, so
+    // the walk runs without them: a settings row never creates or removes a
+    // year (only activity or a loss balance does).
+    Ok(
+        net_years(buckets, opening, current_tax_year(), &HashMap::new())
+            .into_iter()
+            .map(|y| y.tax_year)
+            .collect(),
+    )
 }
 
 /// [`CgtSummaryYear`] for one tax year — `None` when the year has neither
@@ -1465,7 +1656,8 @@ pub(crate) async fn db_cgt_summary_year(
         .map(|(y, b)| (*y, b.amma_discount_grossed_up))
         .collect();
     let opening = crate::entities::cgt_settings::db_opening_capital_loss(&mut *conn).await?;
-    let years = net_years(buckets, opening, current_tax_year());
+    let minimum_tax = tax_year_settings::db_minimum_tax_settings(&mut *conn).await?;
+    let years = net_years(buckets, opening, current_tax_year(), &minimum_tax);
     Ok(years.into_iter().find(|y| y.tax_year == tax_year).map(|y| {
         // At the cent like every other figure on this worksheet, and for the
         // same reason (SCENARIOS W-f): the printed page adds the two gain
@@ -1500,6 +1692,13 @@ pub(crate) async fn db_cgt_summary_year(
             net_non_residential_gain: y.net_non_residential_gain,
             net_residential_gain: y.net_residential_gain,
             quarantined_amount: y.quarantined_amount,
+            minimum_tax_capital_gain: y.minimum_tax_capital_gain,
+            minimum_tax_benchmark: y.minimum_tax_benchmark,
+            minimum_tax_gap_amount: y.minimum_tax_gap_amount,
+            minimum_tax_already_borne: y.minimum_tax_already_borne,
+            minimum_tax_effective_rate: y.minimum_tax_effective_rate,
+            minimum_tax_extra_income_tax: y.minimum_tax_extra_income_tax,
+            minimum_tax_income_support_exempt: y.minimum_tax_income_support_exempt,
             capital_losses_this_year: y.capital_losses,
             capital_loss_brought_forward: y.capital_loss_brought_forward,
             capital_loss_carried_forward: y.capital_loss_carried_forward,
@@ -1547,6 +1746,15 @@ struct NetCapitalGainYearCsv {
     cgt_discount: Cents,
     net_capital_gain: Cents,
     capital_loss_carried_forward: Cents,
+    minimum_tax_capital_gain: Cents,
+    minimum_tax_benchmark: Cents,
+    minimum_tax_gap_amount: Cents,
+    minimum_tax_already_borne: Cents,
+    // A rate, not an amount: exported verbatim like the entity rates, never
+    // rounded to the cent (`reports::export`'s `Cents` is for money).
+    minimum_tax_effective_rate: Decimal,
+    minimum_tax_extra_income_tax: Cents,
+    minimum_tax_income_support_exempt: bool,
     cgt_event_e10_gain: Cents,
     cgt_event_g1_gain: Cents,
     cgt_event_c2_gain: Cents,
@@ -1575,6 +1783,13 @@ impl From<&NetCapitalGainYear> for NetCapitalGainYearCsv {
             cgt_discount: y.cgt_discount.into(),
             net_capital_gain: y.net_capital_gain.into(),
             capital_loss_carried_forward: y.capital_loss_carried_forward.into(),
+            minimum_tax_capital_gain: y.minimum_tax_capital_gain.into(),
+            minimum_tax_benchmark: y.minimum_tax_benchmark.into(),
+            minimum_tax_gap_amount: y.minimum_tax_gap_amount.into(),
+            minimum_tax_already_borne: y.minimum_tax_already_borne.into(),
+            minimum_tax_effective_rate: y.minimum_tax_effective_rate,
+            minimum_tax_extra_income_tax: y.minimum_tax_extra_income_tax.into(),
+            minimum_tax_income_support_exempt: y.minimum_tax_income_support_exempt,
             cgt_event_e10_gain: y.cgt_event_e10_gain.into(),
             cgt_event_g1_gain: y.cgt_event_g1_gain.into(),
             cgt_event_c2_gain: y.cgt_event_c2_gain.into(),
@@ -1705,6 +1920,14 @@ async fn what_if_handler(
         .await
         .map_err(ApiError::from)?;
     let opening = crate::entities::cgt_settings::db_opening_capital_loss(&mut *tx)
+        .await
+        .map_err(ApiError::from)?;
+    // The recorded Division 119 inputs, on the same snapshot. The hypothetical
+    // is always a pre-reform year (the shared disposal guard refuses a
+    // post-commencement date), so they cannot change either scenario's figures
+    // — loaded anyway so the walk is not silently given a different input from
+    // the report it mirrors.
+    let minimum_tax = tax_year_settings::db_minimum_tax_settings(&mut *tx)
         .await
         .map_err(ApiError::from)?;
     tx.commit().await.map_err(ApiError::from)?;
@@ -1841,8 +2064,11 @@ async fn what_if_handler(
         // alone, so the series need not run past it (the quiet-year filler
         // rows before it chain the balance through unchanged, exactly as the
         // report's own walk does, and are then discarded).
-        year_row(net_years(without, opening, tax_year), "without"),
-        year_row(net_years(with, opening, tax_year), "with"),
+        year_row(
+            net_years(without, opening, tax_year, &minimum_tax),
+            "without",
+        ),
+        year_row(net_years(with, opening, tax_year, &minimum_tax), "with"),
     ];
 
     Ok(Json(WhatIfResponse {
@@ -1857,7 +2083,9 @@ async fn what_if_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entities::{amma, cgt_settings, corporate_action, rba_fx_rate, trade};
+    use crate::entities::{
+        amma, cgt_settings, corporate_action, rba_fx_rate, tax_year_settings, trade,
+    };
     use crate::test_support::{self, ApiClient, allocate, dec, test_pool, ymd};
     use axum::http::StatusCode;
 
@@ -4517,12 +4745,26 @@ mod tests {
         // A nil figure reads as a nil figure, not as twenty-four zeros.
         assert_eq!(at("capital_loss_carried_forward"), "0.00"); // label 18V
         assert_eq!(at("other_gains"), "0.00");
-        // Not money, and untouched: the year and the taxpayer assumption.
+        // Not money, and untouched: the year, the taxpayer assumption, the
+        // s 12AA rate (a rate, so it does not round) and the Division 119
+        // exemption flag.
         assert_eq!(at("tax_year"), "2024");
         assert_eq!(at("taxpayer_basis"), crate::reports::TAXPAYER_BASIS);
+        assert_eq!(at("minimum_tax_effective_rate"), "0");
+        assert_eq!(at("minimum_tax_income_support_exempt"), "false");
+        // Division 119's money columns are at the cent too — nil, because this
+        // fixture is a pre-reform year.
+        assert_eq!(at("minimum_tax_capital_gain"), "0.00");
+        assert_eq!(at("minimum_tax_benchmark"), "0.00");
         // Every money cell is at the cent — none escaped the projection.
         for (i, cell) in row.iter().enumerate() {
-            if header[i] == "tax_year" || header[i] == "taxpayer_basis" {
+            if matches!(
+                header[i],
+                "tax_year"
+                    | "taxpayer_basis"
+                    | "minimum_tax_effective_rate"
+                    | "minimum_tax_income_support_exempt"
+            ) {
                 continue;
             }
             let dp = cell.split_once('.').map(|(_, f)| f.len()).unwrap_or(0);
@@ -4633,6 +4875,10 @@ mod tests {
             "quarantined_amount",
             "capital_losses",
             "capital_loss_brought_forward",
+            // The Division 119 working's own inputs: the covered gain the
+            // benchmark is struck on, and the recorded gap.
+            "minimum_tax_capital_gain",
+            "minimum_tax_gap_amount",
             // Informational, and part of no printed working — but money, and
             // so at the cent like every other money column.
             "cgt_event_e10_gain",
@@ -4651,10 +4897,21 @@ mod tests {
             "cgt_discount",
             "net_capital_gain",
             "capital_loss_carried_forward",
+            // Division 119's derived working around the recorded gap.
+            "minimum_tax_benchmark",
+            "minimum_tax_already_borne",
+            "minimum_tax_effective_rate",
+            "minimum_tax_extra_income_tax",
         ];
-        /// Not money: the year, the taxpayer assumption, and the drilldown
-        /// (whose per-disposal rows keep the realised report's own precision).
-        const NOT_MONEY: &[&str] = &["tax_year", "taxpayer_basis", "disposals"];
+        /// Not money: the year, the taxpayer assumption, the drilldown
+        /// (whose per-disposal rows keep the realised report's own precision),
+        /// and the Division 119 exemption flag.
+        const NOT_MONEY: &[&str] = &[
+            "tax_year",
+            "taxpayer_basis",
+            "disposals",
+            "minimum_tax_income_support_exempt",
+        ];
 
         let pool = odd_cent_years().await;
         let years: Vec<NetCapitalGainYear> =
@@ -4738,6 +4995,18 @@ mod tests {
             // Whatever the categories could not absorb is the year's
             // carried-forward balance (steps 3–4 reduce nothing).
             assert_eq!(loss, y.capital_loss_carried_forward);
+
+            // Division 119 is a reform-year computation and this fixture is
+            // wholly pre-reform, so its whole working is nil — the
+            // "pre-reform year has no minimum tax capital gain" case, pinned
+            // in full by `db_a_pre_reform_year_has_no_minimum_tax`.
+            assert_eq!(y.minimum_tax_capital_gain, Decimal::ZERO);
+            assert_eq!(y.minimum_tax_benchmark, Decimal::ZERO);
+            assert_eq!(y.minimum_tax_gap_amount, Decimal::ZERO);
+            assert_eq!(y.minimum_tax_already_borne, Decimal::ZERO);
+            assert_eq!(y.minimum_tax_effective_rate, Decimal::ZERO);
+            assert_eq!(y.minimum_tax_extra_income_tax, Decimal::ZERO);
+            assert!(!y.minimum_tax_income_support_exempt);
             assert_eq!(
                 y.net_capital_gain,
                 y.net_deferred_non_residential_gain
@@ -6303,7 +6572,7 @@ mod tests {
             },
         )]);
 
-        let years = net_years(buckets, dec("200000"), 2031);
+        let years = net_years(buckets, dec("200000"), 2031, &HashMap::new());
         assert_eq!(years.len(), 1);
         let y = &years[0];
         assert_eq!(y.tax_year, 2031);
@@ -6348,7 +6617,7 @@ mod tests {
             },
         )]);
 
-        let years = net_years(buckets, dec("200000"), 2031);
+        let years = net_years(buckets, dec("200000"), 2031, &HashMap::new());
         let y = &years[0];
         assert_eq!(y.net_deferred_non_residential_gain, dec("400000"));
         assert_eq!(y.cgt_discount, dec("200000"));
@@ -6473,5 +6742,256 @@ mod tests {
         assert_eq!(y30.net_non_residential_gain, dec("100"));
         assert_eq!(y30.net_capital_gain, dec("100"));
         assert_eq!(y30.capital_loss_carried_forward, Decimal::ZERO);
+    }
+
+    // ---- Division 119: the 30 per cent minimum tax (EM 1.171–1.193) --------
+
+    /// A reform-year (FY2029) parcel whose plain non-residential gain is
+    /// $50,000: 100 units bought at $100 and sold at $600, held under 12
+    /// months so the reform indexes nothing. Listing 2.
+    async fn a_minimum_tax_gain_of_50000(pool: &SqlitePool) {
+        a_post_reform_parcel(
+            pool,
+            2,
+            (10, 11, 10),
+            ymd(2028, 1, 5),
+            ymd(2028, 9, 20),
+            "100",
+            "600",
+        )
+        .await;
+    }
+
+    /// Record one year's Division 119 inputs the way the settings `PUT` does:
+    /// the s 119-10(2) gap amount (the taxpayer's own figure) and the s 119-15
+    /// exemption.
+    async fn record_minimum_tax(pool: &SqlitePool, tax_year: i64, gap: Option<&str>, exempt: bool) {
+        tax_year_settings::db_upsert(
+            pool,
+            &tax_year_settings::TaxYearSettings {
+                tax_year,
+                ess_taxed_upfront_reduction_eligible: true,
+                foreign_or_temporary_resident_at_some_time: false,
+                minimum_tax_gap_amount: gap.map(|g| g.parse().unwrap()),
+                minimum_tax_income_support_exempt: exempt,
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    /// **EM Example 1.17 (Genevieve)** — *Calculating minimum capital gains
+    /// tax*, `docs/ato/cgt-reform-cgt-adjustments.md`, paragraphs 1.171–1.193
+    /// (the s 119-10(2) method statement and the s 12AA rate) and the example
+    /// itself.
+    ///
+    /// A $50,000 minimum tax capital gain with a $500 minimum tax gap amount
+    /// gives step 1 $15,000, step 4 $14,500, step 5 $500, and — Rates Act
+    /// s 12AA — a rate of 500 ÷ 50,000 = 1 per cent, i.e. $500 of extra income
+    /// tax.
+    ///
+    /// **Steps 2–4 are recorded, not computed here.** The EM's $18,000 and
+    /// $3,500 are basic income tax liabilities on its illustrative marginal
+    /// schedule. This project computes no tax payable at all — no
+    /// taxable-income total, no marginal-rate schedule, no salary/other-income
+    /// model — so Genevieve's gap is entered per year
+    /// (`tax_year_settings.minimum_tax_gap_amount`, the option-(c) decision)
+    /// and the app derives only the step-1 benchmark and the s 12AA rate
+    /// around it. The EM's *stated* figures are what this test pins.
+    #[tokio::test]
+    async fn db_em_example_1_17_genevieve_minimum_tax_working() {
+        let pool = test_pool().await;
+        a_minimum_tax_gain_of_50000(&pool).await;
+        record_minimum_tax(&pool, 2029, Some("500"), false).await;
+
+        let years = db_net_capital_gain(&pool).await.unwrap();
+        let y = years.iter().find(|y| y.tax_year == 2029).expect("FY2029");
+        assert_eq!(y.minimum_tax_capital_gain, dec("50000"));
+        assert_eq!(y.minimum_tax_benchmark, dec("15000"), "step 1: 30%");
+        assert_eq!(y.minimum_tax_gap_amount, dec("500"), "the recorded step 7");
+        assert_eq!(y.minimum_tax_already_borne, dec("14500"), "steps 2-4");
+        assert_eq!(y.minimum_tax_effective_rate, dec("0.01"), "s 12AA rate");
+        assert_eq!(y.minimum_tax_extra_income_tax, dec("500"));
+        assert!(!y.minimum_tax_income_support_exempt);
+        // The s 12AA formula reproduces the gap exactly (EM 1.192-1.193).
+        assert_eq!(
+            y.minimum_tax_effective_rate * y.minimum_tax_capital_gain,
+            y.minimum_tax_gap_amount
+        );
+        // The Division 119 working is a separate computation from the ordinary
+        // net capital gain: no discount was taken on this indexed gain.
+        assert_eq!(y.net_capital_gain, dec("50000"));
+        assert_eq!(y.cgt_discount, Decimal::ZERO);
+    }
+
+    /// The **deferred** pre-1 July 2027 gain is excluded from the minimum tax
+    /// capital gain (EM 1.175): a boundary-crossing disposal's covered amount
+    /// is its current component alone ($285.60 here), not the $200 deferred
+    /// gain the old law discounts.
+    #[tokio::test]
+    async fn db_a_deferred_gain_is_excluded_from_the_minimum_tax_capital_gain() {
+        let pool = test_pool().await;
+        a_boundary_parcel_with_a_deferred_and_a_current_component(&pool).await;
+
+        let years = db_net_capital_gain(&pool).await.unwrap();
+        let y = years.iter().find(|y| y.tax_year == 2029).expect("FY2029");
+        // The ordinary walk still nets both components: $200 deferred, halved
+        // at step 5, plus the $285.60 current gain.
+        assert_eq!(y.net_capital_gain, dec("385.60"));
+        assert_eq!(y.deferred_non_residential_gains, dec("200"));
+        // Division 119 reaches only the current, post-2027 component.
+        assert_eq!(y.minimum_tax_capital_gain, dec("285.60"));
+        assert_eq!(
+            y.minimum_tax_benchmark,
+            dec("85.68"),
+            "30% of the current gain"
+        );
+    }
+
+    /// Division 119 applies only to CGT events on or after 1 July 2027
+    /// (EM 1.175), so a pre-reform year has **no** minimum tax capital gain —
+    /// not even when the year has a gain and a gap is recorded for it.
+    #[tokio::test]
+    async fn db_a_pre_reform_year_has_no_minimum_tax() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "OLD").await;
+        insert_trade(
+            &pool,
+            1,
+            trade::TradeType::Buy,
+            1,
+            ymd(2024, 1, 2),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
+        insert_trade(
+            &pool,
+            2,
+            trade::TradeType::Sell,
+            1,
+            ymd(2025, 6, 2),
+            Decimal::from(100),
+            Decimal::from(15),
+        )
+        .await;
+        allocate(&pool, 1, 2, 1, Decimal::from(100)).await;
+        // A recorded gap for the year must not create a working.
+        record_minimum_tax(&pool, 2025, Some("500"), false).await;
+
+        let years = db_net_capital_gain(&pool).await.unwrap();
+        let y = years.iter().find(|y| y.tax_year == 2025).unwrap();
+        assert_eq!(
+            y.net_capital_gain,
+            dec("250"),
+            "the pre-reform walk is unchanged"
+        );
+        assert_eq!(y.minimum_tax_capital_gain, Decimal::ZERO);
+        assert_eq!(y.minimum_tax_benchmark, Decimal::ZERO);
+        assert_eq!(y.minimum_tax_gap_amount, Decimal::ZERO);
+        assert_eq!(y.minimum_tax_already_borne, Decimal::ZERO);
+        assert_eq!(y.minimum_tax_effective_rate, Decimal::ZERO);
+        assert_eq!(y.minimum_tax_extra_income_tax, Decimal::ZERO);
+        assert!(!y.minimum_tax_income_support_exempt);
+    }
+
+    /// The recorded s 119-15 income-support exemption zeroes the gap, the
+    /// rate and the extra tax (EM 1.186–1.190). The benchmark stays: it is a
+    /// property of the gain, not of the liability.
+    #[tokio::test]
+    async fn db_the_income_support_exemption_zeroes_the_minimum_tax_working() {
+        let pool = test_pool().await;
+        a_minimum_tax_gain_of_50000(&pool).await;
+        record_minimum_tax(&pool, 2029, Some("500"), true).await;
+
+        let years = db_net_capital_gain(&pool).await.unwrap();
+        let y = years.iter().find(|y| y.tax_year == 2029).expect("FY2029");
+        assert!(y.minimum_tax_income_support_exempt);
+        assert_eq!(y.minimum_tax_capital_gain, dec("50000"));
+        assert_eq!(y.minimum_tax_benchmark, dec("15000"));
+        assert_eq!(y.minimum_tax_gap_amount, Decimal::ZERO);
+        assert_eq!(y.minimum_tax_already_borne, Decimal::ZERO);
+        assert_eq!(y.minimum_tax_effective_rate, Decimal::ZERO);
+        assert_eq!(y.minimum_tax_extra_income_tax, Decimal::ZERO);
+    }
+
+    /// No recorded gap is the "already taxed at 30 per cent or more" case (EM
+    /// 1.181): the whole benchmark reads as the tax already borne and no extra
+    /// tax is due. An absent row and a row that records no gap are the same
+    /// standing assumption.
+    #[tokio::test]
+    async fn db_no_recorded_gap_is_the_already_taxed_case() {
+        let pool = test_pool().await;
+        a_minimum_tax_gain_of_50000(&pool).await;
+
+        // (a) No settings row at all.
+        let years = db_net_capital_gain(&pool).await.unwrap();
+        let y = years.iter().find(|y| y.tax_year == 2029).expect("FY2029");
+        assert_eq!(y.minimum_tax_gap_amount, Decimal::ZERO);
+        assert_eq!(y.minimum_tax_already_borne, dec("15000"));
+        assert_eq!(y.minimum_tax_effective_rate, Decimal::ZERO);
+        assert_eq!(y.minimum_tax_extra_income_tax, Decimal::ZERO);
+
+        // (b) A row that records the exemption as false but no gap.
+        record_minimum_tax(&pool, 2029, None, false).await;
+        let years = db_net_capital_gain(&pool).await.unwrap();
+        let y = years.iter().find(|y| y.tax_year == 2029).expect("FY2029");
+        assert_eq!(y.minimum_tax_gap_amount, Decimal::ZERO);
+        assert_eq!(y.minimum_tax_already_borne, dec("15000"));
+        assert_eq!(y.minimum_tax_extra_income_tax, Decimal::ZERO);
+    }
+
+    /// A recorded gap *above* the step-1 benchmark cannot arise under the
+    /// statute (step 4's amount is never negative, so step 5 never exceeds
+    /// step 1). The recorded figure is the taxpayer's own and is surfaced
+    /// **unchanged** rather than clamped, with `already_borne` floored at nil,
+    /// so the printed working shows the inconsistency instead of hiding it.
+    #[tokio::test]
+    async fn db_a_recorded_gap_above_the_benchmark_is_surfaced_unchanged() {
+        let pool = test_pool().await;
+        a_minimum_tax_gain_of_50000(&pool).await;
+        record_minimum_tax(&pool, 2029, Some("20000"), false).await;
+
+        let years = db_net_capital_gain(&pool).await.unwrap();
+        let y = years.iter().find(|y| y.tax_year == 2029).expect("FY2029");
+        assert_eq!(y.minimum_tax_benchmark, dec("15000"));
+        assert_eq!(y.minimum_tax_gap_amount, dec("20000"));
+        assert_eq!(y.minimum_tax_already_borne, Decimal::ZERO);
+        assert_eq!(y.minimum_tax_effective_rate, dec("0.4"));
+        assert_eq!(y.minimum_tax_extra_income_tax, dec("20000"));
+    }
+
+    /// The s 12AA rate is a rate (never rounded to the cent) and the extra tax
+    /// it produces is the gap at the cent even where the division does not
+    /// terminate: $1,000 over a $30,000 gain.
+    #[tokio::test]
+    async fn db_the_s12aa_rate_reproduces_the_gap_for_a_non_terminating_rate() {
+        let pool = test_pool().await;
+        a_post_reform_parcel(
+            &pool,
+            2,
+            (10, 11, 10),
+            ymd(2028, 1, 5),
+            ymd(2028, 9, 20),
+            "100",
+            "400",
+        )
+        .await;
+        record_minimum_tax(&pool, 2029, Some("1000"), false).await;
+
+        let years = db_net_capital_gain(&pool).await.unwrap();
+        let y = years.iter().find(|y| y.tax_year == 2029).expect("FY2029");
+        assert_eq!(y.minimum_tax_capital_gain, dec("30000"));
+        assert_eq!(y.minimum_tax_gap_amount, dec("1000"));
+        // 1,000 / 30,000 does not terminate, so the rate is kept exact-ish and
+        // the extra tax is the rounded product — the gap.
+        assert!(y.minimum_tax_effective_rate.scale() > 2);
+        assert_eq!(
+            crate::infra::decimal::to_cents(
+                y.minimum_tax_effective_rate * y.minimum_tax_capital_gain
+            ),
+            y.minimum_tax_gap_amount
+        );
+        assert_eq!(y.minimum_tax_extra_income_tax, dec("1000"));
     }
 }

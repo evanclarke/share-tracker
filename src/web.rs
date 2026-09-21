@@ -2708,6 +2708,15 @@ mod tests {
         assert!(js.contains("Residential capital gains"));
         assert!(js.contains("Step 5 — less CGT Concession Amount @ 50%"));
         assert!(js.contains("Steps 3–4 — less quarantined amounts"));
+        // Division 119's 30 per cent minimum tax is printed on the same
+        // document for a reform year, with the recorded gap named as the
+        // taxpayer's own figure — the app computes no basic income tax
+        // liability — and the s 12AA rate rendered verbatim (a rate, not a
+        // money cell).
+        assert!(js.contains("Minimum tax (Division 119)"));
+        assert!(js.contains("Step 1 - 30% benchmark"));
+        assert!(js.contains("Rates Act s 12AA rate (recorded gap / minimum tax capital gain)"));
+        assert!(js.contains("function summaryRateRow(label, value)"));
         // A trust distribution is holding-period tested like a dividend, so its
         // row carries the same franking entitlement status the dividend table
         // prints — a denied credit is visible on the row, never merely absent

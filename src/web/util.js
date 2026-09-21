@@ -1061,6 +1061,11 @@ const COLUMN_KINDS = (function () {
     'net_deferred_non_residential_gain', 'net_deferred_residential_gain',
     'net_non_residential_gain', 'net_residential_gain',
     'capital_losses', 'capital_loss_brought_forward', 'capital_loss_carried_forward',
+    // Division 119's minimum tax (net-capital-gain record): the covered gain,
+    // its 30% benchmark, the recorded gap, the already-borne tax and the extra
+    // income tax are money.
+    'minimum_tax_capital_gain', 'minimum_tax_benchmark', 'minimum_tax_gap_amount',
+    'minimum_tax_already_borne', 'minimum_tax_extra_income_tax',
     'cgt_discount', 'net_capital_gain', 'cgt_event_e10_gain', 'cgt_event_g1_gain',
     'cgt_event_c2_gain', 'dividends_assessable', 'interest_income',
     'foreign_interest_income', 'franking_credits_denied',
@@ -1151,6 +1156,10 @@ const COLUMN_KINDS = (function () {
     // `reform_indexation_factor` is the same figure under the 1 July 2027
     // reform's s 960-275(1B)/(5) rule, shown on the CGT reports.
     'cpi', 'indexation_factor', 'reform_indexation_factor',
+    // Division 119's Rates Act s 12AA rate — the recorded gap over the
+    // minimum tax capital gain. A rate, not money: it is the working the
+    // extra income tax is struck from, so it must not be cent-rounded.
+    'minimum_tax_effective_rate',
   ]);
   // Average price figures — derived (avg_cost_base_per_unit, current_price)
   // or entered (average_price) — round to 4 dp for display; never

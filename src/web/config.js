@@ -473,8 +473,17 @@ export const ENTITIES = [
         default: false,
         hint: 'From 1 July 2027 cost base indexation replaces the 50% CGT discount, and s 114-25 makes it unavailable where you were a foreign or temporary resident at any time between 1 July 2027 (or the asset’s acquisition, if later) and the disposal. Tick the years that contained such a period: a disposal whose testing period runs through a ticked year is not indexed, while its pre-2027 deferred gain is still discounted. Unticked (or no row at all) means Australian resident throughout. The answer is year-granular, so a foreign period later in the disposal’s own financial year also denies indexation — the conservative direction.',
       }),
+      dec('minimum_tax_gap_amount', 'Minimum tax gap amount (Division 119)', {
+        optional: true,
+        default: '',
+        hint: 'Optional. The 30% minimum tax on post-1 July 2027 capital gains applies where it exceeds the tax the gain already bears. Work the gap out under the s 119-10(2) method statement — step 1 is 30% of the year’s minimum tax capital gain, steps 2–4 need a basic income tax liability on your taxable income — and enter the result here. The Net Capital Gain report and the Annual Tax Report then show the 30% benchmark, the tax already borne and the s 12AA extra rate around your figure. Leave blank for no gap: either the gain already bears 30% or more, or you are exempt.',
+      }),
+      bool('minimum_tax_income_support_exempt', 'Exempt from the minimum tax (income support payment)', {
+        default: false,
+        hint: 'Tick if you received a payment of a kind the Minister prescribes for s 119-15 at any time this year — the intended list is the income-support payments (Age Pension, Disability Support Pension, JobSeeker, Parenting Payment, Youth Allowance, farm household allowance, ABSTUDY living allowance, special rate disability pension). An exempt year pays no minimum tax whatever the gap, so its whole working reads nil. Leave unticked (or no row at all) if none applies.',
+      }),
     ],
-    columns: ['tax_year', 'ess_taxed_upfront_reduction_eligible', 'foreign_or_temporary_resident_at_some_time'],
+    columns: ['tax_year', 'ess_taxed_upfront_reduction_eligible', 'foreign_or_temporary_resident_at_some_time', 'minimum_tax_gap_amount', 'minimum_tax_income_support_exempt'],
   },
 ];
 
@@ -582,6 +591,9 @@ export const REPORTS = [
       'net_deferred_non_residential_gain', 'net_deferred_residential_gain',
       'net_non_residential_gain', 'net_residential_gain',
       'cgt_discount', 'net_capital_gain', 'capital_loss_carried_forward',
+      'minimum_tax_capital_gain', 'minimum_tax_benchmark', 'minimum_tax_gap_amount',
+      'minimum_tax_already_borne', 'minimum_tax_effective_rate', 'minimum_tax_extra_income_tax',
+      'minimum_tax_income_support_exempt',
       'cgt_event_e10_gain', 'cgt_event_g1_gain', 'cgt_event_c2_gain', 'taxpayer_basis',
     ],
     expand: {

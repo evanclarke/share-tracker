@@ -232,6 +232,32 @@ function summaryRow(label, value, opts) {
   ]);
 }
 
+// A rate cell: rendered verbatim, never through the money formatter (which
+// would round the s 12AA rate to two decimal places and lose the working).
+function summaryRateRow(label, value) {
+  return el('tr', null, [
+    el('td', { class: 'indent' }, label),
+    el('td', { class: 'num' }, value != null ? cellText(value) : ''),
+  ]);
+}
+
+// Division 119's 30 per cent minimum tax (EM 1.171-1.193), printed for a year
+// the reform governs. The **gap amount is the taxpayer's recorded figure**:
+// steps 2-4 of s 119-10(2) need a basic income tax liability on a taxable
+// income this tool does not compute, so the app derives only the step-1
+// benchmark, the already-borne figure (benchmark less the gap) and the Rates
+// Act s 12AA rate around it.
+function minimumTaxRows(s) {
+  return [
+    summaryRow('Minimum tax capital gain (post-1 July 2027 non-residential gains after losses)', s.minimum_tax_capital_gain),
+    summaryRow('Step 1 - 30% benchmark', s.minimum_tax_benchmark),
+    summaryRow('Recorded minimum tax gap amount (nil = already taxed at 30% or more)', s.minimum_tax_gap_amount),
+    summaryRow('Steps 2-4 - tax the gain already bears as the top slice (benchmark less the recorded gap)', s.minimum_tax_already_borne),
+    summaryRateRow('Rates Act s 12AA rate (recorded gap / minimum tax capital gain)', s.minimum_tax_effective_rate),
+    summaryRow('Extra income tax (rate x minimum tax capital gain)', s.minimum_tax_extra_income_tax),
+  ];
+}
+
 // The ATO's own question-18 worksheet (Other method / Discount method) —
 // `docs/ato/personal-investors-guide-managed-fund-distributions.md`. The
 // layout for a year **before** the CGT reform, when the 50% discount and the
@@ -305,6 +331,15 @@ function cgtSummarySection(s) {
       + 'residential-dwelling income or deductions.') : null,
     el('h4', null, 'Loss position'),
     el('table', { class: 'doc-table summary-table' }, el('tbody', null, lossRows)),
+    s.reform ? el('h4', null, 'Minimum tax (Division 119)') : null,
+    s.reform ? el('table', { class: 'doc-table summary-table' }, el('tbody', null, minimumTaxRows(s))) : null,
+    s.reform ? el('p', { class: 'hint' },
+      'The 30 per cent minimum tax on the year\u2019s post-1 July 2027 capital gains. The minimum tax gap amount is '
+      + 'your own recorded figure for the year — s 119-10(2)\u2019s steps 2-4 need a basic income tax liability on '
+      + 'your taxable income, which this tool does not compute — and the benchmark and Rates Act s 12AA rate are '
+      + 'derived around it. A nil gap is no extra tax: either the gain already bears 30 per cent or more, or the '
+      + 'year carries the s 119-15 income-support-payment exemption'
+      + (s.minimum_tax_income_support_exempt ? ' (recorded for this year).' : '.')) : null,
   ].filter(Boolean));
 }
 
