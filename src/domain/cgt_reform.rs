@@ -18,17 +18,25 @@
 //! Subdivision 112-E deemed disposal and reacquisition at the boundary is
 //! `domain::deferred_gain`, and `reports::realised_gains` splits a disposal
 //! that draws on an asset held across 30 June 2027 into its deferred old-law
-//! component and its post-2027 component. What is *not* built, and what this
-//! module's guards therefore still refuse:
+//! component and its post-2027 component. The **seven-step method statement**
+//! is `reports::net_capital_gain`'s year walk: it consumes current-year and
+//! carried-forward losses against [`GainCategory::ALL`] in the statutory
+//! order, applies the two quarantined-amount steps (structurally nil — this
+//! app holds no residential dwelling), and discounts only the discount capital
+//! gains remaining at step 5 (EM 1.94–1.106). Because every asset this project
+//! holds is non-residential, the four categories collapse to deferred/current;
+//! [`governs_tax_year`] is where an income year's regime is decided. What is
+//! *not* built, and what this module's guards therefore still refuse:
 //!
 //! - a parcel whose cost was **carried** (a rollover replacement, an
 //!   inheritance, a transfer-in) reaching a post-commencement disposal — its
 //!   cost was incurred earlier than its own trade date, so neither its own
 //!   quarter nor a plain boundary split costs it honestly
 //!   ([`guard_deferred_split`]);
-//! - the seven-step method statement (the existing loss chain already has the
-//!   right shape for the non-residential, non-deferred gains this app holds,
-//!   but the deferred categories do not exist yet);
+//! - the two gain categories that need a residential dwelling — the
+//!   residential and deferred-residential categories, and the quarantined
+//!   amounts steps 3–4 apply to them — which stay nil because the data model
+//!   has no dwelling asset class and no dwelling-use record (s 102-6);
 //! - the 30 per cent minimum tax (Division 119); and
 //! - the reform's treatment of non-disposal CGT events (E10/G1/C2), AMMA
 //!   statements and rights sales, which [`guard_discount_events`] still
@@ -41,6 +49,7 @@
 //! apply repealed law guards itself here. A refusal reaches the HTTP layer as a
 //! logged `500` naming the date; it is never a silent discount.
 
+use crate::domain::tax_year::tax_year_for;
 use chrono::NaiveDate;
 
 /// The commencement date for this app's taxpayer: **1 July 2027**.
@@ -121,6 +130,17 @@ impl GainCategory {
         GainCategory::Residential,
     ];
 
+    /// How many categories there are — the length of the per-category gains
+    /// arrays `reports::net_capital_gain`'s method-statement walk carries.
+    pub const COUNT: usize = GainCategory::ALL.len();
+
+    /// This category's position in [`Self::ALL`], for indexing those arrays.
+    /// Declaration order is the statutory order (see the `Ord` note on the
+    /// enum), so `index` is a plain discriminant read.
+    pub fn index(self) -> usize {
+        self as usize
+    }
+
     /// The category's name as the Explanatory Memorandum and s 102-6 give it.
     pub fn label(self) -> &'static str {
         match self {
@@ -151,6 +171,32 @@ pub fn applies_to_event(event_date: NaiveDate) -> bool {
 /// the boundary this module's guard tests.
 pub fn discount_available(event_date: NaiveDate) -> bool {
     !applies_to_event(event_date)
+}
+
+/// The first income year the reform's method statement governs: the income
+/// year that **includes** [`COMMENCEMENT`] (EM 1.219 — "assessments for the
+/// income year that includes 1 July 2027 and for later income years"), i.e.
+/// 1 July 2027 – 30 June 2028, keyed the one shared way by the calendar year
+/// of its 30 June end ([`tax_year_for`]), which is 2028.
+pub fn first_reform_tax_year() -> i32 {
+    tax_year_for(COMMENCEMENT)
+}
+
+/// Whether the reform's seven-step method statement governs `tax_year`.
+///
+/// **No income year straddles the commencement.** An Australian income year
+/// runs 1 July – 30 June, so the income year that includes 1 July 2027
+/// *begins* on it: every CGT event in tax year 2028 or later happens on or
+/// after [`COMMENCEMENT`], and every event in 2027 or earlier happens before
+/// it. There is therefore no year — FY2028 included — in which pre- and
+/// post-commencement events mix: an event dated 30 June 2027 belongs to
+/// FY2027 and the old law, one dated 1 July 2027 to FY2028 and the reform.
+/// The regime is a property of the year, which is what lets
+/// `reports::net_capital_gain`'s single walk pick a statement per year rather
+/// than per event. EM 1.216 reaches the same date from the other direction
+/// (the minimum tax applies to CGT events happening on or after 1 July 2027).
+pub fn governs_tax_year(tax_year: i32) -> bool {
+    tax_year >= first_reform_tax_year()
 }
 
 /// A CGT event the reform governs reached a report that still applies the
@@ -423,6 +469,32 @@ mod tests {
             GainCategory::DeferredNonResidential.label(),
             "deferred non-residential capital gains"
         );
+        // The array index is the statutory rank, which is what the walk's
+        // indexed per-category arrays rely on.
+        for (rank, category) in GainCategory::ALL.into_iter().enumerate() {
+            assert_eq!(category.index(), rank);
+        }
+        assert_eq!(GainCategory::COUNT, 4);
+    }
+
+    /// The reform governs from the income year that includes the commencement
+    /// — FY2028 — and no income year straddles it: the last pre-commencement
+    /// day is in FY2027 and the first reform day in FY2028, so a year's
+    /// regime is well defined per year.
+    #[test]
+    fn the_reform_governs_from_the_income_year_that_includes_commencement() {
+        assert_eq!(first_reform_tax_year(), 2028);
+        assert!(!governs_tax_year(2026));
+        assert!(!governs_tax_year(2027));
+        assert!(governs_tax_year(2028));
+        assert!(governs_tax_year(2029));
+        // The boundary itself: 30 June 2027 is the last day of the last
+        // pre-reform year, 1 July 2027 the first day of the first reform one.
+        let last_old_law_day = COMMENCEMENT.pred_opt().expect("a day before the boundary");
+        assert_eq!(tax_year_for(last_old_law_day), 2027);
+        assert_eq!(tax_year_for(COMMENCEMENT), first_reform_tax_year());
+        assert!(!governs_tax_year(tax_year_for(last_old_law_day)));
+        assert!(governs_tax_year(tax_year_for(COMMENCEMENT)));
     }
 
     /// The deferred-split guard: a disposal on or after 1 July 2027 of an asset

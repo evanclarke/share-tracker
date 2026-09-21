@@ -2,32 +2,70 @@
 //!
 //! Combines the realised disposal gains (per the realised-gains report —
 //! ordinary Sells plus rights sales/lapses, whose gains and losses enter the
-//! same buckets) with the CGT components attributed on AMMA statements, then
-//! computes the assessable net capital gain the ATO way:
+//! same buckets) with the CGT components attributed on AMMA statements and the
+//! E10/G1/C2 excess gains, then computes the assessable net capital gain under
+//! the method statement that governs the year.
 //!
-//!  1. Total the year's gross capital gains, split into:
-//!     - discount-eligible gains (realised parcels held > 12 months, plus AMMA
-//!       discount-method gains grossed up ×2 — the AMMA value is the already-halved
-//!       "discounted capital gain" line, so doubling it restores the gross gain);
-//!     - non-discountable gains (realised parcels held ≤ 12 months, plus AMMA
-//!       indexation-method and other-method gains, neither of which gets the 50%
-//!       discount).
-//!  2. Total the year's capital losses: realised losses, plus the net capital
-//!     loss brought forward from earlier years (losses carry forward
-//!     indefinitely, per `docs/ato/cgt-using-capital-losses.md`). The chain
-//!     starts from the entered opening carried-forward loss in `cgt_settings`
-//!     (losses from before the first year in the system). An AMMA statement's
-//!     `capital_losses_applied` is *not* a loss of the taxpayer's: trust-level
-//!     losses are already netted inside the attributed gains and cannot flow
-//!     to members (`docs/ato/amma-statement-guidance-notes.md`,
-//!     `docs/ato/personal-investors-guide-managed-fund-distributions.md`
-//!     Step 4 — only the investor's own losses enter the worksheet).
-//!  3. Apply losses against gains in the taxpayer-favourable order — non-discountable
-//!     gains first, then discount-eligible gains — so the 50% discount falls on the
-//!     largest possible remaining gain.
-//!  4. Net capital gain = remaining non-discountable gain + 50% of the remaining
-//!     discount-eligible gain. Any unused loss is carried forward into the next
-//!     year in the series.
+//! **Two statements, one walk.** A CGT event happening before 1 July 2027 —
+//! an income year before [`cgt_reform::first_reform_tax_year`] — is assessed
+//! under the old law; an event on or after it is assessed under the reform's
+//! **seven-step** method statement (new s 102-5(1), EM 1.75–1.106). The
+//! commencement is the first day of FY2028, so no income year straddles it and
+//! the regime is a property of the year ([`cgt_reform::governs_tax_year`]).
+//! [`net_years`] is the one walk that implements both, so the parcel optimiser
+//! and pre-sale what-if, which call the same `gross_buckets` + [`net_years`]
+//! pair, follow the same order with no second implementation.
+//!
+//! 1. **Classify** the year's gross gains into the method statement's four
+//!    categories, in statutory order: deferred non-residential, deferred
+//!    residential, non-residential, residential (EM 1.82). This project holds
+//!    only shares, units and crypto, so every gain is **non-residential** and
+//!    the two residential categories are always nil — a residential capital
+//!    gain needs a residential dwelling used to provide residential
+//!    accommodation (s 102-6, EM 1.83–1.85), i.e. an asset class and a
+//!    dwelling-use record this data model has not got. A pre-reform year has
+//!    no deferred component at all, so its whole gain is the one
+//!    non-residential category and the old law's 50% discount still falls on
+//!    its long-held portion. A reform year splits a boundary-crossing disposal
+//!    into its deferred old-law component (discountable only where the old law
+//!    would have discounted it — s 112-160(4)) and its current, indexed
+//!    component, which is never a discount capital gain.
+//! 2. **Total the year's capital losses**: realised losses (deferred and
+//!    current alike — a deferred loss is an ordinary capital loss, EM
+//!    1.97–1.98), plus the net capital loss brought forward from earlier years
+//!    (losses carry forward indefinitely, per
+//!    `docs/ato/cgt-using-capital-losses.md`). The chain starts from the
+//!    entered opening carried-forward loss in `cgt_settings` (losses from
+//!    before the first year in the system). An AMMA statement's
+//!    `capital_losses_applied` is *not* a loss of the taxpayer's: trust-level
+//!    losses are already netted inside the attributed gains and cannot flow
+//!    to members (`docs/ato/amma-statement-guidance-notes.md`,
+//!    `docs/ato/personal-investors-guide-managed-fund-distributions.md`
+//!    Step 4 — only the investor's own losses enter the worksheet).
+//! 3. **Steps 1–2 of the statement**: apply current-year losses, then the
+//!    brought-forward balance, against the categories in that order (EM
+//!    1.94–1.99). Within a category losses absorb the non-discountable slice
+//!    first, so the discount falls on the largest remaining gain — the same
+//!    taxpayer-favourable rule the old law applied across its two buckets.
+//! 4. **Steps 3–4**: apply the year's quarantined amount against the deferred
+//!    residential category, then the residential one. Structurally nil here —
+//!    a quarantined amount is a residential-dwelling rental loss, and this app
+//!    records no residential-dwelling income or deductions (the only rent is
+//!    `amma_net_rent`, a trust-attributed component); the two categories are
+//!    always nil for the same reason. The steps are written out, not omitted,
+//!    so the statement's shape is the statute's.
+//! 5. **Step 5**: reduce by the discount percentage each discount capital gain
+//!    remaining after step 4 (EM 1.103) — for this app only a deferred gain
+//!    the old law would have discounted. The reform repeals the 50% discount
+//!    for a post-2027 indexed gain (EM 1.33, Table 1.1), and the two arms it
+//!    does allow a discount by choice (a new residential dwelling, s 115-102;
+//!    affordable housing, s 115-125) are residential property this model
+//!    cannot hold.
+//! 6. **Step 6** (small business CGT concessions, Division 152) is unchanged
+//!    by the reform and has no data model here.
+//! 7. **Step 7**: add the remaining amounts in each category; the sum is the
+//!    net capital gain. Any unused loss is carried forward into the next year
+//!    in the series.
 //!
 //! **The year record is a worksheet, so it is kept at the cent.** Its input
 //! figures (the gross gains, the year's losses, the brought-forward balance)
@@ -41,7 +79,7 @@
 //! a capital loss forward (label 18V is reported until the loss is used, not
 //! only in years with a CGT event — see [`net_years`]).
 
-use crate::domain::cgt_reform;
+use crate::domain::cgt_reform::{self, GainCategory};
 use crate::domain::cost_base::{self, ParcelRow};
 use crate::domain::open_parcels;
 use crate::domain::tax_year::tax_year_for;
@@ -71,8 +109,35 @@ pub struct NetCapitalGainYear {
     /// held > 12 months + AMMA discount-method gains grossed up ×2).
     pub discount_eligible_gains: Decimal,
     /// Gross non-discountable capital gains (realised parcels held ≤ 12 months +
-    /// AMMA indexation-method + AMMA other-method gains).
+    /// AMMA indexation-method + AMMA other-method gains, plus every post-2027
+    /// component of a disposal the reform governs — the reform indexes that
+    /// component instead of discounting it).
     pub other_gains: Decimal,
+    /// Gross **deferred non-residential** capital gains — the method
+    /// statement's first category, which current-year and carried-forward
+    /// losses reduce before any other (EM 1.94–1.99). The pre-1 July 2027
+    /// component of a disposal that drew on a parcel held across the 30 June
+    /// 2027 deemed disposal (Subdivision 112-E); always nil for a pre-reform
+    /// year, which has no deferred component.
+    pub deferred_non_residential_gains: Decimal,
+    /// Gross **deferred residential** capital gains — always nil: a
+    /// residential capital gain needs a residential dwelling used to provide
+    /// residential accommodation (s 102-6), an asset class and dwelling-use
+    /// record this data model has not got. Present so the walk's category set
+    /// is the statute's.
+    pub deferred_residential_gains: Decimal,
+    /// Gross **non-residential** capital gains — the post-1 July 2027 gains,
+    /// and, for a pre-reform year, the whole year's gains.
+    pub non_residential_gains: Decimal,
+    /// Gross **residential** capital gains — always nil, for the same reason as
+    /// `deferred_residential_gains`.
+    pub residential_gains: Decimal,
+    /// The year's current-year **quarantined amount** applied at steps 3–4.
+    /// Structurally nil: a quarantined amount is a residential-dwelling rental
+    /// loss, and this app records no residential-dwelling income or deductions
+    /// (the only rent is `amma_net_rent`, a trust-attributed component), so
+    /// steps 3–4 have nothing to reduce.
+    pub quarantined_amount: Decimal,
     /// Capital losses arising this year (realised losses), as a positive
     /// amount. Excludes the brought-forward balance. An AMMA's
     /// `capital_losses_applied` is deliberately not counted: those losses were
@@ -89,6 +154,15 @@ pub struct NetCapitalGainYear {
     pub net_discount_eligible_gain: Decimal,
     /// Non-discountable gain remaining after capital losses are applied.
     pub net_other_gain: Decimal,
+    /// The deferred non-residential gain remaining after steps 1–4 (losses and
+    /// the, nil, quarantined amounts), before the step 5 discount.
+    pub net_deferred_non_residential_gain: Decimal,
+    /// The deferred residential gain remaining after steps 1–4 — always nil.
+    pub net_deferred_residential_gain: Decimal,
+    /// The non-residential gain remaining after steps 1–4.
+    pub net_non_residential_gain: Decimal,
+    /// The residential gain remaining after steps 1–4 — always nil.
+    pub net_residential_gain: Decimal,
     /// The 50% CGT discount amount removed from the remaining discount-eligible gain
     /// (= net_discount_eligible_gain / 2, to the cent).
     pub cgt_discount: Decimal,
@@ -146,7 +220,11 @@ pub fn router() -> Router<SqlitePool> {
         .route("/portfolio/net-capital-gain/what-if", post(what_if_handler))
 }
 
-/// CSV export columns — `NetCapitalGainYear`'s fields in declaration order. The
+/// CSV export columns — `NetCapitalGainYearCsv`'s fields in declaration order
+/// (a deliberately frozen subset of [`NetCapitalGainYear`]: the method
+/// statement's new per-category fields are not exported yet, so the header,
+/// its ATO labels and the annual tax report's layout keep their existing
+/// shape until the label-remapping pass). The
 /// csv writer rejects a record whose length differs from this header (see
 /// `reports::export`), so a drift between the two fails loudly.
 const CSV_HEADER: &[&str] = &[
@@ -190,25 +268,61 @@ const CSV_ATO_LABELS: &[&str] = &[
     "",                        // taxpayer_basis
 ];
 
+/// A year's gross capital gains by the method statement's four categories
+/// ([`GainCategory`], in statutory order), each split into the
+/// portion that is a **discount capital gain** under Division 115 and the
+/// portion that is not.
+///
+/// The split is what step 5 reads — "reduce by the discount percentage each
+/// amount of a discount capital gain remaining after step 4" (EM 1.103) — and
+/// it is not the same as the category, for two reasons. A deferred
+/// non-residential gain is a discount capital gain only where the *old law*
+/// would have discounted it, i.e. the units were actually owned for more than
+/// 12 months at the real disposal (s 112-160(4), EM 1.56–1.57); and in a
+/// pre-reform year the whole year is the one non-residential category while
+/// the 50% discount still falls on its long-held slice. Both are stored, so
+/// the walk can consume a category in the statutory order and still discount
+/// only what is discountable within it.
+#[derive(Default, Clone)]
+struct CategoryGains {
+    /// Gross gains per category, indexed by [`GainCategory::index`].
+    gross: [Decimal; GainCategory::COUNT],
+    /// The discount-capital-gain part of each category's gross gains.
+    discountable: [Decimal; GainCategory::COUNT],
+}
+
+impl CategoryGains {
+    /// Fold `gross` into `category`, of which `discountable` is the discount
+    /// capital gain part (`0 ≤ discountable ≤ gross`).
+    fn add(&mut self, category: cgt_reform::GainCategory, gross: Decimal, discountable: Decimal) {
+        debug_assert!(
+            discountable <= gross,
+            "a category's discountable part cannot exceed its gross gain"
+        );
+        let i = category.index();
+        self.gross[i] += gross;
+        self.discountable[i] += discountable;
+    }
+}
+
 /// Gross gains and losses accumulated for one tax year before netting.
 #[derive(Default, Clone)]
 struct GrossBuckets {
-    discount_eligible: Decimal,
-    other: Decimal,
+    gains: CategoryGains,
     losses: Decimal,
-    /// Gross CGT event E10 gains folded into the buckets above (informational).
+    /// Gross CGT event E10 gains folded into `gains` (informational).
     e10: Decimal,
-    /// Gross CGT event G1 gains folded into the buckets above (informational).
+    /// Gross CGT event G1 gains folded into `gains` (informational).
     g1: Decimal,
-    /// Gross CGT event C2 gains folded into the buckets above (informational).
+    /// Gross CGT event C2 gains folded into `gains` (informational).
     c2: Decimal,
-    /// The AMMA discount-method distribution component of `discount_eligible`
-    /// (grossed up ×2), tracked separately so the annual tax report can show
-    /// it on its own ATO-worksheet line ("Discounted Capital Gain
-    /// Distributions (Grossed Up)") — `discount_eligible` itself keeps
-    /// merging it with realised long-term sells and any discount-eligible
-    /// E10/G1 gain, since a capital loss is applied to the combined total
-    /// either way.
+    /// The AMMA discount-method distribution component of the non-residential
+    /// category's discountable slice (grossed up ×2), tracked separately so the
+    /// annual tax report can show it on its own ATO-worksheet line
+    /// ("Discounted Capital Gain Distributions (Grossed Up)") — the category
+    /// keeps merging it with realised long-term sells and any
+    /// discount-eligible E10/G1 gain, since a capital loss is applied to the
+    /// combined total either way.
     amma_discount_grossed_up: Decimal,
 }
 
@@ -787,6 +901,69 @@ pub async fn db_net_capital_gain(
     Ok(years)
 }
 
+/// Fold one realised disposal's gross gains into the categories its tax year's
+/// law assigns them, and mark which of each is a discount capital gain.
+///
+/// A **pre-reform** year is entirely the old law: no event can be on both
+/// sides of a boundary that is itself an income-year boundary
+/// ([`cgt_reform::governs_tax_year`]), so the disposal has no deferred
+/// component and its whole gain is the one non-residential category — with the
+/// 50% discount still falling on its long-held slice.
+///
+/// A **reform** year's disposal that drew on a parcel held across 30 June 2027
+/// carries a deferred pre-2027 component and a current one
+/// (`reports::realised_gains`, Subdivision 112-E). `RealisedGainLoss` keeps
+/// them apart only through its per-parcel rows: `discount_eligible_gain` is
+/// entirely the deferred component the old law discounted — the current
+/// component is never a discount capital gain — while `non_discountable_gain`
+/// mixes the deferred *non-discountable* component with the current one. That
+/// deferred non-discountable part is recovered by reading the split's own
+/// output on each parcel (`ParcelDetail::deferred_gain_loss` with
+/// `deferred_discount_eligible` false) rather than re-deriving the boundary
+/// here; a post-commencement rights sale, the one disposal whose discount flag
+/// is not the split's, is refused wholesale by `reports::realised_gains`
+/// before it reaches this walk.
+///
+/// Both components of a deferred gain are the *deferred non-residential*
+/// category, whatever their discount character: the residential categories
+/// stay nil (s 102-6 — see [`net_years`]).
+fn add_realised_gains(gains: &mut CategoryGains, sale: &super::realised_gains::RealisedGainLoss) {
+    if cgt_reform::governs_tax_year(tax_year_for(sale.sale_date)) {
+        let deferred_discountable = sale.discount_eligible_gain;
+        let deferred_non_discountable: Decimal = sale
+            .parcels
+            .iter()
+            .filter_map(|p| match p.deferred_gain_loss {
+                Some(g) if g > Decimal::ZERO && !p.deferred_discount_eligible => Some(g),
+                _ => None,
+            })
+            .sum();
+        let current = sale.non_discountable_gain - deferred_non_discountable;
+        gains.add(
+            GainCategory::DeferredNonResidential,
+            deferred_discountable,
+            deferred_discountable,
+        );
+        gains.add(
+            GainCategory::DeferredNonResidential,
+            deferred_non_discountable,
+            Decimal::ZERO,
+        );
+        gains.add(GainCategory::NonResidential, current, Decimal::ZERO);
+    } else {
+        gains.add(
+            GainCategory::NonResidential,
+            sale.discount_eligible_gain,
+            sale.discount_eligible_gain,
+        );
+        gains.add(
+            GainCategory::NonResidential,
+            sale.non_discountable_gain,
+            Decimal::ZERO,
+        );
+    }
+}
+
 /// Accumulate the gross per-year buckets from every recorded source:
 /// realised disposals, AMMA CGT components, and the E10/G1 excess gains.
 /// Shared by the report and the what-if (which injects a hypothetical
@@ -799,6 +976,12 @@ pub async fn db_net_capital_gain(
 /// each) — the annual tax report shares one load across its whole document.
 /// Runs on the caller's read transaction, the same snapshot the realised
 /// rows came from.
+///
+/// Each source lands in the method statement's categories by the law
+/// governing its own date: a pre-reform year's gains are the one
+/// non-residential category, a reform year's a deferred and/or current one.
+/// See [`add_realised_gains`] for the split of a disclosed disposal, and
+/// [`net_years`] for why the categories matter.
 async fn gross_buckets(
     conn: &mut sqlx::SqliteConnection,
     realised: &[super::realised_gains::RealisedGainLoss],
@@ -809,8 +992,7 @@ async fn gross_buckets(
     // Realised parcel gains (already AUD), bucketed by the sale's tax year.
     for r in realised {
         let b = buckets.entry(tax_year_for(r.sale_date)).or_default();
-        b.discount_eligible += r.discount_eligible_gain;
-        b.other += r.non_discountable_gain;
+        add_realised_gains(&mut b.gains, r);
         b.losses += r.capital_loss;
     }
 
@@ -855,24 +1037,37 @@ async fn gross_buckets(
         // same fact.
         let b = buckets.entry(tax_year_for(year_end)).or_default();
         let grossed_up = discount_net * Decimal::from(2);
-        b.discount_eligible += grossed_up;
+        // The guard above keeps every statement here pre-commencement, so its
+        // attributed gains are the old law's one non-residential category: the
+        // grossed-up discounted gain is its discountable slice, the
+        // indexation- and other-method gains are not discountable.
+        b.gains
+            .add(GainCategory::NonResidential, grossed_up, grossed_up);
         b.amma_discount_grossed_up += grossed_up;
-        b.other += indexation + other;
+        b.gains.add(
+            GainCategory::NonResidential,
+            indexation + other,
+            Decimal::ZERO,
+        );
     }
 
     // CGT event E10, G1 and C2 gains — a parcel's AMIT and return-of-capital
     // events, which produce capital gains without any disposal of the parcel
-    // itself — are ordinary capital gains: they enter the buckets
+    // itself — are ordinary capital gains: they enter the categories
     // (discount-eligible or not, per the holding period at the event date), so
     // losses can offset them and the discount applies to the eligible portion.
     // They are also reported on their own informational line per event type.
+    // Each event's own guard above keeps them pre-commencement, so each is the
+    // non-residential category with the old law's discount character.
     for gain in non_disposal_gains(&mut *conn, fx).await? {
         let b = buckets.entry(gain.tax_year).or_default();
-        if gain.discount_eligible {
-            b.discount_eligible += gain.amount;
+        let discountable = if gain.discount_eligible {
+            gain.amount
         } else {
-            b.other += gain.amount;
-        }
+            Decimal::ZERO
+        };
+        b.gains
+            .add(GainCategory::NonResidential, gain.amount, discountable);
         match gain.kind {
             CgtEventKind::E10 => b.e10 += gain.amount,
             CgtEventKind::G1 => b.g1 += gain.amount,
@@ -890,21 +1085,36 @@ fn current_tax_year() -> i32 {
     tax_year_for(crate::infra::date::today())
 }
 
-/// Steps 3 and 4: walk the years in order, applying losses ATO-optimally and
-/// chaining unused net capital losses forward — a year's leftover loss
-/// becomes the next year's brought-forward balance (losses carry forward
-/// indefinitely). The chain starts from `brought_forward`, the entered
-/// opening carried-forward loss (pre-system loss years) in `cgt_settings`.
+/// The method statement's steps 1–7, walked over the years in order: classify
+/// each year's gross gains into the four categories, apply current-year and
+/// carried-forward losses against them in the statutory order, apply the
+/// (structurally nil) quarantined amounts at steps 3–4, discount what remains
+/// discountable at step 5, and chain unused net capital losses forward — a
+/// year's leftover loss becomes the next year's brought-forward balance
+/// (losses carry forward indefinitely). The chain starts from
+/// `brought_forward`, the entered opening carried-forward loss (pre-system
+/// loss years) in `cgt_settings`.
+///
+/// **One walk, both statements.** A year before [`cgt_reform::governs_tax_year`]
+/// is the old law, a year from it the reform's seven-step statement (new
+/// s 102-5(1), EM 1.75–1.106). The walk below does not branch on that: a
+/// pre-reform year's gains are all the one non-residential category, so the
+/// statutory category order has a single step and the old law's
+/// non-discountable-before-discountable consumption falls out of the
+/// within-category slice order. A reform year gets the full four-category
+/// order, with **deferred gains before current-year gains** — the change the
+/// reform makes (EM 1.94–1.99). The categories, and why the residential two
+/// are always nil, are documented on the module.
 ///
 /// **Every column here is at the cent** (SCENARIOS W-f). The record's
-/// *inputs* — the two gross-gain buckets, the year's own losses, the
-/// brought-forward balance (which is the previous row's carried-forward
-/// output, so only the entered opening loss is rounded as an input), and the
-/// three informational CGT-event lines — are taken to the cent with
-/// [`crate::infra::decimal::to_cents`]. The rest are *derived* from those
+/// *inputs* — the per-category gross gains and their discountable slices, the
+/// year's own losses, the brought-forward balance (which is the previous row's
+/// carried-forward output, so only the entered opening loss is rounded as an
+/// input), and the three informational CGT-event lines — are taken to the cent
+/// with [`crate::infra::decimal::to_cents`]. The rest are *derived* from those
 /// rounded inputs by exact arithmetic that cannot leave the cent
-/// (`+`, `−`, `min`), except the 50% discount, which halves and so rounds
-/// once itself. The row is what the CSV export, the JSON report and the
+/// (`+`, `−`, `min`), except the discount, which halves and so rounds once per
+/// category. The row is what the CSV export, the JSON report and the
 /// annual tax report's `cgt_summary` all print, so a worksheet whose
 /// columns are rounded independently would print a working that does not
 /// reach its own result: `discount_eligible_gains` of 100.01 halves to
@@ -969,46 +1179,114 @@ fn net_years(
             // export and the annual tax report reaches the figure printed
             // beside it. (`brought_forward` is already at the cent — see the
             // seed above.)
-            let discount_eligible_gains = to_cents(b.discount_eligible);
-            let other_gains = to_cents(b.other);
+            let gross: [Decimal; GainCategory::COUNT] =
+                std::array::from_fn(|i| to_cents(b.gains.gross[i]));
+            let discountable: [Decimal; GainCategory::COUNT] =
+                std::array::from_fn(|i| to_cents(b.gains.discountable[i]));
             let capital_losses = to_cents(b.losses);
 
-            // Apply losses (this year's + brought forward — both offset gains before
-            // the discount) to non-discountable gains first, then to discount-eligible
-            // gains (taxpayer-favourable: the discount falls on the largest remainder).
-            // Addition, subtraction and `min` over cent figures stay at the
-            // cent, so none of these four needs rounding of its own.
-            let available_losses = capital_losses + brought_forward;
-            let loss_to_other = other_gains.min(available_losses);
-            let net_other = other_gains - loss_to_other;
-            let remaining_loss = available_losses - loss_to_other;
+            // Steps 1–2: current-year losses, then the brought-forward
+            // balance, against each category in the statutory order (EM
+            // 1.94–1.99). The two pools are fungible and each is consumed in
+            // that same order, so applying their sum in it gives exactly the
+            // per-category result the statute's two passes give. Within a
+            // category the loss absorbs the non-discountable slice first, so
+            // the discount falls on the largest remaining gain — the
+            // taxpayer-favourable rule the old law applied between its two
+            // buckets, and the same arithmetic here for a pre-reform year,
+            // whose one non-residential category holds both slices. Addition,
+            // subtraction and `min` over cent figures stay at the cent.
+            let mut available_losses = capital_losses + brought_forward;
+            let mut net_gross = [Decimal::ZERO; GainCategory::COUNT];
+            let mut net_discountable = [Decimal::ZERO; GainCategory::COUNT];
+            for category in GainCategory::ALL {
+                let i = category.index();
+                let applied = gross[i].min(available_losses);
+                available_losses -= applied;
+                net_gross[i] = gross[i] - applied;
+                let non_discountable = gross[i] - discountable[i];
+                let to_non_discountable = non_discountable.min(applied);
+                net_discountable[i] = discountable[i] - (applied - to_non_discountable);
+            }
 
-            let loss_to_discount = discount_eligible_gains.min(remaining_loss);
-            let net_discount = discount_eligible_gains - loss_to_discount;
-            let carried_forward = remaining_loss - loss_to_discount;
+            // Steps 3–4: the year's quarantined amount, against the deferred
+            // residential category and then the residential one (EM
+            // 1.100–1.102). The input is structurally nil — a quarantined
+            // amount is a residential-dwelling rental loss, and this model
+            // records no residential-dwelling income or deductions (the only
+            // rent is `amma_net_rent`, a trust-attributed component), while
+            // the two categories it would reduce are nil for the related
+            // s 102-6 reason (see the module doc). The steps are written out
+            // rather than omitted so the statement's shape is the statute's;
+            // with a zero input they reduce nothing.
+            let quarantined_amount = Decimal::ZERO;
+            let mut quarantined_left = quarantined_amount;
+            for category in [GainCategory::DeferredResidential, GainCategory::Residential] {
+                let i = category.index();
+                let applied = net_gross[i].min(quarantined_left);
+                net_gross[i] -= applied;
+                quarantined_left -= applied;
+            }
+            debug_assert_eq!(
+                quarantined_left,
+                Decimal::ZERO,
+                "no quarantined amount can be left beyond the residential categories"
+            );
 
-            // Halving is the one step that can leave the cent: an odd number
-            // of cents of net discount-eligible gain halves onto a half cent
-            // (the mechanism behind SCENARIOS W-d and W-f). The **discount**
-            // is the figure rounded — it is the worksheet's own "less CGT
-            // concession amount @ 50%" line — and the assessable gain is then
-            // what the worksheet says is left after it, rather than a second
-            // independent halving. So `net_discount − cgt_discount` is
-            // exactly the discounted part of `net_capital_gain`, and (the
-            // discount rounding half away from zero) the assessable figure
-            // lands the taxpayer-favourable way on a half cent.
-            let cgt_discount = to_cents(net_discount / two);
+            // Step 5: reduce by the discount percentage each discount capital
+            // gain remaining after step 4 (EM 1.103) — "each amount" is why it
+            // is taken per category, though only one category can be
+            // discountable for this app's assets (a deferred gain the old law
+            // would have discounted). Halving is the one step that can leave
+            // the cent: an odd number of cents of net discountable gain halves
+            // onto a half cent (the mechanism behind SCENARIOS W-d and W-f).
+            // The **discount** is the figure rounded — the worksheet's own
+            // "less CGT concession amount @ 50%" line — and the assessable
+            // gain is what the worksheet says is left after it, rather than a
+            // second independent halving. So `net_discountable − discount` is
+            // exactly the discounted part, and (the discount rounding half
+            // away from zero) the assessable figure lands the
+            // taxpayer-favourable way on a half cent. A post-2027 indexed gain
+            // has an empty `discountable` slice, so it is never reduced here.
+            let mut cgt_discount = Decimal::ZERO;
+            let mut assessable = [Decimal::ZERO; GainCategory::COUNT];
+            for category in GainCategory::ALL {
+                let i = category.index();
+                let discount = to_cents(net_discountable[i] / two);
+                cgt_discount += discount;
+                assessable[i] = net_gross[i] - discount;
+            }
+
+            // Step 6 (small business CGT concessions, Division 152) is
+            // unchanged by the reform and has no data model; step 7 adds what
+            // is left in each category. The two summary splits
+            // (`discount_eligible_gains` / `other_gains` and their nets) are
+            // the discountable and non-discountable slices, which is exactly
+            // what the old law's two buckets were for a pre-reform year.
+            let discount_eligible_gains = discountable.iter().copied().sum();
+            let net_discount_eligible_gain = net_discountable.iter().copied().sum();
+            let net_gross_total: Decimal = net_gross.iter().copied().sum();
             let year = NetCapitalGainYear {
                 tax_year,
                 discount_eligible_gains,
-                other_gains,
+                other_gains: gross.iter().copied().sum::<Decimal>() - discount_eligible_gains,
+                deferred_non_residential_gains: gross[GainCategory::DeferredNonResidential.index()],
+                deferred_residential_gains: gross[GainCategory::DeferredResidential.index()],
+                non_residential_gains: gross[GainCategory::NonResidential.index()],
+                residential_gains: gross[GainCategory::Residential.index()],
+                quarantined_amount,
                 capital_losses,
                 capital_loss_brought_forward: brought_forward,
-                net_discount_eligible_gain: net_discount,
-                net_other_gain: net_other,
+                net_discount_eligible_gain,
+                net_other_gain: net_gross_total - net_discount_eligible_gain,
+                net_deferred_non_residential_gain: net_gross
+                    [GainCategory::DeferredNonResidential.index()],
+                net_deferred_residential_gain: net_gross[GainCategory::DeferredResidential.index()],
+                net_non_residential_gain: net_gross[GainCategory::NonResidential.index()],
+                net_residential_gain: net_gross[GainCategory::Residential.index()],
                 cgt_discount,
-                net_capital_gain: net_other + (net_discount - cgt_discount),
-                capital_loss_carried_forward: carried_forward,
+                net_capital_gain: assessable.iter().copied().sum(),
+                capital_loss_carried_forward: available_losses,
                 cgt_event_e10_gain: to_cents(b.e10),
                 cgt_event_g1_gain: to_cents(b.g1),
                 cgt_event_c2_gain: to_cents(b.c2),
@@ -1018,7 +1296,7 @@ fn net_years(
                 // and on every what-if scenario row.
                 disposals: Vec::new(),
             };
-            brought_forward = carried_forward;
+            brought_forward = available_losses;
             Some(year)
         })
         .collect()
@@ -1436,8 +1714,26 @@ async fn what_if_handler(
     without.entry(tax_year).or_default();
     let mut with = buckets;
     let b = with.entry(tax_year).or_default();
-    b.discount_eligible += totals.discount_eligible_gain;
-    b.other += totals.non_discountable_gain;
+    // The shared hypothetical-disposal guard (`parcel_optimiser::
+    // disposal_figures`) has already refused a post-commencement date, so the
+    // hypothetical is a pre-reform disposal: its gains are the old law's one
+    // non-residential category, with its long-held slice discountable. No
+    // deferred component can be injected — the optimiser does not run the
+    // Subdivision 112-E split for a hypothetical.
+    debug_assert!(
+        !cgt_reform::governs_tax_year(tax_year),
+        "a post-commencement hypothetical disposal is refused before this point"
+    );
+    b.gains.add(
+        GainCategory::NonResidential,
+        totals.discount_eligible_gain,
+        totals.discount_eligible_gain,
+    );
+    b.gains.add(
+        GainCategory::NonResidential,
+        totals.non_discountable_gain,
+        Decimal::ZERO,
+    );
     b.losses += totals.capital_loss;
 
     let year_row = |rows: Vec<NetCapitalGainYear>, scenario: &str| {
@@ -4228,6 +4524,13 @@ mod tests {
         const INPUTS: &[&str] = &[
             "discount_eligible_gains",
             "other_gains",
+            // The method statement's per-category gross gains, and the
+            // quarantined amount steps 3–4 would apply (structurally nil).
+            "deferred_non_residential_gains",
+            "deferred_residential_gains",
+            "non_residential_gains",
+            "residential_gains",
+            "quarantined_amount",
             "capital_losses",
             "capital_loss_brought_forward",
             // Informational, and part of no printed working — but money, and
@@ -4240,6 +4543,11 @@ mod tests {
         const DERIVED: &[&str] = &[
             "net_discount_eligible_gain",
             "net_other_gain",
+            // Each category's gain remaining after steps 1–4.
+            "net_deferred_non_residential_gain",
+            "net_deferred_residential_gain",
+            "net_non_residential_gain",
+            "net_residential_gain",
             "cgt_discount",
             "net_capital_gain",
             "capital_loss_carried_forward",
@@ -4302,6 +4610,47 @@ mod tests {
                 y.net_capital_gain,
                 y.net_other_gain + (y.net_discount_eligible_gain - y.cgt_discount)
             );
+
+            // The method statement's per-category working, from the same
+            // rounded inputs: the loss pool consumes the categories in
+            // statutory order — deferred non-residential, deferred
+            // residential, non-residential, residential — leaving each
+            // category's `net_` figure. (For this pre-reform fixture only the
+            // non-residential category is ever non-zero, which is exactly the
+            // old law the summary assertions above spell out.)
+            let mut loss = available;
+            for (gross, net) in [
+                (
+                    y.deferred_non_residential_gains,
+                    y.net_deferred_non_residential_gain,
+                ),
+                (
+                    y.deferred_residential_gains,
+                    y.net_deferred_residential_gain,
+                ),
+                (y.non_residential_gains, y.net_non_residential_gain),
+                (y.residential_gains, y.net_residential_gain),
+            ] {
+                let applied = gross.min(loss);
+                loss -= applied;
+                assert_eq!(net, gross - applied);
+            }
+            // Whatever the categories could not absorb is the year's
+            // carried-forward balance (steps 3–4 reduce nothing).
+            assert_eq!(loss, y.capital_loss_carried_forward);
+            assert_eq!(
+                y.net_capital_gain,
+                y.net_deferred_non_residential_gain
+                    + y.net_deferred_residential_gain
+                    + y.net_non_residential_gain
+                    + y.net_residential_gain
+                    - y.cgt_discount
+            );
+            assert_eq!(y.quarantined_amount, Decimal::ZERO);
+            assert_eq!(y.deferred_residential_gains, Decimal::ZERO);
+            assert_eq!(y.residential_gains, Decimal::ZERO);
+            assert_eq!(y.net_deferred_residential_gain, Decimal::ZERO);
+            assert_eq!(y.net_residential_gain, Decimal::ZERO);
 
             // …and the chain between years is the same rounded figure.
             if let Some(carried) = previous_carried {
@@ -5662,5 +6011,265 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    // ---- the seven-step method statement (EM 1.75–1.106, s 102-5(1)) -------
+
+    /// Listing 1, trades 1 (buy) and 2 (sell): a parcel **held across
+    /// 30 June 2027** whose FY2029 disposal carries a $200 deferred
+    /// non-residential discount gain and a $285.60 current component — the
+    /// same split `db_a_boundary_crossing_disposal_carries_both_components`
+    /// pins (100 units at $10, a 30 June 2027 close of $12, a $15 sale, and
+    /// the seeded CPI, whose 1.012 factor indexes the $1,200 reacquired base
+    /// to $1,214.40).
+    async fn a_boundary_parcel_with_a_deferred_and_a_current_component(pool: &SqlitePool) {
+        insert_listing(pool, 1, "REF").await;
+        test_support::insert_parcel_bypassing_checks(pool, 1, 1, ymd(2024, 1, 2), "100", "10")
+            .await;
+        test_support::closing_price(1, ymd(2027, 6, 30))
+            .price("12")
+            .insert(pool)
+            .await;
+        test_support::cpi_quarter(pool, ymd(2027, 9, 30), dec("110.85")).await;
+        test_support::cpi_quarter(pool, ymd(2028, 9, 30), dec("112.20")).await;
+        test_support::insert_sell_bypassing_checks(pool, 2, 1, ymd(2028, 9, 20), "100", "15").await;
+        allocate(pool, 1, 2, 1, dec("100")).await;
+    }
+
+    /// A post-1 July 2027 parcel on `listing_id` (its own buy/sell/allocation
+    /// ids in `ids`), held 12 months or less so the reform indexes nothing and
+    /// the gain is the plain proceeds − cost — a clean current-year
+    /// non-residential figure.
+    async fn a_post_reform_parcel(
+        pool: &SqlitePool,
+        listing_id: i64,
+        ids: (i64, i64, i64),
+        buy_date: NaiveDate,
+        sell_date: NaiveDate,
+        buy_price: &str,
+        sell_price: &str,
+    ) {
+        let (buy_id, sell_id, allocation_id) = ids;
+        insert_listing(pool, listing_id, &format!("L{listing_id}")).await;
+        test_support::insert_parcel_bypassing_checks(
+            pool, buy_id, listing_id, buy_date, "100", buy_price,
+        )
+        .await;
+        test_support::insert_sell_bypassing_checks(
+            pool, sell_id, listing_id, sell_date, "100", sell_price,
+        )
+        .await;
+        allocate(pool, allocation_id, sell_id, buy_id, dec("100")).await;
+    }
+
+    /// **EM Example 1.9 (Asher)** — *How to calculate your net capital gain*,
+    /// `docs/ato/cgt-reform-cgt-adjustments.md`, the seven-step method
+    /// statement at paragraphs 1.75–1.106 and the example itself.
+    ///
+    /// Asher's 2030/31 facts, restricted to the arms this data model can hold
+    /// (shares, units and crypto: every gain is non-residential, so the EM's
+    /// residential and quarantined arms are N/A — see the module doc):
+    ///
+    /// - the rights' **deferred non-residential** capital gain of $600,000,
+    ///   a discount capital gain because the pre-1 July 2027 notional gain was
+    ///   one (EM 1.110, s 112-160(4));
+    /// - the ASX shares' **non-residential** capital gain of $12,000; and
+    /// - the carried-forward capital loss of $200,000.
+    ///
+    /// Step 2 reduces the deferred gain to $400,000, step 5 halves it to
+    /// $200,000, and step 7 adds the $12,000 current gain — $212,000, the
+    /// EM's $792,000 step-7 total less its $580,000 residential arm.
+    ///
+    /// The EM also lists a $400,000 **non-residential** component of the
+    /// rights that its own Step 1 category list and Step 7 total omit; the
+    /// test below records that finding and the figure the statute gives when
+    /// the component is included.
+    #[test]
+    fn net_years_reproduces_em_example_1_9_ashers_net_capital_gain() {
+        let mut gains = CategoryGains::default();
+        gains.add(
+            GainCategory::DeferredNonResidential,
+            dec("600000"),
+            dec("600000"),
+        );
+        gains.add(GainCategory::NonResidential, dec("12000"), Decimal::ZERO);
+        let buckets = HashMap::from([(
+            2031,
+            GrossBuckets {
+                gains,
+                ..GrossBuckets::default()
+            },
+        )]);
+
+        let years = net_years(buckets, dec("200000"), 2031);
+        assert_eq!(years.len(), 1);
+        let y = &years[0];
+        assert_eq!(y.tax_year, 2031);
+        assert_eq!(y.deferred_non_residential_gains, dec("600000"));
+        assert_eq!(y.non_residential_gains, dec("12000"));
+        assert_eq!(y.capital_loss_brought_forward, dec("200000"));
+        // Step 2: the $200,000 carried-forward loss reduces the deferred
+        // non-residential gain first.
+        assert_eq!(y.net_deferred_non_residential_gain, dec("400000"));
+        // Step 5: the deferred gain is a discount capital gain and halves.
+        assert_eq!(y.cgt_discount, dec("200000"));
+        // Step 7: $200,000 deferred + $12,000 current.
+        assert_eq!(y.net_non_residential_gain, dec("12000"));
+        assert_eq!(y.net_capital_gain, dec("212000"));
+        assert_eq!(y.capital_loss_carried_forward, Decimal::ZERO);
+    }
+
+    /// The method statement on **all** of EM Example 1.9's non-residential
+    /// arms — including the rights' $400,000 current component that the EM
+    /// states on the rights but then drops from its Step 1 category list and
+    /// its Step 7 total. This is the figure the statute gives when it is
+    /// included: the $600,000 deferred gain less the $200,000 loss is halved
+    /// to $200,000, plus the $400,000 and $12,000 current gains = $612,000.
+    /// Recorded so the EM's arithmetic gap is a stated finding, not silently
+    /// adopted either way; the required $212,000 reproduction (the EM's own
+    /// Step 1 amounts) is the test above.
+    #[test]
+    fn net_years_reproduces_em_example_1_9_with_the_rights_current_component() {
+        let mut gains = CategoryGains::default();
+        gains.add(
+            GainCategory::DeferredNonResidential,
+            dec("600000"),
+            dec("600000"),
+        );
+        gains.add(GainCategory::NonResidential, dec("400000"), Decimal::ZERO);
+        gains.add(GainCategory::NonResidential, dec("12000"), Decimal::ZERO);
+        let buckets = HashMap::from([(
+            2031,
+            GrossBuckets {
+                gains,
+                ..GrossBuckets::default()
+            },
+        )]);
+
+        let years = net_years(buckets, dec("200000"), 2031);
+        let y = &years[0];
+        assert_eq!(y.net_deferred_non_residential_gain, dec("400000"));
+        assert_eq!(y.cgt_discount, dec("200000"));
+        assert_eq!(y.net_non_residential_gain, dec("412000"));
+        assert_eq!(y.net_capital_gain, dec("612000"));
+    }
+
+    /// Steps 1–2: the loss pool reduces the **deferred** category before the
+    /// current-year non-residential one (EM 1.94–1.99). A $200 loss exactly
+    /// consumes the $200 deferred gain and leaves the $1,285.60 of current
+    /// gains whole. The old two-bucket order — losses against the
+    /// non-discountable gains first — would instead have netted the current
+    /// category to $1,085.60 and discounted the deferred $200 to $100, for
+    /// $1,185.60, so the asserted $1,285.60 discriminates the order rather
+    /// than merely being consistent with it.
+    #[tokio::test]
+    async fn db_reform_losses_reduce_the_deferred_gain_before_the_current_year_gain() {
+        let pool = test_pool().await;
+        a_boundary_parcel_with_a_deferred_and_a_current_component(&pool).await;
+        // A post-2027 $1,000 gain and a post-2027 $200 loss, same year.
+        a_post_reform_parcel(
+            &pool,
+            2,
+            (10, 11, 10),
+            ymd(2028, 1, 5),
+            ymd(2028, 9, 20),
+            "100",
+            "110",
+        )
+        .await;
+        a_post_reform_parcel(
+            &pool,
+            3,
+            (20, 21, 20),
+            ymd(2028, 2, 5),
+            ymd(2028, 9, 20),
+            "100",
+            "98",
+        )
+        .await;
+
+        let years = db_net_capital_gain(&pool).await.unwrap();
+        let y = years.iter().find(|y| y.tax_year == 2029).expect("FY2029");
+        assert_eq!(y.deferred_non_residential_gains, dec("200"));
+        assert_eq!(y.non_residential_gains, dec("1285.60"));
+        assert_eq!(y.capital_losses, dec("200"));
+        assert_eq!(y.net_deferred_non_residential_gain, Decimal::ZERO);
+        assert_eq!(y.net_non_residential_gain, dec("1285.60"));
+        assert_eq!(y.cgt_discount, Decimal::ZERO);
+        assert_eq!(y.net_capital_gain, dec("1285.60"));
+        assert_eq!(y.capital_loss_carried_forward, Decimal::ZERO);
+    }
+
+    /// Step 5: the discount falls only on the discountable category — the
+    /// deferred $200 halves to $100 — and never on a post-1 July 2027 indexed
+    /// gain (EM 1.33, Table 1.1; EM 1.103). The $1,285.60 current category is
+    /// untouched.
+    #[tokio::test]
+    async fn db_the_reform_discount_falls_only_on_the_deferred_discountable_gain() {
+        let pool = test_pool().await;
+        a_boundary_parcel_with_a_deferred_and_a_current_component(&pool).await;
+        a_post_reform_parcel(
+            &pool,
+            2,
+            (10, 11, 10),
+            ymd(2028, 1, 5),
+            ymd(2028, 9, 20),
+            "100",
+            "110",
+        )
+        .await;
+
+        let years = db_net_capital_gain(&pool).await.unwrap();
+        let y = years.iter().find(|y| y.tax_year == 2029).expect("FY2029");
+        assert_eq!(y.net_deferred_non_residential_gain, dec("200"));
+        assert_eq!(y.discount_eligible_gains, dec("200"));
+        assert_eq!(y.cgt_discount, dec("100"));
+        assert_eq!(y.net_non_residential_gain, dec("1285.60"));
+        assert_eq!(y.net_capital_gain, dec("1385.60"));
+    }
+
+    /// The loss chain still carries a remainder into the following year. A
+    /// $785.60 FY2029 loss consumes the year's $200 deferred gain and then
+    /// its $285.60 current gain, leaving $300 carried forward; FY2030's $400
+    /// current gain is reduced to $100 by it.
+    #[tokio::test]
+    async fn db_a_reform_year_loss_remainder_carries_into_the_next_year() {
+        let pool = test_pool().await;
+        a_boundary_parcel_with_a_deferred_and_a_current_component(&pool).await;
+        // FY2029: a post-2027 parcel sold $785.60 below cost.
+        a_post_reform_parcel(
+            &pool,
+            3,
+            (20, 21, 20),
+            ymd(2028, 2, 5),
+            ymd(2028, 9, 20),
+            "100",
+            "92.144",
+        )
+        .await;
+        // FY2030: a post-2027 parcel held under 12 months for a $400 gain.
+        a_post_reform_parcel(
+            &pool,
+            4,
+            (30, 31, 30),
+            ymd(2029, 2, 5),
+            ymd(2029, 9, 20),
+            "10",
+            "14",
+        )
+        .await;
+
+        let years = db_net_capital_gain(&pool).await.unwrap();
+        let y29 = years.iter().find(|y| y.tax_year == 2029).expect("FY2029");
+        assert_eq!(y29.capital_losses, dec("785.60"));
+        assert_eq!(y29.net_capital_gain, Decimal::ZERO);
+        assert_eq!(y29.capital_loss_carried_forward, dec("300"));
+
+        let y30 = years.iter().find(|y| y.tax_year == 2030).expect("FY2030");
+        assert_eq!(y30.capital_loss_brought_forward, dec("300"));
+        assert_eq!(y30.non_residential_gains, dec("400"));
+        assert_eq!(y30.net_non_residential_gain, dec("100"));
+        assert_eq!(y30.net_capital_gain, dec("100"));
+        assert_eq!(y30.capital_loss_carried_forward, Decimal::ZERO);
     }
 }

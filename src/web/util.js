@@ -1053,6 +1053,13 @@ const COLUMN_KINDS = (function () {
     'proceeds', 'cost_base', 'capital_gain_loss', 'discount_eligible_gain',
     'non_discountable_gain', 'capital_loss', 'invested', 'income', 'total_return',
     'discount_eligible_gains', 'net_discount_eligible_gain', 'other_gains', 'net_other_gain',
+    // The reformed method statement's four gain categories, the gain each is
+    // left with after steps 1-4, and the (structurally nil) quarantined amount
+    // of steps 3-4 — all AUD money on the net-capital-gain record.
+    'deferred_non_residential_gains', 'deferred_residential_gains',
+    'non_residential_gains', 'residential_gains', 'quarantined_amount',
+    'net_deferred_non_residential_gain', 'net_deferred_residential_gain',
+    'net_non_residential_gain', 'net_residential_gain',
     'capital_losses', 'capital_loss_brought_forward', 'capital_loss_carried_forward',
     'cgt_discount', 'net_capital_gain', 'cgt_event_e10_gain', 'cgt_event_g1_gain',
     'cgt_event_c2_gain', 'dividends_assessable', 'interest_income',
