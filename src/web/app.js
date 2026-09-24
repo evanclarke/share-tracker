@@ -15,7 +15,7 @@ import {
   el, toastIfCurrent, setMainIfCurrent, beginNavigation, navigationToken,
   isCurrentNavigation, onViewTeardown, reload, looksNumeric, isTimestamp, fmtLocalTimestamp, utcTooltip,
   cellText, numericDisplay, decCompare, moneyText, moneyEl, columnKinds, columnLabel, columnLabelMaps,
-  fkLabelMaps, api, apiUrl, pathSeg, safeDecodeURIComponent, nextId, loadOptions, listingNamer,
+  fkLabelMaps, api, apiUrl, pathSeg, safeDecodeURIComponent, loadOptions, listingNamer,
   describeTrade, tradeOrigin,
   columnLinks, listingLinkFrom, defaultSortColumn,
   tableViewCache, debounce,
@@ -659,16 +659,11 @@ async function viewEntityForm(entity, keyParts, seq = navigationToken()) {
   form.addEventListener('submit', async function (ev) {
     ev.preventDefault();
     try {
-      // Resolve the key path.
-      let keyVals;
-      if (editing) {
-        keyVals = entity.keyFields.map(function (kf) { return existing[kf.name]; });
-      } else {
-        keyVals = [];
-        for (const kf of entity.keyFields) {
-          keyVals.push(kf.auto ? await nextId(entity.api) : readFieldValue(kf, form));
-        }
-      }
+      // Resolve the key path. A create POSTs to the collection and lets the
+      // server assign the key — the response carries the stored row, so its id
+      // is known without a `max(id) + 1` guess (which raced, and could
+      // silently overwrite a row that had taken the guessed id first). An edit
+      // PUTs the existing key, which stays the upsert it always was.
       const body = {};
       entity.fields.forEach(function (f) {
         // A field whose type group is not selected has no input; it submits
@@ -676,8 +671,21 @@ async function viewEntityForm(entity, keyParts, seq = navigationToken()) {
         body[f.name] = form.querySelector('[name="' + f.name + '"]') ? readFieldValue(f, form) : null;
       });
       if (wired && wired.transformBody) wired.transformBody(body);
-      await api('PUT', entity.api + '/' + keyVals.join('/'), body);
-      const msg = wired && wired.afterSave ? await wired.afterSave(keyVals.join('/'), seq) : null;
+      let idPath;
+      if (editing) {
+        idPath = entity.keyFields.map(function (kf) { return existing[kf.name]; }).join('/');
+        await api('PUT', entity.api + '/' + idPath, body);
+      } else {
+        const created = await api('POST', entity.api, body);
+        // The echoed row supplies the server-assigned key. Key fields the
+        // server does not allocate are read back from the form.
+        idPath = entity.keyFields.map(function (kf) {
+          return kf.auto && created && created[kf.name] !== undefined
+            ? created[kf.name]
+            : readFieldValue(kf, form);
+        }).join('/');
+      }
+      const msg = wired && wired.afterSave ? await wired.afterSave(idPath, seq) : null;
       if (msg !== '') toastIfCurrent(seq, msg || 'Saved.');
       location.hash = '#/e/' + entity.slug;
     } catch (e) {
@@ -817,8 +825,13 @@ async function viewSellForm(id, seq = navigationToken()) {
       const body = {};
       SELL_FIELDS.forEach(function (f) { body[f.name] = readFieldValue(f, form); });
       body.allocations = allocEditor.read();
-      const sellId = editing ? Number(id) : await nextId('/trades');
-      await api('PUT', '/sells/' + sellId, body);
+      if (editing) {
+        await api('PUT', '/sells/' + Number(id), body);
+      } else {
+        // POST /sells lets the server assign the Sell's id; it answers with the
+        // created trade, so the id is read back rather than guessed.
+        await api('POST', '/sells', body);
+      }
       toastIfCurrent(seq, 'Sell saved.');
       location.hash = '#/sells';
     } catch (e) {
@@ -950,7 +963,10 @@ async function viewTransferForm(seq = navigationToken()) {
         body.fee_allocations = feeAllocs;
         body.fee_market_price = readFieldValue(feePrice, form);
       }
-      const result = await api('PUT', '/transfers/' + await nextId('/transfers'), body);
+      // POST /transfers lets the server assign the transfer's id and answers
+      // with the whole created group (the transfer, its transfer-out Sell, the
+      // transfer-in Buys and any fee Sell), which is what the toast reads.
+      const result = await api('POST', '/transfers', body);
       const n = result && result.transfer_ins ? result.transfer_ins.length : 0;
       const listingName = await listingNamer();
       const acct = (await fkLabelMaps({ a: 'holdingAccounts' })).a || {};

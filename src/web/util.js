@@ -656,13 +656,6 @@ export async function api(method, path, body) {
   return ct.indexOf('application/json') !== -1 ? res.json() : null;
 }
 
-export async function nextId(apiPath) {
-  const rows = await api('GET', apiPath);
-  let max = 0;
-  rows.forEach(function (r) { if (typeof r.id === 'number' && r.id > max) max = r.id; });
-  return max + 1;
-}
-
 // Options for <select> fields, fetched fresh each render so newly created
 // referenced rows (e.g. a just-added listing) are always available.
 export async function loadOptions(source) {

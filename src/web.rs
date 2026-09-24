@@ -1323,6 +1323,33 @@ mod tests {
         assert!(!js.contains("ATTACH_OWNER_LABEL"));
     }
 
+    /// Creates no longer guess the next id.
+    ///
+    /// The form used to compute `max(id) + 1` from a `GET` of the collection
+    /// and `PUT` to it, which raced (two creates could read the same max, and
+    /// the second silently replaced the first through the upsert's
+    /// `ON CONFLICT ... DO UPDATE`) and never learned the id it had written.
+    /// A create now POSTs to the collection, takes the server-assigned key off
+    /// the response, and hands that same key to the form's `afterSave` hook —
+    /// which is how the income form's "Reinvested under DRP" tick and the AMMA
+    /// form's adjustment generator still reach the row they just created.
+    #[tokio::test]
+    async fn creates_use_the_server_assigned_id_rather_than_guessing_one() {
+        let js = app_js_body().await;
+        // The create POSTs to the collection; the edit PUTs the named key.
+        assert!(js.contains("const created = await api('POST', entity.api, body)"));
+        assert!(js.contains("await api('PUT', entity.api + '/' + idPath, body)"));
+        // The assigned key is read off the response and used for the follow-up.
+        assert!(js.contains("kf.auto && created && created[kf.name] !== undefined"));
+        assert!(js.contains("wired.afterSave(idPath, seq)"));
+        // The bespoke create screens go through their own collection POSTs.
+        assert!(js.contains("await api('POST', '/sells', body)"));
+        assert!(js.contains("await api('POST', '/transfers', body)"));
+        // The guessed-id helper is gone, not merely unused.
+        assert!(!js.contains("export async function nextId"));
+        assert!(!js.contains("nextId("));
+    }
+
     #[tokio::test]
     async fn error_toasts_persist_until_dismissed_and_announce_themselves() {
         let js = app_js_body().await;
