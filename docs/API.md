@@ -68,6 +68,23 @@ The session cookie is self-contained (its own signature and expiry, checked agai
 
 No CSRF token is issued or required: the cookie's `SameSite=Lax` withholds it from cross-site `POST`/`PUT`/`DELETE` requests, which covers every state-changing route in this API (`GET` routes are read-only).
 
+## Creating a record
+
+Every entity whose key is a surrogate `id` accepts **two** write entry points, and they differ in exactly one thing — who chooses the id:
+
+| Method | Path | Who picks the id | Answers |
+|--------|------|------------------|---------|
+| `POST` | `/<collection>` | the database | `201 Created` with the created row as JSON, its assigned `id` included |
+| `PUT` | `/<collection>/:id` | the caller | `204 No Content` (an upsert; see below) |
+
+**`POST /<collection>` is the way to add a record.** It takes the same body as the `PUT` — every field except the key — and leaves the id to the database's `AUTOINCREMENT` column, so there is no `max(id) + 1` to compute, no id to get wrong, and no chance of a create landing on a row that already exists. The response is the *stored* row, so a follow-up call that needs the new record's id (attaching the registry advice that documents it, for one) can use it directly with no re-read of the collection. The create runs the entity's full write-time validation, so anything a `PUT` refuses — a franking credit over the ceiling, a Sell whose allocations do not sum to its quantity — is refused identically here, with the same `422` body, and nothing is stored.
+
+**An id-assigning endpoint never overwrites.** `AUTOINCREMENT` only governs the ids SQLite itself picks, which is why the create omits the `id` column rather than binding a value: a create can therefore never take back an id a deleted row held, and so can never inherit that row's [audit trail](#row-history) — the re-use a *user* can still cause deliberately with `PUT` (see [Row history](#row-history)). One table is honest about being the exception: **`holding_accounts` is the only id-keyed entity table whose id is a plain `INTEGER PRIMARY KEY`**, not `AUTOINCREMENT` (it is neither audited nor part of migration 0045's rebuild). A create there may therefore be re-issued the id of a deleted account — harmless for the reason the whole rule exists, since there is no trail to inherit, and the accounts whose reuse could actually confuse anything cannot be deleted at all (an account holding trades, income, AMMA statements, DRP enrolments, or a transfer reference is refused, as is the seeded default).
+
+**`PUT /<collection>/:id` remains the upsert it has always been**: it creates the row if no row holds that id and replaces it if one does, both answering `204 No Content`. It stays the right verb for an edit, for a write that must be idempotent, and for deliberately re-entering a mis-keyed row under its old id — the case that can hand an id to a second record. Two consequences worth stating: a `PUT` answers **no body**, so a client that has just created a row this way still does not learn its id; and because it upserts, `PUT`-ing to an id that is already taken **silently replaces that row** rather than failing.
+
+Entities keyed on something other than a surrogate id are unaffected: the reference tables `exchanges` (`mic`), `currencies` (`code`) and `mic_registry` (`mic`) are keyed on their own natural key, which the body supplies; `exchange_holidays` is keyed on a `(mic, holiday_date)` pair; and `tax_year_settings` is keyed on the financial year by design. There the key **is** the fact's identity, so there is nothing to allocate.
+
 ## Exchanges
 
 | Method | Path | Description |
@@ -109,6 +126,7 @@ Because the calendar changes a reported figure and is hand-maintained — there 
 |--------|------|-------------|
 | `GET` | `/listings` | List all listings |
 | `GET` | `/listings/:id` | Get one listing |
+| `POST` | `/listings` | Create a listing, letting the database assign its id (see [Creating a record](#creating-a-record)) |
 | `PUT` | `/listings/:id` | Create or update a listing |
 | `DELETE` | `/listings/:id` | Delete a listing |
 | `POST` | `/listings/:id/rename` | Record a ticker or exchange change as a dated event |
@@ -180,6 +198,7 @@ Custody/location accounts within the one taxpayer — e.g. an employer share-pla
 |--------|------|-------------|
 | `GET` | `/holding_accounts` | List all holding accounts |
 | `GET` | `/holding_accounts/:id` | Get one holding account |
+| `POST` | `/holding_accounts` | Create a holding account, letting the database assign its id (see [Creating a record](#creating-a-record)) |
 | `PUT` | `/holding_accounts/:id` | Create or rename a holding account |
 | `DELETE` | `/holding_accounts/:id` | Delete a holding account |
 
@@ -379,6 +398,7 @@ Two things follow from running it three times a day over a portfolio spanning th
 |--------|------|-------------|
 | `GET` | `/trades` | List all trades |
 | `GET` | `/trades/:id` | Get one trade |
+| `POST` | `/trades` | Create a trade, letting the database assign its id (see [Creating a record](#creating-a-record)) |
 | `PUT` | `/trades/:id` | Create or update a trade |
 | `DELETE` | `/trades/:id` | Delete a trade |
 
@@ -432,6 +452,7 @@ An unreferenced trade edits and deletes freely.
 |--------|------|-------------|
 | `GET` | `/income` | List all income records |
 | `GET` | `/income/:id` | Get one income record |
+| `POST` | `/income` | Create an income record, letting the database assign its id (see [Creating a record](#creating-a-record)) |
 | `PUT` | `/income/:id` | Create or update an income record |
 | `DELETE` | `/income/:id` | Delete an income record |
 | `POST` | `/income/:id/reinvest` | Create the DRP reinvestment trade for this distribution (see [DRP reinvestment](#drp-reinvestment)) |
@@ -479,6 +500,7 @@ Interest income (`docs/ato/tax-return-labels-2026.md`): bank, term-deposit, or b
 |--------|------|-------------|
 | `GET` | `/interest_income` | List all interest income records |
 | `GET` | `/interest_income/:id` | Get one interest income record |
+| `POST` | `/interest_income` | Create an interest income record, letting the database assign its id (see [Creating a record](#creating-a-record)) |
 | `PUT` | `/interest_income/:id` | Create or update an interest income record |
 | `DELETE` | `/interest_income/:id` | Delete an interest income record |
 
@@ -494,6 +516,7 @@ Deductible investment expenses (`docs/ato/investment-income-deductions.md`, `doc
 |--------|------|-------------|
 | `GET` | `/investment_expenses` | List all investment expenses |
 | `GET` | `/investment_expenses/:id` | Get one investment expense |
+| `POST` | `/investment_expenses` | Create an investment expense, letting the database assign its id (see [Creating a record](#creating-a-record)) |
 | `PUT` | `/investment_expenses/:id` | Create or update an investment expense |
 | `DELETE` | `/investment_expenses/:id` | Delete an investment expense |
 
@@ -511,6 +534,7 @@ Fields: `date_incurred` (its month sets the financial year and the ATO FX conver
 |--------|------|-------------|
 | `GET` | `/amma_statements` | List all AMMA statements |
 | `GET` | `/amma_statements/:id` | Get one AMMA statement |
+| `POST` | `/amma_statements` | Create an AMMA statement, letting the database assign its id (see [Creating a record](#creating-a-record)) |
 | `PUT` | `/amma_statements/:id` | Create or update an AMMA statement |
 | `DELETE` | `/amma_statements/:id` | Delete an AMMA statement |
 | `POST` | `/amma_statements/:id/generate_adjustments` | Generate this statement's per-parcel [AMIT adjustments](#amit-adjustments) (see [Generating AMIT adjustments](#generating-amit-adjustments)) |
@@ -553,6 +577,7 @@ A **share split** between the covered parcels' acquisition dates and the year en
 |--------|------|-------------|
 | `GET` | `/amit_adjustments` | List all AMIT adjustments |
 | `GET` | `/amit_adjustments/:id` | Get one AMIT adjustment |
+| `POST` | `/amit_adjustments` | Create an AMIT adjustment, letting the database assign its id (see [Creating a record](#creating-a-record)) |
 | `PUT` | `/amit_adjustments/:id` | Create or update an AMIT adjustment |
 | `DELETE` | `/amit_adjustments/:id` | Delete an AMIT adjustment |
 
@@ -576,6 +601,7 @@ The income side of an employee share scheme interest (`docs/ato/employee-share-s
 |--------|------|-------------|
 | `GET` | `/ess_statements` | List all ESS statements |
 | `GET` | `/ess_statements/:id` | Get one ESS statement |
+| `POST` | `/ess_statements` | Create an ESS statement, letting the database assign its id (see [Creating a record](#creating-a-record)) |
 | `PUT` | `/ess_statements/:id` | Create or update an ESS statement |
 | `DELETE` | `/ess_statements/:id` | Delete an ESS statement (and its vest Buy, if any) |
 | `POST` | `/ess_statements/:id/vest` | Create the cost-base-reset Buy for this statement (see [Vesting](#vesting-an-ess-statement)) |
@@ -635,6 +661,7 @@ Records when each holding reinvests its distributions, as **dated enrolment peri
 |--------|------|-------------|
 | `GET` | `/drp_enrolments` | List all enrolment periods |
 | `GET` | `/drp_enrolments/:id` | Get one enrolment period |
+| `POST` | `/drp_enrolments` | Create an enrolment period, letting the database assign its id (see [Creating a record](#creating-a-record)) |
 | `PUT` | `/drp_enrolments/:id` | Create or update an enrolment period |
 | `DELETE` | `/drp_enrolments/:id` | Remove an enrolment period (refused once it covers a reinvestment) |
 
@@ -725,6 +752,7 @@ Where **cash in lieu of a fraction is actually received**, it is the disposal of
 |--------|------|-------------|
 | `GET` | `/corporate_actions` | List corporate actions |
 | `GET` | `/corporate_actions/:id` | Get one corporate action |
+| `POST` | `/corporate_actions` | Create a corporate action, letting the database assign its id (see [Creating a record](#creating-a-record)) |
 | `PUT` | `/corporate_actions/:id` | Create or update a corporate action |
 | `DELETE` | `/corporate_actions/:id` | Delete a corporate action |
 | `POST` | `/corporate_actions/:id/exercise` | Exercise a `RightsIssue` into a new Buy parcel |
@@ -1002,10 +1030,11 @@ Returns `204 No Content` on success, `404 Not Found` if no income record has tha
 ## Sells
 
 ```
+POST /sells
 PUT /sells/:id
 ```
 
-Creates or replaces a Sell trade **together with all of its parcel allocations** in a single transaction. This is the only write path for Sell trades and their allocations, which guarantees that a Sell can never be persisted under- or over-allocated.
+Creates or replaces a Sell trade **together with all of its parcel allocations** in a single transaction. This is the only write path for Sell trades and their allocations, which guarantees that a Sell can never be persisted under- or over-allocated. `POST /sells` is the create: its body is identical and the database assigns the Sell's id, the created trade coming back as `201 Created` (a Sell's id is a `trades` id — see [Creating a record](#creating-a-record)).
 
 A Sell's `date`, like a trade's, must be a day its exchange actually traded — a weekend or a seeded [exchange holiday](#exchange-holidays) returns `422` naming the day and the exchange (see [Trades](#trades) for the rule and its exemptions). The disposal date is the CGT event date, so it decides the financial year the gain falls in and whether the 12-month discount was earned. The closing Sell each parcel-substituting operation writes (scrip-for-scrip exchange, demerger, transfer, buy-back participation, worthless-shares recognise) is exempt — it takes its action's own date — and surfaces on the [health report](#health) instead.
 
@@ -1051,6 +1080,7 @@ Moves a quantity of one listing between two holding accounts of the same owner �
 |--------|------|-------------|
 | `GET` | `/transfers` | List all transfers |
 | `GET` | `/transfers/:id` | Get one transfer |
+| `POST` | `/transfers` | Record **and execute** a transfer, letting the database assign its id (see [Creating a record](#creating-a-record)) |
 | `PUT` | `/transfers/:id` | Record **and execute** a transfer, atomically |
 | `DELETE` | `/transfers/:id` | Delete the transfer and its whole trade group, restoring the pre-transfer holding |
 
@@ -1095,6 +1125,7 @@ Inherited parcels from a deceased estate (`docs/ato/inherited-assets-cost-base.m
 |--------|------|-------------|
 | `GET` | `/inheritances` | List all inheritances |
 | `GET` | `/inheritances/:id` | Get one inheritance |
+| `POST` | `/inheritances` | Record an inheritance and create its parcel Buy, letting the database assign its id (see [Creating a record](#creating-a-record)) |
 | `PUT` | `/inheritances/:id` | Record an inheritance **and create/update its parcel Buy**, atomically |
 | `DELETE` | `/inheritances/:id` | Delete the inheritance and its parcel Buy together |
 

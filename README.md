@@ -125,6 +125,14 @@ node --test 'src/web/*.test.js'
 
 `scripts/ui-smoke.sh` is a headless end-to-end smoke check: it starts the server on a temp database seeded from the demo fixture, renders key routes in headless Chrome, and asserts each view drew real data — catching a broken static-module route or a load-time JS exception that neither test suite can. CI runs all three on every push.
 
+**If those Chrome checks fail to render on a locked-down machine**, pass Chrome the sandbox opt-out — `scripts/ui-check.sh` and `scripts/ui-drive.js` take extra browser flags through `CHROME_FLAGS` (`scripts/ui-smoke.sh` already adds this one for itself when `CI` is set):
+
+```bash
+CHROME_FLAGS=--no-sandbox scripts/ui-smoke.sh
+```
+
+The symptom is silent rather than obvious: Chrome exits with `sandbox initialization failed: Operation not permitted` (a sandboxed development shell, or a kernel restricting unprivileged user namespaces), never writes its `DevToolsActivePort` file, and the script reports a rendering timeout or missing markers as though the UI were broken. The flag is safe for these checks because every one of them renders our **own local server** — it is the same opt-out CI has always used, just applied by hand off the runner.
+
 ### Supply-chain checks
 
 The server talks to the internet (Yahoo Finance, the RBA/ISO feeds), so its dependency tree is watched, not just its own code. CI fails on any known [RustSec](https://rustsec.org) advisory against the dependency tree via `cargo deny check advisories` (configured by [`deny.toml`](deny.toml)). The local equivalent:

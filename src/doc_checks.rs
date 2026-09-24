@@ -459,6 +459,46 @@ fn audited_ids_are_never_reused_documented() {
     assert!(API_MD.contains("Their `id` is **`0`**: a preview writes nothing"));
 }
 
+/// Docs-sync pin for the create convention (`POST /<collection>`).
+///
+/// The half of the id-reuse decision the audit-trail docs above left open: the
+/// server no longer computes ids, and a caller no longer has to. Each claim
+/// here is the text that makes the contract usable — that a create returns the
+/// row it made, that the returned id is the *stored* one rather than a guess,
+/// that creation is not an upsert (so nothing can be silently replaced), and
+/// that `PUT` keeps the upsert semantics the audit docs rely on.
+#[test]
+fn creating_a_record_documented() {
+    assert!(API_MD.contains("## Creating a record"));
+    // The two entry points, and who picks the id in each.
+    assert!(
+        API_MD.contains(
+            "Every entity whose key is a surrogate `id` accepts **two** write entry points"
+        )
+    );
+    assert!(API_MD.contains("| `POST` | `/<collection>` | the database |"));
+    assert!(API_MD.contains("| `PUT` | `/<collection>/:id` | the caller |"));
+    // Why it exists: no guess, and no id to get wrong.
+    assert!(API_MD.contains(
+        "there is no `max(id) + 1` to compute, no id to get wrong, and no chance \
+         of a create landing on a row that already exists"
+    ));
+    // The create answers with the stored row, so the id is usable at once.
+    assert!(API_MD.contains("The response is the *stored* row"));
+    // Validation is shared with the upsert, so a create cannot sneak past it.
+    assert!(API_MD.contains(
+        "The create runs the entity's full write-time validation, so anything a \
+         `PUT` refuses"
+    ));
+    // The property that keeps row_history's trail one row's own.
+    assert!(API_MD.contains("**An id-assigning endpoint never overwrites.**"));
+    // The upsert is unchanged, including the silent-replace warning.
+    assert!(API_MD.contains("**`PUT /<collection>/:id` remains the upsert it has always been**"));
+    assert!(API_MD.contains("silently replaces that row"));
+    // Entities keyed on a natural key are deliberately out of scope.
+    assert!(API_MD.contains("is keyed on the financial year by design"));
+}
+
 /// Docs-sync pin for linked attachments on provenance-created trades
 /// (REQUIREMENTS 2026-07-15): the Attachments section documents the
 /// `include_linked` list option, enumerates the three traversed provenance
