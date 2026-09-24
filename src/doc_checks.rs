@@ -495,8 +495,16 @@ fn creating_a_record_documented() {
     // The upsert is unchanged, including the silent-replace warning.
     assert!(API_MD.contains("**`PUT /<collection>/:id` remains the upsert it has always been**"));
     assert!(API_MD.contains("silently replaces that row"));
-    // Entities keyed on a natural key are deliberately out of scope.
+    // Entities keyed on a natural or stated key are deliberately out of scope —
+    // `cgt_settings` included, which is id-keyed but a CHECK-pinned singleton,
+    // so "has an id" alone does not decide whether a collection POST exists.
     assert!(API_MD.contains("is keyed on the financial year by design"));
+    assert!(
+        API_MD.contains(
+            "`cgt_settings` is a **singleton** whose one id is pinned to `1` by a `CHECK`"
+        )
+    );
+    assert!(API_MD.contains("A client that POSTs one of these collections is answered `405`"));
 }
 
 /// Docs-sync pin for linked attachments on provenance-created trades

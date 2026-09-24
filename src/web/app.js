@@ -675,15 +675,20 @@ async function viewEntityForm(entity, keyParts, seq = navigationToken()) {
       if (editing) {
         idPath = entity.keyFields.map(function (kf) { return existing[kf.name]; }).join('/');
         await api('PUT', entity.api + '/' + idPath, body);
-      } else {
+      } else if (entity.keyFields.some(function (kf) { return kf.auto; })) {
+        // A server-assigned key: POST the collection and take the id off the
+        // created row, so nothing has to guess `max(id) + 1`.
         const created = await api('POST', entity.api, body);
-        // The echoed row supplies the server-assigned key. Key fields the
-        // server does not allocate are read back from the form.
-        idPath = entity.keyFields.map(function (kf) {
-          return kf.auto && created && created[kf.name] !== undefined
-            ? created[kf.name]
-            : readFieldValue(kf, form);
-        }).join('/');
+        idPath = entity.keyFields.map(function (kf) { return created[kf.name]; }).join('/');
+      } else {
+        // The key is the fact's own identity — a natural key (`exchanges`,
+        // `exchange_holidays`) or a stated one (`tax_year_settings`,
+        // `cgt_settings`) — and lives in `keyFields`, so it is part of the URL
+        // rather than the body (the write bodies take no key at all). There is
+        // no collection POST for these and nothing to allocate: PUT the path
+        // the fields name.
+        idPath = entity.keyFields.map(function (kf) { return readFieldValue(kf, form); }).join('/');
+        await api('PUT', entity.api + '/' + idPath, body);
       }
       const msg = wired && wired.afterSave ? await wired.afterSave(idPath, seq) : null;
       if (msg !== '') toastIfCurrent(seq, msg || 'Saved.');

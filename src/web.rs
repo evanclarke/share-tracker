@@ -133,7 +133,7 @@ async fn style_css() -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{ApiClient, ApiResponse};
+    use crate::test_support::{ApiClient, ApiResponse, test_pool};
     use axum::http::StatusCode;
 
     async fn get(uri: &str) -> ApiResponse {
@@ -1339,8 +1339,10 @@ mod tests {
         // The create POSTs to the collection; the edit PUTs the named key.
         assert!(js.contains("const created = await api('POST', entity.api, body)"));
         assert!(js.contains("await api('PUT', entity.api + '/' + idPath, body)"));
-        // The assigned key is read off the response and used for the follow-up.
-        assert!(js.contains("kf.auto && created && created[kf.name] !== undefined"));
+        // The create branch turns on where the key comes from: a
+        // server-assigned id is POSTed for, a keyed entity is PUT to its path.
+        assert!(js.contains("entity.keyFields.some(function (kf) { return kf.auto; })"));
+        assert!(js.contains("const created = await api('POST', entity.api, body)"));
         assert!(js.contains("wired.afterSave(idPath, seq)"));
         // The bespoke create screens go through their own collection POSTs.
         assert!(js.contains("await api('POST', '/sells', body)"));
@@ -1348,6 +1350,88 @@ mod tests {
         // The guessed-id helper is gone, not merely unused.
         assert!(!js.contains("export async function nextId"));
         assert!(!js.contains("nextId("));
+    }
+
+    /// Every creatable entity has a route for the *shape* of create the form
+    /// uses, and no creatable entity has silently lost one.
+    ///
+    /// A create branches on where the key comes from: an entity with a
+    /// server-allocated id (`auto: true`) POSTs its collection, while one keyed
+    /// on a natural or stated key PUTs the path its key fields name. Those two
+    /// shapes are not interchangeable — POSTing `exchanges` or
+    /// `exchange_holidays` answers `405`, because a collection POST has no way
+    /// to carry a key that lives in `keyFields` rather than the body. The
+    /// regression this pins is exactly that mismatch: the form always POSTed
+    /// once, and the four keyed entities' "+ New" buttons answered 405 while
+    /// the whole suite stayed green, because a bundle-string assertion cannot
+    /// tell a route that exists from one that was never registered.
+    #[tokio::test]
+    async fn every_creatable_entity_has_a_route_for_the_create_its_form_uses() {
+        let pool = test_pool().await;
+        let client = ApiClient::full(&pool);
+        let config = body_string(get("/static/config.js").await).await;
+        let entities = config
+            .split("export const ENTITIES")
+            .nth(1)
+            .expect("config.js declares ENTITIES")
+            .split("export const REPORTS")
+            .next()
+            .expect("ENTITIES is followed by REPORTS");
+
+        let (mut checked_post, mut checked_put) = (0, 0);
+        for entry in entities.split("slug: '").skip(1) {
+            let slug = &entry[..entry.find('\'').expect("a closing quote")];
+            // Exactly the rule the "+ New" button itself is rendered under
+            // (`viewEntityList`): a read-only or `deleteOnly` entity has no
+            // create form, and a custom view is not the generic form. `sells`
+            // and `transfers` are custom *and* creatable, but each has its own
+            // bespoke POST screen pinned by the bundle test above.
+            if entry.contains("readonly: true")
+                || entry.contains("deleteOnly: true")
+                || entry.contains("custom: '")
+            {
+                continue;
+            }
+            let api = entry
+                .split("api: '")
+                .nth(1)
+                .map(|rest| &rest[..rest.find('\'').expect("a closing quote")])
+                .unwrap_or_else(|| panic!("entity {slug} declares no api path"));
+            // The form's create branch turns on this exact test.
+            let key_fields = entry
+                .split("keyFields: [")
+                .nth(1)
+                .unwrap_or_else(|| panic!("entity {slug} declares no keyFields"));
+            let server_assigns_the_key = key_fields.contains("auto: true");
+
+            if server_assigns_the_key {
+                let status = client.post_empty(api).await.status;
+                assert_ne!(
+                    status,
+                    StatusCode::METHOD_NOT_ALLOWED,
+                    "`{slug}` takes its key from the server, so the form POSTs `{api}` \
+                     on create — but the collection route has no POST"
+                );
+                checked_post += 1;
+            } else {
+                let status = client.post_empty(api).await.status;
+                assert_eq!(
+                    status,
+                    StatusCode::METHOD_NOT_ALLOWED,
+                    "`{slug}` is keyed on its own key fields, which live in the URL path \
+                     rather than the body — the form PUTs a path for it, so `{api}` \
+                     having a collection POST means the form's create branch and this \
+                     entity disagree about where the key comes from"
+                );
+                checked_put += 1;
+            }
+        }
+        assert_eq!(
+            (checked_post, checked_put),
+            (12, 4),
+            "the split between server-assigned and keyed creates changed — re-check \
+             that each entity's form branch still matches its route"
+        );
     }
 
     #[tokio::test]
