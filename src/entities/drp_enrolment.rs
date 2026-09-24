@@ -103,6 +103,13 @@ pub enum UpsertError {
     Overlap,
     #[error("DRP enrolment write failed: {0}")]
     Db(#[from] sqlx::Error),
+    /// A create committed but the row could not be read back. Not reachable in
+    /// practice — the row is committed and unread only if something deletes it
+    /// in the same instant — but a create that answers with no row would be
+    /// worse than a loud failure, so it is its own variant rather than an
+    /// `unwrap`. Mapped to `500`.
+    #[error("the DRP enrolment row was created but could not be read back")]
+    VanishedAfterCreate,
 }
 
 /// `FROM`/`WHERE` selecting **the DRP trades a period covers**, the one place
@@ -143,7 +150,10 @@ impl CrudEntity for DrpEnrolment {
 
 pub fn router() -> Router<SqlitePool> {
     Router::new()
-        .route("/drp_enrolments", get(http::list_handler::<DrpEnrolment>))
+        .route(
+            "/drp_enrolments",
+            get(http::list_handler::<DrpEnrolment>).post(create),
+        )
         .route(
             "/drp_enrolments/{id}",
             get(http::get_handler::<DrpEnrolment>)
@@ -159,7 +169,6 @@ pub async fn db_list(pool: &SqlitePool) -> Result<Vec<DrpEnrolment>, sqlx::Error
     http::crud_list(pool).await
 }
 
-#[cfg(test)]
 pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<DrpEnrolment>, sqlx::Error> {
     http::crud_get(pool, id).await
 }
@@ -167,6 +176,33 @@ pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<DrpEnrolment>, 
 /// Upsert an enrolment period, enforcing the no-overlap invariant and settling
 /// a closed period's trailing residual, all in one transaction.
 pub async fn db_upsert(pool: &SqlitePool, period: &DrpEnrolment) -> Result<(), UpsertError> {
+    write(pool, Some(period.id), period).await?;
+    Ok(())
+}
+
+/// `POST /drp_enrolments` — create without naming an id, and return the row the
+/// database assigned one to.
+pub async fn db_create(
+    pool: &SqlitePool,
+    period: &DrpEnrolment,
+) -> Result<DrpEnrolment, UpsertError> {
+    let id = write(pool, None, period).await?;
+    db_get(pool, id)
+        .await?
+        .ok_or(UpsertError::VanishedAfterCreate)
+}
+
+/// Write an enrolment period, allocating its id when `id` is `None`.
+///
+/// Every invariant below is shared by both callers, so a create and an upsert
+/// can never drift: `id = Some` is the long-standing `PUT /drp_enrolments/:id`
+/// upsert, and `id = None` is the `POST /drp_enrolments` create, which leaves
+/// the id to the database.
+async fn write(
+    pool: &SqlitePool,
+    id: Option<i64>,
+    period: &DrpEnrolment,
+) -> Result<i64, UpsertError> {
     if let Some(end) = period.unenrolment_date
         && end <= period.enrolment_date
     {
@@ -179,16 +215,18 @@ pub async fn db_upsert(pool: &SqlitePool, period: &DrpEnrolment) -> Result<(), U
     // account)'s other periods — the same listing's periods in *another*
     // account are independent: overlap iff new.start < other.end AND
     // other.start < new.end, where an open end is unbounded. Touching periods
-    // (end == next start) are fine.
+    // (end == next start) are fine. `IS NOT` rather than `!=` so a NULL id
+    // (the database-assigned create) excludes nothing: with no row of its own
+    // to skip, every existing period of the pair is a candidate overlap.
     let overlapping: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM drp_enrolments \
-         WHERE listing_id = ? AND holding_account_id = ? AND id != ? \
+         WHERE listing_id = ? AND holding_account_id = ? AND id IS NOT ? \
            AND (unenrolment_date IS NULL OR ? < unenrolment_date) \
            AND (? IS NULL OR enrolment_date < ?)",
     )
     .bind(period.listing_id)
     .bind(period.holding_account_id)
-    .bind(period.id)
+    .bind(id)
     .bind(period.enrolment_date)
     .bind(period.unenrolment_date)
     .bind(period.unenrolment_date)
@@ -198,7 +236,13 @@ pub async fn db_upsert(pool: &SqlitePool, period: &DrpEnrolment) -> Result<(), U
         return Err(UpsertError::Overlap);
     }
 
-    sqlx::query(
+    // A create (`id` is `None`, from `POST /drp_enrolments`) omits the id
+    // column altogether, so the database's `AUTOINCREMENT` sequence assigns
+    // one it has never issued — a server-computed id could hand the new row a
+    // deleted row's id and, with it, that row's `row_history` trail
+    // (SCENARIOS U-a). The upsert branch is otherwise byte-identical, so a
+    // `PUT` on an explicit id stays the upsert it has always been.
+    let query = crate::insert_with_optional_id!(
         "INSERT INTO drp_enrolments \
          (id, listing_id, holding_account_id, enrolment_date, unenrolment_date, residual_handling) \
          VALUES (?, ?, ?, ?, ?, ?) \
@@ -208,20 +252,34 @@ pub async fn db_upsert(pool: &SqlitePool, period: &DrpEnrolment) -> Result<(), U
            enrolment_date = excluded.enrolment_date, \
            unenrolment_date = excluded.unenrolment_date, \
            residual_handling = excluded.residual_handling",
-    )
-    .bind(period.id)
-    .bind(period.listing_id)
-    .bind(period.holding_account_id)
-    .bind(period.enrolment_date)
-    .bind(period.unenrolment_date)
-    .bind(period.residual_handling)
-    .execute(&mut *tx)
-    .await?;
+        "INSERT INTO drp_enrolments \
+         (listing_id, holding_account_id, enrolment_date, unenrolment_date, residual_handling) \
+         VALUES (?, ?, ?, ?, ?) \
+         ON CONFLICT(id) DO UPDATE SET \
+           listing_id = excluded.listing_id, \
+           holding_account_id = excluded.holding_account_id, \
+           enrolment_date = excluded.enrolment_date, \
+           unenrolment_date = excluded.unenrolment_date, \
+           residual_handling = excluded.residual_handling",
+        id,
+    );
+    let result = query
+        .bind(period.listing_id)
+        .bind(period.holding_account_id)
+        .bind(period.enrolment_date)
+        .bind(period.unenrolment_date)
+        .bind(period.residual_handling)
+        .execute(&mut *tx)
+        .await?;
+    // An id-less INSERT was given one by the database; an upsert wrote the
+    // explicit one it was handed. Either way the caller gets the id the row
+    // actually holds.
+    let assigned_id = id.unwrap_or_else(|| result.last_insert_rowid());
 
     recompute_residuals(&mut tx, period).await?;
 
     tx.commit().await?;
-    Ok(())
+    Ok(assigned_id)
 }
 
 /// Where one reinvestment sits in its period's residual chain — the only
@@ -437,16 +495,34 @@ async fn upsert(
     Path(id): Path<i64>,
     Json(body): Json<DrpEnrolmentBody>,
 ) -> Result<StatusCode, ApiError> {
-    let period = DrpEnrolment {
+    db_upsert(&pool, &drp_enrolment_from_body(id, body)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /drp_enrolments` — create the period without naming an id. The
+/// database assigns one (see [`write`]), and the created row is returned so the
+/// caller can act on its id at once — unenrolling it, for one — with no
+/// `max(id) + 1` guess between the two calls.
+async fn create(
+    State(pool): State<SqlitePool>,
+    Json(body): Json<DrpEnrolmentBody>,
+) -> Result<(StatusCode, Json<DrpEnrolment>), ApiError> {
+    let created = db_create(&pool, &drp_enrolment_from_body(0, body)).await?;
+    Ok((StatusCode::CREATED, Json(created)))
+}
+
+/// The row a request body describes. `id` is the path's on an upsert and
+/// ignored on a create (the database assigns one), so both entry points build
+/// their `DrpEnrolment` through this one mapping and cannot drift.
+fn drp_enrolment_from_body(id: i64, body: DrpEnrolmentBody) -> DrpEnrolment {
+    DrpEnrolment {
         id,
         listing_id: body.listing_id,
         holding_account_id: body.holding_account_id,
         enrolment_date: body.enrolment_date,
         unenrolment_date: body.unenrolment_date,
         residual_handling: body.residual_handling,
-    };
-    db_upsert(&pool, &period).await?;
-    Ok(StatusCode::NO_CONTENT)
+    }
 }
 
 async fn delete(
@@ -471,6 +547,10 @@ impl From<UpsertError> for ApiError {
             ),
             // A bad listing_id violates the FK to listings → 422 via the shared map.
             UpsertError::Db(err) => err.into(),
+            // A committed create whose row could not be read back: a real
+            // server-side fault, so it answers `500` and is logged rather than
+            // dressed up as a client error.
+            err @ UpsertError::VanishedAfterCreate => ApiError::internal(err),
         }
     }
 }
@@ -1216,6 +1296,166 @@ mod tests {
 
         assert!(db_delete(&pool, 1).await.unwrap());
         assert!(db_get(&pool, 1).await.unwrap().is_none());
+    }
+
+    /// `POST /drp_enrolments` allocates its own id — the create that makes the
+    /// `max(id) + 1` dance unnecessary (SCENARIOS U-a).
+    #[tokio::test]
+    async fn post_drp_enrolment_creates_a_row_with_a_database_assigned_id() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        let client = client(&pool);
+
+        let body = serde_json::json!({
+            "listing_id": 1,
+            "enrolment_date": "2024-01-01",
+            "residual_handling": "PayOut",
+        });
+        let response = client.post("/drp_enrolments", &body).await;
+        let (status, text) = response.status_and_body();
+        assert_eq!(status, StatusCode::CREATED, "body: {text:?}");
+
+        let created: DrpEnrolment = response.json();
+        assert_ne!(created.id, 0, "a create must not land on id 0");
+        assert_eq!(created.residual_handling, ResidualHandling::PayOut);
+
+        // The returned row is the stored one, readable under its own id.
+        let read_back = db_get(&pool, created.id).await.unwrap().unwrap();
+        assert_eq!(read_back.id, created.id);
+        assert_eq!(read_back.listing_id, 1);
+        assert_eq!(read_back.enrolment_date, d("2024-01-01"));
+    }
+
+    /// Each create gets its own id rather than overwriting the previous row
+    /// through the upsert's `ON CONFLICT ... DO UPDATE` — the bug the id-less
+    /// entry point exists to kill.
+    #[tokio::test]
+    async fn post_drp_enrolment_twice_stores_two_distinct_rows() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        let client = client(&pool);
+
+        // Two non-overlapping periods: the create path enforces the same
+        // no-overlap invariant the upsert does.
+        let first: DrpEnrolment = client
+            .post(
+                "/drp_enrolments",
+                &serde_json::json!({
+                    "listing_id": 1,
+                    "enrolment_date": "2023-01-01",
+                    "unenrolment_date": "2024-01-01",
+                }),
+            )
+            .await
+            .expect_status(StatusCode::CREATED)
+            .json();
+        let second: DrpEnrolment = client
+            .post(
+                "/drp_enrolments",
+                &serde_json::json!({
+                    "listing_id": 1,
+                    "enrolment_date": "2024-01-01",
+                }),
+            )
+            .await
+            .expect_status(StatusCode::CREATED)
+            .json();
+
+        assert_ne!(
+            first.id, second.id,
+            "each create must get its own id, not overwrite the previous row"
+        );
+        let all: Vec<DrpEnrolment> = client.get_json("/drp_enrolments").await;
+        assert_eq!(all.len(), 2, "both creates are stored: {all:?}");
+    }
+
+    /// A create never re-issues an id a deleted row held: an id handed out
+    /// twice inherits the previous occupant's `row_history` trail, and
+    /// `AUTOINCREMENT` guarantees it only while the INSERT omits the id column
+    /// — which is exactly what the create path does (SCENARIOS U-a, migration
+    /// 0045).
+    #[tokio::test]
+    async fn post_drp_enrolment_never_reuses_a_deleted_rows_id() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        let client = client(&pool);
+
+        let body = serde_json::json!({
+            "listing_id": 1,
+            "enrolment_date": "2024-01-01",
+        });
+        let first: DrpEnrolment = client
+            .post("/drp_enrolments", &body)
+            .await
+            .expect_status(StatusCode::CREATED)
+            .json();
+
+        // Edit it, so its trail is non-empty, then delete it — the id is now
+        // free and carries history that must never be inherited.
+        client
+            .put(
+                &format!("/drp_enrolments/{}", first.id),
+                &serde_json::json!({
+                    "listing_id": 1,
+                    "enrolment_date": "2024-01-01",
+                    "residual_handling": "PayOut",
+                }),
+            )
+            .await
+            .expect_status(StatusCode::NO_CONTENT);
+        client
+            .delete(&format!("/drp_enrolments/{}", first.id))
+            .await
+            .expect_status(StatusCode::NO_CONTENT);
+
+        let second: DrpEnrolment = client
+            .post("/drp_enrolments", &body)
+            .await
+            .expect_status(StatusCode::CREATED)
+            .json();
+        assert_ne!(
+            first.id, second.id,
+            "the create took the deleted row's id back, inheriting its audit history"
+        );
+    }
+
+    /// A create shares every write-time validation with the upsert, so an
+    /// overlapping period is refused and nothing is stored — the create path
+    /// is not a way round the no-overlap invariant.
+    #[tokio::test]
+    async fn post_drp_enrolment_rejects_like_the_upsert_and_stores_nothing() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        client(&pool)
+            .post(
+                "/drp_enrolments",
+                &serde_json::json!({
+                    "listing_id": 1,
+                    "enrolment_date": "2024-01-01",
+                }),
+            )
+            .await
+            .expect_status(StatusCode::CREATED);
+
+        // A second open period always overlaps the first.
+        let response = client(&pool)
+            .post(
+                "/drp_enrolments",
+                &serde_json::json!({
+                    "listing_id": 1,
+                    "enrolment_date": "2025-01-01",
+                }),
+            )
+            .await;
+        let (status, text) = response.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "body: {text:?}");
+        assert!(
+            text.contains("overlaps"),
+            "the shared overlap wording is reused: {text:?}"
+        );
+
+        let all: Vec<DrpEnrolment> = client(&pool).get_json("/drp_enrolments").await;
+        assert_eq!(all.len(), 1, "a rejected create stores nothing: {all:?}");
     }
 
     #[tokio::test]

@@ -100,8 +100,12 @@ pub(crate) fn add_business_days(
 /// exchange observes a holiday in the window. Non-blocking — the write
 /// proceeds; the settlement-holiday-coverage report
 /// (`GET /reports/settlement_holiday_coverage`) flags the persisted trades.
+///
+/// `trade_id` is `None` on a create, where the database has not assigned the
+/// id the row will hold until the INSERT runs — an honest "no id yet" beats a
+/// made-up one in the log field.
 pub(crate) fn warn_if_outside_holiday_coverage(
-    trade_id: i64,
+    trade_id: Option<i64>,
     date: NaiveDate,
     settlement_date: NaiveDate,
     holidays: &HashSet<NaiveDate>,
@@ -109,7 +113,7 @@ pub(crate) fn warn_if_outside_holiday_coverage(
     use crate::entities::exchange_holiday::{coverage_span, window_outside_coverage};
     if window_outside_coverage(date, settlement_date, coverage_span(holidays)) {
         tracing::warn!(
-            trade_id,
+            trade_id = ?trade_id,
             %date,
             %settlement_date,
             "settlement window outside seeded exchange-holiday coverage; computed skipping weekends only"
@@ -187,9 +191,13 @@ impl Settlement {
     /// supplied date equal to the stored one keeps the recorded source, and
     /// only a *different* supplied date (or a trade being created) is
     /// [`SettlementDateSource::Stated`].
+    ///
+    /// `trade_id` is `None` on a create (`POST /trades`): the database has not
+    /// assigned the row's id yet, so there is no stored row to compare against
+    /// and a supplied date is simply stated.
     pub(crate) async fn resolve_on(
         conn: &mut sqlx::SqliteConnection,
-        trade_id: i64,
+        trade_id: Option<i64>,
         listing_id: i64,
         date: NaiveDate,
         supplied: Option<NaiveDate>,
@@ -235,15 +243,17 @@ pub(crate) async fn auto_settlement_date(
     date: NaiveDate,
 ) -> Result<NaiveDate, SettlementError> {
     let mut conn = pool.acquire().await?;
-    auto_settlement_date_on(&mut conn, trade_id, listing_id, date).await
+    auto_settlement_date_on(&mut conn, Some(trade_id), listing_id, date).await
 }
 
 /// [`auto_settlement_date`] on the caller's own connection, so the
 /// `settlement-recompute` job can re-derive a date on the transaction it
 /// rewrites it in — one consistent read of the calendar for the whole run.
+/// `trade_id` is passed only to the coverage warning, and is `None` on a
+/// create, before the database has assigned one.
 pub(crate) async fn auto_settlement_date_on(
     conn: &mut sqlx::SqliteConnection,
-    trade_id: i64,
+    trade_id: Option<i64>,
     listing_id: i64,
     date: NaiveDate,
 ) -> Result<NaiveDate, SettlementError> {
@@ -329,7 +339,7 @@ pub async fn run_recompute(pool: &SqlitePool) -> Result<(), String> {
         .collect();
     let mut recomputed = 0usize;
     for trade in &candidates {
-        let wanted = auto_settlement_date_on(&mut tx, trade.id, trade.listing_id, trade.date)
+        let wanted = auto_settlement_date_on(&mut tx, Some(trade.id), trade.listing_id, trade.date)
             .await
             .map_err(|e| e.to_string())?;
         if wanted == trade.settlement_date {

@@ -1,6 +1,6 @@
 //! HTTP routes: list/get/upsert/delete over the corporate_actions table.
 
-use super::db::{db_delete, db_upsert};
+use super::db::{db_create, db_delete, db_upsert};
 use super::model::{CorporateAction, CorporateActionBody};
 use crate::infra::http::{self, ApiError};
 use axum::{
@@ -15,7 +15,7 @@ pub fn router() -> Router<SqlitePool> {
     Router::new()
         .route(
             "/corporate_actions",
-            get(http::list_handler::<CorporateAction>),
+            get(http::list_handler::<CorporateAction>).post(create),
         )
         .route(
             "/corporate_actions/{id}",
@@ -29,25 +29,48 @@ pub fn router() -> Router<SqlitePool> {
         )
 }
 
-async fn upsert(
-    State(pool): State<SqlitePool>,
-    Path(id): Path<i64>,
-    Json(body): Json<CorporateActionBody>,
-) -> Result<StatusCode, ApiError> {
+/// The action a request body describes. `id` is the path's on an upsert and
+/// ignored on a create (the database assigns one), so both entry points build
+/// their `CorporateAction` through this one mapping and cannot drift. The
+/// per-type terms check is shared unchanged: a body whose fields do not match
+/// its `action_type` is refused on either path.
+fn corporate_action_from_body(
+    id: i64,
+    body: CorporateActionBody,
+) -> Result<CorporateAction, ApiError> {
     let (listing_id, date) = (body.listing_id, body.date);
     let kind = body.kind().ok_or_else(|| {
         ApiError::unprocessable(
             "the corporate-action terms are missing or do not match the action type",
         )
     })?;
-    let action = CorporateAction {
+    Ok(CorporateAction {
         id,
         listing_id,
         date,
         kind,
-    };
-    db_upsert(&pool, &action).await?;
+    })
+}
+
+async fn upsert(
+    State(pool): State<SqlitePool>,
+    Path(id): Path<i64>,
+    Json(body): Json<CorporateActionBody>,
+) -> Result<StatusCode, ApiError> {
+    db_upsert(&pool, &corporate_action_from_body(id, body)?).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /corporate_actions` — create the action without naming an id. The
+/// database assigns one (see `db::write`), and the created row is returned so
+/// a client can act on its id immediately — participating, exercising,
+/// demerging — instead of guessing `max(id) + 1` between the two calls.
+async fn create(
+    State(pool): State<SqlitePool>,
+    Json(body): Json<CorporateActionBody>,
+) -> Result<(StatusCode, Json<CorporateAction>), ApiError> {
+    let created = db_create(&pool, &corporate_action_from_body(0, body)?).await?;
+    Ok((StatusCode::CREATED, Json(created)))
 }
 
 async fn delete(

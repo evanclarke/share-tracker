@@ -198,6 +198,13 @@ pub enum UpsertError {
     NegativeAmount(&'static str),
     #[error("AMMA statement write failed: {0}")]
     Db(#[from] sqlx::Error),
+    /// A create committed but the row could not be read back. Not reachable in
+    /// practice — the row is committed and unread only if something deletes it
+    /// in the same instant — but a create that answers with no row would be
+    /// worse than a loud failure, so it is its own variant rather than an
+    /// `unwrap`. Mapped to `500`.
+    #[error("the AMMA statement row was created but could not be read back")]
+    VanishedAfterCreate,
 }
 
 impl From<UpsertError> for ApiError {
@@ -231,6 +238,10 @@ impl From<UpsertError> for ApiError {
                  net amount, where a negative value is the upward (shortfall) adjustment"
             )),
             UpsertError::Db(err) => err.into(),
+            // A committed create whose row could not be read back: a real
+            // server-side fault, so it answers `500` and is logged rather than
+            // dressed up as a client error.
+            err @ UpsertError::VanishedAfterCreate => ApiError::internal(err),
         }
     }
 }
@@ -251,7 +262,10 @@ impl CrudEntity for AmmaStatement {
 
 pub fn router() -> Router<SqlitePool> {
     Router::new()
-        .route("/amma_statements", get(http::list_handler::<AmmaStatement>))
+        .route(
+            "/amma_statements",
+            get(http::list_handler::<AmmaStatement>).post(create),
+        )
         .route(
             "/amma_statements/{id}",
             get(http::get_handler::<AmmaStatement>)
@@ -267,12 +281,38 @@ pub async fn db_list(pool: &SqlitePool) -> Result<Vec<AmmaStatement>, sqlx::Erro
     http::crud_list(pool).await
 }
 
-#[cfg(test)]
 pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<AmmaStatement>, sqlx::Error> {
     http::crud_get(pool, id).await
 }
 
 pub async fn db_upsert(pool: &SqlitePool, stmt: &AmmaStatement) -> Result<(), UpsertError> {
+    write(pool, Some(stmt.id), stmt).await?;
+    Ok(())
+}
+
+/// `POST /amma_statements` — create without naming an id, and return the row
+/// the database assigned one to.
+pub async fn db_create(
+    pool: &SqlitePool,
+    stmt: &AmmaStatement,
+) -> Result<AmmaStatement, UpsertError> {
+    let id = write(pool, None, stmt).await?;
+    db_get(pool, id)
+        .await?
+        .ok_or(UpsertError::VanishedAfterCreate)
+}
+
+/// Write an AMMA statement, allocating its id when `id` is `None`.
+///
+/// Every validation below is shared by both callers, so a create and an upsert
+/// can never drift: `id = Some` is the long-standing `PUT
+/// /amma_statements/:id` upsert, and `id = None` is the `POST
+/// /amma_statements` create, which leaves the id to the database.
+async fn write(
+    pool: &SqlitePool,
+    id: Option<i64>,
+    stmt: &AmmaStatement,
+) -> Result<i64, UpsertError> {
     // No component of the statement may be negative: every figure is the
     // fund's own attributed amount, and the ATO's AMMA guidance notes state
     // the rule outright — "An AMIT or attribution CCIV sub-fund trust
@@ -339,7 +379,14 @@ pub async fn db_upsert(pool: &SqlitePool, stmt: &AmmaStatement) -> Result<(), Up
         ));
     }
     let mut tx = write_tx(pool).await?;
-    sqlx::query(
+
+    // A create (`id` is `None`, from `POST /amma_statements`) omits the id
+    // column altogether, so the database's `AUTOINCREMENT` sequence assigns
+    // one it has never issued — a server-computed id could hand the new row a
+    // deleted row's id and, with it, that row's `row_history` trail
+    // (SCENARIOS U-a). The upsert branch is otherwise byte-identical, so a
+    // `PUT` on an explicit id stays the upsert it has always been.
+    let query = crate::insert_with_optional_id!(
         "INSERT INTO amma_statements \
          (id, listing_id, tax_year_end_date, units_held, date_received, \
           australian_interest, australian_dividends_unfranked, franked_dividends, \
@@ -373,33 +420,71 @@ pub async fn db_upsert(pool: &SqlitePool, stmt: &AmmaStatement) -> Result<(), Up
              tfn_withholding_tax             = excluded.tfn_withholding_tax, \
              currency                        = excluded.currency, \
              holding_account_id              = excluded.holding_account_id",
-    )
-    .bind(stmt.id)
-    .bind(stmt.listing_id)
-    .bind(stmt.tax_year_end_date)
-    .bind(Money(stmt.units_held))
-    .bind(stmt.date_received)
-    .bind(Money(stmt.australian_interest))
-    .bind(Money(stmt.australian_dividends_unfranked))
-    .bind(Money(stmt.franked_dividends))
-    .bind(Money(stmt.franking_credits))
-    .bind(Money(stmt.net_rent))
-    .bind(Money(stmt.foreign_income))
-    .bind(Money(stmt.foreign_tax_credits))
-    .bind(Money(stmt.foreign_tax_credits_capital_gains))
-    .bind(Money(stmt.other_income))
-    .bind(Money(stmt.cgt_discount_gains))
-    .bind(Money(stmt.cgt_indexation_gains))
-    .bind(Money(stmt.cgt_other_gains))
-    .bind(Money(stmt.capital_losses_applied))
-    .bind(Money(stmt.tax_deferred_amount))
-    .bind(Money(stmt.tax_free_amount))
-    .bind(Money(stmt.cost_base_adjustment))
-    .bind(Money(stmt.tfn_withholding_tax))
-    .bind(&stmt.currency)
-    .bind(stmt.holding_account_id)
-    .execute(&mut *tx)
-    .await?;
+        "INSERT INTO amma_statements \
+         (listing_id, tax_year_end_date, units_held, date_received, \
+          australian_interest, australian_dividends_unfranked, franked_dividends, \
+          franking_credits, net_rent, foreign_income, foreign_tax_credits, \
+         foreign_tax_credits_capital_gains, other_income, \
+          cgt_discount_gains, cgt_indexation_gains, cgt_other_gains, capital_losses_applied, \
+          tax_deferred_amount, tax_free_amount, cost_base_adjustment, tfn_withholding_tax, \
+          currency, holding_account_id) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+         ON CONFLICT(id) DO UPDATE SET \
+             listing_id                      = excluded.listing_id, \
+             tax_year_end_date               = excluded.tax_year_end_date, \
+             units_held                      = excluded.units_held, \
+             date_received                   = excluded.date_received, \
+             australian_interest             = excluded.australian_interest, \
+             australian_dividends_unfranked  = excluded.australian_dividends_unfranked, \
+             franked_dividends               = excluded.franked_dividends, \
+             franking_credits                = excluded.franking_credits, \
+             net_rent                        = excluded.net_rent, \
+             foreign_income                  = excluded.foreign_income, \
+             foreign_tax_credits             = excluded.foreign_tax_credits, \
+             foreign_tax_credits_capital_gains = excluded.foreign_tax_credits_capital_gains, \
+             other_income                    = excluded.other_income, \
+             cgt_discount_gains              = excluded.cgt_discount_gains, \
+             cgt_indexation_gains            = excluded.cgt_indexation_gains, \
+             cgt_other_gains                 = excluded.cgt_other_gains, \
+             capital_losses_applied          = excluded.capital_losses_applied, \
+             tax_deferred_amount             = excluded.tax_deferred_amount, \
+             tax_free_amount                 = excluded.tax_free_amount, \
+             cost_base_adjustment            = excluded.cost_base_adjustment, \
+             tfn_withholding_tax             = excluded.tfn_withholding_tax, \
+             currency                        = excluded.currency, \
+             holding_account_id              = excluded.holding_account_id",
+        id,
+    );
+    let result = query
+        .bind(stmt.listing_id)
+        .bind(stmt.tax_year_end_date)
+        .bind(Money(stmt.units_held))
+        .bind(stmt.date_received)
+        .bind(Money(stmt.australian_interest))
+        .bind(Money(stmt.australian_dividends_unfranked))
+        .bind(Money(stmt.franked_dividends))
+        .bind(Money(stmt.franking_credits))
+        .bind(Money(stmt.net_rent))
+        .bind(Money(stmt.foreign_income))
+        .bind(Money(stmt.foreign_tax_credits))
+        .bind(Money(stmt.foreign_tax_credits_capital_gains))
+        .bind(Money(stmt.other_income))
+        .bind(Money(stmt.cgt_discount_gains))
+        .bind(Money(stmt.cgt_indexation_gains))
+        .bind(Money(stmt.cgt_other_gains))
+        .bind(Money(stmt.capital_losses_applied))
+        .bind(Money(stmt.tax_deferred_amount))
+        .bind(Money(stmt.tax_free_amount))
+        .bind(Money(stmt.cost_base_adjustment))
+        .bind(Money(stmt.tfn_withholding_tax))
+        .bind(&stmt.currency)
+        .bind(stmt.holding_account_id)
+        .execute(&mut *tx)
+        .await?;
+    // An id-less INSERT was given one by the database; an upsert wrote the
+    // explicit one it was handed. Either way the caller gets the id the row
+    // actually holds.
+    let assigned_id = id.unwrap_or_else(|| result.last_insert_rowid());
 
     // The statement's currency must be the listing's, as a trade's must
     // (SCENARIOS M-08). Checked after the write, like the trade path's twin,
@@ -416,15 +501,14 @@ pub async fn db_upsert(pool: &SqlitePool, stmt: &AmmaStatement) -> Result<(), Up
     }
 
     tx.commit().await?;
-    Ok(())
+    Ok(assigned_id)
 }
 
-async fn upsert(
-    State(pool): State<SqlitePool>,
-    Path(id): Path<i64>,
-    Json(body): Json<AmmaStatementBody>,
-) -> Result<StatusCode, ApiError> {
-    let stmt = AmmaStatement {
+/// The row a request body describes. `id` is the path's on an upsert and
+/// ignored on a create (the database assigns one), so both entry points build
+/// their `AmmaStatement` through this one mapping and cannot drift.
+fn amma_from_body(id: i64, body: AmmaStatementBody) -> AmmaStatement {
+    AmmaStatement {
         id,
         listing_id: body.listing_id,
         tax_year_end_date: body.tax_year_end_date,
@@ -449,11 +533,31 @@ async fn upsert(
         tfn_withholding_tax: body.tfn_withholding_tax,
         currency: body.currency,
         holding_account_id: body.holding_account_id,
-    };
-    db_upsert(&pool, &stmt)
+    }
+}
+
+async fn upsert(
+    State(pool): State<SqlitePool>,
+    Path(id): Path<i64>,
+    Json(body): Json<AmmaStatementBody>,
+) -> Result<StatusCode, ApiError> {
+    db_upsert(&pool, &amma_from_body(id, body))
         .await
         .map(|_| StatusCode::NO_CONTENT)
         .map_err(ApiError::from)
+}
+
+/// `POST /amma_statements` — create the statement without naming an id. The
+/// database assigns one (see [`write`]), and the created row is returned so the
+/// caller can act on its id at once — attaching the AMMA's generated AMIT
+/// adjustments to it, for one — with no `max(id) + 1` guess between the two
+/// calls.
+async fn create(
+    State(pool): State<SqlitePool>,
+    Json(body): Json<AmmaStatementBody>,
+) -> Result<(StatusCode, Json<AmmaStatement>), ApiError> {
+    let created = db_create(&pool, &amma_from_body(0, body)).await?;
+    Ok((StatusCode::CREATED, Json(created)))
 }
 
 #[cfg(test)]
@@ -542,6 +646,150 @@ mod tests {
         db_upsert(&pool, &updated).await.unwrap();
         let got = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(got.australian_interest, "99.99".parse::<Decimal>().unwrap());
+    }
+
+    /// `POST /amma_statements` allocates its own id — the create that makes the
+    /// `max(id) + 1` dance unnecessary (SCENARIOS U-a).
+    #[tokio::test]
+    async fn post_amma_creates_a_row_with_a_database_assigned_id() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        let client = client(&pool);
+
+        let body = serde_json::json!({
+            "listing_id": 1,
+            "tax_year_end_date": "2024-06-30",
+            "units_held": "1000",
+            "date_received": "2024-08-15",
+            "australian_interest": "12.50",
+        });
+        let response = client.post("/amma_statements", &body).await;
+        let (status, text) = response.status_and_body();
+        assert_eq!(status, StatusCode::CREATED, "body: {text:?}");
+
+        let created: AmmaStatement = response.json();
+        assert_ne!(created.id, 0, "a create must not land on id 0");
+        assert_eq!(created.units_held, dec("1000"));
+
+        // The returned row is the stored one, and it is readable under its own
+        // id — so the caller can act on the id at once instead of re-reading
+        // the collection to discover it.
+        let read_back = db_get(&pool, created.id).await.unwrap().unwrap();
+        assert_eq!(read_back.id, created.id);
+        assert_eq!(read_back.listing_id, 1);
+        assert_eq!(read_back.australian_interest, dec("12.50"));
+    }
+
+    /// The bug this endpoint exists to kill: with an id-less create there is no
+    /// guessed id to collide with, so two creates are two rows — before, a
+    /// second `max(id) + 1`-style PUT on a taken id silently overwrote the
+    /// first through the upsert's `ON CONFLICT ... DO UPDATE`.
+    #[tokio::test]
+    async fn post_amma_twice_stores_two_distinct_rows() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        let client = client(&pool);
+
+        let body = serde_json::json!({
+            "listing_id": 1,
+            "tax_year_end_date": "2024-06-30",
+            "date_received": "2024-08-15",
+        });
+        let first: AmmaStatement = client
+            .post("/amma_statements", &body)
+            .await
+            .expect_status(StatusCode::CREATED)
+            .json();
+        let second: AmmaStatement = client
+            .post("/amma_statements", &body)
+            .await
+            .expect_status(StatusCode::CREATED)
+            .json();
+        assert_ne!(
+            first.id, second.id,
+            "each create must get its own id, not overwrite the previous row"
+        );
+
+        let all: Vec<AmmaStatement> = client.get_json("/amma_statements").await;
+        assert_eq!(all.len(), 2, "both creates are stored: {all:?}");
+    }
+
+    /// A create never re-issues an id a deleted row held: an id handed out
+    /// twice inherits the previous occupant's `row_history` trail, and
+    /// `AUTOINCREMENT` guarantees it only while the INSERT omits the id column
+    /// — which is exactly what the create path does (SCENARIOS U-a, migration
+    /// 0045).
+    #[tokio::test]
+    async fn post_amma_never_reuses_a_deleted_rows_id() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        let client = client(&pool);
+
+        let body = serde_json::json!({
+            "listing_id": 1,
+            "tax_year_end_date": "2024-06-30",
+            "date_received": "2024-08-15",
+        });
+        let first: AmmaStatement = client
+            .post("/amma_statements", &body)
+            .await
+            .expect_status(StatusCode::CREATED)
+            .json();
+
+        // Edit it, so its trail is non-empty, then delete it — the id is now
+        // free and carries history that must never be inherited.
+        client
+            .put(
+                &format!("/amma_statements/{}", first.id),
+                &serde_json::json!({
+                    "listing_id": 1,
+                    "tax_year_end_date": "2024-06-30",
+                    "date_received": "2024-08-20",
+                    "units_held": "1000",
+                }),
+            )
+            .await
+            .expect_status(StatusCode::NO_CONTENT);
+        client
+            .delete(&format!("/amma_statements/{}", first.id))
+            .await
+            .expect_status(StatusCode::NO_CONTENT);
+
+        let second: AmmaStatement = client
+            .post("/amma_statements", &body)
+            .await
+            .expect_status(StatusCode::CREATED)
+            .json();
+        assert_ne!(
+            first.id, second.id,
+            "the create took the deleted row's id back, inheriting its audit history"
+        );
+    }
+
+    /// A create shares every write-time validation with the upsert, so a bad
+    /// statement is refused and nothing is stored — the create path is not a
+    /// way round the 30 June rule.
+    #[tokio::test]
+    async fn post_amma_rejects_like_the_upsert_and_stores_nothing() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        let client = client(&pool);
+
+        let body = serde_json::json!({
+            "listing_id": 1,
+            "tax_year_end_date": "2024-12-31",
+            "date_received": "2024-08-15",
+        });
+        let response = client.post("/amma_statements", &body).await;
+        let (status, text) = response.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "body: {text:?}");
+        assert!(
+            text.contains("30 June"),
+            "the shared FY-end wording is reused: {text:?}"
+        );
+
+        let all: Vec<AmmaStatement> = client.get_json("/amma_statements").await;
+        assert!(all.is_empty(), "a rejected create stores nothing: {all:?}");
     }
 
     // API-level tests

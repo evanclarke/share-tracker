@@ -55,7 +55,7 @@ pub fn router() -> Router<SqlitePool> {
     Router::new()
         .route(
             "/amit_adjustments",
-            get(http::list_handler::<AmitAdjustment>),
+            get(http::list_handler::<AmitAdjustment>).post(create),
         )
         .route(
             "/amit_adjustments/{id}",
@@ -65,7 +65,6 @@ pub fn router() -> Router<SqlitePool> {
         )
 }
 
-#[cfg(test)]
 pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<AmitAdjustment>, sqlx::Error> {
     http::crud_get(pool, id).await
 }
@@ -126,6 +125,13 @@ pub enum UpsertError {
     /// `amit_adjustments_statement_trade` UNIQUE index (migration 0022).
     #[error("this parcel already has an adjustment on this AMMA statement")]
     DuplicateParcel,
+    /// A create committed but the row could not be read back. Not reachable in
+    /// practice — the row is committed and unread only if something deletes it
+    /// in the same instant — but a create that answers with no row would be
+    /// worse than a loud failure, so it is its own variant rather than an
+    /// `unwrap`. Mapped to `500`.
+    #[error("the AMIT adjustment row was created but could not be read back")]
+    VanishedAfterCreate,
 }
 
 /// [`db_upsert`] on a caller-supplied connection, so the AMMA statement's
@@ -136,16 +142,7 @@ pub async fn db_upsert_on(
     conn: &mut sqlx::SqliteConnection,
     adj: &AmitAdjustment,
 ) -> Result<(), UpsertError> {
-    db_write_on(
-        conn,
-        Some(adj.id),
-        &AmitAdjustmentBody {
-            amma_statement_id: adj.amma_statement_id,
-            trade_id: adj.trade_id,
-            quantity: adj.quantity,
-        },
-    )
-    .await?;
+    db_write_on(conn, Some(adj.id), &adjustment_body(adj)).await?;
     Ok(())
 }
 
@@ -160,6 +157,32 @@ pub async fn db_insert_on(
     body: &AmitAdjustmentBody,
 ) -> Result<i64, UpsertError> {
     db_write_on(conn, None, body).await
+}
+
+/// `POST /amit_adjustments` — create without naming an id, and return the row
+/// the database assigned one to.
+pub async fn db_create(
+    pool: &SqlitePool,
+    adj: &AmitAdjustment,
+) -> Result<AmitAdjustment, UpsertError> {
+    let id = {
+        let mut conn = pool.acquire().await?;
+        db_insert_on(&mut conn, &adjustment_body(adj)).await?
+    };
+    db_get(pool, id)
+        .await?
+        .ok_or(UpsertError::VanishedAfterCreate)
+}
+
+/// The write body an [`AmitAdjustment`] describes — the one mapping
+/// [`db_upsert_on`] and [`db_create`] both go through, so the two entry points
+/// cannot drift.
+fn adjustment_body(adj: &AmitAdjustment) -> AmitAdjustmentBody {
+    AmitAdjustmentBody {
+        amma_statement_id: adj.amma_statement_id,
+        trade_id: adj.trade_id,
+        quantity: adj.quantity,
+    }
 }
 
 /// Does `parcel_id` hold units a rollover carried out of
@@ -386,22 +409,34 @@ async fn db_write_on(
         return Err(UpsertError::DuplicateParcel);
     }
 
-    // A NULL id is an omitted one: SQLite assigns the next id the
-    // AUTOINCREMENT column has never issued.
-    let result = sqlx::query(
+    // A create (`id` is `None` — `POST /amit_adjustments`, and the AMMA
+    // statement's generator) omits the id column altogether, so the database's
+    // `AUTOINCREMENT` sequence assigns one it has never issued: an id computed
+    // in Rust could hand the new row a deleted row's id and, with it, that
+    // row's `row_history` trail (SCENARIOS U-a). The upsert branch is otherwise
+    // byte-identical, so a `PUT` on an explicit id stays the upsert it has
+    // always been.
+    let query = crate::insert_with_optional_id!(
         "INSERT INTO amit_adjustments (id, amma_statement_id, trade_id, quantity) \
          VALUES (?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET \
              amma_statement_id = excluded.amma_statement_id, \
              trade_id          = excluded.trade_id, \
              quantity          = excluded.quantity",
-    )
-    .bind(id)
-    .bind(adj.amma_statement_id)
-    .bind(adj.trade_id)
-    .bind(Money(adj.quantity))
-    .execute(&mut *conn)
-    .await?;
+        "INSERT INTO amit_adjustments (amma_statement_id, trade_id, quantity) \
+         VALUES (?, ?, ?) \
+         ON CONFLICT(id) DO UPDATE SET \
+             amma_statement_id = excluded.amma_statement_id, \
+             trade_id          = excluded.trade_id, \
+             quantity          = excluded.quantity",
+        id,
+    );
+    let result = query
+        .bind(adj.amma_statement_id)
+        .bind(adj.trade_id)
+        .bind(Money(adj.quantity))
+        .execute(&mut *conn)
+        .await?;
     Ok(id.unwrap_or_else(|| result.last_insert_rowid()))
 }
 
@@ -550,19 +585,38 @@ pub async fn db_cost_base_reduction_events(
     Ok(map)
 }
 
+/// The row a request body describes. `id` is the path's on an upsert and
+/// ignored on a create (the database assigns one), so both entry points build
+/// their `AmitAdjustment` through this one mapping and cannot drift.
+fn amit_adjustment_from_body(id: i64, body: AmitAdjustmentBody) -> AmitAdjustment {
+    AmitAdjustment {
+        id,
+        amma_statement_id: body.amma_statement_id,
+        trade_id: body.trade_id,
+        quantity: body.quantity,
+    }
+}
+
 async fn upsert(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
     Json(body): Json<AmitAdjustmentBody>,
 ) -> Result<StatusCode, ApiError> {
-    let adj = AmitAdjustment {
-        id,
-        amma_statement_id: body.amma_statement_id,
-        trade_id: body.trade_id,
-        quantity: body.quantity,
-    };
+    let adj = amit_adjustment_from_body(id, body);
     db_upsert(&pool, &adj).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /amit_adjustments` — create the row without naming an id. The
+/// database assigns one (see [`db_insert_on`]), and the created row is returned
+/// so the caller can act on its id at once with no `max(id) + 1` guess between
+/// the two calls.
+async fn create(
+    State(pool): State<SqlitePool>,
+    Json(body): Json<AmitAdjustmentBody>,
+) -> Result<(StatusCode, Json<AmitAdjustment>), ApiError> {
+    let created = db_create(&pool, &amit_adjustment_from_body(0, body)).await?;
+    Ok((StatusCode::CREATED, Json(created)))
 }
 
 impl From<UpsertError> for ApiError {
@@ -611,6 +665,10 @@ impl From<UpsertError> for ApiError {
                  reduce the parcel's cost base twice",
             ),
             UpsertError::Db(err) => err.into(),
+            // A committed create whose row could not be read back: a real
+            // server-side fault, so it answers `500` and is logged rather than
+            // dressed up as a client error.
+            err @ UpsertError::VanishedAfterCreate => ApiError::internal(err),
         }
     }
 }
@@ -1094,6 +1152,167 @@ mod tests {
     }
 
     // API-level tests
+
+    /// `POST /amit_adjustments` allocates its own id — the create that makes the
+    /// `max(id) + 1` dance unnecessary (SCENARIOS U-a).
+    #[tokio::test]
+    async fn post_amit_adjustment_creates_a_row_with_a_database_assigned_id() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool, 1, "XASX", "VAF").await;
+        insert_buy_trade(&pool, 1, 1, Decimal::from(100)).await;
+        insert_amma(&pool, 1, 1, dec("0.05")).await;
+        let client = client(&pool);
+
+        let body = serde_json::json!({
+            "amma_statement_id": 1,
+            "trade_id": 1,
+            "quantity": "100",
+        });
+        let response = client.post("/amit_adjustments", &body).await;
+        let (status, text) = response.status_and_body();
+        assert_eq!(status, StatusCode::CREATED, "body: {text:?}");
+
+        let created: AmitAdjustment = response.json();
+        assert_ne!(created.id, 0, "a create must not land on id 0");
+        assert_eq!(created.quantity, Decimal::from(100));
+
+        // The returned row is the stored one, readable under its own id.
+        let read_back = db_get(&pool, created.id).await.unwrap().unwrap();
+        assert_eq!(read_back.id, created.id);
+        assert_eq!(read_back.amma_statement_id, 1);
+        assert_eq!(read_back.trade_id, 1);
+    }
+
+    /// Each create gets its own id rather than overwriting the previous row
+    /// through the upsert's `ON CONFLICT ... DO UPDATE`. Two statements may
+    /// each adjust the same parcel — one row per (statement, parcel) — so two
+    /// creates are two rows.
+    #[tokio::test]
+    async fn post_amit_adjustment_twice_stores_two_distinct_rows() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool, 1, "XASX", "VAF").await;
+        insert_buy_trade(&pool, 1, 1, Decimal::from(100)).await;
+        insert_amma(&pool, 1, 1, dec("0.05")).await;
+        insert_amma(&pool, 2, 1, dec("0.03")).await;
+        let client = client(&pool);
+
+        let first: AmitAdjustment = client
+            .post(
+                "/amit_adjustments",
+                &serde_json::json!({
+                    "amma_statement_id": 1,
+                    "trade_id": 1,
+                    "quantity": "100",
+                }),
+            )
+            .await
+            .expect_status(StatusCode::CREATED)
+            .json();
+        let second: AmitAdjustment = client
+            .post(
+                "/amit_adjustments",
+                &serde_json::json!({
+                    "amma_statement_id": 2,
+                    "trade_id": 1,
+                    "quantity": "100",
+                }),
+            )
+            .await
+            .expect_status(StatusCode::CREATED)
+            .json();
+        assert_ne!(
+            first.id, second.id,
+            "each create must get its own id, not overwrite the previous row"
+        );
+
+        let all: Vec<AmitAdjustment> = client.get_json("/amit_adjustments").await;
+        assert_eq!(all.len(), 2, "both creates are stored: {all:?}");
+    }
+
+    /// A create never re-issues an id a deleted row held: an id handed out
+    /// twice inherits the previous occupant's `row_history` trail, and
+    /// `AUTOINCREMENT` guarantees it only while the INSERT omits the id column
+    /// — which is exactly what the create path does (SCENARIOS U-a, migration
+    /// 0045).
+    #[tokio::test]
+    async fn post_amit_adjustment_never_reuses_a_deleted_rows_id() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool, 1, "XASX", "VAF").await;
+        insert_buy_trade(&pool, 1, 1, Decimal::from(100)).await;
+        insert_amma(&pool, 1, 1, dec("0.05")).await;
+        let client = client(&pool);
+
+        let body = serde_json::json!({
+            "amma_statement_id": 1,
+            "trade_id": 1,
+            "quantity": "100",
+        });
+        let first: AmitAdjustment = client
+            .post("/amit_adjustments", &body)
+            .await
+            .expect_status(StatusCode::CREATED)
+            .json();
+
+        // Edit it, so its trail is non-empty, then delete it — the id is now
+        // free and carries history that must never be inherited.
+        client
+            .put(
+                &format!("/amit_adjustments/{}", first.id),
+                &serde_json::json!({
+                    "amma_statement_id": 1,
+                    "trade_id": 1,
+                    "quantity": "80",
+                }),
+            )
+            .await
+            .expect_status(StatusCode::NO_CONTENT);
+        client
+            .delete(&format!("/amit_adjustments/{}", first.id))
+            .await
+            .expect_status(StatusCode::NO_CONTENT);
+
+        let second: AmitAdjustment = client
+            .post("/amit_adjustments", &body)
+            .await
+            .expect_status(StatusCode::CREATED)
+            .json();
+        assert_ne!(
+            first.id, second.id,
+            "the create took the deleted row's id back, inheriting its audit history"
+        );
+    }
+
+    /// A create shares every write-time validation with the upsert, so a
+    /// quantity above the parcel's own is refused and nothing is stored — the
+    /// create path is not a way round the cap.
+    #[tokio::test]
+    async fn post_amit_adjustment_rejects_like_the_upsert_and_stores_nothing() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool, 1, "XASX", "VAF").await;
+        insert_buy_trade(&pool, 1, 1, Decimal::from(100)).await;
+        insert_amma(&pool, 1, 1, dec("0.05")).await;
+        let client = client(&pool);
+
+        let response = client
+            .post(
+                "/amit_adjustments",
+                &serde_json::json!({
+                    "amma_statement_id": 1,
+                    "trade_id": 1,
+                    "quantity": "101",
+                }),
+            )
+            .await;
+        let (status, text) = response.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "body: {text:?}");
+        assert!(
+            text.contains("exceeds"),
+            "the shared cap wording is reused: {text:?}"
+        );
+
+        let all: Vec<AmitAdjustment> = client.get_json("/amit_adjustments").await;
+        assert!(all.is_empty(), "a rejected create stores nothing: {all:?}");
+    }
 
     #[tokio::test]
     async fn api_upsert_and_get() {

@@ -46,6 +46,13 @@ pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<Trade>, sqlx::E
 pub enum UpsertError {
     #[error("trade write failed: {0}")]
     Db(#[from] sqlx::Error),
+    /// A create committed but the row could not be read back. Not reachable in
+    /// practice — the row is committed and unread only if something deletes it
+    /// in the same instant — but a create that answers with no row would be
+    /// worse than a loud failure, so it is its own variant rather than an
+    /// `unwrap`. Mapped to `500`.
+    #[error("the trade row was created but could not be read back")]
+    VanishedAfterCreate,
     /// The new quantity falls below the total already allocated out of this
     /// parcel by Sell allocations — accepting it would leave those allocations
     /// drawing on units the parcel no longer has.
@@ -325,13 +332,13 @@ pub(crate) async fn listing_currency_mismatch(
     Ok(listing.filter(|l| l != currency))
 }
 
-/// How [`db_upsert_in_tx`] settles the row's `settlement_date` and
+/// How [`write`] settles the row's `settlement_date` and
 /// `settlement_date_source`.
 ///
 /// `None` writes the row's own two fields as given — the test/fixture writer
-/// ([`db_upsert`]). `Some(supplied)` is a `PUT /trades/{id}` body's
-/// `settlement_date`: `Some(d)` is the taxpayer's stated value, `None` asks
-/// for T+n, resolved on the write's own transaction
+/// ([`db_upsert`]). `Some(supplied)` is a `PUT /trades/{id}` or
+/// `POST /trades` body's `settlement_date`: `Some(d)` is the taxpayer's
+/// stated value, `None` asks for T+n, resolved on the write's own transaction
 /// ([`Settlement::resolve_on`]).
 type SettlementWrite = Option<Option<NaiveDate>>;
 
@@ -350,7 +357,8 @@ type SettlementWrite = Option<Option<NaiveDate>>;
 /// to Sells, or any linked AMIT adjustment's covered quantity.
 #[cfg(test)]
 pub async fn db_upsert(pool: &SqlitePool, trade: &Trade) -> Result<(), UpsertError> {
-    db_upsert_in_tx(pool, trade, None).await
+    write(pool, Some(trade.id), trade, None).await?;
+    Ok(())
 }
 
 /// Create or update a trade from a `PUT /trades/{id}` body. `supplied` is the
@@ -375,14 +383,36 @@ pub async fn db_upsert_resolving_settlement(
     trade: &Trade,
     supplied: Option<NaiveDate>,
 ) -> Result<(), UpsertError> {
-    db_upsert_in_tx(pool, trade, Some(supplied)).await
+    write(pool, Some(trade.id), trade, Some(supplied)).await?;
+    Ok(())
 }
 
-async fn db_upsert_in_tx(
+/// `POST /trades` — create without naming an id, and return the row the
+/// database assigned one to. `supplied` carries the `PUT` body's
+/// settlement-date semantics: `Some(d)` stated, `None` computed T+n.
+pub async fn db_create(
     pool: &SqlitePool,
     trade: &Trade,
+    supplied: Option<NaiveDate>,
+) -> Result<Trade, UpsertError> {
+    let id = write(pool, None, trade, Some(supplied)).await?;
+    db_get(pool, id)
+        .await?
+        .ok_or(UpsertError::VanishedAfterCreate)
+}
+
+/// Write a trade row, allocating its id when `id` is `None`.
+///
+/// Every validation below is shared by both callers, so a create and an upsert
+/// can never drift: `id = Some` is the long-standing `PUT /trades/{id}` upsert
+/// (and the test/fixture writer), and `id = None` is the `POST /trades`
+/// create, which leaves the id to the database.
+async fn write(
+    pool: &SqlitePool,
+    id: Option<i64>,
+    trade: &Trade,
     settlement_write: SettlementWrite,
-) -> Result<(), UpsertError> {
+) -> Result<i64, UpsertError> {
     // Degenerate figures (zero/negative quantity, negative costs, …) corrupt
     // every downstream report without failing anything — rejected before
     // anything else runs.
@@ -423,8 +453,7 @@ async fn db_upsert_in_tx(
             source: trade.settlement_date_source,
         },
         Some(supplied) => {
-            Settlement::resolve_on(&mut tx, trade.id, trade.listing_id, trade.date, supplied)
-                .await?
+            Settlement::resolve_on(&mut tx, id, trade.listing_id, trade.date, supplied).await?
         }
     };
 
@@ -434,13 +463,18 @@ async fn db_upsert_in_tx(
     // cost base and deemed acquisition date), which an edit could silently
     // break. (The INSERT below never sets any provenance column, so a normal
     // trade can't become one either.)
+    //
+    // Every guard below is about an *existing* row the upsert would rewrite,
+    // so all of them bind `id`: on a create (`None`) each lookup asks for a
+    // NULL id, matches nothing, and the guards fall away exactly as they
+    // should for a row that does not exist yet.
     let existing: Option<ExistingTrade> = sqlx::query_as(
         "SELECT trade_type, listing_id, date, holding_account_id, \
                 rights_action_id, buyback_action_id, scrip_action_id, \
                 demerger_action_id, transfer_id, ess_statement_id, inheritance_id \
          FROM trades WHERE id = ?",
     )
-    .bind(trade.id)
+    .bind(id)
     .fetch_optional(&mut *tx)
     .await?;
     if let Some(existing) = &existing {
@@ -473,7 +507,7 @@ async fn db_upsert_in_tx(
     let anchors_rights: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM rights_sale_allocations WHERE purchase_trade_id = ?)",
     )
-    .bind(trade.id)
+    .bind(id)
     .fetch_one(&mut *tx)
     .await?;
     if anchors_rights {
@@ -484,7 +518,7 @@ async fn db_upsert_in_tx(
     // the trade row, so it is guarded by a lookup rather than a column.
     let is_transfer_fee: bool =
         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM transfers WHERE fee_sale_trade_id = ?)")
-            .bind(trade.id)
+            .bind(id)
             .fetch_one(&mut *tx)
             .await?;
     if is_transfer_fee {
@@ -497,7 +531,7 @@ async fn db_upsert_in_tx(
     // delete path.
     let is_reinvestment: bool =
         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM income WHERE reinvestment_trade_id = ?)")
-            .bind(trade.id)
+            .bind(id)
             .fetch_one(&mut *tx)
             .await?;
     if is_reinvestment {
@@ -545,7 +579,7 @@ async fn db_upsert_in_tx(
             "SELECT EXISTS(SELECT 1 FROM parcel_allocations WHERE purchase_trade_id = ?1) \
                  OR EXISTS(SELECT 1 FROM amit_adjustments WHERE trade_id = ?1)",
         )
-        .bind(trade.id)
+        .bind(id)
         .fetch_one(&mut *tx)
         .await?;
         if referenced {
@@ -568,7 +602,7 @@ async fn db_upsert_in_tx(
             "SELECT EXISTS(SELECT 1 FROM parcel_allocations WHERE purchase_trade_id = ?1) \
                  OR EXISTS(SELECT 1 FROM amit_adjustments WHERE trade_id = ?1)",
         )
-        .bind(trade.id)
+        .bind(id)
         .fetch_one(&mut *tx)
         .await?;
         if referenced {
@@ -589,7 +623,7 @@ async fn db_upsert_in_tx(
              JOIN trades s ON s.id = pa.sale_trade_id \
              WHERE pa.purchase_trade_id = ?",
         )
-        .bind(trade.id)
+        .bind(id)
         .fetch_one(&mut *tx)
         .await?;
         if earliest_sale.is_some_and(|sale| trade.date > sale) {
@@ -610,7 +644,7 @@ async fn db_upsert_in_tx(
          FROM parcel_allocations pa JOIN trades s ON s.id = pa.sale_trade_id \
          WHERE pa.purchase_trade_id = ?",
     )
-    .bind(trade.id)
+    .bind(id)
     .fetch_all(&mut *tx)
     .await?;
     let mut allocated_total = Decimal::ZERO;
@@ -627,7 +661,7 @@ async fn db_upsert_in_tx(
 
     let amit_quantities: Vec<String> =
         sqlx::query_scalar("SELECT quantity FROM amit_adjustments WHERE trade_id = ?")
-            .bind(trade.id)
+            .bind(id)
             .fetch_all(&mut *tx)
             .await?;
     for q in amit_quantities {
@@ -636,7 +670,13 @@ async fn db_upsert_in_tx(
         }
     }
 
-    sqlx::query(
+    // A create (`id` is `None`, from `POST /trades`) omits the id column
+    // altogether, so the database's `AUTOINCREMENT` sequence assigns one it
+    // has never issued — a server-computed id could hand the new row a
+    // deleted row's id and, with it, that row's `row_history` trail
+    // (SCENARIOS U-a). The upsert branch is otherwise byte-identical, so a
+    // `PUT` on an explicit id stays the upsert it has always been.
+    let query = crate::insert_with_optional_id!(
         "INSERT INTO trades \
          (id, trade_type, date, settlement_date, settlement_date_source, listing_id, \
           average_price, quantity, \
@@ -666,30 +706,64 @@ async fn db_upsert_in_tx(
              residual_carried_forward = excluded.residual_carried_forward, \
              residual_paid_out        = excluded.residual_paid_out, \
              holding_account_id       = excluded.holding_account_id",
-    )
-    .bind(trade.id)
-    .bind(trade.trade_type)
-    .bind(trade.date)
-    .bind(settlement.date)
-    .bind(settlement.source)
-    .bind(trade.listing_id)
-    .bind(Money(trade.average_price))
-    .bind(Money(trade.quantity))
-    .bind(&trade.currency)
-    .bind(Money(trade.brokerage))
-    .bind(Money(trade.gst_on_brokerage))
-    .bind(trade.brokerage_includes_gst)
-    .bind(&trade.brokerage_currency)
-    .bind(Money(trade.fx_rate))
-    .bind(OptMoney(trade.spot_fx_rate))
-    .bind(&trade.contract_note_ref)
-    .bind(OptMoney(trade.statement_total))
-    .bind(Money(trade.residual_brought_forward))
-    .bind(Money(trade.residual_carried_forward))
-    .bind(Money(trade.residual_paid_out))
-    .bind(trade.holding_account_id)
-    .execute(&mut *tx)
-    .await?;
+        "INSERT INTO trades \
+         (trade_type, date, settlement_date, settlement_date_source, listing_id, \
+          average_price, quantity, \
+          currency, brokerage, gst_on_brokerage, brokerage_includes_gst, brokerage_currency, \
+          fx_rate, spot_fx_rate, contract_note_ref, statement_total, \
+          residual_brought_forward, residual_carried_forward, residual_paid_out, \
+          holding_account_id) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+         ON CONFLICT(id) DO UPDATE SET \
+             trade_type               = excluded.trade_type, \
+             date                     = excluded.date, \
+             settlement_date          = excluded.settlement_date, \
+             settlement_date_source   = excluded.settlement_date_source, \
+             listing_id               = excluded.listing_id, \
+             average_price            = excluded.average_price, \
+             quantity                 = excluded.quantity, \
+             currency                 = excluded.currency, \
+             brokerage                = excluded.brokerage, \
+             gst_on_brokerage         = excluded.gst_on_brokerage, \
+             brokerage_includes_gst   = excluded.brokerage_includes_gst, \
+             brokerage_currency       = excluded.brokerage_currency, \
+             fx_rate                  = excluded.fx_rate, \
+             spot_fx_rate             = excluded.spot_fx_rate, \
+             contract_note_ref        = excluded.contract_note_ref, \
+             statement_total          = excluded.statement_total, \
+             residual_brought_forward = excluded.residual_brought_forward, \
+             residual_carried_forward = excluded.residual_carried_forward, \
+             residual_paid_out        = excluded.residual_paid_out, \
+             holding_account_id       = excluded.holding_account_id",
+        id,
+    );
+    let result = query
+        .bind(trade.trade_type)
+        .bind(trade.date)
+        .bind(settlement.date)
+        .bind(settlement.source)
+        .bind(trade.listing_id)
+        .bind(Money(trade.average_price))
+        .bind(Money(trade.quantity))
+        .bind(&trade.currency)
+        .bind(Money(trade.brokerage))
+        .bind(Money(trade.gst_on_brokerage))
+        .bind(trade.brokerage_includes_gst)
+        .bind(&trade.brokerage_currency)
+        .bind(Money(trade.fx_rate))
+        .bind(OptMoney(trade.spot_fx_rate))
+        .bind(&trade.contract_note_ref)
+        .bind(OptMoney(trade.statement_total))
+        .bind(Money(trade.residual_brought_forward))
+        .bind(Money(trade.residual_carried_forward))
+        .bind(Money(trade.residual_paid_out))
+        .bind(trade.holding_account_id)
+        .execute(&mut *tx)
+        .await?;
+    // An id-less INSERT was given one by the database; an upsert wrote the
+    // explicit one it was handed. Either way the caller gets the id the row
+    // actually holds.
+    let assigned_id = id.unwrap_or_else(|| result.last_insert_rowid());
 
     // The trade's currency must be the listing's: `average_price` is the price
     // of that listed security, so the two are one money (SCENARIOS M-08).
@@ -782,7 +856,7 @@ async fn db_upsert_in_tx(
     }
 
     tx.commit().await?;
-    Ok(())
+    Ok(assigned_id)
 }
 
 /// Outcome of a delete request, so the handler can map to the right status.
@@ -1009,6 +1083,10 @@ impl From<UpsertError> for ApiError {
             // `422` (or the DB failure's `500`) the handler gave before.
             UpsertError::Settlement(err) => err.into(),
             UpsertError::Db(err) => err.into(),
+            // A committed create whose row could not be read back: a real
+            // server-side fault, so it answers `500` and is logged rather than
+            // dressed up as a client error.
+            err @ UpsertError::VanishedAfterCreate => ApiError::internal(err),
         }
     }
 }

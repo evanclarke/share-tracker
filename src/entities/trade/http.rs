@@ -4,7 +4,7 @@
 //! invariants (allocations, residual chain) always hold.
 
 use super::{
-    DeleteOutcome, Trade, TradeBody, TradeType, db_delete, db_get, db_list,
+    DeleteOutcome, Trade, TradeBody, TradeType, db_create, db_delete, db_get, db_list,
     db_upsert_resolving_settlement, model::SettlementDateSource, resolve_brokerage,
 };
 use crate::infra::http::ApiError;
@@ -18,7 +18,7 @@ use sqlx::SqlitePool;
 
 pub fn router() -> Router<SqlitePool> {
     Router::new()
-        .route("/trades", get(list))
+        .route("/trades", get(list).post(create))
         .route("/trades/{id}", get(get_one).put(upsert).delete(delete))
 }
 
@@ -38,40 +38,42 @@ async fn get_one(
         .ok_or(ApiError::NotFound)
 }
 
-async fn upsert(
-    State(pool): State<SqlitePool>,
-    Path(id): Path<i64>,
-    Json(body): Json<TradeBody>,
-) -> Result<StatusCode, ApiError> {
-    // Sells must be created via PUT /sells/{id} so they are persisted together
-    // with a full set of parcel allocations (no uncovered Sell can exist).
+/// The row a request body describes. `id` is the path's on an upsert and
+/// ignored on a create (the database assigns one), so both entry points build
+/// their `Trade` through this one mapping and cannot drift.
+///
+/// The two refusals live here rather than in the write because they are about
+/// the *body's* kind, which only the HTTP boundary knows. Sells must be created
+/// via `PUT /sells/{id}` so they are persisted together with a full set of
+/// parcel allocations (no uncovered Sell can exist). DRP trades are only ever
+/// created via `POST /income/:id/reinvest`, which links the shares back to
+/// their funding distribution and threads the residual carry-forward chain. A
+/// free-form DRP here would be an orphan parcel (no income link, zero
+/// residuals) that could shadow that chain — and editing a reinvest-created DRP
+/// through this endpoint would silently zero its residual columns (the form
+/// doesn't carry them). Reject both.
+fn trade_from_body(id: i64, body: TradeBody) -> Result<Trade, ApiError> {
     if body.trade_type == TradeType::Sell {
         return Err(ApiError::unprocessable(
             "a Sell must be created via PUT /sells/:id so it carries its parcel allocations",
         ));
     }
-    // DRP trades are only ever created via POST /income/:id/reinvest, which
-    // links the shares back to their funding distribution and threads the
-    // residual carry-forward chain. A free-form DRP here would be an orphan
-    // parcel (no income link, zero residuals) that could shadow that chain —
-    // and editing a reinvest-created DRP through this endpoint would silently
-    // zero its residual columns (the form doesn't carry them). Reject both.
     if body.trade_type == TradeType::DRP {
         return Err(ApiError::unprocessable(
             "a DRP trade is created via POST /income/:id/reinvest so it stays linked to its \
              distribution and residual chain",
         ));
     }
-    // Which of the two wrote the stored settlement date is recorded with it:
-    // a supplied value is the taxpayer's own assertion and is never rewritten,
-    // a computed one is re-derived by the `settlement-recompute` job once the
-    // calendar it was computed against is completed (SCENARIOS S-04/S-05). The
-    // decision is made inside the write's own transaction
-    // (`db_upsert_resolving_settlement`), not here, so a concurrent write
-    // cannot change the stored row between the classifying read and the write.
-    // The two fields below are only the placeholder that lets the
-    // pre-transaction figure checks validate a supplied date (and passes on
-    // the trade date when one will be computed).
+    // The stored settlement date's placeholder. Which of the two wrote it — the
+    // taxpayer (a supplied value, never rewritten) or the exchange calendar (a
+    // computed one, re-derived by the `settlement-recompute` job once the
+    // calendar it was computed against is completed, SCENARIOS S-04/S-05) — is
+    // decided inside the write's own transaction
+    // (`db_upsert_resolving_settlement`/`db_create`), not here, so a concurrent
+    // write cannot change the stored row between the classifying read and the
+    // write. The two fields below are only the placeholder that lets the
+    // pre-transaction figure checks validate a supplied date (and passes on the
+    // trade date when one will be computed).
     let settlement_date = body.settlement_date.unwrap_or(body.date);
     // A GST-inclusive brokerage entry is split here, at the API boundary, so
     // the stored columns (and `Trade` itself) are always ex-GST + GST.
@@ -80,7 +82,7 @@ async fn upsert(
         body.brokerage,
         body.gst_on_brokerage,
     );
-    let trade = Trade {
+    Ok(Trade {
         id,
         trade_type: body.trade_type,
         date: body.date,
@@ -111,9 +113,34 @@ async fn upsert(
         transfer_id: None,
         ess_statement_id: None,
         inheritance_id: None,
-    };
-    db_upsert_resolving_settlement(&pool, &trade, body.settlement_date).await?;
+    })
+}
+
+async fn upsert(
+    State(pool): State<SqlitePool>,
+    Path(id): Path<i64>,
+    Json(body): Json<TradeBody>,
+) -> Result<StatusCode, ApiError> {
+    let supplied = body.settlement_date;
+    let trade = trade_from_body(id, body)?;
+    db_upsert_resolving_settlement(&pool, &trade, supplied).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /trades` — create the row without naming an id. The database assigns
+/// one (see `db::write`), and the created row is returned so the caller can use
+/// its id immediately with no `max(id) + 1` guess between the two calls. The
+/// create runs the full write-time validation (settlement resolution,
+/// holding-account/currency checks, rollover guards, parcel re-basing) exactly
+/// as the upsert does, so it is not a way round any of it.
+async fn create(
+    State(pool): State<SqlitePool>,
+    Json(body): Json<TradeBody>,
+) -> Result<(StatusCode, Json<Trade>), ApiError> {
+    let supplied = body.settlement_date;
+    let trade = trade_from_body(0, body)?;
+    let created = db_create(&pool, &trade, supplied).await?;
+    Ok((StatusCode::CREATED, Json(created.present())))
 }
 
 async fn delete(

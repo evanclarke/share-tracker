@@ -12,7 +12,7 @@
 //! id must either be free or already hold a plain Sell — a Buy or DRP parcel
 //! is refused rather than rewritten as a disposal in place (SCENARIOS Z-b).
 
-use crate::entities::trade::{self, TradeType};
+use crate::entities::trade::{self, Trade, TradeType};
 use crate::infra::db::write_tx;
 use crate::infra::decimal::{Money, OptMoney};
 use crate::infra::http::ApiError;
@@ -20,7 +20,7 @@ use axum::{
     Json, Router,
     extract::{Path, State},
     http::StatusCode,
-    routing::put,
+    routing::{post, put},
 };
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
@@ -89,6 +89,13 @@ pub struct SellBody {
 pub enum SellError {
     #[error("Sell write failed: {0}")]
     Db(#[from] sqlx::Error),
+    /// A create committed but the row could not be read back. Not reachable in
+    /// practice — the row is committed and unread only if something deletes it
+    /// in the same instant — but a create that answers with no row would be
+    /// worse than a loud failure, so it is its own variant rather than an
+    /// `unwrap`. Mapped to `500`.
+    #[error("the sell row was created but could not be read back")]
+    VanishedAfterCreate,
     /// Allocated quantities do not sum exactly to the sell quantity. Both
     /// figures are carried so the refusal can name them: at 50 open parcels
     /// (SCENARIOS Y-b) "they do not sum" leaves the user to add 50 rows up by
@@ -303,12 +310,18 @@ impl From<SellError> for ApiError {
             )),
             SellError::Settlement(err) => err.into(),
             SellError::Db(err) => err.into(),
+            // A committed create whose row could not be read back: a real
+            // server-side fault, so it answers `500` and is logged rather than
+            // dressed up as a client error.
+            err @ SellError::VanishedAfterCreate => ApiError::internal(err),
         }
     }
 }
 
 pub fn router() -> Router<SqlitePool> {
-    Router::new().route("/sells/{id}", put(upsert).delete(delete))
+    Router::new()
+        .route("/sells", post(create))
+        .route("/sells/{id}", put(upsert).delete(delete))
 }
 
 /// Outcome of a delete request, so the handler can map to the right status.
@@ -456,12 +469,16 @@ pub async fn db_delete_sell(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome,
     Ok(DeleteOutcome::Deleted)
 }
 
-/// Create or replace a Sell trade together with its full set of parcel
-/// allocations, atomically. Returns an error (mapped to 422) unless the
-/// allocations sum exactly to the sell quantity and every parcel is a valid,
-/// not-over-allocated Buy/DRP. A buy-back participation Sell is immutable
-/// here — delete it via `DELETE /sells/:id` and re-participate instead.
-pub async fn db_upsert_sell(pool: &SqlitePool, id: i64, body: &SellBody) -> Result<(), SellError> {
+/// Write a Sell trade together with its full set of parcel allocations,
+/// atomically, allocating the Sell's id when `id` is `None`.
+///
+/// Every validation below is shared by both callers, so a create and an upsert
+/// can never drift: `id = Some` is the long-standing `PUT /sells/{id}` upsert,
+/// and `id = None` is the `POST /sells` create, which leaves the id to the
+/// database. Returns the id the row actually holds — `upsert_sell_in_tx` reads
+/// it straight off the INSERT it ran, so the create writes its allocations
+/// against the id the database assigned rather than a guessed one.
+async fn write(pool: &SqlitePool, id: Option<i64>, body: &SellBody) -> Result<i64, SellError> {
     let mut tx = write_tx(pool).await?;
 
     // Recorded with the date, as on the trade path: a supplied value is the
@@ -472,7 +489,8 @@ pub async fn db_upsert_sell(pool: &SqlitePool, id: i64, body: &SellBody) -> Resu
     // pool before it (2026-09-17 review): the classifying read and the row the
     // write lands on must be one state, or a concurrent recompute or another
     // `PUT` can leave the row stamped with a source that does not describe how
-    // the date it wrote was arrived at.
+    // the date it wrote was arrived at. A create passes `id = None`: there is
+    // no stored row to compare a re-supplied date against, so it is stated.
     let settlement = trade::Settlement::resolve_on(
         &mut tx,
         id,
@@ -487,54 +505,60 @@ pub async fn db_upsert_sell(pool: &SqlitePool, id: i64, body: &SellBody) -> Resu
     // carries linked rows — a dividend income row, or the group's replacement
     // Buys). The upsert below never sets any provenance column, so a normal
     // Sell can't become one either.
-    let existing: Option<SellProvenanceRow> = sqlx::query_as(
-        "SELECT trade_type, buyback_action_id, scrip_action_id, demerger_action_id, transfer_id, \
-                worthless_action_id \
-         FROM trades WHERE id = ?",
-    )
-    .bind(id)
-    .fetch_optional(&mut *tx)
-    .await?;
-    if let Some(p) = existing {
-        // First, and independently of any provenance column: this endpoint
-        // writes Sells. An id holding a Buy or a DRP parcel is refused rather
-        // than overwritten, so the purpose-built parcels `PUT /trades/:id`
-        // guards (a reinvested DRP, a rights exercise, an ESS vest, an
-        // inherited parcel) cannot be turned into disposals through here
-        // either (SCENARIOS Z-b).
-        if p.trade_type != TradeType::Sell {
-            return Err(SellError::NotASell {
-                id,
-                existing: p.trade_type,
-            });
+    //
+    // Both guards are about an *existing* row the upsert would rewrite, so
+    // they run only for `id = Some`: a create has no stored row whose
+    // provenance it could disturb.
+    if let Some(id) = id {
+        let existing: Option<SellProvenanceRow> = sqlx::query_as(
+            "SELECT trade_type, buyback_action_id, scrip_action_id, demerger_action_id, \
+                    transfer_id, worthless_action_id \
+             FROM trades WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(p) = existing {
+            // First, and independently of any provenance column: this endpoint
+            // writes Sells. An id holding a Buy or a DRP parcel is refused rather
+            // than overwritten, so the purpose-built parcels `PUT /trades/:id`
+            // guards (a reinvested DRP, a rights exercise, an ESS vest, an
+            // inherited parcel) cannot be turned into disposals through here
+            // either (SCENARIOS Z-b).
+            if p.trade_type != TradeType::Sell {
+                return Err(SellError::NotASell {
+                    id,
+                    existing: p.trade_type,
+                });
+            }
+            if p.buyback_action_id.is_some() {
+                return Err(SellError::BuyBackSell);
+            }
+            if p.scrip_action_id.is_some() {
+                return Err(SellError::ScripExchangeSell);
+            }
+            if p.demerger_action_id.is_some() {
+                return Err(SellError::DemergerSell);
+            }
+            if p.transfer_id.is_some() {
+                return Err(SellError::TransferSell);
+            }
+            if p.worthless_action_id.is_some() {
+                return Err(SellError::WorthlessSell);
+            }
         }
-        if p.buyback_action_id.is_some() {
-            return Err(SellError::BuyBackSell);
-        }
-        if p.scrip_action_id.is_some() {
-            return Err(SellError::ScripExchangeSell);
-        }
-        if p.demerger_action_id.is_some() {
-            return Err(SellError::DemergerSell);
-        }
-        if p.transfer_id.is_some() {
+        // A transfer's network-fee disposal Sell carries its provenance on the
+        // transfer (transfers.fee_sale_trade_id), not on the trade row, so it is
+        // guarded separately — it is immutable here, like the transfer-out Sell.
+        if is_transfer_fee_sale(&mut tx, id).await? {
             return Err(SellError::TransferSell);
         }
-        if p.worthless_action_id.is_some() {
-            return Err(SellError::WorthlessSell);
-        }
-    }
-    // A transfer's network-fee disposal Sell carries its provenance on the
-    // transfer (transfers.fee_sale_trade_id), not on the trade row, so it is
-    // guarded separately — it is immutable here, like the transfer-out Sell.
-    if is_transfer_fee_sale(&mut tx, id).await? {
-        return Err(SellError::TransferSell);
     }
 
-    upsert_sell_in_tx(
+    let written = upsert_sell_in_tx(
         &mut tx,
         SellWrite {
-            id: Some(id),
+            id,
             body,
             settlement,
             provenance: None,
@@ -558,7 +582,31 @@ pub async fn db_upsert_sell(pool: &SqlitePool, id: i64, body: &SellBody) -> Resu
     }
 
     tx.commit().await?;
+    Ok(written)
+}
+
+/// `PUT /sells/:id` — the long-standing upsert on a caller-chosen id: replaces
+/// the Sell row and *all* of its parcel allocations with the submitted set.
+/// Returns an error (mapped to 422) unless the allocations sum exactly to the
+/// sell quantity and every parcel is a valid, not-over-allocated Buy/DRP. A
+/// buy-back participation Sell is immutable here — delete it via
+/// `DELETE /sells/:id` and re-participate instead.
+pub async fn db_upsert_sell(pool: &SqlitePool, id: i64, body: &SellBody) -> Result<(), SellError> {
+    write(pool, Some(id), body).await?;
     Ok(())
+}
+
+/// `POST /sells` — create without naming an id. The database assigns the
+/// Sell's id (`AUTOINCREMENT`, so a deleted Sell's id — and its `row_history`
+/// trail — is never re-issued; SCENARIOS U-a), and
+/// [`upsert_sell_in_tx`] writes the parcel allocations against that assigned
+/// id, all in the one transaction. The created row is returned so the caller
+/// can act on the id at once.
+pub async fn db_create_sell(pool: &SqlitePool, body: &SellBody) -> Result<Trade, SellError> {
+    let id = write(pool, None, body).await?;
+    trade::db_get(pool, id)
+        .await?
+        .ok_or(SellError::VanishedAfterCreate)
 }
 
 /// Which operation created a server-created Sell: the `trades` column linking
@@ -913,6 +961,19 @@ async fn upsert(
 ) -> Result<StatusCode, ApiError> {
     db_upsert_sell(&pool, id, &body).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /sells` — create the Sell without naming an id, so the database
+/// assigns one and its allocations are written against that assigned id. The
+/// created row is returned (presented exactly as `GET /trades/:id` would) so
+/// the caller can act on its id at once with no `max(id) + 1` guess between
+/// the two calls.
+async fn create(
+    State(pool): State<SqlitePool>,
+    Json(body): Json<SellBody>,
+) -> Result<(StatusCode, Json<Trade>), ApiError> {
+    let created = db_create_sell(&pool, &body).await?;
+    Ok((StatusCode::CREATED, Json(created.present())))
 }
 
 async fn delete(
@@ -3027,5 +3088,171 @@ mod tests {
         assert_eq!(status, StatusCode::NO_CONTENT, "{detail}");
         assert_eq!(stored_trade_type(&pool, 77).await, TradeType::Sell);
         assert_eq!(count_allocations(&pool, 77).await, 1);
+    }
+
+    // Create-entry-point tests (`POST /sells`)
+
+    /// A body drawing `qty` units out of the parcel Buy 1, for the create
+    /// tests below (the whole-parcel helper would over-allocate on a second
+    /// sell).
+    fn partial_sell_json(qty: &str) -> serde_json::Value {
+        serde_json::json!({
+            "date": "2024-06-03",
+            "listing_id": 1,
+            "average_price": "15",
+            "quantity": qty,
+            "currency": "AUD",
+            "brokerage": "0",
+            "gst_on_brokerage": "0",
+            "brokerage_currency": "AUD",
+            "fx_rate": "1",
+            "allocations": [ { "purchase_trade_id": 1, "quantity_allocated": qty } ]
+        })
+    }
+
+    /// `POST /sells` allocates its own id, and — the whole point of the
+    /// reference's `write` returning one — writes the parcel allocations
+    /// against the id the INSERT produced rather than a guessed one.
+    #[tokio::test]
+    async fn post_sell_creates_a_row_with_a_database_assigned_id() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+        let client = client(&pool);
+
+        let response = client.post("/sells", &partial_sell_json("40")).await;
+        let (status, text) = response.status_and_body();
+        assert_eq!(status, StatusCode::CREATED, "body: {text:?}");
+
+        let created: Trade = response.json();
+        assert_ne!(created.id, 0, "a create must not land on id 0");
+        assert_eq!(created.trade_type, TradeType::Sell);
+        assert_eq!(created.quantity, Decimal::from(40));
+        // Monday 2024-06-03 + XASX T+2 settles Wednesday the 5th, computed
+        // exactly as the upsert path computes it.
+        assert_eq!(
+            created.settlement_date,
+            NaiveDate::from_ymd_opt(2024, 6, 5).unwrap()
+        );
+
+        // The allocations landed against the assigned id, and the returned row
+        // is the stored one.
+        assert_eq!(count_allocations(&pool, created.id).await, 1);
+        let stored = trade::db_get(&pool, created.id).await.unwrap().unwrap();
+        assert_eq!(stored.id, created.id);
+        assert_eq!(stored.listing_id, 1);
+        assert_eq!(
+            stored.settlement_date_source,
+            trade::SettlementDateSource::Computed
+        );
+    }
+
+    /// Two creates are two Sell rows with distinct ids, each carrying its own
+    /// allocation — never a second `max(id) + 1` PUT overwriting the first.
+    #[tokio::test]
+    async fn post_sell_twice_stores_two_distinct_rows() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+        let client = client(&pool);
+
+        let first: Trade = client
+            .post("/sells", &partial_sell_json("10"))
+            .await
+            .expect_status(StatusCode::CREATED)
+            .json();
+        let second: Trade = client
+            .post("/sells", &partial_sell_json("10"))
+            .await
+            .expect_status(StatusCode::CREATED)
+            .json();
+        assert_ne!(
+            first.id, second.id,
+            "each create must get its own id, not overwrite the previous row"
+        );
+
+        let sell_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM trades WHERE trade_type = 'Sell'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(sell_count, 2, "both creates are stored");
+        assert_eq!(count_allocations(&pool, first.id).await, 1);
+        assert_eq!(count_allocations(&pool, second.id).await, 1);
+    }
+
+    /// The property the whole `row_history` occupant marking rests on: an id
+    /// handed out twice inherits the previous occupant's trail. `AUTOINCREMENT`
+    /// guarantees a create never re-issues a deleted Sell's id only while the
+    /// INSERT omits the id column — which is exactly what the create path does
+    /// (SCENARIOS U-a, migration 0045).
+    #[tokio::test]
+    async fn post_sell_never_reuses_a_deleted_rows_id() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+        let client = client(&pool);
+
+        let first: Trade = client
+            .post("/sells", &partial_sell_json("40"))
+            .await
+            .expect_status(StatusCode::CREATED)
+            .json();
+
+        // Edit it, so its trail is non-empty, then delete it — the id is now
+        // free and carries history that must never be inherited.
+        client
+            .put(&format!("/sells/{}", first.id), &partial_sell_json("40"))
+            .await
+            .expect_status(StatusCode::NO_CONTENT);
+        client
+            .delete(&format!("/sells/{}", first.id))
+            .await
+            .expect_status(StatusCode::NO_CONTENT);
+
+        let second: Trade = client
+            .post("/sells", &partial_sell_json("40"))
+            .await
+            .expect_status(StatusCode::CREATED)
+            .json();
+        assert_ne!(
+            first.id, second.id,
+            "the create took the deleted row's id back, inheriting its audit history"
+        );
+    }
+
+    /// A create shares every write-time validation with the upsert, so a bad
+    /// allocation set is refused and nothing is stored — the create path is not
+    /// a way round the sum check that keeps partial Sells impossible.
+    #[tokio::test]
+    async fn post_sell_rejects_like_the_upsert_and_stores_nothing() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+        let client = client(&pool);
+
+        // Sell 100 but allocate only 40 out of the parcel.
+        let mut body = partial_sell_json("100");
+        body["allocations"] =
+            serde_json::json!([{ "purchase_trade_id": 1, "quantity_allocated": "40" }]);
+        let response = client.post("/sells", &body).await;
+        let (status, text) = response.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "body: {text:?}");
+        assert!(
+            text.contains("allocations sum to 40"),
+            "the shared wording is reused: {text:?}"
+        );
+
+        let sell_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM trades WHERE trade_type = 'Sell'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(sell_count, 0, "a rejected create stores nothing");
+        let allocations: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM parcel_allocations")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(allocations, 0, "and writes no allocation rows");
     }
 }

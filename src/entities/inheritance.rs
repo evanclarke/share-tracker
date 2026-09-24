@@ -228,7 +228,10 @@ impl CrudEntity for Inheritance {
 
 pub fn router() -> Router<SqlitePool> {
     Router::new()
-        .route("/inheritances", get(http::list_handler::<Inheritance>))
+        .route(
+            "/inheritances",
+            get(http::list_handler::<Inheritance>).post(create),
+        )
         .route(
             "/inheritances/{id}",
             get(http::get_handler::<Inheritance>)
@@ -243,6 +246,13 @@ pub fn router() -> Router<SqlitePool> {
 pub enum UpsertError {
     #[error("inheritance write failed: {0}")]
     Db(#[from] sqlx::Error),
+    /// A create committed but the row could not be read back. Not reachable in
+    /// practice — the row is committed and unread only if something deletes it
+    /// in the same instant — but a create that answers with no row would be
+    /// worse than a loud failure, so it is its own variant rather than an
+    /// `unwrap`. Mapped to `500`.
+    #[error("the inheritance row was created but could not be read back")]
+    VanishedAfterCreate,
     /// The inherited unit count must be positive — there is no parcel
     /// otherwise.
     #[error("the inherited quantity must be greater than zero")]
@@ -451,14 +461,16 @@ impl From<UpsertError> for ApiError {
             UpsertError::BackDatedOverWholeHolding(e) => ApiError::Unprocessable(e.message()),
             UpsertError::UnrepresentableRebasedQuantity(e) => ApiError::Unprocessable(e.message()),
             UpsertError::Db(err) => err.into(),
+            // A create that cannot read back its own committed row is a server
+            // fault, not the caller's.
+            err @ UpsertError::VanishedAfterCreate => ApiError::internal(err),
         }
     }
 }
 
-/// One-line delegation to the shared CRUD read, kept because the DB-level
-/// tests call it by name; the route reaches the same query through
+/// One-line delegation to the shared CRUD read, through which `db_create`
+/// reads the created row back; the route reaches the same query through
 /// `get_handler` (see CLAUDE.md's entity-module pattern).
-#[cfg(test)]
 pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<Inheritance>, sqlx::Error> {
     http::crud_get(pool, id).await
 }
@@ -611,12 +623,16 @@ fn validate(inh: &Inheritance) -> Result<(), UpsertError> {
     Ok(())
 }
 
-/// Create or update an inheritance and its linked Buy, atomically. The Buy
-/// carries the whole cost base (first element + LPR expenditure) on the
-/// brokerage column with price 0, and the s 115-30 discount clock as its
-/// deemed acquisition date (post-CGT rule only). An edit is refused while
-/// the parcel is drawn on (the linked Buy keeps its id across edits).
-pub async fn db_upsert(pool: &SqlitePool, inh: &Inheritance) -> Result<(), UpsertError> {
+/// Write an inheritance row and its linked Buy, atomically, allocating the
+/// inheritance's id when `id` is `None`.
+///
+/// Every validation and the parcel-Buy write below are shared by both callers,
+/// so a create and an upsert can never drift: `id = Some` is the long-standing
+/// `PUT /inheritances/:id` upsert, and `id = None` is the `POST /inheritances`
+/// create, which leaves the id to the database. An edit keeps the linked Buy's
+/// id (the `ON CONFLICT` arm below rewrites that row); an edit is refused while
+/// the parcel is drawn on.
+async fn write(pool: &SqlitePool, id: Option<i64>, inh: &Inheritance) -> Result<i64, UpsertError> {
     validate(inh)?;
 
     let mut tx = write_tx(pool).await?;
@@ -625,21 +641,36 @@ pub async fn db_upsert(pool: &SqlitePool, inh: &Inheritance) -> Result<(), Upser
     check_convertible(&mut tx, inh).await?;
 
     // The inheritance's stored position, for the whole-holding guard below: an
-    // edit of a parcel already behind an operation must stay possible.
-    let stored_position: Option<(i64, NaiveDate)> =
-        sqlx::query_as("SELECT listing_id, date_of_death FROM inheritances WHERE id = ?")
-            .bind(inh.id)
-            .fetch_optional(&mut *tx)
-            .await?;
+    // edit of a parcel already behind an operation must stay possible. A create
+    // has no stored row and no linked Buy yet, so both of these are the upsert
+    // path's alone.
+    let stored_position: Option<(i64, NaiveDate)> = match id {
+        Some(id) => {
+            sqlx::query_as("SELECT listing_id, date_of_death FROM inheritances WHERE id = ?")
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await?
+        }
+        None => None,
+    };
 
-    let existing_buy = linked_buy_id(&mut tx, inh.id).await?;
+    let existing_buy = match id {
+        Some(id) => linked_buy_id(&mut tx, id).await?,
+        None => None,
+    };
     if let Some(buy_id) = existing_buy
         && buy_drawn_on(&mut tx, buy_id).await?
     {
         return Err(UpsertError::ParcelDrawnOn);
     }
 
-    sqlx::query(
+    // A create (`id` is `None`, from `POST /inheritances`) omits the id column
+    // altogether, so the database's `AUTOINCREMENT` sequence assigns one it has
+    // never issued — a server-computed id could hand the new row a deleted
+    // row's id and, with it, that row's `row_history` trail (SCENARIOS U-a).
+    // The upsert branch is otherwise byte-identical, so a `PUT` on an explicit
+    // id stays the upsert it has always been.
+    let query = crate::insert_with_optional_id!(
         "INSERT INTO inheritances \
          (id, listing_id, holding_account_id, quantity, date_of_death, cost_base_rule, \
           cost_base, lpr_expenditure, lpr_expenditure_date, deceased_acquisition_date, \
@@ -657,21 +688,43 @@ pub async fn db_upsert(pool: &SqlitePool, inh: &Inheritance) -> Result<(), Upser
              deceased_acquisition_date = excluded.deceased_acquisition_date, \
              currency                  = excluded.currency, \
              fx_rate                   = excluded.fx_rate",
-    )
-    .bind(inh.id)
-    .bind(inh.listing_id)
-    .bind(inh.holding_account_id)
-    .bind(Money(inh.quantity))
-    .bind(inh.date_of_death)
-    .bind(inh.cost_base_rule)
-    .bind(Money(inh.cost_base))
-    .bind(Money(inh.lpr_expenditure))
-    .bind(inh.lpr_expenditure_date)
-    .bind(inh.deceased_acquisition_date)
-    .bind(&inh.currency)
-    .bind(Money(inh.fx_rate))
-    .execute(&mut *tx)
-    .await?;
+        "INSERT INTO inheritances \
+         (listing_id, holding_account_id, quantity, date_of_death, cost_base_rule, \
+          cost_base, lpr_expenditure, lpr_expenditure_date, deceased_acquisition_date, \
+          currency, fx_rate) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+         ON CONFLICT(id) DO UPDATE SET \
+             listing_id                = excluded.listing_id, \
+             holding_account_id        = excluded.holding_account_id, \
+             quantity                  = excluded.quantity, \
+             date_of_death             = excluded.date_of_death, \
+             cost_base_rule            = excluded.cost_base_rule, \
+             cost_base                 = excluded.cost_base, \
+             lpr_expenditure           = excluded.lpr_expenditure, \
+             lpr_expenditure_date      = excluded.lpr_expenditure_date, \
+             deceased_acquisition_date = excluded.deceased_acquisition_date, \
+             currency                  = excluded.currency, \
+             fx_rate                   = excluded.fx_rate",
+        id,
+    );
+    let result = query
+        .bind(inh.listing_id)
+        .bind(inh.holding_account_id)
+        .bind(Money(inh.quantity))
+        .bind(inh.date_of_death)
+        .bind(inh.cost_base_rule)
+        .bind(Money(inh.cost_base))
+        .bind(Money(inh.lpr_expenditure))
+        .bind(inh.lpr_expenditure_date)
+        .bind(inh.deceased_acquisition_date)
+        .bind(&inh.currency)
+        .bind(Money(inh.fx_rate))
+        .execute(&mut *tx)
+        .await?;
+    // An id-less INSERT was given one by the database; an upsert wrote the
+    // explicit one it was handed. Either way the linked Buy below names the id
+    // the inheritance row actually holds.
+    let assigned_id = id.unwrap_or_else(|| result.last_insert_rowid());
 
     // The parcel Buy: dated and settled on the date of death, the whole cost
     // base (first element + LPR expenditure) on the brokerage column with
@@ -725,7 +778,7 @@ pub async fn db_upsert(pool: &SqlitePool, inh: &Inheritance) -> Result<(), Upser
     .bind(&inh.currency)
     .bind(Money(inh.fx_rate))
     .bind(inh.holding_account_id)
-    .bind(inh.id)
+    .bind(assigned_id)
     .bind(inh.deceased_acquisition_date)
     .execute(&mut *tx)
     .await?;
@@ -785,7 +838,22 @@ pub async fn db_upsert(pool: &SqlitePool, inh: &Inheritance) -> Result<(), Upser
     }
 
     tx.commit().await?;
+    Ok(assigned_id)
+}
+
+/// `PUT /inheritances/:id` — the long-standing upsert on a caller-chosen id.
+pub async fn db_upsert(pool: &SqlitePool, inh: &Inheritance) -> Result<(), UpsertError> {
+    write(pool, Some(inh.id), inh).await?;
     Ok(())
+}
+
+/// `POST /inheritances` — create without naming an id, and return the row (and
+/// the linked parcel Buy) the database assigned one to.
+pub async fn db_create(pool: &SqlitePool, inh: &Inheritance) -> Result<Inheritance, UpsertError> {
+    let id = write(pool, None, inh).await?;
+    db_get(pool, id)
+        .await?
+        .ok_or(UpsertError::VanishedAfterCreate)
 }
 
 /// Outcome of a delete request, so the handler can map to the right status.
@@ -829,12 +897,11 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome, sqlx
     Ok(DeleteOutcome::Deleted)
 }
 
-async fn upsert(
-    State(pool): State<SqlitePool>,
-    Path(id): Path<i64>,
-    Json(body): Json<InheritanceBody>,
-) -> Result<StatusCode, ApiError> {
-    let inh = Inheritance {
+/// The row a request body describes. `id` is the path's on an upsert and
+/// ignored on a create (the database assigns one), so both entry points build
+/// their `Inheritance` through this one mapping and cannot drift.
+fn inheritance_from_body(id: i64, body: InheritanceBody) -> Inheritance {
+    Inheritance {
         id,
         listing_id: body.listing_id,
         holding_account_id: body.holding_account_id,
@@ -847,9 +914,28 @@ async fn upsert(
         deceased_acquisition_date: body.deceased_acquisition_date,
         currency: body.currency,
         fx_rate: body.fx_rate.unwrap_or(Decimal::ONE),
-    };
-    db_upsert(&pool, &inh).await?;
+    }
+}
+
+async fn upsert(
+    State(pool): State<SqlitePool>,
+    Path(id): Path<i64>,
+    Json(body): Json<InheritanceBody>,
+) -> Result<StatusCode, ApiError> {
+    db_upsert(&pool, &inheritance_from_body(id, body)).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /inheritances` — create the inheritance and its linked parcel Buy
+/// without naming an id. The database assigns one (see [`write`]), and the
+/// created row is returned so the caller can use its id immediately with no
+/// `max(id) + 1` guess between the two calls.
+async fn create(
+    State(pool): State<SqlitePool>,
+    Json(body): Json<InheritanceBody>,
+) -> Result<(StatusCode, Json<Inheritance>), ApiError> {
+    let created = db_create(&pool, &inheritance_from_body(0, body)).await?;
+    Ok((StatusCode::CREATED, Json(created)))
 }
 
 async fn delete(
@@ -873,6 +959,11 @@ mod tests {
     use crate::entities::sell::{self, AllocationInput, SellBody};
     use crate::entities::trade::{self, TradeType};
     use crate::test_support::{self, ApiClient, dec, test_pool, ymd};
+
+    /// Client over this module's own routes.
+    fn client(pool: &SqlitePool) -> ApiClient {
+        ApiClient::over(router().with_state(pool.clone()))
+    }
 
     async fn insert_listing(pool: &SqlitePool, id: i64, currency: &str) {
         test_support::listing(id)
@@ -2070,5 +2161,180 @@ mod tests {
             "79000000000000000000000000000"
         );
         assert_eq!(rows[0]["original_cost_base"], "500");
+    }
+
+    // Create (`POST /inheritances`) tests
+
+    /// `POST /inheritances` allocates its own id — the create that makes the
+    /// whole `max(id) + 1` dance unnecessary (SCENARIOS U-a) — and the parcel
+    /// Buy written in the same transaction names *that* id, not the 0 the
+    /// body mapping started from.
+    #[tokio::test]
+    async fn post_inheritance_creates_a_row_with_a_database_assigned_id() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        let client = client(&pool);
+
+        let body = serde_json::json!({
+            "listing_id": 1,
+            "quantity": "100",
+            "date_of_death": "2025-01-10",
+            "cost_base_rule": "DeceasedCostBase",
+            "cost_base": "3000",
+            "lpr_expenditure": "200",
+            "lpr_expenditure_date": "2025-03-01",
+            "deceased_acquisition_date": "2020-02-01"
+        });
+        let response = client.post("/inheritances", &body).await;
+        let (status, text) = response.status_and_body();
+        assert_eq!(status, StatusCode::CREATED, "body: {text:?}");
+
+        let created: Inheritance = response.json();
+        assert_ne!(created.id, 0, "a create must not land on id 0");
+        assert_eq!(created.cost_base, dec("3000"));
+
+        // The returned row is the stored one, so the caller can act on the id
+        // at once instead of re-reading the collection to discover it.
+        let listed = db_get(&pool, created.id).await.unwrap().unwrap();
+        assert_eq!(listed.id, created.id);
+        assert_eq!(listed.quantity, dec("100"));
+        assert_eq!(
+            listed.holding_account_id, 1,
+            "the body's default took effect"
+        );
+
+        // The linked parcel Buy carries the assigned id, not the placeholder.
+        let buy = linked_buy(&pool, created.id).await;
+        assert_eq!(buy.inheritance_id, Some(created.id));
+        assert_eq!(
+            buy.brokerage,
+            dec("3200"),
+            "first element + LPR expenditure"
+        );
+    }
+
+    /// A create never re-issues an id a deleted row held.
+    ///
+    /// This is the property the whole `row_history` occupant marking rests on:
+    /// an id handed out twice inherits the previous occupant's trail, so the
+    /// new row's history would open with someone else's edits. `AUTOINCREMENT`
+    /// guarantees it only while the INSERT omits the id column — which is
+    /// exactly what the create path does (SCENARIOS U-a, migration 0045).
+    #[tokio::test]
+    async fn post_inheritance_never_reuses_a_deleted_rows_id() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        let client = client(&pool);
+
+        let body = serde_json::json!({
+            "listing_id": 1,
+            "quantity": "100",
+            "date_of_death": "2025-01-10",
+            "cost_base_rule": "DeceasedCostBase",
+            "cost_base": "3000",
+            "deceased_acquisition_date": "2020-02-01"
+        });
+        let first: Inheritance = client
+            .post("/inheritances", &body)
+            .await
+            .expect_status(StatusCode::CREATED)
+            .json();
+
+        // Edit it, so its trail is non-empty, then delete it (which removes
+        // its linked Buy too) — the id is now free and carries history that
+        // must never be inherited.
+        client
+            .put(
+                &format!("/inheritances/{}", first.id),
+                &serde_json::json!({
+                    "listing_id": 1,
+                    "quantity": "150",
+                    "date_of_death": "2025-01-10",
+                    "cost_base_rule": "DeceasedCostBase",
+                    "cost_base": "3000",
+                    "deceased_acquisition_date": "2020-02-01"
+                }),
+            )
+            .await
+            .expect_status(StatusCode::NO_CONTENT);
+        client
+            .delete(&format!("/inheritances/{}", first.id))
+            .await
+            .expect_status(StatusCode::NO_CONTENT);
+
+        let second: Inheritance = client
+            .post("/inheritances", &body)
+            .await
+            .expect_status(StatusCode::CREATED)
+            .json();
+        assert_ne!(
+            first.id, second.id,
+            "the create took the deleted row's id back, inheriting its audit history"
+        );
+    }
+
+    #[tokio::test]
+    async fn post_inheritance_twice_stores_two_distinct_rows() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        let client = client(&pool);
+
+        let body = serde_json::json!({
+            "listing_id": 1,
+            "quantity": "100",
+            "date_of_death": "2025-01-10",
+            "cost_base_rule": "MarketValueAtDeath",
+            "cost_base": "5000"
+        });
+        let first: Inheritance = client
+            .post("/inheritances", &body)
+            .await
+            .expect_status(StatusCode::CREATED)
+            .json();
+        let second: Inheritance = client
+            .post("/inheritances", &body)
+            .await
+            .expect_status(StatusCode::CREATED)
+            .json();
+        assert_ne!(
+            first.id, second.id,
+            "each create must get its own id, not overwrite the previous row"
+        );
+
+        let all: Vec<Inheritance> = client.get_json("/inheritances").await;
+        assert_eq!(all.len(), 2, "both creates are stored: {all:?}");
+        let mut ids: Vec<i64> = all.iter().map(|i| i.id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), 2, "the ids are distinct: {all:?}");
+    }
+
+    /// A create shares every write-time validation with the upsert, so a bad
+    /// entry is refused and neither the inheritance nor its parcel Buy is
+    /// stored — the create path is not a way round the cost-base-rule pairing.
+    #[tokio::test]
+    async fn post_inheritance_rejects_like_the_upsert_and_stores_nothing() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        let client = client(&pool);
+
+        // The post-CGT rule without the deceased's acquisition date.
+        let body = serde_json::json!({
+            "listing_id": 1,
+            "quantity": "100",
+            "date_of_death": "2025-01-10",
+            "cost_base_rule": "DeceasedCostBase",
+            "cost_base": "3000"
+        });
+        let response = client.post("/inheritances", &body).await;
+        let (status, text) = response.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "body: {text:?}");
+        assert!(
+            text.contains("acquisition date"),
+            "the shared wording is reused: {text:?}"
+        );
+
+        let all: Vec<Inheritance> = client.get_json("/inheritances").await;
+        assert!(all.is_empty(), "a rejected create stores nothing: {all:?}");
     }
 }

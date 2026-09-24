@@ -122,6 +122,13 @@ pub struct TransferGroup {
 pub enum TransferError {
     #[error("transfer write failed: {0}")]
     Db(#[from] sqlx::Error),
+    /// A create committed but the transfer row could not be read back. Not
+    /// reachable in practice — the row is committed and unread only if
+    /// something deletes it in the same instant — but a create that answers
+    /// with no row would be worse than a loud failure, so it is its own
+    /// variant rather than an `unwrap`. Mapped to `500`.
+    #[error("the transfer row was created but could not be read back")]
+    VanishedAfterCreate,
     /// Source and destination accounts are the same — nothing to move.
     #[error("the source and destination accounts are the same")]
     SameAccount,
@@ -300,6 +307,10 @@ impl From<TransferError> for ApiError {
                 }
             }
             TransferError::Db(err) => err.into(),
+            // A committed create whose row could not be read back: a real
+            // server-side fault, so it answers `500` and is logged rather than
+            // dressed up as a client error.
+            err @ TransferError::VanishedAfterCreate => ApiError::internal(err),
         }
     }
 }
@@ -315,7 +326,10 @@ impl CrudEntity for Transfer {
 
 pub fn router() -> Router<SqlitePool> {
     Router::new()
-        .route("/transfers", get(http::list_handler::<Transfer>))
+        .route(
+            "/transfers",
+            get(http::list_handler::<Transfer>).post(create),
+        )
         .route(
             "/transfers/{id}",
             get(http::get_handler::<Transfer>)
@@ -328,13 +342,43 @@ pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<Transfer>, sqlx
     http::crud_get(pool, id).await
 }
 
-/// Record and execute a transfer, atomically: insert the transfer row, close
-/// the chosen quantities in the source account with a price-0 transfer-out
-/// Sell, and re-create them in the destination account carrying each parcel's
-/// remaining reduced cost base and acquisition date.
+/// Record and execute a transfer on a caller-chosen id (`PUT
+/// /transfers/:id`), atomically: insert the transfer row, close the chosen
+/// quantities in the source account with a price-0 transfer-out Sell, and
+/// re-create them in the destination account carrying each parcel's remaining
+/// reduced cost base and acquisition date.
 pub async fn db_transfer(
     pool: &SqlitePool,
     id: i64,
+    body: &TransferBody,
+) -> Result<TransferGroup, TransferError> {
+    write(pool, Some(id), body).await
+}
+
+/// `POST /transfers` — execute a transfer without naming an id: the database
+/// assigns the transfer row's id (see [`write`]), and the transfer-out Sell and
+/// transfer-in Buys it creates carry that assigned id as their provenance, so
+/// the whole group belongs to the row that names it.
+pub async fn db_create(
+    pool: &SqlitePool,
+    body: &TransferBody,
+) -> Result<TransferGroup, TransferError> {
+    write(pool, None, body).await
+}
+
+/// The shared write behind both entry points, allocating the transfer row's id
+/// when `id` is `None`.
+///
+/// `id = Some` is the long-standing `PUT /transfers/:id` execution on a
+/// caller-chosen id; `id = None` is the `POST /transfers` create, which leaves
+/// the id to the database. Unlike the single-table entities' creates, this one
+/// cannot hand the assigned id back for the caller to read the row with: the
+/// group it returns is built from the Sell and transfer-in Buy ids the write
+/// itself created, which exist only here. So the write reads the group back
+/// (exactly what the upsert path always did) and both entry points return it.
+async fn write(
+    pool: &SqlitePool,
+    id: Option<i64>,
     body: &TransferBody,
 ) -> Result<TransferGroup, TransferError> {
     if body.from_account_id == body.to_account_id {
@@ -346,12 +390,20 @@ pub async fn db_transfer(
 
     let mut tx = write_tx(pool).await?;
 
-    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM transfers WHERE id = ?)")
-        .bind(id)
-        .fetch_one(&mut *tx)
-        .await?;
-    if exists {
-        return Err(TransferError::AlreadyExists);
+    // A recorded transfer is immutable, so a `PUT` onto an id already taken is
+    // refused. A create has no id to collide with: it omits the id column, so
+    // the database's `AUTOINCREMENT` sequence assigns one it has never issued
+    // — a server-computed id could hand the new row a deleted transfer's id
+    // and, with it, that row's `row_history` trail (SCENARIOS U-a).
+    if let Some(id) = id {
+        let exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM transfers WHERE id = ?)")
+                .bind(id)
+                .fetch_one(&mut *tx)
+                .await?;
+        if exists {
+            return Err(TransferError::AlreadyExists);
+        }
     }
 
     // The transfer-in parcels are dated the transfer date, so an executed
@@ -371,17 +423,26 @@ pub async fn db_transfer(
     }
 
     // A bad listing or account id fails the FK here (→ 422 via the shared map).
-    sqlx::query(
+    // The create branch omits the id column (one placeholder fewer); the upsert
+    // branch is otherwise byte-identical.
+    let query = crate::insert_with_optional_id!(
         "INSERT INTO transfers (id, listing_id, date, from_account_id, to_account_id) \
          VALUES (?, ?, ?, ?, ?)",
-    )
-    .bind(id)
-    .bind(body.listing_id)
-    .bind(body.date)
-    .bind(body.from_account_id)
-    .bind(body.to_account_id)
-    .execute(&mut *tx)
-    .await?;
+        "INSERT INTO transfers (listing_id, date, from_account_id, to_account_id) \
+         VALUES (?, ?, ?, ?)",
+        id,
+    );
+    let result = query
+        .bind(body.listing_id)
+        .bind(body.date)
+        .bind(body.from_account_id)
+        .bind(body.to_account_id)
+        .execute(&mut *tx)
+        .await?;
+    // An id-less INSERT was given one by the database; an upsert wrote the
+    // explicit one it was handed. Either way the trade rows below are written
+    // against the id the transfer row actually holds.
+    let transfer_id = id.unwrap_or_else(|| result.last_insert_rowid());
 
     // Cost-base inputs, shared with the scrip-for-scrip exchange and the
     // demerge: splits re-base units, AMIT adjustments and return-of-capital
@@ -420,7 +481,7 @@ pub async fn db_transfer(
             id: None,
             body: &sell_body,
             settlement: trade::Settlement::stated(body.date),
-            provenance: Some(sell::SellProvenance::Transfer(id)),
+            provenance: Some(sell::SellProvenance::Transfer(transfer_id)),
         },
     )
     .await?;
@@ -444,7 +505,7 @@ pub async fn db_transfer(
                 deemed_acquisition_date: t.deemed_acquisition_date,
                 holding_account_id: body.to_account_id,
             },
-            rollover::Provenance::Transfer(id),
+            rollover::Provenance::Transfer(transfer_id),
         )
         .await?;
         transfer_in_ids.push(buy_id);
@@ -459,13 +520,16 @@ pub async fn db_transfer(
     // via `transfers.fee_sale_trade_id` so the two are created and deleted
     // together. Its parcels' over-allocation is checked against the source
     // holding net of the transfer-out Sell above (both share the same tx).
-    let fee_sale_id = write_fee_sale(&mut tx, id, body, listing_currency).await?;
+    let fee_sale_id = write_fee_sale(&mut tx, transfer_id, body, listing_currency).await?;
 
     tx.commit().await?;
 
     // Read the freshly created rows back so the response is exactly what was
-    // stored.
-    let transfer = db_get(pool, id).await?.ok_or(sqlx::Error::RowNotFound)?;
+    // stored. The row was committed a moment ago, so its absence is a
+    // server-side fault (500) rather than a client error.
+    let transfer = db_get(pool, transfer_id)
+        .await?
+        .ok_or(TransferError::VanishedAfterCreate)?;
     let sell = trade::db_get(pool, sell_id)
         .await?
         .ok_or(sqlx::Error::RowNotFound)?;
@@ -745,6 +809,19 @@ async fn upsert(
     Ok((StatusCode::CREATED, Json(group)))
 }
 
+/// `POST /transfers` — execute the transfer without naming an id. The database
+/// assigns the transfer row's id (see [`write`]) and the group's Sell and
+/// transfer-in Buys are written against it, so the caller gets the whole
+/// executed group — its own id included — from one request rather than
+/// guessing `max(id) + 1` first.
+async fn create(
+    State(pool): State<SqlitePool>,
+    Json(body): Json<TransferBody>,
+) -> Result<(StatusCode, Json<TransferGroup>), ApiError> {
+    let group = db_create(&pool, &body).await?;
+    Ok((StatusCode::CREATED, Json(group)))
+}
+
 async fn delete(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
@@ -831,6 +908,11 @@ mod tests {
             fee_market_price: None,
             fee_fx_rate: None,
         }
+    }
+
+    /// Client over this module's own routes.
+    fn client(pool: &SqlitePool) -> ApiClient {
+        ApiClient::over(router().with_state(pool.clone()))
     }
 
     // DB-level tests
@@ -2241,5 +2323,162 @@ mod tests {
         let group = db_transfer(&pool, 1, &b).await.unwrap();
         let fee = group.fee_sale.as_ref().expect("a fee Sell was created");
         assert_eq!(fee.fx_rate, dec("0.62"));
+    }
+
+    // The `POST /transfers` create — the second entry point beside the
+    // `PUT /transfers/:id` upsert, mirroring income's four tests.
+
+    /// `POST /transfers` allocates the transfer row's own id, and the
+    /// transfer-out Sell and transfer-in Buys it executes are written against
+    /// that assigned id (SCENARIOS U-a).
+    #[tokio::test]
+    async fn post_transfer_creates_a_group_with_a_database_assigned_id() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "ICE").await;
+        insert_vest(&pool, 1, d(2023, 3, 1), "100", "120").await;
+
+        let body = serde_json::json!({
+            "listing_id": 1,
+            "date": "2024-06-01",
+            "from_account_id": 2,
+            "to_account_id": 1,
+            "allocations": [ { "purchase_trade_id": 1, "quantity_allocated": "100" } ]
+        });
+        let response = client(&pool).post("/transfers", &body).await;
+        let (status, text) = response.status_and_body();
+        assert_eq!(status, StatusCode::CREATED, "body: {text:?}");
+
+        let v: serde_json::Value = response.json();
+        let id = v["transfer"]["id"]
+            .as_i64()
+            .expect("the created transfer carries its id");
+        assert_ne!(id, 0, "a create must not land on id 0");
+        // The group is linked to the row the database named: the Sell and every
+        // transfer-in Buy carry it as their provenance.
+        assert_eq!(v["sell"]["transfer_id"], id);
+        assert_eq!(v["transfer_ins"][0]["transfer_id"], id);
+
+        let stored = db_get(&pool, id).await.unwrap().unwrap();
+        assert_eq!(stored.id, id);
+        assert_eq!(stored.listing_id, 1);
+        assert_eq!(stored.from_account_id, 2);
+        assert_eq!(stored.to_account_id, 1);
+    }
+
+    /// The bug this endpoint exists to kill: with an id-less create there is no
+    /// guessed id to collide with, so two creates are two rows — before, a
+    /// second `max(id) + 1`-style PUT on a taken id was refused outright (a
+    /// transfer is immutable).
+    #[tokio::test]
+    async fn post_transfer_twice_stores_two_distinct_rows() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "ICE").await;
+        insert_vest(&pool, 1, d(2023, 3, 1), "100", "120").await;
+        insert_vest(&pool, 2, d(2023, 4, 3), "100", "130").await;
+        let client = client(&pool);
+
+        let mut ids = Vec::new();
+        for parcel in [1_i64, 2] {
+            let body = serde_json::json!({
+                "listing_id": 1,
+                "date": "2024-06-01",
+                "from_account_id": 2,
+                "to_account_id": 1,
+                "allocations": [ { "purchase_trade_id": parcel, "quantity_allocated": "100" } ]
+            });
+            let v: serde_json::Value = client
+                .post("/transfers", &body)
+                .await
+                .expect_status(StatusCode::CREATED)
+                .json();
+            ids.push(v["transfer"]["id"].as_i64().unwrap());
+        }
+        assert_ne!(
+            ids[0], ids[1],
+            "each create must get its own id, not overwrite the previous row"
+        );
+
+        let all: Vec<Transfer> = client.get_json("/transfers").await;
+        assert_eq!(all.len(), 2, "both creates are stored: {all:?}");
+    }
+
+    /// A create never re-issues an id a deleted transfer held — the property
+    /// the whole `row_history` occupant marking rests on. `AUTOINCREMENT`
+    /// guarantees it only while the INSERT omits the id column, which is
+    /// exactly what the create path does (SCENARIOS U-a, migration 0045).
+    #[tokio::test]
+    async fn post_transfer_never_reuses_a_deleted_transfers_id() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "ICE").await;
+        insert_vest(&pool, 1, d(2023, 3, 1), "100", "120").await;
+        let client = client(&pool);
+
+        let body = serde_json::json!({
+            "listing_id": 1,
+            "date": "2024-06-01",
+            "from_account_id": 2,
+            "to_account_id": 1,
+            "allocations": [ { "purchase_trade_id": 1, "quantity_allocated": "100" } ]
+        });
+        let first: serde_json::Value = client
+            .post("/transfers", &body)
+            .await
+            .expect_status(StatusCode::CREATED)
+            .json();
+        let first_id = first["transfer"]["id"].as_i64().unwrap();
+
+        // Delete the group (the delete is itself a `row_history` entry on that
+        // id) and re-create the same transfer from the restored parcel.
+        client
+            .delete(&format!("/transfers/{first_id}"))
+            .await
+            .expect_status(StatusCode::NO_CONTENT);
+
+        let second: serde_json::Value = client
+            .post("/transfers", &body)
+            .await
+            .expect_status(StatusCode::CREATED)
+            .json();
+        assert_ne!(
+            first_id,
+            second["transfer"]["id"].as_i64().unwrap(),
+            "the create took the deleted transfer's id back, inheriting its audit history"
+        );
+    }
+
+    /// A create shares every write-time validation with the upsert, and the
+    /// whole transaction rolls back: a create rejected by the Sell core stores
+    /// no transfer row and leaves no trade behind.
+    #[tokio::test]
+    async fn post_transfer_rejects_like_the_upsert_and_stores_nothing() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "ICE").await;
+        insert_vest(&pool, 1, d(2023, 3, 1), "100", "120").await;
+
+        // The parcel holds 100 units; moving 101 is refused after the transfer
+        // row has already been inserted in the transaction.
+        let body = serde_json::json!({
+            "listing_id": 1,
+            "date": "2024-06-01",
+            "from_account_id": 2,
+            "to_account_id": 1,
+            "allocations": [ { "purchase_trade_id": 1, "quantity_allocated": "101" } ]
+        });
+        let response = client(&pool).post("/transfers", &body).await;
+        let (status, text) = response.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "body: {text:?}");
+        assert!(
+            text.contains("exceed what a selected parcel still holds"),
+            "the shared Sell wording is reused: {text:?}"
+        );
+
+        let all: Vec<Transfer> = client(&pool).get_json("/transfers").await;
+        assert!(all.is_empty(), "a rejected create stores nothing: {all:?}");
+        let group_trades: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM trades WHERE transfer_id IS NOT NULL")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(group_trades, 0, "the rolled-back group left trades behind");
     }
 }

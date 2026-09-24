@@ -445,7 +445,7 @@ impl CrudEntity for Income {
 
 pub fn router() -> Router<SqlitePool> {
     Router::new()
-        .route("/income", get(http::list_handler::<Income>))
+        .route("/income", get(http::list_handler::<Income>).post(create))
         .route(
             "/income/{id}",
             get(http::get_handler::<Income>).put(upsert).delete(delete),
@@ -460,6 +460,13 @@ pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<Income>, sqlx::
 pub enum UpsertError {
     #[error("income write failed: {0}")]
     Db(#[from] sqlx::Error),
+    /// A create committed but the row could not be read back. Not reachable in
+    /// practice — the row is committed and unread only if something deletes it
+    /// in the same instant — but a create that answers with no row would be
+    /// worse than a loud failure, so it is its own variant rather than an
+    /// `unwrap`. Mapped to `500`.
+    #[error("the income row was created but could not be read back")]
+    VanishedAfterCreate,
     /// The existing row is a buy-back dividend component (`buyback_trade_id`
     /// set): its figures derive from the buy-back's terms, so free-form edits
     /// are rejected. Delete the buy-back Sell via `DELETE /sells/:id` (which
@@ -669,7 +676,13 @@ pub(crate) fn per_share_detail(e: &PerShareError) -> String {
     }
 }
 
-pub async fn db_upsert(pool: &SqlitePool, income: &Income) -> Result<(), UpsertError> {
+/// Write an income row, allocating its id when `id` is `None`.
+///
+/// Every validation below is shared by both callers, so a create and an upsert
+/// can never drift: `id = Some` is the long-standing `PUT /income/:id` upsert,
+/// and `id = None` is the `POST /income` create, which leaves the id to the
+/// database.
+async fn write(pool: &SqlitePool, id: Option<i64>, income: &Income) -> Result<i64, UpsertError> {
     // No money figure on the row may be negative: statements report positive
     // (or zero) amounts, and a negative would silently reduce the year's
     // totals in every report. Checked before the per-share cross-check so a
@@ -716,13 +729,22 @@ pub async fn db_upsert(pool: &SqlitePool, income: &Income) -> Result<(), UpsertE
 
     let mut tx = write_tx(pool).await?;
 
-    let existing: Option<Income> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT {} FROM income WHERE id = ?",
-        <Income as CrudEntity>::COLUMNS
-    )))
-    .bind(income.id)
-    .fetch_optional(&mut *tx)
-    .await?;
+    // No id means a create, and a row that does not exist yet has nothing to
+    // freeze: the buy-back and reinvestment guards below are about an
+    // *existing* row the edit would disturb, so they are reached only on the
+    // upsert path.
+    let existing: Option<Income> = match id {
+        Some(id) => {
+            sqlx::query_as(sqlx::AssertSqlSafe(format!(
+                "SELECT {} FROM income WHERE id = ?",
+                <Income as CrudEntity>::COLUMNS
+            )))
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?
+        }
+        None => None,
+    };
 
     // A buy-back dividend-component row is immutable here: it was created
     // from its action's terms by the participation operation. (The INSERT
@@ -876,7 +898,14 @@ pub async fn db_upsert(pool: &SqlitePool, income: &Income) -> Result<(), UpsertE
     // list (a new row starts unlinked) and the ON CONFLICT SET (an edit
     // preserves an existing link): the DRP link is written only by the
     // reinvest operation, in its own transaction.
-    sqlx::query(
+    //
+    // A create (`id` is `None`, from `POST /income`) omits the id column
+    // altogether, so the database's `AUTOINCREMENT` sequence assigns one it
+    // has never issued — a server-computed id could hand the new row a
+    // deleted row's id and, with it, that row's `row_history` trail
+    // (SCENARIOS U-a). The upsert branch is otherwise byte-identical, so a
+    // `PUT` on an explicit id stays the upsert it has always been.
+    let query = crate::insert_with_optional_id!(
         "INSERT INTO income \
          (id, listing_id, date_paid, ex_date, franked_amount, unfranked_amount, \
           foreign_source_income, foreign_tax_paid, tfn_withholding_tax, franking_credits, \
@@ -904,31 +933,78 @@ pub async fn db_upsert(pool: &SqlitePool, income: &Income) -> Result<(), UpsertE
              securities_held            = excluded.securities_held, \
              tax_deferred_amount        = excluded.tax_deferred_amount, \
              income_type                = excluded.income_type",
-    )
-    .bind(income.id)
-    .bind(income.listing_id)
-    .bind(income.date_paid)
-    .bind(income.ex_date)
-    .bind(Money(income.franked_amount))
-    .bind(Money(income.unfranked_amount))
-    .bind(Money(income.foreign_source_income))
-    .bind(Money(income.foreign_tax_paid))
-    .bind(Money(income.tfn_withholding_tax))
-    .bind(Money(income.franking_credits))
-    .bind(Money(income.lic_capital_gain_amount))
-    .bind(Money(income.conduit_foreign_income))
-    .bind(income.trust_income)
-    .bind(income.entitlement_date)
-    .bind(&income.currency)
-    .bind(income.holding_account_id)
-    .bind(OptMoney(income.amount_per_security))
-    .bind(OptMoney(income.securities_held))
-    .bind(OptMoney(income.tax_deferred_amount))
-    .bind(income.income_type)
-    .execute(&mut *tx)
-    .await?;
+        "INSERT INTO income \
+         (listing_id, date_paid, ex_date, franked_amount, unfranked_amount, \
+          foreign_source_income, foreign_tax_paid, tfn_withholding_tax, franking_credits, \
+          lic_capital_gain_amount, conduit_foreign_income, trust_income, entitlement_date, \
+          currency, holding_account_id, amount_per_security, \
+          securities_held, tax_deferred_amount, income_type) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+         ON CONFLICT(id) DO UPDATE SET \
+             listing_id                 = excluded.listing_id, \
+             date_paid                  = excluded.date_paid, \
+             ex_date                    = excluded.ex_date, \
+             franked_amount             = excluded.franked_amount, \
+             unfranked_amount           = excluded.unfranked_amount, \
+             foreign_source_income      = excluded.foreign_source_income, \
+             foreign_tax_paid           = excluded.foreign_tax_paid, \
+             tfn_withholding_tax        = excluded.tfn_withholding_tax, \
+             franking_credits           = excluded.franking_credits, \
+             lic_capital_gain_amount = excluded.lic_capital_gain_amount, \
+             conduit_foreign_income     = excluded.conduit_foreign_income, \
+             trust_income               = excluded.trust_income, \
+             entitlement_date           = excluded.entitlement_date, \
+             currency                   = excluded.currency, \
+             holding_account_id         = excluded.holding_account_id, \
+             amount_per_security        = excluded.amount_per_security, \
+             securities_held            = excluded.securities_held, \
+             tax_deferred_amount        = excluded.tax_deferred_amount, \
+             income_type                = excluded.income_type",
+        id,
+    );
+    let result = query
+        .bind(income.listing_id)
+        .bind(income.date_paid)
+        .bind(income.ex_date)
+        .bind(Money(income.franked_amount))
+        .bind(Money(income.unfranked_amount))
+        .bind(Money(income.foreign_source_income))
+        .bind(Money(income.foreign_tax_paid))
+        .bind(Money(income.tfn_withholding_tax))
+        .bind(Money(income.franking_credits))
+        .bind(Money(income.lic_capital_gain_amount))
+        .bind(Money(income.conduit_foreign_income))
+        .bind(income.trust_income)
+        .bind(income.entitlement_date)
+        .bind(&income.currency)
+        .bind(income.holding_account_id)
+        .bind(OptMoney(income.amount_per_security))
+        .bind(OptMoney(income.securities_held))
+        .bind(OptMoney(income.tax_deferred_amount))
+        .bind(income.income_type)
+        .execute(&mut *tx)
+        .await?;
+    // An id-less INSERT was given one by the database; an upsert wrote the
+    // explicit one it was handed. Either way the caller gets the id the row
+    // actually holds.
+    let assigned_id = id.unwrap_or_else(|| result.last_insert_rowid());
     tx.commit().await?;
+    Ok(assigned_id)
+}
+
+/// `PUT /income/:id` — the long-standing upsert on a caller-chosen id.
+pub async fn db_upsert(pool: &SqlitePool, income: &Income) -> Result<(), UpsertError> {
+    write(pool, Some(income.id), income).await?;
     Ok(())
+}
+
+/// `POST /income` — create without naming an id, and return the row the
+/// database assigned one to.
+pub async fn db_create(pool: &SqlitePool, income: &Income) -> Result<Income, UpsertError> {
+    let id = write(pool, None, income).await?;
+    db_get(pool, id)
+        .await?
+        .ok_or(UpsertError::VanishedAfterCreate)
 }
 
 /// Outcome of a delete request, so the handler can map to the right status.
@@ -972,12 +1048,11 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome, sqlx
     Ok(DeleteOutcome::Deleted)
 }
 
-async fn upsert(
-    State(pool): State<SqlitePool>,
-    Path(id): Path<i64>,
-    Json(body): Json<IncomeBody>,
-) -> Result<StatusCode, ApiError> {
-    let income = Income {
+/// The row a request body describes. `id` is the path's on an upsert and
+/// ignored on a create (the database assigns one), so both entry points build
+/// their `Income` through this one mapping and cannot drift.
+fn income_from_body(id: i64, body: IncomeBody) -> Income {
+    Income {
         id,
         listing_id: body.listing_id,
         date_paid: body.date_paid,
@@ -992,7 +1067,7 @@ async fn upsert(
         conduit_foreign_income: body.conduit_foreign_income,
         trust_income: body.trust_income,
         entitlement_date: body.entitlement_date,
-        // Provenance links are never client-settable; db_upsert doesn't
+        // Provenance links are never client-settable; the write doesn't
         // write them anyway (an edit preserves an existing DRP link).
         reinvestment_trade_id: None,
         currency: body.currency,
@@ -1002,9 +1077,28 @@ async fn upsert(
         securities_held: body.securities_held,
         tax_deferred_amount: body.tax_deferred_amount,
         income_type: body.income_type,
-    };
-    db_upsert(&pool, &income).await?;
+    }
+}
+
+async fn upsert(
+    State(pool): State<SqlitePool>,
+    Path(id): Path<i64>,
+    Json(body): Json<IncomeBody>,
+) -> Result<StatusCode, ApiError> {
+    db_upsert(&pool, &income_from_body(id, body)).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /income` — create the row without naming an id. The database assigns
+/// one (see [`write`]), and the created row is returned so the caller can use
+/// its id immediately — attaching the registry advice that documents it, for
+/// one — with no `max(id) + 1` guess between the two calls.
+async fn create(
+    State(pool): State<SqlitePool>,
+    Json(body): Json<IncomeBody>,
+) -> Result<(StatusCode, Json<Income>), ApiError> {
+    let created = db_create(&pool, &income_from_body(0, body)).await?;
+    Ok((StatusCode::CREATED, Json(created)))
 }
 
 impl From<UpsertError> for ApiError {
@@ -1097,6 +1191,10 @@ impl From<UpsertError> for ApiError {
                  only the maximum is claimable in any case"
             )),
             UpsertError::Db(err) => err.into(),
+            // A committed create whose row could not be read back: a real
+            // server-side fault, so it answers `500` and is logged rather than
+            // dressed up as a client error.
+            err @ UpsertError::VanishedAfterCreate => ApiError::internal(err),
         }
     }
 }
@@ -1354,6 +1452,194 @@ mod tests {
     }
 
     // DB-level tests
+
+    /// `POST /income` allocates its own id — the create that makes the whole
+    /// `max(id) + 1` dance unnecessary (SCENARIOS U-a).
+    #[tokio::test]
+    async fn post_income_creates_a_row_with_a_database_assigned_id() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        let client = client(&pool);
+
+        let body = serde_json::json!({
+            "listing_id": 1,
+            "date_paid": "2024-03-15",
+            "ex_date": "2024-03-01",
+            "franked_amount": "70",
+            "franking_credits": "30",
+        });
+        let response = client.post("/income", &body).await;
+        let (status, text) = response.status_and_body();
+        assert_eq!(status, StatusCode::CREATED, "body: {text:?}");
+
+        let created: Income = response.json();
+        assert_ne!(created.id, 0, "a create must not land on id 0");
+        assert_eq!(created.franking_credits, Decimal::from(30));
+
+        // The returned row is the stored one, and it is listed under its own
+        // id — so the caller can act on the id at once instead of re-reading
+        // the collection to discover it.
+        let listed = db_get(&pool, created.id).await.unwrap().unwrap();
+        assert_eq!(listed.id, created.id);
+        assert_eq!(listed.listing_id, 1);
+        assert_eq!(listed.franked_amount, Decimal::from(70));
+    }
+
+    /// The bug this endpoint exists to kill: with an id-less create there is no
+    /// guessed id to collide with, so two creates are two rows — before, a
+    /// second `max(id) + 1`-style PUT on a taken id silently overwrote the
+    /// first through the upsert's `ON CONFLICT ... DO UPDATE`.
+    /// A create never re-issues an id a deleted row held.
+    ///
+    /// This is the property the whole `row_history` occupant marking rests on:
+    /// an id handed out twice inherits the previous occupant's trail, so the
+    /// new row's history would open with someone else's edits. `AUTOINCREMENT`
+    /// guarantees it only while the INSERT omits the id column — which is
+    /// exactly what the create path does (SCENARIOS U-a, migration 0045).
+    #[tokio::test]
+    async fn post_income_never_reuses_a_deleted_rows_id() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        let client = client(&pool);
+
+        let body = serde_json::json!({
+            "listing_id": 1,
+            "date_paid": "2024-03-15",
+            "franked_amount": "70",
+            "franking_credits": "30",
+        });
+        let first: Income = client
+            .post("/income", &body)
+            .await
+            .expect_status(StatusCode::CREATED)
+            .json();
+
+        // Edit it, so its trail is non-empty, then delete it — the id is now
+        // free and carries history that must never be inherited.
+        let edited = serde_json::json!({
+            "listing_id": 1,
+            "date_paid": "2024-03-16",
+            "franked_amount": "140",
+            "franking_credits": "60",
+        });
+        client
+            .put(&format!("/income/{}", first.id), &edited)
+            .await
+            .expect_status(StatusCode::NO_CONTENT);
+        client
+            .delete(&format!("/income/{}", first.id))
+            .await
+            .expect_status(StatusCode::NO_CONTENT);
+
+        let second: Income = client
+            .post("/income", &body)
+            .await
+            .expect_status(StatusCode::CREATED)
+            .json();
+        assert_ne!(
+            first.id, second.id,
+            "the create took the deleted row's id back, inheriting its audit history"
+        );
+    }
+
+    #[tokio::test]
+    async fn post_income_twice_stores_two_distinct_rows() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        let client = client(&pool);
+
+        let body = serde_json::json!({
+            "listing_id": 1,
+            "date_paid": "2024-03-15",
+            "franked_amount": "70",
+            "franking_credits": "30",
+        });
+        let first: Income = client
+            .post("/income", &body)
+            .await
+            .expect_status(StatusCode::CREATED)
+            .json();
+        let second: Income = client
+            .post("/income", &body)
+            .await
+            .expect_status(StatusCode::CREATED)
+            .json();
+        assert_ne!(
+            first.id, second.id,
+            "each create must get its own id, not overwrite the previous row"
+        );
+
+        let all: Vec<Income> = client.get_json("/income").await;
+        assert_eq!(all.len(), 2, "both creates are stored: {all:?}");
+        let mut ids: Vec<i64> = all.iter().map(|i| i.id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), 2, "the ids are distinct: {all:?}");
+    }
+
+    /// A create shares every write-time validation with the upsert, so a bad
+    /// statement is refused and nothing is stored — the create path is not a
+    /// way round the franking ceiling.
+    #[tokio::test]
+    async fn post_income_rejects_like_the_upsert_and_stores_nothing() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        let client = client(&pool);
+
+        // 70 franked carries at most 70 × 30/70 = 30 of credits; 99 exceeds it.
+        let body = serde_json::json!({
+            "listing_id": 1,
+            "date_paid": "2024-03-15",
+            "franked_amount": "70",
+            "franking_credits": "99",
+        });
+        let response = client.post("/income", &body).await;
+        let (status, text) = response.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "body: {text:?}");
+        assert!(
+            text.contains("exceed"),
+            "the shared ceiling wording is reused: {text:?}"
+        );
+
+        let all: Vec<Income> = client.get_json("/income").await;
+        assert!(all.is_empty(), "a rejected create stores nothing: {all:?}");
+    }
+
+    /// `PUT` on an explicit id is still the upsert it always was — the create
+    /// path was added beside it, not instead of it.
+    #[tokio::test]
+    async fn put_still_upserts_on_the_named_id() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        let client = client(&pool);
+
+        let body = serde_json::json!({
+            "listing_id": 1,
+            "date_paid": "2024-03-15",
+            "franked_amount": "70",
+            "franking_credits": "30",
+        });
+        client.put_ok("/income/500", &body).await;
+        let stored = db_get(&pool, 500).await.unwrap().unwrap();
+        assert_eq!(stored.id, 500);
+
+        // The same PUT again edits in place rather than adding a row.
+        client
+            .put_ok(
+                "/income/500",
+                &serde_json::json!({
+                    "listing_id": 1,
+                    "date_paid": "2024-03-15",
+                    "franked_amount": "140",
+                    "franking_credits": "60",
+                }),
+            )
+            .await;
+        let edited = db_get(&pool, 500).await.unwrap().unwrap();
+        assert_eq!(edited.franked_amount, Decimal::from(140));
+        let all: Vec<Income> = client.get_json("/income").await;
+        assert_eq!(all.len(), 1, "an upsert on a held id adds no row: {all:?}");
+    }
 
     #[tokio::test]
     async fn db_dividend_income_insert_and_retrieve() {

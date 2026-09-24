@@ -62,6 +62,13 @@ where
 pub enum WriteError {
     #[error("corporate action write failed: {0}")]
     Db(#[from] sqlx::Error),
+    /// A create committed but the row could not be read back. Not reachable in
+    /// practice — the row is committed and unread only if something deletes it
+    /// in the same instant — but a create that answers with no row would be
+    /// worse than a loud failure, so it is its own variant rather than an
+    /// `unwrap`. Mapped to `500`.
+    #[error("the corporate action row was created but could not be read back")]
+    VanishedAfterCreate,
     /// The action is referenced by rights-exercise, buy-back participation,
     /// scrip-for-scrip exchange, demerger, or worthless-shares recognise trades
     /// (`trades.rights_action_id` / `trades.buyback_action_id` /
@@ -208,6 +215,10 @@ impl From<WriteError> for ApiError {
             ),
             // Unknown listing/currency FK or enum CHECK violation → 422.
             WriteError::Db(err) => err.into(),
+            // A committed create whose row could not be read back: a real
+            // server-side fault, so it answers `500` and is logged rather than
+            // dressed up as a client error.
+            err @ WriteError::VanishedAfterCreate => ApiError::internal(err),
         }
     }
 }
@@ -444,7 +455,19 @@ fn stated_close_only(stored: &CorporateAction, written: &CorporateAction) -> boo
         && blank_close(&stored.kind) == blank_close(&written.kind)
 }
 
-pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<(), WriteError> {
+/// The shared write behind both entry points, allocating the action's id when
+/// `id` is `None`.
+///
+/// `id = Some` is the long-standing `PUT /corporate_actions/:id` upsert on a
+/// caller-chosen id; `id = None` is the `POST /corporate_actions` create,
+/// which leaves the id to the database's `AUTOINCREMENT` sequence (SCENARIOS
+/// U-a). The per-type payload mapping and every write-time invariant are
+/// shared, so a create and an upsert can never drift.
+async fn write(
+    pool: &SqlitePool,
+    id: Option<i64>,
+    action: &CorporateAction,
+) -> Result<i64, WriteError> {
     // Spread the variant's payload over the per-type columns; the other
     // types' columns are NULL (the table CHECKs require exactly this shape).
     #[derive(Default)]
@@ -578,19 +601,29 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
     // and written in one transaction.
     // Loaded once: the row as it stands decides both whether a referenced
     // action is nonetheless writable (below) and which listing an edit is
-    // moving it off (further down).
-    let stored = db_get_tx(&mut *tx, action.id).await?;
+    // moving it off (further down). A create has no stored row: the id the
+    // database is about to assign names nothing, so there is nothing to
+    // compare against and nothing that can reference it.
+    let stored: Option<CorporateAction> = match id {
+        Some(id) => db_get_tx(&mut *tx, id).await?,
+        None => None,
+    };
 
-    let referenced: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM trades \
-                       WHERE rights_action_id = ?1 OR buyback_action_id = ?1 \
-                          OR scrip_action_id = ?1 OR demerger_action_id = ?1 \
-                          OR worthless_action_id = ?1) \
-             OR EXISTS(SELECT 1 FROM rights_sales WHERE rights_action_id = ?1)",
-    )
-    .bind(action.id)
-    .fetch_one(&mut *tx)
-    .await?;
+    let referenced: bool = match id {
+        Some(id) => {
+            sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM trades \
+                               WHERE rights_action_id = ?1 OR buyback_action_id = ?1 \
+                                  OR scrip_action_id = ?1 OR demerger_action_id = ?1 \
+                                  OR worthless_action_id = ?1) \
+                     OR EXISTS(SELECT 1 FROM rights_sales WHERE rights_action_id = ?1)",
+            )
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await?
+        }
+        None => false,
+    };
     // Frozen against its *terms* — but a Demerger's stated pre-demerger close
     // is not one of them (see `WriteError::ReferencedByTrade`), so a write that
     // changes nothing else is let through. `stated_close_only` requires the
@@ -655,7 +688,13 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
             | ActionKind::ShareSplit { .. }
             | ActionKind::BonusIssue { .. }
     ) {
-        let rollovers = rollovers_after(&mut tx, action.listing_id, action.date, action.id).await?;
+        let rollovers = rollovers_after(
+            &mut tx,
+            action.listing_id,
+            action.date,
+            id.unwrap_or_default(),
+        )
+        .await?;
         if !rollovers.is_empty() {
             return Err(WriteError::BackDatedOverRollover { rollovers });
         }
@@ -665,7 +704,13 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
     // stream it is removed from has to hold up too). `None` for an insert.
     let previous_listing_id: Option<i64> = stored.as_ref().map(|stored| stored.listing_id);
 
-    sqlx::query(
+    // A create (`id` is `None`, from `POST /corporate_actions`) omits the id
+    // column altogether, so the database's `AUTOINCREMENT` sequence assigns
+    // one it has never issued — a server-computed id could hand the new row a
+    // deleted action's id and, with it, that row's `row_history` trail
+    // (SCENARIOS U-a). The upsert branch is otherwise byte-identical, so a
+    // `PUT` on an explicit id stays the upsert it has always been.
+    let query = crate::insert_with_optional_id!(
         "INSERT INTO corporate_actions \
          (id, action_type, listing_id, date, amount_per_unit, currency, \
           split_new_units, split_old_units, bonus_units, bonus_held_units, \
@@ -713,43 +758,95 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
              demerger_close_sourced_from = excluded.demerger_close_sourced_from, \
              demerger_close_reason       = excluded.demerger_close_reason, \
              renounceable                = excluded.renounceable",
-    )
-    .bind(action.id)
-    .bind(action.kind.type_str())
-    .bind(action.listing_id)
-    .bind(action.date)
-    .bind(c.amount_per_unit)
-    .bind(c.currency)
-    .bind(c.split_new_units)
-    .bind(c.split_old_units)
-    .bind(c.bonus_units)
-    .bind(c.bonus_held_units)
-    .bind(c.rights_units)
-    .bind(c.rights_held_units)
-    .bind(c.exercise_price)
-    .bind(c.buyback_price)
-    .bind(c.buyback_dividend)
-    .bind(c.buyback_franking_credit)
-    .bind(c.buyback_market_value)
-    .bind(c.scrip_listing_id)
-    .bind(c.scrip_new_units)
-    .bind(c.scrip_old_units)
-    .bind(c.scrip_cash_per_unit)
-    .bind(c.scrip_market_value)
-    .bind(c.scrip_cash_currency)
-    .bind(c.demerger_listing_id)
-    .bind(c.demerger_new_units)
-    .bind(c.demerger_held_units)
-    .bind(c.demerger_cost_base_pct)
-    .bind(c.worthless_event)
-    .bind(c.record_date)
-    .bind(c.demerger_close_date)
-    .bind(c.demerger_close_price)
-    .bind(c.demerger_close_sourced_from)
-    .bind(c.demerger_close_reason)
-    .bind(c.renounceable)
-    .execute(&mut *tx)
-    .await?;
+        "INSERT INTO corporate_actions \
+         (action_type, listing_id, date, amount_per_unit, currency, \
+          split_new_units, split_old_units, bonus_units, bonus_held_units, \
+          rights_units, rights_held_units, exercise_price, \
+          buyback_price, buyback_dividend, buyback_franking_credit, buyback_market_value, \
+          scrip_listing_id, scrip_new_units, scrip_old_units, \
+          scrip_cash_per_unit, scrip_market_value, scrip_cash_currency, \
+          demerger_listing_id, demerger_new_units, demerger_held_units, \
+          demerger_cost_base_pct, worthless_event, record_date, \
+          demerger_close_date, demerger_close_price, demerger_close_sourced_from, \
+          demerger_close_reason, renounceable) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \
+                 ?, ?, ?, ?, ?) \
+         ON CONFLICT(id) DO UPDATE SET \
+             action_type       = excluded.action_type, \
+             listing_id        = excluded.listing_id, \
+             date              = excluded.date, \
+             amount_per_unit   = excluded.amount_per_unit, \
+             currency          = excluded.currency, \
+             split_new_units   = excluded.split_new_units, \
+             split_old_units   = excluded.split_old_units, \
+             bonus_units       = excluded.bonus_units, \
+             bonus_held_units  = excluded.bonus_held_units, \
+             rights_units      = excluded.rights_units, \
+             rights_held_units = excluded.rights_held_units, \
+             exercise_price    = excluded.exercise_price, \
+             buyback_price           = excluded.buyback_price, \
+             buyback_dividend        = excluded.buyback_dividend, \
+             buyback_franking_credit = excluded.buyback_franking_credit, \
+             buyback_market_value    = excluded.buyback_market_value, \
+             scrip_listing_id  = excluded.scrip_listing_id, \
+             scrip_new_units   = excluded.scrip_new_units, \
+             scrip_old_units   = excluded.scrip_old_units, \
+             scrip_cash_per_unit = excluded.scrip_cash_per_unit, \
+             scrip_market_value  = excluded.scrip_market_value, \
+             scrip_cash_currency = excluded.scrip_cash_currency, \
+             demerger_listing_id    = excluded.demerger_listing_id, \
+             demerger_new_units     = excluded.demerger_new_units, \
+             demerger_held_units    = excluded.demerger_held_units, \
+             demerger_cost_base_pct = excluded.demerger_cost_base_pct, \
+             worthless_event        = excluded.worthless_event, \
+             record_date            = excluded.record_date, \
+             demerger_close_date         = excluded.demerger_close_date, \
+             demerger_close_price        = excluded.demerger_close_price, \
+             demerger_close_sourced_from = excluded.demerger_close_sourced_from, \
+             demerger_close_reason       = excluded.demerger_close_reason, \
+             renounceable                = excluded.renounceable",
+        id,
+    );
+    let result = query
+        .bind(action.kind.type_str())
+        .bind(action.listing_id)
+        .bind(action.date)
+        .bind(c.amount_per_unit)
+        .bind(c.currency)
+        .bind(c.split_new_units)
+        .bind(c.split_old_units)
+        .bind(c.bonus_units)
+        .bind(c.bonus_held_units)
+        .bind(c.rights_units)
+        .bind(c.rights_held_units)
+        .bind(c.exercise_price)
+        .bind(c.buyback_price)
+        .bind(c.buyback_dividend)
+        .bind(c.buyback_franking_credit)
+        .bind(c.buyback_market_value)
+        .bind(c.scrip_listing_id)
+        .bind(c.scrip_new_units)
+        .bind(c.scrip_old_units)
+        .bind(c.scrip_cash_per_unit)
+        .bind(c.scrip_market_value)
+        .bind(c.scrip_cash_currency)
+        .bind(c.demerger_listing_id)
+        .bind(c.demerger_new_units)
+        .bind(c.demerger_held_units)
+        .bind(c.demerger_cost_base_pct)
+        .bind(c.worthless_event)
+        .bind(c.record_date)
+        .bind(c.demerger_close_date)
+        .bind(c.demerger_close_price)
+        .bind(c.demerger_close_sourced_from)
+        .bind(c.demerger_close_reason)
+        .bind(c.renounceable)
+        .execute(&mut *tx)
+        .await?;
+    // An id-less INSERT was given one by the database; an upsert wrote the
+    // explicit one it was handed. Either way the caller gets the id the row
+    // actually holds.
+    let assigned_id = id.unwrap_or_else(|| result.last_insert_rowid());
 
     // Editing an action is deliberately *not* frozen the way deleting one is
     // (docs/API.md Known limitations: a mis-keyed ratio, date, or amount has
@@ -809,7 +906,26 @@ pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<()
     }
 
     tx.commit().await?;
+    Ok(assigned_id)
+}
+
+/// `PUT /corporate_actions/:id` — the long-standing upsert on a caller-chosen
+/// id.
+pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<(), WriteError> {
+    write(pool, Some(action.id), action).await?;
     Ok(())
+}
+
+/// `POST /corporate_actions` — create the action without naming an id, and
+/// return the row the database assigned one to.
+pub async fn db_create(
+    pool: &SqlitePool,
+    action: &CorporateAction,
+) -> Result<CorporateAction, WriteError> {
+    let id = write(pool, None, action).await?;
+    db_get_tx(pool, id)
+        .await?
+        .ok_or(WriteError::VanishedAfterCreate)
 }
 
 #[derive(thiserror::Error, Debug)]

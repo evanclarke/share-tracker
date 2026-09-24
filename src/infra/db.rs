@@ -155,6 +155,45 @@ pub async fn write_tx(pool: &SqlitePool) -> Result<Transaction<'static, Sqlite>,
     pool.begin_with("BEGIN IMMEDIATE").await
 }
 
+/// Build the INSERT an entity's write path needs, binding the row's id only
+/// when the caller named one.
+///
+/// An entity write has two entry points with one statement each: `PUT /x/:id`
+/// upserts on a caller-chosen id, and `POST /x` creates a row the database
+/// assigns an id to. They differ in exactly one column, so the two SQL strings
+/// live at the call site and this macro picks between them, binding `id` first
+/// (the id column leads every one of these INSERTs) only for the upsert.
+///
+/// Why the create must omit the column rather than bind a value: `AUTOINCREMENT`
+/// governs only the ids SQLite itself picks, so a create that bound even a
+/// deliberately-unused number could be handed a deleted row's id — and inherit
+/// that row's `row_history` trail with it. `reports::row_history`'s occupant
+/// marking exists to expose the re-use a *user* can still cause with an explicit
+/// `PUT`; the server half must not add any (SCENARIOS U-a, migration 0045,
+/// SCHEMA.md).
+///
+/// `$upsert` and `$create` are the two complete INSERT statements and `$id` is
+/// `Option<i64>`; the remaining `$values` are the non-id binds, in column
+/// order. Use it as
+/// `db::insert_with_optional_id!(sql_with_id, sql_without_id, id).bind(a).bind(b)`,
+/// and reach the assigned id through [`sqlx::query::QueryResult::last_insert_rowid`].
+///
+/// The trailing-comma arm is not decoration: an `expr` fragment cannot be
+/// followed by a comma without one, and `rustfmt` formats a multi-line macro
+/// invocation with a trailing comma, so without it the formatted call site
+/// stops compiling.
+#[macro_export]
+macro_rules! insert_with_optional_id {
+    ($upsert:expr, $create:expr, $id:expr $(,)?) => {{
+        let id: Option<i64> = $id;
+        let mut query = sqlx::query(if id.is_some() { $upsert } else { $create });
+        if let Some(id) = id {
+            query = query.bind(id);
+        }
+        query
+    }};
+}
+
 pub async fn init(db_path: &str) -> Result<SqlitePool, sqlx::Error> {
     let pool = SqlitePool::connect_with(connect_options(db_path)?).await?;
 

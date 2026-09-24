@@ -105,7 +105,7 @@ pub fn router() -> Router<SqlitePool> {
     Router::new()
         .route(
             "/interest_income",
-            get(http::list_handler::<InterestIncome>),
+            get(http::list_handler::<InterestIncome>).post(create),
         )
         .route(
             "/interest_income/{id}",
@@ -115,7 +115,9 @@ pub fn router() -> Router<SqlitePool> {
         )
 }
 
-#[cfg(test)]
+/// One-line delegation to the shared CRUD read, through which `db_create`
+/// reads the created row back; the route reaches the same query through
+/// `get_handler` (see CLAUDE.md's entity-module pattern).
 pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<InterestIncome>, sqlx::Error> {
     http::crud_get(pool, id).await
 }
@@ -124,6 +126,13 @@ pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<InterestIncome>
 pub enum UpsertError {
     #[error("interest income write failed: {0}")]
     Db(#[from] sqlx::Error),
+    /// A create committed but the row could not be read back. Not reachable in
+    /// practice — the row is committed and unread only if something deletes it
+    /// in the same instant — but a create that answers with no row would be
+    /// worse than a loud failure, so it is its own variant rather than an
+    /// `unwrap`. Mapped to `500`.
+    #[error("the interest income row was created but could not be read back")]
+    VanishedAfterCreate,
     /// A negative `amount`, `tfn_withholding_tax`, or `foreign_tax_paid`
     /// (carries the field name): interest figures are the statement's
     /// positive (or zero) amounts — a negative would silently reduce the
@@ -162,11 +171,20 @@ impl From<UpsertError> for ApiError {
             // Unknown currency/account (FK) surfaces as 422 with the
             // offending constraint named.
             UpsertError::Db(err) => err.into(),
+            // A create that cannot read back its own committed row is a server
+            // fault, not the caller's.
+            err @ UpsertError::VanishedAfterCreate => ApiError::internal(err),
         }
     }
 }
 
-pub async fn db_upsert(pool: &SqlitePool, i: &InterestIncome) -> Result<(), UpsertError> {
+/// Write an interest income row, allocating its id when `id` is `None`.
+///
+/// Every validation below is shared by both callers, so a create and an upsert
+/// can never drift: `id = Some` is the long-standing `PUT /interest_income/:id`
+/// upsert, and `id = None` is the `POST /interest_income` create, which leaves
+/// the id to the database.
+async fn write(pool: &SqlitePool, id: Option<i64>, i: &InterestIncome) -> Result<i64, UpsertError> {
     for (field, value) in [
         ("amount", i.amount),
         ("tfn_withholding_tax", i.tfn_withholding_tax),
@@ -185,7 +203,13 @@ pub async fn db_upsert(pool: &SqlitePool, i: &InterestIncome) -> Result<(), Upse
     if i.foreign_source && i.tfn_withholding_tax > Decimal::ZERO {
         return Err(UpsertError::TfnWithholdingOnForeignSource);
     }
-    sqlx::query(
+    // A create (`id` is `None`, from `POST /interest_income`) omits the id
+    // column altogether, so the database's `AUTOINCREMENT` sequence assigns one
+    // it has never issued — a server-computed id could hand the new row a
+    // deleted row's id and, with it, that row's `row_history` trail
+    // (SCENARIOS U-a). The upsert branch is otherwise byte-identical, so a
+    // `PUT` on an explicit id stays the upsert it has always been.
+    let query = crate::insert_with_optional_id!(
         "INSERT INTO interest_income \
          (id, date_paid, amount, tfn_withholding_tax, foreign_source, foreign_tax_paid, \
           currency, source, holding_account_id) \
@@ -199,19 +223,54 @@ pub async fn db_upsert(pool: &SqlitePool, i: &InterestIncome) -> Result<(), Upse
              currency            = excluded.currency, \
              source              = excluded.source, \
              holding_account_id  = excluded.holding_account_id",
-    )
-    .bind(i.id)
-    .bind(i.date_paid)
-    .bind(Money(i.amount))
-    .bind(Money(i.tfn_withholding_tax))
-    .bind(i.foreign_source)
-    .bind(Money(i.foreign_tax_paid))
-    .bind(&i.currency)
-    .bind(&i.source)
-    .bind(i.holding_account_id)
-    .execute(pool)
-    .await?;
+        "INSERT INTO interest_income \
+         (date_paid, amount, tfn_withholding_tax, foreign_source, foreign_tax_paid, \
+          currency, source, holding_account_id) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+         ON CONFLICT(id) DO UPDATE SET \
+             date_paid           = excluded.date_paid, \
+             amount              = excluded.amount, \
+             tfn_withholding_tax = excluded.tfn_withholding_tax, \
+             foreign_source      = excluded.foreign_source, \
+             foreign_tax_paid    = excluded.foreign_tax_paid, \
+             currency            = excluded.currency, \
+             source              = excluded.source, \
+             holding_account_id  = excluded.holding_account_id",
+        id,
+    );
+    let result = query
+        .bind(i.date_paid)
+        .bind(Money(i.amount))
+        .bind(Money(i.tfn_withholding_tax))
+        .bind(i.foreign_source)
+        .bind(Money(i.foreign_tax_paid))
+        .bind(&i.currency)
+        .bind(&i.source)
+        .bind(i.holding_account_id)
+        .execute(pool)
+        .await?;
+    // An id-less INSERT was given one by the database; an upsert wrote the
+    // explicit one it was handed. Either way the caller gets the id the row
+    // actually holds.
+    Ok(id.unwrap_or_else(|| result.last_insert_rowid()))
+}
+
+/// `PUT /interest_income/:id` — the long-standing upsert on a caller-chosen id.
+pub async fn db_upsert(pool: &SqlitePool, i: &InterestIncome) -> Result<(), UpsertError> {
+    write(pool, Some(i.id), i).await?;
     Ok(())
+}
+
+/// `POST /interest_income` — create without naming an id, and return the row
+/// the database assigned one to.
+pub async fn db_create(
+    pool: &SqlitePool,
+    i: &InterestIncome,
+) -> Result<InterestIncome, UpsertError> {
+    let id = write(pool, None, i).await?;
+    db_get(pool, id)
+        .await?
+        .ok_or(UpsertError::VanishedAfterCreate)
 }
 
 #[cfg(test)]
@@ -219,12 +278,11 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<bool, sqlx::Error> 
     http::crud_delete::<InterestIncome>(pool, id).await
 }
 
-async fn upsert(
-    State(pool): State<SqlitePool>,
-    Path(id): Path<i64>,
-    Json(body): Json<InterestIncomeBody>,
-) -> Result<StatusCode, ApiError> {
-    let i = InterestIncome {
+/// The row a request body describes. `id` is the path's on an upsert and
+/// ignored on a create (the database assigns one), so both entry points build
+/// their `InterestIncome` through this one mapping and cannot drift.
+fn interest_income_from_body(id: i64, body: InterestIncomeBody) -> InterestIncome {
+    InterestIncome {
         id,
         date_paid: body.date_paid,
         amount: body.amount,
@@ -234,11 +292,30 @@ async fn upsert(
         currency: body.currency,
         source: body.source,
         holding_account_id: body.holding_account_id,
-    };
-    db_upsert(&pool, &i)
+    }
+}
+
+async fn upsert(
+    State(pool): State<SqlitePool>,
+    Path(id): Path<i64>,
+    Json(body): Json<InterestIncomeBody>,
+) -> Result<StatusCode, ApiError> {
+    db_upsert(&pool, &interest_income_from_body(id, body))
         .await
         .map(|_| StatusCode::NO_CONTENT)
         .map_err(ApiError::from)
+}
+
+/// `POST /interest_income` — create the row without naming an id. The database
+/// assigns one (see [`write`]), and the created row is returned so the caller
+/// can use its id immediately with no `max(id) + 1` guess between the two
+/// calls.
+async fn create(
+    State(pool): State<SqlitePool>,
+    Json(body): Json<InterestIncomeBody>,
+) -> Result<(StatusCode, Json<InterestIncome>), ApiError> {
+    let created = db_create(&pool, &interest_income_from_body(0, body)).await?;
+    Ok((StatusCode::CREATED, Json(created)))
 }
 
 #[cfg(test)]
@@ -502,5 +579,138 @@ mod tests {
         let pool = test_pool().await;
         let resp = client(&pool).delete("/interest_income/99").await;
         assert_eq!(resp.status, StatusCode::NOT_FOUND);
+    }
+
+    // Create (`POST /interest_income`) tests
+
+    /// `POST /interest_income` allocates its own id — the create that makes the
+    /// whole `max(id) + 1` dance unnecessary (SCENARIOS U-a).
+    #[tokio::test]
+    async fn post_interest_income_creates_a_row_with_a_database_assigned_id() {
+        let pool = test_pool().await;
+        let client = client(&pool);
+
+        let body = serde_json::json!({
+            "date_paid": "2024-03-15",
+            "amount": "250.75",
+            "source": "term deposit"
+        });
+        let response = client.post("/interest_income", &body).await;
+        let (status, text) = response.status_and_body();
+        assert_eq!(status, StatusCode::CREATED, "body: {text:?}");
+
+        let created: InterestIncome = response.json();
+        assert_ne!(created.id, 0, "a create must not land on id 0");
+        assert_eq!(created.amount, "250.75".parse::<Decimal>().unwrap());
+
+        // The returned row is the stored one, so the caller can act on the id
+        // at once instead of re-reading the collection to discover it.
+        let listed = db_get(&pool, created.id).await.unwrap().unwrap();
+        assert_eq!(listed.id, created.id);
+        assert_eq!(listed.source.as_deref(), Some("term deposit"));
+        assert_eq!(listed.currency, "AUD", "the body's default took effect");
+    }
+
+    /// A create never re-issues an id a deleted row held.
+    ///
+    /// This is the property the whole `row_history` occupant marking rests on:
+    /// an id handed out twice inherits the previous occupant's trail, so the
+    /// new row's history would open with someone else's edits. `AUTOINCREMENT`
+    /// guarantees it only while the INSERT omits the id column — which is
+    /// exactly what the create path does (SCENARIOS U-a, migration 0045).
+    #[tokio::test]
+    async fn post_interest_income_never_reuses_a_deleted_rows_id() {
+        let pool = test_pool().await;
+        let client = client(&pool);
+
+        let body = serde_json::json!({
+            "date_paid": "2024-03-15",
+            "amount": "250"
+        });
+        let first: InterestIncome = client
+            .post("/interest_income", &body)
+            .await
+            .expect_status(StatusCode::CREATED)
+            .json();
+
+        // Edit it, so its trail is non-empty, then delete it — the id is now
+        // free and carries history that must never be inherited.
+        client
+            .put(
+                &format!("/interest_income/{}", first.id),
+                &serde_json::json!({ "date_paid": "2024-03-16", "amount": "500" }),
+            )
+            .await
+            .expect_status(StatusCode::NO_CONTENT);
+        client
+            .delete(&format!("/interest_income/{}", first.id))
+            .await
+            .expect_status(StatusCode::NO_CONTENT);
+
+        let second: InterestIncome = client
+            .post("/interest_income", &body)
+            .await
+            .expect_status(StatusCode::CREATED)
+            .json();
+        assert_ne!(
+            first.id, second.id,
+            "the create took the deleted row's id back, inheriting its audit history"
+        );
+    }
+
+    #[tokio::test]
+    async fn post_interest_income_twice_stores_two_distinct_rows() {
+        let pool = test_pool().await;
+        let client = client(&pool);
+
+        let body = serde_json::json!({
+            "date_paid": "2024-03-15",
+            "amount": "250"
+        });
+        let first: InterestIncome = client
+            .post("/interest_income", &body)
+            .await
+            .expect_status(StatusCode::CREATED)
+            .json();
+        let second: InterestIncome = client
+            .post("/interest_income", &body)
+            .await
+            .expect_status(StatusCode::CREATED)
+            .json();
+        assert_ne!(
+            first.id, second.id,
+            "each create must get its own id, not overwrite the previous row"
+        );
+
+        let all: Vec<InterestIncome> = client.get_json("/interest_income").await;
+        assert_eq!(all.len(), 2, "both creates are stored: {all:?}");
+        let mut ids: Vec<i64> = all.iter().map(|i| i.id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), 2, "the ids are distinct: {all:?}");
+    }
+
+    /// A create shares every write-time validation with the upsert, so a bad
+    /// statement is refused and nothing is stored — the create path is not a
+    /// way round the negative-amount rule.
+    #[tokio::test]
+    async fn post_interest_income_rejects_like_the_upsert_and_stores_nothing() {
+        let pool = test_pool().await;
+        let client = client(&pool);
+
+        let body = serde_json::json!({
+            "date_paid": "2024-03-15",
+            "amount": "-250"
+        });
+        let response = client.post("/interest_income", &body).await;
+        let (status, text) = response.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "body: {text:?}");
+        assert!(
+            text.contains("cannot be negative"),
+            "the shared wording is reused: {text:?}"
+        );
+
+        let all: Vec<InterestIncome> = client.get_json("/interest_income").await;
+        assert!(all.is_empty(), "a rejected create stores nothing: {all:?}");
     }
 }

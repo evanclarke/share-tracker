@@ -124,7 +124,7 @@ pub fn router() -> Router<SqlitePool> {
     Router::new()
         .route(
             "/investment_expenses",
-            get(http::list_handler::<InvestmentExpense>),
+            get(http::list_handler::<InvestmentExpense>).post(create),
         )
         .route(
             "/investment_expenses/{id}",
@@ -134,7 +134,9 @@ pub fn router() -> Router<SqlitePool> {
         )
 }
 
-#[cfg(test)]
+/// One-line delegation to the shared CRUD read, through which `db_create`
+/// reads the created row back; the route reaches the same query through
+/// `get_handler` (see CLAUDE.md's entity-module pattern).
 pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<InvestmentExpense>, sqlx::Error> {
     http::crud_get(pool, id).await
 }
@@ -143,6 +145,13 @@ pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<InvestmentExpen
 pub enum UpsertError {
     #[error("investment expense write failed: {0}")]
     Db(#[from] sqlx::Error),
+    /// A create committed but the row could not be read back. Not reachable in
+    /// practice — the row is committed and unread only if something deletes it
+    /// in the same instant — but a create that answers with no row would be
+    /// worse than a loud failure, so it is its own variant rather than an
+    /// `unwrap`. Mapped to `500`.
+    #[error("the investment expense row was created but could not be read back")]
+    VanishedAfterCreate,
     /// A negative `amount` or `gross_amount` (carries the field name): an
     /// expense is the invoice's own positive (or zero) figure, and a negative
     /// deduction is arithmetically income — it lifts the tax summary's net
@@ -178,6 +187,9 @@ impl From<UpsertError> for ApiError {
             // Unknown currency/listing/account (FK) or a bad enum value (CHECK)
             // surfaces as 422 with the offending constraint named.
             UpsertError::Db(err) => err.into(),
+            // A create that cannot read back its own committed row is a server
+            // fault, not the caller's.
+            err @ UpsertError::VanishedAfterCreate => ApiError::internal(err),
         }
     }
 }
@@ -215,7 +227,17 @@ fn check_apportionment(e: &InvestmentExpense) -> Result<(), UpsertError> {
     Ok(())
 }
 
-pub async fn db_upsert(pool: &SqlitePool, e: &InvestmentExpense) -> Result<(), UpsertError> {
+/// Write an investment expense row, allocating its id when `id` is `None`.
+///
+/// Every validation below is shared by both callers, so a create and an upsert
+/// can never drift: `id = Some` is the long-standing `PUT
+/// /investment_expenses/:id` upsert, and `id = None` is the
+/// `POST /investment_expenses` create, which leaves the id to the database.
+async fn write(
+    pool: &SqlitePool,
+    id: Option<i64>,
+    e: &InvestmentExpense,
+) -> Result<i64, UpsertError> {
     // A negative expense is not an expense: it would reduce the year's
     // deduction total, and — since the tax summary subtracts that total from
     // gross assessable investment income — lift the net line above the gross.
@@ -230,7 +252,13 @@ pub async fn db_upsert(pool: &SqlitePool, e: &InvestmentExpense) -> Result<(), U
         return Err(UpsertError::PercentageOutOfRange(pct));
     }
     check_apportionment(e)?;
-    sqlx::query(
+    // A create (`id` is `None`, from `POST /investment_expenses`) omits the id
+    // column altogether, so the database's `AUTOINCREMENT` sequence assigns one
+    // it has never issued — a server-computed id could hand the new row a
+    // deleted row's id and, with it, that row's `row_history` trail
+    // (SCENARIOS U-a). The upsert branch is otherwise byte-identical, so a
+    // `PUT` on an explicit id stays the upsert it has always been.
+    let query = crate::insert_with_optional_id!(
         "INSERT INTO investment_expenses \
          (id, date_incurred, expense_type, amount, gross_amount, deductible_percentage, \
           currency, description, listing_id, holding_account_id) \
@@ -245,20 +273,57 @@ pub async fn db_upsert(pool: &SqlitePool, e: &InvestmentExpense) -> Result<(), U
              description           = excluded.description, \
              listing_id            = excluded.listing_id, \
              holding_account_id    = excluded.holding_account_id",
-    )
-    .bind(e.id)
-    .bind(e.date_incurred)
-    .bind(e.expense_type)
-    .bind(Money(e.amount))
-    .bind(OptMoney(e.gross_amount))
-    .bind(OptMoney(e.deductible_percentage))
-    .bind(&e.currency)
-    .bind(&e.description)
-    .bind(e.listing_id)
-    .bind(e.holding_account_id)
-    .execute(pool)
-    .await?;
+        "INSERT INTO investment_expenses \
+         (date_incurred, expense_type, amount, gross_amount, deductible_percentage, \
+          currency, description, listing_id, holding_account_id) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
+         ON CONFLICT(id) DO UPDATE SET \
+             date_incurred         = excluded.date_incurred, \
+             expense_type          = excluded.expense_type, \
+             amount                = excluded.amount, \
+             gross_amount          = excluded.gross_amount, \
+             deductible_percentage = excluded.deductible_percentage, \
+             currency              = excluded.currency, \
+             description           = excluded.description, \
+             listing_id            = excluded.listing_id, \
+             holding_account_id    = excluded.holding_account_id",
+        id,
+    );
+    let result = query
+        .bind(e.date_incurred)
+        .bind(e.expense_type)
+        .bind(Money(e.amount))
+        .bind(OptMoney(e.gross_amount))
+        .bind(OptMoney(e.deductible_percentage))
+        .bind(&e.currency)
+        .bind(&e.description)
+        .bind(e.listing_id)
+        .bind(e.holding_account_id)
+        .execute(pool)
+        .await?;
+    // An id-less INSERT was given one by the database; an upsert wrote the
+    // explicit one it was handed. Either way the caller gets the id the row
+    // actually holds.
+    Ok(id.unwrap_or_else(|| result.last_insert_rowid()))
+}
+
+/// `PUT /investment_expenses/:id` — the long-standing upsert on a caller-chosen
+/// id.
+pub async fn db_upsert(pool: &SqlitePool, e: &InvestmentExpense) -> Result<(), UpsertError> {
+    write(pool, Some(e.id), e).await?;
     Ok(())
+}
+
+/// `POST /investment_expenses` — create without naming an id, and return the
+/// row the database assigned one to.
+pub async fn db_create(
+    pool: &SqlitePool,
+    e: &InvestmentExpense,
+) -> Result<InvestmentExpense, UpsertError> {
+    let id = write(pool, None, e).await?;
+    db_get(pool, id)
+        .await?
+        .ok_or(UpsertError::VanishedAfterCreate)
 }
 
 #[cfg(test)]
@@ -266,12 +331,11 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<bool, sqlx::Error> 
     http::crud_delete::<InvestmentExpense>(pool, id).await
 }
 
-async fn upsert(
-    State(pool): State<SqlitePool>,
-    Path(id): Path<i64>,
-    Json(body): Json<InvestmentExpenseBody>,
-) -> Result<StatusCode, ApiError> {
-    let e = InvestmentExpense {
+/// The row a request body describes. `id` is the path's on an upsert and
+/// ignored on a create (the database assigns one), so both entry points build
+/// their `InvestmentExpense` through this one mapping and cannot drift.
+fn investment_expense_from_body(id: i64, body: InvestmentExpenseBody) -> InvestmentExpense {
+    InvestmentExpense {
         id,
         date_incurred: body.date_incurred,
         expense_type: body.expense_type,
@@ -282,11 +346,30 @@ async fn upsert(
         description: body.description,
         listing_id: body.listing_id,
         holding_account_id: body.holding_account_id,
-    };
-    db_upsert(&pool, &e)
+    }
+}
+
+async fn upsert(
+    State(pool): State<SqlitePool>,
+    Path(id): Path<i64>,
+    Json(body): Json<InvestmentExpenseBody>,
+) -> Result<StatusCode, ApiError> {
+    db_upsert(&pool, &investment_expense_from_body(id, body))
         .await
         .map(|_| StatusCode::NO_CONTENT)
         .map_err(ApiError::from)
+}
+
+/// `POST /investment_expenses` — create the row without naming an id. The
+/// database assigns one (see [`write`]), and the created row is returned so the
+/// caller can use its id immediately with no `max(id) + 1` guess between the
+/// two calls.
+async fn create(
+    State(pool): State<SqlitePool>,
+    Json(body): Json<InvestmentExpenseBody>,
+) -> Result<(StatusCode, Json<InvestmentExpense>), ApiError> {
+    let created = db_create(&pool, &investment_expense_from_body(0, body)).await?;
+    Ok((StatusCode::CREATED, Json(created)))
 }
 
 #[cfg(test)]
@@ -779,5 +862,147 @@ mod tests {
         let pool = test_pool().await;
         let resp = client(&pool).delete("/investment_expenses/99").await;
         assert_eq!(resp.status, StatusCode::NOT_FOUND);
+    }
+
+    // Create (`POST /investment_expenses`) tests
+
+    /// `POST /investment_expenses` allocates its own id — the create that makes
+    /// the whole `max(id) + 1` dance unnecessary (SCENARIOS U-a).
+    #[tokio::test]
+    async fn post_investment_expense_creates_a_row_with_a_database_assigned_id() {
+        let pool = test_pool().await;
+        let client = client(&pool);
+
+        let body = serde_json::json!({
+            "date_incurred": "2024-03-15",
+            "expense_type": "LoanInterest",
+            "amount": "500",
+            "description": "margin loan interest"
+        });
+        let response = client.post("/investment_expenses", &body).await;
+        let (status, text) = response.status_and_body();
+        assert_eq!(status, StatusCode::CREATED, "body: {text:?}");
+
+        let created: InvestmentExpense = response.json();
+        assert_ne!(created.id, 0, "a create must not land on id 0");
+        assert_eq!(created.amount, Decimal::from(500));
+        assert_eq!(created.expense_type, ExpenseType::LoanInterest);
+
+        // The returned row is the stored one, so the caller can act on the id
+        // at once instead of re-reading the collection to discover it.
+        let listed = db_get(&pool, created.id).await.unwrap().unwrap();
+        assert_eq!(listed.id, created.id);
+        assert_eq!(listed.description.as_deref(), Some("margin loan interest"));
+        assert_eq!(listed.currency, "AUD", "the body's default took effect");
+    }
+
+    /// A create never re-issues an id a deleted row held.
+    ///
+    /// This is the property the whole `row_history` occupant marking rests on:
+    /// an id handed out twice inherits the previous occupant's trail, so the
+    /// new row's history would open with someone else's edits. `AUTOINCREMENT`
+    /// guarantees it only while the INSERT omits the id column — which is
+    /// exactly what the create path does (SCENARIOS U-a, migration 0045).
+    #[tokio::test]
+    async fn post_investment_expense_never_reuses_a_deleted_rows_id() {
+        let pool = test_pool().await;
+        let client = client(&pool);
+
+        let body = serde_json::json!({
+            "date_incurred": "2024-03-15",
+            "expense_type": "AdviceFee",
+            "amount": "500"
+        });
+        let first: InvestmentExpense = client
+            .post("/investment_expenses", &body)
+            .await
+            .expect_status(StatusCode::CREATED)
+            .json();
+
+        // Edit it, so its trail is non-empty, then delete it — the id is now
+        // free and carries history that must never be inherited.
+        client
+            .put(
+                &format!("/investment_expenses/{}", first.id),
+                &serde_json::json!({
+                    "date_incurred": "2024-03-16",
+                    "expense_type": "AdviceFee",
+                    "amount": "900"
+                }),
+            )
+            .await
+            .expect_status(StatusCode::NO_CONTENT);
+        client
+            .delete(&format!("/investment_expenses/{}", first.id))
+            .await
+            .expect_status(StatusCode::NO_CONTENT);
+
+        let second: InvestmentExpense = client
+            .post("/investment_expenses", &body)
+            .await
+            .expect_status(StatusCode::CREATED)
+            .json();
+        assert_ne!(
+            first.id, second.id,
+            "the create took the deleted row's id back, inheriting its audit history"
+        );
+    }
+
+    #[tokio::test]
+    async fn post_investment_expense_twice_stores_two_distinct_rows() {
+        let pool = test_pool().await;
+        let client = client(&pool);
+
+        let body = serde_json::json!({
+            "date_incurred": "2024-03-15",
+            "expense_type": "ManagementFee",
+            "amount": "500"
+        });
+        let first: InvestmentExpense = client
+            .post("/investment_expenses", &body)
+            .await
+            .expect_status(StatusCode::CREATED)
+            .json();
+        let second: InvestmentExpense = client
+            .post("/investment_expenses", &body)
+            .await
+            .expect_status(StatusCode::CREATED)
+            .json();
+        assert_ne!(
+            first.id, second.id,
+            "each create must get its own id, not overwrite the previous row"
+        );
+
+        let all: Vec<InvestmentExpense> = client.get_json("/investment_expenses").await;
+        assert_eq!(all.len(), 2, "both creates are stored: {all:?}");
+        let mut ids: Vec<i64> = all.iter().map(|e| e.id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), 2, "the ids are distinct: {all:?}");
+    }
+
+    /// A create shares every write-time validation with the upsert, so a bad
+    /// statement is refused and nothing is stored — the create path is not a
+    /// way round the negative-amount rule.
+    #[tokio::test]
+    async fn post_investment_expense_rejects_like_the_upsert_and_stores_nothing() {
+        let pool = test_pool().await;
+        let client = client(&pool);
+
+        let body = serde_json::json!({
+            "date_incurred": "2024-03-15",
+            "expense_type": "Other",
+            "amount": "-500"
+        });
+        let response = client.post("/investment_expenses", &body).await;
+        let (status, text) = response.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "body: {text:?}");
+        assert!(
+            text.contains("amount") && text.contains("cannot be negative"),
+            "the shared wording is reused: {text:?}"
+        );
+
+        let all: Vec<InvestmentExpense> = client.get_json("/investment_expenses").await;
+        assert!(all.is_empty(), "a rejected create stores nothing: {all:?}");
     }
 }

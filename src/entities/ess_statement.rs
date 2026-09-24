@@ -197,7 +197,10 @@ impl CrudEntity for EssStatement {
 
 pub fn router() -> Router<SqlitePool> {
     Router::new()
-        .route("/ess_statements", get(http::list_handler::<EssStatement>))
+        .route(
+            "/ess_statements",
+            get(http::list_handler::<EssStatement>).post(create),
+        )
         .route(
             "/ess_statements/{id}",
             get(http::get_handler::<EssStatement>)
@@ -231,6 +234,13 @@ pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<EssStatement>, 
 pub enum UpsertError {
     #[error("ESS statement write failed: {0}")]
     Db(#[from] sqlx::Error),
+    /// A create committed but the row could not be read back. Not reachable in
+    /// practice — the row is committed and unread only if something deletes it
+    /// in the same instant — but a create that answers with no row would be
+    /// worse than a loud failure, so it is its own variant rather than an
+    /// `unwrap`. Mapped to `500`.
+    #[error("the ESS statement row was created but could not be read back")]
+    VanishedAfterCreate,
     /// The statement already has a vest Buy (`trades.ess_statement_id`) and the
     /// edit changes a field that Buy was created from (listing, account, taxing
     /// point, quantity, market value, or currency), which would desync it.
@@ -475,7 +485,14 @@ fn validate(s: &EssStatement) -> Result<(), UpsertError> {
     Ok(())
 }
 
-pub async fn db_upsert(pool: &SqlitePool, s: &EssStatement) -> Result<(), UpsertError> {
+/// The shared write behind both entry points, allocating the statement's id
+/// when `id` is `None`.
+///
+/// `id = Some` is the long-standing `PUT /ess_statements/:id` upsert on a
+/// caller-chosen id; `id = None` is the `POST /ess_statements` create, which
+/// leaves the id to the database. Every validation and the vest-freeze rule are
+/// shared, so a create and an upsert can never drift.
+async fn write(pool: &SqlitePool, id: Option<i64>, s: &EssStatement) -> Result<i64, UpsertError> {
     validate(s)?;
 
     // A statement-AUD override restates a label the statement already gives in
@@ -528,24 +545,29 @@ pub async fn db_upsert(pool: &SqlitePool, s: &EssStatement) -> Result<(), Upsert
     // account, taxing point, quantity, market value, currency, FX rate) are frozen —
     // editing them would desync the Buy. The income side (discount labels, TFN
     // withheld, statement-AUD overrides) stays editable: the employer's annual
-    // ESS statement arrives after the vest is recorded. (A new id has no vest,
-    // so an insert always passes.)
-    let existing: Option<EssStatement> = {
-        let vested: bool =
-            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM trades WHERE ess_statement_id = ?)")
-                .bind(s.id)
-                .fetch_one(&mut *tx)
-                .await?;
-        if vested {
-            sqlx::query_as(sqlx::AssertSqlSafe(format!(
-                "SELECT {COLUMNS} FROM ess_statements WHERE id = ?"
-            )))
-            .bind(s.id)
-            .fetch_optional(&mut *tx)
-            .await?
-        } else {
-            None
+    // ESS statement arrives after the vest is recorded. A create has no stored
+    // row: the id the database is about to assign carries no vest, so the guard
+    // is reached only on the upsert path.
+    let existing: Option<EssStatement> = match id {
+        Some(id) => {
+            let vested: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM trades WHERE ess_statement_id = ?)",
+            )
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await?;
+            if vested {
+                sqlx::query_as(sqlx::AssertSqlSafe(format!(
+                    "SELECT {COLUMNS} FROM ess_statements WHERE id = ?"
+                )))
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await?
+            } else {
+                None
+            }
         }
+        None => None,
     };
     if let Some(old) = existing {
         let vest_side_unchanged = old.listing_id == s.listing_id
@@ -560,7 +582,13 @@ pub async fn db_upsert(pool: &SqlitePool, s: &EssStatement) -> Result<(), Upsert
         }
     }
 
-    sqlx::query(
+    // A create (`id` is `None`, from `POST /ess_statements`) omits the id
+    // column altogether, so the database's `AUTOINCREMENT` sequence assigns
+    // one it has never issued — a server-computed id could hand the new row a
+    // deleted statement's id and, with it, that row's `row_history` trail
+    // (SCENARIOS U-a). The upsert branch is otherwise byte-identical, so a
+    // `PUT` on an explicit id stays the upsert it has always been.
+    let query = crate::insert_with_optional_id!(
         "INSERT INTO ess_statements \
          (id, listing_id, holding_account_id, taxing_point_date, quantity, \
           market_value_per_share, taxed_upfront_eligible, taxed_upfront_not_eligible, \
@@ -588,30 +616,79 @@ pub async fn db_upsert(pool: &SqlitePool, s: &EssStatement) -> Result<(), Upsert
              aud_deferral_discount           = excluded.aud_deferral_discount, \
              aud_pre_2009_cessation_discount = excluded.aud_pre_2009_cessation_discount, \
              aud_foreign_source_discount     = excluded.aud_foreign_source_discount",
-    )
-    .bind(s.id)
-    .bind(s.listing_id)
-    .bind(s.holding_account_id)
-    .bind(s.taxing_point_date)
-    .bind(Money(s.quantity))
-    .bind(Money(s.market_value_per_share))
-    .bind(Money(s.taxed_upfront_eligible))
-    .bind(Money(s.taxed_upfront_not_eligible))
-    .bind(Money(s.deferral_discount))
-    .bind(Money(s.pre_2009_cessation_discount))
-    .bind(Money(s.foreign_source_discount))
-    .bind(Money(s.tfn_withholding))
-    .bind(&s.currency)
-    .bind(OptMoney(s.fx_rate))
-    .bind(OptMoney(s.aud_taxed_upfront_eligible))
-    .bind(OptMoney(s.aud_taxed_upfront_not_eligible))
-    .bind(OptMoney(s.aud_deferral_discount))
-    .bind(OptMoney(s.aud_pre_2009_cessation_discount))
-    .bind(OptMoney(s.aud_foreign_source_discount))
-    .execute(&mut *tx)
-    .await?;
+        "INSERT INTO ess_statements \
+         (listing_id, holding_account_id, taxing_point_date, quantity, \
+          market_value_per_share, taxed_upfront_eligible, taxed_upfront_not_eligible, \
+          deferral_discount, pre_2009_cessation_discount, foreign_source_discount, \
+          tfn_withholding, currency, fx_rate, aud_taxed_upfront_eligible, \
+          aud_taxed_upfront_not_eligible, aud_deferral_discount, \
+          aud_pre_2009_cessation_discount, aud_foreign_source_discount) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+         ON CONFLICT(id) DO UPDATE SET \
+             listing_id                      = excluded.listing_id, \
+             holding_account_id              = excluded.holding_account_id, \
+             taxing_point_date               = excluded.taxing_point_date, \
+             quantity                        = excluded.quantity, \
+             market_value_per_share          = excluded.market_value_per_share, \
+             taxed_upfront_eligible          = excluded.taxed_upfront_eligible, \
+             taxed_upfront_not_eligible      = excluded.taxed_upfront_not_eligible, \
+             deferral_discount               = excluded.deferral_discount, \
+             pre_2009_cessation_discount     = excluded.pre_2009_cessation_discount, \
+             foreign_source_discount         = excluded.foreign_source_discount, \
+             tfn_withholding                 = excluded.tfn_withholding, \
+             currency                        = excluded.currency, \
+             fx_rate                         = excluded.fx_rate, \
+             aud_taxed_upfront_eligible      = excluded.aud_taxed_upfront_eligible, \
+             aud_taxed_upfront_not_eligible  = excluded.aud_taxed_upfront_not_eligible, \
+             aud_deferral_discount           = excluded.aud_deferral_discount, \
+             aud_pre_2009_cessation_discount = excluded.aud_pre_2009_cessation_discount, \
+             aud_foreign_source_discount     = excluded.aud_foreign_source_discount",
+        id,
+    );
+    let result = query
+        .bind(s.listing_id)
+        .bind(s.holding_account_id)
+        .bind(s.taxing_point_date)
+        .bind(Money(s.quantity))
+        .bind(Money(s.market_value_per_share))
+        .bind(Money(s.taxed_upfront_eligible))
+        .bind(Money(s.taxed_upfront_not_eligible))
+        .bind(Money(s.deferral_discount))
+        .bind(Money(s.pre_2009_cessation_discount))
+        .bind(Money(s.foreign_source_discount))
+        .bind(Money(s.tfn_withholding))
+        .bind(&s.currency)
+        .bind(OptMoney(s.fx_rate))
+        .bind(OptMoney(s.aud_taxed_upfront_eligible))
+        .bind(OptMoney(s.aud_taxed_upfront_not_eligible))
+        .bind(OptMoney(s.aud_deferral_discount))
+        .bind(OptMoney(s.aud_pre_2009_cessation_discount))
+        .bind(OptMoney(s.aud_foreign_source_discount))
+        .execute(&mut *tx)
+        .await?;
+    // An id-less INSERT was given one by the database; an upsert wrote the
+    // explicit one it was handed. Either way the caller gets the id the row
+    // actually holds.
+    let assigned_id = id.unwrap_or_else(|| result.last_insert_rowid());
     tx.commit().await?;
+    Ok(assigned_id)
+}
+
+/// `PUT /ess_statements/:id` — the long-standing upsert on a caller-chosen id.
+pub async fn db_upsert(pool: &SqlitePool, s: &EssStatement) -> Result<(), UpsertError> {
+    write(pool, Some(s.id), s).await?;
     Ok(())
+}
+
+/// `POST /ess_statements` — create the statement without naming an id, and
+/// return the row the database assigned one to.
+pub async fn db_create(pool: &SqlitePool, s: &EssStatement) -> Result<EssStatement, UpsertError> {
+    let id = write(pool, None, s).await?;
+    // `db_get` is test-gated, so a create reads the row back through the same
+    // `crud_get` it delegates to.
+    http::crud_get(pool, id)
+        .await?
+        .ok_or(UpsertError::VanishedAfterCreate)
 }
 
 /// Outcome of a delete request, so the handler can map to the right status.
@@ -672,12 +749,11 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome, sqlx
     Ok(DeleteOutcome::Deleted)
 }
 
-async fn upsert(
-    State(pool): State<SqlitePool>,
-    Path(id): Path<i64>,
-    Json(body): Json<EssStatementBody>,
-) -> Result<StatusCode, ApiError> {
-    let s = EssStatement {
+/// The statement a request body describes. `id` is the path's on an upsert and
+/// ignored on a create (the database assigns one), so both entry points build
+/// their `EssStatement` through this one mapping and cannot drift.
+fn ess_statement_from_body(id: i64, body: EssStatementBody) -> EssStatement {
+    EssStatement {
         id,
         listing_id: body.listing_id,
         holding_account_id: body.holding_account_id,
@@ -698,9 +774,28 @@ async fn upsert(
         aud_pre_2009_cessation_discount: body.aud_pre_2009_cessation_discount,
         aud_foreign_source_discount: body.aud_foreign_source_discount,
         vest_trade_id: None, // derived on read; never written
-    };
-    db_upsert(&pool, &s).await?;
+    }
+}
+
+async fn upsert(
+    State(pool): State<SqlitePool>,
+    Path(id): Path<i64>,
+    Json(body): Json<EssStatementBody>,
+) -> Result<StatusCode, ApiError> {
+    db_upsert(&pool, &ess_statement_from_body(id, body)).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /ess_statements` — create the statement without naming an id. The
+/// database assigns one (see [`write`]), and the created row is returned so
+/// `POST /ess_statements/:id/vest` can follow on the same call's id with no
+/// `max(id) + 1` guess between the two.
+async fn create(
+    State(pool): State<SqlitePool>,
+    Json(body): Json<EssStatementBody>,
+) -> Result<(StatusCode, Json<EssStatement>), ApiError> {
+    let created = db_create(&pool, &ess_statement_from_body(0, body)).await?;
+    Ok((StatusCode::CREATED, Json(created)))
 }
 
 impl From<UpsertError> for ApiError {
@@ -776,6 +871,10 @@ impl From<UpsertError> for ApiError {
                  discount in another currency against this statement's market value"
             )),
             UpsertError::Db(err) => err.into(),
+            // A committed create whose row could not be read back: a real
+            // server-side fault, so it answers `500` and is logged rather than
+            // dressed up as a client error.
+            err @ UpsertError::VanishedAfterCreate => ApiError::internal(err),
         }
     }
 }
@@ -1456,5 +1555,156 @@ mod tests {
             "currency": "AUD"
         });
         client(&pool).put_ok("/ess_statements/1", &body).await;
+    }
+
+    // The `POST /ess_statements` create — the second entry point beside the
+    // `PUT /ess_statements/:id` upsert, mirroring income's four tests. The
+    // statement is created by the database-assigned id the later
+    // `POST /ess_statements/:id/vest` acts on.
+
+    /// `POST /ess_statements` allocates its own id — the create that makes the
+    /// whole `max(id) + 1` dance unnecessary (SCENARIOS U-a).
+    #[tokio::test]
+    async fn post_ess_statement_creates_a_row_with_a_database_assigned_id() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+
+        let body = sample_body();
+        let response = client(&pool).post("/ess_statements", &body).await;
+        let (status, text) = response.status_and_body();
+        assert_eq!(status, StatusCode::CREATED, "body: {text:?}");
+
+        let created: EssStatement = response.json();
+        assert_ne!(created.id, 0, "a create must not land on id 0");
+        assert_eq!(created.listing_id, 1);
+        assert_eq!(created.deferral_discount, Decimal::from(600));
+        assert_eq!(created.vest_trade_id, None);
+
+        // The returned row is the stored one, and it can carry a vest on the id
+        // the create answered with.
+        let stored = db_get(&pool, created.id).await.unwrap().unwrap();
+        assert_eq!(stored.id, created.id);
+        assert_eq!(stored.deferral_discount, Decimal::from(600));
+        crate::entities::ess_vest::db_vest(&pool, created.id)
+            .await
+            .unwrap();
+    }
+
+    /// The bug this endpoint exists to kill: with an id-less create there is no
+    /// guessed id to collide with, so two creates are two statements — before,
+    /// a second `max(id) + 1`-style PUT on a taken id silently overwrote the
+    /// first through the upsert's `ON CONFLICT ... DO UPDATE`.
+    #[tokio::test]
+    async fn post_ess_statement_twice_stores_two_distinct_rows() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        let client = client(&pool);
+
+        let body = sample_body();
+        let first: EssStatement = client
+            .post("/ess_statements", &body)
+            .await
+            .expect_status(StatusCode::CREATED)
+            .json();
+        let second: EssStatement = client
+            .post("/ess_statements", &body)
+            .await
+            .expect_status(StatusCode::CREATED)
+            .json();
+        assert_ne!(
+            first.id, second.id,
+            "each create must get its own id, not overwrite the previous row"
+        );
+
+        let all: Vec<EssStatement> = client.get_json("/ess_statements").await;
+        assert_eq!(all.len(), 2, "both creates are stored: {all:?}");
+    }
+
+    /// A create never re-issues an id a deleted statement held — the property
+    /// the whole `row_history` occupant marking rests on. `AUTOINCREMENT`
+    /// guarantees it only while the INSERT omits the id column, which is
+    /// exactly what the create path does (SCENARIOS U-a, migration 0045).
+    #[tokio::test]
+    async fn post_ess_statement_never_reuses_a_deleted_rows_id() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        let client = client(&pool);
+
+        let body = sample_body();
+        let first: EssStatement = client
+            .post("/ess_statements", &body)
+            .await
+            .expect_status(StatusCode::CREATED)
+            .json();
+
+        // Edit it, so its trail is non-empty, then delete it — the id is now
+        // free and carries history that must never be inherited.
+        let edited = serde_json::json!({
+            "listing_id": 1,
+            "taxing_point_date": "2024-09-01",
+            "quantity": "100",
+            "market_value_per_share": "6",
+            "deferral_discount": "300",
+            "currency": "AUD"
+        });
+        client
+            .put_ok(&format!("/ess_statements/{}", first.id), &edited)
+            .await;
+        client
+            .delete(&format!("/ess_statements/{}", first.id))
+            .await
+            .expect_status(StatusCode::NO_CONTENT);
+
+        let second: EssStatement = client
+            .post("/ess_statements", &body)
+            .await
+            .expect_status(StatusCode::CREATED)
+            .json();
+        assert_ne!(
+            first.id, second.id,
+            "the create took the deleted row's id back, inheriting its audit history"
+        );
+    }
+
+    /// A create shares every write-time validation with the upsert, so a
+    /// statement in a currency its listing is not quoted in is refused the same
+    /// way and nothing is stored — the create path is no way round it.
+    #[tokio::test]
+    async fn post_ess_statement_rejects_like_the_upsert_and_stores_nothing() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await; // AUD listing
+
+        let body = serde_json::json!({
+            "listing_id": 1,
+            "taxing_point_date": "2024-09-01",
+            "quantity": "100",
+            "market_value_per_share": "6",
+            "deferral_discount": "600",
+            "currency": "USD"
+        });
+        let response = client(&pool).post("/ess_statements", &body).await;
+        let (status, text) = response.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "body: {text:?}");
+        assert!(
+            text.contains("but its listing is quoted in"),
+            "the shared currency wording is reused: {text:?}"
+        );
+
+        let all: Vec<EssStatement> = client(&pool).get_json("/ess_statements").await;
+        assert!(all.is_empty(), "a rejected create stores nothing: {all:?}");
+    }
+
+    /// The body the create tests post: a valid statement carrying the `sample`
+    /// figures (100 units at 6, a 600 deferral discount — the whole market
+    /// value, which is the most a discount can be).
+    fn sample_body() -> serde_json::Value {
+        serde_json::json!({
+            "listing_id": 1,
+            "taxing_point_date": "2024-09-01",
+            "quantity": "100",
+            "market_value_per_share": "6",
+            "deferral_discount": "600",
+            "currency": "AUD"
+        })
     }
 }

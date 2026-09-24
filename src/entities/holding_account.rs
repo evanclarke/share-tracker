@@ -56,7 +56,7 @@ pub fn router() -> Router<SqlitePool> {
     Router::new()
         .route(
             "/holding_accounts",
-            get(http::list_handler::<HoldingAccount>),
+            get(http::list_handler::<HoldingAccount>).post(create),
         )
         .route(
             "/holding_accounts/{id}",
@@ -71,21 +71,92 @@ pub async fn db_list(pool: &SqlitePool) -> Result<Vec<HoldingAccount>, sqlx::Err
     http::crud_list(pool).await
 }
 
-#[cfg(test)]
+/// One-line delegation to the shared CRUD read, through which `db_create`
+/// reads the created row back; the route reaches the same query through
+/// `get_handler` (see CLAUDE.md's entity-module pattern).
 pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<HoldingAccount>, sqlx::Error> {
     http::crud_get(pool, id).await
 }
 
-pub async fn db_upsert(pool: &SqlitePool, account: &HoldingAccount) -> Result<(), sqlx::Error> {
-    sqlx::query(
+/// Why a holding-account write failed. The entity's only write-time invariant
+/// is the UNIQUE `name`, which the database enforces, so the upsert path's
+/// whole error set is the `sqlx::Error` its long-standing signature answers
+/// with; `VanishedAfterCreate` is the create path's alone.
+#[derive(thiserror::Error, Debug)]
+pub enum UpsertError {
+    #[error("holding account write failed: {0}")]
+    Db(#[from] sqlx::Error),
+    /// A create committed but the row could not be read back. Not reachable in
+    /// practice — the row is committed and unread only if something deletes it
+    /// in the same instant — but a create that answers with no row would be
+    /// worse than a loud failure, so it is its own variant rather than an
+    /// `unwrap`. Mapped to `500`.
+    #[error("the holding account was created but could not be read back")]
+    VanishedAfterCreate,
+}
+
+impl From<UpsertError> for ApiError {
+    fn from(e: UpsertError) -> Self {
+        match e {
+            // A duplicate name violates the UNIQUE constraint → 422 with the
+            // offending constraint named.
+            UpsertError::Db(err) => err.into(),
+            // A create that cannot read back its own committed row is a server
+            // fault, not the caller's.
+            err @ UpsertError::VanishedAfterCreate => ApiError::internal(err),
+        }
+    }
+}
+
+/// Write a holding account, allocating its id when `id` is `None`.
+///
+/// The one statement is shared by both callers: `id = Some` is the
+/// long-standing `PUT /holding_accounts/:id` upsert, and `id = None` is the
+/// `POST /holding_accounts` create, which leaves the id to the database. The
+/// error is the plain `sqlx::Error` the upsert has always answered with, since
+/// the UNIQUE `name` is the only validation and the database applies it.
+async fn write(
+    pool: &SqlitePool,
+    id: Option<i64>,
+    account: &HoldingAccount,
+) -> Result<i64, sqlx::Error> {
+    // A create (`id` is `None`, from `POST /holding_accounts`) omits the id
+    // column altogether, so the database — not the caller — chooses the new
+    // row's id (SCENARIOS U-a). The upsert branch is otherwise byte-identical,
+    // so a `PUT` on an explicit id stays the upsert it has always been.
+    //
+    // `holding_accounts` is the one table here that is not `AUTOINCREMENT` (it
+    // sits outside the audit scope), so a deleted *highest* id can be
+    // re-issued; see
+    // `post_holding_account_lands_on_an_unheld_id_and_never_overwrites`.
+    let query = crate::insert_with_optional_id!(
         "INSERT INTO holding_accounts (id, name) VALUES (?, ?) \
          ON CONFLICT(id) DO UPDATE SET name = excluded.name",
-    )
-    .bind(account.id)
-    .bind(&account.name)
-    .execute(pool)
-    .await?;
-    Ok(())
+        "INSERT INTO holding_accounts (name) VALUES (?) \
+         ON CONFLICT(id) DO UPDATE SET name = excluded.name",
+        id,
+    );
+    let result = query.bind(&account.name).execute(pool).await?;
+    // An id-less INSERT was given one by the database; an upsert wrote the
+    // explicit one it was handed. Either way the caller gets the id the row
+    // actually holds.
+    Ok(id.unwrap_or_else(|| result.last_insert_rowid()))
+}
+
+pub async fn db_upsert(pool: &SqlitePool, account: &HoldingAccount) -> Result<(), sqlx::Error> {
+    write(pool, Some(account.id), account).await.map(|_| ())
+}
+
+/// `POST /holding_accounts` — create without naming an id, and return the row
+/// the database assigned one to.
+pub async fn db_create(
+    pool: &SqlitePool,
+    account: &HoldingAccount,
+) -> Result<HoldingAccount, UpsertError> {
+    let id = write(pool, None, account).await?;
+    db_get(pool, id)
+        .await?
+        .ok_or(UpsertError::VanishedAfterCreate)
 }
 
 /// Outcome of a delete request, so the handler can map to the right status.
@@ -141,22 +212,38 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome, sqlx
     Ok(DeleteOutcome::Deleted)
 }
 
+/// The row a request body describes. `id` is the path's on an upsert and
+/// ignored on a create (the database assigns one), so both entry points build
+/// their `HoldingAccount` through this one mapping and cannot drift.
+fn holding_account_from_body(id: i64, body: HoldingAccountBody) -> HoldingAccount {
+    HoldingAccount {
+        id,
+        name: body.name,
+    }
+}
+
 async fn upsert(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
     Json(body): Json<HoldingAccountBody>,
 ) -> Result<StatusCode, ApiError> {
-    db_upsert(
-        &pool,
-        &HoldingAccount {
-            id,
-            name: body.name,
-        },
-    )
-    .await
-    .map(|_| StatusCode::NO_CONTENT)
-    // A duplicate name violates the UNIQUE constraint → 422.
-    .map_err(ApiError::from)
+    db_upsert(&pool, &holding_account_from_body(id, body))
+        .await
+        .map(|_| StatusCode::NO_CONTENT)
+        // A duplicate name violates the UNIQUE constraint → 422.
+        .map_err(ApiError::from)
+}
+
+/// `POST /holding_accounts` — create the account without naming an id. The
+/// database assigns one (see [`write`]), and the created row is returned so the
+/// caller can use its id immediately with no `max(id) + 1` guess between the
+/// two calls.
+async fn create(
+    State(pool): State<SqlitePool>,
+    Json(body): Json<HoldingAccountBody>,
+) -> Result<(StatusCode, Json<HoldingAccount>), ApiError> {
+    let created = db_create(&pool, &holding_account_from_body(0, body)).await?;
+    Ok((StatusCode::CREATED, Json(created)))
 }
 
 async fn delete(
@@ -178,6 +265,11 @@ async fn delete(
 mod tests {
     use super::*;
     use crate::test_support::{ApiClient, test_pool};
+
+    /// Client over this module's own routes.
+    fn client(pool: &SqlitePool) -> ApiClient {
+        ApiClient::over(router().with_state(pool.clone()))
+    }
 
     // DB-level tests
 
@@ -316,5 +408,163 @@ mod tests {
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
         let detail = resp.text().to_string();
         assert!(detail.contains("still has"), "detail: {detail}");
+    }
+
+    // Create (`POST /holding_accounts`) tests
+
+    /// `POST /holding_accounts` allocates its own id — the create that makes
+    /// the whole `max(id) + 1` dance unnecessary (SCENARIOS U-a).
+    #[tokio::test]
+    async fn post_holding_account_creates_a_row_with_a_database_assigned_id() {
+        let pool = test_pool().await;
+        let client = client(&pool);
+
+        let response = client
+            .post(
+                "/holding_accounts",
+                &serde_json::json!({ "name": "ICE Employee Plan" }),
+            )
+            .await;
+        let (status, text) = response.status_and_body();
+        assert_eq!(status, StatusCode::CREATED, "body: {text:?}");
+
+        let created: HoldingAccount = response.json();
+        assert_ne!(created.id, 0, "a create must not land on id 0");
+        assert_eq!(created.name, "ICE Employee Plan");
+
+        // The returned row is the stored one, so the caller can act on the id
+        // at once instead of re-reading the collection to discover it.
+        let listed = db_get(&pool, created.id).await.unwrap().unwrap();
+        assert_eq!(listed.id, created.id);
+        assert_eq!(listed.name, "ICE Employee Plan");
+        // The seeded default account is untouched alongside it.
+        assert_eq!(db_list(&pool).await.unwrap().len(), 2);
+    }
+
+    /// A create lands on an id no live row holds and never overwrites one.
+    ///
+    /// `holding_accounts` is the one entity this change covers whose table is
+    /// **not** `AUTOINCREMENT`: it is identity-only and carries no
+    /// `row_history` trail, so migration 0045 (which gave every audited table
+    /// an AUTOINCREMENT id) left it a plain `INTEGER PRIMARY KEY` and SQLite
+    /// assigns `max(rowid) + 1` over the rows that remain. A deleted *highest*
+    /// id therefore can come back — pinned here is the property that holds
+    /// either way, and is what actually matters: a create takes an id no live
+    /// row holds and leaves every existing row alone. A re-issued number
+    /// inherits nothing, because accounts are outside the audit scope, and an
+    /// account anything references — or the seeded default — cannot be deleted
+    /// at all (`db_delete`). Tightening this to a never-reissued id needs a
+    /// migration adding AUTOINCREMENT (SCENARIOS U-a).
+    #[tokio::test]
+    async fn post_holding_account_lands_on_an_unheld_id_and_never_overwrites() {
+        let pool = test_pool().await;
+        let client = client(&pool);
+
+        let first: HoldingAccount = client
+            .post("/holding_accounts", &serde_json::json!({ "name": "Plan" }))
+            .await
+            .expect_status(StatusCode::CREATED)
+            .json();
+        let second: HoldingAccount = client
+            .post(
+                "/holding_accounts",
+                &serde_json::json!({ "name": "Second" }),
+            )
+            .await
+            .expect_status(StatusCode::CREATED)
+            .json();
+        assert_ne!(first.id, second.id);
+
+        // Delete the lower id: its number is the one a naive `max(id) + 1`
+        // client would hand back, and the next create must not take it.
+        client
+            .delete(&format!("/holding_accounts/{}", first.id))
+            .await
+            .expect_status(StatusCode::NO_CONTENT);
+
+        let before: Vec<i64> = db_list(&pool).await.unwrap().iter().map(|a| a.id).collect();
+        let third: HoldingAccount = client
+            .post("/holding_accounts", &serde_json::json!({ "name": "Third" }))
+            .await
+            .expect_status(StatusCode::CREATED)
+            .json();
+        assert_ne!(
+            third.id, first.id,
+            "the create took a deleted id back: live ids were {before:?}"
+        );
+        assert!(
+            !before.contains(&third.id),
+            "the create landed on an id a live row already holds: {before:?}"
+        );
+        assert_eq!(third.name, "Third");
+
+        // No existing row was replaced by the create.
+        let second_after = db_get(&pool, second.id).await.unwrap().unwrap();
+        assert_eq!(second_after.name, "Second");
+        let default = db_get(&pool, DEFAULT_HOLDING_ACCOUNT_ID)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(default.name, "Default");
+    }
+
+    #[tokio::test]
+    async fn post_holding_account_twice_stores_two_distinct_rows() {
+        let pool = test_pool().await;
+        let client = client(&pool);
+
+        let first: HoldingAccount = client
+            .post("/holding_accounts", &serde_json::json!({ "name": "Plan" }))
+            .await
+            .expect_status(StatusCode::CREATED)
+            .json();
+        let second: HoldingAccount = client
+            .post(
+                "/holding_accounts",
+                &serde_json::json!({ "name": "Second" }),
+            )
+            .await
+            .expect_status(StatusCode::CREATED)
+            .json();
+        assert_ne!(
+            first.id, second.id,
+            "each create must get its own id, not overwrite the previous row"
+        );
+
+        let all = db_list(&pool).await.unwrap();
+        assert_eq!(all.len(), 3, "the seed plus both creates: {all:?}");
+        let mut ids: Vec<i64> = all.iter().map(|a| a.id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), 3, "the ids are distinct: {all:?}");
+    }
+
+    /// A create shares the upsert's one write-time invariant — the UNIQUE
+    /// `name`, enforced by the database — so a duplicate is refused the same
+    /// way and nothing is stored.
+    #[tokio::test]
+    async fn post_holding_account_rejects_like_the_upsert_and_stores_nothing() {
+        let pool = test_pool().await;
+        let client = client(&pool);
+
+        // "Default" is the seeded account's name.
+        let response = client
+            .post(
+                "/holding_accounts",
+                &serde_json::json!({ "name": "Default" }),
+            )
+            .await;
+        let (status, text) = response.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "body: {text:?}");
+        assert!(
+            text.contains("already exists"),
+            "the shared wording is reused: {text:?}"
+        );
+
+        assert_eq!(
+            db_list(&pool).await.unwrap().len(),
+            1,
+            "a rejected create stores nothing"
+        );
     }
 }

@@ -241,8 +241,11 @@ impl Trade {
     /// component (informational on reads; a flagged write ignores it), and
     /// unflagged trades read back as stored. Applies only at the HTTP
     /// boundary — internal callers of `db_get`/`db_list` keep the stored
-    /// ex-GST split.
-    pub(super) fn present(mut self) -> Self {
+    /// ex-GST split. `pub(crate)` rather than `pub(super)` because
+    /// `entities::sell` re-presents the row its `POST /sells` created through
+    /// it, so a create's response reads exactly like the `GET /trades/:id` of
+    /// the same row.
+    pub(crate) fn present(mut self) -> Self {
         if self.brokerage_includes_gst {
             self.brokerage += self.gst_on_brokerage;
         }

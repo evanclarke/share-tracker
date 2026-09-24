@@ -256,6 +256,13 @@ pub enum UpsertError {
     /// half of the same CHECK, and the other half of SCENARIOS L-09.
     #[error("a non-Crypto listing was written without an exchange")]
     ExchangeRequired,
+    /// A create committed but the row could not be read back. Not reachable in
+    /// practice — the row is committed and unread only if something deletes it
+    /// in the same instant — but a create that answers with no row would be
+    /// worse than a loud failure, so it is its own variant rather than an
+    /// `unwrap`. Mapped to `500`.
+    #[error("the listing row was created but could not be read back")]
+    VanishedAfterCreate,
     /// Constraint violations (duplicate ticker, unknown exchange or currency)
     /// surface here via the table's CHECKs and FKs. The exchange/security-type
     /// pairing is checked above, before its CHECK can fire.
@@ -322,6 +329,10 @@ impl From<UpsertError> for ApiError {
                      two dates is the case they are both for)"
             )),
             UpsertError::Db(err) => err.into(),
+            // A committed create whose row could not be read back: a real
+            // server-side fault, so it answers `500` and is logged rather than
+            // dressed up as a client error.
+            err @ UpsertError::VanishedAfterCreate => ApiError::internal(err),
         }
     }
 }
@@ -359,7 +370,7 @@ pub fn amit_in_tax_year(amit: bool, amit_from: Option<NaiveDate>, tax_year: i32)
 
 pub fn router() -> Router<SqlitePool> {
     Router::new()
-        .route("/listings", get(http::list_handler::<Listing>))
+        .route("/listings", get(http::list_handler::<Listing>).post(create))
         .route(
             "/listings/{id}",
             get(http::get_handler::<Listing>)
@@ -379,7 +390,13 @@ where
     http::crud_get(executor, id).await
 }
 
-pub async fn db_upsert(pool: &SqlitePool, listing: &Listing) -> Result<(), UpsertError> {
+/// Write a listing row, allocating its id when `id` is `None`.
+///
+/// Every validation below is shared by both callers, so a create and an upsert
+/// can never drift: `id = Some` is the long-standing `PUT /listings/:id`
+/// upsert, and `id = None` is the `POST /listings` create, which leaves the id
+/// to the database.
+async fn write(pool: &SqlitePool, id: Option<i64>, listing: &Listing) -> Result<i64, UpsertError> {
     // A blank ticker or name is refused before the transaction is even opened:
     // it is a pure check on the request, and neither value is inert. The
     // ticker (with the exchange) resolves the provider symbol — a stored blank
@@ -401,9 +418,11 @@ pub async fn db_upsert(pool: &SqlitePool, listing: &Listing) -> Result<(), Upser
     // history must go through the rename action instead of a bare field
     // edit, so the change is recorded rather than silently lost — a
     // brand-new listing with no dependents yet stays freely editable here.
+    // A create (`id` is `None`) has no stored row, so there is nothing whose
+    // identity the write could change; the lookup binds NULL and finds none.
     let current: Option<(String, Option<String>, String)> =
         sqlx::query_as("SELECT ticker, exchange_mic, currency FROM listings WHERE id = ?")
-            .bind(listing.id)
+            .bind(id)
             .fetch_optional(&mut *tx)
             .await?;
     if let Some((old_ticker, old_exchange_mic, old_currency)) = current {
@@ -420,7 +439,7 @@ pub async fn db_upsert(pool: &SqlitePool, listing: &Listing) -> Result<(), Upser
                  OR EXISTS(SELECT 1 FROM income WHERE listing_id = ?1) \
                  OR EXISTS(SELECT 1 FROM closing_prices WHERE listing_id = ?1)",
             )
-            .bind(listing.id)
+            .bind(id)
             .fetch_one(&mut *tx)
             .await?;
             if has_dependents {
@@ -487,7 +506,7 @@ pub async fn db_upsert(pool: &SqlitePool, listing: &Listing) -> Result<(), Upser
              WHERE listing_id = ?1 AND status = 'ok' AND price_date < ?2 \
                AND (?3 IS NULL OR price_date >= ?3)",
         )
-        .bind(listing.id)
+        .bind(id)
         .bind(from)
         .bind(listing.unpriced_before)
         .fetch_one(&mut *tx)
@@ -502,7 +521,7 @@ pub async fn db_upsert(pool: &SqlitePool, listing: &Listing) -> Result<(), Upser
             "SELECT MIN(price_date) FROM closing_prices \
              WHERE listing_id = ?1 AND status = 'ok' AND origin = 'fetched' AND price_date >= ?2",
         )
-        .bind(listing.id)
+        .bind(id)
         .bind(from)
         .fetch_one(&mut *tx)
         .await?;
@@ -539,7 +558,13 @@ pub async fn db_upsert(pool: &SqlitePool, listing: &Listing) -> Result<(), Upser
             return Err(UpsertError::UnrecognisedDigitalToken);
         }
     }
-    sqlx::query(
+    // A create (`id` is `None`, from `POST /listings`) omits the id column
+    // altogether, so the database's `AUTOINCREMENT` sequence assigns one it
+    // has never issued — a server-computed id could hand the new row a
+    // deleted row's id and, with it, that row's `row_history` trail
+    // (SCENARIOS U-a). The upsert branch is otherwise byte-identical, so a
+    // `PUT` on an explicit id stays the upsert it has always been.
+    let query = crate::insert_with_optional_id!(
         "INSERT INTO listings \
          (id, exchange_mic, ticker, name, isin, security_type, currency, amit, amit_from, \
           unpriced_from, unpriced_before, preference, price_symbol) \
@@ -557,24 +582,61 @@ pub async fn db_upsert(pool: &SqlitePool, listing: &Listing) -> Result<(), Upser
              unpriced_before = excluded.unpriced_before, \
              preference    = excluded.preference, \
              price_symbol  = excluded.price_symbol",
-    )
-    .bind(listing.id)
-    .bind(&listing.exchange_mic)
-    .bind(&listing.ticker)
-    .bind(&listing.name)
-    .bind(&listing.isin)
-    .bind(listing.security_type)
-    .bind(listing.currency.as_str())
-    .bind(listing.amit)
-    .bind(listing.amit_from)
-    .bind(listing.unpriced_from)
-    .bind(listing.unpriced_before)
-    .bind(listing.preference)
-    .bind(&listing.price_symbol)
-    .execute(&mut *tx)
-    .await?;
+        "INSERT INTO listings \
+         (exchange_mic, ticker, name, isin, security_type, currency, amit, amit_from, \
+          unpriced_from, unpriced_before, preference, price_symbol) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+         ON CONFLICT(id) DO UPDATE SET \
+             exchange_mic  = excluded.exchange_mic, \
+             ticker        = excluded.ticker, \
+             name          = excluded.name, \
+             isin          = excluded.isin, \
+             security_type = excluded.security_type, \
+             currency      = excluded.currency, \
+             amit          = excluded.amit, \
+             amit_from     = excluded.amit_from, \
+             unpriced_from = excluded.unpriced_from, \
+             unpriced_before = excluded.unpriced_before, \
+             preference    = excluded.preference, \
+             price_symbol  = excluded.price_symbol",
+        id,
+    );
+    let result = query
+        .bind(&listing.exchange_mic)
+        .bind(&listing.ticker)
+        .bind(&listing.name)
+        .bind(&listing.isin)
+        .bind(listing.security_type)
+        .bind(listing.currency.as_str())
+        .bind(listing.amit)
+        .bind(listing.amit_from)
+        .bind(listing.unpriced_from)
+        .bind(listing.unpriced_before)
+        .bind(listing.preference)
+        .bind(&listing.price_symbol)
+        .execute(&mut *tx)
+        .await?;
+    // An id-less INSERT was given one by the database; an upsert wrote the
+    // explicit one it was handed. Either way the caller gets the id the row
+    // actually holds.
+    let assigned_id = id.unwrap_or_else(|| result.last_insert_rowid());
     tx.commit().await?;
+    Ok(assigned_id)
+}
+
+/// `PUT /listings/:id` — the long-standing upsert on a caller-chosen id.
+pub async fn db_upsert(pool: &SqlitePool, listing: &Listing) -> Result<(), UpsertError> {
+    write(pool, Some(listing.id), listing).await?;
     Ok(())
+}
+
+/// `POST /listings` — create without naming an id, and return the row the
+/// database assigned one to.
+pub async fn db_create(pool: &SqlitePool, listing: &Listing) -> Result<Listing, UpsertError> {
+    let id = write(pool, None, listing).await?;
+    db_get(pool, id)
+        .await?
+        .ok_or(UpsertError::VanishedAfterCreate)
 }
 
 #[cfg(test)]
@@ -582,12 +644,11 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<bool, sqlx::Error> 
     http::crud_delete::<Listing>(pool, id).await
 }
 
-async fn upsert(
-    State(pool): State<SqlitePool>,
-    Path(id): Path<i64>,
-    Json(body): Json<ListingBody>,
-) -> Result<StatusCode, ApiError> {
-    let listing = Listing {
+/// The row a request body describes. `id` is the path's on an upsert and
+/// ignored on a create (the database assigns one), so both entry points build
+/// their `Listing` through this one mapping and cannot drift.
+fn listing_from_body(id: i64, body: ListingBody) -> Listing {
+    Listing {
         id,
         exchange_mic: body.exchange_mic,
         ticker: body.ticker,
@@ -601,9 +662,30 @@ async fn upsert(
         unpriced_before: body.unpriced_before,
         preference: body.preference,
         price_symbol: body.price_symbol,
-    };
-    db_upsert(&pool, &listing).await?;
+    }
+}
+
+async fn upsert(
+    State(pool): State<SqlitePool>,
+    Path(id): Path<i64>,
+    Json(body): Json<ListingBody>,
+) -> Result<StatusCode, ApiError> {
+    db_upsert(&pool, &listing_from_body(id, body)).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /listings` — create the row without naming an id. The database
+/// assigns one (see [`write`]), and the created row is returned so the caller
+/// can use its id immediately with no `max(id) + 1` guess between the two
+/// calls. A listing's ticker and exchange decide the price provider's symbol,
+/// but a create writes no history for the rename guard to protect — it simply
+/// lands the id the database issues.
+async fn create(
+    State(pool): State<SqlitePool>,
+    Json(body): Json<ListingBody>,
+) -> Result<(StatusCode, Json<Listing>), ApiError> {
+    let created = db_create(&pool, &listing_from_body(0, body)).await?;
+    Ok((StatusCode::CREATED, Json(created)))
 }
 
 #[cfg(test)]
@@ -1580,5 +1662,136 @@ mod tests {
         let pool = test_pool().await;
         let resp = client(&pool).delete("/listings/999").await;
         assert_eq!(resp.status, StatusCode::NOT_FOUND);
+    }
+
+    /// `POST /listings` allocates its own id — the create that makes the whole
+    /// `max(id) + 1` dance unnecessary (SCENARIOS U-a).
+    #[tokio::test]
+    async fn post_listing_creates_a_row_with_a_database_assigned_id() {
+        let pool = test_pool().await;
+        let client = client(&pool);
+
+        let body = serde_json::json!({
+            "ticker": "NEW", "name": "New Co", "exchange_mic": "XASX",
+            "security_type": "Share", "currency": "AUD", "amit": false,
+        });
+        let response = client.post("/listings", &body).await;
+        let (status, text) = response.status_and_body();
+        assert_eq!(status, StatusCode::CREATED, "body: {text:?}");
+
+        let created: Listing = response.json();
+        assert_ne!(created.id, 0, "a create must not land on id 0");
+        assert_eq!(created.ticker, "NEW");
+
+        // The returned row is the stored one, and it is listed under its own
+        // id — so the caller can act on the id at once instead of re-reading
+        // the collection to discover it.
+        let listed = db_get(&pool, created.id).await.unwrap().unwrap();
+        assert_eq!(listed.id, created.id);
+        assert_eq!(listed.name, "New Co");
+    }
+
+    /// The bug this endpoint exists to kill: with an id-less create there is no
+    /// guessed id to collide with, so two creates are two rows — before, a
+    /// second `max(id) + 1`-style PUT on a taken id silently overwrote the
+    /// first through the upsert's `ON CONFLICT ... DO UPDATE`.
+    #[tokio::test]
+    async fn post_listing_twice_stores_two_distinct_rows() {
+        let pool = test_pool().await;
+        let client = client(&pool);
+
+        let body = |ticker: &str| {
+            serde_json::json!({
+                "ticker": ticker, "name": "New Co", "exchange_mic": "XASX",
+                "security_type": "Share", "currency": "AUD", "amit": false,
+            })
+        };
+        let first: Listing = client
+            .post("/listings", &body("AAA"))
+            .await
+            .expect_status(StatusCode::CREATED)
+            .json();
+        let second: Listing = client
+            .post("/listings", &body("BBB"))
+            .await
+            .expect_status(StatusCode::CREATED)
+            .json();
+        assert_ne!(
+            first.id, second.id,
+            "each create must get its own id, not overwrite the previous row"
+        );
+
+        let all: Vec<Listing> = client.get_json("/listings").await;
+        assert_eq!(all.len(), 2, "both creates are stored: {all:?}");
+    }
+
+    /// The property the whole `row_history` occupant marking rests on: an id
+    /// handed out twice inherits the previous occupant's trail. `AUTOINCREMENT`
+    /// guarantees a create never re-issues a deleted row's id only while the
+    /// INSERT omits the id column — which is exactly what the create path does
+    /// (SCENARIOS U-a, migration 0045).
+    #[tokio::test]
+    async fn post_listing_never_reuses_a_deleted_rows_id() {
+        let pool = test_pool().await;
+        let client = client(&pool);
+
+        let body = serde_json::json!({
+            "ticker": "NEW", "name": "New Co", "exchange_mic": "XASX",
+            "security_type": "Share", "currency": "AUD", "amit": false,
+        });
+        let first: Listing = client
+            .post("/listings", &body)
+            .await
+            .expect_status(StatusCode::CREATED)
+            .json();
+
+        // Edit it, so its trail is non-empty, then delete it — the id is now
+        // free and carries history that must never be inherited.
+        let edited = serde_json::json!({
+            "ticker": "NEW", "name": "Renamed Co", "exchange_mic": "XASX",
+            "security_type": "Share", "currency": "AUD", "amit": false,
+        });
+        client
+            .put(&format!("/listings/{}", first.id), &edited)
+            .await
+            .expect_status(StatusCode::NO_CONTENT);
+        client
+            .delete(&format!("/listings/{}", first.id))
+            .await
+            .expect_status(StatusCode::NO_CONTENT);
+
+        let second: Listing = client
+            .post("/listings", &body)
+            .await
+            .expect_status(StatusCode::CREATED)
+            .json();
+        assert_ne!(
+            first.id, second.id,
+            "the create took the deleted row's id back, inheriting its audit history"
+        );
+    }
+
+    /// A create shares every write-time validation with the upsert, so a bad
+    /// body is refused and nothing is stored — the create path is not a way
+    /// round the blank-ticker guard.
+    #[tokio::test]
+    async fn post_listing_rejects_like_the_upsert_and_stores_nothing() {
+        let pool = test_pool().await;
+        let client = client(&pool);
+
+        let body = serde_json::json!({
+            "ticker": "   ", "name": "New Co", "exchange_mic": "XASX",
+            "security_type": "Share", "currency": "AUD", "amit": false,
+        });
+        let response = client.post("/listings", &body).await;
+        let (status, text) = response.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "body: {text:?}");
+        assert!(
+            text.contains("ticker cannot be blank"),
+            "the shared wording is reused: {text:?}"
+        );
+
+        let all: Vec<Listing> = client.get_json("/listings").await;
+        assert!(all.is_empty(), "a rejected create stores nothing: {all:?}");
     }
 }
