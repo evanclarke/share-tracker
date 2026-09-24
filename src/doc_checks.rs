@@ -470,12 +470,18 @@ fn audited_ids_are_never_reused_documented() {
 #[test]
 fn creating_a_record_documented() {
     assert!(API_MD.contains("## Creating a record"));
-    // The two entry points, and who picks the id in each.
+    // The two entry points, and who picks the id in each. The lead says
+    // "allocated" rather than "surrogate" deliberately: `cgt_settings` is
+    // id-keyed but a CHECK-pinned singleton with no collection POST, so which
+    // ids get the two entry points is the distinction the section turns on.
     assert!(
-        API_MD.contains(
-            "Every entity whose key is a surrogate `id` accepts **two** write entry points"
-        )
+        API_MD
+            .contains("Every entity whose key is an **allocated** `id` — one the server hands out")
     );
+    assert!(API_MD.contains(
+        "accepts **two** write entry points, and they differ in exactly one thing: \
+         who chooses the id:"
+    ));
     assert!(API_MD.contains("| `POST` | `/<collection>` | the database |"));
     assert!(API_MD.contains("| `PUT` | `/<collection>/:id` | the caller |"));
     // Why it exists: no guess, and no id to get wrong.

@@ -1397,11 +1397,19 @@ mod tests {
                 .nth(1)
                 .map(|rest| &rest[..rest.find('\'').expect("a closing quote")])
                 .unwrap_or_else(|| panic!("entity {slug} declares no api path"));
-            // The form's create branch turns on this exact test.
+            // The form's create branch turns on this exact test. Bounded at the
+            // array's closing `]`: an unbounded scan would run on into the
+            // entity's `fields` array and its hints, and a `hint` that merely
+            // mentions `auto: true` would classify the entity wrongly. Each
+            // `keyFields` entry is a single flat constructor call, so the first
+            // `]` is the array's own.
             let key_fields = entry
                 .split("keyFields: [")
                 .nth(1)
                 .unwrap_or_else(|| panic!("entity {slug} declares no keyFields"));
+            let key_fields = &key_fields[..key_fields
+                .find(']')
+                .unwrap_or_else(|| panic!("entity {slug}'s keyFields array is unterminated"))];
             let server_assigns_the_key = key_fields.contains("auto: true");
 
             if server_assigns_the_key {
@@ -1431,6 +1439,42 @@ mod tests {
             (12, 4),
             "the split between server-assigned and keyed creates changed — re-check \
              that each entity's form branch still matches its route"
+        );
+    }
+
+    /// A create answers `201` **with the stored row**, which is the whole
+    /// reason the form can stop guessing an id.
+    ///
+    /// The route pin above only proves the endpoint exists — it drives a
+    /// bodyless POST and reads the status, so a create that answered `204`
+    /// would satisfy it while leaving `app.js` with no key to build its
+    /// follow-up path from. This asserts the response contract itself, on a
+    /// real create: `201`, a body, and the server-assigned key inside it.
+    #[tokio::test]
+    async fn a_create_answers_with_the_row_its_key_came_from() {
+        let pool = test_pool().await;
+        let client = ApiClient::full(&pool);
+
+        let response = client
+            .post(
+                "/interest_income",
+                &serde_json::json!({ "date_paid": "2026-09-24", "amount": "10.00" }),
+            )
+            .await;
+        let (status, text) = response.status_and_body();
+        assert_eq!(status, StatusCode::CREATED, "body: {text:?}");
+        let created: serde_json::Value = response.json();
+        // The key the form reads off the response, and the figures it wrote.
+        assert!(
+            created
+                .get("id")
+                .and_then(|v| v.as_i64())
+                .is_some_and(|id| id > 0),
+            "the created row carries no server-assigned id: {created}"
+        );
+        assert_eq!(
+            created.get("amount").and_then(|v| v.as_str()),
+            Some("10.00")
         );
     }
 

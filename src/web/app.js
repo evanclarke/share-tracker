@@ -677,9 +677,18 @@ async function viewEntityForm(entity, keyParts, seq = navigationToken()) {
         await api('PUT', entity.api + '/' + idPath, body);
       } else if (entity.keyFields.some(function (kf) { return kf.auto; })) {
         // A server-assigned key: POST the collection and take the id off the
-        // created row, so nothing has to guess `max(id) + 1`.
+        // created row, so nothing has to guess `max(id) + 1`. Every collection
+        // POST answers `201` with the stored row, so the key is always there —
+        // checked rather than assumed, because a bodyless answer would leave
+        // the next read throwing a bare TypeError.
         const created = await api('POST', entity.api, body);
-        idPath = entity.keyFields.map(function (kf) { return created[kf.name]; }).join('/');
+        idPath = entity.keyFields.map(function (kf) {
+          if (!created || created[kf.name] === undefined) {
+            throw new Error('the server returned no created row, so this record\u2019s '
+              + kf.name + ' is unknown — POST ' + entity.api + ' must answer 201 with the row');
+          }
+          return created[kf.name];
+        }).join('/');
       } else {
         // The key is the fact's own identity — a natural key (`exchanges`,
         // `exchange_holidays`) or a stated one (`tax_year_settings`,

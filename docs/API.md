@@ -70,7 +70,7 @@ No CSRF token is issued or required: the cookie's `SameSite=Lax` withholds it fr
 
 ## Creating a record
 
-Every entity whose key is a surrogate `id` accepts **two** write entry points, and they differ in exactly one thing — who chooses the id:
+Every entity whose key is an **allocated** `id` — one the server hands out, rather than a natural or stated key the client supplies — accepts **two** write entry points, and they differ in exactly one thing: who chooses the id:
 
 | Method | Path | Who picks the id | Answers |
 |--------|------|------------------|---------|
