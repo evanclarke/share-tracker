@@ -231,6 +231,9 @@ pub struct ApiClient {
     app: axum::Router,
     /// Extra headers sent with every request — see [`Self::with_header`].
     headers: Vec<(String, String)>,
+    /// The peer address installed as the request's `ConnectInfo` extension on
+    /// every request — see [`Self::with_peer`].
+    peer: Option<std::net::SocketAddr>,
 }
 
 impl ApiClient {
@@ -240,6 +243,7 @@ impl ApiClient {
         ApiClient {
             app,
             headers: Vec::new(),
+            peer: None,
         }
     }
 
@@ -249,6 +253,23 @@ impl ApiClient {
     /// `client.with_header("Cookie", a).with_header("X-Foo", b)`.
     pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.headers.push((name.into(), value.into()));
+        self
+    }
+
+    /// Returns a client whose every request carries `addr` as the connection's
+    /// peer address — the `ConnectInfo<SocketAddr>` extension a real listener
+    /// built by `into_make_service_with_connect_info` installs, which an
+    /// in-process `oneshot` request has no socket to provide.
+    ///
+    /// `infra::auth`'s login lockout keys on exactly that extension (read as
+    /// `Option<Extension<ConnectInfo<SocketAddr>>>`), so this is how a test
+    /// gives two clients distinct sources — or reaches the one `<unknown peer>`
+    /// bucket by leaving it off. A bare `SocketAddr` is deliberately **not**
+    /// inserted alongside it: the handler looks up `Extension<ConnectInfo<_>>`
+    /// specifically, so only the wrapped type it actually reads is installed
+    /// here.
+    pub fn with_peer(mut self, addr: std::net::SocketAddr) -> Self {
+        self.peer = Some(addr);
         self
     }
 
@@ -292,6 +313,10 @@ impl ApiClient {
                 axum::http::HeaderName::from_bytes(name.as_bytes()).expect("valid header name"),
                 axum::http::HeaderValue::from_str(value).expect("valid header value"),
             );
+        }
+        if let Some(addr) = self.peer {
+            req.extensions_mut()
+                .insert(axum::extract::ConnectInfo(addr));
         }
         let resp = self.app.clone().oneshot(req).await.unwrap();
         let status = resp.status();

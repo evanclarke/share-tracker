@@ -164,10 +164,23 @@ async fn main() {
         settings.base_path
     );
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .expect("server error");
+    // `into_make_service_with_connect_info` is what puts each connection's peer
+    // `SocketAddr` into the request extensions, which is the only thing
+    // `POST /login`'s per-source lockout keys on (`infra::auth`). Without it the
+    // extractor still works — it is taken as an `Option` — but every login
+    // would share the one `<unknown peer>` bucket, so the lockout would be
+    // global rather than per-source. Note what the documented nginx deployment
+    // implies: the peer *address* is then the proxy's (127.0.0.1) for every
+    // client, so those clients share one bucket — the lockout still bounds
+    // aggregate guessing, but a per-client limit belongs at the proxy (the
+    // README states the caveat beside its `limit_req` example).
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    .expect("server error");
 
     tracing::info!("shutting down");
     pool.close().await;

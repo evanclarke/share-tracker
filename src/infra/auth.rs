@@ -39,11 +39,59 @@
 //! limitations as accepted for a single-credential app rather than papered
 //! over with a token nothing else in the app needs.
 //!
-//! Failed logins are throttled by Argon2 itself (~30 ms/attempt on ordinary
-//! hardware, i.e. tens of attempts/sec/core): there is deliberately no
-//! separate lockout counter for a single-credential hobbyist deployment.
+//! Argon2 throttles each individual guess (~30 ms/attempt on ordinary
+//! hardware, i.e. tens of attempts/sec/core), but that is a per-attempt cost,
+//! not a bound on how many guesses a source gets — and since the API became a
+//! script/LLM surface as well as a browser one, an unattended client can spend
+//! as long as it likes spending it. So failed logins are **also** bounded by a
+//! per-source lockout ([`LockoutTracker`]), which reopens the earlier "no
+//! separate lockout counter" scope decision deliberately:
+//!
+//! - **What it bounds**: consecutive *failed* `POST /login` attempts from one
+//!   source. After [`LOCKOUT_BUDGET`] of them inside
+//!   [`LOCKOUT_FAILURE_WINDOW`], further attempts from that source are refused
+//!   outright for [`LOCKOUT_COOLDOWN`] — **without even checking the
+//!   password**, so a correct password cannot be used to reset the lockout,
+//!   which is the whole point. A success before the budget is reached clears
+//!   that source's streak.
+//! - **The key**: the request's peer address
+//!   (`ConnectInfo<SocketAddr>`), with the absent case — an in-process test
+//!   client, or any deployment without
+//!   `into_make_service_with_connect_info` — sharing one documented
+//!   [`Source::Unknown`] bucket.
+//! - **State bound**: at most [`LOCKOUT_MAX_SOURCES`] sources are tracked,
+//!   oldest-seen evicted first ([`LockoutTracker`] carries the reasoning), so
+//!   the table is a bucket an attacker cannot grow into a memory-exhaustion
+//!   hole.
+//! - **Reverse-proxy caveat, stated honestly**: in the documented nginx
+//!   deployment the peer is **the proxy** (127.0.0.1) for every request, so
+//!   every client shares one bucket — the lockout then still bounds
+//!   *aggregate* guessing, but one attacker can lock out everybody, and nginx
+//!   cannot fix it by forwarding a header because nothing here trusts one. A
+//!   per-client limit in front of the app (the README's `limit_req` example)
+//!   is the complementary control, not a substitute for this one.
+//! - **Under a flood, the bound wins over the lockout**: an attacker who
+//!   contributes more than [`LOCKOUT_MAX_SOURCES`] distinct sources inside the
+//!   failure window can have an actively locked-out entry evicted — the cap is
+//!   the memory guarantee, and no bound on memory can also be a bound on every
+//!   source. That is a deliberate trade (the alternative, refusing new sources
+//!   once full, would let a flood block *legitimate* logins outright), and it
+//!   costs real work — a distinct peer address per attempt — to buy back one
+//!   source's guesses, which Argon2's per-guess cost still prices.
+//! - **The answer**: `429 Too Many Requests` with a plain-text reason and a
+//!   `Retry-After` naming the remaining seconds — except a browser
+//!   (`Accept: text/html`), which gets the sign-in page rendered with the
+//!   lockout message instead, exactly as the wrong-credentials path renders
+//!   its own.
+//!
+//! This is **defence in depth against brute force, not a user account
+//! system**: there is still one shared credential, no per-user state, no
+//! permanent lock and no audit of who tried what beyond a `WARN` naming the
+//! source (never the attempted password).
+//!
 //! Argon2 runs on login only; every other authenticated request costs one
-//! HMAC verification.
+//! HMAC verification. The lockout is checked before the hash is, so a refused
+//! attempt costs nothing at all.
 
 use crate::infra::http::ApiError;
 use argon2::{
@@ -52,7 +100,7 @@ use argon2::{
 };
 use axum::{
     Router,
-    extract::{Request, State},
+    extract::{ConnectInfo, FromRequest, Request, State},
     http::{HeaderMap, StatusCode, header},
     middleware::Next,
     response::{Html, IntoResponse, Redirect, Response},
@@ -61,8 +109,11 @@ use axum::{
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use sqlx::SqlitePool;
+use std::collections::HashMap;
 use std::fmt::Write as _;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::net::{IpAddr, SocketAddr};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const LOGIN_HTML: &str = include_str!("auth/login.html");
 const COOKIE_NAME: &str = "st_session";
@@ -71,12 +122,307 @@ const SESSION_CONTEXT: &[u8] = b"share-tracker session v1";
 /// setting to get wrong; sign in again after 30 days.
 const SESSION_LIFETIME_SECS: u64 = 30 * 24 * 60 * 60;
 
+/// Consecutive failed `POST /login` attempts one source may make before it is
+/// locked out. Not a config knob: the item is about behaviour, not another
+/// setting to get wrong, and five is small enough that an attacker spending
+/// Argon2's ~30 ms/guess gets nowhere while a person mistyping a password
+/// twice is unaffected.
+const LOCKOUT_BUDGET: u32 = 5;
+/// How long a source's failure streak survives with no further attempt. A
+/// streak older than this is dropped rather than counted toward the budget,
+/// so isolated mistyped passwords days apart never accumulate into a lockout.
+/// (An *active* lockout is bounded by [`LOCKOUT_COOLDOWN`] instead.)
+const LOCKOUT_FAILURE_WINDOW: Duration = Duration::from_secs(15 * 60);
+/// How long a locked-out source is refused before it may try again. Deliberately
+/// short: this is a single-credential hobbyist deployment whose owner may
+/// legitimately have just mistyped the password five times, and the point is to
+/// make online guessing impractical, not to lock the owner out of their own
+/// portfolio.
+const LOCKOUT_COOLDOWN: Duration = Duration::from_secs(5 * 60);
+/// The most sources tracked at once. See [`LockoutTracker`] for why the state
+/// is capped rather than merely expired.
+const LOCKOUT_MAX_SOURCES: usize = 4096;
+
+// ---------------------------------------------------------------------------
+// Per-source failed-login lockout
+// ---------------------------------------------------------------------------
+
+/// Where a login attempt came from. Two variants only: any deployment without
+/// `into_make_service_with_connect_info` — the in-process test client among
+/// them — collapses into the one [`Source::Unknown`] bucket, which is
+/// documented behaviour rather than a silent fallback (a plain-HTTP listener
+/// misconfigured without a socket still gets a working, if coarse, lockout).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Source {
+    /// One peer **IP address** — deliberately not the port. A TCP client picks
+    /// a fresh ephemeral source port per connection, so keying on `IP:port`
+    /// would hand an attacker a clean counter for every guess: reconnect, and
+    /// the lockout is gone. Ignoring the port is what makes the lockout cost an
+    /// attacker something; a NATed network still shares one bucket, which is
+    /// the usual trade-off (fail2ban and nginx's `limit_req_zone` key on the
+    /// bare address for the same reason).
+    Peer(IpAddr),
+    /// No connect info on the request. A single shared bucket for every such
+    /// request — the in-process test client, and any deployment whose listener
+    /// was not built with `into_make_service_with_connect_info`.
+    Unknown,
+}
+
+impl Source {
+    fn of(peer: Option<SocketAddr>) -> Self {
+        match peer {
+            Some(addr) => Source::Peer(addr.ip()),
+            None => Source::Unknown,
+        }
+    }
+
+    /// How the source is named in the log line. Never the attempted password
+    /// (which is not even in scope where this is called).
+    fn label(self) -> String {
+        match self {
+            Source::Peer(ip) => ip.to_string(),
+            Source::Unknown => "<unknown peer>".to_string(),
+        }
+    }
+}
+
+/// The `POST /login` handler: reads the peer and the browser/script split off
+/// the request, then delegates to [`login_submit`].
+///
+/// It is an `async fn` taking the whole `Request` rather than a handler with
+/// extractor arguments because one of the two values it needs — the peer
+/// address — has **no optional extractor** in axum 0.8: `ConnectInfo` is
+/// mandatory by design (`Option<ConnectInfo<_>>` needs an
+/// `OptionalFromRequestParts` impl axum deliberately does not provide, and
+/// both types are foreign so it cannot be added here). Reading the extension
+/// directly keeps the peer optional — a listener built without
+/// `into_make_service_with_connect_info`, and the in-process test client,
+/// simply land in the documented [`Source::Unknown`] bucket — while consulting
+/// exactly the value a real socket installs. The form body is still decoded
+/// through axum's own `Form` extractor.
+async fn login_handler(auth: Auth, base_path: String, req: Request) -> Response {
+    // The peer is `ConnectInfo<SocketAddr>` — the extension
+    // `into_make_service_with_connect_info::<SocketAddr>()` (see `main`)
+    // installs, stored in the request's extensions as the bare `ConnectInfo`
+    // value (`axum::Extension` inserts its inner `T`).
+    let source = Source::of(
+        req.extensions()
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|ConnectInfo(addr)| *addr),
+    );
+    // Read before the body is decoded, and before any lockout decision: a
+    // browser (`Accept: text/html`) gets the rendered page on either failure
+    // path, a script gets the machine-readable status.
+    let html = wants_html(req.headers());
+    // The form body is decoded through axum's own extractor, so an absent or
+    // malformed body is answered exactly as it is on every other form route.
+    let form = match axum::extract::Form::<LoginForm>::from_request(req, &()).await {
+        Ok(axum::extract::Form(form)) => form,
+        Err(rejection) => return rejection.into_response(),
+    };
+    login_submit(auth, base_path, source, html, form).await
+}
+
+/// What the tracker remembers about one source.
+#[derive(Debug)]
+struct SourceState {
+    /// Consecutive failures in the current window, and when that window began.
+    /// Only ever incremented while the source is *not* locked out (a refused
+    /// attempt costs nothing, so hammering during a lockout cannot extend it).
+    failures: u32,
+    window_started: Instant,
+    /// When this source was last seen, for the cap's oldest-first eviction.
+    last_seen: Instant,
+    /// When an active lockout ends; `None` when not locked out.
+    locked_until: Option<Instant>,
+}
+
+/// The bounded, in-memory failed-login tracker behind `POST /login`.
+///
+/// **Why bounded.** An attacker chooses the peer address of every attempt (and
+/// rotates it freely), so a map keyed on the source would be a table an
+/// attacker can grow until the process runs out of memory — a denial of service
+/// handed over by the very control meant to prevent one. Two mechanisms close
+/// that, and both are deliberate:
+///
+/// 1. every access prunes entries whose lockout has expired *and* whose failure
+///    window has elapsed — so an idle source stops being tracked at all; and
+/// 2. the map is hard-capped at [`LOCKOUT_MAX_SOURCES`] entries, evicting the
+///    least-recently-seen source when a new one would exceed the cap.
+///
+/// Expiry alone is not enough (an attacker can create sources faster than they
+/// expire, within the window), and the hard cap alone is not enough (it would
+/// let a flood of one-shot sources evict a genuinely locked-out one), so the
+/// two run together: the cap is the memory bound, and eviction prefers a stale
+/// entry over a live one by virtue of being least-recently-seen.
+///
+/// Cloned with the [`Auth`] it lives on, sharing one table through the `Arc`;
+/// the `Mutex` is held only across a few map operations, never across an
+/// `await`.
+#[derive(Clone, Debug)]
+struct LockoutTracker {
+    state: Arc<Mutex<TrackerState>>,
+    policy: LockoutPolicy,
+}
+
+/// The lockout's tunables as one value, so the production consts and a test's
+/// small numbers are the *same* state machine with different numbers rather
+/// than two code paths.
+#[derive(Clone, Copy, Debug)]
+struct LockoutPolicy {
+    /// Consecutive failures allowed before the cooldown starts.
+    budget: u32,
+    /// How long a failure streak survives with no further attempt.
+    window: Duration,
+    /// How long a locked-out source is refused.
+    cooldown: Duration,
+    /// The most sources tracked at once.
+    max_sources: usize,
+}
+
+impl LockoutPolicy {
+    /// The documented production policy — the consts at the top of the module.
+    const fn production() -> Self {
+        LockoutPolicy {
+            budget: LOCKOUT_BUDGET,
+            window: LOCKOUT_FAILURE_WINDOW,
+            cooldown: LOCKOUT_COOLDOWN,
+            max_sources: LOCKOUT_MAX_SOURCES,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct TrackerState {
+    /// Keyed by source; capped at [`LockoutPolicy::max_sources`].
+    sources: HashMap<Source, SourceState>,
+}
+
+impl LockoutTracker {
+    /// The production policy — the documented consts above.
+    fn new() -> Self {
+        Self::with_policy(LockoutPolicy::production())
+    }
+
+    /// The same state machine over a caller's policy. Kept out of the public
+    /// API — there is no deployment path to it — and used by
+    /// [`Auth::with_lockout_policy`] so a test drives the identical code over a
+    /// small budget and a sub-second cooldown instead of sleeping for minutes.
+    fn with_policy(policy: LockoutPolicy) -> Self {
+        LockoutTracker {
+            state: Arc::new(Mutex::new(TrackerState {
+                sources: HashMap::new(),
+            })),
+            policy,
+        }
+    }
+
+    /// How many sources are currently tracked — the bound's observable, for
+    /// the tests that drive more sources than the cap.
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.lock().sources.len()
+    }
+
+    /// The tracker's mutex, recovering the state from a poisoned lock rather
+    /// than panicking: a panic in an unrelated handler must not make the whole
+    /// surface permanently unservable, and the tracker's own operations cannot
+    /// leave its invariants broken half-way.
+    fn lock(&self) -> std::sync::MutexGuard<'_, TrackerState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Seconds this source must wait before it may try again, `None` when it
+    /// is free to. Also prunes expired entries, so a source that has served
+    /// its cooldown is forgotten rather than left to occupy the cap.
+    fn retry_after(&self, source: Source) -> Option<u64> {
+        let now = Instant::now();
+        let mut state = self.lock();
+        Self::prune(&mut state, now, self.policy.window);
+        let entry = state.sources.get_mut(&source)?;
+        entry.last_seen = now;
+        let until = entry.locked_until?;
+        if until <= now {
+            entry.locked_until = None;
+            entry.failures = 0;
+            entry.window_started = now;
+            return None;
+        }
+        // Rounded up: a `Retry-After` of 0 would invite an immediate retry
+        // that is still refused.
+        Some(until.saturating_duration_since(now).as_secs().max(1))
+    }
+
+    /// Records one failed attempt. Reaching the budget starts (or restarts) the
+    /// cooldown; while one is already active this is a no-op, so a locked-out
+    /// source cannot have its cooldown extended by continuing to try.
+    fn record_failure(&self, source: Source) {
+        let now = Instant::now();
+        let mut state = self.lock();
+        Self::prune(&mut state, now, self.policy.window);
+        if !state.sources.contains_key(&source) && state.sources.len() >= self.policy.max_sources {
+            Self::evict_oldest(&mut state);
+        }
+        let entry = state.sources.entry(source).or_insert_with(|| SourceState {
+            failures: 0,
+            window_started: now,
+            last_seen: now,
+            locked_until: None,
+        });
+        entry.last_seen = now;
+        if entry.locked_until.is_some_and(|until| until > now) {
+            return;
+        }
+        entry.failures += 1;
+        if entry.failures >= self.policy.budget {
+            entry.locked_until = Some(now + self.policy.cooldown);
+        }
+    }
+
+    /// Clears a source's failure streak — a login that succeeded before the
+    /// budget was reached is forgiven, so an ordinary mistyped attempt costs
+    /// nothing permanent.
+    fn record_success(&self, source: Source) {
+        let now = Instant::now();
+        let mut state = self.lock();
+        Self::prune(&mut state, now, self.policy.window);
+        state.sources.remove(&source);
+    }
+
+    /// Drop entries that hold nothing worth bounding: a source that has no
+    /// active lockout and whose failure window has elapsed can be forgotten
+    /// entirely.
+    fn prune(state: &mut TrackerState, now: Instant, window: Duration) {
+        state.sources.retain(|_, entry| {
+            let locked = entry.locked_until.is_some_and(|until| until > now);
+            locked || now.saturating_duration_since(entry.window_started) < window
+        });
+    }
+
+    /// Make room under the cap by dropping the least-recently-seen source. The
+    /// live lockouts are what the cap must not lose preferentially, and the
+    /// least-recently-seen entry is the one no request has touched for longest.
+    fn evict_oldest(state: &mut TrackerState) {
+        let Some(oldest) = state
+            .sources
+            .iter()
+            .min_by_key(|(_, entry)| entry.last_seen)
+            .map(|(source, _)| *source)
+        else {
+            return;
+        };
+        state.sources.remove(&oldest);
+    }
+}
+
 /// The resolved `[auth]` configuration. Cheap to clone (a couple of
-/// `String`s, a bool, a 32-byte key) — cloned into every handler/middleware
-/// closure that needs it, the same way `SharedFetcher` is. `Debug`/`PartialEq`
-/// exist only so `config::Settings` (which derives both) can keep doing so;
-/// the only place either fires is a test assertion's failure message.
-#[derive(Clone, Debug, PartialEq)]
+/// `String`s, a bool, a 32-byte key, and an `Arc` to the lockout table) —
+/// cloned into every handler/middleware closure that needs it, the same way
+/// `SharedFetcher` is. `Debug` exists so `config::Settings` (which derives it)
+/// can keep doing so. `PartialEq` is hand-written — see its impl below — since
+/// `Settings` derives that too and equality must not depend on how many failed
+/// logins happened to be in flight.
+#[derive(Clone, Debug)]
 pub struct Auth {
     username: String,
     /// The PHC string (`$argon2id$...`), re-parsed on each password check —
@@ -92,6 +438,25 @@ pub struct Auth {
     /// `[auth]` only for a deliberately plain-HTTP setup (e.g. local testing).
     secure_cookie: bool,
     signing_key: [u8; 32],
+    /// The bounded per-source failed-login lockout. Shared through its own
+    /// `Arc` (not the derived `Clone` of an inner `HashMap`), so every clone
+    /// of one `Auth` — the router closure, the test client — sees one table.
+    lockouts: LockoutTracker,
+}
+
+/// Equality over the *configuration* only. The lockout table is live state
+/// that changes with traffic, and `config::Settings`' `PartialEq` compares
+/// resolved settings — a failed login is not a change of configuration, and
+/// two `Auth`s built from the same `[auth]` table must compare equal however
+/// many attempts either has seen.
+impl PartialEq for Auth {
+    fn eq(&self, other: &Self) -> bool {
+        self.username == other.username
+            && self.password_hash == other.password_hash
+            && self.api_token == other.api_token
+            && self.secure_cookie == other.secure_cookie
+            && self.signing_key == other.signing_key
+    }
 }
 
 impl Auth {
@@ -114,7 +479,42 @@ impl Auth {
             api_token,
             secure_cookie,
             signing_key,
+            lockouts: LockoutTracker::new(),
         })
+    }
+
+    /// [`Auth::new`] over a test-sized lockout policy — the identical state
+    /// machine with a small budget and a sub-second cooldown, so the
+    /// lockout's tests exercise the real code without sleeping for minutes.
+    /// `#[cfg(test)]` so the production policy on a real server can never be
+    /// configured around the documented consts.
+    #[cfg(test)]
+    fn with_lockout_policy(
+        username: String,
+        password_hash: String,
+        api_token: Option<String>,
+        secure_cookie: bool,
+        policy: LockoutPolicy,
+    ) -> Result<Self, String> {
+        let mut auth = Auth::new(username, password_hash, api_token, secure_cookie)?;
+        auth.lockouts = LockoutTracker::with_policy(policy);
+        Ok(auth)
+    }
+
+    /// Seconds the given peer must wait before another login attempt, or `None`
+    /// when it may try now. Checked *before* the password, so a locked-out
+    /// source is refused without an Argon2 verify and a correct password cannot
+    /// reset the lockout — see [`LockoutTracker`].
+    fn lockout_retry_after(&self, source: Source) -> Option<u64> {
+        self.lockouts.retry_after(source)
+    }
+
+    fn record_login_failure(&self, source: Source) {
+        self.lockouts.record_failure(source);
+    }
+
+    fn record_login_success(&self, source: Source) {
+        self.lockouts.record_success(source);
     }
 
     /// Hashes `password` as a fresh Argon2id PHC string, for `share-tracker
@@ -349,6 +749,13 @@ pub(crate) struct LoginForm {
 /// `GET /login`, `POST /login` and `POST /logout` — merged into the app
 /// alongside `web::router` only when `[auth]` is configured, so these routes
 /// (and the `Auth` they need) simply don't exist otherwise.
+///
+/// `POST /login` keys its lockout on the request's peer address, which `main`
+/// installs by serving through
+/// `into_make_service_with_connect_info::<SocketAddr>()`. It is read
+/// **optionally** (see [`login_handler`]): the in-process test client, and any
+/// listener built without that call, has no such extension and still serves the
+/// login page, sharing the one documented [`Source::Unknown`] bucket.
 pub fn router(auth: Auth, base_path: &str) -> Router<SqlitePool> {
     let base_path = base_path.to_string();
     let get_base = base_path.clone();
@@ -363,13 +770,11 @@ pub fn router(auth: Auth, base_path: &str) -> Router<SqlitePool> {
                 let base_path = get_base.clone();
                 async move { render_login(&base_path, None) }
             })
-            .post(
-                move |axum::extract::Form(form): axum::extract::Form<LoginForm>| {
-                    let auth = post_auth.clone();
-                    let base_path = post_base.clone();
-                    async move { login_submit(auth, base_path, form).await }
-                },
-            ),
+            .post(move |req: Request| {
+                let auth = post_auth.clone();
+                let base_path = post_base.clone();
+                async move { login_handler(auth, base_path, req).await }
+            }),
         )
         .route(
             "/logout",
@@ -400,8 +805,38 @@ fn render_login(base_path: &str, error: Option<&str>) -> Html<String> {
     )
 }
 
-async fn login_submit(auth: Auth, base_path: String, form: LoginForm) -> Response {
+async fn login_submit(
+    auth: Auth,
+    base_path: String,
+    source: Source,
+    html: bool,
+    form: LoginForm,
+) -> Response {
+    // The lockout gate comes **first**, before the password is even looked at:
+    // that is what makes a correct password unable to reset an active lockout,
+    // and it is also why a refused attempt costs no Argon2 work.
+    if let Some(retry_after) = auth.lockout_retry_after(source) {
+        // Named by source, never by the attempted password — which is not in
+        // scope here and must never reach a log. The source is either a socket
+        // address or the fixed `<unknown peer>` sentinel, so nothing
+        // attacker-chosen is written verbatim.
+        tracing::warn!(
+            source = %source.label(),
+            retry_after_secs = retry_after,
+            "login refused: locked out after repeated failures"
+        );
+        // A browser must still see the sign-in page carrying the reason rather
+        // than a bare body it would render as plain text; the 429 with a
+        // `Retry-After` is for the script/LLM clients that can act on it.
+        if html {
+            return render_login(&base_path, Some(&lockout_message(retry_after))).into_response();
+        }
+        return ApiError::too_many_requests(lockout_message(retry_after), retry_after)
+            .into_response();
+    }
+
     if auth.verify_password(&form.username, &form.password) {
+        auth.record_login_success(source);
         // `?` (Debug quoting) rather than `%`: the username is request text,
         // and the default `fmt` subscriber writes a `%` field verbatim, so a
         // control character in it would split the log line.
@@ -416,20 +851,32 @@ async fn login_submit(auth: Auth, base_path: String, form: LoginForm) -> Respons
         )
             .into_response()
     } else {
-        // Named by attempted username rather than peer address: the app has
-        // no `ConnectInfo` plumbing (added only for this it would also have
-        // to reach the in-process test harness, which has no real socket),
-        // and behind the documented reverse-proxy deployment the peer is
-        // always 127.0.0.1 regardless — the attempted username is the more
-        // useful signal here.
+        auth.record_login_failure(source);
+        // Named by attempted username as well as source: the username is the
+        // signal a human reading the log wants (which credential is being
+        // guessed at), and the source is what the lockout keys on.
         //
         // `?` (Debug quoting) rather than `%`: this is the **pre-auth**
         // `POST /login` and the username is entirely attacker-chosen, so a
         // `%` field written verbatim would let `username=evil%0A…` append
         // lines to the log.
-        tracing::warn!(username = ?form.username, "login failed: wrong username or password");
+        tracing::warn!(
+            source = %source.label(),
+            username = ?form.username,
+            "login failed: wrong username or password"
+        );
         render_login(&base_path, Some("Incorrect username or password.")).into_response()
     }
+}
+
+/// The lockout's user-facing reason — the one string both answers carry: the
+/// plain-text `429` body and, wrapped in the login page's error paragraph, the
+/// browser's message. Built here so the two cannot drift.
+///
+/// It says how long to wait but never how many attempts are allowed: naming
+/// the budget would only help someone probing it.
+fn lockout_message(retry_after_secs: u64) -> String {
+    format!("Too many failed sign-in attempts. Try again in {retry_after_secs} seconds.")
 }
 
 async fn logout(auth: Auth, base_path: String) -> Response {
@@ -630,6 +1077,8 @@ mod tests {
         let response = login_submit(
             auth(),
             String::new(),
+            Source::Unknown,
+            false,
             LoginForm {
                 username: "evil\nforged login succeeded".to_string(),
                 // The credential is run through `Auth::verify_login` against the
@@ -867,5 +1316,534 @@ mod api_tests {
             .post_empty("/jobs/no-such-job")
             .await;
         assert_eq!(right.status, StatusCode::NOT_FOUND);
+    }
+}
+
+/// The bounded per-source failed-login lockout (REST API audit, 2026-09-24:
+/// "Rate-limit / lock out `POST /login`", B6).
+///
+/// Two layers, deliberately distinct:
+///
+/// - the **tracker** unit-tested directly — the budget, the window, the
+///   cooldown, the cap and per-source isolation are properties of that state
+///   machine, and driving them through HTTP would test the same code with more
+///   ceremony (and, for the cap, hundreds of connections);
+/// - the **HTTP surface** tested through the whole application router, for the
+///   parts only it can answer: which status and headers a refusal carries, that
+///   a browser gets the rendered page instead, and that the request's peer
+///   address is what selects the bucket.
+///
+/// No test sleeps for minutes. The policy is a value ([`LockoutPolicy`]), so
+/// these use a three-failure budget and a ~1 s cooldown; the state machine
+/// itself runs on real `Instant`s — there is no stubbed clock anywhere — and
+/// the one test that must see a lockout *expire* sleeps just past that
+/// cooldown (~1.2 s in total for the module).
+#[cfg(test)]
+mod lockout_tests {
+    use super::*;
+    use crate::test_support::{ApiClient, test_pool};
+    use axum::http::HeaderValue;
+    use sqlx::SqlitePool;
+    use std::net::SocketAddr;
+
+    /// The small policy every test drives the production state machine with.
+    /// The cooldown is a whole number of seconds plus a little: `Retry-After`
+    /// truncates to seconds, so a sub-second cooldown would advertise `1` and
+    /// make the expiry assertion's timing the only thing under test.
+    const TEST_BUDGET: u32 = 3;
+    const TEST_COOLDOWN: Duration = Duration::from_millis(1100);
+    const TEST_WINDOW: Duration = Duration::from_secs(60);
+    const TEST_CAP: usize = 4;
+
+    fn policy() -> LockoutPolicy {
+        LockoutPolicy {
+            budget: TEST_BUDGET,
+            window: TEST_WINDOW,
+            cooldown: TEST_COOLDOWN,
+            max_sources: TEST_CAP,
+        }
+    }
+
+    fn auth_with(policy: LockoutPolicy) -> Auth {
+        Auth::with_lockout_policy(
+            "evan".to_string(),
+            Auth::hash_password("hunter2").unwrap(),
+            Some("test-token".to_string()),
+            false,
+            policy,
+        )
+        .unwrap()
+    }
+
+    /// A tracker on its own, for the unit-level properties.
+    fn tracker() -> LockoutTracker {
+        LockoutTracker::with_policy(policy())
+    }
+
+    /// A distinct source per `n`, varying the peer's **IP** — the lockout keys
+    /// on the address, so tests that mean "another source" must vary the
+    /// address, not the port (which the port test below proves is ignored).
+    fn peer(n: u16) -> Source {
+        let n = u32::from(n);
+        Source::of(Some(SocketAddr::from((
+            [203, 0, ((n / 256) % 256) as u8, (n % 256) as u8],
+            40001,
+        ))))
+    }
+
+    /// One address with two different ports, for `the_source_is_the_ip_not_the_port`.
+    fn peer_on_port(port: u16) -> Source {
+        Source::of(Some(SocketAddr::from(([203, 0, 113, 7], port))))
+    }
+
+    // ---- The tracker itself ------------------------------------------------
+
+    /// The source is the peer's **IP**, so a client cannot shake off its
+    /// failures by reconnecting: every connection from one host lands in the
+    /// same bucket however the kernel numbers its ephemeral ports.
+    #[test]
+    fn the_source_is_the_ip_not_the_port() {
+        assert_eq!(
+            peer_on_port(40001),
+            peer_on_port(40002),
+            "two connections from one host are one source"
+        );
+        let tracker = tracker();
+        for _ in 0..TEST_BUDGET {
+            tracker.record_failure(peer_on_port(40001));
+        }
+        assert!(
+            tracker.retry_after(peer_on_port(40002)).is_some(),
+            "a fresh port must not be a fresh budget"
+        );
+    }
+
+    /// The budget is a count of *consecutive failures*: the first `budget`
+    /// attempts are answered normally, and the source is locked out from the
+    /// moment the budget is exhausted.
+    #[test]
+    fn a_source_is_locked_out_only_once_the_budget_is_exhausted() {
+        let tracker = tracker();
+        for attempt in 1..=TEST_BUDGET {
+            assert_eq!(
+                tracker.retry_after(peer(1)),
+                None,
+                "attempt {attempt} is within the budget and must be allowed"
+            );
+            tracker.record_failure(peer(1));
+        }
+        assert_eq!(
+            tracker.retry_after(peer(1)),
+            Some(1),
+            "the attempt that exhausted the budget must start the cooldown"
+        );
+        // A refused attempt changes nothing: the remaining cooldown is
+        // unchanged, so hammering a locked-out source cannot extend its lock.
+        let first = tracker.retry_after(peer(1)).unwrap();
+        tracker.record_failure(peer(1));
+        assert!(
+            tracker.retry_after(peer(1)).unwrap() <= first,
+            "a refused attempt must not extend the lockout"
+        );
+    }
+
+    /// One source's failures must not lock out another — the whole point of
+    /// keying on the peer.
+    #[test]
+    fn one_sources_failures_do_not_lock_out_another() {
+        let tracker = tracker();
+        for _ in 0..TEST_BUDGET {
+            tracker.record_failure(peer(1));
+        }
+        assert!(tracker.retry_after(peer(1)).is_some(), "source 1 is locked");
+        assert_eq!(
+            tracker.retry_after(peer(2)),
+            None,
+            "source 2 has made no attempt and must not be locked out by source 1's"
+        );
+        assert_eq!(
+            tracker.retry_after(Source::Unknown),
+            None,
+            "the no-peer bucket is its own source, not a shared one"
+        );
+    }
+
+    /// A success clears the streak, so ordinary mistyping costs nothing.
+    #[test]
+    fn a_success_before_the_budget_clears_the_failure_streak() {
+        let tracker = tracker();
+        for _ in 0..TEST_BUDGET - 1 {
+            tracker.record_failure(peer(1));
+        }
+        tracker.record_success(peer(1));
+        // A fresh streak of budget-1 failures still leaves the source free —
+        // were the old count still there it would have locked out on the first
+        // of them.
+        for _ in 0..TEST_BUDGET - 1 {
+            tracker.record_failure(peer(1));
+        }
+        assert_eq!(
+            tracker.retry_after(peer(1)),
+            None,
+            "the successful attempt must have reset the count"
+        );
+    }
+
+    /// The lockout is a *cooldown*, not a permanent lock: once it has elapsed
+    /// the source is free again and its streak has been forgotten.
+    #[test]
+    fn a_lockout_expires_back_to_a_clean_slate() {
+        let tracker = tracker();
+        for _ in 0..TEST_BUDGET {
+            tracker.record_failure(peer(1));
+        }
+        assert!(tracker.retry_after(peer(1)).is_some());
+        std::thread::sleep(TEST_COOLDOWN + Duration::from_millis(100));
+        assert_eq!(
+            tracker.retry_after(peer(1)),
+            None,
+            "the cooldown has elapsed; the source may try again"
+        );
+        // …and it is back inside the budget: budget-1 further failures do not
+        // re-lock, where a surviving count at the budget already would.
+        for _ in 0..TEST_BUDGET - 1 {
+            tracker.record_failure(peer(1));
+        }
+        assert_eq!(tracker.retry_after(peer(1)), None);
+    }
+
+    /// The state is **bounded**: driving many more distinct sources than the
+    /// cap leaves the table at the cap, never at the number of sources seen.
+    /// A lockout table an attacker can grow is a memory-exhaustion hole, and
+    /// the attacker chooses the source of every attempt.
+    #[test]
+    fn the_tracker_never_grows_past_its_cap() {
+        let tracker = tracker();
+        for port in 1..=(TEST_CAP as u16 * 25) {
+            tracker.record_failure(peer(port));
+        }
+        assert_eq!(
+            tracker.len(),
+            TEST_CAP,
+            "the tracker must be capped at {TEST_CAP} sources, not grow with traffic"
+        );
+        // Eviction drops the least-recently-seen source, so the newest
+        // sources are the ones that survive: a source that just failed is
+        // still tracked (a burst of new sources cannot silently un-lock one
+        // that is actively being attacked).
+        let last = peer(TEST_CAP as u16 * 25);
+        for _ in 0..TEST_BUDGET - 1 {
+            tracker.record_failure(last);
+        }
+        assert!(
+            tracker.retry_after(last).is_some(),
+            "the most recently seen source must still be tracked"
+        );
+        assert!(tracker.len() <= TEST_CAP);
+    }
+
+    /// The documented consequence of capping the table: the bound wins over the
+    /// lockout. A flood of distinct sources inside the failure window evicts an
+    /// actively locked-out entry (there is no bound on memory that is also a
+    /// bound on every source), and the tracker stays capped while it happens.
+    /// This is pinned rather than hidden because the module doc and
+    /// `docs/API.md` both state it.
+    #[test]
+    fn a_flood_of_new_sources_can_evict_a_locked_out_one() {
+        let tracker = tracker();
+        let locked = peer(1);
+        for _ in 0..TEST_BUDGET {
+            tracker.record_failure(locked);
+        }
+        assert!(tracker.retry_after(locked).is_some(), "sanity: locked out");
+
+        // More distinct sources than the cap, each seen after the locked one.
+        for port in 100..100 + TEST_CAP as u16 + 1 {
+            tracker.record_failure(peer(port));
+        }
+        assert_eq!(tracker.len(), TEST_CAP, "the cap still holds");
+        assert_eq!(
+            tracker.retry_after(locked),
+            None,
+            "the least-recently-seen source was evicted, as the docs say it can be"
+        );
+    }
+
+    // ---- The HTTP surface --------------------------------------------------
+
+    /// The whole application, auth on, over the tracker's small policy — as
+    /// `main` builds it when `[auth]` is configured, except for the policy.
+    fn client(pool: &SqlitePool, auth: Auth) -> ApiClient {
+        let fetcher = crate::entities::closing_price::test_support::QuoteStub::default().shared();
+        let registry = crate::infra::scheduler::registry(
+            pool.clone(),
+            ":memory:".to_string(),
+            None,
+            None,
+            fetcher.clone(),
+            crate::entities::distribution_event::test_support::DistributionStub::default().shared(),
+            None,
+        );
+        ApiClient::over(crate::app::router(
+            "",
+            pool.clone(),
+            registry,
+            fetcher,
+            Some(auth),
+        ))
+    }
+
+    /// The login form body, and the browser's own `Accept` header — the pair
+    /// the sign-in page submits.
+    const FORM_CONTENT_TYPE: &str = "application/x-www-form-urlencoded";
+    fn login_body(password: &str) -> String {
+        format!("username=evan&password={password}")
+    }
+
+    /// `POST /login` for the password given, as a person's browser sends it
+    /// (`Accept: text/html`). Passwords in this module are test inputs that can
+    /// only ever fail against the Argon2 hash, never credentials — the same
+    /// CodeQL `rust/hard-coded-cryptographic-value` false positive documented
+    /// on `a_control_character_in_a_failed_login_username_cannot_split_the_log_line`.
+    async fn browser_login(c: &ApiClient, password: &str) -> crate::test_support::ApiResponse {
+        c.clone()
+            .with_header("Accept", "text/html")
+            .post_bytes("/login", Some(FORM_CONTENT_TYPE), login_body(password))
+            .await
+    }
+
+    /// `POST /login` as a script or LLM client sends it: no `Accept:
+    /// text/html`, so a refusal is the machine-readable `429`.
+    async fn script_login(c: &ApiClient, password: &str) -> crate::test_support::ApiResponse {
+        c.post_bytes("/login", Some(FORM_CONTENT_TYPE), login_body(password))
+            .await
+    }
+
+    /// The whole lockout sequence over one source, driven through HTTP:
+    ///
+    /// 1. the first `budget - 1` wrong attempts answer exactly what the
+    ///    wrong-credentials path answers today (a `200` re-render);
+    /// 2. the attempt that exhausts the budget is still answered normally —
+    ///    the budget counts failures, so it takes that many to trip — and every
+    ///    attempt after it answers `429` with the reason and a `Retry-After`;
+    /// 3. during the lockout a **correct** password is still refused `429` —
+    ///    the password is not even checked, which is the point;
+    /// 4. once the cooldown elapses a correct password signs in (`303` with a
+    ///    session cookie) and the counter is cleared, so a following wrong
+    ///    attempt starts counting from one again.
+    #[tokio::test]
+    async fn the_login_lockout_refuses_by_source_with_429_and_retry_after() {
+        let pool = test_pool().await;
+        let client = client(&pool, auth_with(policy())).with_peer(([203, 0, 113, 7], 4001).into());
+
+        for attempt in 1..=TEST_BUDGET {
+            let resp = script_login(&client, "definitely-wrong").await;
+            assert_eq!(
+                resp.status,
+                StatusCode::OK,
+                "attempt {attempt} is within the budget and must answer the ordinary \
+                 wrong-credentials response; body: {}",
+                resp.text()
+            );
+            assert!(resp.text().contains("Incorrect username or password."));
+            assert!(resp.headers.get(header::SET_COOKIE).is_none());
+        }
+
+        // The budget is now exhausted, so the *next* attempt is refused — and
+        // this one is a failed attempt like any other, so the budget counts it
+        // before the cooldown starts.
+        let exhausting = script_login(&client, "definitely-wrong").await;
+        assert_eq!(exhausting.status, StatusCode::TOO_MANY_REQUESTS);
+        let retry_after = exhausting
+            .headers
+            .get(header::RETRY_AFTER)
+            .expect("a 429 names how long to wait")
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(retry_after, "1");
+        assert!(
+            exhausting
+                .text()
+                .contains("Too many failed sign-in attempts."),
+            "the 429 body must carry the reason: {}",
+            exhausting.text()
+        );
+        assert!(exhausting.headers.get(header::SET_COOKIE).is_none());
+
+        // The next attempt — and, crucially, one with the *right* password —
+        // is still refused: a correct password must not reset an active
+        // lockout, and a refusal never reaches the hash.
+        for password in ["definitely-wrong", "hunter2"] {
+            let resp = script_login(&client, password).await;
+            assert_eq!(
+                resp.status,
+                StatusCode::TOO_MANY_REQUESTS,
+                "a locked-out source must be refused whatever password it presents"
+            );
+            assert_eq!(
+                resp.headers.get(header::RETRY_AFTER).unwrap(),
+                &HeaderValue::from_static("1")
+            );
+        }
+
+        // Wait out the (test-sized) cooldown: the correct password now signs
+        // in, cookie and all.
+        tokio::time::sleep(TEST_COOLDOWN + Duration::from_millis(250)).await;
+        let signed_in = script_login(&client, "hunter2").await;
+        assert_eq!(
+            signed_in.status,
+            StatusCode::SEE_OTHER,
+            "the cooldown has elapsed; a correct password must sign in. body: {}",
+            signed_in.text()
+        );
+        assert!(signed_in.headers.get(header::SET_COOKIE).is_some());
+
+        // The success cleared the streak: exactly budget failures from the
+        // same source are allowed again, and the attempt after them locks it
+        // out — so the sign-in above reset the count rather than the cooldown
+        // simply carrying it away. (The attempt that *reaches* the budget is
+        // still answered normally; only the one after it is refused, which is
+        // why the first assertion below expects OK from all `budget` of them.)
+        for attempt in 1..=TEST_BUDGET {
+            assert_eq!(
+                script_login(&client, "definitely-wrong").await.status,
+                StatusCode::OK,
+                "attempt {attempt} of a freshly cleared budget must be answered normally"
+            );
+        }
+        assert_eq!(
+            script_login(&client, "definitely-wrong").await.status,
+            StatusCode::TOO_MANY_REQUESTS,
+            "a cleared streak must count from one, so the budget+1'th failure is refused"
+        );
+    }
+
+    /// The lockout keys on the request's **peer address**, not on the
+    /// connection at large: one source exhausting the budget leaves another
+    /// entirely unaffected, and the peer reaches the handler through the same
+    /// `ConnectInfo<SocketAddr>` extension a real listener installs.
+    #[tokio::test]
+    async fn the_lockout_is_per_source_not_per_server() {
+        let pool = test_pool().await;
+        let auth = auth_with(policy());
+        let attacker = client(&pool, auth.clone()).with_peer(([203, 0, 113, 7], 4001).into());
+        let innocent = client(&pool, auth).with_peer(([198, 51, 100, 9], 4002).into());
+
+        for _ in 0..TEST_BUDGET {
+            script_login(&attacker, "definitely-wrong").await;
+        }
+        assert_eq!(
+            script_login(&attacker, "definitely-wrong").await.status,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_eq!(
+            script_login(&innocent, "hunter2").await.status,
+            StatusCode::SEE_OTHER,
+            "another source's failures must not lock this one out"
+        );
+    }
+
+    /// A successful login *before* the budget is exhausted clears the count,
+    /// so two mistyped attempts followed by a successful one do not leave the
+    /// source one failure from a lockout.
+    #[tokio::test]
+    async fn a_successful_login_before_the_budget_clears_the_count() {
+        let pool = test_pool().await;
+        let client = client(&pool, auth_with(policy())).with_peer(([203, 0, 113, 7], 4001).into());
+
+        for _ in 0..TEST_BUDGET - 1 {
+            assert_eq!(
+                script_login(&client, "definitely-wrong").await.status,
+                StatusCode::OK
+            );
+        }
+        assert_eq!(
+            script_login(&client, "hunter2").await.status,
+            StatusCode::SEE_OTHER
+        );
+        // A full fresh budget-1 of failures is still allowed.
+        for _ in 0..TEST_BUDGET - 1 {
+            assert_eq!(
+                script_login(&client, "definitely-wrong").await.status,
+                StatusCode::OK,
+                "the successful login must have reset the failure count"
+            );
+        }
+    }
+
+    /// The browser path: an HTML login POST during a lockout renders the
+    /// sign-in page carrying the lockout message, exactly as the
+    /// wrong-credentials path renders its own — never a bare `429` body that
+    /// the browser would show as plain text.
+    #[tokio::test]
+    async fn a_locked_out_browser_gets_the_login_page_with_the_lockout_message() {
+        let pool = test_pool().await;
+        let client = client(&pool, auth_with(policy())).with_peer(([203, 0, 113, 7], 4001).into());
+
+        // The ordinary wrong-credentials browser path, for contrast: a 200
+        // rendered page with its own message.
+        let first = browser_login(&client, "definitely-wrong").await;
+        assert_eq!(first.status, StatusCode::OK);
+        assert!(first.text().contains("Incorrect username or password."));
+
+        for _ in 2..=TEST_BUDGET {
+            browser_login(&client, "definitely-wrong").await;
+        }
+        let locked = browser_login(&client, "hunter2").await;
+        assert_eq!(
+            locked.status,
+            StatusCode::OK,
+            "a browser must get the page, not a bare 429"
+        );
+        let body = locked.text();
+        assert!(
+            body.contains("Too many failed sign-in attempts."),
+            "the login page must carry the lockout message: {body}"
+        );
+        assert!(
+            body.contains("<title>share-tracker — sign in</title>"),
+            "the lockout message must be rendered in the sign-in page itself: {body}"
+        );
+        assert!(
+            !body.contains("Incorrect username or password."),
+            "the lockout page must not claim the credentials were wrong: {body}"
+        );
+        assert!(locked.headers.get(header::SET_COOKIE).is_none());
+        // A browser is not asked to honour a `Retry-After`; the message says
+        // how long to wait in prose instead.
+        assert!(locked.headers.get(header::RETRY_AFTER).is_none());
+
+        // The exact response the documented Error-body contract's `429` row
+        // (and its `doc_checks` pin) describe, from the code side.
+        let refused = ApiError::too_many_requests(lockout_message(300), 300).into_response();
+        assert_eq!(refused.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            refused.headers().get(header::CONTENT_TYPE).unwrap(),
+            "text/plain; charset=utf-8"
+        );
+        assert_eq!(refused.headers().get(header::RETRY_AFTER).unwrap(), "300");
+    }
+
+    /// A request with **no** connect info — the in-process client, and any
+    /// listener not built with `into_make_service_with_connect_info` — is not
+    /// rejected: it shares the one documented [`Source::Unknown`] bucket, so
+    /// the lockout still works there, just coarsely.
+    #[tokio::test]
+    async fn requests_without_connect_info_share_one_documented_bucket() {
+        let pool = test_pool().await;
+        let client = client(&pool, auth_with(policy()));
+
+        for _ in 0..TEST_BUDGET {
+            assert_eq!(
+                script_login(&client, "definitely-wrong").await.status,
+                StatusCode::OK
+            );
+        }
+        assert_eq!(
+            script_login(&client, "hunter2").await.status,
+            StatusCode::TOO_MANY_REQUESTS,
+            "the absent-peer bucket is a source like any other"
+        );
     }
 }

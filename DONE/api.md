@@ -103,3 +103,38 @@ found for a non-browser client; the first is the largest.
       statements) exists.
 
 Closed 2026-09-25. The audit's largest item landed first: `GET /openapi.json` serves a generated OpenAPI 3.1 document (`src/api_spec.rs`) built from a route table covering every route and from `utoipa::ToSchema` derives on the real request/response types, pinned by coverage, money-string, deny-unknown-fields and ref/uniqueness tests. Outbound money is an explicit string codec (`rust_decimal`'s `serde-str`, with two serialization tests that fail the moment a `Decimal` renders as a number), the error-body matrix is one documented contract pinned in `docs/API.md`, the OpenAPI description and `infra::http`'s own tests, and `docs/API.md`'s `## Reading a list` states list ordering, the four POST-bodied reads and `/reports/row_history`'s two cursor-paged shapes in one place.
+
+## REST API audit — API improvements (2026-09-24)
+
+Improvements that change behaviour or add features, called out by the same audit. These go beyond
+fixing drift: they make the API safer and cheaper to build against, for the web UI and machine
+clients alike. Each is closed by the tests named.
+
+- [x] Non-clobbering writes (B3). `PUT /collection/:id` silently replaces an existing row with no
+      body and no created-vs-replaced signal, and there is no version/`If-Match`, so a stale or
+      mistaken write clobbers a record with no confirmation. Make the outcome explicit and/or add
+      optimistic concurrency: answer `201`+row on create and `204` (or a body) on update, or add a
+      version/ETag so a stale read cannot overwrite a newer row. Test: round-trip tests assert the
+      create-vs-update signal; an `If-Match`-stale write answers `412`/`409`.
+- [x] Server-side filtering (and paging) on the workhorse lists (B4). Only `closing_prices`,
+      `attachments`, and `report_snapshots` accept query filters; `GET /trades`, `/income`,
+      `/listings`, `/amma_statements`, … return the whole table, so a client fetches and filters
+      entire tables. Add the obvious filters (`?listing_id=`, `?from=`/`?to=`,
+      `?holding_account_id=`) and/or cursor paging to the entity lists. Test: API tests assert each
+      filter narrows the result and unknown params still `422`.
+- [x] Make the as-at default explicit (B8). Omitting the as-of date silently means "today's live
+      position" (`as_of_or_today`), never the open-ended sentinel, and `/portfolio/overview` has no
+      as-of parameter at all while `performance`/`unrealised-gains`/`parcel-optimiser` each default
+      their own. Expose `as_of_date` uniformly on the valuation reports (overview included) and
+      state the default in `docs/API.md`. Test: API tests assert the omitted-date default and the
+      as-of behaviour; `doc_checks` pins the stated default.
+- [x] Filter errored rows out of `GET /closing_prices` (B7). The list returns errored rows
+      (`status:"error"`, `price:null`) interleaved with ok ones, so a client computing a valuation
+      must filter client-side. Add a `?status=ok|error` filter (or `include_errored=false` default)
+      so clean prices are one call. Test: API tests assert the filter.
+- [x] Rate-limit / lock out `POST /login` (B6). There is deliberately no lockout or rate limit
+      (`infra/auth.rs:43-44`), so a single-credential deployment can be brute-forced. Add a bounded
+      per-source lockout (or rate limit) — this reopens the prior scope decision, now that the API
+      is also a script/LLM surface. Test: a lockout test over a small attempt budget.
+
+Closed 2026-09-25. All five improvements landed: `PUT /<collection>/{id}` reports its create-vs-replace outcome (`201` with the created row, `204` on a replace, decided inside the write transaction), the workhorse entity lists take server-side filters, every valuation report takes `as_of_date` (omitted = today's live position, stated in `docs/API.md`), `GET /closing_prices` takes `?status=ok|error`, and `POST /login` carries a bounded per-source lockout (5 failures, 5-minute cooldown, `429` + `Retry-After`, keyed on the peer IP). This was the last open section of the audit.

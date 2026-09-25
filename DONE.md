@@ -15,7 +15,7 @@ Split into topical files (mirrors the `docs/ato/` pattern of many small files
 | File | Covers | Sections |
 | --- | --- | --- |
 | [`DONE/infra.md`](DONE/infra.md) | Infrastructure setup, FX/MIC/currency reference-data imports, backups, scheduler, the append-only audit trail, packaging/CI, authentication, outbound email | 36 |
-| [`DONE/api.md`](DONE/api.md) | The HTTP/REST API surface — the 2026-09-24 audit's contract corrections, consistency fixes, machine-client contract, and API-improvement items | 3 |
+| [`DONE/api.md`](DONE/api.md) | The HTTP/REST API surface — the 2026-09-24 audit's contract corrections, consistency fixes, machine-client contract, and API-improvement items | 4 |
 | [`DONE/reference-data.md`](DONE/reference-data.md) | Exchanges, listings, accounts, holding accounts, ticker/exchange-code renames, price-collection gaps, deployed-database cleanups | 16 |
 | [`DONE/trades-income.md`](DONE/trades-income.md) | Trade/income entry, AMMA, DRP, parcel allocations, attachments, cost-base adjustments, trade/settlement dates | 32 |
 | [`DONE/reporting.md`](DONE/reporting.md) | Portfolio/gains/tax reports, snapshots, performance metrics, tax-return export | 42 |

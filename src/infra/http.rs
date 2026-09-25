@@ -2,7 +2,7 @@
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use sqlx::error::ErrorKind;
 use sqlx::sqlite::SqliteRow;
@@ -92,6 +92,22 @@ pub enum ApiError {
     /// failed login itself, naming the peer.
     #[error("{0}")]
     Unauthorized(String),
+    /// 429 with a plain-text reason, the request refused for now — the
+    /// failed-login lockout on `POST /login` alone (see `infra::auth`).
+    ///
+    /// Distinct from [`ApiError::Busy`]'s 503, which is the *database* being
+    /// unavailable: a 429 is an answer about the *client*, and it is
+    /// actionable precisely because a `Retry-After` names how long to wait.
+    /// [`Self::into_response`] sets that header, so constructing the error is
+    /// enough — no handler has to remember it.
+    ///
+    /// The login handler does **not** render a browser's request through this
+    /// (it re-renders the sign-in page with the same message instead, under
+    /// `200`, exactly as the wrong-credentials path does); this is the
+    /// script/LLM client's answer, and the shape the Error-body contract's
+    /// `429` row documents.
+    #[error("{body}")]
+    TooManyRequests { body: String, retry_after_secs: u64 },
 }
 
 impl ApiError {
@@ -136,6 +152,15 @@ impl ApiError {
     /// A 401 with the given plain-text explanation.
     pub fn unauthorized(msg: impl Into<String>) -> Self {
         ApiError::Unauthorized(msg.into())
+    }
+
+    /// A 429 with the given plain-text explanation and the seconds to wait —
+    /// `Retry-After` is set from the latter when the response is built.
+    pub fn too_many_requests(msg: impl Into<String>, retry_after_secs: u64) -> Self {
+        ApiError::TooManyRequests {
+            body: msg.into(),
+            retry_after_secs,
+        }
     }
 }
 
@@ -283,6 +308,15 @@ impl IntoResponse for ApiError {
             ApiError::NotFound => StatusCode::NOT_FOUND.into_response(),
             ApiError::NotFoundWithReason(body) => (StatusCode::NOT_FOUND, body).into_response(),
             ApiError::Unauthorized(body) => (StatusCode::UNAUTHORIZED, body).into_response(),
+            ApiError::TooManyRequests {
+                body,
+                retry_after_secs,
+            } => (
+                StatusCode::TOO_MANY_REQUESTS,
+                [(header::RETRY_AFTER, retry_after_secs.to_string())],
+                body,
+            )
+                .into_response(),
         }
     }
 }
@@ -1090,6 +1124,15 @@ mod tests {
                 "422",
                 ApiError::unprocessable("the allocations sum to 4910, not the 5000 units sold"),
                 StatusCode::UNPROCESSABLE_ENTITY,
+                Some(PLAIN),
+            ),
+            (
+                "429",
+                ApiError::too_many_requests(
+                    "Too many failed sign-in attempts. Try again in 300 seconds.",
+                    300,
+                ),
+                StatusCode::TOO_MANY_REQUESTS,
                 Some(PLAIN),
             ),
             (

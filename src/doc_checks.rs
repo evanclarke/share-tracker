@@ -1067,6 +1067,9 @@ fn response_code_table_codes() -> Vec<String> {
 /// - `413` — `ApiError::PayloadTooLarge`;
 /// - `422` — `ApiError::Unprocessable`, plus every constraint violation
 ///   `impl From<sqlx::Error> for ApiError` classifies;
+/// - `429` — `ApiError::TooManyRequests`, the `POST /login` failed-attempt
+///   lockout (`infra::auth`, `ApiError::too_many_requests`), which also sets
+///   `Retry-After` — the `429` row joined the matrix and this list together;
 /// - `502` — `ApiError::BadGateway`;
 /// - `503` — `ApiError::Busy`.
 ///
@@ -1084,7 +1087,7 @@ fn response_code_table_codes() -> Vec<String> {
 fn error_bodies_list_names_only_returned_codes() {
     /// The codes `ApiError::into_response` answers with a non-empty body,
     /// derived above from `src/infra/http.rs`.
-    const RETURNED_WITH_BODY: &[&str] = &["400", "401", "404", "413", "422", "502", "503"];
+    const RETURNED_WITH_BODY: &[&str] = &["400", "401", "404", "413", "422", "429", "502", "503"];
 
     let paragraph = error_bodies_paragraph();
     let listed = error_bodies_listed_codes(paragraph);
@@ -1190,6 +1193,10 @@ fn error_body_matrix_rows() -> Vec<(String, String)> {
 /// - `422` — `ApiError::Unprocessable`, every constraint violation
 ///   `impl From<sqlx::Error> for ApiError` classifies, and axum's JSON *data*
 ///   rejection (which is how `deny_unknown_fields` surfaces);
+/// - `429` — `ApiError::TooManyRequests`, the `POST /login` failed-attempt
+///   lockout (`infra::auth`), which also sets `Retry-After`; the browser path
+///   renders the sign-in page instead, which is why this is a text-carrying
+///   status rather than an empty one;
 /// - `500` empty — `ApiError::Internal` and `panic_response`;
 /// - `500` text — `ApiError::JobFailed` (the manual `POST /jobs/:name`);
 /// - `502` — `ApiError::BadGateway`;
@@ -1219,6 +1226,7 @@ fn error_body_matrix_pins_every_status_and_shape() {
         ("413", "text"),
         ("415", "text"),
         ("422", "text"),
+        ("429", "text"),
         ("500", "empty"),
         ("500", "text"),
         ("502", "text"),
@@ -5883,5 +5891,119 @@ fn the_hard_coded_password_false_positive_is_documented() {
     assert!(
         AUTH_RS.contains("                password: \"wrong\".to_string(),"),
         "the flagged test literal is still there — if it is gone, the alert is moot"
+    );
+}
+
+/// Docs-sync pin for the `POST /login` failed-attempt lockout (REST API audit,
+/// 2026-09-24: "Rate-limit / lock out `POST /login`", B6).
+///
+/// The item reopens the old "no separate lockout counter" scope decision, so
+/// the documentation has to carry the new behaviour — and, just as importantly,
+/// the things it *cannot* do. Four readers look at four places, and all four
+/// must agree with the consts in `src/infra/auth.rs`:
+///
+/// - `docs/API.md`'s Authentication section — the budget, the cooldown, what a
+///   refused attempt answers, **which source it keys on**, the state bound, and
+///   the reverse-proxy caveat (the peer is the proxy, so every client shares
+///   one bucket);
+/// - the same file's Response codes and Error-body contract tables — the `429`
+///   row in each (the matrix pin above already requires the body shape);
+/// - `README.md`, where the old text promised there was no lockout counter at
+///   all and told the reader only to rate-limit at the proxy;
+/// - `docs/FEATURES.md`'s Authentication entry, the feature list a reader
+///   skims.
+///
+/// The honesty requirement rides along: every one of them says this is defence
+/// in depth, not a user account system — there is still one shared credential.
+#[test]
+fn the_login_lockout_is_documented_everywhere_it_applies() {
+    // docs/API.md: the section, the mechanism, the source and the caveat.
+    assert!(
+        API_MD.contains("### Login lockout (defence in depth, not an account system)"),
+        "docs/API.md must carry the lockout's own section"
+    );
+    for fact in [
+        "**5 consecutive failed** attempts from one source",
+        "for **5 minutes**",
+        "a **correct password is still refused**",
+        "**4096**",
+        "`Retry-After`",
+        "**`429 Too Many Requests`**",
+        "the peer is the proxy",
+        "defence in depth against brute force, not a user account system",
+    ] {
+        assert!(
+            API_MD.contains(fact),
+            "docs/API.md's lockout section must state `{fact}`"
+        );
+    }
+    // It reopens the old decision rather than leaving the old claim standing:
+    // the phrase is now only allowed as a description of what changed.
+    assert!(
+        !API_MD.contains("there is deliberately no separate lockout counter"),
+        "docs/API.md still claims there is no lockout counter"
+    );
+    assert!(
+        !README_MD.contains("has no lockout counter"),
+        "README.md still claims there is no lockout counter"
+    );
+
+    // Both tables in docs/API.md gained their 429 row, and the Error-body
+    // matrix's own pin (above) requires the text shape.
+    let table_codes = response_code_table_codes();
+    assert!(
+        table_codes.iter().any(|code| code == "429"),
+        "the Response codes table must carry a 429 row"
+    );
+    assert!(
+        error_body_matrix_rows()
+            .iter()
+            .any(|(code, body)| code == "429" && body == "text"),
+        "the Error-body matrix must carry a text-carrying 429 row"
+    );
+
+    // README.md: the operational facts, and the caveat beside the proxy advice
+    // that used to be the whole answer.
+    for fact in [
+        "bounded per-source failed-login lockout",
+        "5 consecutive failed",
+        "**5 minutes**",
+        "defence in depth",
+    ] {
+        assert!(
+            README_MD.contains(fact),
+            "README must state `{fact}` about the login lockout"
+        );
+    }
+
+    // docs/FEATURES.md's Authentication entry names it too — that list is the
+    // scope decision's public face, and "no lockout" was a scope decision.
+    assert!(
+        FEATURES_MD.contains("bounded per-source lockout"),
+        "docs/FEATURES.md must name the login lockout"
+    );
+    assert!(
+        FEATURES_MD.contains("defence in depth"),
+        "docs/FEATURES.md must say the lockout is defence in depth, not accounts"
+    );
+
+    // The consts the docs quote are the consts in the code: a change to either
+    // side alone fails here rather than leaving the prose quietly wrong.
+    assert!(
+        AUTH_RS.contains("const LOCKOUT_BUDGET: u32 = 5;"),
+        "the documented budget must remain the code's LOCKOUT_BUDGET"
+    );
+    assert!(
+        AUTH_RS.contains("Duration::from_secs(5 * 60)"),
+        "the documented cooldown must remain the code's LOCKOUT_COOLDOWN"
+    );
+    assert!(
+        AUTH_RS.contains("const LOCKOUT_MAX_SOURCES: usize = 4096;"),
+        "the documented state bound must remain the code's LOCKOUT_MAX_SOURCES"
+    );
+    // …and that the item did not grow a config setting.
+    assert!(
+        !include_str!("infra/config.rs").contains("lockout"),
+        "the lockout must stay a const, not a [auth] setting"
     );
 }

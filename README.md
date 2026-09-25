@@ -196,7 +196,16 @@ There is deliberately no `--auth-*` CLI flag for either value — config file on
 
 Keep the config file owner-only (`chmod 600`) — it is part of the credential, not just where the credential is written. `password_hash` is the *input to the session-signing key* (`Auth::new` derives it from the PHC string), so any local user who can read the file can mint a valid `st_session` cookie for any expiry without ever knowing the password, and `api_token` is full read/write API access. The same goes for the directory holding the database and its backups: the FreeBSD package installs the config `0600` owned by the service user (the server runs as it, so only that account can read the secrets), re-tightening a copy an earlier version left `0644` along with its ownership, and makes `/var/db/share-tracker` `0700`, and the server logs a startup `WARN` naming a loaded config file whose group or other bits are set — see [Configuration file](#configuration-file).
 
-`[auth]` has no lockout counter of its own — failed logins are throttled only by Argon2's own ~30 ms/attempt cost, which is deliberate for a single-credential hobbyist deployment but scales with however many source IPs an attacker uses. If the server is reachable from the internet, rate-limit `/login` at the proxy rather than in the app — see the `limit_req` example in the next section.
+`POST /login` carries a **bounded per-source failed-login lockout**, so a single-credential deployment cannot be brute-forced online even though the API is also a script/LLM surface: after **5 consecutive failed** attempts from one source, further attempts from it are refused for **5 minutes**, with a **`429 Too Many Requests`** and a `Retry-After` naming the remaining seconds (a browser gets the sign-in page carrying the lockout message instead, and a correct password during a lockout is still refused — that is the point). The source is the request's peer **IP address** (the port is ignored deliberately — a fresh ephemeral port per connection would otherwise buy a fresh budget per guess), and at most 4096 sources are tracked at once (least-recently-seen evicted first), so the table cannot be grown into a memory-exhaustion hole; a success before the budget clears the count. This is **defence in depth**, not a user account system: one shared credential, no per-user state, no permanent lock, and an in-memory table a restart forgets. It is not a config knob — the budget, window and cooldown are consts in `infra::auth`, so nothing changed in the sample config. **Behind a reverse proxy the peer is the proxy**, so every client shares one source: the lockout still bounds aggregate guessing, but one attacker locks out everybody. Rate-limiting `/login` at the proxy as well (next section) is the complementary per-client control; the two are meant to be used together, because Argon2's ~30 ms/attempt is a per-guess cost, not a bound on how many guesses a source gets.
+
+<details>
+<summary>What "per source" means in each deployment</summary>
+
+- **Direct** — the server reached on its own address: the peer is the real client, so the lockout is per client host, as you would expect.
+- **Behind the documented nginx proxy**: every proxied request arrives from `127.0.0.1`, so there is one bucket for the whole internet. The lockout then protects the *credential* (no online brute force gets through) at the cost of letting one attacker deny sign-in to everyone. That is accepted deliberately: the alternative is trusting `X-Forwarded-For`, which any client can forge, and a lockout that can be evaded by setting a header is not a lockout. `limit_req` in front fixes the per-client half; neither replaces the other.
+- **A listener started without connect info**: every attempt shares one documented `<unknown peer>` bucket, so the lockout is global. `main.rs` serves with `into_make_service_with_connect_info::<SocketAddr>()`, which is what makes the direct case per-client.
+
+</details>
 
 ### Emailed reports
 
@@ -231,7 +240,7 @@ To serve it from a **sub-path** instead (`https://example.com/share_tracker/`), 
 share-tracker --base-path /share_tracker
 ```
 
-If [`[auth]`](#authentication) is configured and the server is reachable from the internet, also throttle `/login` — the app itself has no lockout counter (see the note above). Declare the zone once, in the `http {}` block:
+If [`[auth]`](#authentication) is configured and the server is reachable from the internet, also throttle `/login` at the proxy. The app has its own [per-source lockout](#authentication), but behind a proxy every client shares the proxy's address as one source, so the app's lockout is a backstop on the *credential* rather than a per-client control — `limit_req` is what bounds a single client. Declare the zone once, in the `http {}` block:
 
 ```nginx
 # 5 requests/minute per client IP, tracked in a 10 MB shared zone (enough

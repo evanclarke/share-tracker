@@ -72,9 +72,13 @@ them.
 Errors are never JSON. A rejected request answers either a text/plain; \
 charset=utf-8 body with the reason — 400 (a malformed path parameter, query \
 string or body), 401, 404 on a delete or operation, 413, 415 (a JSON body sent \
-without Content-Type: application/json), 422, a failed POST /jobs/{name}'s 500, \
-502, 503 — or a deliberately empty body: a GET's 404, a 405, and an internal \
-500. docs/API.md's \"Error-body contract\" section carries the full matrix.
+without Content-Type: application/json), 422, 429 on POST /login once a source \
+has exhausted its failed-attempt budget (the body carries the reason and a \
+Retry-After header the remaining whole seconds; a browser login POST gets the \
+sign-in page with the same message under 200 instead), a failed POST \
+/jobs/{name}'s 500, 502, 503 — or a deliberately empty body: a GET's 404, a \
+405, and an internal 500. docs/API.md's \"Error-body contract\" section \
+carries the full matrix.
 
 Reading a collection is one more contract, stated here and in docs/API.md's \
 \"Reading a list\" section. First, list endpoints return rows ascending — by \
@@ -1237,7 +1241,7 @@ const ROUTES: &[RouteRow] = &[
         Verb::Post,
         "/login",
         &[303],
-        "Verify credentials; 303 to the home path with the session cookie, or 200 re-rendering the page with the error. Unauthenticated: on the allowlist.",
+        "Verify credentials; 303 to the home path with the session cookie, or 200 re-rendering the page with the error. A source over its failed-attempt budget is refused 429 with a Retry-After (a browser gets the page carrying the lockout message instead). Unauthenticated: on the allowlist.",
         Body::Form("LoginForm"),
         Body::Other("text/html"),
     ),
@@ -1582,7 +1586,7 @@ const ROUTES: &[RouteRow] = &[
 pub fn document() -> OpenApi {
     let mut paths = Paths::new();
     for &(verb, path, statuses, summary, request, response) in ROUTES {
-        let operation = operation(path, statuses, summary, request, response);
+        let operation = operation(verb, path, statuses, summary, request, response);
         paths.add_path_operation(path, vec![verb.http()], operation);
     }
     // The `/static/*.js` routes are registered in a loop over `JS_MODULES`,
@@ -1590,6 +1594,7 @@ pub fn document() -> OpenApi {
     // list rather than transcribing the paths.
     for (path, _) in crate::web::JS_MODULES {
         let operation = operation(
+            Verb::Get,
             path,
             &[200],
             "A served frontend ES module (JavaScript).",
@@ -1773,6 +1778,7 @@ fn component_schemas() -> Vec<(String, RefOr<Schema>)> {
 /// because it reports whether it created or replaced. A `201` is the only
 /// status that carries `response`; a `204` never has a body.
 fn operation(
+    verb: Verb,
     path: &str,
     statuses: &[u16],
     summary: &str,
@@ -1783,6 +1789,24 @@ fn operation(
     for &status in statuses {
         let body = if status == 201 { response } else { Body::None };
         responses = responses.response(status.to_string(), success_response(status, body));
+    }
+    // `POST /login` can answer 429 — the failed-attempt lockout
+    // (`infra::auth`) — and it is not a JSON body, so it is recorded here by
+    // description rather than as a schema. The browser path renders the
+    // sign-in page with the same message under 200 instead; both shapes are
+    // stated in `docs/API.md`'s Error-body contract.
+    if path == "/login" && verb == Verb::Post {
+        responses = responses.response(
+            "429".to_string(),
+            ResponseBuilder::new()
+                .description(
+                    "This source has exhausted its failed-attempt budget: the body is the \
+                     plain-text reason and Retry-After names the remaining whole seconds. A \
+                     browser login POST (Accept: text/html) is answered the sign-in page with \
+                     the same message under 200 instead.",
+                )
+                .build(),
+        );
     }
     // Every JSON/form body can answer 422 — the deny-unknown-fields rule and
     // the money-as-string rule are both enforced there.
@@ -2312,8 +2336,11 @@ mod tests {
             "text/plain; charset=utf-8",
             // The text-carrying statuses, the job trigger's 500 among them.
             "400 (a malformed path parameter, query string or body), 401, 404 on a delete or \
-             operation, 413, 415 (a JSON body sent without Content-Type: application/json), 422, a \
-             failed POST /jobs/{name}'s 500, 502, 503",
+             operation, 413, 415 (a JSON body sent without Content-Type: application/json), 422, \
+             429 on POST /login once a source has exhausted its failed-attempt budget (the body \
+             carries the reason and a Retry-After header the remaining whole seconds; a browser \
+             login POST gets the sign-in page with the same message under 200 instead), a failed \
+             POST /jobs/{name}'s 500, 502, 503",
             // …and the empty-bodied ones, both 404s and both 500s named apart.
             "a deliberately empty body: a GET's 404, a 405, and an internal 500",
         ] {
@@ -2442,6 +2469,76 @@ mod tests {
                 "info.description must state `{rule}`; got:\n{description}"
             );
         }
+    }
+
+    /// The 2026-09-24 REST-audit item "Rate-limit / lock out `POST /login`"
+    /// (B6): the generated document must carry the lockout, because a machine
+    /// client reading only `GET /openapi.json` is exactly the caller the item
+    /// was written for — it needs to know a `429` with a `Retry-After` is a
+    /// possible answer, and that retrying immediately will not work.
+    ///
+    /// Three surfaces, one fact: the route's summary, the operation's own
+    /// documented `429` response, and the `info.description` error paragraph.
+    #[test]
+    fn the_login_lockout_is_documented() {
+        let login = ROUTES
+            .iter()
+            .find(|(verb, path, _, _, _, _)| *verb == Verb::Post && *path == "/login")
+            .expect("the POST /login route is documented");
+        for fact in ["429", "Retry-After", "failed-attempt budget"] {
+            assert!(
+                login.3.contains(fact),
+                "the POST /login summary must state `{fact}`: {}",
+                login.3
+            );
+        }
+
+        let doc = doc();
+        let responses = doc["paths"]["/login"]["post"]["responses"]
+            .as_object()
+            .expect("POST /login documents its responses");
+        let locked = responses
+            .get("429")
+            .expect("POST /login must document its 429");
+        let description = locked["description"]
+            .as_str()
+            .expect("the 429 response has a description");
+        assert!(
+            description.contains("Retry-After"),
+            "the documented 429 must name Retry-After: {description}"
+        );
+        assert!(
+            description.contains("sign-in page"),
+            "the documented 429 must state the browser's page answer: {description}"
+        );
+        // No other route carries it — the lockout is a login fact, and a 429
+        // invented on the entity routes would describe behaviour no handler
+        // has.
+        let mut with_429 = Vec::new();
+        for (path, item) in doc["paths"].as_object().expect("paths is an object") {
+            for (method, operation) in item.as_object().expect("a path item is an object") {
+                if operation["responses"].get("429").is_some() {
+                    with_429.push(format!("{} {}", method.to_ascii_uppercase(), path));
+                }
+            }
+        }
+        assert_eq!(
+            with_429,
+            vec!["POST /login".to_string()],
+            "only POST /login answers 429"
+        );
+
+        // The error paragraph a client reading only `info.description` gets.
+        let info = doc["info"]["description"]
+            .as_str()
+            .expect("info.description is a string");
+        assert!(
+            info.contains(
+                "429 on POST /login once a source has exhausted its failed-attempt budget"
+            ),
+            "info.description must state the login 429: {info}"
+        );
+        assert!(info.contains("Retry-After"));
     }
 
     /// Every `$ref` in the document resolves to a component schema, and no
