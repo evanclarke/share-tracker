@@ -28,7 +28,7 @@ below.
       composite-key message (`exchange_holiday.rs:252-254`). Test: extend
       `entities::tests::deleting_a_missing_row_is_404_naming_what_was_missing` to assert the
       key-specific wording.
-- [ ] Make `GET /rights_sales/{id}` consistent with the empty-body GET-one 404.
+- [x] Make `GET /rights_sales/{id}` consistent with the empty-body GET-one 404.
       `src/entities/rights_sale.rs:737` returns `no rights sale with that id`, the only GET-one that
       carries a body; every other GET-one uses the empty `ApiError::NotFound`. Return the empty
       body, or document the divergence as deliberate. Test: assert the 404 body is empty (or, if

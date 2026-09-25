@@ -731,10 +731,7 @@ async fn get_one(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
 ) -> Result<Json<RightsSale>, ApiError> {
-    db_get(&pool, id)
-        .await?
-        .map(Json)
-        .ok_or_else(|| ApiError::not_found("no rights sale with that id"))
+    db_get(&pool, id).await?.map(Json).ok_or(ApiError::NotFound)
 }
 
 async fn delete_one(
@@ -1378,6 +1375,25 @@ mod tests {
         assert_eq!(resp.status, StatusCode::NO_CONTENT);
         let resp = app.get(format!("/rights_sales/{id}")).await;
         assert_eq!(resp.status, StatusCode::NOT_FOUND);
+    }
+
+    /// A GET-one 404 is deliberately **empty** — the URL itself names what is
+    /// missing — the contract `infra::http::get_handler` gives every other
+    /// entity, and what the web UI can render without a body. Only a `DELETE`
+    /// (fired from a list row, where the toast is the only thing to read) or an
+    /// operation whose prerequisite is missing carries a plain-text reason.
+    #[tokio::test]
+    async fn api_get_missing_rights_sale_answers_empty_404() {
+        let pool = test_pool().await;
+        let app = ApiClient::over(router().with_state(pool.clone()));
+
+        let resp = app.get("/rights_sales/9999").await;
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            resp.text(),
+            "",
+            "a GET-one 404 must carry no body: its URL already names what is missing"
+        );
     }
 
     #[tokio::test]
