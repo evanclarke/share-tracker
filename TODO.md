@@ -72,6 +72,16 @@ present/absent.
       normalise the paths (UI `REPORTS` config and docs following) or state the rule in
       `docs/API.md`. Test: `doc_checks` asserts the chosen rule is stated (and any path change
       keeps the UI config and route table in agreement).
+- [ ] Normalise the verb and success status for reads. 12 read reports are `POST`+JSON body
+      (`overview`, `activity`, `performance`, `period-performance`, `unrealised-gains`,
+      `parcel-optimiser`, `wash_sales`, `row_history`, `tax-report`, the two `what-if`s) while
+      sibling reads are `GET`+query (`open-parcels`, `realised-gains`, `net-capital-gain`,
+      `tax-summary`, the cross-checks), and `POST /closing_prices/fetch` answers `200` where every
+      other "returns the created row" POST answers `201`. Move scalar-parameter reads
+      (`listing_id`, `from`/`to`, `window_days`, `tax_year`) onto `GET`+query, keep `POST` only for
+      genuinely complex bodies (price maps, allocations), and make "returns the created row"
+      uniformly `201`. Breaking: the UI `REPORTS`/`ACTIONS` config and docs follow. Test: router
+      tests assert each read's verb and status; the UI bundle still drives them.
 
 ## REST API audit — LLM / machine-client surface (2026-09-24)
 
@@ -100,3 +110,36 @@ found for a non-browser client; the first is the largest.
       array vs `{entries, page_size, next_before_id}`). Add one summary table to `docs/API.md` so a
       client can learn these once. Test: `doc_checks` asserts the table (or the per-endpoint
       statements) exists.
+
+## REST API audit — API improvements (2026-09-24)
+
+Improvements that change behaviour or add features, called out by the same audit. These go beyond
+fixing drift: they make the API safer and cheaper to build against, for the web UI and machine
+clients alike. Each is closed by the tests named.
+
+- [ ] Non-clobbering writes (B3). `PUT /collection/:id` silently replaces an existing row with no
+      body and no created-vs-replaced signal, and there is no version/`If-Match`, so a stale or
+      mistaken write clobbers a record with no confirmation. Make the outcome explicit and/or add
+      optimistic concurrency: answer `201`+row on create and `204` (or a body) on update, or add a
+      version/ETag so a stale read cannot overwrite a newer row. Test: round-trip tests assert the
+      create-vs-update signal; an `If-Match`-stale write answers `412`/`409`.
+- [ ] Server-side filtering (and paging) on the workhorse lists (B4). Only `closing_prices`,
+      `attachments`, and `report_snapshots` accept query filters; `GET /trades`, `/income`,
+      `/listings`, `/amma_statements`, … return the whole table, so a client fetches and filters
+      entire tables. Add the obvious filters (`?listing_id=`, `?from=`/`?to=`,
+      `?holding_account_id=`) and/or cursor paging to the entity lists. Test: API tests assert each
+      filter narrows the result and unknown params still `422`.
+- [ ] Make the as-at default explicit (B8). Omitting the as-of date silently means "today's live
+      position" (`as_of_or_today`), never the open-ended sentinel, and `/portfolio/overview` has no
+      as-of parameter at all while `performance`/`unrealised-gains`/`parcel-optimiser` each default
+      their own. Expose `as_of_date` uniformly on the valuation reports (overview included) and
+      state the default in `docs/API.md`. Test: API tests assert the omitted-date default and the
+      as-of behaviour; `doc_checks` pins the stated default.
+- [ ] Filter errored rows out of `GET /closing_prices` (B7). The list returns errored rows
+      (`status:"error"`, `price:null`) interleaved with ok ones, so a client computing a valuation
+      must filter client-side. Add a `?status=ok|error` filter (or `include_errored=false` default)
+      so clean prices are one call. Test: API tests assert the filter.
+- [ ] Rate-limit / lock out `POST /login` (B6). There is deliberately no lockout or rate limit
+      (`infra/auth.rs:43-44`), so a single-credential deployment can be brute-forced. Add a bounded
+      per-source lockout (or rate limit) — this reopens the prior scope decision, now that the API
+      is also a script/LLM surface. Test: a lockout test over a small attempt budget.
