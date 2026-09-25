@@ -55,6 +55,18 @@ fn portfolio_reports_section() -> &'static str {
         .expect("split always yields at least one part")
 }
 
+/// The body of the `## Reading a list` section of `docs/API.md`.
+fn reading_a_list_section() -> &'static str {
+    let section = API_MD
+        .split("## Reading a list")
+        .nth(1)
+        .expect("docs/API.md has a Reading a list section");
+    section
+        .split("\n## ")
+        .next()
+        .expect("split always yields at least one part")
+}
+
 /// Docs-sync pin for the report-path namespace/case rule (REST API audit
 /// 2026-09-24): `/portfolio/*` names its report in **kebab-case** and
 /// `/reports/*` in **snake_case**, the naming segment using its namespace's
@@ -108,6 +120,151 @@ fn unrecognised_body_fields_documented() {
     // The consequence for clients.
     assert!(API_MD.contains("what a `GET` returns cannot be `PUT` back verbatim"));
     assert!(API_MD.contains("`settlement_date_source`"));
+}
+
+/// Docs-sync pin for the list-reading contract (REST API audit 2026-09-24):
+/// list ordering (ascending, with the newest-first browse surfaces as the
+/// stated exceptions), the POST-for-read set, and pagination (the one cursor
+/// endpoint and both of its shapes) are stated once, in one section, so a
+/// machine client learns all three in one place. Scoped to the section and
+/// asserted table-row by table-row, so a dropped or newly-invented endpoint
+/// fails here rather than passing on a stray mention elsewhere in the file.
+#[test]
+fn list_ordering_post_reads_and_pagination_documented() {
+    let section = reading_a_list_section();
+
+    // The ordering rule, and the deliberate divergence from the web UI's
+    // newest-first tables (which the API does not share).
+    assert!(section.contains("returns its rows **ascending**"));
+    assert!(section.contains("The server does **not** sort newest-first"));
+    assert!(section.contains("see [Web frontend](#web-frontend)"));
+
+    // The ordering table, parsed by its first cell, so each group's endpoints
+    // are asserted where they belong.
+    let order_rows: Vec<(&str, &str)> = section
+        .lines()
+        .filter(|l| l.starts_with("| ascending") || l.starts_with("| **descending**"))
+        .map(|l| {
+            let mut cells = l.split('|');
+            cells.next();
+            let order = cells.next().expect("an order cell").trim();
+            let endpoints = cells.next().expect("an endpoints cell");
+            (order, endpoints)
+        })
+        .collect();
+    let row = |order: &str| -> &str {
+        order_rows
+            .iter()
+            .find(|(label, _)| *label == order)
+            .map(|(_, endpoints)| *endpoints)
+            .unwrap_or_else(|| panic!("the ordering table has an `{order}` row"))
+    };
+
+    // Ascending id: the entity lists whose key is their surrogate id.
+    for path in [
+        "/holding_accounts",
+        "/cgt_settings",
+        "/parcel_allocations",
+        "/amit_adjustments",
+        "/corporate_actions",
+        "/attachments",
+    ] {
+        assert!(
+            row("ascending `id`").contains(path),
+            "ascending `id` must name `{path}`"
+        );
+    }
+    // Ascending natural key.
+    for path in [
+        "/exchanges",
+        "/mic_registry",
+        "/currencies",
+        "/tax_year_settings",
+        "/rba_fx_rates",
+        "/listings",
+    ] {
+        assert!(
+            row("ascending natural key").contains(path),
+            "ascending natural key must name `{path}`"
+        );
+    }
+    // Ascending date, then id: the dated fact lists.
+    for path in [
+        "/trades",
+        "/income",
+        "/interest_income",
+        "/investment_expenses",
+        "/ess_statements",
+        "/amma_statements",
+        "/inheritances",
+        "/transfers",
+        "/drp_enrolments",
+        "/rights_sales",
+    ] {
+        assert!(
+            row("ascending date, then `id`").contains(path),
+            "ascending date, then `id` must name `{path}`"
+        );
+    }
+
+    // The one descending row is the whole exception list: every endpoint it
+    // names is a newest-first browse surface, and no ascending list is
+    // mislabelled into it.
+    let descending = row("**descending** — newest-first browse");
+    for path in [
+        "/closing_prices",
+        "/distribution_events",
+        "/listings/:id/renames",
+        "/jobs",
+        "/reports/row_history",
+    ] {
+        assert!(
+            descending.contains(path),
+            "the descending row must name `{path}`"
+        );
+    }
+    for path in ["/trades", "/income", "/attachments", "/report_snapshots"] {
+        assert!(
+            !descending.contains(path),
+            "`{path}` is an ascending list and must not be in the descending row"
+        );
+    }
+
+    // The POST-for-read table is exactly the four report reads, parsed out of
+    // the section so an endpoint added to (or dropped from) it fails here.
+    let post_paths: Vec<&str> = section
+        .lines()
+        .filter(|l| l.starts_with("| `POST` |"))
+        .filter_map(|l| l.split('|').nth(2))
+        .map(str::trim)
+        .collect();
+    assert_eq!(
+        post_paths,
+        vec![
+            "`/portfolio/overview`",
+            "`/portfolio/performance`",
+            "`/portfolio/unrealised-gains`",
+            "`/portfolio/net-capital-gain/what-if`",
+        ]
+    );
+    assert!(section.contains("the `prices` price-override map"));
+    assert!(section.contains("a contemplated-disposal body whose `allocations` are a list"));
+
+    // Pagination: the sole endpoint, both shapes, the cursor and the page size.
+    assert!(section.contains("`/reports/row_history` is the **only** paginated endpoint"));
+    assert!(section.contains("Every other list returns the whole result"));
+    assert!(section.contains("`GET /reports/row_history?table=trades&row_id=1`"));
+    assert!(section.contains("a bare JSON **array** — that row's whole trail, newest-first"));
+    assert!(section.contains(
+        "an **object** `{\"entries\": […], \"page_size\": n, \"next_before_id\": id \\| null}`, \
+         newest-first"
+    ));
+    assert!(section.contains(
+        "`before_id` is the **cursor**: it returns entries **older** than that trail id"
+    ));
+    assert!(section.contains("`next_before_id` is `null` exactly when the page reached the end"));
+    assert!(section.contains("`limit` is `1`–`1000`, default `100`"));
+    assert!(section.contains("never a silently truncated page"));
 }
 
 /// Docs-sync pin for the cent-rounded CSV exports (SCENARIOS W-c): both

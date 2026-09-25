@@ -73,3 +73,33 @@ Response codes table, so the sections cannot drift apart again).
       tests assert each read's verb and status; the UI bundle still drives them.
 
 Closed 2026-09-25. The DELETE 404s name the key (`CrudEntity::missing_row_body`), `GET /rights_sales/{id}` answers the shared empty-body 404, the report surface has one case rule per namespace (`/reports/tax-report` → `/reports/tax_report`, stated in `docs/API.md` and pinned by `doc_checks::report_path_namespace_case_rule_documented` plus `reports::tests::report_paths_use_their_namespace_case`), and the scalar-parameter reads moved from `POST`+body to `GET`+query (`activity`, `period-performance`, `parcel-optimiser`, `wash_sales`, `row_history`, `tax_report`, the franking what-if) while the price-map and allocation-list reads kept their bodies and `POST /closing_prices/fetch` now answers `201`. The verb split is pinned by `reports::tests::report_routes_use_the_read_verb_their_parameters_call_for`, the status by `closing_price`'s fetch test, and the UI's query building by `web::tests::moved_report_reads_are_driven_as_get_with_a_query` over `util.js`'s `queryString` (unit-tested in `src/web/util.test.js`).
+
+## REST API audit — LLM / machine-client surface (2026-09-24)
+
+The API is also consumed by LLMs and scripts, not just the web UI. These close the gaps the audit
+found for a non-browser client; the first is the largest.
+
+- [x] Emit a machine-readable API description (OpenAPI or JSON-Schema). The whole contract is
+      currently the ~616 KB prose `docs/API.md` (1,936 lines), with the critical global rules
+      (money/quantity as JSON strings, `deny_unknown_fields` on every body) stated only in prose at
+      the end (docs/API.md:1838–1865). Generate it from the route table + serde structs and pin it
+      with a test (like the existing `doc_checks`) so it cannot drift. Test: a check that the
+      generated spec covers every route and carries the string-decimal and deny-unknown-fields
+      rules.
+- [x] Pin outbound money/quantity serialization. Responses serialize `Decimal` as strings only by
+      accident of `rust_decimal`'s default (`Cargo.toml:16` `features=["maths"]`; no
+      `serialize_with` anywhere in `src`). A dependency-feature change would silently turn every
+      money/quantity field into a float. Add an explicit string codec (the write-side mirror of
+      `infra::decimal::strict_decimal`) and a test that a money field serializes as a JSON string.
+- [x] Standardise error responses for machine clients. Every error body is `text/plain` with a
+      status/body matrix (422/400/413/502/503 carry text; GET 404 is empty; internal 500 is empty;
+      job 500 carries text). Either adopt one JSON error envelope, or document the matrix as an
+      explicit contract in `docs/API.md`. Test: `doc_checks` pins the chosen contract.
+- [x] Document list ordering, the POST-for-read set, and pagination as a first-class contract. API
+      list order is ascending id/date (not the UI's newest-first), 12 read reports are POST+body,
+      and `/reports/row_history` is the only cursor-paginated endpoint (and is shape-polymorphic:
+      array vs `{entries, page_size, next_before_id}`). Add one summary table to `docs/API.md` so a
+      client can learn these once. Test: `doc_checks` asserts the table (or the per-endpoint
+      statements) exists.
+
+Closed 2026-09-25. The audit's largest item landed first: `GET /openapi.json` serves a generated OpenAPI 3.1 document (`src/api_spec.rs`) built from a route table covering every route and from `utoipa::ToSchema` derives on the real request/response types, pinned by coverage, money-string, deny-unknown-fields and ref/uniqueness tests. Outbound money is an explicit string codec (`rust_decimal`'s `serde-str`, with two serialization tests that fail the moment a `Decimal` renders as a number), the error-body matrix is one documented contract pinned in `docs/API.md`, the OpenAPI description and `infra::http`'s own tests, and `docs/API.md`'s `## Reading a list` states list ordering, the four POST-bodied reads and `/reports/row_history`'s two cursor-paged shapes in one place.

@@ -39,8 +39,12 @@ use utoipa::{PartialSchema, ToSchema};
 
 /// The document's `info.description`: the two global rules every endpoint
 /// obeys, stated in prose *and* carried structurally by the schemas (a money
-/// field is a `string`; a request body has `additionalProperties: false`).
-/// The wording is pinned by `the_two_global_rules_are_stated_in_the_description`.
+/// field is a `string`; a request body has `additionalProperties: false`) —
+/// plus the never-JSON error matrix and the reading-a-list contract (ascending
+/// order, the four POST-bodied report reads, the sole paginated endpoint).
+/// The wording is pinned by `the_two_global_rules_are_stated_in_the_description`,
+/// `the_error_body_matrix_is_stated_in_the_description` and
+/// `the_list_reading_contract_is_stated_in_the_description`.
 const DESCRIPTION: &str = "\
 The share-tracker JSON API, for the web UI and machine clients alike. Every \
 route app::router serves is listed here, under its axum path spelling ({id} \
@@ -67,11 +71,26 @@ charset=utf-8 body with the reason — 400 (a malformed path parameter, query \
 string or body), 401, 404 on a delete or operation, 413, 415 (a JSON body sent \
 without Content-Type: application/json), 422, a failed POST /jobs/{name}'s 500, \
 502, 503 — or a deliberately empty body: a GET's 404, a 405, and an internal \
-500. docs/API.md's \"Error-body contract\" section carries the full matrix. \
-Report routes answered by POST take their parameters in a JSON body; the GET \
-reports take theirs in the query string. The document itself is generated from \
-the route table and the serde structs in src/api_spec.rs and is pinned by that \
-module's tests.";
+500. docs/API.md's \"Error-body contract\" section carries the full matrix.
+
+Reading a collection is one more contract, stated here and in docs/API.md's \
+\"Reading a list\" section. First, list endpoints return rows ascending — by \
+id, by natural key, or by date then id — except the deliberate newest-first \
+browse surfaces (/closing_prices, /distribution_events, a listing's rename \
+chain, a job's run history, and the /reports/row_history trail). This is the \
+reverse of the web UI, which sorts its own tables newest-first client-side. \
+Second, a read is GET with its parameters in the query string; only four \
+report reads keep a POST body, because their parameter is a map or a list a \
+query string cannot carry: /portfolio/overview, /portfolio/performance and \
+/portfolio/unrealised-gains (a prices price-override map) and \
+/portfolio/net-capital-gain/what-if (an allocations list). Third, \
+/reports/row_history is the only paginated endpoint: without row_id it answers \
+{\"entries\":[…],\"page_size\":n,\"next_before_id\":id|null}, where before_id \
+returns entries older than that trail id and limit is 1-1000 (default 100); \
+with row_id it answers that row's whole trail as a bare JSON array.
+
+The document itself is generated from the route table and the serde structs in \
+src/api_spec.rs and is pinned by that module's tests.";
 
 /// The four HTTP verbs the server uses, as the table spells them.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -183,7 +202,7 @@ const ROUTES: &[RouteRow] = &[
         Verb::Get,
         "/trades",
         200,
-        "List every trade (Buys, DRPs, Sells), ascending id.",
+        "List every trade (Buys, DRPs, Sells), ascending date then id.",
         Body::None,
         Body::JsonArray("Trade"),
     ),
@@ -2243,6 +2262,43 @@ mod tests {
              failed POST /jobs/{name}'s 500, 502, 503",
             // …and the empty-bodied ones, both 404s and both 500s named apart.
             "a deliberately empty body: a GET's 404, a 405, and an internal 500",
+        ] {
+            assert!(
+                description.contains(rule),
+                "info.description must state `{rule}`; got:\n{description}"
+            );
+        }
+    }
+
+    /// The reading-a-list contract — ascending order with its newest-first
+    /// browse exceptions, the four report reads that keep a POST body, and the
+    /// one paginated endpoint with both its shapes — rides in
+    /// `info.description`, the machine-client surface. `docs/API.md`'s
+    /// "Reading a list" section is the long form (`doc_checks` pins that copy);
+    /// this is the compact twin a client reading only the generated document
+    /// gets, and it must name each endpoint so a dropped one fails here.
+    #[test]
+    fn the_list_reading_contract_is_stated_in_the_description() {
+        let doc = doc();
+        let description = doc["info"]["description"]
+            .as_str()
+            .expect("info.description is a string");
+        for rule in [
+            // Ordering: the rule, then the newest-first exceptions by name.
+            "list endpoints return rows ascending",
+            "except the deliberate newest-first browse surfaces (/closing_prices, \
+             /distribution_events, a listing's rename chain, a job's run history, and the \
+             /reports/row_history trail)",
+            "This is the reverse of the web UI, which sorts its own tables newest-first \
+             client-side.",
+            // The POST-for-read set, each endpoint named.
+            "/portfolio/overview, /portfolio/performance and /portfolio/unrealised-gains (a \
+             prices price-override map) and /portfolio/net-capital-gain/what-if (an allocations \
+             list)",
+            // Pagination: the one endpoint, both shapes and the cursor facts.
+            "/reports/row_history is the only paginated endpoint",
+            "with row_id it answers that row's whole trail as a bare JSON array",
+            "before_id returns entries older than that trail id and limit is 1-1000 (default 100)",
         ] {
             assert!(
                 description.contains(rule),

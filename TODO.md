@@ -15,36 +15,8 @@ The last full pass recorded here — the 2026-09-17 code review — is closed an
 [`DONE/verification-passes.md`](DONE/verification-passes.md). Everything before it is likewise
 archived; the maintained record of what has been verified is SCENARIOS.md's
 [Verification status](SCENARIOS.md#verification-status) table, and of what was built and decided,
-the [DONE.md](DONE.md) index. The open work is the 2026-09-24 REST API audit, in the two sections
+the [DONE.md](DONE.md) index. The open work is the 2026-09-24 REST API audit, in the one remaining section
 below.
-
-## REST API audit — LLM / machine-client surface (2026-09-24)
-
-The API is also consumed by LLMs and scripts, not just the web UI. These close the gaps the audit
-found for a non-browser client; the first is the largest.
-
-- [x] Emit a machine-readable API description (OpenAPI or JSON-Schema). The whole contract is
-      currently the ~616 KB prose `docs/API.md` (1,936 lines), with the critical global rules
-      (money/quantity as JSON strings, `deny_unknown_fields` on every body) stated only in prose at
-      the end (docs/API.md:1838–1865). Generate it from the route table + serde structs and pin it
-      with a test (like the existing `doc_checks`) so it cannot drift. Test: a check that the
-      generated spec covers every route and carries the string-decimal and deny-unknown-fields
-      rules.
-- [x] Pin outbound money/quantity serialization. Responses serialize `Decimal` as strings only by
-      accident of `rust_decimal`'s default (`Cargo.toml:16` `features=["maths"]`; no
-      `serialize_with` anywhere in `src`). A dependency-feature change would silently turn every
-      money/quantity field into a float. Add an explicit string codec (the write-side mirror of
-      `infra::decimal::strict_decimal`) and a test that a money field serializes as a JSON string.
-- [x] Standardise error responses for machine clients. Every error body is `text/plain` with a
-      status/body matrix (422/400/413/502/503 carry text; GET 404 is empty; internal 500 is empty;
-      job 500 carries text). Either adopt one JSON error envelope, or document the matrix as an
-      explicit contract in `docs/API.md`. Test: `doc_checks` pins the chosen contract.
-- [ ] Document list ordering, the POST-for-read set, and pagination as a first-class contract. API
-      list order is ascending id/date (not the UI's newest-first), 12 read reports are POST+body,
-      and `/reports/row_history` is the only cursor-paginated endpoint (and is shape-polymorphic:
-      array vs `{entries, page_size, next_before_id}`). Add one summary table to `docs/API.md` so a
-      client can learn these once. Test: `doc_checks` asserts the table (or the per-endpoint
-      statements) exists.
 
 ## REST API audit — API improvements (2026-09-24)
 
