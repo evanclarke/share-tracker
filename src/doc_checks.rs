@@ -900,6 +900,35 @@ fn amma_components_are_documented_as_non_negative() {
     );
 }
 
+/// Docs-sync pin for the AMMA statement's required body fields (2026-09-24 REST
+/// API audit): `date_received` is a bare `NaiveDate` field of
+/// `entities::amma::AmmaStatementBody` with no `#[serde(default)]`, so a body
+/// omitting it is refused `422 missing field date_received` — yet the field
+/// appeared nowhere in `docs/API.md`, leaving the refusal unexplained. The
+/// AMMA statements section now names it among the required fields and says what
+/// it is. Scoped to that section deliberately: a bare `contains("date_received")`
+/// over the whole file would pass on prose about any other entity. The write
+/// behaviour itself is pinned by `entities::amma`'s API tests; this is the
+/// documentation half.
+#[test]
+fn amma_date_received_documented_as_required() {
+    let section = API_MD
+        .split("## AMMA statements")
+        .nth(1)
+        .expect("docs/API.md has an AMMA statements section")
+        .split("\n## ")
+        .next()
+        .expect("split always yields at least one part");
+    assert!(
+        section.contains("**`listing_id`, `tax_year_end_date`, and `date_received` are required**"),
+        "the AMMA statements section names `date_received` as required"
+    );
+    assert!(
+        section.contains("`date_received` is the date the statement was received"),
+        "the AMMA statements section says what `date_received` is"
+    );
+}
+
 /// Docs-sync pin for SCENARIOS G-11/G-20: what anchors the franking
 /// holding-period window, and that a dividend with no such date is reported
 /// rather than passing quietly — the promise that makes an empty franking

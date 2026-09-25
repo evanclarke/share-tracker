@@ -24,7 +24,7 @@ An audit of the HTTP surface against `docs/API.md`. The code is accurate; every 
 `docs/API.md` correction, each closed by a `doc_checks.rs` assertion that the required text is now
 present/absent.
 
-- [ ] Document `date_received` as a **required** AMMA-statement field. `src/entities/amma.rs:109`
+- [x] Document `date_received` as a **required** AMMA-statement field. `src/entities/amma.rs:109`
       declares `pub date_received: NaiveDate` with no `#[serde(default)]`, so it is mandatory — yet
       `date_received` appears nowhere in `docs/API.md`. Add it to the AMMA statements section
       (docs/API.md ~531–572) as required. A machine client omitting it gets an unexplained
