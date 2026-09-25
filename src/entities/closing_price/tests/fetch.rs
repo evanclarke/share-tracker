@@ -41,7 +41,7 @@ async fn api_backfill_fetches_only_missing_trading_days() {
     assert_eq!(summary.fetched_ok, 4);
     assert_eq!(summary.errored, 0);
 
-    let rows = db_list(&pool, Some(1), None, None).await.unwrap();
+    let rows = db_list(&pool, Some(1), None, None, None).await.unwrap();
     assert_eq!(rows.len(), 5);
     assert!(rows.iter().all(|r| r.status == PriceStatus::Ok));
     // Wednesday kept its original fetch (the stub reports the provider's own
@@ -579,4 +579,99 @@ async fn api_list_filters_by_listing_and_date_range_including_errors() {
     let one_day = get("/closing_prices?from=2026-06-05&to=2026-06-05").await;
     assert_eq!(one_day.len(), 2);
     assert!(one_day.iter().any(|r| r.status == PriceStatus::Error));
+}
+
+/// REST API audit 2026-09-24, item B7. The list interleaves errored rows
+/// (`status: "error"`, `price` null) with ok ones, so a client computing a
+/// valuation had to filter them out itself. `?status=ok` is that clean series
+/// in one call; `?status=error` is the fetch-failure list; omitting it is every
+/// row, which is the unchanged default the Closing Prices screen reads. The
+/// filter ANDs with the existing listing/date bounds, matches nothing as an
+/// empty `200` array, and a value the typed enum cannot read is refused `400`
+/// naming the parameter (never a silently-ignored unknown status).
+#[tokio::test]
+async fn api_list_filters_by_status() {
+    let pool = test_pool().await;
+    insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
+    insert_listing(&pool, 2, "ICE", "XNYS", "USD").await;
+    async fn seed(pool: &SqlitePool, listing_id: i64, date: NaiveDate, price: &str, errored: bool) {
+        let row = crate::test_support::closing_price(listing_id, date).price(price);
+        if errored {
+            row.errored("no candle for the day").insert(pool).await;
+        } else {
+            row.insert(pool).await;
+        }
+    }
+    // A mix across two listings and two days: four ok rows and three errored.
+    seed(&pool, 1, ymd(2026, 6, 4), "62.80", false).await;
+    seed(&pool, 1, ymd(2026, 6, 5), "61.24", false).await;
+    seed(&pool, 1, ymd(2026, 5, 1), "60.00", true).await;
+    seed(&pool, 1, ymd(2026, 5, 2), "60.00", true).await;
+    seed(&pool, 2, ymd(2026, 6, 5), "99.99", false).await;
+    seed(&pool, 2, ymd(2026, 5, 1), "99.00", false).await;
+    seed(&pool, 2, ymd(2026, 5, 2), "99.00", true).await;
+
+    let app = ApiClient::over(router().with_state(pool));
+    let get = |uri: &str| {
+        let app = app.clone();
+        let uri = uri.to_string();
+        async move {
+            let resp = app.get(uri.clone()).await;
+            assert_eq!(resp.status, StatusCode::OK, "{uri}");
+            let bytes = resp.body.clone();
+            serde_json::from_slice::<Vec<ClosingPrice>>(&bytes).unwrap()
+        }
+    };
+
+    // Omitted: every row, errored ones included — the default is unchanged.
+    let all = get("/closing_prices").await;
+    assert_eq!(all.len(), 7, "the default still lists every row");
+    assert_eq!(
+        all.iter()
+            .filter(|r| r.status == PriceStatus::Error)
+            .count(),
+        3
+    );
+
+    // The "one call" the item is about: only the clean figures.
+    let ok = get("/closing_prices?status=ok").await;
+    assert_eq!(ok.len(), 4);
+    assert!(
+        ok.iter().all(|r| r.status == PriceStatus::Ok),
+        "no errored row survives ?status=ok"
+    );
+    assert!(
+        ok.iter().all(|r| r.price.is_some()),
+        "every ok row carries a price, so a valuation needs no client-side filter"
+    );
+
+    // …and the fetch-failure list.
+    let errored = get("/closing_prices?status=error").await;
+    assert_eq!(errored.len(), 3);
+    assert!(errored.iter().all(|r| r.status == PriceStatus::Error));
+    assert!(errored.iter().all(|r| r.price.is_none()));
+
+    // Every filter ANDs together.
+    assert_eq!(get("/closing_prices?status=ok&listing_id=1").await.len(), 2);
+    let bounded = get("/closing_prices?status=ok&listing_id=1&from=2026-06-05&to=2026-06-05").await;
+    assert_eq!(bounded.len(), 1);
+    assert_eq!(bounded[0].listing_id, 1);
+    assert_eq!(bounded[0].price_date, ymd(2026, 6, 5));
+
+    // A filter matching nothing is an empty `200`, never a `404`.
+    assert!(
+        get("/closing_prices?status=error&listing_id=2&from=2026-06-04&to=2026-06-05")
+            .await
+            .is_empty()
+    );
+
+    // A value the typed enum cannot read is refused `400` naming the
+    // parameter — never silently read as "no filter".
+    let resp = app.get("/closing_prices?status=maybe").await;
+    let (status, body) = resp.status_and_body();
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        body.contains("status"),
+        "the refusal names the parameter: {body}"
+    );
 }

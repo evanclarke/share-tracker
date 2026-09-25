@@ -27,6 +27,13 @@ struct ListParams {
     listing_id: Option<i64>,
     from: Option<NaiveDate>,
     to: Option<NaiveDate>,
+    /// The row's own `status`, as a typed enum: `?status=ok` is the clean
+    /// price series a valuation client wants in one call, `?status=error`
+    /// is the fetch-failure list. Omitted is every row — the default the
+    /// Closing Prices screen reads. A value the enum cannot read
+    /// (`?status=maybe`) is refused by the `Query` extractor as a `400`
+    /// naming the parameter, exactly like every other unreadable query field.
+    status: Option<PriceStatus>,
 }
 
 #[derive(utoipa::ToSchema, Debug, Deserialize)]
@@ -100,10 +107,16 @@ async fn list(
     State(pool): State<SqlitePool>,
     Query(params): Query<ListParams>,
 ) -> Result<Json<Vec<ClosingPrice>>, ApiError> {
-    db_list(&pool, params.listing_id, params.from, params.to)
-        .await
-        .map(Json)
-        .map_err(ApiError::from)
+    db_list(
+        &pool,
+        params.listing_id,
+        params.from,
+        params.to,
+        params.status,
+    )
+    .await
+    .map(Json)
+    .map_err(ApiError::from)
 }
 
 /// Store a price entered by hand for one (listing, day), with the provenance

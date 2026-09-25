@@ -293,12 +293,14 @@ A **hand-entered** price is contemporaneous **by declaration** — you are stati
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/closing_prices` | List stored prices, newest first, **including errored rows**; filter with `?listing_id=`, `?from=`, `?to=` (dates inclusive) |
+| `GET` | `/closing_prices` | List stored prices, newest first, **including errored rows**; filter with `?listing_id=`, `?from=`, `?to=` (dates inclusive) and `?status=ok`\|`error` |
 | `POST` | `/closing_prices/fetch` | Re-fetch one day for one listing (body: `{ "listing_id": 1, "price_date": "YYYY-MM-DD" }`) |
 | `POST` | `/closing_prices/backfill` | Backfill a listing over a date range (body: `{ "listing_id": 1, "from": "...", "to": "...", "symbol": null }`) |
 | `POST` | `/closing_prices/clear_unpriced_before` | Clear every stored row a listing's [`unpriced_before`](#listings) supersedes — the whole span before that date, in one transaction (body: `{ "listing_id": 1 }`) |
 | `PUT` | `/closing_prices/:listing_id/:price_date` | Store a price **entered by hand** for a day the provider cannot serve (body: `{ "price": "62.48", "sourced_from": "...", "reason": "..." }`) |
 | `DELETE` | `/closing_prices/:listing_id/:price_date` | Delete one **errored** row — the acknowledgement that no price will ever exist for that day — or any row inside the listing's [`unpriced_before`](#listings) span |
+
+`GET /closing_prices?status=ok` answers **only the clean rows** (`status: "ok"`, every one carrying a `price`), and `?status=error` only the recorded fetch failures (`price: null`, `error` set) — so a client computing a valuation gets the priced series in **one call** instead of fetching both kinds and dropping the nulls itself. Omitting `status` is unchanged: every row, errored ones included, which is what the Closing Prices screen reads. The parameter takes exactly the two `status` values (`ok`, `error`) and **ANDs** with `?listing_id=`/`?from=`/`?to=`; anything else is refused `400` naming the parameter, like every other unreadable query field (see [Reading a list](#reading-a-list)). This narrows the *response*, not what a date may be valued at: a day whose stored row is errored still blocks [valuation](#report-snapshots) exactly as before, so the errored list remains the to-do `GET /reports/health`'s `errored_prices` summarises.
 
 `POST /closing_prices/fetch` replaces whatever is stored for that (listing, day) — its purpose is re-running a failed fetch once the provider recovers. It returns `201` with the freshly stored row (which is itself errored if the provider failed again — the row's own `status` says so), `404` for an unknown listing, or `422` if the day's close is not final yet, the date is not a trading day, the date falls on or after the listing's [`unpriced_from`](#listings) or before its [`unpriced_before`](#listings) (the refusal names the marker and the two ways past it: enter the price by hand, or move/clear the marker), or the stored row was **entered manually** (see below — the refusal quotes the row's `reason`). The `201` is the same "returns the created row" signal every other such `POST` gives (see [Creating a record](#creating-a-record)).
 
@@ -1915,7 +1917,7 @@ Every other report read takes its parameters as query-string fields and answers 
 | `/drp_enrolments` | `listing_id`, `holding_account_id` (no date range: a period has two dates) |
 | `/amit_adjustments` | `amma_statement_id`, `trade_id` |
 | `/parcel_allocations` | `sale_trade_id`, `purchase_trade_id` |
-| `/closing_prices` | `listing_id`, `from`/`to` over `price_date` |
+| `/closing_prices` | `listing_id`, `from`/`to` over `price_date`, `status` (`ok` or `error`) |
 | `/attachments` | `trade_id`, `income_id`, `amma_statement_id`, `ess_statement_id`, `interest_income_id`, `corporate_action_id`, `include_linked` |
 | `/report_snapshots` | `report`, `from`/`to` over `snapshot_date` |
 

@@ -42,7 +42,7 @@ clients alike. Each is closed by the tests named.
       their own. Expose `as_of_date` uniformly on the valuation reports (overview included) and
       state the default in `docs/API.md`. Test: API tests assert the omitted-date default and the
       as-of behaviour; `doc_checks` pins the stated default.
-- [ ] Filter errored rows out of `GET /closing_prices` (B7). The list returns errored rows
+- [x] Filter errored rows out of `GET /closing_prices` (B7). The list returns errored rows
       (`status:"error"`, `price:null`) interleaved with ok ones, so a client computing a valuation
       must filter client-side. Add a `?status=ok|error` filter (or `include_errored=false` default)
       so clean prices are one call. Test: API tests assert the filter.

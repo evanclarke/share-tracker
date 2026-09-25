@@ -342,7 +342,7 @@ fn list_filtering_contract_documented() {
         ),
         (
             "`/closing_prices`",
-            "`listing_id`, `from`/`to` over `price_date`",
+            "`listing_id`, `from`/`to` over `price_date`, `status` (`ok` or `error`)",
         ),
         (
             "`/report_snapshots`",
@@ -3169,6 +3169,53 @@ fn clearing_superseded_closing_prices_documented() {
     assert!(SCHEMA_MD.contains("since 0050, its `AFTER DELETE` counterpart"));
     // Features doc: the span is the one place a stored price may be deleted.
     assert!(FEATURES_MD.contains("the one span in which a stored price may be **deleted**"));
+}
+
+/// Docs-sync pin for filtering errored rows out of `GET /closing_prices` (REST
+/// API audit 2026-09-24, item B7): the Closing prices section's own route table
+/// row names the `?status=ok|error` parameter, so the list can be narrowed to
+/// the clean figures in one call, and the section states what the filter does
+/// to the response and that omitting it is unchanged. The behaviour itself is
+/// pinned by `entities::closing_price`'s `api_list_filters_by_status`; this is
+/// the documentation half, scoped to the section so a stray mention elsewhere
+/// cannot satisfy it.
+#[test]
+fn closing_price_status_filter_documented() {
+    let closing_prices = API_MD
+        .split("## Closing prices")
+        .nth(1)
+        .expect("API.md has a Closing prices section")
+        .split("\n## ")
+        .next()
+        .unwrap();
+    // The route table row names the parameter and both values.
+    assert!(
+        closing_prices.contains("`?status=ok`\\|`error`"),
+        "the Closing prices line table must name ?status= referencing ok/error"
+    );
+    // The semantics: one call for the clean series, the errored list, the
+    // unchanged default, the ANDing, and the refusal.
+    assert!(
+        closing_prices.contains("`GET /closing_prices?status=ok` answers **only the clean rows**")
+    );
+    assert!(
+        closing_prices
+            .contains("so a client computing a valuation gets the priced series in **one call**")
+    );
+    assert!(
+        closing_prices.contains("Omitting `status` is unchanged: every row, errored ones included")
+    );
+    assert!(closing_prices.contains("**ANDs** with `?listing_id=`/`?from=`/`?to=`"));
+    assert!(closing_prices.contains("anything else is refused `400` naming the parameter"));
+    // The "Reading a list" filters table names it too (the other half of the
+    // contract, which `list_filtering_contract_documented` also pins).
+    assert!(
+        reading_a_list_section().contains(
+            "| `/closing_prices` | `listing_id`, `from`/`to` over `price_date`, `status` (`ok` \
+             or `error`) |"
+        ),
+        "the Reading a list filters table must name the status filter"
+    );
 }
 
 /// Docs-sync pin for auditing closing prices (2026-07-28): the schema records

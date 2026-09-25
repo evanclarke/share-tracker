@@ -102,7 +102,9 @@ account: /trades, /income, /investment_expenses, /amma_statements, \
 /drp_enrolments takes ?listing_id= and ?holding_account_id=; \
 /amit_adjustments takes ?amma_statement_id= and ?trade_id=, and \
 /parcel_allocations ?sale_trade_id= and ?purchase_trade_id=. The \
-long-standing /closing_prices (?listing_id=, ?from=, ?to=) and /attachments \
+long-standing /closing_prices (?listing_id=, ?from=, ?to=, ?status= — ok or \
+error, omitted is every row, so a valuation client gets the clean series in \
+one call) and /attachments \
 (owner ids, include_linked) filters are unchanged. An unrecognised \
 parameter is a 400 naming it on every list route that decodes a query \
 string — including a list that accepts no filter, which refuses any \
@@ -920,7 +922,7 @@ const ROUTES: &[RouteRow] = &[
         Verb::Get,
         "/closing_prices",
         &[200],
-        "List stored closing prices, optionally narrowed by ?listing_id= / ?from= / ?to=.",
+        "List stored closing prices, optionally narrowed by ?listing_id= / ?from= / ?to= / ?status= (ok or error; omitted is every row).",
         Body::None,
         Body::JsonArray("ClosingPrice"),
     ),
@@ -2558,8 +2560,9 @@ mod tests {
             "/drp_enrolments takes ?listing_id= and ?holding_account_id=",
             "/amit_adjustments takes ?amma_statement_id= and ?trade_id=",
             "/parcel_allocations ?sale_trade_id= and ?purchase_trade_id=",
-            "The long-standing /closing_prices (?listing_id=, ?from=, ?to=) and /attachments \
-             (owner ids, include_linked) filters are unchanged.",
+            "The long-standing /closing_prices (?listing_id=, ?from=, ?to=, ?status= — ok or \
+             error, omitted is every row, so a valuation client gets the clean series in one \
+             call) and /attachments (owner ids, include_linked) filters are unchanged.",
             "An unrecognised parameter is a 400 naming it on every list route that decodes a \
              query string",
             "including a list that accepts no filter, which refuses any parameter at all rather \
@@ -2618,8 +2621,13 @@ mod tests {
                 "/parcel_allocations",
                 &["?sale_trade_id=", "?purchase_trade_id="],
             ),
-            // The long-standing filters the hand-written lists already took.
-            ("/closing_prices", &["?listing_id=", "?from=", "?to="]),
+            // The long-standing filters the hand-written lists already took; the
+            // closing-price list's `?status=` is the 2026-09-24 REST-audit item
+            // B7 (the errored-row filter).
+            (
+                "/closing_prices",
+                &["?listing_id=", "?from=", "?to=", "?status="],
+            ),
             ("/attachments", &["?trade_id="]),
         ];
         let mut checked = 0;

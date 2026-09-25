@@ -3,7 +3,7 @@
 //! force on their date, and the `unpriced_before` clear.
 
 use super::fetcher::clean_price;
-use super::model::ClosingPrice;
+use super::model::{ClosingPrice, PriceStatus};
 use crate::infra::db::write_tx;
 use crate::infra::decimal::{Money, OptMoney};
 use chrono::{DateTime, NaiveDate, Utc};
@@ -71,13 +71,25 @@ where
     Ok(row.map(|(date, Money(price))| (date, price)))
 }
 
-/// Stored prices, newest first, optionally filtered by listing and date range.
-pub async fn db_list(
-    pool: &SqlitePool,
+/// Stored prices, newest first, optionally filtered by listing, date range and
+/// row status.
+///
+/// Every filter is ANDed, and `status` is what makes a valuation read one call:
+/// a client that wants only the figures it can price with asks for `ok` rather
+/// than fetching the errored rows (`status = 'error'`, `price` null) and
+/// dropping them itself. `None` is every row — the stored default, unchanged.
+/// Executor-generic so it composes onto a caller's own connection the way
+/// [`db_get_one`] does.
+pub async fn db_list<'e, E>(
+    executor: E,
     listing_id: Option<i64>,
     from: Option<NaiveDate>,
     to: Option<NaiveDate>,
-) -> Result<Vec<ClosingPrice>, sqlx::Error> {
+    status: Option<PriceStatus>,
+) -> Result<Vec<ClosingPrice>, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
     let mut qb = QueryBuilder::new(
         "SELECT id, listing_id, price_date, price, price_as_observed, source, fetched_at, \
                 fetched_symbol, status, error, origin, sourced_from, reason \
@@ -92,8 +104,11 @@ pub async fn db_list(
     if let Some(to) = to {
         qb.push(" AND price_date <= ").push_bind(to);
     }
+    if let Some(status) = status {
+        qb.push(" AND status = ").push_bind(status);
+    }
     qb.push(" ORDER BY price_date DESC, listing_id");
-    qb.build_query_as().fetch_all(pool).await
+    qb.build_query_as().fetch_all(executor).await
 }
 
 /// The dates in `from..=to` already stored with status ok for the listing

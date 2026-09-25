@@ -61,7 +61,7 @@ async fn collection_covers_a_listing_sold_inside_the_lookback_window() {
         .await
         .unwrap();
 
-    let stored = db_list(&pool, Some(1), None, None).await.unwrap();
+    let stored = db_list(&pool, Some(1), None, None, None).await.unwrap();
     assert!(
         !stored.is_empty(),
         "the sold listing is still collected for the window"

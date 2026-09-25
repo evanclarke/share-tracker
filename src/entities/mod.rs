@@ -1043,7 +1043,7 @@ mod tests {
         // `/exchange_holidays` decode no query at all.
         ListRoute {
             path: "/closing_prices",
-            filters: &["listing_id", "from", "to"],
+            filters: &["listing_id", "from", "to", "status"],
             kind: ListKind::HandWrittenQuery,
             reason: "",
         },
@@ -1096,6 +1096,7 @@ mod tests {
             "exchange_mic" => "XASX",
             "security_type" => "Share",
             "include_linked" => "false",
+            "status" => "ok",
             _ => "1",
         }
     }

@@ -36,7 +36,7 @@ async fn collection_stores_price_per_held_listing_and_skips_non_held() {
     assert_eq!(row.status, PriceStatus::Ok);
     assert_eq!(row.source, PriceSource::Yahoo);
     assert!(row.error.is_none());
-    let rows = db_list(&pool, Some(2), None, None).await.unwrap();
+    let rows = db_list(&pool, Some(2), None, None, None).await.unwrap();
     assert!(rows.is_empty(), "the non-held listing is not collected");
     assert_eq!(
         fetcher.calls(),
@@ -62,14 +62,20 @@ async fn collection_skips_days_already_stored_ok() {
         1,
         "one provider call spans the window"
     );
-    assert_eq!(db_list(&pool, None, None, None).await.unwrap().len(), 10);
+    assert_eq!(
+        db_list(&pool, None, None, None, None).await.unwrap().len(),
+        10
+    );
 
     // A second run (same evening) finds every window day ok: no re-fetch.
     run_collection(&pool, &fetcher, friday_evening_sydney())
         .await
         .unwrap();
     assert_eq!(fetcher.calls().len(), 1, "no second provider call");
-    assert_eq!(db_list(&pool, None, None, None).await.unwrap().len(), 10);
+    assert_eq!(
+        db_list(&pool, None, None, None, None).await.unwrap().len(),
+        10
+    );
 }
 
 /// The lookback self-heals: a day stored errored (and a day missed
@@ -119,7 +125,7 @@ async fn collection_failure_stores_errored_rows_and_fails_the_job() {
         .unwrap_err();
     assert!(err.contains("BHP"), "job error names the listing: {err}");
 
-    let rows = db_list(&pool, None, None, None).await.unwrap();
+    let rows = db_list(&pool, None, None, None, None).await.unwrap();
     assert_eq!(
         rows.len(),
         asx_lookback_window().len(),
@@ -151,7 +157,7 @@ async fn collection_replaces_errored_rows_once_the_provider_recovers() {
         .await
         .unwrap();
 
-    let rows = db_list(&pool, None, None, None).await.unwrap();
+    let rows = db_list(&pool, None, None, None, None).await.unwrap();
     assert_eq!(rows.len(), asx_lookback_window().len());
     assert!(rows.iter().all(|r| r.status == PriceStatus::Ok));
     assert!(rows.iter().all(|r| r.error.is_none()));
