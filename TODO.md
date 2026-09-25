@@ -30,7 +30,7 @@ found for a non-browser client; the first is the largest.
       with a test (like the existing `doc_checks`) so it cannot drift. Test: a check that the
       generated spec covers every route and carries the string-decimal and deny-unknown-fields
       rules.
-- [ ] Pin outbound money/quantity serialization. Responses serialize `Decimal` as strings only by
+- [x] Pin outbound money/quantity serialization. Responses serialize `Decimal` as strings only by
       accident of `rust_decimal`'s default (`Cargo.toml:16` `features=["maths"]`; no
       `serialize_with` anywhere in `src`). A dependency-feature change would silently turn every
       money/quantity field into a float. Add an explicit string codec (the write-side mirror of

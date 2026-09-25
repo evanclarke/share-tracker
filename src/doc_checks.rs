@@ -243,12 +243,14 @@ fn worksheet_derived_columns_documented() {
 
 /// Docs-sync pin for the money/quantity encoding rule (SCENARIOS W-a): its own
 /// section beside [`unrecognised_body_fields_documented`]'s, the `422` list
-/// pointing at it, the reason a JSON number cannot be honoured, and the two
+/// pointing at it, the reason a JSON number cannot be honoured, and the three
 /// things a client could otherwise get wrong (integers are refused too; a read
-/// already answers with strings, so the round trip needs no conversion). The
-/// behaviour itself is pinned by
-/// `infra::http::tests::every_money_request_field_refuses_a_json_number` and
-/// the `entities::trade` API tests; this is the documentation half.
+/// already answers with strings, so the round trip needs no conversion; and
+/// that string codec is an explicit crate feature, not a dependency default).
+/// The behaviour itself is pinned by
+/// `infra::http::tests::every_money_request_field_refuses_a_json_number`,
+/// `infra::decimal`'s outbound serialization tests and the
+/// `entities::trade` API tests; this is the documentation half.
 #[test]
 fn money_as_a_json_number_documented() {
     assert!(API_MD.contains("## Money as a JSON number"));
@@ -263,8 +265,15 @@ fn money_as_a_json_number_documented() {
     // Integers are in scope, and so are the price-override maps.
     assert!(API_MD.contains("Integers are refused too"));
     assert!(API_MD.contains("{\"prices\": {\"7\": \"58.12\"}}"));
-    // No conversion needed on the way back.
+    // No conversion needed on the way back — and how that is enforced rather
+    // than left to a dependency default (the codec pin itself is
+    // `infra::decimal`'s outbound serialization tests).
     assert!(API_MD.contains("Reads already answer with strings"));
+    assert!(API_MD.contains("That is enforced rather than incidental"));
+    assert!(API_MD.contains("`serde-str` in `Cargo.toml`"));
+    // …and the codec that would break it is named, so the rule reads as a
+    // choice rather than a default.
+    assert!(API_MD.contains("`serde-float`"));
     // The `422` row of the response-code table points at the section.
     assert!(API_MD.contains(
         "**any money or quantity field sent as a bare JSON number** rather than a decimal \
