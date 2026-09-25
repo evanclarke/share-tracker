@@ -69,8 +69,8 @@ use std::collections::{HashMap, HashSet};
 
 pub fn router() -> Router<SqlitePool> {
     Router::new()
-        .route("/reports/tax-report/years", get(years_handler))
-        .route("/reports/tax-report", post(tax_report_handler))
+        .route("/reports/tax_report/years", get(years_handler))
+        .route("/reports/tax_report", post(tax_report_handler))
 }
 
 #[derive(Debug, Deserialize)]
@@ -2072,7 +2072,7 @@ async fn tax_report_handler(
 ///
 /// Bounded to [`MIN_TAX_YEAR`]..=[`MAX_TAX_YEAR`] so the list and
 /// [`TaxYear::new`] agree: the list never offers a year `POST
-/// /reports/tax-report` would refuse `422`.
+/// /reports/tax_report` would refuse `422`.
 ///
 /// And bounded above at the financial year *in progress*
 /// (`tax_year_for(today())`) — the last year a return could be being prepared
@@ -2196,7 +2196,7 @@ mod tests {
         // Over HTTP, the surface the archived document is printed from.
         let body: serde_json::Value = crate::test_support::ApiClient::full(&pool)
             .post_json(
-                "/reports/tax-report",
+                "/reports/tax_report",
                 &serde_json::json!({"tax_year": 2026}),
             )
             .await;
@@ -3895,7 +3895,7 @@ mod tests {
         // Over HTTP, the surface the archived document is printed from.
         let body: serde_json::Value = crate::test_support::ApiClient::full(&pool)
             .post_json(
-                "/reports/tax-report",
+                "/reports/tax_report",
                 &serde_json::json!({"tax_year": 2026}),
             )
             .await;
@@ -4076,7 +4076,7 @@ mod tests {
     /// built from, so a year missing here cannot be generated at all.
     async fn listed_years(pool: &SqlitePool) -> Vec<i32> {
         test_support::ApiClient::full(pool)
-            .get_json("/reports/tax-report/years")
+            .get_json("/reports/tax_report/years")
             .await
     }
 
@@ -4108,7 +4108,7 @@ mod tests {
     /// (`trade::AmountsError::FutureDate`), but the list unions every dated
     /// fact, and the other write paths are not bounded that way — an interest
     /// payment dated two years out used to put a financial year that has not
-    /// begun on the closed `<select>`, and `POST /reports/tax-report` would
+    /// begun on the closed `<select>`, and `POST /reports/tax_report` would
     /// then render an annual document for it.
     #[tokio::test]
     async fn the_year_list_never_offers_a_year_beyond_the_one_in_progress() {
@@ -4321,7 +4321,7 @@ mod tests {
     /// forward is offered too. `a_quiet_year_still_reports_its_carried_forward_loss`
     /// pins that the document prints such a year's label 18V figure; this
     /// pins that the picker can actually reach it. Every listed year is one
-    /// `POST /reports/tax-report` accepts, so the list and the `tax_year`
+    /// `POST /reports/tax_report` accepts, so the list and the `tax_year`
     /// range validator agree.
     #[tokio::test]
     async fn the_year_list_offers_a_quiet_carry_forward_year() {
@@ -4359,7 +4359,7 @@ mod tests {
         for year in years {
             client
                 .post(
-                    "/reports/tax-report",
+                    "/reports/tax_report",
                     &serde_json::json!({ "tax_year": year }),
                 )
                 .await
@@ -4488,7 +4488,7 @@ mod tests {
         for year in [300_000, MAX_TAX_YEAR + 1, i32::MAX] {
             let resp = client
                 .post(
-                    "/reports/tax-report",
+                    "/reports/tax_report",
                     &serde_json::json!({"tax_year": year}),
                 )
                 .await;
@@ -4513,7 +4513,7 @@ mod tests {
         for year in [0, -1, MIN_TAX_YEAR - 1, i32::MIN] {
             let resp = client
                 .post(
-                    "/reports/tax-report",
+                    "/reports/tax_report",
                     &serde_json::json!({"tax_year": year}),
                 )
                 .await;
@@ -4556,7 +4556,7 @@ mod tests {
 
         let body: serde_json::Value = client
             .post_json(
-                "/reports/tax-report",
+                "/reports/tax_report",
                 &serde_json::json!({"tax_year": 1999}),
             )
             .await;
@@ -4575,7 +4575,7 @@ mod tests {
         let next_year = tax_year_for(Utc::now().date_naive()) + 1;
         let body: serde_json::Value = client
             .post_json(
-                "/reports/tax-report",
+                "/reports/tax_report",
                 &serde_json::json!({"tax_year": next_year}),
             )
             .await;
@@ -4691,7 +4691,7 @@ mod tests {
 
         let body: serde_json::Value = test_support::ApiClient::full(&pool)
             .post_json(
-                "/reports/tax-report",
+                "/reports/tax_report",
                 &serde_json::json!({"tax_year": 2024}),
             )
             .await;
@@ -4805,7 +4805,7 @@ mod tests {
 
         let body: serde_json::Value = client
             .post_json(
-                "/reports/tax-report",
+                "/reports/tax_report",
                 &serde_json::json!({"tax_year": 2024}),
             )
             .await;
@@ -4922,7 +4922,7 @@ mod tests {
 
         let body: serde_json::Value = test_support::ApiClient::full(&pool)
             .post_json(
-                "/reports/tax-report",
+                "/reports/tax_report",
                 &serde_json::json!({"tax_year": 2024}),
             )
             .await;
@@ -5010,7 +5010,7 @@ mod tests {
 
         let body: serde_json::Value = test_support::ApiClient::full(&pool)
             .post_json(
-                "/reports/tax-report",
+                "/reports/tax_report",
                 &serde_json::json!({"tax_year": 2024}),
             )
             .await;
@@ -5073,7 +5073,7 @@ mod tests {
 
         let body: serde_json::Value = test_support::ApiClient::full(&pool)
             .post_json(
-                "/reports/tax-report",
+                "/reports/tax_report",
                 &serde_json::json!({"tax_year": 2024}),
             )
             .await;
@@ -5182,7 +5182,7 @@ mod tests {
 
         let body: serde_json::Value = test_support::ApiClient::full(&pool)
             .post_json(
-                "/reports/tax-report",
+                "/reports/tax_report",
                 &serde_json::json!({"tax_year": 2024}),
             )
             .await;
@@ -5323,7 +5323,7 @@ mod tests {
         // FY2025: the exchange (2024-07-10) is the only disposal in it.
         let body: serde_json::Value = client
             .post_json(
-                "/reports/tax-report",
+                "/reports/tax_report",
                 &serde_json::json!({"tax_year": 2025}),
             )
             .await;
@@ -5442,7 +5442,7 @@ mod tests {
         // it G1.
         let fy2024: serde_json::Value = client
             .post_json(
-                "/reports/tax-report",
+                "/reports/tax_report",
                 &serde_json::json!({"tax_year": 2024}),
             )
             .await;
@@ -5460,7 +5460,7 @@ mod tests {
         // agreeing with the summary's attribution.
         let fy2025: serde_json::Value = client
             .post_json(
-                "/reports/tax-report",
+                "/reports/tax_report",
                 &serde_json::json!({"tax_year": 2025}),
             )
             .await;
@@ -5550,7 +5550,7 @@ mod tests {
         let client = test_support::ApiClient::full(&pool);
         let fy2025: serde_json::Value = client
             .post_json(
-                "/reports/tax-report",
+                "/reports/tax_report",
                 &serde_json::json!({"tax_year": 2025}),
             )
             .await;
@@ -5588,7 +5588,7 @@ mod tests {
         // gain, and the FY2024 increase raises no gain of its own.
         let fy2023: serde_json::Value = client
             .post_json(
-                "/reports/tax-report",
+                "/reports/tax_report",
                 &serde_json::json!({"tax_year": 2023}),
             )
             .await;
@@ -5598,7 +5598,7 @@ mod tests {
         );
         let fy2024: serde_json::Value = client
             .post_json(
-                "/reports/tax-report",
+                "/reports/tax_report",
                 &serde_json::json!({"tax_year": 2024}),
             )
             .await;

@@ -105,3 +105,134 @@ pub fn router() -> Router<SqlitePool> {
         .merge(tax_report::router())
         .merge(attachments::router())
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    /// Every route path string in `src/reports/*.rs`, sorted and de-duplicated.
+    /// The path literal may sit on the route call's own line or the next one,
+    /// so this reads the first string literal after each route call rather than
+    /// grepping line by line. The needle is assembled rather than written out
+    /// so this module does not match itself (it walks `mod.rs` too).
+    fn report_route_paths() -> Vec<String> {
+        let needle = format!(".{}(", "route");
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/reports");
+        let mut paths = Vec::new();
+        for entry in std::fs::read_dir(&dir)
+            .expect("src/reports should be readable")
+            .flatten()
+        {
+            let path = entry.path();
+            if path.extension().is_none_or(|x| x != "rs") {
+                continue;
+            }
+            let body = std::fs::read_to_string(&path).expect("report source should be readable");
+            let mut rest = body.as_str();
+            while let Some(at) = rest.find(&needle) {
+                rest = &rest[at + needle.len()..];
+                let Some(open) = rest.find('"') else { break };
+                let after = &rest[open + 1..];
+                let Some(close) = after.find('"') else { break };
+                paths.push(after[..close].to_string());
+                rest = &after[close..];
+            }
+        }
+        paths.sort();
+        paths.dedup();
+        paths
+    }
+
+    /// Whether every byte of one path segment is a lowercase letter, a digit or
+    /// `separator` — the shape the namespace's case names.
+    fn segment_matches(segment: &str, separator: char) -> bool {
+        !segment.is_empty()
+            && segment
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == separator)
+    }
+
+    /// The one sub-resource qualifier both report namespaces share: it
+    /// qualifies an endpoint (`/what-if`) rather than naming a report, so the
+    /// namespace case rule — which governs how a path names its report — does
+    /// not reach it. Every other segment after the namespace does.
+    const SHARED_QUALIFIER_SEGMENTS: [&str; 1] = ["what-if"];
+
+    /// The report surface's path namespace/case rule (REST API audit
+    /// 2026-09-24), pinned against the route table rather than the prose: a
+    /// report path lives under `/portfolio/*` in **kebab-case** or `/reports/*`
+    /// in **snake_case**, the naming segment and every qualifier after it
+    /// included, so a new route in either namespace that breaks its case fails
+    /// here with the offending path named.
+    ///
+    /// `/report_snapshots/*` is the resource surface over the `report_snapshots`
+    /// table (its own `## Report snapshots` docs section), not a report path, so
+    /// the case rule does not govern it — but it is still required to sit in
+    /// that one namespace, and a report route invented anywhere else fails.
+    #[test]
+    fn report_paths_use_their_namespace_case() {
+        let paths = report_route_paths();
+        assert!(!paths.is_empty(), "the walk found no report routes");
+
+        for path in &paths {
+            if path == "/report_snapshots" || path.starts_with("/report_snapshots/") {
+                continue;
+            }
+            let (namespace, separator, case, rest) =
+                if let Some(rest) = path.strip_prefix("/portfolio/") {
+                    ("/portfolio/", '-', "kebab-case", rest)
+                } else if let Some(rest) = path.strip_prefix("/reports/") {
+                    ("/reports/", '_', "snake_case", rest)
+                } else {
+                    panic!(
+                        "report route `{path}` is outside `/portfolio/`, `/reports/` and \
+                         `/report_snapshots/`"
+                    );
+                };
+            for (i, segment) in rest.split('/').enumerate() {
+                if i > 0 && SHARED_QUALIFIER_SEGMENTS.contains(&segment) {
+                    continue;
+                }
+                assert!(
+                    segment_matches(segment, separator),
+                    "report route `{path}`: segment `{segment}` after {namespace} must be {case}"
+                );
+            }
+        }
+
+        // The two endpoints renamed by the audit, named explicitly: the case
+        // check above would already refuse the old kebab spelling, and this pins
+        // that the rename landed rather than the paths having vanished.
+        assert!(paths.iter().any(|p| p.as_str() == "/reports/tax_report"));
+        assert!(
+            paths
+                .iter()
+                .any(|p| p.as_str() == "/reports/tax_report/years")
+        );
+    }
+
+    /// The UI config and the route table agree (REST API audit 2026-09-24):
+    /// every `/reports/*` endpoint is driven from one of the three served
+    /// modules that call report endpoints — the `REPORTS` config, the annual tax
+    /// report's own renderer, or `app.js`, where the health banner calls
+    /// `/reports/health` (deliberately not a `REPORTS` entry, it drives the
+    /// cross-view banner) and the annual tax report's year picker calls
+    /// `/reports/tax_report/years`. A `/reports/*` route with no UI caller at
+    /// all fails here.
+    #[test]
+    fn report_routes_have_a_ui_caller() {
+        const CONFIG_JS: &str = include_str!("../web/config.js");
+        const TAXREPORT_JS: &str = include_str!("../web/taxreport.js");
+        const APP_JS: &str = include_str!("../web/app.js");
+        let ui = [CONFIG_JS, TAXREPORT_JS, APP_JS].join("\n");
+        for path in report_route_paths() {
+            if !path.starts_with("/reports/") {
+                continue;
+            }
+            assert!(
+                ui.contains(path.as_str()),
+                "report route `{path}` is served but called from no UI module"
+            );
+        }
+    }
+}

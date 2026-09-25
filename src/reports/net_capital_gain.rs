@@ -4306,7 +4306,7 @@ mod tests {
 
         let report: serde_json::Value = api
             .post_json(
-                "/reports/tax-report",
+                "/reports/tax_report",
                 &serde_json::json!({ "tax_year": 2024 }),
             )
             .await;

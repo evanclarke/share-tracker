@@ -138,7 +138,7 @@ pub(crate) enum AmountsError {
     /// future date is a typo (a 2027-for-2026 slip on a July trade is exactly
     /// the shape this catches), and it puts a financial year that has not
     /// begun on the annual tax report's year picker
-    /// (`GET /reports/tax-report/years`). The rest of the system already
+    /// (`GET /reports/tax_report/years`). The rest of the system already
     /// bounds its dated facts this way: a listing rename
     /// (`listing_rename::RenameError::FutureDated`), a closing price whose
     /// close is not final yet, and the net-capital-gain report's

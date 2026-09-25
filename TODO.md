@@ -33,7 +33,7 @@ below.
       carries a body; every other GET-one uses the empty `ApiError::NotFound`. Return the empty
       body, or document the divergence as deliberate. Test: assert the 404 body is empty (or, if
       kept, pin the wording).
-- [ ] Resolve the report path namespace/case split. `/portfolio/*` is kebab-case and `/reports/*`
+- [x] Resolve the report path namespace/case split. `/portfolio/*` is kebab-case and `/reports/*`
       is snake_case, but `/reports/tax-report` (kebab) sits beside `/reports/rollover_consistency`
       (snake), and route names diverge from module names (`mic_validation` →
       `/reports/exchange_mic_validation`). Pick one scheme for the whole report surface and either

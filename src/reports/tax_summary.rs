@@ -4497,7 +4497,7 @@ mod tests {
         }
         let resp = c
             .post(
-                "/reports/tax-report",
+                "/reports/tax_report",
                 &serde_json::json!({"tax_year": 2023}),
             )
             .await;

@@ -1216,7 +1216,7 @@ mod tests {
     /// one disposal's rounded gain must read the same on Realised Gains
     /// (`GET /portfolio/realised-gains`, which answers the exact decimal the
     /// screen rounds) and on the [annual tax
-    /// report](crate::reports::tax_report) (`POST /reports/tax-report`, which
+    /// report](crate::reports::tax_report) (`POST /reports/tax_report`, which
     /// cent-rounds each parcel row and prints the sum of those, SCENARIOS
     /// W-d) — Z-a is those two printing 30,645.07 and 30,645.08 for one
     /// disposal.
@@ -1264,7 +1264,7 @@ mod tests {
 
         let report: serde_json::Value = client
             .post_json(
-                "/reports/tax-report",
+                "/reports/tax_report",
                 &serde_json::json!({"tax_year": 2026}),
             )
             .await;

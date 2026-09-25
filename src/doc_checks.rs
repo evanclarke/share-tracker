@@ -43,6 +43,48 @@ fn known_limitations() -> &'static str {
         .expect("split always yields at least one part")
 }
 
+/// The body of the `## Portfolio reports` section of `docs/API.md`.
+fn portfolio_reports_section() -> &'static str {
+    let section = API_MD
+        .split("## Portfolio reports")
+        .nth(1)
+        .expect("docs/API.md has a Portfolio reports section");
+    section
+        .split("\n## ")
+        .next()
+        .expect("split always yields at least one part")
+}
+
+/// Docs-sync pin for the report-path namespace/case rule (REST API audit
+/// 2026-09-24): `/portfolio/*` names its report in **kebab-case** and
+/// `/reports/*` in **snake_case**, the naming segment using its namespace's
+/// case with no exception — the one kebab report name under `/reports` was
+/// renamed, not excused — and the path, never the report's Rust module name,
+/// is the contract (the two endpoints that spell out more than their module
+/// say so here). Scoped to the section, so a mention elsewhere cannot satisfy
+/// it and deleting the statement fails the test.
+#[test]
+fn report_path_namespace_case_rule_documented() {
+    let section = portfolio_reports_section();
+    assert!(section.contains("**A report path names its report in the case of its namespace.**"));
+    assert!(section.contains("`/portfolio/*` in **kebab-case**"));
+    assert!(section.contains("`/reports/*` in **snake_case**"));
+    assert!(section.contains("uses its namespace's case throughout with no exception in it"));
+    assert!(
+        section.contains("(`tax-report`) was renamed `/reports/tax_report` rather than excused")
+    );
+    // The path — not the module — is the contract, and the two deliberate
+    // divergences are named rather than left to be discovered.
+    assert!(section.contains("**The path is the contract, not the report's Rust module name**"));
+    assert!(section.contains("`mic_validation` → `/reports/exchange_mic_validation`"));
+    assert!(section.contains("`settlement_coverage` → `/reports/settlement_holiday_coverage`"));
+    // The section's own kebab outlier now obeys the rule it states: its two
+    // endpoints are spelled in the snake_case form (the route table itself is
+    // pinned by `reports::tests::report_paths_use_their_namespace_case`).
+    assert!(section.contains("GET  /reports/tax_report/years"));
+    assert!(section.contains("POST /reports/tax_report"));
+}
+
 /// Docs-sync pin for the strict decoding of request bodies (SCENARIOS V-a):
 /// the refusal has its own section, the `422` list points at it, and the one
 /// consequence a client has to know about — a read body is no longer PUT-able
@@ -1960,7 +2002,7 @@ fn tax_report_year_picker_scope_documented() {
     assert!(API_MD.contains("plus every quiet year still carrying a capital loss forward"));
     // Honest in both directions, and never offering a year the POST refuses.
     assert!(API_MD.contains("A year with nothing in it and no loss balance is still absent"));
-    assert!(API_MD.contains("every listed year is one `POST /reports/tax-report` answers"));
+    assert!(API_MD.contains("every listed year is one `POST /reports/tax_report` answers"));
     // The superseded note — "request a quiet year by `tax_year` directly" —
     // described a picker that could not reach such a year, and is gone.
     assert!(!API_MD.contains("request a quiet year by `tax_year` directly"));

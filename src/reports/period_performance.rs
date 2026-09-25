@@ -1086,9 +1086,9 @@ mod tests {
                 c.get("/portfolio/tax-summary").await,
             ),
             (
-                "/reports/tax-report",
+                "/reports/tax_report",
                 c.post(
-                    "/reports/tax-report",
+                    "/reports/tax_report",
                     &serde_json::json!({ "tax_year": 2026 }),
                 )
                 .await,

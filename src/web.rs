@@ -2820,8 +2820,8 @@ mod tests {
     async fn annual_tax_report_ui_present() {
         let js = app_js_body().await;
         assert!(js.contains("custom: 'tax-report'"));
-        assert!(js.contains("/reports/tax-report/years"));
-        assert!(js.contains("/reports/tax-report"));
+        assert!(js.contains("/reports/tax_report/years"));
+        assert!(js.contains("/reports/tax_report"));
         assert!(js.contains("viewTaxReport"));
         assert!(js.contains("Generate report"));
         assert!(js.contains("Print / Save as PDF"));

@@ -480,7 +480,7 @@ function renderReport(report) {
 // on the screen they moved on to.
 export async function viewTaxReport(seq = navigationToken()) {
   setActiveNav('r:tax-report');
-  const years = await api('GET', '/reports/tax-report/years');
+  const years = await api('GET', '/reports/tax_report/years');
   const header = el('div', null, [
     el('h2', null, 'Annual Tax Report'),
     el('p', { class: 'view-desc' },
@@ -515,7 +515,7 @@ export async function viewTaxReport(seq = navigationToken()) {
   generateBtn.addEventListener('click', async function () {
     if (!years.length) { toastIfCurrent(seq, 'No tax year has any recorded data yet.', true); return; }
     try {
-      const report = await api('POST', '/reports/tax-report', { tax_year: Number(yearSelect.value) });
+      const report = await api('POST', '/reports/tax_report', { tax_year: Number(yearSelect.value) });
       result.innerHTML = '';
       result.appendChild(renderReport(report));
       printBtn.hidden = false;
