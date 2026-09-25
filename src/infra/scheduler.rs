@@ -655,10 +655,12 @@ mod tests {
             }
             for write in writes {
                 let (id, status, body) = write.await.expect("the request task");
-                assert_eq!(
-                    status,
-                    StatusCode::NO_CONTENT,
-                    "PUT /listings/{id} during scheduler startup: {body}"
+                // Either outcome is a served write: round 0 creates each id
+                // (201) and every later round replaces it (204). The point is
+                // that it is not a 500 database-is-locked.
+                assert!(
+                    status == StatusCode::CREATED || status == StatusCode::NO_CONTENT,
+                    "PUT /listings/{id} during scheduler startup answered {status}: {body}"
                 );
             }
         }

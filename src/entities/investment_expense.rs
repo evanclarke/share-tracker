@@ -16,8 +16,9 @@
 //! investment income, converting a non-AUD amount to AUD via the ATO rate for the
 //! month of `date_incurred` (failing loudly when no rate exists).
 
+use crate::infra::db::write_tx;
 use crate::infra::decimal::{Money, OptMoney, mul_div};
-use crate::infra::http::{self, ApiError, CrudEntity};
+use crate::infra::http::{self, ApiError, CrudEntity, Upsert, UpsertResponse};
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -237,7 +238,7 @@ async fn write(
     pool: &SqlitePool,
     id: Option<i64>,
     e: &InvestmentExpense,
-) -> Result<i64, UpsertError> {
+) -> Result<(i64, Upsert), UpsertError> {
     // A negative expense is not an expense: it would reduce the year's
     // deduction total, and — since the tax summary subtracts that total from
     // gross assessable investment income — lift the net line above the gross.
@@ -289,6 +290,13 @@ async fn write(
              holding_account_id    = excluded.holding_account_id",
         id,
     );
+    let mut tx = write_tx(pool).await?;
+    // The create-vs-replace decision is made inside the write's own
+    // `BEGIN IMMEDIATE` transaction (CLAUDE.md, "Data integrity").
+    let existed = match id {
+        Some(id) => http::crud_exists::<InvestmentExpense, _>(&mut *tx, id).await?,
+        None => false,
+    };
     let result = query
         .bind(e.date_incurred)
         .bind(e.expense_type)
@@ -299,19 +307,26 @@ async fn write(
         .bind(&e.description)
         .bind(e.listing_id)
         .bind(e.holding_account_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
     // An id-less INSERT was given one by the database; an upsert wrote the
     // explicit one it was handed. Either way the caller gets the id the row
     // actually holds.
-    Ok(id.unwrap_or_else(|| result.last_insert_rowid()))
+    let assigned_id = id.unwrap_or_else(|| result.last_insert_rowid());
+    let outcome = if existed {
+        Upsert::Replaced
+    } else {
+        Upsert::Created
+    };
+    Ok((assigned_id, outcome))
 }
 
 /// `PUT /investment_expenses/:id` — the long-standing upsert on a caller-chosen
 /// id.
-pub async fn db_upsert(pool: &SqlitePool, e: &InvestmentExpense) -> Result<(), UpsertError> {
-    write(pool, Some(e.id), e).await?;
-    Ok(())
+pub async fn db_upsert(pool: &SqlitePool, e: &InvestmentExpense) -> Result<Upsert, UpsertError> {
+    let (_, outcome) = write(pool, Some(e.id), e).await?;
+    Ok(outcome)
 }
 
 /// `POST /investment_expenses` — create without naming an id, and return the
@@ -320,7 +335,7 @@ pub async fn db_create(
     pool: &SqlitePool,
     e: &InvestmentExpense,
 ) -> Result<InvestmentExpense, UpsertError> {
-    let id = write(pool, None, e).await?;
+    let (id, _) = write(pool, None, e).await?;
     db_get(pool, id)
         .await?
         .ok_or(UpsertError::VanishedAfterCreate)
@@ -353,11 +368,9 @@ async fn upsert(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
     Json(body): Json<InvestmentExpenseBody>,
-) -> Result<StatusCode, ApiError> {
-    db_upsert(&pool, &investment_expense_from_body(id, body))
-        .await
-        .map(|_| StatusCode::NO_CONTENT)
-        .map_err(ApiError::from)
+) -> Result<UpsertResponse<InvestmentExpense>, ApiError> {
+    let outcome = db_upsert(&pool, &investment_expense_from_body(id, body)).await?;
+    http::upsert_response::<InvestmentExpense>(&pool, outcome, id).await
 }
 
 /// `POST /investment_expenses` — create the row without naming an id. The
@@ -474,7 +487,7 @@ mod tests {
             }),
         )
         .await;
-        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(status, StatusCode::CREATED);
         let got = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(got.expense_type, ExpenseType::ManagementFee);
         assert_eq!(got.amount, "120.50".parse::<Decimal>().unwrap());
@@ -536,7 +549,7 @@ mod tests {
             }),
         )
         .await;
-        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(status, StatusCode::CREATED);
     }
 
     /// A `deductible_percentage` outside 0–100 is not a percentage: both ends
@@ -582,7 +595,10 @@ mod tests {
                 }),
             )
             .await;
-            assert_eq!(status, StatusCode::NO_CONTENT, "{pct}% must be accepted");
+            assert!(
+                status == StatusCode::CREATED || status == StatusCode::NO_CONTENT,
+                "{pct}% must be accepted, got {status}"
+            );
         }
     }
 
@@ -665,7 +681,10 @@ mod tests {
             ),
         ] {
             let status = put(&pool, 2, body).await;
-            assert_eq!(status, StatusCode::NO_CONTENT, "{label} must be accepted");
+            assert!(
+                status == StatusCode::CREATED || status == StatusCode::NO_CONTENT,
+                "{label} must be accepted, got {status}"
+            );
         }
     }
 
@@ -702,7 +721,10 @@ mod tests {
                 }),
             )
             .await;
-            assert_eq!(status, StatusCode::NO_CONTENT, "{label} must be accepted");
+            assert!(
+                status == StatusCode::CREATED || status == StatusCode::NO_CONTENT,
+                "{label} must be accepted, got {status}"
+            );
         }
         // And the cross-check still refuses a figure that does not reconcile
         // at that scale — the answer it computes is the right one, not a

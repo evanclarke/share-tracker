@@ -40,11 +40,13 @@ use utoipa::{PartialSchema, ToSchema};
 /// The document's `info.description`: the two global rules every endpoint
 /// obeys, stated in prose *and* carried structurally by the schemas (a money
 /// field is a `string`; a request body has `additionalProperties: false`) —
-/// plus the never-JSON error matrix and the reading-a-list contract (ascending
-/// order, the four POST-bodied report reads, the sole paginated endpoint).
+/// plus the never-JSON error matrix, the reading-a-list contract (ascending
+/// order, the four POST-bodied report reads, the sole paginated endpoint), and
+/// the PUT upsert outcome rule (201 with the created row, or 204 on a replace).
 /// The wording is pinned by `the_two_global_rules_are_stated_in_the_description`,
-/// `the_error_body_matrix_is_stated_in_the_description` and
-/// `the_list_reading_contract_is_stated_in_the_description`.
+/// `the_error_body_matrix_is_stated_in_the_description`,
+/// `the_list_reading_contract_is_stated_in_the_description` and
+/// `the_put_outcome_rule_is_stated_in_the_description`.
 const DESCRIPTION: &str = "\
 The share-tracker JSON API, for the web UI and machine clients alike. Every \
 route app::router serves is listed here, under its axum path spelling ({id} \
@@ -88,6 +90,16 @@ query string cannot carry: /portfolio/overview, /portfolio/performance and \
 {\"entries\":[…],\"page_size\":n,\"next_before_id\":id|null}, where before_id \
 returns entries older than that trail id and limit is 1-1000 (default 100); \
 with row_id it answers that row's whole trail as a bare JSON array.
+
+A PUT upsert reports its outcome. PUT /<collection>/{id} answers 201 Created \
+carrying the created row — exactly the body POST /<collection> answers — when \
+the id was free, and 204 No Content when it replaced an existing row. There is \
+deliberately no If-Match/ETag: the status is the created-vs-replaced signal, so \
+a client that must not clobber a row it has not seen reads it before writing. \
+Two PUTs differ: /transfers/{id} is create-only and always answers 201 with the \
+executed group, because a bare 204 would hide the created Sell/Buy ids; and \
+/rba_fx_rates/{id} only ever corrects an existing row, so always answers 204 \
+(new rates arrive through POST /rba_fx_rates/import).
 
 The document itself is generated from the route table and the serde structs in \
 src/api_spec.rs and is pinned by that module's tests.";
@@ -138,14 +150,22 @@ enum Body {
 }
 
 /// One row of the route table, in the order the builder reads it:
-/// `(verb, axum path, success status, summary, request body, success response)`.
+/// `(verb, axum path, success statuses, summary, request body, success response)`.
 ///
 /// Every row is a real route: the path is the literal registered in the module
-/// the summary describes, the success status is the one the handler returns,
-/// and the schemas are the handler's actual extractor and return types. A
-/// route whose request is not a JSON struct says so in its summary and records
+/// the summary describes, the success statuses are the ones the handler can
+/// answer, and the schemas are the handler's actual extractor and return types.
+/// A route whose request is not a JSON struct says so in its summary and records
 /// the media type it does take.
-type RouteRow = (Verb, &'static str, u16, &'static str, Body, Body);
+///
+/// Most routes record one status. A `PUT` upsert records two — `&[201, 204]` —
+/// because it reports its outcome: `201 Created` carrying `response` (the
+/// created row) or `204 No Content`. The two exceptions
+/// (`/transfers/{id}` is create-only and always `201` with the executed group;
+/// `/rba_fx_rates/{id}` only ever corrects an existing row, so always `204`)
+/// record their single status, and `every_put_route_documents_its_outcome`
+/// pins that classification.
+type RouteRow = (Verb, &'static str, &'static [u16], &'static str, Body, Body);
 
 /// Every route `app::router` serves, plus `GET /openapi.json` itself.
 ///
@@ -156,12 +176,13 @@ type RouteRow = (Verb, &'static str, u16, &'static str, Body, Body);
 const ROUTES: &[RouteRow] = &[
     // ---- Entities: the CRUD shape -----------------------------------------
     // GET list (200, array), POST create (201, created row), GET one (200),
-    // PUT upsert (204 or 201 where the handler returns the created group),
+    // PUT upsert (201 with the created row on create, 204 on replace — the
+    // two deliberate exceptions are `/transfers/{id}` and `/rba_fx_rates/{id}`),
     // DELETE (204).
     (
         Verb::Get,
         "/listings",
-        200,
+        &[200],
         "List every listing.",
         Body::None,
         Body::JsonArray("Listing"),
@@ -169,7 +190,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Post,
         "/listings",
-        201,
+        &[201],
         "Create a listing; the database assigns the id and the created row is returned.",
         Body::Json("ListingBody"),
         Body::Json("Listing"),
@@ -177,7 +198,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/listings/{id}",
-        200,
+        &[200],
         "Fetch one listing, or 404.",
         Body::None,
         Body::Json("Listing"),
@@ -185,15 +206,15 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Put,
         "/listings/{id}",
-        204,
+        &[201, 204],
         "Create or replace the listing at this id.",
         Body::Json("ListingBody"),
-        Body::None,
+        Body::Json("Listing"),
     ),
     (
         Verb::Delete,
         "/listings/{id}",
-        204,
+        &[204],
         "Delete the listing; 422 while a trade or other row still references it.",
         Body::None,
         Body::None,
@@ -201,7 +222,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/trades",
-        200,
+        &[200],
         "List every trade (Buys, DRPs, Sells), ascending date then id.",
         Body::None,
         Body::JsonArray("Trade"),
@@ -209,7 +230,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Post,
         "/trades",
-        201,
+        &[201],
         "Create a trade; the database assigns the id and the created row is returned.",
         Body::Json("TradeBody"),
         Body::Json("Trade"),
@@ -217,7 +238,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/trades/{id}",
-        200,
+        &[200],
         "Fetch one trade, or 404.",
         Body::None,
         Body::Json("Trade"),
@@ -225,15 +246,15 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Put,
         "/trades/{id}",
-        204,
+        &[201, 204],
         "Create or replace the trade at this id (the Buy/DRP parcel path).",
         Body::Json("TradeBody"),
-        Body::None,
+        Body::Json("Trade"),
     ),
     (
         Verb::Delete,
         "/trades/{id}",
-        204,
+        &[204],
         "Delete the trade; 422 while a sale allocation or a derived row still depends on it.",
         Body::None,
         Body::None,
@@ -241,7 +262,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Post,
         "/sells",
-        201,
+        &[201],
         "Create a Sell with its parcel allocations; the created row is returned as GET /trades/{id} would present it.",
         Body::Json("SellBody"),
         Body::Json("Trade"),
@@ -249,15 +270,15 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Put,
         "/sells/{id}",
-        204,
+        &[201, 204],
         "Create or replace the Sell at this id.",
         Body::Json("SellBody"),
-        Body::None,
+        Body::Json("Trade"),
     ),
     (
         Verb::Delete,
         "/sells/{id}",
-        204,
+        &[204],
         "Delete the Sell; 422 if it is not a Sell, or a replacement parcel it created is consumed later.",
         Body::None,
         Body::None,
@@ -265,7 +286,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/income",
-        200,
+        &[200],
         "List every income (distribution) row.",
         Body::None,
         Body::JsonArray("Income"),
@@ -273,7 +294,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Post,
         "/income",
-        201,
+        &[201],
         "Create an income row; the created row is returned.",
         Body::Json("IncomeBody"),
         Body::Json("Income"),
@@ -281,7 +302,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/income/{id}",
-        200,
+        &[200],
         "Fetch one income row, or 404.",
         Body::None,
         Body::Json("Income"),
@@ -289,15 +310,15 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Put,
         "/income/{id}",
-        204,
+        &[201, 204],
         "Create or replace the income row at this id.",
         Body::Json("IncomeBody"),
-        Body::None,
+        Body::Json("Income"),
     ),
     (
         Verb::Delete,
         "/income/{id}",
-        204,
+        &[204],
         "Delete the income row.",
         Body::None,
         Body::None,
@@ -305,7 +326,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/interest_income",
-        200,
+        &[200],
         "List every interest-income row.",
         Body::None,
         Body::JsonArray("InterestIncome"),
@@ -313,7 +334,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Post,
         "/interest_income",
-        201,
+        &[201],
         "Create an interest-income row; the created row is returned.",
         Body::Json("InterestIncomeBody"),
         Body::Json("InterestIncome"),
@@ -321,7 +342,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/interest_income/{id}",
-        200,
+        &[200],
         "Fetch one interest-income row, or 404.",
         Body::None,
         Body::Json("InterestIncome"),
@@ -329,15 +350,15 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Put,
         "/interest_income/{id}",
-        204,
+        &[201, 204],
         "Create or replace the interest-income row at this id.",
         Body::Json("InterestIncomeBody"),
-        Body::None,
+        Body::Json("InterestIncome"),
     ),
     (
         Verb::Delete,
         "/interest_income/{id}",
-        204,
+        &[204],
         "Delete the interest-income row.",
         Body::None,
         Body::None,
@@ -345,7 +366,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/investment_expenses",
-        200,
+        &[200],
         "List every investment-expense row.",
         Body::None,
         Body::JsonArray("InvestmentExpense"),
@@ -353,7 +374,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Post,
         "/investment_expenses",
-        201,
+        &[201],
         "Create an investment-expense row; the created row is returned.",
         Body::Json("InvestmentExpenseBody"),
         Body::Json("InvestmentExpense"),
@@ -361,7 +382,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/investment_expenses/{id}",
-        200,
+        &[200],
         "Fetch one investment-expense row, or 404.",
         Body::None,
         Body::Json("InvestmentExpense"),
@@ -369,15 +390,15 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Put,
         "/investment_expenses/{id}",
-        204,
+        &[201, 204],
         "Create or replace the investment-expense row at this id.",
         Body::Json("InvestmentExpenseBody"),
-        Body::None,
+        Body::Json("InvestmentExpense"),
     ),
     (
         Verb::Delete,
         "/investment_expenses/{id}",
-        204,
+        &[204],
         "Delete the investment-expense row.",
         Body::None,
         Body::None,
@@ -385,7 +406,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/amma_statements",
-        200,
+        &[200],
         "List every AMMA statement.",
         Body::None,
         Body::JsonArray("AmmaStatement"),
@@ -393,7 +414,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Post,
         "/amma_statements",
-        201,
+        &[201],
         "Create an AMMA statement; the created row is returned.",
         Body::Json("AmmaStatementBody"),
         Body::Json("AmmaStatement"),
@@ -401,7 +422,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/amma_statements/{id}",
-        200,
+        &[200],
         "Fetch one AMMA statement, or 404.",
         Body::None,
         Body::Json("AmmaStatement"),
@@ -409,15 +430,15 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Put,
         "/amma_statements/{id}",
-        204,
+        &[201, 204],
         "Create or replace the AMMA statement at this id.",
         Body::Json("AmmaStatementBody"),
-        Body::None,
+        Body::Json("AmmaStatement"),
     ),
     (
         Verb::Delete,
         "/amma_statements/{id}",
-        204,
+        &[204],
         "Delete the AMMA statement.",
         Body::None,
         Body::None,
@@ -425,7 +446,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/amit_adjustments",
-        200,
+        &[200],
         "List every AMIT cost-base adjustment.",
         Body::None,
         Body::JsonArray("AmitAdjustment"),
@@ -433,7 +454,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Post,
         "/amit_adjustments",
-        201,
+        &[201],
         "Create an AMIT adjustment; the created row is returned.",
         Body::Json("AmitAdjustmentBody"),
         Body::Json("AmitAdjustment"),
@@ -441,7 +462,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/amit_adjustments/{id}",
-        200,
+        &[200],
         "Fetch one AMIT adjustment, or 404.",
         Body::None,
         Body::Json("AmitAdjustment"),
@@ -449,15 +470,15 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Put,
         "/amit_adjustments/{id}",
-        204,
+        &[201, 204],
         "Create or replace the AMIT adjustment at this id.",
         Body::Json("AmitAdjustmentBody"),
-        Body::None,
+        Body::Json("AmitAdjustment"),
     ),
     (
         Verb::Delete,
         "/amit_adjustments/{id}",
-        204,
+        &[204],
         "Delete the AMIT adjustment.",
         Body::None,
         Body::None,
@@ -465,7 +486,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/holding_accounts",
-        200,
+        &[200],
         "List every holding account.",
         Body::None,
         Body::JsonArray("HoldingAccount"),
@@ -473,7 +494,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Post,
         "/holding_accounts",
-        201,
+        &[201],
         "Create a holding account; the created row is returned.",
         Body::Json("HoldingAccountBody"),
         Body::Json("HoldingAccount"),
@@ -481,7 +502,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/holding_accounts/{id}",
-        200,
+        &[200],
         "Fetch one holding account, or 404.",
         Body::None,
         Body::Json("HoldingAccount"),
@@ -489,15 +510,15 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Put,
         "/holding_accounts/{id}",
-        204,
+        &[201, 204],
         "Create or replace the holding account at this id.",
         Body::Json("HoldingAccountBody"),
-        Body::None,
+        Body::Json("HoldingAccount"),
     ),
     (
         Verb::Delete,
         "/holding_accounts/{id}",
-        204,
+        &[204],
         "Delete the holding account; 422 while a trade or statement still references it.",
         Body::None,
         Body::None,
@@ -505,7 +526,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/inheritances",
-        200,
+        &[200],
         "List every inheritance record.",
         Body::None,
         Body::JsonArray("Inheritance"),
@@ -513,7 +534,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Post,
         "/inheritances",
-        201,
+        &[201],
         "Create an inheritance record; the created row is returned.",
         Body::Json("InheritanceBody"),
         Body::Json("Inheritance"),
@@ -521,7 +542,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/inheritances/{id}",
-        200,
+        &[200],
         "Fetch one inheritance record, or 404.",
         Body::None,
         Body::Json("Inheritance"),
@@ -529,15 +550,15 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Put,
         "/inheritances/{id}",
-        204,
+        &[201, 204],
         "Create or replace the inheritance record at this id.",
         Body::Json("InheritanceBody"),
-        Body::None,
+        Body::Json("Inheritance"),
     ),
     (
         Verb::Delete,
         "/inheritances/{id}",
-        204,
+        &[204],
         "Delete the inheritance record.",
         Body::None,
         Body::None,
@@ -545,7 +566,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/drp_enrolments",
-        200,
+        &[200],
         "List every DRP enrolment period.",
         Body::None,
         Body::JsonArray("DrpEnrolment"),
@@ -553,7 +574,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Post,
         "/drp_enrolments",
-        201,
+        &[201],
         "Create a DRP enrolment period; the created row is returned.",
         Body::Json("DrpEnrolmentBody"),
         Body::Json("DrpEnrolment"),
@@ -561,7 +582,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/drp_enrolments/{id}",
-        200,
+        &[200],
         "Fetch one DRP enrolment period, or 404.",
         Body::None,
         Body::Json("DrpEnrolment"),
@@ -569,15 +590,15 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Put,
         "/drp_enrolments/{id}",
-        204,
+        &[201, 204],
         "Create or replace the DRP enrolment period at this id.",
         Body::Json("DrpEnrolmentBody"),
-        Body::None,
+        Body::Json("DrpEnrolment"),
     ),
     (
         Verb::Delete,
         "/drp_enrolments/{id}",
-        204,
+        &[204],
         "Delete the DRP enrolment period.",
         Body::None,
         Body::None,
@@ -585,7 +606,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/ess_statements",
-        200,
+        &[200],
         "List every ESS statement.",
         Body::None,
         Body::JsonArray("EssStatement"),
@@ -593,7 +614,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Post,
         "/ess_statements",
-        201,
+        &[201],
         "Create an ESS statement; the created row is returned.",
         Body::Json("EssStatementBody"),
         Body::Json("EssStatement"),
@@ -601,7 +622,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/ess_statements/{id}",
-        200,
+        &[200],
         "Fetch one ESS statement, or 404.",
         Body::None,
         Body::Json("EssStatement"),
@@ -609,15 +630,15 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Put,
         "/ess_statements/{id}",
-        204,
+        &[201, 204],
         "Create or replace the ESS statement at this id.",
         Body::Json("EssStatementBody"),
-        Body::None,
+        Body::Json("EssStatement"),
     ),
     (
         Verb::Delete,
         "/ess_statements/{id}",
-        204,
+        &[204],
         "Delete the ESS statement; 422 while its vested Buy is still there.",
         Body::None,
         Body::None,
@@ -625,7 +646,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/transfers",
-        200,
+        &[200],
         "List every holding-account transfer.",
         Body::None,
         Body::JsonArray("Transfer"),
@@ -633,7 +654,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Post,
         "/transfers",
-        201,
+        &[201],
         "Execute a transfer: the Sell and transfer-in Buys are written atomically and the whole group is returned.",
         Body::Json("TransferBody"),
         Body::Json("TransferGroup"),
@@ -641,7 +662,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/transfers/{id}",
-        200,
+        &[200],
         "Fetch one transfer, or 404.",
         Body::None,
         Body::Json("Transfer"),
@@ -649,15 +670,15 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Put,
         "/transfers/{id}",
-        201,
-        "Create or replace the transfer at this id; the executed group is returned (201, not 204 — a bare 204 would hide the created trade ids).",
+        &[201],
+        "Create the transfer at this id; the executed group is returned. The one PUT that is always 201: a transfer is create-only (a re-PUT is 422), and the response must carry the created Sell/Buy ids a bare 204 would hide.",
         Body::Json("TransferBody"),
         Body::Json("TransferGroup"),
     ),
     (
         Verb::Delete,
         "/transfers/{id}",
-        204,
+        &[204],
         "Delete the transfer and its derived trades; 422 while a transferred-in parcel is consumed later.",
         Body::None,
         Body::None,
@@ -665,7 +686,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/corporate_actions",
-        200,
+        &[200],
         "List every corporate action.",
         Body::None,
         Body::JsonArray("CorporateAction"),
@@ -673,7 +694,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Post,
         "/corporate_actions",
-        201,
+        &[201],
         "Create a corporate action; the created row is returned.",
         Body::Json("CorporateActionBody"),
         Body::Json("CorporateAction"),
@@ -681,7 +702,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/corporate_actions/{id}",
-        200,
+        &[200],
         "Fetch one corporate action, or 404.",
         Body::None,
         Body::Json("CorporateAction"),
@@ -689,15 +710,15 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Put,
         "/corporate_actions/{id}",
-        204,
+        &[201, 204],
         "Create or replace the corporate action at this id.",
         Body::Json("CorporateActionBody"),
-        Body::None,
+        Body::Json("CorporateAction"),
     ),
     (
         Verb::Delete,
         "/corporate_actions/{id}",
-        204,
+        &[204],
         "Delete the corporate action; 422 while a trade references it.",
         Body::None,
         Body::None,
@@ -705,7 +726,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/rights_sales",
-        200,
+        &[200],
         "List every rights sale.",
         Body::None,
         Body::JsonArray("RightsSale"),
@@ -713,7 +734,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/rights_sales/{id}",
-        200,
+        &[200],
         "Fetch one rights sale, or 404.",
         Body::None,
         Body::Json("RightsSale"),
@@ -721,7 +742,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Delete,
         "/rights_sales/{id}",
-        204,
+        &[204],
         "Delete the rights sale.",
         Body::None,
         Body::None,
@@ -729,7 +750,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/exchange_holidays",
-        200,
+        &[200],
         "List every exchange holiday.",
         Body::None,
         Body::JsonArray("ExchangeHoliday"),
@@ -737,7 +758,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/exchange_holidays/{mic}",
-        200,
+        &[200],
         "List one exchange's holiday calendar.",
         Body::None,
         Body::JsonArray("ExchangeHoliday"),
@@ -745,7 +766,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/exchange_holidays/{mic}/{date}",
-        200,
+        &[200],
         "Fetch one holiday, or 404.",
         Body::None,
         Body::Json("ExchangeHoliday"),
@@ -753,15 +774,15 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Put,
         "/exchange_holidays/{mic}/{date}",
-        204,
+        &[201, 204],
         "Create or replace the holiday at this exchange and date.",
         Body::Json("ExchangeHolidayBody"),
-        Body::None,
+        Body::Json("ExchangeHoliday"),
     ),
     (
         Verb::Delete,
         "/exchange_holidays/{mic}/{date}",
-        204,
+        &[204],
         "Delete the holiday.",
         Body::None,
         Body::None,
@@ -769,7 +790,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/exchanges",
-        200,
+        &[200],
         "List every curated exchange.",
         Body::None,
         Body::JsonArray("Exchange"),
@@ -777,7 +798,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/exchanges/{mic}",
-        200,
+        &[200],
         "Fetch one exchange, or 404.",
         Body::None,
         Body::Json("Exchange"),
@@ -785,15 +806,15 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Put,
         "/exchanges/{mic}",
-        204,
+        &[201, 204],
         "Create or replace the exchange at this MIC.",
         Body::Json("ExchangeBody"),
-        Body::None,
+        Body::Json("Exchange"),
     ),
     (
         Verb::Delete,
         "/exchanges/{mic}",
-        204,
+        &[204],
         "Delete the exchange.",
         Body::None,
         Body::None,
@@ -801,7 +822,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/currencies",
-        200,
+        &[200],
         "List every currency.",
         Body::None,
         Body::JsonArray("Currency"),
@@ -809,7 +830,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/currencies/{code}",
-        200,
+        &[200],
         "Fetch one currency by ISO 4217 code, or 404.",
         Body::None,
         Body::Json("Currency"),
@@ -817,7 +838,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Post,
         "/currencies/import",
-        200,
+        &[200],
         "Import the currency reference data; the body is a bare (text) ISO 4217 XML or ISO 24165 JSON document, and an empty body fetches the live sources.",
         Body::Other("text/plain"),
         Body::Json("CurrencyImportSummary"),
@@ -825,7 +846,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/mic_registry",
-        200,
+        &[200],
         "List every exchange MIC registry entry.",
         Body::None,
         Body::JsonArray("MicEntry"),
@@ -833,7 +854,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/mic_registry/{mic}",
-        200,
+        &[200],
         "Fetch one MIC registry entry, or 404.",
         Body::None,
         Body::Json("MicEntry"),
@@ -841,7 +862,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Post,
         "/mic_registry/import",
-        200,
+        &[200],
         "Import the ISO 10383 MIC registry; the body is a bare (text) CSV document, and an empty body fetches the live source.",
         Body::Other("text/plain"),
         Body::Json("MicImportSummary"),
@@ -849,7 +870,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/rba_fx_rates",
-        200,
+        &[200],
         "List every stored ATO/RBA FX rate.",
         Body::None,
         Body::JsonArray("RbaFxRate"),
@@ -857,7 +878,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/rba_fx_rates/{id}",
-        200,
+        &[200],
         "Fetch one FX rate by id, or 404.",
         Body::None,
         Body::Json("RbaFxRate"),
@@ -865,15 +886,15 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Put,
         "/rba_fx_rates/{id}",
-        204,
-        "Correct the stored rate at this id (the only field a correction may change).",
+        &[204],
+        "Correct the stored rate at this id (the only field a correction may change). Always 204: this route can never create a row — new rates arrive through POST /rba_fx_rates/import.",
         Body::Json("CorrectionBody"),
         Body::None,
     ),
     (
         Verb::Post,
         "/rba_fx_rates/import",
-        200,
+        &[200],
         "Import the RBA F11 rates; the body is a bare (text) CSV document, and an empty body fetches the live source.",
         Body::Other("text/plain"),
         Body::Json("RbaImportSummary"),
@@ -881,7 +902,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/closing_prices",
-        200,
+        &[200],
         "List stored closing prices, optionally narrowed by ?listing_id= / ?from= / ?to=.",
         Body::None,
         Body::JsonArray("ClosingPrice"),
@@ -889,7 +910,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Post,
         "/closing_prices/fetch",
-        201,
+        &[201],
         "Fetch and store one day's close from the price provider; the stored row is returned.",
         Body::Json("FetchBody"),
         Body::Json("ClosingPrice"),
@@ -897,7 +918,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Post,
         "/closing_prices/backfill",
-        200,
+        &[200],
         "Backfill a listing's price history over a date range and report what was stored.",
         Body::Json("BackfillBody"),
         Body::Json("BackfillSummary"),
@@ -905,7 +926,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Post,
         "/closing_prices/clear_unpriced_before",
-        200,
+        &[200],
         "Clear the span of a listing's stored prices that its own unpriced_before marker declares superseded, and report how many rows were removed.",
         Body::Json("ClearBody"),
         Body::Json("ClearSummary"),
@@ -913,15 +934,15 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Put,
         "/closing_prices/{listing_id}/{price_date}",
-        204,
-        "Store a hand-entered price for one (listing, day) with its provenance.",
+        &[201, 204],
+        "Store a hand-entered price for one (listing, day) with its provenance: 201 with the stored row when no price was there, 204 when one was replaced.",
         Body::Json("ManualPriceBody"),
-        Body::None,
+        Body::Json("ClosingPrice"),
     ),
     (
         Verb::Delete,
         "/closing_prices/{listing_id}/{price_date}",
-        204,
+        &[204],
         "Delete a stored price row that is errored or superseded; 422 for an ok row.",
         Body::None,
         Body::None,
@@ -929,7 +950,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/cgt_settings",
-        200,
+        &[200],
         "List the CGT settings rows.",
         Body::None,
         Body::JsonArray("CgtSettings"),
@@ -937,7 +958,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/cgt_settings/{id}",
-        200,
+        &[200],
         "Fetch one CGT settings row, or 404.",
         Body::None,
         Body::Json("CgtSettings"),
@@ -945,15 +966,15 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Put,
         "/cgt_settings/{id}",
-        204,
+        &[201, 204],
         "Create or replace the CGT settings row at this id.",
         Body::Json("CgtSettingsBody"),
-        Body::None,
+        Body::Json("CgtSettings"),
     ),
     (
         Verb::Delete,
         "/cgt_settings/{id}",
-        204,
+        &[204],
         "Delete the CGT settings row.",
         Body::None,
         Body::None,
@@ -961,7 +982,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/tax_year_settings",
-        200,
+        &[200],
         "List the per-tax-year eligibility settings.",
         Body::None,
         Body::JsonArray("TaxYearSettings"),
@@ -969,7 +990,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/tax_year_settings/{tax_year}",
-        200,
+        &[200],
         "Fetch one tax year's settings, or 404.",
         Body::None,
         Body::Json("TaxYearSettings"),
@@ -977,15 +998,15 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Put,
         "/tax_year_settings/{tax_year}",
-        204,
+        &[201, 204],
         "Create or replace the settings for this tax year.",
         Body::Json("TaxYearSettingsBody"),
-        Body::None,
+        Body::Json("TaxYearSettings"),
     ),
     (
         Verb::Delete,
         "/tax_year_settings/{tax_year}",
-        204,
+        &[204],
         "Delete the settings for this tax year.",
         Body::None,
         Body::None,
@@ -993,7 +1014,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/parcel_allocations",
-        200,
+        &[200],
         "List every sale's parcel allocations.",
         Body::None,
         Body::JsonArray("ParcelAllocation"),
@@ -1001,7 +1022,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/parcel_allocations/{id}",
-        200,
+        &[200],
         "Fetch one parcel allocation, or 404.",
         Body::None,
         Body::Json("ParcelAllocation"),
@@ -1009,7 +1030,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/attachments",
-        200,
+        &[200],
         "List stored attachments, optionally filtered by owner (?trade_id=, ?income_id=, ...).",
         Body::None,
         Body::JsonArray("Attachment"),
@@ -1017,7 +1038,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Post,
         "/attachments",
-        201,
+        &[201],
         "Upload an attachment; multipart/form-data carrying the file and exactly one owner field. The stored row is returned.",
         Body::Other("multipart/form-data"),
         Body::Json("Attachment"),
@@ -1025,7 +1046,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/attachments/{id}",
-        200,
+        &[200],
         "Fetch one attachment's metadata, or 404.",
         Body::None,
         Body::Json("Attachment"),
@@ -1033,7 +1054,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Delete,
         "/attachments/{id}",
-        204,
+        &[204],
         "Delete the attachment and its stored bytes.",
         Body::None,
         Body::None,
@@ -1041,7 +1062,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/attachments/{id}/content",
-        200,
+        &[200],
         "Download an attachment's bytes under the content type it was stored with; ?disposition=inline lets the browser render it in place.",
         Body::None,
         Body::Other("application/octet-stream"),
@@ -1049,7 +1070,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/distribution_events",
-        200,
+        &[200],
         "List cached distribution events.",
         Body::None,
         Body::JsonArray("DistributionEvent"),
@@ -1057,7 +1078,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/distribution_events/{id}",
-        200,
+        &[200],
         "Fetch one cached distribution event, or 404.",
         Body::None,
         Body::Json("DistributionEvent"),
@@ -1066,7 +1087,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Post,
         "/amma_statements/{id}/generate_adjustments",
-        201,
+        &[201],
         "Generate the AMIT adjustments an AMMA statement implies (201; a preview run answers 200 with the same body and writes nothing).",
         Body::Json("AmitGenerateBody"),
         Body::Json("GeneratedAdjustments"),
@@ -1074,7 +1095,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Post,
         "/corporate_actions/{id}/participate",
-        201,
+        &[201],
         "Participate in a buy-back: the closing Sell and its dividend-component income row are written together and returned.",
         Body::Json("ParticipationBody"),
         Body::Json("Participation"),
@@ -1082,7 +1103,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Post,
         "/corporate_actions/{id}/demerge",
-        201,
+        &[201],
         "Apportion the head listing's open parcels between head and demerged listing, and return the created replacement parcels.",
         Body::None,
         Body::Json("Demerge"),
@@ -1090,7 +1111,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Post,
         "/corporate_actions/{id}/exchange",
-        201,
+        &[201],
         "Substitute every open parcel of a scrip-for-scrip action's original listing, and return the created replacement parcels.",
         Body::None,
         Body::Json("ScripExchange"),
@@ -1098,7 +1119,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Post,
         "/corporate_actions/{id}/exercise",
-        201,
+        &[201],
         "Exercise a rights issue into a new Buy carrying the rights cost, and return the created trade.",
         Body::Json("ExerciseBody"),
         Body::Json("Trade"),
@@ -1106,7 +1127,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Post,
         "/corporate_actions/{id}/sell_rights",
-        201,
+        &[201],
         "Sell the rights of a renounceable issue and return the created rights sale.",
         Body::Json("SellRightsBody"),
         Body::Json("RightsSale"),
@@ -1114,7 +1135,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Post,
         "/corporate_actions/{id}/recognise",
-        201,
+        &[201],
         "Recognise a worthless-shares loss by closing every open parcel at nil, and return the closing Sell.",
         Body::None,
         Body::Json("Recognise"),
@@ -1122,7 +1143,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Post,
         "/income/{id}/reinvest",
-        201,
+        &[201],
         "Create the DRP trade for a distribution and link it; the created trade is returned.",
         Body::Json("ReinvestBody"),
         Body::Json("Trade"),
@@ -1130,7 +1151,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Delete,
         "/income/{id}/reinvest",
-        204,
+        &[204],
         "Undo the DRP reinvestment; 422 if a later trade drew on it.",
         Body::None,
         Body::None,
@@ -1138,7 +1159,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Post,
         "/ess_statements/{id}/vest",
-        201,
+        &[201],
         "Vest an ESS statement into the cost-base-reset Buy it implies, and return the created trade.",
         Body::None,
         Body::Json("Trade"),
@@ -1146,7 +1167,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Post,
         "/listings/{id}/rename",
-        201,
+        &[201],
         "Rename a listing from a date and return the recorded rename.",
         Body::Json("RenameBody"),
         Body::Json("ListingRename"),
@@ -1154,7 +1175,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/listings/{id}/renames",
-        200,
+        &[200],
         "List one listing's recorded renames.",
         Body::None,
         Body::JsonArray("ListingRename"),
@@ -1162,7 +1183,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Delete,
         "/listings/{id}/renames/{rename_id}",
-        204,
+        &[204],
         "Undo a recorded rename.",
         Body::None,
         Body::None,
@@ -1171,7 +1192,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/jobs",
-        200,
+        &[200],
         "List the registered maintenance jobs with their schedule, trigger kind and run history.",
         Body::None,
         Body::JsonArray("JobStatus"),
@@ -1179,7 +1200,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Post,
         "/jobs/{name}",
-        204,
+        &[204],
         "Trigger a registered job by name now; 404 naming the registered names, or 500 carrying the job's own failure text. Takes an optional ?suffix= / ?skip_command= in the query string, not a body.",
         Body::None,
         Body::None,
@@ -1188,7 +1209,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/login",
-        200,
+        &[200],
         "The sign-in page (HTML). Unauthenticated: on require_auth's allowlist.",
         Body::None,
         Body::Other("text/html"),
@@ -1196,7 +1217,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Post,
         "/login",
-        303,
+        &[303],
         "Verify credentials; 303 to the home path with the session cookie, or 200 re-rendering the page with the error. Unauthenticated: on the allowlist.",
         Body::Form("LoginForm"),
         Body::Other("text/html"),
@@ -1204,7 +1225,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Post,
         "/logout",
-        303,
+        &[303],
         "Tell the browser to drop the session cookie (the page itself is not gated).",
         Body::None,
         Body::Other("text/html"),
@@ -1213,7 +1234,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/",
-        200,
+        &[200],
         "The single-page app shell (HTML).",
         Body::None,
         Body::Other("text/html"),
@@ -1221,7 +1242,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/static/style.css",
-        200,
+        &[200],
         "The app stylesheet. Unauthenticated: on require_auth's allowlist.",
         Body::None,
         Body::Other("text/css"),
@@ -1230,7 +1251,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/openapi.json",
-        200,
+        &[200],
         "This OpenAPI 3.1 document, generated from the route table and the serde structs. Behind [auth] like every other route.",
         Body::None,
         Body::JsonFree("The OpenAPI 3.1 document for this API, as described by info above."),
@@ -1242,7 +1263,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Post,
         "/portfolio/overview",
-        200,
+        &[200],
         "Open holdings per (listing, holding account) with quantity, cost base and value; body carries the optional price-override map, live flag and as_of_date.",
         Body::Json("OverviewRequest"),
         Body::JsonArray("HoldingOverview"),
@@ -1250,7 +1271,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Post,
         "/portfolio/performance",
-        200,
+        &[200],
         "Per-holding performance: accumulated figures and dated cash flows; body carries the optional price-override map, live flag and as_of_date.",
         Body::Json("PerformanceRequest"),
         Body::JsonArray("HoldingPerformance"),
@@ -1258,7 +1279,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/portfolio/period-performance",
-        200,
+        &[200],
         "Portfolio return over a period, with FX attribution; ?from= / ?to= bound the window.",
         Body::None,
         Body::Json("PeriodPerformance"),
@@ -1266,7 +1287,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/portfolio/activity",
-        200,
+        &[200],
         "One listing's activity ledger; ?listing_id= is required, with optional ?price= and as-of bounds.",
         Body::None,
         Body::Json("ActivityResponse"),
@@ -1274,7 +1295,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/portfolio/open-parcels",
-        200,
+        &[200],
         "Every open parcel, per parcel rather than aggregated.",
         Body::None,
         Body::JsonArray("OpenParcel"),
@@ -1282,7 +1303,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Post,
         "/portfolio/unrealised-gains",
-        200,
+        &[200],
         "Unrealised gains and losses; body carries the optional price-override map, live flag and as_of_date.",
         Body::Json("UnrealisedGainsRequest"),
         Body::JsonArray("UnrealisedGain"),
@@ -1290,7 +1311,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/portfolio/realised-gains",
-        200,
+        &[200],
         "Realised gains and losses per disposal.",
         Body::None,
         Body::JsonArray("RealisedGainLoss"),
@@ -1298,7 +1319,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/portfolio/net-capital-gain",
-        200,
+        &[200],
         "Net capital gain per financial year, with the discount and loss-netting order applied.",
         Body::None,
         Body::JsonArray("NetCapitalGainYear"),
@@ -1306,7 +1327,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/portfolio/net-capital-gain/export",
-        200,
+        &[200],
         "The net capital gain report as CSV.",
         Body::None,
         Body::Other("text/csv"),
@@ -1314,7 +1335,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Post,
         "/portfolio/net-capital-gain/what-if",
-        200,
+        &[200],
         "What-if net capital gain for a contemplated disposal; the body's allocations are a list of per-parcel inputs.",
         Body::Json("WhatIfRequest"),
         Body::Json("WhatIfResponse"),
@@ -1322,7 +1343,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/portfolio/parcel-optimiser",
-        200,
+        &[200],
         "Which parcels to sell for a target, under a chosen strategy; ?listing_id=, ?units=, ?sale_date=, ?price= and ?holding_account_id= drive it.",
         Body::None,
         Body::Json("OptimiserResponse"),
@@ -1330,7 +1351,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/portfolio/tax-summary",
-        200,
+        &[200],
         "The per-financial-year tax summary.",
         Body::None,
         Body::JsonArray("TaxYearSummary"),
@@ -1338,7 +1359,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/portfolio/tax-summary/export",
-        200,
+        &[200],
         "The tax summary as CSV.",
         Body::None,
         Body::Other("text/csv"),
@@ -1346,7 +1367,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/reports/exchange_mic_validation",
-        200,
+        &[200],
         "Validate every curated exchange's MIC against the registry.",
         Body::None,
         Body::JsonArray("ExchangeMicStatus"),
@@ -1354,7 +1375,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/reports/settlement_holiday_coverage",
-        200,
+        &[200],
         "Flag every trade whose settlement date cannot be trusted (no calendar, or a missing holiday).",
         Body::None,
         Body::JsonArray("SettlementCoverageAlert"),
@@ -1362,7 +1383,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/reports/e4_cross_check",
-        200,
+        &[200],
         "Cross-check the CGT event E4 amounts against the trust income rows.",
         Body::None,
         Body::JsonArray("E4CrossCheckAlert"),
@@ -1370,7 +1391,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/reports/indexation_cross_check",
-        200,
+        &[200],
         "Cross-check the indexation factors against the ATO's published table.",
         Body::None,
         Body::Json("IndexationCrossCheck"),
@@ -1378,7 +1399,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/reports/amit_adjustment_cross_check",
-        200,
+        &[200],
         "Flag AMMA statements whose adjustments do not reconcile with the adjusted parcels.",
         Body::None,
         Body::JsonArray("AmitAdjustmentAlert"),
@@ -1386,7 +1407,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/reports/row_history",
-        200,
+        &[200],
         "The append-only audit trail; a browse array, or the cursor-paginated {entries, page_size, next_before_id} shape. ?table=, ?row_id=, ?before_id= and ?limit= drive it.",
         Body::None,
         Body::Json("RowHistoryResponse"),
@@ -1394,7 +1415,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/reports/rollover_consistency",
-        200,
+        &[200],
         "Flag rollover groups whose replacement parcels do not reconcile.",
         Body::None,
         Body::JsonArray("RolloverAlert"),
@@ -1402,7 +1423,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/reports/amit_cash_cross_check",
-        200,
+        &[200],
         "Flag (AMIT listing, account, financial year) combinations with cash that no statement accounts for.",
         Body::None,
         Body::JsonArray("AmitCashAlert"),
@@ -1410,7 +1431,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/reports/wash_sales",
-        200,
+        &[200],
         "Flag loss-realising sales with a re-purchase inside the wash-sale window; ?window_days= sets the window.",
         Body::None,
         Body::JsonArray("WashSaleAlert"),
@@ -1418,7 +1439,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/reports/franking_at_risk",
-        200,
+        &[200],
         "Franking credits at risk from the holding-period rule.",
         Body::None,
         Body::JsonArray("FrankingAtRiskAlert"),
@@ -1426,7 +1447,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/reports/franking_at_risk/what-if",
-        200,
+        &[200],
         "What-if franking-at-risk for a contemplated sale; ?listing_id=, ?sale_date= and ?units= drive it.",
         Body::None,
         Body::JsonArray("FrankingWhatIfAlert"),
@@ -1434,7 +1455,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/reports/fx_coverage",
-        200,
+        &[200],
         "Every record that needs an AUD conversion and the rate it resolves to.",
         Body::None,
         Body::JsonArray("FxCoverageAlert"),
@@ -1442,7 +1463,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/reports/health",
-        200,
+        &[200],
         "The data-health report behind the UI's banner: stale prices and FX, failed and stalled jobs, unpriced days, duplicates and more.",
         Body::None,
         Body::Json("HealthReport"),
@@ -1450,7 +1471,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/reports/tax_report",
-        200,
+        &[200],
         "The Annual Tax Report for one financial year; ?tax_year= selects it, defaulting to the one in progress.",
         Body::None,
         Body::Json("TaxReport"),
@@ -1458,7 +1479,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/reports/tax_report/years",
-        200,
+        &[200],
         "Every financial year with a recorded fact, for the annual report's year picker.",
         Body::None,
         Body::JsonIntegers,
@@ -1466,7 +1487,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/reports/attachments",
-        200,
+        &[200],
         "Every stored attachment joined out to its owning activity.",
         Body::None,
         Body::JsonArray("AttachmentIndexRow"),
@@ -1474,7 +1495,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/report_snapshots",
-        200,
+        &[200],
         "List stored report snapshots, optionally narrowed by ?report= and ?from= / ?to=.",
         Body::None,
         Body::JsonArray("SnapshotMeta"),
@@ -1482,7 +1503,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/report_snapshots/series",
-        200,
+        &[200],
         "One report's stored series over a date range; ?report= is required.",
         Body::None,
         Body::JsonArray("SeriesPoint"),
@@ -1490,7 +1511,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/report_snapshots/holding-series",
-        200,
+        &[200],
         "One holding's stored valuation series; ?listing_id= and ?holding_account_id= drive it.",
         Body::None,
         Body::JsonArray("HoldingSeries"),
@@ -1498,7 +1519,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Post,
         "/report_snapshots/generate",
-        200,
+        &[200],
         "Generate (or re-generate) snapshots for a date range; the resulting snapshot metadata is returned.",
         Body::Json("SnapshotGenerateBody"),
         Body::JsonArray("SnapshotMeta"),
@@ -1506,7 +1527,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Post,
         "/report_snapshots/regenerate_all",
-        200,
+        &[200],
         "Regenerate every held date in a range (default: first-ever-held through the latest valuable date), reporting per-date blockers in the summary.",
         Body::Json("RegenerateBody"),
         Body::Json("RegenerateSummary"),
@@ -1514,7 +1535,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/report_snapshots/regenerate_range",
-        200,
+        &[200],
         "The default bulk-regeneration bounds, for the UI to prefill before submitting.",
         Body::None,
         Body::Json("RegenerateRange"),
@@ -1522,7 +1543,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Post,
         "/report_snapshots/regenerate_provisional",
-        200,
+        &[200],
         "Regenerate every snapshot flagged provisional, now that a later FX rate may have arrived.",
         Body::None,
         Body::Json("RegenerateSummary"),
@@ -1530,7 +1551,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Get,
         "/report_snapshots/{report}/{date}",
-        200,
+        &[200],
         "Fetch one stored snapshot's payload, or 404.",
         Body::None,
         Body::Json("Snapshot"),
@@ -1541,8 +1562,8 @@ const ROUTES: &[RouteRow] = &[
 /// referenced types derive.
 pub fn document() -> OpenApi {
     let mut paths = Paths::new();
-    for &(verb, path, status, summary, request, response) in ROUTES {
-        let operation = operation(path, status, summary, request, response);
+    for &(verb, path, statuses, summary, request, response) in ROUTES {
+        let operation = operation(path, statuses, summary, request, response);
         paths.add_path_operation(path, vec![verb.http()], operation);
     }
     // The `/static/*.js` routes are registered in a loop over `JS_MODULES`,
@@ -1551,7 +1572,7 @@ pub fn document() -> OpenApi {
     for (path, _) in crate::web::JS_MODULES {
         let operation = operation(
             path,
-            200,
+            &[200],
             "A served frontend ES module (JavaScript).",
             Body::None,
             Body::Other("text/javascript"),
@@ -1726,10 +1747,24 @@ fn component_schemas() -> Vec<(String, RefOr<Schema>)> {
 }
 
 /// One operation: its summary, the path parameters its spelling declares, and
-/// its request and success response.
-fn operation(path: &str, status: u16, summary: &str, request: Body, response: Body) -> Operation {
-    let mut responses =
-        ResponsesBuilder::new().response(status.to_string(), success_response(status, response));
+/// its request and success responses.
+///
+/// `statuses` is the success set the route can answer. A `PUT` upsert carries
+/// two — `201` with `response` (the created row) and `204` with no content —
+/// because it reports whether it created or replaced. A `201` is the only
+/// status that carries `response`; a `204` never has a body.
+fn operation(
+    path: &str,
+    statuses: &[u16],
+    summary: &str,
+    request: Body,
+    response: Body,
+) -> Operation {
+    let mut responses = ResponsesBuilder::new();
+    for &status in statuses {
+        let body = if status == 201 { response } else { Body::None };
+        responses = responses.response(status.to_string(), success_response(status, body));
+    }
     // Every JSON/form body can answer 422 — the deny-unknown-fields rule and
     // the money-as-string rule are both enforced there.
     if matches!(
@@ -2299,6 +2334,89 @@ mod tests {
             "/reports/row_history is the only paginated endpoint",
             "with row_id it answers that row's whole trail as a bare JSON array",
             "before_id returns entries older than that trail id and limit is 1-1000 (default 100)",
+        ] {
+            assert!(
+                description.contains(rule),
+                "info.description must state `{rule}`; got:\n{description}"
+            );
+        }
+    }
+
+    /// Every `PUT` route records the statuses it can answer: the create/replace
+    /// pair `[201, 204]` for the upserts, and the single status the two
+    /// documented exceptions can give. A new `PUT` route that records neither
+    /// fails here, so the create-vs-replace signal cannot go missing from the
+    /// machine-client contract.
+    #[test]
+    fn every_put_route_documents_its_outcome() {
+        // The two `PUT`s that deliberately do not report the pair, with the one
+        // status each can answer.
+        const EXCEPTIONS: &[(&str, &[u16])] = &[
+            // Create-only: always 201 with the executed group.
+            ("/transfers/{id}", &[201]),
+            // A correction of an existing row: never creates, so always 204.
+            ("/rba_fx_rates/{id}", &[204]),
+        ];
+        let doc = doc();
+        let mut puts = 0;
+        for &(verb, path, statuses, _, _, _) in ROUTES {
+            if verb != Verb::Put {
+                continue;
+            }
+            puts += 1;
+            match EXCEPTIONS.iter().find(|(p, _)| *p == path) {
+                Some((_, expected)) => assert_eq!(
+                    statuses, *expected,
+                    "PUT {path} is a classified exception with the wrong statuses"
+                ),
+                None => assert_eq!(
+                    statuses,
+                    &[201, 204],
+                    "PUT {path} must record 201 Created then 204 No Content"
+                ),
+            }
+            let responses = doc["paths"][path]["put"]["responses"]
+                .as_object()
+                .unwrap_or_else(|| panic!("PUT {path} has no documented responses"));
+            for status in statuses {
+                let documented = responses
+                    .get(&status.to_string())
+                    .unwrap_or_else(|| panic!("PUT {path} does not document {status}"));
+                // A 201 is the created row (a body); a 204 never has one.
+                if *status == 201 {
+                    assert!(
+                        documented.get("content").is_some(),
+                        "PUT {path}'s 201 must carry the created row schema"
+                    );
+                } else {
+                    assert!(
+                        documented.get("content").is_none(),
+                        "PUT {path}'s 204 must carry no body"
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            puts, 20,
+            "the route table should carry every PUT route; a new one must be classified here"
+        );
+    }
+
+    /// The PUT outcome rule rides in `info.description`, the machine-client
+    /// surface, so a client reading only the generated document learns that a
+    /// `PUT` reports whether it created or replaced.
+    #[test]
+    fn the_put_outcome_rule_is_stated_in_the_description() {
+        let doc = doc();
+        let description = doc["info"]["description"]
+            .as_str()
+            .expect("info.description is a string");
+        for rule in [
+            "A PUT upsert reports its outcome.",
+            "answers 201 Created carrying the created row",
+            "204 No Content when it replaced an existing row",
+            "/transfers/{id} is create-only and always answers 201",
+            "/rba_fx_rates/{id} only ever corrects an existing row, so always answers 204",
         ] {
             assert!(
                 description.contains(rule),

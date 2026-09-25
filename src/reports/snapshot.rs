@@ -1884,7 +1884,7 @@ mod tests {
                 &serde_json::json!({ "name": "Test Closure" }),
             )
             .await
-            .expect_status(StatusCode::NO_CONTENT);
+            .expect_status(StatusCode::CREATED);
         assert_eq!(stale_flags(&pool, ymd(2026, 6, 5)).await, vec![true; 3]);
         assert_eq!(
             stale_flags(&pool, ymd(2026, 6, 4)).await,

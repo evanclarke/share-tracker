@@ -105,7 +105,7 @@
 
 use crate::infra::db::write_tx;
 use crate::infra::decimal::Money;
-use crate::infra::http::{self, ApiError, CrudEntity};
+use crate::infra::http::{self, ApiError, CrudEntity, Upsert, UpsertResponse};
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -632,10 +632,20 @@ fn validate(inh: &Inheritance) -> Result<(), UpsertError> {
 /// create, which leaves the id to the database. An edit keeps the linked Buy's
 /// id (the `ON CONFLICT` arm below rewrites that row); an edit is refused while
 /// the parcel is drawn on.
-async fn write(pool: &SqlitePool, id: Option<i64>, inh: &Inheritance) -> Result<i64, UpsertError> {
+async fn write(
+    pool: &SqlitePool,
+    id: Option<i64>,
+    inh: &Inheritance,
+) -> Result<(i64, Upsert), UpsertError> {
     validate(inh)?;
 
     let mut tx = write_tx(pool).await?;
+    // The create-vs-replace decision is made inside the write's own
+    // `BEGIN IMMEDIATE` transaction (CLAUDE.md, "Data integrity").
+    let existed = match id {
+        Some(id) => http::crud_exists::<Inheritance, _>(&mut *tx, id).await?,
+        None => false,
+    };
 
     check_listing_currency(&mut tx, inh).await?;
     check_convertible(&mut tx, inh).await?;
@@ -838,19 +848,24 @@ async fn write(pool: &SqlitePool, id: Option<i64>, inh: &Inheritance) -> Result<
     }
 
     tx.commit().await?;
-    Ok(assigned_id)
+    let outcome = if existed {
+        Upsert::Replaced
+    } else {
+        Upsert::Created
+    };
+    Ok((assigned_id, outcome))
 }
 
 /// `PUT /inheritances/:id` — the long-standing upsert on a caller-chosen id.
-pub async fn db_upsert(pool: &SqlitePool, inh: &Inheritance) -> Result<(), UpsertError> {
-    write(pool, Some(inh.id), inh).await?;
-    Ok(())
+pub async fn db_upsert(pool: &SqlitePool, inh: &Inheritance) -> Result<Upsert, UpsertError> {
+    let (_, outcome) = write(pool, Some(inh.id), inh).await?;
+    Ok(outcome)
 }
 
 /// `POST /inheritances` — create without naming an id, and return the row (and
 /// the linked parcel Buy) the database assigned one to.
 pub async fn db_create(pool: &SqlitePool, inh: &Inheritance) -> Result<Inheritance, UpsertError> {
-    let id = write(pool, None, inh).await?;
+    let (id, _) = write(pool, None, inh).await?;
     db_get(pool, id)
         .await?
         .ok_or(UpsertError::VanishedAfterCreate)
@@ -921,9 +936,9 @@ async fn upsert(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
     Json(body): Json<InheritanceBody>,
-) -> Result<StatusCode, ApiError> {
-    db_upsert(&pool, &inheritance_from_body(id, body)).await?;
-    Ok(StatusCode::NO_CONTENT)
+) -> Result<UpsertResponse<Inheritance>, ApiError> {
+    let outcome = db_upsert(&pool, &inheritance_from_body(id, body)).await?;
+    http::upsert_response::<Inheritance>(&pool, outcome, id).await
 }
 
 /// `POST /inheritances` — create the inheritance and its linked parcel Buy
@@ -1848,7 +1863,7 @@ mod tests {
             "deceased_acquisition_date": "2020-02-01"
         });
         let resp = ApiClient::over(app()).put("/inheritances/1", &body).await;
-        assert_eq!(resp.status, StatusCode::NO_CONTENT);
+        assert_eq!(resp.status, StatusCode::CREATED);
 
         // The omitted fields took their defaults (account 1, AUD, fx 1).
         let resp = ApiClient::over(app()).get("/inheritances/1").await;

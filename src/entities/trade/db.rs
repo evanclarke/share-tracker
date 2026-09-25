@@ -11,7 +11,7 @@ use super::model::Trade;
 use super::{Settlement, SettlementError};
 use crate::infra::db::write_tx;
 use crate::infra::decimal::{Money, OptMoney, parse_dec};
-use crate::infra::http::{self, ApiError, CrudEntity};
+use crate::infra::http::{self, ApiError, CrudEntity, Upsert};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use sqlx::{Row, SqlitePool};
@@ -32,6 +32,13 @@ impl CrudEntity for Trade {
          holding_account_id, transfer_id, ess_statement_id, worthless_action_id, inheritance_id";
     const ORDER_BY: &'static str = "date, id";
     const NOUN: &'static str = "trade";
+
+    /// A trade goes on the wire with its GST-inclusive brokerage recombined,
+    /// exactly as this entity's hand-written list/get handlers present it — so
+    /// the `201` a `PUT /trades/{id}` create answers matches the following GET.
+    fn present(row: Self) -> Self {
+        Trade::present(row)
+    }
 }
 
 pub async fn db_list(pool: &SqlitePool) -> Result<Vec<Trade>, sqlx::Error> {
@@ -356,9 +363,9 @@ type SettlementWrite = Option<Option<NaiveDate>>;
 /// quantity below what its dependants rely on — the quantity already allocated
 /// to Sells, or any linked AMIT adjustment's covered quantity.
 #[cfg(test)]
-pub async fn db_upsert(pool: &SqlitePool, trade: &Trade) -> Result<(), UpsertError> {
-    write(pool, Some(trade.id), trade, None).await?;
-    Ok(())
+pub async fn db_upsert(pool: &SqlitePool, trade: &Trade) -> Result<Upsert, UpsertError> {
+    let (_, outcome) = write(pool, Some(trade.id), trade, None).await?;
+    Ok(outcome)
 }
 
 /// Create or update a trade from a `PUT /trades/{id}` body. `supplied` is the
@@ -382,9 +389,9 @@ pub async fn db_upsert_resolving_settlement(
     pool: &SqlitePool,
     trade: &Trade,
     supplied: Option<NaiveDate>,
-) -> Result<(), UpsertError> {
-    write(pool, Some(trade.id), trade, Some(supplied)).await?;
-    Ok(())
+) -> Result<Upsert, UpsertError> {
+    let (_, outcome) = write(pool, Some(trade.id), trade, Some(supplied)).await?;
+    Ok(outcome)
 }
 
 /// `POST /trades` — create without naming an id, and return the row the
@@ -395,7 +402,7 @@ pub async fn db_create(
     trade: &Trade,
     supplied: Option<NaiveDate>,
 ) -> Result<Trade, UpsertError> {
-    let id = write(pool, None, trade, Some(supplied)).await?;
+    let (id, _) = write(pool, None, trade, Some(supplied)).await?;
     db_get(pool, id)
         .await?
         .ok_or(UpsertError::VanishedAfterCreate)
@@ -412,7 +419,7 @@ async fn write(
     id: Option<i64>,
     trade: &Trade,
     settlement_write: SettlementWrite,
-) -> Result<i64, UpsertError> {
+) -> Result<(i64, Upsert), UpsertError> {
     // Degenerate figures (zero/negative quantity, negative costs, …) corrupt
     // every downstream report without failing anything — rejected before
     // anything else runs.
@@ -441,6 +448,13 @@ async fn write(
     validate_spot_fx_rate(&trade.currency, trade.spot_fx_rate).map_err(UpsertError::SpotFxRate)?;
 
     let mut tx = write_tx(pool).await?;
+
+    // The create-vs-replace decision is made inside the write's own
+    // `BEGIN IMMEDIATE` transaction (CLAUDE.md, "Data integrity").
+    let existed = match id {
+        Some(id) => http::crud_exists::<Trade, _>(&mut *tx, id).await?,
+        None => false,
+    };
 
     // The settlement date is resolved on this transaction — the row the write
     // lands on is the row the classification read (see
@@ -856,7 +870,12 @@ async fn write(
     }
 
     tx.commit().await?;
-    Ok(assigned_id)
+    let outcome = if existed {
+        Upsert::Replaced
+    } else {
+        Upsert::Created
+    };
+    Ok((assigned_id, outcome))
 }
 
 /// Outcome of a delete request, so the handler can map to the right status.

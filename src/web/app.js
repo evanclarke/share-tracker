@@ -663,7 +663,10 @@ async function viewEntityForm(entity, keyParts, seq = navigationToken()) {
       // server assign the key — the response carries the stored row, so its id
       // is known without a `max(id) + 1` guess (which raced, and could
       // silently overwrite a row that had taken the guessed id first). An edit
-      // PUTs the existing key, which stays the upsert it always was.
+      // PUTs the existing key, which is the upsert it always was: it answers
+      // 201 with the created row when the id was free and 204 when it replaced
+      // one, and `api()` accepts either (it gates on `res.ok`), so neither
+      // branch needs a body from the response.
       const body = {};
       entity.fields.forEach(function (f) {
         // A field whose type group is not selected has no input; it submits

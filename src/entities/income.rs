@@ -1,6 +1,6 @@
 use crate::infra::db::write_tx;
 use crate::infra::decimal::{Money, OptMoney};
-use crate::infra::http::{self, ApiError, CrudEntity};
+use crate::infra::http::{self, ApiError, CrudEntity, Upsert, UpsertResponse};
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -684,7 +684,11 @@ pub(crate) fn per_share_detail(e: &PerShareError) -> String {
 /// can never drift: `id = Some` is the long-standing `PUT /income/:id` upsert,
 /// and `id = None` is the `POST /income` create, which leaves the id to the
 /// database.
-async fn write(pool: &SqlitePool, id: Option<i64>, income: &Income) -> Result<i64, UpsertError> {
+async fn write(
+    pool: &SqlitePool,
+    id: Option<i64>,
+    income: &Income,
+) -> Result<(i64, Upsert), UpsertError> {
     // No money figure on the row may be negative: statements report positive
     // (or zero) amounts, and a negative would silently reduce the year's
     // totals in every report. Checked before the per-share cross-check so a
@@ -730,6 +734,14 @@ async fn write(pool: &SqlitePool, id: Option<i64>, income: &Income) -> Result<i6
     }
 
     let mut tx = write_tx(pool).await?;
+
+    // The create-vs-replace decision is made here, inside the write's own
+    // `BEGIN IMMEDIATE` transaction (CLAUDE.md, "Data integrity"); a check
+    // outside it could see no row and then race another PUT for the same id.
+    let existed = match id {
+        Some(id) => http::crud_exists::<Income, _>(&mut *tx, id).await?,
+        None => false,
+    };
 
     // No id means a create, and a row that does not exist yet has nothing to
     // freeze: the buy-back and reinvestment guards below are about an
@@ -991,19 +1003,24 @@ async fn write(pool: &SqlitePool, id: Option<i64>, income: &Income) -> Result<i6
     // actually holds.
     let assigned_id = id.unwrap_or_else(|| result.last_insert_rowid());
     tx.commit().await?;
-    Ok(assigned_id)
+    let outcome = if existed {
+        Upsert::Replaced
+    } else {
+        Upsert::Created
+    };
+    Ok((assigned_id, outcome))
 }
 
 /// `PUT /income/:id` — the long-standing upsert on a caller-chosen id.
-pub async fn db_upsert(pool: &SqlitePool, income: &Income) -> Result<(), UpsertError> {
-    write(pool, Some(income.id), income).await?;
-    Ok(())
+pub async fn db_upsert(pool: &SqlitePool, income: &Income) -> Result<Upsert, UpsertError> {
+    let (_, outcome) = write(pool, Some(income.id), income).await?;
+    Ok(outcome)
 }
 
 /// `POST /income` — create without naming an id, and return the row the
 /// database assigned one to.
 pub async fn db_create(pool: &SqlitePool, income: &Income) -> Result<Income, UpsertError> {
-    let id = write(pool, None, income).await?;
+    let (id, _) = write(pool, None, income).await?;
     db_get(pool, id)
         .await?
         .ok_or(UpsertError::VanishedAfterCreate)
@@ -1086,9 +1103,9 @@ async fn upsert(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
     Json(body): Json<IncomeBody>,
-) -> Result<StatusCode, ApiError> {
-    db_upsert(&pool, &income_from_body(id, body)).await?;
-    Ok(StatusCode::NO_CONTENT)
+) -> Result<UpsertResponse<Income>, ApiError> {
+    let outcome = db_upsert(&pool, &income_from_body(id, body)).await?;
+    http::upsert_response::<Income>(&pool, outcome, id).await
 }
 
 /// `POST /income` — create the row without naming an id. The database assigns
@@ -1916,7 +1933,7 @@ mod tests {
             "franking_credits": "30.0"
         });
         let resp = client(&pool).put("/income/1", &body).await;
-        assert_eq!(resp.status, StatusCode::NO_CONTENT);
+        assert_eq!(resp.status, StatusCode::CREATED);
         let got = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(got.franked_amount, Decimal::from(70));
     }
@@ -1994,7 +2011,7 @@ mod tests {
                 }),
             )
             .await;
-        assert_eq!(resp.status, StatusCode::NO_CONTENT);
+        assert_eq!(resp.status, StatusCode::CREATED);
         let got = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(got.reinvestment_trade_id, None);
 
@@ -2068,7 +2085,7 @@ mod tests {
             "franking_credits": "30.052631578"
         });
         let resp = client(&pool).put("/income/1", &body).await;
-        assert_eq!(resp.status, StatusCode::NO_CONTENT);
+        assert_eq!(resp.status, StatusCode::CREATED);
         let resp = client(&pool).get("/income/1").await;
         let inc: Income = resp.json();
         assert_eq!(
@@ -2116,7 +2133,7 @@ mod tests {
             }),
         )
         .await;
-        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(status, StatusCode::CREATED);
         let got = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(got.amount_per_security, Some("0.14".parse().unwrap()));
         assert_eq!(got.securities_held, Some(Decimal::from(19695)));
@@ -2142,7 +2159,7 @@ mod tests {
             }),
         )
         .await;
-        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(status, StatusCode::CREATED);
     }
 
     #[tokio::test]
@@ -2216,7 +2233,7 @@ mod tests {
             }),
         )
         .await;
-        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(status, StatusCode::CREATED);
     }
 
     /// Both omitted = no check (existing clients unchanged), and the columns
@@ -2235,7 +2252,7 @@ mod tests {
             }),
         )
         .await;
-        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(status, StatusCode::CREATED);
         let got = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(got.amount_per_security, None);
         assert_eq!(got.securities_held, None);
@@ -2257,7 +2274,7 @@ mod tests {
             }),
         )
         .await;
-        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(status, StatusCode::CREATED);
         let resp = client(&pool).get("/income/1").await;
         let inc: Income = resp.json();
         assert_eq!(
@@ -2324,7 +2341,7 @@ mod tests {
             }),
         )
         .await;
-        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(status, StatusCode::CREATED);
     }
 
     /// A franking credit is attached to the franked part of a distribution, so
@@ -2652,7 +2669,7 @@ mod tests {
             }),
         )
         .await;
-        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(status, StatusCode::CREATED);
         let got = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(got.tax_deferred_amount, None);
     }
@@ -2676,7 +2693,7 @@ mod tests {
             }),
         )
         .await;
-        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(status, StatusCode::CREATED);
         assert_eq!(
             db_get(&pool, 1).await.unwrap().unwrap().income_type,
             IncomeType::Dividend
@@ -2698,7 +2715,7 @@ mod tests {
             }),
         )
         .await;
-        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(status, StatusCode::CREATED);
         let got = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(got.income_type, IncomeType::EmploymentIncome);
         assert_eq!(got.unfranked_amount, Decimal::from(250));
@@ -2771,7 +2788,7 @@ mod tests {
             }),
         )
         .await;
-        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(status, StatusCode::CREATED);
         let got = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(got.income_type, IncomeType::OtherIncome);
         assert_eq!(got.unfranked_amount, Decimal::from(2000));
@@ -3014,7 +3031,7 @@ mod tests {
             }),
         )
         .await;
-        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(status, StatusCode::CREATED);
         let resp = client(&pool).get("/income/1").await;
         let inc: Income = resp.json();
         assert_eq!(
@@ -3046,7 +3063,7 @@ mod tests {
         let resp = client(&pool)
             .put("/income/1", &body("1000000000000000000000000000"))
             .await;
-        assert_eq!(resp.status, StatusCode::NO_CONTENT);
+        assert_eq!(resp.status, StatusCode::CREATED);
 
         // Over it: refused 422 naming the ceiling, which is the figure the
         // arithmetic used to die computing.

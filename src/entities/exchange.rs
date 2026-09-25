@@ -1,8 +1,8 @@
-use crate::infra::http::{self, ApiError, CrudEntity};
+use crate::infra::db::write_tx;
+use crate::infra::http::{self, ApiError, CrudEntity, Upsert, UpsertResponse};
 use axum::{
     Json, Router,
     extract::{Path, State},
-    http::StatusCode,
     routing::get,
 };
 use chrono::NaiveTime;
@@ -154,7 +154,7 @@ where
     http::crud_get(executor, mic.to_string()).await
 }
 
-pub async fn db_upsert(pool: &SqlitePool, exchange: &Exchange) -> Result<(), UpsertError> {
+pub async fn db_upsert(pool: &SqlitePool, exchange: &Exchange) -> Result<Upsert, UpsertError> {
     // `settlement_days` drives T+n on every trade written against this
     // exchange, so it is validated here, at the one write path, rather than
     // trusted. Both bounds are what the unchecked date step in
@@ -180,6 +180,10 @@ pub async fn db_upsert(pool: &SqlitePool, exchange: &Exchange) -> Result<(), Ups
     if exchange.timezone.parse::<chrono_tz::Tz>().is_err() {
         return Err(UpsertError::UnknownTimezone(exchange.timezone.clone()));
     }
+    // The exists check decides create-vs-replace inside the write's own
+    // `BEGIN IMMEDIATE` transaction (CLAUDE.md, "Data integrity").
+    let mut tx = write_tx(pool).await?;
+    let existed = http::crud_exists::<Exchange, _>(&mut *tx, exchange.mic.clone()).await?;
     sqlx::query(
         "INSERT INTO exchanges (mic, name, country, currency, timezone, settlement_days, close_time) \
          VALUES (?, ?, ?, ?, ?, ?, ?) \
@@ -198,9 +202,14 @@ pub async fn db_upsert(pool: &SqlitePool, exchange: &Exchange) -> Result<(), Ups
     .bind(&exchange.timezone)
     .bind(exchange.settlement_days)
     .bind(&exchange.close_time)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
-    Ok(())
+    tx.commit().await?;
+    Ok(if existed {
+        Upsert::Replaced
+    } else {
+        Upsert::Created
+    })
 }
 
 /// Is `s` an `HH:MM` local time — exactly two digits, a colon, two digits, in
@@ -223,7 +232,7 @@ async fn upsert(
     State(pool): State<SqlitePool>,
     Path(mic): Path<String>,
     Json(body): Json<ExchangeBody>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<UpsertResponse<Exchange>, ApiError> {
     let exchange = Exchange {
         mic,
         name: body.name,
@@ -233,16 +242,16 @@ async fn upsert(
         settlement_days: body.settlement_days,
         close_time: body.close_time,
     };
-    db_upsert(&pool, &exchange)
-        .await
-        .map(|_| StatusCode::NO_CONTENT)
-        .map_err(ApiError::from)
+    let key = exchange.mic.clone();
+    let outcome = db_upsert(&pool, &exchange).await?;
+    http::upsert_response::<Exchange>(&pool, outcome, key).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_support::{ApiClient, test_pool};
+    use axum::http::StatusCode;
 
     fn client(pool: &SqlitePool) -> ApiClient {
         ApiClient::over(router().with_state(pool.clone()))

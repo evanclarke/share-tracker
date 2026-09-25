@@ -36,11 +36,16 @@ async fn api_manual_price_stores_the_price_with_its_provenance() {
         put_json(&app, "/closing_prices/1/2026-06-04", manual_body("62.48")).await;
     assert_eq!(
         status,
-        StatusCode::NO_CONTENT,
+        StatusCode::CREATED,
         "{}",
         String::from_utf8_lossy(&bytes)
     );
-    assert!(bytes.is_empty());
+    // A create answers 201 with the stored row, the same body POST
+    // /closing_prices/fetch returns — not a bare 204.
+    let created: serde_json::Value =
+        serde_json::from_slice(&bytes).expect("the 201 body is the created row");
+    assert_eq!(created["listing_id"], 1);
+    assert_eq!(created["price"], "62.48");
 
     let row = db_get_one(&pool, 1, ymd(2026, 6, 4))
         .await
@@ -194,7 +199,7 @@ async fn api_manual_price_accepts_a_weekend_day_for_crypto_only() {
         put_json(&app, "/closing_prices/1/2026-06-06", manual_body("91000")).await;
     assert_eq!(
         status,
-        StatusCode::NO_CONTENT,
+        StatusCode::CREATED,
         "{}",
         String::from_utf8_lossy(&bytes)
     );
@@ -343,7 +348,7 @@ async fn revising_a_manual_price_retains_the_superseded_provenance() {
         "reason": "provider serves no candle since the delisting",
     });
     let (status, _) = put_json(&app, "/closing_prices/1/2026-06-04", first).await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(status, StatusCode::CREATED);
     let stored = db_get_one(&pool, 1, ymd(2026, 6, 4))
         .await
         .unwrap()

@@ -709,9 +709,16 @@ fn creating_a_record_documented() {
     ));
     // The property that keeps row_history's trail one row's own.
     assert!(API_MD.contains("**An id-assigning endpoint never overwrites.**"));
-    // The upsert is unchanged, including the silent-replace warning.
-    assert!(API_MD.contains("**`PUT /<collection>/:id` remains the upsert it has always been**"));
-    assert!(API_MD.contains("silently replaces that row"));
+    // The upsert now reports which of the two it did, so a replace is not
+    // silent — and the status is the *only* signal (no If-Match/ETag).
+    assert!(API_MD.contains("**`PUT /<collection>/:id` reports which of the two it did.**"));
+    assert!(API_MD.contains("**`201 Created`** with the created row as JSON"));
+    assert!(API_MD.contains("**`204 No Content`** when an existing row was replaced"));
+    assert!(API_MD.contains("This status is the **only** create-vs-replace signal"));
+    assert!(API_MD.contains("there is deliberately no `If-Match`/ETag and no version column"));
+    // …and the two PUTs that deliberately report a single status instead.
+    assert!(API_MD.contains("is create-only and always answers `201` with the executed group"));
+    assert!(API_MD.contains("only ever corrects an existing row, so always answers `204`"));
     // Entities keyed on a natural or stated key are deliberately out of scope —
     // `cgt_settings` included, which is id-keyed but a CHECK-pinned singleton,
     // so "has an id" alone does not decide whether a collection POST exists.

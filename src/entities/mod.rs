@@ -575,12 +575,20 @@ mod tests {
             let created = client.put(case.put_path, &case.create).await;
             assert_eq!(
                 created.status,
-                StatusCode::NO_CONTENT,
+                StatusCode::CREATED,
                 "PUT {} did not create the row: {}",
                 case.put_path,
                 created.text()
             );
             let first: serde_json::Value = client.get_json(get_path).await;
+            // The 201 carries the created row: exactly what the following GET
+            // answers, so a client never needs the extra read.
+            assert_eq!(
+                created.json::<serde_json::Value>(),
+                first,
+                "PUT {} answered 201 with a body the GET does not match",
+                case.put_path
+            );
 
             // The read carries what the write does not own — the key in the
             // URL, and the server-owned provenance/derived columns. Since
@@ -624,5 +632,238 @@ mod tests {
                 "GET {get_path} changed after its own body was PUT back"
             );
         }
+    }
+
+    /// The success outcome a `PUT` route reports.
+    ///
+    /// The convention is `201 Created` with the created row on a fresh id and
+    /// `204 No Content` on a replace; the two exceptions are the only routes
+    /// that can answer one status, each with the reason it must.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    enum PutOutcome {
+        /// `201` with the created row on a create, `204` on a replace.
+        CreateThenReplace,
+        /// `PUT /transfers/{id}`: create-only, so always `201` with the
+        /// executed group — a bare `204` would hide the created Sell/Buy ids.
+        AlwaysCreatedGroup,
+        /// `PUT /rba_fx_rates/{id}`: a correction of an existing row, so
+        /// always `204`; it can never create one (that is the import route).
+        NeverCreates,
+    }
+
+    /// Every `PUT` route `entities::router()` serves, classified by outcome.
+    ///
+    /// A new `PUT` route fails `every_put_route_reports_create_then_replace`
+    /// until it is added here, so the create-vs-replace signal cannot be left
+    /// out by omission. `api_spec::tests::every_put_route_documents_its_outcome`
+    /// pins the same classification in the generated OpenAPI document.
+    const PUT_ROUTES: &[(&str, PutOutcome)] = &[
+        ("/exchanges/{mic}", PutOutcome::CreateThenReplace),
+        (
+            "/exchange_holidays/{mic}/{date}",
+            PutOutcome::CreateThenReplace,
+        ),
+        ("/listings/{id}", PutOutcome::CreateThenReplace),
+        ("/holding_accounts/{id}", PutOutcome::CreateThenReplace),
+        ("/trades/{id}", PutOutcome::CreateThenReplace),
+        ("/income/{id}", PutOutcome::CreateThenReplace),
+        ("/interest_income/{id}", PutOutcome::CreateThenReplace),
+        ("/investment_expenses/{id}", PutOutcome::CreateThenReplace),
+        ("/amma_statements/{id}", PutOutcome::CreateThenReplace),
+        ("/amit_adjustments/{id}", PutOutcome::CreateThenReplace),
+        ("/drp_enrolments/{id}", PutOutcome::CreateThenReplace),
+        ("/cgt_settings/{id}", PutOutcome::CreateThenReplace),
+        (
+            "/tax_year_settings/{tax_year}",
+            PutOutcome::CreateThenReplace,
+        ),
+        ("/corporate_actions/{id}", PutOutcome::CreateThenReplace),
+        ("/ess_statements/{id}", PutOutcome::CreateThenReplace),
+        ("/inheritances/{id}", PutOutcome::CreateThenReplace),
+        ("/sells/{id}", PutOutcome::CreateThenReplace),
+        (
+            "/closing_prices/{listing_id}/{price_date}",
+            PutOutcome::CreateThenReplace,
+        ),
+        ("/transfers/{id}", PutOutcome::AlwaysCreatedGroup),
+        ("/rba_fx_rates/{id}", PutOutcome::NeverCreates),
+    ];
+
+    /// Every `PUT` route on a fresh id answers `201 Created` with the created
+    /// row, and the same `PUT` again answers `204 No Content`.
+    ///
+    /// `PUT` used to answer a bare `204` either way, so a stale or mistaken
+    /// write clobbered a record with no signal that it had replaced anything.
+    /// This is the round-trip contract's status half: the body half (the `201`
+    /// equals the following `GET`, and a re-PUT of that body does not move the
+    /// row) is `what_a_get_returns_can_be_put_back_unchanged` above. It drives
+    /// [`PUT_ROUTES`] rather than a hand-picked list, so a new entity is
+    /// covered without its author having to remember, and the two exceptions
+    /// are named with the reason they differ.
+    #[tokio::test]
+    async fn every_put_route_reports_create_then_replace() {
+        /// The [`PUT_ROUTES`] template a concrete request path instantiates, so
+        /// the concrete paths the round-trip table carries can be compared with
+        /// the templates the classification table names.
+        fn template_for(path: &str) -> &'static str {
+            let segments: Vec<&str> = path.split('/').collect();
+            PUT_ROUTES
+                .iter()
+                .map(|(template, _)| *template)
+                .find(|template| {
+                    let pattern: Vec<&str> = template.split('/').collect();
+                    pattern.len() == segments.len()
+                        && pattern
+                            .iter()
+                            .zip(&segments)
+                            .all(|(p, s)| p.starts_with('{') || p == s)
+                })
+                .unwrap_or_else(|| panic!("no PUT_ROUTES template matches {path}"))
+        }
+
+        let mut checked: Vec<&str> = Vec::new();
+
+        // The sixteen upserts whose create body `round_trip_cases` supplies:
+        // PUT the same body twice — 201 then 204.
+        for case in round_trip_cases() {
+            let pool = test_pool().await;
+            seed_round_trip_fixtures(&pool).await;
+            let client = ApiClient::over(router().with_state(pool));
+
+            let created = client.put(case.put_path, &case.create).await;
+            assert_eq!(
+                created.status,
+                StatusCode::CREATED,
+                "PUT {} on a fresh id did not answer 201: {}",
+                case.put_path,
+                created.text()
+            );
+            let replaced = client.put(case.put_path, &case.create).await;
+            assert_eq!(
+                replaced.status,
+                StatusCode::NO_CONTENT,
+                "PUT {} replacing an existing row did not answer 204: {}",
+                case.put_path,
+                replaced.text()
+            );
+            checked.push(template_for(case.put_path));
+        }
+
+        // The tax-year settings upsert (no GET-one round-trip case, because it
+        // is not one of the entities the read-body round trip covers).
+        let pool = test_pool().await;
+        let client = ApiClient::over(router().with_state(pool));
+        let settings = serde_json::json!({ "ess_taxed_upfront_reduction_eligible": false });
+        assert_eq!(
+            client
+                .put("/tax_year_settings/2026", &settings)
+                .await
+                .status,
+            StatusCode::CREATED
+        );
+        assert_eq!(
+            client
+                .put("/tax_year_settings/2026", &settings)
+                .await
+                .status,
+            StatusCode::NO_CONTENT
+        );
+        checked.push("/tax_year_settings/{tax_year}");
+
+        // The manual closing price: 201 with the freshly stored row (the body
+        // POST /closing_prices/fetch answers), then 204.
+        let pool = test_pool().await;
+        crate::test_support::listing(1).insert(&pool).await;
+        let client = ApiClient::over(router().with_state(pool));
+        let price = serde_json::json!({
+            "price": "62.48",
+            "sourced_from": "asx.com.au closing report",
+            "reason": "provider serves no candle since the delisting",
+        });
+        let created = client.put("/closing_prices/1/2026-06-04", &price).await;
+        assert_eq!(
+            created.status,
+            StatusCode::CREATED,
+            "the first manual price did not answer 201: {}",
+            created.text()
+        );
+        assert_eq!(
+            created.json::<serde_json::Value>()["price"],
+            "62.48",
+            "the 201 must carry the stored row"
+        );
+        assert_eq!(
+            client
+                .put("/closing_prices/1/2026-06-04", &price)
+                .await
+                .status,
+            StatusCode::NO_CONTENT
+        );
+        checked.push("/closing_prices/{listing_id}/{price_date}");
+
+        // Exception 1: the RBA rate correction only ever replaces an existing
+        // row, so it answers 204 — and a missing id is 404, never a create.
+        let pool = test_pool().await;
+        crate::entities::rba_fx_rate::db_import_rate(
+            &pool,
+            "USD",
+            "2024-01",
+            crate::test_support::dec("1.5"),
+        )
+        .await
+        .unwrap();
+        let id: i64 = sqlx::query_scalar("SELECT id FROM rba_fx_rates")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let client = ApiClient::over(router().with_state(pool));
+        let correction = serde_json::json!({ "rate": "1.6" });
+        assert_eq!(
+            client
+                .put(format!("/rba_fx_rates/{id}"), &correction)
+                .await
+                .status,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            client.put("/rba_fx_rates/9999", &correction).await.status,
+            StatusCode::NOT_FOUND,
+            "the correction cannot create a row"
+        );
+
+        // Exception 2: `PUT /transfers/{id}` is create-only and always 201
+        // with the executed group — `transfer.rs`'s own tests cover the
+        // execution and the refusal of a re-PUT (the group's trade ids are what
+        // a 204 would hide), so only the classification is pinned here.
+
+        // The classification is exhaustive: every route exercised above is a
+        // CreateThenReplace entry, and the exceptions are the only others.
+        let create_then_replace: Vec<&str> = PUT_ROUTES
+            .iter()
+            .filter(|(_, outcome)| *outcome == PutOutcome::CreateThenReplace)
+            .map(|(path, _)| *path)
+            .collect();
+        let exceptions: Vec<&str> = PUT_ROUTES
+            .iter()
+            .filter(|(_, outcome)| *outcome != PutOutcome::CreateThenReplace)
+            .map(|(path, _)| *path)
+            .collect();
+        checked.sort_unstable();
+        let mut expected = create_then_replace.clone();
+        expected.sort_unstable();
+        assert_eq!(
+            checked, expected,
+            "every CreateThenReplace PUT route must be exercised here, and vice versa"
+        );
+        assert_eq!(
+            exceptions,
+            vec!["/transfers/{id}", "/rba_fx_rates/{id}"],
+            "the only PUT routes that report a single outcome"
+        );
+        assert_eq!(
+            PUT_ROUTES.len(),
+            20,
+            "the table must carry every PUT route entities::router serves"
+        );
     }
 }

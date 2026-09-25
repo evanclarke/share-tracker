@@ -16,11 +16,11 @@
 //! recorded year at once — one global flag would strip the reduction from years
 //! that never crossed the threshold.
 
-use crate::infra::http::{self, ApiError, CrudEntity};
+use crate::infra::db::write_tx;
+use crate::infra::http::{self, ApiError, CrudEntity, Upsert, UpsertResponse};
 use axum::{
     Json, Router,
     extract::{Path, State},
-    http::StatusCode,
     routing::get,
 };
 use serde::{Deserialize, Serialize};
@@ -91,7 +91,15 @@ pub async fn db_get(
     http::crud_get(pool, tax_year).await
 }
 
-pub async fn db_upsert(pool: &SqlitePool, settings: &TaxYearSettings) -> Result<(), sqlx::Error> {
+pub async fn db_upsert(
+    pool: &SqlitePool,
+    settings: &TaxYearSettings,
+) -> Result<Upsert, sqlx::Error> {
+    // The exists check decides create-vs-replace inside the write's own
+    // `BEGIN IMMEDIATE` transaction (CLAUDE.md, "Data integrity"), so a
+    // concurrent insert of the same year cannot race the decision.
+    let mut tx = write_tx(pool).await?;
+    let existed = http::crud_exists::<TaxYearSettings, _>(&mut *tx, settings.tax_year).await?;
     sqlx::query(
         "INSERT INTO tax_year_settings (tax_year, ess_taxed_upfront_reduction_eligible) \
          VALUES (?, ?) \
@@ -100,9 +108,14 @@ pub async fn db_upsert(pool: &SqlitePool, settings: &TaxYearSettings) -> Result<
     )
     .bind(settings.tax_year)
     .bind(settings.ess_taxed_upfront_reduction_eligible)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
-    Ok(())
+    tx.commit().await?;
+    Ok(if existed {
+        Upsert::Replaced
+    } else {
+        Upsert::Created
+    })
 }
 
 /// The financial years recorded as **not** eligible for the $1,000 taxed-upfront
@@ -130,7 +143,7 @@ async fn upsert(
     State(pool): State<SqlitePool>,
     Path(tax_year): Path<i64>,
     Json(body): Json<TaxYearSettingsBody>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<UpsertResponse<TaxYearSettings>, ApiError> {
     // A year before CGT can hold no assessable ESS discount either (the ESS
     // provisions date from 1995 at the earliest), so a settings row for one is
     // a typo, not a position. The table CHECKs it as well; this answers with
@@ -144,10 +157,8 @@ async fn upsert(
         tax_year,
         ess_taxed_upfront_reduction_eligible: body.ess_taxed_upfront_reduction_eligible,
     };
-    db_upsert(&pool, &settings)
-        .await
-        .map(|_| StatusCode::NO_CONTENT)
-        .map_err(ApiError::from)
+    let outcome = db_upsert(&pool, &settings).await?;
+    http::upsert_response::<TaxYearSettings>(&pool, outcome, tax_year).await
 }
 
 #[cfg(test)]

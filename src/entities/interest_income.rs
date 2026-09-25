@@ -14,8 +14,9 @@
 //! ATO rate for the month of `date_paid` (failing loudly when no rate
 //! exists).
 
+use crate::infra::db::write_tx;
 use crate::infra::decimal::Money;
-use crate::infra::http::{self, ApiError, CrudEntity};
+use crate::infra::http::{self, ApiError, CrudEntity, Upsert, UpsertResponse};
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -184,7 +185,11 @@ impl From<UpsertError> for ApiError {
 /// can never drift: `id = Some` is the long-standing `PUT /interest_income/:id`
 /// upsert, and `id = None` is the `POST /interest_income` create, which leaves
 /// the id to the database.
-async fn write(pool: &SqlitePool, id: Option<i64>, i: &InterestIncome) -> Result<i64, UpsertError> {
+async fn write(
+    pool: &SqlitePool,
+    id: Option<i64>,
+    i: &InterestIncome,
+) -> Result<(i64, Upsert), UpsertError> {
     for (field, value) in [
         ("amount", i.amount),
         ("tfn_withholding_tax", i.tfn_withholding_tax),
@@ -238,6 +243,13 @@ async fn write(pool: &SqlitePool, id: Option<i64>, i: &InterestIncome) -> Result
              holding_account_id  = excluded.holding_account_id",
         id,
     );
+    let mut tx = write_tx(pool).await?;
+    // The create-vs-replace decision is made inside the write's own
+    // `BEGIN IMMEDIATE` transaction (CLAUDE.md, "Data integrity").
+    let existed = match id {
+        Some(id) => http::crud_exists::<InterestIncome, _>(&mut *tx, id).await?,
+        None => false,
+    };
     let result = query
         .bind(i.date_paid)
         .bind(Money(i.amount))
@@ -247,18 +259,25 @@ async fn write(pool: &SqlitePool, id: Option<i64>, i: &InterestIncome) -> Result
         .bind(&i.currency)
         .bind(&i.source)
         .bind(i.holding_account_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
     // An id-less INSERT was given one by the database; an upsert wrote the
     // explicit one it was handed. Either way the caller gets the id the row
     // actually holds.
-    Ok(id.unwrap_or_else(|| result.last_insert_rowid()))
+    let assigned_id = id.unwrap_or_else(|| result.last_insert_rowid());
+    let outcome = if existed {
+        Upsert::Replaced
+    } else {
+        Upsert::Created
+    };
+    Ok((assigned_id, outcome))
 }
 
 /// `PUT /interest_income/:id` — the long-standing upsert on a caller-chosen id.
-pub async fn db_upsert(pool: &SqlitePool, i: &InterestIncome) -> Result<(), UpsertError> {
-    write(pool, Some(i.id), i).await?;
-    Ok(())
+pub async fn db_upsert(pool: &SqlitePool, i: &InterestIncome) -> Result<Upsert, UpsertError> {
+    let (_, outcome) = write(pool, Some(i.id), i).await?;
+    Ok(outcome)
 }
 
 /// `POST /interest_income` — create without naming an id, and return the row
@@ -267,7 +286,7 @@ pub async fn db_create(
     pool: &SqlitePool,
     i: &InterestIncome,
 ) -> Result<InterestIncome, UpsertError> {
-    let id = write(pool, None, i).await?;
+    let (id, _) = write(pool, None, i).await?;
     db_get(pool, id)
         .await?
         .ok_or(UpsertError::VanishedAfterCreate)
@@ -299,11 +318,9 @@ async fn upsert(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
     Json(body): Json<InterestIncomeBody>,
-) -> Result<StatusCode, ApiError> {
-    db_upsert(&pool, &interest_income_from_body(id, body))
-        .await
-        .map(|_| StatusCode::NO_CONTENT)
-        .map_err(ApiError::from)
+) -> Result<UpsertResponse<InterestIncome>, ApiError> {
+    let outcome = db_upsert(&pool, &interest_income_from_body(id, body)).await?;
+    http::upsert_response::<InterestIncome>(&pool, outcome, id).await
 }
 
 /// `POST /interest_income` — create the row without naming an id. The database
@@ -428,7 +445,7 @@ mod tests {
             }),
         )
         .await;
-        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(status, StatusCode::CREATED);
         let got = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(got.amount, "250.75".parse::<Decimal>().unwrap());
         assert_eq!(

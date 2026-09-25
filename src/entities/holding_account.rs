@@ -14,7 +14,7 @@
 //! reports (tax summary, net capital gain) aggregate across all of them.
 
 use crate::infra::db::write_tx;
-use crate::infra::http::{self, ApiError, CrudEntity};
+use crate::infra::http::{self, ApiError, CrudEntity, Upsert, UpsertResponse};
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -119,7 +119,7 @@ async fn write(
     pool: &SqlitePool,
     id: Option<i64>,
     account: &HoldingAccount,
-) -> Result<i64, sqlx::Error> {
+) -> Result<(i64, Upsert), sqlx::Error> {
     // A create (`id` is `None`, from `POST /holding_accounts`) omits the id
     // column altogether, so the database — not the caller — chooses the new
     // row's id (SCENARIOS U-a). The upsert branch is otherwise byte-identical,
@@ -136,15 +136,30 @@ async fn write(
          ON CONFLICT(id) DO UPDATE SET name = excluded.name",
         id,
     );
-    let result = query.bind(&account.name).execute(pool).await?;
+    let mut tx = write_tx(pool).await?;
+    // The create-vs-replace decision is made inside the write's own
+    // `BEGIN IMMEDIATE` transaction (CLAUDE.md, "Data integrity").
+    let existed = match id {
+        Some(id) => http::crud_exists::<HoldingAccount, _>(&mut *tx, id).await?,
+        None => false,
+    };
+    let result = query.bind(&account.name).execute(&mut *tx).await?;
+    tx.commit().await?;
     // An id-less INSERT was given one by the database; an upsert wrote the
     // explicit one it was handed. Either way the caller gets the id the row
     // actually holds.
-    Ok(id.unwrap_or_else(|| result.last_insert_rowid()))
+    let assigned_id = id.unwrap_or_else(|| result.last_insert_rowid());
+    let outcome = if existed {
+        Upsert::Replaced
+    } else {
+        Upsert::Created
+    };
+    Ok((assigned_id, outcome))
 }
 
-pub async fn db_upsert(pool: &SqlitePool, account: &HoldingAccount) -> Result<(), sqlx::Error> {
-    write(pool, Some(account.id), account).await.map(|_| ())
+pub async fn db_upsert(pool: &SqlitePool, account: &HoldingAccount) -> Result<Upsert, sqlx::Error> {
+    let (_, outcome) = write(pool, Some(account.id), account).await?;
+    Ok(outcome)
 }
 
 /// `POST /holding_accounts` — create without naming an id, and return the row
@@ -153,7 +168,7 @@ pub async fn db_create(
     pool: &SqlitePool,
     account: &HoldingAccount,
 ) -> Result<HoldingAccount, UpsertError> {
-    let id = write(pool, None, account).await?;
+    let (id, _) = write(pool, None, account).await?;
     db_get(pool, id)
         .await?
         .ok_or(UpsertError::VanishedAfterCreate)
@@ -226,12 +241,10 @@ async fn upsert(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
     Json(body): Json<HoldingAccountBody>,
-) -> Result<StatusCode, ApiError> {
-    db_upsert(&pool, &holding_account_from_body(id, body))
-        .await
-        .map(|_| StatusCode::NO_CONTENT)
-        // A duplicate name violates the UNIQUE constraint → 422.
-        .map_err(ApiError::from)
+) -> Result<UpsertResponse<HoldingAccount>, ApiError> {
+    // A duplicate name violates the UNIQUE constraint → 422.
+    let outcome = db_upsert(&pool, &holding_account_from_body(id, body)).await?;
+    http::upsert_response::<HoldingAccount>(&pool, outcome, id).await
 }
 
 /// `POST /holding_accounts` — create the account without naming an id. The
@@ -377,7 +390,7 @@ mod tests {
         let resp = ApiClient::over(app())
             .put_raw("/holding_accounts/2", r#"{"name":"ICE Employee Plan"}"#)
             .await;
-        assert_eq!(resp.status, StatusCode::NO_CONTENT);
+        assert_eq!(resp.status, StatusCode::CREATED);
 
         let resp = ApiClient::over(app()).get("/holding_accounts").await;
         assert_eq!(resp.status, StatusCode::OK);

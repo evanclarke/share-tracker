@@ -268,7 +268,7 @@ async fn api_a_manual_price_records_no_fetched_symbol() {
             }),
         )
         .await;
-    assert_eq!(resp.status, StatusCode::NO_CONTENT);
+    assert_eq!(resp.status, StatusCode::CREATED);
 
     let row = db_get_one(&pool, 1, ymd(2026, 6, 4))
         .await

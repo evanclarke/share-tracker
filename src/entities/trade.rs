@@ -816,7 +816,7 @@ mod tests {
             "fx_rate": "1.0"
         });
         let resp = client(&pool).put("/trades/1", &body).await;
-        assert_eq!(resp.status, StatusCode::NO_CONTENT);
+        assert_eq!(resp.status, StatusCode::CREATED);
         let trade = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(
             trade.settlement_date,
@@ -855,7 +855,7 @@ mod tests {
             "fx_rate": "1"
         });
         let resp = client(&pool).put("/trades/1", &body).await;
-        assert_eq!(resp.status, StatusCode::NO_CONTENT);
+        assert_eq!(resp.status, StatusCode::CREATED);
         let trade = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(
             trade.settlement_date,
@@ -890,7 +890,7 @@ mod tests {
         });
         let resp = client(&pool).put("/trades/1", &body).await;
         // Non-blocking: the write succeeds, the warning surfaces the gap.
-        assert_eq!(resp.status, StatusCode::NO_CONTENT);
+        assert_eq!(resp.status, StatusCode::CREATED);
         assert!(logs_contain(
             "settlement window outside seeded exchange-holiday coverage"
         ));
@@ -914,7 +914,7 @@ mod tests {
             "fx_rate": "1.0"
         });
         let resp = client(&pool).put("/trades/1", &body).await;
-        assert_eq!(resp.status, StatusCode::NO_CONTENT);
+        assert_eq!(resp.status, StatusCode::CREATED);
         assert!(!logs_contain(
             "settlement window outside seeded exchange-holiday coverage"
         ));
@@ -1007,7 +1007,7 @@ mod tests {
             "fx_rate": "1.0"
         });
         let resp = client(&pool).put("/trades/1", &body).await;
-        assert_eq!(resp.status, StatusCode::NO_CONTENT);
+        assert_eq!(resp.status, StatusCode::CREATED);
         let trade = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(
             trade.settlement_date,
@@ -1033,7 +1033,7 @@ mod tests {
             "fx_rate": "1.0"
         });
         let resp = client(&pool).put("/trades/1", &body).await;
-        assert_eq!(resp.status, StatusCode::NO_CONTENT);
+        assert_eq!(resp.status, StatusCode::CREATED);
         let trade = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(
             trade.settlement_date,
@@ -1732,7 +1732,7 @@ mod tests {
 
         // A new, free id.
         let resp = client(&pool).put("/trades/7", &body("5")).await;
-        assert_eq!(resp.status, StatusCode::NO_CONTENT);
+        assert_eq!(resp.status, StatusCode::CREATED);
         let created = db_get(&pool, 7).await.unwrap().unwrap();
         assert_eq!(created.trade_type, TradeType::Buy);
         assert_eq!(created.quantity, Decimal::from(5));
@@ -1756,7 +1756,7 @@ mod tests {
             "fx_rate": "1.0"
         });
         let resp = client(&pool).put("/trades/1", &body).await;
-        assert_eq!(resp.status, StatusCode::NO_CONTENT);
+        assert_eq!(resp.status, StatusCode::CREATED);
         let trade = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(
             trade.settlement_date,
@@ -1903,7 +1903,7 @@ mod tests {
             "fx_rate": "1.0"
         });
         let resp = client(&pool).put("/trades/1", &body).await;
-        assert_eq!(resp.status, StatusCode::NO_CONTENT);
+        assert_eq!(resp.status, StatusCode::CREATED);
         let resp = client(&pool).get("/trades/1").await;
         let t: Trade = resp.json();
         assert_eq!(t.average_price, "99.9999999999".parse::<Decimal>().unwrap());
@@ -1993,7 +1993,7 @@ mod tests {
         fine["quantity"] = "0.00000001".into();
         fine["settlement_date"] = "2024-01-15".into();
         let (status, _) = put_trade_json(&pool, 1, fine).await;
-        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(status, StatusCode::CREATED);
     }
 
     /// A trade dated before the start of CGT (20 September 1985) is rejected
@@ -2032,7 +2032,7 @@ mod tests {
         first_cgt_day["date"] = "1985-09-20".into();
         first_cgt_day["settlement_date"] = "1985-09-20".into();
         let (status, _) = put_trade_json(&pool, 1, first_cgt_day).await;
-        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(status, StatusCode::CREATED);
     }
 
     /// SCENARIOS S-10: a trade dated after the server's current date is
@@ -2087,7 +2087,7 @@ mod tests {
         boundary["date"] = today.to_string().into();
         boundary["listing_id"] = 2.into();
         let (status, detail) = put_trade_json(&pool, 1, boundary).await;
-        assert_eq!(status, StatusCode::NO_CONTENT, "detail: {detail}");
+        assert_eq!(status, StatusCode::CREATED, "detail: {detail}");
         let stored = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(stored.date, today);
 
@@ -2104,7 +2104,7 @@ mod tests {
         let mut settled = base;
         settled["date"] = last_open.to_string().into();
         let (status, detail) = put_trade_json(&pool, 2, settled).await;
-        assert_eq!(status, StatusCode::NO_CONTENT, "detail: {detail}");
+        assert_eq!(status, StatusCode::CREATED, "detail: {detail}");
         let stored = db_get(&pool, 2).await.unwrap().unwrap();
         assert!(
             stored.settlement_date > today,
@@ -2165,7 +2165,7 @@ mod tests {
 
         // The Monday between them is an ordinary trading day.
         let (status, _) = put_trade_json(&pool, 1, base).await;
-        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(status, StatusCode::CREATED);
     }
 
     /// SCENARIOS S-08: the same Saturday is accepted for an exchange-less
@@ -2194,7 +2194,7 @@ mod tests {
             "fx_rate": "1"
         });
         let (status, detail) = put_trade_json(&pool, 1, body).await;
-        assert_eq!(status, StatusCode::NO_CONTENT, "{detail}");
+        assert_eq!(status, StatusCode::CREATED, "{detail}");
         let stored = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(stored.date, ymd(2024, 1, 13));
         // Same-day settlement, unchanged by this rule.
@@ -2224,7 +2224,7 @@ mod tests {
             "fx_rate": "1"
         });
         let (status, detail) = put_trade_json(&pool, 1, base.clone()).await;
-        assert_eq!(status, StatusCode::NO_CONTENT, "{detail}");
+        assert_eq!(status, StatusCode::CREATED, "{detail}");
 
         // The weekend either side of it still is: Saturday 2018-12-22.
         let mut saturday = base;
@@ -2270,7 +2270,7 @@ mod tests {
             "fx_rate": "1"
         });
         let (status, _) = put_trade_json(&pool, 1, body).await;
-        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(status, StatusCode::CREATED);
         let t = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(t.brokerage, d("9.05"));
         assert_eq!(t.gst_on_brokerage, d("0.90"));
@@ -2312,7 +2312,7 @@ mod tests {
             "fx_rate": "1"
         });
         let (status, _) = put_trade_json(&pool, 2, body).await;
-        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(status, StatusCode::CREATED);
         let t = db_get(&pool, 2).await.unwrap().unwrap();
         assert_eq!(t.brokerage, d("9.95"));
         assert_eq!(t.gst_on_brokerage, d("0.995"));
@@ -2354,7 +2354,7 @@ mod tests {
             "statement_total": "1000.99"
         });
         let (status, _) = put_trade_json(&pool, 1, body).await;
-        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(status, StatusCode::CREATED);
 
         // Two full GET → PUT-verbatim passes: the stored split never moves.
         for pass in 1..=2 {
@@ -2394,7 +2394,7 @@ mod tests {
             "fx_rate": "1"
         });
         let (status, _) = put_trade_json(&pool, 2, body).await;
-        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(status, StatusCode::CREATED);
         let (_, seen) = get_trade_raw(&pool, 2).await;
         assert_eq!(seen.brokerage, d("9.95"));
         assert_eq!(seen.gst_on_brokerage, d("0.995"));
@@ -2423,7 +2423,7 @@ mod tests {
             "statement_total": "1009.95"
         });
         let (status, _) = put_trade_json(&pool, 1, body.clone()).await;
-        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(status, StatusCode::CREATED);
         assert_eq!(
             db_get(&pool, 1).await.unwrap().unwrap().statement_total,
             Some(d("1009.95"))
@@ -2484,21 +2484,21 @@ mod tests {
         // Trade 19: HNDQ 1 Mar 2024 contract note 1404967.
         let hndq = buy("1302", "37.585914", "8.64", "0.86", "48946.36");
         let (status, _) = put_trade_json(&pool, 1, hndq).await;
-        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(status, StatusCode::CREATED);
         // Trade 16: VDHG 8 Apr 2026 contract note 4518597 (…54975 → .55).
         let vdhg = buy("562", "73.259875", "8.64", "0.86", "41181.55");
         let (status, _) = put_trade_json(&pool, 2, vdhg).await;
-        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(status, StatusCode::CREATED);
         // Trade 21: ETH 22 Sep 2021 card purchase (…0080… → 100.00).
         let eth = buy("0.02413796", "3983.77", "3.84", "0", "100.00");
         let (status, _) = put_trade_json(&pool, 3, eth).await;
-        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(status, StatusCode::CREATED);
 
         // An exact midpoint rounds half away from zero (100.005 → 100.01),
         // not banker's-to-even (100.00).
         let mid = buy("1", "100.005", "0", "0", "100.01");
         let (status, _) = put_trade_json(&pool, 4, mid).await;
-        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(status, StatusCode::CREATED);
         let even = buy("1", "100.005", "0", "0", "100.00");
         let (status, _) = put_trade_json(&pool, 5, even).await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
@@ -2574,7 +2574,7 @@ mod tests {
             }),
         )
         .await;
-        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(status, StatusCode::CREATED);
     }
 
     /// The parcel side of the return-of-capital currency invariant (SCENARIOS
@@ -2642,7 +2642,7 @@ mod tests {
         // A parcel acquired *after* the payment is fine: it was never entitled
         // to it, so nothing ever nets the two currencies.
         let (status, _) = put_trade_json(&pool, 2, buy("2024-06-03")).await;
-        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(status, StatusCode::CREATED);
     }
 
     /// A trade is recorded in its listing's own currency (SCENARIOS M-08).
@@ -2675,7 +2675,7 @@ mod tests {
 
         // In the listing's own currency it goes through.
         let (status, _) = put_trade_json(&pool, 1, buy("USD")).await;
-        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(status, StatusCode::CREATED);
 
         // A Sell of the same parcel meets the same rule on its own path.
         let sell = |currency: &str| {
@@ -2698,7 +2698,7 @@ mod tests {
         assert!(db_get(&pool, 2).await.unwrap().is_none(), "nothing written");
         full.put("/sells/2", &sell("USD"))
             .await
-            .expect_status(StatusCode::NO_CONTENT);
+            .expect_status(StatusCode::CREATED);
     }
 
     /// The boolean column is CHECK-constrained to 0/1 in the database.
@@ -2796,7 +2796,7 @@ mod tests {
             }),
         )
         .await;
-        assert_eq!(resp.status, StatusCode::NO_CONTENT);
+        assert_eq!(resp.status, StatusCode::CREATED);
         let got = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(got.spot_fx_rate, Some("0.6543".parse().unwrap()));
 
@@ -3083,7 +3083,7 @@ mod tests {
             let sent = trade_body_raw(&format!("\"{quantity}\""), "\"1\"");
             let response = client(&pool).put_raw(&path, &sent).await;
             let (status, body) = response.status_and_body();
-            assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+            assert_eq!(status, StatusCode::CREATED, "{body}");
 
             // Straight off the column, so nothing on the read path can round it.
             let stored: String = sqlx::query_scalar("SELECT quantity FROM trades WHERE id = ?")
@@ -3360,7 +3360,7 @@ mod tests {
         client(&pool)
             .put("/trades/900", &nil_priced_buy("79000000000000000000000000"))
             .await
-            .expect_status(StatusCode::NO_CONTENT);
+            .expect_status(StatusCode::CREATED);
 
         let client = ApiClient::full(&pool);
         let rows: Vec<serde_json::Value> = client.get_json("/portfolio/open-parcels").await;

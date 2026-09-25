@@ -15,7 +15,7 @@
 use crate::entities::trade::{self, Trade, TradeType};
 use crate::infra::db::write_tx;
 use crate::infra::decimal::{Money, OptMoney};
-use crate::infra::http::ApiError;
+use crate::infra::http::{self, ApiError, Upsert, UpsertResponse};
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -479,8 +479,20 @@ pub async fn db_delete_sell(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome,
 /// database. Returns the id the row actually holds — `upsert_sell_in_tx` reads
 /// it straight off the INSERT it ran, so the create writes its allocations
 /// against the id the database assigned rather than a guessed one.
-async fn write(pool: &SqlitePool, id: Option<i64>, body: &SellBody) -> Result<i64, SellError> {
+async fn write(
+    pool: &SqlitePool,
+    id: Option<i64>,
+    body: &SellBody,
+) -> Result<(i64, Upsert), SellError> {
     let mut tx = write_tx(pool).await?;
+
+    // The create-vs-replace decision is made inside the write's own
+    // `BEGIN IMMEDIATE` transaction (CLAUDE.md, "Data integrity"). A Sell is a
+    // `trades` row, so the check is against that table.
+    let existed = match id {
+        Some(id) => http::crud_exists::<Trade, _>(&mut *tx, id).await?,
+        None => false,
+    };
 
     // Recorded with the date, as on the trade path: a supplied value is the
     // taxpayer's assertion and is never rewritten; a computed one is
@@ -583,7 +595,12 @@ async fn write(pool: &SqlitePool, id: Option<i64>, body: &SellBody) -> Result<i6
     }
 
     tx.commit().await?;
-    Ok(written)
+    let outcome = if existed {
+        Upsert::Replaced
+    } else {
+        Upsert::Created
+    };
+    Ok((written, outcome))
 }
 
 /// `PUT /sells/:id` — the long-standing upsert on a caller-chosen id: replaces
@@ -592,9 +609,13 @@ async fn write(pool: &SqlitePool, id: Option<i64>, body: &SellBody) -> Result<i6
 /// sell quantity and every parcel is a valid, not-over-allocated Buy/DRP. A
 /// buy-back participation Sell is immutable here — delete it via
 /// `DELETE /sells/:id` and re-participate instead.
-pub async fn db_upsert_sell(pool: &SqlitePool, id: i64, body: &SellBody) -> Result<(), SellError> {
-    write(pool, Some(id), body).await?;
-    Ok(())
+pub async fn db_upsert_sell(
+    pool: &SqlitePool,
+    id: i64,
+    body: &SellBody,
+) -> Result<Upsert, SellError> {
+    let (_, outcome) = write(pool, Some(id), body).await?;
+    Ok(outcome)
 }
 
 /// `POST /sells` — create without naming an id. The database assigns the
@@ -604,7 +625,7 @@ pub async fn db_upsert_sell(pool: &SqlitePool, id: i64, body: &SellBody) -> Resu
 /// id, all in the one transaction. The created row is returned so the caller
 /// can act on the id at once.
 pub async fn db_create_sell(pool: &SqlitePool, body: &SellBody) -> Result<Trade, SellError> {
-    let id = write(pool, None, body).await?;
+    let (id, _) = write(pool, None, body).await?;
     trade::db_get(pool, id)
         .await?
         .ok_or(SellError::VanishedAfterCreate)
@@ -959,9 +980,9 @@ async fn upsert(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
     Json(body): Json<SellBody>,
-) -> Result<StatusCode, ApiError> {
-    db_upsert_sell(&pool, id, &body).await?;
-    Ok(StatusCode::NO_CONTENT)
+) -> Result<UpsertResponse<Trade>, ApiError> {
+    let outcome = db_upsert_sell(&pool, id, &body).await?;
+    http::upsert_response::<Trade>(&pool, outcome, id).await
 }
 
 /// `POST /sells` — create the Sell without naming an id, so the database
@@ -1681,7 +1702,7 @@ mod tests {
             "allocations": [ { "purchase_trade_id": 1, "quantity_allocated": "100" } ]
         });
         let resp = client(&pool).put("/sells/2", &body).await;
-        assert_eq!(resp.status, StatusCode::NO_CONTENT);
+        assert_eq!(resp.status, StatusCode::CREATED);
     }
 
     #[tokio::test]
@@ -1918,7 +1939,7 @@ mod tests {
             "allocations": [ { "purchase_trade_id": 1, "quantity_allocated": "100" } ]
         });
         let (status, _) = put_sell_json(&pool, 2, body).await;
-        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(status, StatusCode::CREATED);
 
         // Two full read → re-PUT passes: the stored split never moves.
         for pass in 1..=2 {
@@ -2199,7 +2220,7 @@ mod tests {
         boundary["allocations"] =
             serde_json::json!([ { "purchase_trade_id": 3, "quantity_allocated": "100" } ]);
         let (status, detail) = put_sell_json(&pool, 2, boundary).await;
-        assert_eq!(status, StatusCode::NO_CONTENT, "detail: {detail}");
+        assert_eq!(status, StatusCode::CREATED, "detail: {detail}");
         let sell = trade::db_get(&pool, 2).await.unwrap().unwrap();
         assert_eq!(sell.date, today);
         assert!(sell.settlement_date >= today);
@@ -2256,7 +2277,7 @@ mod tests {
 
         // The ordinary Monday the fixtures use is accepted.
         let (status, detail) = put_sell_json(&pool, 2, base).await;
-        assert_eq!(status, StatusCode::NO_CONTENT, "detail: {detail}");
+        assert_eq!(status, StatusCode::CREATED, "detail: {detail}");
         assert_eq!(count_allocations(&pool, 2).await, 1);
     }
 
@@ -2285,7 +2306,7 @@ mod tests {
             "allocations": [ { "purchase_trade_id": 1, "quantity_allocated": "100" } ]
         });
         let (status, detail) = put_sell_json(&pool, 2, body).await;
-        assert_eq!(status, StatusCode::NO_CONTENT, "detail: {detail}");
+        assert_eq!(status, StatusCode::CREATED, "detail: {detail}");
         let sell = trade::db_get(&pool, 2).await.unwrap().unwrap();
         assert_eq!(sell.date, NaiveDate::from_ymd_opt(2024, 6, 1).unwrap());
     }
@@ -2329,7 +2350,7 @@ mod tests {
 
         // …and a USD Sell persists it.
         let resp = put(pool.clone(), "USD").await;
-        assert_eq!(resp.status, StatusCode::NO_CONTENT);
+        assert_eq!(resp.status, StatusCode::CREATED);
         let got = trade::db_get(&pool, 2).await.unwrap().unwrap();
         assert_eq!(got.spot_fx_rate, Some("0.6543".parse().unwrap()));
     }
@@ -2710,7 +2731,7 @@ mod tests {
             for racer in racers {
                 let (id, outcome) = racer.await.expect("no racer panics");
                 match outcome {
-                    Ok(()) => {
+                    Ok(_) => {
                         assert!(
                             winner.replace(id).is_none(),
                             "round {round}: two Sells both took the parcel's last units"
@@ -3061,7 +3082,7 @@ mod tests {
         insert_listing(&pool, 1).await;
         insert_buy(&pool, 1, 1, Decimal::from(100)).await;
         let (status, _) = put_sell_json(&pool, 2, sell_over_parcel_json()).await;
-        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(status, StatusCode::CREATED);
 
         // Same id again, at a different price: the edit lands.
         let mut edited = sell_over_parcel_json();
@@ -3086,7 +3107,7 @@ mod tests {
         insert_buy(&pool, 1, 1, Decimal::from(100)).await;
 
         let (status, detail) = put_sell_json(&pool, 77, sell_over_parcel_json()).await;
-        assert_eq!(status, StatusCode::NO_CONTENT, "{detail}");
+        assert_eq!(status, StatusCode::CREATED, "{detail}");
         assert_eq!(stored_trade_type(&pool, 77).await, TradeType::Sell);
         assert_eq!(count_allocations(&pool, 77).await, 1);
     }

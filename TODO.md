@@ -24,7 +24,7 @@ Improvements that change behaviour or add features, called out by the same audit
 fixing drift: they make the API safer and cheaper to build against, for the web UI and machine
 clients alike. Each is closed by the tests named.
 
-- [ ] Non-clobbering writes (B3). `PUT /collection/:id` silently replaces an existing row with no
+- [x] Non-clobbering writes (B3). `PUT /collection/:id` silently replaces an existing row with no
       body and no created-vs-replaced signal, and there is no version/`If-Match`, so a stale or
       mistaken write clobbers a record with no confirmation. Make the outcome explicit and/or add
       optimistic concurrency: answer `201`+row on create and `204` (or a body) on update, or add a

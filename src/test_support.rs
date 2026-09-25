@@ -409,7 +409,8 @@ impl ApiClient {
     }
 
     /// PUT a JSON body and return the status alone (an entity upsert answers
-    /// 204 with no body); the rejection tests use [`Self::put`] instead.
+    /// `201` when it created the row and `204` when it replaced one); the
+    /// rejection tests use [`Self::put`] instead.
     pub async fn put_json(
         &self,
         path: impl AsRef<str>,
@@ -418,11 +419,18 @@ impl ApiClient {
         self.put(path, body).await.status
     }
 
-    /// PUT a JSON body and require the 204 an entity upsert answers.
+    /// PUT a JSON body and require that the upsert succeeded — the `204 No
+    /// Content` it answers when it replaced a row, or the `201 Created` (with
+    /// the created row as its body) it answers when the id was free. A `200`
+    /// or `404` still fails, and a rejection test that needs a specific status
+    /// uses [`Self::put`] instead.
     pub async fn put_ok(&self, path: impl AsRef<str>, body: &impl serde::Serialize) {
-        self.put(path, body)
-            .await
-            .expect_status(StatusCode::NO_CONTENT);
+        let path = path.as_ref().to_string();
+        let status = self.put(&path, body).await.status;
+        assert!(
+            status == StatusCode::NO_CONTENT || status == StatusCode::CREATED,
+            "PUT {path} answered {status}, expected 201 Created or 204 No Content"
+        );
     }
 
     /// POST a JSON body, require 200, decode the JSON body.
@@ -1487,7 +1495,12 @@ mod tests {
         let pool = test_pool().await;
         let client = ApiClient::full(&pool);
 
-        // PUT reports the upsert status; the body reached the handler.
+        // PUT reports the upsert outcome: 201 with the created row when the id
+        // was free, 204 when an existing row was replaced.
+        let created = client.put("/exchanges/XTES", &xtes()).await;
+        assert_eq!(created.status, StatusCode::CREATED);
+        let body: Exchange = created.json();
+        assert_eq!(body.name, "Test Exchange");
         assert_eq!(
             client.put_json("/exchanges/XTES", &xtes()).await,
             StatusCode::NO_CONTENT

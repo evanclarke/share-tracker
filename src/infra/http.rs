@@ -165,6 +165,93 @@ fn deleted_with_body(found: bool, body: String) -> Result<StatusCode, ApiError> 
     }
 }
 
+/// The outcome a `PUT` upsert reports: whether the id it addressed already
+/// held a row (and was replaced) or did not (and was created).
+///
+/// A `PUT /<collection>/{id}` used to answer a bare `204` either way, so a
+/// stale or mistaken write clobbered a record with no signal that it had
+/// replaced anything. Every entity's `db_upsert` now returns this — decided by
+/// [`crud_exists`] inside its own write transaction — and every `PUT` handler
+/// renders it through [`upsert_response`]: `201 Created` carrying the freshly
+/// read row when the id was free, `204 No Content` when an existing row was
+/// replaced.
+///
+/// The one `PUT` that deliberately does not use this is `PUT /transfers/{id}`,
+/// which always answers `201` with the executed group: a transfer is
+/// create-only and a `204` would hide the new trade ids (see docs/API.md).
+/// `PUT /rba_fx_rates/{id}` is a correction of an existing row and so can never
+/// create — it keeps its own `204` — and
+/// `PUT /closing_prices/{listing_id}/{price_date}` keys on a natural key rather
+/// than a `CrudEntity` id, so it renders through [`upsert_response_of`] after
+/// reading the stored row itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Upsert {
+    /// The id held no row; the write inserted one.
+    Created,
+    /// The id already held a row; the write replaced it.
+    Replaced,
+}
+
+/// Turn a `PUT` upsert's `(outcome, key)` into its response: `201 Created`
+/// with the freshly read row when the write created it, `204 No Content` when
+/// it replaced one.
+///
+/// The row is read back with [`crud_get`] after the write transaction has
+/// committed, so the `201` body is exactly what a following `GET` answers —
+/// including any server-assigned or derived column the request body did not
+/// carry. A create whose row cannot be read back is an internal fault (the
+/// write committed, so the read should always find it), never a silent empty
+/// `201`.
+pub async fn upsert_response<E: CrudEntity>(
+    pool: &SqlitePool,
+    outcome: Upsert,
+    key: E::Key,
+) -> Result<UpsertResponse<E>, ApiError> {
+    if outcome == Upsert::Replaced {
+        return Ok(UpsertResponse::Replaced);
+    }
+    let row = crud_get::<E, _>(pool, key).await.map_err(ApiError::from)?;
+    upsert_response_of(outcome, row.map(E::present))
+}
+
+/// The `PUT` response for an upsert keyed on a natural key rather than a
+/// `CrudEntity` id (`PUT /exchange_holidays/{mic}/{date}` and
+/// `PUT /closing_prices/{listing_id}/{price_date}`), where the caller reads the
+/// row itself — `201` carrying `row` on a create, `204` on a replace. A create
+/// with no row to show is an internal fault, the same as a `crud_get` that
+/// found nothing after its own write.
+pub fn upsert_response_of<E: serde::Serialize>(
+    outcome: Upsert,
+    row: Option<E>,
+) -> Result<UpsertResponse<E>, ApiError> {
+    match (outcome, row) {
+        (Upsert::Replaced, _) => Ok(UpsertResponse::Replaced),
+        (Upsert::Created, Some(row)) => Ok(UpsertResponse::Created(row)),
+        (Upsert::Created, None) => Err(ApiError::internal(
+            "the row a PUT just created could not be read back",
+        )),
+    }
+}
+
+/// A `PUT` upsert's rendered response: `201 Created` carrying the created row,
+/// or `204 No Content` when an existing row was replaced. Returned by
+/// [`upsert_response`]/[`upsert_response_of`] so a handler stays
+/// `Result<_, ApiError>` while still choosing between the two statuses.
+#[derive(Debug)]
+pub enum UpsertResponse<E> {
+    Created(E),
+    Replaced,
+}
+
+impl<E: serde::Serialize> IntoResponse for UpsertResponse<E> {
+    fn into_response(self) -> Response {
+        match self {
+            UpsertResponse::Created(row) => (StatusCode::CREATED, Json(row)).into_response(),
+            UpsertResponse::Replaced => StatusCode::NO_CONTENT.into_response(),
+        }
+    }
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         match self {
@@ -290,6 +377,15 @@ pub trait CrudEntity:
     fn missing_row_body(_key: &Self::Key) -> String {
         format!("no {} with that id", Self::NOUN)
     }
+
+    /// The presentation a row gets before it goes on the wire, applied by the
+    /// `201 Created` body [`upsert_response`] reads back so it is exactly what
+    /// the entity's own GET answers. Identity by default; a `Trade` overrides
+    /// it to recombine its GST-inclusive brokerage (`Trade::present`), the
+    /// same transformation its hand-written list/get handlers apply.
+    fn present(row: Self) -> Self {
+        row
+    }
 }
 
 /// Every row of `E`'s table, in `E::ORDER_BY` order.
@@ -324,6 +420,32 @@ where
     .bind(key)
     .fetch_optional(executor)
     .await
+}
+
+/// Whether `E`'s table already holds the row `key` addresses.
+///
+/// This is the read that decides a `PUT`'s create-vs-replace outcome, and it
+/// must run **inside the caller's write transaction**: a check outside it would
+/// race (two `PUT`s of the same fresh id would both see no row, then one would
+/// overwrite the other while still claiming to have created it), and
+/// CLAUDE.md's Data-integrity rule puts the decision in the same
+/// `BEGIN IMMEDIATE` transaction as the write. Executor-generic so it composes
+/// onto a `write_tx` or a pool exactly as [`crud_get`] does — the entity's
+/// `db_upsert` calls it on `&mut *tx` between the `BEGIN` and the INSERT.
+pub async fn crud_exists<'e, E, X>(executor: X, key: E::Key) -> Result<bool, sqlx::Error>
+where
+    E: CrudEntity,
+    X: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    let found: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT EXISTS(SELECT 1 FROM {} WHERE {} = ?)",
+        E::TABLE,
+        E::KEY_COLUMN
+    )))
+    .bind(key)
+    .fetch_one(executor)
+    .await?;
+    Ok(found != 0)
 }
 
 /// Delete one row of `E`'s table by primary key; `true` if a row went.

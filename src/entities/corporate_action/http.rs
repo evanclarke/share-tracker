@@ -2,7 +2,7 @@
 
 use super::db::{db_create, db_delete, db_upsert};
 use super::model::{CorporateAction, CorporateActionBody};
-use crate::infra::http::{self, ApiError};
+use crate::infra::http::{self, ApiError, UpsertResponse};
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -56,9 +56,9 @@ async fn upsert(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
     Json(body): Json<CorporateActionBody>,
-) -> Result<StatusCode, ApiError> {
-    db_upsert(&pool, &corporate_action_from_body(id, body)?).await?;
-    Ok(StatusCode::NO_CONTENT)
+) -> Result<UpsertResponse<CorporateAction>, ApiError> {
+    let outcome = db_upsert(&pool, &corporate_action_from_body(id, body)?).await?;
+    http::upsert_response::<CorporateAction>(&pool, outcome, id).await
 }
 
 /// `POST /corporate_actions` — create the action without naming an id. The

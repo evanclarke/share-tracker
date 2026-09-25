@@ -7,7 +7,7 @@ use super::{
     DeleteOutcome, Trade, TradeBody, TradeType, db_create, db_delete, db_get, db_list,
     db_upsert_resolving_settlement, model::SettlementDateSource, resolve_brokerage,
 };
-use crate::infra::http::ApiError;
+use crate::infra::http::{self, ApiError, UpsertResponse};
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -120,11 +120,11 @@ async fn upsert(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
     Json(body): Json<TradeBody>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<UpsertResponse<Trade>, ApiError> {
     let supplied = body.settlement_date;
     let trade = trade_from_body(id, body)?;
-    db_upsert_resolving_settlement(&pool, &trade, supplied).await?;
-    Ok(StatusCode::NO_CONTENT)
+    let outcome = db_upsert_resolving_settlement(&pool, &trade, supplied).await?;
+    http::upsert_response::<Trade>(&pool, outcome, id).await
 }
 
 /// `POST /trades` — create the row without naming an id. The database assigns

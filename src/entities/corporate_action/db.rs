@@ -10,7 +10,7 @@ use super::adjustments::{
 use super::model::{ActionKind, CorporateAction};
 use crate::infra::db::write_tx;
 use crate::infra::decimal::{OptMoney, parse_dec};
-use crate::infra::http::{self, ApiError, CrudEntity};
+use crate::infra::http::{self, ApiError, CrudEntity, Upsert};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use sqlx::{Row, SqlitePool};
@@ -467,7 +467,7 @@ async fn write(
     pool: &SqlitePool,
     id: Option<i64>,
     action: &CorporateAction,
-) -> Result<i64, WriteError> {
+) -> Result<(i64, Upsert), WriteError> {
     // Spread the variant's payload over the per-type columns; the other
     // types' columns are NULL (the table CHECKs require exactly this shape).
     #[derive(Default)]
@@ -594,6 +594,12 @@ async fn write(
     }
 
     let mut tx = write_tx(pool).await?;
+    // The create-vs-replace decision is made inside the write's own
+    // `BEGIN IMMEDIATE` transaction (CLAUDE.md, "Data integrity").
+    let existed = match id {
+        Some(id) => http::crud_exists::<CorporateAction, _>(&mut *tx, id).await?,
+        None => false,
+    };
 
     // An action that exercise, participation, exchange, or demerge trades
     // were validated against is frozen: editing its terms (or re-typing it)
@@ -906,14 +912,19 @@ async fn write(
     }
 
     tx.commit().await?;
-    Ok(assigned_id)
+    let outcome = if existed {
+        Upsert::Replaced
+    } else {
+        Upsert::Created
+    };
+    Ok((assigned_id, outcome))
 }
 
 /// `PUT /corporate_actions/:id` — the long-standing upsert on a caller-chosen
 /// id.
-pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<(), WriteError> {
-    write(pool, Some(action.id), action).await?;
-    Ok(())
+pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<Upsert, WriteError> {
+    let (_, outcome) = write(pool, Some(action.id), action).await?;
+    Ok(outcome)
 }
 
 /// `POST /corporate_actions` — create the action without naming an id, and
@@ -922,7 +933,7 @@ pub async fn db_create(
     pool: &SqlitePool,
     action: &CorporateAction,
 ) -> Result<CorporateAction, WriteError> {
-    let id = write(pool, None, action).await?;
+    let (id, _) = write(pool, None, action).await?;
     db_get_tx(pool, id)
         .await?
         .ok_or(WriteError::VanishedAfterCreate)

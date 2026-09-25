@@ -162,6 +162,8 @@ pub use db::{DeleteError, WriteError, db_delete, db_get, db_list, db_upsert};
 pub use adjustments::split_ratio;
 
 #[cfg(test)]
+use crate::infra::http::Upsert;
+#[cfg(test)]
 use axum::http::StatusCode;
 #[cfg(test)]
 use chrono::NaiveDate;
@@ -1592,7 +1594,7 @@ mod tests {
             "currency": "AUD",
         });
         let resp = client(&pool).put("/corporate_actions/1", &body).await;
-        assert_eq!(resp.status, StatusCode::NO_CONTENT);
+        assert_eq!(resp.status, StatusCode::CREATED);
 
         let resp = client(&pool).get("/corporate_actions/1").await;
         assert_eq!(resp.status, StatusCode::OK);
@@ -1627,7 +1629,7 @@ mod tests {
                 "split_new_units": "2",
                 "split_old_units": "1",
             }),
-            StatusCode::NO_CONTENT,
+            StatusCode::CREATED,
         )
         .await;
         let got = db_get(&pool, 1).await.unwrap().unwrap();
@@ -1653,7 +1655,7 @@ mod tests {
                 "bonus_units": "1",
                 "bonus_held_units": "10",
             }),
-            StatusCode::NO_CONTENT,
+            StatusCode::CREATED,
         )
         .await;
         let got = db_get(&pool, 1).await.unwrap().unwrap();
@@ -1682,7 +1684,7 @@ mod tests {
                 "currency": "AUD",
                 "renounceable": true,
             }),
-            StatusCode::NO_CONTENT,
+            StatusCode::CREATED,
         )
         .await;
         let got = db_get(&pool, 1).await.unwrap().unwrap();
@@ -1718,7 +1720,7 @@ mod tests {
                 "currency": "AUD",
                 "renounceable": false,
             }),
-            StatusCode::NO_CONTENT,
+            StatusCode::CREATED,
         )
         .await;
         let got = db_get(&pool, 1).await.unwrap().unwrap();
@@ -1851,7 +1853,7 @@ mod tests {
                 "buyback_market_value": "10.20",
                 "currency": "AUD",
             }),
-            StatusCode::NO_CONTENT,
+            StatusCode::CREATED,
         )
         .await;
         let got = db_get(&pool, 1).await.unwrap().unwrap();
@@ -1877,6 +1879,7 @@ mod tests {
                 "buyback_price": "5.00",
                 "currency": "AUD",
             }),
+            // A second PUT to the same id replaces the stored row.
             StatusCode::NO_CONTENT,
         )
         .await;
@@ -2016,7 +2019,7 @@ mod tests {
                 "scrip_new_units": "2",
                 "scrip_old_units": "1",
             }),
-            StatusCode::NO_CONTENT,
+            StatusCode::CREATED,
         )
         .await;
         let got = db_get(&pool, 1).await.unwrap().unwrap();
@@ -2048,7 +2051,7 @@ mod tests {
                 "scrip_cash_per_unit": "10.005", "scrip_market_value": "20.105",
                 "scrip_cash_currency": "AUD",
             }),
-            StatusCode::NO_CONTENT,
+            StatusCode::CREATED,
         )
         .await;
         let got = db_get(&pool, 1).await.unwrap().unwrap();
@@ -2194,7 +2197,7 @@ mod tests {
                 "demerger_held_units": "5",
                 "demerger_cost_base_pct": "5.063",
             }),
-            StatusCode::NO_CONTENT,
+            StatusCode::CREATED,
         )
         .await;
         let got = db_get(&pool, 1).await.unwrap().unwrap();
@@ -2320,7 +2323,7 @@ mod tests {
             "demerger_close_sourced_from": "  nyse.com daily close  ",
             "demerger_close_reason": "the provider adjusts the pre-demerger series",
         });
-        api_put_expecting(&pool, complete.clone(), StatusCode::NO_CONTENT).await;
+        api_put_expecting(&pool, complete.clone(), StatusCode::CREATED).await;
         assert_eq!(
             db_get(&pool, 1).await.unwrap().unwrap().kind,
             ActionKind::Demerger {
@@ -2437,7 +2440,7 @@ mod tests {
                 "date": "2025-03-31",
                 "worthless_event": "G3Declaration",
             }),
-            StatusCode::NO_CONTENT,
+            StatusCode::CREATED,
         )
         .await;
         let got = db_get(&pool, 1).await.unwrap().unwrap();
@@ -2518,7 +2521,7 @@ mod tests {
                 "currency": "AUD",
                 "record_date": "2025-02-10",
             }),
-            StatusCode::NO_CONTENT,
+            StatusCode::CREATED,
         )
         .await;
 
@@ -2581,7 +2584,7 @@ mod tests {
                 "currency": "AUD",
                 "record_date": "2025-03-01",
             }),
-            StatusCode::NO_CONTENT,
+            StatusCode::CREATED,
         )
         .await;
     }
@@ -2723,7 +2726,7 @@ mod tests {
             StatusCode::OK
         );
         // The same payment in the parcels' own currency is accepted.
-        api_put_expecting(&pool, payment("AUD"), StatusCode::NO_CONTENT).await;
+        api_put_expecting(&pool, payment("AUD"), StatusCode::CREATED).await;
     }
 
     /// Re-denominate a parcel the way a **rollover** does: a scrip-for-scrip
@@ -2815,7 +2818,7 @@ mod tests {
                 "amount_per_unit": "0.50",
                 "currency": "AUD",
             }),
-            StatusCode::NO_CONTENT,
+            StatusCode::CREATED,
         )
         .await;
         // With a record date it is entitlement at *that* date that decides: a
@@ -2833,7 +2836,7 @@ mod tests {
         let resp = client(&pool)
             .put("/corporate_actions/2", &payment("2025-01-06"))
             .await;
-        assert_eq!(resp.status, StatusCode::NO_CONTENT);
+        assert_eq!(resp.status, StatusCode::CREATED);
         // … while one acquired the day before it is not, and the same edit is
         // refused — the check runs over the state the write would leave.
         let resp = client(&pool)
@@ -2951,12 +2954,12 @@ mod tests {
             })
         };
         let c = client(&pool);
-        // FY2024, before the conversion: accepted…
+        // FY2024, before the conversion: accepted (a create, so 201)…
         assert_eq!(
             c.put("/corporate_actions/1", &payment("2024-05-01", "0.50"))
                 .await
                 .status,
-            StatusCode::NO_CONTENT
+            StatusCode::CREATED
         );
         // …and still editable afterwards (correcting the amount years later).
         assert_eq!(
@@ -3006,7 +3009,7 @@ mod tests {
         let resp = client(&pool).put("/corporate_actions/1", &payment(1)).await;
         assert_eq!(
             resp.status,
-            StatusCode::NO_CONTENT,
+            StatusCode::CREATED,
             "a non-AMIT trust's E4 reduction is exactly what this action is for"
         );
 
@@ -3032,7 +3035,7 @@ mod tests {
                 }),
             )
             .await;
-        assert_eq!(resp.status, StatusCode::NO_CONTENT);
+        assert_eq!(resp.status, StatusCode::CREATED);
     }
 
     // Delete-time guard: the three types that create no trades
@@ -3054,7 +3057,11 @@ mod tests {
     /// A Sell of `qty` units, entered on the unit basis in force at `date`,
     /// allocated wholly against parcel 1 — the write path validates the
     /// allocation against the parcel's re-based capacity.
-    async fn insert_sell(pool: &SqlitePool, date: NaiveDate, qty: &str) -> Result<(), SellError> {
+    async fn insert_sell(
+        pool: &SqlitePool,
+        date: NaiveDate,
+        qty: &str,
+    ) -> Result<Upsert, SellError> {
         sell::db_upsert_sell(
             pool,
             2,

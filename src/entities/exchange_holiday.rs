@@ -7,7 +7,8 @@
 //! [`exchange_holidays_for_listing`], which the trade/sell settlement logic uses
 //! to look up the holiday set for a listing's exchange.
 
-use crate::infra::http::ApiError;
+use crate::infra::db::write_tx;
+use crate::infra::http::{self, ApiError, Upsert, UpsertResponse};
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -109,7 +110,26 @@ pub async fn db_get(
     .await
 }
 
-pub async fn db_upsert(pool: &SqlitePool, holiday: &ExchangeHoliday) -> Result<(), sqlx::Error> {
+/// Upsert one holiday by its `(mic, holiday_date)` natural key, reporting
+/// whether it created or replaced the row.
+///
+/// The row is keyed on a natural key rather than a `CrudEntity` id, so the
+/// exists check cannot go through [`http::crud_exists`]; it is the same
+/// `EXISTS` on the same key column pair, run on this write's own
+/// `BEGIN IMMEDIATE` transaction so the create-vs-replace decision cannot race
+/// a concurrent write of the same day (CLAUDE.md, "Data integrity").
+pub async fn db_upsert(
+    pool: &SqlitePool,
+    holiday: &ExchangeHoliday,
+) -> Result<Upsert, sqlx::Error> {
+    let mut tx = write_tx(pool).await?;
+    let existed: i64 = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM exchange_holidays WHERE mic = ? AND holiday_date = ?)",
+    )
+    .bind(&holiday.mic)
+    .bind(holiday.holiday_date)
+    .fetch_one(&mut *tx)
+    .await?;
     sqlx::query(
         "INSERT INTO exchange_holidays (mic, holiday_date, name) VALUES (?, ?, ?) \
          ON CONFLICT(mic, holiday_date) DO UPDATE SET name = excluded.name",
@@ -117,9 +137,14 @@ pub async fn db_upsert(pool: &SqlitePool, holiday: &ExchangeHoliday) -> Result<(
     .bind(&holiday.mic)
     .bind(holiday.holiday_date)
     .bind(&holiday.name)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
-    Ok(())
+    tx.commit().await?;
+    Ok(if existed != 0 {
+        Upsert::Replaced
+    } else {
+        Upsert::Created
+    })
 }
 
 pub async fn db_delete(pool: &SqlitePool, mic: &str, date: NaiveDate) -> Result<bool, sqlx::Error> {
@@ -219,7 +244,7 @@ async fn upsert(
     State(pool): State<SqlitePool>,
     Path((mic, date)): Path<(String, String)>,
     Json(body): Json<ExchangeHolidayBody>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<UpsertResponse<ExchangeHoliday>, ApiError> {
     let holiday_date: NaiveDate = date
         .parse()
         .map_err(|_| ApiError::bad_request("the holiday date is not a valid date"))?;
@@ -231,10 +256,9 @@ async fn upsert(
         holiday_date,
         name: body.name,
     };
-    db_upsert(&pool, &holiday)
-        .await
-        .map(|_| StatusCode::NO_CONTENT)
-        .map_err(ApiError::from)
+    let outcome = db_upsert(&pool, &holiday).await?;
+    let row = db_get(&pool, &holiday.mic, holiday.holiday_date).await?;
+    http::upsert_response_of(outcome, row)
 }
 
 async fn delete(
@@ -448,7 +472,7 @@ mod tests {
         let resp = client(&pool)
             .put("/exchange_holidays/XASX/2030-04-01", &body)
             .await;
-        assert_eq!(resp.status, StatusCode::NO_CONTENT);
+        assert_eq!(resp.status, StatusCode::CREATED);
         let got = db_get(&pool, "XASX", ymd(2030, 4, 1))
             .await
             .unwrap()

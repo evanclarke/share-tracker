@@ -9,7 +9,7 @@ use super::market::{Market, load_market};
 use super::model::{ClosingPrice, PriceOrigin, PriceSource, PriceStatus, UNASSIGNED_ID};
 use crate::entities::listing;
 use crate::infra::db::write_tx;
-use crate::infra::http::ApiError;
+use crate::infra::http::{self, ApiError, Upsert, UpsertResponse};
 use axum::{
     Extension, Json, Router,
     extract::{Path, Query, State},
@@ -122,7 +122,7 @@ async fn put_manual(
     State(pool): State<SqlitePool>,
     Path((listing_id, price_date)): Path<(i64, NaiveDate)>,
     Json(body): Json<ManualPriceBody>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<UpsertResponse<ClosingPrice>, ApiError> {
     let market = load_market(&pool, listing_id)
         .await
         .map_err(internal)?
@@ -168,8 +168,24 @@ async fn put_manual(
         sourced_from: Some(sourced_from.to_string()),
         reason: Some(reason.to_string()),
     };
-    db_store(&pool, &row).await?;
-    Ok(StatusCode::NO_CONTENT)
+    // A manual price is an upsert on the (listing, day) natural key, so it
+    // reports the same create-vs-replace outcome every other PUT does: the
+    // exists check and the store share one `BEGIN IMMEDIATE` transaction, or a
+    // concurrent store of the same day could race the decision (CLAUDE.md,
+    // "Data integrity").
+    let mut tx = write_tx(&pool).await?;
+    let existed = db_get_one(&mut *tx, listing_id, price_date)
+        .await?
+        .is_some();
+    db_store(&mut *tx, &row).await?;
+    tx.commit().await?;
+    let outcome = if existed {
+        Upsert::Replaced
+    } else {
+        Upsert::Created
+    };
+    let stored = db_get_one(&pool, listing_id, price_date).await?;
+    http::upsert_response_of(outcome, stored)
 }
 
 /// Re-fetch one (listing, date) on demand — typically to replace an errored

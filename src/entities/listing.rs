@@ -1,6 +1,6 @@
 use crate::domain::tax_year::tax_year_for;
 use crate::infra::db::write_tx;
-use crate::infra::http::{self, ApiError, CrudEntity};
+use crate::infra::http::{self, ApiError, CrudEntity, Upsert, UpsertResponse};
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -396,7 +396,11 @@ where
 /// can never drift: `id = Some` is the long-standing `PUT /listings/:id`
 /// upsert, and `id = None` is the `POST /listings` create, which leaves the id
 /// to the database.
-async fn write(pool: &SqlitePool, id: Option<i64>, listing: &Listing) -> Result<i64, UpsertError> {
+async fn write(
+    pool: &SqlitePool,
+    id: Option<i64>,
+    listing: &Listing,
+) -> Result<(i64, Upsert), UpsertError> {
     // A blank ticker or name is refused before the transaction is even opened:
     // it is a pure check on the request, and neither value is inert. The
     // ticker (with the exchange) resolves the provider symbol — a stored blank
@@ -413,6 +417,12 @@ async fn write(pool: &SqlitePool, id: Option<i64>, listing: &Listing) -> Result<
     }
 
     let mut tx = write_tx(pool).await?;
+    // The create-vs-replace decision is made inside the write's own
+    // `BEGIN IMMEDIATE` transaction (CLAUDE.md, "Data integrity").
+    let existed = match id {
+        Some(id) => http::crud_exists::<Listing, _>(&mut *tx, id).await?,
+        None => false,
+    };
 
     // An identity change (ticker or exchange) on a listing that already has
     // history must go through the rename action instead of a bare field
@@ -621,19 +631,24 @@ async fn write(pool: &SqlitePool, id: Option<i64>, listing: &Listing) -> Result<
     // actually holds.
     let assigned_id = id.unwrap_or_else(|| result.last_insert_rowid());
     tx.commit().await?;
-    Ok(assigned_id)
+    let outcome = if existed {
+        Upsert::Replaced
+    } else {
+        Upsert::Created
+    };
+    Ok((assigned_id, outcome))
 }
 
 /// `PUT /listings/:id` — the long-standing upsert on a caller-chosen id.
-pub async fn db_upsert(pool: &SqlitePool, listing: &Listing) -> Result<(), UpsertError> {
-    write(pool, Some(listing.id), listing).await?;
-    Ok(())
+pub async fn db_upsert(pool: &SqlitePool, listing: &Listing) -> Result<Upsert, UpsertError> {
+    let (_, outcome) = write(pool, Some(listing.id), listing).await?;
+    Ok(outcome)
 }
 
 /// `POST /listings` — create without naming an id, and return the row the
 /// database assigned one to.
 pub async fn db_create(pool: &SqlitePool, listing: &Listing) -> Result<Listing, UpsertError> {
-    let id = write(pool, None, listing).await?;
+    let (id, _) = write(pool, None, listing).await?;
     db_get(pool, id)
         .await?
         .ok_or(UpsertError::VanishedAfterCreate)
@@ -669,9 +684,9 @@ async fn upsert(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
     Json(body): Json<ListingBody>,
-) -> Result<StatusCode, ApiError> {
-    db_upsert(&pool, &listing_from_body(id, body)).await?;
-    Ok(StatusCode::NO_CONTENT)
+) -> Result<UpsertResponse<Listing>, ApiError> {
+    let outcome = db_upsert(&pool, &listing_from_body(id, body)).await?;
+    http::upsert_response::<Listing>(&pool, outcome, id).await
 }
 
 /// `POST /listings` — create the row without naming an id. The database
@@ -1468,7 +1483,7 @@ mod tests {
             "amit": true
         });
         let resp = client(&pool).put("/listings/1", &body).await;
-        assert_eq!(resp.status, StatusCode::NO_CONTENT);
+        assert_eq!(resp.status, StatusCode::CREATED);
         assert!(db_get(&pool, 1).await.unwrap().is_some());
     }
 
@@ -1548,7 +1563,7 @@ mod tests {
             "amit": false
         });
         let resp = client(&pool).put("/listings/2", &body).await;
-        assert_eq!(resp.status, StatusCode::NO_CONTENT);
+        assert_eq!(resp.status, StatusCode::CREATED);
         let got = db_get(&pool, 2).await.unwrap().unwrap();
         assert_eq!(got.exchange_mic, None);
         assert_eq!(got.security_type, SecurityType::Crypto);

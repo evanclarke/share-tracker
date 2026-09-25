@@ -1,8 +1,9 @@
 use crate::domain::cost_base::AmitReductionEvent;
 use crate::domain::rollover;
 use crate::entities::corporate_action;
+use crate::infra::db::write_tx;
 use crate::infra::decimal::{Money, parse_dec};
-use crate::infra::http::{self, ApiError, CrudEntity};
+use crate::infra::http::{self, ApiError, CrudEntity, Upsert, UpsertResponse};
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -141,9 +142,17 @@ pub enum UpsertError {
 pub async fn db_upsert_on(
     conn: &mut sqlx::SqliteConnection,
     adj: &AmitAdjustment,
-) -> Result<(), UpsertError> {
+) -> Result<Upsert, UpsertError> {
+    // The exists check runs on the caller's own connection, so it is inside
+    // whatever transaction the write goes on to use — for [`db_upsert`] that
+    // is its own `BEGIN IMMEDIATE` transaction (CLAUDE.md, "Data integrity").
+    let existed = http::crud_exists::<AmitAdjustment, _>(&mut *conn, adj.id).await?;
     db_write_on(conn, Some(adj.id), &adjustment_body(adj)).await?;
-    Ok(())
+    Ok(if existed {
+        Upsert::Replaced
+    } else {
+        Upsert::Created
+    })
 }
 
 /// Write a *new* adjustment, letting the database assign its id, and answer
@@ -440,9 +449,14 @@ async fn db_write_on(
     Ok(id.unwrap_or_else(|| result.last_insert_rowid()))
 }
 
-pub async fn db_upsert(pool: &SqlitePool, adj: &AmitAdjustment) -> Result<(), UpsertError> {
-    let mut conn = pool.acquire().await?;
-    db_upsert_on(&mut conn, adj).await
+pub async fn db_upsert(pool: &SqlitePool, adj: &AmitAdjustment) -> Result<Upsert, UpsertError> {
+    // The check and the write share one `BEGIN IMMEDIATE` transaction; this
+    // used to be a bare pooled connection, whose autocommit left the two
+    // racing.
+    let mut tx = write_tx(pool).await?;
+    let outcome = db_upsert_on(&mut tx, adj).await?;
+    tx.commit().await?;
+    Ok(outcome)
 }
 
 /// The cost-base reduction one AMMA statement applies to `quantity` units of
@@ -601,10 +615,10 @@ async fn upsert(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
     Json(body): Json<AmitAdjustmentBody>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<UpsertResponse<AmitAdjustment>, ApiError> {
     let adj = amit_adjustment_from_body(id, body);
-    db_upsert(&pool, &adj).await?;
-    Ok(StatusCode::NO_CONTENT)
+    let outcome = db_upsert(&pool, &adj).await?;
+    http::upsert_response::<AmitAdjustment>(&pool, outcome, id).await
 }
 
 /// `POST /amit_adjustments` — create the row without naming an id. The
@@ -1327,7 +1341,7 @@ mod tests {
             "quantity": "100"
         });
         let resp = client(&pool).put("/amit_adjustments/1", &body).await;
-        assert_eq!(resp.status, StatusCode::NO_CONTENT);
+        assert_eq!(resp.status, StatusCode::CREATED);
 
         let got = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(got.amma_statement_id, 1);
@@ -1385,7 +1399,7 @@ mod tests {
         let c = client(&pool);
         assert_eq!(
             c.put("/amit_adjustments/1", &body).await.status,
-            StatusCode::NO_CONTENT
+            StatusCode::CREATED
         );
         let resp = c.put("/amit_adjustments/2", &body).await;
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);

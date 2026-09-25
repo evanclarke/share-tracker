@@ -4450,7 +4450,7 @@ mod tests {
         // With gains stated it goes through and is apportioned.
         c.put("/amma_statements/1", &body("1000"))
             .await
-            .expect_status(StatusCode::NO_CONTENT);
+            .expect_status(StatusCode::CREATED);
         let year = &db_tax_summary(&pool).await.unwrap()[0];
         assert_eq!(year.foreign_tax_offsets, Decimal::from(75));
     }

@@ -1,6 +1,6 @@
 use crate::infra::db::write_tx;
 use crate::infra::decimal::Money;
-use crate::infra::http::{self, ApiError, CrudEntity};
+use crate::infra::http::{self, ApiError, CrudEntity, Upsert, UpsertResponse};
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -285,9 +285,9 @@ pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<AmmaStatement>,
     http::crud_get(pool, id).await
 }
 
-pub async fn db_upsert(pool: &SqlitePool, stmt: &AmmaStatement) -> Result<(), UpsertError> {
-    write(pool, Some(stmt.id), stmt).await?;
-    Ok(())
+pub async fn db_upsert(pool: &SqlitePool, stmt: &AmmaStatement) -> Result<Upsert, UpsertError> {
+    let (_, outcome) = write(pool, Some(stmt.id), stmt).await?;
+    Ok(outcome)
 }
 
 /// `POST /amma_statements` — create without naming an id, and return the row
@@ -296,7 +296,7 @@ pub async fn db_create(
     pool: &SqlitePool,
     stmt: &AmmaStatement,
 ) -> Result<AmmaStatement, UpsertError> {
-    let id = write(pool, None, stmt).await?;
+    let (id, _) = write(pool, None, stmt).await?;
     db_get(pool, id)
         .await?
         .ok_or(UpsertError::VanishedAfterCreate)
@@ -312,7 +312,7 @@ async fn write(
     pool: &SqlitePool,
     id: Option<i64>,
     stmt: &AmmaStatement,
-) -> Result<i64, UpsertError> {
+) -> Result<(i64, Upsert), UpsertError> {
     // No component of the statement may be negative: every figure is the
     // fund's own attributed amount, and the ATO's AMMA guidance notes state
     // the rule outright — "An AMIT or attribution CCIV sub-fund trust
@@ -379,6 +379,12 @@ async fn write(
         ));
     }
     let mut tx = write_tx(pool).await?;
+    // The create-vs-replace decision is made inside the write's own
+    // `BEGIN IMMEDIATE` transaction (CLAUDE.md, "Data integrity").
+    let existed = match id {
+        Some(id) => http::crud_exists::<AmmaStatement, _>(&mut *tx, id).await?,
+        None => false,
+    };
 
     // A create (`id` is `None`, from `POST /amma_statements`) omits the id
     // column altogether, so the database's `AUTOINCREMENT` sequence assigns
@@ -501,7 +507,12 @@ async fn write(
     }
 
     tx.commit().await?;
-    Ok(assigned_id)
+    let outcome = if existed {
+        Upsert::Replaced
+    } else {
+        Upsert::Created
+    };
+    Ok((assigned_id, outcome))
 }
 
 /// The row a request body describes. `id` is the path's on an upsert and
@@ -540,11 +551,9 @@ async fn upsert(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
     Json(body): Json<AmmaStatementBody>,
-) -> Result<StatusCode, ApiError> {
-    db_upsert(&pool, &amma_from_body(id, body))
-        .await
-        .map(|_| StatusCode::NO_CONTENT)
-        .map_err(ApiError::from)
+) -> Result<UpsertResponse<AmmaStatement>, ApiError> {
+    let outcome = db_upsert(&pool, &amma_from_body(id, body)).await?;
+    http::upsert_response::<AmmaStatement>(&pool, outcome, id).await
 }
 
 /// `POST /amma_statements` — create the statement without naming an id. The
@@ -808,7 +817,7 @@ mod tests {
             "cost_base_adjustment": "0.0023"
         });
         let resp = client(&pool).put("/amma_statements/1", &body).await;
-        assert_eq!(resp.status, StatusCode::NO_CONTENT);
+        assert_eq!(resp.status, StatusCode::CREATED);
         let got = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(got.australian_interest, "12.50".parse::<Decimal>().unwrap());
         assert_eq!(
@@ -989,7 +998,7 @@ mod tests {
         client(&pool)
             .put("/amma_statements/1", &body)
             .await
-            .expect_status(StatusCode::NO_CONTENT);
+            .expect_status(StatusCode::CREATED);
         let got = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(got.australian_interest, dec("12.50"));
         assert_eq!(got.cgt_other_gains, dec("20"));
@@ -1005,7 +1014,7 @@ mod tests {
         client(&pool)
             .put("/amma_statements/2", &zero)
             .await
-            .expect_status(StatusCode::NO_CONTENT);
+            .expect_status(StatusCode::CREATED);
         let got = db_get(&pool, 2).await.unwrap().unwrap();
         assert_eq!(got.units_held, Decimal::ZERO);
         assert_eq!(got.cost_base_adjustment, Decimal::ZERO);
@@ -1030,7 +1039,7 @@ mod tests {
         client(&pool)
             .put("/amma_statements/1", &body)
             .await
-            .expect_status(StatusCode::NO_CONTENT);
+            .expect_status(StatusCode::CREATED);
         let got = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(got.cost_base_adjustment, dec("-10"));
     }
@@ -1048,7 +1057,7 @@ mod tests {
             "cost_base_adjustment": "0.001234567890"
         });
         let resp = client(&pool).put("/amma_statements/1", &body).await;
-        assert_eq!(resp.status, StatusCode::NO_CONTENT);
+        assert_eq!(resp.status, StatusCode::CREATED);
         let resp = client(&pool).get("/amma_statements/1").await;
         let got: AmmaStatement = resp.json();
         assert_eq!(got.units_held, "1234.567890123".parse::<Decimal>().unwrap());
@@ -1104,6 +1113,6 @@ mod tests {
         client(&pool)
             .put("/amma_statements/1", &body("USD"))
             .await
-            .expect_status(StatusCode::NO_CONTENT);
+            .expect_status(StatusCode::CREATED);
     }
 }

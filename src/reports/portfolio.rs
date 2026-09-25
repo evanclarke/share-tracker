@@ -318,7 +318,7 @@ mod tests {
         let resp = ApiClient::over(trade::router().with_state(pool.clone()))
             .put("/trades/1", &body)
             .await;
-        assert_eq!(resp.status, StatusCode::NO_CONTENT);
+        assert_eq!(resp.status, StatusCode::CREATED);
 
         let holdings = db_holdings(&pool, None).await.unwrap();
         // cost = 10 × 100 + 9.95 (the inclusive amount paid) = 1009.95

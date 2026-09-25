@@ -815,7 +815,7 @@ mod api_tests {
         });
         assert_eq!(
             authed.put_json("/exchanges/XTES", &exchange).await,
-            StatusCode::NO_CONTENT
+            StatusCode::CREATED
         );
         assert_eq!(authed.get("/exchanges/XTES").await.status, StatusCode::OK);
         assert_eq!(

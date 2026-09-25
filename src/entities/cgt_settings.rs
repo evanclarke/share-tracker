@@ -7,12 +7,12 @@
 //! when chaining unused losses across its year series (losses carry forward
 //! indefinitely, per `docs/ato/cgt-using-capital-losses.md`). Absent row = zero.
 
+use crate::infra::db::write_tx;
 use crate::infra::decimal::Money;
-use crate::infra::http::{self, ApiError, CrudEntity};
+use crate::infra::http::{self, ApiError, CrudEntity, Upsert, UpsertResponse};
 use axum::{
     Json, Router,
     extract::{Path, State},
-    http::StatusCode,
     routing::get,
 };
 use rust_decimal::Decimal;
@@ -59,16 +59,26 @@ pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<CgtSettings>, s
     http::crud_get(pool, id).await
 }
 
-pub async fn db_upsert(pool: &SqlitePool, settings: &CgtSettings) -> Result<(), sqlx::Error> {
+pub async fn db_upsert(pool: &SqlitePool, settings: &CgtSettings) -> Result<Upsert, sqlx::Error> {
+    // The exists check and the write share one `BEGIN IMMEDIATE` transaction:
+    // a check outside it could see no row and then race another `PUT` for the
+    // same id, each claiming to have created it (CLAUDE.md, "Data integrity").
+    let mut tx = write_tx(pool).await?;
+    let existed = http::crud_exists::<CgtSettings, _>(&mut *tx, settings.id).await?;
     sqlx::query(
         "INSERT INTO cgt_settings (id, opening_capital_loss) VALUES (?, ?) \
          ON CONFLICT(id) DO UPDATE SET opening_capital_loss = excluded.opening_capital_loss",
     )
     .bind(settings.id)
     .bind(Money(settings.opening_capital_loss))
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
-    Ok(())
+    tx.commit().await?;
+    Ok(if existed {
+        Upsert::Replaced
+    } else {
+        Upsert::Created
+    })
 }
 
 /// The opening carried-forward capital loss, or zero when no settings row exists.
@@ -90,7 +100,7 @@ async fn upsert(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
     Json(body): Json<CgtSettingsBody>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<UpsertResponse<CgtSettings>, ApiError> {
     // A negative opening loss is meaningless (losses are stored as positive
     // amounts); reject at write time so the report never consumes one.
     if body.opening_capital_loss < Decimal::ZERO {
@@ -102,17 +112,16 @@ async fn upsert(
         id,
         opening_capital_loss: body.opening_capital_loss,
     };
-    db_upsert(&pool, &settings)
-        .await
-        .map(|_| StatusCode::NO_CONTENT)
-        // id != 1 violates the singleton CHECK → 422.
-        .map_err(ApiError::from)
+    // id != 1 violates the singleton CHECK → 422.
+    let outcome = db_upsert(&pool, &settings).await?;
+    http::upsert_response::<CgtSettings>(&pool, outcome, id).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_support::{ApiClient, test_pool};
+    use axum::http::StatusCode;
 
     /// Client over this module's own routes.
     fn client(pool: &SqlitePool) -> ApiClient {
@@ -198,7 +207,7 @@ mod tests {
         let resp = client(&pool)
             .put_raw("/cgt_settings/1", r#"{"opening_capital_loss":"1500.25"}"#)
             .await;
-        assert_eq!(resp.status, StatusCode::NO_CONTENT);
+        assert_eq!(resp.status, StatusCode::CREATED);
 
         let resp = client(&pool).get("/cgt_settings/1").await;
         assert_eq!(resp.status, StatusCode::OK);

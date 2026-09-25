@@ -1483,6 +1483,46 @@ mod tests {
         );
     }
 
+    /// The save path accepts **both** halves of the `PUT` create-vs-replace
+    /// signal.
+    ///
+    /// A server-assigned-key create goes through `POST`, but a natural-key
+    /// create (`/exchanges/:mic`, `/tax_year_settings/:tax_year`, …) goes
+    /// through `PUT`, and every edit is a `PUT` too — and the same route answers
+    /// `201` with the created row on a create and `204` on a replace. The
+    /// central `api()` client gates on `res.ok`, so both pass; a `204`-only
+    /// check would turn every natural-key create into a spurious toast. This
+    /// pins that gate, the branch that needs no body from either answer, and
+    /// the contract itself, driven for real.
+    #[tokio::test]
+    async fn the_ui_accepts_a_put_that_created_as_well_as_one_that_replaced() {
+        let js = app_js_body().await;
+        assert!(
+            js.contains("if (!res.ok) {"),
+            "the API client must treat every 2xx as success — a PUT answers 201 on create \
+             and 204 on replace"
+        );
+        // The edit branch PUTs and reads nothing off the response, so neither
+        // status needs body handling.
+        assert!(js.contains("await api('PUT', entity.api + '/' + idPath, body);"));
+
+        // …and the contract it relies on, driven for real: 201 + the created
+        // row, then 204 on the replace.
+        let pool = test_pool().await;
+        let client = ApiClient::full(&pool);
+        let exchange = serde_json::json!({
+            "name": "Test Exchange", "country": "AU", "currency": "AUD",
+            "timezone": "UTC", "settlement_days": 2,
+        });
+        let created = client.put("/exchanges/XTES", &exchange).await;
+        assert_eq!(created.status, StatusCode::CREATED);
+        assert_eq!(created.json::<serde_json::Value>()["mic"], "XTES");
+        assert_eq!(
+            client.put("/exchanges/XTES", &exchange).await.status,
+            StatusCode::NO_CONTENT
+        );
+    }
+
     #[tokio::test]
     async fn error_toasts_persist_until_dismissed_and_announce_themselves() {
         let js = app_js_body().await;

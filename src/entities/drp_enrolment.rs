@@ -36,7 +36,7 @@
 use crate::entities::income::Income;
 use crate::infra::db::write_tx;
 use crate::infra::decimal::{Money, parse_dec};
-use crate::infra::http::{self, ApiError, CrudEntity};
+use crate::infra::http::{self, ApiError, CrudEntity, Upsert, UpsertResponse};
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -177,9 +177,9 @@ pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<DrpEnrolment>, 
 
 /// Upsert an enrolment period, enforcing the no-overlap invariant and settling
 /// a closed period's trailing residual, all in one transaction.
-pub async fn db_upsert(pool: &SqlitePool, period: &DrpEnrolment) -> Result<(), UpsertError> {
-    write(pool, Some(period.id), period).await?;
-    Ok(())
+pub async fn db_upsert(pool: &SqlitePool, period: &DrpEnrolment) -> Result<Upsert, UpsertError> {
+    let (_, outcome) = write(pool, Some(period.id), period).await?;
+    Ok(outcome)
 }
 
 /// `POST /drp_enrolments` — create without naming an id, and return the row the
@@ -188,7 +188,7 @@ pub async fn db_create(
     pool: &SqlitePool,
     period: &DrpEnrolment,
 ) -> Result<DrpEnrolment, UpsertError> {
-    let id = write(pool, None, period).await?;
+    let (id, _) = write(pool, None, period).await?;
     db_get(pool, id)
         .await?
         .ok_or(UpsertError::VanishedAfterCreate)
@@ -204,7 +204,7 @@ async fn write(
     pool: &SqlitePool,
     id: Option<i64>,
     period: &DrpEnrolment,
-) -> Result<i64, UpsertError> {
+) -> Result<(i64, Upsert), UpsertError> {
     if let Some(end) = period.unenrolment_date
         && end <= period.enrolment_date
     {
@@ -212,6 +212,12 @@ async fn write(
     }
 
     let mut tx = write_tx(pool).await?;
+    // The create-vs-replace decision is made inside the write's own
+    // `BEGIN IMMEDIATE` transaction (CLAUDE.md, "Data integrity").
+    let existed = match id {
+        Some(id) => http::crud_exists::<DrpEnrolment, _>(&mut *tx, id).await?,
+        None => false,
+    };
 
     // Half-open [start, end) overlap test against the (listing, holding
     // account)'s other periods — the same listing's periods in *another*
@@ -281,7 +287,12 @@ async fn write(
     recompute_residuals(&mut tx, period).await?;
 
     tx.commit().await?;
-    Ok(assigned_id)
+    let outcome = if existed {
+        Upsert::Replaced
+    } else {
+        Upsert::Created
+    };
+    Ok((assigned_id, outcome))
 }
 
 /// Where one reinvestment sits in its period's residual chain — the only
@@ -496,9 +507,9 @@ async fn upsert(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
     Json(body): Json<DrpEnrolmentBody>,
-) -> Result<StatusCode, ApiError> {
-    db_upsert(&pool, &drp_enrolment_from_body(id, body)).await?;
-    Ok(StatusCode::NO_CONTENT)
+) -> Result<UpsertResponse<DrpEnrolment>, ApiError> {
+    let outcome = db_upsert(&pool, &drp_enrolment_from_body(id, body)).await?;
+    http::upsert_response::<DrpEnrolment>(&pool, outcome, id).await
 }
 
 /// `POST /drp_enrolments` — create the period without naming an id. The
@@ -1489,7 +1500,7 @@ mod tests {
                 r#"{"listing_id":1,"enrolment_date":"2024-01-01"}"#,
             )
             .await;
-        assert_eq!(resp.status, StatusCode::NO_CONTENT);
+        assert_eq!(resp.status, StatusCode::CREATED);
 
         let resp = client(&pool).get("/drp_enrolments").await;
         assert_eq!(resp.status, StatusCode::OK);

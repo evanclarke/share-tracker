@@ -186,7 +186,7 @@ async fn api_a_manual_price_is_neither_normalised_on_entry_nor_rebased() {
             }),
         )
         .await
-        .expect_status(StatusCode::NO_CONTENT);
+        .expect_status(StatusCode::CREATED);
 
     assert_eq!(
         stored(&pool, ymd(2026, 6, 5)).await,

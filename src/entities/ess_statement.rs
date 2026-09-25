@@ -33,7 +33,7 @@
 
 use crate::infra::db::write_tx;
 use crate::infra::decimal::{Money, OptMoney};
-use crate::infra::http::{self, ApiError, CrudEntity};
+use crate::infra::http::{self, ApiError, CrudEntity, Upsert, UpsertResponse};
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -492,7 +492,11 @@ fn validate(s: &EssStatement) -> Result<(), UpsertError> {
 /// caller-chosen id; `id = None` is the `POST /ess_statements` create, which
 /// leaves the id to the database. Every validation and the vest-freeze rule are
 /// shared, so a create and an upsert can never drift.
-async fn write(pool: &SqlitePool, id: Option<i64>, s: &EssStatement) -> Result<i64, UpsertError> {
+async fn write(
+    pool: &SqlitePool,
+    id: Option<i64>,
+    s: &EssStatement,
+) -> Result<(i64, Upsert), UpsertError> {
     validate(s)?;
 
     // A statement-AUD override restates a label the statement already gives in
@@ -518,6 +522,12 @@ async fn write(pool: &SqlitePool, id: Option<i64>, s: &EssStatement) -> Result<i
     }
 
     let mut tx = write_tx(pool).await?;
+    // The create-vs-replace decision is made inside the write's own
+    // `BEGIN IMMEDIATE` transaction (CLAUDE.md, "Data integrity").
+    let existed = match id {
+        Some(id) => http::crud_exists::<EssStatement, _>(&mut *tx, id).await?,
+        None => false,
+    };
 
     // The statement's currency must be the listing's: `market_value_per_share`
     // is the market value of *that listed share*, so the price and the listed
@@ -671,19 +681,24 @@ async fn write(pool: &SqlitePool, id: Option<i64>, s: &EssStatement) -> Result<i
     // actually holds.
     let assigned_id = id.unwrap_or_else(|| result.last_insert_rowid());
     tx.commit().await?;
-    Ok(assigned_id)
+    let outcome = if existed {
+        Upsert::Replaced
+    } else {
+        Upsert::Created
+    };
+    Ok((assigned_id, outcome))
 }
 
 /// `PUT /ess_statements/:id` — the long-standing upsert on a caller-chosen id.
-pub async fn db_upsert(pool: &SqlitePool, s: &EssStatement) -> Result<(), UpsertError> {
-    write(pool, Some(s.id), s).await?;
-    Ok(())
+pub async fn db_upsert(pool: &SqlitePool, s: &EssStatement) -> Result<Upsert, UpsertError> {
+    let (_, outcome) = write(pool, Some(s.id), s).await?;
+    Ok(outcome)
 }
 
 /// `POST /ess_statements` — create the statement without naming an id, and
 /// return the row the database assigned one to.
 pub async fn db_create(pool: &SqlitePool, s: &EssStatement) -> Result<EssStatement, UpsertError> {
-    let id = write(pool, None, s).await?;
+    let (id, _) = write(pool, None, s).await?;
     // `db_get` is test-gated, so a create reads the row back through the same
     // `crud_get` it delegates to.
     http::crud_get(pool, id)
@@ -781,9 +796,9 @@ async fn upsert(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
     Json(body): Json<EssStatementBody>,
-) -> Result<StatusCode, ApiError> {
-    db_upsert(&pool, &ess_statement_from_body(id, body)).await?;
-    Ok(StatusCode::NO_CONTENT)
+) -> Result<UpsertResponse<EssStatement>, ApiError> {
+    let outcome = db_upsert(&pool, &ess_statement_from_body(id, body)).await?;
+    http::upsert_response::<EssStatement>(&pool, outcome, id).await
 }
 
 /// `POST /ess_statements` — create the statement without naming an id. The

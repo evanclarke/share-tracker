@@ -1335,10 +1335,12 @@ mod tests {
                     }),
                 )
                 .await;
-            assert_eq!(
+            // The same id is re-PUT per strategy: the first creates it (201,
+            // with the created row) and every later one replaces it (204).
+            assert!(
+                resp.status == StatusCode::CREATED || resp.status == StatusCode::NO_CONTENT,
+                "{strategy:?}: {} {}",
                 resp.status,
-                StatusCode::NO_CONTENT,
-                "{strategy:?}: {}",
                 resp.text()
             );
         }
