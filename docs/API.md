@@ -103,7 +103,7 @@ Entities keyed on something other than an allocated id are unaffected, and delib
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/exchanges` | List all exchanges |
+| `GET` | `/exchanges` | List all exchanges (a reference table read whole; no query filters) |
 | `GET` | `/exchanges/:mic` | Get one exchange |
 | `PUT` | `/exchanges/:mic` | Create or update an exchange |
 | `DELETE` | `/exchanges/:mic` | Delete an exchange |
@@ -138,7 +138,7 @@ Because the calendar changes a reported figure and is hand-maintained — there 
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/listings` | List all listings |
+| `GET` | `/listings` | List all listings; filter with `?exchange_mic=`, `?security_type=` |
 | `GET` | `/listings/:id` | Get one listing |
 | `POST` | `/listings` | Create a listing, letting the database assign its id (see [Creating a record](#creating-a-record)) |
 | `PUT` | `/listings/:id` | Create or update a listing |
@@ -212,7 +212,7 @@ Custody/location accounts within the one taxpayer — e.g. an employer share-pla
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/holding_accounts` | List all holding accounts |
+| `GET` | `/holding_accounts` | List all holding accounts (read whole; no query filters) |
 | `GET` | `/holding_accounts/:id` | Get one holding account |
 | `POST` | `/holding_accounts` | Create a holding account, letting the database assign its id (see [Creating a record](#creating-a-record)) |
 | `PUT` | `/holding_accounts/:id` | Create or rename a holding account |
@@ -226,7 +226,7 @@ Monthly foreign exchange rates from the RBA's F11 table, stored as foreign-curre
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/rba_fx_rates` | List all FX rates (ordered by currency, then month) |
+| `GET` | `/rba_fx_rates` | List all FX rates (ordered by currency, then month; an import-fed reference table read whole, no query filters) |
 | `GET` | `/rba_fx_rates/:id` | Get one FX rate |
 | `PUT` | `/rba_fx_rates/:id` | Correct one stored rate (see below) |
 | `POST` | `/rba_fx_rates/import` | Trigger an import (see below) |
@@ -241,7 +241,7 @@ The ISO 10383 Market Identifier Code list, imported from the official ISO20022 `
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/mic_registry` | List all MIC entries (ordered by MIC) |
+| `GET` | `/mic_registry` | List all MIC entries (ordered by MIC; an import-fed reference table read whole, no query filters) |
 | `GET` | `/mic_registry/:mic` | Get one MIC entry |
 | `POST` | `/mic_registry/import` | Trigger an import (see below) |
 
@@ -253,7 +253,7 @@ The recognised currencies list — fiat (ISO 4217) and digital tokens (ISO 24165
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/currencies` | List all currencies (ordered by code) |
+| `GET` | `/currencies` | List all currencies (ordered by code; an import-fed reference table read whole, no query filters) |
 | `GET` | `/currencies/:code` | Get one currency |
 | `POST` | `/currencies/import` | Trigger an import (see below) |
 
@@ -328,7 +328,7 @@ What the price provider says each held listing distributed, per ex-date. Rows ar
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/distribution_events` | List every stored event, newest ex-date first |
+| `GET` | `/distribution_events` | List every stored event, newest ex-date first; filter with `?listing_id=`, `?from=`, `?to=` (inclusive, over `ex_date`) |
 | `GET` | `/distribution_events/:id` | One event by its surrogate id |
 
 Each row is `{ "id", "listing_id", "ex_date", "amount_per_unit", "currency", "source", "fetched_symbol", "fetched_at" }`. The table is **provider-owned**: there is no `PUT` and no `DELETE`. A wrong row is corrected by fixing the listing's [symbol mapping](#closing-prices) and re-running the job, not by hand-editing the provider's answer — and the `id` exists so a row can be looked up in the [audit trail](#row-history) (`{"table": "distribution_events", "row_id": <id>}`), where a per-unit figure the provider later revised stays visible.
@@ -412,7 +412,7 @@ Two things follow from running it three times a day over a portfolio spanning th
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/trades` | List all trades |
+| `GET` | `/trades` | List all trades; filter with `?listing_id=`, `?holding_account_id=`, `?from=`, `?to=` (dates inclusive, over `date`) |
 | `GET` | `/trades/:id` | Get one trade |
 | `POST` | `/trades` | Create a trade, letting the database assign its id (see [Creating a record](#creating-a-record)) |
 | `PUT` | `/trades/:id` | Create or update a trade |
@@ -468,7 +468,7 @@ An unreferenced trade edits and deletes freely.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/income` | List all income records |
+| `GET` | `/income` | List all income records; filter with `?listing_id=`, `?holding_account_id=`, `?from=`, `?to=` (inclusive, over `date_paid`) |
 | `GET` | `/income/:id` | Get one income record |
 | `POST` | `/income` | Create an income record, letting the database assign its id (see [Creating a record](#creating-a-record)) |
 | `PUT` | `/income/:id` | Create or update an income record |
@@ -516,7 +516,7 @@ Interest income (`docs/ato/tax-return-labels-2026.md`): bank, term-deposit, or b
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/interest_income` | List all interest income records |
+| `GET` | `/interest_income` | List all interest income records; filter with `?holding_account_id=`, `?from=`, `?to=` (inclusive, over `date_paid`) — interest has no listing to filter on |
 | `GET` | `/interest_income/:id` | Get one interest income record |
 | `POST` | `/interest_income` | Create an interest income record, letting the database assign its id (see [Creating a record](#creating-a-record)) |
 | `PUT` | `/interest_income/:id` | Create or update an interest income record |
@@ -532,7 +532,7 @@ Deductible investment expenses (`docs/ato/investment-income-deductions.md`, `doc
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/investment_expenses` | List all investment expenses |
+| `GET` | `/investment_expenses` | List all investment expenses; filter with `?listing_id=`, `?holding_account_id=`, `?from=`, `?to=` (inclusive, over `date_incurred`) |
 | `GET` | `/investment_expenses/:id` | Get one investment expense |
 | `POST` | `/investment_expenses` | Create an investment expense, letting the database assign its id (see [Creating a record](#creating-a-record)) |
 | `PUT` | `/investment_expenses/:id` | Create or update an investment expense |
@@ -550,7 +550,7 @@ Fields: `date_incurred` (its month sets the financial year and the ATO FX conver
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/amma_statements` | List all AMMA statements |
+| `GET` | `/amma_statements` | List all AMMA statements; filter with `?listing_id=`, `?holding_account_id=`, `?from=`, `?to=` (inclusive, over `tax_year_end_date`) |
 | `GET` | `/amma_statements/:id` | Get one AMMA statement |
 | `POST` | `/amma_statements` | Create an AMMA statement, letting the database assign its id (see [Creating a record](#creating-a-record)) |
 | `PUT` | `/amma_statements/:id` | Create or update an AMMA statement |
@@ -595,7 +595,7 @@ A **share split** between the covered parcels' acquisition dates and the year en
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/amit_adjustments` | List all AMIT adjustments |
+| `GET` | `/amit_adjustments` | List all AMIT adjustments; filter with `?amma_statement_id=`, `?trade_id=` |
 | `GET` | `/amit_adjustments/:id` | Get one AMIT adjustment |
 | `POST` | `/amit_adjustments` | Create an AMIT adjustment, letting the database assign its id (see [Creating a record](#creating-a-record)) |
 | `PUT` | `/amit_adjustments/:id` | Create or update an AMIT adjustment |
@@ -619,7 +619,7 @@ The income side of an employee share scheme interest (`docs/ato/employee-share-s
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/ess_statements` | List all ESS statements |
+| `GET` | `/ess_statements` | List all ESS statements; filter with `?listing_id=`, `?holding_account_id=`, `?from=`, `?to=` (inclusive, over `taxing_point_date`) |
 | `GET` | `/ess_statements/:id` | Get one ESS statement |
 | `POST` | `/ess_statements` | Create an ESS statement, letting the database assign its id (see [Creating a record](#creating-a-record)) |
 | `PUT` | `/ess_statements/:id` | Create or update an ESS statement |
@@ -679,7 +679,7 @@ Records when each holding reinvests its distributions, as **dated enrolment peri
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/drp_enrolments` | List all enrolment periods |
+| `GET` | `/drp_enrolments` | List all enrolment periods; filter with `?listing_id=`, `?holding_account_id=` (no date range: a period carries two dates) |
 | `GET` | `/drp_enrolments/:id` | Get one enrolment period |
 | `POST` | `/drp_enrolments` | Create an enrolment period, letting the database assign its id (see [Creating a record](#creating-a-record)) |
 | `PUT` | `/drp_enrolments/:id` | Create or update an enrolment period |
@@ -709,7 +709,7 @@ A singleton row (the id is always `1`) holding the **opening carried-forward cap
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/cgt_settings` | List the settings row (empty array if never set) |
+| `GET` | `/cgt_settings` | List the settings row (empty array if never set; a singleton, no query filters) |
 | `GET` | `/cgt_settings/:id` | Get the settings row (id is always 1) |
 | `PUT` | `/cgt_settings/:id` | Set the opening carried-forward capital loss |
 | `DELETE` | `/cgt_settings/:id` | Remove the settings row (opening loss reverts to zero) |
@@ -729,7 +729,7 @@ Facts about the **taxpayer** rather than a holding, answered **year by year**: o
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/tax_year_settings` | List the recorded years, oldest first |
+| `GET` | `/tax_year_settings` | List the recorded years, oldest first (read whole; the keyed `GET-one` is the narrowed read) |
 | `GET` | `/tax_year_settings/:tax_year` | Get one year's settings |
 | `PUT` | `/tax_year_settings/:tax_year` | Record (or replace) that year's settings |
 | `DELETE` | `/tax_year_settings/:tax_year` | Remove the row (the year reverts to the defaults) |
@@ -770,7 +770,7 @@ Where **cash in lieu of a fraction is actually received**, it is the disposal of
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/corporate_actions` | List corporate actions |
+| `GET` | `/corporate_actions` | List corporate actions; filter with `?listing_id=`, `?from=`, `?to=` (inclusive, over `date`) |
 | `GET` | `/corporate_actions/:id` | Get one corporate action |
 | `POST` | `/corporate_actions` | Create a corporate action, letting the database assign its id (see [Creating a record](#creating-a-record)) |
 | `PUT` | `/corporate_actions/:id` | Create or update a corporate action |
@@ -1098,7 +1098,7 @@ Moves a quantity of one listing between two holding accounts of the same owner �
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/transfers` | List all transfers |
+| `GET` | `/transfers` | List all transfers; filter with `?listing_id=`, `?from=`, `?to=` (inclusive, over `date`) |
 | `GET` | `/transfers/:id` | Get one transfer |
 | `POST` | `/transfers` | Record **and execute** a transfer, letting the database assign its id (see [Creating a record](#creating-a-record)) |
 | `PUT` | `/transfers/:id` | Record **and execute** a transfer, atomically |
@@ -1143,7 +1143,7 @@ Inherited parcels from a deceased estate (`docs/ato/inherited-assets-cost-base.m
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/inheritances` | List all inheritances |
+| `GET` | `/inheritances` | List all inheritances; filter with `?listing_id=`, `?holding_account_id=`, `?from=`, `?to=` (inclusive, over `date_of_death`) |
 | `GET` | `/inheritances/:id` | Get one inheritance |
 | `POST` | `/inheritances` | Record an inheritance and create its parcel Buy, letting the database assign its id (see [Creating a record](#creating-a-record)) |
 | `PUT` | `/inheritances/:id` | Record an inheritance **and create/update its parcel Buy**, atomically |
@@ -1187,7 +1187,7 @@ Parcel allocations are **read-only** over HTTP; they are created and replaced at
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/parcel_allocations` | List all parcel allocations |
+| `GET` | `/parcel_allocations` | List all parcel allocations; filter with `?sale_trade_id=`, `?purchase_trade_id=` |
 | `GET` | `/parcel_allocations/:id` | Get one parcel allocation |
 
 `PUT` and `DELETE` on these paths return `405 Method Not Allowed`.
@@ -1816,7 +1816,7 @@ Deliberate scope decisions (2026-06-07), documented rather than modelled:
 - **Brokerage is billed in the trade's own currency** (2026-08-15) — a [trade](#trades) or [Sell](#sells) whose `brokerage_currency` differs from its `currency` is rejected with `422` (SCENARIOS B-02). Every figure the fee feeds is a single-currency sum — a Buy/DRP's cost base (`price × quantity + brokerage + GST`, converted to AUD as one figure), a Sell's proceeds net of those costs, the [activity ledger](#listing-activity)'s transaction total, the `statement_total` cross-check — so an unconverted foreign fee would be added at the trade currency's scale and silently mis-cost the parcel (an A\$33 fee on a USD trade at 0.50 overstated the cost base by A\$33). Strictly, s 960-50 translates each amount at its own time (`docs/ato/forex-common-transactions.md`), which would let the two legs convert at their own rates; that is not modelled. **An Australian broker's AUD commission on a US trade is entered converted into the trade's currency** — at the trade month's rate this gives the identical AUD cost base, since the whole figure converts at that rate anyway, and it keeps every downstream sum in one currency. `brokerage_currency` is retained (it is what the contract note states) but can now only repeat `currency`. **A crypto exchange's fee billed in crypto** (SCENARIOS L-08) meets the same rule, and has three shapes worth separating, because only one of them is a second CGT event: a fee **netted out of the units you receive** is not a fee to record at all — you acquired fewer units, so enter the net `quantity`; a fee **taken from the units you sold** is an incidental cost of that sale — enter its AUD (or trade-currency) value as `brokerage`, with no second disposal, since those units are already in the Sell's quantity; and a fee **paid in a third asset you hold** (the exchange's own token, say) *is* a disposal of those units at their market value — enter it as a [Sell](#sells) of that listing alongside the trade, and the same value as the trade's `brokerage`. The disposal leg is the one the system cannot infer: the on-chain network fee on a [transfer](#transfers) is modelled because a transfer says which parcels were burned, and a trade does not.
 - **Editing a split, bonus issue, or return of capital in place restates prior figures** (2026-08-14; narrowed 2026-08-15) — deleting one of these three [corporate actions](#corporate-actions) is guarded once trades depend on it (see *Deleting an action that is already depended on*), but `PUT /corporate_actions/:id` is deliberately **not**: a mis-keyed ratio, date, or per-unit amount stays correctable in place, because the alternative — freezing the action the moment anything depends on it — would mean deleting every later trade of the listing to fix a typo. What an edit can no longer do is leave an *invalid* state: every write re-checks that each affected listing's parcels still cover the sale allocations drawn on them (see *Writing terms that would over-consume a parcel*), so the residual exposure is restatement of valid figures only. That remains real — an edit recomputes every open-parcel quantity, cost base, and realised gain that reads the action, including figures in an already-lodged year, with nothing marking the restatement (the change itself is recorded in [row history](#row-history)). There is no lodged/closed-year concept in the data model; check the affected years' reports after editing one of these actions.
 - **A lodged financial year can be restated with nothing marking it** (2026-08-15) — the entry above is one instance of a general limitation: **no financial year is ever closed**. There is no lodgement marker in the data model, and every tax figure — the [tax summary](#tax-summary), [net capital gain](#net-capital-gain), [realised gains](#realised-gains), and the [annual tax report](#annual-tax-report) — is computed live from the current facts each time it is run, never stored. So editing or deleting an input to a year already lodged silently changes that year's figures, answering the ordinary `204`/`200` with no flag anywhere and no trace in the report itself; the annual tax report keeps reporting `completeness.complete: true` throughout. Reproduced four ways: changing a lodged year's Buy price (FY2023 net capital gain \$500 → \$1,100); editing a [return of capital](#corporate-actions)'s per-unit amount after its CGT event G1 gain was reported (deleting one is now refused, but the edit restates the same year); deleting the [CGT settings](#cgt-settings) opening carried-forward loss after later years consumed it (FY2024 net gain \$500 → \$1,000); and deleting the only disposal of a loss year that a later year's carry-forward drew on (FY2024 net gain \$750 → \$1,500). Note the last two: a *later* year's figures move because an *earlier* year's inputs changed, so the restatement need not be in the year you edited. Modelling this properly is a feature, not a fix — a per-year lodgement marker plus a "changed since lodgement" flag driven off [row history](#row-history) timestamps — and it is deliberately not built. What exists instead: `row_history` records every edit and deletion of an audited table with a UTC timestamp, so a restatement is fully **auditable after the fact**, but nothing **surfaces** it — you have to go looking. [Report snapshots](#report-snapshots) do not help here either; they persist the three price-dependent reports only, never a tax report. So treat a lodged year as settled by your own record-keeping: save the [annual tax report](#annual-tax-report) as a PDF at lodgement (it is a print document meant to be archived for exactly this reason, and it stamps the version that produced it beside the timestamp, so a later disagreement can be told from a changed *rule* as well as changed facts), and compare against it — or check [row history](#row-history) — before relying on a re-run of a prior year. The same applies in miniature to [`DELETE /exchange_holidays/:mic/:date`](#exchange-holidays), which has no guard: a trade re-saved afterwards without an explicit `settlement_date` silently recomputes against the changed calendar (deleting Good Friday moved an ASX trade's settlement from 2024-04-02 to 2024-03-29 — the holiday itself). Stored `settlement_date` values are untouched, and no CGT figure reads the column (only the settlement-coverage report and the annual tax report's display), so on the *trade* side that one is a record field, not a tax figure. The **calendar itself** is more than a write-time input, though — it was once described here as one, wrongly (corrected 2026-08-20, SCENARIOS Q-05/Q-08): [valuation](#report-snapshots) reads it live on every snapshot generation, valuing each holding at its nearest trading day on or before the snapshot date, so adding or removing a holiday re-values every stored snapshot from that date on. That part is no longer unflagged — a holiday insert, update or delete now marks those snapshots stale in the same transaction (migration 0033), so the daily job regenerates them and the series says which figures moved. It reaches no tax figure either way: no CGT or income figure reads a closing price. Nor is the change itself unrecorded any longer: the calendar joined the audited tables on 2026-08-21 (migration 0039), so the holiday a `DELETE` removed — the one thing here that nothing else in the database could reconstruct — is recoverable from [row history](#row-history).
-- **Server-side pagination** (2026-06-08) — the list and report endpoints always return the **full** result set as one JSON array; there is no server-side paging (`limit`/`offset`/cursor) of the payload. The web UI paginates **client-side** (the shared table renders one 50-row page at a time over the whole fetched set), so this addresses rendering/usability, not payload size — a very large table still transfers the entire array.
+- **Server-side pagination** (2026-06-08; filters added 2026-09-24) — the list and report endpoints always return the **full** result set as one JSON array; there is no server-side paging (`limit`/`offset`/cursor) of the payload. The workhorse **entity** lists are now narrowed server-side by query filters (`?listing_id=`, `?holding_account_id=`, `?from=`/`?to=`, and each table's own columns — see [Reading a list](#reading-a-list)), so a client no longer fetches a whole table to filter it; **cursor paging is the part that remains open**, and `/reports/row_history` is still the only paginated endpoint. The web UI paginates **client-side** (the shared table renders one 50-row page at a time over the whole fetched set), so this addresses rendering/usability, not payload size — a very large table still transfers the entire array.
 - **Period-performance FX attribution is approximate for a holding traded inside the window** (2026-07-25) — the [period-performance report](#period-performance)'s `fx_movement` values *closing* units at the opening vs closing FX rate; it does not track each parcel's own buy/sell dates within the window, so a holding fully closed by `to` (or a currency the holding wasn't yet in at `from`) shows zero FX contribution even if the native price moved against the AUD while it was held — that movement lands in `capital_growth` instead. `capital_growth + fx_movement + income` still sums exactly to `total_return` (the split is a residual by construction), so no figure is wrong — the FX/capital *boundary* is approximate, not the total. `realised_capital_gain` on the same response is the separate **tax** realised-gain figure ([realised-gains report](#realised-gains)), not a fourth additive bucket — don't sum it with the other three.
 - **Settlement dates follow the listing's *current* exchange, not the date of the change** (2026-07-26; narrowed 2026-07-28) — settlement-date calculation reads the settlement-holiday calendar via `exchange_holiday::exchange_holidays_for_listing`, joined by the listing's **live** `exchange_mic`, so it resolves against whichever exchange the listing currently records: [`POST /listings/:id/rename`](#listings) records *when* an exchange change took effect, but settlement does not retroactively pin historical trades to the calendar that was actually in force at the time. `trades.settlement_date` is a stored column computed once at write time, so an already-settled trade dated before the change is unaffected — but re-saving that trade **without** an explicit `settlement_date` recomputes it against the exchange currently on the listing, which is the new one. Re-enter an explicit `settlement_date` on such a trade if it needs to be preserved verbatim across an exchange change — which also pins it against the [`settlement-recompute` job](#jobs), whose whole purpose is to leave a computed date where a re-save would put it and which therefore recomputes over the live exchange's calendar too. ([Price collection](#closing-prices) no longer shares this limitation — its provider symbol and trading calendar both resolve as at the date being fetched.) The **trading-day check** on a trade's own `date` (see [Trades](#trades)) resolves as at that date as well, so on a listing that has changed exchange the calendar a trade is *judged* against and the calendar its settlement is *counted* on can be two different exchanges'. That is deliberate: the check answers "was the market this security traded on open that day", which only the as-at calendar can answer, while settlement stays as described here.
 - **Nothing verifies that a fetched symbol names the *same security*** (2026-08-21) — [price collection](#closing-prices) asks the provider for a symbol and stores whatever series comes back under the listing's own `listing_id`. The only automatic cross-check is the **quote currency** (a mismatch is refused and stored as an errored row for the day), which catches a symbol that reached another *market* but not one that reached another security quoted in the same currency. The live case: `LAC`'s whole pre-demerger history was fetched through `POST /closing_prices/backfill`'s one-off `symbol` override — the provider serves no `LAC` candle before the demerger at all — and returned the spun-off entity's demerger-adjusted series, 260 rows about 2.46× below the actual close, with nothing rejecting it. **No tax figure is affected** (closing prices feed valuation only), and the two mitigations are provenance rather than prevention: every fetched row now records the symbol it was fetched under (`fetched_symbol`), so an overridden run is identifiable afterwards, and a listing whose provider series genuinely begins later is declared with [`unpriced_before`](#listings), which excludes the earlier dates from valuation and makes the stored rows clearable. Rows stored before that column existed carry no symbol, and no migration invents one — for the 260 rows above it would have been the wrong answer.
@@ -1868,7 +1868,7 @@ Error bodies are **never** JSON. Every rejection carries either a short plain-te
 
 ## Reading a list
 
-Three facts about reading a collection are one contract, stated here once so a machine client learns them in one place; the per-endpoint sections below give each list's fields, filters and semantics.
+Four facts about reading a collection are one contract, stated here once so a machine client learns them in one place; the per-endpoint sections below give each list's fields, filters and semantics.
 
 **Order.** Every list endpoint returns its rows **ascending**, and the order is **total** (it always ends in a unique column), so identical requests return identical row positions. The server does **not** sort newest-first — the web UI does that client-side for its own tables (see [Web frontend](#web-frontend)), so the API's order and the screen's deliberately differ. An entity list's key is its `CrudEntity::ORDER_BY` (`src/entities/…`); the deliberate exceptions are the newest-first browse surfaces named below.
 
@@ -1893,7 +1893,31 @@ Report reads (`/portfolio/*` and `/reports/*`) return their rows in the order th
 
 Every other report read takes its parameters as query-string fields and answers `400` for an unreadable one (see [Response codes](#response-codes)). A `POST` on a write endpoint (`/report_snapshots/generate`, `/closing_prices/fetch`, the entity operations and creates) is a write, not a read.
 
-**Pagination.** `/reports/row_history` is the **only** paginated endpoint. Every other list returns the whole result: several accept filters (`/closing_prices?listing_id=&from=&to=`, `/attachments?<owner>_id=`, `/report_snapshots?report=&from=&to=`, `/report_snapshots/holding-series?from=&to=`, `/report_snapshots/series?listing_id=`), but none carries a `limit`, an offset or a cursor. The one endpoint answers in two shapes, chosen by whether the request names a `row_id`:
+**Filters.** The workhorse entity lists are narrowed **server-side**, each accepting the parameters its own columns offer, so a client no longer fetches a whole table to filter it. The date bounds are **inclusive at both ends**, the convention `GET /closing_prices?from=&to=` set; an entity list whose columns offer no such filter takes none. `/interest_income` has no listing (see [Interest income](#interest-income)), and `/corporate_actions`, `/transfers` and `/distribution_events` have no holding account, so those lists simply do not name it.
+
+| List | Query parameters |
+|------|------------------|
+| `/listings` | `exchange_mic`, `security_type` |
+| `/trades` | `listing_id`, `holding_account_id`, `from`/`to` over `date` |
+| `/income` | `listing_id`, `holding_account_id`, `from`/`to` over `date_paid` |
+| `/interest_income` | `holding_account_id`, `from`/`to` over `date_paid` |
+| `/investment_expenses` | `listing_id`, `holding_account_id`, `from`/`to` over `date_incurred` |
+| `/amma_statements` | `listing_id`, `holding_account_id`, `from`/`to` over `tax_year_end_date` |
+| `/ess_statements` | `listing_id`, `holding_account_id`, `from`/`to` over `taxing_point_date` |
+| `/inheritances` | `listing_id`, `holding_account_id`, `from`/`to` over `date_of_death` |
+| `/corporate_actions` | `listing_id`, `from`/`to` over `date` |
+| `/transfers` | `listing_id`, `from`/`to` over `date` |
+| `/distribution_events` | `listing_id`, `from`/`to` over `ex_date` |
+| `/drp_enrolments` | `listing_id`, `holding_account_id` (no date range: a period has two dates) |
+| `/amit_adjustments` | `amma_statement_id`, `trade_id` |
+| `/parcel_allocations` | `sale_trade_id`, `purchase_trade_id` |
+| `/closing_prices` | `listing_id`, `from`/`to` over `price_date` |
+| `/attachments` | `trade_id`, `income_id`, `amma_statement_id`, `ess_statement_id`, `interest_income_id`, `corporate_action_id`, `include_linked` |
+| `/report_snapshots` | `report`, `from`/`to` over `snapshot_date` |
+
+Several filters on one request **AND** together, and a filter matching nothing is an empty `200` array — never a `404`. A list whose columns offer no filter takes **none**: `/exchanges`, `/currencies`, `/mic_registry`, `/rba_fx_rates`, `/holding_accounts`, `/cgt_settings` and `/tax_year_settings` are reference or settings tables read whole (each has a keyed `GET-one` for a single row). An **unrecognised parameter is refused `400` naming it on every list route that decodes a query string** — including those unfiltered ones, which refuse *any* parameter at all rather than silently ignoring it (see [Response codes](#response-codes) and [Unrecognised body fields](#unrecognised-body-fields)).
+
+**Pagination.** `/reports/row_history` is the **only** paginated endpoint. Every other list returns the whole result: the filters above narrow a list, but none carries a `limit`, an offset or a cursor — cursor paging of the entity lists remains an open item (see [Known limitations](#known-limitations)). The one endpoint answers in two shapes, chosen by whether the request names a `row_id`:
 
 | Request | Response |
 |---------|----------|

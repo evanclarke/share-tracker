@@ -108,6 +108,7 @@ pub async fn true_up_provisional_snapshots(
 
 impl CrudEntity for RbaFxRate {
     type Key = i64;
+    type Filter = crate::infra::http::NoFilter;
     const TABLE: &'static str = "rba_fx_rates";
     const COLUMNS: &'static str = "id, currency, month, rate";
     const ORDER_BY: &'static str = "currency, month";

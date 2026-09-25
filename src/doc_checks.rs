@@ -267,6 +267,133 @@ fn list_ordering_post_reads_and_pagination_documented() {
     assert!(section.contains("never a silently truncated page"));
 }
 
+/// Docs-sync pin for the server-side filtering contract (REST API audit
+/// 2026-09-24, item B4): the "Reading a list" section states that the
+/// workhorse entity lists are narrowed server-side, which parameters each
+/// accepts, that the date bounds are inclusive, that an unrecognised parameter
+/// is refused `400` naming it, and that cursor paging is the part deliberately
+/// left open. The behaviour itself is pinned by the per-entity list tests and
+/// `entities::tests::every_list_route_refuses_an_unknown_parameter`; this is
+/// the documentation half, scoped to the section so a stray mention elsewhere
+/// cannot satisfy it.
+#[test]
+fn list_filtering_contract_documented() {
+    let section = reading_a_list_section();
+    assert!(
+        section.contains("**Filters.** The workhorse entity lists are narrowed **server-side**")
+    );
+    assert!(section.contains("**inclusive at both ends**"));
+    assert!(section.contains("Several filters on one request **AND** together"));
+    assert!(section.contains("never a `404`"));
+    assert!(section.contains(
+        "An **unrecognised parameter is refused `400` naming it on every list route that decodes \
+         a query string**"
+    ));
+    assert!(section.contains("cursor paging of the entity lists remains an open item"));
+    // Every filtered entity list is named in the section's own table, with the
+    // parameters it honours.
+    for (path, params) in [
+        ("`/listings`", "`exchange_mic`, `security_type`"),
+        (
+            "`/trades`",
+            "`listing_id`, `holding_account_id`, `from`/`to` over `date`",
+        ),
+        (
+            "`/income`",
+            "`listing_id`, `holding_account_id`, `from`/`to` over `date_paid`",
+        ),
+        (
+            "`/interest_income`",
+            "`holding_account_id`, `from`/`to` over `date_paid`",
+        ),
+        (
+            "`/investment_expenses`",
+            "`listing_id`, `holding_account_id`, `from`/`to` over `date_incurred`",
+        ),
+        (
+            "`/amma_statements`",
+            "`listing_id`, `holding_account_id`, `from`/`to` over `tax_year_end_date`",
+        ),
+        (
+            "`/ess_statements`",
+            "`listing_id`, `holding_account_id`, `from`/`to` over `taxing_point_date`",
+        ),
+        (
+            "`/inheritances`",
+            "`listing_id`, `holding_account_id`, `from`/`to` over `date_of_death`",
+        ),
+        (
+            "`/corporate_actions`",
+            "`listing_id`, `from`/`to` over `date`",
+        ),
+        ("`/transfers`", "`listing_id`, `from`/`to` over `date`"),
+        (
+            "`/distribution_events`",
+            "`listing_id`, `from`/`to` over `ex_date`",
+        ),
+        (
+            "`/drp_enrolments`",
+            "`listing_id`, `holding_account_id` (no date range: a period has two dates)",
+        ),
+        ("`/amit_adjustments`", "`amma_statement_id`, `trade_id`"),
+        (
+            "`/parcel_allocations`",
+            "`sale_trade_id`, `purchase_trade_id`",
+        ),
+        (
+            "`/closing_prices`",
+            "`listing_id`, `from`/`to` over `price_date`",
+        ),
+        (
+            "`/report_snapshots`",
+            "`report`, `from`/`to` over `snapshot_date`",
+        ),
+    ] {
+        assert!(
+            section.contains(&format!("| {path} | {params} |")),
+            "the filters table must name `{path}` with `{params}`"
+        );
+    }
+    // The unfiltered entity lists are named as read whole, so the
+    // classification is stated rather than left to be discovered.
+    assert!(section.contains(
+        "`/exchanges`, `/currencies`, `/mic_registry`, `/rba_fx_rates`, `/holding_accounts`, \
+         `/cgt_settings` and `/tax_year_settings` are reference or settings tables read whole"
+    ));
+    // Each affected section's own list route names its filters.
+    for (row, param) in [
+        (
+            "| `GET` | `/listings` | List all listings; filter with `?exchange_mic=`, `?security_type=` |",
+            "?exchange_mic=",
+        ),
+        ("| `GET` | `/trades` |", "?holding_account_id="),
+        ("| `GET` | `/income` |", "?from="),
+        ("| `GET` | `/interest_income` |", "?holding_account_id="),
+        ("| `GET` | `/investment_expenses` |", "?to="),
+        ("| `GET` | `/amma_statements` |", "?listing_id="),
+        ("| `GET` | `/amit_adjustments` |", "?amma_statement_id="),
+        ("| `GET` | `/ess_statements` |", "?holding_account_id="),
+        ("| `GET` | `/drp_enrolments` |", "?listing_id="),
+        ("| `GET` | `/corporate_actions` |", "?listing_id="),
+        ("| `GET` | `/transfers` |", "?from="),
+        ("| `GET` | `/inheritances` |", "?holding_account_id="),
+        ("| `GET` | `/parcel_allocations` |", "?sale_trade_id="),
+        ("| `GET` | `/distribution_events` |", "?from="),
+    ] {
+        let line = API_MD
+            .lines()
+            .find(|l| l.starts_with(row) || l == &row)
+            .unwrap_or_else(|| panic!("docs/API.md has no `{row}` route row"));
+        assert!(
+            line.contains(param),
+            "the {row} row must name {param}: {line}"
+        );
+    }
+    // The Known limitation says filters landed and cursor paging did not.
+    assert!(API_MD.contains("- **Server-side pagination** (2026-06-08; filters added 2026-09-24)"));
+    assert!(API_MD.contains("**cursor paging is the part that remains open**"));
+}
+
 /// Docs-sync pin for the cent-rounded CSV exports (SCENARIOS W-c): both
 /// export paragraphs state the rounding, and the display-rules paragraph no
 /// longer claims the CSV exports return full-precision decimals — the sentence

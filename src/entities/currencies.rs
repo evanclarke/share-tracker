@@ -172,6 +172,7 @@ impl ImportSummary {
 impl CrudEntity for Currency {
     /// Keyed by ISO 4217 (or ISO 24165 DTI) code, not a rowid.
     type Key = String;
+    type Filter = crate::infra::http::NoFilter;
     const TABLE: &'static str = "currencies";
     const COLUMNS: &'static str = "code, kind, numeric_code, name, short_name, minor_units, source";
     const KEY_COLUMN: &'static str = "code";

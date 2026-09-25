@@ -433,8 +433,40 @@ fn default_currency() -> String {
     "AUD".to_string()
 }
 
+/// The `/income` list filters: the owning columns and the `date_paid`
+/// range, inclusive at both ends.
+///
+/// The query filters the list route accepts — see
+/// [`crate::infra::http::CrudListFilter`].
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IncomeListQuery {
+    pub listing_id: Option<i64>,
+    pub holding_account_id: Option<i64>,
+    pub from: Option<NaiveDate>,
+    pub to: Option<NaiveDate>,
+}
+
+impl crate::infra::http::CrudListFilter for IncomeListQuery {
+    fn apply_filter(&self, qb: &mut sqlx::QueryBuilder<sqlx::Sqlite>) {
+        if let Some(value) = self.listing_id {
+            qb.push(" AND listing_id = ").push_bind(value);
+        }
+        if let Some(value) = self.holding_account_id {
+            qb.push(" AND holding_account_id = ").push_bind(value);
+        }
+        if let Some(from) = self.from {
+            qb.push(" AND date_paid >= ").push_bind(from);
+        }
+        if let Some(to) = self.to {
+            qb.push(" AND date_paid <= ").push_bind(to);
+        }
+    }
+}
+
 impl CrudEntity for Income {
     type Key = i64;
+    type Filter = IncomeListQuery;
     const TABLE: &'static str = "income";
     const COLUMNS: &'static str = "id, listing_id, date_paid, ex_date, franked_amount, unfranked_amount, \
          foreign_source_income, foreign_tax_paid, tfn_withholding_tax, franking_credits, \
@@ -3079,5 +3111,57 @@ mod tests {
             ),
             Some("1292142857142857142857142857.1".parse().unwrap())
         );
+    }
+
+    /// The `/income` list narrows by `?listing_id=`, `?holding_account_id=`
+    /// and the `?from=`/`?to=` range over `date_paid` (inclusive at both
+    /// ends); combined filters AND, and a filter matching nothing is an empty
+    /// `200` array.
+    #[tokio::test]
+    async fn the_list_narrows_by_listing_account_and_date_range() {
+        use crate::test_support::assert_list_filters;
+        let pool = test_pool().await;
+        for id in [1, 2] {
+            test_support::listing(id)
+                .ticker(&format!("LST{id}"))
+                .insert(&pool)
+                .await;
+        }
+        crate::entities::holding_account::db_upsert(
+            &pool,
+            &crate::entities::holding_account::HoldingAccount {
+                id: 2,
+                name: "Second".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+        for (id, listing_id, account, date) in [
+            (1, 1, 1, ymd(2024, 6, 3)),
+            (2, 1, 2, ymd(2024, 7, 3)),
+            (3, 2, 1, ymd(2024, 8, 5)),
+            (4, 2, 2, ymd(2024, 9, 4)),
+        ] {
+            test_support::income(id, listing_id, date)
+                .with(|i| i.holding_account_id = account)
+                .insert(&pool)
+                .await;
+        }
+        assert_list_filters(
+            &client(&pool),
+            "/income",
+            |i: &Income| i.id,
+            &[
+                ("", &[1, 2, 3, 4]),
+                ("?listing_id=1", &[1, 2]),
+                ("?holding_account_id=1", &[1, 3]),
+                ("?from=2024-08-01", &[3, 4]),
+                ("?to=2024-07-31", &[1, 2]),
+                ("?listing_id=2&holding_account_id=2", &[4]),
+                ("?listing_id=99", &[]),
+            ],
+        )
+        .await;
     }
 }

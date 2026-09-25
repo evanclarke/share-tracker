@@ -85,6 +85,7 @@ pub struct ImportSummary {
 impl CrudEntity for MicEntry {
     /// Keyed by MIC, not a rowid.
     type Key = String;
+    type Filter = crate::infra::http::NoFilter;
     const TABLE: &'static str = "mic_registry";
     const COLUMNS: &'static str =
         "mic, operating_mic, name, country_code, city, status, expiry_date";

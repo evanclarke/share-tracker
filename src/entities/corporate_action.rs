@@ -4132,4 +4132,41 @@ mod tests {
         let all: Vec<CorporateAction> = client(&pool).get_json("/corporate_actions").await;
         assert!(all.is_empty(), "a rejected create stores nothing: {all:?}");
     }
+
+    /// The `/corporate_actions` list narrows by `?listing_id=` and the
+    /// `?from=`/`?to=` range over the action `date` (inclusive); combined
+    /// filters AND.
+    #[tokio::test]
+    async fn the_list_narrows_by_listing_and_date_range() {
+        use crate::test_support::assert_list_filters;
+        use crate::test_support::ymd;
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "CA1").await;
+        insert_listing(&pool, 2, "CA2").await;
+        for (id, listing_id, date) in [
+            (1, 1, ymd(2024, 6, 3)),
+            (2, 1, ymd(2024, 7, 3)),
+            (3, 2, ymd(2024, 8, 5)),
+            (4, 2, ymd(2024, 9, 4)),
+        ] {
+            db_upsert(&pool, &roc(id, listing_id, date, "0.10"))
+                .await
+                .unwrap();
+        }
+
+        assert_list_filters(
+            &client(&pool),
+            "/corporate_actions",
+            |a: &CorporateAction| a.id,
+            &[
+                ("", &[1, 2, 3, 4]),
+                ("?listing_id=1", &[1, 2]),
+                ("?from=2024-08-01", &[3, 4]),
+                ("?to=2024-07-31", &[1, 2]),
+                ("?listing_id=2&from=2024-09-01", &[4]),
+                ("?listing_id=99", &[]),
+            ],
+        )
+        .await;
+    }
 }

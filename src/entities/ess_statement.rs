@@ -187,8 +187,40 @@ fn default_currency() -> String {
     "AUD".to_string()
 }
 
+/// The `/ess_statements` list filters: the owning columns and the
+/// `taxing_point_date` range, inclusive at both ends.
+///
+/// The query filters the list route accepts — see
+/// [`crate::infra::http::CrudListFilter`].
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EssStatementListQuery {
+    pub listing_id: Option<i64>,
+    pub holding_account_id: Option<i64>,
+    pub from: Option<NaiveDate>,
+    pub to: Option<NaiveDate>,
+}
+
+impl crate::infra::http::CrudListFilter for EssStatementListQuery {
+    fn apply_filter(&self, qb: &mut sqlx::QueryBuilder<sqlx::Sqlite>) {
+        if let Some(value) = self.listing_id {
+            qb.push(" AND listing_id = ").push_bind(value);
+        }
+        if let Some(value) = self.holding_account_id {
+            qb.push(" AND holding_account_id = ").push_bind(value);
+        }
+        if let Some(from) = self.from {
+            qb.push(" AND taxing_point_date >= ").push_bind(from);
+        }
+        if let Some(to) = self.to {
+            qb.push(" AND taxing_point_date <= ").push_bind(to);
+        }
+    }
+}
+
 impl CrudEntity for EssStatement {
     type Key = i64;
+    type Filter = EssStatementListQuery;
     const TABLE: &'static str = "ess_statements";
     const COLUMNS: &'static str = COLUMNS;
     const ORDER_BY: &'static str = "taxing_point_date, id";
@@ -1721,5 +1753,57 @@ mod tests {
             "deferral_discount": "600",
             "currency": "AUD"
         })
+    }
+
+    /// The `/ess_statements` list narrows by `?listing_id=`,
+    /// `?holding_account_id=` and the `?from=`/`?to=` range over
+    /// `taxing_point_date` (inclusive); combined filters AND.
+    #[tokio::test]
+    async fn the_list_narrows_by_listing_account_and_date_range() {
+        use crate::test_support::assert_list_filters;
+        let pool = test_pool().await;
+        for id in [1, 2] {
+            test_support::listing(id)
+                .ticker(&format!("ESS{id}"))
+                .insert(&pool)
+                .await;
+        }
+        crate::entities::holding_account::db_upsert(
+            &pool,
+            &crate::entities::holding_account::HoldingAccount {
+                id: 2,
+                name: "Second".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+        for (id, listing_id, account, taxing_point) in [
+            (1, 1, 1, ymd(2024, 3, 15)),
+            (2, 1, 2, ymd(2024, 4, 15)),
+            (3, 2, 1, ymd(2025, 1, 10)),
+            (4, 2, 2, ymd(2025, 2, 10)),
+        ] {
+            test_support::ess_statement(id, listing_id, taxing_point)
+                .with(|s| s.holding_account_id = account)
+                .insert(&pool)
+                .await;
+        }
+
+        assert_list_filters(
+            &client(&pool),
+            "/ess_statements",
+            |s: &EssStatement| s.id,
+            &[
+                ("", &[1, 2, 3, 4]),
+                ("?listing_id=1", &[1, 2]),
+                ("?holding_account_id=1", &[1, 3]),
+                ("?from=2025-01-01", &[3, 4]),
+                ("?to=2024-12-31", &[1, 2]),
+                ("?listing_id=2&holding_account_id=2", &[4]),
+                ("?listing_id=99", &[]),
+            ],
+        )
+        .await;
     }
 }

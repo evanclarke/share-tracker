@@ -246,8 +246,40 @@ impl From<UpsertError> for ApiError {
     }
 }
 
+/// The `/amma_statements` list filters: the owning columns and the
+/// `tax_year_end_date` range, inclusive at both ends.
+///
+/// The query filters the list route accepts — see
+/// [`crate::infra::http::CrudListFilter`].
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AmmaListQuery {
+    pub listing_id: Option<i64>,
+    pub holding_account_id: Option<i64>,
+    pub from: Option<NaiveDate>,
+    pub to: Option<NaiveDate>,
+}
+
+impl crate::infra::http::CrudListFilter for AmmaListQuery {
+    fn apply_filter(&self, qb: &mut sqlx::QueryBuilder<sqlx::Sqlite>) {
+        if let Some(value) = self.listing_id {
+            qb.push(" AND listing_id = ").push_bind(value);
+        }
+        if let Some(value) = self.holding_account_id {
+            qb.push(" AND holding_account_id = ").push_bind(value);
+        }
+        if let Some(from) = self.from {
+            qb.push(" AND tax_year_end_date >= ").push_bind(from);
+        }
+        if let Some(to) = self.to {
+            qb.push(" AND tax_year_end_date <= ").push_bind(to);
+        }
+    }
+}
+
 impl CrudEntity for AmmaStatement {
     type Key = i64;
+    type Filter = AmmaListQuery;
     const TABLE: &'static str = "amma_statements";
     const COLUMNS: &'static str = "id, listing_id, tax_year_end_date, units_held, date_received, \
          australian_interest, australian_dividends_unfranked, franked_dividends, \
@@ -1114,5 +1146,62 @@ mod tests {
             .put("/amma_statements/1", &body("USD"))
             .await
             .expect_status(StatusCode::CREATED);
+    }
+
+    /// The `/amma_statements` list narrows by `?listing_id=`,
+    /// `?holding_account_id=` and the `?from=`/`?to=` range over
+    /// `tax_year_end_date` (inclusive); combined filters AND.
+    #[tokio::test]
+    async fn the_list_narrows_by_listing_account_and_date_range() {
+        use crate::test_support::assert_list_filters;
+        use crate::test_support::ymd;
+        let pool = test_pool().await;
+        for id in [1, 2] {
+            test_support::listing(id)
+                .ticker(&format!("AMM{id}"))
+                .amit(true)
+                .insert(&pool)
+                .await;
+        }
+        crate::entities::holding_account::db_upsert(
+            &pool,
+            &crate::entities::holding_account::HoldingAccount {
+                id: 2,
+                name: "Second".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+        for (id, listing_id, account, year_end) in [
+            (1, 1, 1, ymd(2024, 6, 30)),
+            (2, 1, 2, ymd(2025, 6, 30)),
+            (3, 2, 1, ymd(2026, 6, 30)),
+            (4, 2, 2, ymd(2025, 6, 30)),
+        ] {
+            test_support::amma(id, listing_id)
+                .with(|a| {
+                    a.holding_account_id = account;
+                    a.tax_year_end_date = year_end;
+                })
+                .insert(&pool)
+                .await;
+        }
+
+        assert_list_filters(
+            &client(&pool),
+            "/amma_statements",
+            |a: &AmmaStatement| a.id,
+            &[
+                ("", &[1, 2, 3, 4]),
+                ("?listing_id=1", &[1, 2]),
+                ("?holding_account_id=1", &[1, 3]),
+                ("?from=2025-01-01", &[2, 3, 4]),
+                ("?to=2024-12-31", &[1]),
+                ("?listing_id=1&holding_account_id=2", &[2]),
+                ("?listing_id=99", &[]),
+            ],
+        )
+        .await;
     }
 }

@@ -173,6 +173,7 @@ const METADATA_COLS: &str = "id, trade_id, income_id, amma_statement_id, ess_sta
 
 impl CrudEntity for Attachment {
     type Key = i64;
+    type Filter = crate::infra::http::NoFilter;
     const TABLE: &'static str = "attachments";
     const COLUMNS: &'static str = METADATA_COLS;
     const NOUN: &'static str = "attachment";

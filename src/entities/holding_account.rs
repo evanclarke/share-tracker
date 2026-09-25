@@ -47,6 +47,7 @@ pub struct HoldingAccountBody {
 
 impl CrudEntity for HoldingAccount {
     type Key = i64;
+    type Filter = crate::infra::http::NoFilter;
     const TABLE: &'static str = "holding_accounts";
     const COLUMNS: &'static str = "id, name";
     const NOUN: &'static str = "holding account";

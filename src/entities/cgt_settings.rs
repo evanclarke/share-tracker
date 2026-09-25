@@ -38,6 +38,7 @@ pub struct CgtSettingsBody {
 
 impl CrudEntity for CgtSettings {
     type Key = i64;
+    type Filter = crate::infra::http::NoFilter;
     const TABLE: &'static str = "cgt_settings";
     const COLUMNS: &'static str = "id, opening_capital_loss";
     const NOUN: &'static str = "CGT settings row";

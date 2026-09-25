@@ -337,8 +337,32 @@ impl From<UpsertError> for ApiError {
     }
 }
 
+/// The `/listings` list filters: the two non-id columns the list is
+/// browsed by. (`listing_id` is the path's own `{id}`.)
+///
+/// The query filters the list route accepts — see
+/// [`crate::infra::http::CrudListFilter`].
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ListingListQuery {
+    pub exchange_mic: Option<String>,
+    pub security_type: Option<SecurityType>,
+}
+
+impl crate::infra::http::CrudListFilter for ListingListQuery {
+    fn apply_filter(&self, qb: &mut sqlx::QueryBuilder<sqlx::Sqlite>) {
+        if let Some(value) = &self.exchange_mic {
+            qb.push(" AND exchange_mic = ").push_bind(value.clone());
+        }
+        if let Some(value) = self.security_type {
+            qb.push(" AND security_type = ").push_bind(value);
+        }
+    }
+}
+
 impl CrudEntity for Listing {
     type Key = i64;
+    type Filter = ListingListQuery;
     const TABLE: &'static str = "listings";
     const COLUMNS: &'static str = "id, exchange_mic, ticker, name, isin, security_type, currency, amit, \
          amit_from, unpriced_from, unpriced_before, preference, price_symbol";
@@ -1808,5 +1832,41 @@ mod tests {
 
         let all: Vec<Listing> = client.get_json("/listings").await;
         assert!(all.is_empty(), "a rejected create stores nothing: {all:?}");
+    }
+
+    /// The `/listings` list narrows by `?exchange_mic=` and `?security_type=`,
+    /// the two non-id columns it is browsed by; they AND together, and a
+    /// filter matching nothing is an empty `200` array.
+    #[tokio::test]
+    async fn the_list_narrows_by_exchange_and_security_type() {
+        use crate::test_support::assert_list_filters;
+        let pool = test_pool().await;
+        crate::test_support::listing(1).insert(&pool).await; // XASX ETF
+        crate::test_support::listing(2).insert(&pool).await; // XASX ETF
+        crate::test_support::listing(3)
+            .mic("XNYS")
+            .security_type(SecurityType::Share)
+            .insert(&pool)
+            .await;
+        crate::test_support::listing(4)
+            .mic("XNYS")
+            .security_type(SecurityType::Share)
+            .insert(&pool)
+            .await;
+
+        assert_list_filters(
+            &client(&pool),
+            "/listings",
+            |l: &Listing| l.id,
+            &[
+                ("", &[1, 2, 3, 4]),
+                ("?exchange_mic=XASX", &[1, 2]),
+                ("?security_type=Share", &[3, 4]),
+                ("?exchange_mic=XASX&security_type=ETF", &[1, 2]),
+                ("?exchange_mic=XNYS&security_type=ETF", &[]),
+                ("?exchange_mic=XZZZ", &[]),
+            ],
+        )
+        .await;
     }
 }

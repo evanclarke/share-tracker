@@ -315,8 +315,38 @@ impl From<TransferError> for ApiError {
     }
 }
 
+/// The `/transfers` list filters: the listing and the transfer `date`
+/// range, inclusive at both ends. A transfer's two sides are
+/// `from_account_id`/`to_account_id`, not a single holding account, so
+/// there is no one account to filter on without choosing a side.
+///
+/// The query filters the list route accepts — see
+/// [`crate::infra::http::CrudListFilter`].
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TransferListQuery {
+    pub listing_id: Option<i64>,
+    pub from: Option<NaiveDate>,
+    pub to: Option<NaiveDate>,
+}
+
+impl crate::infra::http::CrudListFilter for TransferListQuery {
+    fn apply_filter(&self, qb: &mut sqlx::QueryBuilder<sqlx::Sqlite>) {
+        if let Some(value) = self.listing_id {
+            qb.push(" AND listing_id = ").push_bind(value);
+        }
+        if let Some(from) = self.from {
+            qb.push(" AND date >= ").push_bind(from);
+        }
+        if let Some(to) = self.to {
+            qb.push(" AND date <= ").push_bind(to);
+        }
+    }
+}
+
 impl CrudEntity for Transfer {
     type Key = i64;
+    type Filter = TransferListQuery;
     const TABLE: &'static str = "transfers";
     const COLUMNS: &'static str =
         "id, listing_id, date, from_account_id, to_account_id, fee_sale_trade_id";
@@ -2480,5 +2510,61 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(group_trades, 0, "the rolled-back group left trades behind");
+    }
+
+    /// The `/transfers` list narrows by `?listing_id=` and the
+    /// `?from=`/`?to=` range over the transfer `date` (inclusive); combined
+    /// filters AND.
+    #[tokio::test]
+    async fn the_list_narrows_by_listing_and_date_range() {
+        use crate::test_support::assert_list_filters;
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "ONE").await;
+        insert_listing(&pool, 2, "TWO").await;
+        for (id, listing_id, day) in [
+            (1, 1, d(2023, 3, 1)),
+            (2, 1, d(2023, 3, 2)),
+            (3, 2, d(2023, 3, 3)),
+            (4, 2, d(2023, 3, 6)),
+        ] {
+            test_support::buy(id, listing_id)
+                .date(day)
+                .settlement(day)
+                .qty(dec("100"))
+                .price(dec("120"))
+                .currency("USD")
+                .fx_rate(dec("1.5"))
+                .spot_fx_rate(dec("1.4034"))
+                .account(2)
+                .insert(&pool)
+                .await;
+        }
+        for (id, listing_id, date, parcel) in [
+            (1, 1, d(2024, 6, 3), 1),
+            (2, 1, d(2024, 7, 3), 2),
+            (3, 2, d(2024, 8, 5), 3),
+            (4, 2, d(2024, 9, 4), 4),
+        ] {
+            // `body` builds a listing-1 transfer; the listing is the filter
+            // under test, so it is set here rather than assumed.
+            let mut request = body(date, 2, 1, vec![(parcel, "100")]);
+            request.listing_id = listing_id;
+            db_transfer(&pool, id, &request).await.unwrap();
+        }
+
+        assert_list_filters(
+            &client(&pool),
+            "/transfers",
+            |t: &Transfer| t.id,
+            &[
+                ("", &[1, 2, 3, 4]),
+                ("?listing_id=1", &[1, 2]),
+                ("?from=2024-08-01", &[3, 4]),
+                ("?to=2024-07-31", &[1, 2]),
+                ("?listing_id=2&from=2024-09-01", &[4]),
+                ("?listing_id=99", &[]),
+            ],
+        )
+        .await;
     }
 }

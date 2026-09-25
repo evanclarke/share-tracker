@@ -27,8 +27,37 @@ const COLUMNS: &str = "id, action_type, listing_id, date, amount_per_unit, curre
                        record_date, demerger_close_date, demerger_close_price, \
                        demerger_close_sourced_from, demerger_close_reason, renounceable";
 
+/// The `/corporate_actions` list filters: the listing and the action
+/// `date` range, inclusive at both ends. A corporate action belongs to
+/// no holding account, so there is none to filter on.
+///
+/// The query filters the list route accepts — see
+/// [`crate::infra::http::CrudListFilter`].
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CorporateActionListQuery {
+    pub listing_id: Option<i64>,
+    pub from: Option<NaiveDate>,
+    pub to: Option<NaiveDate>,
+}
+
+impl crate::infra::http::CrudListFilter for CorporateActionListQuery {
+    fn apply_filter(&self, qb: &mut sqlx::QueryBuilder<sqlx::Sqlite>) {
+        if let Some(value) = self.listing_id {
+            qb.push(" AND listing_id = ").push_bind(value);
+        }
+        if let Some(from) = self.from {
+            qb.push(" AND date >= ").push_bind(from);
+        }
+        if let Some(to) = self.to {
+            qb.push(" AND date <= ").push_bind(to);
+        }
+    }
+}
+
 impl CrudEntity for CorporateAction {
     type Key = i64;
+    type Filter = CorporateActionListQuery;
     const TABLE: &'static str = "corporate_actions";
     const COLUMNS: &'static str = COLUMNS;
     const NOUN: &'static str = "corporate action";

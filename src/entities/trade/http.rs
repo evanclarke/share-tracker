@@ -4,13 +4,14 @@
 //! invariants (allocations, residual chain) always hold.
 
 use super::{
-    DeleteOutcome, Trade, TradeBody, TradeType, db_create, db_delete, db_get, db_list,
-    db_upsert_resolving_settlement, model::SettlementDateSource, resolve_brokerage,
+    DeleteOutcome, Trade, TradeBody, TradeListQuery, TradeType, db_create, db_delete, db_get,
+    db_list_filtered, db_upsert_resolving_settlement, model::SettlementDateSource,
+    resolve_brokerage,
 };
 use crate::infra::http::{self, ApiError, UpsertResponse};
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     routing::get,
 };
@@ -22,8 +23,15 @@ pub fn router() -> Router<SqlitePool> {
         .route("/trades/{id}", get(get_one).put(upsert).delete(delete))
 }
 
-async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<Trade>>, ApiError> {
-    let trades = db_list(&pool).await?;
+/// The trade list is hand-written only because a trade is *presented* through
+/// [`Trade::present`] (its GST-inclusive brokerage recombined); the filtering
+/// itself is the shared [`http::crud_list_filtered`], over the same
+/// [`TradeListQuery`] every other entity's list takes.
+async fn list(
+    State(pool): State<SqlitePool>,
+    Query(filter): Query<TradeListQuery>,
+) -> Result<Json<Vec<Trade>>, ApiError> {
+    let trades = db_list_filtered(&pool, &filter).await?;
     Ok(Json(trades.into_iter().map(Trade::present).collect()))
 }
 

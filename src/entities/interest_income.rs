@@ -93,8 +93,37 @@ fn default_currency() -> String {
     "AUD".to_string()
 }
 
+/// The `/interest_income` list filters: the owning account and the
+/// `date_paid` range, inclusive at both ends. Interest has no listing
+/// (see the module docs), so there is no `listing_id` to filter on.
+///
+/// The query filters the list route accepts — see
+/// [`crate::infra::http::CrudListFilter`].
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InterestIncomeListQuery {
+    pub holding_account_id: Option<i64>,
+    pub from: Option<NaiveDate>,
+    pub to: Option<NaiveDate>,
+}
+
+impl crate::infra::http::CrudListFilter for InterestIncomeListQuery {
+    fn apply_filter(&self, qb: &mut sqlx::QueryBuilder<sqlx::Sqlite>) {
+        if let Some(value) = self.holding_account_id {
+            qb.push(" AND holding_account_id = ").push_bind(value);
+        }
+        if let Some(from) = self.from {
+            qb.push(" AND date_paid >= ").push_bind(from);
+        }
+        if let Some(to) = self.to {
+            qb.push(" AND date_paid <= ").push_bind(to);
+        }
+    }
+}
+
 impl CrudEntity for InterestIncome {
     type Key = i64;
+    type Filter = InterestIncomeListQuery;
     const TABLE: &'static str = "interest_income";
     const COLUMNS: &'static str = "id, date_paid, amount, tfn_withholding_tax, foreign_source, \
      foreign_tax_paid, currency, source, holding_account_id";
@@ -729,5 +758,41 @@ mod tests {
 
         let all: Vec<InterestIncome> = client.get_json("/interest_income").await;
         assert!(all.is_empty(), "a rejected create stores nothing: {all:?}");
+    }
+
+    /// The `/interest_income` list narrows by `?holding_account_id=` and the
+    /// `?from=`/`?to=` range over `date_paid` (inclusive at both ends, and
+    /// matching the `GET /closing_prices` convention); the account column is
+    /// nullable, so `= 1` excludes the unassigned rows; combined filters AND.
+    #[tokio::test]
+    async fn the_list_narrows_by_account_and_date_range() {
+        use crate::test_support::assert_list_filters;
+        let pool = test_pool().await;
+        for (id, account, date) in [
+            (1, Some(1), crate::test_support::ymd(2024, 3, 15)),
+            (2, Some(1), crate::test_support::ymd(2024, 4, 15)),
+            (3, None, crate::test_support::ymd(2025, 1, 10)),
+            (4, None, crate::test_support::ymd(2025, 2, 10)),
+        ] {
+            let mut row = sample(id);
+            row.holding_account_id = account;
+            row.date_paid = date;
+            db_upsert(&pool, &row).await.unwrap();
+        }
+
+        assert_list_filters(
+            &client(&pool),
+            "/interest_income",
+            |i: &InterestIncome| i.id,
+            &[
+                ("", &[1, 2, 3, 4]),
+                ("?holding_account_id=1", &[1, 2]),
+                ("?from=2025-01-01", &[3, 4]),
+                ("?to=2024-12-31", &[1, 2]),
+                ("?holding_account_id=1&from=2024-04-01", &[2]),
+                ("?holding_account_id=99", &[]),
+            ],
+        )
+        .await;
     }
 }

@@ -45,8 +45,32 @@ pub struct AmitAdjustmentBody {
     pub quantity: Decimal,
 }
 
+/// The `/amit_adjustments` list filters: the two rows an adjustment
+/// belongs to (its statement and the parcel trade it reduces).
+///
+/// The query filters the list route accepts — see
+/// [`crate::infra::http::CrudListFilter`].
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AmitAdjustmentListQuery {
+    pub amma_statement_id: Option<i64>,
+    pub trade_id: Option<i64>,
+}
+
+impl crate::infra::http::CrudListFilter for AmitAdjustmentListQuery {
+    fn apply_filter(&self, qb: &mut sqlx::QueryBuilder<sqlx::Sqlite>) {
+        if let Some(value) = self.amma_statement_id {
+            qb.push(" AND amma_statement_id = ").push_bind(value);
+        }
+        if let Some(value) = self.trade_id {
+            qb.push(" AND trade_id = ").push_bind(value);
+        }
+    }
+}
+
 impl CrudEntity for AmitAdjustment {
     type Key = i64;
+    type Filter = AmitAdjustmentListQuery;
     const TABLE: &'static str = "amit_adjustments";
     const COLUMNS: &'static str = "id, amma_statement_id, trade_id, quantity";
     const NOUN: &'static str = "AMIT adjustment";
@@ -2086,5 +2110,35 @@ mod tests {
         let pool = test_pool().await;
         let resp = client(&pool).delete("/amit_adjustments/999").await;
         assert_eq!(resp.status, StatusCode::NOT_FOUND);
+    }
+
+    /// The `/amit_adjustments` list narrows by `?amma_statement_id=` and
+    /// `?trade_id=`, which AND together.
+    #[tokio::test]
+    async fn the_list_narrows_by_statement_and_parcel() {
+        use crate::test_support::assert_list_filters;
+        let pool = test_pool().await;
+        insert_test_listing(&pool, 1, "XASX", "VAF").await;
+        insert_buy_trade(&pool, 1, 1, Decimal::from(100)).await;
+        insert_buy_trade(&pool, 2, 1, Decimal::from(100)).await;
+        insert_amma(&pool, 1, 1, dec("0.05")).await;
+        insert_amma(&pool, 2, 1, dec("0.05")).await;
+        for (id, amma_id, trade_id) in [(1, 1, 1), (2, 1, 2), (3, 2, 1), (4, 2, 2)] {
+            test_support::amit_adjustment(&pool, id, amma_id, trade_id, Decimal::from(10)).await;
+        }
+
+        assert_list_filters(
+            &client(&pool),
+            "/amit_adjustments",
+            |a: &AmitAdjustment| a.id,
+            &[
+                ("", &[1, 2, 3, 4]),
+                ("?amma_statement_id=1", &[1, 2]),
+                ("?trade_id=1", &[1, 3]),
+                ("?amma_statement_id=2&trade_id=2", &[4]),
+                ("?amma_statement_id=99", &[]),
+            ],
+        )
+        .await;
     }
 }

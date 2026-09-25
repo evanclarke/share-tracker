@@ -18,6 +18,10 @@ mod settlement;
 /// the non-test build warning-free.
 #[cfg(test)]
 pub use db::UpsertError;
+/// The unfiltered whole-table read: now that the route filters, only tests
+/// name it, so it is re-exported only for them.
+#[cfg(test)]
+pub use db::db_list;
 /// `db_upsert` writes a row's settlement provenance exactly as given, which
 /// only the tests (and the fixture builders) need: the HTTP path resolves the
 /// body's date on the write's own transaction
@@ -26,7 +30,8 @@ pub use db::UpsertError;
 #[cfg(test)]
 pub use db::db_upsert;
 pub use db::{
-    DeleteOutcome, db_create, db_delete, db_get, db_list, db_upsert_resolving_settlement,
+    DeleteOutcome, TradeListQuery, db_create, db_delete, db_get, db_list_filtered,
+    db_upsert_resolving_settlement,
 };
 // The Sell path shares this DB-level rule, as it shares `check_amounts`.
 pub(crate) use db::listing_currency_mismatch;
@@ -3609,5 +3614,60 @@ mod tests {
 
         let all: Vec<Trade> = client.get_json("/trades").await;
         assert!(all.is_empty(), "a refused create stores nothing: {all:?}");
+    }
+
+    /// The `/trades` list narrows by `?listing_id=`, `?holding_account_id=`
+    /// and the `?from=`/`?to=` range over `date` (inclusive at both ends, the
+    /// convention `GET /closing_prices` set); combined filters AND, and a
+    /// filter matching nothing is an empty `200` array.
+    #[tokio::test]
+    async fn the_list_narrows_by_listing_account_and_date_range() {
+        use crate::test_support::assert_list_filters;
+        let pool = test_pool().await;
+        for id in [1, 2] {
+            test_support::listing(id)
+                .ticker(&format!("TRD{id}"))
+                .insert(&pool)
+                .await;
+        }
+        crate::entities::holding_account::db_upsert(
+            &pool,
+            &crate::entities::holding_account::HoldingAccount {
+                id: 2,
+                name: "Second".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+        for (id, listing_id, account, date) in [
+            (1, 1, 1, ymd(2024, 6, 3)),
+            (2, 1, 2, ymd(2024, 7, 3)),
+            (3, 2, 1, ymd(2024, 8, 5)),
+            (4, 2, 2, ymd(2024, 9, 4)),
+        ] {
+            test_support::buy(id, listing_id)
+                .date(date)
+                .settlement(date)
+                .account(account)
+                .insert(&pool)
+                .await;
+        }
+
+        assert_list_filters(
+            &client(&pool),
+            "/trades",
+            |t: &Trade| t.id,
+            &[
+                ("", &[1, 2, 3, 4]),
+                ("?listing_id=1", &[1, 2]),
+                ("?holding_account_id=1", &[1, 3]),
+                ("?from=2024-08-01", &[3, 4]),
+                ("?to=2024-07-31", &[1, 2]),
+                ("?listing_id=2&holding_account_id=2", &[4]),
+                ("?listing_id=99", &[]),
+            ],
+        )
+        .await;
     }
 }

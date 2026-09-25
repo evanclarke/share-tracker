@@ -218,8 +218,40 @@ fn default_currency() -> String {
     "AUD".to_string()
 }
 
+/// The `/inheritances` list filters: the owning columns and the
+/// `date_of_death` range, inclusive at both ends.
+///
+/// The query filters the list route accepts — see
+/// [`crate::infra::http::CrudListFilter`].
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InheritanceListQuery {
+    pub listing_id: Option<i64>,
+    pub holding_account_id: Option<i64>,
+    pub from: Option<NaiveDate>,
+    pub to: Option<NaiveDate>,
+}
+
+impl crate::infra::http::CrudListFilter for InheritanceListQuery {
+    fn apply_filter(&self, qb: &mut sqlx::QueryBuilder<sqlx::Sqlite>) {
+        if let Some(value) = self.listing_id {
+            qb.push(" AND listing_id = ").push_bind(value);
+        }
+        if let Some(value) = self.holding_account_id {
+            qb.push(" AND holding_account_id = ").push_bind(value);
+        }
+        if let Some(from) = self.from {
+            qb.push(" AND date_of_death >= ").push_bind(from);
+        }
+        if let Some(to) = self.to {
+            qb.push(" AND date_of_death <= ").push_bind(to);
+        }
+    }
+}
+
 impl CrudEntity for Inheritance {
     type Key = i64;
+    type Filter = InheritanceListQuery;
     const TABLE: &'static str = "inheritances";
     const COLUMNS: &'static str = COLUMNS;
     const ORDER_BY: &'static str = "date_of_death, id";
@@ -2351,5 +2383,59 @@ mod tests {
 
         let all: Vec<Inheritance> = client.get_json("/inheritances").await;
         assert!(all.is_empty(), "a rejected create stores nothing: {all:?}");
+    }
+
+    /// The `/inheritances` list narrows by `?listing_id=`,
+    /// `?holding_account_id=` and the `?from=`/`?to=` range over
+    /// `date_of_death` (inclusive); combined filters AND.
+    #[tokio::test]
+    async fn the_list_narrows_by_listing_account_and_date_range() {
+        use crate::test_support::assert_list_filters;
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        insert_listing(&pool, 2, "AUD").await;
+        crate::entities::holding_account::db_upsert(
+            &pool,
+            &crate::entities::holding_account::HoldingAccount {
+                id: 2,
+                name: "Second".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+        for (id, listing_id, account, date) in [
+            (1, 1, 1, ymd(2025, 1, 10)),
+            (2, 1, 2, ymd(2025, 2, 10)),
+            (3, 2, 1, ymd(2025, 3, 10)),
+            (4, 2, 2, ymd(2025, 4, 10)),
+        ] {
+            let mut row = post_cgt(id);
+            row.listing_id = listing_id;
+            row.holding_account_id = account;
+            row.date_of_death = date;
+            // The LPR fee must be incurred after the death, and each row here
+            // carries its own death date — so it is left out rather than
+            // re-dating `post_cgt`'s fixed one.
+            row.lpr_expenditure = Decimal::ZERO;
+            row.lpr_expenditure_date = None;
+            db_upsert(&pool, &row).await.unwrap();
+        }
+
+        assert_list_filters(
+            &client(&pool),
+            "/inheritances",
+            |i: &Inheritance| i.id,
+            &[
+                ("", &[1, 2, 3, 4]),
+                ("?listing_id=1", &[1, 2]),
+                ("?holding_account_id=1", &[1, 3]),
+                ("?from=2025-02-01", &[2, 3, 4]),
+                ("?to=2025-01-31", &[1]),
+                ("?listing_id=1&holding_account_id=2", &[2]),
+                ("?listing_id=99", &[]),
+            ],
+        )
+        .await;
     }
 }

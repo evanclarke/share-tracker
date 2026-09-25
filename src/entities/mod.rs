@@ -866,4 +866,360 @@ mod tests {
             "the table must carry every PUT route entities::router serves"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Every entity list route is classified for filtering
+    // -----------------------------------------------------------------------
+
+    /// How an entity list route reaches its rows.
+    #[derive(PartialEq, Eq)]
+    enum ListKind {
+        /// Registered with the shared `http::list_handler`, so its filters are
+        /// its `CrudEntity::Filter` and an unknown parameter is axum's `Query`
+        /// rejection.
+        Shared,
+        /// A hand-written handler that decodes its own query string — the
+        /// trades list (it presents the row), and the two shared lists that
+        /// already had filters. It refuses an unknown parameter too.
+        HandWrittenQuery,
+        /// A hand-written list with no query decoding at all, left as it was
+        /// by this item.
+        HandWrittenIgnoringQuery,
+    }
+
+    /// One entity list route.
+    struct ListRoute {
+        path: &'static str,
+        /// The query parameters it accepts; `&[]` for none, which then
+        /// requires a `reason`.
+        filters: &'static [&'static str],
+        kind: ListKind,
+        /// Why an unfiltered list takes none — empty for a filtered one.
+        reason: &'static str,
+    }
+
+    /// Every list route `entities::router` serves, classified. The filtered
+    /// ones carry the parameters this item added (or the pre-existing ones the
+    /// hand-written lists already took); the unfiltered ones say why.
+    ///
+    /// `every_list_route_is_classified_for_filtering` scans the sources for
+    /// the shared `list_handler` registrations and fails on one missing here,
+    /// so a new entity list cannot ship without the filters its columns offer
+    /// (or a stated reason it takes none), and
+    /// `every_list_route_refuses_an_unknown_parameter` drives each classified
+    /// route so the refusal is real rather than documented.
+    const LIST_ROUTES: &[ListRoute] = &[
+        // Filtered: the workhorse entity lists.
+        ListRoute {
+            path: "/listings",
+            filters: &["exchange_mic", "security_type"],
+            kind: ListKind::Shared,
+            reason: "",
+        },
+        ListRoute {
+            path: "/trades",
+            filters: &["listing_id", "holding_account_id", "from", "to"],
+            kind: ListKind::HandWrittenQuery,
+            reason: "",
+        },
+        ListRoute {
+            path: "/income",
+            filters: &["listing_id", "holding_account_id", "from", "to"],
+            kind: ListKind::Shared,
+            reason: "",
+        },
+        ListRoute {
+            path: "/interest_income",
+            filters: &["holding_account_id", "from", "to"],
+            kind: ListKind::Shared,
+            reason: "",
+        },
+        ListRoute {
+            path: "/investment_expenses",
+            filters: &["listing_id", "holding_account_id", "from", "to"],
+            kind: ListKind::Shared,
+            reason: "",
+        },
+        ListRoute {
+            path: "/amma_statements",
+            filters: &["listing_id", "holding_account_id", "from", "to"],
+            kind: ListKind::Shared,
+            reason: "",
+        },
+        ListRoute {
+            path: "/ess_statements",
+            filters: &["listing_id", "holding_account_id", "from", "to"],
+            kind: ListKind::Shared,
+            reason: "",
+        },
+        ListRoute {
+            path: "/inheritances",
+            filters: &["listing_id", "holding_account_id", "from", "to"],
+            kind: ListKind::Shared,
+            reason: "",
+        },
+        ListRoute {
+            path: "/corporate_actions",
+            filters: &["listing_id", "from", "to"],
+            kind: ListKind::Shared,
+            reason: "",
+        },
+        ListRoute {
+            path: "/transfers",
+            filters: &["listing_id", "from", "to"],
+            kind: ListKind::Shared,
+            reason: "",
+        },
+        ListRoute {
+            path: "/distribution_events",
+            filters: &["listing_id", "from", "to"],
+            kind: ListKind::Shared,
+            reason: "",
+        },
+        ListRoute {
+            path: "/drp_enrolments",
+            filters: &["listing_id", "holding_account_id"],
+            kind: ListKind::Shared,
+            reason: "",
+        },
+        ListRoute {
+            path: "/amit_adjustments",
+            filters: &["amma_statement_id", "trade_id"],
+            kind: ListKind::Shared,
+            reason: "",
+        },
+        ListRoute {
+            path: "/parcel_allocations",
+            filters: &["sale_trade_id", "purchase_trade_id"],
+            kind: ListKind::Shared,
+            reason: "",
+        },
+        // Unfiltered entity lists: no filter this item's columns offer, or a
+        // table only ever read whole.
+        ListRoute {
+            path: "/exchanges",
+            filters: &[],
+            kind: ListKind::Shared,
+            reason: "Reference table: a handful of rows, read whole by every picker.",
+        },
+        ListRoute {
+            path: "/currencies",
+            filters: &[],
+            kind: ListKind::Shared,
+            reason: "Import-fed ISO reference table, read whole (a code-keyed GET-one exists).",
+        },
+        ListRoute {
+            path: "/mic_registry",
+            filters: &[],
+            kind: ListKind::Shared,
+            reason: "Import-fed ISO reference table, read whole (a MIC-keyed GET-one exists).",
+        },
+        ListRoute {
+            path: "/rba_fx_rates",
+            filters: &[],
+            kind: ListKind::Shared,
+            reason: "Import-fed reference table, read whole; its rows are corrected one at a time by id.",
+        },
+        ListRoute {
+            path: "/holding_accounts",
+            filters: &[],
+            kind: ListKind::Shared,
+            reason: "A handful of rows, read whole.",
+        },
+        ListRoute {
+            path: "/cgt_settings",
+            filters: &[],
+            kind: ListKind::Shared,
+            reason: "Singleton settings row.",
+        },
+        ListRoute {
+            path: "/tax_year_settings",
+            filters: &[],
+            kind: ListKind::Shared,
+            reason: "One row per financial year, read whole; the keyed GET-one is the narrowed read.",
+        },
+        // Hand-written lists outside this item's workhorse entity lists.
+        // Their existing filters are unchanged; `/rights_sales` and
+        // `/exchange_holidays` decode no query at all.
+        ListRoute {
+            path: "/closing_prices",
+            filters: &["listing_id", "from", "to"],
+            kind: ListKind::HandWrittenQuery,
+            reason: "",
+        },
+        ListRoute {
+            path: "/attachments",
+            filters: &[
+                "trade_id",
+                "income_id",
+                "amma_statement_id",
+                "ess_statement_id",
+                "interest_income_id",
+                "corporate_action_id",
+                "include_linked",
+            ],
+            kind: ListKind::HandWrittenQuery,
+            reason: "",
+        },
+        ListRoute {
+            path: "/rights_sales",
+            filters: &[],
+            kind: ListKind::HandWrittenIgnoringQuery,
+            reason: "Hand-written list outside this item's scope; it decodes no query string.",
+        },
+        ListRoute {
+            path: "/exchange_holidays",
+            filters: &[],
+            kind: ListKind::HandWrittenIgnoringQuery,
+            reason: "Hand-written list outside this item's scope; it decodes no query string.",
+        },
+        ListRoute {
+            path: "/exchange_holidays/{mic}",
+            filters: &[],
+            kind: ListKind::HandWrittenIgnoringQuery,
+            reason: "Path-narrowed to one exchange's calendar; outside this item's scope.",
+        },
+        ListRoute {
+            path: "/listings/{id}/renames",
+            filters: &[],
+            kind: ListKind::HandWrittenIgnoringQuery,
+            reason: "Path-narrowed to one listing's rename chain; outside this item's scope.",
+        },
+    ];
+
+    /// The value each filter is driven with — the shape the parameter takes,
+    /// not a row that has to exist (every route answers an empty `200` for a
+    /// filter that matches nothing).
+    fn sample_filter_value(param: &str) -> &'static str {
+        match param {
+            "from" | "to" => "2024-01-02",
+            "exchange_mic" => "XASX",
+            "security_type" => "Share",
+            "include_linked" => "false",
+            _ => "1",
+        }
+    }
+
+    /// The `/<path>` literals `entities/` registers with the shared
+    /// `http::list_handler`, read out of the sources rather than transcribed.
+    fn shared_list_route_paths() -> Vec<String> {
+        let mut paths: Vec<String> = Vec::new();
+        for (file, body) in crate::test_support::rust_sources() {
+            // `entities/mod.rs` is this file — the scan's own needle appears in
+            // it, and every router it merges is defined in the module beside it.
+            if !file.starts_with("entities/") || file == "entities/mod.rs" {
+                continue;
+            }
+            for (at, _) in body.match_indices("get(http::list_handler::<") {
+                let before = &body[..at];
+                let route_at = before
+                    .rfind(".route(")
+                    .expect("a list_handler is registered by a `.route(…)` call");
+                let rest = before[route_at + ".route(".len()..].trim_start();
+                let path = rest
+                    .strip_prefix('"')
+                    .expect("the route path is a string literal");
+                paths.push(path.split('"').next().unwrap().to_string());
+            }
+        }
+        paths.sort();
+        paths.dedup();
+        paths
+    }
+
+    /// Every entity list route is classified in [`LIST_ROUTES`], and every
+    /// shared `list_handler` registration in the sources is one of them — so a
+    /// new entity list cannot quietly ship without the filters its columns
+    /// offer, or without a stated reason it takes none.
+    #[test]
+    fn every_list_route_is_classified_for_filtering() {
+        let scanned = shared_list_route_paths();
+        assert!(
+            scanned.len() >= 20,
+            "the scan found only {} shared list routes — it has stopped parsing",
+            scanned.len()
+        );
+
+        let mut shared: Vec<String> = LIST_ROUTES
+            .iter()
+            .filter(|r| r.kind == ListKind::Shared)
+            .map(|r| r.path.to_string())
+            .collect();
+        shared.sort();
+        assert_eq!(
+            shared, scanned,
+            "every `http::list_handler` route in the sources must be classified in LIST_ROUTES \
+             (and vice versa)"
+        );
+
+        let mut seen: Vec<&str> = LIST_ROUTES.iter().map(|r| r.path).collect();
+        seen.sort_unstable();
+        let before = seen.len();
+        seen.dedup();
+        assert_eq!(before, seen.len(), "LIST_ROUTES names a path twice");
+
+        for route in LIST_ROUTES {
+            if route.filters.is_empty() {
+                assert!(
+                    !route.reason.is_empty(),
+                    "{} takes no filter and must say why in its reason",
+                    route.path
+                );
+            } else {
+                assert!(
+                    route.reason.is_empty(),
+                    "{} is filtered; drop its reason",
+                    route.path
+                );
+            }
+        }
+    }
+
+    /// Every classified list route that decodes a query string refuses an
+    /// unrecognised parameter with a `400` naming it — the shared generic
+    /// lists (filtered and `NoFilter` alike), the trades list, and the two
+    /// hand-written filtered lists. An unfiltered `NoFilter` route is the
+    /// point of the last case: the empty braced struct does decode the empty
+    /// query string a bare `GET` sends, while any parameter at all is the
+    /// unknown-field rejection.
+    #[tokio::test]
+    async fn every_list_route_refuses_an_unknown_parameter() {
+        let pool = test_pool().await;
+        let client = ApiClient::full(&pool);
+        let mut checked = 0;
+        for route in LIST_ROUTES {
+            if route.kind == ListKind::HandWrittenIgnoringQuery || route.path.contains('{') {
+                continue;
+            }
+            let resp = client.get(route.path).await;
+            assert_eq!(
+                resp.status,
+                StatusCode::OK,
+                "GET {} must list without a query string",
+                route.path
+            );
+            for filter in route.filters {
+                let query = format!("{}?{}={}", route.path, filter, sample_filter_value(filter));
+                let resp = client.get(&query).await;
+                assert_eq!(resp.status, StatusCode::OK, "GET {query}");
+            }
+            let query = format!("{}?zzz_unrecognised=1", route.path);
+            let resp = client.get(&query).await;
+            let (status, body) = resp.status_and_body();
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "GET {query} must be refused, not ignored: {body}"
+            );
+            assert!(
+                body.contains("zzz_unrecognised"),
+                "GET {query} must name the parameter: {body}"
+            );
+            checked += 1;
+        }
+        assert_eq!(
+            checked, 23,
+            "every query-decoding list route must be driven here"
+        );
+    }
 }

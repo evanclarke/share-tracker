@@ -41,8 +41,9 @@ use utoipa::{PartialSchema, ToSchema};
 /// obeys, stated in prose *and* carried structurally by the schemas (a money
 /// field is a `string`; a request body has `additionalProperties: false`) —
 /// plus the never-JSON error matrix, the reading-a-list contract (ascending
-/// order, the four POST-bodied report reads, the sole paginated endpoint), and
-/// the PUT upsert outcome rule (201 with the created row, or 204 on a replace).
+/// order, the four POST-bodied report reads, the sole paginated endpoint, and
+/// the per-entity query filters), and the PUT upsert outcome rule (201 with
+/// the created row, or 204 on a replace).
 /// The wording is pinned by `the_two_global_rules_are_stated_in_the_description`,
 /// `the_error_body_matrix_is_stated_in_the_description`,
 /// `the_list_reading_contract_is_stated_in_the_description` and
@@ -89,7 +90,23 @@ query string cannot carry: /portfolio/overview, /portfolio/performance and \
 /reports/row_history is the only paginated endpoint: without row_id it answers \
 {\"entries\":[…],\"page_size\":n,\"next_before_id\":id|null}, where before_id \
 returns entries older than that trail id and limit is 1-1000 (default 100); \
-with row_id it answers that row's whole trail as a bare JSON array.
+with row_id it answers that row's whole trail as a bare JSON array. Fourth, \
+an entity list may be narrowed by query filters. /listings takes \
+?exchange_mic= and ?security_type=. The dated workhorse lists take an \
+inclusive ?from=/?to= over their own date column, plus ?listing_id= where \
+the row has a listing and ?holding_account_id= where it has a holding \
+account: /trades, /income, /investment_expenses, /amma_statements, \
+/ess_statements, /inheritances, /corporate_actions, /transfers and \
+/distribution_events (the last three have no holding account); \
+/interest_income takes ?holding_account_id= and the date range; \
+/drp_enrolments takes ?listing_id= and ?holding_account_id=; \
+/amit_adjustments takes ?amma_statement_id= and ?trade_id=, and \
+/parcel_allocations ?sale_trade_id= and ?purchase_trade_id=. The \
+long-standing /closing_prices (?listing_id=, ?from=, ?to=) and /attachments \
+(owner ids, include_linked) filters are unchanged. An unrecognised \
+parameter is a 400 naming it on every list route that decodes a query \
+string — including a list that accepts no filter, which refuses any \
+parameter at all rather than silently ignoring it.
 
 A PUT upsert reports its outcome. PUT /<collection>/{id} answers 201 Created \
 carrying the created row — exactly the body POST /<collection> answers — when \
@@ -183,7 +200,7 @@ const ROUTES: &[RouteRow] = &[
         Verb::Get,
         "/listings",
         &[200],
-        "List every listing.",
+        "List every listing, optionally narrowed by ?exchange_mic= or ?security_type=.",
         Body::None,
         Body::JsonArray("Listing"),
     ),
@@ -223,7 +240,7 @@ const ROUTES: &[RouteRow] = &[
         Verb::Get,
         "/trades",
         &[200],
-        "List every trade (Buys, DRPs, Sells), ascending date then id.",
+        "List every trade (Buys, DRPs, Sells), ascending date then id, optionally narrowed by ?listing_id=, ?holding_account_id= and an inclusive ?from=/?to= over the trade date.",
         Body::None,
         Body::JsonArray("Trade"),
     ),
@@ -287,7 +304,7 @@ const ROUTES: &[RouteRow] = &[
         Verb::Get,
         "/income",
         &[200],
-        "List every income (distribution) row.",
+        "List every income (distribution) row, optionally narrowed by ?listing_id=, ?holding_account_id= and an inclusive ?from=/?to= over date_paid.",
         Body::None,
         Body::JsonArray("Income"),
     ),
@@ -327,7 +344,7 @@ const ROUTES: &[RouteRow] = &[
         Verb::Get,
         "/interest_income",
         &[200],
-        "List every interest-income row.",
+        "List every interest-income row, optionally narrowed by ?holding_account_id= and an inclusive ?from=/?to= over date_paid.",
         Body::None,
         Body::JsonArray("InterestIncome"),
     ),
@@ -367,7 +384,7 @@ const ROUTES: &[RouteRow] = &[
         Verb::Get,
         "/investment_expenses",
         &[200],
-        "List every investment-expense row.",
+        "List every investment-expense row, optionally narrowed by ?listing_id=, ?holding_account_id= and an inclusive ?from=/?to= over date_incurred.",
         Body::None,
         Body::JsonArray("InvestmentExpense"),
     ),
@@ -407,7 +424,7 @@ const ROUTES: &[RouteRow] = &[
         Verb::Get,
         "/amma_statements",
         &[200],
-        "List every AMMA statement.",
+        "List every AMMA statement, optionally narrowed by ?listing_id=, ?holding_account_id= and an inclusive ?from=/?to= over tax_year_end_date.",
         Body::None,
         Body::JsonArray("AmmaStatement"),
     ),
@@ -447,7 +464,7 @@ const ROUTES: &[RouteRow] = &[
         Verb::Get,
         "/amit_adjustments",
         &[200],
-        "List every AMIT cost-base adjustment.",
+        "List every AMIT cost-base adjustment, optionally narrowed by ?amma_statement_id= and ?trade_id=.",
         Body::None,
         Body::JsonArray("AmitAdjustment"),
     ),
@@ -527,7 +544,7 @@ const ROUTES: &[RouteRow] = &[
         Verb::Get,
         "/inheritances",
         &[200],
-        "List every inheritance record.",
+        "List every inheritance record, optionally narrowed by ?listing_id=, ?holding_account_id= and an inclusive ?from=/?to= over date_of_death.",
         Body::None,
         Body::JsonArray("Inheritance"),
     ),
@@ -567,7 +584,7 @@ const ROUTES: &[RouteRow] = &[
         Verb::Get,
         "/drp_enrolments",
         &[200],
-        "List every DRP enrolment period.",
+        "List every DRP enrolment period, optionally narrowed by ?listing_id= and ?holding_account_id=.",
         Body::None,
         Body::JsonArray("DrpEnrolment"),
     ),
@@ -607,7 +624,7 @@ const ROUTES: &[RouteRow] = &[
         Verb::Get,
         "/ess_statements",
         &[200],
-        "List every ESS statement.",
+        "List every ESS statement, optionally narrowed by ?listing_id=, ?holding_account_id= and an inclusive ?from=/?to= over taxing_point_date.",
         Body::None,
         Body::JsonArray("EssStatement"),
     ),
@@ -647,7 +664,7 @@ const ROUTES: &[RouteRow] = &[
         Verb::Get,
         "/transfers",
         &[200],
-        "List every holding-account transfer.",
+        "List every holding-account transfer, optionally narrowed by ?listing_id= and an inclusive ?from=/?to= over the transfer date.",
         Body::None,
         Body::JsonArray("Transfer"),
     ),
@@ -687,7 +704,7 @@ const ROUTES: &[RouteRow] = &[
         Verb::Get,
         "/corporate_actions",
         &[200],
-        "List every corporate action.",
+        "List every corporate action, optionally narrowed by ?listing_id= and an inclusive ?from=/?to= over the action date.",
         Body::None,
         Body::JsonArray("CorporateAction"),
     ),
@@ -1015,7 +1032,7 @@ const ROUTES: &[RouteRow] = &[
         Verb::Get,
         "/parcel_allocations",
         &[200],
-        "List every sale's parcel allocations.",
+        "List every sale's parcel allocations, optionally narrowed by ?sale_trade_id= and ?purchase_trade_id=.",
         Body::None,
         Body::JsonArray("ParcelAllocation"),
     ),
@@ -1071,7 +1088,7 @@ const ROUTES: &[RouteRow] = &[
         Verb::Get,
         "/distribution_events",
         &[200],
-        "List cached distribution events.",
+        "List cached distribution events, optionally narrowed by ?listing_id= and an inclusive ?from=/?to= over ex_date.",
         Body::None,
         Body::JsonArray("DistributionEvent"),
     ),
@@ -2519,5 +2536,110 @@ mod tests {
         assert_eq!(body["openapi"].as_str(), Some("3.1.0"));
         assert!(body["info"]["title"].is_string());
         assert!(body["paths"]["/openapi.json"]["get"].is_object());
+    }
+
+    /// The filtering half of the reading-a-list contract — which entity list
+    /// takes which query parameters, and that an unrecognised one is a `400`
+    /// whether the list filters or not — rides in `info.description`, the
+    /// machine-client surface. `docs/API.md`'s "Reading a list" section is the
+    /// long form (`doc_checks` pins that copy); this is the compact twin a
+    /// client reading only the generated document gets.
+    #[test]
+    fn the_list_filtering_contract_is_stated_in_the_description() {
+        let doc = doc();
+        let description = doc["info"]["description"]
+            .as_str()
+            .expect("info.description is a string");
+        for rule in [
+            "an entity list may be narrowed by query filters.",
+            "/listings takes ?exchange_mic= and ?security_type=",
+            "inclusive ?from=/?to= over their own date column",
+            "/interest_income takes ?holding_account_id= and the date range",
+            "/drp_enrolments takes ?listing_id= and ?holding_account_id=",
+            "/amit_adjustments takes ?amma_statement_id= and ?trade_id=",
+            "/parcel_allocations ?sale_trade_id= and ?purchase_trade_id=",
+            "The long-standing /closing_prices (?listing_id=, ?from=, ?to=) and /attachments \
+             (owner ids, include_linked) filters are unchanged.",
+            "An unrecognised parameter is a 400 naming it on every list route that decodes a \
+             query string",
+            "including a list that accepts no filter, which refuses any parameter at all rather \
+             than silently ignoring it.",
+        ] {
+            assert!(
+                description.contains(rule),
+                "info.description must state `{rule}`; got:\n{description}"
+            );
+        }
+    }
+
+    /// Every filtered list's summary names the parameters it accepts — the
+    /// per-route half of the same contract, and the one a client browsing
+    /// `paths` reads. Driven by a table, and each entry must be a real `GET`
+    /// in [`ROUTES`], so a renamed or dropped route fails here rather than
+    /// silently passing.
+    #[test]
+    fn every_filtered_list_summary_names_its_filters() {
+        const FILTERED: &[(&str, &[&str])] = &[
+            ("/listings", &["?exchange_mic=", "?security_type="]),
+            (
+                "/trades",
+                &["?listing_id=", "?holding_account_id=", "?from=", "?to="],
+            ),
+            (
+                "/income",
+                &["?listing_id=", "?holding_account_id=", "?from=", "?to="],
+            ),
+            (
+                "/interest_income",
+                &["?holding_account_id=", "?from=", "?to="],
+            ),
+            (
+                "/investment_expenses",
+                &["?listing_id=", "?holding_account_id=", "?from=", "?to="],
+            ),
+            (
+                "/amma_statements",
+                &["?listing_id=", "?holding_account_id=", "?from=", "?to="],
+            ),
+            (
+                "/ess_statements",
+                &["?listing_id=", "?holding_account_id=", "?from=", "?to="],
+            ),
+            (
+                "/inheritances",
+                &["?listing_id=", "?holding_account_id=", "?from=", "?to="],
+            ),
+            ("/corporate_actions", &["?listing_id=", "?from=", "?to="]),
+            ("/transfers", &["?listing_id=", "?from=", "?to="]),
+            ("/distribution_events", &["?listing_id=", "?from=", "?to="]),
+            ("/drp_enrolments", &["?listing_id=", "?holding_account_id="]),
+            ("/amit_adjustments", &["?amma_statement_id=", "?trade_id="]),
+            (
+                "/parcel_allocations",
+                &["?sale_trade_id=", "?purchase_trade_id="],
+            ),
+            // The long-standing filters the hand-written lists already took.
+            ("/closing_prices", &["?listing_id=", "?from=", "?to="]),
+            ("/attachments", &["?trade_id="]),
+        ];
+        let mut checked = 0;
+        for (path, params) in FILTERED {
+            let row = ROUTES
+                .iter()
+                .find(|(verb, p, _, _, _, _)| *verb == Verb::Get && p == path)
+                .unwrap_or_else(|| panic!("no GET route is documented at {path}"));
+            let summary = row.3;
+            for param in *params {
+                assert!(
+                    summary.contains(param),
+                    "the {path} summary must name {param}: {summary}"
+                );
+            }
+            checked += 1;
+        }
+        assert_eq!(
+            checked, 16,
+            "every filtered list route must be named here, and no other"
+        );
     }
 }

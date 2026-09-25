@@ -170,8 +170,37 @@ pub struct DistributionEvent {
     pub fetched_at: String,
 }
 
+/// The `/distribution_events` list filters: the listing and the
+/// `ex_date` range, inclusive at both ends (the list itself is
+/// newest-first — see the module docs).
+///
+/// The query filters the list route accepts — see
+/// [`crate::infra::http::CrudListFilter`].
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DistributionEventListQuery {
+    pub listing_id: Option<i64>,
+    pub from: Option<NaiveDate>,
+    pub to: Option<NaiveDate>,
+}
+
+impl crate::infra::http::CrudListFilter for DistributionEventListQuery {
+    fn apply_filter(&self, qb: &mut sqlx::QueryBuilder<sqlx::Sqlite>) {
+        if let Some(value) = self.listing_id {
+            qb.push(" AND listing_id = ").push_bind(value);
+        }
+        if let Some(from) = self.from {
+            qb.push(" AND ex_date >= ").push_bind(from);
+        }
+        if let Some(to) = self.to {
+            qb.push(" AND ex_date <= ").push_bind(to);
+        }
+    }
+}
+
 impl CrudEntity for DistributionEvent {
     type Key = i64;
+    type Filter = DistributionEventListQuery;
     const TABLE: &'static str = "distribution_events";
     const COLUMNS: &'static str =
         "id, listing_id, ex_date, amount_per_unit, currency, source, fetched_symbol, fetched_at";

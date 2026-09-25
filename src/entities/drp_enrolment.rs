@@ -141,8 +141,34 @@ pub(crate) static PERIOD_TRADES_FROM_WHERE: LazyLock<String> = LazyLock::new(|| 
     )
 });
 
+/// The `/drp_enrolments` list filters: the owning columns. No date
+/// range: a period carries two dates (`enrolment_date`,
+/// `unenrolment_date`) and neither is *the* period's date, so a bare
+/// `from`/`to` would silently mean one of two defensible things.
+///
+/// The query filters the list route accepts — see
+/// [`crate::infra::http::CrudListFilter`].
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DrpEnrolmentListQuery {
+    pub listing_id: Option<i64>,
+    pub holding_account_id: Option<i64>,
+}
+
+impl crate::infra::http::CrudListFilter for DrpEnrolmentListQuery {
+    fn apply_filter(&self, qb: &mut sqlx::QueryBuilder<sqlx::Sqlite>) {
+        if let Some(value) = self.listing_id {
+            qb.push(" AND listing_id = ").push_bind(value);
+        }
+        if let Some(value) = self.holding_account_id {
+            qb.push(" AND holding_account_id = ").push_bind(value);
+        }
+    }
+}
+
 impl CrudEntity for DrpEnrolment {
     type Key = i64;
+    type Filter = DrpEnrolmentListQuery;
     const TABLE: &'static str = "drp_enrolments";
     const COLUMNS: &'static str =
         "id, listing_id, holding_account_id, enrolment_date, unenrolment_date, residual_handling";
@@ -1552,5 +1578,64 @@ mod tests {
         let pool = test_pool().await;
         let resp = client(&pool).get("/drp_enrolments/1").await;
         assert_eq!(resp.status, StatusCode::NOT_FOUND);
+    }
+
+    /// The `/drp_enrolments` list narrows by `?listing_id=` and
+    /// `?holding_account_id=`, which AND together.
+    #[tokio::test]
+    async fn the_list_narrows_by_listing_and_holding_account() {
+        use crate::test_support::assert_list_filters;
+        use crate::test_support::ymd;
+        let pool = test_pool().await;
+        for id in [1, 2] {
+            test_support::listing(id)
+                .ticker(&format!("DRP{id}"))
+                .insert(&pool)
+                .await;
+        }
+        crate::entities::holding_account::db_upsert(
+            &pool,
+            &crate::entities::holding_account::HoldingAccount {
+                id: 2,
+                name: "Second".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+        for (id, listing_id, account, start) in [
+            (1, 1, 1, ymd(2024, 1, 1)),
+            (2, 1, 2, ymd(2024, 2, 1)),
+            (3, 2, 1, ymd(2024, 3, 1)),
+            (4, 2, 2, ymd(2024, 4, 1)),
+        ] {
+            db_upsert(
+                &pool,
+                &DrpEnrolment {
+                    id,
+                    listing_id,
+                    holding_account_id: account,
+                    enrolment_date: start,
+                    unenrolment_date: None,
+                    residual_handling: ResidualHandling::CarryForward,
+                },
+            )
+            .await
+            .unwrap();
+        }
+
+        assert_list_filters(
+            &client(&pool),
+            "/drp_enrolments",
+            |e: &DrpEnrolment| e.id,
+            &[
+                ("", &[1, 2, 3, 4]),
+                ("?listing_id=1", &[1, 2]),
+                ("?holding_account_id=1", &[1, 3]),
+                ("?listing_id=2&holding_account_id=2", &[4]),
+                ("?listing_id=99", &[]),
+            ],
+        )
+        .await;
     }
 }

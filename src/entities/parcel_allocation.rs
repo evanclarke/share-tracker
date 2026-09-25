@@ -19,6 +19,29 @@ pub struct ParcelAllocation {
     pub quantity_allocated: Decimal,
 }
 
+/// The `/parcel_allocations` list filters: the two trades an
+/// allocation joins (the sale it covers and the parcel it draws on).
+///
+/// The query filters the list route accepts — see
+/// [`crate::infra::http::CrudListFilter`].
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ParcelAllocationListQuery {
+    pub sale_trade_id: Option<i64>,
+    pub purchase_trade_id: Option<i64>,
+}
+
+impl crate::infra::http::CrudListFilter for ParcelAllocationListQuery {
+    fn apply_filter(&self, qb: &mut sqlx::QueryBuilder<sqlx::Sqlite>) {
+        if let Some(value) = self.sale_trade_id {
+            qb.push(" AND sale_trade_id = ").push_bind(value);
+        }
+        if let Some(value) = self.purchase_trade_id {
+            qb.push(" AND purchase_trade_id = ").push_bind(value);
+        }
+    }
+}
+
 /// Parcel allocations are read-only over HTTP. They are created and replaced
 /// atomically together with their Sell trade via `PUT /sells/{id}` (see
 /// `sell` module); allowing standalone writes here would let a Sell become
@@ -26,6 +49,7 @@ pub struct ParcelAllocation {
 /// invariant that every persisted Sell is fully allocated.
 impl CrudEntity for ParcelAllocation {
     type Key = i64;
+    type Filter = ParcelAllocationListQuery;
     const TABLE: &'static str = "parcel_allocations";
     const COLUMNS: &'static str = "id, sale_trade_id, purchase_trade_id, quantity_allocated";
     const NOUN: &'static str = "parcel allocation";
@@ -501,5 +525,35 @@ mod tests {
         let resp = client(&pool).get("/parcel_allocations/1").await;
         let alloc: ParcelAllocation = resp.json();
         assert_eq!(alloc.quantity_allocated, "10.5".parse::<Decimal>().unwrap());
+    }
+
+    /// The `/parcel_allocations` list narrows by `?sale_trade_id=` and
+    /// `?purchase_trade_id=`, which AND together.
+    #[tokio::test]
+    async fn the_list_narrows_by_sale_and_purchase_trade() {
+        use crate::test_support::assert_list_filters;
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        test_support::buy(1, 1).qty(dec("100")).insert(&pool).await;
+        test_support::buy(2, 1).qty(dec("100")).insert(&pool).await;
+        test_support::sell(3, 1).qty(dec("20")).insert(&pool).await;
+        test_support::sell(4, 1).qty(dec("20")).insert(&pool).await;
+        for (id, sale, buy) in [(1, 3, 1), (2, 3, 2), (3, 4, 1), (4, 4, 2)] {
+            test_support::allocate(&pool, id, sale, buy, dec("10")).await;
+        }
+
+        assert_list_filters(
+            &client(&pool),
+            "/parcel_allocations",
+            |a: &ParcelAllocation| a.id,
+            &[
+                ("", &[1, 2, 3, 4]),
+                ("?sale_trade_id=3", &[1, 2]),
+                ("?purchase_trade_id=1", &[1, 3]),
+                ("?sale_trade_id=4&purchase_trade_id=2", &[4]),
+                ("?sale_trade_id=99", &[]),
+            ],
+        )
+        .await;
     }
 }

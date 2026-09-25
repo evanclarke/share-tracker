@@ -446,6 +446,33 @@ impl ApiClient {
     }
 }
 
+/// Drive one list route's whole filter contract, so each filtered entity's
+/// test is a table of `(query, expected ids)` rather than a hand-rolled
+/// request/decode/compare block.
+///
+/// `cases` is every request to make against `path`, each with the row ids it
+/// must return — the caller's first case is the bare route (`""`) with every
+/// seeded row, which is what pins that the *unfiltered* list still returns
+/// them all. The remaining cases are each filter on its own, two or more
+/// combined (to pin that they AND, not OR), and at least one matching nothing
+/// — an empty `200` array, never a `404`, which `get_json` decodes as an empty
+/// `Vec` and would have failed on for any other status.
+pub async fn assert_list_filters<T: serde::de::DeserializeOwned>(
+    client: &ApiClient,
+    path: &str,
+    id_of: impl Fn(&T) -> i64,
+    cases: &[(&str, &[i64])],
+) {
+    for (query, expected) in cases {
+        let rows: Vec<T> = client.get_json(format!("{path}{query}")).await;
+        let mut got: Vec<i64> = rows.iter().map(&id_of).collect();
+        got.sort_unstable();
+        let mut want: Vec<i64> = expected.to_vec();
+        want.sort_unstable();
+        assert_eq!(got, want, "GET {path}{query} returned the wrong rows");
+    }
+}
+
 /// `NaiveDate` literal without the `from_ymd_opt(..).unwrap()` ceremony.
 pub fn ymd(y: i32, m: u32, d: u32) -> NaiveDate {
     NaiveDate::from_ymd_opt(y, m, d).unwrap()

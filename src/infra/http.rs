@@ -1,12 +1,12 @@
 //! HTTP helpers shared by entity and report handlers.
 
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use sqlx::error::ErrorKind;
 use sqlx::sqlite::SqliteRow;
-use sqlx::{Row, Sqlite, SqlitePool};
+use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool};
 
 /// A boxed error source carried by [`ApiError::Internal`].
 pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
@@ -314,6 +314,50 @@ pub fn panic_response(err: Box<dyn std::any::Any + Send + 'static>) -> Response 
     StatusCode::INTERNAL_SERVER_ERROR.into_response()
 }
 
+/// The query filters one entity's list route accepts.
+///
+/// Each filtered entity declares its own `#[serde(deny_unknown_fields)]` struct
+/// naming **only** the filters that entity's columns can honour, and implements
+/// this trait for it. Putting [`Self::apply_filter`] on the filter type rather
+/// than on [`CrudEntity`] is what makes "never accept a filter and silently
+/// ignore it" a compile-time fact: a list can only be parameterised by a type
+/// that has said how it narrows the query, so a filter struct with no `apply_filter`
+/// cannot be reached from a route at all. The alternative — a defaulted method
+/// on `CrudEntity` — would let a mis-wired entity accept a parameter and drop
+/// it, which is exactly the failure this item exists to prevent.
+///
+/// [`Self::apply_filter`] appends its `AND …` clauses to a query builder whose
+/// statement has already been opened with `WHERE 1=1` (see
+/// [`crud_list_filtered`]). The **column names are fixed text this tree owns**
+/// and are pushed as SQL; every *value* goes through `push_bind`, never
+/// interpolated — the same split the whole-list query's trusted
+/// `AssertSqlSafe(format!(…))` already made.
+pub trait CrudListFilter: Default + serde::de::DeserializeOwned + Send + 'static {
+    /// Narrow the list. Called once per request on a builder opened with
+    /// `WHERE 1=1`; an all-`None` filter appends nothing.
+    fn apply_filter(&self, qb: &mut QueryBuilder<Sqlite>);
+}
+
+/// The empty filter: an entity whose list accepts **no** query parameter.
+///
+/// Deliberately an **empty braced struct** rather than a unit struct
+/// (`struct NoFilter;`): serde derives a unit struct as `deserialize_unit`,
+/// which `serde_urlencoded` refuses as soon as any query string is present, and
+/// which has no field set for the unknown-field error to name. An empty braced
+/// struct derives the ordinary struct/map path, so the empty string a bare
+/// `GET /collection` sends decodes to `NoFilter {}` while **any** parameter at
+/// all is `deny_unknown_fields`' unknown-field rejection — which axum's `Query`
+/// turns into the documented `400` naming it. Both halves are pinned against
+/// the real routes by
+/// `entities::tests::every_list_route_refuses_an_unknown_parameter`.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NoFilter {}
+
+impl CrudListFilter for NoFilter {
+    fn apply_filter(&self, _qb: &mut QueryBuilder<Sqlite>) {}
+}
+
 /// An entity whose list / get-one / delete are plain single-table operations
 /// over one primary key, implemented once here instead of copied per module.
 ///
@@ -366,6 +410,13 @@ pub trait CrudEntity:
     /// `"AMMA statement"` → `no AMMA statement with that id`.
     const NOUN: &'static str;
 
+    /// The query filters this entity's list route accepts, applied by
+    /// [`list_handler`] through [`crud_list_filtered`]. [`NoFilter`] for an
+    /// entity whose list takes none — which still refuses an unrecognised
+    /// parameter (`400` naming it), because a client cannot quietly send a
+    /// filter the server drops.
+    type Filter: CrudListFilter;
+
     /// The plain-text `404` body [`delete_handler`] answers with when `key`
     /// matched no row: `no <noun> with that id` by default.
     ///
@@ -389,15 +440,37 @@ pub trait CrudEntity:
 }
 
 /// Every row of `E`'s table, in `E::ORDER_BY` order.
+///
+/// The unfiltered read: it is [`crud_list_filtered`] with `E::Filter`'s
+/// default (all filters unset), kept for the callers that want the whole table
+/// rather than the HTTP surface. Those are the DB-level tests and the
+/// `#[cfg(test)]` `db_list` wrappers they call (the routes all filter now), so
+/// it is test-gated to keep the non-test build warning-free — the same rule
+/// the trades entity's own `db_list` follows.
+#[cfg(test)]
 pub async fn crud_list<E: CrudEntity>(pool: &SqlitePool) -> Result<Vec<E>, sqlx::Error> {
-    sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT {} FROM {} ORDER BY {}",
-        E::COLUMNS,
-        E::TABLE,
-        E::ORDER_BY
-    )))
-    .fetch_all(pool)
-    .await
+    crud_list_filtered::<E>(pool, &E::Filter::default()).await
+}
+
+/// Every row of `E`'s table matching `filter`, in `E::ORDER_BY` order.
+///
+/// The SELECT is assembled through a [`QueryBuilder`]: the columns, table and
+/// ORDER BY are trusted `&'static str` constants (`E::COLUMNS`/`TABLE`/
+/// `ORDER_BY`), exactly as the plain `AssertSqlSafe(format!(…))` read was, and
+/// every **value** the filter carries is bound with `push_bind` — no filter
+/// value is ever interpolated into SQL. The statement opens with `WHERE 1=1`
+/// so each filter can append a plain `AND …` clause without tracking whether
+/// it is the first, and an all-unset filter appends nothing, leaving the
+/// unfiltered list byte-for-byte what it always was.
+pub async fn crud_list_filtered<E: CrudEntity>(
+    pool: &SqlitePool,
+    filter: &E::Filter,
+) -> Result<Vec<E>, sqlx::Error> {
+    let mut qb: QueryBuilder<Sqlite> =
+        QueryBuilder::new(format!("SELECT {} FROM {} WHERE 1=1", E::COLUMNS, E::TABLE));
+    filter.apply_filter(&mut qb);
+    qb.push(" ORDER BY ").push(E::ORDER_BY);
+    qb.build_query_as::<E>().fetch_all(pool).await
 }
 
 /// One row of `E`'s table by primary key, or `None`.
@@ -464,11 +537,18 @@ pub async fn crud_delete<E: CrudEntity>(
     Ok(result.rows_affected() > 0)
 }
 
-/// `GET /<entities>` → 200 with every row as JSON.
+/// `GET /<entities>?<filters>` → 200 with every matching row as JSON.
+///
+/// The filter is `E::Filter`, an entity-specific
+/// `#[serde(deny_unknown_fields)]` struct, so an unrecognised parameter is
+/// axum's own `Query` rejection — `400` with a body naming it — and never a
+/// silently ignored filter. An entity whose list takes no filter declares
+/// [`NoFilter`], which refuses every parameter for the same reason.
 pub async fn list_handler<E: CrudEntity>(
     State(pool): State<SqlitePool>,
+    Query(filter): Query<E::Filter>,
 ) -> Result<Json<Vec<E>>, ApiError> {
-    crud_list::<E>(&pool)
+    crud_list_filtered::<E>(&pool, &filter)
         .await
         .map(Json)
         .map_err(ApiError::from)

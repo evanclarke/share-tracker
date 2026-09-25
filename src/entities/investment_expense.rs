@@ -112,8 +112,40 @@ fn default_currency() -> String {
     "AUD".to_string()
 }
 
+/// The `/investment_expenses` list filters: the owning columns and the
+/// `date_incurred` range, inclusive at both ends.
+///
+/// The query filters the list route accepts — see
+/// [`crate::infra::http::CrudListFilter`].
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InvestmentExpenseListQuery {
+    pub listing_id: Option<i64>,
+    pub holding_account_id: Option<i64>,
+    pub from: Option<NaiveDate>,
+    pub to: Option<NaiveDate>,
+}
+
+impl crate::infra::http::CrudListFilter for InvestmentExpenseListQuery {
+    fn apply_filter(&self, qb: &mut sqlx::QueryBuilder<sqlx::Sqlite>) {
+        if let Some(value) = self.listing_id {
+            qb.push(" AND listing_id = ").push_bind(value);
+        }
+        if let Some(value) = self.holding_account_id {
+            qb.push(" AND holding_account_id = ").push_bind(value);
+        }
+        if let Some(from) = self.from {
+            qb.push(" AND date_incurred >= ").push_bind(from);
+        }
+        if let Some(to) = self.to {
+            qb.push(" AND date_incurred <= ").push_bind(to);
+        }
+    }
+}
+
 impl CrudEntity for InvestmentExpense {
     type Key = i64;
+    type Filter = InvestmentExpenseListQuery;
     const TABLE: &'static str = "investment_expenses";
     const COLUMNS: &'static str = "id, date_incurred, expense_type, amount, gross_amount, \
      deductible_percentage, currency, description, listing_id, holding_account_id";
@@ -1026,5 +1058,46 @@ mod tests {
 
         let all: Vec<InvestmentExpense> = client.get_json("/investment_expenses").await;
         assert!(all.is_empty(), "a rejected create stores nothing: {all:?}");
+    }
+
+    /// The `/investment_expenses` list narrows by `?listing_id=`,
+    /// `?holding_account_id=` and the `?from=`/`?to=` range over
+    /// `date_incurred` (inclusive); both owning columns are nullable, so an
+    /// equality filter drops the unassigned rows; combined filters AND.
+    #[tokio::test]
+    async fn the_list_narrows_by_listing_account_and_date_range() {
+        use crate::test_support::assert_list_filters;
+        let pool = test_pool().await;
+        for id in [1, 2] {
+            insert_listing(&pool, id).await;
+        }
+        for (id, listing, account, date) in [
+            (1, Some(1), Some(1), crate::test_support::ymd(2024, 3, 15)),
+            (2, Some(1), Some(1), crate::test_support::ymd(2024, 4, 15)),
+            (3, Some(2), None, crate::test_support::ymd(2025, 1, 10)),
+            (4, Some(2), None, crate::test_support::ymd(2025, 2, 10)),
+        ] {
+            let mut row = sample(id);
+            row.listing_id = listing;
+            row.holding_account_id = account;
+            row.date_incurred = date;
+            db_upsert(&pool, &row).await.unwrap();
+        }
+
+        assert_list_filters(
+            &client(&pool),
+            "/investment_expenses",
+            |e: &InvestmentExpense| e.id,
+            &[
+                ("", &[1, 2, 3, 4]),
+                ("?listing_id=1", &[1, 2]),
+                ("?holding_account_id=1", &[1, 2]),
+                ("?from=2025-01-01", &[3, 4]),
+                ("?to=2024-12-31", &[1, 2]),
+                ("?listing_id=2&from=2025-02-01", &[4]),
+                ("?listing_id=99", &[]),
+            ],
+        )
+        .await;
     }
 }

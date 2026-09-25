@@ -600,3 +600,52 @@ async fn a_re_fetch_under_a_different_symbol_is_still_recorded() {
     assert_eq!(trail.len(), 1, "the provenance change is recorded");
     assert!(trail[0].contains("LAAC"), "{}", trail[0]);
 }
+
+/// The `/distribution_events` list narrows by `?listing_id=` and the
+/// `?from=`/`?to=` range over `ex_date` (inclusive at both ends); combined
+/// filters AND, and a filter matching nothing is an empty `200` array.
+#[tokio::test]
+async fn the_list_narrows_by_listing_and_ex_date_range() {
+    use crate::test_support::assert_list_filters;
+    let pool = test_pool().await;
+    listing(1).insert(&pool).await;
+    listing(2).insert(&pool).await;
+    for (listing_id, ex_date, amount) in [
+        (1, ymd(2024, 6, 3), "0.10"),
+        (1, ymd(2024, 7, 3), "0.20"),
+        (2, ymd(2024, 8, 5), "0.30"),
+        (2, ymd(2024, 9, 4), "0.40"),
+    ] {
+        let mut conn = pool.acquire().await.unwrap();
+        db_store(
+            &mut conn,
+            listing_id,
+            &FetchedDistribution {
+                ex_date,
+                amount_per_unit: dec(amount),
+                currency: "AUD".to_string(),
+            },
+            "AUD",
+            DistributionSource::Yahoo,
+            "SYM",
+            "2026-08-27T00:00:00Z",
+        )
+        .await
+        .unwrap();
+    }
+
+    assert_list_filters(
+        &client(&pool),
+        "/distribution_events",
+        |e: &DistributionEvent| e.id,
+        &[
+            ("", &[1, 2, 3, 4]),
+            ("?listing_id=1", &[1, 2]),
+            ("?from=2024-08-01", &[3, 4]),
+            ("?to=2024-07-31", &[1, 2]),
+            ("?listing_id=2&from=2024-09-01", &[4]),
+            ("?listing_id=99", &[]),
+        ],
+    )
+    .await;
+}

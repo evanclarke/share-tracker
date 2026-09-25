@@ -30,7 +30,7 @@ clients alike. Each is closed by the tests named.
       optimistic concurrency: answer `201`+row on create and `204` (or a body) on update, or add a
       version/ETag so a stale read cannot overwrite a newer row. Test: round-trip tests assert the
       create-vs-update signal; an `If-Match`-stale write answers `412`/`409`.
-- [ ] Server-side filtering (and paging) on the workhorse lists (B4). Only `closing_prices`,
+- [x] Server-side filtering (and paging) on the workhorse lists (B4). Only `closing_prices`,
       `attachments`, and `report_snapshots` accept query filters; `GET /trades`, `/income`,
       `/listings`, `/amma_statements`, … return the whole table, so a client fetches and filters
       entire tables. Add the obvious filters (`?listing_id=`, `?from=`/`?to=`,

@@ -16,12 +16,45 @@ use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use sqlx::{Row, SqlitePool};
 
+/// The `/trades` list filters: the two owning columns and the trade
+/// date range, inclusive at both ends (the convention
+/// `GET /closing_prices?from=&to=` set).
+///
+/// The query filters the list route accepts — see
+/// [`crate::infra::http::CrudListFilter`].
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TradeListQuery {
+    pub listing_id: Option<i64>,
+    pub holding_account_id: Option<i64>,
+    pub from: Option<NaiveDate>,
+    pub to: Option<NaiveDate>,
+}
+
+impl crate::infra::http::CrudListFilter for TradeListQuery {
+    fn apply_filter(&self, qb: &mut sqlx::QueryBuilder<sqlx::Sqlite>) {
+        if let Some(value) = self.listing_id {
+            qb.push(" AND listing_id = ").push_bind(value);
+        }
+        if let Some(value) = self.holding_account_id {
+            qb.push(" AND holding_account_id = ").push_bind(value);
+        }
+        if let Some(from) = self.from {
+            qb.push(" AND date >= ").push_bind(from);
+        }
+        if let Some(to) = self.to {
+            qb.push(" AND date <= ").push_bind(to);
+        }
+    }
+}
+
 /// The list and get *reads* are the plain single-table shape, so their SQL
 /// comes from here; the routes still use hand-written handlers, because a
 /// trade is presented through [`Trade::present`] and its delete has its own
 /// [`DeleteOutcome`] guards.
 impl CrudEntity for Trade {
     type Key = i64;
+    type Filter = TradeListQuery;
     const TABLE: &'static str = "trades";
     const COLUMNS: &'static str = "id, trade_type, date, settlement_date, settlement_date_source, \
          listing_id, average_price, quantity, \
@@ -41,8 +74,21 @@ impl CrudEntity for Trade {
     }
 }
 
+/// Only the tests read the whole table now (the route goes through
+/// [`db_list_filtered`]), so the unfiltered read is test-gated.
+#[cfg(test)]
 pub async fn db_list(pool: &SqlitePool) -> Result<Vec<Trade>, sqlx::Error> {
     http::crud_list(pool).await
+}
+
+/// The filtered `/trades` read. The route is hand-written (a trade is
+/// presented through [`Trade::present`]), so it reaches the shared filtered
+/// query through here rather than `http::list_handler`.
+pub async fn db_list_filtered(
+    pool: &SqlitePool,
+    filter: &TradeListQuery,
+) -> Result<Vec<Trade>, sqlx::Error> {
+    http::crud_list_filtered::<Trade>(pool, filter).await
 }
 
 pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<Trade>, sqlx::Error> {

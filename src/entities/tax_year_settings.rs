@@ -56,6 +56,7 @@ fn default_true() -> bool {
 
 impl CrudEntity for TaxYearSettings {
     type Key = i64;
+    type Filter = crate::infra::http::NoFilter;
     const TABLE: &'static str = "tax_year_settings";
     const COLUMNS: &'static str = "tax_year, ess_taxed_upfront_reduction_eligible";
     const KEY_COLUMN: &'static str = "tax_year";
