@@ -1189,10 +1189,7 @@ mod tests {
         // trades is audited, and the job writes through the same triggers as
         // any other update: the superseded date is recoverable.
         let history: Vec<serde_json::Value> = app
-            .post_json(
-                "/reports/row_history",
-                &serde_json::json!({ "table": "trades", "row_id": 1 }),
-            )
+            .get_json("/reports/row_history?table=trades&row_id=1")
             .await;
         assert_eq!(history.len(), 1);
         assert_eq!(history[0]["operation"], "UPDATE");
@@ -1254,10 +1251,7 @@ mod tests {
         let after: Trade = app.get_json("/trades/1").await;
         assert_eq!(after.settlement_date, before.settlement_date);
         let history: Vec<serde_json::Value> = app
-            .post_json(
-                "/reports/row_history",
-                &serde_json::json!({ "table": "trades", "row_id": 1 }),
-            )
+            .get_json("/reports/row_history?table=trades&row_id=1")
             .await;
         assert!(history.is_empty(), "nothing should have been written");
     }
@@ -1300,10 +1294,7 @@ mod tests {
         assert_eq!(alerts[0]["trade_id"], 9071);
         assert_eq!(alerts[0]["settlement_non_trading_reason"], "weekend");
         let history: Vec<serde_json::Value> = app
-            .post_json(
-                "/reports/row_history",
-                &serde_json::json!({ "table": "trades", "row_id": 9071 }),
-            )
+            .get_json("/reports/row_history?table=trades&row_id=9071")
             .await;
         assert!(
             history.is_empty(),

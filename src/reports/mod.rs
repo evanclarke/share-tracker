@@ -110,15 +110,19 @@ pub fn router() -> Router<SqlitePool> {
 mod tests {
     use std::path::PathBuf;
 
-    /// Every route path string in `src/reports/*.rs`, sorted and de-duplicated.
+    /// Every route registered under `src/reports/*.rs` as a `(path, verb)`
+    /// pair, sorted and de-duplicated. The verb is whichever of
+    /// `get(...)`/`post(...)` the route registration itself names, so the
+    /// table is read out of the route registration rather than kept by hand.
     /// The path literal may sit on the route call's own line or the next one,
-    /// so this reads the first string literal after each route call rather than
-    /// grepping line by line. The needle is assembled rather than written out
-    /// so this module does not match itself (it walks `mod.rs` too).
-    fn report_route_paths() -> Vec<String> {
+    /// so this reads the first string literal after each route call and then
+    /// the first routing fn after it. The needle is assembled rather than
+    /// written out so this module does not match itself (it walks `mod.rs`
+    /// too).
+    fn report_routes() -> Vec<(String, &'static str)> {
         let needle = format!(".{}(", "route");
         let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/reports");
-        let mut paths = Vec::new();
+        let mut routes = Vec::new();
         for entry in std::fs::read_dir(&dir)
             .expect("src/reports should be readable")
             .flatten()
@@ -134,10 +138,34 @@ mod tests {
                 let Some(open) = rest.find('"') else { break };
                 let after = &rest[open + 1..];
                 let Some(close) = after.find('"') else { break };
-                paths.push(after[..close].to_string());
-                rest = &after[close..];
+                let route = after[..close].to_string();
+                let tail = &after[close..];
+                let verb = match (tail.find("get("), tail.find("post(")) {
+                    (Some(g), Some(p)) => {
+                        if g < p {
+                            "GET"
+                        } else {
+                            "POST"
+                        }
+                    }
+                    (Some(_), None) => "GET",
+                    (None, Some(_)) => "POST",
+                    (None, None) => panic!(
+                        "report route `{route}` registers neither `get(...)` nor `post(...)`"
+                    ),
+                };
+                routes.push((route, verb));
+                rest = tail;
             }
         }
+        routes.sort();
+        routes.dedup();
+        routes
+    }
+
+    /// Every route path string in `src/reports/*.rs`, sorted and de-duplicated.
+    fn report_route_paths() -> Vec<String> {
+        let mut paths: Vec<String> = report_routes().into_iter().map(|(path, _)| path).collect();
         paths.sort();
         paths.dedup();
         paths
@@ -234,5 +262,110 @@ mod tests {
                 "report route `{path}` is served but called from no UI module"
             );
         }
+    }
+
+    /// The `/report_snapshots/*` routes that answer `POST`: the generation
+    /// writes that persist snapshots. `/report_snapshots/*` is the resource
+    /// surface over the `report_snapshots` table, not a report path (the
+    /// namespace rule in `docs/API.md` and the case test above both say so),
+    /// so the read-verb rule does not reach it — its `POST`s write. Named
+    /// rather than skipped, so a new `POST` there is a deliberate
+    /// classification and a report route on the wrong verb still fails.
+    const SNAPSHOT_WRITES: [&str; 3] = [
+        "/report_snapshots/generate",
+        "/report_snapshots/regenerate_all",
+        "/report_snapshots/regenerate_provisional",
+    ];
+
+    /// The report surface's verb table (REST API audit 2026-09-24): a report
+    /// is a **read**, so it is a `GET` with its parameters in the query string
+    /// unless what it takes genuinely cannot be expressed in one. Exactly four
+    /// report routes keep a `POST` body, each because its body carries a
+    /// **map or a list**, not a scalar:
+    ///
+    /// - `/portfolio/overview`, `/portfolio/performance` and
+    ///   `/portfolio/unrealised-gains` take the price-override map
+    ///   (`{"prices": {"<listing_id>": "<price>"}}`) that a what-if run
+    ///   supplies, beside `live` and `as_of_date`;
+    /// - `/portfolio/net-capital-gain/what-if` takes a contemplated-disposal
+    ///   body whose `allocations` are a list of per-parcel inputs.
+    ///
+    /// Every other report route is a `GET` — including the scalar-parameter
+    /// reads this audit moved off `POST` (`/portfolio/activity` with
+    /// `listing_id`/`price`, `/portfolio/period-performance` with
+    /// `from`/`to`, `/portfolio/parcel-optimiser` with `listing_id`/
+    /// `holding_account_id`/`units`/`sale_date`/`price`,
+    /// `/reports/wash_sales` with `window_days`, `/reports/row_history` with
+    /// its browse parameters, `/reports/tax_report` with `tax_year`, and
+    /// `/reports/franking_at_risk/what-if` with `listing_id`/`sale_date`/
+    /// `units`) — and the newly added ones with it. The offending path is
+    /// named on failure.
+    #[test]
+    fn report_routes_use_the_read_verb_their_parameters_call_for() {
+        /// The four POST-bodied report reads, each with the reason its body
+        /// is a map or a list a query string cannot carry.
+        const POST_BODIES: [(&str, &str); 4] = [
+            (
+                "/portfolio/overview",
+                "the price-override map (beside `live` and `as_of_date`)",
+            ),
+            (
+                "/portfolio/performance",
+                "the price-override map (beside `live` and `as_of_date`)",
+            ),
+            (
+                "/portfolio/unrealised-gains",
+                "the price-override map (beside `live` and `as_of_date`)",
+            ),
+            (
+                "/portfolio/net-capital-gain/what-if",
+                "a contemplated-disposal body whose allocations are a list",
+            ),
+        ];
+
+        let routes = report_routes();
+        assert!(!routes.is_empty(), "the walk found no report routes");
+
+        for (path, verb) in &routes {
+            let expected = if path.starts_with("/report_snapshots") {
+                if SNAPSHOT_WRITES.contains(&path.as_str()) {
+                    "POST"
+                } else {
+                    "GET"
+                }
+            } else if POST_BODIES.iter().any(|(p, _)| p == path) {
+                "POST"
+            } else {
+                "GET"
+            };
+            assert_eq!(
+                *verb, expected,
+                "report route `{path}` is registered `{verb}` but must be `{expected}` — a \
+                 scalar-parameter read is `get(...)` with a query string; only a body carrying a \
+                 map or a list (or a snapshot-generation write) stays `post(...)`"
+            );
+        }
+
+        // The POST-bodied paths the table names are real routes, so a rename
+        // cannot leave an entry excusing nothing — and only the four listed
+        // report reads keep a body.
+        for (path, _) in POST_BODIES {
+            assert!(
+                routes.iter().any(|(p, _)| p == path),
+                "the verb table names `{path}`, which is not a registered report route"
+            );
+        }
+        let body_posts: Vec<&str> = routes
+            .iter()
+            .filter(|(path, verb)| *verb == "POST" && !path.starts_with("/report_snapshots"))
+            .map(|(path, _)| path.as_str())
+            .collect();
+        let mut expected_body_posts: Vec<&str> =
+            POST_BODIES.iter().map(|(path, _)| *path).collect();
+        expected_body_posts.sort_unstable();
+        assert_eq!(
+            body_posts, expected_body_posts,
+            "unexpected POST-bodied report reads: {body_posts:?}"
+        );
     }
 }

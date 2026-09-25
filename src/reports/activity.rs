@@ -39,7 +39,11 @@ use crate::infra::decimal::{mul_div, parse_dec};
 use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
 use crate::reports::portfolio::{self, HoldingOverview};
-use axum::{Extension, Json, Router, extract::State, routing::post};
+use axum::{
+    Extension, Json, Router,
+    extract::{Query, State},
+    routing::get,
+};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -844,13 +848,13 @@ fn describe_action(
 }
 
 pub fn router() -> Router<SqlitePool> {
-    Router::new().route("/portfolio/activity", post(activity_handler))
+    Router::new().route("/portfolio/activity", get(activity_handler))
 }
 
 async fn activity_handler(
     State(pool): State<SqlitePool>,
     fetcher: Option<Extension<SharedFetcher>>,
-    Json(req): Json<ActivityRequest>,
+    Query(req): Query<ActivityRequest>,
 ) -> Result<Json<ActivityResponse>, ApiError> {
     let Some((events, mut holdings)) = db_activity(&pool, req.listing_id)
         .await
@@ -1381,9 +1385,9 @@ mod tests {
 
     // API-level tests
 
-    async fn post_activity(pool: SqlitePool, body: serde_json::Value) -> ApiResponse {
+    async fn get_activity(pool: SqlitePool, query: &str) -> ApiResponse {
         ApiClient::over(router().with_state(pool))
-            .post("/portfolio/activity", &body)
+            .get(format!("/portfolio/activity?{query}"))
             .await
     }
 
@@ -1393,7 +1397,7 @@ mod tests {
         insert_listing(&pool, 1, "VAS").await;
         test_support::buy(1, 1).qty(dec("100")).insert(&pool).await;
 
-        let resp = post_activity(pool, serde_json::json!({ "listing_id": 1, "price": "12" })).await;
+        let resp = get_activity(pool, "listing_id=1&price=12").await;
         assert_eq!(resp.status, StatusCode::OK);
         let r: ActivityResponse = resp.json();
         assert_eq!(r.events.len(), 1);
@@ -1411,7 +1415,7 @@ mod tests {
         insert_listing(&pool, 1, "VAS").await;
         test_support::buy(1, 1).insert(&pool).await;
 
-        let resp = post_activity(pool, serde_json::json!({ "listing_id": 1 })).await;
+        let resp = get_activity(pool, "listing_id=1").await;
         assert_eq!(resp.status, StatusCode::OK);
         let r: ActivityResponse = resp.json();
         assert!(r.holdings[0].market_value.is_none());
@@ -1432,10 +1436,7 @@ mod tests {
             .shared();
 
         let resp = ApiClient::over(router().with_state(pool).layer(axum::Extension(fetcher)))
-            .post(
-                "/portfolio/activity",
-                &serde_json::json!({ "listing_id": 1 }),
-            )
+            .get("/portfolio/activity?listing_id=1")
             .await;
         assert_eq!(resp.status, StatusCode::OK);
         let r: ActivityResponse = resp.json();
@@ -1446,7 +1447,7 @@ mod tests {
     #[tokio::test]
     async fn api_activity_unknown_listing_404() {
         let pool = test_pool().await;
-        let resp = post_activity(pool, serde_json::json!({ "listing_id": 42 })).await;
+        let resp = get_activity(pool, "listing_id=42").await;
         assert_eq!(resp.status, StatusCode::NOT_FOUND);
     }
 
@@ -1731,7 +1732,7 @@ mod tests {
         .await
         .unwrap();
 
-        let resp = post_activity(pool, serde_json::json!({ "listing_id": 1 })).await;
+        let resp = get_activity(pool, "listing_id=1").await;
         let (status, body) = resp.status_and_body();
         assert_eq!(status, StatusCode::OK, "{body}");
         let r: ActivityResponse = serde_json::from_str(body).unwrap();

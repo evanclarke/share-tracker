@@ -39,7 +39,11 @@ use crate::domain::open_parcels;
 use crate::entities::closing_price::{self, SharedFetcher};
 use crate::infra::decimal::mul_div;
 use crate::infra::http::ApiError;
-use axum::{Extension, Json, Router, extract::State, routing::post};
+use axum::{
+    Extension, Json, Router,
+    extract::{Query, State},
+    routing::get,
+};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -447,13 +451,13 @@ pub struct OptimiserResponse {
 }
 
 pub fn router() -> Router<SqlitePool> {
-    Router::new().route("/portfolio/parcel-optimiser", post(optimiser_handler))
+    Router::new().route("/portfolio/parcel-optimiser", get(optimiser_handler))
 }
 
 async fn optimiser_handler(
     State(pool): State<SqlitePool>,
     fetcher: Option<Extension<SharedFetcher>>,
-    Json(req): Json<OptimiserRequest>,
+    Query(req): Query<OptimiserRequest>,
 ) -> Result<Json<OptimiserResponse>, ApiError> {
     if req.units <= Decimal::ZERO {
         return Err(ApiError::Unprocessable(
@@ -859,7 +863,7 @@ mod tests {
     async fn api_past_dated_request_excludes_parcels_acquired_after_it() {
         let pool = test_pool().await;
         as_at_fixture(&pool).await;
-        let (status, body) = post_optimiser(
+        let (status, body) = get_optimiser(
             pool,
             None,
             serde_json::json!({
@@ -925,7 +929,7 @@ mod tests {
     async fn api_past_dated_request_classifies_a_short_held_parcel_as_non_discountable() {
         let pool = test_pool().await;
         as_at_fixture(&pool).await;
-        let (status, body) = post_optimiser(
+        let (status, body) = get_optimiser(
             pool,
             None,
             serde_json::json!({
@@ -959,7 +963,7 @@ mod tests {
     async fn api_past_dated_open_quantity_is_what_was_open_then() {
         let pool = test_pool().await;
         as_at_fixture(&pool).await;
-        let (status, body) = post_optimiser(
+        let (status, body) = get_optimiser(
             pool,
             None,
             serde_json::json!({
@@ -979,7 +983,7 @@ mod tests {
     async fn api_a_parcel_acquired_on_the_sale_date_is_still_a_candidate() {
         let pool = test_pool().await;
         as_at_fixture(&pool).await;
-        let (status, body) = post_optimiser(
+        let (status, body) = get_optimiser(
             pool,
             None,
             serde_json::json!({
@@ -1020,7 +1024,7 @@ mod tests {
         assert!(live.parcels().iter().all(|p| p.trade_id != 2));
 
         // …but it was open on 2023-06-15, so a request for that date has it.
-        let (status, body) = post_optimiser(
+        let (status, body) = get_optimiser(
             pool,
             None,
             serde_json::json!({
@@ -1088,7 +1092,7 @@ mod tests {
         let today = crate::infra::date::today();
         let later = today + chrono::Duration::days(400);
         let run = async |date: NaiveDate| {
-            let (status, body) = post_optimiser(
+            let (status, body) = get_optimiser(
                 pool.clone(),
                 None,
                 serde_json::json!({
@@ -1123,7 +1127,23 @@ mod tests {
 
     // ---- API ---------------------------------------------------------------
 
-    async fn post_optimiser(
+    /// The report's request is a `GET`+query, so a test's parameter object
+    /// maps one-for-one onto `?key=value`. Every value is a string or a
+    /// number; a string is used verbatim, so a decimal like `"150"` stays the
+    /// decimal string the request parses rather than becoming a JSON number.
+    fn query_string(body: &serde_json::Value) -> String {
+        body.as_object()
+            .expect("a query-parameter object")
+            .iter()
+            .map(|(k, v)| match v {
+                serde_json::Value::String(s) => format!("{k}={s}"),
+                other => format!("{k}={other}"),
+            })
+            .collect::<Vec<_>>()
+            .join("&")
+    }
+
+    async fn get_optimiser(
         pool: SqlitePool,
         fetcher: Option<SharedFetcher>,
         body: serde_json::Value,
@@ -1133,7 +1153,10 @@ mod tests {
             router = router.layer(Extension(f));
         }
         let resp = ApiClient::over(router)
-            .post("/portfolio/parcel-optimiser", &body)
+            .get(format!(
+                "/portfolio/parcel-optimiser?{}",
+                query_string(&body)
+            ))
             .await;
         let status = resp.status;
         (status, resp.body.to_vec())
@@ -1143,7 +1166,7 @@ mod tests {
     async fn api_explicit_price_returns_all_strategies() {
         let pool = test_pool().await;
         strategy_fixture(&pool).await;
-        let (status, body) = post_optimiser(
+        let (status, body) = get_optimiser(
             pool,
             None,
             serde_json::json!({
@@ -1185,7 +1208,7 @@ mod tests {
     async fn api_optimiser_states_the_taxpayer_basis_behind_its_ranking() {
         let pool = test_pool().await;
         strategy_fixture(&pool).await;
-        let (status, body) = post_optimiser(
+        let (status, body) = get_optimiser(
             pool,
             None,
             serde_json::json!({
@@ -1208,7 +1231,7 @@ mod tests {
         let fetcher = QuoteStub::default()
             .with_quote(1, "10.00", "AUD", as_of)
             .shared();
-        let (status, body) = post_optimiser(
+        let (status, body) = get_optimiser(
             pool,
             Some(fetcher),
             serde_json::json!({
@@ -1229,7 +1252,7 @@ mod tests {
         let pool = test_pool().await;
         strategy_fixture(&pool).await;
         let fetcher = QuoteStub::failing("provider down").shared();
-        let (status, body) = post_optimiser(
+        let (status, body) = get_optimiser(
             pool,
             Some(fetcher),
             serde_json::json!({ "listing_id": 1, "holding_account_id": 1, "units": "10" }),
@@ -1244,7 +1267,7 @@ mod tests {
     async fn api_units_exceeding_open_quantity_rejected() {
         let pool = test_pool().await;
         strategy_fixture(&pool).await;
-        let (status, body) = post_optimiser(
+        let (status, body) = get_optimiser(
             pool,
             None,
             serde_json::json!({
@@ -1268,7 +1291,7 @@ mod tests {
     async fn every_strategys_allocations_are_accepted_verbatim_by_the_sell_endpoint() {
         let pool = test_pool().await;
         strategy_fixture(&pool).await;
-        let (status, body) = post_optimiser(
+        let (status, body) = get_optimiser(
             pool.clone(),
             None,
             serde_json::json!({
@@ -1324,7 +1347,7 @@ mod tests {
     async fn api_non_positive_units_rejected() {
         let pool = test_pool().await;
         strategy_fixture(&pool).await;
-        let (status, _) = post_optimiser(
+        let (status, _) = get_optimiser(
             pool,
             None,
             serde_json::json!({
@@ -1355,7 +1378,7 @@ mod tests {
         )
         .await;
 
-        let (status, body) = post_optimiser(
+        let (status, body) = get_optimiser(
             pool,
             None,
             serde_json::json!({
@@ -1391,7 +1414,7 @@ mod tests {
         )
         .await;
 
-        let (status, body) = post_optimiser(
+        let (status, body) = get_optimiser(
             pool,
             None,
             serde_json::json!({
@@ -1412,7 +1435,7 @@ mod tests {
     // ---- agreeing with the Sell the estimate rehearses ----------------------
 
     /// The sale a matrix cell asks the optimiser to rehearse: it is entered
-    /// twice over, once as a question (`POST /portfolio/parcel-optimiser`) and
+    /// twice over, once as a question (`GET /portfolio/parcel-optimiser`) and
     /// once as the recorded fact the question was about.
     struct Rehearsal {
         units: Decimal,
@@ -1472,16 +1495,10 @@ mod tests {
         let r = setup(&pool, &client).await;
 
         let estimate: OptimiserResponse = client
-            .post_json(
-                "/portfolio/parcel-optimiser",
-                &serde_json::json!({
-                    "listing_id": 1,
-                    "holding_account_id": 1,
-                    "units": r.units.to_string(),
-                    "sale_date": r.sale_date.to_string(),
-                    "price": r.price.to_string(),
-                }),
-            )
+            .get_json(format!(
+                "/portfolio/parcel-optimiser?listing_id=1&holding_account_id=1&units={}&sale_date={}&price={}",
+                r.units, r.sale_date, r.price
+            ))
             .await;
         // FIFO is the cell's allocation: it is the one strategy whose picks
         // are fixed by the fixture rather than by the very cost bases under
@@ -1843,12 +1860,8 @@ mod tests {
         test_support::amit_adjustment(&pool, 1, 1, 1, dec("100")).await;
 
         let estimate: OptimiserResponse = client
-            .post_json(
-                "/portfolio/parcel-optimiser",
-                &serde_json::json!({
-                    "listing_id": 1, "holding_account_id": 1, "units": "100",
-                    "sale_date": "2026-03-02", "price": "70"
-                }),
+            .get_json(
+                "/portfolio/parcel-optimiser?listing_id=1&holding_account_id=1&units=100&sale_date=2026-03-02&price=70",
             )
             .await;
         let min_gain: Vec<i64> = estimate

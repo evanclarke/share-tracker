@@ -620,6 +620,26 @@ export function apiUrl(path) {
   return basePath() + path;
 }
 
+// ---- query strings -----------------------------------------------------
+// A parameterised report read whose verb is `GET` (config.js's `method:
+// 'GET'`) sends its assembled `params` as the query string rather than a JSON
+// body. Keys whose value is null/undefined are dropped entirely: an omitted
+// optional field must not travel as an empty value, because `?window_days=`
+// is a different request from no `window_days` at all — the server sees a
+// supplied parameter, not an absent one, where the report's own default
+// applies. Every remaining key and value is percent-encoded, so a value
+// carrying `&`, `=`, `+` or a space cannot split into another parameter.
+// Pure (no DOM, no fetch), so the Node unit tests cover it directly.
+export function queryString(params) {
+  const parts = [];
+  Object.keys(params).forEach(function (k) {
+    const v = params[k];
+    if (v == null) return;
+    parts.push(encodeURIComponent(k) + '=' + encodeURIComponent(String(v)));
+  });
+  return parts.join('&');
+}
+
 // Whether infra::auth is configured, from the shell's <meta name="auth">
 // (server-substituted — see src/web.rs's index_html). Read on each call, same
 // reasoning as basePath: a pure function of the document, so the Node unit

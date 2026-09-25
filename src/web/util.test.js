@@ -21,6 +21,7 @@ import {
   tradeOrigin,
   periodReturnPct,
   holdingHasActivity, loadPref, savePref, pathSeg, safeDecodeURIComponent, basePath, apiUrl,
+  queryString,
   authEnabled,
   cellText, adjustmentPreviewText, allocationSummary, toastLifetime, moneyText,
   resolveTheme, otherTheme, themeToggleLabel, applyTheme, currentTheme, toggleTheme,
@@ -659,6 +660,43 @@ test('a document without the meta tag means the root, not undefined', () => {
   } finally {
     delete globalThis.document;
   }
+});
+
+// ---- queryString ---------------------------------------------------------
+// A parameterised GET report assembles its `params` body into the query
+// string with this. The two edges the moved reads depend on: a value is
+// never sent empty (an omitted optional field must be *absent*, not present
+// as `?window_days=`), and every value is encoded so it cannot split into
+// another parameter.
+test('queryString joins name=value pairs in insertion order', () => {
+  assert.equal(queryString({ listing_id: 1, price: '12.50' }), 'listing_id=1&price=12.50');
+  assert.equal(
+    queryString({ listing_id: 1, holding_account_id: 1, units: '1500', sale_date: '2026-06-15' }),
+    'listing_id=1&holding_account_id=1&units=1500&sale_date=2026-06-15',
+  );
+});
+
+test('queryString drops null and undefined keys rather than sending them empty', () => {
+  // A blank optional price, or a blank int with no default, reads back null
+  // from readFieldValue and must not reach the server: `?price=` is a
+  // *supplied* empty value, not the absent parameter whose default applies.
+  assert.equal(queryString({ window_days: 30, price: null }), 'window_days=30');
+  assert.equal(queryString({ from: '2026-04-25', to: '2026-07-25', cursor: undefined }),
+    'from=2026-04-25&to=2026-07-25');
+  assert.equal(queryString({ a: null, b: undefined }), '');
+});
+
+test('queryString encodes every key and value', () => {
+  assert.equal(queryString({ table: 'trades', q: 'a&b=c' }), 'table=trades&q=a%26b%3Dc');
+  // A space and a plus each have one canonical encoding, so a value carrying
+  // either cannot be read as another parameter or as a decoded space.
+  assert.equal(queryString({ note: 'a b+c' }), 'note=a%20b%2Bc');
+  // A slash in a `table`/path-like value stays encoded (it is data here).
+  assert.equal(queryString({ table: 'rights_sale_allocations' }), 'table=rights_sale_allocations');
+});
+
+test('queryString encodes a boolean as its string spelling', () => {
+  assert.equal(queryString({ trust_income: true, flag: false }), 'trust_income=true&flag=false');
 });
 
 // ---- authEnabled ----------------------------------------------------------

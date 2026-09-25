@@ -416,7 +416,7 @@ price_alerts                 The price-change alert send log: one row per emaile
 ├── threshold_pct  TEXT decimal  The threshold in force when this alert fired ([email] price_alert_pct). Recorded because it is configuration and can change: without it an old alert cannot be read back against the rule that produced it
 └── sent_at        TEXT          RFC 3339 UTC instant the alert email was accepted. Written only **after** the send succeeds, so a failed send leaves no row and the next run retries the move rather than swallowing it
 
-row_history                  Append-only audit trail of the financial fact tables (written by database triggers on every UPDATE/DELETE; inspected via POST /reports/row_history — see API.md Row history)
+row_history                  Append-only audit trail of the financial fact tables (written by database triggers on every UPDATE/DELETE; inspected via GET /reports/row_history — see API.md Row history)
 ├── id          INTEGER PK       Autoincrement — write order (newest entry = highest id); indexed with (table_name, row_id) for per-row lookups
 ├── table_name  TEXT             The audited table (CHECK-enforced enum: trades, parcel_allocations, income, interest_income, amma_statements, amit_adjustments, ess_statements, transfers, corporate_actions, inheritances, rights_sales, rights_sale_allocations, investment_expenses, drp_enrolments, cgt_settings, attachments, listings, listing_renames, closing_prices, tax_year_settings, rba_fx_rates, exchange_holidays, distribution_events)
 ├── row_id      INTEGER          The audited row's id — for tax_year_settings, whose identity is the financial year, that year

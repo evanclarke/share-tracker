@@ -2611,14 +2611,78 @@ mod tests {
         assert!(js.contains("a date you enter is kept exactly as given"));
     }
 
+    /// The 2026-09-24 REST-audit item "Normalise the verb and success status
+    /// for reads", UI side: the seven reads it moved from `POST`+JSON body to
+    /// `GET`+query are driven as `GET`s by the bundle, parameters and all.
+    /// Pinned per report — the `REPORTS` entry (config.js) declares
+    /// `method: 'GET'` right beside the `api:` path it drives, and the served
+    /// bundle carries the shared query builder (`util.js`'s `queryString`) the
+    /// parameterised ones assemble their query with, including its
+    /// null-for-empty rule (an omitted optional field must be absent from the
+    /// query, never `?window_days=`).
+    ///
+    /// Two of the seven are not the generic report runner's own call site, so
+    /// they are pinned where they are driven: the Annual Tax Report's year
+    /// picker (taxreport.js) and the Portfolio Overview's period-performance
+    /// panel (app.js). The four reports the audit deliberately left on `POST`
+    /// (the price-map reports and the allocation-list what-if) are pinned as
+    /// still POST, so a later edit cannot quietly move them.
+    #[tokio::test]
+    async fn moved_report_reads_are_driven_as_get_with_a_query() {
+        let config = module_source("/static/config.js");
+        for path in [
+            "/portfolio/activity",
+            "/portfolio/parcel-optimiser",
+            "/reports/wash_sales",
+            "/reports/row_history",
+            "/reports/tax_report",
+            "/reports/franking_at_risk/what-if",
+        ] {
+            assert!(
+                config.contains(&format!("api: '{path}', method: 'GET'")),
+                "{path} must declare method: 'GET' beside its api path — the audit moved it off POST"
+            );
+        }
+        // Period performance is the seventh moved read, but it has no REPORTS
+        // entry: the Portfolio Overview's panel calls it directly (pinned
+        // below), so there is no config verb to change.
+        for path in [
+            "/portfolio/overview",
+            "/portfolio/performance",
+            "/portfolio/unrealised-gains",
+            "/portfolio/net-capital-gain/what-if",
+        ] {
+            assert!(
+                config.contains(&format!("api: '{path}', method: 'POST'")),
+                "{path} keeps POST — its body is a price map or allocation list, not scalar params"
+            );
+        }
+        let js = app_js_body().await;
+        // The shared query builder: keys are encoded, and a null/undefined
+        // value is dropped rather than sent empty.
+        assert!(js.contains("export function queryString(params)"));
+        assert!(js.contains("if (v == null) return;"));
+        assert!(js.contains("encodeURIComponent(String(v))"));
+        // The parameterised runner assembles the body into the query and
+        // issues the GET (the empty-body case sends the bare path).
+        assert!(js.contains("const qs = queryString(body);"));
+        assert!(js.contains("api('GET', qs ? report.api + '?' + qs : report.api)"));
+        // The two reads driven outside the generic report runner.
+        assert!(js.contains("'/portfolio/period-performance?'"));
+        assert!(js.contains("queryString({ from: resolved.from, to: resolved.to })"));
+        assert!(js.contains("'/reports/tax_report?'"));
+        assert!(js.contains("queryString({ tax_year: Number(yearSelect.value) })"));
+    }
+
     #[tokio::test]
     async fn wash_sales_report_ui_present() {
         let js = app_js_body().await;
-        // The Wash Sales report view drives POST /reports/wash_sales with a
-        // configurable window field (blank = the 30-day default).
+        // The Wash Sales report view drives GET /reports/wash_sales?window_days=…
+        // with a configurable window field (blank = the 30-day default).
         assert!(js.contains("'wash-sales'"));
         assert!(js.contains("/reports/wash_sales"));
         assert!(js.contains("window_days"));
+        assert!(js.contains("api: '/reports/wash_sales', method: 'GET'"));
     }
 
     #[tokio::test]
@@ -2951,10 +3015,11 @@ mod tests {
     #[tokio::test]
     async fn listing_activity_report_ui_present() {
         let js = app_js_body().await;
-        // The Listing Activity report drives POST /portfolio/activity through
-        // the generic params-form + titled-tables report machinery: the
-        // chronological ledger, then the final holding summary.
+        // The Listing Activity report drives GET /portfolio/activity?listing_id=…
+        // (&price=…) through the generic params-form + titled-tables report
+        // machinery: the chronological ledger, then the final holding summary.
         assert!(js.contains("/portfolio/activity"));
+        assert!(js.contains("api: '/portfolio/activity', method: 'GET'"));
         assert!(js.contains("Listing Activity"));
         assert!(js.contains("'events'"));
         assert!(js.contains("'holdings'"));

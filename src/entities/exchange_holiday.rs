@@ -22,7 +22,7 @@ use std::collections::HashSet;
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct ExchangeHoliday {
     /// Server-assigned surrogate key (0039): the row's identity for the audit
-    /// trail (`row_history.row_id`, so `POST /reports/row_history` can be
+    /// trail (`row_history.row_id`, so `GET /reports/row_history` can be
     /// keyed on it). Writes address a holiday by its `(mic, holiday_date)`
     /// natural key, never by this — [`db_upsert`] ignores the value it is
     /// handed and lets the database assign or preserve it.
@@ -550,7 +550,7 @@ mod tests {
     /// re-derive it from — the seed is a one-off in 0001_schema.sql — and a
     /// holiday changes a reported figure, since valuation reads the calendar
     /// live. So a correction records the superseded row, readable through
-    /// `POST /reports/row_history` keyed on the surrogate `id` the rebuild
+    /// `GET /reports/row_history` keyed on the surrogate `id` the rebuild
     /// gave the table.
     #[tokio::test]
     async fn correcting_a_holiday_records_the_superseded_row() {
@@ -570,10 +570,10 @@ mod tests {
         .await;
 
         let history: Vec<serde_json::Value> = app
-            .post_json(
-                "/reports/row_history",
-                &serde_json::json!({ "table": "exchange_holidays", "row_id": before.id }),
-            )
+            .get_json(format!(
+                "/reports/row_history?table=exchange_holidays&row_id={}",
+                before.id
+            ))
             .await;
         assert_eq!(history.len(), 1, "one entry for one correction");
         assert_eq!(history[0]["operation"], "UPDATE");
@@ -618,10 +618,10 @@ mod tests {
         );
 
         let history: Vec<serde_json::Value> = app
-            .post_json(
-                "/reports/row_history",
-                &serde_json::json!({ "table": "exchange_holidays", "row_id": holiday.id }),
-            )
+            .get_json(format!(
+                "/reports/row_history?table=exchange_holidays&row_id={}",
+                holiday.id
+            ))
             .await;
         assert_eq!(history.len(), 1);
         assert_eq!(history[0]["operation"], "DELETE");

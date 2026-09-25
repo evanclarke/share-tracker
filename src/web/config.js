@@ -507,7 +507,7 @@ export const REPORTS = [
     },
   },
   {
-    slug: 'activity', title: 'Listing Activity', api: '/portfolio/activity', method: 'POST',
+    slug: 'activity', title: 'Listing Activity', api: '/portfolio/activity', method: 'GET',
     menu: 'Reports', section: 'Portfolio',
     desc: 'One listing, laid out like the Portfolio Overview: its market-value or unrealised-gain graph over a selectable date range, then the holding summary per account (units held, cost base, market value), then everything ever recorded against it, newest first — trades labelled with the operation that created them, transfers, income, corporate actions, statements — each with the units held after it, so the top row is the holding as it stands. Sort the Date column to read it forwards.',
     params: [
@@ -526,7 +526,7 @@ export const REPORTS = [
     ],
   },
   {
-    slug: 'parcel-optimiser', title: 'Parcel Optimiser', api: '/portfolio/parcel-optimiser', method: 'POST',
+    slug: 'parcel-optimiser', title: 'Parcel Optimiser', api: '/portfolio/parcel-optimiser', method: 'GET',
     menu: 'Reports', section: 'Decision support',
     desc: 'Candidate parcel selections for a contemplated sale — which parcels a sale comes from is your choice, and it changes the tax outcome. Each strategy shows its per-parcel allocations and the resulting gross gain / discountable split. Nothing is recorded: enter the chosen allocations on the real Sell.',
     params: [
@@ -618,7 +618,7 @@ export const REPORTS = [
   },
   { slug: 'tax-summary', title: 'Tax Summary', api: '/portfolio/tax-summary', method: 'GET', export: true, menu: 'Reports', section: 'CGT & tax', desc: 'Income aggregated by Australian financial year. A dividend from a company reports at 11S/11T; a non-AMIT trust distribution reports at question 13 instead \u2014 unfranked at 13U, franked at 13C \u2014 the same labels the AMMA lines carry. Investment-expense deductions are cut two ways over the same total: by kind of expense (loan interest, management fee, \u2026) and by the question each is claimed at \u2014 13Y for expenses of earning a trust or AMIT distribution (interest on money borrowed to buy the units included), 20M for expenses of earning foreign-source income, D15 for a debt deduction against foreign income (question 20\u2019s worksheet excludes those), and D7/D8 for the ordinary Australian interest and dividend case. An expense attributed to no listing cannot be routed and is reported at D7/D8.' },
   {
-    slug: 'tax-report', title: 'Annual Tax Report', custom: 'tax-report', api: '/reports/tax_report',
+    slug: 'tax-report', title: 'Annual Tax Report', custom: 'tax-report', api: '/reports/tax_report', method: 'GET',
     menu: 'Reports', section: 'CGT & tax',
     desc: 'A printable, archivable tax document for one financial year — trading gains/losses with a full cost-base breakdown, the ATO gain/loss worksheet, income by category, and a data-completeness check. Print or Save as PDF to archive it.',
   },
@@ -639,7 +639,7 @@ export const REPORTS = [
   { slug: 'rollover-consistency', title: 'Rollover Consistency', api: '/reports/rollover_consistency', method: 'GET', menu: 'Reports', section: 'Cross-checks & alerts', desc: 'Parcel-substituting operations whose recorded picture no longer holds, in two ways. A transfer, scrip-for-scrip exchange or demerger writes the cost base (and units) its replacement parcels carry as a stored value, computed when it ran — so editing a source parcel, or correcting an AMMA statement behind it, moves the parcels the reports still walk while the frozen replacement figures stay put, and the same holding reports a different cost base depending on the order things were entered. Separately, a scrip-for-scrip exchange, demerger or worthless-shares recognise consumes every open parcel of its listing as a matter of law, so a parcel still open at the operation’s date is units it could never reach — entered after the operation ran and dated on or before it. Each row names what the operation carried, what the units it consumed are worth now and the difference, or the parcel left behind and what it still holds; the fix either way is to delete that operation and run it again. A partial-rollover scrip exchange (one with a cash component) has its stored figures listed as not checked, because how much of each cost base went to the cash side is the exchange’s own apportionment. An empty report means every rollover still reconciles and every whole-holding operation took the whole holding.' },
   { slug: 'amit-cash-cross-check', title: 'AMIT Cash Cross-Check', api: '/reports/amit_cash_cross_check', method: 'GET', menu: 'Reports', section: 'Cross-checks & alerts', desc: 'Financial years with AMIT cash distribution rows but no AMMA statement covering the year, per holding account — a registry issues one statement per holder account, so a fund held in two accounts needs two. AMIT cash rows fund DRP reinvestment only — the AMMA attribution is the assessable record the Tax Summary reports — so a missing AMMA would silently drop the year’s income from the return. Enter that account’s AMMA statement to clear a row; an AMMA year with no cash rows is fine.' },
   {
-    slug: 'wash-sales', title: 'Wash Sales', api: '/reports/wash_sales', method: 'POST',
+    slug: 'wash-sales', title: 'Wash Sales', api: '/reports/wash_sales', method: 'GET',
     menu: 'Reports', section: 'Decision support',
     desc: 'Loss-realising Sells with a Buy of the same listing within the window either side, across all holding accounts — the sell-and-repurchase pattern the ATO warns may have the loss cancelled under Part IVA (TR 2008/1). Advisory only: nothing is rejected and the loss still counts in every CGT report; whether a flag matters depends on the facts (a market-driven repurchase days later survived the ATO’s own example).',
     params: [
@@ -648,7 +648,7 @@ export const REPORTS = [
   },
   { slug: 'franking-at-risk', title: 'Franking At-Risk', api: '/reports/franking_at_risk', method: 'GET', statusField: 'status', menu: 'Reports', section: 'Cross-checks & alerts', desc: 'Each dividend whose shares fail the 45-day (90 for preference) at-risk holding-period walk: the failing qualification window, the entitled and disqualified units, and the credits denied — or shielded by the year’s under-$5,000 small-shareholder exemption. Denied rows are exactly what the Tax Summary subtracts as franking_credits_denied. A row marked untested_no_ex_date is a dividend the rule could not be applied to at all — no ex date (or trust entitlement date) was recorded to anchor the window — so record that date to resolve it; with none of these, every attached credit is claimable on the tests modelled here. The other two qualified-person conditions — the 30%-at-risk test (hedges, options, futures) and the related payments rule, which the small-shareholder exemption does not excuse — are not modelled and cannot be recorded, so an empty report assumes the holdings are unhedged and under no related-payment obligation.' },
   {
-    slug: 'franking-what-if', title: 'Franking Sale What-If', api: '/reports/franking_at_risk/what-if', method: 'POST', statusField: 'status',
+    slug: 'franking-what-if', title: 'Franking Sale What-If', api: '/reports/franking_at_risk/what-if', method: 'GET', statusField: 'status',
     menu: 'Reports', section: 'Decision support',
     desc: 'Before recording a Sell: which dividends’ franking credits the contemplated sale would put at risk under the 45-day rule. Each row shows the additional credits at stake and the qualification window end — selling after that date cannot disqualify the dividend. Nothing is written.',
     params: [
@@ -659,7 +659,7 @@ export const REPORTS = [
   },
   { slug: 'snapshots', title: 'Snapshots', custom: 'snapshots', api: '/report_snapshots', menu: 'Jobs', desc: 'Stored daily results of the price-dependent reports (portfolio overview, unrealised gains, performance), valued at the stored closing prices. A back-dated fact marks affected snapshots stale; regenerate them here. The market-value graph is on the Portfolio Overview screen.' },
   {
-    slug: 'row-history', title: 'Row History', api: '/reports/row_history', method: 'POST',
+    slug: 'row-history', title: 'Row History', api: '/reports/row_history', method: 'GET',
     menu: 'Jobs',
     desc: 'The append-only audit trail: every past version of a record, newest first. Database triggers capture the prior values whenever an audited row is edited or deleted, so an accidental change to a historical fact can be noticed and reconstructed; entries are kept forever and nothing can rewrite them. Run it with no Row ID to browse the recent changes across every audited table \u2014 the way to find an operation that changed rows you never named (a demerger group, a cascade, a bulk price clear), whose ids appear in no list afterwards; each entry then links through to that row\u2019s own trail. With a Row ID, no entries = the row has never been changed since the trail began.',
     // The browse form answers an object ({ entries, page_size,

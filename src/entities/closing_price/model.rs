@@ -52,7 +52,7 @@ pub const UNASSIGNED_ID: i64 = 0;
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct ClosingPrice {
     /// Server-assigned surrogate key (0021): the row's identity for the audit
-    /// trail (`row_history.row_id`, so `POST /reports/row_history` can be
+    /// trail (`row_history.row_id`, so `GET /reports/row_history` can be
     /// keyed on it). Writes address a row by its `(listing_id, price_date)`
     /// natural key, never by this — [`db_store`] ignores the value it is
     /// handed and lets the database assign or preserve it.

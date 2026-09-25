@@ -15,7 +15,7 @@ import {
   el, toastIfCurrent, setMainIfCurrent, beginNavigation, navigationToken,
   isCurrentNavigation, onViewTeardown, reload, looksNumeric, isTimestamp, fmtLocalTimestamp, utcTooltip,
   cellText, numericDisplay, decCompare, moneyText, moneyEl, columnKinds, columnLabel, columnLabelMaps,
-  fkLabelMaps, api, apiUrl, pathSeg, safeDecodeURIComponent, loadOptions, listingNamer,
+  fkLabelMaps, api, apiUrl, queryString, pathSeg, safeDecodeURIComponent, loadOptions, listingNamer,
   describeTrade, tradeOrigin,
   columnLinks, listingLinkFrom, defaultSortColumn,
   tableViewCache, debounce,
@@ -2638,8 +2638,12 @@ async function performancePanel() {
       try {
         // Both reads are of the same window and both are stored-snapshot
         // reads, so they go out together rather than one after the other.
+        // Period performance is a query-string read (the 2026-09-24 audit
+        // moved it off a POST body), built by the same helper the
+        // parameterised GET reports use.
         const [result, trends] = await Promise.all([
-          api('POST', '/portfolio/period-performance', { from: resolved.from, to: resolved.to }),
+          api('GET', '/portfolio/period-performance?'
+            + queryString({ from: resolved.from, to: resolved.to })),
           api('GET', '/report_snapshots/holding-series?from='
             + encodeURIComponent(resolved.from) + '&to=' + encodeURIComponent(resolved.to)),
         ]);
@@ -2714,6 +2718,13 @@ function reportError(e) {
 // way, to drill from a trail entry into that row's own history.
 async function viewReport(report, args, seq = navigationToken()) {
   setActiveNav('r:' + report.slug);
+  // The verb this report's read travels by. `method` is config-driven
+  // (config.js): `'GET'` for a read whose scalar parameters are the query
+  // string — the seven endpoints the 2026-09-24 REST-api audit moved off
+  // POST bodies — and `'POST'` for the reports that genuinely need a body
+  // (the price-override map, the allocation list). Decided once here so the
+  // plain-GET branch and the params form cannot disagree.
+  const verb = report.method === 'GET' ? 'GET' : 'POST';
   const header = el('div', null, [
     el('h2', null, report.title),
     el('p', { class: 'view-desc' }, report.desc),
@@ -2917,7 +2928,10 @@ async function viewReport(report, args, seq = navigationToken()) {
     if (more) result.appendChild(more);
   }
 
-  if (report.method === 'GET') {
+  // A `GET` report with no params (open parcels, the cross-checks) reads its
+  // endpoint as-is; one that *has* params falls through to the params form
+  // below, which assembles its query string.
+  if (verb === 'GET' && !report.params) {
     // Paint the shell *before* the request goes out — header, shortcuts, the
     // still-loading performance panel and a pending line in the result slot —
     // so `#app` is never blank (topbar only) while the GET is in flight. The
@@ -2944,12 +2958,14 @@ async function viewReport(report, args, seq = navigationToken()) {
     return;
   }
 
-  // Parameterised POST reports (the parcel optimiser, the pre-sale what-if):
-  // the body comes from the configured `params` fields — the same field
-  // constructors the entity forms use — and the report runs on submit only,
-  // since the inputs are required. Two exceptions run it for you: a deep link
-  // that carries the values in the hash, and a report declaring `autoRun`
-  // because every one of its fields is optional (Row History's browse page).
+  // Parameterised reports whose inputs come from the configured `params`
+  // fields (the same field constructors the entity forms use): the report
+  // runs on submit only, since the inputs are required. The verb decides how
+  // they travel — a `method: 'GET'` report assembles them into the query
+  // string, the rest POST the body — and two exceptions run it for you: a
+  // deep link that carries the values in the hash, and a report declaring
+  // `autoRun` because every one of its fields is optional (Row History's
+  // browse page).
   if (report.params) {
     // `paramsPanel` (config.js) moves the named fields out of the header form
     // into a collapsed panel rendered under one of the tables — the Portfolio
@@ -3004,7 +3020,17 @@ async function viewReport(report, args, seq = navigationToken()) {
       });
       lastBody = body;
       try {
-        await render(await api('POST', report.api, body));
+        if (verb === 'GET') {
+          // The moved reads travel as `GET <api>?<query>`: the same assembled
+          // values, URL-encoded, with an omitted optional field absent from
+          // the query rather than present and empty (util.js's `queryString`).
+          // Row History's browse page needs no filter at all, so an empty
+          // body sends the bare path, not a dangling `?`.
+          const qs = queryString(body);
+          await render(await api('GET', qs ? report.api + '?' + qs : report.api));
+        } else {
+          await render(await api('POST', report.api, body));
+        }
       } catch (e) {
         toastIfCurrent(seq, e.message, true);
       }

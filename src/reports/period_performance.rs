@@ -40,7 +40,11 @@
 use crate::infra::fx::{FxError, FxRates};
 use crate::infra::http::ApiError;
 use crate::reports::{performance, realised_gains, valuation};
-use axum::{Json, Router, extract::State, routing::post};
+use axum::{
+    Json, Router,
+    extract::{Query, State},
+    routing::get,
+};
 use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -476,7 +480,7 @@ pub async fn compute(
 
 async fn period_performance_handler(
     State(pool): State<SqlitePool>,
-    Json(req): Json<PeriodRequest>,
+    Query(req): Query<PeriodRequest>,
 ) -> Result<Json<PeriodPerformance>, ApiError> {
     let result = compute(&pool, req.from, req.to, Utc::now()).await?;
     Ok(Json(result))
@@ -485,7 +489,7 @@ async fn period_performance_handler(
 pub fn router() -> Router<SqlitePool> {
     Router::new().route(
         "/portfolio/period-performance",
-        post(period_performance_handler),
+        get(period_performance_handler),
     )
 }
 
@@ -992,9 +996,8 @@ mod tests {
         store_price(&pool, 1, from, "12").await;
         store_price(&pool, 1, to, "15").await;
 
-        let body = serde_json::json!({ "from": from, "to": to });
         let resp = ApiClient::over(router().with_state(pool))
-            .post("/portfolio/period-performance", &body)
+            .get(format!("/portfolio/period-performance?from={from}&to={to}"))
             .await;
         assert_eq!(resp.status, StatusCode::OK);
         let result: PeriodPerformance = resp.json();
@@ -1004,9 +1007,8 @@ mod tests {
     #[tokio::test]
     async fn api_period_performance_invalid_range_is_422() {
         let pool = test_pool().await;
-        let body = serde_json::json!({ "from": "2026-07-01", "to": "2026-06-01" });
         let resp = ApiClient::over(router().with_state(pool))
-            .post("/portfolio/period-performance", &body)
+            .get("/portfolio/period-performance?from=2026-07-01&to=2026-06-01")
             .await;
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
     }
@@ -1067,11 +1069,8 @@ mod tests {
             ),
             (
                 "/portfolio/period-performance",
-                c.post(
-                    "/portfolio/period-performance",
-                    &serde_json::json!({ "from": from, "to": to }),
-                )
-                .await,
+                c.get(format!("/portfolio/period-performance?from={from}&to={to}"))
+                    .await,
             ),
             (
                 "/report_snapshots/generate",
@@ -1087,11 +1086,7 @@ mod tests {
             ),
             (
                 "/reports/tax_report",
-                c.post(
-                    "/reports/tax_report",
-                    &serde_json::json!({ "tax_year": 2026 }),
-                )
-                .await,
+                c.get("/reports/tax_report?tax_year=2026").await,
             ),
         ];
         let mut first: Option<(&str, String)> = None;

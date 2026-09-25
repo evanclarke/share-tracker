@@ -4304,12 +4304,7 @@ mod tests {
                 .unwrap()
         };
 
-        let report: serde_json::Value = api
-            .post_json(
-                "/reports/tax_report",
-                &serde_json::json!({ "tax_year": 2024 }),
-            )
-            .await;
+        let report: serde_json::Value = api.get_json("/reports/tax_report?tax_year=2024").await;
         let summary = &report["cgt_summary"];
         let line = |name: &str| summary[name].as_str().unwrap().parse::<Decimal>().unwrap();
 

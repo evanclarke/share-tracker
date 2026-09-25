@@ -557,14 +557,9 @@ async fn keeping_records_example_boris_optimiser_recommends_the_loss_parcel() {
     put_buy(&pool, 2, 1, "2024-05-15", "3000", "10", "0").await;
 
     // Optimise a sale of 1,500 at $8 on Boris's 2025 sale date.
-    let r: OptimiserResponse = api_post(
+    let r: OptimiserResponse = api_get(
         &pool,
-        "/portfolio/parcel-optimiser",
-        json!({
-            "listing_id": 1, "holding_account_id": 1, "units": "1500",
-            "sale_date": "2025-05-15", "price": "8"
-        }),
-        StatusCode::OK,
+        "/portfolio/parcel-optimiser?listing_id=1&holding_account_id=1&units=1500&sale_date=2025-05-15&price=8",
     )
     .await;
     let harvest = r

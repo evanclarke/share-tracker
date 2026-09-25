@@ -82,7 +82,7 @@ fn report_path_namespace_case_rule_documented() {
     // endpoints are spelled in the snake_case form (the route table itself is
     // pinned by `reports::tests::report_paths_use_their_namespace_case`).
     assert!(section.contains("GET  /reports/tax_report/years"));
-    assert!(section.contains("POST /reports/tax_report"));
+    assert!(section.contains("GET  /reports/tax_report?tax_year=2026"));
 }
 
 /// Docs-sync pin for the strict decoding of request bodies (SCENARIOS V-a):
@@ -433,7 +433,7 @@ fn row_history_audit_trail_documented() {
     assert!(SCHEMA_MD.contains("deliberately has no pruning job"));
     // API.md: the inspection endpoint, its section, and its 422.
     assert!(API_MD.contains("### Row history"));
-    assert!(API_MD.contains("POST /reports/row_history"));
+    assert!(API_MD.contains("GET /reports/row_history?table=trades&row_id=1"));
     assert!(API_MD.contains("a row-history request naming a table that is not audited"));
     // The browse form (SCENARIOS U-b): both request shapes, the uniform
     // entry, the cursor, the bounded page, and the ordering rule that makes
@@ -2002,7 +2002,9 @@ fn tax_report_year_picker_scope_documented() {
     assert!(API_MD.contains("plus every quiet year still carrying a capital loss forward"));
     // Honest in both directions, and never offering a year the POST refuses.
     assert!(API_MD.contains("A year with nothing in it and no loss balance is still absent"));
-    assert!(API_MD.contains("every listed year is one `POST /reports/tax_report` answers"));
+    assert!(
+        API_MD.contains("every listed year is one `GET /reports/tax_report?tax_year=…` answers")
+    );
     // The superseded note — "request a quiet year by `tax_year` directly" —
     // described a picker that could not reach such a year, and is gone.
     assert!(!API_MD.contains("request a quiet year by `tax_year` directly"));
@@ -3220,7 +3222,7 @@ fn advisory_ignores_expire() {
 #[test]
 fn period_performance_panel_documented() {
     assert!(API_MD.contains("### Period performance"));
-    assert!(API_MD.contains("POST /portfolio/period-performance"));
+    assert!(API_MD.contains("GET /portfolio/period-performance?from=2026-04-25&to=2026-07-25"));
     assert!(API_MD.contains("half-open `(from, to]`"));
     assert!(
         API_MD.contains("a period-performance request whose `from` is not strictly before `to`")

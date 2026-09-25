@@ -26,7 +26,11 @@
 //! append-only (enforced in the schema), so there is nothing here to write.
 
 use crate::infra::http::ApiError;
-use axum::{Json, Router, extract::State, routing::post};
+use axum::{
+    Json, Router,
+    extract::{Query, State},
+    routing::get,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sqlx::{Row, SqlitePool};
@@ -217,7 +221,7 @@ pub struct RowHistoryRequest {
 }
 
 pub fn router() -> Router<SqlitePool> {
-    Router::new().route("/reports/row_history", post(report))
+    Router::new().route("/reports/row_history", get(report))
 }
 
 /// One browse entry: the trail's own uniform columns, and nothing else.
@@ -379,7 +383,7 @@ pub async fn db_browse_row_history(
 
 async fn report(
     State(pool): State<SqlitePool>,
-    Json(req): Json<RowHistoryRequest>,
+    Query(req): Query<RowHistoryRequest>,
 ) -> Result<Json<RowHistoryResponse>, ApiError> {
     if let Some(table) = &req.table
         && !AUDITED_TABLES.contains(&table.as_str())
@@ -623,12 +627,19 @@ mod tests {
         edited.quantity = Decimal::from(150);
         trade::db_upsert(&pool, &edited).await.unwrap();
 
-        let post = |body: String| {
+        let get = |query: String| {
             let client = ApiClient::over(router().with_state(pool.clone()));
-            async move { client.post_raw("/reports/row_history", body.as_ref()).await }
+            async move {
+                let path = if query.is_empty() {
+                    "/reports/row_history".to_string()
+                } else {
+                    format!("/reports/row_history?{query}")
+                };
+                client.get(path).await
+            }
         };
 
-        let resp = post(r#"{"table": "trades", "row_id": 1}"#.to_string()).await;
+        let resp = get("table=trades&row_id=1".to_string()).await;
         assert_eq!(resp.status, StatusCode::OK);
         let entries: Vec<Map<String, Value>> = resp.json();
         assert_eq!(entries.len(), 1);
@@ -636,13 +647,13 @@ mod tests {
         assert_eq!(entries[0]["quantity"], "100");
 
         // A row with no recorded history is an empty trail, not an error.
-        let resp = post(r#"{"table": "trades", "row_id": 999}"#.to_string()).await;
+        let resp = get("table=trades&row_id=999".to_string()).await;
         assert_eq!(resp.status, StatusCode::OK);
         assert_eq!(resp.text(), "[]");
 
         // Unknown table: rejected with the audited list, never interpolated
         // into SQL.
-        let resp = post(r#"{"table": "sqlite_master", "row_id": 1}"#.to_string()).await;
+        let resp = get("table=sqlite_master&row_id=1".to_string()).await;
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
         let msg = resp.text();
         assert!(msg.contains("not an audited table"), "{msg}");
@@ -966,10 +977,7 @@ mod tests {
         edit_trade_qty(&pool, 1, 9).await;
 
         let entries: Vec<Map<String, Value>> = ApiClient::over(router().with_state(pool.clone()))
-            .post_json(
-                "/reports/row_history",
-                &serde_json::json!({ "table": "trades", "row_id": 1 }),
-            )
+            .get_json("/reports/row_history?table=trades&row_id=1")
             .await;
         assert_eq!(occupants(&entries), vec![(1, true), (2, false)]);
     }
@@ -988,7 +996,7 @@ mod tests {
         test_support::buy(1, 1).insert(&pool).await;
 
         let page: Value = ApiClient::over(router().with_state(pool.clone()))
-            .post_json("/reports/row_history", &serde_json::json!({}))
+            .get_json("/reports/row_history")
             .await;
         let entry = &page["entries"][0];
         assert_eq!(entry["row_id"], 1);
@@ -1041,7 +1049,7 @@ mod tests {
         seed_mixed_trail(&pool).await;
 
         let client = ApiClient::over(router().with_state(pool.clone()));
-        let body = page(&client.post_raw("/reports/row_history", "{}").await);
+        let body = page(&client.get("/reports/row_history").await);
         let entries = body["entries"].as_array().unwrap();
 
         // Four entries over three tables: the Sell delete's pair, then the
@@ -1102,11 +1110,7 @@ mod tests {
         seed_mixed_trail(&pool).await;
         let client = ApiClient::over(router().with_state(pool.clone()));
 
-        let first = page(
-            &client
-                .post_raw("/reports/row_history", r#"{"limit": 2}"#)
-                .await,
-        );
+        let first = page(&client.get("/reports/row_history?limit=2").await);
         let ids = |body: &Value| -> Vec<i64> {
             body["entries"]
                 .as_array()
@@ -1125,10 +1129,7 @@ mod tests {
         let cursor = first_ids[1];
         let second = page(
             &client
-                .post_raw(
-                    "/reports/row_history",
-                    &format!(r#"{{"limit": 2, "before_id": {cursor}}}"#),
-                )
+                .get(format!("/reports/row_history?limit=2&before_id={cursor}"))
                 .await,
         );
         let second_ids = ids(&second);
@@ -1157,36 +1158,25 @@ mod tests {
         let client = ApiClient::over(router().with_state(pool.clone()));
 
         // `table` without `row_id` is a filter, not a lookup.
-        let body = page(
-            &client
-                .post_raw("/reports/row_history", r#"{"table": "trades"}"#)
-                .await,
-        );
+        let body = page(&client.get("/reports/row_history?table=trades").await);
         let entries = body["entries"].as_array().unwrap();
         assert_eq!(entries.len(), 2);
         assert!(entries.iter().all(|e| e["table_name"] == "trades"));
 
         // The audited-table check still applies to the filter.
-        let resp = client
-            .post_raw("/reports/row_history", r#"{"table": "sqlite_master"}"#)
-            .await;
+        let resp = client.get("/reports/row_history?table=sqlite_master").await;
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
         assert!(resp.text().contains("not an audited table"));
 
         // A row id means nothing without the table it is an id in.
-        let resp = client
-            .post_raw("/reports/row_history", r#"{"row_id": 1}"#)
-            .await;
+        let resp = client.get("/reports/row_history?row_id=1").await;
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
         assert!(resp.text().contains("needs the 'table'"), "{}", resp.text());
 
         // Browse-only parameters are refused on the single-row form rather
         // than silently ignored.
         let resp = client
-            .post_raw(
-                "/reports/row_history",
-                r#"{"table": "trades", "row_id": 1, "limit": 5}"#,
-            )
+            .get("/reports/row_history?table=trades&row_id=1&limit=5")
             .await;
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
         assert!(
@@ -1199,7 +1189,7 @@ mod tests {
         // cap — never a silently truncated page.
         for limit in [0, MAX_BROWSE_LIMIT + 1] {
             let resp = client
-                .post_raw("/reports/row_history", &format!(r#"{{"limit": {limit}}}"#))
+                .get(format!("/reports/row_history?limit={limit}"))
                 .await;
             assert_eq!(
                 resp.status,
@@ -1278,9 +1268,7 @@ mod tests {
         // Browse: no ids, no table — just what changed most recently. The
         // demerge itself only INSERTed (INSERTs are not audited), so the
         // whole trail is the one delete: four entries over two tables.
-        let body: Value = client
-            .post_json("/reports/row_history", &serde_json::json!({}))
-            .await;
+        let body: Value = client.get_json("/reports/row_history").await;
         let entries = body["entries"].as_array().unwrap();
         assert_eq!(
             entries.len(),
@@ -1319,10 +1307,9 @@ mod tests {
         // back from the single-row form, ids and all.
         let unknown = created[0];
         let trail: Vec<Map<String, Value>> = client
-            .post_json(
-                "/reports/row_history",
-                &serde_json::json!({ "table": "trades", "row_id": unknown }),
-            )
+            .get_json(format!(
+                "/reports/row_history?table=trades&row_id={unknown}"
+            ))
             .await;
         assert_eq!(trail.len(), 1);
         assert_eq!(trail[0]["operation"], "DELETE");

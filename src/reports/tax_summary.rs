@@ -4495,12 +4495,7 @@ mod tests {
                 "{path}: {body}"
             );
         }
-        let resp = c
-            .post(
-                "/reports/tax_report",
-                &serde_json::json!({"tax_year": 2023}),
-            )
-            .await;
+        let resp = c.get("/reports/tax_report?tax_year=2023").await;
         let (status, body) = resp.status_and_body();
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert!(body.contains("USD") && body.contains("2023-05"), "{body}");

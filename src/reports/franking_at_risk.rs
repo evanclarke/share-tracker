@@ -30,7 +30,11 @@
 use crate::infra::fx::FxRates;
 use crate::infra::http::ApiError;
 use crate::reports::franking;
-use axum::{Json, Router, extract::State, routing::get, routing::post};
+use axum::{
+    Json, Router,
+    extract::{Query, State},
+    routing::get,
+};
 use chrono::{Duration, NaiveDate};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -124,7 +128,7 @@ pub struct FrankingWhatIfAlert {
 pub fn router() -> Router<SqlitePool> {
     Router::new()
         .route("/reports/franking_at_risk", get(report))
-        .route("/reports/franking_at_risk/what-if", post(what_if))
+        .route("/reports/franking_at_risk/what-if", get(what_if))
 }
 
 /// Tickers for the alerts to carry (the required at-risk days come from the
@@ -268,7 +272,7 @@ async fn report(
 
 async fn what_if(
     State(pool): State<SqlitePool>,
-    Json(req): Json<WhatIfRequest>,
+    Query(req): Query<WhatIfRequest>,
 ) -> Result<Json<Vec<FrankingWhatIfAlert>>, ApiError> {
     if req.units <= Decimal::ZERO {
         return Err(ApiError::Unprocessable(
@@ -849,37 +853,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn api_post_what_if_and_validation() {
+    async fn api_get_what_if_and_validation() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "JES").await;
         insert_buy(&pool, 1, 1, ymd(2025, 3, 4), 4000).await;
         insert_dividend(&pool, 1, 1, ymd(2025, 3, 28), ymd(2025, 3, 14), 7000).await;
 
-        let post = |body: String| {
+        let get = |query: &'static str| {
             let client = ApiClient::over(router().with_state(pool.clone()));
             async move {
                 client
-                    .post_raw("/reports/franking_at_risk/what-if", body.as_ref())
+                    .get(format!("/reports/franking_at_risk/what-if?{query}"))
                     .await
             }
         };
 
-        let resp =
-            post(r#"{"listing_id": 1, "sale_date": "2025-04-03", "units": "4000"}"#.to_string())
-                .await;
+        let resp = get("listing_id=1&sale_date=2025-04-03&units=4000").await;
         assert_eq!(resp.status, StatusCode::OK);
         let alerts: Vec<FrankingWhatIfAlert> = resp.json();
         assert_eq!(alerts.len(), 1);
         assert_eq!(alerts[0].additional_credits_at_risk, Decimal::from(7000));
 
-        // Non-positive units rejected.
-        let resp =
-            post(r#"{"listing_id": 1, "sale_date": "2025-04-03", "units": "0"}"#.to_string()).await;
+        // Non-positive units rejected (a semantic refusal inside the handler).
+        let resp = get("listing_id=1&sale_date=2025-04-03&units=0").await;
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
 
-        // A missing required field is a deserialization failure (422).
-        let resp = post(r#"{"listing_id": 1}"#.to_string()).await;
-        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+        // A missing required parameter never reaches the handler: the query
+        // extractor answers 400 (where a JSON body gave 422).
+        let resp = get("listing_id=1").await;
+        assert_eq!(resp.status, StatusCode::BAD_REQUEST);
     }
 
     /// SCENARIOS W. `HoldingPeriodTest::denied` apportions the attached

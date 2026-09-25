@@ -58,8 +58,8 @@ use crate::reports::{
 };
 use axum::{
     Json, Router,
-    extract::State,
-    routing::{get, post},
+    extract::{Query, State},
+    routing::get,
 };
 use chrono::{NaiveDate, Utc};
 use rust_decimal::Decimal;
@@ -70,7 +70,7 @@ use std::collections::{HashMap, HashSet};
 pub fn router() -> Router<SqlitePool> {
     Router::new()
         .route("/reports/tax_report/years", get(years_handler))
-        .route("/reports/tax_report", post(tax_report_handler))
+        .route("/reports/tax_report", get(tax_report_handler))
 }
 
 #[derive(Debug, Deserialize)]
@@ -2033,7 +2033,7 @@ pub async fn db_tax_report(pool: &SqlitePool, tax_year: i32) -> Result<TaxReport
 
 async fn tax_report_handler(
     State(pool): State<SqlitePool>,
-    Json(req): Json<TaxReportRequest>,
+    Query(req): Query<TaxReportRequest>,
 ) -> Result<Json<TaxReport>, ApiError> {
     db_tax_report(&pool, req.tax_year).await.map(Json)
 }
@@ -2071,7 +2071,7 @@ async fn tax_report_handler(
 /// per session is the cheaper failure.
 ///
 /// Bounded to [`MIN_TAX_YEAR`]..=[`MAX_TAX_YEAR`] so the list and
-/// [`TaxYear::new`] agree: the list never offers a year `POST
+/// [`TaxYear::new`] agree: the list never offers a year `GET
 /// /reports/tax_report` would refuse `422`.
 ///
 /// And bounded above at the financial year *in progress*
@@ -2195,10 +2195,7 @@ mod tests {
         assert_eq!(summary.capital_loss_carried_forward, dec("4000"));
         // Over HTTP, the surface the archived document is printed from.
         let body: serde_json::Value = crate::test_support::ApiClient::full(&pool)
-            .post_json(
-                "/reports/tax_report",
-                &serde_json::json!({"tax_year": 2026}),
-            )
+            .get_json("/reports/tax_report?tax_year=2026")
             .await;
         assert_eq!(
             body["cgt_summary"]["capital_loss_carried_forward"],
@@ -3894,10 +3891,7 @@ mod tests {
 
         // Over HTTP, the surface the archived document is printed from.
         let body: serde_json::Value = crate::test_support::ApiClient::full(&pool)
-            .post_json(
-                "/reports/tax_report",
-                &serde_json::json!({"tax_year": 2026}),
-            )
+            .get_json("/reports/tax_report?tax_year=2026")
             .await;
         assert_eq!(body["income"]["deductions"][0]["ato_label"], "13Y");
         assert_eq!(
@@ -4108,7 +4102,7 @@ mod tests {
     /// (`trade::AmountsError::FutureDate`), but the list unions every dated
     /// fact, and the other write paths are not bounded that way — an interest
     /// payment dated two years out used to put a financial year that has not
-    /// begun on the closed `<select>`, and `POST /reports/tax_report` would
+    /// begun on the closed `<select>`, and `GET /reports/tax_report` would
     /// then render an annual document for it.
     #[tokio::test]
     async fn the_year_list_never_offers_a_year_beyond_the_one_in_progress() {
@@ -4321,7 +4315,7 @@ mod tests {
     /// forward is offered too. `a_quiet_year_still_reports_its_carried_forward_loss`
     /// pins that the document prints such a year's label 18V figure; this
     /// pins that the picker can actually reach it. Every listed year is one
-    /// `POST /reports/tax_report` accepts, so the list and the `tax_year`
+    /// `GET /reports/tax_report` accepts, so the list and the `tax_year`
     /// range validator agree.
     #[tokio::test]
     async fn the_year_list_offers_a_quiet_carry_forward_year() {
@@ -4358,10 +4352,7 @@ mod tests {
         let client = test_support::ApiClient::full(&pool);
         for year in years {
             client
-                .post(
-                    "/reports/tax_report",
-                    &serde_json::json!({ "tax_year": year }),
-                )
+                .get(format!("/reports/tax_report?tax_year={}", year))
                 .await
                 .expect_status(StatusCode::OK);
         }
@@ -4487,10 +4478,7 @@ mod tests {
         let client = test_support::ApiClient::full(&pool);
         for year in [300_000, MAX_TAX_YEAR + 1, i32::MAX] {
             let resp = client
-                .post(
-                    "/reports/tax_report",
-                    &serde_json::json!({"tax_year": year}),
-                )
+                .get(format!("/reports/tax_report?tax_year={}", year))
                 .await;
             let (status, body) = resp.status_and_body();
             assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{year}: {body}");
@@ -4499,6 +4487,33 @@ mod tests {
                     && body.contains(&MAX_TAX_YEAR.to_string()),
                 "the refusal must name the accepted range: {body}"
             );
+        }
+    }
+
+    /// The report is a `GET` now, so its `tax_year` is a query parameter and
+    /// the decoder owns a missing or unparseable one: both are a `400`, never
+    /// the handler's `422` (which stays for a year outside 1900–2999, above).
+    /// `deny_unknown_fields` still applies to the query, so a misspelt
+    /// parameter is refused too rather than silently defaulting.
+    #[tokio::test]
+    async fn a_missing_or_unparseable_tax_year_is_a_query_rejection() {
+        let pool = test_support::test_pool().await;
+        let client = test_support::ApiClient::full(&pool);
+        for (query, names_param) in [
+            ("", true),
+            ("?tax_year=lots", false),
+            ("?tax_yer=2026", true),
+        ] {
+            let resp = client.get(format!("/reports/tax_report{query}")).await;
+            let (status, body) = resp.status_and_body();
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{query}: {body}");
+            assert!(!body.is_empty(), "{query} must say why");
+            if names_param {
+                assert!(
+                    body.contains("tax_year"),
+                    "{query} must name the parameter: {body}"
+                );
+            }
         }
     }
 
@@ -4512,10 +4527,7 @@ mod tests {
         let client = test_support::ApiClient::full(&pool);
         for year in [0, -1, MIN_TAX_YEAR - 1, i32::MIN] {
             let resp = client
-                .post(
-                    "/reports/tax_report",
-                    &serde_json::json!({"tax_year": year}),
-                )
+                .get(format!("/reports/tax_report?tax_year={}", year))
                 .await;
             let (status, body) = resp.status_and_body();
             assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{year}: {body}");
@@ -4554,12 +4566,7 @@ mod tests {
         test_support::allocate(&pool, 1, 2, 1, dec("100")).await;
         let client = test_support::ApiClient::full(&pool);
 
-        let body: serde_json::Value = client
-            .post_json(
-                "/reports/tax_report",
-                &serde_json::json!({"tax_year": 1999}),
-            )
-            .await;
+        let body: serde_json::Value = client.get_json("/reports/tax_report?tax_year=1999").await;
         assert_eq!(body["meta"]["period_start"], "1998-07-01");
         assert_eq!(body["meta"]["period_end"], "1999-06-30");
         assert_eq!(
@@ -4574,10 +4581,7 @@ mod tests {
         // zeroed document — but a document, not a refusal.
         let next_year = tax_year_for(Utc::now().date_naive()) + 1;
         let body: serde_json::Value = client
-            .post_json(
-                "/reports/tax_report",
-                &serde_json::json!({"tax_year": next_year}),
-            )
+            .get_json(format!("/reports/tax_report?tax_year={}", next_year))
             .await;
         assert_eq!(body["meta"]["tax_year"], next_year);
         assert!(
@@ -4690,10 +4694,7 @@ mod tests {
         bhp_three_parcel_disposal(&pool).await;
 
         let body: serde_json::Value = test_support::ApiClient::full(&pool)
-            .post_json(
-                "/reports/tax_report",
-                &serde_json::json!({"tax_year": 2024}),
-            )
+            .get_json("/reports/tax_report?tax_year=2024")
             .await;
         let group = &body["disposals"]["listings"][0];
         let parcels = group["parcels"].as_array().expect("three parcels");
@@ -4803,12 +4804,7 @@ mod tests {
             .await;
         test_support::allocate(&pool, 1, 2, 1, dec("550")).await;
 
-        let body: serde_json::Value = client
-            .post_json(
-                "/reports/tax_report",
-                &serde_json::json!({"tax_year": 2024}),
-            )
-            .await;
+        let body: serde_json::Value = client.get_json("/reports/tax_report?tax_year=2024").await;
         let parcel = &body["disposals"]["listings"][0]["parcels"][0];
 
         let adjustments = parcel["adjustments"].as_array().expect("adjustments");
@@ -4921,10 +4917,7 @@ mod tests {
         test_support::allocate(&pool, 21, 22, 21, dec("19")).await;
 
         let body: serde_json::Value = test_support::ApiClient::full(&pool)
-            .post_json(
-                "/reports/tax_report",
-                &serde_json::json!({"tax_year": 2024}),
-            )
+            .get_json("/reports/tax_report?tax_year=2024")
             .await;
         let disposals = &body["disposals"];
         let groups = disposals["listings"].as_array().expect("three groups");
@@ -5009,10 +5002,7 @@ mod tests {
         bhp_three_parcel_disposal(&pool).await;
 
         let body: serde_json::Value = test_support::ApiClient::full(&pool)
-            .post_json(
-                "/reports/tax_report",
-                &serde_json::json!({"tax_year": 2024}),
-            )
+            .get_json("/reports/tax_report?tax_year=2024")
             .await;
         let parcel = &body["disposals"]["listings"][0]["parcels"][0];
         assert_eq!(
@@ -5072,10 +5062,7 @@ mod tests {
         }
 
         let body: serde_json::Value = test_support::ApiClient::full(&pool)
-            .post_json(
-                "/reports/tax_report",
-                &serde_json::json!({"tax_year": 2024}),
-            )
+            .get_json("/reports/tax_report?tax_year=2024")
             .await;
         let groups = body["disposals"]["listings"]
             .as_array()
@@ -5181,10 +5168,7 @@ mod tests {
         .unwrap();
 
         let body: serde_json::Value = test_support::ApiClient::full(&pool)
-            .post_json(
-                "/reports/tax_report",
-                &serde_json::json!({"tax_year": 2024}),
-            )
+            .get_json("/reports/tax_report?tax_year=2024")
             .await;
         let groups = body["disposals"]["listings"]
             .as_array()
@@ -5321,12 +5305,7 @@ mod tests {
             .expect_status(StatusCode::CREATED);
 
         // FY2025: the exchange (2024-07-10) is the only disposal in it.
-        let body: serde_json::Value = client
-            .post_json(
-                "/reports/tax_report",
-                &serde_json::json!({"tax_year": 2025}),
-            )
-            .await;
+        let body: serde_json::Value = client.get_json("/reports/tax_report?tax_year=2025").await;
         let groups = body["disposals"]["listings"]
             .as_array()
             .expect("the closing Sell's listing group")
@@ -5440,12 +5419,7 @@ mod tests {
         // base, so the later statement's $60 against the $40 left is the one
         // that runs past nil — a $20 CGT event E10 gain in FY2024, none of
         // it G1.
-        let fy2024: serde_json::Value = client
-            .post_json(
-                "/reports/tax_report",
-                &serde_json::json!({"tax_year": 2024}),
-            )
-            .await;
+        let fy2024: serde_json::Value = client.get_json("/reports/tax_report?tax_year=2024").await;
         assert_eq!(
             json_dec(&fy2024["cgt_summary"]["cgt_event_e10_gain"]),
             dec("20")
@@ -5458,12 +5432,7 @@ mod tests {
         // The worksheet half of the same archived report: rows in date order,
         // and the **AMIT** row — not the earlier payment — flagged `capped`,
         // agreeing with the summary's attribution.
-        let fy2025: serde_json::Value = client
-            .post_json(
-                "/reports/tax_report",
-                &serde_json::json!({"tax_year": 2025}),
-            )
-            .await;
+        let fy2025: serde_json::Value = client.get_json("/reports/tax_report?tax_year=2025").await;
         let adjustments = fy2025["disposals"]["listings"][0]["parcels"][0]["adjustments"]
             .as_array()
             .expect("two itemised adjustment rows")
@@ -5548,12 +5517,7 @@ mod tests {
         test_support::allocate(&pool, 10, 11, 10, dec("100")).await;
 
         let client = test_support::ApiClient::full(&pool);
-        let fy2025: serde_json::Value = client
-            .post_json(
-                "/reports/tax_report",
-                &serde_json::json!({"tax_year": 2025}),
-            )
-            .await;
+        let fy2025: serde_json::Value = client.get_json("/reports/tax_report?tax_year=2025").await;
         let parcel = fy2025["disposals"]["listings"][0]["parcels"][0].clone();
         assert_eq!(json_dec(&parcel["initial_cost_base_aud"]), dec("100"));
         let adjustments = parcel["adjustments"].as_array().expect("adjustments");
@@ -5586,22 +5550,12 @@ mod tests {
 
         // The CGT half of the same document: the excess stays one FY2023 E10
         // gain, and the FY2024 increase raises no gain of its own.
-        let fy2023: serde_json::Value = client
-            .post_json(
-                "/reports/tax_report",
-                &serde_json::json!({"tax_year": 2023}),
-            )
-            .await;
+        let fy2023: serde_json::Value = client.get_json("/reports/tax_report?tax_year=2023").await;
         assert_eq!(
             json_dec(&fy2023["cgt_summary"]["cgt_event_e10_gain"]),
             dec("100")
         );
-        let fy2024: serde_json::Value = client
-            .post_json(
-                "/reports/tax_report",
-                &serde_json::json!({"tax_year": 2024}),
-            )
-            .await;
+        let fy2024: serde_json::Value = client.get_json("/reports/tax_report?tax_year=2024").await;
         assert_eq!(
             json_dec(&fy2024["cgt_summary"]["cgt_event_e10_gain"]),
             Decimal::ZERO

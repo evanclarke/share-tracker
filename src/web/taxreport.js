@@ -14,7 +14,7 @@
 // helpers every other screen uses, so figures read identically to the rest
 // of the app.
 import {
-  el, toastIfCurrent, setMainIfCurrent, navigationToken, api, moneyEl, moneyText,
+  el, toastIfCurrent, setMainIfCurrent, navigationToken, api, queryString, moneyEl, moneyText,
   cellText, fmtLocalTimestamp, columnLabel, decStrEq,
 } from './util.js';
 import { setActiveNav } from './nav.js';
@@ -515,7 +515,11 @@ export async function viewTaxReport(seq = navigationToken()) {
   generateBtn.addEventListener('click', async function () {
     if (!years.length) { toastIfCurrent(seq, 'No tax year has any recorded data yet.', true); return; }
     try {
-      const report = await api('POST', '/reports/tax_report', { tax_year: Number(yearSelect.value) });
+      // The report read is `GET /reports/tax_report?tax_year=…` (the
+      // 2026-09-24 audit moved it off a POST body); the years picker above is
+      // its own unchanged `GET /reports/tax_report/years`.
+      const report = await api('GET', '/reports/tax_report?'
+        + queryString({ tax_year: Number(yearSelect.value) }));
       result.innerHTML = '';
       result.appendChild(renderReport(report));
       printBtn.hidden = false;

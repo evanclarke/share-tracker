@@ -3376,7 +3376,7 @@ mod tests {
                     &serde_json::json!({"listing_id": 1, "price_date": date}),
                 )
                 .await
-                .expect_status(StatusCode::OK);
+                .expect_status(StatusCode::CREATED);
         }
 
         let now = utc(2026, 6, 12, 8, 0);

@@ -174,7 +174,8 @@ async fn put_manual(
 
 /// Re-fetch one (listing, date) on demand — typically to replace an errored
 /// row. Returns the freshly stored row (which itself is errored if the
-/// provider failed again).
+/// provider failed again) with `201 Created`, the same signal every other
+/// "returns the created row" POST gives.
 ///
 /// A **manual** row is rejected 422: a hand-entered price is a deliberate
 /// correction for a day the provider got wrong or cannot serve at all, so the
@@ -184,7 +185,7 @@ async fn fetch_one(
     State(pool): State<SqlitePool>,
     Extension(fetcher): Extension<SharedFetcher>,
     Json(body): Json<FetchBody>,
-) -> Result<Json<ClosingPrice>, ApiError> {
+) -> Result<(StatusCode, Json<ClosingPrice>), ApiError> {
     let market = load_market(&pool, body.listing_id)
         .await
         .map_err(internal)?
@@ -209,7 +210,7 @@ async fn fetch_one(
         .await
         .map_err(internal)?
         .ok_or_else(|| internal("stored row vanished"))?;
-    Ok(Json(row))
+    Ok((StatusCode::CREATED, Json(row)))
 }
 
 /// Backfill a listing's price history over a date range (e.g. after importing

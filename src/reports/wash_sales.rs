@@ -21,7 +21,11 @@
 use crate::infra::decimal::row_dec;
 use crate::infra::http::ApiError;
 use crate::reports::realised_gains::{self, DisposalSource};
-use axum::{Json, Router, extract::State, routing::post};
+use axum::{
+    Json, Router,
+    extract::{Query, State},
+    routing::get,
+};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -65,7 +69,7 @@ pub struct WashSalesRequest {
 }
 
 pub fn router() -> Router<SqlitePool> {
-    Router::new().route("/reports/wash_sales", post(report))
+    Router::new().route("/reports/wash_sales", get(report))
 }
 
 /// Flag every loss-realising Sell (any allocation realised a capital loss,
@@ -159,7 +163,7 @@ pub async fn db_wash_sales(
 
 async fn report(
     State(pool): State<SqlitePool>,
-    Json(req): Json<WashSalesRequest>,
+    Query(req): Query<WashSalesRequest>,
 ) -> Result<Json<Vec<WashSaleAlert>>, ApiError> {
     let window_days = req.window_days.unwrap_or(DEFAULT_WINDOW_DAYS);
     if window_days < 1 {
@@ -537,7 +541,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn api_post_wash_sales_defaults_and_custom_window() {
+    async fn api_get_wash_sales_defaults_and_custom_window() {
         let pool = test_pool().await;
         loss_sale_fixture(&pool, ymd(2025, 6, 10)).await;
         test_support::buy(3, 1)
@@ -547,26 +551,38 @@ mod tests {
             .insert(&pool)
             .await;
 
-        let post = |body: &'static str| {
+        let get = |query: &'static str| {
             let client = ApiClient::over(router().with_state(pool.clone()));
-            async move { client.post_raw("/reports/wash_sales", body.as_ref()).await }
+            async move {
+                let path = if query.is_empty() {
+                    "/reports/wash_sales".to_string()
+                } else {
+                    format!("/reports/wash_sales?{query}")
+                };
+                client.get(path).await
+            }
         };
 
-        // Empty body → default 30-day window: the 10-day repurchase flags.
-        let resp = post("{}").await;
+        // No parameters → default 30-day window: the 10-day repurchase flags.
+        let resp = get("").await;
         assert_eq!(resp.status, StatusCode::OK);
         let alerts: Vec<WashSaleAlert> = resp.json();
         assert_eq!(alerts.len(), 1);
         assert_eq!(alerts[0].days_apart, 10);
 
         // An explicit 5-day window excludes it.
-        let resp = post(r#"{"window_days": 5}"#).await;
+        let resp = get("window_days=5").await;
         assert_eq!(resp.status, StatusCode::OK);
         let alerts: Vec<WashSaleAlert> = resp.json();
         assert!(alerts.is_empty());
 
         // A non-positive window is rejected, not silently defaulted.
-        let resp = post(r#"{"window_days": 0}"#).await;
+        let resp = get("window_days=0").await;
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+
+        // An unparseable window never reaches the handler: the query
+        // extractor answers 400 (where a JSON body would have been 422).
+        let resp = get("window_days=lots").await;
+        assert_eq!(resp.status, StatusCode::BAD_REQUEST);
     }
 }

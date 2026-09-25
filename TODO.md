@@ -15,41 +15,8 @@ The last full pass recorded here — the 2026-09-17 code review — is closed an
 [`DONE/verification-passes.md`](DONE/verification-passes.md). Everything before it is likewise
 archived; the maintained record of what has been verified is SCENARIOS.md's
 [Verification status](SCENARIOS.md#verification-status) table, and of what was built and decided,
-the [DONE.md](DONE.md) index. The open work is the 2026-09-24 REST API audit, in the three sections
+the [DONE.md](DONE.md) index. The open work is the 2026-09-24 REST API audit, in the two sections
 below.
-
-## REST API audit — consistency fixes (2026-09-24)
-
-- [x] Fix the natural-key DELETE 404 wording. `infra::http::deleted` hard-codes
-      `no {noun} with that id` (`src/infra/http.rs:156`), which is wrong for `DELETE /exchanges/{mic}`
-      (key is `mic`, `src/entities/exchange.rs:123-124`) and `DELETE /tax_year_settings/{tax_year}`
-      (`src/entities/tax_year_settings.rs`). Give each a key-specific body (`no exchange with that
-      mic`, `no tax year settings row for that year`); `exchange_holidays` already hand-writes its
-      composite-key message (`exchange_holiday.rs:252-254`). Test: extend
-      `entities::tests::deleting_a_missing_row_is_404_naming_what_was_missing` to assert the
-      key-specific wording.
-- [x] Make `GET /rights_sales/{id}` consistent with the empty-body GET-one 404.
-      `src/entities/rights_sale.rs:737` returns `no rights sale with that id`, the only GET-one that
-      carries a body; every other GET-one uses the empty `ApiError::NotFound`. Return the empty
-      body, or document the divergence as deliberate. Test: assert the 404 body is empty (or, if
-      kept, pin the wording).
-- [x] Resolve the report path namespace/case split. `/portfolio/*` is kebab-case and `/reports/*`
-      is snake_case, but `/reports/tax-report` (kebab) sits beside `/reports/rollover_consistency`
-      (snake), and route names diverge from module names (`mic_validation` →
-      `/reports/exchange_mic_validation`). Pick one scheme for the whole report surface and either
-      normalise the paths (UI `REPORTS` config and docs following) or state the rule in
-      `docs/API.md`. Test: `doc_checks` asserts the chosen rule is stated (and any path change
-      keeps the UI config and route table in agreement).
-- [ ] Normalise the verb and success status for reads. 12 read reports are `POST`+JSON body
-      (`overview`, `activity`, `performance`, `period-performance`, `unrealised-gains`,
-      `parcel-optimiser`, `wash_sales`, `row_history`, `tax-report`, the two `what-if`s) while
-      sibling reads are `GET`+query (`open-parcels`, `realised-gains`, `net-capital-gain`,
-      `tax-summary`, the cross-checks), and `POST /closing_prices/fetch` answers `200` where every
-      other "returns the created row" POST answers `201`. Move scalar-parameter reads
-      (`listing_id`, `from`/`to`, `window_days`, `tax_year`) onto `GET`+query, keep `POST` only for
-      genuinely complex bodies (price maps, allocations), and make "returns the created row"
-      uniformly `201`. Breaking: the UI `REPORTS`/`ACTIONS` config and docs follow. Test: router
-      tests assert each read's verb and status; the UI bundle still drives them.
 
 ## REST API audit — LLM / machine-client surface (2026-09-24)
 
