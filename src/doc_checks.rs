@@ -3889,9 +3889,70 @@ fn as_at_today_convention_documented() {
     assert!(
         API_MD.contains("The [realised](#realised-gains) and FY-keyed tax reports are not bounded")
     );
-    // The undated reports name themselves as as-at-today where they are
+    // The valued reports name the parameter and its default where they are
     // documented, not only in the shared section.
-    assert!(API_MD.contains("as at today (see [As-at date](#as-at-date))"));
+    assert!(API_MD.contains("as at `as_of_date` (today when omitted"));
+    assert!(API_MD.contains("`as_of_date` defaults to **today's live position**"));
+}
+
+/// Docs-sync pin for the uniform valuation-date parameter (2026-09-24 REST
+/// API audit, B8): `as_of_date` is the name on every report that values a
+/// holding at a date, and omitting it means **today's live position** — never
+/// the open-ended "every recorded fact" sentinel the shared loader would
+/// otherwise resolve `None` to. Pinned here because the requirement is
+/// satisfied in part by documentation alone; the behaviour itself is pinned by
+/// the API tests in `reports::portfolio` and `reports::open_parcels`.
+#[test]
+fn as_of_date_is_the_documented_valuation_date() {
+    // The shared section states the parameter, its default, and the fact that
+    // the default is *not* the open-ended sentinel.
+    let as_at = API_MD
+        .split("### As-at date")
+        .nth(1)
+        .expect("docs/API.md has an As-at date section")
+        .split("\n### ")
+        .next()
+        .expect("split always yields at least one part");
+    assert!(
+        as_at.contains(
+            "**The valuation-date parameter is `as_of_date`, and omitting it means today's live \
+             position.**"
+        ),
+        "the As-at date section must state the parameter and its default"
+    );
+    assert!(
+        as_at.contains(
+            "resolves through `infra::date::as_of_or_today` to **today's live position**"
+        )
+    );
+    assert!(
+        as_at.contains("never the open-ended sentinel that means \"every recorded fact on file\"")
+    );
+    // The four valuation reports, named one by one.
+    for report in [
+        "[overview](#overview)",
+        "[open parcels](#open-parcels)",
+        "[unrealised gains](#unrealised-gains)",
+        "[performance](#performance)",
+    ] {
+        assert!(
+            as_at.contains(report),
+            "the statement must name {report} as taking `as_of_date`"
+        );
+    }
+    // The deliberate name split from the contemplated-disposal date.
+    assert!(as_at.contains("Their parameter is deliberately *not* named `as_of_date`"));
+    assert!(as_at.contains("`as_of_date` is the one valuation-date name"));
+    assert!(as_at.contains("`sale_date` / `date` the disposal-date ones"));
+
+    // Each report's own route row names the parameter and the default.
+    assert!(API_MD.contains("as at `as_of_date` (today when omitted"));
+    assert!(API_MD.contains("`as_of_date` defaults to **today's live position**"));
+    assert!(API_MD.contains("GET /portfolio/open-parcels?as_of_date=2026-06-30"));
+    assert!(API_MD.contains(
+        "{ \"live\": true, \"prices\": { \"<listing_id>\": \"<price>\" }, \"as_of_date\": \
+         \"YYYY-MM-DD\" }"
+    ));
 }
 
 /// Docs-sync pin for the AMIT/E4 mutual exclusion (2026-08-16, SCENARIOS

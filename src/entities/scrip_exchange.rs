@@ -778,7 +778,7 @@ mod tests {
         insert_scrip(&pool, 10, d(2024, 7, 1)).await;
         db_exchange(&pool, 10).await.unwrap();
 
-        let open = crate::reports::open_parcels::db_open_parcels(&pool)
+        let open = crate::reports::open_parcels::db_open_parcels(&pool, None)
             .await
             .unwrap();
         assert_eq!(open.len(), 1);
@@ -977,7 +977,7 @@ mod tests {
         );
         assert_eq!(ex.replacements[0].brokerage, dec("1010"));
 
-        let parcels = crate::reports::open_parcels::db_open_parcels(&pool)
+        let parcels = crate::reports::open_parcels::db_open_parcels(&pool, None)
             .await
             .unwrap();
         assert_eq!(parcels.len(), 1);

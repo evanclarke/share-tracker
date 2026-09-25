@@ -480,7 +480,7 @@ export const ENTITIES = [
 // `section`, since it holds far more entries) — see nav.js's navModel.
 export const REPORTS = [
   {
-    slug: 'overview', title: 'Portfolio Overview', api: '/portfolio/overview', method: 'POST', prices: true, performancePanel: true,
+    slug: 'overview', title: 'Portfolio Overview', api: '/portfolio/overview', method: 'POST', prices: true, asOfDate: true, performancePanel: true,
     menu: 'Reports', section: 'Portfolio',
     desc: 'Open holdings per listing and holding account, with optional market value, a market-value or unrealised-gain graph (one series at a time) over a selectable date range, and a period performance summary (capital growth / FX movement / income).',
     // Shortcut buttons for the most common data-entry paths, shown above the

@@ -854,7 +854,7 @@ mod tests {
         assert_eq!(sale.allocations[0].units, Decimal::from(250));
 
         // The holding is untouched: selling rights consumes no share parcel.
-        let parcels = crate::reports::open_parcels::db_open_parcels(&pool)
+        let parcels = crate::reports::open_parcels::db_open_parcels(&pool, None)
             .await
             .unwrap();
         assert_eq!(parcels.len(), 1);

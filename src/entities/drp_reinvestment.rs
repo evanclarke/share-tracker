@@ -1117,7 +1117,7 @@ mod tests {
         // carried, not capitalised into the parcel.
         assert_eq!(trade.residual_carried_forward, Decimal::from(5));
 
-        let parcels = crate::reports::open_parcels::db_open_parcels(&pool)
+        let parcels = crate::reports::open_parcels::db_open_parcels(&pool, None)
             .await
             .unwrap();
         assert_eq!(parcels.len(), 1);
@@ -1142,7 +1142,7 @@ mod tests {
             trade.residual_carried_forward,
             "0.0064".parse::<Decimal>().unwrap()
         );
-        let parcels = crate::reports::open_parcels::db_open_parcels(&pool)
+        let parcels = crate::reports::open_parcels::db_open_parcels(&pool, None)
             .await
             .unwrap();
         assert_eq!(parcels[0].remaining_cost_base, "999.9936".parse().unwrap());
@@ -1325,7 +1325,7 @@ mod tests {
 
         let trade = db_reinvest(&pool, 1, &body("7")).await.unwrap();
         assert_eq!(trade.quantity, Decimal::from(7));
-        let parcels = crate::reports::open_parcels::db_open_parcels(&pool)
+        let parcels = crate::reports::open_parcels::db_open_parcels(&pool, None)
             .await
             .unwrap();
         assert_eq!(
@@ -1397,7 +1397,7 @@ mod tests {
         );
 
         // …and the reinvested parcel carries the E10 uplift: $500 + 10 × $1.50.
-        let parcels = crate::reports::open_parcels::db_open_parcels(&pool)
+        let parcels = crate::reports::open_parcels::db_open_parcels(&pool, None)
             .await
             .unwrap();
         assert_eq!(parcels.len(), 1);
@@ -1433,7 +1433,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let parcels = crate::reports::open_parcels::db_open_parcels(&pool)
+        let parcels = crate::reports::open_parcels::db_open_parcels(&pool, None)
             .await
             .unwrap();
         assert_eq!(parcels[0].original_quantity, Decimal::from(10));
@@ -1442,7 +1442,7 @@ mod tests {
 
         db_unreinvest(&pool, 1).await.unwrap();
         assert!(
-            crate::reports::open_parcels::db_open_parcels(&pool)
+            crate::reports::open_parcels::db_open_parcels(&pool, None)
                 .await
                 .unwrap()
                 .is_empty()

@@ -2910,7 +2910,7 @@ mod tests {
 
         // The parcel still carries the AMMA statement's reduction alone:
         // 1000 − 50, not the 900 the accepted double entry produced.
-        let parcels = crate::reports::open_parcels::db_open_parcels(&pool)
+        let parcels = crate::reports::open_parcels::db_open_parcels(&pool, None)
             .await
             .unwrap();
         assert_eq!(parcels.len(), 1);
@@ -3116,7 +3116,7 @@ mod tests {
         .await
         .unwrap();
 
-        let parcels = crate::reports::open_parcels::db_open_parcels(&pool)
+        let parcels = crate::reports::open_parcels::db_open_parcels(&pool, None)
             .await
             .unwrap();
         let remaining = parcels[0].remaining_quantity;
@@ -3129,7 +3129,7 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            crate::reports::open_parcels::db_open_parcels(&pool)
+            crate::reports::open_parcels::db_open_parcels(&pool, None)
                 .await
                 .unwrap()
                 .is_empty()
@@ -3164,7 +3164,7 @@ mod tests {
             db_get(&pool, 1).await.unwrap().unwrap(),
             roc(1, 1, d(2024, 3, 1), "0.123456")
         );
-        let parcels = crate::reports::open_parcels::db_open_parcels(&pool)
+        let parcels = crate::reports::open_parcels::db_open_parcels(&pool, None)
             .await
             .unwrap();
         // 3,333 × 0.123456 = 411.478848, to the last digit.

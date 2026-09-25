@@ -649,9 +649,11 @@ async fn performance_handler(
     body: Option<Json<PerformanceRequest>>,
 ) -> Result<Json<Vec<HoldingPerformance>>, ApiError> {
     let req = body.map(|Json(req)| req).unwrap_or_default();
-    let as_of = req
-        .as_of_date
-        .unwrap_or_else(|| chrono::Local::now().date_naive());
+    // An omitted `as_of_date` is **today's live position** — the live-view
+    // resolver (`infra::date::as_of_or_today`), never `as_of_or_open`'s
+    // open-ended "every recorded fact" sentinel; stated here rather than
+    // re-derived inline so the API default lives with the other reports'.
+    let as_of = crate::infra::date::as_of_or_today(req.as_of_date);
 
     // Live-fetch a current price for each open held listing without an explicit
     // override (when requested); an explicit price always wins.

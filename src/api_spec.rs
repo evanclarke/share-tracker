@@ -1281,7 +1281,7 @@ const ROUTES: &[RouteRow] = &[
         Verb::Post,
         "/portfolio/overview",
         &[200],
-        "Open holdings per (listing, holding account) with quantity, cost base and value; body carries the optional price-override map, live flag and as_of_date.",
+        "Open holdings per (listing, holding account) with quantity, cost base and value; body carries the optional price-override map, live flag and as_of_date (omitted = today's live position).",
         Body::Json("OverviewRequest"),
         Body::JsonArray("HoldingOverview"),
     ),
@@ -1289,7 +1289,7 @@ const ROUTES: &[RouteRow] = &[
         Verb::Post,
         "/portfolio/performance",
         &[200],
-        "Per-holding performance: accumulated figures and dated cash flows; body carries the optional price-override map, live flag and as_of_date.",
+        "Per-holding performance: accumulated figures and dated cash flows; body carries the optional price-override map, live flag and as_of_date (omitted = today's live position).",
         Body::Json("PerformanceRequest"),
         Body::JsonArray("HoldingPerformance"),
     ),
@@ -1313,7 +1313,7 @@ const ROUTES: &[RouteRow] = &[
         Verb::Get,
         "/portfolio/open-parcels",
         &[200],
-        "Every open parcel, per parcel rather than aggregated.",
+        "Every open parcel, per parcel rather than aggregated; ?as_of_date= is the valuation date (omitted = today's live position).",
         Body::None,
         Body::JsonArray("OpenParcel"),
     ),
@@ -1321,7 +1321,7 @@ const ROUTES: &[RouteRow] = &[
         Verb::Post,
         "/portfolio/unrealised-gains",
         &[200],
-        "Unrealised gains and losses; body carries the optional price-override map, live flag and as_of_date.",
+        "Unrealised gains and losses; body carries the optional price-override map, live flag and as_of_date (omitted = today's live position).",
         Body::Json("UnrealisedGainsRequest"),
         Body::JsonArray("UnrealisedGain"),
     ),
@@ -2641,5 +2641,68 @@ mod tests {
             checked, 16,
             "every filtered list route must be named here, and no other"
         );
+    }
+
+    /// The 2026-09-24 REST-audit item "Make the as-at default explicit" (B8):
+    /// every valuation report exposes the same `as_of_date`, the summaries say
+    /// that omitting it is today's live position, and the OpenAPI schema
+    /// carries it as an **optional** field rather than a required one (a
+    /// required date would break every caller that omits it).
+    #[test]
+    fn the_valuation_reports_expose_as_of_date() {
+        // The route summaries name the parameter and the default. The
+        // overview/performance/unrealised-gains bodies take it; open-parcels
+        // takes it as a query parameter.
+        for path in [
+            "/portfolio/overview",
+            "/portfolio/performance",
+            "/portfolio/unrealised-gains",
+        ] {
+            let row = ROUTES
+                .iter()
+                .find(|(_, p, _, _, _, _)| *p == path)
+                .unwrap_or_else(|| panic!("no route is documented at {path}"));
+            assert!(
+                row.3.contains("as_of_date"),
+                "the {path} summary must name as_of_date: {}",
+                row.3
+            );
+            assert!(
+                row.3.contains("today's live position"),
+                "the {path} summary must state the omitted-date default: {}",
+                row.3
+            );
+        }
+        let open_parcels = ROUTES
+            .iter()
+            .find(|(_, p, _, _, _, _)| *p == "/portfolio/open-parcels")
+            .expect("the open-parcels route is documented");
+        assert!(
+            open_parcels.3.contains("?as_of_date="),
+            "the open-parcels summary must name ?as_of_date=: {}",
+            open_parcels.3
+        );
+
+        // The generated document carries the field on the request schemas, and
+        // it is optional there.
+        let doc = doc();
+        for schema in [
+            "OverviewRequest",
+            "PerformanceRequest",
+            "UnrealisedGainsRequest",
+        ] {
+            let props = &doc["components"]["schemas"][schema]["properties"];
+            assert!(
+                props.get("as_of_date").is_some(),
+                "{schema} must expose as_of_date in the OpenAPI schema"
+            );
+            let required = doc["components"]["schemas"][schema]["required"].as_array();
+            if let Some(required) = required {
+                assert!(
+                    !required.iter().any(|r| r == "as_of_date"),
+                    "{schema}.as_of_date must stay optional"
+                );
+            }
+        }
     }
 }

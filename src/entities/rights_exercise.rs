@@ -629,7 +629,7 @@ mod tests {
         assert_eq!(trade.rights_action_id, Some(10));
 
         // The parcel's cost base is exactly the amount paid to exercise.
-        let parcels = crate::reports::open_parcels::db_open_parcels(&pool)
+        let parcels = crate::reports::open_parcels::db_open_parcels(&pool, None)
             .await
             .unwrap();
         let parcel = parcels.iter().find(|p| p.trade_id == trade.id).unwrap();
@@ -657,7 +657,7 @@ mod tests {
         let trade = db_exercise(&pool, 10, &exercise).await.unwrap();
         assert_eq!(trade.brokerage, "50.05".parse::<Decimal>().unwrap());
 
-        let parcels = crate::reports::open_parcels::db_open_parcels(&pool)
+        let parcels = crate::reports::open_parcels::db_open_parcels(&pool, None)
             .await
             .unwrap();
         let parcel = parcels.iter().find(|p| p.trade_id == trade.id).unwrap();
@@ -721,7 +721,7 @@ mod tests {
         assert_eq!(trade.brokerage, Decimal::ZERO);
 
         // The parcels cost the exercise payment alone.
-        let parcels = crate::reports::open_parcels::db_open_parcels(&pool)
+        let parcels = crate::reports::open_parcels::db_open_parcels(&pool, None)
             .await
             .unwrap();
         let parcel = parcels.iter().find(|p| p.trade_id == trade.id).unwrap();
@@ -1134,7 +1134,7 @@ mod tests {
         let trade: Trade = resp.json();
         assert_eq!(trade.brokerage, "50.05".parse::<Decimal>().unwrap());
 
-        let parcels = crate::reports::open_parcels::db_open_parcels(&pool)
+        let parcels = crate::reports::open_parcels::db_open_parcels(&pool, None)
             .await
             .unwrap();
         let parcel = parcels.iter().find(|p| p.trade_id == trade.id).unwrap();
@@ -1721,7 +1721,7 @@ mod tests {
             .unwrap();
         assert_eq!(trade.fx_rate, dec("0.5"));
 
-        let parcels = crate::reports::open_parcels::db_open_parcels(&pool)
+        let parcels = crate::reports::open_parcels::db_open_parcels(&pool, None)
             .await
             .unwrap();
         let exercised = parcels.iter().find(|p| p.trade_id == trade.id).unwrap();

@@ -2632,6 +2632,25 @@ mod tests {
         assert!(js.contains("/portfolio/open-parcels"));
     }
 
+    /// The Portfolio Overview offers the same as-of date as the other
+    /// valuation reports (REST API audit 2026-09-24, B8): its `REPORTS` entry
+    /// declares `asOfDate: true` beside `prices: true`, so the shared price
+    /// form renders the date input and carries `as_of_date` in the POST body.
+    #[tokio::test]
+    async fn overview_report_offers_the_as_of_date() {
+        let config = module_source("/static/config.js");
+        assert!(
+            config.contains(
+                "api: '/portfolio/overview', method: 'POST', prices: true, asOfDate: true"
+            ),
+            "the Portfolio Overview must offer the as-of date its endpoint now takes"
+        );
+        let js = app_js_body().await;
+        assert!(js.contains("if (report.asOfDate) {"));
+        assert!(js.contains("labelledField('as_of_date', 'As-of date', asOfInp)"));
+        assert!(js.contains("if (d !== '') body.as_of_date = d;"));
+    }
+
     #[tokio::test]
     async fn settlement_coverage_report_ui_present() {
         let js = app_js_body().await;

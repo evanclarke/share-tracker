@@ -643,7 +643,7 @@ mod tests {
         assert_eq!(accepted.income.unwrap().franked_amount, dec("420.00"));
         // The 700 unaccepted units are still held, at their share of the cost
         // base — and only one income row exists for the buy-back.
-        let parcels = crate::reports::open_parcels::db_open_parcels(&pool)
+        let parcels = crate::reports::open_parcels::db_open_parcels(&pool, None)
             .await
             .unwrap();
         assert_eq!(parcels.len(), 1);

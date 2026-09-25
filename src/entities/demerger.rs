@@ -852,7 +852,7 @@ mod tests {
         assert_eq!(dm.head_replacements[0].brokerage, dec("5400"));
         assert_eq!(dm.demerged_replacements[0].brokerage, dec("600"));
 
-        let parcels = crate::reports::open_parcels::db_open_parcels(&pool)
+        let parcels = crate::reports::open_parcels::db_open_parcels(&pool, None)
             .await
             .unwrap();
         assert!(
@@ -983,7 +983,7 @@ mod tests {
         assert_eq!(dm.head_replacements[0].brokerage, dec("1200"));
         assert_eq!(dm.demerged_replacements[0].brokerage, dec("300"));
 
-        let open = crate::reports::open_parcels::db_open_parcels(&pool)
+        let open = crate::reports::open_parcels::db_open_parcels(&pool, None)
             .await
             .unwrap();
         let head = open

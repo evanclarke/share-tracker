@@ -1399,7 +1399,7 @@ mod tests {
         insert_listing(&pool, 1, "AUD").await;
         db_upsert(&pool, &post_cgt(1)).await.unwrap();
 
-        let parcels = crate::reports::open_parcels::db_open_parcels(&pool)
+        let parcels = crate::reports::open_parcels::db_open_parcels(&pool, None)
             .await
             .unwrap();
         assert_eq!(parcels.len(), 1);

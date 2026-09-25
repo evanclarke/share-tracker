@@ -777,7 +777,7 @@ mod tests {
     /// The one open parcel of listing 2: its return-of-capital reduction and
     /// remaining cost base, for the two chain tests below.
     async fn listing_2_parcel(pool: &sqlx::SqlitePool) -> (Decimal, Decimal) {
-        let open: Vec<OpenParcel> = db_open_parcels(pool)
+        let open: Vec<OpenParcel> = db_open_parcels(pool, None)
             .await
             .unwrap()
             .into_iter()

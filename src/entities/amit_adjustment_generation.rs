@@ -1623,7 +1623,7 @@ mod tests {
         assert_eq!(result.difference, Decimal::ZERO);
         // …and the reduction lands on the replacement parcel: 100 × 50c off
         // the cost base it carried over.
-        let parcels = crate::reports::open_parcels::db_open_parcels(&pool)
+        let parcels = crate::reports::open_parcels::db_open_parcels(&pool, None)
             .await
             .unwrap();
         assert_eq!(parcels.len(), 1);

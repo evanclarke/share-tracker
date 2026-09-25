@@ -1574,7 +1574,7 @@ mod tests {
         let replacement = transfer_out(&pool, 1, Decimal::from(100)).await;
 
         // 100 × $100 + 9.95 + 0.995 = 10,010.945, less 100 × 5c.
-        let parcels = crate::reports::open_parcels::db_open_parcels(&pool)
+        let parcels = crate::reports::open_parcels::db_open_parcels(&pool, None)
             .await
             .unwrap();
         assert_eq!(parcels.len(), 1);

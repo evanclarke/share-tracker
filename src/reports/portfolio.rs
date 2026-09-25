@@ -58,6 +58,18 @@ pub struct OverviewRequest {
         deserialize_with = "crate::infra::decimal::strict_decimal_map"
     )]
     pub prices: HashMap<i64, Decimal>,
+    /// The **valuation date**: the holdings are taken as at it, so trades,
+    /// sales, corporate actions, and AMIT adjustments dated after it are
+    /// excluded and quantities are in that date's unit basis (see
+    /// `docs/API.md`'s As-at date section). An explicit `prices` entry values
+    /// the as-at quantity either way.
+    ///
+    /// Omitting it means **today's live position** — the live-view resolver
+    /// `infra::date::as_of_or_today` (never `as_of_or_open`'s open-ended
+    /// "every recorded fact" sentinel) — the same default
+    /// `performance`/`unrealised-gains` apply.
+    #[serde(default)]
+    pub as_of_date: Option<NaiveDate>,
     /// Fetch the current price live from the price source for every held
     /// listing without an explicit price above. Off by default so existing
     /// callers (and the deterministic ATO acceptance tests) never hit the
@@ -71,8 +83,8 @@ pub fn router() -> Router<SqlitePool> {
 }
 
 /// Returns open holdings per (listing, holding account): quantity, cost base,
-/// and optional market value. The same listing held in two accounts reports
-/// as two holdings.
+/// and optional market value, as at `as_of_date` — omitted, **today's live
+/// position**. The same listing held in two accounts reports as two holdings.
 ///
 /// "Open" quantity for a parcel = trade.quantity − sum of parcel_allocations where purchase_trade_id = trade.id
 /// (each allocation re-based to the parcel's as-acquired units — a post-split
@@ -165,7 +177,16 @@ async fn overview(
     body: Option<Json<OverviewRequest>>,
 ) -> Result<Json<Vec<HoldingOverview>>, ApiError> {
     let req = body.map(|Json(req)| req).unwrap_or_default();
-    let mut holdings = db_holdings(&pool, None).await.map_err(ApiError::from)?;
+    // The valuation date: an omitted `as_of_date` is **today's live position**.
+    // `as_of_or_today` is the live-view resolver — deliberately not
+    // `as_of_or_open`, whose `None` is the open-ended "every recorded fact"
+    // sentinel — and it is what the shared open-parcels loader would resolve
+    // `None` to anyway (SCENARIOS E-14). Resolving it here states the API
+    // default at the boundary rather than leaving it implicit in the loader.
+    let as_of = crate::infra::date::as_of_or_today(req.as_of_date);
+    let mut holdings = db_holdings(&pool, Some(as_of))
+        .await
+        .map_err(ApiError::from)?;
 
     // Live-fetch a current price for every held listing without an explicit
     // override (when requested); an explicit price always wins.
@@ -213,6 +234,19 @@ mod tests {
 
     async fn insert_listing(pool: &SqlitePool, id: i64, ticker: &str) {
         test_support::listing(id)
+            .ticker(ticker)
+            .name(ticker)
+            .insert(pool)
+            .await;
+    }
+
+    /// A listing with no exchange calendar, so a trade dated *today* or
+    /// *yesterday* is accepted by the write path whatever day the suite runs
+    /// on: an ASX listing refuses a weekend or a seeded holiday (SCENARIOS
+    /// S-08), and a Crypto listing settles same-day with no calendar.
+    async fn insert_crypto_listing(pool: &SqlitePool, id: i64, ticker: &str) {
+        test_support::listing(id)
+            .crypto()
             .ticker(ticker)
             .name(ticker)
             .insert(pool)
@@ -768,6 +802,148 @@ mod tests {
             as_at[0].quantity,
             Decimal::from(100),
             "the June sale hasn't happened yet"
+        );
+    }
+
+    /// A disposal dated **today** (accepted by the write path) is in force at
+    /// the omitted-date default, and out of force as at yesterday: the same
+    /// request reports two correctly-dated positions (REST API audit
+    /// 2026-09-24, B8).
+    #[tokio::test]
+    async fn api_overview_as_of_date_bounds_the_holdings() {
+        let pool = test_pool().await;
+        insert_crypto_listing(&pool, 1, "BTC").await;
+        insert_buy(&pool, 1, 1, Decimal::from(100), Decimal::from(10)).await; // 2024-01-02
+        let today = crate::infra::date::today();
+        let yesterday = today.pred_opt().expect("today has a yesterday");
+        test_support::sell(2, 1)
+            .date(today)
+            .qty(Decimal::from(40))
+            .price(Decimal::from(120))
+            .brokerage(dec("9.95"))
+            .gst_on_brokerage(dec("0.995"))
+            .insert(&pool)
+            .await;
+        allocate(&pool, 1, 2, 1, Decimal::from(40)).await;
+
+        // Omitted: today's live position — the sale counts.
+        let omitted: Vec<HoldingOverview> =
+            client(&pool).post_empty("/portfolio/overview").await.json();
+        assert_eq!(omitted.len(), 1);
+        assert_eq!(omitted[0].quantity, Decimal::from(60));
+
+        // Explicitly today is the same position, field for field.
+        let body = serde_json::json!({ "as_of_date": today.to_string() });
+        let at_today: Vec<HoldingOverview> = client(&pool)
+            .post("/portfolio/overview", &body)
+            .await
+            .json();
+        assert_eq!(at_today[0].quantity, omitted[0].quantity);
+        assert_eq!(at_today[0].total_cost_base, omitted[0].total_cost_base);
+        assert_eq!(
+            at_today[0].avg_cost_base_per_unit,
+            omitted[0].avg_cost_base_per_unit
+        );
+
+        // As at yesterday the sale has not happened yet.
+        let body = serde_json::json!({ "as_of_date": yesterday.to_string() });
+        let as_at: Vec<HoldingOverview> = client(&pool)
+            .post("/portfolio/overview", &body)
+            .await
+            .json();
+        assert_eq!(
+            as_at[0].quantity,
+            Decimal::from(100),
+            "yesterday's own disposal is not in force before its date"
+        );
+        assert_ne!(as_at[0].quantity, omitted[0].quantity);
+    }
+
+    /// The bound is **inclusive**: a disposal dated exactly on `as_of_date` is
+    /// in force at it (the `<=` every as-at read uses), so it counts on its
+    /// own date and not on the day before.
+    #[tokio::test]
+    async fn api_overview_as_of_date_boundary_includes_a_same_day_disposal() {
+        let pool = test_pool().await;
+        insert_crypto_listing(&pool, 1, "BTC").await;
+        insert_buy(&pool, 1, 1, Decimal::from(100), Decimal::from(10)).await;
+        let sale_date = crate::infra::date::today()
+            .pred_opt()
+            .expect("today has a yesterday");
+        test_support::sell(2, 1)
+            .date(sale_date)
+            .qty(Decimal::from(40))
+            .price(Decimal::from(120))
+            .brokerage(dec("9.95"))
+            .gst_on_brokerage(dec("0.995"))
+            .insert(&pool)
+            .await;
+        allocate(&pool, 1, 2, 1, Decimal::from(40)).await;
+
+        let body = serde_json::json!({ "as_of_date": sale_date.to_string() });
+        let on_the_day: Vec<HoldingOverview> = client(&pool)
+            .post("/portfolio/overview", &body)
+            .await
+            .json();
+        assert_eq!(on_the_day[0].quantity, Decimal::from(60));
+
+        let before = sale_date
+            .pred_opt()
+            .expect("the sale date has a day before");
+        let body = serde_json::json!({ "as_of_date": before.to_string() });
+        let earlier: Vec<HoldingOverview> = client(&pool)
+            .post("/portfolio/overview", &body)
+            .await
+            .json();
+        assert_eq!(earlier[0].quantity, Decimal::from(100));
+    }
+
+    /// A misspelt field is refused rather than silently ignored (the
+    /// house `deny_unknown_fields` rule), so `as_of_date` cannot be typo'd
+    /// into a silently-undated request.
+    #[tokio::test]
+    async fn api_overview_unknown_body_field_is_refused() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "VAS").await;
+        insert_buy(&pool, 1, 1, Decimal::from(100), Decimal::from(10)).await;
+
+        let body = serde_json::json!({ "as_of_dates": "2024-03-01" });
+        let resp = client(&pool).post("/portfolio/overview", &body).await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(resp.text().contains("as_of_dates"));
+    }
+
+    /// An explicit `prices` override still wins at a back-dated `as_of_date`:
+    /// it values the *as-at* quantity, not today's.
+    #[tokio::test]
+    async fn api_overview_as_of_date_with_price_override_values_the_as_at_quantity() {
+        let pool = test_pool().await;
+        insert_crypto_listing(&pool, 1, "BTC").await;
+        insert_buy(&pool, 1, 1, Decimal::from(100), Decimal::from(10)).await;
+        let today = crate::infra::date::today();
+        test_support::sell(2, 1)
+            .date(today)
+            .qty(Decimal::from(40))
+            .price(Decimal::from(120))
+            .brokerage(dec("9.95"))
+            .gst_on_brokerage(dec("0.995"))
+            .insert(&pool)
+            .await;
+        allocate(&pool, 1, 2, 1, Decimal::from(40)).await;
+
+        let yesterday = today.pred_opt().unwrap();
+        let body = serde_json::json!({
+            "as_of_date": yesterday.to_string(),
+            "prices": { "1": "120.50" }
+        });
+        let holdings: Vec<HoldingOverview> = client(&pool)
+            .post("/portfolio/overview", &body)
+            .await
+            .json();
+        assert_eq!(holdings[0].quantity, Decimal::from(100));
+        assert_eq!(
+            holdings[0].market_value,
+            Some("12050.00".parse::<Decimal>().unwrap())
         );
     }
 

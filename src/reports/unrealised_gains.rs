@@ -167,9 +167,11 @@ async fn unrealised_gains_handler(
     body: Option<Json<UnrealisedGainsRequest>>,
 ) -> Result<Json<Vec<UnrealisedGain>>, ApiError> {
     let req = body.map(|Json(req)| req).unwrap_or_default();
-    let as_of_date = req
-        .as_of_date
-        .unwrap_or_else(|| chrono::Local::now().date_naive());
+    // An omitted `as_of_date` is **today's live position** — the live-view
+    // resolver (`infra::date::as_of_or_today`), never `as_of_or_open`'s
+    // open-ended "every recorded fact" sentinel; resolved through the shared
+    // helper rather than re-deriving "today" inline.
+    let as_of_date = crate::infra::date::as_of_or_today(req.as_of_date);
 
     let mut gains = db_unrealised_gains(&pool, as_of_date)
         .await

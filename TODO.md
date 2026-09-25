@@ -36,7 +36,7 @@ clients alike. Each is closed by the tests named.
       entire tables. Add the obvious filters (`?listing_id=`, `?from=`/`?to=`,
       `?holding_account_id=`) and/or cursor paging to the entity lists. Test: API tests assert each
       filter narrows the result and unknown params still `422`.
-- [ ] Make the as-at default explicit (B8). Omitting the as-of date silently means "today's live
+- [x] Make the as-at default explicit (B8). Omitting the as-of date silently means "today's live
       position" (`as_of_or_today`), never the open-ended sentinel, and `/portfolio/overview` has no
       as-of parameter at all while `performance`/`unrealised-gains`/`parcel-optimiser` each default
       their own. Expose `as_of_date` uniformly on the valuation reports (overview included) and

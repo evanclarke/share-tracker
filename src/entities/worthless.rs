@@ -514,7 +514,7 @@ mod tests {
 
         insert_buy(&pool, 50, 1, d(2024, 9, 3), "100", "0.50").await;
 
-        let parcels = crate::reports::open_parcels::db_open_parcels(&pool)
+        let parcels = crate::reports::open_parcels::db_open_parcels(&pool, None)
             .await
             .unwrap();
         assert_eq!(parcels.len(), 1);

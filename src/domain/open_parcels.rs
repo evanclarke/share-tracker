@@ -692,7 +692,7 @@ mod tests {
         // The live view: the portfolio overview and the open-parcels
         // schedule are both `as_of: None`.
         let holdings = portfolio::db_holdings(&pool, None).await.unwrap();
-        let parcels = open_parcels::db_open_parcels(&pool).await.unwrap();
+        let parcels = open_parcels::db_open_parcels(&pool, None).await.unwrap();
         let holdings_total: Decimal = holdings.iter().map(|h| h.total_cost_base).sum();
         let parcels_total: Decimal = parcels.iter().map(|p| p.remaining_cost_base).sum();
         assert_eq!(holdings_total, parcels_total);
@@ -756,7 +756,7 @@ mod tests {
         assert_eq!(holdings[0].quantity, dec("100"));
         assert_eq!(holdings[0].total_cost_base, dec("1000"));
 
-        let parcels = open_parcels::db_open_parcels(&pool).await.unwrap();
+        let parcels = open_parcels::db_open_parcels(&pool, None).await.unwrap();
         assert_eq!(parcels.len(), 1);
         assert_eq!(parcels[0].remaining_quantity, dec("100"));
         assert_eq!(parcels[0].return_of_capital_reduction, Decimal::ZERO);

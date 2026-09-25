@@ -2612,7 +2612,7 @@ mod tests {
 
         // And the cost base the walk is describing agrees: the covered units
         // are floored at nil, the sold ones untouched.
-        let open = crate::reports::open_parcels::db_open_parcels(&pool)
+        let open = crate::reports::open_parcels::db_open_parcels(&pool, None)
             .await
             .unwrap();
         assert_eq!(open[0].remaining_cost_base, Decimal::ZERO);
@@ -2817,7 +2817,7 @@ mod tests {
 
         // And the cost base the open-parcels view reports is floored at nil,
         // not the $400 a naive `quantity × per-unit` multiplication leaves.
-        let parcels = crate::reports::open_parcels::db_open_parcels(&pool)
+        let parcels = crate::reports::open_parcels::db_open_parcels(&pool, None)
             .await
             .unwrap();
         assert_eq!(parcels.len(), 1);
@@ -3210,7 +3210,7 @@ mod tests {
         assert_eq!(r[0].cgt_event_c2_gain, Decimal::from(10));
 
         // The 50 units still held took the reduction instead: 500 − 25.
-        let open = crate::reports::open_parcels::db_open_parcels(&pool)
+        let open = crate::reports::open_parcels::db_open_parcels(&pool, None)
             .await
             .unwrap();
         assert_eq!(open[0].return_of_capital_reduction, Decimal::from(25));
@@ -3284,7 +3284,7 @@ mod tests {
         // parcel, so the payment is an ordinary G1 cost-base reduction there —
         // established first, because it is what makes a C2 gain beside it a
         // *double* count rather than a substitution.
-        let open = crate::reports::open_parcels::db_open_parcels(&pool)
+        let open = crate::reports::open_parcels::db_open_parcels(&pool, None)
             .await
             .unwrap();
         assert_eq!(open.len(), 1);
@@ -3377,7 +3377,7 @@ mod tests {
 
         // The 70 units still owned take the reduction: 30 in the original
         // parcel and 40 in the replacement, 50c each either way.
-        let mut open = crate::reports::open_parcels::db_open_parcels(&pool)
+        let mut open = crate::reports::open_parcels::db_open_parcels(&pool, None)
             .await
             .unwrap();
         open.sort_by_key(|p| p.remaining_quantity);
@@ -3813,7 +3813,7 @@ mod tests {
 
         // The cost base itself was always right: both reductions reported in
         // full, the parcel floored at nil.
-        let parcels = crate::reports::open_parcels::db_open_parcels(&pool)
+        let parcels = crate::reports::open_parcels::db_open_parcels(&pool, None)
             .await
             .unwrap();
         assert_eq!(parcels.len(), 1);

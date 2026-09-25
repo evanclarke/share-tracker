@@ -1,6 +1,10 @@
 use crate::domain::open_parcels;
 use crate::infra::http::ApiError;
-use axum::{Json, Router, extract::State, routing::get};
+use axum::{
+    Json, Router,
+    extract::{Query, State},
+    routing::get,
+};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -52,17 +56,35 @@ pub fn router() -> Router<SqlitePool> {
     Router::new().route("/portfolio/open-parcels", get(open_parcels_handler))
 }
 
-/// Lists every open parcel: a Buy/DRP trade whose quantity is not fully
-/// consumed by parcel allocations. Same open-quantity and AMIT/E10 cost-base
-/// rules as the portfolio/unrealised reports, but per parcel instead of
-/// aggregated per listing.
-pub async fn db_open_parcels(pool: &SqlitePool) -> Result<Vec<OpenParcel>, sqlx::Error> {
+/// The open-parcels report's query string: just the valuation date.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OpenParcelsQuery {
+    /// The **valuation date**: the schedule is the parcels open as at it, with
+    /// quantities in that date's unit basis (see `docs/API.md`'s As-at date
+    /// section). Omitting it means **today's live position** — the live-view
+    /// resolver `infra::date::as_of_or_today`, never `as_of_or_open`'s
+    /// open-ended "every recorded fact" sentinel. An unparseable value is
+    /// refused `400` by the query decoder, and `deny_unknown_fields` refuses a
+    /// misspelt parameter rather than silently ignoring it.
+    #[serde(default)]
+    pub as_of_date: Option<NaiveDate>,
+}
+
+/// Lists every open parcel as at `as_of` — `None` the live view (as at today,
+/// through the shared loader's `as_of_or_today`): a Buy/DRP trade whose
+/// quantity is not fully consumed by parcel allocations. Same open-quantity
+/// and AMIT/E10 cost-base rules as the portfolio/unrealised reports, but per
+/// parcel instead of aggregated per listing.
+pub async fn db_open_parcels(
+    pool: &SqlitePool,
+    as_of: Option<NaiveDate>,
+) -> Result<Vec<OpenParcel>, sqlx::Error> {
     // One read transaction: every input below comes from the same snapshot,
     // so an interleaved write can't yield e.g. an allocation whose parcel is
     // missing from the same read.
     let mut tx = pool.begin().await?;
-    // `None`: this endpoint is the live schedule, as at today.
-    let parcels = db_open_parcels_on(&mut tx, None).await?;
+    let parcels = db_open_parcels_on(&mut tx, as_of).await?;
     tx.commit().await?;
     Ok(parcels)
 }
@@ -143,8 +165,15 @@ pub async fn db_open_parcels_on(
 
 async fn open_parcels_handler(
     State(pool): State<SqlitePool>,
+    Query(q): Query<OpenParcelsQuery>,
 ) -> Result<Json<Vec<OpenParcel>>, ApiError> {
-    db_open_parcels(&pool)
+    // An omitted `as_of_date` is **today's live position**. `as_of_or_today`
+    // is the live-view resolver (`infra::date`), deliberately not
+    // `as_of_or_open` — whose `None` means "every recorded fact" — and
+    // resolving it here states the API default at the boundary rather than
+    // leaving it implicit in the shared loader (SCENARIOS E-14).
+    let as_of = crate::infra::date::as_of_or_today(q.as_of_date);
+    db_open_parcels(&pool, Some(as_of))
         .await
         .map(Json)
         .map_err(ApiError::from)
@@ -159,6 +188,19 @@ mod tests {
 
     async fn insert_listing(pool: &SqlitePool, id: i64, ticker: &str) {
         test_support::listing(id)
+            .ticker(ticker)
+            .name(ticker)
+            .insert(pool)
+            .await;
+    }
+
+    /// A listing with no exchange calendar, so a trade dated *today* or
+    /// *yesterday* is accepted by the write path whatever day the suite runs
+    /// on: an ASX listing refuses a weekend or a seeded holiday (SCENARIOS
+    /// S-08), and a Crypto listing settles same-day with no calendar.
+    async fn insert_crypto_listing(pool: &SqlitePool, id: i64, ticker: &str) {
+        test_support::listing(id)
+            .crypto()
             .ticker(ticker)
             .name(ticker)
             .insert(pool)
@@ -242,7 +284,7 @@ mod tests {
     #[tokio::test]
     async fn db_no_trades_returns_empty() {
         let pool = test_pool().await;
-        let parcels = db_open_parcels(&pool).await.unwrap();
+        let parcels = db_open_parcels(&pool, None).await.unwrap();
         assert!(parcels.is_empty());
     }
 
@@ -253,7 +295,7 @@ mod tests {
         insert_listing(&pool, 1, "VAS").await;
         insert_buy(&pool, 1, 1, buy_date, Decimal::from(100), Decimal::from(10)).await;
 
-        let parcels = db_open_parcels(&pool).await.unwrap();
+        let parcels = db_open_parcels(&pool, None).await.unwrap();
         assert_eq!(parcels.len(), 1);
         let p = &parcels[0];
         assert_eq!(p.trade_id, 1);
@@ -300,7 +342,7 @@ mod tests {
         .await
         .unwrap();
 
-        let parcels = db_open_parcels(&pool).await.unwrap();
+        let parcels = db_open_parcels(&pool, None).await.unwrap();
         assert_eq!(parcels.len(), 1);
         let p = &parcels[0];
         assert_eq!(p.listing_id, 1);
@@ -322,7 +364,7 @@ mod tests {
         insert_sell(&pool, 2, 1, Decimal::from(40)).await;
         allocate(&pool, 1, 2, 1, Decimal::from(40)).await;
 
-        let parcels = db_open_parcels(&pool).await.unwrap();
+        let parcels = db_open_parcels(&pool, None).await.unwrap();
         assert_eq!(parcels.len(), 1);
         let p = &parcels[0];
         assert_eq!(p.original_quantity, Decimal::from(100));
@@ -343,7 +385,7 @@ mod tests {
         insert_sell(&pool, 3, 1, Decimal::from(100)).await;
         allocate(&pool, 1, 3, 1, Decimal::from(100)).await;
 
-        let parcels = db_open_parcels(&pool).await.unwrap();
+        let parcels = db_open_parcels(&pool, None).await.unwrap();
         assert_eq!(parcels.len(), 1);
         assert_eq!(parcels[0].trade_id, 2);
         assert_eq!(parcels[0].remaining_quantity, Decimal::from(50));
@@ -363,7 +405,7 @@ mod tests {
         insert_sell(&pool, 2, 1, Decimal::from(40)).await;
         allocate(&pool, 1, 2, 1, Decimal::from(40)).await;
 
-        let parcels = db_open_parcels(&pool).await.unwrap();
+        let parcels = db_open_parcels(&pool, None).await.unwrap();
         assert_eq!(parcels.len(), 1);
         let p = &parcels[0];
         assert_eq!(p.remaining_quantity, Decimal::from(60));
@@ -385,7 +427,7 @@ mod tests {
         // Reduction 100 * 11 = 1100 exceeds the 1010.945 cost base → E10 floor.
         apply_amit(&pool, 1, 1, 1, Decimal::from(100), Decimal::from(11)).await;
 
-        let parcels = db_open_parcels(&pool).await.unwrap();
+        let parcels = db_open_parcels(&pool, None).await.unwrap();
         assert_eq!(parcels.len(), 1);
         let p = &parcels[0];
         // The full cumulative reduction is still reported…
@@ -408,7 +450,7 @@ mod tests {
         insert_buy(&pool, 1, 1, buy_date, Decimal::from(100), Decimal::from(10)).await;
         apply_amit(&pool, 1, 1, 1, Decimal::from(100), "-0.30".parse().unwrap()).await;
 
-        let parcels = db_open_parcels(&pool).await.unwrap();
+        let parcels = db_open_parcels(&pool, None).await.unwrap();
         let p = &parcels[0];
         // Reported as a negative reduction — the statement's own sign.
         assert_eq!(p.amit_cost_base_reduction, Decimal::from(-30));
@@ -444,7 +486,7 @@ mod tests {
         )
         .await;
 
-        let parcels = db_open_parcels(&pool).await.unwrap();
+        let parcels = db_open_parcels(&pool, None).await.unwrap();
         assert_eq!(parcels.len(), 1);
         // USD cost = 1010.945 → AUD 2021.89 at 0.50
         assert_eq!(
@@ -489,7 +531,7 @@ mod tests {
             .insert(&pool)
             .await;
 
-        let parcels = db_open_parcels(&pool).await.unwrap();
+        let parcels = db_open_parcels(&pool, None).await.unwrap();
         assert_eq!(parcels.len(), 1);
         assert_eq!(
             parcels[0].original_cost_base,
@@ -523,7 +565,7 @@ mod tests {
             .insert(&pool)
             .await;
 
-        let parcels = db_open_parcels(&pool).await.unwrap();
+        let parcels = db_open_parcels(&pool, None).await.unwrap();
         assert_eq!(parcels.len(), 1);
         assert_eq!(
             parcels[0].remaining_cost_base,
@@ -543,7 +585,7 @@ mod tests {
         insert_buy(&pool, 2, 1, d2, Decimal::from(10), Decimal::from(10)).await;
         insert_buy(&pool, 3, 1, d1, Decimal::from(10), Decimal::from(10)).await;
 
-        let parcels = db_open_parcels(&pool).await.unwrap();
+        let parcels = db_open_parcels(&pool, None).await.unwrap();
         let order: Vec<(i64, NaiveDate)> = parcels
             .iter()
             .map(|p| (p.listing_id, p.acquisition_date))
@@ -653,7 +695,7 @@ mod tests {
         // 1-for-10 on 105 units: 10.5 bonus units, not 10.
         apply_bonus(&pool, 1, 1, ymd(2024, 3, 1), "1", "10").await;
 
-        let parcels = db_open_parcels(&pool).await.unwrap();
+        let parcels = db_open_parcels(&pool, None).await.unwrap();
         assert_eq!(parcels.len(), 1);
         assert_eq!(parcels[0].remaining_quantity, dec("115.5"));
         assert_eq!(parcels[0].original_quantity, Decimal::from(105));
@@ -687,7 +729,7 @@ mod tests {
         insert_sell(&pool, 2, 1, Decimal::from(80)).await; // sale dated 2025-06-01
         allocate(&pool, 1, 2, 1, Decimal::from(80)).await;
 
-        let parcels = db_open_parcels(&pool).await.unwrap();
+        let parcels = db_open_parcels(&pool, None).await.unwrap();
         assert_eq!(parcels.len(), 1);
         let p = &parcels[0];
         assert_eq!(p.acquisition_date, buy_date);
@@ -718,7 +760,7 @@ mod tests {
         )
         .await;
 
-        let parcels = db_open_parcels(&pool).await.unwrap();
+        let parcels = db_open_parcels(&pool, None).await.unwrap();
         assert_eq!(parcels[0].remaining_quantity, Decimal::from(15));
         // Total cost base untouched: 10 × 150 + 9.95 + 0.995.
         assert_eq!(
@@ -759,7 +801,7 @@ mod tests {
         // 1-for-10 consolidation of the 220 → 22 units.
         apply_split(&pool, 3, 1, ymd(2024, 5, 1), "1", "10").await;
 
-        let parcels = db_open_parcels(&pool).await.unwrap();
+        let parcels = db_open_parcels(&pool, None).await.unwrap();
         assert_eq!(parcels.len(), 1);
         let p = &parcels[0];
         // 100 → 200 → 220 → 22, and the transacted quantity is untouched.
@@ -790,13 +832,13 @@ mod tests {
         .await;
         apply_split(&pool, 1, 1, ymd(2024, 3, 1), "7", "10").await;
 
-        let parcels = db_open_parcels(&pool).await.unwrap();
+        let parcels = db_open_parcels(&pool, None).await.unwrap();
         assert_eq!(parcels[0].remaining_quantity, dec("23.10"));
 
         // Selling exactly that fractional quantity closes the parcel.
         insert_sell(&pool, 2, 1, dec("23.1")).await;
         allocate(&pool, 1, 2, 1, dec("23.1")).await;
-        assert!(db_open_parcels(&pool).await.unwrap().is_empty());
+        assert!(db_open_parcels(&pool, None).await.unwrap().is_empty());
     }
 
     /// A return of capital (CGT event G1) is reported per parcel and netted off
@@ -820,7 +862,7 @@ mod tests {
         )
         .await;
 
-        let parcels = db_open_parcels(&pool).await.unwrap();
+        let parcels = db_open_parcels(&pool, None).await.unwrap();
         assert_eq!(parcels.len(), 1);
         let p = &parcels[0];
         assert_eq!(p.remaining_quantity, Decimal::from(60));
@@ -849,7 +891,7 @@ mod tests {
         apply_roc_with_record(&pool, 1, 1, paid, "0.50", Some(record)).await;
 
         // Sorted by acquisition date: the entitled parcel first.
-        let parcels = db_open_parcels(&pool).await.unwrap();
+        let parcels = db_open_parcels(&pool, None).await.unwrap();
         assert_eq!(parcels.len(), 2);
         assert_eq!(parcels[0].return_of_capital_reduction, Decimal::from(50));
         assert_eq!(
@@ -865,7 +907,7 @@ mod tests {
 
         // The same action without a record date falls back to the payment date.
         apply_roc_with_record(&pool, 1, 1, paid, "0.50", None).await;
-        let parcels = db_open_parcels(&pool).await.unwrap();
+        let parcels = db_open_parcels(&pool, None).await.unwrap();
         assert_eq!(parcels[1].return_of_capital_reduction, Decimal::from(50));
     }
 
@@ -887,7 +929,7 @@ mod tests {
         )
         .await;
 
-        let parcels = db_open_parcels(&pool).await.unwrap();
+        let parcels = db_open_parcels(&pool, None).await.unwrap();
         assert_eq!(parcels.len(), 1);
         // The full payment is still reported…
         assert_eq!(parcels[0].return_of_capital_reduction, Decimal::from(1100));
@@ -918,6 +960,141 @@ mod tests {
             parcels[0].remaining_cost_base,
             "606.567".parse::<Decimal>().unwrap()
         );
+    }
+
+    /// A disposal dated **today** (accepted by the write path) is in force at
+    /// the omitted-date default, and out of force as at yesterday: the
+    /// schedule is correctly dated at each (REST API audit 2026-09-24, B8).
+    #[tokio::test]
+    async fn api_open_parcels_as_of_date_bounds_the_schedule() {
+        let pool = test_pool().await;
+        insert_crypto_listing(&pool, 1, "BTC").await;
+        insert_buy(
+            &pool,
+            1,
+            1,
+            ymd(2024, 1, 2),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
+        let today = crate::infra::date::today();
+        let yesterday = today.pred_opt().expect("today has a yesterday");
+        test_support::sell(2, 1)
+            .date(today)
+            .qty(Decimal::from(40))
+            .price(Decimal::from(120))
+            .brokerage(dec("9.95"))
+            .gst_on_brokerage(dec("0.995"))
+            .insert(&pool)
+            .await;
+        allocate(&pool, 1, 2, 1, Decimal::from(40)).await;
+
+        // Omitted: today's live schedule — the sale counts.
+        let omitted: Vec<OpenParcel> = ApiClient::over(router().with_state(pool.clone()))
+            .get("/portfolio/open-parcels")
+            .await
+            .json();
+        assert_eq!(omitted.len(), 1);
+        assert_eq!(omitted[0].remaining_quantity, Decimal::from(60));
+
+        // Explicitly today is identical to the omitted default.
+        let at_today: Vec<OpenParcel> = ApiClient::over(router().with_state(pool.clone()))
+            .get(format!("/portfolio/open-parcels?as_of_date={today}"))
+            .await
+            .json();
+        assert_eq!(
+            at_today[0].remaining_quantity,
+            omitted[0].remaining_quantity
+        );
+        assert_eq!(
+            at_today[0].remaining_cost_base,
+            omitted[0].remaining_cost_base
+        );
+
+        // As at yesterday the sale has not happened yet.
+        let as_at: Vec<OpenParcel> = ApiClient::over(router().with_state(pool))
+            .get(format!("/portfolio/open-parcels?as_of_date={yesterday}"))
+            .await
+            .json();
+        assert_eq!(as_at[0].remaining_quantity, Decimal::from(100));
+        assert_ne!(as_at[0].remaining_quantity, omitted[0].remaining_quantity);
+    }
+
+    /// The bound is **inclusive**: a disposal dated exactly on `as_of_date` is
+    /// in force at it, so it counts on its own date and not on the day before.
+    #[tokio::test]
+    async fn api_open_parcels_as_of_date_boundary_includes_a_same_day_disposal() {
+        let pool = test_pool().await;
+        insert_crypto_listing(&pool, 1, "BTC").await;
+        insert_buy(
+            &pool,
+            1,
+            1,
+            ymd(2024, 1, 2),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
+        let sale_date = crate::infra::date::today()
+            .pred_opt()
+            .expect("today has a yesterday");
+        test_support::sell(2, 1)
+            .date(sale_date)
+            .qty(Decimal::from(40))
+            .price(Decimal::from(120))
+            .brokerage(dec("9.95"))
+            .gst_on_brokerage(dec("0.995"))
+            .insert(&pool)
+            .await;
+        allocate(&pool, 1, 2, 1, Decimal::from(40)).await;
+
+        let on_the_day: Vec<OpenParcel> = ApiClient::over(router().with_state(pool.clone()))
+            .get(format!("/portfolio/open-parcels?as_of_date={sale_date}"))
+            .await
+            .json();
+        assert_eq!(on_the_day[0].remaining_quantity, Decimal::from(60));
+
+        let before = sale_date
+            .pred_opt()
+            .expect("the sale date has a day before");
+        let earlier: Vec<OpenParcel> = ApiClient::over(router().with_state(pool))
+            .get(format!("/portfolio/open-parcels?as_of_date={before}"))
+            .await
+            .json();
+        assert_eq!(earlier[0].remaining_quantity, Decimal::from(100));
+    }
+
+    /// The date is a query parameter now, so the decoder owns it: an
+    /// unparseable value and a misspelt parameter are both a `400` (never a
+    /// silently-undated live schedule).
+    #[tokio::test]
+    async fn api_open_parcels_query_rejects_unparseable_and_unknown_params() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "VAS").await;
+        insert_buy(
+            &pool,
+            1,
+            1,
+            ymd(2024, 1, 2),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
+        for (query, names_param) in [("?as_of_date=lots", true), ("?as_of=2024-06-01", false)] {
+            let resp = ApiClient::over(router().with_state(pool.clone()))
+                .get(format!("/portfolio/open-parcels{query}"))
+                .await;
+            let (status, body) = resp.status_and_body();
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{query}: {body}");
+            assert!(!body.is_empty(), "{query} must say why");
+            if names_param {
+                assert!(
+                    body.contains("as_of_date"),
+                    "{query} must name the parameter: {body}"
+                );
+            }
+        }
     }
 
     /// SCENARIOS W-b. A parcel of 1e15 units used to overflow the cost-base
@@ -1005,7 +1182,7 @@ mod tests {
             .await
             .unwrap();
 
-        let parcels = db_open_parcels(&pool).await.unwrap();
+        let parcels = db_open_parcels(&pool, None).await.unwrap();
         // The original parcel is fully consumed; only the replacement is open.
         assert_eq!(parcels.len(), 1);
         let p = &parcels[0];
@@ -1056,7 +1233,7 @@ mod tests {
             .await
             .unwrap();
 
-        let mut parcels = db_open_parcels(&pool).await.unwrap();
+        let mut parcels = db_open_parcels(&pool, None).await.unwrap();
         // The original parcel is fully consumed; both replacement legs are
         // open and keep the original acquisition date.
         parcels.sort_by_key(|p| p.listing_id);
@@ -1176,7 +1353,9 @@ mod tests {
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
                 let mut reads = 0u32;
                 while !done.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
-                    let parcels = db_open_parcels(&pool).await.expect("the report reads");
+                    let parcels = db_open_parcels(&pool, None)
+                        .await
+                        .expect("the report reads");
                     let remaining = |trade_id: i64| {
                         parcels
                             .iter()

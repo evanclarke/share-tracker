@@ -3521,7 +3521,7 @@ mod tests {
         assert_eq!(realised[0].capital_gain_loss, Decimal::from(200));
 
         // The 60 units covered take the stated 50c each — 600 − 30.
-        let open = crate::reports::open_parcels::db_open_parcels(&pool)
+        let open = crate::reports::open_parcels::db_open_parcels(&pool, None)
             .await
             .unwrap();
         assert_eq!(open.len(), 1);
