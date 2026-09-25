@@ -39,7 +39,7 @@ present/absent.
       (`#[serde(default)] pub preference: bool`, the 90-day preference-share flag read by franking
       at-risk) is never named in the Listings section (docs/API.md:123–191). Test: `doc_checks`
       asserts the Listings section documents `preference`.
-- [ ] Drop the stale `409` from the "Error bodies" list (docs/API.md:1836). No code path returns
+- [x] Drop the stale `409` from the "Error bodies" list (docs/API.md:1836). No code path returns
       HTTP 409 (no `StatusCode::CONFLICT`; `ApiError` has no 409 variant), and the Response codes
       table itself has no 409 row, so the doc is self-inconsistent. Test: `doc_checks` asserts the
       error-bodies list names only the codes the code actually returns.

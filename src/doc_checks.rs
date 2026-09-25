@@ -27,6 +27,9 @@ const REQUIREMENTS_MD: &str = include_str!("../REQUIREMENTS.md");
 // dismissal is recorded in the repo is that comment. `#[cfg(test)]` module, so
 // this costs the release binary nothing.
 const AUTH_RS: &str = include_str!("infra/auth.rs");
+// The `ApiError` status map, for the Error-bodies pin below: the doc's list of
+// codes that carry a body has to match what this file actually returns.
+const HTTP_RS: &str = include_str!("infra/http.rs");
 
 /// The body of the `# Known limitations` section of `docs/API.md`.
 fn known_limitations() -> &'static str {
@@ -589,6 +592,154 @@ fn listing_preference_field_documented() {
         section.contains("Nothing else reads the flag"),
         "the Listings section says nothing else reads the flag"
     );
+}
+
+/// The `**Error bodies.**` paragraph of `docs/API.md` — from its bold lead-in
+/// to the blank line that ends the paragraph.
+fn error_bodies_paragraph() -> &'static str {
+    let rest = API_MD
+        .split("**Error bodies.**")
+        .nth(1)
+        .expect("docs/API.md has an **Error bodies.** paragraph");
+    &rest[..rest
+        .find("\n\n")
+        .expect("the Error bodies paragraph is followed by a blank line")]
+}
+
+/// The status codes in the Error bodies paragraph's leading parenthetical —
+/// the list that reads `` `400`, … `413`, `422`, … ``.
+///
+/// The first parenthetical is the code list; scanning to its matching `)` — not
+/// to the first `)` — keeps a later aside (`(close button, …)`, `(e.g. …)`) out
+/// of it, and backticked three-digit tokens keep a code apart from the prose
+/// (`DELETE`, `POST /jobs/:name`).
+fn error_bodies_listed_codes(paragraph: &str) -> Vec<&str> {
+    let open = paragraph
+        .find('(')
+        .expect("the Error bodies paragraph opens its code list");
+    let mut depth = 0usize;
+    let mut close = None;
+    for (offset, c) in paragraph[open..].char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(open + offset);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let list = &paragraph[open + 1..close.expect("the code list is a closed parenthetical")];
+    list.split('`')
+        .skip(1)
+        .step_by(2)
+        .filter(|piece| piece.len() == 3 && piece.bytes().all(|b| b.is_ascii_digit()))
+        .collect()
+}
+
+/// The codes with a `| \`NNN …\` |` row in the Response codes table — the
+/// neighbouring enumeration the Error bodies list must not contradict.
+fn response_code_table_codes() -> Vec<String> {
+    let section = API_MD
+        .split("# Response codes")
+        .nth(1)
+        .expect("docs/API.md has a Response codes section")
+        .split("\n## ")
+        .next()
+        .expect("split always yields at least one part");
+    section
+        .lines()
+        .filter_map(|line| {
+            let rest = line.strip_prefix("| `")?;
+            let code: String = rest.chars().take_while(char::is_ascii_digit).collect();
+            (code.len() == 3).then_some(code)
+        })
+        .collect()
+}
+
+/// Docs-sync pin for the "Error bodies" code list (REST API audit, 2026-09-24).
+///
+/// The list named a `409` that no code path returns — `ApiError`
+/// (`src/infra/http.rs`) has no 409 variant and `StatusCode::CONFLICT` appears
+/// nowhere in `src` — so it contradicted the Response codes table beside it,
+/// which has no 409 row.
+///
+/// The list is the set of statuses a rejected request carries a plain-text body
+/// on, read off `ApiError::into_response` — the one error type every handler
+/// returns (`Result<_, ApiError>` + `?`):
+///
+/// - `400` — `ApiError::BadRequest` (and `ApiError::bad_request`);
+/// - `401` — `ApiError::Unauthorized`, the optional `[auth]` layer's challenge
+///   (a rejected write under `[auth]` answers it, so it belongs in the list);
+/// - `404` — `ApiError::NotFoundWithReason` (`ApiError::not_found`), the
+///   "`404`-with-a-cause" the list names; the bare `ApiError::NotFound` is the
+///   same status with an **empty** body (entity GETs), which the "with-a-cause"
+///   wording already carves out;
+/// - `413` — `ApiError::PayloadTooLarge`;
+/// - `422` — `ApiError::Unprocessable`, plus every constraint violation
+///   `impl From<sqlx::Error> for ApiError` classifies;
+/// - `502` — `ApiError::BadGateway`;
+/// - `503` — `ApiError::Busy`.
+///
+/// Two body-bearing statuses are deliberately outside the list. The plain
+/// `404` and the internal `500` carry **empty** bodies, so they cannot be in a
+/// list of codes that carry one; the one `500` that does — `ApiError::JobFailed`,
+/// the manual job trigger — is conditional (only a *failed* job answers it), so
+/// the paragraph names it in its own prose instead, which this test pins too.
+///
+/// The list is also cross-checked against the Response codes table: every code
+/// it names must have a `| \`NNN …\` |` row there. That is the drift guard the
+/// stale `409` slipped past — a code in this list with no row in the table —
+/// and it cannot come back without gaining one.
+#[test]
+fn error_bodies_list_names_only_returned_codes() {
+    /// The codes `ApiError::into_response` answers with a non-empty body,
+    /// derived above from `src/infra/http.rs`.
+    const RETURNED_WITH_BODY: &[&str] = &["400", "401", "404", "413", "422", "502", "503"];
+
+    let paragraph = error_bodies_paragraph();
+    let listed = error_bodies_listed_codes(paragraph);
+
+    // No stale code — in particular the `409` this audit removed.
+    assert!(
+        !listed.contains(&"409"),
+        "the Error bodies list still names 409: {listed:?}"
+    );
+    // Every code the code returns, and no code it does not.
+    assert_eq!(
+        listed.as_slice(),
+        RETURNED_WITH_BODY,
+        "the Error bodies list names the wrong set of codes: {paragraph}"
+    );
+
+    // The code side of the `409` claim: no `CONFLICT` anywhere in `ApiError`'s
+    // status map, so a 409 can neither be listed nor be put back into the table.
+    assert!(
+        !HTTP_RS.contains("CONFLICT"),
+        "src/infra/http.rs now names CONFLICT — `ApiError` can answer 409, so the \
+         Error bodies list and the Response codes table must both gain a 409 row"
+    );
+
+    // The conditional `500`: the paragraph names the one shape that carries a
+    // body, so the empty-body `500` cannot be mistaken for it.
+    assert!(
+        paragraph
+            .contains("a failed job triggered via `POST /jobs/:name` returns its own error text"),
+        "the Error bodies paragraph names the job trigger's text-carrying 500"
+    );
+
+    // The two sections cannot drift apart: a listed code must have a table row.
+    let table_codes = response_code_table_codes();
+    for code in &listed {
+        assert!(
+            table_codes.iter().any(|row| row.as_str() == *code),
+            "the Error bodies list names `{code}`, but the Response codes table has no \
+             `{code}` row (rows: {table_codes:?})"
+        );
+    }
 }
 
 /// Docs-sync pin for linked attachments on provenance-created trades
