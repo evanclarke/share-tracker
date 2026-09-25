@@ -35,7 +35,7 @@ present/absent.
       `POST /ess_statements/:id/vest` — all `201` in code — contradicting the table's own "Creating
       a record" section (docs/API.md:77). Test: `doc_checks` asserts the `201` row names the
       collection-POST create path and `vest`.
-- [ ] Document the `preference` listing field. `src/entities/listing.rs:116`
+- [x] Document the `preference` listing field. `src/entities/listing.rs:116`
       (`#[serde(default)] pub preference: bool`, the 90-day preference-share flag read by franking
       at-risk) is never named in the Listings section (docs/API.md:123–191). Test: `doc_checks`
       asserts the Listings section documents `preference`.

@@ -558,6 +558,39 @@ fn created_response_row_names_collection_creates_and_vest() {
     }
 }
 
+/// Docs-sync pin for the `preference` listing field (REST API audit 2026-09-24):
+/// `ListingBody.preference` is a boolean (serde default `false`) whose only
+/// reader is the franking at-risk holding-period walk (`reports::franking`'s
+/// `required_days`, 90 days for a preference share and 45 otherwise), so it is
+/// documented in the Listings section that owns every listing field. Scoped to
+/// that section deliberately: the word already appears in the Tax summary and
+/// Franking at-risk sections, so a bare whole-file `contains` would pass on
+/// prose about the walk rather than on the field's own documentation. The
+/// behaviour itself is pinned by `reports::franking`'s preference test; this is
+/// the documentation half.
+#[test]
+fn listing_preference_field_documented() {
+    let section = API_MD
+        .split("## Listings")
+        .nth(1)
+        .expect("docs/API.md has a Listings section")
+        .split("\n## ")
+        .next()
+        .expect("split always yields at least one part");
+    assert!(
+        section.contains("`preference` (optional, `false` by default)"),
+        "the Listings section documents `preference`: {section}"
+    );
+    assert!(
+        section.contains("**90 days instead of 45**"),
+        "the Listings section says the at-risk period is 90 days rather than 45"
+    );
+    assert!(
+        section.contains("Nothing else reads the flag"),
+        "the Listings section says nothing else reads the flag"
+    );
+}
+
 /// Docs-sync pin for linked attachments on provenance-created trades
 /// (REQUIREMENTS 2026-07-15): the Attachments section documents the
 /// `include_linked` list option, enumerates the three traversed provenance
