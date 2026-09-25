@@ -30,7 +30,7 @@ present/absent.
       (docs/API.md ~531–572) as required. A machine client omitting it gets an unexplained
       `422 missing field date_received`. Test: `doc_checks` asserts the AMMA section names
       `date_received` as required.
-- [ ] Complete the `201 Created` enumeration in the Response codes table (docs/API.md:1800). It
+- [x] Complete the `201 Created` enumeration in the Response codes table (docs/API.md:1800). It
       lists the operation endpoints but omits the 14 standard `POST /<collection>` creates and
       `POST /ess_statements/:id/vest` — all `201` in code — contradicting the table's own "Creating
       a record" section (docs/API.md:77). Test: `doc_checks` asserts the `201` row names the

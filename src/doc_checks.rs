@@ -513,6 +513,51 @@ fn creating_a_record_documented() {
     assert!(API_MD.contains("A client that POSTs one of these collections is answered `405`"));
 }
 
+/// Docs-sync pin for the `201 Created` enumeration (REST API audit, 2026-09-24).
+///
+/// The Response codes table's `201` row listed the operation endpoints but
+/// omitted the standard collection creates and the ESS vest, contradicting the
+/// table's own "Creating a record" section — which promises `POST /<collection>`
+/// answers `201`, and which is the row's own cross-reference. Scoped to the
+/// `201` row deliberately: a bare `contains` over the whole document would pass
+/// on the sections that document each route. The routes themselves are pinned
+/// by their handlers' tests; this is the documentation half.
+#[test]
+fn created_response_row_names_collection_creates_and_vest() {
+    let row = API_MD
+        .lines()
+        .find(|line| line.starts_with("| `201 Created` |"))
+        .expect("docs/API.md's Response codes table has a `201 Created` row");
+    assert!(
+        row.contains("POST /<collection>"),
+        "the `201` row names the collection-POST create path: {row}"
+    );
+    assert!(row.contains("vest"), "the `201` row names the ESS vest");
+    // The row is the enumeration, so it must name every id-keyed collection
+    // create rather than one example of the shape.
+    for collection in [
+        "/listings",
+        "/trades",
+        "/sells",
+        "/income",
+        "/interest_income",
+        "/investment_expenses",
+        "/drp_enrolments",
+        "/holding_accounts",
+        "/amma_statements",
+        "/amit_adjustments",
+        "/corporate_actions",
+        "/inheritances",
+        "/transfers",
+        "/ess_statements",
+    ] {
+        assert!(
+            row.contains(collection),
+            "the `201` row names the `{collection}` collection-POST create"
+        );
+    }
+}
+
 /// Docs-sync pin for linked attachments on provenance-created trades
 /// (REQUIREMENTS 2026-07-15): the Attachments section documents the
 /// `include_linked` list option, enumerates the three traversed provenance
