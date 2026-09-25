@@ -146,14 +146,22 @@ impl ApiError {
 /// screen when the 404 arrives, a delete is fired from a list row and its
 /// failure surfaces only as a toast. So the body always names what was
 /// missing ("no income with that id") rather than leaving the web UI to show
-/// a bare "HTTP 404". Every entity delete goes through this helper, or (where
-/// the delete has its own outcome enum for the referenced-row cases) returns
-/// the same wording by hand.
+/// a bare "HTTP 404". [`delete_handler`] renders it through
+/// [`CrudEntity::missing_row_body`], which an entity keyed on a natural key
+/// overrides; this helper is what a hand-written delete uses, and a delete
+/// with its own outcome enum returns the same wording by hand.
 pub fn deleted(found: bool, noun: &str) -> Result<StatusCode, ApiError> {
+    deleted_with_body(found, format!("no {noun} with that id"))
+}
+
+/// [`deleted`]'s twin where the `404` body comes ready-made instead of being
+/// built from a noun — the shared outcome used by [`delete_handler`], whose
+/// body is [`CrudEntity::missing_row_body`]'s.
+fn deleted_with_body(found: bool, body: String) -> Result<StatusCode, ApiError> {
     if found {
         Ok(StatusCode::NO_CONTENT)
     } else {
-        Err(ApiError::not_found(format!("no {noun} with that id")))
+        Err(ApiError::not_found(body))
     }
 }
 
@@ -270,6 +278,18 @@ pub trait CrudEntity:
     /// What a 404 from [`delete_handler`] calls the missing row, e.g.
     /// `"AMMA statement"` → `no AMMA statement with that id`.
     const NOUN: &'static str;
+
+    /// The plain-text `404` body [`delete_handler`] answers with when `key`
+    /// matched no row: `no <noun> with that id` by default.
+    ///
+    /// That default names the `id` column, which every rowid-keyed entity's
+    /// URL carries. An entity keyed on a natural key overrides it, because
+    /// "that id" names a column its URL never mentions — `no exchange with
+    /// that mic`, `no tax year settings row for that year`. The key is passed
+    /// so an override can name the value it looked for.
+    fn missing_row_body(_key: &Self::Key) -> String {
+        format!("no {} with that id", Self::NOUN)
+    }
 }
 
 /// Every row of `E`'s table, in `E::ORDER_BY` order.
@@ -353,7 +373,7 @@ pub async fn delete_handler<E: CrudEntity>(
     Path(key): Path<E::Key>,
 ) -> Result<StatusCode, ApiError> {
     match crud_delete::<E>(&pool, key.clone()).await {
-        Ok(found) => deleted(found, E::NOUN),
+        Ok(found) => deleted_with_body(found, E::missing_row_body(&key)),
         Err(err) => {
             match fk_dependants_message(&pool, &err, E::NOUN, E::TABLE, E::KEY_COLUMN, key).await {
                 Ok(Some(body)) => Err(ApiError::Unprocessable(body)),

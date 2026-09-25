@@ -61,6 +61,12 @@ impl CrudEntity for TaxYearSettings {
     const KEY_COLUMN: &'static str = "tax_year";
     const ORDER_BY: &'static str = "tax_year";
     const NOUN: &'static str = "tax year settings row";
+
+    /// Keyed by the financial year itself, so the default body's "with that
+    /// id" would name a column the route's URL never carries.
+    fn missing_row_body(_tax_year: &i64) -> String {
+        "no tax year settings row for that year".to_string()
+    }
 }
 
 pub fn router() -> Router<SqlitePool> {

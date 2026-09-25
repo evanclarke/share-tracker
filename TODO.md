@@ -20,7 +20,7 @@ below.
 
 ## REST API audit — consistency fixes (2026-09-24)
 
-- [ ] Fix the natural-key DELETE 404 wording. `infra::http::deleted` hard-codes
+- [x] Fix the natural-key DELETE 404 wording. `infra::http::deleted` hard-codes
       `no {noun} with that id` (`src/infra/http.rs:156`), which is wrong for `DELETE /exchanges/{mic}`
       (key is `mic`, `src/entities/exchange.rs:123-124`) and `DELETE /tax_year_settings/{tax_year}`
       (`src/entities/tax_year_settings.rs`). Give each a key-specific body (`no exchange with that

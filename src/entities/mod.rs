@@ -89,7 +89,7 @@ mod tests {
     use crate::test_support::{ApiClient, test_pool};
     use axum::http::StatusCode;
 
-    /// Every entity DELETE route, with the noun its 404 body must name.
+    /// Every entity DELETE route, with the exact 404 body it must answer.
     ///
     /// A delete is fired from a list row, so its failure only ever reaches the
     /// user as a toast — an empty-bodied 404 shows as a bare "HTTP 404". The
@@ -97,44 +97,63 @@ mod tests {
     /// `StatusCode::NOT_FOUND`) before `infra::http::deleted` and the
     /// `CrudEntity` delete handler made one wording the default; this table
     /// keeps a new entity from drifting again.
+    ///
+    /// The body is pinned whole rather than merely containing the noun: an
+    /// entity keyed on a natural key must name *its* key, not `id` — the URL
+    /// for `/exchanges/ZZZZ` never carries an id, so `no exchange with that
+    /// id` would send the user looking for a column that is not there.
     const DELETE_ROUTES: &[(&str, &str)] = &[
-        ("/amma_statements/9999", "AMMA statement"),
-        ("/amit_adjustments/9999", "AMIT adjustment"),
-        ("/attachments/9999", "attachment"),
-        ("/cgt_settings/9999", "CGT settings row"),
-        ("/closing_prices/9999/2024-01-02", "stored price"),
-        ("/corporate_actions/9999", "corporate action"),
-        ("/drp_enrolments/9999", "DRP enrolment"),
-        ("/ess_statements/9999", "ESS statement"),
-        ("/exchanges/ZZZZ", "exchange"),
-        ("/exchange_holidays/ZZZZ/2024-01-02", "exchange holiday"),
-        ("/holding_accounts/9999", "holding account"),
-        ("/income/9999", "income"),
-        ("/income/9999/reinvest", "distribution"),
-        ("/inheritances/9999", "inheritance"),
-        ("/interest_income/9999", "interest income"),
-        ("/investment_expenses/9999", "investment expense"),
-        ("/listings/9999", "listing"),
-        ("/rights_sales/9999", "rights sale"),
-        ("/sells/9999", "sell"),
-        ("/tax_year_settings/2026", "tax year settings row"),
-        ("/trades/9999", "trade"),
-        ("/transfers/9999", "transfer"),
+        ("/amma_statements/9999", "no AMMA statement with that id"),
+        ("/amit_adjustments/9999", "no AMIT adjustment with that id"),
+        ("/attachments/9999", "no attachment with that id"),
+        ("/cgt_settings/9999", "no CGT settings row with that id"),
+        (
+            "/closing_prices/9999/2024-01-02",
+            "no stored price for that listing and date",
+        ),
+        (
+            "/corporate_actions/9999",
+            "no corporate action with that id",
+        ),
+        ("/drp_enrolments/9999", "no DRP enrolment with that id"),
+        ("/ess_statements/9999", "no ESS statement with that id"),
+        ("/exchanges/ZZZZ", "no exchange with that mic"),
+        (
+            "/exchange_holidays/ZZZZ/2024-01-02",
+            "no exchange holiday on that date for that exchange",
+        ),
+        ("/holding_accounts/9999", "no holding account with that id"),
+        ("/income/9999", "no income with that id"),
+        ("/income/9999/reinvest", "no distribution with that id"),
+        ("/inheritances/9999", "no inheritance with that id"),
+        ("/interest_income/9999", "no interest income with that id"),
+        (
+            "/investment_expenses/9999",
+            "no investment expense with that id",
+        ),
+        ("/listings/9999", "no listing with that id"),
+        ("/rights_sales/9999", "no rights sale with that id"),
+        ("/sells/9999", "no sell with that id"),
+        (
+            "/tax_year_settings/2026",
+            "no tax year settings row for that year",
+        ),
+        ("/trades/9999", "no trade with that id"),
+        ("/transfers/9999", "no transfer with that id"),
     ];
 
     #[tokio::test]
     async fn deleting_a_missing_row_is_404_naming_what_was_missing() {
-        for (uri, noun) in DELETE_ROUTES {
+        for (uri, expected) in DELETE_ROUTES {
             let pool = test_pool().await;
             let resp = ApiClient::over(router().with_state(pool))
                 .delete(*uri)
                 .await;
             assert_eq!(resp.status, StatusCode::NOT_FOUND, "DELETE {uri}");
-            let body = resp.text().to_string();
-            assert!(
-                body.contains(noun),
-                "DELETE {uri} answered 404 with a body that does not name the missing \
-                 {noun}: {body:?}"
+            assert_eq!(
+                resp.text(),
+                *expected,
+                "DELETE {uri} answered 404 with the wrong body"
             );
         }
     }
