@@ -49,7 +49,9 @@ use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::sync::LazyLock;
 
-#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize, sqlx::Type)]
+#[derive(
+    utoipa::ToSchema, Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize, sqlx::Type,
+)]
 pub enum ResidualHandling {
     /// Leftover cash is carried forward and added to the next reinvestment.
     #[default]
@@ -58,7 +60,7 @@ pub enum ResidualHandling {
     PayOut,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct DrpEnrolment {
     pub id: i64,
     /// Listing this enrolment period applies to.
@@ -78,7 +80,7 @@ pub struct DrpEnrolment {
     pub residual_handling: ResidualHandling,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DrpEnrolmentBody {
     pub listing_id: i64,

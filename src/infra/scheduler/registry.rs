@@ -94,7 +94,7 @@ fn flag<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<bool, D::Er
 /// lines every startup buried the one that would matter). It is carried on
 /// `GET /jobs` too, so the Jobs screen can label a never-scheduled job as what
 /// it is rather than leaving it looking overdue.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JobTrigger {
     /// Recurring work: it belongs on the schedule, so a missing line is a fault.

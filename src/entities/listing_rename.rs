@@ -74,7 +74,7 @@ use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct ListingRename {
     pub id: i64,
     pub listing_id: i64,
@@ -93,7 +93,7 @@ pub struct ListingRename {
     pub note: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RenameBody {
     pub effective_date: NaiveDate,

@@ -81,7 +81,7 @@ pub struct TaxReportRequest {
 
 // ---- meta ---------------------------------------------------------------
 
-#[derive(Debug, Serialize)]
+#[derive(utoipa::ToSchema, Debug, Serialize)]
 pub struct TaxReportMeta {
     pub tax_year: i32,
     pub period_start: NaiveDate,
@@ -155,7 +155,7 @@ fn period_for(tax_year: TaxYear) -> (NaiveDate, NaiveDate) {
 
 // ---- completeness ---------------------------------------------------------
 
-#[derive(Debug, Serialize)]
+#[derive(utoipa::ToSchema, Debug, Serialize)]
 pub struct AmmaMissingAlert {
     pub listing_id: i64,
     pub ticker: String,
@@ -173,7 +173,7 @@ pub struct AmmaMissingAlert {
 /// statement and there would be nothing to enter to clear it. It is a
 /// question, not a gap — either the year's distributions have not been entered
 /// yet, or the fund genuinely made none.
-#[derive(Debug, Serialize)]
+#[derive(utoipa::ToSchema, Debug, Serialize)]
 pub struct AmmaNothingRecordedAlert {
     pub listing_id: i64,
     pub ticker: String,
@@ -189,7 +189,7 @@ struct AmmaCoverage {
     nothing_recorded: Vec<AmmaNothingRecordedAlert>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(utoipa::ToSchema, Debug, Serialize)]
 pub struct Completeness {
     pub complete: bool,
     /// AMIT (listing, holding account) pairs **known to have been attributed
@@ -422,7 +422,8 @@ async fn amma_coverage(
 
 // ---- disposals ------------------------------------------------------------
 
-#[derive(Debug, Default, Clone, Copy, Serialize)]
+#[derive(utoipa::ToSchema, Debug, Default, Clone, Copy, Serialize)]
+#[schema(as = TaxReportDisposalTotals)]
 pub struct DisposalTotals {
     pub proceeds_aud: Decimal,
     pub cost_base_aud: Decimal,
@@ -451,7 +452,7 @@ impl DisposalTotals {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(utoipa::ToSchema, Debug, Serialize)]
 pub struct DisposalParcelRow {
     pub source: DisposalSource,
     pub sale_trade_id: i64,
@@ -609,7 +610,7 @@ impl DisposalParcelRow {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(utoipa::ToSchema, Debug, Serialize)]
 pub struct DisposalListingGroup {
     pub listing_id: i64,
     pub ticker: String,
@@ -618,7 +619,7 @@ pub struct DisposalListingGroup {
     pub subtotal: DisposalTotals,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(utoipa::ToSchema, Debug, Serialize)]
 pub struct DisposalsSection {
     pub listings: Vec<DisposalListingGroup>,
     pub totals: DisposalTotals,
@@ -1092,7 +1093,7 @@ async fn disposals_section(
 
 // ---- income -----------------------------------------------------------
 
-#[derive(Debug, Serialize)]
+#[derive(utoipa::ToSchema, Debug, Serialize)]
 pub struct TrustIncomeRow {
     pub income_id: i64,
     pub listing_id: i64,
@@ -1142,7 +1143,7 @@ pub struct TrustIncomeRow {
     pub franking_credits_denied_aud: Decimal,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(utoipa::ToSchema, Debug, Serialize)]
 pub struct AmmaStatementRow {
     pub amma_statement_id: i64,
     pub listing_id: i64,
@@ -1170,7 +1171,7 @@ pub struct AmmaStatementRow {
     pub tfn_withholding_tax_aud: Decimal,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(utoipa::ToSchema, Debug, Serialize)]
 pub struct DividendIncomeRow {
     pub income_id: i64,
     pub listing_id: i64,
@@ -1194,7 +1195,7 @@ pub struct DividendIncomeRow {
 /// calculated from — a dividend equivalent on unvested RSUs (TD 2017/26,
 /// SCENARIOS J-10). Printed in its own table, never among the dividends, since
 /// the whole point of the kind is that the payment is not one.
-#[derive(Debug, Serialize)]
+#[derive(utoipa::ToSchema, Debug, Serialize)]
 pub struct EmploymentIncomeRow {
     pub income_id: i64,
     pub listing_id: i64,
@@ -1209,7 +1210,7 @@ pub struct EmploymentIncomeRow {
 /// receipt (QC 69950, `docs/ato/crypto-staking-airdrops.md`, SCENARIOS
 /// L-03/L-04). Printed in its own table against **item 24**, never among the
 /// dividends.
-#[derive(Debug, Serialize)]
+#[derive(utoipa::ToSchema, Debug, Serialize)]
 pub struct OtherIncomeRow {
     pub income_id: i64,
     pub listing_id: i64,
@@ -1223,7 +1224,7 @@ pub struct OtherIncomeRow {
 /// defined by it: which rows a subtotal may add is a tax question, not a
 /// string comparison. The serialized names are the labels the printed table's
 /// *Kind* column shows.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(utoipa::ToSchema, Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub enum ForeignIncomeKind {
     /// An [income](crate::entities::income) row's `foreign_source_income` —
     /// a foreign company's dividend or a trust's foreign-source component.
@@ -1245,7 +1246,7 @@ pub enum ForeignIncomeKind {
     EssMemo,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(utoipa::ToSchema, Debug, Serialize)]
 pub struct ForeignIncomeRow {
     pub kind: ForeignIncomeKind,
     pub listing_id: Option<i64>,
@@ -1264,7 +1265,7 @@ pub struct ForeignIncomeRow {
 /// The rows themselves stay exact and still sum exactly to their tax-summary
 /// lines, so a line here can sit up to a cent from the exact sum of those —
 /// the accepted price of a printed working that adds up.
-#[derive(Debug, Default, Serialize)]
+#[derive(utoipa::ToSchema, Debug, Default, Serialize)]
 pub struct ForeignIncomeSubtotal {
     pub amount_aud: Decimal,
     pub foreign_tax_paid_aud: Decimal,
@@ -1294,7 +1295,7 @@ impl ForeignIncomeSubtotal {
 /// already inside the year's ESS discount at item 12, so totalling it here
 /// would report the same dollars twice. That is why `total` need not equal the
 /// column as printed — the memo row is marked as one in its own *Kind* cell.
-#[derive(Debug, Default, Serialize)]
+#[derive(utoipa::ToSchema, Debug, Default, Serialize)]
 pub struct ForeignIncomeTotals {
     pub non_amma: ForeignIncomeSubtotal,
     pub amma: ForeignIncomeSubtotal,
@@ -1318,7 +1319,7 @@ impl ForeignIncomeTotals {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(utoipa::ToSchema, Debug, Serialize)]
 pub struct InterestIncomeRow {
     pub interest_income_id: i64,
     pub date_paid: NaiveDate,
@@ -1329,7 +1330,7 @@ pub struct InterestIncomeRow {
     pub tfn_withholding_tax_aud: Decimal,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(utoipa::ToSchema, Debug, Serialize)]
 pub struct EssIncomeRow {
     pub ess_statement_id: i64,
     pub listing_id: i64,
@@ -1343,7 +1344,7 @@ pub struct EssIncomeRow {
     pub tfn_withholding_aud: Decimal,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(utoipa::ToSchema, Debug, Serialize)]
 pub struct DeductionRow {
     pub investment_expense_id: i64,
     pub date_incurred: NaiveDate,
@@ -1369,7 +1370,7 @@ pub struct DeductionRow {
     pub description: Option<String>,
 }
 
-#[derive(Debug, Default, Serialize)]
+#[derive(utoipa::ToSchema, Debug, Default, Serialize)]
 pub struct IncomeSections {
     pub trust_income: Vec<TrustIncomeRow>,
     pub amma_statements: Vec<AmmaStatementRow>,
@@ -1903,7 +1904,7 @@ async fn push_deduction_rows(
 
 // ---- tax summary ------------------------------------------------------
 
-#[derive(Debug, Serialize)]
+#[derive(utoipa::ToSchema, Debug, Serialize)]
 pub struct TaxSummaryLine {
     pub field: String,
     pub ato_label: String,
@@ -1912,7 +1913,7 @@ pub struct TaxSummaryLine {
 
 // ---- top level ----------------------------------------------------------
 
-#[derive(Debug, Serialize)]
+#[derive(utoipa::ToSchema, Debug, Serialize)]
 pub struct TaxReport {
     pub meta: TaxReportMeta,
     pub completeness: Completeness,

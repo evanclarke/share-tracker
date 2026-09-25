@@ -12,7 +12,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct AmmaStatement {
     pub id: i64,
     pub listing_id: i64,
@@ -99,7 +99,7 @@ pub struct AmmaStatement {
     pub holding_account_id: i64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AmmaStatementBody {
     pub listing_id: i64,

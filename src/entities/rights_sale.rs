@@ -68,7 +68,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool, sqlite::SqliteRow};
 use std::collections::HashMap;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(utoipa::ToSchema, Debug, Clone, Serialize)]
 pub struct RightsSale {
     pub id: i64,
     pub rights_action_id: i64,
@@ -85,7 +85,7 @@ pub struct RightsSale {
     pub allocations: Vec<RightsSaleAllocation>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(utoipa::ToSchema, Debug, Clone, Serialize)]
 pub struct RightsSaleAllocation {
     pub purchase_trade_id: i64,
     pub units: Decimal,
@@ -105,15 +105,16 @@ fn sale_from_row(row: &SqliteRow) -> Result<RightsSale, sqlx::Error> {
     })
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[schema(as = SellRightsAllocationInput)]
 pub struct AllocationInput {
     pub purchase_trade_id: i64,
     #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub units: Decimal,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SellRightsBody {
     /// Sale (or lapse) date. Must not precede the issue's record date.

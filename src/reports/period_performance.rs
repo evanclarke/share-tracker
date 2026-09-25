@@ -58,7 +58,7 @@ pub struct PeriodRequest {
     pub to: NaiveDate,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize)]
 pub struct HoldingPeriod {
     pub listing_id: i64,
     pub holding_account_id: i64,
@@ -72,7 +72,7 @@ pub struct HoldingPeriod {
     pub total_return: Decimal,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize)]
 pub struct CurrencyFx {
     pub currency: String,
     pub fx_movement: Decimal,
@@ -86,7 +86,7 @@ pub struct CurrencyFx {
     pub provisional: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize)]
 pub struct PeriodPerformance {
     pub from: NaiveDate,
     pub to: NaiveDate,

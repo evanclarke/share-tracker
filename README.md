@@ -395,7 +395,7 @@ Before installing, if the service is running, `update.sh` takes a one-off backup
 
 - [Features](docs/FEATURES.md) — what each feature does, the ATO rule behind it, and where it stops
 - [Database schema](docs/SCHEMA.md) — every table, column, and relationship
-- [HTTP API](docs/API.md) — every endpoint, request/response shape, and response code, plus known limitations
+- [HTTP API](docs/API.md) — every endpoint, request/response shape, and response code, plus known limitations. A generated [OpenAPI 3.1 description](docs/API.md#openapi-description) of the whole surface is served at `GET /openapi.json`
 - [docs/ato/](docs/ato/OVERVIEW.md) — mirrored ATO reference guidance behind the tax calculations
 
 ## Tech stack

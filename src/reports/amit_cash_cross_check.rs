@@ -19,7 +19,7 @@ use std::collections::{BTreeMap, HashSet};
 /// entering the fund's AMMA statement clears the flag. The converse (an AMMA
 /// year with no cash rows) is not flagged: a fund can be held without
 /// receiving or recording cash that year.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AmitCashAlert {
     pub listing_id: i64,
     pub ticker: String,

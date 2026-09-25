@@ -62,7 +62,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, Row, SqlitePool};
 use std::collections::HashMap;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize)]
 pub struct NetCapitalGainYear {
     /// Australian tax year: the calendar year in which 30 June falls (e.g. 2024 = FY2023/24).
     pub tax_year: i32,
@@ -999,7 +999,7 @@ fn net_years(
 /// second implementation of the netting rule. It is therefore at the cent
 /// and internally consistent for the same reason (SCENARIOS W-f): this is
 /// the layout that is *printed*, and its lines subtract from one another.
-#[derive(Debug, Clone, Serialize)]
+#[derive(utoipa::ToSchema, Debug, Clone, Serialize)]
 pub(crate) struct CgtSummaryYear {
     pub tax_year: i32,
     /// "Capital Gains on shares applicable for 'Other' method (short term
@@ -1203,7 +1203,7 @@ async fn net_capital_gain_export_handler(
 /// `proceeds` (total capital proceeds, AUD), drawn from open parcels via
 /// either explicit `allocations` or a named optimiser `strategy` — exactly
 /// one of the two.
-#[derive(Debug, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WhatIfRequest {
     pub listing_id: i64,
@@ -1223,7 +1223,7 @@ pub struct WhatIfRequest {
     pub strategy: Option<Strategy>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WhatIfAllocation {
     pub purchase_trade_id: i64,
@@ -1233,14 +1233,14 @@ pub struct WhatIfAllocation {
 
 /// One year row labelled with its scenario (`without` / `with` the
 /// hypothetical disposal).
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Serialize, Deserialize)]
 pub struct ScenarioYear {
     pub scenario: String,
     #[serde(flatten)]
     pub year: NetCapitalGainYear,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Serialize, Deserialize)]
 pub struct WhatIfResponse {
     /// The disposal's tax year — the year the two scenario rows describe.
     pub tax_year: i32,

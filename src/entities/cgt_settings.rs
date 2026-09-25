@@ -19,7 +19,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct CgtSettings {
     /// Always 1 — the table CHECKs it, so at most one settings row exists.
     pub id: i64,
@@ -29,7 +29,7 @@ pub struct CgtSettings {
     pub opening_capital_loss: Decimal,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CgtSettingsBody {
     #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]

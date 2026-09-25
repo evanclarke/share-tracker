@@ -20,7 +20,9 @@ const MIC_REGISTRY_URL: &str =
 
 /// The ISO STATUS of a MIC entry — a limited value set, so an enum with a DB
 /// CHECK (0051) rather than free text.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[derive(
+    utoipa::ToSchema, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type,
+)]
 #[sqlx(rename_all = "UPPERCASE")]
 #[serde(rename_all = "UPPERCASE")]
 pub enum MicStatus {
@@ -48,7 +50,7 @@ impl MicStatus {
 /// `EXPIRED`); `expiry_date` is set only for expired entries. All fields are
 /// surfaced by the read endpoints; `status`/`expiry_date` additionally drive the
 /// exchange-MIC validation report.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
 pub struct MicEntry {
     pub mic: String,
     pub operating_mic: String,
@@ -74,7 +76,8 @@ pub enum ImportError {
 /// Outcome of an import run: how many registry rows were written (inserted or
 /// updated). The registry mirrors the latest ISO publication, so every row in the
 /// feed is upserted on every run.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[schema(as = MicImportSummary)]
 pub struct ImportSummary {
     pub imported: usize,
 }

@@ -23,7 +23,7 @@ below.
 The API is also consumed by LLMs and scripts, not just the web UI. These close the gaps the audit
 found for a non-browser client; the first is the largest.
 
-- [ ] Emit a machine-readable API description (OpenAPI or JSON-Schema). The whole contract is
+- [x] Emit a machine-readable API description (OpenAPI or JSON-Schema). The whole contract is
       currently the ~616 KB prose `docs/API.md` (1,936 lines), with the critical global rules
       (money/quantity as JSON strings, `deny_unknown_fields` on every body) stated only in prose at
       the end (docs/API.md:1838–1865). Generate it from the route table + serde structs and pin it

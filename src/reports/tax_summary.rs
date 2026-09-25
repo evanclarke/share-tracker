@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, Row, SqlitePool};
 use std::collections::{HashMap, HashSet};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize)]
 pub struct TaxYearSummary {
     /// Australian tax year: the calendar year in which June 30 falls (e.g. 2024 = FY2023/24).
     pub tax_year: i32,

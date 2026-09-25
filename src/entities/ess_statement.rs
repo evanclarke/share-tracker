@@ -45,7 +45,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct EssStatement {
     pub id: i64,
     pub listing_id: i64,
@@ -124,7 +124,7 @@ pub struct EssStatement {
     pub vest_trade_id: Option<i64>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EssStatementBody {
     pub listing_id: i64,

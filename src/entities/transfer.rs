@@ -51,7 +51,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Transfer {
     pub id: i64,
     pub listing_id: i64,
@@ -68,7 +68,7 @@ pub struct Transfer {
     pub fee_sale_trade_id: Option<i64>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TransferBody {
     pub listing_id: i64,
@@ -108,7 +108,7 @@ pub struct TransferBody {
 /// The two sides of an executed transfer: the transfer-out Sell in the source
 /// account and the transfer-in Buys it re-created in the destination (one per
 /// consumed parcel, in allocation order).
-#[derive(Debug, Serialize)]
+#[derive(utoipa::ToSchema, Debug, Serialize)]
 pub struct TransferGroup {
     pub transfer: Transfer,
     pub sell: Trade,

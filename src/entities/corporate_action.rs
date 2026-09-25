@@ -142,7 +142,8 @@ pub use adjustments::{
 pub use db::{db_get_tx, rebased_quantity_beyond_range};
 pub use http::router;
 pub use model::{
-    ActionKind, CorporateAction, NOTHING_PAID_FOR_NON_RENOUNCEABLE_RIGHTS, WorthlessEvent,
+    ActionKind, CorporateAction, CorporateActionBody, NOTHING_PAID_FOR_NON_RENOUNCEABLE_RIGHTS,
+    WorthlessEvent,
 };
 
 /// Referenced by name only from other modules' tests (production code calls

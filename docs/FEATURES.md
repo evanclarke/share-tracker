@@ -368,6 +368,10 @@ What it puts on screen:
 
 See [Web frontend](API.md#web-frontend).
 
+### Machine-readable API description
+
+The whole HTTP surface — every route, its success status, and its request and response schemas — is served as a generated **OpenAPI 3.1** document at `GET /openapi.json`, so a machine client (an LLM, a deployment script) can read the contract without parsing the prose in [API.md](API.md). It is derived from the code rather than written beside it: the paths come from a route table in `src/api_spec.rs` and the schemas from `#[derive(utoipa::ToSchema)]` on the real request/response structs. Tests pin it **both ways** — a route the sources register but the document omits fails the suite, as does a document path no source registers — and pin the two global rules structurally: a money or quantity field's schema is a JSON `string`, and every request-body schema carries `additionalProperties: false`. It sits behind `[auth]` like every other route (see [OpenAPI description](API.md#openapi-description)).
+
 ### Append-only audit trail
 
 Every edit or deletion of a financial fact (trades, allocations, income, statements, corporate actions, expenses, hand-entered closing prices, the exchange holiday calendar every valuation reads, and the rest of the audited tables) records the prior row with a UTC timestamp, written by database triggers inside the same transaction so no write path can bypass it; entries are kept forever, the trail itself cannot be rewritten (database-enforced append-only), and any record's history is inspectable via the API and the web UI's Row History screen — which also **browses the recent changes across every audited table**, newest first and cursor-paged, so an operation that changed rows you never named (a demerger group, a cascade delete, a bulk price clear) is found by *when it happened* and drilled into from there, rather than needing an id that appears in no list once the row is gone.

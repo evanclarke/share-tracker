@@ -31,7 +31,7 @@ use std::collections::HashSet;
 /// 1985, inside FY1986. Pinned by the table's CHECK too.
 pub const FIRST_TAX_YEAR: i64 = 1986;
 
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct TaxYearSettings {
     /// The financial year, by the calendar year of its 30 June end.
     pub tax_year: i64,
@@ -41,7 +41,7 @@ pub struct TaxYearSettings {
     pub ess_taxed_upfront_reduction_eligible: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TaxYearSettingsBody {
     /// Defaults to true so a PUT can state only the ineligible case, and an

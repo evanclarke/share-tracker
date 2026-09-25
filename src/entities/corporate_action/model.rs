@@ -12,7 +12,7 @@ use sqlx::Row;
 /// produce the identical loss arithmetic (close every open parcel at nil
 /// proceeds); the discriminator captures the legal basis. Serialized as its
 /// variant name, the value stored in the `worthless_event` TEXT column.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum WorthlessEvent {
     /// CGT event G3 (s 104-145): a liquidator/administrator declared the shares
     /// worthless and the shareholder chose to crystallise the loss.
@@ -46,7 +46,7 @@ impl WorthlessEvent {
 /// states the table CHECKs reject) is unrepresentable once constructed.
 /// Internally tagged on `action_type` and flattened into [`CorporateAction`],
 /// so the JSON wire shape stays flat: the tag plus the variant's own fields.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "action_type")]
 pub enum ActionKind {
     ReturnOfCapital {
@@ -228,7 +228,7 @@ impl ActionKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
 pub struct CorporateAction {
     pub id: i64,
     pub listing_id: i64,
@@ -325,7 +325,7 @@ impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for ActionKind {
 /// The PUT body's `action_type` tag. Deserialized separately from the
 /// payload fields (unlike [`ActionKind`]) so a stray cross-type field is
 /// *rejected*, not silently dropped as serde's tagged-enum decoding would.
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Clone, Copy, Deserialize)]
 enum ActionType {
     ReturnOfCapital,
     ShareSplit,
@@ -337,7 +337,7 @@ enum ActionType {
     WorthlessShares,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CorporateActionBody {
     action_type: ActionType,

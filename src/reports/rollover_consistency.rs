@@ -71,7 +71,7 @@ use sqlx::{FromRow, Row, SqlitePool};
 use std::collections::HashMap;
 
 /// Which operation a flagged group is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RolloverKind {
     Transfer,
     ScripForScrip,
@@ -108,7 +108,7 @@ impl From<whole_holding::Kind> for RolloverKind {
 /// One rollover whose stored figures no longer reconcile (or cannot be
 /// checked), with every problem found on it. A rollover that reconciles is not
 /// returned at all.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RolloverAlert {
     pub kind: RolloverKind,
     /// The `transfers.id` / `corporate_actions.id` the group hangs off.

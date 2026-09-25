@@ -90,7 +90,9 @@ use crate::entities::closing_price::{self, Market};
 use crate::reports::{performance, portfolio, unrealised_gains, valuation};
 
 /// The price-dependent reports that are snapshotted daily.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type)]
+#[derive(
+    utoipa::ToSchema, Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type,
+)]
 #[sqlx(rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
 pub enum ReportKind {
@@ -121,7 +123,7 @@ impl ReportKind {
 
 /// One stored snapshot's metadata (the result rows are fetched separately —
 /// lists never carry the JSON payload).
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct SnapshotMeta {
     pub report: ReportKind,
     pub snapshot_date: NaiveDate,
@@ -155,7 +157,7 @@ pub struct SnapshotMeta {
 /// `try_from` newtype the `FromRow` derives read it through (a `Vec` of a
 /// local type cannot implement `TryFrom<String>` itself). Serialises as the
 /// bare array, so the API shape is a list, not a wrapper.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ExcludedHoldings(pub Vec<valuation::ExcludedHolding>);
 
@@ -168,7 +170,7 @@ impl TryFrom<String> for ExcludedHoldings {
 }
 
 /// A full snapshot: metadata plus the report's stored response rows.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Serialize, Deserialize)]
 pub struct Snapshot {
     pub report: ReportKind,
     pub snapshot_date: NaiveDate,
@@ -186,7 +188,7 @@ pub struct Snapshot {
 /// One point of the snapshot time series (from the unrealised-gains
 /// snapshots): portfolio-total AUD figures for graphing market value and
 /// unrealised gain over time.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Serialize, Deserialize)]
 pub struct SeriesPoint {
     pub snapshot_date: NaiveDate,
     pub stale: bool,
@@ -212,7 +214,7 @@ pub struct SeriesPoint {
 /// the one thing this line exists to show. The row's own
 /// `opening_market_value`/`closing_market_value` columns carry the position's
 /// size beside it.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Serialize, Deserialize)]
 pub struct HoldingSeriesPoint {
     pub snapshot_date: NaiveDate,
     pub unit_price: Decimal,
@@ -223,7 +225,7 @@ pub struct HoldingSeriesPoint {
 /// contributions table. Deliberately just the plotted figure: the
 /// contributions row itself carries every money column the reader can read,
 /// and the line is there for the *shape* of the window.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Serialize, Deserialize)]
 pub struct HoldingSeries {
     pub listing_id: i64,
     pub holding_account_id: i64,
@@ -550,7 +552,7 @@ pub async fn latest_snapshot_date(
 /// definition as [`closing_price::db_held_listing_ids`]) through the latest
 /// date the portfolio can be valued at with final prices. Both `None` when
 /// nothing has ever been held.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Serialize, Deserialize)]
 pub struct RegenerateRange {
     pub from: Option<NaiveDate>,
     pub to: Option<NaiveDate>,
@@ -877,13 +879,13 @@ pub async fn run_snapshot_job(pool: &SqlitePool, now: DateTime<Utc>) -> Result<(
 /// What a bulk regeneration did: the dates regenerated, and the dates that
 /// could not be (with each one's blocker) — a blocked date never aborts the
 /// others.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Serialize, Deserialize)]
 pub struct RegenerateSummary {
     pub regenerated: Vec<NaiveDate>,
     pub blocked: Vec<BlockedDate>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Serialize, Deserialize)]
 pub struct BlockedDate {
     pub date: NaiveDate,
     pub reason: String,
@@ -1024,9 +1026,10 @@ struct HoldingSeriesParams {
     to: Option<NaiveDate>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct GenerateBody {
+#[schema(as = SnapshotGenerateBody)]
+pub(crate) struct GenerateBody {
     /// The snapshot date; defaults to the latest fully-valuable date.
     date: Option<NaiveDate>,
 }
@@ -1103,9 +1106,9 @@ impl From<GenerateError> for ApiError {
 
 /// The optional `{ "from", "to" }` body for `regenerate_all` — either or both
 /// omitted default per [`default_regenerate_range`].
-#[derive(Debug, Default, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RegenerateBody {
+pub(crate) struct RegenerateBody {
     from: Option<NaiveDate>,
     to: Option<NaiveDate>,
 }

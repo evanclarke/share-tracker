@@ -43,7 +43,6 @@ pub use db::JOB_RUN_HISTORY_LIMIT;
 pub use db::JobRunStatus;
 #[cfg(test)]
 use db::{db_record_run, db_run_histories, db_start_run};
-#[cfg(test)]
 pub use http::JobStatus;
 #[cfg(test)]
 pub use registry::{JobParams, JobTrigger, RegisteredJob};

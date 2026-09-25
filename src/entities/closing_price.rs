@@ -215,12 +215,14 @@ pub use db::{ClearOutcome, db_clear_unpriced_before, db_delete, db_list};
 pub use fetcher::{
     FetchFuture, FetchedClose, LatestQuote, PriceFetcher, QuoteFuture, QuotesFuture,
 };
-#[cfg(test)]
-pub use http::{BackfillSummary, ClearSummary};
+pub use http::{
+    BackfillBody, BackfillSummary, ClearBody, ClearSummary, FetchBody, ManualPriceBody,
+};
 #[cfg(test)]
 pub use live::fetch_live_aud_prices;
+pub use model::ClosingPrice;
 #[cfg(test)]
-pub use model::{ClosingPrice, UNASSIGNED_ID};
+pub use model::UNASSIGNED_ID;
 /// Reached by name only from tests: the symbol resolution the live fetcher
 /// does (so a stub's stored `fetched_symbol` is the symbol a real fetch would
 /// have recorded), its provider-failure classification, and the by-symbol

@@ -39,7 +39,7 @@ pub const DEFAULT_WINDOW_DAYS: i64 = 30;
 
 /// One loss-Sell × re-acquisition pair inside the window. A Sell with several
 /// nearby Buys yields one row per Buy.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WashSaleAlert {
     pub sale_trade_id: i64,
     pub listing_id: i64,

@@ -47,7 +47,7 @@ use std::collections::HashMap;
 /// One AMMA statement whose per-parcel adjustment set does not reconcile,
 /// with every problem found on it. A statement that reconciles is not
 /// returned at all.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AmitAdjustmentAlert {
     pub amma_statement_id: i64,
     pub listing_id: i64,

@@ -10,7 +10,7 @@ use sqlx::SqlitePool;
 #[cfg(test)]
 use sqlx::Row;
 
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct ParcelAllocation {
     pub id: i64,
     pub sale_trade_id: i64,

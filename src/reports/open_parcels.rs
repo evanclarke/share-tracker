@@ -10,7 +10,7 @@ use std::collections::HashMap;
 /// One open (not fully sold) purchase parcel — the per-parcel schedule a user
 /// reconciles against a broker statement. All monetary figures are AUD,
 /// converted at the parcel's buy-month ATO rate (manual `fx_rate` fallback).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize)]
 pub struct OpenParcel {
     /// The Buy/DRP trade that created the parcel.
     pub trade_id: i64,

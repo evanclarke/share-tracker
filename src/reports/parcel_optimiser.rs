@@ -53,7 +53,7 @@ use std::collections::HashMap;
 
 /// A parcel-selection strategy: the order in which open parcels are consumed
 /// by a hypothetical sale.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Strategy {
     /// Oldest acquisition first — the no-choice baseline.
@@ -291,7 +291,7 @@ pub fn allocate_strategy(
 }
 
 /// One parcel's share of a hypothetical disposal.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize)]
 pub struct HypotheticalAllocation {
     pub purchase_trade_id: i64,
     pub holding_account_id: i64,
@@ -309,7 +309,8 @@ pub struct HypotheticalAllocation {
 
 /// A hypothetical disposal's totals, in the realised-gains report's buckets:
 /// `capital_gain_loss == discount_eligible_gain + non_discountable_gain − capital_loss`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Clone, Default, Serialize, Deserialize)]
+#[schema(as = OptimiserDisposalTotals)]
 pub struct DisposalTotals {
     pub proceeds: Decimal,
     pub cost_base: Decimal,
@@ -410,21 +411,21 @@ pub struct OptimiserRequest {
 
 /// One strategy's candidate: its totals, with the per-parcel rows in the
 /// response's flat `allocations` list (keyed back by `strategy`).
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Serialize, Deserialize)]
 pub struct StrategySummary {
     pub strategy: Strategy,
     #[serde(flatten)]
     pub totals: DisposalTotals,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Serialize, Deserialize)]
 pub struct StrategyAllocation {
     pub strategy: Strategy,
     #[serde(flatten)]
     pub allocation: HypotheticalAllocation,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Serialize, Deserialize)]
 pub struct OptimiserResponse {
     pub listing_id: i64,
     pub holding_account_id: i64,

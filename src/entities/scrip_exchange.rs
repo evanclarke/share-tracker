@@ -72,7 +72,8 @@ use sqlx::SqlitePool;
 /// The two sides of an exchange: the closing Sell on the original listing
 /// and the replacement Buys it was substituted with (one per consumed
 /// parcel, in the original parcels' date order).
-#[derive(Debug, Serialize)]
+#[derive(utoipa::ToSchema, Debug, Serialize)]
+#[schema(as = ScripExchange)]
 pub struct Exchange {
     pub sell: Trade,
     pub replacements: Vec<Trade>,

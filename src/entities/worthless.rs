@@ -56,7 +56,7 @@ use std::collections::HashMap;
 
 /// The result of recognising a worthless holding: the closing Sell that
 /// consumed every open parcel at nil proceeds.
-#[derive(Debug, Serialize)]
+#[derive(utoipa::ToSchema, Debug, Serialize)]
 pub struct Recognise {
     pub sell: Trade,
 }

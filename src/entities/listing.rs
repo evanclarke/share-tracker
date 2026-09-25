@@ -15,7 +15,7 @@ use sqlx::SqlitePool;
 // `security_type` column (matched by a CHECK constraint), so the acronym
 // spellings are the wire/storage format and must not be camel-cased.
 #[allow(clippy::upper_case_acronyms)]
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, sqlx::Type)]
+#[derive(utoipa::ToSchema, Debug, Clone, Copy, PartialEq, Serialize, Deserialize, sqlx::Type)]
 pub enum SecurityType {
     Share,
     ETF,
@@ -28,7 +28,7 @@ pub enum SecurityType {
     Crypto,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Listing {
     pub id: i64,
     /// NULL exactly for Crypto listings (CHECK-enforced): a crypto asset
@@ -95,7 +95,7 @@ pub struct Listing {
     pub price_symbol: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ListingBody {
     #[serde(default)]

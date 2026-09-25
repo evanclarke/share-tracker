@@ -9,7 +9,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 /// Whether a stored row carries a price or a fetch failure.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, sqlx::Type)]
+#[derive(utoipa::ToSchema, Debug, Clone, Copy, PartialEq, Serialize, Deserialize, sqlx::Type)]
 #[sqlx(rename_all = "lowercase")]
 #[serde(rename_all = "lowercase")]
 pub enum PriceStatus {
@@ -19,7 +19,7 @@ pub enum PriceStatus {
 
 /// How a stored row came to be: fetched from the provider, or entered by hand
 /// for a day the provider cannot serve.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, sqlx::Type)]
+#[derive(utoipa::ToSchema, Debug, Clone, Copy, PartialEq, Serialize, Deserialize, sqlx::Type)]
 #[sqlx(rename_all = "lowercase")]
 #[serde(rename_all = "lowercase")]
 pub enum PriceOrigin {
@@ -31,7 +31,9 @@ pub enum PriceOrigin {
 /// was entered by hand. A closed set — the DB CHECK added in 0051 pins it to
 /// `{'yahoo', 'manual'}` — and a typed enum here, so a typo cannot silently
 /// change the provenance a row records.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[derive(
+    utoipa::ToSchema, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type,
+)]
 #[sqlx(rename_all = "lowercase")]
 #[serde(rename_all = "lowercase")]
 pub enum PriceSource {
@@ -49,7 +51,7 @@ pub const UNASSIGNED_ID: i64 = 0;
 
 /// One stored closing price — or one recorded fetch failure (`status =
 /// "error"`, `price` null, `error` set).
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct ClosingPrice {
     /// Server-assigned surrogate key (0021): the row's identity for the audit
     /// trail (`row_history.row_id`, so `GET /reports/row_history` can be

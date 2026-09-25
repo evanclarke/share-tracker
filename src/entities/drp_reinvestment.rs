@@ -113,7 +113,7 @@ use rust_decimal::Decimal;
 use serde::Deserialize;
 use sqlx::SqlitePool;
 
-#[derive(Debug, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReinvestBody {
     /// Per-share price the distribution is reinvested at.

@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::collections::HashSet;
 
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct ExchangeHoliday {
     /// Server-assigned surrogate key (0039): the row's identity for the audit
     /// trail (`row_history.row_id`, so `GET /reports/row_history` can be
@@ -34,7 +34,7 @@ pub struct ExchangeHoliday {
     pub name: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExchangeHolidayBody {
     pub name: String,

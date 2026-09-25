@@ -28,7 +28,7 @@ use std::collections::{HashMap, HashSet};
 /// settlement dates worth a second look.
 ///
 /// [`coverage_status`]: SettlementCoverageAlert::coverage_status
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SettlementCoverageAlert {
     pub trade_id: i64,
     pub listing_id: i64,

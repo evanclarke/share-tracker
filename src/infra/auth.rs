@@ -339,9 +339,9 @@ fn unauthorized_response(state: &AuthState, headers: &HeaderMap) -> Response {
 // Login / logout routes
 // ---------------------------------------------------------------------------
 
-#[derive(serde::Deserialize)]
+#[derive(utoipa::ToSchema, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct LoginForm {
+pub(crate) struct LoginForm {
     username: String,
     password: String,
 }

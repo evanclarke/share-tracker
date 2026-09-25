@@ -1,3 +1,4 @@
+mod api_spec;
 mod app;
 // API-level acceptance tests reproducing the worked examples in the ATO docs.
 #[cfg(test)]

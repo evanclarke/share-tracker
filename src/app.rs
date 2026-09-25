@@ -37,6 +37,7 @@ pub fn router(
     let mut app = crate::entities::router()
         .merge(crate::reports::router())
         .merge(scheduler::router())
+        .merge(crate::api_spec::router())
         .merge(crate::web::router(base_path, auth.is_some()));
     if let Some(auth) = &auth {
         app = app.merge(crate::infra::auth::router(auth.clone(), base_path));
@@ -216,13 +217,15 @@ mod tests {
             resp.headers.get(axum::http::header::LOCATION).unwrap(),
             "/share_tracker"
         );
-        // A static asset, an entity route, a report route, and the scheduler
-        // routes — one from each merged router, so nesting covers all of them.
+        // A static asset, an entity route, a report route, the scheduler
+        // routes, and the OpenAPI description — one from each merged router,
+        // so nesting covers all of them.
         for uri in [
             "/share_tracker/static/app.js",
             "/share_tracker/listings",
             "/share_tracker/reports/health",
             "/share_tracker/jobs",
+            "/share_tracker/openapi.json",
         ] {
             assert_eq!(client.get(uri).await.status, StatusCode::OK, "{uri}");
         }
@@ -316,10 +319,12 @@ mod tests {
 
     /// `require_auth` is layered onto the merged router before `nest`, so it
     /// covers everything nested under the prefix — one route from each of
-    /// the entity, report, scheduler and web routers merged in `router`,
-    /// mirroring `a_base_path_moves_the_whole_application_under_the_prefix`'s
-    /// own route list but proving each one is actually gated rather than
-    /// just reachable.
+    /// the entity, report, scheduler, api_spec and web routers merged in
+    /// `router`, mirroring
+    /// `a_base_path_moves_the_whole_application_under_the_prefix`'s own route
+    /// list but proving each one is actually gated rather than just reachable.
+    /// `/openapi.json` is in the list deliberately: the description is behind
+    /// `[auth]` like every other route, not on the login page's allowlist.
     #[tokio::test]
     async fn auth_gates_one_route_from_every_merged_router() {
         let pool = test_pool().await;
@@ -329,6 +334,7 @@ mod tests {
             "/share_tracker/listings",
             "/share_tracker/reports/health",
             "/share_tracker/jobs",
+            "/share_tracker/openapi.json",
         ] {
             assert_eq!(
                 client.get(uri).await.status,
@@ -360,6 +366,7 @@ mod tests {
             "/share_tracker/listings",
             "/share_tracker/reports/health",
             "/share_tracker/jobs",
+            "/share_tracker/openapi.json",
         ] {
             assert_eq!(authed.get(uri).await.status, StatusCode::OK, "{uri}");
         }

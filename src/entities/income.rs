@@ -18,7 +18,9 @@ use sqlx::SqlitePool;
 /// Orthogonal to [`Income::trust_income`], which distinguishes two kinds of
 /// *investment* income (a company dividend from a trust distribution); this
 /// says whether the row is investment income **at all**.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[derive(
+    utoipa::ToSchema, Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, sqlx::Type,
+)]
 pub enum IncomeType {
     /// A distribution from the holding: a company dividend, a trust
     /// distribution, or a buy-back's dividend component. Item 11/13, and what
@@ -82,7 +84,7 @@ impl IncomeType {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Income {
     pub id: i64,
     pub listing_id: i64,
@@ -368,7 +370,7 @@ impl Income {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IncomeBody {
     pub listing_id: i64,

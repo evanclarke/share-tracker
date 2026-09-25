@@ -22,7 +22,7 @@ const RBA_FX_RATES_URL: &str = "https://www.rba.gov.au/statistics/tables/csv/f11
 
 /// An official monthly foreign exchange rate. `rate` is foreign currency units
 /// per 1 AUD (foreign-per-AUD), so AUD = foreign / rate.
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct RbaFxRate {
     pub id: i64,
     pub currency: String,
@@ -48,7 +48,7 @@ pub enum ImportError {
 /// rewrite history unasked — so the row is left alone and reported here
 /// instead: without this, a revised or mis-imported rate is indistinguishable
 /// from an identical one, both counted only as `skipped` (SCENARIOS M-13).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RateConflict {
     pub id: i64,
     pub currency: String,
@@ -62,7 +62,8 @@ pub struct RateConflict {
 
 /// Outcome of an import run: how many new rows were inserted, how many the
 /// feed repeated unchanged, and every row where it disagreed.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[schema(as = RbaImportSummary)]
 pub struct ImportSummary {
     pub inserted: usize,
     pub skipped: usize,
@@ -116,7 +117,7 @@ impl CrudEntity for RbaFxRate {
 /// The body of a rate correction: the rate to store, and nothing else — a
 /// row's (currency, month) is its identity and is not editable, since changing
 /// it would silently re-point every conversion that used it.
-#[derive(Debug, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CorrectionBody {
     #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]

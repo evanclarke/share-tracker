@@ -105,7 +105,7 @@ use std::collections::HashMap;
 
 /// One parcel allocation of one disposal, with the two methods' assessable
 /// gains set against each other. Every figure is AUD.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IndexationComparison {
     /// The financial year the disposal falls in (calendar year of its 30 June
     /// end) — the key of the matching `years` row.
@@ -157,7 +157,7 @@ pub struct IndexationComparison {
 /// One financial year's roll-up of the comparisons above, with the fact that
 /// decides whether they can be read at face value: the capital losses the
 /// year actually realised.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IndexationYear {
     pub tax_year: i32,
     /// How many parcel allocations in the year are indexation-eligible gains.
@@ -182,7 +182,7 @@ pub struct IndexationYear {
 }
 
 /// The report: the per-allocation comparisons and their per-year roll-up.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IndexationCrossCheck {
     pub comparisons: Vec<IndexationComparison>,
     pub years: Vec<IndexationYear>,

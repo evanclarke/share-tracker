@@ -47,7 +47,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
-#[derive(Debug, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ParticipationBody {
     /// The date of the CGT event — when the company accepts the application
@@ -79,7 +79,7 @@ pub struct ParticipationBody {
 /// The two sides of a participation: the Sell carrying the capital proceeds,
 /// and the dividend-component income row (`None` when the buy-back price has
 /// no dividend component).
-#[derive(Debug, Serialize)]
+#[derive(utoipa::ToSchema, Debug, Serialize)]
 pub struct Participation {
     pub trade: Trade,
     pub income: Option<Income>,

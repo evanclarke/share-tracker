@@ -44,7 +44,7 @@ use sqlx::Row;
 use std::collections::HashMap;
 
 /// The tax-return question an investment-expense deduction is claimed at.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(utoipa::ToSchema, Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum DeductionDestination {
     /// Question 13 label Y — deductions relating to a trust (or partnership)
     /// distribution, non-primary production.

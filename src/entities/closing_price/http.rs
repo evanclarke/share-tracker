@@ -29,16 +29,16 @@ struct ListParams {
     to: Option<NaiveDate>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct FetchBody {
+pub struct FetchBody {
     listing_id: i64,
     price_date: NaiveDate,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct BackfillBody {
+pub struct BackfillBody {
     listing_id: i64,
     from: NaiveDate,
     to: NaiveDate,
@@ -53,9 +53,9 @@ struct BackfillBody {
 
 /// A price entered by hand for a day the provider cannot serve, with the
 /// provenance that makes the figure auditable later.
-#[derive(Debug, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ManualPriceBody {
+pub struct ManualPriceBody {
     /// Closing price in the listing's quote currency (never AUD).
     #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]
     price: Decimal,
@@ -68,14 +68,14 @@ struct ManualPriceBody {
 
 /// Which listing's superseded price rows to clear. No date range: the span
 /// is the listing's own `unpriced_before` declaration and nothing else.
-#[derive(Debug, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ClearBody {
+pub struct ClearBody {
     listing_id: i64,
 }
 
 /// What a clear run did, returned to the caller.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Serialize, Deserialize)]
 pub struct ClearSummary {
     pub listing_id: i64,
     /// The marker that defined the cleared span, echoed back so the caller
@@ -86,7 +86,7 @@ pub struct ClearSummary {
 }
 
 /// What a backfill run did, returned to the caller.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Serialize, Deserialize)]
 pub struct BackfillSummary {
     /// Trading days in the (clamped) range.
     pub trading_days: usize,

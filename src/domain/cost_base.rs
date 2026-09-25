@@ -809,7 +809,7 @@ pub fn adjusted_cost_base(
 
 /// Which step of the pipeline (see the module doc) a [`CostBaseAdjustment`]
 /// row belongs to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(utoipa::ToSchema, Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum AdjustmentKind {
     AmitCostBase,
     ReturnOfCapital,
@@ -826,7 +826,7 @@ pub enum AdjustmentKind {
 /// until the caller converts (each row's `amount` divides by the same
 /// acquisition-month rate as the parcel's other cost-base components, per
 /// [`CostBase::into_aud_with`]'s step-5 simplification).
-#[derive(Debug, Clone, Serialize)]
+#[derive(utoipa::ToSchema, Debug, Clone, Serialize)]
 pub struct CostBaseAdjustment {
     pub kind: AdjustmentKind,
     /// The AMMA statement's year end / the return-of-capital payment date /

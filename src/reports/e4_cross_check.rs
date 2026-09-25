@@ -15,7 +15,7 @@ use sqlx::{FromRow, Row, SqlitePool};
 /// matching action means the cost base is silently overstated. Non-blocking:
 /// income writes are never rejected — this report only surfaces rows whose
 /// reduction still needs to be entered; entering the action clears the flag.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct E4CrossCheckAlert {
     pub income_id: i64,
     pub listing_id: i64,

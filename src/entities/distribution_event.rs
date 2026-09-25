@@ -110,7 +110,9 @@ pub mod test_support;
 /// The provider that produced a stored distribution row — a closed set, so an
 /// enum with a DB CHECK (0051) rather than free text. One value today: the
 /// only [`DistributionFetcher`] is the Yahoo adapter.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[derive(
+    utoipa::ToSchema, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type,
+)]
 #[sqlx(rename_all = "lowercase")]
 #[serde(rename_all = "lowercase")]
 pub enum DistributionSource {
@@ -119,7 +121,7 @@ pub enum DistributionSource {
 
 /// One known distribution: what the provider says a listing paid per unit, and
 /// the ex-date it paid it on.
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct DistributionEvent {
     /// Server-assigned surrogate key: the row's identity for the audit trail
     /// (`row_history.row_id`). Writes address a row by its

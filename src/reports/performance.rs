@@ -53,7 +53,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 use std::collections::{BTreeMap, HashMap};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize)]
 pub struct HoldingPerformance {
     /// `None` on the OVERALL row.
     pub listing_id: Option<i64>,
@@ -114,7 +114,7 @@ pub struct HoldingPerformance {
     pub price_unavailable: Option<String>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PerformanceRequest {
     /// Current price per unit by listing id, expected in AUD so it lines up

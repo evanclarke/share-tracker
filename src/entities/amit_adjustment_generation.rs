@@ -42,8 +42,9 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[schema(as = AmitGenerateBody)]
 pub struct GenerateBody {
     /// Delete the statement's existing adjustments and regenerate them in the
     /// same transaction. Without it, a statement that already has adjustments
@@ -59,7 +60,7 @@ pub struct GenerateBody {
     pub preview: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(utoipa::ToSchema, Debug, Serialize)]
 pub struct GeneratedAdjustments {
     /// The adjustment rows created — or, for a preview, the rows that would
     /// be. A preview writes nothing, so its rows carry no id yet
@@ -108,7 +109,7 @@ pub struct GeneratedAdjustments {
 /// differ only where a share split/consolidation falls between the parcel's
 /// acquisition and the statement's year end; showing both is what stops a
 /// per-row list and its total reading as a contradiction (SCENARIOS Y-c).
-#[derive(Debug, Serialize)]
+#[derive(utoipa::ToSchema, Debug, Serialize)]
 pub struct GeneratedAdjustment {
     #[serde(flatten)]
     pub adjustment: AmitAdjustment,
@@ -117,7 +118,7 @@ pub struct GeneratedAdjustment {
 
 /// One source parcel's units that a rollover carried away and generation left
 /// for hand entry — see [`GeneratedAdjustments::unattributed`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnattributedUnits {
     /// The parcel the statement's account held at year end.
     pub source_trade_id: i64,

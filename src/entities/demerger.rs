@@ -73,7 +73,7 @@ use sqlx::SqlitePool;
 /// The sides of a demerge: the closing Sell on the head listing, the head
 /// replacement Buys, and the demerged-entity Buys (the latter two one per
 /// consumed parcel, in the original parcels' date order, pairwise matching).
-#[derive(Debug, Serialize)]
+#[derive(utoipa::ToSchema, Debug, Serialize)]
 pub struct Demerge {
     pub sell: Trade,
     pub head_replacements: Vec<Trade>,

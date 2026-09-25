@@ -173,7 +173,7 @@ pub const ESS_THIRTY_DAY_WINDOW: i64 = 30;
 /// a restart interrupted, which `job_runs` now records as started and never
 /// finished (SCENARIOS T-11) — is deliberately not a failure and does not
 /// appear here.
-#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(utoipa::ToSchema, Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct FailedJob {
     pub name: String,
     pub finished_at: String,
@@ -206,7 +206,7 @@ pub struct FailedJob {
 /// job whose schedule line was *removed* — the startup WARN reports that, and a
 /// row kept for a job nobody schedules any more would be an alarm nobody could
 /// clear.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Serialize, Deserialize)]
 pub struct OverdueJob {
     pub name: String,
     /// The cron expression of the entry that is late, as written in the
@@ -236,7 +236,7 @@ pub struct OverdueJob {
 /// Only the *latest* run per job is considered, as with `failed_jobs`: once a
 /// later run has started, the job is running again and the abandoned row is
 /// history rather than a live fault.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Serialize, Deserialize)]
 pub struct StalledJob {
     pub name: String,
     /// RFC 3339 timestamp the run began.
@@ -259,7 +259,7 @@ pub struct StalledJob {
 /// than a to-do, and valuation carries the last close forward instead of
 /// blocking (SCENARIOS Q-02) or leaves the holding out of the date's totals
 /// (migration 0037).
-#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(utoipa::ToSchema, Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct ErroredPriceListing {
     pub listing_id: i64,
     pub ticker: String,
@@ -288,7 +288,7 @@ pub struct ErroredPriceListing {
 /// manual price for a day the provider can never serve. Days from the
 /// listing's `unpriced_from`, or before its `unpriced_before`, are excluded
 /// for the same reason [`ErroredPriceListing`] excludes them.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Serialize, Deserialize)]
 pub struct UnpricedListing {
     pub listing_id: i64,
     pub ticker: String,
@@ -339,7 +339,7 @@ pub struct UnpricedListing {
 /// (nothing needs re-basing), and stating the close clears the whole row while
 /// those rows stay as entered. Judging a hand-entered price wrong is a
 /// different check from this one.
-#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(utoipa::ToSchema, Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct DemergerMissingClose {
     pub action_id: i64,
     pub listing_id: i64,
@@ -437,7 +437,7 @@ pub struct DemergerMissingClose {
 /// soon as the head listing is the one with the earlier series.
 ///
 /// [`unpriced_before`]: crate::entities::listing::Listing::unpriced_before
-#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(utoipa::ToSchema, Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct DemergerHeadNotContinuing {
     pub action_id: i64,
     /// The head listing — the one recorded as continuing, which the price
@@ -515,7 +515,7 @@ pub struct DemergerHeadNotContinuing {
 /// `errored_prices`, where the marker explains an *absence*.
 ///
 /// [`unpriced_before`]: crate::entities::listing::Listing::unpriced_before
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Serialize, Deserialize)]
 pub struct DuplicatePriceSeries {
     /// The pair, ordered by id, so each pair is reported once.
     pub listing_id: i64,
@@ -584,7 +584,7 @@ pub struct DuplicatePriceSeries {
 /// the rest of the `duplicate_*` family: it clears when the surplus trade goes
 /// (`DELETE /trades/:id`, `DELETE /sells/:id`) or when the reference on it is
 /// corrected to the one the second note actually carries.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Serialize, Deserialize)]
 pub struct DuplicateTrade {
     pub listing_id: i64,
     pub ticker: String,
@@ -627,7 +627,7 @@ struct DuplicateTradeRow {
 /// Deliberately a **warning, not a constraint**: a genuine same-day pair
 /// exists in principle (two tranches of one capital return), so the pair stays
 /// enterable and this names it for the user to judge.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Serialize, Deserialize)]
 pub struct DuplicateAction {
     pub listing_id: i64,
     pub ticker: String,
@@ -669,7 +669,7 @@ struct DuplicateActionRow {
 /// while both are enterable. The holding account is part of the key because
 /// the statement is issued per holder account — a fund held in two accounts
 /// legitimately has two statements for one year (SCENARIOS F-03).
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Serialize, Deserialize)]
 pub struct DuplicateAmmaStatement {
     pub listing_id: i64,
     pub ticker: String,
@@ -717,7 +717,7 @@ struct DuplicateAmmaStatementRow {
 /// twice. Non-money differences (an `ex_date` filled in on one row only, a
 /// trust flag) are ignored: they are how a re-entry usually differs from the
 /// original, not evidence of a second payment.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Serialize, Deserialize)]
 pub struct DuplicateIncome {
     pub listing_id: i64,
     pub ticker: String,
@@ -750,7 +750,7 @@ pub struct DuplicateIncome {
 /// [`DuplicateIncome`]: a payer really can credit the same amount twice in one
 /// day (two term deposits of equal size maturing together), so the pair stays
 /// enterable.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Serialize, Deserialize)]
 pub struct DuplicateInterest {
     pub date_paid: NaiveDate,
     /// ISO 4217 currency the shared amount is stated in (part of the key).
@@ -784,7 +784,7 @@ pub struct DuplicateInterest {
 ///
 /// Deliberately a **warning, not a constraint**, the same call as
 /// [`DuplicateIncome`].
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Serialize, Deserialize)]
 pub struct DuplicateExpense {
     pub date_incurred: NaiveDate,
     pub expense_type: ExpenseType,
@@ -827,7 +827,7 @@ pub struct DuplicateExpense {
 /// ordinary, so the pair stays enterable. The figures are part of the key for
 /// exactly that reason — two same-date statements differing in quantity, market
 /// value or any discount label are two grants, not one entered twice.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Serialize, Deserialize)]
 pub struct DuplicateEssStatement {
     pub listing_id: i64,
     pub ticker: String,
@@ -864,7 +864,7 @@ pub struct DuplicateEssStatement {
 /// figures are part of the key for exactly that reason: two rows differing in
 /// quantity, cost base or LPR expenditure are two inheritances, not one
 /// entered twice.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Serialize, Deserialize)]
 pub struct DuplicateInheritance {
     pub listing_id: i64,
     pub ticker: String,
@@ -911,7 +911,7 @@ pub struct DuplicateInheritance {
 /// Exchange-less listings — `security_type = 'Crypto'`, NULL `exchange_mic` —
 /// have no exchange to disagree with and are excluded (the SQL joins
 /// `exchanges`, so they never appear).
-#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(utoipa::ToSchema, Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct ExchangeCurrencyMismatch {
     pub listing_id: i64,
     pub ticker: String,
@@ -945,7 +945,7 @@ pub struct ExchangeCurrencyMismatch {
 /// `source` says which path wrote the row, so it is clear whether to correct
 /// the trade or the fact behind it. Rows entered before the refusal existed
 /// surface here too.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Serialize, Deserialize)]
 pub struct NonTradingDayTrade {
     pub trade_id: i64,
     /// `Buy`, `Sell` or `DRP`.
@@ -1022,7 +1022,7 @@ struct NonTradingDayCandidate {
 ///   ordinary-shares test, (9)'s continuing-employment and two 10% tests), and
 ///   (5) makes a partial-rollover's cash component a disposal to that extent.
 ///   Advisory is the honest answer there, not silence.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Serialize, Deserialize)]
 pub struct EssThirtyDaySale {
     /// The Sell whose allocation draws on the vest parcel.
     pub sale_trade_id: i64,
@@ -1059,7 +1059,7 @@ pub struct EssThirtyDaySale {
 
 /// What kind of Sell reached the 30-day-rule alert — see
 /// [`EssThirtyDaySale`]'s "What counts as a disposal".
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EssDisposalKind {
     /// An ordinary disposal: the rule applies, and the correction is an amended
     /// employer statement.
@@ -1140,7 +1140,7 @@ struct EssThirtyDaySaleRow {
 /// stranger animal — arithmetic, not a nil-consideration disposal — and
 /// flagging it under this rule's reason would be saying something untrue about
 /// it.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Serialize, Deserialize)]
 pub struct NilProceedsDisposal {
     /// Which record the alert is about, and therefore what `record_id` and
     /// `quantity` mean.
@@ -1166,7 +1166,7 @@ pub struct NilProceedsDisposal {
 }
 
 /// Which kind of record a [`NilProceedsDisposal`] names.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NilProceedsKind {
     /// An ordinary Sell trade entered by hand, at a zero `average_price`.
     Sell,
@@ -1245,7 +1245,7 @@ const DIVIDEND_AMOUNT_TOLERANCE_FLOOR: i64 = 1;
 
 /// A distribution the provider knows about that no income row records
 /// (see [`db_distribution_calendar`]).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MissingDividendEntry {
     pub listing_id: i64,
     pub ticker: String,
@@ -1266,7 +1266,7 @@ pub struct MissingDividendEntry {
 
 /// A recorded distribution whose gross does not match what the provider's
 /// per-unit figure implies (see [`db_distribution_calendar`]).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DividendAmountMismatch {
     /// The `income` row the alert is about.
     pub income_id: i64,
@@ -1498,7 +1498,7 @@ struct NilProceedsRightsSaleRow {
     rights_cost: Decimal,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Serialize, Deserialize)]
 pub struct HealthReport {
     /// Latest `closing_prices` date stored with status ok, across every
     /// listing; `None` when no price has ever been stored.

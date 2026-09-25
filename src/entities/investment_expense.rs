@@ -29,7 +29,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, sqlx::Type)]
+#[derive(utoipa::ToSchema, Debug, Clone, Copy, PartialEq, Serialize, Deserialize, sqlx::Type)]
 pub enum ExpenseType {
     /// Interest on money borrowed to buy income-producing shares/investments.
     LoanInterest,
@@ -45,7 +45,7 @@ pub enum ExpenseType {
     Other,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct InvestmentExpense {
     pub id: i64,
     /// Date incurred: its month sets the ATO FX conversion month and the
@@ -80,7 +80,7 @@ pub struct InvestmentExpense {
     pub holding_account_id: Option<i64>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InvestmentExpenseBody {
     pub date_incurred: NaiveDate,

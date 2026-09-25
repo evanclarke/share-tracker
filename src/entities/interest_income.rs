@@ -27,7 +27,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct InterestIncome {
     pub id: i64,
     /// The date the interest was **credited** — credited, received, or applied
@@ -68,7 +68,7 @@ pub struct InterestIncome {
     pub holding_account_id: Option<i64>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InterestIncomeBody {
     pub date_paid: NaiveDate,

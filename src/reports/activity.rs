@@ -55,7 +55,7 @@ use std::collections::{HashMap, HashSet};
 /// `units_after` is the whole-listing running balance after the row — a
 /// split/bonus re-bases it, a transfer leaves it unchanged, so the last row's
 /// balance equals the holding summary's total quantity.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize)]
 pub struct ActivityEvent {
     pub date: NaiveDate,
     /// What happened — e.g. `Buy`, `Sell (buy-back)`, `DRP reinvestment`,
@@ -87,7 +87,7 @@ pub struct ActivityRequest {
     pub price: Option<Decimal>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Serialize, Deserialize)]
 pub struct ActivityResponse {
     pub listing_id: i64,
     /// The full ledger, chronological.

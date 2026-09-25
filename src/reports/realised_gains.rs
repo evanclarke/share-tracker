@@ -13,7 +13,9 @@ use sqlx::SqlitePool;
 use std::collections::HashMap;
 
 /// Where a realised disposal came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    utoipa::ToSchema, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize,
+)]
 pub enum DisposalSource {
     /// An ordinary Sell trade (incl. buy-back and worthless-shares closing
     /// Sells) — `sale_trade_id` is the trade id.
@@ -24,7 +26,7 @@ pub enum DisposalSource {
     RightsSale,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize)]
 pub struct RealisedGainLoss {
     pub source: DisposalSource,
     /// The disposal's row id in its `source`'s table (`trades` for `Sell`,
@@ -71,7 +73,7 @@ pub struct RealisedGainLoss {
 /// can show which parcel contributed what. Mirrors
 /// `parcel_optimiser::HypotheticalAllocation`'s field set (the hypothetical
 /// equivalent), but for an actually-recorded allocation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize)]
 pub struct ParcelDetail {
     /// The Buy/DRP trade (or, for a rights sale, the parcel that earned the
     /// rights) this allocation drew from.

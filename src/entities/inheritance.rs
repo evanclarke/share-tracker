@@ -120,7 +120,7 @@ use sqlx::SqlitePool;
 /// Which QC 66053 rule produced the inheritance's first-element cost base.
 /// Serialized verbatim to JSON and to the CHECK-constrained TEXT
 /// `cost_base_rule` column.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, sqlx::Type)]
+#[derive(utoipa::ToSchema, Debug, Clone, Copy, PartialEq, Serialize, Deserialize, sqlx::Type)]
 pub enum CostBaseRule {
     /// The deceased acquired the asset on or after 20 September 1985: the
     /// beneficiary's first element is the deceased's cost base on the day
@@ -141,7 +141,7 @@ pub enum CostBaseRule {
 /// write paths, which reject any pre-CGT-dated trade.
 use super::trade::CGT_START;
 
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Inheritance {
     pub id: i64,
     pub listing_id: i64,
@@ -173,7 +173,7 @@ pub struct Inheritance {
     pub fx_rate: Decimal,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InheritanceBody {
     pub listing_id: i64,

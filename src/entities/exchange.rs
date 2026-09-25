@@ -9,7 +9,7 @@ use chrono::NaiveTime;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Exchange {
     pub mic: String,
     pub name: String,
@@ -23,7 +23,7 @@ pub struct Exchange {
     pub close_time: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExchangeBody {
     pub name: String,

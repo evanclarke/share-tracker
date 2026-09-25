@@ -67,6 +67,14 @@ subtle = "2"
 # into the logged, empty-bodied 500 `ApiError::Internal` already answers with.
 # Already in the tree as a transitive dependency of reqwest.
 tower-http = { version = "0.7", default-features = false, features = ["catch-panic"] }
+# api_spec: the `GET /openapi.json` machine-readable API description. The
+# `ToSchema` derive is applied to the real request/response structs (no mirror
+# types), and `OpenApi` assembles the document from them plus api_spec's route
+# table. Features: `chrono` renders NaiveDate as a date string and `decimal`
+# renders rust_decimal::Decimal as a JSON **string** (utoipa's default with
+# that feature is String, matching what the API actually sends) rather than a
+# number — the two global rules the spec has to carry.
+utoipa = { version = "6.0.0", features = ["chrono", "decimal"] }
 
 [dev-dependencies]
 http-body-util = "0.1"

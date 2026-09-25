@@ -9,7 +9,7 @@ use sqlx::{Row, SqlitePool};
 /// (`#/attachments/<owner_field>/<owner_id>`) is the only other place these
 /// rows are visible; this report is the whole-portfolio document register —
 /// what has been filed, against which activity, for which listing.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttachmentIndexRow {
     pub id: i64,
     pub filename: String,

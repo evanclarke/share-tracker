@@ -27,15 +27,16 @@ use rust_decimal::Decimal;
 use serde::Deserialize;
 use sqlx::{Row, SqlitePool};
 
-#[derive(Debug, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[schema(as = SellAllocationInput)]
 pub struct AllocationInput {
     pub purchase_trade_id: i64,
     #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub quantity_allocated: Decimal,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SellBody {
     pub date: NaiveDate,

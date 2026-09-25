@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 use std::collections::HashMap;
 
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct AmitAdjustment {
     pub id: i64,
     pub amma_statement_id: i64,
@@ -35,7 +35,7 @@ pub struct AmitAdjustment {
     pub quantity: Decimal,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AmitAdjustmentBody {
     pub amma_statement_id: i64,

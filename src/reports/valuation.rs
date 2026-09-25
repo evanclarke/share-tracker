@@ -91,7 +91,7 @@ pub struct ListingValuation {
 /// cannot judge the total without knowing which one and why — so the
 /// `listing_id`, its `ticker`, and the reason travel with the result and are
 /// stored with the snapshot.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExcludedHolding {
     pub listing_id: i64,
     pub ticker: String,

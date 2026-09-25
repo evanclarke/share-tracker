@@ -6,7 +6,7 @@ use sqlx::{Row, SqlitePool};
 /// Validation status of a curated exchange's MIC against the ISO 10383 registry.
 /// Non-blocking: writes to `exchanges` are never rejected — this report only
 /// surfaces MICs worth a second look.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExchangeMicStatus {
     pub mic: String,
     pub exchange_name: String,

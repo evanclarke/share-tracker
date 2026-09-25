@@ -12,7 +12,7 @@ use std::collections::HashMap;
 /// Cost base is in AUD (each parcel converted via the ATO FX rate). The supplied
 /// `current_price` is taken as AUD too, so `market_value` and
 /// `unrealised_gain_loss` are AUD.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize)]
 pub struct UnrealisedGain {
     pub listing_id: i64,
     /// The holding account the parcels sit in: the same listing held in two
@@ -49,7 +49,7 @@ pub struct UnrealisedGain {
     pub price_unavailable: Option<String>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UnrealisedGainsRequest {
     /// Current price per unit by listing id, expected in AUD so it lines up with

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 // column (matched by a CHECK constraint), so the acronym spelling is the
 // wire/storage format and must not be camel-cased.
 #[allow(clippy::upper_case_acronyms)]
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, sqlx::Type)]
+#[derive(utoipa::ToSchema, Debug, Clone, Copy, PartialEq, Serialize, Deserialize, sqlx::Type)]
 pub enum TradeType {
     Buy,
     Sell,
@@ -43,7 +43,9 @@ impl TradeType {
 /// taxpayer's own assertion that must never be rewritten (S-05).
 ///
 /// [`auto_settlement_date`]: super::settlement::auto_settlement_date
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[derive(
+    utoipa::ToSchema, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type,
+)]
 #[sqlx(rename_all = "lowercase")]
 #[serde(rename_all = "lowercase")]
 pub enum SettlementDateSource {
@@ -71,7 +73,7 @@ impl SettlementDateSource {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Trade {
     pub id: i64,
     pub trade_type: TradeType,
@@ -284,7 +286,7 @@ impl Trade {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TradeBody {
     pub trade_type: TradeType,

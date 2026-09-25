@@ -46,7 +46,7 @@ use std::collections::HashMap;
 /// them (`status` says which; `credits_denied` is what the tax summary
 /// actually excludes) — or one whose walk could not be anchored at all
 /// (`untested_no_ex_date`).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FrankingAtRiskAlert {
     /// The `income` row id.
     pub income_id: i64,
@@ -102,7 +102,7 @@ pub struct WhatIfRequest {
 }
 
 /// A dividend whose credits the contemplated sale would (further) disqualify.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FrankingWhatIfAlert {
     pub income_id: i64,
     pub listing_id: i64,

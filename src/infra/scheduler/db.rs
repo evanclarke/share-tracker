@@ -23,7 +23,9 @@ use std::collections::HashMap;
 /// finished, which is neither a success nor a failure (SCENARIOS T-11). Before
 /// 0042 the row was written only after the work returned, so such a run left no
 /// trace at all and `GET /jobs` went on showing the previous run's result.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[derive(
+    utoipa::ToSchema, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type,
+)]
 #[sqlx(rename_all = "lowercase")]
 #[serde(rename_all = "lowercase")]
 pub enum JobRunStatus {
@@ -52,7 +54,7 @@ impl JobRunStatus {
 /// (SCENARIOS T-09). It is separate from `error` on purpose: the run did not
 /// fail, so its status stays `ok` and the Jobs screen's red/green reading stays
 /// honest; the note is what stops it also reading as *complete*.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize)]
 pub struct JobRunRecord {
     pub started_at: String,
     pub finished_at: Option<String>,

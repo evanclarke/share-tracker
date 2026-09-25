@@ -60,7 +60,12 @@ pub(crate) const THEME_BOOT_SCRIPT: &str = r#"  <script>
 /// The ES modules making up the app, as (route, source) pairs: the `app.js`
 /// entry point plus everything it (transitively) imports. A new module is
 /// served by adding a pair here.
-const JS_MODULES: [(&str, &str); 7] = [
+///
+/// `pub(crate)` so `api_spec` can name each module's route in the generated
+/// OpenAPI document: the served paths are built in code by the loop in
+/// [`router`], so a source scan cannot see them and the document reads them
+/// from this same list rather than a transcription that could drift.
+pub(crate) const JS_MODULES: [(&str, &str); 7] = [
     ("/static/app.js", include_str!("web/app.js")),
     ("/static/chart.js", include_str!("web/chart.js")),
     ("/static/config.js", include_str!("web/config.js")),

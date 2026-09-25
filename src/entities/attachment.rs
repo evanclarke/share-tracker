@@ -51,7 +51,7 @@ pub const MAX_UPLOAD_BYTES: usize = 25 * 1024 * 1024;
 
 /// The accepted attachment content types. Stored as TEXT and constrained by a DB
 /// CHECK to the same allowlist; an unsupported type is rejected with `422`.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, sqlx::Type)]
+#[derive(utoipa::ToSchema, Debug, Clone, Copy, PartialEq, Serialize, Deserialize, sqlx::Type)]
 pub enum ContentType {
     #[sqlx(rename = "application/pdf")]
     #[serde(rename = "application/pdf")]
@@ -93,7 +93,7 @@ impl ContentType {
 
 /// Attachment metadata. The `content` blob is deliberately absent here — it is
 /// loaded only by the download path — so list/get stay light.
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Attachment {
     pub id: i64,
     pub trade_id: Option<i64>,

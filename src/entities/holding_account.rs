@@ -33,13 +33,13 @@ pub fn default_holding_account_id() -> i64 {
     DEFAULT_HOLDING_ACCOUNT_ID
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct HoldingAccount {
     pub id: i64,
     pub name: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HoldingAccountBody {
     pub name: String,

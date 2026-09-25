@@ -44,7 +44,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 
 /// One recorded amount worth a second look before a tax figure rests on it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FxCoverageAlert {
     /// `missing_rate`, `settlement_crosses_rate_month`, or
     /// `reduction_converted_at_acquisition_month`.

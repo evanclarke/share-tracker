@@ -41,7 +41,9 @@ const ISO_24165_URL: &str = "https://download.dtif.org/data.json";
 
 /// Whether a currency is a fiat currency (ISO 4217) or a digital token
 /// (ISO 24165). Limited value set → enum + DB CHECK constraint.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[derive(
+    utoipa::ToSchema, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type,
+)]
 pub enum CurrencyKind {
     Fiat,
     DigitalToken,
@@ -49,7 +51,9 @@ pub enum CurrencyKind {
 
 /// Which feed a currency row came from. Limited value set → enum + DB CHECK
 /// constraint.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[derive(
+    utoipa::ToSchema, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type,
+)]
 pub enum CurrencySource {
     Iso4217,
     Iso24165,
@@ -58,7 +62,7 @@ pub enum CurrencySource {
 /// One recognised currency. `code` is the ISO 4217 alphabetic code for fiat or the
 /// ISO 24165 Digital Token Identifier (DTI) for a token. `numeric_code` is the
 /// ISO 4217 numeric code (fiat only). `minor_units` is informational only.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Currency {
     pub code: String,
     pub kind: CurrencyKind,
@@ -108,7 +112,8 @@ pub const TOKEN_FEED_NOT_CONFIGURED: &str =
 ///   of whichever feed the body is, the other `None`, and no `skipped`: that
 ///   call never intended the other feed, so nothing was passed over and it must
 ///   not be reported as if something had been.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(utoipa::ToSchema, Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[schema(as = CurrencyImportSummary)]
 pub struct ImportSummary {
     /// Rows written from the ISO 4217 fiat list.
     pub fiat: Option<usize>,

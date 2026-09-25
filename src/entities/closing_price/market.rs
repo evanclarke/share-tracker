@@ -299,7 +299,7 @@ pub(crate) async fn load_market_on(
 
 /// Why a date is not on a listing's trading calendar — the only two ways
 /// `MarketIdentity::is_trading_day` can answer no.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NonTradingReason {
     /// A Saturday or a Sunday.

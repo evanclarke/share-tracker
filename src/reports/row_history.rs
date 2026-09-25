@@ -233,7 +233,7 @@ pub fn router() -> Router<SqlitePool> {
 /// misrepresent what changed — so the prior values stay one drill-down away,
 /// through the single-row form this entry names in full (`table_name` +
 /// `row_id`).
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(utoipa::ToSchema, Debug, Serialize, sqlx::FromRow)]
 pub struct BrowseEntry {
     #[sqlx(rename = "id")]
     pub history_id: i64,
@@ -247,7 +247,7 @@ pub struct BrowseEntry {
 /// continue. `next_before_id` is `None` exactly when the page reached the end
 /// of the trail, so "there is more" is a stated fact rather than something
 /// the caller has to infer from a full-looking page.
-#[derive(Debug, Serialize)]
+#[derive(utoipa::ToSchema, Debug, Serialize)]
 pub struct RowHistoryPage {
     pub entries: Vec<BrowseEntry>,
     pub page_size: i64,
@@ -257,7 +257,7 @@ pub struct RowHistoryPage {
 /// The two response shapes of the one endpoint, untagged so each serialises
 /// as itself: the single-row trail is the flat array it has always been, and
 /// the browse page is an object (it carries the cursor as well as the rows).
-#[derive(Debug, Serialize)]
+#[derive(utoipa::ToSchema, Debug, Serialize)]
 #[serde(untagged)]
 pub enum RowHistoryResponse {
     Row(Vec<Map<String, Value>>),

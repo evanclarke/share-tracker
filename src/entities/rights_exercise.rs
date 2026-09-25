@@ -51,7 +51,7 @@ use rust_decimal::Decimal;
 use serde::Deserialize;
 use sqlx::{Row, SqlitePool};
 
-#[derive(Debug, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExerciseBody {
     /// Exercise date — the new parcel's acquisition date. Must not precede

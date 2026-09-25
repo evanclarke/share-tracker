@@ -45,7 +45,7 @@ use sqlx::SqlitePool;
 /// died went on reading `ok` for ever (SCENARIOS T-11/T-02/T-12). `None` for a
 /// manual-only job (it has no schedule by design) and for a scheduled job whose
 /// line has been lost — the case the startup WARN names.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Serialize, Deserialize)]
 pub struct JobStatus {
     pub name: String,
     pub trigger: JobTrigger,
