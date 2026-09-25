@@ -62,11 +62,16 @@ the offending field rather than a silently-ignored default writing a zero into \
 a tax figure. Query parameters follow the same rule on the routes that take \
 them.
 
-Errors are text/plain bodies (empty for an internal 500), not JSON; docs/API.md \
-documents each endpoint's status/body matrix. Report routes answered by POST \
-take their parameters in a JSON body; the GET reports take theirs in the query \
-string. The document itself is generated from the route table and the serde \
-structs in src/api_spec.rs and is pinned by that module's tests.";
+Errors are never JSON. A rejected request answers either a text/plain; \
+charset=utf-8 body with the reason — 400 (a malformed path parameter, query \
+string or body), 401, 404 on a delete or operation, 413, 415 (a JSON body sent \
+without Content-Type: application/json), 422, a failed POST /jobs/{name}'s 500, \
+502, 503 — or a deliberately empty body: a GET's 404, a 405, and an internal \
+500. docs/API.md's \"Error-body contract\" section carries the full matrix. \
+Report routes answered by POST take their parameters in a JSON body; the GET \
+reports take theirs in the query string. The document itself is generated from \
+the route table and the serde structs in src/api_spec.rs and is pinned by that \
+module's tests.";
 
 /// The four HTTP verbs the server uses, as the table spells them.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2209,6 +2214,35 @@ mod tests {
             "Every request body denies unknown fields.",
             "additionalProperties: false",
             "422",
+        ] {
+            assert!(
+                description.contains(rule),
+                "info.description must state `{rule}`; got:\n{description}"
+            );
+        }
+    }
+
+    /// The error-body matrix — the never-JSON rule, the media type, and every
+    /// status's body shape — rides in `info.description`, which is the
+    /// machine-client surface. `docs/API.md`'s "Error-body contract" section
+    /// is the long form (`doc_checks` pins that copy); this is the compact
+    /// twin a client reading only the generated document gets, and it must
+    /// name each status so a dropped one fails here.
+    #[test]
+    fn the_error_body_matrix_is_stated_in_the_description() {
+        let doc = doc();
+        let description = doc["info"]["description"]
+            .as_str()
+            .expect("info.description is a string");
+        for rule in [
+            "Errors are never JSON.",
+            "text/plain; charset=utf-8",
+            // The text-carrying statuses, the job trigger's 500 among them.
+            "400 (a malformed path parameter, query string or body), 401, 404 on a delete or \
+             operation, 413, 415 (a JSON body sent without Content-Type: application/json), 422, a \
+             failed POST /jobs/{name}'s 500, 502, 503",
+            // …and the empty-bodied ones, both 404s and both 500s named apart.
+            "a deliberately empty body: a GET's 404, a 405, and an internal 500",
         ] {
             assert!(
                 description.contains(rule),

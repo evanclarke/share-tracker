@@ -35,7 +35,7 @@ found for a non-browser client; the first is the largest.
       `serialize_with` anywhere in `src`). A dependency-feature change would silently turn every
       money/quantity field into a float. Add an explicit string codec (the write-side mirror of
       `infra::decimal::strict_decimal`) and a test that a money field serializes as a JSON string.
-- [ ] Standardise error responses for machine clients. Every error body is `text/plain` with a
+- [x] Standardise error responses for machine clients. Every error body is `text/plain` with a
       status/body matrix (422/400/413/502/503 carry text; GET 404 is empty; internal 500 is empty;
       job 500 carries text). Either adopt one JSON error envelope, or document the matrix as an
       explicit contract in `docs/API.md`. Test: `doc_checks` pins the chosen contract.

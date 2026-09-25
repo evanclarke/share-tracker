@@ -837,6 +837,123 @@ fn error_bodies_list_names_only_returned_codes() {
     }
 }
 
+/// The `## Error-body contract` section of `docs/API.md` — the explicit
+/// status/body matrix plus the prose beside it.
+fn error_body_contract_section() -> &'static str {
+    API_MD
+        .split("## Error-body contract")
+        .nth(1)
+        .expect("docs/API.md has an Error-body contract section")
+        .split("\n## ")
+        .next()
+        .expect("split always yields at least one part")
+}
+
+/// The `(status, body)` rows of the Error-body matrix, in table order: the
+/// three-digit code from the leading `` | `NNN …` `` cell and the shape word
+/// from the second cell — `text`, or `empty` once its `**…**` emphasis is
+/// trimmed.
+fn error_body_matrix_rows() -> Vec<(String, String)> {
+    error_body_contract_section()
+        .lines()
+        .filter_map(|line| {
+            let rest = line.strip_prefix("| `")?;
+            let code: String = rest.chars().take_while(char::is_ascii_digit).collect();
+            if code.len() != 3 {
+                return None;
+            }
+            let mut cells = line.split('|').skip(1);
+            let _status = cells.next()?;
+            let body = cells.next()?.trim().trim_matches('*').to_string();
+            Some((code, body))
+        })
+        .collect()
+}
+
+/// Docs-sync pin for the error-body matrix (REST API audit, 2026-09-24:
+/// "Standardise error responses for machine clients").
+///
+/// The chosen resolution is to **document** the matrix rather than adopt a
+/// JSON error envelope — the plain-text reasons are deliberate and the web UI
+/// depends on them — so this is the test that keeps the documented contract
+/// honest. It pins, exactly:
+///
+/// - the never-JSON rule and the `text/plain; charset=utf-8` media type;
+/// - every `(status, body)` row, in table order, so a removed row or a status
+///   silently flipped between empty and text fails here;
+/// - that each status has a [Response codes](#response-codes) row of its own
+///   kind above it (the two `404`s and the two `500`s share one row each),
+///   the same drift guard the Error-bodies list gets.
+///
+/// The rows are derived from the code, not invented for the table:
+///
+/// - `400` — `ApiError::BadRequest`, and axum's `Path`/`Query`/JSON-syntax
+///   extractor rejections, all `text/plain; charset=utf-8`;
+/// - `401` — `ApiError::Unauthorized` (the `[auth]` layer);
+/// - `404` empty — `ApiError::NotFound` (an entity `GET`, an unrouted path);
+/// - `404` text — `ApiError::NotFoundWithReason` (`ApiError::not_found`), the
+///   delete/operation/job 404;
+/// - `405` empty — axum's `MethodRouter` on a read-only path;
+/// - `413` — `ApiError::PayloadTooLarge` and axum's body-length ceiling;
+/// - `415` — axum's `Json` extractor with no `application/json` content type;
+/// - `422` — `ApiError::Unprocessable`, every constraint violation
+///   `impl From<sqlx::Error> for ApiError` classifies, and axum's JSON *data*
+///   rejection (which is how `deny_unknown_fields` surfaces);
+/// - `500` empty — `ApiError::Internal` and `panic_response`;
+/// - `500` text — `ApiError::JobFailed` (the manual `POST /jobs/:name`);
+/// - `502` — `ApiError::BadGateway`;
+/// - `503` — `ApiError::Busy`.
+///
+/// The media type each of these actually sends is pinned on the code side by
+/// `infra::http::tests::every_error_body_carries_the_documented_media_type_or_nothing`.
+#[test]
+fn error_body_matrix_pins_every_status_and_shape() {
+    let section = error_body_contract_section();
+
+    assert!(
+        section.contains("Error bodies are **never** JSON."),
+        "the error-body contract must say error bodies are never JSON: {section}"
+    );
+    assert!(
+        section.contains("`text/plain; charset=utf-8`"),
+        "the error-body contract must state the media type: {section}"
+    );
+
+    const EXPECTED: &[(&str, &str)] = &[
+        ("400", "text"),
+        ("401", "text"),
+        ("404", "empty"),
+        ("404", "text"),
+        ("405", "empty"),
+        ("413", "text"),
+        ("415", "text"),
+        ("422", "text"),
+        ("500", "empty"),
+        ("500", "text"),
+        ("502", "text"),
+        ("503", "text"),
+    ];
+    let rows = error_body_matrix_rows();
+    let actual: Vec<(&str, &str)> = rows
+        .iter()
+        .map(|(code, body)| (code.as_str(), body.as_str()))
+        .collect();
+    assert_eq!(
+        actual, EXPECTED,
+        "the Error-body matrix must carry exactly these (status, body) rows, in order: {section}"
+    );
+
+    // Every status in the matrix has a Response codes row above it.
+    let table_codes = response_code_table_codes();
+    for (code, _) in &rows {
+        assert!(
+            table_codes.iter().any(|row| row == code),
+            "the Error-body matrix names `{code}`, but the Response codes table has no \
+             `{code}` row (rows: {table_codes:?})"
+        );
+    }
+}
+
 /// Docs-sync pin for linked attachments on provenance-created trades
 /// (REQUIREMENTS 2026-07-15): the Attachments section documents the
 /// `include_linked` list option, enumerates the three traversed provenance

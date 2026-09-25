@@ -843,6 +843,94 @@ mod tests {
         assert_eq!(message, None);
     }
 
+    /// The media type every text-carrying error body is sent with, and the
+    /// absence of any on the deliberately empty ones — the code side of the
+    /// status/body/media-type matrix `docs/API.md`'s "Error-body contract"
+    /// section documents and `doc_checks` pins.
+    ///
+    /// A `(StatusCode, String)` is axum's `text/plain; charset=utf-8` pair;
+    /// the empty responses are a bare `StatusCode`, which carries no
+    /// `Content-Type` header at all. Never JSON, in either case.
+    #[tokio::test]
+    async fn every_error_body_carries_the_documented_media_type_or_nothing() {
+        use axum::http::header::CONTENT_TYPE;
+
+        /// What axum's `(StatusCode, String)` sends.
+        const PLAIN: &str = "text/plain; charset=utf-8";
+
+        // (label, error, status, content type — `None` for an empty body)
+        let cases: Vec<(&str, ApiError, StatusCode, Option<&str>)> = vec![
+            (
+                "400",
+                ApiError::bad_request("not a date"),
+                StatusCode::BAD_REQUEST,
+                Some(PLAIN),
+            ),
+            (
+                "401",
+                ApiError::unauthorized("no session cookie or bearer token"),
+                StatusCode::UNAUTHORIZED,
+                Some(PLAIN),
+            ),
+            (
+                "404 with a cause",
+                ApiError::not_found("no income with that id"),
+                StatusCode::NOT_FOUND,
+                Some(PLAIN),
+            ),
+            (
+                "413",
+                ApiError::PayloadTooLarge("the upload is over the limit".to_string()),
+                StatusCode::PAYLOAD_TOO_LARGE,
+                Some(PLAIN),
+            ),
+            (
+                "422",
+                ApiError::unprocessable("the allocations sum to 4910, not the 5000 units sold"),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Some(PLAIN),
+            ),
+            (
+                "500 for a failed job trigger",
+                ApiError::job_failed("backup", "the destination is not writable"),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Some(PLAIN),
+            ),
+            (
+                "502",
+                ApiError::bad_gateway("could not fetch the RBA FX rate feed", "timed out"),
+                StatusCode::BAD_GATEWAY,
+                Some(PLAIN),
+            ),
+            (
+                "503",
+                ApiError::Busy {
+                    body: BUSY_BODY.to_string(),
+                    source: "database is locked (code: 5)".into(),
+                },
+                StatusCode::SERVICE_UNAVAILABLE,
+                Some(PLAIN),
+            ),
+            ("bare 404", ApiError::NotFound, StatusCode::NOT_FOUND, None),
+            (
+                "internal 500",
+                ApiError::internal("boom"),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                None,
+            ),
+        ];
+
+        for (label, error, status, content_type) in cases {
+            let resp = error.into_response();
+            assert_eq!(resp.status(), status, "{label}: wrong status");
+            let sent = resp
+                .headers()
+                .get(CONTENT_TYPE)
+                .map(|value| value.to_str().unwrap().to_string());
+            assert_eq!(sent.as_deref(), content_type, "{label}: wrong media type");
+        }
+    }
+
     #[tokio::test]
     async fn unprocessable_is_422_with_the_message_as_body() {
         let resp =
