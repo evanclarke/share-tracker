@@ -594,6 +594,50 @@ fn listing_preference_field_documented() {
     );
 }
 
+/// Docs-sync pin for the three DRP residual columns on the trade body (REST API
+/// audit 2026-09-24): `TradeBody`'s `residual_brought_forward` /
+/// `residual_carried_forward` / `residual_paid_out` (all `#[serde(default)]`
+/// decimals, `src/entities/trade/model.rs`) are the reinvest-created DRP
+/// trade's server-managed residual chain — written by
+/// `POST /income/:id/reinvest` and re-derived by `drp_enrolment`'s residual
+/// recompute, and out of reach of a client `PUT /trades/:id`, which refuses a
+/// `DRP` body and a `Buy` body at a reinvest-created DRP. Scoped to the Trades
+/// section deliberately: the names already appear in the DRP reinvestment and
+/// Sells prose, so a bare whole-file `contains` would pass without the trade
+/// body's own fields being documented. The behaviour is pinned by
+/// `entities::trade`'s residual round-trip and `drp_reinvestment`'s chain
+/// tests; this is the documentation half.
+#[test]
+fn drp_residual_columns_documented_in_trades() {
+    let section = API_MD
+        .split("## Trades")
+        .nth(1)
+        .expect("docs/API.md has a Trades section")
+        .split("\n## ")
+        .next()
+        .expect("split always yields at least one part");
+    for column in [
+        "residual_brought_forward",
+        "residual_carried_forward",
+        "residual_paid_out",
+    ] {
+        assert!(
+            section.contains(column),
+            "the Trades section documents `{column}`: {section}"
+        );
+    }
+    assert!(
+        section.contains("The server owns them"),
+        "the Trades section says the DRP residual chain is server-managed"
+    );
+    // …and that the body accepting them does not make them client-writable on
+    // a trade the chain reads.
+    assert!(
+        section.contains("no client write can put them on a trade the chain reads"),
+        "the Trades section says the residual chain is not client-writable in practice"
+    );
+}
+
 /// The `**Error bodies.**` paragraph of `docs/API.md` — from its bold lead-in
 /// to the blank line that ends the paragraph.
 fn error_bodies_paragraph() -> &'static str {
