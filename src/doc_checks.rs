@@ -448,9 +448,39 @@ fn list_filtering_contract_documented() {
             "the {row} row must name {param}: {line}"
         );
     }
-    // The Known limitation says filters landed and cursor paging did not.
-    assert!(API_MD.contains("- **Server-side pagination** (2026-06-08; filters added 2026-09-24)"));
+    // The Known limitation says filters landed and cursor paging did not. The
+    // date is the filters' own commit (`9400e70`, 2026-09-25), not the day the
+    // audit that asked for them was written — the entry dated them 2026-09-24
+    // against a 2026-09-25 commit.
+    assert!(API_MD.contains("- **Server-side pagination** (2026-06-08; filters added 2026-09-25)"));
     assert!(API_MD.contains("**cursor paging is the part that remains open**"));
+}
+
+/// The one live document that names the annual tax report's **superseded**
+/// endpoint spelling says so.
+///
+/// `REQUIREMENTS.md` is the historical requirement text and is deliberately not
+/// rewritten when an endpoint moves — but it named `POST /reports/tax-report`
+/// and `GET /reports/tax-report/years`, which have answered `405` since
+/// `ea21d55` moved every scalar-parameter report read onto `GET`+query. The
+/// requirement text stays; the note beside it names what is actually served, so
+/// the file cannot be read as specifying an endpoint that does not exist.
+#[test]
+fn the_superseded_tax_report_endpoints_are_marked_as_such() {
+    let requirements = include_str!("../REQUIREMENTS.md");
+    assert!(
+        requirements.contains("**Superseded spelling** (`ea21d55`, 2026-09-25)"),
+        "REQUIREMENTS.md must mark the POST /reports/tax-report spelling as superseded"
+    );
+    assert!(
+        requirements.contains("`GET /reports/tax_report?tax_year=N`"),
+        "the note must name the endpoint that is actually served"
+    );
+    // …and that endpoint is the one the document serves.
+    assert!(
+        API_MD.contains("`/reports/tax_report`"),
+        "docs/API.md must document GET /reports/tax_report"
+    );
 }
 
 /// Docs-sync pin for the cent-rounded CSV exports (SCENARIOS W-c): both

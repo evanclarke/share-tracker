@@ -167,13 +167,15 @@ async fn open_parcels_handler(
     State(pool): State<SqlitePool>,
     Query(q): Query<OpenParcelsQuery>,
 ) -> Result<Json<Vec<OpenParcel>>, ApiError> {
-    // An omitted `as_of_date` is **today's live position**. `as_of_or_today`
-    // is the live-view resolver (`infra::date`), deliberately not
-    // `as_of_or_open` — whose `None` means "every recorded fact" — and
-    // resolving it here states the API default at the boundary rather than
-    // leaving it implicit in the shared loader (SCENARIOS E-14).
-    let as_of = crate::infra::date::as_of_or_today(q.as_of_date);
-    db_open_parcels(&pool, Some(as_of))
+    // An omitted `as_of_date` is **today's live position** (SCENARIOS E-14),
+    // and the query is passed through unresolved because
+    // `domain::open_parcels::load` already resolves `None` that way — with
+    // `infra::date::as_of_or_today`, the live-view resolver, deliberately not
+    // `as_of_or_open`, whose `None` means "every recorded fact". Resolving it
+    // here as well stated the default twice, and the handler's copy *masked*
+    // the loader's: a change to the loader's default would have left this
+    // endpoint on the old one with every test still green.
+    db_open_parcels(&pool, q.as_of_date)
         .await
         .map(Json)
         .map_err(ApiError::from)

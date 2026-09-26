@@ -992,47 +992,56 @@ impl From<csv::Error> for ApiError {
     }
 }
 
-/// One live sample of every [`ApiError`] variant, with the status it answers
-/// and the content type its body is sent with (`None` for an empty body).
+/// One live sample of every error response this tree builds, with the status it
+/// answers and the content type its body is sent with (`None` for an empty
+/// body).
 ///
 /// This is the **one** table the error contract is read from: the media-type
 /// test below drives it against real responses, and `doc_checks` derives the
 /// documented status/body lists from it, so the two can no longer be edited
 /// apart. `assert_every_variant_is_sampled` is a no-wildcard match over the
 /// enum, so adding a variant breaks the build until a sample is added here.
+///
+/// The rows are already-built `Response`s rather than `ApiError`s so that
+/// [`panic_response`] can be one of them: it is named in the documented
+/// Error-body matrix as a `500` shape, and it returns a `Response` directly
+/// (there is no `ApiError` for a panic to become — the unwind is caught by the
+/// layer). It was the one documented shape outside the table the docs are
+/// derived from.
 #[cfg(test)]
-fn error_cases() -> Vec<(&'static str, ApiError, StatusCode, Option<&'static str>)> {
+fn error_cases() -> Vec<(&'static str, Response, StatusCode, Option<&'static str>)> {
     /// What axum's `(StatusCode, String)` sends.
     const PLAIN: &str = "text/plain; charset=utf-8";
-    // (label, error, status, content type — `None` for an empty body)
+    // (label, response, status, content type — `None` for an empty body)
     vec![
         (
             "400",
-            ApiError::bad_request("not a date"),
+            ApiError::bad_request("not a date").into_response(),
             StatusCode::BAD_REQUEST,
             Some(PLAIN),
         ),
         (
             "401",
-            ApiError::unauthorized("no session cookie or bearer token"),
+            ApiError::unauthorized("no session cookie or bearer token").into_response(),
             StatusCode::UNAUTHORIZED,
             Some(PLAIN),
         ),
         (
             "404 with a cause",
-            ApiError::not_found("no income with that id"),
+            ApiError::not_found("no income with that id").into_response(),
             StatusCode::NOT_FOUND,
             Some(PLAIN),
         ),
         (
             "413",
-            ApiError::PayloadTooLarge("the upload is over the limit".to_string()),
+            ApiError::PayloadTooLarge("the upload is over the limit".to_string()).into_response(),
             StatusCode::PAYLOAD_TOO_LARGE,
             Some(PLAIN),
         ),
         (
             "422",
-            ApiError::unprocessable("the allocations sum to 4910, not the 5000 units sold"),
+            ApiError::unprocessable("the allocations sum to 4910, not the 5000 units sold")
+                .into_response(),
             StatusCode::UNPROCESSABLE_ENTITY,
             Some(PLAIN),
         ),
@@ -1041,19 +1050,21 @@ fn error_cases() -> Vec<(&'static str, ApiError, StatusCode, Option<&'static str
             ApiError::too_many_requests(
                 "Too many failed sign-in attempts. Try again in 300 seconds.",
                 300,
-            ),
+            )
+            .into_response(),
             StatusCode::TOO_MANY_REQUESTS,
             Some(PLAIN),
         ),
         (
             "500 for a failed job trigger",
-            ApiError::job_failed("backup", "the destination is not writable"),
+            ApiError::job_failed("backup", "the destination is not writable").into_response(),
             StatusCode::INTERNAL_SERVER_ERROR,
             Some(PLAIN),
         ),
         (
             "502",
-            ApiError::bad_gateway("could not fetch the RBA FX rate feed", "timed out"),
+            ApiError::bad_gateway("could not fetch the RBA FX rate feed", "timed out")
+                .into_response(),
             StatusCode::BAD_GATEWAY,
             Some(PLAIN),
         ),
@@ -1062,14 +1073,29 @@ fn error_cases() -> Vec<(&'static str, ApiError, StatusCode, Option<&'static str
             ApiError::Busy {
                 body: BUSY_BODY.to_string(),
                 source: "database is locked (code: 5)".into(),
-            },
+            }
+            .into_response(),
             StatusCode::SERVICE_UNAVAILABLE,
             Some(PLAIN),
         ),
-        ("bare 404", ApiError::NotFound, StatusCode::NOT_FOUND, None),
+        (
+            "bare 404",
+            ApiError::NotFound.into_response(),
+            StatusCode::NOT_FOUND,
+            None,
+        ),
         (
             "internal 500",
-            ApiError::internal("boom"),
+            ApiError::internal("boom").into_response(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            None,
+        ),
+        (
+            // A panic unwinds past every `Result<_, ApiError>`, so the layer
+            // catches it and answers this — deliberately indistinguishable from
+            // an internal 500, since a panic message can carry anything.
+            "500 from a caught panic",
+            panic_response(Box::new("the parcel arithmetic overflowed")),
             StatusCode::INTERNAL_SERVER_ERROR,
             None,
         ),
@@ -1108,12 +1134,7 @@ fn assert_every_variant_is_sampled(error: &ApiError) {
 pub(crate) fn documented_error_shapes() -> Vec<(u16, bool)> {
     error_cases()
         .into_iter()
-        .map(|(_, error, _, content_type)| {
-            (
-                error.into_response().status().as_u16(),
-                content_type.is_some(),
-            )
-        })
+        .map(|(_, response, _, content_type)| (response.status().as_u16(), content_type.is_some()))
         .collect()
 }
 
@@ -1304,8 +1325,7 @@ mod tests {
         use axum::http::header::CONTENT_TYPE;
 
         let cases = error_cases();
-        for (label, error, status, content_type) in cases {
-            let resp = error.into_response();
+        for (label, resp, status, content_type) in cases {
             assert_eq!(resp.status(), status, "{label}: wrong status");
             let sent = resp
                 .headers()

@@ -1362,6 +1362,13 @@ Resolution: a rename becomes an explicit, dated, audited event, not a bare field
   UI's year dropdown) and `POST /reports/tax-report` (body `{ "tax_year": N }`) returning
   the full document for one financial year. An out-of-range year returns a zeroed document,
   not an error (a mid-year draft is a legitimate use)
+  - **Superseded spelling** (`ea21d55`, 2026-09-25): both are served as
+    `GET /reports/tax_report/years` and `GET /reports/tax_report?tax_year=N` — underscores,
+    and a `GET` with its parameter in the query string, because a report is a read (the REST
+    API audit, archived in [`DONE/api.md`](DONE/api.md)). The `POST` spelling above answers
+    `405`. The requirement itself is unchanged and this file keeps its original text; the
+    note is here because it is the one live document that would otherwise name an endpoint
+    that does not exist
 - The document has: a title with the tax year and its date range (1 Jul–30 Jun), a
   "produced at" timestamp, and these sections:
   - **Data completeness** — checked at generation time, never blocking: every AMIT listing

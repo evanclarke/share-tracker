@@ -172,19 +172,38 @@ it rather than rediscover it.
       default; trusting one *only* when the operator declares the proxy is not the
       forgeable design the docs reject. Test: per-source isolation through a declared
       proxy, and that the header is ignored when none is declared.
-- [ ] Add `panic_response` to `infra::http`'s `error_cases` table. It is named in the
+- [x] Add `panic_response` to `infra::http`'s `error_cases` table. It is named in the
       Error-body matrix as a 500 shape but is absent from the one sample table the docs
       and the OpenAPI description derive from; it returns a `Response` directly, so it
       is trivially includable. Test: the existing media-type/shape tests covering it
       like every other case.
-- [ ] Resolve `/portfolio/open-parcels`' as-of default in one place. The handler resolves
+      Done: `error_cases`' rows are now already-built `Response`s rather than `ApiError`s,
+      which is what lets a panic be one of them (there is no `ApiError` a panic becomes —
+      the unwind is caught by the layer). The media-type/shape test and
+      `documented_error_shapes` both read the table unchanged, so the caught-panic `500` is
+      covered like every other case and the docs are derived from a table with nothing
+      outside it.
+- [x] Resolve `/portfolio/open-parcels`' as-of default in one place. The handler resolves
       `as_of_or_today` and passes `Some(as_of)`; `domain::open_parcels::load` resolves
       `None` the same way, so the default is stated in the handler, the loader and the
       docs, and a change to the loader is masked by the handler. Test: the existing
       boundary tests, with the duplicate branch gone.
-- [ ] Two stale references, both low: `REQUIREMENTS.md:1361-1362` still specifies
+      Done: the handler passes `q.as_of_date` through unresolved and the loader owns the
+      default (it has to — every other caller passes `None`). The masking was the real
+      defect: a change to the loader's default would have left this endpoint on the old one
+      with `api_open_parcels_as_of_date_bounds_the_schedule` still green. That test, which
+      drives the omitted date, explicitly-today and as-at-yesterday, is unchanged and
+      passes.
+- [x] Two stale references, both low: `REQUIREMENTS.md:1361-1362` still specifies
       `GET /reports/tax-report/years` and `POST /reports/tax-report`, which have answered
       405 since `ea21d55` (defensible — that file is the historical requirement text —
       but it is the one live document naming an endpoint that does not exist); and
       `docs/API.md`'s Server-side pagination limitation dates the filters 2026-09-24
       against a 2026-09-25 commit. Test: `doc_checks` for whichever wording lands.
+      Done: the pagination entry now dates the filters 2026-09-25, their own commit
+      (`9400e70`), and the existing `doc_checks` assertion pins the corrected line with the
+      reason. `REQUIREMENTS.md` keeps its original requirement text — it is the historical
+      record — with a **Superseded spelling** note beneath it naming what is actually served
+      (`GET /reports/tax_report?tax_year=N`, `GET /reports/tax_report/years`) and why it
+      moved; `doc_checks::the_superseded_tax_report_endpoints_are_marked_as_such` pins both
+      halves.
