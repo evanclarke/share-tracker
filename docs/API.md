@@ -532,7 +532,7 @@ Interest income (`docs/ato/tax-return-labels-2026.md`): bank, term-deposit, or b
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/interest_income` | List all interest income records; filter with `?holding_account_id=`, `?from=`, `?to=` (inclusive, over `date_paid`) — interest has no listing to filter on |
+| `GET` | `/interest_income` | List all interest income records; filter with `?holding_account_id=`, `?from=`, `?to=` (inclusive, over `date_paid`) — interest has no listing to filter on, and a `NULL` (portfolio-wide) holding account is not matched by `?holding_account_id=` |
 | `GET` | `/interest_income/:id` | Get one interest income record |
 | `POST` | `/interest_income` | Create an interest income record, letting the database assign its id (see [Creating a record](#creating-a-record)) |
 | `PUT` | `/interest_income/:id` | Create or update an interest income record |
@@ -548,7 +548,7 @@ Deductible investment expenses (`docs/ato/investment-income-deductions.md`, `doc
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/investment_expenses` | List all investment expenses; filter with `?listing_id=`, `?holding_account_id=`, `?from=`, `?to=` (inclusive, over `date_incurred`) |
+| `GET` | `/investment_expenses` | List all investment expenses; filter with `?listing_id=`, `?holding_account_id=`, `?from=`, `?to=` (inclusive, over `date_incurred`) — a `NULL` owner (a portfolio-wide expense) is not matched by either owner filter |
 | `GET` | `/investment_expenses/:id` | Get one investment expense |
 | `POST` | `/investment_expenses` | Create an investment expense, letting the database assign its id (see [Creating a record](#creating-a-record)) |
 | `PUT` | `/investment_expenses/:id` | Create or update an investment expense |
@@ -1919,6 +1919,8 @@ Report reads (`/portfolio/*` and `/reports/*`) return their rows in the order th
 Every other report read takes its parameters as query-string fields and answers `400` for an unreadable one (see [Response codes](#response-codes)). A `POST` on a write endpoint (`/report_snapshots/generate`, `/closing_prices/fetch`, the entity operations and creates) is a write, not a read.
 
 **Filters.** The workhorse entity lists are narrowed **server-side**, each accepting the parameters its own columns offer, so a client no longer fetches a whole table to filter it. The date bounds are **inclusive at both ends**, the convention `GET /closing_prices?from=&to=` set; an entity list whose columns offer no such filter takes none. `/interest_income` has no listing (see [Interest income](#interest-income)), and `/corporate_actions`, `/transfers` and `/distribution_events` have no holding account, so those lists simply do not name it.
+
+**A filter matches recorded values only.** [`investment_expenses`](#investment-expenses)'s `listing_id`/`holding_account_id` and [`interest_income`](#interest-income)'s `holding_account_id` are nullable by design — a `NULL` is a **portfolio-wide** amount that belongs to no single listing or account (an adviser's whole-of-portfolio fee, say) — and `?listing_id=`/`?holding_account_id=` compares equality, so those rows match no value and are **excluded from the filtered result**. The response does not flag it: the array is simply smaller. So iterating `?holding_account_id=N` over the accounts totals what is *attributed to* each account, not every amount in the portfolio — to include the un-attributed rows, read the unfiltered list and take the `NULL`-owner ones, or query the relevant report, which aggregates them in full.
 
 | List | Query parameters |
 |------|------------------|

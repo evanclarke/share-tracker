@@ -282,6 +282,14 @@ fn list_filtering_contract_documented() {
     assert!(
         section.contains("**Filters.** The workhorse entity lists are narrowed **server-side**")
     );
+    // The NULL-owner exception: equality cannot match a NULL, so a filter drops
+    // the portfolio-wide rows, and a client totalling a filter has to know.
+    assert!(
+        section.contains("**A filter matches recorded values only.**"),
+        "the Filters contract must state that a NULL owner matches no value"
+    );
+    assert!(section.contains("a `NULL` is a **portfolio-wide** amount"));
+    assert!(section.contains("are **excluded from the filtered result**"));
     assert!(section.contains("**inclusive at both ends**"));
     assert!(section.contains("Several filters on one request **AND** together"));
     assert!(section.contains("never a `404`"));
