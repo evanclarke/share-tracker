@@ -15,7 +15,8 @@ import {
   el, toastIfCurrent, setMainIfCurrent, beginNavigation, navigationToken,
   isCurrentNavigation, onViewTeardown, reload, looksNumeric, isTimestamp, fmtLocalTimestamp, utcTooltip,
   cellText, numericDisplay, decCompare, moneyText, moneyEl, columnKinds, columnLabel, columnLabelMaps,
-  fkLabelMaps, api, apiUrl, queryString, pathSeg, safeDecodeURIComponent, loadOptions, listingNamer,
+  fkLabelMaps, api, apiResponse, apiRowExists, replaceConfirmText, putOutcomeMessage, apiUrl, queryString, pathSeg,
+  safeDecodeURIComponent, loadOptions, listingNamer,
   describeTrade, tradeOrigin,
   columnLinks, listingLinkFrom, defaultSortColumn,
   tableViewCache, debounce,
@@ -675,9 +676,13 @@ async function viewEntityForm(entity, keyParts, seq = navigationToken()) {
       });
       if (wired && wired.transformBody) wired.transformBody(body);
       let idPath;
+      // A `PUT`'s status carries whether it created or replaced — surfaced
+      // below so a clobber is never toasted as a plain "Saved.".
+      let outcomeMsg = null;
       if (editing) {
         idPath = entity.keyFields.map(function (kf) { return existing[kf.name]; }).join('/');
-        await api('PUT', entity.api + '/' + idPath, body);
+        const res = await apiResponse('PUT', entity.api + '/' + idPath, body);
+        outcomeMsg = putOutcomeMessage(res.status, true);
       } else if (entity.keyFields.some(function (kf) { return kf.auto; })) {
         // A server-assigned key: POST the collection and take the id off the
         // created row, so nothing has to guess `max(id) + 1`. Every collection
@@ -698,12 +703,20 @@ async function viewEntityForm(entity, keyParts, seq = navigationToken()) {
         // `cgt_settings`) — and lives in `keyFields`, so it is part of the URL
         // rather than the body (the write bodies take no key at all). There is
         // no collection POST for these and nothing to allocate: PUT the path
-        // the fields name.
+        // the fields name. Because that PUT is an upsert, a key that is
+        // already taken would silently replace the existing row (an exchange's
+        // settlement days, say), so read the key first and ask before writing;
+        // declining writes nothing.
         idPath = entity.keyFields.map(function (kf) { return readFieldValue(kf, form); }).join('/');
-        await api('PUT', entity.api + '/' + idPath, body);
+        if (await apiRowExists(entity.api + '/' + idPath)
+          && !window.confirm(replaceConfirmText(entity.title, idPath))) {
+          return;
+        }
+        const res = await apiResponse('PUT', entity.api + '/' + idPath, body);
+        outcomeMsg = putOutcomeMessage(res.status, false);
       }
       const msg = wired && wired.afterSave ? await wired.afterSave(idPath, seq) : null;
-      if (msg !== '') toastIfCurrent(seq, msg || 'Saved.');
+      if (msg !== '') toastIfCurrent(seq, msg || outcomeMsg || 'Saved.');
       location.hash = '#/e/' + entity.slug;
     } catch (e) {
       toastIfCurrent(seq, e.message, true);

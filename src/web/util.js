@@ -650,7 +650,11 @@ export function authEnabled() {
   return !!(meta && meta.getAttribute('content'));
 }
 
-export async function api(method, path, body) {
+// The whole of `api` except that it also hands back the response status. A
+// `PUT`'s status *is* the create-vs-replace signal (`201` created, `204`
+// replaced — see docs/API.md), and the entity form has to read it to tell a
+// create from a clobber, so `api` below is this with the status dropped.
+export async function apiResponse(method, path, body) {
   const opts = { method: method, headers: {} };
   if (body !== undefined) {
     opts.headers['Content-Type'] = 'application/json';
@@ -670,10 +674,57 @@ export async function api(method, path, body) {
   if (!res.ok) {
     let detail = '';
     try { detail = (await res.text()).trim(); } catch (e) { /* ignore */ }
-    throw new Error('HTTP ' + res.status + (detail ? ': ' + detail : ''));
+    const err = new Error('HTTP ' + res.status + (detail ? ': ' + detail : ''));
+    // Carried so a caller that must distinguish statuses (the create form's
+    // clobber guard) can read it without matching on the message text.
+    err.status = res.status;
+    throw err;
   }
   const ct = res.headers.get('content-type') || '';
-  return ct.indexOf('application/json') !== -1 ? res.json() : null;
+  const data = ct.indexOf('application/json') !== -1 ? await res.json() : null;
+  return { status: res.status, data: data };
+}
+
+export async function api(method, path, body) {
+  return (await apiResponse(method, path, body)).data;
+}
+
+// Whether a `GET`-one finds a row: `true` when it does, `false` on the
+// documented empty 404, and a throw on anything else — a 500 or an outage must
+// never read as "absent" and let a create PUT clobber the row it could not
+// see.
+export async function apiRowExists(path) {
+  try {
+    await apiResponse('GET', path);
+    return true;
+  } catch (e) {
+    if (e && e.status === 404) return false;
+    throw e;
+  }
+}
+
+// The confirmation shown before a *create* form PUTs a natural key that is
+// already taken. The server's `PUT` is an upsert, so proceeding replaces the
+// existing row — for a seeded reference row (an exchange's settlement days,
+// say) that silently changes every trade's T+n. The form reads the key first
+// and asks; a decline aborts the write entirely.
+export function replaceConfirmText(noun, key) {
+  return noun.replace(/s$/, '') + ' ' + key + ' already exists. Replace it?';
+}
+
+// The extra toast a `PUT` outcome deserves, or null for the ordinary "Saved.".
+// A create form answering `204` replaced a row the user did not know was
+// there; an edit answering `201` wrote a row that had been deleted underneath
+// the form. Both are real write outcomes the server reports and the form used
+// to swallow by toasting "Saved." unconditionally.
+export function putOutcomeMessage(status, editing) {
+  if (editing && status === 201) {
+    return 'Saved, but the record had been deleted \u2014 this recreated it.';
+  }
+  if (!editing && status === 204) {
+    return 'Saved, replacing the record that already had that key.';
+  }
+  return null;
 }
 
 // Options for <select> fields, fetched fresh each render so newly created

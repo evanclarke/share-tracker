@@ -1341,9 +1341,10 @@ mod tests {
     #[tokio::test]
     async fn creates_use_the_server_assigned_id_rather_than_guessing_one() {
         let js = app_js_body().await;
-        // The create POSTs to the collection; the edit PUTs the named key.
+        // The create POSTs to the collection; the edit PUTs the named key and
+        // reads the create-vs-replace status off the response.
         assert!(js.contains("const created = await api('POST', entity.api, body)"));
-        assert!(js.contains("await api('PUT', entity.api + '/' + idPath, body)"));
+        assert!(js.contains("await apiResponse('PUT', entity.api + '/' + idPath, body)"));
         // The create branch turns on where the key comes from: a
         // server-assigned id is POSTed for, a keyed entity is PUT to its path.
         assert!(js.contains("entity.keyFields.some(function (kf) { return kf.auto; })"));
@@ -1484,16 +1485,19 @@ mod tests {
     }
 
     /// The save path accepts **both** halves of the `PUT` create-vs-replace
-    /// signal.
+    /// signal, and acts on which one it got.
     ///
     /// A server-assigned-key create goes through `POST`, but a natural-key
     /// create (`/exchanges/:mic`, `/tax_year_settings/:tax_year`, …) goes
     /// through `PUT`, and every edit is a `PUT` too — and the same route answers
     /// `201` with the created row on a create and `204` on a replace. The
-    /// central `api()` client gates on `res.ok`, so both pass; a `204`-only
-    /// check would turn every natural-key create into a spurious toast. This
-    /// pins that gate, the branch that needs no body from either answer, and
-    /// the contract itself, driven for real.
+    /// central client gates on `res.ok`, so both pass. That used to be all the
+    /// form knew: a natural-key create on a taken key toasted "Saved." while
+    /// silently replacing the existing row (an exchange's settlement days, say),
+    /// and an edit of a row deleted underneath it toasted "Saved." while
+    /// resurrecting it. This pins the guard that asks before the clobber, the
+    /// status reads that name both outcomes, and the contract itself, driven
+    /// for real.
     #[tokio::test]
     async fn the_ui_accepts_a_put_that_created_as_well_as_one_that_replaced() {
         let js = app_js_body().await;
@@ -1502,9 +1506,20 @@ mod tests {
             "the API client must treat every 2xx as success — a PUT answers 201 on create \
              and 204 on replace"
         );
-        // The edit branch PUTs and reads nothing off the response, so neither
-        // status needs body handling.
-        assert!(js.contains("await api('PUT', entity.api + '/' + idPath, body);"));
+        // A natural-key create reads the key before writing and asks, so a
+        // decline writes nothing.
+        assert!(
+            js.contains("if (await apiRowExists(entity.api + '/' + idPath)"),
+            "the create form must probe a natural key before its replacing PUT"
+        );
+        assert!(
+            js.contains("window.confirm(replaceConfirmText(entity.title, idPath))"),
+            "a taken natural key must be confirmed before the row is replaced"
+        );
+        // Both PUT branches keep the status the client used to discard, so a
+        // clobber and a resurrection are named rather than toasted "Saved.".
+        assert!(js.contains("putOutcomeMessage(res.status, true)"));
+        assert!(js.contains("putOutcomeMessage(res.status, false)"));
 
         // …and the contract it relies on, driven for real: 201 + the created
         // row, then 204 on the replace.

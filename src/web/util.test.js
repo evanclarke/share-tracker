@@ -23,6 +23,7 @@ import {
   holdingHasActivity, loadPref, savePref, pathSeg, safeDecodeURIComponent, basePath, apiUrl,
   queryString,
   authEnabled,
+  apiResponse, apiRowExists, replaceConfirmText, putOutcomeMessage,
   cellText, adjustmentPreviewText, allocationSummary, toastLifetime, moneyText,
   resolveTheme, otherTheme, themeToggleLabel, applyTheme, currentTheme, toggleTheme,
   THEME_PREF_KEY,
@@ -1260,3 +1261,44 @@ test('debounce fires again for a later burst', () => {
   }
 });
 
+
+// ---- PUT outcome / clobber guard ----------------------------------------
+// The entity form reads a PUT's status to tell a create from a replace and a
+// GET's 404 to tell "no such row" from a real failure. Both pure helpers are
+// unit-tested because the served-bundle assertions in web.rs cannot execute
+// them, and getting either backwards is the silent clobber this whole path
+// exists to stop.
+test('putOutcomeMessage names the two surprising PUT outcomes and nothing else', () => {
+  assert.equal(putOutcomeMessage(201, false), null); // ordinary create
+  assert.equal(putOutcomeMessage(204, true), null); // ordinary replace
+  assert.match(putOutcomeMessage(204, false), /replacing/); // create clobbered a row
+  assert.match(putOutcomeMessage(201, true), /recreated/); // edit of a deleted row
+});
+
+test('replaceConfirmText names the noun and key, singularised, and asks', () => {
+  assert.equal(replaceConfirmText('Exchanges', 'XASX'),
+    'Exchange XASX already exists. Replace it?');
+  assert.equal(replaceConfirmText('Exchange Holidays', 'XASX/2024-01-01'),
+    'Exchange Holiday XASX/2024-01-01 already exists. Replace it?');
+});
+
+test('apiRowExists maps only a 404 to absent and propagates any other failure', async () => {
+  const realFetch = globalThis.fetch;
+  const res = (status, body, ct) => ({
+    ok: status >= 200 && status < 300,
+    status: status,
+    headers: { get: () => ct || '' },
+    json: async () => body,
+    text: async () => body == null ? '' : String(body),
+  });
+  try {
+    globalThis.fetch = async () => res(404, 'no exchange with that id');
+    assert.equal(await apiRowExists('/exchanges/XASX'), false);
+    globalThis.fetch = async () => res(200, { mic: 'XASX' }, 'application/json');
+    assert.equal(await apiRowExists('/exchanges/XASX'), true);
+    globalThis.fetch = async () => res(500, 'boom');
+    await assert.rejects(() => apiRowExists('/exchanges/XASX'), (e) => e.status === 500);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
