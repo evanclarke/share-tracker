@@ -214,7 +214,6 @@ fn list_ordering_post_reads_and_pagination_documented() {
         "/amma_statements",
         "/inheritances",
         "/transfers",
-        "/drp_enrolments",
         "/rights_sales",
     ] {
         assert!(
@@ -222,6 +221,35 @@ fn list_ordering_post_reads_and_pagination_documented() {
             "ascending date, then `id` must name `{path}`"
         );
     }
+
+    // `/drp_enrolments` is grouped by listing and holding account **before** the
+    // date, so filing it with the plain dated lists was wrong: a client merging
+    // enrolments in date order would read them interleaved by listing. It has
+    // its own row, and must not be in the plain dated one.
+    assert!(
+        row("ascending listing, then holding account, then date, then `id`")
+            .contains("`/drp_enrolments` (`listing_id`, `holding_account_id`, `enrolment_date`)"),
+        "`/drp_enrolments` must be filed under its real ORDER_BY"
+    );
+    assert!(
+        !row("ascending date, then `id`").contains("/drp_enrolments"),
+        "`/drp_enrolments` must not be filed under the plain dated lists"
+    );
+    // `/exchange_holidays` leads on the exchange's MIC, not the date.
+    assert!(
+        row("ascending natural key, then date")
+            .contains("`/exchange_holidays` (`mic`, `holiday_date`"),
+        "`/exchange_holidays` must be filed under mic-then-date"
+    );
+    // The "key lives in ORDER_BY" claim is qualified: five hand-written lists
+    // have no const, and the section must say so rather than send a maintainer
+    // looking for one.
+    assert!(section.contains(
+        "the hand-written lists (`/closing_prices`, `/attachments`, `/rights_sales`, \
+         `/exchange_holidays`, `/listings/:id/renames`) state their own `ORDER BY`"
+    ));
+    // …and "total" is a unique column **or tuple**, not always a single column.
+    assert!(section.contains("or in a unique tuple where the leading keys are not unique"));
 
     // The one descending row is the whole exception list: every endpoint it
     // names is a newest-first browse surface, and no ascending list is
@@ -314,76 +342,63 @@ fn list_filtering_contract_documented() {
          a query string**"
     ));
     assert!(section.contains("cursor paging of the entity lists remains an open item"));
-    // Every filtered entity list is named in the section's own table, with the
-    // parameters it honours.
-    for (path, params) in [
-        ("`/listings`", "`exchange_mic`, `security_type`"),
-        (
-            "`/trades`",
-            "`listing_id`, `holding_account_id`, `from`/`to` over `date`",
-        ),
-        (
-            "`/income`",
-            "`listing_id`, `holding_account_id`, `from`/`to` over `date_paid`",
-        ),
-        (
-            "`/interest_income`",
-            "`holding_account_id`, `from`/`to` over `date_paid`",
-        ),
-        (
-            "`/investment_expenses`",
-            "`listing_id`, `holding_account_id`, `from`/`to` over `date_incurred`",
-        ),
-        (
-            "`/amma_statements`",
-            "`listing_id`, `holding_account_id`, `from`/`to` over `tax_year_end_date`",
-        ),
-        (
-            "`/ess_statements`",
-            "`listing_id`, `holding_account_id`, `from`/`to` over `taxing_point_date`",
-        ),
-        (
-            "`/inheritances`",
-            "`listing_id`, `holding_account_id`, `from`/`to` over `date_of_death`",
-        ),
-        (
-            "`/corporate_actions`",
-            "`listing_id`, `from`/`to` over `date`",
-        ),
-        ("`/transfers`", "`listing_id`, `from`/`to` over `date`"),
-        (
-            "`/distribution_events`",
-            "`listing_id`, `from`/`to` over `ex_date`",
-        ),
-        (
-            "`/drp_enrolments`",
-            "`listing_id`, `holding_account_id` (no date range: a period has two dates)",
-        ),
-        ("`/amit_adjustments`", "`amma_statement_id`, `trade_id`"),
-        (
-            "`/parcel_allocations`",
-            "`sale_trade_id`, `purchase_trade_id`",
-        ),
-        (
-            "`/closing_prices`",
-            "`listing_id`, `from`/`to` over `price_date`, `status` (`ok` or `error`)",
-        ),
-        (
-            "`/report_snapshots`",
-            "`report`, `from`/`to` over `snapshot_date`",
-        ),
-    ] {
-        assert!(
-            section.contains(&format!("| {path} | {params} |")),
-            "the filters table must name `{path}` with `{params}`"
-        );
+    // The filters table's paths and parameters are **derived** from
+    // `entities::filtered_list_routes()` (the classification table the
+    // filtering tests drive), plus `/report_snapshots` — a resource surface,
+    // not an entity list. The table must name exactly those lists, each with
+    // every parameter it accepts; the hand-typed copy this replaces omitted
+    // `/attachments` entirely.
+    let filter_rows: Vec<(String, String)> = section
+        .lines()
+        .filter(|line| line.starts_with("| `/"))
+        .map(|line| {
+            let mut cells = line.split('|');
+            cells.next();
+            (
+                cells.next().expect("a path cell").trim().to_string(),
+                cells.next().expect("a parameters cell").trim().to_string(),
+            )
+        })
+        .collect();
+    let filtered = crate::entities::filtered_list_routes();
+    for (path, params) in &filtered {
+        let label = format!("`{path}`");
+        let params_cell = filter_rows
+            .iter()
+            .find(|(p, _)| *p == label)
+            .unwrap_or_else(|| panic!("the filters table must name `{path}`"))
+            .1
+            .clone();
+        for param in *params {
+            assert!(
+                params_cell.contains(&format!("`{param}`")),
+                "the filters table's `{path}` row must name `{param}`: {params_cell}"
+            );
+        }
     }
+    let mut documented: Vec<String> = filter_rows.iter().map(|(p, _)| p.clone()).collect();
+    documented.sort();
+    let mut expected: Vec<String> = filtered.iter().map(|(p, _)| format!("`{p}`")).collect();
+    expected.push("`/report_snapshots`".to_string());
+    expected.sort();
+    assert_eq!(
+        documented, expected,
+        "the filters table must name exactly the filtered list routes plus `/report_snapshots`"
+    );
     // The unfiltered entity lists are named as read whole, so the
     // classification is stated rather than left to be discovered.
     assert!(section.contains(
         "`/exchanges`, `/currencies`, `/mic_registry`, `/rba_fx_rates`, `/holding_accounts`, \
          `/cgt_settings` and `/tax_year_settings` are reference or settings tables read whole"
     ));
+    // …and the two hand-written lists that decode no query at all are stated
+    // too, so a client does not read `GET /rights_sales?listing_id=3` as a
+    // narrowed list.
+    assert!(
+        section.contains("Two hand-written lists decode **no query string at all**"),
+        "the filters section must state the query-ignoring lists"
+    );
+    assert!(section.contains("`/rights_sales` and `/exchange_holidays` return the whole table"));
     // Each affected section's own list route names its filters.
     for (row, param) in [
         (

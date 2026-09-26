@@ -142,6 +142,237 @@ pub(crate) const PUT_ROUTES: &[(&str, PutOutcome)] = &[
 ];
 
 #[cfg(test)]
+/// How an entity list route reaches its rows.
+#[derive(PartialEq, Eq)]
+pub(crate) enum ListKind {
+    /// Registered with the shared `http::list_handler`, so its filters are
+    /// its `CrudEntity::Filter` and an unknown parameter is axum's `Query`
+    /// rejection.
+    Shared,
+    /// A hand-written handler that decodes its own query string — the
+    /// trades list (it presents the row), and the two shared lists that
+    /// already had filters. It refuses an unknown parameter too.
+    HandWrittenQuery,
+    /// A hand-written list with no query decoding at all, left as it was
+    /// by this item.
+    HandWrittenIgnoringQuery,
+}
+
+#[cfg(test)]
+/// One entity list route.
+pub(crate) struct ListRoute {
+    pub(crate) path: &'static str,
+    /// The query parameters it accepts; `&[]` for none, which then
+    /// requires a `reason`.
+    pub(crate) filters: &'static [&'static str],
+    pub(crate) kind: ListKind,
+    /// Why an unfiltered list takes none — empty for a filtered one.
+    pub(crate) reason: &'static str,
+}
+
+#[cfg(test)]
+/// Every list route `entities::router` serves, classified. The filtered
+/// ones carry the parameters this item added (or the pre-existing ones the
+/// hand-written lists already took); the unfiltered ones say why.
+///
+/// `every_list_route_is_classified_for_filtering` scans the sources for
+/// the shared `list_handler` registrations and fails on one missing here,
+/// so a new entity list cannot ship without the filters its columns offer
+/// (or a stated reason it takes none), and
+/// `every_list_route_refuses_an_unknown_parameter` drives each classified
+/// route so the refusal is real rather than documented.
+pub(crate) const LIST_ROUTES: &[ListRoute] = &[
+    // Filtered: the workhorse entity lists.
+    ListRoute {
+        path: "/listings",
+        filters: &["exchange_mic", "security_type"],
+        kind: ListKind::Shared,
+        reason: "",
+    },
+    ListRoute {
+        path: "/trades",
+        filters: &["listing_id", "holding_account_id", "from", "to"],
+        kind: ListKind::HandWrittenQuery,
+        reason: "",
+    },
+    ListRoute {
+        path: "/income",
+        filters: &["listing_id", "holding_account_id", "from", "to"],
+        kind: ListKind::Shared,
+        reason: "",
+    },
+    ListRoute {
+        path: "/interest_income",
+        filters: &["holding_account_id", "from", "to"],
+        kind: ListKind::Shared,
+        reason: "",
+    },
+    ListRoute {
+        path: "/investment_expenses",
+        filters: &["listing_id", "holding_account_id", "from", "to"],
+        kind: ListKind::Shared,
+        reason: "",
+    },
+    ListRoute {
+        path: "/amma_statements",
+        filters: &["listing_id", "holding_account_id", "from", "to"],
+        kind: ListKind::Shared,
+        reason: "",
+    },
+    ListRoute {
+        path: "/ess_statements",
+        filters: &["listing_id", "holding_account_id", "from", "to"],
+        kind: ListKind::Shared,
+        reason: "",
+    },
+    ListRoute {
+        path: "/inheritances",
+        filters: &["listing_id", "holding_account_id", "from", "to"],
+        kind: ListKind::Shared,
+        reason: "",
+    },
+    ListRoute {
+        path: "/corporate_actions",
+        filters: &["listing_id", "from", "to"],
+        kind: ListKind::Shared,
+        reason: "",
+    },
+    ListRoute {
+        path: "/transfers",
+        filters: &["listing_id", "from", "to"],
+        kind: ListKind::Shared,
+        reason: "",
+    },
+    ListRoute {
+        path: "/distribution_events",
+        filters: &["listing_id", "from", "to"],
+        kind: ListKind::Shared,
+        reason: "",
+    },
+    ListRoute {
+        path: "/drp_enrolments",
+        filters: &["listing_id", "holding_account_id"],
+        kind: ListKind::Shared,
+        reason: "",
+    },
+    ListRoute {
+        path: "/amit_adjustments",
+        filters: &["amma_statement_id", "trade_id"],
+        kind: ListKind::Shared,
+        reason: "",
+    },
+    ListRoute {
+        path: "/parcel_allocations",
+        filters: &["sale_trade_id", "purchase_trade_id"],
+        kind: ListKind::Shared,
+        reason: "",
+    },
+    // Unfiltered entity lists: no filter this item's columns offer, or a
+    // table only ever read whole.
+    ListRoute {
+        path: "/exchanges",
+        filters: &[],
+        kind: ListKind::Shared,
+        reason: "Reference table: a handful of rows, read whole by every picker.",
+    },
+    ListRoute {
+        path: "/currencies",
+        filters: &[],
+        kind: ListKind::Shared,
+        reason: "Import-fed ISO reference table, read whole (a code-keyed GET-one exists).",
+    },
+    ListRoute {
+        path: "/mic_registry",
+        filters: &[],
+        kind: ListKind::Shared,
+        reason: "Import-fed ISO reference table, read whole (a MIC-keyed GET-one exists).",
+    },
+    ListRoute {
+        path: "/rba_fx_rates",
+        filters: &[],
+        kind: ListKind::Shared,
+        reason: "Import-fed reference table, read whole; its rows are corrected one at a time by id.",
+    },
+    ListRoute {
+        path: "/holding_accounts",
+        filters: &[],
+        kind: ListKind::Shared,
+        reason: "A handful of rows, read whole.",
+    },
+    ListRoute {
+        path: "/cgt_settings",
+        filters: &[],
+        kind: ListKind::Shared,
+        reason: "Singleton settings row.",
+    },
+    ListRoute {
+        path: "/tax_year_settings",
+        filters: &[],
+        kind: ListKind::Shared,
+        reason: "One row per financial year, read whole; the keyed GET-one is the narrowed read.",
+    },
+    // Hand-written lists outside this item's workhorse entity lists.
+    // Their existing filters are unchanged; `/rights_sales` and
+    // `/exchange_holidays` decode no query at all.
+    ListRoute {
+        path: "/closing_prices",
+        filters: &["listing_id", "from", "to", "status"],
+        kind: ListKind::HandWrittenQuery,
+        reason: "",
+    },
+    ListRoute {
+        path: "/attachments",
+        filters: &[
+            "trade_id",
+            "income_id",
+            "amma_statement_id",
+            "ess_statement_id",
+            "interest_income_id",
+            "corporate_action_id",
+            "include_linked",
+        ],
+        kind: ListKind::HandWrittenQuery,
+        reason: "",
+    },
+    ListRoute {
+        path: "/rights_sales",
+        filters: &[],
+        kind: ListKind::HandWrittenIgnoringQuery,
+        reason: "Hand-written list outside this item's scope; it decodes no query string.",
+    },
+    ListRoute {
+        path: "/exchange_holidays",
+        filters: &[],
+        kind: ListKind::HandWrittenIgnoringQuery,
+        reason: "Hand-written list outside this item's scope; it decodes no query string.",
+    },
+    ListRoute {
+        path: "/exchange_holidays/{mic}",
+        filters: &[],
+        kind: ListKind::HandWrittenIgnoringQuery,
+        reason: "Path-narrowed to one exchange's calendar; outside this item's scope.",
+    },
+    ListRoute {
+        path: "/listings/{id}/renames",
+        filters: &[],
+        kind: ListKind::HandWrittenIgnoringQuery,
+        reason: "Path-narrowed to one listing's rename chain; outside this item's scope.",
+    },
+];
+
+#[cfg(test)]
+/// The filtered entity list routes as `(path, query parameters)`, read by
+/// `api_spec` and `doc_checks` so the per-route filter documentation is derived
+/// from the one classification table rather than transcribed beside it.
+pub(crate) fn filtered_list_routes() -> Vec<(&'static str, &'static [&'static str])> {
+    LIST_ROUTES
+        .iter()
+        .filter(|route| !route.filters.is_empty())
+        .map(|route| (route.path, route.filters))
+        .collect()
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_support::{ApiClient, test_pool};
@@ -874,222 +1105,6 @@ mod tests {
     // Every entity list route is classified for filtering
     // -----------------------------------------------------------------------
 
-    /// How an entity list route reaches its rows.
-    #[derive(PartialEq, Eq)]
-    enum ListKind {
-        /// Registered with the shared `http::list_handler`, so its filters are
-        /// its `CrudEntity::Filter` and an unknown parameter is axum's `Query`
-        /// rejection.
-        Shared,
-        /// A hand-written handler that decodes its own query string — the
-        /// trades list (it presents the row), and the two shared lists that
-        /// already had filters. It refuses an unknown parameter too.
-        HandWrittenQuery,
-        /// A hand-written list with no query decoding at all, left as it was
-        /// by this item.
-        HandWrittenIgnoringQuery,
-    }
-
-    /// One entity list route.
-    struct ListRoute {
-        path: &'static str,
-        /// The query parameters it accepts; `&[]` for none, which then
-        /// requires a `reason`.
-        filters: &'static [&'static str],
-        kind: ListKind,
-        /// Why an unfiltered list takes none — empty for a filtered one.
-        reason: &'static str,
-    }
-
-    /// Every list route `entities::router` serves, classified. The filtered
-    /// ones carry the parameters this item added (or the pre-existing ones the
-    /// hand-written lists already took); the unfiltered ones say why.
-    ///
-    /// `every_list_route_is_classified_for_filtering` scans the sources for
-    /// the shared `list_handler` registrations and fails on one missing here,
-    /// so a new entity list cannot ship without the filters its columns offer
-    /// (or a stated reason it takes none), and
-    /// `every_list_route_refuses_an_unknown_parameter` drives each classified
-    /// route so the refusal is real rather than documented.
-    const LIST_ROUTES: &[ListRoute] = &[
-        // Filtered: the workhorse entity lists.
-        ListRoute {
-            path: "/listings",
-            filters: &["exchange_mic", "security_type"],
-            kind: ListKind::Shared,
-            reason: "",
-        },
-        ListRoute {
-            path: "/trades",
-            filters: &["listing_id", "holding_account_id", "from", "to"],
-            kind: ListKind::HandWrittenQuery,
-            reason: "",
-        },
-        ListRoute {
-            path: "/income",
-            filters: &["listing_id", "holding_account_id", "from", "to"],
-            kind: ListKind::Shared,
-            reason: "",
-        },
-        ListRoute {
-            path: "/interest_income",
-            filters: &["holding_account_id", "from", "to"],
-            kind: ListKind::Shared,
-            reason: "",
-        },
-        ListRoute {
-            path: "/investment_expenses",
-            filters: &["listing_id", "holding_account_id", "from", "to"],
-            kind: ListKind::Shared,
-            reason: "",
-        },
-        ListRoute {
-            path: "/amma_statements",
-            filters: &["listing_id", "holding_account_id", "from", "to"],
-            kind: ListKind::Shared,
-            reason: "",
-        },
-        ListRoute {
-            path: "/ess_statements",
-            filters: &["listing_id", "holding_account_id", "from", "to"],
-            kind: ListKind::Shared,
-            reason: "",
-        },
-        ListRoute {
-            path: "/inheritances",
-            filters: &["listing_id", "holding_account_id", "from", "to"],
-            kind: ListKind::Shared,
-            reason: "",
-        },
-        ListRoute {
-            path: "/corporate_actions",
-            filters: &["listing_id", "from", "to"],
-            kind: ListKind::Shared,
-            reason: "",
-        },
-        ListRoute {
-            path: "/transfers",
-            filters: &["listing_id", "from", "to"],
-            kind: ListKind::Shared,
-            reason: "",
-        },
-        ListRoute {
-            path: "/distribution_events",
-            filters: &["listing_id", "from", "to"],
-            kind: ListKind::Shared,
-            reason: "",
-        },
-        ListRoute {
-            path: "/drp_enrolments",
-            filters: &["listing_id", "holding_account_id"],
-            kind: ListKind::Shared,
-            reason: "",
-        },
-        ListRoute {
-            path: "/amit_adjustments",
-            filters: &["amma_statement_id", "trade_id"],
-            kind: ListKind::Shared,
-            reason: "",
-        },
-        ListRoute {
-            path: "/parcel_allocations",
-            filters: &["sale_trade_id", "purchase_trade_id"],
-            kind: ListKind::Shared,
-            reason: "",
-        },
-        // Unfiltered entity lists: no filter this item's columns offer, or a
-        // table only ever read whole.
-        ListRoute {
-            path: "/exchanges",
-            filters: &[],
-            kind: ListKind::Shared,
-            reason: "Reference table: a handful of rows, read whole by every picker.",
-        },
-        ListRoute {
-            path: "/currencies",
-            filters: &[],
-            kind: ListKind::Shared,
-            reason: "Import-fed ISO reference table, read whole (a code-keyed GET-one exists).",
-        },
-        ListRoute {
-            path: "/mic_registry",
-            filters: &[],
-            kind: ListKind::Shared,
-            reason: "Import-fed ISO reference table, read whole (a MIC-keyed GET-one exists).",
-        },
-        ListRoute {
-            path: "/rba_fx_rates",
-            filters: &[],
-            kind: ListKind::Shared,
-            reason: "Import-fed reference table, read whole; its rows are corrected one at a time by id.",
-        },
-        ListRoute {
-            path: "/holding_accounts",
-            filters: &[],
-            kind: ListKind::Shared,
-            reason: "A handful of rows, read whole.",
-        },
-        ListRoute {
-            path: "/cgt_settings",
-            filters: &[],
-            kind: ListKind::Shared,
-            reason: "Singleton settings row.",
-        },
-        ListRoute {
-            path: "/tax_year_settings",
-            filters: &[],
-            kind: ListKind::Shared,
-            reason: "One row per financial year, read whole; the keyed GET-one is the narrowed read.",
-        },
-        // Hand-written lists outside this item's workhorse entity lists.
-        // Their existing filters are unchanged; `/rights_sales` and
-        // `/exchange_holidays` decode no query at all.
-        ListRoute {
-            path: "/closing_prices",
-            filters: &["listing_id", "from", "to", "status"],
-            kind: ListKind::HandWrittenQuery,
-            reason: "",
-        },
-        ListRoute {
-            path: "/attachments",
-            filters: &[
-                "trade_id",
-                "income_id",
-                "amma_statement_id",
-                "ess_statement_id",
-                "interest_income_id",
-                "corporate_action_id",
-                "include_linked",
-            ],
-            kind: ListKind::HandWrittenQuery,
-            reason: "",
-        },
-        ListRoute {
-            path: "/rights_sales",
-            filters: &[],
-            kind: ListKind::HandWrittenIgnoringQuery,
-            reason: "Hand-written list outside this item's scope; it decodes no query string.",
-        },
-        ListRoute {
-            path: "/exchange_holidays",
-            filters: &[],
-            kind: ListKind::HandWrittenIgnoringQuery,
-            reason: "Hand-written list outside this item's scope; it decodes no query string.",
-        },
-        ListRoute {
-            path: "/exchange_holidays/{mic}",
-            filters: &[],
-            kind: ListKind::HandWrittenIgnoringQuery,
-            reason: "Path-narrowed to one exchange's calendar; outside this item's scope.",
-        },
-        ListRoute {
-            path: "/listings/{id}/renames",
-            filters: &[],
-            kind: ListKind::HandWrittenIgnoringQuery,
-            reason: "Path-narrowed to one listing's rename chain; outside this item's scope.",
-        },
-    ];
-
     /// The value each filter is driven with — the shape the parameter takes,
     /// not a row that has to exist (every route answers an empty `200` for a
     /// filter that matches nothing).
@@ -1106,6 +1121,15 @@ mod tests {
 
     /// The `/<path>` literals `entities/` registers with the shared
     /// `http::list_handler`, read out of the sources rather than transcribed.
+    ///
+    /// The needle is the **handler name alone** (`list_handler::<`), not the
+    /// fully-qualified `get(http::list_handler::<`: an entity that imports the
+    /// handler (`use crate::infra::http::list_handler;`) and registers
+    /// `get(list_handler::<X>)` is the same route written differently, and the
+    /// longer needle made it invisible to the scan *and* absent from
+    /// `LIST_ROUTES`, so the both-ways assertion passed while a list shipped
+    /// unclassified. A comment line is skipped so a doc mention cannot be read
+    /// as a registration.
     fn shared_list_route_paths() -> Vec<String> {
         let mut paths: Vec<String> = Vec::new();
         for (file, body) in crate::test_support::rust_sources() {
@@ -1114,8 +1138,12 @@ mod tests {
             if !file.starts_with("entities/") || file == "entities/mod.rs" {
                 continue;
             }
-            for (at, _) in body.match_indices("get(http::list_handler::<") {
+            for (at, _) in body.match_indices("list_handler::<") {
                 let before = &body[..at];
+                let line_start = before.rfind('\n').map_or(0, |i| i + 1);
+                if before[line_start..].trim_start().starts_with("//") {
+                    continue;
+                }
                 let route_at = before
                     .rfind(".route(")
                     .expect("a list_handler is registered by a `.route(…)` call");
@@ -1176,6 +1204,55 @@ mod tests {
                     route.path
                 );
             }
+        }
+    }
+
+    /// Every entity list route the classification table knows is named in
+    /// **exactly one** row of `docs/API.md`'s ordering table.
+    ///
+    /// The ordering pin in `doc_checks` asserts each row's endpoints were typed
+    /// in as they are; nothing there reads `LIST_ROUTES`, so a new entity list
+    /// shipped without any ordering row failed nothing — which is how
+    /// `/drp_enrolments` came to be filed under a key it does not have. This
+    /// closes the completeness half from the table's own source.
+    #[test]
+    fn every_classified_list_route_is_in_the_documented_ordering_table() {
+        let md = include_str!("../../docs/API.md");
+        let section = md
+            .split("## Reading a list")
+            .nth(1)
+            .expect("docs/API.md has a Reading a list section")
+            .split("\n## ")
+            .next()
+            .expect("split always yields at least one part");
+        let rows: Vec<&str> = section
+            .lines()
+            .filter(|line| line.starts_with("| ascending") || line.starts_with("| **descending**"))
+            .collect();
+
+        for route in LIST_ROUTES {
+            // A path-narrowed variant (`/exchange_holidays/{mic}`) is documented
+            // with its parent collection and has no row of its own.
+            if route.path.contains('{') {
+                continue;
+            }
+            let needle = format!("`{}`", route.path);
+            let count = rows.iter().filter(|row| row.contains(&needle)).count();
+            assert_eq!(
+                count, 1,
+                "`{}` must appear in exactly one ordering-table row (found {count}): {rows:?}",
+                route.path
+            );
+        }
+        // The non-entity list surfaces the table also names, so a row dropped
+        // for one of those fails here too.
+        for path in ["/report_snapshots", "/jobs", "/reports/row_history"] {
+            let needle = format!("`{path}`");
+            let count = rows.iter().filter(|row| row.contains(&needle)).count();
+            assert_eq!(
+                count, 1,
+                "`{path}` must appear in exactly one ordering-table row (found {count})"
+            );
         }
     }
 

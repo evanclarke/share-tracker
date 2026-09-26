@@ -74,11 +74,11 @@ charset=utf-8 body with the reason — 400 (a malformed path parameter, query \
 string or body), 401, 404 on a delete or operation, 413, 415 (a JSON body sent \
 without Content-Type: application/json), 422, 429 on POST /login once a source \
 has exhausted its failed-attempt budget (the body carries the reason and a \
-Retry-After header the remaining whole seconds; a browser login POST gets the \
-sign-in page with the same message under 200 instead), a failed POST \
-/jobs/{name}'s 500, 502, 503 — or a deliberately empty body: a GET's 404, a \
-405, and an internal 500. docs/API.md's \"Error-body contract\" section \
-carries the full matrix.
+Retry-After header the remaining whole seconds; a browser login POST is refused \
+429 too, with the sign-in page as the body instead of the plain-text reason), a \
+failed POST /jobs/{name}'s 500, 502, 503 — or a deliberately empty body: a \
+GET's 404, a 405, and an internal 500. docs/API.md's \"Error-body contract\" \
+section carries the full matrix.
 
 Reading a collection is one more contract, stated here and in docs/API.md's \
 \"Reading a list\" section. First, list endpoints return rows ascending — by \
@@ -1054,7 +1054,9 @@ const ROUTES: &[RouteRow] = &[
         Verb::Get,
         "/attachments",
         &[200],
-        "List stored attachments, optionally filtered by owner (?trade_id=, ?income_id=, ...).",
+        "List stored attachments, optionally filtered by owner (?trade_id=, ?income_id=, \
+         ?amma_statement_id=, ?ess_statement_id=, ?interest_income_id=, ?corporate_action_id=) \
+         or request an owner's linked documents (?include_linked=true, with ?trade_id=).",
         Body::None,
         Body::JsonArray("Attachment"),
     ),
@@ -2355,32 +2357,46 @@ mod tests {
     /// status's body shape — rides in `info.description`, which is the
     /// machine-client surface. `docs/API.md`'s "Error-body contract" section
     /// is the long form (`doc_checks` pins that copy); this is the compact
-    /// twin a client reading only the generated document gets, and it must
-    /// name each status so a dropped one fails here.
+    /// twin a client reading only the generated document gets.
+    ///
+    /// The status list is **cross-checked against the code**: every
+    /// body-carrying `ApiError` shape (read from `infra::http`'s one sample
+    /// table) must be named here, so a new variant fails rather than leaving
+    /// the compact contract silently short.
     #[test]
     fn the_error_body_matrix_is_stated_in_the_description() {
         let doc = doc();
         let description = doc["info"]["description"]
             .as_str()
             .expect("info.description is a string");
-        for rule in [
-            "Errors are never JSON.",
-            "text/plain; charset=utf-8",
-            // The text-carrying statuses, the job trigger's 500 among them.
-            "400 (a malformed path parameter, query string or body), 401, 404 on a delete or \
-             operation, 413, 415 (a JSON body sent without Content-Type: application/json), 422, \
-             429 on POST /login once a source has exhausted its failed-attempt budget (the body \
-             carries the reason and a Retry-After header the remaining whole seconds; a browser \
-             login POST gets the sign-in page with the same message under 200 instead), a failed \
-             POST /jobs/{name}'s 500, 502, 503",
-            // …and the empty-bodied ones, both 404s and both 500s named apart.
-            "a deliberately empty body: a GET's 404, a 405, and an internal 500",
-        ] {
+        assert!(description.contains("Errors are never JSON."));
+        assert!(description.contains("text/plain; charset=utf-8"));
+        for (code, has_body) in crate::infra::http::documented_error_shapes() {
+            if !has_body {
+                continue;
+            }
+            // The 500 is named through the shape it comes from (the manual job
+            // trigger), not as a bare code — which the empty-bodied 500 shares.
+            let needle = if code == 500 {
+                "a failed POST /jobs/{name}'s 500".to_string()
+            } else {
+                code.to_string()
+            };
             assert!(
-                description.contains(rule),
-                "info.description must state `{rule}`; got:\n{description}"
+                description.contains(&needle),
+                "info.description must name the body-carrying {code}: {description}"
             );
         }
+        // The one body-carrying status no `ApiError` variant answers.
+        assert!(
+            description.contains("415"),
+            "info.description must name axum's 415: {description}"
+        );
+        // …and the empty-bodied ones, both 404s and both 500s named apart.
+        assert!(
+            description
+                .contains("a deliberately empty body: a GET's 404, a 405, and an internal 500")
+        );
     }
 
     /// The reading-a-list contract — ascending order with its newest-first
@@ -2715,78 +2731,30 @@ mod tests {
 
     /// Every filtered list's summary names the parameters it accepts — the
     /// per-route half of the same contract, and the one a client browsing
-    /// `paths` reads. Driven by a table, and each entry must be a real `GET`
-    /// in [`ROUTES`], so a renamed or dropped route fails here rather than
-    /// silently passing.
+    /// `paths` reads. The list and its parameters are **read from**
+    /// `entities::filtered_list_routes()` (the classification table the
+    /// filtering tests drive), not transcribed here, so a filter added to an
+    /// entity fails until its summary documents it.
     #[test]
     fn every_filtered_list_summary_names_its_filters() {
-        const FILTERED: &[(&str, &[&str])] = &[
-            ("/listings", &["?exchange_mic=", "?security_type="]),
-            (
-                "/trades",
-                &["?listing_id=", "?holding_account_id=", "?from=", "?to="],
-            ),
-            (
-                "/income",
-                &["?listing_id=", "?holding_account_id=", "?from=", "?to="],
-            ),
-            (
-                "/interest_income",
-                &["?holding_account_id=", "?from=", "?to="],
-            ),
-            (
-                "/investment_expenses",
-                &["?listing_id=", "?holding_account_id=", "?from=", "?to="],
-            ),
-            (
-                "/amma_statements",
-                &["?listing_id=", "?holding_account_id=", "?from=", "?to="],
-            ),
-            (
-                "/ess_statements",
-                &["?listing_id=", "?holding_account_id=", "?from=", "?to="],
-            ),
-            (
-                "/inheritances",
-                &["?listing_id=", "?holding_account_id=", "?from=", "?to="],
-            ),
-            ("/corporate_actions", &["?listing_id=", "?from=", "?to="]),
-            ("/transfers", &["?listing_id=", "?from=", "?to="]),
-            ("/distribution_events", &["?listing_id=", "?from=", "?to="]),
-            ("/drp_enrolments", &["?listing_id=", "?holding_account_id="]),
-            ("/amit_adjustments", &["?amma_statement_id=", "?trade_id="]),
-            (
-                "/parcel_allocations",
-                &["?sale_trade_id=", "?purchase_trade_id="],
-            ),
-            // The long-standing filters the hand-written lists already took; the
-            // closing-price list's `?status=` is the 2026-09-24 REST-audit item
-            // B7 (the errored-row filter).
-            (
-                "/closing_prices",
-                &["?listing_id=", "?from=", "?to=", "?status="],
-            ),
-            ("/attachments", &["?trade_id="]),
-        ];
-        let mut checked = 0;
-        for (path, params) in FILTERED {
+        let filtered = crate::entities::filtered_list_routes();
+        assert!(
+            !filtered.is_empty(),
+            "the entity filter classification table came back empty"
+        );
+        for (path, params) in filtered {
             let row = ROUTES
                 .iter()
-                .find(|(verb, p, _, _, _, _)| *verb == Verb::Get && p == path)
+                .find(|(verb, p, _, _, _, _)| *verb == Verb::Get && *p == path)
                 .unwrap_or_else(|| panic!("no GET route is documented at {path}"));
             let summary = row.3;
-            for param in *params {
+            for param in params {
                 assert!(
-                    summary.contains(param),
-                    "the {path} summary must name {param}: {summary}"
+                    summary.contains(&format!("?{param}=")),
+                    "the {path} summary must name ?{param}=: {summary}"
                 );
             }
-            checked += 1;
         }
-        assert_eq!(
-            checked, 16,
-            "every filtered list route must be named here, and no other"
-        );
     }
 
     /// The 2026-09-24 REST-audit item "Make the as-at default explicit" (B8):
