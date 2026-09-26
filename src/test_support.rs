@@ -1368,7 +1368,11 @@ pub fn rust_sources() -> Vec<(String, String)> {
 }
 
 /// `source` with every comment and every string / char literal blanked out,
-/// keeping the line structure intact so a scan can still report `file:line`.
+/// **byte-for-byte**: the result has the same length and the same newlines, so
+/// a byte offset into it addresses the same place in the original — a scan can
+/// report `file:line`, and one that has found a token in the code can read the
+/// surrounding source (the path literal of the route registration the match
+/// belongs to, say) out of the raw text at the very same index.
 ///
 /// The source-scanning tests all look for a token *in code*, and a token named
 /// in prose is not an offender: `infra::decimal`'s money-`f64` scan would fail
@@ -1385,7 +1389,17 @@ pub fn code_only(source: &str) -> String {
     let mut out = String::with_capacity(source.len());
     // Whatever is consumed as prose is replaced one-for-one, newlines kept, so
     // every line of the result is the line of the same number in the input.
-    let blank = |out: &mut String, c: char| out.push(if c == '\n' { '\n' } else { ' ' });
+    // One space per *byte* of what is dropped, so the result's byte offsets are
+    // the input's (a blanked `é` would otherwise shorten the file by one).
+    let blank = |out: &mut String, c: char| {
+        if c == '\n' {
+            out.push('\n');
+        } else {
+            for _ in 0..c.len_utf8() {
+                out.push(' ');
+            }
+        }
+    };
     let mut i = 0;
     while let Some(c) = at(i) {
         // A line comment runs to the newline, which is kept as the terminator.

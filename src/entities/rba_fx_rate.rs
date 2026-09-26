@@ -76,7 +76,8 @@ pub struct ImportSummary {
 /// What the manual import endpoint returns: the import summary plus the
 /// provisional-snapshot true-up that followed it (absent when the import
 /// added no new rows, so no snapshot could have improved).
-#[derive(Debug, Serialize)]
+#[derive(utoipa::ToSchema, Debug, Serialize)]
+#[schema(as = RbaImportOutcome)]
 pub struct ImportOutcome {
     #[serde(flatten)]
     pub summary: ImportSummary,

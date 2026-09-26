@@ -68,7 +68,7 @@ it rather than rediscover it.
       `entities::tests::a_filter_value_is_bound_not_interpolated`, over `exchange_mic`
       (the only free-text filter): a value closing the quote and opening an `OR` matches
       no row, and the table a `DROP` names is still there afterwards.
-- [ ] Derive the OpenAPI route table's remaining hand-maintained fields. `(path, verb)`
+- [x] Derive the OpenAPI route table's remaining hand-maintained fields. `(path, verb)`
       is pinned both ways, every PUT row's statuses are pinned twice, and the query
       parameters now come from each route's `Query<T>` type — but ~110 rows' success
       statuses, request/response schema names and summaries are still typed by hand.
@@ -78,6 +78,37 @@ it rather than rediscover it.
       `utoipa::path` on every handler), so this is a design decision, not a fix.
       Test: a both-ways comparison per field, as `every_served_route_is_documented_and_nothing_else_is`
       already does for `(path, verb)`.
+      Done, and the design decision it needed turned out not to be a new per-handler
+      attribute: the handler's own **types** already say all of it, so four scans read
+      them rather than anything being declared twice.
+      `the_generic_crud_routes_derive_their_status_and_schemas` takes the status and
+      response of all ~55 `http::list_handler`/`get_handler`/`delete_handler`
+      registrations off the type parameter (`list_handler::<Listing>` *is*
+      `JsonArray("Listing")`). `every_request_body_matches_its_handlers_extractor` and
+      `every_response_body_matches_its_handlers_return_type` follow every other
+      registration to its `fn` and read the `Json<T>`/`Form<T>` out of the parameter
+      list and the `Json<T>`/`Json<Vec<T>>`/`UpsertResponse<T>`/`StatusCode` out of the
+      return type — both directions, with `#[schema(as = …)]` honoured. The five
+      hand-built `Response`s (two CSV exports, the stylesheet, the attachment download
+      and upload) are classified in `RESPONSES_NOT_DERIVABLE` and the five closure
+      registrations in `UNRESOLVED_HANDLERS`, each with what it answers, so the lists are
+      exhaustive rather than a sample. `the_success_statuses_are_derived_from_the_verb_or_the_handler`
+      covers the statuses: a GET's 200 and a DELETE's 204 from the verb (110 of the 171
+      rows), a POST's from the `StatusCode::…` its handler names, and the PUTs from
+      `entities::PUT_ROUTES` as before.
+      The scans compose `test_support::code_only` over `api_spec`'s `strip_test_modules`,
+      both now blanking byte-for-byte, so a token found in the code can be read back out
+      of the raw source at the same offset — which is how the route path, a string
+      literal, is recovered.
+      Two things stay hand-written, by decision: the **summaries**, which are prose no
+      scan can write (their `?name=` halves are already cross-checked against the real
+      `Query<T>`), and the `POST /login` row's `Form("LoginForm")`, whose handler decodes
+      the form inside its body so it can answer either HTML or plain text.
+      The derivation also found a real defect on its first run: `POST /rba_fx_rates/import`
+      documented its response as `RbaImportSummary` while the handler returns
+      `ImportOutcome` — the summary *plus* the provisional-snapshot true-up that
+      `docs/API.md` has always described. `ImportOutcome` is now a `ToSchema`
+      (`RbaImportOutcome`) and the row records it.
 - [ ] Decide the four `api_spec` pins that assert `DESCRIPTION` against `DESCRIPTION`
       (`the_two_global_rules_…`, the ordering/pagination half of
       `the_list_reading_contract_…`, `the_put_outcome_rule_…`,

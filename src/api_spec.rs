@@ -935,7 +935,7 @@ const ROUTES: &[RouteRow] = &[
         &[200],
         "Import the RBA F11 rates; the body is a bare (text) CSV document, and an empty body fetches the live source.",
         Body::Other("text/plain"),
-        Body::Json("RbaImportSummary"),
+        Body::Json("RbaImportOutcome"),
     ),
     (
         Verb::Get,
@@ -1830,6 +1830,7 @@ fn component_schemas() -> Vec<(String, RefOr<Schema>)> {
         crate::reports::snapshot::SeriesPoint,
         crate::reports::snapshot::HoldingSeries,
         crate::reports::snapshot::RegenerateSummary,
+        crate::entities::rba_fx_rate::ImportOutcome,
         crate::reports::snapshot::RegenerateRange,
         crate::reports::snapshot::Snapshot,
     );
@@ -2324,8 +2325,14 @@ mod tests {
         routes
     }
 
-    /// Strip `#[cfg(test)] mod …{ … }` blocks, so a route registered by a
+    /// Blank `#[cfg(test)] mod …{ … }` blocks, so a route registered by a
     /// test (the panic layer's `/boom`) is not mistaken for a served one.
+    ///
+    /// Blanked byte-for-byte, like [`crate::test_support::code_only`] (which
+    /// the handler scans compose over this): a caller that finds a token in the
+    /// result reads the surrounding source out of the raw text at the same
+    /// offset, and the route path it wants is a string literal only the raw
+    /// text still has.
     fn strip_test_modules(source: &str) -> String {
         let bytes = source.as_bytes();
         let mut out = String::with_capacity(source.len());
@@ -2352,7 +2359,15 @@ mod tests {
                         }
                         j += 1;
                     }
-                    out.push('\n');
+                    for c in source[i..j].chars() {
+                        if c == '\n' {
+                            out.push('\n');
+                        } else {
+                            for _ in 0..c.len_utf8() {
+                                out.push(' ');
+                            }
+                        }
+                    }
                     i = j;
                     continue;
                 }
@@ -2561,6 +2576,666 @@ mod tests {
             dynamic_sites, classified,
             "the sources register dynamic routes that api_spec's DYNAMIC_ROUTE_SITES does not \
              classify (or vice versa)"
+        );
+    }
+
+    /// The shape of a [`Body`], for comparing a derived body against a
+    /// recorded one: the variant, and the component-schema name it names.
+    fn body_shape(body: &Body) -> (&'static str, Option<&'static str>) {
+        match body {
+            Body::None => ("no body", None),
+            Body::Json(name) => ("a JSON object", Some(name)),
+            Body::JsonArray(name) => ("a JSON array", Some(name)),
+            Body::JsonIntegers => ("a JSON array of integers", None),
+            Body::JsonFree(_) => ("a free-form JSON value", None),
+            Body::Form(name) => ("a form body", Some(name)),
+            Body::Other(media) => ("a non-JSON payload", Some(media)),
+        }
+    }
+
+    /// One registration of a generic CRUD handler found in the sources: the
+    /// path it is registered on, which handler, and the model type it is
+    /// instantiated with.
+    struct GenericRoute {
+        file: String,
+        path: String,
+        handler: &'static str,
+        model: String,
+    }
+
+    /// Every `http::list_handler::<M>` / `get_handler::<M>` /
+    /// `delete_handler::<M>` registration in the sources.
+    ///
+    /// The needles are the handler names alone, not the qualified
+    /// `http::list_handler::<`, for the reason
+    /// `entities::tests::shared_list_route_paths` gives: an entity that imports
+    /// the handler registers `get(list_handler::<X>)`, which is the same route
+    /// written differently, and the longer needle would not see it.
+    fn generic_crud_registrations() -> Vec<GenericRoute> {
+        // Assembled so this module's own text is not a registration.
+        let needles: Vec<(String, &'static str)> = ["list", "get", "delete"]
+            .iter()
+            .map(|verb| (format!("{verb}_handler::{}", '<'), *verb))
+            .collect();
+        let mut found = Vec::new();
+        for (file, body) in crate::test_support::rust_sources() {
+            // The needles are looked for in the *code*, so a doc comment
+            // explaining the scan and a test quoting the needle as a string
+            // literal are not registrations. `code_only` blanks both
+            // byte-for-byte, so an offset into it addresses the same place in
+            // `body` — which is where the route path, itself a string literal,
+            // has to be read from.
+            let code = crate::test_support::code_only(&body);
+            for (needle, handler) in &needles {
+                for (at, _) in code.match_indices(needle.as_str()) {
+                    let before = &code[..at];
+                    let route_at = before
+                        .rfind(".route(")
+                        .expect("a generic handler is registered by a `.route(…)` call");
+                    // The path is a string literal, so it survives only in the
+                    // raw source — at the same offset.
+                    let rest = body[route_at + ".route(".len()..].trim_start();
+                    let path = rest
+                        .strip_prefix('"')
+                        .expect("the route path is a string literal")
+                        .split('"')
+                        .next()
+                        .expect("a closing quote")
+                        .to_string();
+                    let model = code[at + needle.len()..]
+                        .split('>')
+                        .next()
+                        .expect("a closing angle bracket")
+                        .trim()
+                        .to_string();
+                    found.push(GenericRoute {
+                        file: file.clone(),
+                        path,
+                        handler,
+                        model,
+                    });
+                }
+            }
+        }
+        found
+    }
+
+    /// The three fields a generic-CRUD row does **not** have to be typed by
+    /// hand are derived from the registration itself and compared against
+    /// [`ROUTES`]: its success status, its request body (there is none), and
+    /// its response schema, which is the handler's own type parameter.
+    ///
+    /// This is the answer to the review finding that ~110 rows' statuses and
+    /// schemas were hand-maintained with nothing checking them — the proof it
+    /// drifts being `59bc2e6`, which had to hand-edit 536 lines when the `PUT`
+    /// statuses changed, with nothing failing had it not. The ~55 registrations
+    /// that go through `http::list_handler`/`get_handler`/`delete_handler` are
+    /// the largest class and need no new metadata: the handler fixes the status
+    /// (`200`/`200`/`204`) and takes no body, and `CrudEntity`'s type parameter
+    /// *is* the schema name (`every_component_schema_is_referenced` is what
+    /// then ties that name to a real `ToSchema` derive).
+    ///
+    /// What is deliberately **not** derived: the summaries, which are prose no
+    /// scan can write, and the hand-written verbs' bodies, covered by
+    /// [`every_request_body_matches_its_handlers_extractor`] instead.
+    #[test]
+    fn the_generic_crud_routes_derive_their_status_and_schemas() {
+        let mut checked = 0;
+        for route in generic_crud_registrations() {
+            let (verb, statuses, response) = match route.handler {
+                "list" => (
+                    Verb::Get,
+                    &[200u16][..],
+                    ("a JSON array", Some(&route.model)),
+                ),
+                "get" => (
+                    Verb::Get,
+                    &[200u16][..],
+                    ("a JSON object", Some(&route.model)),
+                ),
+                "delete" => (Verb::Delete, &[204u16][..], ("no body", None)),
+                other => panic!("unclassified generic handler {other}"),
+            };
+            let row = ROUTES
+                .iter()
+                .find(|(v, p, ..)| *v == verb && *p == route.path)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{}: {verb:?} {} is registered with {}_handler but ROUTES has no row \
+                         for it",
+                        route.file, route.path, route.handler
+                    )
+                });
+            let (_, _, recorded_statuses, _, request, recorded_response) = row;
+            assert_eq!(
+                *recorded_statuses, statuses,
+                "{verb:?} {} goes through http::{}_handler, which answers {statuses:?}",
+                route.path, route.handler
+            );
+            assert_eq!(
+                body_shape(request).0,
+                "no body",
+                "{verb:?} {} goes through http::{}_handler, which reads no request body",
+                route.path,
+                route.handler
+            );
+            let (kind, name) = body_shape(recorded_response);
+            assert_eq!(
+                (kind, name.map(str::to_string)),
+                (response.0, response.1.cloned()),
+                "{verb:?} {} is registered as {}_handler::<{}>, so that is its response",
+                route.path,
+                route.handler,
+                route.model
+            );
+            checked += 1;
+        }
+        assert!(
+            checked >= 50,
+            "only {checked} generic CRUD registrations found — the scan has stopped parsing"
+        );
+    }
+
+    /// The text between the parentheses that open at `from`, which must be the
+    /// `(` itself — the call's or the parameter list's own arguments.
+    fn balanced(source: &str, from: usize) -> &str {
+        let rest = &source[from + 1..];
+        let mut depth = 1i32;
+        for (i, c) in rest.char_indices() {
+            match c {
+                '(' | '<' => depth += 1,
+                ')' | '>' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &rest[..i];
+                    }
+                }
+                _ => {}
+            }
+        }
+        rest
+    }
+
+    /// The `{ … }` block that opens at or after `from`, balanced on braces —
+    /// a handler's body. ([`balanced`] counts `<`/`>` as nesting too, which a
+    /// body's comparisons and turbofish would throw off.)
+    fn block_after(source: &str, from: usize) -> &str {
+        let Some(open) = source[from..].find('{').map(|i| from + i) else {
+            return "";
+        };
+        let rest = &source[open + 1..];
+        let mut depth = 1i32;
+        for (i, c) in rest.char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &rest[..i];
+                    }
+                }
+                _ => {}
+            }
+        }
+        rest
+    }
+
+    /// The `Json<T>` / `Form<T>` extractor a handler's parameter list declares,
+    /// as the `(variant, schema name)` pair [`body_shape`] would print for it.
+    ///
+    /// The schema name is `T`'s own name unless the struct renames itself with
+    /// `#[schema(as = …)]`, which one body does (`GenerateBody` is
+    /// `AmitGenerateBody` in the document, its module-local name being too
+    /// generic to publish) — so the attribute is read out of the declaration
+    /// rather than the row being allowed to disagree with the type.
+    fn extractor_body(params: &str, file_code: &str) -> Option<(&'static str, String)> {
+        for (needle, kind) in [("Json<", "a JSON object"), ("Form<", "a form body")] {
+            if let Some(at) = params.find(needle) {
+                let ty = balanced(params, at + needle.len() - 1).trim();
+                return Some((kind, schema_name_of(ty, file_code)));
+            }
+        }
+        None
+    }
+
+    /// The success response a handler's **return type** names, in
+    /// [`body_shape`] terms: the `Json<…>` inside the `Result`, which is what
+    /// the handler serialises on the success path.
+    ///
+    /// `None` where the return type is not a `Json` — a `Response` built by
+    /// hand (an asset, a redirect, a file download), a `StatusCode`, or the
+    /// upsert's own outcome type. Those rows say what they answer in their
+    /// summary and are classified rather than derived.
+    fn returned_body(signature: &str, file_code: &str) -> Option<(&'static str, String)> {
+        // A `PUT` upsert answers `UpsertResponse<E>`: the created row on a
+        // create, nothing on a replace — so `E` is the documented response.
+        if let Some(at) = signature.find("UpsertResponse<") {
+            let inner = balanced(signature, at + "UpsertResponse<".len() - 1).trim();
+            return Some(("a JSON object", schema_name_of(inner, file_code)));
+        }
+        // A handler whose success value is a bare `StatusCode` has no body at
+        // all — every `DELETE`, the job trigger, the FX correction `PUT`.
+        if signature.contains("StatusCode") && !signature.contains("Json<") {
+            return Some(("no body", String::new()));
+        }
+        let at = signature.find("Json<")?;
+        let inner = balanced(signature, at + "Json<".len() - 1).trim();
+        if let Some(item) = inner.strip_prefix("Vec<").and_then(|r| r.strip_suffix('>')) {
+            let item = item.trim();
+            if item == "i32" {
+                return Some(("a JSON array of integers", String::new()));
+            }
+            return Some(("a JSON array", schema_name_of(item, file_code)));
+        }
+        if matches!(inner, "Value" | "serde_json::Value") {
+            return Some(("a free-form JSON value", String::new()));
+        }
+        Some(("a JSON object", schema_name_of(inner, file_code)))
+    }
+
+    /// `ty`'s name in the document: itself, or whatever its
+    /// `#[schema(as = …)]` renames it to.
+    fn schema_name_of(ty: &str, file_code: &str) -> String {
+        let declaration = format!("struct {ty} ");
+        if let Some(at) = file_code.find(&declaration) {
+            let attributes = &file_code[..at];
+            let needle = "#[schema(as = ";
+            if let Some(from) = attributes.rfind(needle) {
+                // Only the attributes of *this* declaration: anything before
+                // the previous item's end belongs to another type.
+                let between = &attributes[from..];
+                if between.lines().count() <= 6
+                    && let Some(renamed) = between[needle.len()..].split(')').next()
+                {
+                    return renamed.trim().to_string();
+                }
+            }
+        }
+        ty.to_string()
+    }
+
+    /// Registrations whose handler the scan cannot follow to a parameter list,
+    /// each with why the row it serves is still right. Named rather than
+    /// skipped, so a new unfollowable registration fails here until it is
+    /// classified.
+    ///
+    /// All five are **closures** rather than named functions, each because the
+    /// route captures something the router was built with (the serialised
+    /// document, the configured base path, the shell HTML) — so there is no
+    /// `fn` whose parameter list could be read, and four of them take no
+    /// request body at all.
+    const UNRESOLVED_HANDLERS: &[(&str, &str)] = &[
+        (
+            "api_spec.rs: Get /openapi.json",
+            "a closure over the document serialised once at router build time; no request body",
+        ),
+        (
+            "infra/auth.rs: Get /login",
+            "a closure over the configured base path, rendering the sign-in page; no request body",
+        ),
+        (
+            "infra/auth.rs: Post /login",
+            "a closure over the auth state that hands the whole `Request` to `login_handler`, \
+             which decodes `Form::<LoginForm>` itself — it has to own the failure to answer \
+             either the page or a plain-text reason by `Accept`, so the extractor is inside the \
+             body rather than in a parameter list. The row's `Form(\"LoginForm\")` is that type",
+        ),
+        (
+            "infra/auth.rs: Post /logout",
+            "a closure over the auth state; the cookie is the whole request, so no body",
+        ),
+        (
+            "web.rs: Get /",
+            "a closure over the `include_str!` shell; no request body",
+        ),
+    ];
+
+    /// One hand-written route the scan resolved: the registration, and the
+    /// handler function behind it.
+    struct ResolvedRoute {
+        site: String,
+        verb: Verb,
+        path: String,
+        handler: String,
+        /// The handler's parameter list, as written.
+        params: String,
+        /// Its return type, `->` to the opening brace.
+        returns: String,
+        /// Its body, for the success status it names explicitly.
+        body: String,
+        /// The whole (comment- and literal-blanked) file, for reading a
+        /// `#[schema(as = …)]` off a type declared in it.
+        file_code: std::rc::Rc<String>,
+    }
+
+    /// Every `.route("…", verb(handler))` registration whose handler is a named
+    /// function in the same file, with that function's signature — the source
+    /// the two derivation tests below read the request and response bodies out
+    /// of. The second return is the registrations whose handler could not be
+    /// followed, for [`UNRESOLVED_HANDLERS`] to account for.
+    ///
+    /// The generic CRUD handlers are skipped: they take no body and their
+    /// response is their type parameter, which
+    /// [`the_generic_crud_routes_derive_their_status_and_schemas`] derives.
+    fn resolved_handler_routes() -> (Vec<ResolvedRoute>, Vec<String>) {
+        let verbs = [
+            ("get(", Verb::Get),
+            ("post(", Verb::Post),
+            ("put(", Verb::Put),
+            ("delete(", Verb::Delete),
+        ];
+        let mut resolved: Vec<ResolvedRoute> = Vec::new();
+        let mut unresolved: Vec<String> = Vec::new();
+        for (file, raw) in crate::test_support::rust_sources() {
+            // Test modules blanked first (the panic layer's `/boom` is not a
+            // served route), then comments and string literals — both
+            // byte-for-byte, so an offset into `code` is an offset into `raw`.
+            let code = std::rc::Rc::new(crate::test_support::code_only(&strip_test_modules(&raw)));
+            let needle = format!(".{}(", "route");
+            let mut at = 0;
+            while let Some(found) = code[at..].find(&needle) {
+                let call = at + found;
+                at = call + needle.len();
+                let args_code = balanced(&code, call + needle.len() - 1);
+                // The path is a string literal, so it is only in the raw text —
+                // at the same offset, `code_only` being byte-for-byte.
+                let args_raw = balanced(&raw, call + needle.len() - 1);
+                let Some(path) = args_raw
+                    .trim_start()
+                    .strip_prefix('"')
+                    .and_then(|rest| rest.split('"').next())
+                else {
+                    // A path built in code; `DYNAMIC_ROUTE_SITES` classifies these.
+                    continue;
+                };
+                for (verb_needle, verb) in verbs {
+                    let Some(verb_at) = args_code.find(verb_needle) else {
+                        continue;
+                    };
+                    let handler = balanced(args_code, verb_at + verb_needle.len() - 1).trim();
+                    // The generic CRUD handlers read no body and are pinned by
+                    // the derivation test above.
+                    if handler.contains("_handler::") {
+                        continue;
+                    }
+                    let name = handler.rsplit("::").next().unwrap_or(handler);
+                    let signature = format!("fn {name}(");
+                    let site = format!("{file}: {verb:?} {path}");
+                    let Some(fn_at) = code.find(&signature) else {
+                        unresolved.push(site);
+                        continue;
+                    };
+                    let params = balanced(&code, fn_at + signature.len() - 1);
+                    // The return type: `->` to the body's opening brace.
+                    let after = &code[fn_at + signature.len() + params.len()..];
+                    let returns: String = after
+                        .find("->")
+                        .and_then(|arrow| {
+                            after[arrow..]
+                                .find('{')
+                                .map(|end| &after[arrow..arrow + end])
+                        })
+                        .unwrap_or("")
+                        .to_string();
+                    resolved.push(ResolvedRoute {
+                        site,
+                        verb,
+                        path: path.to_string(),
+                        handler: name.to_string(),
+                        params: params.to_string(),
+                        body: block_after(
+                            &code,
+                            fn_at + signature.len() + params.len() + returns.len(),
+                        )
+                        .to_string(),
+                        returns,
+                        file_code: std::rc::Rc::clone(&code),
+                    });
+                }
+            }
+        }
+        assert!(
+            resolved.len() >= 60,
+            "only {} hand-written handlers resolved — the scan has stopped parsing",
+            resolved.len()
+        );
+        unresolved.sort();
+        unresolved.dedup();
+        (resolved, unresolved)
+    }
+
+    /// The row a resolved registration documents.
+    fn row_for(route: &ResolvedRoute) -> &'static RouteRow {
+        ROUTES
+            .iter()
+            .find(|(v, p, ..)| *v == route.verb && *p == route.path)
+            .unwrap_or_else(|| panic!("{:?} {} has no row in ROUTES", route.verb, route.path))
+    }
+
+    /// The paths [`UNRESOLVED_HANDLERS`] excuses from a both-ways check.
+    fn excused_paths() -> Vec<&'static str> {
+        UNRESOLVED_HANDLERS
+            .iter()
+            .map(|(site, _)| site.rsplit(' ').next().unwrap_or(site))
+            .collect()
+    }
+
+    /// Every registration names a handler the scan can follow, or is classified
+    /// in [`UNRESOLVED_HANDLERS`] with why its row is right.
+    #[test]
+    fn every_registration_resolves_to_a_handler_or_is_classified() {
+        let (_, unresolved) = resolved_handler_routes();
+        let classified: Vec<String> = UNRESOLVED_HANDLERS
+            .iter()
+            .map(|(site, _)| (*site).to_string())
+            .collect();
+        assert_eq!(
+            unresolved, classified,
+            "these registrations name a handler the scan cannot follow to a parameter list; \
+             classify each in UNRESOLVED_HANDLERS with why its row is right"
+        );
+    }
+
+    /// Routes whose handler builds its `Response` by hand, so the return type
+    /// says nothing about the body — each with what it actually answers, which
+    /// is what its row records.
+    ///
+    /// All five set a content type (and, for the download, a
+    /// `Content-Disposition`) that no `Json`/`UpsertResponse`/`StatusCode`
+    /// return could carry. There is nothing to derive for them; the point of
+    /// naming them is that the list is exhaustive — a *new* hand-built response
+    /// fails this test rather than joining ~110 rows nothing checks.
+    const RESPONSES_NOT_DERIVABLE: &[(&str, &str)] = &[
+        (
+            "entities/attachment.rs: Get /attachments/{id}/content",
+            "the stored bytes under the content type they were stored with, plus a \
+             Content-Disposition the `?disposition=` parameter chooses",
+        ),
+        (
+            "entities/attachment.rs: Post /attachments",
+            "201 with the stored metadata row, built by hand because the multipart upload's \
+             own failures are answered from the same function",
+        ),
+        (
+            "reports/net_capital_gain.rs: Get /portfolio/net-capital-gain/export",
+            "a text/csv download",
+        ),
+        (
+            "reports/tax_summary.rs: Get /portfolio/tax-summary/export",
+            "a text/csv download",
+        ),
+        (
+            "web.rs: Get /static/style.css",
+            "the stylesheet as text/css",
+        ),
+    ];
+
+    /// The request-body half of the finding: every route's recorded request
+    /// schema is the one its handler's own extractor names.
+    ///
+    /// The scan follows each registration to its handler and takes the
+    /// `Json<T>`/`Form<T>` out of the parameter list — the type axum actually
+    /// decodes, exactly as [`query_parameters`] takes the query half from the
+    /// real `Query<T>`. Both directions: a row naming a schema its handler does
+    /// not take fails, and so does a row that records no body for a handler
+    /// that declares one.
+    #[test]
+    fn every_request_body_matches_its_handlers_extractor() {
+        let (resolved, _) = resolved_handler_routes();
+        let mut covered: Vec<(Verb, String)> = Vec::new();
+        for route in &resolved {
+            let recorded = body_shape(&row_for(route).4);
+            match extractor_body(&route.params, &route.file_code) {
+                Some((kind, ty)) => assert_eq!(
+                    (recorded.0, recorded.1.map(str::to_string)),
+                    (kind, Some(ty.clone())),
+                    "{}: handled by `{}`, whose extractor is {kind} of {ty}",
+                    route.site,
+                    route.handler
+                ),
+                None => assert!(
+                    !matches!(recorded.0, "a JSON object" | "a form body"),
+                    "{} records {} of {:?}, but `{}` declares no Json/Form extractor",
+                    route.site,
+                    recorded.0,
+                    recorded.1,
+                    route.handler
+                ),
+            }
+            covered.push((route.verb, route.path.clone()));
+        }
+        // …and no row claims a JSON/form body that no handler was read for.
+        let excused = excused_paths();
+        let unchecked: Vec<(Verb, &str)> = ROUTES
+            .iter()
+            .filter(|(.., request, _)| matches!(request, Body::Json(_) | Body::Form(_)))
+            .map(|(verb, path, ..)| (*verb, *path))
+            .filter(|(verb, path)| {
+                !covered.contains(&(*verb, (*path).to_string())) && !excused.contains(path)
+            })
+            .collect();
+        assert!(
+            unchecked.is_empty(),
+            "these rows record a JSON/form request body that was never read off a handler: \
+             {unchecked:?}"
+        );
+    }
+
+    /// The response half: every route's recorded success body is the one its
+    /// handler's **return type** names.
+    ///
+    /// A handler that answers JSON returns `Result<Json<T>, ApiError>` — or
+    /// `Json<Vec<T>>` for a list — so the type is there to be read, the same way
+    /// the request half reads the extractor. Where the return type is not a
+    /// `Json` there is nothing to derive: a hand-built `Response` (an asset, a
+    /// redirect, a download), a `StatusCode`, or the upsert's own
+    /// `Upserted`-shaped outcome. Those are the rows whose response is typed by
+    /// hand, and each is classified in [`RESPONSES_NOT_DERIVABLE`] with what it
+    /// answers instead.
+    #[test]
+    fn every_response_body_matches_its_handlers_return_type() {
+        let (resolved, _) = resolved_handler_routes();
+        let mut checked = 0;
+        let mut hand_typed: Vec<String> = Vec::new();
+        for route in &resolved {
+            let row = row_for(route);
+            let recorded = body_shape(&row.5);
+            match returned_body(&route.returns, &route.file_code) {
+                Some((kind, name)) => {
+                    let recorded_name = recorded.1.unwrap_or_default().to_string();
+                    assert_eq!(
+                        (recorded.0, recorded_name),
+                        (kind, name.clone()),
+                        "{}: `{}` returns {kind}{}, so that is its documented response",
+                        route.site,
+                        route.handler,
+                        if name.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" of {name}")
+                        }
+                    );
+                    checked += 1;
+                }
+                None => hand_typed.push(route.site.clone()),
+            }
+        }
+        assert!(
+            checked >= 40,
+            "only {checked} responses derived — the scan has stopped parsing"
+        );
+        hand_typed.sort();
+        hand_typed.dedup();
+        let classified: Vec<String> = RESPONSES_NOT_DERIVABLE
+            .iter()
+            .map(|(site, _)| (*site).to_string())
+            .collect();
+        assert_eq!(
+            hand_typed, classified,
+            "these handlers do not return a `Json<…>`, so their row's response is typed by hand; \
+             classify each in RESPONSES_NOT_DERIVABLE with what it answers"
+        );
+    }
+
+    /// The success statuses, derived the two ways they can be.
+    ///
+    /// By **verb** for the 110 rows where the verb decides it: a read answers
+    /// `200` and a delete `204`, which is the API convention (docs/API.md) and
+    /// the shape every handler of those verbs has. The `PUT` rows are pinned
+    /// separately and twice over by
+    /// [`every_put_route_documents_its_outcome`] against
+    /// `entities::PUT_ROUTES`.
+    ///
+    /// By **handler** for the `POST`s, whose status genuinely varies — a create
+    /// is `201`, a POST-for-read `200`, the job trigger `204`, a login `303` —
+    /// read from the `StatusCode::…` the handler names, or `200` where it names
+    /// none and simply returns its JSON.
+    #[test]
+    fn the_success_statuses_are_derived_from_the_verb_or_the_handler() {
+        for &(verb, path, statuses, ..) in ROUTES {
+            match verb {
+                Verb::Get => assert_eq!(
+                    statuses,
+                    &[200],
+                    "GET {path}: a read answers 200 (docs/API.md, Response codes)"
+                ),
+                Verb::Delete => assert_eq!(
+                    statuses,
+                    &[204],
+                    "DELETE {path}: a delete answers 204 (docs/API.md, Response codes)"
+                ),
+                Verb::Post | Verb::Put => {}
+            }
+        }
+
+        let (resolved, _) = resolved_handler_routes();
+        let mut checked = 0;
+        for route in resolved.iter().filter(|r| r.verb == Verb::Post) {
+            let named = [
+                ("StatusCode::CREATED", 201u16),
+                ("StatusCode::NO_CONTENT", 204),
+                ("StatusCode::SEE_OTHER", 303),
+            ]
+            .into_iter()
+            .find_map(|(spelling, status)| {
+                (route.body.contains(spelling) || route.returns.contains(spelling))
+                    .then_some(status)
+            });
+            // No status in the handler at all: it returns its JSON, which axum
+            // answers 200 with.
+            let derived = named.unwrap_or(200);
+            assert_eq!(
+                row_for(route).2,
+                &[derived],
+                "{}: `{}` answers {derived}",
+                route.site,
+                route.handler
+            );
+            checked += 1;
+        }
+        assert!(
+            checked >= 30,
+            "only {checked} POST handlers checked — the scan has stopped parsing"
         );
     }
 

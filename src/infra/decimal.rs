@@ -728,7 +728,11 @@ mod tests {
     /// written as, which a line-by-line comment trim would read as code.
     #[test]
     fn code_only_keeps_code_and_drops_prose() {
-        let src = "let a: f64 = 1.0; // comment f64\n\
+        // The `é` is in the scan's way on purpose: a blanked multi-byte char
+        // has to leave as many bytes as it took, or every offset after it
+        // shifts and a caller reading the raw source at a match's index reads
+        // the wrong place.
+        let src = "let a: f64 = 1.0; // comment f64 é\n\
                    let s = \"a string f64\";\n\
                    let r = r#\"raw \"f64\" here\"#;\n\
                    /* block\n   f64 in it */\n\
@@ -737,6 +741,7 @@ mod tests {
         let code = crate::test_support::code_only(src);
         let lines: Vec<&str> = code.lines().collect();
         assert_eq!(src.lines().count(), lines.len(), "line count preserved");
+        assert_eq!(src.len(), code.len(), "byte offsets preserved");
         assert!(lines[0].contains("let a: f64 = 1.0;"), "{:?}", lines[0]);
         assert!(!lines[0].contains("comment"), "{:?}", lines[0]);
         assert!(!lines[1].contains("f64"), "{:?}", lines[1]);
