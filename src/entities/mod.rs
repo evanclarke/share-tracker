@@ -448,6 +448,34 @@ mod tests {
         }
     }
 
+    /// A natural-key entity must override [`CrudEntity::missing_row_body`],
+    /// whose default names a column its URL never carries.
+    ///
+    /// The `DELETE_ROUTES` table above pins the exact body for every delete
+    /// route that exists; the entity-type half is pinned here, so a new
+    /// natural-key entity that forgets the override fails at the type rather
+    /// than only when someone remembers to add its route to that table. The
+    /// two below are the only keyed entities with a DELETE route
+    /// (`currencies`/`mic_registry` are keyed too but expose no delete).
+    #[test]
+    fn a_natural_key_entity_names_its_key_in_its_delete_404() {
+        use crate::entities::{
+            exchange::Exchange, listing::Listing, tax_year_settings::TaxYearSettings,
+        };
+        use crate::infra::http::CrudEntity;
+
+        assert_ne!(Exchange::KEY_COLUMN, "id");
+        assert_ne!(TaxYearSettings::KEY_COLUMN, "id");
+        assert_eq!(Exchange::missing_row_body(), "no exchange with that mic");
+        assert_eq!(
+            TaxYearSettings::missing_row_body(),
+            "no tax year settings row for that year"
+        );
+        // …and a rowid-keyed entity keeps the default wording.
+        assert_eq!(Listing::KEY_COLUMN, "id");
+        assert_eq!(Listing::missing_row_body(), "no listing with that id");
+    }
+
     /// A DELETE blocked by an *inbound* foreign key must say so — the row is
     /// there and something depends on it.
     ///

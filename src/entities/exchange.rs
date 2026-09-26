@@ -126,7 +126,7 @@ impl CrudEntity for Exchange {
 
     /// Keyed by MIC, so the default body's "with that id" would name a column
     /// the route's URL never carries.
-    fn missing_row_body(_mic: &String) -> String {
+    fn missing_row_body() -> String {
         "no exchange with that mic".to_string()
     }
 }

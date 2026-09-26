@@ -496,9 +496,8 @@ pub trait CrudEntity:
     /// That default names the `id` column, which every rowid-keyed entity's
     /// URL carries. An entity keyed on a natural key overrides it, because
     /// "that id" names a column its URL never mentions — `no exchange with
-    /// that mic`, `no tax year settings row for that year`. The key is passed
-    /// so an override can name the value it looked for.
-    fn missing_row_body(_key: &Self::Key) -> String {
+    /// that mic`, `no tax year settings row for that year`.
+    fn missing_row_body() -> String {
         format!("no {} with that id", Self::NOUN)
     }
 
@@ -648,7 +647,7 @@ pub async fn delete_handler<E: CrudEntity>(
     Path(key): Path<E::Key>,
 ) -> Result<StatusCode, ApiError> {
     match crud_delete::<E>(&pool, key.clone()).await {
-        Ok(found) => deleted_with_body(found, E::missing_row_body(&key)),
+        Ok(found) => deleted_with_body(found, E::missing_row_body()),
         Err(err) => {
             match fk_dependants_message(&pool, &err, E::NOUN, E::TABLE, E::KEY_COLUMN, key).await {
                 Ok(Some(body)) => Err(ApiError::Unprocessable(body)),

@@ -65,7 +65,7 @@ impl CrudEntity for TaxYearSettings {
 
     /// Keyed by the financial year itself, so the default body's "with that
     /// id" would name a column the route's URL never carries.
-    fn missing_row_body(_tax_year: &i64) -> String {
+    fn missing_row_body() -> String {
         "no tax year settings row for that year".to_string()
     }
 }

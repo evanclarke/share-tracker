@@ -83,8 +83,10 @@ detail on every one** — what it computes, which ATO rule it follows, and where
   per-holding contributions), and a price-change alert after each market close when a holding moves
   more than a configured percentage. See [Emailed reports](#emailed-reports) to turn them on.
 - **[The application itself](docs/FEATURES.md#the-application-itself)** — a no-build-step web UI
-  served from the same binary, an append-only audit trail of every edit and deletion, and optional
-  single-credential authentication.
+  served from the same binary, an append-only audit trail of every edit and deletion, optional
+  single-credential authentication, and a generated OpenAPI 3.1 description of the whole HTTP
+  surface at `GET /openapi.json` (see
+  [Machine-readable API description](docs/FEATURES.md#machine-readable-api-description)).
 
 **Not in scope**, deliberately: this assumes a share **investor** on capital account (not a trader),
 **one taxpayer per database**, and no pre-CGT holdings — among a dozen other decisions listed under
