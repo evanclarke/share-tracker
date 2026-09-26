@@ -1977,6 +1977,38 @@ pub fn router() -> Router<SqlitePool> {
     Router::new().route("/openapi.json", get(openapi_json))
 }
 
+/// Every **id-keyed collection create** the route table documents — a
+/// parameterless `POST /<collection>` answering `201 Created` — sorted.
+///
+/// Read by `doc_checks` so the Response-codes `201` row is *derived* from the
+/// same route table `every_served_route_is_documented_and_nothing_else_is`
+/// pins to the live router, rather than transcribed into a second list that a
+/// new entity silently escapes.
+///
+/// Two parameterless `201` `POST`s are operations rather than collection
+/// creates — `/attachments` (an upload) and `/closing_prices/fetch` (a fetch)
+/// — which the `201` row names in its operation clauses instead of its
+/// collection list. They are listed here so a *new* operation-shaped create
+/// fails this test until it is classified rather than quietly widening the
+/// collection set.
+#[cfg(test)]
+pub(crate) fn documented_id_keyed_collection_creates() -> Vec<String> {
+    const OPERATION_CREATES: &[&str] = &["/attachments", "/closing_prices/fetch"];
+    let mut out: Vec<String> = ROUTES
+        .iter()
+        .filter(|(verb, path, statuses, _, _, _)| {
+            *verb == Verb::Post
+                && statuses.contains(&201)
+                && !path.contains('{')
+                && !OPERATION_CREATES.contains(path)
+        })
+        .map(|(_, path, _, _, _, _)| (*path).to_string())
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2395,14 +2427,26 @@ mod tests {
     /// machine-client contract.
     #[test]
     fn every_put_route_documents_its_outcome() {
-        // The two `PUT`s that deliberately do not report the pair, with the one
-        // status each can answer.
-        const EXCEPTIONS: &[(&str, &[u16])] = &[
-            // Create-only: always 201 with the executed group.
-            ("/transfers/{id}", &[201]),
-            // A correction of an existing row: never creates, so always 204.
-            ("/rba_fx_rates/{id}", &[204]),
-        ];
+        use crate::entities::{PUT_ROUTES, PutOutcome};
+
+        // The entity route classification is the **one** source for which PUTs
+        // report the create/replace pair and which are the two deliberate
+        // exceptions — read, not re-declared here, so the document cannot lie
+        // while both tests stay green.
+        let expected_statuses = |path: &str| -> &'static [u16] {
+            match PUT_ROUTES
+                .iter()
+                .find(|(p, _)| *p == path)
+                .map(|(_, outcome)| *outcome)
+            {
+                Some(PutOutcome::CreateThenReplace) => &[201, 204],
+                // Create-only: always 201 with the executed group.
+                Some(PutOutcome::AlwaysCreatedGroup) => &[201],
+                // A correction of an existing row: never creates, so always 204.
+                Some(PutOutcome::NeverCreates) => &[204],
+                None => panic!("PUT {path} is not classified in entities::PUT_ROUTES"),
+            }
+        };
         let doc = doc();
         let mut puts = 0;
         for &(verb, path, statuses, _, _, _) in ROUTES {
@@ -2410,17 +2454,12 @@ mod tests {
                 continue;
             }
             puts += 1;
-            match EXCEPTIONS.iter().find(|(p, _)| *p == path) {
-                Some((_, expected)) => assert_eq!(
-                    statuses, *expected,
-                    "PUT {path} is a classified exception with the wrong statuses"
-                ),
-                None => assert_eq!(
-                    statuses,
-                    &[201, 204],
-                    "PUT {path} must record 201 Created then 204 No Content"
-                ),
-            }
+            assert_eq!(
+                statuses,
+                expected_statuses(path),
+                "PUT {path} records statuses that disagree with its entities::PUT_ROUTES \
+                 classification"
+            );
             let responses = doc["paths"][path]["put"]["responses"]
                 .as_object()
                 .unwrap_or_else(|| panic!("PUT {path} has no documented responses"));
@@ -2443,8 +2482,10 @@ mod tests {
             }
         }
         assert_eq!(
-            puts, 20,
-            "the route table should carry every PUT route; a new one must be classified here"
+            puts,
+            PUT_ROUTES.len(),
+            "the documented PUT routes and the classified PUT routes must be the same set; a \
+             new `PUT` route must be classified in entities::PUT_ROUTES"
         );
     }
 

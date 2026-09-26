@@ -28,40 +28,59 @@ const REQUIREMENTS_MD: &str = include_str!("../REQUIREMENTS.md");
 // this costs the release binary nothing.
 const AUTH_RS: &str = include_str!("infra/auth.rs");
 
+/// One ATX-heading section of a Markdown document: from the line holding
+/// `heading` (which includes its `#`s) up to the next heading at the same or a
+/// shallower level.
+///
+/// This is the one section-slicing idiom the doc pins share. Scoping a pin to
+/// its section is deliberate — a bare `contains` over the whole document passes
+/// on a mention elsewhere — and doing it inline at each call site meant a dozen
+/// subtly different copies (some cut at `\n## `, some at `\n### `, some not at
+/// all, so a `##` later in the file truncated a `###` section). The heading must
+/// start its own line and be followed by a newline, so `## Listings` cannot
+/// match `## Listings and renames`.
+fn md_section<'a>(doc: &'a str, heading: &str) -> &'a str {
+    let start = doc
+        .match_indices(heading)
+        .map(|(offset, _)| offset)
+        .find(|offset| {
+            (*offset == 0 || doc.as_bytes()[*offset - 1] == b'\n')
+                && doc[*offset + heading.len()..]
+                    .chars()
+                    .next()
+                    .is_none_or(|c| c == '\n' || c == '\r')
+        })
+        .unwrap_or_else(|| panic!("the document has a `{heading}` heading"));
+    let rest = &doc[start..];
+    let level = heading.chars().take_while(|c| *c == '#').count();
+    let mut at = 0usize;
+    for line in rest.split_inclusive('\n') {
+        // The first line is the heading itself; a body line starting with `#`
+        // is only a boundary if its level is shallower or equal.
+        if at > 0
+            && line.starts_with('#')
+            && line.chars().take_while(|c| *c == '#').count() <= level
+        {
+            return &rest[..at];
+        }
+        at += line.len();
+    }
+    rest
+}
+
 /// The body of the `# Known limitations` section of `docs/API.md`.
 fn known_limitations() -> &'static str {
-    let section = API_MD
-        .split("# Known limitations")
-        .nth(1)
-        .expect("docs/API.md has a Known limitations section");
-    section
-        .split("\n# ")
-        .next()
-        .expect("split always yields at least one part")
+    md_section(API_MD, "# Known limitations")
 }
 
 /// The body of the `## Portfolio reports` section of `docs/API.md`.
 fn portfolio_reports_section() -> &'static str {
-    let section = API_MD
-        .split("## Portfolio reports")
-        .nth(1)
-        .expect("docs/API.md has a Portfolio reports section");
-    section
-        .split("\n## ")
-        .next()
-        .expect("split always yields at least one part")
+    md_section(API_MD, "## Portfolio reports")
 }
 
 /// The body of the `## Reading a list` section of `docs/API.md`.
 fn reading_a_list_section() -> &'static str {
-    let section = API_MD
-        .split("## Reading a list")
-        .nth(1)
-        .expect("docs/API.md has a Reading a list section");
-    section
-        .split("\n## ")
-        .next()
-        .expect("split always yields at least one part")
+    md_section(API_MD, "## Reading a list")
 }
 
 /// Docs-sync pin for the report-path namespace/case rule (REST API audit
@@ -872,6 +891,15 @@ fn creating_a_record_documented() {
 /// `201` row deliberately: a bare `contains` over the whole document would pass
 /// on the sections that document each route. The routes themselves are pinned
 /// by their handlers' tests; this is the documentation half.
+///
+/// Two assertions here were **vacuous** as originally written, and are not now:
+/// a bare `row.contains("vest")` was satisfied by the `vest` inside
+/// `/investment_expenses`, and a `row.contains("/listings")` by the operation
+/// clauses further along the row (`/listings/:id/rename`). The vest is asserted
+/// as its exact path, and the collection list is sliced out of the row before
+/// the set comparison. The set itself is **derived** from the OpenAPI route
+/// table (which a both-ways test pins to the live router), so a new id-keyed
+/// collection create fails here until the row names it.
 #[test]
 fn created_response_row_names_collection_creates_and_vest() {
     let row = API_MD
@@ -879,33 +907,34 @@ fn created_response_row_names_collection_creates_and_vest() {
         .find(|line| line.starts_with("| `201 Created` |"))
         .expect("docs/API.md's Response codes table has a `201 Created` row");
     assert!(
-        row.contains("POST /<collection>"),
+        row.contains("`POST /<collection>`"),
         "the `201` row names the collection-POST create path: {row}"
     );
-    assert!(row.contains("vest"), "the `201` row names the ESS vest");
-    // The row is the enumeration, so it must name every id-keyed collection
-    // create rather than one example of the shape.
-    for collection in [
-        "/listings",
-        "/trades",
-        "/sells",
-        "/income",
-        "/interest_income",
-        "/investment_expenses",
-        "/drp_enrolments",
-        "/holding_accounts",
-        "/amma_statements",
-        "/amit_adjustments",
-        "/corporate_actions",
-        "/inheritances",
-        "/transfers",
-        "/ess_statements",
-    ] {
-        assert!(
-            row.contains(collection),
-            "the `201` row names the `{collection}` collection-POST create"
-        );
-    }
+    // The exact operation path — not the substring inside `/investment_expenses`.
+    assert!(
+        row.contains("`POST /ess_statements/:id/vest`"),
+        "the `201` row names the ESS vest by its own path: {row}"
+    );
+    // Slice the row's own parenthetical collection list; `row.contains(path)`
+    // over the whole row is satisfied by the operation clauses it also names.
+    let list = row
+        .split("the id-keyed collections ")
+        .nth(1)
+        .and_then(|rest| rest.split(" — each answering").next())
+        .unwrap_or_else(|| panic!("the `201` row enumerates the id-keyed collections: {row}"));
+    let mut named: Vec<String> = list
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .map(str::to_string)
+        .collect();
+    named.sort();
+    named.dedup();
+    assert_eq!(
+        named,
+        crate::api_spec::documented_id_keyed_collection_creates(),
+        "the `201` row's collection list and the route table disagree; the row is: {row}"
+    );
 }
 
 /// Docs-sync pin for the `preference` listing field (REST API audit 2026-09-24):
@@ -920,13 +949,7 @@ fn created_response_row_names_collection_creates_and_vest() {
 /// the documentation half.
 #[test]
 fn listing_preference_field_documented() {
-    let section = API_MD
-        .split("## Listings")
-        .nth(1)
-        .expect("docs/API.md has a Listings section")
-        .split("\n## ")
-        .next()
-        .expect("split always yields at least one part");
+    let section = md_section(API_MD, "## Listings");
     assert!(
         section.contains("`preference` (optional, `false` by default)"),
         "the Listings section documents `preference`: {section}"
@@ -956,13 +979,7 @@ fn listing_preference_field_documented() {
 /// tests; this is the documentation half.
 #[test]
 fn drp_residual_columns_documented_in_trades() {
-    let section = API_MD
-        .split("## Trades")
-        .nth(1)
-        .expect("docs/API.md has a Trades section")
-        .split("\n## ")
-        .next()
-        .expect("split always yields at least one part");
+    let section = md_section(API_MD, "## Trades");
     for column in [
         "residual_brought_forward",
         "residual_carried_forward",
@@ -1034,13 +1051,7 @@ fn error_bodies_listed_codes(paragraph: &str) -> Vec<&str> {
 /// The codes with a `| \`NNN …\` |` row in the Response codes table — the
 /// neighbouring enumeration the Error bodies list must not contradict.
 fn response_code_table_codes() -> Vec<String> {
-    let section = API_MD
-        .split("# Response codes")
-        .nth(1)
-        .expect("docs/API.md has a Response codes section")
-        .split("\n## ")
-        .next()
-        .expect("split always yields at least one part");
+    let section = md_section(API_MD, "# Response codes");
     section
         .lines()
         .filter_map(|line| {
@@ -1169,13 +1180,7 @@ fn error_bodies_list_names_only_returned_codes() {
 /// The `## Error-body contract` section of `docs/API.md` — the explicit
 /// status/body matrix plus the prose beside it.
 fn error_body_contract_section() -> &'static str {
-    API_MD
-        .split("## Error-body contract")
-        .nth(1)
-        .expect("docs/API.md has an Error-body contract section")
-        .split("\n## ")
-        .next()
-        .expect("split always yields at least one part")
+    md_section(API_MD, "## Error-body contract")
 }
 
 /// The `(status, body)` rows of the Error-body matrix, in table order: the
@@ -1690,13 +1695,7 @@ fn amma_components_are_documented_as_non_negative() {
 /// documentation half.
 #[test]
 fn amma_date_received_documented_as_required() {
-    let section = API_MD
-        .split("## AMMA statements")
-        .nth(1)
-        .expect("docs/API.md has an AMMA statements section")
-        .split("\n## ")
-        .next()
-        .expect("split always yields at least one part");
+    let section = md_section(API_MD, "## AMMA statements");
     assert!(
         section.contains("**`listing_id`, `tax_year_end_date`, and `date_received` are required**"),
         "the AMMA statements section names `date_received` as required"
@@ -3183,13 +3182,7 @@ fn manual_closing_prices_documented() {
 /// one place a stored price may be deleted.
 #[test]
 fn clearing_superseded_closing_prices_documented() {
-    let closing_prices = API_MD
-        .split("## Closing prices")
-        .nth(1)
-        .expect("API.md has a Closing prices section")
-        .split("\n## ")
-        .next()
-        .unwrap();
+    let closing_prices = md_section(API_MD, "## Closing prices");
     // The relaxation, its reason, and the asymmetry with `unpriced_from`.
     assert!(closing_prices.contains(
         "**The one relaxation: a date inside the listing's [`unpriced_before`](#listings) span**"
@@ -3227,13 +3220,7 @@ fn clearing_superseded_closing_prices_documented() {
 /// cannot satisfy it.
 #[test]
 fn closing_price_status_filter_documented() {
-    let closing_prices = API_MD
-        .split("## Closing prices")
-        .nth(1)
-        .expect("API.md has a Closing prices section")
-        .split("\n## ")
-        .next()
-        .unwrap();
+    let closing_prices = md_section(API_MD, "## Closing prices");
     // The route table row names the parameter and both values.
     assert!(
         closing_prices.contains("`?status=ok`\\|`error`"),
@@ -3330,13 +3317,7 @@ fn audited_exchange_holidays_documented() {
 /// guarantee.
 #[test]
 fn fetched_symbol_provenance_documented() {
-    let closing_prices = API_MD
-        .split("## Closing prices")
-        .nth(1)
-        .expect("docs/API.md has a Closing prices section")
-        .split("\n## ")
-        .next()
-        .expect("split always yields at least one part");
+    let closing_prices = md_section(API_MD, "## Closing prices");
     assert!(
         closing_prices.contains("**Every fetched row records the symbol it was fetched under**")
     );
@@ -3364,13 +3345,7 @@ fn fetched_symbol_provenance_documented() {
 /// and the repair job is named in both the API and the README.
 #[test]
 fn contemporaneous_price_basis_documented() {
-    let closing_prices = API_MD
-        .split("## Closing prices")
-        .nth(1)
-        .expect("docs/API.md has a Closing prices section")
-        .split("\n## ")
-        .next()
-        .expect("split always yields at least one part");
+    let closing_prices = md_section(API_MD, "## Closing prices");
     assert!(closing_prices.contains("**A stored price is in its own trading day's unit basis**"));
     assert!(
         closing_prices.contains(
@@ -3413,13 +3388,7 @@ fn contemporaneous_price_basis_documented() {
 /// says the same in a sentence.
 #[test]
 fn demerger_price_rebasing_documented() {
-    let closing_prices = API_MD
-        .split("## Closing prices")
-        .nth(1)
-        .expect("docs/API.md has a Closing prices section")
-        .split("\n## ")
-        .next()
-        .expect("split always yields at least one part");
+    let closing_prices = md_section(API_MD, "## Closing prices");
     // The invariant is no longer stated unconditionally: the exception list is
     // there, and names both the kinds that restate the series and those that
     // do not.
@@ -3477,13 +3446,7 @@ fn demerger_price_rebasing_documented() {
 /// states the invariant from the other side.
 #[test]
 fn demerger_date_price_basis_exception_documented() {
-    let closing_prices = API_MD
-        .split("## Closing prices")
-        .nth(1)
-        .expect("docs/API.md has a Closing prices section")
-        .split("\n## ")
-        .next()
-        .expect("split always yields at least one part");
+    let closing_prices = md_section(API_MD, "## Closing prices");
     // The exception itself, beside the invariant it qualifies.
     assert!(
         closing_prices.contains("**The one exception, and it is on the demerger's own date.**")
@@ -3999,13 +3962,7 @@ fn as_at_today_convention_documented() {
 fn as_of_date_is_the_documented_valuation_date() {
     // The shared section states the parameter, its default, and the fact that
     // the default is *not* the open-ended sentinel.
-    let as_at = API_MD
-        .split("### As-at date")
-        .nth(1)
-        .expect("docs/API.md has an As-at date section")
-        .split("\n### ")
-        .next()
-        .expect("split always yields at least one part");
+    let as_at = md_section(API_MD, "### As-at date");
     assert!(
         as_at.contains(
             "**The valuation-date parameter is `as_of_date`, and omitting it means today's live \
@@ -4803,13 +4760,7 @@ fn lpr_expenditure_on_a_foreign_parcel_documented() {
 #[test]
 fn presale_tools_read_candidates_as_at_the_request_date() {
     // The As-at date section names them and states the unit basis.
-    let as_at = API_MD
-        .split("### As-at date")
-        .nth(1)
-        .expect("docs/API.md has an As-at date section")
-        .split("\n### ")
-        .next()
-        .expect("split always yields at least one part");
+    let as_at = md_section(API_MD, "### As-at date");
     assert!(as_at.contains("[parcel-selection optimiser](#parcel-selection-optimiser)"));
     assert!(as_at.contains("[pre-sale what-if](#pre-sale-what-if)"));
     assert!(as_at.contains("as at the request's `sale_date` / `date`"));
@@ -4901,13 +4852,7 @@ fn price_collection_lookback_window_documented_as_the_constant() {
 /// say that endpoint is reachable from.
 #[test]
 fn listing_rename_ui_documented() {
-    let frontend = API_MD
-        .split("## Web frontend")
-        .nth(1)
-        .expect("docs/API.md has a Web frontend section")
-        .split("\n## ")
-        .next()
-        .expect("split always yields at least one part");
+    let frontend = md_section(API_MD, "## Web frontend");
     // The action, and why it exists at all (the PUT refusal it answers).
     assert!(frontend.contains("a **Rename** action on listing rows (`POST /listings/:id/rename`"));
     assert!(

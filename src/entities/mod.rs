@@ -84,6 +84,64 @@ pub fn router() -> Router<SqlitePool> {
 }
 
 #[cfg(test)]
+/// The success outcome a `PUT` route reports.
+///
+/// The convention is `201 Created` with the created row on a fresh id and
+/// `204 No Content` on a replace; the two exceptions are the only routes
+/// that can answer one status, each with the reason it must.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum PutOutcome {
+    /// `201` with the created row on a create, `204` on a replace.
+    CreateThenReplace,
+    /// `PUT /transfers/{id}`: create-only, so always `201` with the
+    /// executed group — a bare `204` would hide the created Sell/Buy ids.
+    AlwaysCreatedGroup,
+    /// `PUT /rba_fx_rates/{id}`: a correction of an existing row, so
+    /// always `204`; it can never create one (that is the import route).
+    NeverCreates,
+}
+
+#[cfg(test)]
+/// Every `PUT` route `entities::router()` serves, classified by outcome.
+///
+/// A new `PUT` route fails `every_put_route_reports_create_then_replace`
+/// until it is added here, so the create-vs-replace signal cannot be left
+/// out by omission. `api_spec::tests::every_put_route_documents_its_outcome`
+/// **reads this list** (rather than re-declaring its own copy) to check the
+/// generated OpenAPI document records each route's statuses.
+pub(crate) const PUT_ROUTES: &[(&str, PutOutcome)] = &[
+    ("/exchanges/{mic}", PutOutcome::CreateThenReplace),
+    (
+        "/exchange_holidays/{mic}/{date}",
+        PutOutcome::CreateThenReplace,
+    ),
+    ("/listings/{id}", PutOutcome::CreateThenReplace),
+    ("/holding_accounts/{id}", PutOutcome::CreateThenReplace),
+    ("/trades/{id}", PutOutcome::CreateThenReplace),
+    ("/income/{id}", PutOutcome::CreateThenReplace),
+    ("/interest_income/{id}", PutOutcome::CreateThenReplace),
+    ("/investment_expenses/{id}", PutOutcome::CreateThenReplace),
+    ("/amma_statements/{id}", PutOutcome::CreateThenReplace),
+    ("/amit_adjustments/{id}", PutOutcome::CreateThenReplace),
+    ("/drp_enrolments/{id}", PutOutcome::CreateThenReplace),
+    ("/cgt_settings/{id}", PutOutcome::CreateThenReplace),
+    (
+        "/tax_year_settings/{tax_year}",
+        PutOutcome::CreateThenReplace,
+    ),
+    ("/corporate_actions/{id}", PutOutcome::CreateThenReplace),
+    ("/ess_statements/{id}", PutOutcome::CreateThenReplace),
+    ("/inheritances/{id}", PutOutcome::CreateThenReplace),
+    ("/sells/{id}", PutOutcome::CreateThenReplace),
+    (
+        "/closing_prices/{listing_id}/{price_date}",
+        PutOutcome::CreateThenReplace,
+    ),
+    ("/transfers/{id}", PutOutcome::AlwaysCreatedGroup),
+    ("/rba_fx_rates/{id}", PutOutcome::NeverCreates),
+];
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_support::{ApiClient, test_pool};
@@ -633,61 +691,6 @@ mod tests {
             );
         }
     }
-
-    /// The success outcome a `PUT` route reports.
-    ///
-    /// The convention is `201 Created` with the created row on a fresh id and
-    /// `204 No Content` on a replace; the two exceptions are the only routes
-    /// that can answer one status, each with the reason it must.
-    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-    enum PutOutcome {
-        /// `201` with the created row on a create, `204` on a replace.
-        CreateThenReplace,
-        /// `PUT /transfers/{id}`: create-only, so always `201` with the
-        /// executed group — a bare `204` would hide the created Sell/Buy ids.
-        AlwaysCreatedGroup,
-        /// `PUT /rba_fx_rates/{id}`: a correction of an existing row, so
-        /// always `204`; it can never create one (that is the import route).
-        NeverCreates,
-    }
-
-    /// Every `PUT` route `entities::router()` serves, classified by outcome.
-    ///
-    /// A new `PUT` route fails `every_put_route_reports_create_then_replace`
-    /// until it is added here, so the create-vs-replace signal cannot be left
-    /// out by omission. `api_spec::tests::every_put_route_documents_its_outcome`
-    /// pins the same classification in the generated OpenAPI document.
-    const PUT_ROUTES: &[(&str, PutOutcome)] = &[
-        ("/exchanges/{mic}", PutOutcome::CreateThenReplace),
-        (
-            "/exchange_holidays/{mic}/{date}",
-            PutOutcome::CreateThenReplace,
-        ),
-        ("/listings/{id}", PutOutcome::CreateThenReplace),
-        ("/holding_accounts/{id}", PutOutcome::CreateThenReplace),
-        ("/trades/{id}", PutOutcome::CreateThenReplace),
-        ("/income/{id}", PutOutcome::CreateThenReplace),
-        ("/interest_income/{id}", PutOutcome::CreateThenReplace),
-        ("/investment_expenses/{id}", PutOutcome::CreateThenReplace),
-        ("/amma_statements/{id}", PutOutcome::CreateThenReplace),
-        ("/amit_adjustments/{id}", PutOutcome::CreateThenReplace),
-        ("/drp_enrolments/{id}", PutOutcome::CreateThenReplace),
-        ("/cgt_settings/{id}", PutOutcome::CreateThenReplace),
-        (
-            "/tax_year_settings/{tax_year}",
-            PutOutcome::CreateThenReplace,
-        ),
-        ("/corporate_actions/{id}", PutOutcome::CreateThenReplace),
-        ("/ess_statements/{id}", PutOutcome::CreateThenReplace),
-        ("/inheritances/{id}", PutOutcome::CreateThenReplace),
-        ("/sells/{id}", PutOutcome::CreateThenReplace),
-        (
-            "/closing_prices/{listing_id}/{price_date}",
-            PutOutcome::CreateThenReplace,
-        ),
-        ("/transfers/{id}", PutOutcome::AlwaysCreatedGroup),
-        ("/rba_fx_rates/{id}", PutOutcome::NeverCreates),
-    ];
 
     /// Every `PUT` route on a fresh id answers `201 Created` with the created
     /// row, and the same `PUT` again answers `204 No Content`.
