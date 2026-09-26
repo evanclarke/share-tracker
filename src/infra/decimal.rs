@@ -121,17 +121,16 @@ impl sqlx::Encode<'_, Sqlite> for OptMoney {
 // unchanged.
 //
 // The **response** direction has no twin here, deliberately. A response's
-// `Decimal` fields go out through `rust_decimal`'s own `Serialize` impl, which
-// this crate selects as a string codec in `Cargo.toml` (`serde-str`): it is a
-// type-level impl, so it already covers every field of every struct, and a
+// `Decimal` fields go out through `rust_decimal`'s own `Serialize` impl: it is
+// a type-level impl, so it already covers every field of every struct, and a
 // per-field `#[serde(serialize_with = "…")]` would restate it without changing
-// a byte. Adding one anyway would leave a `pub fn` reachable only from
-// `#[cfg(test)]` code — which warns in the non-test build (CLAUDE.md) — so the
-// codec is the crate feature and its pin is the test pair at the bottom of
-// this module, which fails if a `Decimal` ever renders as a JSON number. The
-// input side cannot work that way: `rust_decimal`'s default `Deserialize`
-// *accepts* a JSON number, which is the hole SCENARIOS W-a found, so there the
-// attribute is per field and has to be.
+// a byte. (`serde-str` in `Cargo.toml` does **not** select that outbound
+// format — it gates only the `Deserialize` impls. The string `Serialize` is
+// simply what `rust_decimal` does while `serde-float` is off, which is why the
+// outbound rule is pinned by the test pair at the bottom of this module rather
+// than by the feature.) The input side cannot work that way: `rust_decimal`'s
+// default `Deserialize` *accepts* a JSON number, which is the hole SCENARIOS
+// W-a found, so there the attribute is per field and has to be.
 // ---------------------------------------------------------------------------
 
 /// What a money/quantity field is refused with when it arrives as a JSON
@@ -731,11 +730,14 @@ mod tests {
     // The serde half: writing a decimal *out of a response*
     // -----------------------------------------------------------------------
 
-    /// A real money field of a real row serializes as a JSON **string** — what
-    /// this crate's `serde-str` feature names in `Cargo.toml` (see the module
-    /// docs above). `Trade` is the row the whole report tree is built on, and
-    /// it carries both shapes: eight required TEXT-decimal columns and the
-    /// nullable `spot_fx_rate` / `statement_total` pair.
+    /// A real money field of a real row serializes as a JSON **string**.
+    /// `Trade` is the row the whole report tree is built on, and it carries
+    /// both shapes: the required TEXT-decimal columns and the nullable pair.
+    ///
+    /// Every one of the row's ten `Decimal` fields is checked by name — the
+    /// three `residual_*` DRP fields included — and a field **looked up**
+    /// rather than indexed under `obj[field]`, so a rename fails loudly instead
+    /// of reading `Value::Null` and passing.
     #[test]
     fn a_money_field_serializes_as_a_json_string() {
         let trade = buy(1, 1)
@@ -743,6 +745,11 @@ mod tests {
             .qty(dec("10.5"))
             .brokerage(dec("9.95"))
             .spot_fx_rate(dec("1.5"))
+            .with(|t| {
+                t.residual_brought_forward = dec("1.25");
+                t.residual_carried_forward = dec("2.5");
+                t.residual_paid_out = dec("0.75");
+            })
             .build();
         let value = serde_json::to_value(&trade).expect("a Trade serialises");
         let obj = value.as_object().expect("a Trade serialises as an object");
@@ -756,11 +763,26 @@ mod tests {
         // integers — the leak a "no fractional numbers" check alone misses.
         assert_eq!(obj["fx_rate"], Value::String("1".into()));
         assert_eq!(obj["gst_on_brokerage"], Value::String("0".into()));
-        for field in ["average_price", "quantity", "brokerage", "fx_rate"] {
+        // Every money/quantity field of the row, by name — the lookup fails on
+        // a rename rather than silently reading `Null`.
+        for field in [
+            "average_price",
+            "quantity",
+            "brokerage",
+            "gst_on_brokerage",
+            "fx_rate",
+            "spot_fx_rate",
+            "statement_total",
+            "residual_brought_forward",
+            "residual_carried_forward",
+            "residual_paid_out",
+        ] {
+            let v = obj.get(field).unwrap_or_else(|| {
+                panic!("Trade no longer has a `{field}` field — update this list")
+            });
             assert!(
-                !obj[field].is_number(),
-                "{field} must never be a JSON number: {}",
-                obj[field]
+                matches!(v, Value::String(_) | Value::Null),
+                "{field} must be a JSON string or null, never a number: {v}"
             );
         }
 
@@ -782,9 +804,10 @@ mod tests {
     /// assertion below — so a `Decimal` that starts rendering as a number
     /// (fractional, or whole: a quantity of `100` would read `100`) fails here
     /// by name. **This is the test that fails if `rust_decimal`'s string codec
-    /// is swapped for `serde-float` or `serde-arbitrary-precision`**, each of
-    /// which renders every money and quantity field of every response as a
-    /// JSON number.
+    /// is swapped for `serde-float`**, which renders every money and quantity
+    /// field of every response as a JSON number. (The list is fail-closed the
+    /// other way too: **a new integer id belongs in it**, or the assertion
+    /// reports a money-leak for a field that is only an id.)
     #[test]
     fn every_money_field_of_a_serialized_row_is_a_json_string() {
         let row = OpenParcel {

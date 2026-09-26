@@ -421,6 +421,7 @@ mod tests {
             "no investment expense with that id",
         ),
         ("/listings/9999", "no listing with that id"),
+        ("/listings/9999/renames/9999", "no rename with that id"),
         ("/rights_sales/9999", "no rights sale with that id"),
         ("/sells/9999", "no sell with that id"),
         (

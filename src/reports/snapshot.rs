@@ -1005,7 +1005,7 @@ struct SeriesParams {
     listing_id: Option<i64>,
 }
 
-/// `GET /report_snapshots/holding-series` query: the snapshot dates to read,
+/// `GET /report_snapshots/holding_series` query: the snapshot dates to read,
 /// both ends inclusive; absent means every stored snapshot.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1143,7 +1143,7 @@ pub fn router() -> Router<SqlitePool> {
     Router::new()
         .route("/report_snapshots", get(list))
         .route("/report_snapshots/series", get(series))
-        .route("/report_snapshots/holding-series", get(holding_series))
+        .route("/report_snapshots/holding_series", get(holding_series))
         .route("/report_snapshots/generate", post(generate_handler))
         .route(
             "/report_snapshots/regenerate_all",
@@ -2889,7 +2889,7 @@ mod tests {
         // The per-holding series behind the overview's contributions
         // sparklines: one line per listing × holding account, bounded by
         // the same window the panel ran its period summary over.
-        let resp = app.get("/report_snapshots/holding-series").await;
+        let resp = app.get("/report_snapshots/holding_series").await;
         assert_eq!(resp.status, StatusCode::OK);
         let holdings = body_json(resp).await;
         assert_eq!(holdings.as_array().unwrap().len(), 1);
@@ -2900,7 +2900,7 @@ mod tests {
         assert_eq!(holdings[0]["points"][1]["unit_price"], "62.48");
 
         let resp = app
-            .get("/report_snapshots/holding-series?from=2026-06-05&to=2026-06-05")
+            .get("/report_snapshots/holding_series?from=2026-06-05&to=2026-06-05")
             .await;
         assert_eq!(resp.status, StatusCode::OK);
         let holdings = body_json(resp).await;

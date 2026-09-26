@@ -2333,7 +2333,7 @@ function statItem(label, valueEl) {
 // reports::period_performance) shown above the chart so it's visible without
 // scrolling, and a `detail` (the per-currency FX line and the collapsed
 // per-holding contributions) shown below the range control.
-// `trends` is the matching `GET /report_snapshots/holding-series` response
+// `trends` is the matching `GET /report_snapshots/holding_series` response
 // for the same window — one unit-price point per stored snapshot per holding,
 // drawn as a sparkline beside that holding's contributions row. Per unit
 // rather than per holding value, so a purchase inside the window cannot draw
@@ -2660,7 +2660,7 @@ async function performancePanel() {
         const [result, trends] = await Promise.all([
           api('GET', '/portfolio/period-performance?'
             + queryString({ from: resolved.from, to: resolved.to })),
-          api('GET', '/report_snapshots/holding-series?from='
+          api('GET', '/report_snapshots/holding_series?from='
             + encodeURIComponent(resolved.from) + '&to=' + encodeURIComponent(resolved.to)),
         ]);
         const summary = await renderPeriodSummary(result, trends,

@@ -1719,6 +1719,13 @@ fn amma_date_received_documented_as_required() {
         section.contains("`date_received` is the date the statement was received"),
         "the AMMA statements section says what `date_received` is"
     );
+    // …and that it is informational only, so a required field a reader cannot
+    // tell is inert is not mistaken for one driving a calculation.
+    assert!(
+        section.contains("it is **informational only**")
+            && section.contains("an approximate date changes no figure"),
+        "the AMMA statements section must mark `date_received` informational-only"
+    );
 }
 
 /// Docs-sync pin for SCENARIOS G-11/G-20: what anchors the franking

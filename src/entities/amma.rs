@@ -24,6 +24,11 @@ pub struct AmmaStatement {
     pub tax_year_end_date: NaiveDate,
     #[sqlx(try_from = "Money")]
     pub units_held: Decimal,
+    /// When the statement was received. **Informational only** — no
+    /// calculation or report reads it (the statement's financial year is fixed
+    /// by `tax_year_end_date`, and nothing is keyed on receipt); it is required
+    /// so the record states when the figure arrived, and an approximate date
+    /// changes no figure.
     pub date_received: NaiveDate,
     #[sqlx(try_from = "Money")]
     pub australian_interest: Decimal,

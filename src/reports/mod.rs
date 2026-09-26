@@ -110,28 +110,33 @@ pub fn router() -> Router<SqlitePool> {
 mod tests {
     use std::path::PathBuf;
 
-    /// Every route registered under `src/reports/*.rs` as a `(path, verb)`
+    /// Every route registered under `src/reports/**/*.rs` as a `(path, verb)`
     /// pair, sorted and de-duplicated. The verb is whichever of
     /// `get(...)`/`post(...)` the route registration itself names, so the
     /// table is read out of the route registration rather than kept by hand.
     /// The path literal may sit on the route call's own line or the next one,
     /// so this reads the first string literal after each route call and then
-    /// the first routing fn after it. The needle is assembled rather than
-    /// written out so this module does not match itself (it walks `mod.rs`
-    /// too).
+    /// the first routing fn **inside that same call** (bounded at the next
+    /// route registration, so a call carrying two verbs cannot be mis-read from
+    /// a later route's verb). The needle is assembled rather than written out so
+    /// this module does not match itself (it walks `mod.rs` too).
+    ///
+    /// The walk is **recursive**: an entity module split into submodules
+    /// (`trade.rs` → `trade/…`) is the documented growth path, and a
+    /// non-recursive scan would silently stop seeing a report that had been
+    /// split into `reports/<name>/http.rs`.
     fn report_routes() -> Vec<(String, &'static str)> {
         let needle = format!(".{}(", "route");
         let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/reports");
+        let mut sources = Vec::new();
+        collect_report_sources(&dir, &mut sources);
+        assert!(
+            sources.len() >= 30,
+            "the walk found only {} report sources — it has stopped reading the directory",
+            sources.len()
+        );
         let mut routes = Vec::new();
-        for entry in std::fs::read_dir(&dir)
-            .expect("src/reports should be readable")
-            .flatten()
-        {
-            let path = entry.path();
-            if path.extension().is_none_or(|x| x != "rs") {
-                continue;
-            }
-            let body = std::fs::read_to_string(&path).expect("report source should be readable");
+        for (file, body) in &sources {
             let mut rest = body.as_str();
             while let Some(at) = rest.find(&needle) {
                 rest = &rest[at + needle.len()..];
@@ -140,7 +145,8 @@ mod tests {
                 let Some(close) = after.find('"') else { break };
                 let route = after[..close].to_string();
                 let tail = &after[close..];
-                let verb = match (tail.find("get("), tail.find("post(")) {
+                let call = &tail[..tail.find(&needle).unwrap_or(tail.len())];
+                let verb = match (call.find("get("), call.find("post(")) {
                     (Some(g), Some(p)) => {
                         if g < p {
                             "GET"
@@ -151,7 +157,8 @@ mod tests {
                     (Some(_), None) => "GET",
                     (None, Some(_)) => "POST",
                     (None, None) => panic!(
-                        "report route `{route}` registers neither `get(...)` nor `post(...)`"
+                        "report route `{route}` in {file} registers neither `get(...)` nor \
+                         `post(...)` — the reports surface should have no other verb"
                     ),
                 };
                 routes.push((route, verb));
@@ -161,6 +168,24 @@ mod tests {
         routes.sort();
         routes.dedup();
         routes
+    }
+
+    /// Every `.rs` file under `dir`, recursively, as `(path, contents)`.
+    fn collect_report_sources(dir: &std::path::Path, out: &mut Vec<(String, String)>) {
+        for entry in std::fs::read_dir(dir)
+            .expect("src/reports should be readable")
+            .flatten()
+        {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_report_sources(&path, out);
+            } else if path.extension().is_some_and(|x| x == "rs") {
+                out.push((
+                    path.display().to_string(),
+                    std::fs::read_to_string(&path).expect("report source should be readable"),
+                ));
+            }
+        }
     }
 
     /// Every route path string in `src/reports/*.rs`, sorted and de-duplicated.
@@ -194,30 +219,42 @@ mod tests {
     /// here with the offending path named.
     ///
     /// `/report_snapshots/*` is the resource surface over the `report_snapshots`
-    /// table (its own `## Report snapshots` docs section), not a report path, so
-    /// the case rule does not govern it — but it is still required to sit in
-    /// that one namespace, and a report route invented anywhere else fails.
+    /// table (its own `## Report snapshots` docs section), not a report path —
+    /// but it is **uniformly snake_case** too. Its one kebab segment
+    /// (`holding-series`) was renamed `holding_series` rather than excused, so
+    /// the surface has a single case rule like the other two, and this test
+    /// reaches it instead of skipping it. A report route invented in a fourth
+    /// namespace still fails.
     #[test]
     fn report_paths_use_their_namespace_case() {
         let paths = report_route_paths();
         assert!(!paths.is_empty(), "the walk found no report routes");
 
         for path in &paths {
-            if path == "/report_snapshots" || path.starts_with("/report_snapshots/") {
-                continue;
-            }
             let (namespace, separator, case, rest) =
                 if let Some(rest) = path.strip_prefix("/portfolio/") {
                     ("/portfolio/", '-', "kebab-case", rest)
                 } else if let Some(rest) = path.strip_prefix("/reports/") {
                     ("/reports/", '_', "snake_case", rest)
+                } else if let Some(rest) = path.strip_prefix("/report_snapshots") {
+                    ("/report_snapshots", '_', "snake_case", rest)
                 } else {
                     panic!(
                         "report route `{path}` is outside `/portfolio/`, `/reports/` and \
                          `/report_snapshots/`"
                     );
                 };
+            let rest = rest.trim_start_matches('/');
+            if rest.is_empty() {
+                continue;
+            }
             for (i, segment) in rest.split('/').enumerate() {
+                // An axum path parameter (`{id}`) names no case — it is a value,
+                // not a segment of the path's spelling — so the case rule does
+                // not reach it and the message below is not about one.
+                if segment.starts_with('{') && segment.ends_with('}') {
+                    continue;
+                }
                 if i > 0 && SHARED_QUALIFIER_SEGMENTS.contains(&segment) {
                     continue;
                 }
@@ -228,31 +265,37 @@ mod tests {
             }
         }
 
-        // The two endpoints renamed by the audit, named explicitly: the case
-        // check above would already refuse the old kebab spelling, and this pins
-        // that the rename landed rather than the paths having vanished.
-        assert!(paths.iter().any(|p| p.as_str() == "/reports/tax_report"));
-        assert!(
-            paths
-                .iter()
-                .any(|p| p.as_str() == "/reports/tax_report/years")
-        );
+        // The endpoints renamed by the audit, named explicitly: the case check
+        // above would already refuse the old spellings, and this pins that the
+        // renames landed rather than the paths having vanished.
+        for renamed in [
+            "/reports/tax_report",
+            "/reports/tax_report/years",
+            "/report_snapshots/holding_series",
+        ] {
+            assert!(
+                paths.iter().any(|p| p.as_str() == renamed),
+                "the renamed route `{renamed}` is missing"
+            );
+        }
     }
 
     /// The UI config and the route table agree (REST API audit 2026-09-24):
-    /// every `/reports/*` endpoint is driven from one of the three served
-    /// modules that call report endpoints — the `REPORTS` config, the annual tax
-    /// report's own renderer, or `app.js`, where the health banner calls
-    /// `/reports/health` (deliberately not a `REPORTS` entry, it drives the
-    /// cross-view banner) and the annual tax report's year picker calls
-    /// `/reports/tax_report/years`. A `/reports/*` route with no UI caller at
-    /// all fails here.
+    /// every `/reports/*` endpoint is driven from one of the served JS modules
+    /// — the `REPORTS` config, the annual tax report's own renderer, or
+    /// `app.js`, where the health banner calls `/reports/health` (deliberately
+    /// not a `REPORTS` entry, it drives the cross-view banner) and the annual
+    /// tax report's year picker calls `/reports/tax_report/years`. A
+    /// `/reports/*` route with no UI caller at all fails here.
+    ///
+    /// The surface is the **served bundle** (`web::served_js_bundle`, the
+    /// `JS_MODULES` concatenation), not three `include_str!`s by name, so a
+    /// module split — the documented growth path for this UI — is covered
+    /// automatically rather than leaving the caller in a fourth module the test
+    /// cannot see.
     #[test]
     fn report_routes_have_a_ui_caller() {
-        const CONFIG_JS: &str = include_str!("../web/config.js");
-        const TAXREPORT_JS: &str = include_str!("../web/taxreport.js");
-        const APP_JS: &str = include_str!("../web/app.js");
-        let ui = [CONFIG_JS, TAXREPORT_JS, APP_JS].join("\n");
+        let ui = crate::web::served_js_bundle();
         for path in report_route_paths() {
             if !path.starts_with("/reports/") {
                 continue;
@@ -366,6 +409,55 @@ mod tests {
         assert_eq!(
             body_posts, expected_body_posts,
             "unexpected POST-bodied report reads: {body_posts:?}"
+        );
+    }
+
+    /// A misspelt or unparseable query parameter on a report read is refused
+    /// `400` naming it, never silently defaulted — the same boundary the entity
+    /// lists pin (`entities::tests::every_list_route_refuses_an_unknown_parameter`),
+    /// applied to the scalar report reads the audit moved onto `GET`. The
+    /// highest-stakes cases are the optimiser and the activity ledger, where a
+    /// silently-defaulted `price` is a wrong **money** figure.
+    #[tokio::test]
+    async fn every_query_decoding_report_read_refuses_an_unknown_parameter() {
+        use crate::test_support::{ApiClient, test_pool};
+        use axum::http::StatusCode;
+
+        let pool = test_pool().await;
+        let client = ApiClient::full(&pool);
+        // (path, a parameter the route does take, so the refusal is about the
+        // unknown one rather than a missing required one)
+        for (path, known) in [
+            ("/portfolio/activity", "listing_id=1"),
+            ("/portfolio/parcel-optimiser", "listing_id=1"),
+            ("/portfolio/period-performance", "from=2024-01-02"),
+            ("/reports/row_history", "table=trades"),
+            ("/reports/tax_report", "tax_year=2026"),
+            ("/reports/wash_sales", "window_days=30"),
+            ("/portfolio/open-parcels", "as_of_date=2024-01-02"),
+        ] {
+            let resp = client
+                .get(&format!("{path}?{known}&zzz_unrecognised=1"))
+                .await;
+            assert_eq!(
+                resp.status,
+                StatusCode::BAD_REQUEST,
+                "GET {path} must refuse an unknown parameter, not default it: {}",
+                resp.text()
+            );
+            assert!(
+                resp.text().contains("zzz_unrecognised"),
+                "the {path} 400 must name the offending parameter: {}",
+                resp.text()
+            );
+        }
+        // …and an unparseable value for a parameter the route does take.
+        let resp = client.get("/reports/tax_report?tax_year=not-a-year").await;
+        assert_eq!(
+            resp.status,
+            StatusCode::BAD_REQUEST,
+            "an unparseable tax_year must be refused: {}",
+            resp.text()
         );
     }
 }

@@ -15,19 +15,22 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 # maths: the checked arithmetic the money rules are built on (mul_div, the
 # "figures beyond the decimal range" guards).
-# serde-str: rust_decimal's explicit **string** codec, so the wire format is a
-# named choice rather than a side effect of `serde-float` happening to be off.
-# It selects `rust_decimal::serde::str` and makes `Decimal`'s own `Deserialize`
-# string-only, so a JSON number is refused even on a field with no
-# `infra::decimal::strict_decimal` — the mirror of that module's strict
-# request codec. What no feature can do is *forbid* `serde-float` (which makes
-# `Decimal`'s `Serialize` emit an f64 and its `Deserialize` read one) or
-# `serde-arbitrary-precision` (a JSON number too); feature unification means
-# any crate in the graph enabling either would change every money and quantity
-# field at once. So the outbound contract itself is pinned by a test —
-# `infra::decimal::tests::a_money_field_serializes_as_a_json_string` and
+# serde-str: rust_decimal's explicit **string deserializer** — the inbound
+# half only. `Deserialize` for a `Decimal` then reads a string and refuses a
+# JSON number even on a field with no `infra::decimal::strict_decimal`, the
+# mirror of that module's strict request codec. It does **not** choose the
+# outbound format: rust_decimal's string `Serialize` is what you get whenever
+# `serde-float` is off, so that direction is a side effect of the feature
+# graph, not a declared choice — which is why it is pinned by test instead
+# (`infra::decimal::tests::a_money_field_serializes_as_a_json_string` and
 # `every_money_field_of_a_serialized_row_is_a_json_string` fail the moment a
-# `Decimal` renders as a JSON number instead of a string.
+# `Decimal` renders as a JSON number). What no feature can do is *forbid*
+# `serde-float` (which makes `Serialize` emit an f64 and `Deserialize` read
+# one) or `serde-arbitrary-precision` — the latter changes only the
+# `arbitrary_precision` helper module, since both number-emitting `Serialize`
+# impls are themselves gated on `serde-float`; feature unification means any
+# crate in the graph enabling either would change every money and quantity
+# field at once.
 rust_decimal = { version = "1", features = ["maths", "serde-str"] }
 sqlx = { version = "0.9", features = ["runtime-tokio", "sqlite", "chrono", "migrate"] }
 # Only the features the server uses: the multi-thread runtime + the

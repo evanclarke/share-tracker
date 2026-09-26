@@ -75,6 +75,23 @@ pub(crate) const JS_MODULES: [(&str, &str); 7] = [
     ("/static/util.js", include_str!("web/util.js")),
 ];
 
+/// Every served JS module concatenated into one string — the exact bundle the
+/// browser runs, in `JS_MODULES` order.
+///
+/// Shared with other modules' UI pins (the reports' namespace/case walk among
+/// them) so they assert against the served bundle rather than `include_str!`ing
+/// two or three modules by name: a module added to `JS_MODULES` — the
+/// documented growth path for this UI — is then covered automatically instead
+/// of silently escaping a hand-kept list.
+#[cfg(test)]
+pub(crate) fn served_js_bundle() -> String {
+    JS_MODULES
+        .iter()
+        .map(|(_, source)| *source)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Routes serving the frontend shell and its static assets. Returns a
 /// `Router<SqlitePool>` purely so it merges with the entity/report routers; the
 /// handlers are stateless.
@@ -2294,7 +2311,7 @@ mod tests {
         // The points come from the stored snapshots, split per holding and
         // bounded to the same window the period summary was run over — one
         // request beside the period-performance one, not one per row.
-        assert!(js.contains("/report_snapshots/holding-series?from="));
+        assert!(js.contains("/report_snapshots/holding_series?from="));
         assert!(js.contains("renderPeriodSummary(result, trends,"));
         // Drawn by chart.js's `sparkline` into a filterableTable cell the
         // caller renders itself (`cells`), keyed the way a contributions row
@@ -2711,19 +2728,19 @@ mod tests {
     /// The 2026-09-24 REST-audit item "Normalise the verb and success status
     /// for reads", UI side: the seven reads it moved from `POST`+JSON body to
     /// `GET`+query are driven as `GET`s by the bundle, parameters and all.
-    /// Pinned per report — the `REPORTS` entry (config.js) declares
-    /// `method: 'GET'` right beside the `api:` path it drives, and the served
-    /// bundle carries the shared query builder (`util.js`'s `queryString`) the
-    /// parameterised ones assemble their query with, including its
-    /// null-for-empty rule (an omitted optional field must be absent from the
-    /// query, never `?window_days=`).
+    /// Pinned where each is actually driven — the generic report runner's own
+    /// call site (config.js's `api:` path, **without** a dead `method` on the
+    /// entries whose renderer is a `custom` view), the Annual Tax Report's year
+    /// picker (`taxreport.js` hardcodes its `GET`, so a `method: 'GET'` in
+    /// config.js would be config nothing reads) and the Portfolio Overview's
+    /// period-performance panel (`app.js`). The shared query builder
+    /// (`util.js`'s `queryString`) is pinned too, including its null-for-empty
+    /// rule (an omitted optional field must be absent from the query, never
+    /// `?window_days=`).
     ///
-    /// Two of the seven are not the generic report runner's own call site, so
-    /// they are pinned where they are driven: the Annual Tax Report's year
-    /// picker (taxreport.js) and the Portfolio Overview's period-performance
-    /// panel (app.js). The four reports the audit deliberately left on `POST`
-    /// (the price-map reports and the allocation-list what-if) are pinned as
-    /// still POST, so a later edit cannot quietly move them.
+    /// The four reports the audit deliberately left on `POST` (the price-map
+    /// reports and the allocation-list what-if) are pinned as still POST, so a
+    /// later edit cannot quietly move them.
     #[tokio::test]
     async fn moved_report_reads_are_driven_as_get_with_a_query() {
         let config = module_source("/static/config.js");
@@ -2732,7 +2749,6 @@ mod tests {
             "/portfolio/parcel-optimiser",
             "/reports/wash_sales",
             "/reports/row_history",
-            "/reports/tax_report",
             "/reports/franking_at_risk/what-if",
         ] {
             assert!(
@@ -2740,6 +2756,15 @@ mod tests {
                 "{path} must declare method: 'GET' beside its api path — the audit moved it off POST"
             );
         }
+        // `/reports/tax_report` is the seventh, but its renderer is the
+        // `custom: 'tax-report'` view, which `app.js` dispatches before the
+        // generic `viewReport` — so its verb lives in `taxreport.js` (pinned
+        // below) and a `method` here would be config nothing reads.
+        assert!(
+            config.contains("api: '/reports/tax_report',")
+                && !config.contains("api: '/reports/tax_report', method:"),
+            "the tax report's config entry carries no dead `method` — its verb is in taxreport.js"
+        );
         // Period performance is the seventh moved read, but it has no REPORTS
         // entry: the Portfolio Overview's panel calls it directly (pinned
         // below), so there is no config verb to change.

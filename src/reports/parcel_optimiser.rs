@@ -465,9 +465,10 @@ async fn optimiser_handler(
             "units must be positive".to_string(),
         ));
     }
-    let sale_date = req
-        .sale_date
-        .unwrap_or_else(|| chrono::Local::now().date_naive());
+    // The contemplated sale's own date, defaulting to today through the shared
+    // resolver rather than a fourth inline `Local::now()` (the date-scoped twin
+    // of `infra::date::as_of_or_open`).
+    let sale_date = crate::infra::date::as_of_or_today(req.sale_date);
 
     // Candidates as at the contemplated sale's own date, not today: a parcel
     // acquired after it can't be sold on it, and one sold since was still

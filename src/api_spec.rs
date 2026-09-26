@@ -1538,7 +1538,7 @@ const ROUTES: &[RouteRow] = &[
     ),
     (
         Verb::Get,
-        "/report_snapshots/holding-series",
+        "/report_snapshots/holding_series",
         &[200],
         "One holding's stored valuation series; ?listing_id= and ?holding_account_id= drive it.",
         Body::None,
