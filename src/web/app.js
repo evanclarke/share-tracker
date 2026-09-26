@@ -3087,6 +3087,15 @@ async function viewReport(report, args, seq = navigationToken()) {
   if (report.asOfDate) {
     const asOfInp = el('input', { type: 'date', name: 'as_of_date' });
     priceForm.appendChild(labelledField('as_of_date', 'As-of date', asOfInp));
+    // The date bounds the position, not the price: a live quote is the
+    // provider's latest, so a back-dated run values that date's quantities at
+    // the current quote. Say so where the control is, rather than letting the
+    // market-value column read as if it were that day's close.
+    priceForm.appendChild(el('p', { class: 'hint' },
+      'The date bounds which trades and corporate actions are in force, and the '
+      + 'unit basis. A live price is the provider\u2019s latest quote \u2014 its own '
+      + 'date is the row\u2019s "as at" \u2014 so enter a price above to value a '
+      + 'holding at a figure as at this date.'));
   }
   priceForm.appendChild(el('div', { class: 'form-actions' }, [
     el('button', { type: 'submit', class: 'primary' }, 'Run report'),

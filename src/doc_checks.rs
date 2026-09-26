@@ -3999,6 +3999,17 @@ fn as_of_date_is_the_documented_valuation_date() {
     assert!(as_at.contains("Their parameter is deliberately *not* named `as_of_date`"));
     assert!(as_at.contains("`as_of_date` is the one valuation-date name"));
     assert!(as_at.contains("`sale_date` / `date` the disposal-date ones"));
+    // The date bounds the position, not the price: a live quote is the
+    // provider's latest and is independent of `as_of_date`, so a back-dated
+    // live run is never passed off as that day's close.
+    assert!(
+        as_at.contains("**The date bounds the *position*, not the price.**"),
+        "the As-at section must carve out the price from the date bound"
+    );
+    assert!(
+        API_MD.contains("**Independent of `as_of_date`:**"),
+        "Live valuation must state that a live quote does not follow `as_of_date`"
+    );
 
     // Each report's own route row names the parameter and the default.
     assert!(API_MD.contains("as at `as_of_date` (today when omitted"));

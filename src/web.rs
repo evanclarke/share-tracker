@@ -2654,16 +2654,34 @@ mod tests {
     #[tokio::test]
     async fn overview_report_offers_the_as_of_date() {
         let config = module_source("/static/config.js");
-        assert!(
-            config.contains(
-                "api: '/portfolio/overview', method: 'POST', prices: true, asOfDate: true"
-            ),
-            "the Portfolio Overview must offer the as-of date its endpoint now takes"
-        );
+        // Slice the Overview's own entry rather than matching the whole line
+        // as one ordered substring: a harmless property reorder must not read
+        // as a missing control.
+        let entry = config
+            .split("api: '/portfolio/overview'")
+            .nth(1)
+            .and_then(|rest| rest.split("\n  },").next())
+            .expect("config.js has a Portfolio Overview report entry");
+        for (property, why) in [
+            ("method: 'POST'", "the overview read is a POST"),
+            ("prices: true", "the overview takes price overrides"),
+            ("asOfDate: true", "the overview takes an as-of date"),
+        ] {
+            assert!(
+                entry.contains(property),
+                "Portfolio Overview {why}: {property}"
+            );
+        }
         let js = app_js_body().await;
         assert!(js.contains("if (report.asOfDate) {"));
         assert!(js.contains("labelledField('as_of_date', 'As-of date', asOfInp)"));
         assert!(js.contains("if (d !== '') body.as_of_date = d;"));
+        // …and says where the control sits: the date bounds the position, a
+        // live price is the provider's latest.
+        assert!(
+            js.contains("The date bounds which trades and corporate actions are in force"),
+            "the as-of control must not read as if the price were as at the date"
+        );
     }
 
     #[tokio::test]
