@@ -316,17 +316,14 @@ pub async fn db_exchange(pool: &SqlitePool, action_id: i64) -> Result<Exchange, 
         return Err(ExchangeError::UnrepresentableRebasedQuantity(beyond));
     }
 
-    tx.commit().await?;
-
-    // Read the freshly created rows back so the response is exactly what was
-    // stored.
-    let sell = trade::db_get(pool, sell_id)
+    // Read the freshly created rows back **inside this transaction** so the
+    // response is exactly what this write stored.
+    let sell = trade::db_get(&mut *tx, sell_id)
         .await?
         .ok_or(sqlx::Error::RowNotFound)?;
-    Ok(Exchange {
-        sell,
-        replacements: rollover::created_trades(pool, replacement_ids).await?,
-    })
+    let replacements = rollover::created_trades(&mut tx, replacement_ids).await?;
+    tx.commit().await?;
+    Ok(Exchange { sell, replacements })
 }
 
 /// The exchange's terms, read off the action: the replacement listing, the

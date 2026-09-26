@@ -469,14 +469,25 @@ async fn db_write_on(
     Ok(id.unwrap_or_else(|| result.last_insert_rowid()))
 }
 
-pub async fn db_upsert(pool: &SqlitePool, adj: &AmitAdjustment) -> Result<Upsert, UpsertError> {
+pub async fn db_upsert(
+    pool: &SqlitePool,
+    adj: &AmitAdjustment,
+) -> Result<http::Upserted<AmitAdjustment>, UpsertError> {
     // The check and the write share one `BEGIN IMMEDIATE` transaction; this
     // used to be a bare pooled connection, whose autocommit left the two
     // racing.
     let mut tx = write_tx(pool).await?;
     let outcome = db_upsert_on(&mut tx, adj).await?;
+    // Read the created row inside this transaction: after the commit a
+    // concurrent DELETE or replace could turn the `201` into a 500 or report
+    // the other writer's row.
+    let stored = if outcome == Upsert::Replaced {
+        None
+    } else {
+        http::crud_get::<AmitAdjustment, _>(&mut *tx, adj.id).await?
+    };
     tx.commit().await?;
-    Ok(outcome)
+    Ok((outcome, stored))
 }
 
 /// The cost-base reduction one AMMA statement applies to `quantity` units of
@@ -637,8 +648,8 @@ async fn upsert(
     Json(body): Json<AmitAdjustmentBody>,
 ) -> Result<UpsertResponse<AmitAdjustment>, ApiError> {
     let adj = amit_adjustment_from_body(id, body);
-    let outcome = db_upsert(&pool, &adj).await?;
-    http::upsert_response::<AmitAdjustment>(&pool, outcome, id).await
+    let (outcome, row) = db_upsert(&pool, &adj).await?;
+    http::upsert_response::<AmitAdjustment>(outcome, row)
 }
 
 /// `POST /amit_adjustments` — create the row without naming an id. The

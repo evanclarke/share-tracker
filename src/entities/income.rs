@@ -711,7 +711,7 @@ async fn write(
     pool: &SqlitePool,
     id: Option<i64>,
     income: &Income,
-) -> Result<(i64, Upsert), UpsertError> {
+) -> Result<(i64, Upsert, Option<Income>), UpsertError> {
     // No money figure on the row may be negative: statements report positive
     // (or zero) amounts, and a negative would silently reduce the year's
     // totals in every report. Checked before the per-share cross-check so a
@@ -1025,28 +1025,38 @@ async fn write(
     // explicit one it was handed. Either way the caller gets the id the row
     // actually holds.
     let assigned_id = id.unwrap_or_else(|| result.last_insert_rowid());
+    // Read the created row inside this transaction (a replace answers `204`
+    // with no body): reading it after the commit let a concurrent DELETE turn
+    // a committed create into a 500, or made the `201` report the other
+    // writer's row.
+    let stored = if existed {
+        None
+    } else {
+        http::crud_get::<Income, _>(&mut *tx, assigned_id).await?
+    };
     tx.commit().await?;
     let outcome = if existed {
         Upsert::Replaced
     } else {
         Upsert::Created
     };
-    Ok((assigned_id, outcome))
+    Ok((assigned_id, outcome, stored))
 }
 
 /// `PUT /income/:id` — the long-standing upsert on a caller-chosen id.
-pub async fn db_upsert(pool: &SqlitePool, income: &Income) -> Result<Upsert, UpsertError> {
-    let (_, outcome) = write(pool, Some(income.id), income).await?;
-    Ok(outcome)
+pub async fn db_upsert(
+    pool: &SqlitePool,
+    income: &Income,
+) -> Result<http::Upserted<Income>, UpsertError> {
+    let (_, outcome, row) = write(pool, Some(income.id), income).await?;
+    Ok((outcome, row))
 }
 
 /// `POST /income` — create without naming an id, and return the row the
 /// database assigned one to.
 pub async fn db_create(pool: &SqlitePool, income: &Income) -> Result<Income, UpsertError> {
-    let (id, _) = write(pool, None, income).await?;
-    db_get(pool, id)
-        .await?
-        .ok_or(UpsertError::VanishedAfterCreate)
+    let (_, _, stored) = write(pool, None, income).await?;
+    stored.ok_or(UpsertError::VanishedAfterCreate)
 }
 
 /// Outcome of a delete request, so the handler can map to the right status.
@@ -1127,8 +1137,8 @@ async fn upsert(
     Path(id): Path<i64>,
     Json(body): Json<IncomeBody>,
 ) -> Result<UpsertResponse<Income>, ApiError> {
-    let outcome = db_upsert(&pool, &income_from_body(id, body)).await?;
-    http::upsert_response::<Income>(&pool, outcome, id).await
+    let (outcome, row) = db_upsert(&pool, &income_from_body(id, body)).await?;
+    http::upsert_response::<Income>(outcome, row)
 }
 
 /// `POST /income` — create the row without naming an id. The database assigns

@@ -494,6 +494,7 @@ impl From<UpsertError> for ApiError {
 /// One-line delegation to the shared CRUD read, through which `db_create`
 /// reads the created row back; the route reaches the same query through
 /// `get_handler` (see CLAUDE.md's entity-module pattern).
+#[cfg(test)]
 pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<Inheritance>, sqlx::Error> {
     http::crud_get(pool, id).await
 }
@@ -659,7 +660,7 @@ async fn write(
     pool: &SqlitePool,
     id: Option<i64>,
     inh: &Inheritance,
-) -> Result<(i64, Upsert), UpsertError> {
+) -> Result<(i64, Upsert, Option<Inheritance>), UpsertError> {
     validate(inh)?;
 
     let mut tx = write_tx(pool).await?;
@@ -870,28 +871,38 @@ async fn write(
         });
     }
 
+    // Read the created row inside this transaction (a replace answers `204`
+    // with no body): reading it after the commit let a concurrent DELETE turn
+    // a committed create into a 500, or made the `201` report the other
+    // writer's row.
+    let stored = if existed {
+        None
+    } else {
+        http::crud_get::<Inheritance, _>(&mut *tx, assigned_id).await?
+    };
     tx.commit().await?;
     let outcome = if existed {
         Upsert::Replaced
     } else {
         Upsert::Created
     };
-    Ok((assigned_id, outcome))
+    Ok((assigned_id, outcome, stored))
 }
 
 /// `PUT /inheritances/:id` — the long-standing upsert on a caller-chosen id.
-pub async fn db_upsert(pool: &SqlitePool, inh: &Inheritance) -> Result<Upsert, UpsertError> {
-    let (_, outcome) = write(pool, Some(inh.id), inh).await?;
-    Ok(outcome)
+pub async fn db_upsert(
+    pool: &SqlitePool,
+    inh: &Inheritance,
+) -> Result<http::Upserted<Inheritance>, UpsertError> {
+    let (_, outcome, row) = write(pool, Some(inh.id), inh).await?;
+    Ok((outcome, row))
 }
 
 /// `POST /inheritances` — create without naming an id, and return the row (and
 /// the linked parcel Buy) the database assigned one to.
 pub async fn db_create(pool: &SqlitePool, inh: &Inheritance) -> Result<Inheritance, UpsertError> {
-    let (id, _) = write(pool, None, inh).await?;
-    db_get(pool, id)
-        .await?
-        .ok_or(UpsertError::VanishedAfterCreate)
+    let (_, _, stored) = write(pool, None, inh).await?;
+    stored.ok_or(UpsertError::VanishedAfterCreate)
 }
 
 /// Outcome of a delete request, so the handler can map to the right status.
@@ -960,8 +971,8 @@ async fn upsert(
     Path(id): Path<i64>,
     Json(body): Json<InheritanceBody>,
 ) -> Result<UpsertResponse<Inheritance>, ApiError> {
-    let outcome = db_upsert(&pool, &inheritance_from_body(id, body)).await?;
-    http::upsert_response::<Inheritance>(&pool, outcome, id).await
+    let (outcome, row) = db_upsert(&pool, &inheritance_from_body(id, body)).await?;
+    http::upsert_response::<Inheritance>(outcome, row)
 }
 
 /// `POST /inheritances` — create the inheritance and its linked parcel Buy

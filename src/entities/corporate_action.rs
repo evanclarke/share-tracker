@@ -3088,6 +3088,7 @@ mod tests {
             },
         )
         .await
+        .map(|(outcome, _)| outcome)
     }
 
     /// SCENARIOS E-09: a consolidation whose ratio does not divide the

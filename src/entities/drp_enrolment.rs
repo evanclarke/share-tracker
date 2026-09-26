@@ -193,15 +193,19 @@ pub async fn db_list(pool: &SqlitePool) -> Result<Vec<DrpEnrolment>, sqlx::Error
     http::crud_list(pool).await
 }
 
+#[cfg(test)]
 pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<DrpEnrolment>, sqlx::Error> {
     http::crud_get(pool, id).await
 }
 
 /// Upsert an enrolment period, enforcing the no-overlap invariant and settling
 /// a closed period's trailing residual, all in one transaction.
-pub async fn db_upsert(pool: &SqlitePool, period: &DrpEnrolment) -> Result<Upsert, UpsertError> {
-    let (_, outcome) = write(pool, Some(period.id), period).await?;
-    Ok(outcome)
+pub async fn db_upsert(
+    pool: &SqlitePool,
+    period: &DrpEnrolment,
+) -> Result<http::Upserted<DrpEnrolment>, UpsertError> {
+    let (_, outcome, row) = write(pool, Some(period.id), period).await?;
+    Ok((outcome, row))
 }
 
 /// `POST /drp_enrolments` — create without naming an id, and return the row the
@@ -210,10 +214,8 @@ pub async fn db_create(
     pool: &SqlitePool,
     period: &DrpEnrolment,
 ) -> Result<DrpEnrolment, UpsertError> {
-    let (id, _) = write(pool, None, period).await?;
-    db_get(pool, id)
-        .await?
-        .ok_or(UpsertError::VanishedAfterCreate)
+    let (_, _, stored) = write(pool, None, period).await?;
+    stored.ok_or(UpsertError::VanishedAfterCreate)
 }
 
 /// Write an enrolment period, allocating its id when `id` is `None`.
@@ -226,7 +228,7 @@ async fn write(
     pool: &SqlitePool,
     id: Option<i64>,
     period: &DrpEnrolment,
-) -> Result<(i64, Upsert), UpsertError> {
+) -> Result<(i64, Upsert, Option<DrpEnrolment>), UpsertError> {
     if let Some(end) = period.unenrolment_date
         && end <= period.enrolment_date
     {
@@ -308,13 +310,22 @@ async fn write(
 
     recompute_residuals(&mut tx, period).await?;
 
+    // Read the created row inside this transaction (a replace answers `204`
+    // with no body): reading it after the commit let a concurrent DELETE turn
+    // a committed create into a 500, or made the `201` report the other
+    // writer's row.
+    let stored = if existed {
+        None
+    } else {
+        http::crud_get::<DrpEnrolment, _>(&mut *tx, assigned_id).await?
+    };
     tx.commit().await?;
     let outcome = if existed {
         Upsert::Replaced
     } else {
         Upsert::Created
     };
-    Ok((assigned_id, outcome))
+    Ok((assigned_id, outcome, stored))
 }
 
 /// Where one reinvestment sits in its period's residual chain — the only
@@ -530,8 +541,8 @@ async fn upsert(
     Path(id): Path<i64>,
     Json(body): Json<DrpEnrolmentBody>,
 ) -> Result<UpsertResponse<DrpEnrolment>, ApiError> {
-    let outcome = db_upsert(&pool, &drp_enrolment_from_body(id, body)).await?;
-    http::upsert_response::<DrpEnrolment>(&pool, outcome, id).await
+    let (outcome, row) = db_upsert(&pool, &drp_enrolment_from_body(id, body)).await?;
+    http::upsert_response::<DrpEnrolment>(outcome, row)
 }
 
 /// `POST /drp_enrolments` — create the period without naming an id. The

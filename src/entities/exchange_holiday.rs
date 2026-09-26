@@ -96,17 +96,20 @@ where
     Ok(dates.into_iter().collect())
 }
 
-pub async fn db_get(
-    pool: &SqlitePool,
+pub async fn db_get<'e, X>(
+    executor: X,
     mic: &str,
     date: NaiveDate,
-) -> Result<Option<ExchangeHoliday>, sqlx::Error> {
+) -> Result<Option<ExchangeHoliday>, sqlx::Error>
+where
+    X: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
     sqlx::query_as(
         "SELECT id, mic, holiday_date, name FROM exchange_holidays WHERE mic = ? AND holiday_date = ?",
     )
     .bind(mic)
     .bind(date)
-    .fetch_optional(pool)
+    .fetch_optional(executor)
     .await
 }
 
@@ -121,7 +124,7 @@ pub async fn db_get(
 pub async fn db_upsert(
     pool: &SqlitePool,
     holiday: &ExchangeHoliday,
-) -> Result<Upsert, sqlx::Error> {
+) -> Result<http::Upserted<ExchangeHoliday>, sqlx::Error> {
     let mut tx = write_tx(pool).await?;
     let existed: i64 = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM exchange_holidays WHERE mic = ? AND holiday_date = ?)",
@@ -139,12 +142,24 @@ pub async fn db_upsert(
     .bind(&holiday.name)
     .execute(&mut *tx)
     .await?;
-    tx.commit().await?;
-    Ok(if existed != 0 {
-        Upsert::Replaced
+    // Read the created row **inside this transaction**: after the commit a
+    // concurrent DELETE or replace could turn the `201` into a 500 or report
+    // the other writer's row.
+    let created = existed == 0;
+    let stored = if created {
+        db_get(&mut *tx, &holiday.mic, holiday.holiday_date).await?
     } else {
-        Upsert::Created
-    })
+        None
+    };
+    tx.commit().await?;
+    Ok((
+        if created {
+            Upsert::Created
+        } else {
+            Upsert::Replaced
+        },
+        stored,
+    ))
 }
 
 pub async fn db_delete(pool: &SqlitePool, mic: &str, date: NaiveDate) -> Result<bool, sqlx::Error> {
@@ -256,8 +271,7 @@ async fn upsert(
         holiday_date,
         name: body.name,
     };
-    let outcome = db_upsert(&pool, &holiday).await?;
-    let row = db_get(&pool, &holiday.mic, holiday.holiday_date).await?;
+    let (outcome, row) = db_upsert(&pool, &holiday).await?;
     http::upsert_response_of(outcome, row)
 }
 

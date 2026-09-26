@@ -57,8 +57,8 @@ async fn upsert(
     Path(id): Path<i64>,
     Json(body): Json<CorporateActionBody>,
 ) -> Result<UpsertResponse<CorporateAction>, ApiError> {
-    let outcome = db_upsert(&pool, &corporate_action_from_body(id, body)?).await?;
-    http::upsert_response::<CorporateAction>(&pool, outcome, id).await
+    let (outcome, row) = db_upsert(&pool, &corporate_action_from_body(id, body)?).await?;
+    http::upsert_response::<CorporateAction>(outcome, row)
 }
 
 /// `POST /corporate_actions` — create the action without naming an id. The

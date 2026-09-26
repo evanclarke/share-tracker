@@ -420,7 +420,7 @@ async fn write(
     pool: &SqlitePool,
     id: Option<i64>,
     listing: &Listing,
-) -> Result<(i64, Upsert), UpsertError> {
+) -> Result<(i64, Upsert, Option<Listing>), UpsertError> {
     // A blank ticker or name is refused before the transaction is even opened:
     // it is a pure check on the request, and neither value is inert. The
     // ticker (with the exchange) resolves the provider symbol — a stored blank
@@ -650,28 +650,38 @@ async fn write(
     // explicit one it was handed. Either way the caller gets the id the row
     // actually holds.
     let assigned_id = id.unwrap_or_else(|| result.last_insert_rowid());
+    // Read the stored row **inside this transaction** (a create only — a
+    // replace answers `204` with no body): reading it after the commit let a
+    // concurrent DELETE turn a committed create into a 500 and a concurrent
+    // replace report the other writer's row.
+    let stored = if existed {
+        None
+    } else {
+        http::crud_get::<Listing, _>(&mut *tx, assigned_id).await?
+    };
     tx.commit().await?;
     let outcome = if existed {
         Upsert::Replaced
     } else {
         Upsert::Created
     };
-    Ok((assigned_id, outcome))
+    Ok((assigned_id, outcome, stored))
 }
 
 /// `PUT /listings/:id` — the long-standing upsert on a caller-chosen id.
-pub async fn db_upsert(pool: &SqlitePool, listing: &Listing) -> Result<Upsert, UpsertError> {
-    let (_, outcome) = write(pool, Some(listing.id), listing).await?;
-    Ok(outcome)
+pub async fn db_upsert(
+    pool: &SqlitePool,
+    listing: &Listing,
+) -> Result<http::Upserted<Listing>, UpsertError> {
+    let (_, outcome, row) = write(pool, Some(listing.id), listing).await?;
+    Ok((outcome, row))
 }
 
 /// `POST /listings` — create without naming an id, and return the row the
-/// database assigned one to.
+/// database assigned one to (read inside the write's own transaction).
 pub async fn db_create(pool: &SqlitePool, listing: &Listing) -> Result<Listing, UpsertError> {
-    let (id, _) = write(pool, None, listing).await?;
-    db_get(pool, id)
-        .await?
-        .ok_or(UpsertError::VanishedAfterCreate)
+    let (_, _, stored) = write(pool, None, listing).await?;
+    stored.ok_or(UpsertError::VanishedAfterCreate)
 }
 
 #[cfg(test)]
@@ -705,8 +715,8 @@ async fn upsert(
     Path(id): Path<i64>,
     Json(body): Json<ListingBody>,
 ) -> Result<UpsertResponse<Listing>, ApiError> {
-    let outcome = db_upsert(&pool, &listing_from_body(id, body)).await?;
-    http::upsert_response::<Listing>(&pool, outcome, id).await
+    let (outcome, row) = db_upsert(&pool, &listing_from_body(id, body)).await?;
+    http::upsert_response::<Listing>(outcome, row)
 }
 
 /// `POST /listings` — create the row without naming an id. The database
@@ -1724,6 +1734,27 @@ mod tests {
         let listed = db_get(&pool, created.id).await.unwrap().unwrap();
         assert_eq!(listed.id, created.id);
         assert_eq!(listed.name, "New Co");
+    }
+
+    /// The `201` body is read **inside the write transaction**, not after it:
+    /// `db_upsert` hands back the stored row for a create and `None` for a
+    /// replace. This is the contract every `PUT` handler renders, and the one
+    /// that stops a concurrent delete or replace in the commit-then-read window
+    /// from turning a committed create into a `500` or reporting the other
+    /// writer's row.
+    #[tokio::test]
+    async fn db_upsert_returns_the_created_row_and_no_row_on_replace() {
+        let pool = test_pool().await;
+        let listing = xtest();
+        let (outcome, row) = db_upsert(&pool, &listing).await.unwrap();
+        assert_eq!(outcome, Upsert::Created);
+        assert_eq!(row.expect("a create hands back its row").id, listing.id);
+        let (outcome, row) = db_upsert(&pool, &listing).await.unwrap();
+        assert_eq!(outcome, Upsert::Replaced);
+        assert!(
+            row.is_none(),
+            "a replace answers 204 with no body, so no row is read"
+        );
     }
 
     /// The bug this endpoint exists to kill: with an id-less create there is no

@@ -483,7 +483,7 @@ async fn write(
     pool: &SqlitePool,
     id: Option<i64>,
     body: &SellBody,
-) -> Result<(i64, Upsert), SellError> {
+) -> Result<(i64, Upsert, Option<Trade>), SellError> {
     let mut tx = write_tx(pool).await?;
 
     // The create-vs-replace decision is made inside the write's own
@@ -594,13 +594,22 @@ async fn write(
         return Err(SellError::NonTradingDay(shut.describe(body.date)));
     }
 
+    // Read the created row inside this transaction (a replace answers `204`
+    // with no body): reading it after the commit let a concurrent DELETE turn
+    // a committed create into a 500, or made the `201` report the other
+    // writer's row.
+    let stored = if existed {
+        None
+    } else {
+        http::crud_get::<Trade, _>(&mut *tx, written).await?
+    };
     tx.commit().await?;
     let outcome = if existed {
         Upsert::Replaced
     } else {
         Upsert::Created
     };
-    Ok((written, outcome))
+    Ok((written, outcome, stored))
 }
 
 /// `PUT /sells/:id` — the long-standing upsert on a caller-chosen id: replaces
@@ -613,9 +622,9 @@ pub async fn db_upsert_sell(
     pool: &SqlitePool,
     id: i64,
     body: &SellBody,
-) -> Result<Upsert, SellError> {
-    let (_, outcome) = write(pool, Some(id), body).await?;
-    Ok(outcome)
+) -> Result<http::Upserted<Trade>, SellError> {
+    let (_, outcome, row) = write(pool, Some(id), body).await?;
+    Ok((outcome, row))
 }
 
 /// `POST /sells` — create without naming an id. The database assigns the
@@ -625,10 +634,8 @@ pub async fn db_upsert_sell(
 /// id, all in the one transaction. The created row is returned so the caller
 /// can act on the id at once.
 pub async fn db_create_sell(pool: &SqlitePool, body: &SellBody) -> Result<Trade, SellError> {
-    let (id, _) = write(pool, None, body).await?;
-    trade::db_get(pool, id)
-        .await?
-        .ok_or(SellError::VanishedAfterCreate)
+    let (_, _, stored) = write(pool, None, body).await?;
+    stored.ok_or(SellError::VanishedAfterCreate)
 }
 
 /// Which operation created a server-created Sell: the `trades` column linking
@@ -981,8 +988,8 @@ async fn upsert(
     Path(id): Path<i64>,
     Json(body): Json<SellBody>,
 ) -> Result<UpsertResponse<Trade>, ApiError> {
-    let outcome = db_upsert_sell(&pool, id, &body).await?;
-    http::upsert_response::<Trade>(&pool, outcome, id).await
+    let (outcome, row) = db_upsert_sell(&pool, id, &body).await?;
+    http::upsert_response::<Trade>(outcome, row)
 }
 
 /// `POST /sells` — create the Sell without naming an id, so the database

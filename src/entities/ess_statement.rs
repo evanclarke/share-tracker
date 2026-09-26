@@ -519,7 +519,7 @@ async fn write(
     pool: &SqlitePool,
     id: Option<i64>,
     s: &EssStatement,
-) -> Result<(i64, Upsert), UpsertError> {
+) -> Result<(i64, Upsert, Option<EssStatement>), UpsertError> {
     validate(s)?;
 
     // A statement-AUD override restates a label the statement already gives in
@@ -703,30 +703,38 @@ async fn write(
     // explicit one it was handed. Either way the caller gets the id the row
     // actually holds.
     let assigned_id = id.unwrap_or_else(|| result.last_insert_rowid());
+    // Read the created row inside this transaction (a replace answers `204`
+    // with no body): reading it after the commit let a concurrent DELETE turn
+    // a committed create into a 500, or made the `201` report the other
+    // writer's row.
+    let stored = if existed {
+        None
+    } else {
+        http::crud_get::<EssStatement, _>(&mut *tx, assigned_id).await?
+    };
     tx.commit().await?;
     let outcome = if existed {
         Upsert::Replaced
     } else {
         Upsert::Created
     };
-    Ok((assigned_id, outcome))
+    Ok((assigned_id, outcome, stored))
 }
 
 /// `PUT /ess_statements/:id` — the long-standing upsert on a caller-chosen id.
-pub async fn db_upsert(pool: &SqlitePool, s: &EssStatement) -> Result<Upsert, UpsertError> {
-    let (_, outcome) = write(pool, Some(s.id), s).await?;
-    Ok(outcome)
+pub async fn db_upsert(
+    pool: &SqlitePool,
+    s: &EssStatement,
+) -> Result<http::Upserted<EssStatement>, UpsertError> {
+    let (_, outcome, row) = write(pool, Some(s.id), s).await?;
+    Ok((outcome, row))
 }
 
 /// `POST /ess_statements` — create the statement without naming an id, and
 /// return the row the database assigned one to.
 pub async fn db_create(pool: &SqlitePool, s: &EssStatement) -> Result<EssStatement, UpsertError> {
-    let (id, _) = write(pool, None, s).await?;
-    // `db_get` is test-gated, so a create reads the row back through the same
-    // `crud_get` it delegates to.
-    http::crud_get(pool, id)
-        .await?
-        .ok_or(UpsertError::VanishedAfterCreate)
+    let (_, _, stored) = write(pool, None, s).await?;
+    stored.ok_or(UpsertError::VanishedAfterCreate)
 }
 
 /// Outcome of a delete request, so the handler can map to the right status.
@@ -820,8 +828,8 @@ async fn upsert(
     Path(id): Path<i64>,
     Json(body): Json<EssStatementBody>,
 ) -> Result<UpsertResponse<EssStatement>, ApiError> {
-    let outcome = db_upsert(&pool, &ess_statement_from_body(id, body)).await?;
-    http::upsert_response::<EssStatement>(&pool, outcome, id).await
+    let (outcome, row) = db_upsert(&pool, &ess_statement_from_body(id, body)).await?;
+    http::upsert_response::<EssStatement>(outcome, row)
 }
 
 /// `POST /ess_statements` — create the statement without naming an id. The

@@ -361,8 +361,11 @@ pub fn router() -> Router<SqlitePool> {
         )
 }
 
-pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<Transfer>, sqlx::Error> {
-    http::crud_get(pool, id).await
+pub async fn db_get<'e, X>(executor: X, id: i64) -> Result<Option<Transfer>, sqlx::Error>
+where
+    X: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    http::crud_get(executor, id).await
 }
 
 /// Record and execute a transfer on a caller-chosen id (`PUT
@@ -545,29 +548,30 @@ async fn write(
     // holding net of the transfer-out Sell above (both share the same tx).
     let fee_sale_id = write_fee_sale(&mut tx, transfer_id, body, listing_currency).await?;
 
-    tx.commit().await?;
-
-    // Read the freshly created rows back so the response is exactly what was
-    // stored. The row was committed a moment ago, so its absence is a
-    // server-side fault (500) rather than a client error.
-    let transfer = db_get(pool, transfer_id)
+    // Read the freshly created rows back **inside this transaction** so the
+    // group is exactly what this write stored. Reading after the commit left a
+    // window in which a concurrent delete turned the `201` into a 500 or a
+    // replace reported another writer's row.
+    let transfer = db_get(&mut *tx, transfer_id)
         .await?
         .ok_or(TransferError::VanishedAfterCreate)?;
-    let sell = trade::db_get(pool, sell_id)
+    let sell = trade::db_get(&mut *tx, sell_id)
         .await?
         .ok_or(sqlx::Error::RowNotFound)?;
     let fee_sale = match fee_sale_id {
         Some(fid) => Some(
-            trade::db_get(pool, fid)
+            trade::db_get(&mut *tx, fid)
                 .await?
                 .ok_or(sqlx::Error::RowNotFound)?,
         ),
         None => None,
     };
+    let transfer_ins = rollover::created_trades(&mut tx, transfer_in_ids).await?;
+    tx.commit().await?;
     Ok(TransferGroup {
         transfer,
         sell,
-        transfer_ins: rollover::created_trades(pool, transfer_in_ids).await?,
+        transfer_ins,
         fee_sale,
     })
 }

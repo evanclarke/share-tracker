@@ -131,8 +131,8 @@ async fn upsert(
 ) -> Result<UpsertResponse<Trade>, ApiError> {
     let supplied = body.settlement_date;
     let trade = trade_from_body(id, body)?;
-    let outcome = db_upsert_resolving_settlement(&pool, &trade, supplied).await?;
-    http::upsert_response::<Trade>(&pool, outcome, id).await
+    let (outcome, row) = db_upsert_resolving_settlement(&pool, &trade, supplied).await?;
+    http::upsert_response::<Trade>(outcome, row)
 }
 
 /// `POST /trades` — create the row without naming an id. The database assigns

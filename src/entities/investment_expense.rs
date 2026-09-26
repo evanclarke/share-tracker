@@ -161,6 +161,7 @@ pub fn router() -> Router<SqlitePool> {
 /// One-line delegation to the shared CRUD read, through which `db_create`
 /// reads the created row back; the route reaches the same query through
 /// `get_handler` (see CLAUDE.md's entity-module pattern).
+#[cfg(test)]
 pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<InvestmentExpense>, sqlx::Error> {
     http::crud_get(pool, id).await
 }
@@ -261,7 +262,7 @@ async fn write(
     pool: &SqlitePool,
     id: Option<i64>,
     e: &InvestmentExpense,
-) -> Result<(i64, Upsert), UpsertError> {
+) -> Result<(i64, Upsert, Option<InvestmentExpense>), UpsertError> {
     // A negative expense is not an expense: it would reduce the year's
     // deduction total, and — since the tax summary subtracts that total from
     // gross assessable investment income — lift the net line above the gross.
@@ -332,24 +333,36 @@ async fn write(
         .bind(e.holding_account_id)
         .execute(&mut *tx)
         .await?;
-    tx.commit().await?;
     // An id-less INSERT was given one by the database; an upsert wrote the
     // explicit one it was handed. Either way the caller gets the id the row
     // actually holds.
     let assigned_id = id.unwrap_or_else(|| result.last_insert_rowid());
+    // Read the created row inside this transaction (a replace answers `204`
+    // with no body): reading it after the commit let a concurrent DELETE turn
+    // a committed create into a 500, or made the `201` report the other
+    // writer's row.
+    let stored = if existed {
+        None
+    } else {
+        http::crud_get::<InvestmentExpense, _>(&mut *tx, assigned_id).await?
+    };
+    tx.commit().await?;
     let outcome = if existed {
         Upsert::Replaced
     } else {
         Upsert::Created
     };
-    Ok((assigned_id, outcome))
+    Ok((assigned_id, outcome, stored))
 }
 
 /// `PUT /investment_expenses/:id` — the long-standing upsert on a caller-chosen
 /// id.
-pub async fn db_upsert(pool: &SqlitePool, e: &InvestmentExpense) -> Result<Upsert, UpsertError> {
-    let (_, outcome) = write(pool, Some(e.id), e).await?;
-    Ok(outcome)
+pub async fn db_upsert(
+    pool: &SqlitePool,
+    e: &InvestmentExpense,
+) -> Result<http::Upserted<InvestmentExpense>, UpsertError> {
+    let (_, outcome, row) = write(pool, Some(e.id), e).await?;
+    Ok((outcome, row))
 }
 
 /// `POST /investment_expenses` — create without naming an id, and return the
@@ -358,10 +371,8 @@ pub async fn db_create(
     pool: &SqlitePool,
     e: &InvestmentExpense,
 ) -> Result<InvestmentExpense, UpsertError> {
-    let (id, _) = write(pool, None, e).await?;
-    db_get(pool, id)
-        .await?
-        .ok_or(UpsertError::VanishedAfterCreate)
+    let (_, _, stored) = write(pool, None, e).await?;
+    stored.ok_or(UpsertError::VanishedAfterCreate)
 }
 
 #[cfg(test)]
@@ -392,8 +403,8 @@ async fn upsert(
     Path(id): Path<i64>,
     Json(body): Json<InvestmentExpenseBody>,
 ) -> Result<UpsertResponse<InvestmentExpense>, ApiError> {
-    let outcome = db_upsert(&pool, &investment_expense_from_body(id, body)).await?;
-    http::upsert_response::<InvestmentExpense>(&pool, outcome, id).await
+    let (outcome, row) = db_upsert(&pool, &investment_expense_from_body(id, body)).await?;
+    http::upsert_response::<InvestmentExpense>(outcome, row)
 }
 
 /// `POST /investment_expenses` — create the row without naming an id. The

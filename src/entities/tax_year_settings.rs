@@ -95,7 +95,7 @@ pub async fn db_get(
 pub async fn db_upsert(
     pool: &SqlitePool,
     settings: &TaxYearSettings,
-) -> Result<Upsert, sqlx::Error> {
+) -> Result<http::Upserted<TaxYearSettings>, sqlx::Error> {
     // The exists check decides create-vs-replace inside the write's own
     // `BEGIN IMMEDIATE` transaction (CLAUDE.md, "Data integrity"), so a
     // concurrent insert of the same year cannot race the decision.
@@ -111,12 +111,23 @@ pub async fn db_upsert(
     .bind(settings.ess_taxed_upfront_reduction_eligible)
     .execute(&mut *tx)
     .await?;
-    tx.commit().await?;
-    Ok(if existed {
-        Upsert::Replaced
+    // Read the created row inside this transaction: after the commit a
+    // concurrent DELETE or replace could turn the `201` into a 500 or report
+    // the other writer's row.
+    let stored = if existed {
+        None
     } else {
-        Upsert::Created
-    })
+        http::crud_get::<TaxYearSettings, _>(&mut *tx, settings.tax_year).await?
+    };
+    tx.commit().await?;
+    Ok((
+        if existed {
+            Upsert::Replaced
+        } else {
+            Upsert::Created
+        },
+        stored,
+    ))
 }
 
 /// The financial years recorded as **not** eligible for the $1,000 taxed-upfront
@@ -158,8 +169,8 @@ async fn upsert(
         tax_year,
         ess_taxed_upfront_reduction_eligible: body.ess_taxed_upfront_reduction_eligible,
     };
-    let outcome = db_upsert(&pool, &settings).await?;
-    http::upsert_response::<TaxYearSettings>(&pool, outcome, tax_year).await
+    let (outcome, row) = db_upsert(&pool, &settings).await?;
+    http::upsert_response::<TaxYearSettings>(outcome, row)
 }
 
 #[cfg(test)]

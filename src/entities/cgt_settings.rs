@@ -60,7 +60,10 @@ pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<CgtSettings>, s
     http::crud_get(pool, id).await
 }
 
-pub async fn db_upsert(pool: &SqlitePool, settings: &CgtSettings) -> Result<Upsert, sqlx::Error> {
+pub async fn db_upsert(
+    pool: &SqlitePool,
+    settings: &CgtSettings,
+) -> Result<http::Upserted<CgtSettings>, sqlx::Error> {
     // The exists check and the write share one `BEGIN IMMEDIATE` transaction:
     // a check outside it could see no row and then race another `PUT` for the
     // same id, each claiming to have created it (CLAUDE.md, "Data integrity").
@@ -74,12 +77,23 @@ pub async fn db_upsert(pool: &SqlitePool, settings: &CgtSettings) -> Result<Upse
     .bind(Money(settings.opening_capital_loss))
     .execute(&mut *tx)
     .await?;
-    tx.commit().await?;
-    Ok(if existed {
-        Upsert::Replaced
+    // Read the created row inside this transaction: after the commit a
+    // concurrent DELETE or replace could turn the `201` into a 500 or report
+    // the other writer's row.
+    let stored = if existed {
+        None
     } else {
-        Upsert::Created
-    })
+        http::crud_get::<CgtSettings, _>(&mut *tx, settings.id).await?
+    };
+    tx.commit().await?;
+    Ok((
+        if existed {
+            Upsert::Replaced
+        } else {
+            Upsert::Created
+        },
+        stored,
+    ))
 }
 
 /// The opening carried-forward capital loss, or zero when no settings row exists.
@@ -114,8 +128,8 @@ async fn upsert(
         opening_capital_loss: body.opening_capital_loss,
     };
     // id != 1 violates the singleton CHECK → 422.
-    let outcome = db_upsert(&pool, &settings).await?;
-    http::upsert_response::<CgtSettings>(&pool, outcome, id).await
+    let (outcome, row) = db_upsert(&pool, &settings).await?;
+    http::upsert_response::<CgtSettings>(outcome, row)
 }
 
 #[cfg(test)]

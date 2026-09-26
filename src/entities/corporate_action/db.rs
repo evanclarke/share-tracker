@@ -489,7 +489,7 @@ async fn write(
     pool: &SqlitePool,
     id: Option<i64>,
     action: &CorporateAction,
-) -> Result<(i64, Upsert), WriteError> {
+) -> Result<(i64, Upsert, Option<CorporateAction>), WriteError> {
     // Spread the variant's payload over the per-type columns; the other
     // types' columns are NULL (the table CHECKs require exactly this shape).
     #[derive(Default)]
@@ -933,20 +933,32 @@ async fn write(
         });
     }
 
+    // Read the created row inside this transaction (a replace answers `204`
+    // with no body): reading it after the commit let a concurrent DELETE turn
+    // a committed create into a 500, or made the `201` report the other
+    // writer's row.
+    let stored = if existed {
+        None
+    } else {
+        http::crud_get::<CorporateAction, _>(&mut *tx, assigned_id).await?
+    };
     tx.commit().await?;
     let outcome = if existed {
         Upsert::Replaced
     } else {
         Upsert::Created
     };
-    Ok((assigned_id, outcome))
+    Ok((assigned_id, outcome, stored))
 }
 
 /// `PUT /corporate_actions/:id` — the long-standing upsert on a caller-chosen
 /// id.
-pub async fn db_upsert(pool: &SqlitePool, action: &CorporateAction) -> Result<Upsert, WriteError> {
-    let (_, outcome) = write(pool, Some(action.id), action).await?;
-    Ok(outcome)
+pub async fn db_upsert(
+    pool: &SqlitePool,
+    action: &CorporateAction,
+) -> Result<http::Upserted<CorporateAction>, WriteError> {
+    let (_, outcome, row) = write(pool, Some(action.id), action).await?;
+    Ok((outcome, row))
 }
 
 /// `POST /corporate_actions` — create the action without naming an id, and
@@ -955,10 +967,8 @@ pub async fn db_create(
     pool: &SqlitePool,
     action: &CorporateAction,
 ) -> Result<CorporateAction, WriteError> {
-    let (id, _) = write(pool, None, action).await?;
-    db_get_tx(pool, id)
-        .await?
-        .ok_or(WriteError::VanishedAfterCreate)
+    let (_, _, stored) = write(pool, None, action).await?;
+    stored.ok_or(WriteError::VanishedAfterCreate)
 }
 
 #[derive(thiserror::Error, Debug)]

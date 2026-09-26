@@ -2177,6 +2177,22 @@ pub fn router(base_path: &str, auth: bool) -> Router<SqlitePool> {
 /// collection list. They are listed here so a *new* operation-shaped create
 /// fails this test until it is classified rather than quietly widening the
 /// collection set.
+/// Every **`GET`-one** route the document carries: a `GET` on a path with a
+/// parameter whose success body is a single object (not an array, which is how
+/// a path-narrowed list like `/exchange_holidays/{mic}` is told apart). Read by
+/// the empty-404 test below so a new GET-one is covered without a hand-kept
+/// list.
+#[cfg(test)]
+pub(crate) fn documented_get_one_routes() -> Vec<String> {
+    ROUTES
+        .iter()
+        .filter(|(verb, path, _, _, _, response)| {
+            *verb == Verb::Get && path.contains('{') && matches!(response, Body::Json(_))
+        })
+        .map(|(_, path, _, _, _, _)| (*path).to_string())
+        .collect()
+}
+
 #[cfg(test)]
 pub(crate) fn documented_id_keyed_collection_creates() -> Vec<String> {
     const OPERATION_CREATES: &[&str] = &["/attachments", "/closing_prices/fetch"];
@@ -3166,5 +3182,49 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Every `GET`-one answers a missing key with a bare `404` whose body is
+    /// **empty** — the contract the web UI and a machine client both read as
+    /// "no such row", and the one `72046a0` moved `GET /rights_sales/{id}` onto.
+    /// Driven from the route table, so a new GET-one is covered without a
+    /// hand-kept list.
+    #[tokio::test]
+    async fn every_get_one_route_answers_the_empty_404() {
+        use crate::test_support::{ApiClient, test_pool};
+        use axum::http::StatusCode;
+
+        let pool = test_pool().await;
+        let client = ApiClient::full(&pool);
+        let mut checked = 0;
+        for template in documented_get_one_routes() {
+            let mut uri = template.clone();
+            for (name, value) in [
+                ("{id}", "9999"),
+                ("{tax_year}", "9999"),
+                ("{listing_id}", "9999"),
+                ("{rename_id}", "9999"),
+                ("{code}", "ZZZZ"),
+                ("{mic}", "ZZZZ"),
+                ("{date}", "2020-01-01"),
+                ("{price_date}", "2020-01-01"),
+                ("{report}", "overview"),
+            ] {
+                uri = uri.replace(name, value);
+            }
+            assert!(!uri.contains('{'), "unsubstituted parameter in {uri}");
+            let resp = client.get(&uri).await;
+            assert_eq!(resp.status, StatusCode::NOT_FOUND, "GET {uri}");
+            assert_eq!(
+                resp.text(),
+                "",
+                "a GET-one's 404 must have an empty body: GET {uri}"
+            );
+            checked += 1;
+        }
+        assert!(
+            checked >= 20,
+            "the walk found only {checked} GET-one routes — it has stopped reading the table"
+        );
     }
 }

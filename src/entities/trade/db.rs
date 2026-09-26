@@ -82,8 +82,11 @@ pub async fn db_list_filtered(
     http::crud_list_filtered::<Trade>(pool, filter).await
 }
 
-pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<Trade>, sqlx::Error> {
-    http::crud_get(pool, id).await
+pub async fn db_get<'e, X>(executor: X, id: i64) -> Result<Option<Trade>, sqlx::Error>
+where
+    X: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    http::crud_get(executor, id).await
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -400,9 +403,12 @@ type SettlementWrite = Option<Option<NaiveDate>>;
 /// quantity below what its dependants rely on — the quantity already allocated
 /// to Sells, or any linked AMIT adjustment's covered quantity.
 #[cfg(test)]
-pub async fn db_upsert(pool: &SqlitePool, trade: &Trade) -> Result<Upsert, UpsertError> {
-    let (_, outcome) = write(pool, Some(trade.id), trade, None).await?;
-    Ok(outcome)
+pub async fn db_upsert(
+    pool: &SqlitePool,
+    trade: &Trade,
+) -> Result<http::Upserted<Trade>, UpsertError> {
+    let (_, outcome, row) = write(pool, Some(trade.id), trade, None).await?;
+    Ok((outcome, row))
 }
 
 /// Create or update a trade from a `PUT /trades/{id}` body. `supplied` is the
@@ -426,9 +432,9 @@ pub async fn db_upsert_resolving_settlement(
     pool: &SqlitePool,
     trade: &Trade,
     supplied: Option<NaiveDate>,
-) -> Result<Upsert, UpsertError> {
-    let (_, outcome) = write(pool, Some(trade.id), trade, Some(supplied)).await?;
-    Ok(outcome)
+) -> Result<http::Upserted<Trade>, UpsertError> {
+    let (_, outcome, row) = write(pool, Some(trade.id), trade, Some(supplied)).await?;
+    Ok((outcome, row))
 }
 
 /// `POST /trades` — create without naming an id, and return the row the
@@ -439,10 +445,8 @@ pub async fn db_create(
     trade: &Trade,
     supplied: Option<NaiveDate>,
 ) -> Result<Trade, UpsertError> {
-    let (id, _) = write(pool, None, trade, Some(supplied)).await?;
-    db_get(pool, id)
-        .await?
-        .ok_or(UpsertError::VanishedAfterCreate)
+    let (_, _, stored) = write(pool, None, trade, Some(supplied)).await?;
+    stored.ok_or(UpsertError::VanishedAfterCreate)
 }
 
 /// Write a trade row, allocating its id when `id` is `None`.
@@ -456,7 +460,7 @@ async fn write(
     id: Option<i64>,
     trade: &Trade,
     settlement_write: SettlementWrite,
-) -> Result<(i64, Upsert), UpsertError> {
+) -> Result<(i64, Upsert, Option<Trade>), UpsertError> {
     // Degenerate figures (zero/negative quantity, negative costs, …) corrupt
     // every downstream report without failing anything — rejected before
     // anything else runs.
@@ -906,13 +910,22 @@ async fn write(
         });
     }
 
+    // Read the created row inside this transaction (a replace answers `204`
+    // with no body): reading it after the commit let a concurrent DELETE turn
+    // a committed create into a 500, or made the `201` report the other
+    // writer's row.
+    let stored = if existed {
+        None
+    } else {
+        http::crud_get::<Trade, _>(&mut *tx, assigned_id).await?
+    };
     tx.commit().await?;
     let outcome = if existed {
         Upsert::Replaced
     } else {
         Upsert::Created
     };
-    Ok((assigned_id, outcome))
+    Ok((assigned_id, outcome, stored))
 }
 
 /// Outcome of a delete request, so the handler can map to the right status.

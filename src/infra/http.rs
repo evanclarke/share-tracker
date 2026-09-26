@@ -197,9 +197,9 @@ fn deleted_with_body(found: bool, body: String) -> Result<StatusCode, ApiError> 
 /// stale or mistaken write clobbered a record with no signal that it had
 /// replaced anything. Every entity's `db_upsert` now returns this — decided by
 /// [`crud_exists`] inside its own write transaction — and every `PUT` handler
-/// renders it through [`upsert_response`]: `201 Created` carrying the freshly
-/// read row when the id was free, `204 No Content` when an existing row was
-/// replaced.
+/// renders it through [`upsert_response`]: `201 Created` carrying the row read
+/// inside that transaction when the id was free, `204 No Content` when an
+/// existing row was replaced.
 ///
 /// The one `PUT` that deliberately does not use this is `PUT /transfers/{id}`,
 /// which always answers `201` with the executed group: a transfer is
@@ -217,34 +217,38 @@ pub enum Upsert {
     Replaced,
 }
 
-/// Turn a `PUT` upsert's `(outcome, key)` into its response: `201 Created`
-/// with the freshly read row when the write created it, `204 No Content` when
-/// it replaced one.
+/// Turn a `PUT` upsert's outcome and the row its write read **inside the write
+/// transaction** into its response: `201 Created` carrying that row when the
+/// write created it, `204 No Content` when it replaced one.
 ///
-/// The row is read back with [`crud_get`] after the write transaction has
-/// committed, so the `201` body is exactly what a following `GET` answers —
-/// including any server-assigned or derived column the request body did not
-/// carry. A create whose row cannot be read back is an internal fault (the
-/// write committed, so the read should always find it), never a silent empty
-/// `201`.
-pub async fn upsert_response<E: CrudEntity>(
-    pool: &SqlitePool,
+/// The row comes from inside the transaction deliberately. Reading it back
+/// with [`crud_get`] *after* the commit — which is what this did — meant a
+/// concurrent `DELETE` in that window turned a committed create into an
+/// empty-bodied `500`, and a concurrent replace made the `201` report the
+/// other writer's row. Every `db_upsert` now reads the created row before its
+/// `commit`, so the `201` body is exactly what *this* write stored, including
+/// any server-assigned or derived column the request body did not carry. A
+/// create with no row to show is still an internal fault (a create always
+/// stores one), never a silent empty `201`.
+pub fn upsert_response<E: CrudEntity>(
     outcome: Upsert,
-    key: E::Key,
+    row: Option<E>,
 ) -> Result<UpsertResponse<E>, ApiError> {
-    if outcome == Upsert::Replaced {
-        return Ok(UpsertResponse::Replaced);
-    }
-    let row = crud_get::<E, _>(pool, key).await.map_err(ApiError::from)?;
     upsert_response_of(outcome, row.map(E::present))
 }
+
+/// A write that reports create-vs-replace hands back the outcome plus the
+/// stored row for a create, read inside its own write transaction — the
+/// return shape of every entity's `db_upsert` (see [`upsert_response`]).
+pub type Upserted<E> = (Upsert, Option<E>);
 
 /// The `PUT` response for an upsert keyed on a natural key rather than a
 /// `CrudEntity` id (`PUT /exchange_holidays/{mic}/{date}` and
 /// `PUT /closing_prices/{listing_id}/{price_date}`), where the caller reads the
-/// row itself — `201` carrying `row` on a create, `204` on a replace. A create
-/// with no row to show is an internal fault, the same as a `crud_get` that
-/// found nothing after its own write.
+/// row itself — **inside its own write transaction** — and hands it here: `201`
+/// carrying `row` on a create, `204` on a replace. A create with no row to show
+/// is an internal fault, the same as a create whose in-transaction read found
+/// nothing.
 pub fn upsert_response_of<E: serde::Serialize>(
     outcome: Upsert,
     row: Option<E>,

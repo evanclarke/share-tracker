@@ -191,13 +191,20 @@ async fn put_manual(
         .await?
         .is_some();
     db_store(&mut *tx, &row).await?;
+    // Read the stored row **inside this transaction**: reading it after the
+    // commit let a concurrent delete or replace turn the `201` into a 500 or
+    // report the other writer's row.
+    let stored = if existed {
+        None
+    } else {
+        db_get_one(&mut *tx, listing_id, price_date).await?
+    };
     tx.commit().await?;
     let outcome = if existed {
         Upsert::Replaced
     } else {
         Upsert::Created
     };
-    let stored = db_get_one(&pool, listing_id, price_date).await?;
     http::upsert_response_of(outcome, stored)
 }
 

@@ -309,13 +309,17 @@ pub async fn db_list(pool: &SqlitePool) -> Result<Vec<AmmaStatement>, sqlx::Erro
     http::crud_list(pool).await
 }
 
+#[cfg(test)]
 pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<AmmaStatement>, sqlx::Error> {
     http::crud_get(pool, id).await
 }
 
-pub async fn db_upsert(pool: &SqlitePool, stmt: &AmmaStatement) -> Result<Upsert, UpsertError> {
-    let (_, outcome) = write(pool, Some(stmt.id), stmt).await?;
-    Ok(outcome)
+pub async fn db_upsert(
+    pool: &SqlitePool,
+    stmt: &AmmaStatement,
+) -> Result<http::Upserted<AmmaStatement>, UpsertError> {
+    let (_, outcome, row) = write(pool, Some(stmt.id), stmt).await?;
+    Ok((outcome, row))
 }
 
 /// `POST /amma_statements` — create without naming an id, and return the row
@@ -324,10 +328,8 @@ pub async fn db_create(
     pool: &SqlitePool,
     stmt: &AmmaStatement,
 ) -> Result<AmmaStatement, UpsertError> {
-    let (id, _) = write(pool, None, stmt).await?;
-    db_get(pool, id)
-        .await?
-        .ok_or(UpsertError::VanishedAfterCreate)
+    let (_, _, stored) = write(pool, None, stmt).await?;
+    stored.ok_or(UpsertError::VanishedAfterCreate)
 }
 
 /// Write an AMMA statement, allocating its id when `id` is `None`.
@@ -340,7 +342,7 @@ async fn write(
     pool: &SqlitePool,
     id: Option<i64>,
     stmt: &AmmaStatement,
-) -> Result<(i64, Upsert), UpsertError> {
+) -> Result<(i64, Upsert, Option<AmmaStatement>), UpsertError> {
     // No component of the statement may be negative: every figure is the
     // fund's own attributed amount, and the ATO's AMMA guidance notes state
     // the rule outright — "An AMIT or attribution CCIV sub-fund trust
@@ -534,13 +536,22 @@ async fn write(
         });
     }
 
+    // Read the created row inside this transaction (a replace answers `204`
+    // with no body): reading it after the commit let a concurrent DELETE turn
+    // a committed create into a 500, or made the `201` report the other
+    // writer's row.
+    let stored = if existed {
+        None
+    } else {
+        http::crud_get::<AmmaStatement, _>(&mut *tx, assigned_id).await?
+    };
     tx.commit().await?;
     let outcome = if existed {
         Upsert::Replaced
     } else {
         Upsert::Created
     };
-    Ok((assigned_id, outcome))
+    Ok((assigned_id, outcome, stored))
 }
 
 /// The row a request body describes. `id` is the path's on an upsert and
@@ -580,8 +591,8 @@ async fn upsert(
     Path(id): Path<i64>,
     Json(body): Json<AmmaStatementBody>,
 ) -> Result<UpsertResponse<AmmaStatement>, ApiError> {
-    let outcome = db_upsert(&pool, &amma_from_body(id, body)).await?;
-    http::upsert_response::<AmmaStatement>(&pool, outcome, id).await
+    let (outcome, row) = db_upsert(&pool, &amma_from_body(id, body)).await?;
+    http::upsert_response::<AmmaStatement>(outcome, row)
 }
 
 /// `POST /amma_statements` — create the statement without naming an id. The

@@ -155,7 +155,10 @@ where
     http::crud_get(executor, mic.to_string()).await
 }
 
-pub async fn db_upsert(pool: &SqlitePool, exchange: &Exchange) -> Result<Upsert, UpsertError> {
+pub async fn db_upsert(
+    pool: &SqlitePool,
+    exchange: &Exchange,
+) -> Result<http::Upserted<Exchange>, UpsertError> {
     // `settlement_days` drives T+n on every trade written against this
     // exchange, so it is validated here, at the one write path, rather than
     // trusted. Both bounds are what the unchecked date step in
@@ -205,12 +208,23 @@ pub async fn db_upsert(pool: &SqlitePool, exchange: &Exchange) -> Result<Upsert,
     .bind(&exchange.close_time)
     .execute(&mut *tx)
     .await?;
-    tx.commit().await?;
-    Ok(if existed {
-        Upsert::Replaced
+    // Read the created row inside this transaction: after the commit a
+    // concurrent DELETE or replace could turn the `201` into a 500 or report
+    // the other writer's row.
+    let stored = if existed {
+        None
     } else {
-        Upsert::Created
-    })
+        http::crud_get::<Exchange, _>(&mut *tx, exchange.mic.clone()).await?
+    };
+    tx.commit().await?;
+    Ok((
+        if existed {
+            Upsert::Replaced
+        } else {
+            Upsert::Created
+        },
+        stored,
+    ))
 }
 
 /// Is `s` an `HH:MM` local time — exactly two digits, a colon, two digits, in
@@ -243,9 +257,8 @@ async fn upsert(
         settlement_days: body.settlement_days,
         close_time: body.close_time,
     };
-    let key = exchange.mic.clone();
-    let outcome = db_upsert(&pool, &exchange).await?;
-    http::upsert_response::<Exchange>(&pool, outcome, key).await
+    let (outcome, row) = db_upsert(&pool, &exchange).await?;
+    http::upsert_response::<Exchange>(outcome, row)
 }
 
 #[cfg(test)]

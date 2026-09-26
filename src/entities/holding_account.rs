@@ -75,6 +75,7 @@ pub async fn db_list(pool: &SqlitePool) -> Result<Vec<HoldingAccount>, sqlx::Err
 /// One-line delegation to the shared CRUD read, through which `db_create`
 /// reads the created row back; the route reaches the same query through
 /// `get_handler` (see CLAUDE.md's entity-module pattern).
+#[cfg(test)]
 pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<HoldingAccount>, sqlx::Error> {
     http::crud_get(pool, id).await
 }
@@ -120,7 +121,7 @@ async fn write(
     pool: &SqlitePool,
     id: Option<i64>,
     account: &HoldingAccount,
-) -> Result<(i64, Upsert), sqlx::Error> {
+) -> Result<(i64, Upsert, Option<HoldingAccount>), sqlx::Error> {
     // A create (`id` is `None`, from `POST /holding_accounts`) omits the id
     // column altogether, so the database — not the caller — chooses the new
     // row's id (SCENARIOS U-a). The upsert branch is otherwise byte-identical,
@@ -145,22 +146,34 @@ async fn write(
         None => false,
     };
     let result = query.bind(&account.name).execute(&mut *tx).await?;
-    tx.commit().await?;
     // An id-less INSERT was given one by the database; an upsert wrote the
     // explicit one it was handed. Either way the caller gets the id the row
     // actually holds.
     let assigned_id = id.unwrap_or_else(|| result.last_insert_rowid());
+    // Read the created row inside this transaction (a replace answers `204`
+    // with no body): reading it after the commit let a concurrent DELETE turn
+    // a committed create into a 500, or made the `201` report the other
+    // writer's row.
+    let stored = if existed {
+        None
+    } else {
+        http::crud_get::<HoldingAccount, _>(&mut *tx, assigned_id).await?
+    };
+    tx.commit().await?;
     let outcome = if existed {
         Upsert::Replaced
     } else {
         Upsert::Created
     };
-    Ok((assigned_id, outcome))
+    Ok((assigned_id, outcome, stored))
 }
 
-pub async fn db_upsert(pool: &SqlitePool, account: &HoldingAccount) -> Result<Upsert, sqlx::Error> {
-    let (_, outcome) = write(pool, Some(account.id), account).await?;
-    Ok(outcome)
+pub async fn db_upsert(
+    pool: &SqlitePool,
+    account: &HoldingAccount,
+) -> Result<http::Upserted<HoldingAccount>, sqlx::Error> {
+    let (_, outcome, row) = write(pool, Some(account.id), account).await?;
+    Ok((outcome, row))
 }
 
 /// `POST /holding_accounts` — create without naming an id, and return the row
@@ -169,10 +182,8 @@ pub async fn db_create(
     pool: &SqlitePool,
     account: &HoldingAccount,
 ) -> Result<HoldingAccount, UpsertError> {
-    let (id, _) = write(pool, None, account).await?;
-    db_get(pool, id)
-        .await?
-        .ok_or(UpsertError::VanishedAfterCreate)
+    let (_, _, stored) = write(pool, None, account).await?;
+    stored.ok_or(UpsertError::VanishedAfterCreate)
 }
 
 /// Outcome of a delete request, so the handler can map to the right status.
@@ -244,8 +255,8 @@ async fn upsert(
     Json(body): Json<HoldingAccountBody>,
 ) -> Result<UpsertResponse<HoldingAccount>, ApiError> {
     // A duplicate name violates the UNIQUE constraint → 422.
-    let outcome = db_upsert(&pool, &holding_account_from_body(id, body)).await?;
-    http::upsert_response::<HoldingAccount>(&pool, outcome, id).await
+    let (outcome, row) = db_upsert(&pool, &holding_account_from_body(id, body)).await?;
+    http::upsert_response::<HoldingAccount>(outcome, row)
 }
 
 /// `POST /holding_accounts` — create the account without naming an id. The

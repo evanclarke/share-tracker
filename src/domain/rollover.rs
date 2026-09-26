@@ -504,13 +504,13 @@ pub async fn insert_replacement_buy(
 /// response is exactly what was stored. A missing row is a bug, not a
 /// not-found: the ids were just inserted in the committed transaction.
 pub async fn created_trades(
-    pool: &sqlx::SqlitePool,
+    conn: &mut sqlx::SqliteConnection,
     ids: impl IntoIterator<Item = i64>,
 ) -> Result<Vec<Trade>, sqlx::Error> {
     let mut out = Vec::new();
     for id in ids {
         out.push(
-            trade::db_get(pool, id)
+            trade::db_get(&mut *conn, id)
                 .await?
                 .ok_or(sqlx::Error::RowNotFound)?,
         );
