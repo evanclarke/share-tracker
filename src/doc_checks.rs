@@ -27,9 +27,6 @@ const REQUIREMENTS_MD: &str = include_str!("../REQUIREMENTS.md");
 // dismissal is recorded in the repo is that comment. `#[cfg(test)]` module, so
 // this costs the release binary nothing.
 const AUTH_RS: &str = include_str!("infra/auth.rs");
-// The `ApiError` status map, for the Error-bodies pin below: the doc's list of
-// codes that carry a body has to match what this file actually returns.
-const HTTP_RS: &str = include_str!("infra/http.rs");
 
 /// The body of the `# Known limitations` section of `docs/API.md`.
 fn known_limitations() -> &'static str {
@@ -1056,86 +1053,116 @@ fn response_code_table_codes() -> Vec<String> {
 
 /// Docs-sync pin for the "Error bodies" code list (REST API audit, 2026-09-24).
 ///
-/// The list named a `409` that no code path returns — `ApiError`
-/// (`src/infra/http.rs`) has no 409 variant and `StatusCode::CONFLICT` appears
-/// nowhere in `src` — so it contradicted the Response codes table beside it,
-/// which has no 409 row.
+/// The list named a `409` that no code path returns, contradicted the Response
+/// codes table beside it, and omitted the `415` the matrix three lines above
+/// says carries a body — while the test that was supposed to catch exactly this
+/// transcribed the eight codes by hand and `assert_eq!`d them, so the document
+/// could not be fixed without editing the test.
 ///
-/// The list is the set of statuses a rejected request carries a plain-text body
-/// on, read off `ApiError::into_response` — the one error type every handler
-/// returns (`Result<_, ApiError>` + `?`):
+/// The list is now **derived**, not transcribed: `infra::http`'s one sample
+/// table of every `ApiError` variant (`error_cases`, the same table the
+/// media-type test drives) yields the statuses that carry a non-empty body, and
+/// the paragraph must name all of them except the conditional `500` — the
+/// manual job trigger, which the paragraph names in prose instead — plus the
+/// one framework status no `ApiError` variant answers, `415` (axum's `Json`
+/// content-type rejection). A new variant therefore fails this test until the
+/// paragraph and the Response-codes table gain it.
 ///
-/// - `400` — `ApiError::BadRequest` (and `ApiError::bad_request`);
-/// - `401` — `ApiError::Unauthorized`, the optional `[auth]` layer's challenge
-///   (a rejected write under `[auth]` answers it, so it belongs in the list);
-/// - `404` — `ApiError::NotFoundWithReason` (`ApiError::not_found`), the
-///   "`404`-with-a-cause" the list names; the bare `ApiError::NotFound` is the
-///   same status with an **empty** body (entity GETs), which the "with-a-cause"
-///   wording already carves out;
-/// - `413` — `ApiError::PayloadTooLarge`;
-/// - `422` — `ApiError::Unprocessable`, plus every constraint violation
-///   `impl From<sqlx::Error> for ApiError` classifies;
-/// - `429` — `ApiError::TooManyRequests`, the `POST /login` failed-attempt
-///   lockout (`infra::auth`, `ApiError::too_many_requests`), which also sets
-///   `Retry-After` — the `429` row joined the matrix and this list together;
-/// - `502` — `ApiError::BadGateway`;
-/// - `503` — `ApiError::Busy`.
+/// The cross-check with the Response codes table runs **both ways**: every
+/// listed code has a `| \`NNN …\` |` row, and every text-carrying row of the
+/// matrix is in the list — so the mirror image of the bug this audit fixed (a
+/// `409` row reappearing in the table) fails too.
 ///
-/// Two body-bearing statuses are deliberately outside the list. The plain
-/// `404` and the internal `500` carry **empty** bodies, so they cannot be in a
-/// list of codes that carry one; the one `500` that does — `ApiError::JobFailed`,
-/// the manual job trigger — is conditional (only a *failed* job answers it), so
-/// the paragraph names it in its own prose instead, which this test pins too.
-///
-/// The list is also cross-checked against the Response codes table: every code
-/// it names must have a `| \`NNN …\` |` row there. That is the drift guard the
-/// stale `409` slipped past — a code in this list with no row in the table —
-/// and it cannot come back without gaining one.
+/// Two body-bearing statuses stay outside the list by design: the plain `404`
+/// and the internal `500` carry **empty** bodies, so they cannot be in a list
+/// of codes that carry one.
 #[test]
 fn error_bodies_list_names_only_returned_codes() {
-    /// The codes `ApiError::into_response` answers with a non-empty body,
-    /// derived above from `src/infra/http.rs`.
-    const RETURNED_WITH_BODY: &[&str] = &["400", "401", "404", "413", "422", "429", "502", "503"];
+    // The codes `ApiError::into_response` answers with a non-empty body,
+    // **derived** from the error type's own samples in `infra::http` — not
+    // transcribed here, which is how the stale `409` survived.
+    let shapes = crate::infra::http::documented_error_shapes();
+    let mut api_text: Vec<String> = shapes
+        .iter()
+        .filter(|(_, has_body)| *has_body)
+        .map(|(code, _)| code.to_string())
+        .collect();
+    api_text.sort();
+    api_text.dedup();
 
     let paragraph = error_bodies_paragraph();
     let listed = error_bodies_listed_codes(paragraph);
 
-    // No stale code — in particular the `409` this audit removed.
+    // No stale code — in particular the `409` this audit removed. The source
+    // side: no `ApiError` sample answers 409, so a `409` can neither be listed
+    // nor be put back into the Response-codes table.
+    assert!(
+        !api_text.contains(&"409".to_string()),
+        "an ApiError now answers 409 — the Error bodies list and the Response \
+         codes table must both gain a 409 row: {api_text:?}"
+    );
     assert!(
         !listed.contains(&"409"),
         "the Error bodies list still names 409: {listed:?}"
     );
-    // Every code the code returns, and no code it does not.
+
+    // The paragraph lists every body-carrying `ApiError` status except the
+    // conditional `500` (the manual job trigger, which the paragraph names in
+    // prose instead), plus the one framework status axum produces rather than
+    // `ApiError`: `415`, the `Json` extractor's missing/incorrect content type.
+    let mut expected: Vec<String> = api_text
+        .iter()
+        .filter(|code| code.as_str() != "500")
+        .cloned()
+        .collect();
+    expected.push("415".to_string());
+    expected.sort();
+    expected.dedup();
+    let mut actual: Vec<String> = listed.iter().map(|code| code.to_string()).collect();
+    actual.sort();
+    actual.dedup();
     assert_eq!(
-        listed.as_slice(),
-        RETURNED_WITH_BODY,
+        actual, expected,
         "the Error bodies list names the wrong set of codes: {paragraph}"
     );
 
-    // The code side of the `409` claim: no `CONFLICT` anywhere in `ApiError`'s
-    // status map, so a 409 can neither be listed nor be put back into the table.
+    // The `5xx` sentence: three non-internal-fault 5xxs carry a body, not two —
+    // the failed job trigger (500), the upstream feed (502) and the busy
+    // database (503). The old count omitted 502, which the matrix beside it
+    // says carries text.
     assert!(
-        !HTTP_RS.contains("CONFLICT"),
-        "src/infra/http.rs now names CONFLICT — `ApiError` can answer 409, so the \
-         Error bodies list and the Response codes table must both gain a 409 row"
+        paragraph.contains("the three `5xx`s that are *not* internal faults do carry one"),
+        "the Error bodies paragraph must not under-count the body-carrying 5xxs: {paragraph}"
     );
-
-    // The conditional `500`: the paragraph names the one shape that carries a
-    // body, so the empty-body `500` cannot be mistaken for it.
     assert!(
         paragraph
             .contains("a failed job triggered via `POST /jobs/:name` returns its own error text"),
         "the Error bodies paragraph names the job trigger's text-carrying 500"
     );
+    assert!(
+        paragraph.contains("a `502` says the upstream feed could not be reached"),
+        "the Error bodies paragraph names the 502's body"
+    );
 
-    // The two sections cannot drift apart: a listed code must have a table row.
+    // The two sections cannot drift apart, **both ways**: every listed code has
+    // a Response-codes row, and every body-carrying row in that table is in the
+    // list — so a `409` row could not reappear in the table unnoticed either.
     let table_codes = response_code_table_codes();
-    for code in &listed {
+    for code in &actual {
         assert!(
-            table_codes.iter().any(|row| row.as_str() == *code),
+            table_codes.iter().any(|row| row == code),
             "the Error bodies list names `{code}`, but the Response codes table has no \
              `{code}` row (rows: {table_codes:?})"
         );
+    }
+    for (code, body) in error_body_matrix_rows() {
+        if body == "text" && code != "500" {
+            assert!(
+                actual.contains(&code),
+                "the Error-body matrix says `{code}` carries text, but the Error bodies \
+                 list omits it"
+            );
+        }
     }
 }
 
@@ -1225,29 +1252,32 @@ fn error_body_matrix_pins_every_status_and_shape() {
         "the error-body contract must state the media type: {section}"
     );
 
-    const EXPECTED: &[(&str, &str)] = &[
-        ("400", "text"),
-        ("401", "text"),
-        ("404", "empty"),
-        ("404", "text"),
-        ("405", "empty"),
-        ("413", "text"),
-        ("415", "text"),
-        ("422", "text"),
-        ("429", "text"),
-        ("500", "empty"),
-        ("500", "text"),
-        ("502", "text"),
-        ("503", "text"),
-    ];
-    let rows = error_body_matrix_rows();
-    let actual: Vec<(&str, &str)> = rows
-        .iter()
-        .map(|(code, body)| (code.as_str(), body.as_str()))
+    // The `ApiError` half of the matrix is **derived** from the error type's
+    // own samples (via `infra::http`'s one table), so a new variant cannot be
+    // documented in the matrix and skipped in the code, or vice versa.
+    let mut expected: Vec<(String, String)> = crate::infra::http::documented_error_shapes()
+        .into_iter()
+        .map(|(code, has_body)| {
+            (
+                code.to_string(),
+                if has_body { "text" } else { "empty" }.to_string(),
+            )
+        })
         .collect();
+    // …plus the two statuses axum itself produces and no `ApiError` variant
+    // can: an unmatched method on a read-only path (`405`, empty) and the `Json`
+    // extractor's missing or wrong content type (`415`, text).
+    expected.push(("405".to_string(), "empty".to_string()));
+    expected.push(("415".to_string(), "text".to_string()));
+    expected.sort();
+    expected.dedup();
+
+    let rows = error_body_matrix_rows();
+    let mut actual = rows.clone();
+    actual.sort();
     assert_eq!(
-        actual, EXPECTED,
-        "the Error-body matrix must carry exactly these (status, body) rows, in order: {section}"
+        actual, expected,
+        "the Error-body matrix must carry exactly these (status, body) rows: {section}"
     );
 
     // Every status in the matrix has a Response codes row above it.

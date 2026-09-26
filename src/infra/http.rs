@@ -905,6 +905,131 @@ impl From<csv::Error> for ApiError {
     }
 }
 
+/// One live sample of every [`ApiError`] variant, with the status it answers
+/// and the content type its body is sent with (`None` for an empty body).
+///
+/// This is the **one** table the error contract is read from: the media-type
+/// test below drives it against real responses, and `doc_checks` derives the
+/// documented status/body lists from it, so the two can no longer be edited
+/// apart. `assert_every_variant_is_sampled` is a no-wildcard match over the
+/// enum, so adding a variant breaks the build until a sample is added here.
+#[cfg(test)]
+fn error_cases() -> Vec<(&'static str, ApiError, StatusCode, Option<&'static str>)> {
+    /// What axum's `(StatusCode, String)` sends.
+    const PLAIN: &str = "text/plain; charset=utf-8";
+    // (label, error, status, content type — `None` for an empty body)
+    vec![
+        (
+            "400",
+            ApiError::bad_request("not a date"),
+            StatusCode::BAD_REQUEST,
+            Some(PLAIN),
+        ),
+        (
+            "401",
+            ApiError::unauthorized("no session cookie or bearer token"),
+            StatusCode::UNAUTHORIZED,
+            Some(PLAIN),
+        ),
+        (
+            "404 with a cause",
+            ApiError::not_found("no income with that id"),
+            StatusCode::NOT_FOUND,
+            Some(PLAIN),
+        ),
+        (
+            "413",
+            ApiError::PayloadTooLarge("the upload is over the limit".to_string()),
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Some(PLAIN),
+        ),
+        (
+            "422",
+            ApiError::unprocessable("the allocations sum to 4910, not the 5000 units sold"),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Some(PLAIN),
+        ),
+        (
+            "429",
+            ApiError::too_many_requests(
+                "Too many failed sign-in attempts. Try again in 300 seconds.",
+                300,
+            ),
+            StatusCode::TOO_MANY_REQUESTS,
+            Some(PLAIN),
+        ),
+        (
+            "500 for a failed job trigger",
+            ApiError::job_failed("backup", "the destination is not writable"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Some(PLAIN),
+        ),
+        (
+            "502",
+            ApiError::bad_gateway("could not fetch the RBA FX rate feed", "timed out"),
+            StatusCode::BAD_GATEWAY,
+            Some(PLAIN),
+        ),
+        (
+            "503",
+            ApiError::Busy {
+                body: BUSY_BODY.to_string(),
+                source: "database is locked (code: 5)".into(),
+            },
+            StatusCode::SERVICE_UNAVAILABLE,
+            Some(PLAIN),
+        ),
+        ("bare 404", ApiError::NotFound, StatusCode::NOT_FOUND, None),
+        (
+            "internal 500",
+            ApiError::internal("boom"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            None,
+        ),
+    ]
+}
+
+/// The exhaustive-match guard beside [`error_cases`]. This function is never
+/// called; it exists so that a new `ApiError` variant fails to compile here,
+/// next to the sample table, rather than being silently left out of the
+/// documented error contract.
+#[cfg(test)]
+#[allow(dead_code)]
+fn assert_every_variant_is_sampled(error: &ApiError) {
+    match error {
+        ApiError::Internal(_)
+        | ApiError::Unprocessable(_)
+        | ApiError::BadRequest(_)
+        | ApiError::PayloadTooLarge(_)
+        | ApiError::Busy { .. }
+        | ApiError::BadGateway { .. }
+        | ApiError::JobFailed { .. }
+        | ApiError::NotFound
+        | ApiError::NotFoundWithReason(_)
+        | ApiError::Unauthorized(_)
+        | ApiError::TooManyRequests { .. } => {}
+    }
+}
+
+/// Every `ApiError` shape as `(numeric status, carries a non-empty body)`,
+/// straight from [`error_cases`] — the code side `doc_checks` reads so the
+/// documented lists are derived from the error type rather than transcribed
+/// beside it. The status is taken from the response the sample actually builds
+/// (the same one the media-type test asserts), so a sample cannot disagree with
+/// the code it samples.
+#[cfg(test)]
+pub(crate) fn documented_error_shapes() -> Vec<(u16, bool)> {
+    error_cases()
+        .into_iter()
+        .map(|(_, error, _, content_type)| {
+            (
+                error.into_response().status().as_u16(),
+                content_type.is_some(),
+            )
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1091,80 +1216,7 @@ mod tests {
     async fn every_error_body_carries_the_documented_media_type_or_nothing() {
         use axum::http::header::CONTENT_TYPE;
 
-        /// What axum's `(StatusCode, String)` sends.
-        const PLAIN: &str = "text/plain; charset=utf-8";
-
-        // (label, error, status, content type — `None` for an empty body)
-        let cases: Vec<(&str, ApiError, StatusCode, Option<&str>)> = vec![
-            (
-                "400",
-                ApiError::bad_request("not a date"),
-                StatusCode::BAD_REQUEST,
-                Some(PLAIN),
-            ),
-            (
-                "401",
-                ApiError::unauthorized("no session cookie or bearer token"),
-                StatusCode::UNAUTHORIZED,
-                Some(PLAIN),
-            ),
-            (
-                "404 with a cause",
-                ApiError::not_found("no income with that id"),
-                StatusCode::NOT_FOUND,
-                Some(PLAIN),
-            ),
-            (
-                "413",
-                ApiError::PayloadTooLarge("the upload is over the limit".to_string()),
-                StatusCode::PAYLOAD_TOO_LARGE,
-                Some(PLAIN),
-            ),
-            (
-                "422",
-                ApiError::unprocessable("the allocations sum to 4910, not the 5000 units sold"),
-                StatusCode::UNPROCESSABLE_ENTITY,
-                Some(PLAIN),
-            ),
-            (
-                "429",
-                ApiError::too_many_requests(
-                    "Too many failed sign-in attempts. Try again in 300 seconds.",
-                    300,
-                ),
-                StatusCode::TOO_MANY_REQUESTS,
-                Some(PLAIN),
-            ),
-            (
-                "500 for a failed job trigger",
-                ApiError::job_failed("backup", "the destination is not writable"),
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Some(PLAIN),
-            ),
-            (
-                "502",
-                ApiError::bad_gateway("could not fetch the RBA FX rate feed", "timed out"),
-                StatusCode::BAD_GATEWAY,
-                Some(PLAIN),
-            ),
-            (
-                "503",
-                ApiError::Busy {
-                    body: BUSY_BODY.to_string(),
-                    source: "database is locked (code: 5)".into(),
-                },
-                StatusCode::SERVICE_UNAVAILABLE,
-                Some(PLAIN),
-            ),
-            ("bare 404", ApiError::NotFound, StatusCode::NOT_FOUND, None),
-            (
-                "internal 500",
-                ApiError::internal("boom"),
-                StatusCode::INTERNAL_SERVER_ERROR,
-                None,
-            ),
-        ];
-
+        let cases = error_cases();
         for (label, error, status, content_type) in cases {
             let resp = error.into_response();
             assert_eq!(resp.status(), status, "{label}: wrong status");
@@ -1173,7 +1225,60 @@ mod tests {
                 .get(CONTENT_TYPE)
                 .map(|value| value.to_str().unwrap().to_string());
             assert_eq!(sent.as_deref(), content_type, "{label}: wrong media type");
+            // …and the shape the table claims: an entry with no content type is
+            // an *empty* body, not a text one that merely omits its header.
+            let body = body_of(resp).await;
+            assert_eq!(
+                body.is_empty(),
+                content_type.is_none(),
+                "{label}: the body and its documented shape disagree: {body:?}"
+            );
         }
+    }
+
+    /// The four error shapes **axum** produces rather than `ApiError`, driven
+    /// through the whole application router — the rows of the documented
+    /// Error-body matrix no unit test of `ApiError` can reach. Nothing else
+    /// pins them, so an extractor swap (say a `Json<T>` route losing its
+    /// content-type guard) would otherwise change a documented status with
+    /// every test still green.
+    #[tokio::test]
+    async fn framework_produced_error_rows_behave_as_documented() {
+        use crate::test_support::{ApiClient, test_pool};
+
+        let pool = test_pool().await;
+        let client = ApiClient::full(&pool);
+
+        // `404` from an unrouted path: empty.
+        let resp = client.get("/no-such-route").await;
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
+        assert_eq!(resp.text(), "", "an unrouted 404 carries no body");
+
+        // `405` from an unmatched method on a read-only collection: empty.
+        let resp = client.post_bytes("/currencies", None, "").await;
+        assert_eq!(resp.status, StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(resp.text(), "", "a 405 carries no body");
+
+        // `415` from a `Json` route with no `application/json` content type:
+        // text, because that is the documented body-carrying shape.
+        let resp = client.post_bytes("/listings", None, "{}").await;
+        assert_eq!(resp.status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert!(
+            !resp.text().is_empty(),
+            "a 415 must carry the extractor's reason"
+        );
+
+        // `413` from axum's body-length ceiling (2 MiB), before the JSON parser
+        // ever sees the payload: text.
+        let oversized = format!("{{\"ticker\":\"{}\"}}", "x".repeat(3 * 1024 * 1024));
+        let resp = client
+            .post_bytes("/listings", Some("application/json"), oversized)
+            .await;
+        assert_eq!(resp.status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(
+            !resp.text().is_empty(),
+            "a 413 must carry the body-limit reason"
+        );
     }
 
     #[tokio::test]
