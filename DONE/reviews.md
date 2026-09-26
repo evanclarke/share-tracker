@@ -6889,3 +6889,83 @@ Tests: `infra::auth::tests::hex_decode_rejects_non_ascii_instead_of_panicking` �
 existing `hex_round_trips` (including its odd-length and non-hex cases) still passing. Gates:
 `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` (2,477 passed) all
 clean.
+
+## Per-commit review of the 2026-09-24 REST API audit (2026-09-26)
+
+A review of all 20 commits of the audit (`ac3a361..a9da849`), one fresh reviewer per commit against
+CLAUDE.md, then an independent verification of the fix pass those reviews prompted. Six commits were
+clean (`cfacc75`, `1006989`, `57a0574`, `28eac50`, `dde16ed`, `72046a0`). The mechanics were right
+almost everywhere — no SQL injection in the new list filters, `deny_unknown_fields` and exact-decimal
+money parsing surviving the body→query move, create-vs-replace decided inside `BEGIN IMMEDIATE`, the
+login lockout gating before the Argon2 verify. What the audit had accumulated instead was **contract
+drift its tests could not see**.
+
+- [x] The PUT clobber fix shipped server-side only: on a natural-key **Create** form the UI PUT a
+      user-typed key and toasted "Saved." on the new `204 Replaced`, so re-adding exchange `XASX`
+      silently overwrote the seeded row's settlement days — changing T+n on every ASX trade. The one
+      case the commit existed to prevent. Fixed in the create path with a confirm and
+      `putOutcomeMessage`, pinned in `src/web/util.test.js`
+- [x] A back-dated `as_of_date` combined with *today's* live price and FX, while the new docs asserted
+      the opposite with no carve-out (`docs/API.md`'s performance row was outright false under
+      `live`). Closed by documenting the split — the date bounds the *position*, not the price — and a
+      hint beside the control
+- [x] The owner filters silently dropped NULL-owner rows: `investment_expenses` and `interest_income`
+      have deliberately-nullable owner columns, so totalling deductions by iterating
+      `?holding_account_id=` over accounts understated them with no error. Known to the author and
+      documented only in a test comment; now stated in the Filters table, both endpoint rows and the
+      OpenAPI summaries
+- [x] Two tests in `doc_checks.rs` enforced **mutually inconsistent** contracts about `415`, so the
+      doc could not be fixed without editing a test. `RETURNED_WITH_BODY` is gone — the expected set
+      derives from `infra::http::documented_error_shapes()` over one sample table, guarded by a
+      no-wildcard match, and the cross-check runs both ways. The three-commit stale "two `5xx`s"
+      sentence was corrected with it
+- [x] The login lockout was check-then-act (effective budget `5 + concurrency`) and keyed full IPv6
+      addresses, so a /64 defeated it for free. Both fixed with tests
+- [x] The published OpenAPI document declared **no query parameters at all** — right after four
+      commits moved or added ~20 routes' worth onto query strings — and its own description claimed
+      otherwise. Fixed twice over: first emitted from the summary prose, then (`7c5aed1`) derived from
+      each route's `Query<T>` type via `utoipa::IntoParams`, because the prose version could only
+      guess `required` and the schema and guessed wrong — every parameter came out
+      `required: false, type: string`, including `?tax_year=`, whose absence is a `400` and which
+      `docs/API.md` already documented as required. `POST /jobs/{name}`'s parameters were reaching the
+      document not at all; the new set-equality test caught that while being written
+- [x] The `404` contract said a `GET`'s 404 is empty, so a generated client discarded
+      `/portfolio/activity`'s `listing 42 not found` as a body that could not exist. The rule turns on
+      what the URL addresses, not the verb; `/portfolio/activity` is the only such read (every
+      `ApiError::not_found` site audited) and a test drives it and scans `src/reports` recursively so
+      a second one fails until classified
+- [x] Three places still said the browser lockout answers `200` after it began answering `429` —
+      including the user-facing matrix row, which contradicted the Authentication section, README and
+      FEATURES in the same tree, and `ApiError::TooManyRequests`' own doc comment
+- [x] `ui-check.sh` and `screenshots.sh` built the server only when the binary was **missing**. The UI
+      is embedded with `include_str!`, so a stale binary served the previous HTML/JS while the tree
+      had the new, and the script rendered that and reported success — which is how the first check of
+      a config.js change in this very pass "passed" before the change had been compiled.
+      `screenshots.sh` would have committed shots of the old UI as current. Both always build now
+- [x] Two archived items had been ticked with an acceptance criterion that was not met; `DONE/api.md`
+      now records both, and drops its own claim that `serde-str` is an outbound codec (it gates only
+      `Deserialize`, so the tests are the whole guard)
+- [ ] Nine items were deliberately left, and are open in TODO.md rather than closed here — the `f64`
+      scan test, the filter bind rule, the OpenAPI table's remaining hand-maintained fields, the four
+      requirement-only `DESCRIPTION` pins, the unauthenticated Argon2 bound, `trusted_proxy`,
+      `panic_response`, the duplicated as-of default, and two stale references
+
+**Closed 2026-09-26.** The running theme, worth carrying forward: this codebase's pins are excellent
+where they are derived and misleading where they are transcribed. Several hand-maintained lists were
+*documented as derived* — `RETURNED_WITH_BODY` said "derived above from `src/infra/http.rs`" while
+being typed by hand — and `a9da849` proved the cost by having to hand-edit four of them at once to add
+one status code; it got all four right, and nothing would have failed if it had not. The same shape
+appeared in the ordering table pin (which is why `/drp_enrolments` was documented date-ordered when
+its `ORDER_BY` leads with `listing_id`), the 201-create list, the `FILTERED` tables and `PUT_ROUTES`'
+second copy. Most are now derived from the router, the schema or the Rust type.
+
+Two process notes. `cargo test` passed while `cargo build` failed, because a re-export was
+`#[cfg(test)]` and `api_spec` is non-test code — the suite alone does not cover the build gate. And
+the UI scripts' stale-binary bug means a rendered-DOM check is only evidence if the binary is newer
+than the tree; both fixes here were re-verified against a freshly built server (`GET /listings/9999`
+→ 404 empty, `/portfolio/activity?listing_id=9999` → 404 with text, `?as_of_date=2024-02-01` → one
+open parcel of two).
+
+Gates at close: `cargo build`, `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`
+clean; `cargo test` 2,636 passed; `node --test 'src/web/*.test.js'` 189 passed; `scripts/ui-smoke.sh`
+all routes rendered.
