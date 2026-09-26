@@ -2620,10 +2620,6 @@ mod tests {
              /reports/row_history trail)",
             "This is the reverse of the web UI, which sorts its own tables newest-first \
              client-side.",
-            // The POST-for-read set, each endpoint named.
-            "/portfolio/overview, /portfolio/performance and /portfolio/unrealised-gains (a \
-             prices price-override map) and /portfolio/net-capital-gain/what-if (an allocations \
-             list)",
             // Pagination: the one endpoint, both shapes and the cursor facts.
             "/reports/row_history is the only paginated endpoint",
             "with row_id it answers that row's whole trail as a bare JSON array",
@@ -2632,6 +2628,34 @@ mod tests {
             assert!(
                 description.contains(rule),
                 "info.description must state `{rule}`; got:\n{description}"
+            );
+        }
+        // The POST-bodied report reads are **derived from the route table**,
+        // not from a copy of the sentence that names them: the compact contract
+        // must name every one, and no new `POST /portfolio/*` report read can
+        // quietly join the set without being documented here.
+        let mut posts: Vec<String> = ROUTES
+            .iter()
+            .filter(|(verb, path, _, _, _, _)| {
+                *verb == Verb::Post && path.starts_with("/portfolio/")
+            })
+            .map(|(_, path, _, _, _, _)| (*path).to_string())
+            .collect();
+        posts.sort();
+        assert_eq!(
+            posts,
+            [
+                "/portfolio/net-capital-gain/what-if",
+                "/portfolio/overview",
+                "/portfolio/performance",
+                "/portfolio/unrealised-gains",
+            ],
+            "the POST-bodied report reads have changed — the description must name the new set"
+        );
+        for path in &posts {
+            assert!(
+                description.contains(path.as_str()),
+                "info.description must name the POST-bodied report read {path}"
             );
         }
     }
