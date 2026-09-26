@@ -22,6 +22,10 @@ const FEATURES_MD: &str = include_str!("../docs/FEATURES.md");
 const SCHEMA_MD: &str = include_str!("../docs/SCHEMA.md");
 const DENY_TOML: &str = include_str!("../deny.toml");
 const REQUIREMENTS_MD: &str = include_str!("../REQUIREMENTS.md");
+/// The config file the FreeBSD package installs — documentation as much as
+/// configuration, since every setting's commented example is where an operator
+/// reads what exists.
+const SAMPLE_CONFIG: &str = include_str!("../pkg/freebsd/share-tracker.toml.sample");
 // The auth module's own source, for the CodeQL false-positive pin below: Rust
 // has no inline `// codeql[...]` suppression, so the one place the reviewed
 // dismissal is recorded in the repo is that comment. `#[cfg(test)]` module, so
@@ -456,6 +460,53 @@ fn list_filtering_contract_documented() {
     assert!(API_MD.contains("**cursor paging is the part that remains open**"));
 }
 
+/// Docs-sync pin for the opt-in `[auth] trusted_proxies` setting.
+///
+/// The three documents that describe the lockout each have to describe this
+/// too, because the default — nothing trusts a forwarded header — is the one
+/// that leaves every client behind a proxy in one bucket, and an operator who
+/// does not know the setting exists reads that as "the lockout locks me out".
+/// Each also has to carry the two limits, since a reader who takes "trusts the
+/// proxy" to mean "believes X-Forwarded-For" has the security model backwards:
+/// the header is read **only** for a request from a declared address, and only
+/// its rightmost entry, so exactly one hop is trusted.
+#[test]
+fn the_trusted_proxies_setting_is_documented() {
+    for fact in [
+        "**`trusted_proxies`**",
+        "peer is one of those addresses",
+        "nothing trusts `X-Forwarded-For` at all",
+        "**rightmost** entry is the one taken",
+        "**aborts startup**",
+    ] {
+        assert!(
+            API_MD.contains(fact),
+            "docs/API.md's lockout section must state `{fact}` about trusted_proxies"
+        );
+    }
+    for fact in [
+        "**`trusted_proxies = [\"127.0.0.1\", \"::1\"]`**",
+        "an undeclared client's header is ignored",
+        "**rightmost** entry is read",
+    ] {
+        assert!(
+            README_MD.contains(fact),
+            "README must state `{fact}` about trusted_proxies"
+        );
+    }
+    assert!(
+        FEATURES_MD.contains("`[auth] trusted_proxies`"),
+        "docs/FEATURES.md's Authentication entry must name the setting"
+    );
+    // The sample config documents it as a commented example — pinned on the
+    // config side by `infra::config`'s sample test, and here for the prose that
+    // says why it is opt-in.
+    assert!(
+        SAMPLE_CONFIG.contains("cannot choose its bucket by sending one"),
+        "the sample config must say why trusting the header is opt-in and per-address"
+    );
+}
+
 /// The one live document that names the annual tax report's **superseded**
 /// endpoint spelling says so.
 ///
@@ -467,13 +518,12 @@ fn list_filtering_contract_documented() {
 /// the file cannot be read as specifying an endpoint that does not exist.
 #[test]
 fn the_superseded_tax_report_endpoints_are_marked_as_such() {
-    let requirements = include_str!("../REQUIREMENTS.md");
     assert!(
-        requirements.contains("**Superseded spelling** (`ea21d55`, 2026-09-25)"),
+        REQUIREMENTS_MD.contains("**Superseded spelling** (`ea21d55`, 2026-09-25)"),
         "REQUIREMENTS.md must mark the POST /reports/tax-report spelling as superseded"
     );
     assert!(
-        requirements.contains("`GET /reports/tax_report?tax_year=N`"),
+        REQUIREMENTS_MD.contains("`GET /reports/tax_report?tax_year=N`"),
         "the note must name the endpoint that is actually served"
     );
     // …and that endpoint is the one the document serves.
@@ -6128,10 +6178,10 @@ fn the_login_lockout_is_documented_everywhere_it_applies() {
 #[test]
 fn the_login_verify_concurrency_bound_is_documented() {
     for fact in [
-        "**2 password verifies at once**",
+        "**4 password verifies at once**",
         "on the blocking pool rather than on an async worker",
         "m=19 MiB",
-        "**2 seconds**",
+        "**5 seconds**",
         "`Retry-After: 1`",
     ] {
         assert!(
@@ -6140,7 +6190,7 @@ fn the_login_verify_concurrency_bound_is_documented() {
         );
     }
     for fact in [
-        "verifies at most **2 passwords at once**",
+        "verifies at most **4 passwords at once**",
         "`Retry-After: 1`",
     ] {
         assert!(
@@ -6150,11 +6200,11 @@ fn the_login_verify_concurrency_bound_is_documented() {
     }
     // The figures are the code's.
     assert!(
-        AUTH_RS.contains("const MAX_CONCURRENT_VERIFIES: usize = 2;"),
+        AUTH_RS.contains("const MAX_CONCURRENT_VERIFIES: usize = 4;"),
         "the documented verify concurrency must remain the code's MAX_CONCURRENT_VERIFIES"
     );
     assert!(
-        AUTH_RS.contains("const VERIFY_QUEUE_WAIT: Duration = Duration::from_secs(2);"),
+        AUTH_RS.contains("const VERIFY_QUEUE_WAIT: Duration = Duration::from_secs(5);"),
         "the documented queue wait must remain the code's VERIFY_QUEUE_WAIT"
     );
 

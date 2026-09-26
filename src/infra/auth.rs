@@ -70,13 +70,17 @@
 //!   the table is a bucket an attacker cannot grow into a memory-exhaustion
 //!   hole.
 //! - **Reverse-proxy caveat, stated honestly**: in the documented nginx
-//!   deployment the peer is **the proxy** (127.0.0.1) for every request, so
-//!   every client shares one bucket — the lockout then still bounds
-//!   *aggregate* guessing, but one attacker can lock out everybody, and nginx
-//!   cannot fix it by forwarding a header because nothing here trusts one. A
-//!   per-client limit in front of the app (the README's `limit_req` example)
-//!   is the complementary control, not a substitute for this one; the bearer
-//!   token is not part of the lockout, so scripted access survives it.
+//!   deployment the peer is **the proxy** (127.0.0.1) for every request, so by
+//!   default every client shares one bucket — the lockout then still bounds
+//!   *aggregate* guessing, but one attacker can lock out everybody. The opt-in
+//!   `[auth] trusted_proxies` list is the answer ([`Auth::login_source`]): for
+//!   a request whose peer is a **declared** proxy, the lockout keys on the
+//!   client address that proxy forwarded, and for every other request — and
+//!   with the list absent — the header is ignored, so nothing forgeable is ever
+//!   believed. A per-client limit in front of the app (the README's `limit_req`
+//!   example) is still the complementary control, not a substitute for this
+//!   one; the bearer token is not part of the lockout, so scripted access
+//!   survives it.
 //! - **Under a flood, the bound wins over the lockout**: an attacker who
 //!   contributes more than [`LOCKOUT_MAX_SOURCES`] distinct sources inside the
 //!   failure window can have an actively locked-out entry evicted — the cap is
@@ -164,20 +168,21 @@ const LOCKOUT_MAX_SOURCES: usize = 4096;
 /// together can. `Argon2::default()` is m=19 MiB and ~30 ms of CPU, and the
 /// verify used to run inline on the async handler — so N concurrent first-time
 /// attempts from N different sources were N × 19 MiB of transient memory and N
-/// blocked tokio workers, with nothing capping N. Two is enough for a
-/// single-credential deployment (a second is there so the owner's own login is
-/// not queued behind one stranger's) and caps the transient cost at ~38 MiB and
-/// two threads of the blocking pool.
-const MAX_CONCURRENT_VERIFIES: usize = 2;
+/// blocked tokio workers, with nothing capping N. Four is generous for a
+/// single-credential deployment and caps the transient cost at ~76 MiB and four
+/// threads of the blocking pool — the point is that the multiplier is a constant
+/// this module chose, not that it is as small as possible.
+const MAX_CONCURRENT_VERIFIES: usize = 4;
 /// How long a login waits for one of the [`MAX_CONCURRENT_VERIFIES`] slots
 /// before it is refused `429` instead.
 ///
 /// Queueing without a deadline would trade the memory bound for an unbounded
 /// wait — a flood could park every pending login indefinitely, which for the
-/// owner is indistinguishable from the server being down. Two seconds is long
-/// enough to absorb a handful of overlapping attempts (each ~30 ms) and short
-/// enough that a refusal is quick.
-const VERIFY_QUEUE_WAIT: Duration = Duration::from_secs(2);
+/// owner is indistinguishable from the server being down. Five seconds absorbs
+/// hundreds of overlapping attempts (each ~30 ms across four slots) while still
+/// being a bound: past it the answer is a `429` saying when to retry rather than
+/// a request that never ends.
+const VERIFY_QUEUE_WAIT: Duration = Duration::from_secs(5);
 
 /// The verify slots [`MAX_CONCURRENT_VERIFIES`] hands out. Process-wide rather
 /// than per-`Auth`: the bound being protected is the host's memory and blocking
@@ -227,8 +232,21 @@ enum Source {
 }
 
 impl Source {
+    /// The source of a raw peer address, with its port discarded.
+    ///
+    /// `#[cfg(test)]`: the login path reaches a source through
+    /// [`Auth::login_source`], which is the only spelling that also honours
+    /// `[auth] trusted_proxies`. An ungated twin would be a second way to key
+    /// the lockout, and the wrong one behind a declared proxy.
+    #[cfg(test)]
     fn of(peer: Option<SocketAddr>) -> Self {
-        match peer.map(|addr| addr.ip()) {
+        Source::of_ip(peer.map(|addr| addr.ip()))
+    }
+
+    /// The same normalisation over a bare address — the form a trusted proxy's
+    /// `X-Forwarded-For` entry arrives in, which carries no port at all.
+    fn of_ip(address: Option<IpAddr>) -> Self {
+        match address {
             Some(IpAddr::V4(v4)) => Source::V4(v4),
             Some(IpAddr::V6(v6)) => {
                 // Zero the interface identifier: the /64 is the allocation a
@@ -285,7 +303,10 @@ async fn login_handler(auth: Auth, base_path: String, req: Request) -> Response 
     // `into_make_service_with_connect_info::<SocketAddr>()` (see `main`)
     // installs, stored in the request's extensions as the bare `ConnectInfo`
     // value (`axum::Extension` inserts its inner `T`).
-    let source = Source::of(
+    // …and, where `[auth] trusted_proxies` declares the peer to be a proxy,
+    // the client address it forwarded instead (`Auth::login_source`).
+    let source = auth.login_source(
+        req.headers(),
         req.extensions()
             .get::<ConnectInfo<SocketAddr>>()
             .map(|ConnectInfo(addr)| *addr),
@@ -548,6 +569,14 @@ pub struct Auth {
     /// `Arc` (not the derived `Clone` of an inner `HashMap`), so every clone
     /// of one `Auth` — the router closure, the test client — sees one table.
     lockouts: LockoutTracker,
+    /// Addresses whose `X-Forwarded-For` the lockout may believe — the
+    /// `[auth] trusted_proxies` list, empty unless it is configured.
+    ///
+    /// The list is what makes the header safe to read: it is consulted only for
+    /// a request that *came from* one of these addresses, so the header is
+    /// attacker-supplied exactly when the attacker is the declared proxy. Empty
+    /// is the default and means the peer address is the source, always.
+    trusted_proxies: Arc<[IpAddr]>,
 }
 
 /// Equality over the *configuration* only. The lockout table is live state
@@ -562,6 +591,7 @@ impl PartialEq for Auth {
             && self.api_token == other.api_token
             && self.secure_cookie == other.secure_cookie
             && self.signing_key == other.signing_key
+            && self.trusted_proxies == other.trusted_proxies
     }
 }
 
@@ -586,7 +616,51 @@ impl Auth {
             secure_cookie,
             signing_key,
             lockouts: LockoutTracker::new(),
+            trusted_proxies: Vec::new().into(),
         })
+    }
+
+    /// The `[auth] trusted_proxies` list, applied after construction so
+    /// [`Auth::new`]'s signature stays the four credential facts.
+    ///
+    /// Config-file only, like the rest of `[auth]`, and parsed to real
+    /// addresses by `config::Settings::resolve` — an unparseable entry aborts
+    /// startup rather than silently trusting nothing.
+    pub fn with_trusted_proxies(mut self, proxies: Vec<IpAddr>) -> Self {
+        self.trusted_proxies = proxies.into();
+        self
+    }
+
+    /// Where a login attempt is counted against: the request's own peer, or —
+    /// only when that peer is a **declared** proxy — the client address that
+    /// proxy forwarded.
+    ///
+    /// The **rightmost** `X-Forwarded-For` entry is the one taken, not the
+    /// leftmost. nginx's `$proxy_add_x_forwarded_for` *appends* the peer it saw
+    /// to whatever the client sent, so the rightmost entry is the proxy's own
+    /// observation and every entry left of it is client-supplied text. Taking
+    /// the leftmost — the usual "original client" reading — would let any client
+    /// pick its own lockout bucket by sending a header of its own, which is the
+    /// forgery this whole design exists to avoid. The consequence, stated rather
+    /// than hidden: this trusts **one** hop. A chain of two proxies would have
+    /// the lockout key on the inner one.
+    ///
+    /// A trusted peer that sends no usable header falls back to the peer
+    /// itself — the pre-`trusted_proxies` behaviour, one shared bucket — rather
+    /// than to [`Source::Unknown`].
+    fn login_source(&self, headers: &HeaderMap, peer: Option<SocketAddr>) -> Source {
+        let Some(address) = peer.map(|addr| addr.ip()) else {
+            return Source::Unknown;
+        };
+        if !self.trusted_proxies.contains(&address) {
+            return Source::of_ip(Some(address));
+        }
+        let forwarded = headers
+            .get("x-forwarded-for")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.rsplit(',').next())
+            .and_then(|entry| entry.trim().parse::<IpAddr>().ok());
+        Source::of_ip(Some(forwarded.unwrap_or(address)))
     }
 
     /// [`Auth::new`] over a test-sized lockout policy — the identical state
@@ -1684,12 +1758,154 @@ mod lockout_tests {
         );
     }
 
+    // -----------------------------------------------------------------------
+    // `[auth] trusted_proxies`: whose forwarded address the lockout believes
+    // -----------------------------------------------------------------------
+
+    /// `X-Forwarded-For` from an **undeclared** peer changes nothing.
+    ///
+    /// This is the default configuration — no `trusted_proxies` at all — and it
+    /// is the property the whole design rests on: if a client could pick its own
+    /// lockout bucket by sending a header, the lockout would be evadable by
+    /// anyone. Ten attempts from one peer with ten different forwarded addresses
+    /// are ten attempts from one source, so the budget still stops them.
+    #[test]
+    fn a_forwarded_header_is_ignored_when_no_proxy_is_declared() {
+        let auth = auth_with(policy());
+        let peer = Some(SocketAddr::from(([203, 0, 113, 7], 40001)));
+        let mut sources = Vec::new();
+        for n in 0..10u8 {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                "x-forwarded-for",
+                HeaderValue::from_str(&format!("198.51.100.{n}")).unwrap(),
+            );
+            sources.push(auth.login_source(&headers, peer));
+        }
+        assert!(
+            sources
+                .iter()
+                .all(|s| *s == Source::V4([203, 0, 113, 7].into())),
+            "an undeclared peer's forwarded header must be ignored: {sources:?}"
+        );
+        // …and the budget is spent by those ten attempts, not multiplied by them.
+        let allowed = sources
+            .iter()
+            .filter(|source| auth.begin_login_attempt(**source) == Attempt::Allowed)
+            .count();
+        assert_eq!(
+            allowed, TEST_BUDGET as usize,
+            "a forged header must not buy a fresh budget per attempt"
+        );
+    }
+
+    /// Declared proxy, forwarded client: each client behind the proxy is its own
+    /// source, which is the whole point of the setting — one attacker behind the
+    /// nginx deployment no longer denies everybody else the sign-in page.
+    #[test]
+    fn a_declared_proxy_isolates_the_clients_it_forwards() {
+        let auth = auth_with(policy()).with_trusted_proxies(vec![[127, 0, 0, 1].into()]);
+        let proxy = Some(SocketAddr::from(([127, 0, 0, 1], 55001)));
+        let forwarded = |client: &str| {
+            let mut headers = HeaderMap::new();
+            headers.insert("x-forwarded-for", HeaderValue::from_str(client).unwrap());
+            auth.login_source(&headers, proxy)
+        };
+
+        let attacker = forwarded("198.51.100.9");
+        let owner = forwarded("203.0.113.7");
+        assert_ne!(attacker, owner, "two forwarded clients are two sources");
+        for _ in 0..TEST_BUDGET {
+            assert_eq!(auth.begin_login_attempt(attacker), Attempt::Allowed);
+        }
+        assert!(
+            matches!(auth.begin_login_attempt(attacker), Attempt::Refused { .. }),
+            "the attacker's own budget is spent"
+        );
+        assert_eq!(
+            auth.begin_login_attempt(owner),
+            Attempt::Allowed,
+            "the owner must still be able to sign in"
+        );
+    }
+
+    /// The **rightmost** entry is taken, not the leftmost: nginx appends the peer
+    /// it saw to whatever the client sent, so everything left of the last entry
+    /// is client-supplied text. A client sending
+    /// `X-Forwarded-For: 10.9.9.9` arrives as `10.9.9.9, <its real address>`,
+    /// and it is the real address the lockout must key on.
+    #[test]
+    fn the_rightmost_forwarded_entry_is_the_one_trusted() {
+        let auth = auth_with(policy()).with_trusted_proxies(vec![[127, 0, 0, 1].into()]);
+        let proxy = Some(SocketAddr::from(([127, 0, 0, 1], 55001)));
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("10.9.9.9, 198.51.100.9"),
+        );
+        assert_eq!(
+            auth.login_source(&headers, proxy),
+            Source::V4([198, 51, 100, 9].into()),
+            "the proxy's own observation is the last entry"
+        );
+    }
+
+    /// Two ways a declared proxy can leave nothing usable — no header at all,
+    /// and a header that is not an address — both fall back to the peer, the
+    /// one-shared-bucket behaviour that predates the setting. Never to
+    /// `Source::Unknown`, which is the *absent peer* bucket and would pool a
+    /// proxied deployment with every test client.
+    #[test]
+    fn a_declared_proxy_with_no_usable_header_falls_back_to_itself() {
+        let auth = auth_with(policy()).with_trusted_proxies(vec![[127, 0, 0, 1].into()]);
+        let proxy = Some(SocketAddr::from(([127, 0, 0, 1], 55001)));
+        assert_eq!(
+            auth.login_source(&HeaderMap::new(), proxy),
+            Source::V4([127, 0, 0, 1].into()),
+            "no header: the peer is the source"
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("not-an-address"),
+        );
+        assert_eq!(
+            auth.login_source(&headers, proxy),
+            Source::V4([127, 0, 0, 1].into()),
+            "an unparseable entry: the peer is the source"
+        );
+    }
+
+    /// A forwarded **IPv6** client is keyed on its /64 like any other, so the
+    /// setting cannot hand an attacker a fresh budget per address inside one
+    /// allocation.
+    #[test]
+    fn a_forwarded_ipv6_client_is_still_keyed_on_its_64() {
+        let auth = auth_with(policy()).with_trusted_proxies(vec![[127, 0, 0, 1].into()]);
+        let proxy = Some(SocketAddr::from(([127, 0, 0, 1], 55001)));
+        let forwarded = |client: &str| {
+            let mut headers = HeaderMap::new();
+            headers.insert("x-forwarded-for", HeaderValue::from_str(client).unwrap());
+            auth.login_source(&headers, proxy)
+        };
+        assert_eq!(
+            forwarded("2001:db8:1:2::1"),
+            forwarded("2001:db8:1:2:ffff:ffff:ffff:ffff"),
+            "one /64 is one source"
+        );
+        assert_ne!(
+            forwarded("2001:db8:1:2::1"),
+            forwarded("2001:db8:1:3::1"),
+            "two /64s are two sources"
+        );
+    }
+
     /// The concurrency bound, driven concurrently — which the
     /// [`the_gate_counts_each_attempt_rather_than_checking_then_acting`] pin
     /// above deliberately does not (it races the gate's arithmetic, in one
     /// thread, and says so).
     ///
-    /// Eight wrong passwords from eight distinct sources are submitted at once
+    /// Twelve wrong passwords from twelve distinct sources are submitted at once
     /// through the real `login_submit`, so each reaches
     /// [`Auth::verify_password_bounded`]. Every one of them must be answered,
     /// and the peak number of Argon2 verifies actually in flight — recorded
@@ -1707,7 +1923,7 @@ mod lockout_tests {
         // every one of them reaches the verify.
         let auth = auth_with(LockoutPolicy::production());
         let mut attempts = Vec::new();
-        for n in 0..8u16 {
+        for n in 0..12u16 {
             let auth = auth.clone();
             attempts.push(tokio::spawn(async move {
                 login_submit(

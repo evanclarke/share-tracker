@@ -59,6 +59,17 @@ schedule = "/usr/local/etc/share-tracker.cron"
 # password_hash = "$argon2id$v=19$m=19456,t=2,p=1$..."
 # api_token = "...output of gen-token..."
 # secure_cookie = true
+#
+# The reverse proxies whose X-Forwarded-For the failed-login lockout may
+# believe. Leave it out and nothing trusts the header: behind a proxy every
+# client then shares one lockout bucket, so one attacker denies everyone the
+# sign-in page (the api_token above is the escape). List the proxy's own
+# address and each forwarded client gets its own bucket instead — the header is
+# only read for a request that came *from* a listed address, so a client that
+# is not the proxy cannot choose its bucket by sending one. Only the lockout
+# reads it, and only its rightmost entry (what nginx itself observed), so this
+# trusts exactly one hop.
+# trusted_proxies = ["127.0.0.1", "::1"]
 
 # Emailed reports (see the README's "Emailed reports" section). Commented out
 # by default: with no [email] table the server sends nothing, and the two email

@@ -121,6 +121,18 @@ pub struct AuthConfig {
     /// `infra::auth::Auth`); set `false` only for a deliberately plain-HTTP
     /// setup.
     pub secure_cookie: Option<bool>,
+    /// The reverse proxies whose `X-Forwarded-For` the failed-login lockout may
+    /// believe, as IP addresses (`["127.0.0.1", "::1"]`).
+    ///
+    /// Absent or empty, **nothing** trusts a forwarded header and the lockout
+    /// keys on the request's own peer — which behind a proxy is the proxy, so
+    /// every client shares one bucket (see `infra::auth`). Declaring the proxy
+    /// is what makes the header safe to read: it is only read when the request
+    /// *came from* a listed address, so a client that is not the proxy cannot
+    /// choose its own bucket by sending the header. Nothing else in the server
+    /// reads it — this is the lockout's source, not a general client-IP
+    /// setting.
+    pub trusted_proxies: Option<Vec<String>>,
 }
 
 /// The fully resolved settings the server runs with.
@@ -164,6 +176,19 @@ impl Settings {
                     a.api_token,
                     a.secure_cookie.unwrap_or(true),
                 )
+                .and_then(|auth| {
+                    let proxies = a
+                        .trusted_proxies
+                        .unwrap_or_default()
+                        .iter()
+                        .map(|address| {
+                            address.parse::<std::net::IpAddr>().map_err(|e| {
+                                format!("invalid auth.trusted_proxies entry {address:?}: {e}")
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok(auth.with_trusted_proxies(proxies))
+                })
             })
             .transpose()?;
         Ok(Settings {
@@ -568,6 +593,58 @@ mod tests {
         assert!(err.contains("password_hash"), "{err}");
     }
 
+    /// `trusted_proxies` reaches the resolved `Auth` as parsed addresses, and an
+    /// entry that is not an address **aborts startup** naming it — the same rule
+    /// the rest of this file follows (a bad value is not quietly a default; here
+    /// the quiet default would be "trust nothing", leaving an operator who meant
+    /// to declare their proxy with the shared-bucket lockout they were trying to
+    /// fix).
+    #[test]
+    fn auth_trusted_proxies_are_parsed_and_a_bad_entry_aborts() {
+        let hash = crate::infra::auth::Auth::hash_password("hunter2").unwrap();
+        let settings = Settings::resolve(
+            Args::parse_from(["share-tracker"]),
+            parse(&format!(
+                r#"
+            [auth]
+            username = "evan"
+            password_hash = "{hash}"
+            trusted_proxies = ["127.0.0.1", "::1"]
+            "#
+            )),
+        )
+        .expect("a valid proxy list resolves");
+        let auth = settings.auth.expect("[auth] resolved");
+        // Equality is over configuration, so an `Auth` with the same credential
+        // and no proxy list is a *different* configuration.
+        let without = crate::infra::auth::Auth::new("evan".into(), hash.clone(), None, true)
+            .expect("the same credential");
+        assert_ne!(auth, without, "the proxy list is part of the configuration");
+        assert_eq!(
+            auth,
+            without
+                .with_trusted_proxies(vec!["127.0.0.1".parse().unwrap(), "::1".parse().unwrap()]),
+            "both entries reached the resolved Auth, in order"
+        );
+
+        let err = Settings::resolve(
+            Args::parse_from(["share-tracker"]),
+            parse(&format!(
+                r#"
+            [auth]
+            username = "evan"
+            password_hash = "{hash}"
+            trusted_proxies = ["127.0.0.1", "the loopback"]
+            "#
+            )),
+        )
+        .expect_err("an unparseable entry must abort startup");
+        assert!(
+            err.contains("auth.trusted_proxies") && err.contains("the loopback"),
+            "the failure must name the key and the offending entry: {err}"
+        );
+    }
+
     #[test]
     fn auth_table_rejects_unknown_keys() {
         let err = toml::from_str::<ConfigFile>(
@@ -688,6 +765,22 @@ mod tests {
             SAMPLE.contains("# [auth]"),
             "sample should document the [auth] table as a commented-out example"
         );
+        // Every [auth] key appears in the commented example too, for the same
+        // reason the [email] list below does. `trusted_proxies` especially: an
+        // operator who does not know it exists gets the shared-bucket lockout
+        // behind their proxy and no hint that it is fixable.
+        for key in [
+            "username",
+            "password_hash",
+            "api_token",
+            "secure_cookie",
+            "trusted_proxies",
+        ] {
+            assert!(
+                SAMPLE.contains(&format!("# {key} = ")),
+                "sample should document the [auth] setting {key}"
+            );
+        }
         // …and [email] for the same reason: with no table the server sends
         // nothing, which is the right default, so the sample documents the
         // settings without turning mail on for a host that never asked.

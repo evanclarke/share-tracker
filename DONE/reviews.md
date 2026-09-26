@@ -6969,3 +6969,209 @@ open parcel of two).
 Gates at close: `cargo build`, `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`
 clean; `cargo test` 2,636 passed; `node --test 'src/web/*.test.js'` 189 passed; `scripts/ui-smoke.sh`
 all routes rendered.
+
+## Per-commit review of the REST API audit — deferred items (2026-09-26)
+
+Every other finding of that review was fixed (commits `7c5aed1`, `c91dfb3`, and the
+fifteen before them). These were judged out of proportion to the task at hand, or
+need a design decision first. Each says why it was left, so a later pass can weigh
+it rather than rediscover it.
+
+- [x] Enforce *"money and quantities are always `Decimal`, never `f64`"* with a scan
+      test. It is the one rule in CLAUDE.md's Financial correctness section with no
+      test behind it: no `f64` exists in `src` today, and the type-level codec is what
+      makes the outbound money-as-string pin structural, so a money field typed `f64`
+      would defeat both at once — and nothing would fail. `infra::decimal`'s existing
+      `.bind(x.to_string())` scan is the shape to copy. Test: the scan itself, over
+      `src`, with the deliberate non-money `f64`s (if any) allowlisted with reasons.
+      Done: `infra::decimal::tests::no_source_file_types_a_money_or_quantity_as_a_float`
+      scans every `.rs` under `src` for `f64`/`f32` as a whole token, over
+      `test_support::code_only` — a small Rust lexer that blanks comments and string /
+      char literals while keeping line numbers, since the rule is quoted in prose all
+      over the tree (the OpenAPI `DESCRIPTION` spells it out across a dozen
+      `\`-continued lines that a line-by-line comment trim reads as code). The only
+      floats in `src` are the two `visit_f64` arms that *refuse* a JSON number, which
+      `FLOATS_ALLOWED` names with that reason — and an entry matching nothing fails the
+      test, so the scan cannot go vacuous. `code_only` is itself pinned by
+      `code_only_keeps_code_and_drops_prose` beside it.
+- [x] Make `CrudListFilter`'s bind-not-interpolate rule structural. `apply_filter`
+      takes a raw `QueryBuilder`, so `qb.push(format!(" AND ticker = '{v}'"))` compiles
+      and passes every test; all ~14 filters go through `push_eq`/`push_date_range`
+      today by convention only. Either scan `impl CrudListFilter` bodies for a `push(`
+      whose argument is not a literal, or narrow the trait so a filter can only reach
+      the helpers. This repo enforces its comparable rules structurally
+      (`write_side_modules_never_begin_a_deferred_transaction`), which is the argument
+      for doing it. Test: the scan, or the narrowed signature refusing to compile.
+      Done, by narrowing rather than scanning: `apply_filter` now takes an
+      `infra::http::FilterClauses<'_>` whose `QueryBuilder` is private, exposing only
+      `.eq` / `.date_range`. A filter has no method that reaches the SQL text, so no
+      scan and no allowlist are needed, and `qb.push(format!(…))` inside an
+      `apply_filter` no longer names anything. The free `push_eq`/`push_date_range`
+      helpers are gone; the two hand-written filtered reads that also used them
+      (`closing_price::db_list`, `reports::snapshot`'s two date-ranged reads) go through
+      `FilterClauses::over`, so there is one implementation of the binding rather than
+      one inside the trait's reach and one outside it. The behavioural half is
+      `entities::tests::a_filter_value_is_bound_not_interpolated`, over `exchange_mic`
+      (the only free-text filter): a value closing the quote and opening an `OR` matches
+      no row, and the table a `DROP` names is still there afterwards.
+- [x] Derive the OpenAPI route table's remaining hand-maintained fields. `(path, verb)`
+      is pinned both ways, every PUT row's statuses are pinned twice, and the query
+      parameters now come from each route's `Query<T>` type — but ~110 rows' success
+      statuses, request/response schema names and summaries are still typed by hand.
+      The proof this drifts is in the archive: `59bc2e6` had to hand-edit 536 lines when
+      the PUT statuses changed, and nothing would have failed had it not. Deriving them
+      needs handler metadata the tree does not carry (a per-handler attribute, or
+      `utoipa::path` on every handler), so this is a design decision, not a fix.
+      Test: a both-ways comparison per field, as `every_served_route_is_documented_and_nothing_else_is`
+      already does for `(path, verb)`.
+      Done, and the design decision it needed turned out not to be a new per-handler
+      attribute: the handler's own **types** already say all of it, so four scans read
+      them rather than anything being declared twice.
+      `the_generic_crud_routes_derive_their_status_and_schemas` takes the status and
+      response of all ~55 `http::list_handler`/`get_handler`/`delete_handler`
+      registrations off the type parameter (`list_handler::<Listing>` *is*
+      `JsonArray("Listing")`). `every_request_body_matches_its_handlers_extractor` and
+      `every_response_body_matches_its_handlers_return_type` follow every other
+      registration to its `fn` and read the `Json<T>`/`Form<T>` out of the parameter
+      list and the `Json<T>`/`Json<Vec<T>>`/`UpsertResponse<T>`/`StatusCode` out of the
+      return type — both directions, with `#[schema(as = …)]` honoured. The five
+      hand-built `Response`s (two CSV exports, the stylesheet, the attachment download
+      and upload) are classified in `RESPONSES_NOT_DERIVABLE` and the five closure
+      registrations in `UNRESOLVED_HANDLERS`, each with what it answers, so the lists are
+      exhaustive rather than a sample. `the_success_statuses_are_derived_from_the_verb_or_the_handler`
+      covers the statuses: a GET's 200 and a DELETE's 204 from the verb (110 of the 171
+      rows), a POST's from the `StatusCode::…` its handler names, and the PUTs from
+      `entities::PUT_ROUTES` as before.
+      The scans compose `test_support::code_only` over `api_spec`'s `strip_test_modules`,
+      both now blanking byte-for-byte, so a token found in the code can be read back out
+      of the raw source at the same offset — which is how the route path, a string
+      literal, is recovered.
+      Two things stay hand-written, by decision: the **summaries**, which are prose no
+      scan can write (their `?name=` halves are already cross-checked against the real
+      `Query<T>`), and the `POST /login` row's `Form("LoginForm")`, whose handler decodes
+      the form inside its body so it can answer either HTML or plain text.
+      The derivation also found a real defect on its first run: `POST /rba_fx_rates/import`
+      documented its response as `RbaImportSummary` while the handler returns
+      `ImportOutcome` — the summary *plus* the provisional-snapshot true-up that
+      `docs/API.md` has always described. `ImportOutcome` is now a `ToSchema`
+      (`RbaImportOutcome`) and the row records it.
+- [x] Decide the four `api_spec` pins that assert `DESCRIPTION` against `DESCRIPTION`
+      (`the_two_global_rules_…`, the ordering/pagination half of
+      `the_list_reading_contract_…`, `the_put_outcome_rule_…`,
+      `the_list_filtering_contract_…`). Each checks that a documentation *requirement*
+      is met, and the facts they describe are pinned behaviourally elsewhere — so they
+      are not worthless, but they cannot catch a behaviour change and they read like
+      coverage. Either cross-check each against the structural twin (as the error-matrix
+      and POST-for-read halves now are) or say in each doc comment that it is a
+      requirement pin only. Test: whichever is chosen.
+      Done: cross-checked where there is something to cross-check against, and stated
+      as a requirement pin where there is not. `the_two_global_rules_…` now also walks
+      the document it is the preamble to — no component schema advertising a JSON number,
+      every request-body schema denying unknown fields — so the promise is kept, not just
+      typed. `the_put_outcome_rule_…` reads the two single-status exceptions out of
+      `entities::PUT_ROUTES` and checks each is described with its status, so a third one
+      fails until the prose says so. `the_list_filtering_contract_…` reads
+      `entities::LIST_ROUTES` both ways: every list that takes a filter is named in the
+      filtering paragraph, every list that takes none is not, and every filter name is
+      spelled `?name=` there (the /attachments owner ids, described collectively, are the
+      one classified exception). `the_list_reading_contract_…`'s page-size claim is now
+      formatted from `row_history::DEFAULT_BROWSE_LIMIT`/`MAX_BROWSE_LIMIT`, so raising the
+      cap cannot leave the prose behind; its **ordering** clause stays a requirement pin,
+      said so in the doc comment, which names the five per-surface tests that pin the
+      behaviour — deriving that set would mean reflecting over every list's `ORDER_BY`
+      including the hand-written queries' SQL, which no scan can do honestly.
+- [x] Bound the unauthenticated Argon2 work on `POST /login`. The lockout now counts an
+      attempt at the gate, so a source gets 5 verifies per cooldown — but
+      `verify_password` still runs on the async handler with no `spawn_blocking`, and
+      `Argon2::default()` is m=19 MiB, so concurrent first-time attempts from *many*
+      sources are still unbounded transient memory and blocked tokio workers. Not
+      urgent for a single-user deployment behind a proxy; it is the residual behind
+      `docs/API.md`'s and README's "cannot be brute-forced online", which is also worth
+      softening — an IPv6 /48 allocation rotates /64s freely, and the 4096-entry table
+      evicts. Test: a threaded case asserting the concurrent bound (the current
+      `the_gate_counts_each_attempt_rather_than_checking_then_acting` is sequential — it
+      pins the right invariant, but its message claims more than it drives).
+      Done: the verify now runs on `spawn_blocking` under a process-wide semaphore of
+      `MAX_CONCURRENT_VERIFIES` (2) slots, so Argon2's 19 MiB and 30 ms are multiplied by
+      a constant this module chose rather than by however many unauthenticated requests
+      arrived together, and no async worker is blocked. An attempt that waits longer than
+      `VERIFY_QUEUE_WAIT` (2 s) for a slot is refused with the same `429` the lockout
+      answers and `Retry-After: 1` — queueing without a deadline would have traded the
+      memory bound for an unbounded wait. `Auth::verify_password` is now `#[cfg(test)]`,
+      so nothing can reach the inline path by accident.
+      The test is `the_concurrent_verifies_are_bounded`: eight wrong passwords from eight
+      distinct sources submitted at once on a multi-thread runtime, asserting on the peak
+      number of verifies **recorded inside the blocking closure** rather than inferred.
+      Raising the slot count to 8 makes that peak 8, so the semaphore is demonstrably what
+      limits it.
+      The overclaim is corrected too: docs/API.md and README said a single-credential
+      deployment "cannot be brute-forced online", which is stronger than the mechanism
+      supports (behind a proxy every client shares one source; a rotated IPv6 /64 or a
+      4096-source flood buys a budget back). Both now say online guessing is *impractical*
+      and point at where the bound gives, and both describe the verify bound and the
+      second cause of a `429`. `doc_checks::the_login_verify_concurrency_bound_is_documented`
+      pins all of that, including the two consts the prose quotes.
+- [x] Decide whether an **opt-in** `trusted_proxy` / `X-Forwarded-For` setting is wanted.
+      Behind the documented nginx deployment every client shares one bucket, so 6 bad
+      logins every 5 minutes denies the owner the sign-in page indefinitely (the bearer
+      token is the documented escape). "Nothing trusts a forwarded header" is the right
+      default; trusting one *only* when the operator declares the proxy is not the
+      forgeable design the docs reject. Test: per-source isolation through a declared
+      proxy, and that the header is ignored when none is declared.
+      Decided (2026-09-26, Evan): yes, opt-in with the **proxy's address declared** —
+      `[auth] trusted_proxies = ["127.0.0.1", "::1"]`, config-file only like the rest of
+      `[auth]`. `Auth::login_source` reads `X-Forwarded-For` only for a request whose peer
+      is on that list, so a client that is not the declared proxy cannot choose its own
+      lockout bucket by sending the header, and with the list absent nothing trusts it at
+      all (the previous behaviour, unchanged by default). An unparseable entry aborts
+      startup: quietly trusting nothing would leave an operator who *meant* to declare
+      their proxy with the shared-bucket lockout they were fixing.
+      Two limits are stated rather than hidden: the **rightmost** entry is taken, not the
+      leftmost, because nginx's `$proxy_add_x_forwarded_for` appends what it saw and
+      everything left of that is client-supplied text — so exactly **one** hop is trusted;
+      and a declared proxy that forwards nothing usable falls back to itself (the shared
+      bucket), never to the absent-peer `Source::Unknown`, which would pool a proxied
+      deployment with every test client.
+      Five tests: the header ignored with no proxy declared (and a forged one not buying a
+      fresh budget per attempt), per-client isolation through a declared proxy, the
+      rightmost entry being the trusted one, both no-usable-header fallbacks, and a
+      forwarded IPv6 client still keyed on its /64. Plus
+      `infra::config`'s `auth_trusted_proxies_are_parsed_and_a_bad_entry_aborts` and its
+      sample-config key list, which now covers every `[auth]` key.
+      `docs/API.md`, README, `docs/FEATURES.md` and the FreeBSD sample config all describe
+      it, pinned by `doc_checks::the_trusted_proxies_setting_is_documented`.
+- [x] Add `panic_response` to `infra::http`'s `error_cases` table. It is named in the
+      Error-body matrix as a 500 shape but is absent from the one sample table the docs
+      and the OpenAPI description derive from; it returns a `Response` directly, so it
+      is trivially includable. Test: the existing media-type/shape tests covering it
+      like every other case.
+      Done: `error_cases`' rows are now already-built `Response`s rather than `ApiError`s,
+      which is what lets a panic be one of them (there is no `ApiError` a panic becomes —
+      the unwind is caught by the layer). The media-type/shape test and
+      `documented_error_shapes` both read the table unchanged, so the caught-panic `500` is
+      covered like every other case and the docs are derived from a table with nothing
+      outside it.
+- [x] Resolve `/portfolio/open-parcels`' as-of default in one place. The handler resolves
+      `as_of_or_today` and passes `Some(as_of)`; `domain::open_parcels::load` resolves
+      `None` the same way, so the default is stated in the handler, the loader and the
+      docs, and a change to the loader is masked by the handler. Test: the existing
+      boundary tests, with the duplicate branch gone.
+      Done: the handler passes `q.as_of_date` through unresolved and the loader owns the
+      default (it has to — every other caller passes `None`). The masking was the real
+      defect: a change to the loader's default would have left this endpoint on the old one
+      with `api_open_parcels_as_of_date_bounds_the_schedule` still green. That test, which
+      drives the omitted date, explicitly-today and as-at-yesterday, is unchanged and
+      passes.
+- [x] Two stale references, both low: `REQUIREMENTS.md:1361-1362` still specifies
+      `GET /reports/tax-report/years` and `POST /reports/tax-report`, which have answered
+      405 since `ea21d55` (defensible — that file is the historical requirement text —
+      but it is the one live document naming an endpoint that does not exist); and
+      `docs/API.md`'s Server-side pagination limitation dates the filters 2026-09-24
+      against a 2026-09-25 commit. Test: `doc_checks` for whichever wording lands.
+      Done: the pagination entry now dates the filters 2026-09-25, their own commit
+      (`9400e70`), and the existing `doc_checks` assertion pins the corrected line with the
+      reason. `REQUIREMENTS.md` keeps its original requirement text — it is the historical
+      record — with a **Superseded spelling** note beneath it naming what is actually served
+      (`GET /reports/tax_report?tax_year=N`, `GET /reports/tax_report/years`) and why it
+      moved; `doc_checks::the_superseded_tax_report_endpoints_are_marked_as_such` pins both
+      halves.
