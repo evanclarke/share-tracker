@@ -1931,6 +1931,8 @@ Every other report read takes its parameters as query-string fields and answers 
 
 **Filters.** The workhorse entity lists are narrowed **server-side**, each accepting the parameters its own columns offer, so a client no longer fetches a whole table to filter it. The date bounds are **inclusive at both ends**, the convention `GET /closing_prices?from=&to=` set; an entity list whose columns offer no such filter takes none. `/interest_income` has no listing (see [Interest income](#interest-income)), and `/corporate_actions`, `/transfers` and `/distribution_events` have no holding account, so those lists simply do not name it.
 
+**String filters compare exactly.** `?exchange_mic=`/`?security_type=` and the other text filters are byte-for-byte and **case-sensitive** (plain SQL `=`, no `NOCASE`), so `?exchange_mic=xasx` matches nothing — spell a code the way the row stores it (`XASX`). An id or date parameter is unaffected; this is the text columns only.
+
 **A filter matches recorded values only.** [`investment_expenses`](#investment-expenses)'s `listing_id`/`holding_account_id` and [`interest_income`](#interest-income)'s `holding_account_id` are nullable by design — a `NULL` is a **portfolio-wide** amount that belongs to no single listing or account (an adviser's whole-of-portfolio fee, say) — and `?listing_id=`/`?holding_account_id=` compares equality, so those rows match no value and are **excluded from the filtered result**. The response does not flag it: the array is simply smaller. So iterating `?holding_account_id=N` over the accounts totals what is *attributed to* each account, not every amount in the portfolio — to include the un-attributed rows, read the unfiltered list and take the `NULL`-owner ones, or query the relevant report, which aggregates them in full.
 
 | List | Query parameters |
@@ -1952,6 +1954,8 @@ Every other report read takes its parameters as query-string fields and answers 
 | `/closing_prices` | `listing_id`, `from`/`to` over `price_date`, `status` (`ok` or `error`) |
 | `/attachments` | `trade_id`, `income_id`, `amma_statement_id`, `ess_statement_id`, `interest_income_id`, `corporate_action_id`, `include_linked` |
 | `/report_snapshots` | `report`, `from`/`to` over `snapshot_date` |
+| `/report_snapshots/series` | `listing_id` |
+| `/report_snapshots/holding_series` | `from`/`to` over `snapshot_date` |
 
 Several filters on one request **AND** together, and a filter matching nothing is an empty `200` array — never a `404`. A list whose columns offer no filter takes **none**: `/exchanges`, `/currencies`, `/mic_registry`, `/rba_fx_rates`, `/holding_accounts`, `/cgt_settings` and `/tax_year_settings` are reference or settings tables read whole (each has a keyed `GET-one` for a single row). Two hand-written lists decode **no query string at all**, so they accept no filter and refuse nothing: `/rights_sales` and `/exchange_holidays` return the whole table whatever parameters are appended — `GET /rights_sales?listing_id=3` is the unfiltered list, so a client must filter those by `listing_id` itself. An **unrecognised parameter is refused `400` naming it on every list route that decodes a query string** — including those unfiltered ones, which refuse *any* parameter at all rather than silently ignoring it (see [Response codes](#response-codes) and [Unrecognised body fields](#unrecognised-body-fields)).
 

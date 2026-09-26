@@ -111,6 +111,14 @@ fn report_path_namespace_case_rule_documented() {
     // pinned by `reports::tests::report_paths_use_their_namespace_case`).
     assert!(section.contains("GET  /reports/tax_report/years"));
     assert!(section.contains("GET  /reports/tax_report?tax_year=2026"));
+    // …and the old kebab path survives in exactly one place: its dated change
+    // note. A reintroduction anywhere else (a route table, a request example)
+    // pushes the count past one and fails.
+    assert_eq!(
+        API_MD.matches("/reports/tax-report").count(),
+        1,
+        "the pre-audit `/reports/tax-report` path may appear only in its dated change note"
+    );
 }
 
 /// Docs-sync pin for the strict decoding of request bodies (SCENARIOS V-a):
@@ -332,6 +340,9 @@ fn list_filtering_contract_documented() {
         section.contains("**A filter matches recorded values only.**"),
         "the Filters contract must state that a NULL owner matches no value"
     );
+    // String filters are plain case-sensitive equality, not NOCASE.
+    assert!(section.contains("**String filters compare exactly.**"));
+    assert!(section.contains("`?exchange_mic=xasx` matches nothing"));
     assert!(section.contains("a `NULL` is a **portfolio-wide** amount"));
     assert!(section.contains("are **excluded from the filtered result**"));
     assert!(section.contains("**inclusive at both ends**"));
@@ -379,11 +390,20 @@ fn list_filtering_contract_documented() {
     let mut documented: Vec<String> = filter_rows.iter().map(|(p, _)| p.clone()).collect();
     documented.sort();
     let mut expected: Vec<String> = filtered.iter().map(|(p, _)| format!("`{p}`")).collect();
-    expected.push("`/report_snapshots`".to_string());
+    // …plus the three `/report_snapshots/*` reads, which are their own
+    // resource surface rather than entity lists.
+    for path in [
+        "`/report_snapshots`",
+        "`/report_snapshots/series`",
+        "`/report_snapshots/holding_series`",
+    ] {
+        expected.push(path.to_string());
+    }
     expected.sort();
     assert_eq!(
         documented, expected,
-        "the filters table must name exactly the filtered list routes plus `/report_snapshots`"
+        "the filters table must name exactly the filtered list routes plus the three \
+         `/report_snapshots/*` reads"
     );
     // The unfiltered entity lists are named as read whole, so the
     // classification is stated rather than left to be discovered.
