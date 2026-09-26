@@ -25,7 +25,7 @@
 //! other one, so `require_auth` gates it and `/openapi.json` is deliberately
 //! *not* on that layer's login-page allowlist.
 
-use axum::{Json, Router, routing::get};
+use axum::{Router, routing::get};
 use sqlx::SqlitePool;
 use utoipa::openapi::{
     Components, ComponentsBuilder, InfoBuilder, OpenApi, OpenApiBuilder, Paths, RefOr, Required,
@@ -34,6 +34,9 @@ use utoipa::openapi::{
     request_body::{RequestBody, RequestBodyBuilder},
     response::{Response, ResponseBuilder, ResponsesBuilder},
     schema::{AdditionalProperties, ArrayBuilder, ObjectBuilder, Ref, Schema, Type},
+    security::{
+        ApiKey, ApiKeyValue, HttpAuthScheme, HttpBuilder, SecurityRequirement, SecurityScheme,
+    },
 };
 use utoipa::{PartialSchema, ToSchema};
 
@@ -128,7 +131,7 @@ The document itself is generated from the route table and the serde structs in \
 src/api_spec.rs and is pinned by that module's tests.";
 
 /// The four HTTP verbs the server uses, as the table spells them.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Verb {
     Get,
     Post,
@@ -1584,10 +1587,24 @@ const ROUTES: &[RouteRow] = &[
 ];
 
 /// The OpenAPI 3.1 document, assembled from [`ROUTES`] and the schemas the
-/// referenced types derive.
+/// referenced types derive — the auth-on, root-path form the tests read.
+#[cfg(test)]
 pub fn document() -> OpenApi {
+    document_for("", true)
+}
+
+/// [`document`] for a deployment: `base_path` becomes the document's `servers`
+/// entry (so a client resolves the paths against the prefix the app is really
+/// mounted under), and `auth` decides whether the authentication scheme and the
+/// `[auth]`-only routes are published. A deployment without `[auth]` has no
+/// `/login` or `/logout` route at all, so advertising them would send a client
+/// at a 404.
+pub fn document_for(base_path: &str, auth: bool) -> OpenApi {
     let mut paths = Paths::new();
     for &(verb, path, statuses, summary, request, response) in ROUTES {
+        if !auth && matches!(path, "/login" | "/logout") {
+            continue;
+        }
         let operation = operation(verb, path, statuses, summary, request, response);
         paths.add_path_operation(path, vec![verb.http()], operation);
     }
@@ -1605,7 +1622,8 @@ pub fn document() -> OpenApi {
         );
         paths.add_path_operation(path, vec![HttpMethod::Get], operation);
     }
-    OpenApiBuilder::new()
+    let server_url = if base_path.is_empty() { "/" } else { base_path };
+    let mut builder = OpenApiBuilder::new()
         .info(
             InfoBuilder::new()
                 .title("share-tracker API")
@@ -1614,8 +1632,19 @@ pub fn document() -> OpenApi {
                 .build(),
         )
         .paths(paths)
-        .components(Some(components()))
-        .build()
+        .components(Some(components(auth)))
+        .servers(Some(vec![
+            utoipa::openapi::ServerBuilder::new()
+                .url(server_url)
+                .build(),
+        ]));
+    if auth {
+        builder = builder.security(Some(vec![
+            SecurityRequirement::new("sessionCookie", Vec::<String>::new()),
+            SecurityRequirement::new("bearerAuth", Vec::<String>::new()),
+        ]));
+    }
+    builder.build()
 }
 
 /// Register a type's own schema and every schema it recursively references.
@@ -1635,22 +1664,42 @@ macro_rules! register_schemas {
 /// plus everything those types reference recursively. A type with no entry
 /// here cannot be reached by a `$ref`, and a `$ref` whose name has no entry
 /// fails `every_referenced_schema_is_registered_and_uniquely_named`.
-fn components() -> Components {
-    let mut unique: Vec<(String, RefOr<Schema>)> = Vec::new();
+///
+/// A name reached twice with the **same** schema is expected — the recursive
+/// collection registers it once per path — so the merge takes the first and
+/// moves on. Two *different* schemas under one name is the error the
+/// uniqueness test pins, deliberately not a runtime `assert!` in a request
+/// path (which would panic inside a handler for an invariant the test already
+/// covers). The `BTreeMap` also makes the merge O(n log n) rather than the
+/// `Vec::iter().find` scan this replaced.
+fn components(auth: bool) -> Components {
+    let mut by_name: std::collections::BTreeMap<String, RefOr<Schema>> =
+        std::collections::BTreeMap::new();
     for (name, schema) in component_schemas() {
-        match unique.iter().find(|(existing, _)| *existing == name) {
-            // Two distinct Rust types with the same name would silently
-            // overwrite one another in the component map, and whichever
-            // `$ref` lost would describe the wrong fields. Rename one with
-            // `#[schema(as = …)]`; the uniqueness test names the pair.
-            Some((_, existing)) => assert!(
-                *existing == schema,
-                "two different schemas are registered under the component name `{name}`"
-            ),
-            None => unique.push((name, schema)),
-        }
+        by_name.entry(name).or_insert(schema);
     }
-    ComponentsBuilder::new().schemas_from_iter(unique).build()
+    let mut components = ComponentsBuilder::new().schemas_from_iter(by_name).build();
+    if auth {
+        // The two credentials docs/API.md documents: the session cookie the
+        // browser carries, and the bearer token the deployment scripts send
+        // (`Authorization: Bearer <api_token>`). Named here so a generated
+        // client can be configured rather than guessing.
+        let mut schemes = std::collections::BTreeMap::new();
+        schemes.insert(
+            "bearerAuth".to_string(),
+            RefOr::T(SecurityScheme::Http(
+                HttpBuilder::new().scheme(HttpAuthScheme::Bearer).build(),
+            )),
+        );
+        schemes.insert(
+            "sessionCookie".to_string(),
+            RefOr::T(SecurityScheme::ApiKey(ApiKey::Cookie(ApiKeyValue::new(
+                "st_session",
+            )))),
+        );
+        components.security_schemes = schemes;
+    }
+    components
 }
 
 /// Every type the route table references, as `(component name, schema)` pairs
@@ -1826,15 +1875,106 @@ fn operation(
                 )
                 .build(),
         );
+    } else if verb == Verb::Post && matches!(request, Body::Other(_)) {
+        // A multipart upload or a bare-text feed: not a JSON struct, so the
+        // deny-unknown-fields rule above cannot describe it, but it answers 422
+        // when the payload cannot be read or parsed.
+        responses = responses.response(
+            "422".to_string(),
+            ResponseBuilder::new()
+                .description(
+                    "The payload could not be read or parsed: the body is the plain-text reason.",
+                )
+                .build(),
+        );
+    }
+    // A route addressed by a path parameter can answer 404 — the row the path
+    // names does not exist. A GET-one's is the **empty** body; a DELETE's or an
+    // operation's carries the plain-text reason. Recorded here rather than in
+    // every row, and by description because neither shape is a schema.
+    if path.contains('{') && matches!(verb, Verb::Get | Verb::Post | Verb::Delete) {
+        responses = responses.response(
+            "404".to_string(),
+            ResponseBuilder::new()
+                .description(if verb == Verb::Get {
+                    "No such row. The body is empty."
+                } else {
+                    "No such row: the body is the plain-text reason."
+                })
+                .build(),
+        );
+    }
+    // The feed-import and provider-fetch routes can answer 502 when their
+    // upstream cannot be reached (`ApiError::BadGateway`).
+    if matches!(verb, Verb::Post)
+        && (path.ends_with("/import") || path.ends_with("/fetch") || path.ends_with("/backfill"))
+    {
+        responses = responses.response(
+            "502".to_string(),
+            ResponseBuilder::new()
+                .description(
+                    "The upstream feed or price provider could not be reached: the body is the \
+                     plain-text reason.",
+                )
+                .build(),
+        );
     }
     let mut builder = OperationBuilder::new()
         .summary(Some(summary))
-        .parameters(Some(path_parameters(path)))
+        .parameters(Some(operation_parameters(path, summary)))
         .responses(responses.build());
     if let Some(body) = request_body(request) {
         builder = builder.request_body(Some(body));
     }
     builder.build()
+}
+
+/// Every parameter of an operation: a required string per `{name}` path
+/// segment, plus an optional query parameter for every `?name=` the summary
+/// names.
+///
+/// Deriving the query parameters from the summary means the two cannot
+/// disagree: a filter added to a list must appear in that list's summary
+/// (`every_filtered_list_summary_names_its_filters` pins it against the entity
+/// classification table), and it then reaches the document automatically. The
+/// document previously declared **no** query parameter at all, so a generated
+/// client could not narrow a list or pass a report's date.
+fn operation_parameters(path: &str, summary: &str) -> Vec<Parameter> {
+    let mut parameters = path_parameters(path);
+    parameters.extend(query_parameters(summary));
+    parameters
+}
+
+/// The optional query parameters a summary names, read out of its `?name=`
+/// tokens. Deduplicated, since a summary may mention one twice (`?from=` …
+/// `?to=` appears in one sentence).
+fn query_parameters(summary: &str) -> Vec<Parameter> {
+    let mut names: Vec<String> = Vec::new();
+    let mut rest = summary;
+    while let Some(at) = rest.find('?') {
+        rest = &rest[at + 1..];
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        if name.is_empty() || !rest[name.len()..].starts_with('=') {
+            continue;
+        }
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
+        .into_iter()
+        .map(|name| {
+            ParameterBuilder::new()
+                .name(name)
+                .parameter_in(ParameterIn::Query)
+                .required(Required::False)
+                .schema(Some(ObjectBuilder::new().schema_type(Type::String)))
+                .build()
+        })
+        .collect()
 }
 
 /// A required string path parameter per `{name}` segment of the path — read
@@ -1967,16 +2107,29 @@ fn json_content(schema: RefOr<Schema>) -> utoipa::openapi::Content {
     ContentBuilder::new().schema(Some(schema)).build()
 }
 
-/// The document as JSON — what `GET /openapi.json` answers.
-async fn openapi_json() -> Json<OpenApi> {
-    Json(document())
-}
-
 /// `GET /openapi.json`. Merged into `app::router` like every other router, so
 /// `[auth]`'s `require_auth` gates it and it is deliberately absent from that
 /// layer's login-page allowlist.
-pub fn router() -> Router<SqlitePool> {
-    Router::new().route("/openapi.json", get(openapi_json))
+///
+/// The document (200+ schemas, ~130 paths) is built and serialised **once**,
+/// when the router is assembled, and each request clones the finished JSON
+/// string — not rebuilt per request as it was.
+pub fn router(base_path: &str, auth: bool) -> Router<SqlitePool> {
+    let body = std::sync::Arc::new(
+        serde_json::to_string(&document_for(base_path, auth)).expect("the document serialises"),
+    );
+    Router::new().route(
+        "/openapi.json",
+        get(move || {
+            let body = body.clone();
+            async move {
+                (
+                    [(axum::http::header::CONTENT_TYPE, "application/json")],
+                    (*body).clone(),
+                )
+            }
+        }),
+    )
 }
 
 /// Every **id-keyed collection create** the route table documents — a
@@ -2680,6 +2833,161 @@ mod tests {
         assert!(doc["info"]["title"].is_string());
         assert!(doc["info"]["version"].is_string());
         assert!(doc["paths"].is_object());
+    }
+
+    /// Every filtered entity list's parameters reach the document as real
+    /// `in: query` parameters, and so do the report reads' own. The document
+    /// declared **no** query parameter at all before this, so a generated
+    /// client could not narrow a list or pass a report's date and answered a
+    /// `422` the contract never mentioned.
+    #[test]
+    fn every_query_parameter_reaches_the_document() {
+        let doc = doc();
+        let query_names = |path: &str, method: &str| -> Vec<String> {
+            doc["paths"][path][method]["parameters"]
+                .as_array()
+                .map(|params| {
+                    params
+                        .iter()
+                        .filter(|p| p["in"] == "query")
+                        .filter_map(|p| p["name"].as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        for (path, params) in crate::entities::filtered_list_routes() {
+            let declared = query_names(path, "get");
+            for param in params {
+                assert!(
+                    declared.iter().any(|d| d == param),
+                    "the document must declare ?{param}= on GET {path}: {declared:?}"
+                );
+            }
+        }
+        // The report reads the review named, each of which survives only as
+        // English in the summary without this.
+        for (path, param) in [
+            ("/portfolio/open-parcels", "as_of_date"),
+            ("/reports/tax_report", "tax_year"),
+            ("/reports/row_history", "before_id"),
+            ("/portfolio/activity", "listing_id"),
+        ] {
+            assert!(
+                query_names(path, "get").iter().any(|d| d == param),
+                "the document must declare ?{param}= on GET {path}"
+            );
+        }
+    }
+
+    /// The document carries the **non-success** responses a client must handle,
+    /// not only the success ones: a `404` on every path-addressed
+    /// GET/POST/DELETE, and a `502` on the feed-import and provider-fetch
+    /// routes. It used to be success-only, so a generated client treated every
+    /// documented 404 (and the imports' 502) as an unexpected status.
+    #[test]
+    fn non_success_responses_are_documented() {
+        let doc = doc();
+        let has = |path: &str, method: &str, status: &str| -> bool {
+            doc["paths"][path][method]["responses"]
+                .get(status)
+                .is_some()
+        };
+        // A path-addressed read, delete and operation each carry a 404.
+        assert!(has("/listings/{id}", "get", "404"));
+        assert!(has("/listings/{id}", "delete", "404"));
+        assert!(has("/income/{id}/reinvest", "post", "404"));
+        // The two upstream-facing creates carry a 502.
+        assert!(has("/rba_fx_rates/import", "post", "502"));
+        assert!(has("/closing_prices/fetch", "post", "502"));
+        // …and the bare-text import feeds carry the 422 a bad payload answers.
+        assert!(has("/rba_fx_rates/import", "post", "422"));
+        assert!(has("/currencies/import", "post", "422"));
+    }
+
+    /// The whole document — schemas, not just the one field an assertion names —
+    /// advertises no JSON number, so no money or quantity field can be sent or
+    /// read as an `f64`. The `rust_decimal` codec renders every `Decimal` as a
+    /// string; this is the non-vacuous version of the `TradeBody.average_price`
+    /// spot check, and it fails on an added `f64` field or a switch to the
+    /// `decimal_float` feature.
+    #[test]
+    fn no_component_schema_advertises_a_json_number() {
+        let doc = doc();
+        let mut numbers = Vec::new();
+        collect_number_schemas(&doc["components"]["schemas"], &mut numbers);
+        assert!(
+            numbers.is_empty(),
+            "these schemas advertise a JSON number, so a tax figure could travel as an f64: \
+             {numbers:?}"
+        );
+    }
+
+    fn collect_number_schemas(value: &Value, out: &mut Vec<String>) {
+        match value {
+            Value::Object(map) => {
+                if map.get("type").and_then(Value::as_str) == Some("number") {
+                    out.push(serde_json::to_string(value).unwrap_or_default());
+                }
+                for child in map.values() {
+                    collect_number_schemas(child, out);
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    collect_number_schemas(item, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The document publishes where it is mounted and what authenticates it: a
+    /// `base_path` deployment must not list root-relative paths (which would
+    /// 404), and an `[auth]` deployment must name the cookie and bearer schemes
+    /// a client has to send. An auth-less deployment advertises neither, and
+    /// omits the `/login`/`/logout` routes it does not serve.
+    #[test]
+    fn the_document_publishes_its_server_and_security() {
+        let rooted = serde_json::to_value(document_for("", true)).expect("serialises");
+        assert_eq!(rooted["servers"][0]["url"], "/");
+        assert!(rooted["components"]["securitySchemes"]["bearerAuth"].is_object());
+        assert!(rooted["components"]["securitySchemes"]["sessionCookie"].is_object());
+        assert!(
+            rooted["security"].as_array().is_some_and(|s| !s.is_empty()),
+            "an auth deployment must carry a global security requirement"
+        );
+
+        let prefixed = serde_json::to_value(document_for("/share_tracker", true)).expect("ser");
+        assert_eq!(
+            prefixed["servers"][0]["url"], "/share_tracker",
+            "a base-path deployment must publish the prefix its paths resolve against"
+        );
+
+        let open = serde_json::to_value(document_for("", false)).expect("serialises");
+        assert!(
+            open["components"]
+                .get("securitySchemes")
+                .is_none_or(|s| s.as_object().is_none_or(|m| m.is_empty())),
+            "an auth-less deployment must declare no security scheme"
+        );
+        assert!(open["paths"].get("/login").is_none());
+        assert!(open["paths"].get("/logout").is_none());
+    }
+
+    /// No `(verb, path)` is registered twice: `Paths::add_path_operation`
+    /// silently overwrites the earlier row, and the coverage test reads the
+    /// collapsed map, so a duplicate would document only the later row with
+    /// nothing failing.
+    #[test]
+    fn every_route_row_is_unique() {
+        let mut seen = std::collections::BTreeSet::new();
+        for (verb, path, ..) in ROUTES {
+            assert!(
+                seen.insert((format!("{verb:?}"), *path)),
+                "ROUTES names `{path}` twice for {verb:?}; the later row silently overwrites \
+                 the earlier in the document"
+            );
+        }
     }
 
     /// Serve check: the full application answers `GET /openapi.json` with the

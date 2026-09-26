@@ -37,7 +37,7 @@ pub fn router(
     let mut app = crate::entities::router()
         .merge(crate::reports::router())
         .merge(scheduler::router())
-        .merge(crate::api_spec::router())
+        .merge(crate::api_spec::router(base_path, auth.is_some()))
         .merge(crate::web::router(base_path, auth.is_some()));
     if let Some(auth) = &auth {
         app = app.merge(crate::infra::auth::router(auth.clone(), base_path));
