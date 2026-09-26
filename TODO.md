@@ -31,13 +31,23 @@ fifteen before them). These were judged out of proportion to the task at hand, o
 need a design decision first. Each says why it was left, so a later pass can weigh
 it rather than rediscover it.
 
-- [ ] Enforce *"money and quantities are always `Decimal`, never `f64`"* with a scan
+- [x] Enforce *"money and quantities are always `Decimal`, never `f64`"* with a scan
       test. It is the one rule in CLAUDE.md's Financial correctness section with no
       test behind it: no `f64` exists in `src` today, and the type-level codec is what
       makes the outbound money-as-string pin structural, so a money field typed `f64`
       would defeat both at once — and nothing would fail. `infra::decimal`'s existing
       `.bind(x.to_string())` scan is the shape to copy. Test: the scan itself, over
       `src`, with the deliberate non-money `f64`s (if any) allowlisted with reasons.
+      Done: `infra::decimal::tests::no_source_file_types_a_money_or_quantity_as_a_float`
+      scans every `.rs` under `src` for `f64`/`f32` as a whole token, over
+      `test_support::code_only` — a small Rust lexer that blanks comments and string /
+      char literals while keeping line numbers, since the rule is quoted in prose all
+      over the tree (the OpenAPI `DESCRIPTION` spells it out across a dozen
+      `\`-continued lines that a line-by-line comment trim reads as code). The only
+      floats in `src` are the two `visit_f64` arms that *refuse* a JSON number, which
+      `FLOATS_ALLOWED` names with that reason — and an entry matching nothing fails the
+      test, so the scan cannot go vacuous. `code_only` is itself pinned by
+      `code_only_keeps_code_and_drops_prose` beside it.
 - [ ] Make `CrudListFilter`'s bind-not-interpolate rule structural. `apply_filter`
       takes a raw `QueryBuilder`, so `qb.push(format!(" AND ticker = '{v}'"))` compiles
       and passes every test; all ~14 filters go through `push_eq`/`push_date_range`

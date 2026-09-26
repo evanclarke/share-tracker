@@ -649,6 +649,106 @@ mod tests {
         );
     }
 
+    /// The one rule in CLAUDE.md's Financial correctness section that had no
+    /// test behind it: *"money and quantities are always `Decimal`, never
+    /// `f64`"*. Both of the structural pins over money are **type**-level —
+    /// the [`Money`]/[`OptMoney`] codec on the way to SQLite, and
+    /// `rust_decimal`'s string `Serialize` on the way out — so a money field
+    /// declared `f64` would defeat both at once and fail nothing: it binds and
+    /// serialises perfectly well as a JSON number. There is no float in `src`
+    /// today; this is what keeps it that way.
+    ///
+    /// Deliberately the whole float family and the whole tree, rather than the
+    /// money fields alone: there is no way to tell from a scan whether a new
+    /// `f64` holds money, and a float has had no legitimate use here yet. The
+    /// two entries below are the exceptions, each a float the project is
+    /// *refusing* rather than computing with.
+    #[test]
+    fn no_source_file_types_a_money_or_quantity_as_a_float() {
+        // (file, the code the line must contain, why the float belongs there)
+        const FLOATS_ALLOWED: &[(&str, &str, &str)] = &[(
+            "infra/decimal.rs",
+            "fn visit_f64",
+            "the serde visitor arm that refuses a JSON number — serde_json picks the \
+             visitor by the literal's shape, so the f64 signature is how the refusal is \
+             reached at all",
+        )];
+        // Assembled so this test's own text is not what it reports.
+        let floats = [format!("f{}", 64), format!("f{}", 32)];
+        let mut offenders = Vec::new();
+        let mut allowed_hits = vec![0usize; FLOATS_ALLOWED.len()];
+        for (file, body) in crate::test_support::rust_sources() {
+            for (n, line) in crate::test_support::code_only(&body).lines().enumerate() {
+                let hit = floats.iter().any(|f| {
+                    line.match_indices(f.as_str()).any(|(at, _)| {
+                        let before = line[..at].chars().next_back();
+                        let after = line[at + f.len()..].chars().next();
+                        !matches!(before, Some(c) if c.is_alphanumeric() || c == '_')
+                            && !matches!(after, Some(c) if c.is_alphanumeric() || c == '_')
+                    })
+                });
+                if !hit {
+                    continue;
+                }
+                let code = line.trim();
+                if let Some(i) = FLOATS_ALLOWED
+                    .iter()
+                    .position(|(f, needle, _)| *f == file && code.contains(needle))
+                {
+                    allowed_hits[i] += 1;
+                    continue;
+                }
+                offenders.push(format!("{file}:{}: {code}", n + 1));
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "money and quantities are always Decimal, never f64 — a float cannot hold a \
+             tax figure, and it defeats both the Money codec and the money-as-a-string \
+             rule at once; if the value is genuinely not money, name the line in \
+             FLOATS_ALLOWED with the reason:\n{}",
+            offenders.join("\n")
+        );
+        // An allowlist entry that matches nothing would mean the scan has
+        // stopped seeing code: these two lines are the only floats in the tree,
+        // so finding them is the proof it is reading Rust and not blanks.
+        for (hits, (file, needle, _)) in allowed_hits.iter().zip(FLOATS_ALLOWED) {
+            assert!(
+                *hits > 0,
+                "FLOATS_ALLOWED names {file}'s `{needle}`, which the scan no longer finds — \
+                 either the line is gone (drop the entry) or the scan has stopped parsing"
+            );
+        }
+    }
+
+    /// [`crate::test_support::code_only`] is what makes the scan above
+    /// non-vacuous in both directions, so it is pinned here beside it: prose
+    /// naming a float is not an offender, and code holding one is — including
+    /// across the `\`-continued multi-line strings the OpenAPI description is
+    /// written as, which a line-by-line comment trim would read as code.
+    #[test]
+    fn code_only_keeps_code_and_drops_prose() {
+        let src = "let a: f64 = 1.0; // comment f64\n\
+                   let s = \"a string f64\";\n\
+                   let r = r#\"raw \"f64\" here\"#;\n\
+                   /* block\n   f64 in it */\n\
+                   let c = '\"';\n\
+                   fn f<'a>(x: &'a str) -> f64 { 0.0 }\n";
+        let code = crate::test_support::code_only(src);
+        let lines: Vec<&str> = code.lines().collect();
+        assert_eq!(src.lines().count(), lines.len(), "line count preserved");
+        assert!(lines[0].contains("let a: f64 = 1.0;"), "{:?}", lines[0]);
+        assert!(!lines[0].contains("comment"), "{:?}", lines[0]);
+        assert!(!lines[1].contains("f64"), "{:?}", lines[1]);
+        assert!(!lines[2].contains("f64"), "{:?}", lines[2]);
+        assert!(!lines[3].contains("block") && !lines[4].contains("f64"));
+        // The `"` inside a char literal must not open a string.
+        assert!(lines[5].contains("let c ="), "{:?}", lines[5]);
+        // …which the next line proves: a lifetime is code, and so is the float.
+        assert!(lines[6].contains("-> f64"), "{:?}", lines[6]);
+        assert!(lines[6].contains("'a str"), "{:?}", lines[6]);
+    }
+
     // -----------------------------------------------------------------------
     // The pro-rating helper
     // -----------------------------------------------------------------------

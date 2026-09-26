@@ -1367,6 +1367,153 @@ pub fn rust_sources() -> Vec<(String, String)> {
     found
 }
 
+/// `source` with every comment and every string / char literal blanked out,
+/// keeping the line structure intact so a scan can still report `file:line`.
+///
+/// The source-scanning tests all look for a token *in code*, and a token named
+/// in prose is not an offender: `infra::decimal`'s money-`f64` scan would fail
+/// on the very doc comment stating the rule, and on the `docs/API.md`
+/// assertions quoting it, if it read the file as plain text. Line-by-line
+/// comment trimming is not enough either — the OpenAPI description's
+/// `\`-continued multi-line string spells the word out in prose across a dozen
+/// lines that each look like code. So this walks the file as Rust lexes it:
+/// line and (nestable) block comments, `"…"`, `r#"…"#`, `b"…"` and char
+/// literals all become spaces, with `'a` lifetimes left alone.
+pub fn code_only(source: &str) -> String {
+    let chars: Vec<char> = source.chars().collect();
+    let at = |i: usize| chars.get(i).copied();
+    let mut out = String::with_capacity(source.len());
+    // Whatever is consumed as prose is replaced one-for-one, newlines kept, so
+    // every line of the result is the line of the same number in the input.
+    let blank = |out: &mut String, c: char| out.push(if c == '\n' { '\n' } else { ' ' });
+    let mut i = 0;
+    while let Some(c) = at(i) {
+        // A line comment runs to the newline, which is kept as the terminator.
+        if c == '/' && at(i + 1) == Some('/') {
+            while let Some(c) = at(i) {
+                if c == '\n' {
+                    break;
+                }
+                blank(&mut out, c);
+                i += 1;
+            }
+            continue;
+        }
+        // Block comments nest in Rust, so count depth rather than stopping at
+        // the first `*/`.
+        if c == '/' && at(i + 1) == Some('*') {
+            let mut depth = 0usize;
+            while let Some(c) = at(i) {
+                if c == '/' && at(i + 1) == Some('*') {
+                    depth += 1;
+                    out.push_str("  ");
+                    i += 2;
+                } else if c == '*' && at(i + 1) == Some('/') {
+                    depth -= 1;
+                    out.push_str("  ");
+                    i += 2;
+                    if depth == 0 {
+                        break;
+                    }
+                } else {
+                    blank(&mut out, c);
+                    i += 1;
+                }
+            }
+            continue;
+        }
+        // A raw string's `r`/`br` prefix is only a prefix when it does not
+        // continue an identifier (`for`, `char`, `expr` all end in one).
+        let starts_token =
+            i == 0 || !matches!(at(i - 1), Some(p) if p.is_alphanumeric() || p == '_');
+        let raw_prefix = starts_token
+            && (c == 'r' || (c == 'b' && at(i + 1) == Some('r')))
+            && matches!(at(i + if c == 'b' { 2 } else { 1 }), Some('"' | '#'));
+        if raw_prefix {
+            let mut j = i + if c == 'b' { 2 } else { 1 };
+            let mut hashes = 0usize;
+            while at(j) == Some('#') {
+                hashes += 1;
+                j += 1;
+            }
+            if at(j) == Some('"') {
+                // The terminator is a quote followed by the same hash count.
+                while i < j {
+                    blank(&mut out, chars[i]);
+                    i += 1;
+                }
+                blank(&mut out, chars[i]);
+                i += 1;
+                loop {
+                    match at(i) {
+                        None => break,
+                        Some('"') if (1..=hashes).all(|h| at(i + h) == Some('#')) => {
+                            for _ in 0..=hashes {
+                                out.push(' ');
+                                i += 1;
+                            }
+                            break;
+                        }
+                        Some(c) => {
+                            blank(&mut out, c);
+                            i += 1;
+                        }
+                    }
+                }
+                continue;
+            }
+        }
+        // An ordinary (or byte) string, `\`-escaped and possibly multi-line.
+        if c == '"' || (c == 'b' && at(i + 1) == Some('"') && starts_token) {
+            if c == 'b' {
+                out.push(' ');
+                i += 1;
+            }
+            out.push(' ');
+            i += 1;
+            while let Some(c) = at(i) {
+                if c == '\\' {
+                    out.push(' ');
+                    blank(&mut out, at(i + 1).unwrap_or(' '));
+                    i += 2;
+                    continue;
+                }
+                blank(&mut out, c);
+                i += 1;
+                if c == '"' {
+                    break;
+                }
+            }
+            continue;
+        }
+        // `'` opens a char literal only when it closes again; otherwise it is a
+        // lifetime (`'de`, `'static`) and stays as written.
+        let char_literal = c == '\''
+            && (at(i + 1) == Some('\\') || (at(i + 1).is_some() && at(i + 2) == Some('\'')));
+        if char_literal {
+            out.push(' ');
+            i += 1;
+            while let Some(c) = at(i) {
+                if c == '\\' {
+                    out.push(' ');
+                    blank(&mut out, at(i + 1).unwrap_or(' '));
+                    i += 2;
+                    continue;
+                }
+                blank(&mut out, c);
+                i += 1;
+                if c == '\'' {
+                    break;
+                }
+            }
+            continue;
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
 /// Tests of the fixtures themselves — specifically [`ApiClient`], whose whole
 /// job is to say what a hand-rolled `Request::builder()` block used to say.
 /// Every verb is driven against the real application router, so a change that
