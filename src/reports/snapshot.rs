@@ -285,8 +285,9 @@ pub async fn db_list(
                 holding_excluded, excluded_holdings \
          FROM report_snapshots WHERE 1=1",
     );
-    crate::infra::http::push_eq(&mut qb, "report", report);
-    crate::infra::http::push_date_range(&mut qb, "snapshot_date", from, to);
+    crate::infra::http::FilterClauses::over(&mut qb)
+        .eq("report", report)
+        .date_range("snapshot_date", from, to);
     qb.push(" ORDER BY snapshot_date, report");
     qb.build_query_as().fetch_all(pool).await
 }
@@ -450,7 +451,7 @@ pub async fn db_holding_series(
         "SELECT snapshot_date, rows_json FROM report_snapshots \
          WHERE report = 'unrealised_gains'",
     );
-    crate::infra::http::push_date_range(&mut qb, "snapshot_date", from, to);
+    crate::infra::http::FilterClauses::over(&mut qb).date_range("snapshot_date", from, to);
     qb.push(" ORDER BY snapshot_date");
     let rows = qb.build().fetch_all(pool).await?;
 

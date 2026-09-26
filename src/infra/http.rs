@@ -366,50 +366,97 @@ pub fn panic_response(err: Box<dyn std::any::Any + Send + 'static>) -> Response 
 /// on `CrudEntity` — would let a mis-wired entity accept a parameter and drop
 /// it, which is exactly the failure this item exists to prevent.
 ///
-/// [`Self::apply_filter`] appends its `AND …` clauses to a query builder whose
-/// statement has already been opened with `WHERE 1=1` (see
-/// [`crud_list_filtered`]). The **column names are fixed text this tree owns**
-/// and are pushed as SQL; every *value* goes through `push_bind`, never
-/// interpolated — the same split the whole-list query's trusted
-/// `AssertSqlSafe(format!(…))` already made.
+/// [`Self::apply_filter`] appends its `AND …` clauses through a
+/// [`FilterClauses`] handle, over a statement already opened with `WHERE 1=1`
+/// (see [`crud_list_filtered`]). The **column names are fixed text this tree
+/// owns** and are pushed as SQL; every *value* is bound, never interpolated —
+/// the same split the whole-list query's trusted `AssertSqlSafe(format!(…))`
+/// already made. That half is the compiler's to keep, not a convention: the
+/// handle is all a filter is given and it exposes no raw push, so there is no
+/// spelling of `apply_filter` that can put a value into the SQL text.
 pub trait CrudListFilter: Default + serde::de::DeserializeOwned + Send + 'static {
     /// Narrow the list. Called once per request on a builder opened with
     /// `WHERE 1=1`; an all-`None` filter appends nothing.
-    fn apply_filter(&self, qb: &mut QueryBuilder<Sqlite>);
+    fn apply_filter(&self, clauses: &mut FilterClauses<'_>);
 }
 
-/// Append `AND <column> = ?`, binding `value` when it is present — the one way
-/// a filter narrows by equality.
+/// The only handle a [`CrudListFilter`] gets on the list query: it can add the
+/// clause shapes the filters contract defines, and nothing else.
 ///
-/// Putting the clause here rather than at each call site gives the
-/// bind-not-interpolate rule a single choke point: `column` is a trusted
-/// `&'static str`, and there is no API by which a filter *value* can reach the
-/// SQL text (`push_bind` is the only value path). The compare is deliberately
-/// NULL-unsafe, matching the SQL: a `NULL` column matches no value, which the
-/// filters contract states (see docs/API.md).
-pub fn push_eq<T>(qb: &mut QueryBuilder<Sqlite>, column: &'static str, value: Option<T>)
-where
-    T: for<'q> sqlx::Encode<'q, Sqlite> + sqlx::Type<Sqlite>,
-{
-    if let Some(value) = value {
-        qb.push(" AND ").push(column).push(" = ").push_bind(value);
-    }
+/// The [`QueryBuilder`] it wraps is **private**, which is the whole point.
+/// While `apply_filter` took the builder itself, `qb.push(format!(" AND ticker
+/// = '{v}'"))` compiled and passed every test, and all ~14 filters went through
+/// the two helpers by convention alone — the one rule in this area with nothing
+/// structural behind it (compare
+/// `infra::db::tests::write_side_modules_never_begin_a_deferred_transaction`,
+/// which has to be a scan because a deferred `BEGIN` is a legitimate call for a
+/// reader). Here the narrowing needs no scan and no allowlist: a filter that
+/// wants to interpolate has no method to do it with, and a new clause shape is
+/// added here, once, with its binding written once.
+pub struct FilterClauses<'a> {
+    qb: &'a mut QueryBuilder<Sqlite>,
 }
 
-/// Append the inclusive `AND <column> >= ?` / `AND <column> <= ?` bounds a
-/// `?from=`/`?to=` pair narrows a date list by — the TEXT `YYYY-MM-DD` sort is
-/// the comparison. Either bound may be absent.
-pub fn push_date_range(
-    qb: &mut QueryBuilder<Sqlite>,
-    column: &'static str,
-    from: Option<chrono::NaiveDate>,
-    to: Option<chrono::NaiveDate>,
-) {
-    if let Some(from) = from {
-        qb.push(" AND ").push(column).push(" >= ").push_bind(from);
+impl<'a> FilterClauses<'a> {
+    /// The same clause set over a **hand-written** list query, for the reads
+    /// that assemble their own statement rather than going through
+    /// [`crud_list_filtered`] (`closing_price::db_list`, which drops error rows
+    /// by status, and `reports::snapshot`'s two date-ranged reads). Those took
+    /// the free `push_eq`/`push_date_range` helpers this type replaced; going
+    /// through the handle keeps one implementation of the binding rather than
+    /// one inside the trait's reach and one outside it.
+    ///
+    /// The statement must already be open for `AND …` to be appended to — a
+    /// `WHERE 1=1` or a real first predicate.
+    pub fn over(qb: &'a mut QueryBuilder<Sqlite>) -> Self {
+        Self { qb }
     }
-    if let Some(to) = to {
-        qb.push(" AND ").push(column).push(" <= ").push_bind(to);
+
+    /// Append `AND <column> = ?`, binding `value` when it is present — the one
+    /// way a filter narrows by equality.
+    ///
+    /// `column` is a trusted `&'static str`; `value` reaches the statement only
+    /// through `push_bind`. The compare is deliberately NULL-unsafe, matching
+    /// the SQL: a `NULL` column matches no value, which the filters contract
+    /// states (see docs/API.md).
+    pub fn eq<T>(&mut self, column: &'static str, value: Option<T>) -> &mut Self
+    where
+        T: for<'q> sqlx::Encode<'q, Sqlite> + sqlx::Type<Sqlite> + Send + 'static,
+    {
+        if let Some(value) = value {
+            self.qb
+                .push(" AND ")
+                .push(column)
+                .push(" = ")
+                .push_bind(value);
+        }
+        self
+    }
+
+    /// Append the inclusive `AND <column> >= ?` / `AND <column> <= ?` bounds a
+    /// `?from=`/`?to=` pair narrows a date list by — the TEXT `YYYY-MM-DD` sort
+    /// is the comparison. Either bound may be absent.
+    pub fn date_range(
+        &mut self,
+        column: &'static str,
+        from: Option<chrono::NaiveDate>,
+        to: Option<chrono::NaiveDate>,
+    ) -> &mut Self {
+        if let Some(from) = from {
+            self.qb
+                .push(" AND ")
+                .push(column)
+                .push(" >= ")
+                .push_bind(from);
+        }
+        if let Some(to) = to {
+            self.qb
+                .push(" AND ")
+                .push(column)
+                .push(" <= ")
+                .push_bind(to);
+        }
+        self
     }
 }
 
@@ -430,7 +477,7 @@ pub fn push_date_range(
 pub struct NoFilter {}
 
 impl CrudListFilter for NoFilter {
-    fn apply_filter(&self, _qb: &mut QueryBuilder<Sqlite>) {}
+    fn apply_filter(&self, _clauses: &mut FilterClauses<'_>) {}
 }
 
 /// An entity whose list / get-one / delete are plain single-table operations
@@ -542,7 +589,7 @@ pub async fn crud_list_filtered<E: CrudEntity>(
 ) -> Result<Vec<E>, sqlx::Error> {
     let mut qb: QueryBuilder<Sqlite> =
         QueryBuilder::new(format!("SELECT {} FROM {} WHERE 1=1", E::COLUMNS, E::TABLE));
-    filter.apply_filter(&mut qb);
+    filter.apply_filter(&mut FilterClauses::over(&mut qb));
     qb.push(" ORDER BY ").push(E::ORDER_BY);
     qb.build_query_as::<E>().fetch_all(pool).await
 }

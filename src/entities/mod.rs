@@ -1349,4 +1349,58 @@ mod tests {
             "every query-decoding list route must be driven here"
         );
     }
+
+    /// The behavioural half of the bind-not-interpolate rule
+    /// (`infra::http::FilterClauses` is the structural half — a filter is
+    /// handed a type with no raw push, so it *cannot* reach the SQL text).
+    ///
+    /// `exchange_mic` is the only free-text filter in the tree, so it is the
+    /// one that can carry SQL: a value closing the quote and opening an `OR`
+    /// would list every row if it were interpolated, and a `;`-separated
+    /// statement would run. Bound, each is just a string no `exchange_mic`
+    /// equals — the *empty* list is the assertion, not a 200.
+    #[tokio::test]
+    async fn a_filter_value_is_bound_not_interpolated() {
+        // Percent-encode everything but the alphanumerics, so the payload
+        // reaches the handler as written rather than as a query-string split.
+        fn encoded(value: &str) -> String {
+            value
+                .bytes()
+                .map(|b| {
+                    if b.is_ascii_alphanumeric() {
+                        (b as char).to_string()
+                    } else {
+                        format!("%{b:02X}")
+                    }
+                })
+                .collect()
+        }
+
+        use crate::test_support::listing;
+
+        let pool = test_pool().await;
+        listing(1).mic("XASX").insert(&pool).await;
+        listing(2).mic("XNYS").currency("USD").insert(&pool).await;
+        let client = ApiClient::full(&pool);
+
+        for payload in [
+            "' OR 1=1 --",
+            "XASX' OR '1'='1",
+            "XASX'; DROP TABLE listings; --",
+            "XASX",
+        ] {
+            let query = format!("/listings?exchange_mic={}", encoded(payload));
+            let rows: Vec<serde_json::Value> = client.get_json(&query).await;
+            let expected = if payload == "XASX" { 1 } else { 0 };
+            assert_eq!(
+                rows.len(),
+                expected,
+                "GET {query} must match the literal value, not interpret it"
+            );
+        }
+
+        // …and the table the `DROP` named is still there, with both rows.
+        let all: Vec<serde_json::Value> = client.get_json("/listings").await;
+        assert_eq!(all.len(), 2, "the unfiltered list must be untouched");
+    }
 }

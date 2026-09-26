@@ -32,10 +32,10 @@ pub struct TradeListQuery {
 }
 
 impl crate::infra::http::CrudListFilter for TradeListQuery {
-    fn apply_filter(&self, qb: &mut sqlx::QueryBuilder<sqlx::Sqlite>) {
-        crate::infra::http::push_eq(qb, "listing_id", self.listing_id);
-        crate::infra::http::push_eq(qb, "holding_account_id", self.holding_account_id);
-        crate::infra::http::push_date_range(qb, "date", self.from, self.to);
+    fn apply_filter(&self, clauses: &mut crate::infra::http::FilterClauses<'_>) {
+        clauses.eq("listing_id", self.listing_id);
+        clauses.eq("holding_account_id", self.holding_account_id);
+        clauses.date_range("date", self.from, self.to);
     }
 }
 

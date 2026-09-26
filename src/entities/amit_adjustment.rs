@@ -58,9 +58,9 @@ pub struct AmitAdjustmentListQuery {
 }
 
 impl crate::infra::http::CrudListFilter for AmitAdjustmentListQuery {
-    fn apply_filter(&self, qb: &mut sqlx::QueryBuilder<sqlx::Sqlite>) {
-        crate::infra::http::push_eq(qb, "amma_statement_id", self.amma_statement_id);
-        crate::infra::http::push_eq(qb, "trade_id", self.trade_id);
+    fn apply_filter(&self, clauses: &mut crate::infra::http::FilterClauses<'_>) {
+        clauses.eq("amma_statement_id", self.amma_statement_id);
+        clauses.eq("trade_id", self.trade_id);
     }
 }
 

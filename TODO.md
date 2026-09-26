@@ -48,7 +48,7 @@ it rather than rediscover it.
       `FLOATS_ALLOWED` names with that reason — and an entry matching nothing fails the
       test, so the scan cannot go vacuous. `code_only` is itself pinned by
       `code_only_keeps_code_and_drops_prose` beside it.
-- [ ] Make `CrudListFilter`'s bind-not-interpolate rule structural. `apply_filter`
+- [x] Make `CrudListFilter`'s bind-not-interpolate rule structural. `apply_filter`
       takes a raw `QueryBuilder`, so `qb.push(format!(" AND ticker = '{v}'"))` compiles
       and passes every test; all ~14 filters go through `push_eq`/`push_date_range`
       today by convention only. Either scan `impl CrudListFilter` bodies for a `push(`
@@ -56,6 +56,18 @@ it rather than rediscover it.
       the helpers. This repo enforces its comparable rules structurally
       (`write_side_modules_never_begin_a_deferred_transaction`), which is the argument
       for doing it. Test: the scan, or the narrowed signature refusing to compile.
+      Done, by narrowing rather than scanning: `apply_filter` now takes an
+      `infra::http::FilterClauses<'_>` whose `QueryBuilder` is private, exposing only
+      `.eq` / `.date_range`. A filter has no method that reaches the SQL text, so no
+      scan and no allowlist are needed, and `qb.push(format!(…))` inside an
+      `apply_filter` no longer names anything. The free `push_eq`/`push_date_range`
+      helpers are gone; the two hand-written filtered reads that also used them
+      (`closing_price::db_list`, `reports::snapshot`'s two date-ranged reads) go through
+      `FilterClauses::over`, so there is one implementation of the binding rather than
+      one inside the trait's reach and one outside it. The behavioural half is
+      `entities::tests::a_filter_value_is_bound_not_interpolated`, over `exchange_mic`
+      (the only free-text filter): a value closing the quote and opening an `OR` matches
+      no row, and the table a `DROP` names is still there afterwards.
 - [ ] Derive the OpenAPI route table's remaining hand-maintained fields. `(path, verb)`
       is pinned both ways, every PUT row's statuses are pinned twice, and the query
       parameters now come from each route's `Query<T>` type — but ~110 rows' success

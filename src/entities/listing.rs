@@ -350,9 +350,9 @@ pub struct ListingListQuery {
 }
 
 impl crate::infra::http::CrudListFilter for ListingListQuery {
-    fn apply_filter(&self, qb: &mut sqlx::QueryBuilder<sqlx::Sqlite>) {
-        crate::infra::http::push_eq(qb, "exchange_mic", self.exchange_mic.clone());
-        crate::infra::http::push_eq(qb, "security_type", self.security_type);
+    fn apply_filter(&self, clauses: &mut crate::infra::http::FilterClauses<'_>) {
+        clauses.eq("exchange_mic", self.exchange_mic.clone());
+        clauses.eq("security_type", self.security_type);
     }
 }
 

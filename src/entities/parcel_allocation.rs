@@ -32,9 +32,9 @@ pub struct ParcelAllocationListQuery {
 }
 
 impl crate::infra::http::CrudListFilter for ParcelAllocationListQuery {
-    fn apply_filter(&self, qb: &mut sqlx::QueryBuilder<sqlx::Sqlite>) {
-        crate::infra::http::push_eq(qb, "sale_trade_id", self.sale_trade_id);
-        crate::infra::http::push_eq(qb, "purchase_trade_id", self.purchase_trade_id);
+    fn apply_filter(&self, clauses: &mut crate::infra::http::FilterClauses<'_>) {
+        clauses.eq("sale_trade_id", self.sale_trade_id);
+        clauses.eq("purchase_trade_id", self.purchase_trade_id);
     }
 }
 

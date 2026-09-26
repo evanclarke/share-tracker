@@ -90,9 +90,10 @@ pub async fn db_list(
                 fetched_symbol, status, error, origin, sourced_from, reason \
          FROM closing_prices WHERE 1=1",
     );
-    crate::infra::http::push_eq(&mut qb, "listing_id", listing_id);
-    crate::infra::http::push_date_range(&mut qb, "price_date", from, to);
-    crate::infra::http::push_eq(&mut qb, "status", status);
+    crate::infra::http::FilterClauses::over(&mut qb)
+        .eq("listing_id", listing_id)
+        .date_range("price_date", from, to)
+        .eq("status", status);
     qb.push(" ORDER BY price_date DESC, listing_id");
     qb.build_query_as().fetch_all(pool).await
 }

@@ -108,9 +108,9 @@ pub struct InterestIncomeListQuery {
 }
 
 impl crate::infra::http::CrudListFilter for InterestIncomeListQuery {
-    fn apply_filter(&self, qb: &mut sqlx::QueryBuilder<sqlx::Sqlite>) {
-        crate::infra::http::push_eq(qb, "holding_account_id", self.holding_account_id);
-        crate::infra::http::push_date_range(qb, "date_paid", self.from, self.to);
+    fn apply_filter(&self, clauses: &mut crate::infra::http::FilterClauses<'_>) {
+        clauses.eq("holding_account_id", self.holding_account_id);
+        clauses.date_range("date_paid", self.from, self.to);
     }
 }
 
