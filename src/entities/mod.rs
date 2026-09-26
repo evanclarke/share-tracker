@@ -1108,13 +1108,25 @@ mod tests {
     /// The value each filter is driven with — the shape the parameter takes,
     /// not a row that has to exist (every route answers an empty `200` for a
     /// filter that matches nothing).
-    fn sample_filter_value(param: &str) -> &'static str {
+    ///
+    /// `route` is passed so a parameter whose valid values are route-specific
+    /// can be classified per route and **fail closed**: `status` is driven at
+    /// `/closing_prices` only, and a future list with its own `status` value set
+    /// panics here until its sample is added rather than being handed `ok` and
+    /// silently left untested.
+    fn sample_filter_value(route: &str, param: &str) -> &'static str {
         match param {
             "from" | "to" => "2024-01-02",
             "exchange_mic" => "XASX",
             "security_type" => "Share",
             "include_linked" => "false",
-            "status" => "ok",
+            "status" => {
+                assert_eq!(
+                    route, "/closing_prices",
+                    "a `status` filter on {route} needs its own sample value classified here"
+                );
+                "ok"
+            }
             _ => "1",
         }
     }
@@ -1280,7 +1292,12 @@ mod tests {
                 route.path
             );
             for filter in route.filters {
-                let query = format!("{}?{}={}", route.path, filter, sample_filter_value(filter));
+                let query = format!(
+                    "{}?{}={}",
+                    route.path,
+                    filter,
+                    sample_filter_value(route.path, filter)
+                );
                 let resp = client.get(&query).await;
                 assert_eq!(resp.status, StatusCode::OK, "GET {query}");
             }

@@ -78,37 +78,23 @@ where
 /// a client that wants only the figures it can price with asks for `ok` rather
 /// than fetching the errored rows (`status = 'error'`, `price` null) and
 /// dropping them itself. `None` is every row — the stored default, unchanged.
-/// Executor-generic so it composes onto a caller's own connection the way
-/// [`db_get_one`] does.
-pub async fn db_list<'e, E>(
-    executor: E,
+pub async fn db_list(
+    pool: &SqlitePool,
     listing_id: Option<i64>,
     from: Option<NaiveDate>,
     to: Option<NaiveDate>,
     status: Option<PriceStatus>,
-) -> Result<Vec<ClosingPrice>, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
-{
+) -> Result<Vec<ClosingPrice>, sqlx::Error> {
     let mut qb = QueryBuilder::new(
         "SELECT id, listing_id, price_date, price, price_as_observed, source, fetched_at, \
                 fetched_symbol, status, error, origin, sourced_from, reason \
          FROM closing_prices WHERE 1=1",
     );
-    if let Some(id) = listing_id {
-        qb.push(" AND listing_id = ").push_bind(id);
-    }
-    if let Some(from) = from {
-        qb.push(" AND price_date >= ").push_bind(from);
-    }
-    if let Some(to) = to {
-        qb.push(" AND price_date <= ").push_bind(to);
-    }
-    if let Some(status) = status {
-        qb.push(" AND status = ").push_bind(status);
-    }
+    crate::infra::http::push_eq(&mut qb, "listing_id", listing_id);
+    crate::infra::http::push_date_range(&mut qb, "price_date", from, to);
+    crate::infra::http::push_eq(&mut qb, "status", status);
     qb.push(" ORDER BY price_date DESC, listing_id");
-    qb.build_query_as().fetch_all(executor).await
+    qb.build_query_as().fetch_all(pool).await
 }
 
 /// The dates in `from..=to` already stored with status ok for the listing

@@ -351,12 +351,8 @@ pub struct ListingListQuery {
 
 impl crate::infra::http::CrudListFilter for ListingListQuery {
     fn apply_filter(&self, qb: &mut sqlx::QueryBuilder<sqlx::Sqlite>) {
-        if let Some(value) = &self.exchange_mic {
-            qb.push(" AND exchange_mic = ").push_bind(value.clone());
-        }
-        if let Some(value) = self.security_type {
-            qb.push(" AND security_type = ").push_bind(value);
-        }
+        crate::infra::http::push_eq(qb, "exchange_mic", self.exchange_mic.clone());
+        crate::infra::http::push_eq(qb, "security_type", self.security_type);
     }
 }
 

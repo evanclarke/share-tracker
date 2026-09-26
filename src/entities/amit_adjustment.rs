@@ -59,12 +59,8 @@ pub struct AmitAdjustmentListQuery {
 
 impl crate::infra::http::CrudListFilter for AmitAdjustmentListQuery {
     fn apply_filter(&self, qb: &mut sqlx::QueryBuilder<sqlx::Sqlite>) {
-        if let Some(value) = self.amma_statement_id {
-            qb.push(" AND amma_statement_id = ").push_bind(value);
-        }
-        if let Some(value) = self.trade_id {
-            qb.push(" AND trade_id = ").push_bind(value);
-        }
+        crate::infra::http::push_eq(qb, "amma_statement_id", self.amma_statement_id);
+        crate::infra::http::push_eq(qb, "trade_id", self.trade_id);
     }
 }
 

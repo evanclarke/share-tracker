@@ -157,12 +157,8 @@ pub struct DrpEnrolmentListQuery {
 
 impl crate::infra::http::CrudListFilter for DrpEnrolmentListQuery {
     fn apply_filter(&self, qb: &mut sqlx::QueryBuilder<sqlx::Sqlite>) {
-        if let Some(value) = self.listing_id {
-            qb.push(" AND listing_id = ").push_bind(value);
-        }
-        if let Some(value) = self.holding_account_id {
-            qb.push(" AND holding_account_id = ").push_bind(value);
-        }
+        crate::infra::http::push_eq(qb, "listing_id", self.listing_id);
+        crate::infra::http::push_eq(qb, "holding_account_id", self.holding_account_id);
     }
 }
 

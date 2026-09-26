@@ -128,18 +128,9 @@ pub struct InvestmentExpenseListQuery {
 
 impl crate::infra::http::CrudListFilter for InvestmentExpenseListQuery {
     fn apply_filter(&self, qb: &mut sqlx::QueryBuilder<sqlx::Sqlite>) {
-        if let Some(value) = self.listing_id {
-            qb.push(" AND listing_id = ").push_bind(value);
-        }
-        if let Some(value) = self.holding_account_id {
-            qb.push(" AND holding_account_id = ").push_bind(value);
-        }
-        if let Some(from) = self.from {
-            qb.push(" AND date_incurred >= ").push_bind(from);
-        }
-        if let Some(to) = self.to {
-            qb.push(" AND date_incurred <= ").push_bind(to);
-        }
+        crate::infra::http::push_eq(qb, "listing_id", self.listing_id);
+        crate::infra::http::push_eq(qb, "holding_account_id", self.holding_account_id);
+        crate::infra::http::push_date_range(qb, "date_incurred", self.from, self.to);
     }
 }
 

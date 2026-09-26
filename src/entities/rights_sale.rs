@@ -753,6 +753,13 @@ mod tests {
         NaiveDate::from_ymd_opt(y, m, day).unwrap()
     }
 
+    /// Client over this module's own routes — one line, rather than the
+    /// `ApiClient::over(router().with_state(…))` this module repeated at every
+    /// API test.
+    fn client(pool: &SqlitePool) -> ApiClient {
+        ApiClient::over(router().with_state(pool.clone()))
+    }
+
     async fn insert_listing(pool: &SqlitePool, id: i64) {
         test_support::listing(id)
             .ticker("RTS")
@@ -1342,7 +1349,7 @@ mod tests {
         insert_listing(&pool, 1).await;
         insert_buy(&pool, 1, d(2024, 1, 16), "1000").await;
         insert_rights_issue(&pool, 10, d(2024, 7, 1)).await;
-        let app = ApiClient::over(router().with_state(pool.clone()));
+        let app = client(&pool);
 
         let resp = app
             .post(
@@ -1386,7 +1393,7 @@ mod tests {
     #[tokio::test]
     async fn api_get_missing_rights_sale_answers_empty_404() {
         let pool = test_pool().await;
-        let app = ApiClient::over(router().with_state(pool.clone()));
+        let app = client(&pool);
 
         let resp = app.get("/rights_sales/9999").await;
         assert_eq!(resp.status, StatusCode::NOT_FOUND);
@@ -1403,7 +1410,7 @@ mod tests {
         insert_listing(&pool, 1).await;
         insert_buy(&pool, 1, d(2024, 1, 16), "1000").await;
         insert_rights_issue(&pool, 10, d(2024, 7, 1)).await;
-        let app = ApiClient::over(router().with_state(pool.clone()));
+        let app = client(&pool);
 
         let cases: Vec<(i64, serde_json::Value, StatusCode)> = vec![
             (
@@ -1466,7 +1473,7 @@ mod tests {
         insert_listing(&pool, 1).await;
         insert_buy(&pool, 1, d(2024, 1, 16), "1000").await;
         insert_non_renounceable_issue(&pool, 10, d(2024, 7, 1)).await;
-        let app = ApiClient::over(router().with_state(pool.clone()));
+        let app = client(&pool);
 
         let resp = app
             .post(
@@ -1532,7 +1539,7 @@ mod tests {
         insert_listing(&pool, 1).await;
         insert_buy(&pool, 1, d(2024, 1, 16), "1000").await;
         insert_rights_issue(&pool, 10, d(2024, 7, 1)).await;
-        let app = ApiClient::over(router().with_state(pool.clone()));
+        let app = client(&pool);
 
         let short = serde_json::json!({
             "date": "2024-07-20", "units": "10",
@@ -1636,7 +1643,7 @@ mod tests {
         insert_usd_buy(&pool, 1, d(2024, 1, 16), "1000").await;
         insert_usd_rights_issue(&pool, 10, d(2024, 7, 1)).await;
 
-        let resp = ApiClient::over(router().with_state(pool.clone()))
+        let resp = client(&pool)
             .post(
                 "/corporate_actions/10/sell_rights",
                 &serde_json::json!({

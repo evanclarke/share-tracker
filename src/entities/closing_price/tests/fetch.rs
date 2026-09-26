@@ -611,7 +611,7 @@ async fn api_list_filters_by_status() {
     seed(&pool, 2, ymd(2026, 5, 1), "99.00", false).await;
     seed(&pool, 2, ymd(2026, 5, 2), "99.00", true).await;
 
-    let app = ApiClient::over(router().with_state(pool));
+    let app = full_router(pool.clone(), StubFetcher::default());
     let get = |uri: &str| {
         let app = app.clone();
         let uri = uri.to_string();

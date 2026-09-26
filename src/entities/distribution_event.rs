@@ -186,15 +186,8 @@ pub struct DistributionEventListQuery {
 
 impl crate::infra::http::CrudListFilter for DistributionEventListQuery {
     fn apply_filter(&self, qb: &mut sqlx::QueryBuilder<sqlx::Sqlite>) {
-        if let Some(value) = self.listing_id {
-            qb.push(" AND listing_id = ").push_bind(value);
-        }
-        if let Some(from) = self.from {
-            qb.push(" AND ex_date >= ").push_bind(from);
-        }
-        if let Some(to) = self.to {
-            qb.push(" AND ex_date <= ").push_bind(to);
-        }
+        crate::infra::http::push_eq(qb, "listing_id", self.listing_id);
+        crate::infra::http::push_date_range(qb, "ex_date", self.from, self.to);
     }
 }
 

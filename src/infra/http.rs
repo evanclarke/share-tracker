@@ -372,6 +372,41 @@ pub trait CrudListFilter: Default + serde::de::DeserializeOwned + Send + 'static
     fn apply_filter(&self, qb: &mut QueryBuilder<Sqlite>);
 }
 
+/// Append `AND <column> = ?`, binding `value` when it is present — the one way
+/// a filter narrows by equality.
+///
+/// Putting the clause here rather than at each call site gives the
+/// bind-not-interpolate rule a single choke point: `column` is a trusted
+/// `&'static str`, and there is no API by which a filter *value* can reach the
+/// SQL text (`push_bind` is the only value path). The compare is deliberately
+/// NULL-unsafe, matching the SQL: a `NULL` column matches no value, which the
+/// filters contract states (see docs/API.md).
+pub fn push_eq<T>(qb: &mut QueryBuilder<Sqlite>, column: &'static str, value: Option<T>)
+where
+    T: for<'q> sqlx::Encode<'q, Sqlite> + sqlx::Type<Sqlite>,
+{
+    if let Some(value) = value {
+        qb.push(" AND ").push(column).push(" = ").push_bind(value);
+    }
+}
+
+/// Append the inclusive `AND <column> >= ?` / `AND <column> <= ?` bounds a
+/// `?from=`/`?to=` pair narrows a date list by — the TEXT `YYYY-MM-DD` sort is
+/// the comparison. Either bound may be absent.
+pub fn push_date_range(
+    qb: &mut QueryBuilder<Sqlite>,
+    column: &'static str,
+    from: Option<chrono::NaiveDate>,
+    to: Option<chrono::NaiveDate>,
+) {
+    if let Some(from) = from {
+        qb.push(" AND ").push(column).push(" >= ").push_bind(from);
+    }
+    if let Some(to) = to {
+        qb.push(" AND ").push(column).push(" <= ").push_bind(to);
+    }
+}
+
 /// The empty filter: an entity whose list accepts **no** query parameter.
 ///
 /// Deliberately an **empty braced struct** rather than a unit struct
