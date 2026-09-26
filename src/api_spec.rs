@@ -114,8 +114,9 @@ account: /trades, /income, /investment_expenses, /amma_statements, \
 /amit_adjustments takes ?amma_statement_id= and ?trade_id=, and \
 /parcel_allocations ?sale_trade_id= and ?purchase_trade_id=. The \
 long-standing /closing_prices (?listing_id=, ?from=, ?to=, ?status= — ok or \
-error, omitted is every row, so a valuation client gets the clean series in \
-one call) and /attachments \
+error, omitted is every row: the rows carrying a price, which is one call \
+rather than two, but not quite the series a valuation reads — a row before \
+its listing's unpriced_before is stored ok and superseded) and /attachments \
 (owner ids, include_linked) filters are unchanged. An unrecognised \
 parameter is a 400 naming it on every list route that decodes a query \
 string — including a list that accepts no filter, which refuses any \
@@ -357,7 +358,10 @@ const ROUTES: &[RouteRow] = &[
         Verb::Get,
         "/interest_income",
         &[200],
-        "List every interest-income row, optionally narrowed by ?holding_account_id= and an inclusive ?from=/?to= over date_paid.",
+        "List every interest-income row, optionally narrowed by ?holding_account_id= and an inclusive \
+         ?from=/?to= over date_paid. An owner filter matches recorded values only: \
+         holding_account_id is nullable, and a row without one is in no ?holding_account_id= \
+         slice — so summing the slices is less than the unfiltered list.",
         Body::None,
         Body::JsonArray("InterestIncome"),
     ),
@@ -397,7 +401,11 @@ const ROUTES: &[RouteRow] = &[
         Verb::Get,
         "/investment_expenses",
         &[200],
-        "List every investment-expense row, optionally narrowed by ?listing_id=, ?holding_account_id= and an inclusive ?from=/?to= over date_incurred.",
+        "List every investment-expense row, optionally narrowed by ?listing_id=, \
+         ?holding_account_id= and an inclusive ?from=/?to= over date_incurred. An owner filter \
+         matches recorded values only: both owner columns are nullable for a portfolio-wide \
+         expense (an adviser's whole-of-portfolio fee), and such a row is in no ?listing_id= or \
+         ?holding_account_id= slice — so summing the slices is less than the unfiltered list.",
         Body::None,
         Body::JsonArray("InvestmentExpense"),
     ),
@@ -933,7 +941,10 @@ const ROUTES: &[RouteRow] = &[
         Verb::Get,
         "/closing_prices",
         &[200],
-        "List stored closing prices, optionally narrowed by ?listing_id= / ?from= / ?to= / ?status= (ok or error; omitted is every row).",
+        "List stored closing prices, optionally narrowed by ?listing_id= / ?from= / ?to= / ?status= \
+         (ok or error; omitted is every row). ?status=ok is the rows that carry a price, which is \
+         not the same as the rows a valuation reads: a row before its listing's unpriced_before is \
+         stored ok and superseded, and no valuation uses it.",
         Body::None,
         Body::JsonArray("ClosingPrice"),
     ),
@@ -3251,8 +3262,10 @@ mod tests {
             "/amit_adjustments takes ?amma_statement_id= and ?trade_id=",
             "/parcel_allocations ?sale_trade_id= and ?purchase_trade_id=",
             "The long-standing /closing_prices (?listing_id=, ?from=, ?to=, ?status= — ok or \
-             error, omitted is every row, so a valuation client gets the clean series in one \
-             call) and /attachments (owner ids, include_linked) filters are unchanged.",
+             error, omitted is every row: the rows carrying a price, which is one call rather \
+             than two, but not quite the series a valuation reads — a row before its listing's \
+             unpriced_before is stored ok and superseded) and /attachments (owner ids, \
+             include_linked) filters are unchanged.",
             "An unrecognised parameter is a 400 naming it on every list route that decodes a \
              query string",
             "including a list that accepts no filter, which refuses any parameter at all rather \

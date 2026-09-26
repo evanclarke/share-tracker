@@ -2701,6 +2701,37 @@ mod tests {
         );
     }
 
+    /// Open Parcels offers the same as-of date the three valuation reports do.
+    /// It was the one of the four whose UI did not, so reconciling a broker
+    /// statement as at 30 June meant hand-crafting a URL.
+    ///
+    /// It is a `params` field rather than the `asOfDate` flag because this is a
+    /// `GET` report with no price form to hang the control on, and `autoRun`
+    /// (Row History's mechanism for an all-optional params report) is what keeps
+    /// the screen opening on today's position instead of waiting for a submit.
+    #[tokio::test]
+    async fn open_parcels_offers_the_as_of_date() {
+        let config = module_source("/static/config.js");
+        let entry = config
+            .split("api: '/portfolio/open-parcels'")
+            .nth(1)
+            .and_then(|rest| rest.split("\n  },").next())
+            .expect("config.js has an Open Parcels report entry");
+        assert!(
+            entry.contains("dt('as_of_date', 'As-of date'"),
+            "Open Parcels must offer the as-of date: {entry}"
+        );
+        assert!(
+            entry.contains("autoRun: true"),
+            "an all-optional params report opens on its default rather than waiting: {entry}"
+        );
+        // The generic runner is what turns it into `?as_of_date=`, and drops it
+        // when blank — so today's position is the bare path.
+        let js = app_js_body().await;
+        assert!(js.contains("const qs = queryString(body);"));
+        assert!(js.contains("if (deepLink || report.autoRun) form.requestSubmit();"));
+    }
+
     #[tokio::test]
     async fn settlement_coverage_report_ui_present() {
         let js = app_js_body().await;

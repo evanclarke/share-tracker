@@ -1147,3 +1147,39 @@ Verified against a running server, not only the suite: `GET /listings/9999` → 
 `suffix` and `skip_command`, which reached the document not at all before.
 
 Gates after all three fixes: build, fmt, clippy clean; **2635 tests pass**.
+
+## Remaining items closed (2026-09-26)
+
+**TODO deviation notes.** `DONE/api.md` gains a dated Corrections block recording the two items
+ticked with an unmet acceptance criterion, since the archive is what outlives the review: the
+outbound "string codec" that was never added (`serde-str` gates only `Deserialize`, so the tests are
+the whole guard — now said plainly rather than claimed as a codec), and the "unknown params still
+`422`" criterion that ships `400` (the criterion was wrong, not unmet: `400` is this API's status for
+an unreadable query string, and singling these routes out would have diverged from every other
+query-decoding route). The wrong claim in the closing note itself is corrected.
+
+**Open Parcels offers the as-of date.** Via `params: [dt('as_of_date', …)]` + `autoRun: true` — not
+the `asOfDate` flag, which lives on the price-form path the three POST valuation reports share and
+which this GET report has no form to hang. `autoRun` is Row History's existing mechanism for an
+all-optional params report, so the screen still opens on today's position. No new JS; pinned by
+`web::tests::open_parcels_offers_the_as_of_date`. Unlike the valuation reports' control this needs no
+live-price caveat: a parcel's cost base is a recorded fact, so the whole answer really is as at the
+date. Verified end to end against the seeded demo DB — today 2 parcels, `?as_of_date=2024-02-01` 1,
+`?as_of_date=2023-01-01` 0 — and rendered headlessly.
+
+**The NULL-owner caveat reaches the OpenAPI summaries.** `/investment_expenses` and
+`/interest_income` now say an owner filter matches recorded values only, and that summing the slices
+is less than the unfiltered list. This was the third of the three places the original finding named.
+
+**`?status=ok`'s superseded caveat.** `docs/API.md` already carried it (the fix-pass verification was
+wrong on that half); `api_spec`'s `DESCRIPTION` and the `/closing_prices` summary said "the clean
+series in one call" and now say what it is — the rows carrying a price, which is not the series a
+valuation reads, because a row before its listing's `unpriced_before` is stored `ok` and superseded.
+
+Also: **`ui-check.sh` and `screenshots.sh` only built the server when the binary was *missing*.** The
+UI is embedded with `include_str!`, so a stale binary serves the old HTML/JS while the tree has the
+new — and the script then renders it and reports success. That is how my first check of the Open
+Parcels control "passed" before the config change had ever been compiled; `screenshots.sh` would have
+committed screenshots of the previous UI the same way. Both now always build (a no-op when nothing
+changed), and an explicit `ST_BIN` is left alone but must exist. `docs/FEATURES.md` also never
+mentioned the as-of date at all — a gap from when the capability landed — and now does.

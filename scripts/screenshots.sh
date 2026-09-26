@@ -29,9 +29,17 @@ while [ $# -gt 0 ]; do
 done
 
 bin="${ST_BIN:-$root/target/debug/share-tracker}"
-if [ ! -x "$bin" ]; then
+# Always build — same reason as `ui-check.sh`, and it bites harder here: the UI
+# is embedded with `include_str!`, so a stale binary would put screenshots of
+# the *previous* UI into `docs/screenshots/` and they would be committed as
+# current. cargo is a no-op when nothing changed. An explicit ST_BIN is the
+# caller's own binary, left alone.
+if [ -z "${ST_BIN:-}" ]; then
   echo "screenshots: building share-tracker (debug)…" >&2
   ( cd "$root" && cargo build ) >&2
+elif [ ! -x "$bin" ]; then
+  echo "screenshots: no executable at ST_BIN=$bin" >&2
+  exit 1
 fi
 
 mkdir -p "$out"

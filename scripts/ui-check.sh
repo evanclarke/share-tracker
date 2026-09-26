@@ -66,9 +66,18 @@ fi
 
 # --- locate / build the server binary ---------------------------------------
 bin="${ST_BIN:-$root/target/debug/share-tracker}"
-if [ ! -x "$bin" ]; then
+# Always build, not just when the binary is missing. The UI is embedded with
+# `include_str!`, so a stale binary serves the *old* HTML/JS while the tree has
+# the new — and this script then renders it and reports success. That is worse
+# than not running: on 2026-09-26 it "confirmed" a config.js change that the
+# server had never seen. cargo is a no-op when nothing changed, so the only
+# cost is honesty. An explicit ST_BIN is the caller's own binary, left alone.
+if [ -z "${ST_BIN:-}" ]; then
   echo "ui-check: building share-tracker (debug)…" >&2
   ( cd "$root" && cargo build ) >&2
+elif [ ! -x "$bin" ]; then
+  echo "ui-check: no executable at ST_BIN=$bin" >&2
+  exit 1
 fi
 
 # --- ephemeral workspace + free port ----------------------------------------

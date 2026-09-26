@@ -492,7 +492,21 @@ export const REPORTS = [
       { label: '+ New transfer', href: '#/transfers/new' },
     ],
   },
-  { slug: 'open-parcels', title: 'Open Parcels', api: '/portfolio/open-parcels', method: 'GET', menu: 'Reports', section: 'Portfolio', desc: 'Every open parcel: acquisition date, original cost base, AMIT and return-of-capital reductions, remaining quantity and adjusted cost base (AUD).' },
+  {
+    slug: 'open-parcels', title: 'Open Parcels', api: '/portfolio/open-parcels', method: 'GET',
+    menu: 'Reports', section: 'Portfolio',
+    desc: 'Every open parcel: acquisition date, original cost base, AMIT and return-of-capital reductions, remaining quantity and adjusted cost base (AUD).',
+    // The as-of date is the report's one parameter and it is optional, so the
+    // screen opens on today's position (`autoRun`) and the form is there to
+    // back-date it — the same shape as Row History's browse page. Unlike the
+    // valuation reports' date control this needs no caveat about live prices:
+    // a parcel's cost base is a recorded fact, so the whole answer really is
+    // as at the date given.
+    params: [
+      dt('as_of_date', 'As-of date', { optional: true, hint: 'Blank = today. The parcels open on this date, with quantities in that date\u2019s unit basis (a later split re-bases them).' }),
+    ],
+    autoRun: true,
+  },
   {
     slug: 'attachments', title: 'Attachments', api: '/reports/attachments', method: 'GET',
     menu: 'Reports', section: 'Portfolio',
