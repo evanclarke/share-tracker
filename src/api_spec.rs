@@ -913,7 +913,7 @@ const ROUTES: &[RouteRow] = &[
         Verb::Put,
         "/rba_fx_rates/{id}",
         &[204],
-        "Correct the stored rate at this id (the only field a correction may change). Always 204: this route can never create a row — new rates arrive through POST /rba_fx_rates/import.",
+        "Correct the stored rate at this id (the only field a correction may change). Always 204 when the id exists — this route can never create a row, so it never answers 201 (new rates arrive through POST /rba_fx_rates/import) — and 404 when it does not.",
         Body::Json("CorrectionBody"),
         Body::None,
     ),
@@ -1852,9 +1852,9 @@ fn operation(
             ResponseBuilder::new()
                 .description(
                     "This source has exhausted its failed-attempt budget: the body is the \
-                     plain-text reason and Retry-After names the remaining whole seconds. A \
-                     browser login POST (Accept: text/html) is answered the sign-in page with \
-                     the same message under 200 instead.",
+                     plain-text reason and Retry-After names the remaining whole seconds, rounded \
+                     up. A browser login POST (Accept: text/html) is refused 429 too, with the \
+                     sign-in page as the body instead of the plain-text reason.",
                 )
                 .build(),
         );
@@ -1915,6 +1915,37 @@ fn operation(
                 .description(
                     "The upstream feed or price provider could not be reached: the body is the \
                      plain-text reason.",
+                )
+                .build(),
+        );
+    }
+    // Every route can answer a generic internal failure — recorded once here so
+    // a generated client handles it rather than treating a 500 as transport
+    // noise. The body is empty; the cause is in the server log.
+    responses = responses.response(
+        "500".to_string(),
+        ResponseBuilder::new()
+            .description("An internal failure. The body is empty; the cause is in the server log.")
+            .build(),
+    );
+    // A route that takes a body can answer 413 (over axum's 2 MiB body limit;
+    // the attachment upload raises its own route) and 415 (a body sent with the
+    // wrong content type) before its handler runs.
+    if !matches!(request, Body::None) {
+        responses = responses.response(
+            "413".to_string(),
+            ResponseBuilder::new()
+                .description(
+                    "The request body is over the size limit. The body is the plain-text reason.",
+                )
+                .build(),
+        );
+        responses = responses.response(
+            "415".to_string(),
+            ResponseBuilder::new()
+                .description(
+                    "The request body's content type is not the one this route takes. The body is \
+                     the plain-text reason.",
                 )
                 .build(),
         );
@@ -2902,6 +2933,15 @@ mod tests {
         // …and the bare-text import feeds carry the 422 a bad payload answers.
         assert!(has("/rba_fx_rates/import", "post", "422"));
         assert!(has("/currencies/import", "post", "422"));
+        // Every route documents a generic 500; a body-taking route also
+        // documents 413 and 415, which axum answers before the handler runs.
+        assert!(has("/listings", "get", "500"));
+        assert!(has("/listings", "post", "413"));
+        assert!(has("/listings", "post", "415"));
+        assert!(
+            !has("/listings", "get", "413"),
+            "a body-less GET has no 413"
+        );
     }
 
     /// The whole document — schemas, not just the one field an assertion names —

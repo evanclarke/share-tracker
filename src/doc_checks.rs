@@ -3255,8 +3255,12 @@ fn closing_price_status_filter_documented() {
     );
     assert!(
         closing_prices
-            .contains("so a client computing a valuation gets the priced series in **one call**")
+            .contains("so a client computing a valuation gets the priced rows in **one call**")
     );
+    // …with the superseded-row carve-out: `status: "ok"` is not the same as
+    // "what valuation reads", so the claim above is not over-stated.
+    assert!(closing_prices.contains("superseded by the listing's `unpriced_before`"));
+    assert!(closing_prices.contains("filters those out too"));
     assert!(
         closing_prices.contains("Omitting `status` is unchanged: every row, errored ones included")
     );
