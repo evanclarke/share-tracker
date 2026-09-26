@@ -5950,6 +5950,12 @@ fn the_login_lockout_is_documented_everywhere_it_applies() {
         "**`429 Too Many Requests`**",
         "the peer is the proxy",
         "defence in depth against brute force, not a user account system",
+        // The three facts the review found unstated or wrong: an IPv6 source is
+        // its /64, `Retry-After` rounds up, and the attempt is reserved at the
+        // gate so concurrent guesses cannot race the budget.
+        "keyed on its **/64 prefix**",
+        "**rounded up**",
+        "counted **at the gate**",
     ] {
         assert!(
             API_MD.contains(fact),
@@ -5988,6 +5994,9 @@ fn the_login_lockout_is_documented_everywhere_it_applies() {
         "5 consecutive failed",
         "**5 minutes**",
         "defence in depth",
+        // The same three corrections the API section carries.
+        "**/64 prefix**",
+        "counted at the gate",
     ] {
         assert!(
             README_MD.contains(fact),
@@ -6005,6 +6014,10 @@ fn the_login_lockout_is_documented_everywhere_it_applies() {
         FEATURES_MD.contains("defence in depth"),
         "docs/FEATURES.md must say the lockout is defence in depth, not accounts"
     );
+    assert!(
+        FEATURES_MD.contains("keyed on its /64"),
+        "docs/FEATURES.md must state the IPv6 /64 keying"
+    );
 
     // The consts the docs quote are the consts in the code: a change to either
     // side alone fails here rather than leaving the prose quietly wrong.
@@ -6013,16 +6026,23 @@ fn the_login_lockout_is_documented_everywhere_it_applies() {
         "the documented budget must remain the code's LOCKOUT_BUDGET"
     );
     assert!(
-        AUTH_RS.contains("Duration::from_secs(5 * 60)"),
-        "the documented cooldown must remain the code's LOCKOUT_COOLDOWN"
+        AUTH_RS.contains("const LOCKOUT_COOLDOWN: Duration = Duration::from_secs(5 * 60);"),
+        "the documented cooldown must remain the code's LOCKOUT_COOLDOWN, and the pin must \
+         name that const rather than any other value it happens to equal"
     );
     assert!(
         AUTH_RS.contains("const LOCKOUT_MAX_SOURCES: usize = 4096;"),
         "the documented state bound must remain the code's LOCKOUT_MAX_SOURCES"
     );
-    // …and that the item did not grow a config setting.
     assert!(
-        !include_str!("infra/config.rs").contains("lockout"),
+        AUTH_RS.contains("const LOCKOUT_FAILURE_WINDOW: Duration = Duration::from_secs(15 * 60);"),
+        "the documented 15-minute window must remain the code's LOCKOUT_FAILURE_WINDOW"
+    );
+    // …and that the item did not grow a config setting. A `lockout` *doc
+    // comment* in config.rs is fine; a `lockout`-prefixed field is not, so the
+    // scan is on the identifier shape rather than the bare word.
+    assert!(
+        !include_str!("infra/config.rs").contains("lockout_"),
         "the lockout must stay a const, not a [auth] setting"
     );
 }

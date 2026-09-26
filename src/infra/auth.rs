@@ -53,10 +53,16 @@
 //!   outright for [`LOCKOUT_COOLDOWN`] — **without even checking the
 //!   password**, so a correct password cannot be used to reset the lockout,
 //!   which is the whole point. A success before the budget is reached clears
-//!   that source's streak.
+//!   that source's streak. The window is **idle-based**: each attempt pushes
+//!   its end out, so only an absence of attempts expires a streak. The attempt
+//!   is counted **at the gate**, atomically with the budget check and before
+//!   the hash, so a burst of concurrent guesses cannot all read a count below
+//!   the budget first — the budget is the budget, not the budget plus however
+//!   many race it.
 //! - **The key**: the request's peer address
-//!   (`ConnectInfo<SocketAddr>`), with the absent case — an in-process test
-//!   client, or any deployment without
+//!   (`ConnectInfo<SocketAddr>`) — an IPv4 address, or an IPv6 **/64 prefix**
+//!   (the allocation a host rotates inside for free), with the absent case — an
+//!   in-process test client, or any deployment without
 //!   `into_make_service_with_connect_info` — sharing one documented
 //!   [`Source::Unknown`] bucket.
 //! - **State bound**: at most [`LOCKOUT_MAX_SOURCES`] sources are tracked,
@@ -69,7 +75,8 @@
 //!   *aggregate* guessing, but one attacker can lock out everybody, and nginx
 //!   cannot fix it by forwarding a header because nothing here trusts one. A
 //!   per-client limit in front of the app (the README's `limit_req` example)
-//!   is the complementary control, not a substitute for this one.
+//!   is the complementary control, not a substitute for this one; the bearer
+//!   token is not part of the lockout, so scripted access survives it.
 //! - **Under a flood, the bound wins over the lockout**: an attacker who
 //!   contributes more than [`LOCKOUT_MAX_SOURCES`] distinct sources inside the
 //!   failure window can have an actively locked-out entry evicted — the cap is
@@ -79,10 +86,10 @@
 //!   costs real work — a distinct peer address per attempt — to buy back one
 //!   source's guesses, which Argon2's per-guess cost still prices.
 //! - **The answer**: `429 Too Many Requests` with a plain-text reason and a
-//!   `Retry-After` naming the remaining seconds — except a browser
-//!   (`Accept: text/html`), which gets the sign-in page rendered with the
-//!   lockout message instead, exactly as the wrong-credentials path renders
-//!   its own.
+//!   `Retry-After` naming the remaining seconds rounded up. A browser
+//!   (`Accept: text/html`) gets the same `429` — the machine-visible refusal
+//!   must not depend on a header the client chooses — carrying the rendered
+//!   sign-in page as its body.
 //!
 //! This is **defence in depth against brute force, not a user account
 //! system**: there is still one shared credential, no per-user state, no
@@ -111,7 +118,7 @@ use sha2::Sha256;
 use sqlx::SqlitePool;
 use std::collections::HashMap;
 use std::fmt::Write as _;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -154,14 +161,23 @@ const LOCKOUT_MAX_SOURCES: usize = 4096;
 /// misconfigured without a socket still gets a working, if coarse, lockout).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Source {
-    /// One peer **IP address** — deliberately not the port. A TCP client picks
-    /// a fresh ephemeral source port per connection, so keying on `IP:port`
-    /// would hand an attacker a clean counter for every guess: reconnect, and
-    /// the lockout is gone. Ignoring the port is what makes the lockout cost an
+    /// One IPv4 peer address — deliberately not the port. A TCP client picks a
+    /// fresh ephemeral source port per connection, so keying on `IP:port` would
+    /// hand an attacker a clean counter for every guess: reconnect, and the
+    /// lockout is gone. Ignoring the port is what makes the lockout cost an
     /// attacker something; a NATed network still shares one bucket, which is
     /// the usual trade-off (fail2ban and nginx's `limit_req_zone` key on the
     /// bare address for the same reason).
-    Peer(IpAddr),
+    V4(Ipv4Addr),
+    /// One IPv6 **/64 prefix**, with the low 64 bits zeroed.
+    ///
+    /// Keying an IPv6 peer on the full address would make the lockout free to
+    /// defeat: a residential or VPS allocation is a /64, and rotating the
+    /// interface identifier costs an attacker nothing while each attempt gets a
+    /// fresh budget (and evicts a real entry from the 4096 cap). fail2ban and
+    /// nginx's `limit_req_zone` key IPv6 on the /64 for exactly this reason,
+    /// and `Source::of` is where that normalisation happens.
+    V6Prefix(Ipv6Addr),
     /// No connect info on the request. A single shared bucket for every such
     /// request — the in-process test client, and any deployment whose listener
     /// was not built with `into_make_service_with_connect_info`.
@@ -170,8 +186,15 @@ enum Source {
 
 impl Source {
     fn of(peer: Option<SocketAddr>) -> Self {
-        match peer {
-            Some(addr) => Source::Peer(addr.ip()),
+        match peer.map(|addr| addr.ip()) {
+            Some(IpAddr::V4(v4)) => Source::V4(v4),
+            Some(IpAddr::V6(v6)) => {
+                // Zero the interface identifier: the /64 is the allocation a
+                // host is given, so every address inside it is one source.
+                let mut octets = v6.octets();
+                octets[8..].fill(0);
+                Source::V6Prefix(Ipv6Addr::from(octets))
+            }
             None => Source::Unknown,
         }
     }
@@ -180,7 +203,8 @@ impl Source {
     /// (which is not even in scope where this is called).
     fn label(self) -> String {
         match self {
-            Source::Peer(ip) => ip.to_string(),
+            Source::V4(ip) => ip.to_string(),
+            Source::V6Prefix(ip) => format!("{ip}/64"),
             Source::Unknown => "<unknown peer>".to_string(),
         }
     }
@@ -226,15 +250,28 @@ async fn login_handler(auth: Auth, base_path: String, req: Request) -> Response 
 /// What the tracker remembers about one source.
 #[derive(Debug)]
 struct SourceState {
-    /// Consecutive failures in the current window, and when that window began.
-    /// Only ever incremented while the source is *not* locked out (a refused
-    /// attempt costs nothing, so hammering during a lockout cannot extend it).
+    /// Consecutive failures in the current streak, and when the streak last
+    /// advanced. The attempt that *reaches* the budget is counted and answered
+    /// normally; the next one is the first refused.
     failures: u32,
+    /// When the current streak last advanced. The failure window is
+    /// **idle-based** — every attempt pushes this out — so a streak survives
+    /// while attempts continue and expires only after the window passes with
+    /// none, which is what the const documents.
     window_started: Instant,
     /// When this source was last seen, for the cap's oldest-first eviction.
     last_seen: Instant,
     /// When an active lockout ends; `None` when not locked out.
     locked_until: Option<Instant>,
+}
+
+/// The outcome of asking to attempt a login: allowed (and the attempt is now
+/// counted against the source's budget), or refused because the source is
+/// locked out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Attempt {
+    Allowed,
+    Refused { retry_after_secs: u64 },
 }
 
 /// The bounded, in-memory failed-login tracker behind `POST /login`.
@@ -332,36 +369,38 @@ impl LockoutTracker {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Seconds this source must wait before it may try again, `None` when it
-    /// is free to. Also prunes expired entries, so a source that has served
-    /// its cooldown is forgotten rather than left to occupy the cap.
-    fn retry_after(&self, source: Source) -> Option<u64> {
-        let now = Instant::now();
-        let mut state = self.lock();
-        Self::prune(&mut state, now, self.policy.window);
-        let entry = state.sources.get_mut(&source)?;
-        entry.last_seen = now;
-        let until = entry.locked_until?;
-        if until <= now {
-            entry.locked_until = None;
-            entry.failures = 0;
-            entry.window_started = now;
-            return None;
-        }
-        // Rounded up: a `Retry-After` of 0 would invite an immediate retry
-        // that is still refused.
-        Some(until.saturating_duration_since(now).as_secs().max(1))
+    /// Rounds a remaining cooldown **up** to whole seconds for `Retry-After`:
+    /// truncating 299.4 s to `299` invites a retry a fraction before the
+    /// cooldown ends, which is refused again — a client that honours the header
+    /// must not be lied to. Never returns 0 while any time remains.
+    fn ceil_secs(remaining: Duration) -> u64 {
+        remaining.as_secs() + u64::from(remaining.subsec_nanos() > 0)
     }
 
-    /// Records one failed attempt. Reaching the budget starts (or restarts) the
-    /// cooldown; while one is already active this is a no-op, so a locked-out
-    /// source cannot have its cooldown extended by continuing to try.
-    fn record_failure(&self, source: Source) {
+    /// Reserve one attempt at the gate: refuse (without counting, and without
+    /// ever reaching the caller's Argon2 verify) when the source is locked out;
+    /// otherwise **count the attempt now**, under the same lock that made the
+    /// decision.
+    ///
+    /// Counting at the gate is what bounds *concurrent* guesses. Checking the
+    /// budget and incrementing it after the verify — which is ~30 ms of Argon2 —
+    /// lets a burst of parallel attempts all read a count below the budget
+    /// before any of them writes, so the effective budget becomes
+    /// `budget + concurrency`, repeatable every cooldown. Reserving here makes
+    /// it exactly the budget: the attempt that reaches it is still answered
+    /// normally (the budget counts failures, so it takes that many to trip),
+    /// and every attempt after it is refused before any hashing.
+    fn begin_attempt(&self, source: Source) -> Attempt {
         let now = Instant::now();
         let mut state = self.lock();
-        Self::prune(&mut state, now, self.policy.window);
-        if !state.sources.contains_key(&source) && state.sources.len() >= self.policy.max_sources {
-            Self::evict_oldest(&mut state);
+        // Pruning is O(tracked sources); only a *new* source can grow the map,
+        // so only that path pays for it. An existing entry's own expiry is
+        // handled below, where it matters.
+        if !state.sources.contains_key(&source) {
+            Self::prune(&mut state, now, self.policy.window);
+            if state.sources.len() >= self.policy.max_sources {
+                Self::evict_oldest(&mut state);
+            }
         }
         let entry = state.sources.entry(source).or_insert_with(|| SourceState {
             failures: 0,
@@ -370,22 +409,33 @@ impl LockoutTracker {
             locked_until: None,
         });
         entry.last_seen = now;
-        if entry.locked_until.is_some_and(|until| until > now) {
-            return;
+        if let Some(until) = entry.locked_until {
+            if until > now {
+                return Attempt::Refused {
+                    retry_after_secs: Self::ceil_secs(until.saturating_duration_since(now)),
+                };
+            }
+            // The cooldown has been served: back to a clean slate.
+            entry.locked_until = None;
+            entry.failures = 0;
+        } else if now.saturating_duration_since(entry.window_started) >= self.policy.window {
+            // The streak went idle for a whole window: it is dropped rather
+            // than counted toward the budget.
+            entry.failures = 0;
         }
         entry.failures += 1;
+        entry.window_started = now;
         if entry.failures >= self.policy.budget {
             entry.locked_until = Some(now + self.policy.cooldown);
         }
+        Attempt::Allowed
     }
 
     /// Clears a source's failure streak — a login that succeeded before the
     /// budget was reached is forgiven, so an ordinary mistyped attempt costs
     /// nothing permanent.
     fn record_success(&self, source: Source) {
-        let now = Instant::now();
         let mut state = self.lock();
-        Self::prune(&mut state, now, self.policy.window);
         state.sources.remove(&source);
     }
 
@@ -501,16 +551,12 @@ impl Auth {
         Ok(auth)
     }
 
-    /// Seconds the given peer must wait before another login attempt, or `None`
-    /// when it may try now. Checked *before* the password, so a locked-out
-    /// source is refused without an Argon2 verify and a correct password cannot
-    /// reset the lockout — see [`LockoutTracker`].
-    fn lockout_retry_after(&self, source: Source) -> Option<u64> {
-        self.lockouts.retry_after(source)
-    }
-
-    fn record_login_failure(&self, source: Source) {
-        self.lockouts.record_failure(source);
+    /// Reserve an attempt for the given peer at the gate, *before* the password
+    /// is checked: a locked-out source is refused without an Argon2 verify, a
+    /// correct password cannot reset the lockout, and the attempt is counted
+    /// atomically with the decision — see [`LockoutTracker::begin_attempt`].
+    fn begin_login_attempt(&self, source: Source) -> Attempt {
+        self.lockouts.begin_attempt(source)
     }
 
     fn record_login_success(&self, source: Source) {
@@ -814,25 +860,34 @@ async fn login_submit(
 ) -> Response {
     // The lockout gate comes **first**, before the password is even looked at:
     // that is what makes a correct password unable to reset an active lockout,
-    // and it is also why a refused attempt costs no Argon2 work.
-    if let Some(retry_after) = auth.lockout_retry_after(source) {
+    // and it is also why a refused attempt costs no Argon2 work. The attempt is
+    // counted here, atomically with the decision, so concurrent guesses cannot
+    // slip past the budget between the check and the verify.
+    if let Attempt::Refused { retry_after_secs } = auth.begin_login_attempt(source) {
         // Named by source, never by the attempted password — which is not in
         // scope here and must never reach a log. The source is either a socket
         // address or the fixed `<unknown peer>` sentinel, so nothing
         // attacker-chosen is written verbatim.
         tracing::warn!(
             source = %source.label(),
-            retry_after_secs = retry_after,
+            retry_after_secs,
             "login refused: locked out after repeated failures"
         );
-        // A browser must still see the sign-in page carrying the reason rather
-        // than a bare body it would render as plain text; the 429 with a
-        // `Retry-After` is for the script/LLM clients that can act on it.
-        if html {
-            return render_login(&base_path, Some(&lockout_message(retry_after))).into_response();
-        }
-        return ApiError::too_many_requests(lockout_message(retry_after), retry_after)
-            .into_response();
+        let message = lockout_message(retry_after_secs);
+        // Both answers are `429` — a machine-visible refusal an operator's log
+        // or fail2ban rule can act on, which a `200` page for `Accept:
+        // text/html` would hide. A browser still gets the rendered sign-in page
+        // as the body rather than a bare plain-text reason.
+        return if html {
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                [(header::RETRY_AFTER, retry_after_secs.to_string())],
+                render_login(&base_path, Some(&message)),
+            )
+                .into_response()
+        } else {
+            ApiError::too_many_requests(message, retry_after_secs).into_response()
+        };
     }
 
     if auth.verify_password(&form.username, &form.password) {
@@ -851,7 +906,8 @@ async fn login_submit(
         )
             .into_response()
     } else {
-        auth.record_login_failure(source);
+        // The attempt was already counted at the gate (see `begin_login_attempt`),
+        // so there is nothing more to record here.
         // Named by attempted username as well as source: the username is the
         // signal a human reading the log wants (which credential is being
         // guessed at), and the source is what the lockout keys on.
@@ -1410,12 +1466,50 @@ mod lockout_tests {
         );
         let tracker = tracker();
         for _ in 0..TEST_BUDGET {
-            tracker.record_failure(peer_on_port(40001));
+            assert_eq!(tracker.begin_attempt(peer_on_port(40001)), Attempt::Allowed);
         }
         assert!(
-            tracker.retry_after(peer_on_port(40002)).is_some(),
+            matches!(
+                tracker.begin_attempt(peer_on_port(40002)),
+                Attempt::Refused { .. }
+            ),
             "a fresh port must not be a fresh budget"
         );
+    }
+
+    /// An IPv6 source is its **/64 prefix**, not the full address: rotating the
+    /// interface identifier (free — it is the host's own allocation) must not
+    /// buy a fresh budget, while a genuinely different /64 still gets its own.
+    #[test]
+    fn an_ipv6_source_is_its_64_prefix() {
+        let addr = |s: &str, port| SocketAddr::new(s.parse::<IpAddr>().unwrap(), port);
+        assert_eq!(
+            Source::of(Some(addr("2001:db8:1:2::1", 40001))),
+            Source::of(Some(addr("2001:db8:1:2:ffff:ffff:ffff:ffff", 40002))),
+            "every address in one /64 is one source"
+        );
+        assert_ne!(
+            Source::of(Some(addr("2001:db8:1:2::1", 40001))),
+            Source::of(Some(addr("2001:db8:1:3::1", 40001))),
+            "a different /64 is a different source"
+        );
+        assert_eq!(
+            Source::of(Some(addr("2001:db8:1:2::1", 40001))).label(),
+            "2001:db8:1:2::/64",
+            "the log line must name the prefix the key is"
+        );
+        // And the budget is spent on the prefix, not one address in it.
+        let tracker = tracker();
+        for _ in 0..TEST_BUDGET {
+            assert_eq!(
+                tracker.begin_attempt(Source::of(Some(addr("2001:db8:1:2:1:2:3:4", 40001)))),
+                Attempt::Allowed
+            );
+        }
+        assert!(matches!(
+            tracker.begin_attempt(Source::of(Some(addr("2001:db8:1:2::9", 40003)))),
+            Attempt::Refused { .. }
+        ));
     }
 
     /// The budget is a count of *consecutive failures*: the first `budget`
@@ -1426,25 +1520,68 @@ mod lockout_tests {
         let tracker = tracker();
         for attempt in 1..=TEST_BUDGET {
             assert_eq!(
-                tracker.retry_after(peer(1)),
-                None,
+                tracker.begin_attempt(peer(1)),
+                Attempt::Allowed,
                 "attempt {attempt} is within the budget and must be allowed"
             );
-            tracker.record_failure(peer(1));
         }
-        assert_eq!(
-            tracker.retry_after(peer(1)),
-            Some(1),
-            "the attempt that exhausted the budget must start the cooldown"
+        assert!(
+            matches!(tracker.begin_attempt(peer(1)), Attempt::Refused { .. }),
+            "the attempt after the budget must start the cooldown"
         );
         // A refused attempt changes nothing: the remaining cooldown is
         // unchanged, so hammering a locked-out source cannot extend its lock.
-        let first = tracker.retry_after(peer(1)).unwrap();
-        tracker.record_failure(peer(1));
+        let Attempt::Refused {
+            retry_after_secs: first,
+        } = tracker.begin_attempt(peer(1))
+        else {
+            panic!("a locked-out source must stay refused");
+        };
+        let Attempt::Refused {
+            retry_after_secs: second,
+        } = tracker.begin_attempt(peer(1))
+        else {
+            panic!("a locked-out source must stay refused");
+        };
         assert!(
-            tracker.retry_after(peer(1)).unwrap() <= first,
+            second <= first,
             "a refused attempt must not extend the lockout"
         );
+    }
+
+    /// The gate **counts every attempt it lets through**, so the budget cannot
+    /// be beaten by racing it: had the count been written after the verify (as
+    /// it was), a burst of parallel guesses would all read a count below the
+    /// budget before any wrote and the effective budget would be
+    /// `budget + concurrency`.
+    #[test]
+    fn the_gate_counts_each_attempt_rather_than_checking_then_acting() {
+        let tracker = tracker();
+        let allowed = (0..TEST_BUDGET * 4)
+            .filter(|_| tracker.begin_attempt(peer(1)) == Attempt::Allowed)
+            .count();
+        assert_eq!(
+            allowed, TEST_BUDGET as usize,
+            "exactly the budget may pass the gate, however many race it"
+        );
+    }
+
+    /// `Retry-After` rounds the remaining cooldown **up**: 1100 ms must
+    /// advertise 2 whole seconds, never a truncated 1 that a client honouring
+    /// the header would retry into a refusal.
+    #[test]
+    fn a_retry_after_rounds_the_remaining_cooldown_up() {
+        let tracker = tracker();
+        for _ in 0..TEST_BUDGET {
+            let _ = tracker.begin_attempt(peer(1));
+        }
+        match tracker.begin_attempt(peer(1)) {
+            Attempt::Refused { retry_after_secs } => assert_eq!(
+                retry_after_secs, 2,
+                "1100 ms of cooldown advertises 2 seconds, rounded up"
+            ),
+            Attempt::Allowed => panic!("the source is locked out"),
+        }
     }
 
     /// One source's failures must not lock out another — the whole point of
@@ -1453,17 +1590,20 @@ mod lockout_tests {
     fn one_sources_failures_do_not_lock_out_another() {
         let tracker = tracker();
         for _ in 0..TEST_BUDGET {
-            tracker.record_failure(peer(1));
+            let _ = tracker.begin_attempt(peer(1));
         }
-        assert!(tracker.retry_after(peer(1)).is_some(), "source 1 is locked");
+        assert!(
+            matches!(tracker.begin_attempt(peer(1)), Attempt::Refused { .. }),
+            "source 1 is locked"
+        );
         assert_eq!(
-            tracker.retry_after(peer(2)),
-            None,
+            tracker.begin_attempt(peer(2)),
+            Attempt::Allowed,
             "source 2 has made no attempt and must not be locked out by source 1's"
         );
         assert_eq!(
-            tracker.retry_after(Source::Unknown),
-            None,
+            tracker.begin_attempt(Source::Unknown),
+            Attempt::Allowed,
             "the no-peer bucket is its own source, not a shared one"
         );
     }
@@ -1473,18 +1613,18 @@ mod lockout_tests {
     fn a_success_before_the_budget_clears_the_failure_streak() {
         let tracker = tracker();
         for _ in 0..TEST_BUDGET - 1 {
-            tracker.record_failure(peer(1));
+            let _ = tracker.begin_attempt(peer(1));
         }
         tracker.record_success(peer(1));
-        // A fresh streak of budget-1 failures still leaves the source free —
-        // were the old count still there it would have locked out on the first
-        // of them.
+        // A fresh streak of budget-1 failures still leaves the source free: the
+        // next (budget'th) attempt is answered, where a count that had survived
+        // the success would already be refusing it.
         for _ in 0..TEST_BUDGET - 1 {
-            tracker.record_failure(peer(1));
+            assert_eq!(tracker.begin_attempt(peer(1)), Attempt::Allowed);
         }
         assert_eq!(
-            tracker.retry_after(peer(1)),
-            None,
+            tracker.begin_attempt(peer(1)),
+            Attempt::Allowed,
             "the successful attempt must have reset the count"
         );
     }
@@ -1495,21 +1635,76 @@ mod lockout_tests {
     fn a_lockout_expires_back_to_a_clean_slate() {
         let tracker = tracker();
         for _ in 0..TEST_BUDGET {
-            tracker.record_failure(peer(1));
+            let _ = tracker.begin_attempt(peer(1));
         }
-        assert!(tracker.retry_after(peer(1)).is_some());
+        assert!(matches!(
+            tracker.begin_attempt(peer(1)),
+            Attempt::Refused { .. }
+        ));
         std::thread::sleep(TEST_COOLDOWN + Duration::from_millis(100));
-        assert_eq!(
-            tracker.retry_after(peer(1)),
-            None,
-            "the cooldown has elapsed; the source may try again"
-        );
-        // …and it is back inside the budget: budget-1 further failures do not
-        // re-lock, where a surviving count at the budget already would.
-        for _ in 0..TEST_BUDGET - 1 {
-            tracker.record_failure(peer(1));
+        // A clean slate: a whole fresh budget is allowed before the lock trips
+        // again, where a surviving count would have tripped on the first.
+        for attempt in 1..=TEST_BUDGET {
+            assert_eq!(
+                tracker.begin_attempt(peer(1)),
+                Attempt::Allowed,
+                "attempt {attempt} after the cooldown is inside a fresh budget"
+            );
         }
-        assert_eq!(tracker.retry_after(peer(1)), None);
+        assert!(matches!(
+            tracker.begin_attempt(peer(1)),
+            Attempt::Refused { .. }
+        ));
+    }
+
+    /// The failure window is **idle-based**: each attempt pushes its end out,
+    /// so a streak survives while attempts continue and expires only after the
+    /// window passes with none. The two halves below pin both directions — a
+    /// streak kept alive across gaps shorter than the window still reaches the
+    /// budget, and one left idle for longer is dropped.
+    ///
+    /// The window is short and the gaps well inside it, so ordinary scheduler
+    /// jitter cannot flip either assertion.
+    #[test]
+    fn the_failure_window_is_idle_based() {
+        let mut policy = policy();
+        policy.budget = 12;
+        policy.window = Duration::from_millis(500);
+        policy.cooldown = Duration::from_secs(60);
+
+        // Kept alive: twelve attempts 60 ms apart span ~720 ms from the first —
+        // past the window — so a window fixed at the first failure would have
+        // dropped the early ones and never tripped.
+        let tracker = LockoutTracker::with_policy(policy);
+        for attempt in 1..=12 {
+            assert_eq!(
+                tracker.begin_attempt(peer(1)),
+                Attempt::Allowed,
+                "attempt {attempt} is inside every 500 ms window"
+            );
+            std::thread::sleep(Duration::from_millis(60));
+        }
+        assert!(
+            matches!(tracker.begin_attempt(peer(1)), Attempt::Refused { .. }),
+            "a streak kept alive by attempts must reach the budget"
+        );
+
+        // Dropped: one failure, then silence for longer than the window, leaves
+        // a full fresh budget.
+        let tracker = LockoutTracker::with_policy(policy);
+        assert_eq!(tracker.begin_attempt(peer(1)), Attempt::Allowed);
+        std::thread::sleep(Duration::from_millis(700));
+        for attempt in 1..=12 {
+            assert_eq!(
+                tracker.begin_attempt(peer(1)),
+                Attempt::Allowed,
+                "attempt {attempt} of the fresh budget after an idle window"
+            );
+        }
+        assert!(matches!(
+            tracker.begin_attempt(peer(1)),
+            Attempt::Refused { .. }
+        ));
     }
 
     /// The state is **bounded**: driving many more distinct sources than the
@@ -1520,7 +1715,7 @@ mod lockout_tests {
     fn the_tracker_never_grows_past_its_cap() {
         let tracker = tracker();
         for port in 1..=(TEST_CAP as u16 * 25) {
-            tracker.record_failure(peer(port));
+            let _ = tracker.begin_attempt(peer(port));
         }
         assert_eq!(
             tracker.len(),
@@ -1532,11 +1727,11 @@ mod lockout_tests {
         // still tracked (a burst of new sources cannot silently un-lock one
         // that is actively being attacked).
         let last = peer(TEST_CAP as u16 * 25);
-        for _ in 0..TEST_BUDGET - 1 {
-            tracker.record_failure(last);
+        for _ in 0..TEST_BUDGET {
+            let _ = tracker.begin_attempt(last);
         }
         assert!(
-            tracker.retry_after(last).is_some(),
+            matches!(tracker.begin_attempt(last), Attempt::Refused { .. }),
             "the most recently seen source must still be tracked"
         );
         assert!(tracker.len() <= TEST_CAP);
@@ -1553,18 +1748,21 @@ mod lockout_tests {
         let tracker = tracker();
         let locked = peer(1);
         for _ in 0..TEST_BUDGET {
-            tracker.record_failure(locked);
+            let _ = tracker.begin_attempt(locked);
         }
-        assert!(tracker.retry_after(locked).is_some(), "sanity: locked out");
+        assert!(
+            matches!(tracker.begin_attempt(locked), Attempt::Refused { .. }),
+            "sanity: locked out"
+        );
 
         // More distinct sources than the cap, each seen after the locked one.
         for port in 100..100 + TEST_CAP as u16 + 1 {
-            tracker.record_failure(peer(port));
+            let _ = tracker.begin_attempt(peer(port));
         }
         assert_eq!(tracker.len(), TEST_CAP, "the cap still holds");
         assert_eq!(
-            tracker.retry_after(locked),
-            None,
+            tracker.begin_attempt(locked),
+            Attempt::Allowed,
             "the least-recently-seen source was evicted, as the docs say it can be"
         );
     }
@@ -1661,7 +1859,7 @@ mod lockout_tests {
             .to_str()
             .unwrap()
             .to_string();
-        assert_eq!(retry_after, "1");
+        assert_eq!(retry_after, "2");
         assert!(
             exhausting
                 .text()
@@ -1683,7 +1881,7 @@ mod lockout_tests {
             );
             assert_eq!(
                 resp.headers.get(header::RETRY_AFTER).unwrap(),
-                &HeaderValue::from_static("1")
+                &HeaderValue::from_static("2")
             );
         }
 
@@ -1772,12 +1970,13 @@ mod lockout_tests {
         }
     }
 
-    /// The browser path: an HTML login POST during a lockout renders the
-    /// sign-in page carrying the lockout message, exactly as the
-    /// wrong-credentials path renders its own — never a bare `429` body that
-    /// the browser would show as plain text.
+    /// The browser path: an HTML login POST during a lockout is refused
+    /// **`429`** — so the refusal is machine-visible in an access log or a
+    /// fail2ban rule however the client spells `Accept` — carrying the sign-in
+    /// page as its body, never a bare plain-text reason a browser would render
+    /// as text.
     #[tokio::test]
-    async fn a_locked_out_browser_gets_the_login_page_with_the_lockout_message() {
+    async fn a_locked_out_browser_gets_a_429_carrying_the_login_page() {
         let pool = test_pool().await;
         let client = client(&pool, auth_with(policy())).with_peer(([203, 0, 113, 7], 4001).into());
 
@@ -1793,8 +1992,13 @@ mod lockout_tests {
         let locked = browser_login(&client, "hunter2").await;
         assert_eq!(
             locked.status,
-            StatusCode::OK,
-            "a browser must get the page, not a bare 429"
+            StatusCode::TOO_MANY_REQUESTS,
+            "the refusal must be a 429 whatever the Accept header says"
+        );
+        assert_eq!(
+            locked.headers.get(header::RETRY_AFTER).unwrap(),
+            &HeaderValue::from_static("2"),
+            "the browser path carries the same Retry-After as the script one"
         );
         let body = locked.text();
         assert!(
@@ -1810,9 +2014,6 @@ mod lockout_tests {
             "the lockout page must not claim the credentials were wrong: {body}"
         );
         assert!(locked.headers.get(header::SET_COOKIE).is_none());
-        // A browser is not asked to honour a `Retry-After`; the message says
-        // how long to wait in prose instead.
-        assert!(locked.headers.get(header::RETRY_AFTER).is_none());
 
         // The exact response the documented Error-body contract's `429` row
         // (and its `doc_checks` pin) describe, from the code side.
