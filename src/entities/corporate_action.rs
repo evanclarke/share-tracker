@@ -139,6 +139,10 @@ pub use adjustments::{
     db_payment_currency_conflict, db_return_of_capital_events, db_share_split_events,
     db_splits_for_listing, sold_in_acquired_units, split_adjusted_quantity,
 };
+/// The list route's filter type — `api_spec` reads its fields through
+/// `utoipa::IntoParams` so the OpenAPI document's query parameters come from
+/// what axum decodes rather than from prose.
+pub use db::CorporateActionListQuery;
 pub use db::{db_get_tx, rebased_quantity_beyond_range};
 pub use http::router;
 pub use model::{

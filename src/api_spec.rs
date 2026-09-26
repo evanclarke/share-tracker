@@ -69,19 +69,23 @@ field (SCENARIOS W-a).
 - Every request body denies unknown fields. Each request-body schema carries \
 additionalProperties: false, so a misspelt or unexpected field is a 422 naming \
 the offending field rather than a silently-ignored default writing a zero into \
-a tax figure. Query parameters follow the same rule on the routes that take \
-them.
+a tax figure. A query string is held to the same rule, but the refusal is a 400 \
+naming the field rather than a 422, because it is the query decoder that rejects \
+it before the handler runs (POST /jobs/{name} is the one exception: it reads the \
+rejection itself and answers 422, so a misspelt ?suffix= cannot take an \
+unlabelled backup).
 
 Errors are never JSON. A rejected request answers either a text/plain; \
 charset=utf-8 body with the reason — 400 (a malformed path parameter, query \
-string or body), 401, 404 on a delete or operation, 413, 415 (a JSON body sent \
+string or body), 401, 404 on a delete, an operation, or a read whose parameter \
+names a missing row (GET /portfolio/activity?listing_id=), 413, 415 (a JSON body sent \
 without Content-Type: application/json), 422, 429 on POST /login once a source \
 has exhausted its failed-attempt budget (the body carries the reason and a \
 Retry-After header the remaining whole seconds; a browser login POST is refused \
 429 too, with the sign-in page as the body instead of the plain-text reason), a \
-failed POST /jobs/{name}'s 500, 502, 503 — or a deliberately empty body: a \
-GET's 404, a 405, and an internal 500. docs/API.md's \"Error-body contract\" \
-section carries the full matrix.
+failed POST /jobs/{name}'s 500, 502, 503 — or a deliberately empty body: the 404 \
+of a GET addressed at one missing row, a 405, and an internal 500. docs/API.md's \
+\"Error-body contract\" section carries the full matrix.
 
 Reading a collection is one more contract, stated here and in docs/API.md's \
 \"Reading a list\" section. First, list endpoints return rows ascending — by \
@@ -1316,7 +1320,7 @@ const ROUTES: &[RouteRow] = &[
         Verb::Get,
         "/portfolio/activity",
         &[200],
-        "One listing's activity ledger; ?listing_id= is required, with optional ?price= and as-of bounds.",
+        "One listing's activity ledger; ?listing_id= is required, with an optional ?price= for the holding summary (absent, it is live-fetched).",
         Body::None,
         Body::Json("ActivityResponse"),
     ),
@@ -1500,7 +1504,7 @@ const ROUTES: &[RouteRow] = &[
         Verb::Get,
         "/reports/tax_report",
         &[200],
-        "The Annual Tax Report for one financial year; ?tax_year= selects it, defaulting to the one in progress.",
+        "The Annual Tax Report for one financial year; ?tax_year= selects it and is required.",
         Body::None,
         Body::Json("TaxReport"),
     ),
@@ -1843,9 +1847,9 @@ fn operation(
     }
     // `POST /login` can answer 429 — the failed-attempt lockout
     // (`infra::auth`) — and it is not a JSON body, so it is recorded here by
-    // description rather than as a schema. The browser path renders the
-    // sign-in page with the same message under 200 instead; both shapes are
-    // stated in `docs/API.md`'s Error-body contract.
+    // description rather than as a schema. The browser path is refused 429 too
+    // — it differs only in rendering the sign-in page as the body; both shapes
+    // are stated in `docs/API.md`'s Error-body contract.
     if path == "/login" && verb == Verb::Post {
         responses = responses.response(
             "429".to_string(),
@@ -1952,7 +1956,7 @@ fn operation(
     }
     let mut builder = OperationBuilder::new()
         .summary(Some(summary))
-        .parameters(Some(operation_parameters(path, summary)))
+        .parameters(Some(operation_parameters(verb, path)))
         .responses(responses.build());
     if let Some(body) = request_body(request) {
         builder = builder.request_body(Some(body));
@@ -1961,25 +1965,106 @@ fn operation(
 }
 
 /// Every parameter of an operation: a required string per `{name}` path
-/// segment, plus an optional query parameter for every `?name=` the summary
-/// names.
+/// segment, plus the query parameters the route's own `Query<T>` type declares.
 ///
-/// Deriving the query parameters from the summary means the two cannot
-/// disagree: a filter added to a list must appear in that list's summary
-/// (`every_filtered_list_summary_names_its_filters` pins it against the entity
-/// classification table), and it then reaches the document automatically. The
-/// document previously declared **no** query parameter at all, so a generated
-/// client could not narrow a list or pass a report's date.
-fn operation_parameters(path: &str, summary: &str) -> Vec<Parameter> {
+/// The query half is derived from that Rust type through `utoipa::IntoParams`,
+/// not from the summary prose: the type is what axum actually decodes, so the
+/// document's name, `required` and schema for each parameter cannot disagree
+/// with the handler. A plain field is required, an `Option` is not, and
+/// `i64`/`NaiveDate`/`Decimal` reach the document as integer/date/string rather
+/// than as one flat "string, optional" shape. Reading `?name=` out of the
+/// summary — which the first version of this did — could only ever guess both,
+/// and guessed wrong: every parameter came out optional, including
+/// `?tax_year=`, which a request is refused `400` for omitting.
+///
+/// [`tests::every_query_parameter_matches_its_summary`] keeps the prose honest
+/// in the other direction, so a summary cannot name a parameter the type does
+/// not have.
+fn operation_parameters(verb: Verb, path: &str) -> Vec<Parameter> {
     let mut parameters = path_parameters(path);
-    parameters.extend(query_parameters(summary));
+    parameters.extend(query_parameters(verb, path));
     parameters
 }
 
-/// The optional query parameters a summary names, read out of its `?name=`
-/// tokens. Deduplicated, since a summary may mention one twice (`?from=` …
-/// `?to=` appears in one sentence).
-fn query_parameters(summary: &str) -> Vec<Parameter> {
+/// The query parameters a route declares, as its `Query<T>` type describes
+/// them. One arm per route that decodes a query string; a route absent from
+/// the match takes none, and `NoFilter` lists (the reference and settings
+/// tables) are deliberately among them.
+///
+/// `into_params` is given `|| Some(ParameterIn::Query)` so every field is
+/// placed in the query string rather than needing a per-field attribute.
+fn query_parameters(verb: Verb, path: &str) -> Vec<Parameter> {
+    use utoipa::IntoParams;
+
+    fn of<T: IntoParams>() -> Vec<Parameter> {
+        T::into_params(|| Some(ParameterIn::Query))
+    }
+
+    // Keyed on the verb too, because one query-decoding route is not a GET:
+    // `POST /jobs/{name}` takes `?suffix=`/`?skip_command=`.
+    if verb == Verb::Post {
+        return match path {
+            "/jobs/{name}" => of::<crate::infra::scheduler::JobParams>(),
+            _ => Vec::new(),
+        };
+    }
+    if verb != Verb::Get {
+        return Vec::new();
+    }
+    match path {
+        // Entity lists: the `CrudEntity::Filter` type behind
+        // `http::list_handler`, one per filtered list (`entities::LIST_ROUTES`
+        // classifies every list route, filtered or not).
+        "/listings" => of::<crate::entities::listing::ListingListQuery>(),
+        "/trades" => of::<crate::entities::trade::TradeListQuery>(),
+        "/income" => of::<crate::entities::income::IncomeListQuery>(),
+        "/interest_income" => of::<crate::entities::interest_income::InterestIncomeListQuery>(),
+        "/investment_expenses" => {
+            of::<crate::entities::investment_expense::InvestmentExpenseListQuery>()
+        }
+        "/amma_statements" => of::<crate::entities::amma::AmmaListQuery>(),
+        "/amit_adjustments" => of::<crate::entities::amit_adjustment::AmitAdjustmentListQuery>(),
+        "/corporate_actions" => of::<crate::entities::corporate_action::CorporateActionListQuery>(),
+        "/distribution_events" => {
+            of::<crate::entities::distribution_event::DistributionEventListQuery>()
+        }
+        "/drp_enrolments" => of::<crate::entities::drp_enrolment::DrpEnrolmentListQuery>(),
+        "/ess_statements" => of::<crate::entities::ess_statement::EssStatementListQuery>(),
+        "/inheritances" => of::<crate::entities::inheritance::InheritanceListQuery>(),
+        "/parcel_allocations" => {
+            of::<crate::entities::parcel_allocation::ParcelAllocationListQuery>()
+        }
+        "/transfers" => of::<crate::entities::transfer::TransferListQuery>(),
+        // Hand-written lists and reads.
+        "/attachments" => of::<crate::entities::attachment::ListQuery>(),
+        "/attachments/{id}/content" => of::<crate::entities::attachment::ContentQuery>(),
+        "/closing_prices" => of::<crate::entities::closing_price::ListParams>(),
+        "/report_snapshots" => of::<crate::reports::snapshot::ListParams>(),
+        "/report_snapshots/series" => of::<crate::reports::snapshot::SeriesParams>(),
+        "/report_snapshots/holding_series" => of::<crate::reports::snapshot::HoldingSeriesParams>(),
+        "/portfolio/activity" => of::<crate::reports::activity::ActivityRequest>(),
+        "/portfolio/open-parcels" => of::<crate::reports::open_parcels::OpenParcelsQuery>(),
+        "/portfolio/parcel-optimiser" => of::<crate::reports::parcel_optimiser::OptimiserRequest>(),
+        "/portfolio/period-performance" => {
+            of::<crate::reports::period_performance::PeriodRequest>()
+        }
+        "/reports/row_history" => of::<crate::reports::row_history::RowHistoryRequest>(),
+        "/reports/tax_report" => of::<crate::reports::tax_report::TaxReportRequest>(),
+        "/reports/wash_sales" => of::<crate::reports::wash_sales::WashSalesRequest>(),
+        "/reports/franking_at_risk/what-if" => {
+            of::<crate::reports::franking_at_risk::WhatIfRequest>()
+        }
+        "/reports/net-capital-gain/what-if" => {
+            of::<crate::reports::net_capital_gain::WhatIfRequest>()
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// The `?name=` tokens a summary mentions — the prose side of
+/// [`query_parameters`], used only by the test that keeps the two in step.
+#[cfg(test)]
+fn summary_query_names(summary: &str) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
     let mut rest = summary;
     while let Some(at) = rest.find('?') {
@@ -1996,16 +2081,6 @@ fn query_parameters(summary: &str) -> Vec<Parameter> {
         }
     }
     names
-        .into_iter()
-        .map(|name| {
-            ParameterBuilder::new()
-                .name(name)
-                .parameter_in(ParameterIn::Query)
-                .required(Required::False)
-                .schema(Some(ObjectBuilder::new().schema_type(Type::String)))
-                .build()
-        })
-        .collect()
 }
 
 /// A required string path parameter per `{name}` segment of the path — read
@@ -2592,10 +2667,21 @@ mod tests {
             description.contains("415"),
             "info.description must name axum's 415: {description}"
         );
-        // …and the empty-bodied ones, both 404s and both 500s named apart.
+        // …and the empty-bodied ones, both 404s and both 500s named apart. The
+        // 404 is qualified on both sides, because the two shapes are told apart
+        // by *what the URL addresses*, not by the verb: a GET aimed at one
+        // missing row is empty, while a read whose parameter names a missing row
+        // carries the reason (`a_read_whose_parameter_names_a_missing_row_…`
+        // drives that one).
+        assert!(description.contains(
+            "a deliberately empty body: the 404 of a GET addressed at one missing row, \
+             a 405, and an internal 500"
+        ));
         assert!(
-            description
-                .contains("a deliberately empty body: a GET's 404, a 405, and an internal 500")
+            description.contains(
+                "404 on a delete, an operation, or a read whose parameter names a missing row"
+            ),
+            "info.description must not claim every GET's 404 is empty: {description}"
         );
     }
 
@@ -2950,6 +3036,68 @@ mod tests {
         }
     }
 
+    /// Every `?name=` a route summary mentions is a parameter that route's
+    /// `Query<T>` type really has, and every parameter the type has is
+    /// mentioned. The document is generated from the type (so a client gets the
+    /// truth), and this is what stops the prose beside it drifting into
+    /// describing a parameter that does not exist — which is how the first
+    /// version of this feature shipped two snapshot routes' parameters swapped.
+    #[test]
+    fn every_query_parameter_matches_its_summary() {
+        for &(verb, path, _, summary, _, _) in ROUTES {
+            let mut declared: Vec<String> = super::query_parameters(verb, path)
+                .iter()
+                .map(|p| p.name.clone())
+                .collect();
+            let mut mentioned = super::summary_query_names(summary);
+            declared.sort();
+            mentioned.sort();
+            assert_eq!(
+                declared, mentioned,
+                "{verb:?} {path}: the summary's ?name= tokens and the Query type's \
+                 fields must be the same set"
+            );
+        }
+    }
+
+    /// A parameter a request is refused for omitting is `required` in the
+    /// document, and one with a non-string type says so. Both come from the
+    /// Rust type via `IntoParams`; the first version of this derived parameters
+    /// from prose and could only emit "optional string", so `?tax_year=` — whose
+    /// absence is a `400` — was advertised as optional, and `docs/API.md`'s
+    /// "Required: yes" contradicted the document generated beside it.
+    #[test]
+    fn a_required_query_parameter_is_documented_as_required() {
+        let doc = doc();
+        let param = |path: &str, name: &str| -> serde_json::Value {
+            doc["paths"][path]["get"]["parameters"]
+                .as_array()
+                .expect("the route must carry parameters")
+                .iter()
+                .find(|p| p["name"] == name)
+                .unwrap_or_else(|| panic!("GET {path} must declare ?{name}="))
+                .clone()
+        };
+        let tax_year = param("/reports/tax_report", "tax_year");
+        assert_eq!(tax_year["required"], serde_json::json!(true));
+        assert_eq!(tax_year["schema"]["type"], serde_json::json!("integer"));
+        let listing_id = param("/portfolio/activity", "listing_id");
+        assert_eq!(listing_id["required"], serde_json::json!(true));
+        assert_eq!(listing_id["schema"]["type"], serde_json::json!("integer"));
+        // …and an `Option` field is optional, so the two are really being told
+        // apart rather than everything being stamped the same way.
+        let as_of = param("/portfolio/open-parcels", "as_of_date");
+        assert_eq!(as_of["required"], serde_json::json!(false));
+        let price = param("/portfolio/activity", "price");
+        assert_eq!(price["required"], serde_json::json!(false));
+        // Money stays a string in the document, as everywhere else — an
+        // optional field's type is the nullable pair, so what matters is that
+        // it is the string and not a JSON number.
+        let ty = price["schema"]["type"].to_string();
+        assert!(ty.contains("string"), "price must be a string, got {ty}");
+        assert!(!ty.contains("number"), "money must never be a JSON number");
+    }
+
     /// The document carries the **non-success** responses a client must handle,
     /// not only the success ones: a `404` on every path-addressed
     /// GET/POST/DELETE, and a `502` on the feed-import and provider-fetch
@@ -3206,6 +3354,65 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The other half of the `404` contract: a read whose **parameter** names a
+    /// row that is not there answers a `404` **with** a plain-text reason, not
+    /// the empty body a `GET`-one gives. `GET /portfolio/activity?listing_id=`
+    /// is the only such read, and the Error-body matrix used to say flatly that
+    /// "a `GET`'s 404" is empty — so a client generated from the document
+    /// discarded "listing 42 not found" as a body that could not exist.
+    ///
+    /// The scan keeps that "only" honest: a new report that answers
+    /// `ApiError::not_found` is a second case the matrix would not cover, so it
+    /// fails here until it is classified.
+    #[tokio::test]
+    async fn a_read_whose_parameter_names_a_missing_row_answers_a_text_404() {
+        use crate::test_support::{ApiClient, test_pool};
+        use axum::http::StatusCode;
+
+        let pool = test_pool().await;
+        let client = ApiClient::full(&pool);
+        let resp = client.get("/portfolio/activity?listing_id=9999").await;
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            resp.text(),
+            "listing 9999 not found",
+            "a read whose parameter names a missing row must say which one"
+        );
+
+        // Exhaustiveness: `src/reports` may answer a text 404 from exactly one
+        // file. Recursive, because a report that outgrows one file becomes a
+        // directory (`trade.rs`/`closing_price.rs` set that precedent).
+        fn sources(dir: &std::path::Path, found: &mut Vec<String>) {
+            for entry in std::fs::read_dir(dir).expect("src/reports must be readable") {
+                let path = entry.expect("a readable dir entry").path();
+                if path.is_dir() {
+                    sources(&path, found);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    let body = std::fs::read_to_string(&path).expect("a readable source");
+                    // The declaration itself lives in `infra::http`; here only
+                    // call sites matter.
+                    if body.contains("ApiError::not_found(") {
+                        found.push(
+                            path.file_name()
+                                .expect("a named file")
+                                .to_string_lossy()
+                                .into_owned(),
+                        );
+                    }
+                }
+            }
+        }
+        let mut found = Vec::new();
+        sources(std::path::Path::new("src/reports"), &mut found);
+        found.sort();
+        assert_eq!(
+            found,
+            vec!["activity.rs".to_string()],
+            "a report answering a text 404 must be named in the Error-body \
+             matrix's text-carrying 404 row, then added here"
+        );
     }
 
     /// Every `GET`-one answers a missing key with a bare `404` whose body is

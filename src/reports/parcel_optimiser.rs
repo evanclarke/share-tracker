@@ -388,7 +388,7 @@ pub fn disposal_figures(
 // HTTP API
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
 #[serde(deny_unknown_fields)]
 pub struct OptimiserRequest {
     pub listing_id: i64,

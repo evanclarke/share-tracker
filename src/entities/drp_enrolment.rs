@@ -148,7 +148,7 @@ pub(crate) static PERIOD_TRADES_FROM_WHERE: LazyLock<String> = LazyLock::new(|| 
 ///
 /// The query filters the list route accepts — see
 /// [`crate::infra::http::CrudListFilter`].
-#[derive(Debug, Default, serde::Deserialize)]
+#[derive(Debug, Default, serde::Deserialize, utoipa::IntoParams)]
 #[serde(deny_unknown_fields)]
 pub struct DrpEnrolmentListQuery {
     pub listing_id: Option<i64>,

@@ -24,7 +24,7 @@ pub struct ParcelAllocation {
 ///
 /// The query filters the list route accepts — see
 /// [`crate::infra::http::CrudListFilter`].
-#[derive(Debug, Default, serde::Deserialize)]
+#[derive(Debug, Default, serde::Deserialize, utoipa::IntoParams)]
 #[serde(deny_unknown_fields)]
 pub struct ParcelAllocationListQuery {
     pub sale_trade_id: Option<i64>,

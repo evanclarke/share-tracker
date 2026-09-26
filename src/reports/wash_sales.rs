@@ -60,7 +60,7 @@ pub struct WashSaleAlert {
     pub days_apart: i64,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, utoipa::IntoParams)]
 #[serde(deny_unknown_fields)]
 pub struct WashSalesRequest {
     /// Days either side of the sale to scan; defaults to

@@ -989,9 +989,9 @@ pub async fn regenerate_provisional(
 // HTTP API
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
 #[serde(deny_unknown_fields)]
-struct ListParams {
+pub(crate) struct ListParams {
     report: Option<ReportKind>,
     from: Option<NaiveDate>,
     to: Option<NaiveDate>,
@@ -999,17 +999,17 @@ struct ListParams {
 
 /// `GET /report_snapshots/series` query: `listing_id` narrows the series to
 /// one listing (see `db_series`), absent means the whole portfolio.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
 #[serde(deny_unknown_fields)]
-struct SeriesParams {
+pub(crate) struct SeriesParams {
     listing_id: Option<i64>,
 }
 
 /// `GET /report_snapshots/holding_series` query: the snapshot dates to read,
 /// both ends inclusive; absent means every stored snapshot.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
 #[serde(deny_unknown_fields)]
-struct HoldingSeriesParams {
+pub(crate) struct HoldingSeriesParams {
     from: Option<NaiveDate>,
     to: Option<NaiveDate>,
 }

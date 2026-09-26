@@ -101,11 +101,13 @@ pub enum ApiError {
     /// [`Self::into_response`] sets that header, so constructing the error is
     /// enough — no handler has to remember it.
     ///
-    /// The login handler does **not** render a browser's request through this
-    /// (it re-renders the sign-in page with the same message instead, under
-    /// `200`, exactly as the wrong-credentials path does); this is the
-    /// script/LLM client's answer, and the shape the Error-body contract's
-    /// `429` row documents.
+    /// The login handler answers a browser's request `429` as well, but builds
+    /// that response itself: the status and `Retry-After` are the same, and only
+    /// the body differs — the rendered sign-in page carrying the same message,
+    /// rather than the plain-text reason. So a refusal is machine-visible
+    /// whatever the client sent, which a `200` page for `Accept: text/html`
+    /// would hide. This variant is the plain-text shape, and the one the
+    /// Error-body contract's `429` row documents.
     #[error("{body}")]
     TooManyRequests { body: String, retry_after_secs: u64 },
 }

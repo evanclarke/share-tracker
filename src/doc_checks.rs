@@ -3790,13 +3790,27 @@ fn top_menu_bar_documented() {
 
 /// Docs-sync pin for the uniform DELETE 404 contract (2026-07-29 Rust review):
 /// the Response-codes table states that a `DELETE` of a missing row answers
-/// with a plain-text reason (a `GET` still answers with an empty body), and
-/// the Error-bodies paragraph counts deletes among the reasoned 404s. The
-/// behaviour itself is pinned by
+/// with a plain-text reason, and the Error-bodies paragraph counts deletes
+/// among the reasoned 404s. The behaviour itself is pinned by
 /// `entities::tests::deleting_a_missing_row_is_404_naming_what_was_missing`.
+///
+/// A `GET` aimed at one missing row still answers empty — but that is not the
+/// same as "every `GET`", which is what these tables used to imply: a read whose
+/// *parameter* names a missing row carries the reason, so the table has to say
+/// so. `api_spec::tests::a_read_whose_parameter_names_a_missing_row_answers_a_text_404`
+/// drives the one such read and keeps the list of them exhaustive.
 #[test]
 fn delete_404_reason_documented() {
     assert!(API_MD.contains("A `GET` of a missing row answers with an empty body"));
+    assert!(
+        API_MD.contains("any read whose *parameter* names a row that is not there"),
+        "the Response-codes 404 row must not imply every GET's 404 is empty"
+    );
+    assert!(
+        API_MD
+            .contains("a **read whose named prerequisite is missing rather than its own subject**"),
+        "the Error-body matrix's text-carrying 404 row must name the parameter case"
+    );
     assert!(API_MD.contains("every `DELETE` of a missing row"));
     assert!(API_MD.contains("no AMMA statement with that id"));
     assert!(API_MD.contains("`404`-with-a-cause — which includes every `DELETE` of a row"));

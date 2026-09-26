@@ -1019,3 +1019,131 @@ DONE archive are all done properly. None of the findings below is "the lockout d
   Its missing query parameters, `servers` and success-only responses are likewise untouched — though
   the new `429` is the first non-success response any operation carries, so the pattern for fixing
   the rest now exists in `operation()`.
+
+---
+
+# Verification of the fix pass (a9da849..1a620a9, 15 commits)
+
+Gates green at `1a620a9`: `cargo fmt --check` clean, `clippy --all-targets -D warnings` clean,
+**2632 tests pass** in 6.57s. Checked against HEAD's code, not the commit messages.
+
+**The five headline findings are genuinely fixed**, four of them structurally:
+- The PUT clobber is fixed in behaviour *and* tested — the create branch now pre-checks existence,
+  confirms, and renders `putOutcomeMessage(res.status, editing)`, so a `204 Replaced` can no longer
+  be toasted as "Saved." (`src/web/app.js:704-716`, `src/web/util.js:696-728`, Node tests at
+  `util.test.js:1271-1300`).
+- The 415/`RETURNED_WITH_BODY` contradiction is gone: the expected set is now derived from
+  `infra::http::documented_error_shapes()` over one sample table, guarded by a no-wildcard match, and
+  the cross-check runs both ways. The three-commit stale "two `5xx`s" sentence is finally correct.
+- The lockout increments inside the same mutex as the budget check (`begin_attempt`,
+  `auth.rs:396-431`) and keys IPv6 on the /64 (`Source::V6Prefix`), both tested. The concurrency test
+  is sequential, not threaded — it pins the right invariant, but its message overstates what is driven.
+- `as_of_date` and the NULL-owner filter were closed by documentation with behaviour unchanged, which
+  is what this review offered as an alternative — worth restating plainly that a back-dated
+  `live: true` overview still returns today's quote and FX month.
+
+Also notable: `md_section` was extracted and used 17× (zero inline copies left), the 201-create and
+ordering mirrors are now derived from the router-pinned route table, `shared_list_route_paths()` no
+longer fails open, `push_eq`/`push_date_range` carry all ~14 filters, and `220ace1` reworked 29 files
+so every `201` body is read inside its own write transaction before commit.
+
+## Still open, contrary to the fix pass's summary
+
+1. **The GET-404 contract is only cosmetically fixed.** `CLAUDE.md:71` was corrected to name
+   `/portfolio/activity`'s text-carrying GET 404, but `docs/API.md:1889` and
+   `src/api_spec.rs:79-84`'s `DESCRIPTION` — the machine-client surface the finding was about — both
+   still state that a `GET`'s 404 is empty, while `src/reports/activity.rs:863` still answers one
+   with `"listing {n} not found"`. `doc_checks.rs:3799` still pins the wrong sentence.
+2. **Three places still say the browser lockout answers `200`; it answers `429`.** Confirmed by
+   reading `login_submit` (`auth.rs:866-885`): *both* branches return `TOO_MANY_REQUESTS`. Stale:
+   `docs/API.md:1895` (user-facing, and contradicts `docs/API.md:86`, README and FEATURES in the same
+   tree), `src/api_spec.rs:1847`, and `src/infra/http.rs:104-107`, whose doc comment states the
+   opposite of what the code does. No test fails because the matrix parser reads only the Body column.
+3. **The new OpenAPI query parameters are all emitted `required: false`, `type: string`**
+   (`api_spec.rs:1981-2008`, confirmed directly). `?tax_year=` is required and an integer;
+   `?listing_id=` on `/portfolio/activity` is required. `docs/API.md:1318` says "Required: yes", so
+   the generated contract and the prose contract now disagree where the document previously said
+   nothing.
+4. **Summary prose became load-bearing with no tie to the handler.** Query parameters are derived from
+   `?name=` tokens *in the summary string*; nothing compares a summary against its `Query<T>` struct.
+   `2627ce0` shipped two swapped parameters immediately (fixed in `fa6cb7b`). Related: `DESCRIPTION`
+   still says query parameters get a `422`, but they get a `400`.
+5. **No commit touched `TODO.md` or `DONE/`.** Two ticked items still read as fully done with no
+   deviation note: `9400e70`'s "unknown params still `422`" (ships 400) and `262e4e8`'s "add an
+   explicit string codec" (none was added; the prose was reworded instead).
+6. Smaller: Open Parcels still offers no date in the UI; the NULL-owner caveat is absent from the
+   OpenAPI summaries; `?status=ok`'s `unpriced_before`-superseded caveat is still unstated; no scan
+   forbids `qb.push(format!(…))` in a filter; `"money is never f64"` still has no scan test.
+
+## On the two admitted exceptions
+
+- **Hand-maintained ROUTES rows: accurate, but it understates one consequence.** Summaries are no
+  longer merely prose — they now *generate* the document's query parameters, so the hand-maintained
+  field became structurally load-bearing (items 3 and 4 above). Conversely it doesn't claim credit
+  for non-success responses, which are now generated from rules rather than per row.
+- **"Two prose-against-prose pins": understates — there are four.**
+  `the_two_global_rules_are_stated_in_the_description` (:2538), the ordering/pagination half of
+  `the_list_reading_contract_is_stated_in_the_description` (:2610),
+  `the_put_outcome_rule_is_stated_in_the_description` (:2736) and
+  `the_list_filtering_contract_is_stated_in_the_description` (:3092). Two of the four do have
+  structural twins elsewhere, so the underlying facts are pinned.
+
+## Fixes applied (uncommitted, 2026-09-26)
+
+Items 2 and 3 of the section above. Gates after: `cargo build` (non-test) clean, `cargo fmt --check`
+clean, `clippy --all-targets -D warnings` clean, **2634 tests pass**.
+
+**1. The browser lockout answers `429`; three places said `200`.** Corrected to describe what
+`login_submit` does — both paths are refused `429` with the same `Retry-After`, differing only in
+that the browser's body is the rendered sign-in page rather than the plain-text reason:
+`docs/API.md`'s `429` matrix row (the user-facing one, which contradicted the Authentication section,
+README and FEATURES in the same tree), `src/api_spec.rs`'s comment above the `429` response, and
+`src/infra/http.rs`'s `TooManyRequests` doc comment, which asserted the opposite of the code.
+
+**2. Query parameters are now derived from the type axum decodes, not from summary prose.**
+`utoipa::IntoParams` is derived on the 30 query structs (14 entity `*ListQuery` filters, the report
+and snapshot query types, `attachment::{ListQuery, ContentQuery}`, `closing_price::ListParams`,
+`scheduler::JobParams`), and `query_parameters(verb, path)` dispatches per route to
+`T::into_params`. So `required` and the schema come from the Rust type: a plain field is required,
+an `Option` is not, and `i64`/`NaiveDate`/`Decimal` emit `integer`/`date`/`string` instead of one
+flat "optional string". `?tax_year=` and `/portfolio/activity`'s `?listing_id=` are now `required:
+true, type: integer`, which is what `docs/API.md:1318` already claimed.
+
+Two new tests, one of which caught a real omission while being written:
+- `every_query_parameter_matches_its_summary` — set equality, both directions, between each route's
+  `?name=` tokens and its `Query<T>` fields. This found that **`POST /jobs/{name}`'s
+  `?suffix=`/`?skip_command=` reached the document not at all** (the first draft gated on `GET`), and
+  it closes the "summary prose is load-bearing" gap: a renamed or misspelt token now fails.
+- `a_required_query_parameter_is_documented_as_required` — pins required-vs-optional and the type,
+  including that money stays a string and never a JSON number.
+
+Also corrected while here: `/reports/tax_report`'s summary said `?tax_year=` defaults "to the one in
+progress" (it is required); `/portfolio/activity`'s claimed "as-of bounds" it does not have; the
+OpenAPI section of `docs/API.md` described the replaced prose-scraping mechanism; and `DESCRIPTION`
+said an unknown query parameter is a `422` when it is a `400` (with `POST /jobs/{name}` the stated
+exception, which reads its own rejection and answers 422).
+
+Worth noting for the next pass: `cargo test` passed while `cargo build` failed, because
+`scheduler::JobParams`' re-export was `#[cfg(test)]` and api_spec is non-test code — exactly the trap
+CLAUDE.md's build-gate rule describes. The re-export is now ungated with the reason stated.
+
+**3. The GET-404 contract now states the real rule.** `/portfolio/activity` is the *only* read whose
+404 carries text (confirmed by auditing every `ApiError::not_found` call site: the `closing_prices`
+ones are all on PUT/POST/DELETE, `POST /jobs/{name}`'s is a write, and `report_snapshots/series`'
+unknown-slug 404 is the bare empty one). Both `docs/API.md` rows, the Response-codes row and
+`api_spec`'s `DESCRIPTION` now distinguish *what the URL addresses* rather than the verb: a `GET`
+aimed at one missing row is empty; a read whose **parameter** names a missing row carries the reason.
+`CLAUDE.md`'s error-response bullet was generalising the same way and is tightened.
+
+Pinned by `a_read_whose_parameter_names_a_missing_row_answers_a_text_404`, which drives the route and
+then scans `src/reports` (recursively, since a report that outgrows one file becomes a directory)
+asserting `activity.rs` is the only file answering a text 404 — so a second such read fails until it
+is classified. `delete_404_reason_documented`, which previously pinned the *wrong* sentence, now
+asserts both halves.
+
+Verified against a running server, not only the suite: `GET /listings/9999` → 404 with 0 bytes;
+`GET /portfolio/activity?listing_id=9999` → 404 `listing 9999 not found`; `/openapi.json` gives
+`tax_year` as `required: true, type: integer (int32)`; and `POST /jobs/{name}` now carries
+`suffix` and `skip_command`, which reached the document not at all before.
+
+Gates after all three fixes: build, fmt, clippy clean; **2635 tests pass**.

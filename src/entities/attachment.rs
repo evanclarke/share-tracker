@@ -129,7 +129,7 @@ pub struct NewAttachment<'a> {
 /// `?corporate_action_id=`). `include_linked=true` (valid only with a lone
 /// `trade_id` filter) also returns the linked source record's attachments —
 /// see [`db_list_with_linked`].
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, utoipa::IntoParams)]
 #[serde(deny_unknown_fields)]
 pub struct ListQuery {
     pub trade_id: Option<i64>,
@@ -441,9 +441,9 @@ async fn read_owner_field(
 /// default) prompts a download, `inline` lets the browser render the file
 /// in place (used by the Attachments report's View link) — any other value
 /// is rejected rather than silently falling back.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
 #[serde(deny_unknown_fields)]
-struct ContentQuery {
+pub(crate) struct ContentQuery {
     disposition: Option<String>,
 }
 

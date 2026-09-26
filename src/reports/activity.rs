@@ -74,7 +74,7 @@ pub struct ActivityEvent {
     pub amount_aud: Option<Decimal>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
 #[serde(deny_unknown_fields)]
 pub struct ActivityRequest {
     pub listing_id: i64,

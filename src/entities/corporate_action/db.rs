@@ -33,7 +33,7 @@ const COLUMNS: &str = "id, action_type, listing_id, date, amount_per_unit, curre
 ///
 /// The query filters the list route accepts — see
 /// [`crate::infra::http::CrudListFilter`].
-#[derive(Debug, Default, serde::Deserialize)]
+#[derive(Debug, Default, serde::Deserialize, utoipa::IntoParams)]
 #[serde(deny_unknown_fields)]
 pub struct CorporateActionListQuery {
     pub listing_id: Option<i64>,

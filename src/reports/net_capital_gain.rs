@@ -1203,7 +1203,7 @@ async fn net_capital_gain_export_handler(
 /// `proceeds` (total capital proceeds, AUD), drawn from open parcels via
 /// either explicit `allocations` or a named optimiser `strategy` — exactly
 /// one of the two.
-#[derive(utoipa::ToSchema, Debug, Deserialize)]
+#[derive(utoipa::ToSchema, Debug, Deserialize, utoipa::IntoParams)]
 #[serde(deny_unknown_fields)]
 pub struct WhatIfRequest {
     pub listing_id: i64,

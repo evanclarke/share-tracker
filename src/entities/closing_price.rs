@@ -170,6 +170,11 @@ pub(crate) use fetcher::FetchError;
 pub(crate) use fetcher::clean_price;
 pub use fetcher::{CachingFetcher, SharedFetcher};
 pub use held::{HeldTimeline, db_held_listing_ids, db_held_listing_ids_on};
+/// The list route's query type, for the same reason as
+/// `corporate_action::CorporateActionListQuery`: the OpenAPI document
+/// derives `?status=`/`?listing_id=`/`?from=`/`?to=` from the struct axum
+/// decodes, not from the route summary.
+pub(crate) use http::ListParams;
 pub use http::router;
 pub use live::resolve_live_prices;
 pub use market::{Market, NonTradingReason, load_market};

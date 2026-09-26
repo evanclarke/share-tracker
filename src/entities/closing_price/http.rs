@@ -21,9 +21,9 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
 #[serde(deny_unknown_fields)]
-struct ListParams {
+pub(crate) struct ListParams {
     listing_id: Option<i64>,
     from: Option<NaiveDate>,
     to: Option<NaiveDate>,

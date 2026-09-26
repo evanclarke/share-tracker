@@ -57,7 +57,7 @@ pub fn router() -> Router<SqlitePool> {
 }
 
 /// The open-parcels report's query string: just the valuation date.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
 #[serde(deny_unknown_fields)]
 pub struct OpenParcelsQuery {
     /// The **valuation date**: the schedule is the parcels open as at it, with

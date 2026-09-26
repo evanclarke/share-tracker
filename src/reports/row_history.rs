@@ -193,7 +193,7 @@ pub const DEFAULT_BROWSE_LIMIT: i64 = 100;
 /// refusal naming the cap, never a silently truncated page.
 pub const MAX_BROWSE_LIMIT: i64 = 1000;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
 #[serde(deny_unknown_fields)]
 pub struct RowHistoryRequest {
     /// One of [`AUDITED_TABLES`]; anything else is rejected 422. Required

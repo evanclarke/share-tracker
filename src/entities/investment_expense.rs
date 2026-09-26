@@ -117,7 +117,7 @@ fn default_currency() -> String {
 ///
 /// The query filters the list route accepts — see
 /// [`crate::infra::http::CrudListFilter`].
-#[derive(Debug, Default, serde::Deserialize)]
+#[derive(Debug, Default, serde::Deserialize, utoipa::IntoParams)]
 #[serde(deny_unknown_fields)]
 pub struct InvestmentExpenseListQuery {
     pub listing_id: Option<i64>,

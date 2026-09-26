@@ -73,7 +73,7 @@ pub fn router() -> Router<SqlitePool> {
         .route("/reports/tax_report", get(tax_report_handler))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
 #[serde(deny_unknown_fields)]
 pub struct TaxReportRequest {
     pub tax_year: i32,

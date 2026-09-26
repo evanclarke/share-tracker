@@ -58,7 +58,7 @@ type Job = Arc<dyn Fn(JobParams) -> JobFuture + Send + Sync>;
 /// and took an *unlabelled* backup, so the operator's one-off label was lost
 /// with nothing said (SCENARIOS T-10). The rejection is turned into a `422`
 /// with the reason by [`super::http`]'s trigger handler.
-#[derive(Debug, Default, Clone, Deserialize)]
+#[derive(Debug, Default, Clone, Deserialize, utoipa::IntoParams)]
 #[serde(deny_unknown_fields)]
 pub struct JobParams {
     pub suffix: Option<String>,
