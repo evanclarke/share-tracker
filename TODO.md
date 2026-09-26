@@ -109,7 +109,7 @@ it rather than rediscover it.
       `ImportOutcome` — the summary *plus* the provisional-snapshot true-up that
       `docs/API.md` has always described. `ImportOutcome` is now a `ToSchema`
       (`RbaImportOutcome`) and the row records it.
-- [ ] Decide the four `api_spec` pins that assert `DESCRIPTION` against `DESCRIPTION`
+- [x] Decide the four `api_spec` pins that assert `DESCRIPTION` against `DESCRIPTION`
       (`the_two_global_rules_…`, the ordering/pagination half of
       `the_list_reading_contract_…`, `the_put_outcome_rule_…`,
       `the_list_filtering_contract_…`). Each checks that a documentation *requirement*
@@ -118,6 +118,22 @@ it rather than rediscover it.
       coverage. Either cross-check each against the structural twin (as the error-matrix
       and POST-for-read halves now are) or say in each doc comment that it is a
       requirement pin only. Test: whichever is chosen.
+      Done: cross-checked where there is something to cross-check against, and stated
+      as a requirement pin where there is not. `the_two_global_rules_…` now also walks
+      the document it is the preamble to — no component schema advertising a JSON number,
+      every request-body schema denying unknown fields — so the promise is kept, not just
+      typed. `the_put_outcome_rule_…` reads the two single-status exceptions out of
+      `entities::PUT_ROUTES` and checks each is described with its status, so a third one
+      fails until the prose says so. `the_list_filtering_contract_…` reads
+      `entities::LIST_ROUTES` both ways: every list that takes a filter is named in the
+      filtering paragraph, every list that takes none is not, and every filter name is
+      spelled `?name=` there (the /attachments owner ids, described collectively, are the
+      one classified exception). `the_list_reading_contract_…`'s page-size claim is now
+      formatted from `row_history::DEFAULT_BROWSE_LIMIT`/`MAX_BROWSE_LIMIT`, so raising the
+      cap cannot leave the prose behind; its **ordering** clause stays a requirement pin,
+      said so in the doc comment, which names the five per-surface tests that pin the
+      behaviour — deriving that set would mean reflecting over every list's `ORDER_BY`
+      including the hand-written queries' SQL, which no scan can do honestly.
 - [ ] Bound the unauthenticated Argon2 work on `POST /login`. The lockout now counts an
       attempt at the gate, so a source gets 5 verifies per cooldown — but
       `verify_password` still runs on the async handler with no `spawn_blocking`, and

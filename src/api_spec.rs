@@ -3295,6 +3295,15 @@ mod tests {
 
     /// The two global rules ride in `info.description` as well as in the
     /// schemas — a machine client that reads only the prose still learns them.
+    ///
+    /// Both halves are checked: that the description states each rule, and that
+    /// the document it is the preamble to actually keeps it. The second half is
+    /// the point — a prose pin on its own could only ever say the sentence is
+    /// still typed there, so the same walks that
+    /// [`no_component_schema_advertises_a_json_number`] and
+    /// [`every_request_body_schema_denies_unknown_fields`] make are made here
+    /// over the schemas the description is promising for, which is what makes
+    /// the promise true rather than present.
     #[test]
     fn the_two_global_rules_are_stated_in_the_description() {
         let doc = doc();
@@ -3312,6 +3321,34 @@ mod tests {
                 "info.description must state `{rule}`; got:\n{description}"
             );
         }
+
+        // …and the document keeps both promises.
+        let mut numbers = Vec::new();
+        collect_number_schemas(&doc["components"]["schemas"], &mut numbers);
+        assert!(
+            numbers.is_empty(),
+            "the description promises money and quantities travel as strings, but these schemas \
+             advertise a JSON number: {numbers:?}"
+        );
+        let schemas = doc["components"]["schemas"]
+            .as_object()
+            .expect("components.schemas is an object");
+        let mut bodies = 0;
+        for (_, _, _, _, request, _) in ROUTES {
+            let (Body::Json(name) | Body::Form(name)) = request else {
+                continue;
+            };
+            assert_eq!(
+                schemas[*name]["additionalProperties"], false,
+                "the description promises every request body denies unknown fields, but `{name}` \
+                 does not"
+            );
+            bodies += 1;
+        }
+        assert!(
+            bodies > 30,
+            "only {bodies} request bodies checked — the walk has stopped finding them"
+        );
     }
 
     /// The error-body matrix — the never-JSON rule, the media type, and every
@@ -3378,6 +3415,25 @@ mod tests {
     /// "Reading a list" section is the long form (`doc_checks` pins that copy);
     /// this is the compact twin a client reading only the generated document
     /// gets, and it must name each endpoint so a dropped one fails here.
+    ///
+    /// Two of the three halves are cross-checked rather than merely present:
+    /// the POST-bodied report reads are read out of [`ROUTES`] (below), and the
+    /// page-size claim is **formatted from
+    /// `reports::row_history::DEFAULT_BROWSE_LIMIT`/`MAX_BROWSE_LIMIT`**, the
+    /// consts the handler validates against, so raising the cap cannot leave the
+    /// prose behind.
+    ///
+    /// The ordering clause is a **requirement pin only** — it asserts the
+    /// sentence is there, and cannot catch a list that started ordering the
+    /// other way. That behaviour is pinned where it happens, per surface
+    /// (`listing_rename`'s `api_list_renames_returns_newest_first`,
+    /// `closing_price`'s and `distribution_event`'s list tests,
+    /// `scheduler::db`'s run history, `reports::row_history`'s trail order) and,
+    /// for the client side of it, by `web`'s
+    /// `tables_open_newest_first_on_their_own_date_column`. Deriving the set
+    /// here would mean reflecting over every list's `ORDER_BY` — including the
+    /// hand-written queries' SQL — which no scan can do honestly, so it is
+    /// stated rather than pretended.
     #[test]
     fn the_list_reading_contract_is_stated_in_the_description() {
         let doc = doc();
@@ -3395,13 +3451,22 @@ mod tests {
             // Pagination: the one endpoint, both shapes and the cursor facts.
             "/reports/row_history is the only paginated endpoint",
             "with row_id it answers that row's whole trail as a bare JSON array",
-            "before_id returns entries older than that trail id and limit is 1-1000 (default 100)",
         ] {
             assert!(
                 description.contains(rule),
                 "info.description must state `{rule}`; got:\n{description}"
             );
         }
+        // The page-size claim, formatted from the consts the handler enforces.
+        let bounds = format!(
+            "before_id returns entries older than that trail id and limit is 1-{} (default {})",
+            crate::reports::row_history::MAX_BROWSE_LIMIT,
+            crate::reports::row_history::DEFAULT_BROWSE_LIMIT
+        );
+        assert!(
+            description.contains(&bounds),
+            "info.description must state `{bounds}`; got:\n{description}"
+        );
         // The POST-bodied report reads are **derived from the route table**,
         // not from a copy of the sentence that names them: the compact contract
         // must name every one, and no new `POST /portfolio/*` report read can
@@ -3504,8 +3569,16 @@ mod tests {
     /// The PUT outcome rule rides in `info.description`, the machine-client
     /// surface, so a client reading only the generated document learns that a
     /// `PUT` reports whether it created or replaced.
+    ///
+    /// The two single-status exceptions are **read out of
+    /// `entities::PUT_ROUTES`** rather than transcribed: a third one, or a
+    /// reclassified existing one, changes what the description has to say and
+    /// fails here until it does. The general rule stays a prose pin — it is
+    /// pinned behaviourally by `entities::tests::every_put_route_reports_create_then_replace`
+    /// and structurally by [`every_put_route_documents_its_outcome`].
     #[test]
     fn the_put_outcome_rule_is_stated_in_the_description() {
+        use crate::entities::{PUT_ROUTES, PutOutcome};
         let doc = doc();
         let description = doc["info"]["description"]
             .as_str()
@@ -3514,14 +3587,35 @@ mod tests {
             "A PUT upsert reports its outcome.",
             "answers 201 Created carrying the created row",
             "204 No Content when it replaced an existing row",
-            "/transfers/{id} is create-only and always answers 201",
-            "/rba_fx_rates/{id} only ever corrects an existing row, so always answers 204",
         ] {
             assert!(
                 description.contains(rule),
                 "info.description must state `{rule}`; got:\n{description}"
             );
         }
+
+        let mut exceptions = 0;
+        for (path, outcome) in PUT_ROUTES {
+            let status = match outcome {
+                PutOutcome::CreateThenReplace => continue,
+                PutOutcome::AlwaysCreatedGroup => 201,
+                PutOutcome::NeverCreates => 204,
+            };
+            let at = description
+                .find(path)
+                .unwrap_or_else(|| panic!("info.description must name the {path} exception"));
+            let sentence = description[at..].split('.').next().unwrap_or_default();
+            assert!(
+                sentence.contains(&format!("always answers {status}")),
+                "info.description must say {path} always answers {status}; it says: {sentence}"
+            );
+            exceptions += 1;
+        }
+        assert_eq!(
+            exceptions, 2,
+            "the single-status PUT exceptions have changed; the description must describe the \
+             new set"
+        );
     }
 
     /// The 2026-09-24 REST-audit item "Rate-limit / lock out `POST /login`"
@@ -3922,8 +4016,17 @@ mod tests {
     /// machine-client surface. `docs/API.md`'s "Reading a list" section is the
     /// long form (`doc_checks` pins that copy); this is the compact twin a
     /// client reading only the generated document gets.
+    ///
+    /// Which lists and which parameters is **read out of
+    /// `entities::LIST_ROUTES`**, both ways, rather than transcribed: every list
+    /// that takes a filter is named in the paragraph and every list that takes
+    /// none is not, and every filter name in the table is spelled `?name=`
+    /// there. So a new filtered list, a new filter, or a filter removed from a
+    /// list fails here until the paragraph says so — which is the half a pin on
+    /// the sentences alone could never catch.
     #[test]
     fn the_list_filtering_contract_is_stated_in_the_description() {
+        use crate::entities::LIST_ROUTES;
         let doc = doc();
         let description = doc["info"]["description"]
             .as_str()
@@ -3950,6 +4053,71 @@ mod tests {
                 description.contains(rule),
                 "info.description must state `{rule}`; got:\n{description}"
             );
+        }
+
+        // The filtering paragraph alone: naming a path anywhere else in the
+        // description (a report read, an operation) is not a filter claim.
+        let from = description
+            .find("an entity list may be narrowed")
+            .expect("the filtering paragraph");
+        let to = description[from..]
+            .find("silently ignoring it.")
+            .expect("the paragraph's last sentence");
+        let paragraph = &description[from..from + to];
+
+        // A path is "named" only as a whole path: `/listings` must not count as
+        // naming `/listings/{id}/renames`, nor the other way about.
+        let names = |path: &str| {
+            paragraph.match_indices(path).any(|(at, _)| {
+                !matches!(paragraph[at + path.len()..].chars().next(),
+                    Some(c) if c.is_alphanumeric() || c == '_' || c == '/')
+            })
+        };
+        let mut filtered = 0;
+        for route in LIST_ROUTES {
+            if route.filters.is_empty() {
+                assert!(
+                    !names(route.path),
+                    "the filtering paragraph names {}, which takes no filter",
+                    route.path
+                );
+                continue;
+            }
+            assert!(
+                names(route.path),
+                "{} takes {:?}, so the filtering paragraph must name it",
+                route.path,
+                route.filters
+            );
+            filtered += 1;
+        }
+        assert_eq!(
+            filtered, 16,
+            "the set of filtered list routes has changed; the paragraph must describe the new one"
+        );
+
+        // …and every filter name is spelled out, bar the owner ids the
+        // /attachments clause describes collectively (there are six of them, one
+        // per owning entity, and `?trade_id=` for an attachment is the same
+        // parameter the trades list takes).
+        const DESCRIBED_COLLECTIVELY: &[&str] = &[
+            "income_id",
+            "ess_statement_id",
+            "interest_income_id",
+            "corporate_action_id",
+            "include_linked",
+        ];
+        for route in LIST_ROUTES {
+            for filter in route.filters {
+                if DESCRIBED_COLLECTIVELY.contains(filter) {
+                    continue;
+                }
+                assert!(
+                    paragraph.contains(&format!("?{filter}=")),
+                    "the filtering paragraph must spell `?{filter}=` ({} takes it)",
+                    route.path
+                );
+            }
         }
     }
 
