@@ -1870,7 +1870,10 @@ fn operation(
                     "This source has exhausted its failed-attempt budget: the body is the \
                      plain-text reason and Retry-After names the remaining whole seconds, rounded \
                      up. A browser login POST (Accept: text/html) is refused 429 too, with the \
-                     sign-in page as the body instead of the plain-text reason.",
+                     sign-in page as the body instead of the plain-text reason. The same 429 \
+                     answers when every password-verify slot is busy — the server verifies at \
+                     most two passwords at once, so a flood cannot allocate unbounded memory on \
+                     this unauthenticated path — and then Retry-After is 1.",
                 )
                 .build(),
         );

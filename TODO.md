@@ -134,7 +134,7 @@ it rather than rediscover it.
       said so in the doc comment, which names the five per-surface tests that pin the
       behaviour — deriving that set would mean reflecting over every list's `ORDER_BY`
       including the hand-written queries' SQL, which no scan can do honestly.
-- [ ] Bound the unauthenticated Argon2 work on `POST /login`. The lockout now counts an
+- [x] Bound the unauthenticated Argon2 work on `POST /login`. The lockout now counts an
       attempt at the gate, so a source gets 5 verifies per cooldown — but
       `verify_password` still runs on the async handler with no `spawn_blocking`, and
       `Argon2::default()` is m=19 MiB, so concurrent first-time attempts from *many*
@@ -145,6 +145,26 @@ it rather than rediscover it.
       evicts. Test: a threaded case asserting the concurrent bound (the current
       `the_gate_counts_each_attempt_rather_than_checking_then_acting` is sequential — it
       pins the right invariant, but its message claims more than it drives).
+      Done: the verify now runs on `spawn_blocking` under a process-wide semaphore of
+      `MAX_CONCURRENT_VERIFIES` (2) slots, so Argon2's 19 MiB and 30 ms are multiplied by
+      a constant this module chose rather than by however many unauthenticated requests
+      arrived together, and no async worker is blocked. An attempt that waits longer than
+      `VERIFY_QUEUE_WAIT` (2 s) for a slot is refused with the same `429` the lockout
+      answers and `Retry-After: 1` — queueing without a deadline would have traded the
+      memory bound for an unbounded wait. `Auth::verify_password` is now `#[cfg(test)]`,
+      so nothing can reach the inline path by accident.
+      The test is `the_concurrent_verifies_are_bounded`: eight wrong passwords from eight
+      distinct sources submitted at once on a multi-thread runtime, asserting on the peak
+      number of verifies **recorded inside the blocking closure** rather than inferred.
+      Raising the slot count to 8 makes that peak 8, so the semaphore is demonstrably what
+      limits it.
+      The overclaim is corrected too: docs/API.md and README said a single-credential
+      deployment "cannot be brute-forced online", which is stronger than the mechanism
+      supports (behind a proxy every client shares one source; a rotated IPv6 /64 or a
+      4096-source flood buys a budget back). Both now say online guessing is *impractical*
+      and point at where the bound gives, and both describe the verify bound and the
+      second cause of a `429`. `doc_checks::the_login_verify_concurrency_bound_is_documented`
+      pins all of that, including the two consts the prose quotes.
 - [ ] Decide whether an **opt-in** `trusted_proxy` / `X-Forwarded-For` setting is wanted.
       Behind the documented nginx deployment every client shares one bucket, so 6 bad
       logins every 5 minutes denies the owner the sign-in page indefinitely (the bearer

@@ -6081,3 +6081,63 @@ fn the_login_lockout_is_documented_everywhere_it_applies() {
         "the lockout must stay a const, not a [auth] setting"
     );
 }
+
+/// Docs-sync pin for the **concurrency** bound on the login verify, and for the
+/// claim the two files used to make about the lockout.
+///
+/// The lockout prices one source's guesses; it says nothing about how many
+/// verifies run at once, which is what `MAX_CONCURRENT_VERIFIES` bounds. Both
+/// documents describe it, because an operator reading either one needs to know
+/// that a `429` on `/login` has two causes, and the figures they quote are
+/// cross-checked against the consts.
+///
+/// The same test holds the corrected claim: "cannot be brute-forced online" was
+/// stronger than the mechanism supports — behind a proxy every client shares one
+/// source, and a rotated IPv6 /64 or a 4096-source flood buys a budget back —
+/// and both files now say "impractical", with where the bound gives.
+#[test]
+fn the_login_verify_concurrency_bound_is_documented() {
+    for fact in [
+        "**2 password verifies at once**",
+        "on the blocking pool rather than on an async worker",
+        "m=19 MiB",
+        "**2 seconds**",
+        "`Retry-After: 1`",
+    ] {
+        assert!(
+            API_MD.contains(fact),
+            "docs/API.md's lockout section must state `{fact}` about the verify bound"
+        );
+    }
+    for fact in [
+        "verifies at most **2 passwords at once**",
+        "`Retry-After: 1`",
+    ] {
+        assert!(
+            README_MD.contains(fact),
+            "README must state `{fact}` about the verify bound"
+        );
+    }
+    // The figures are the code's.
+    assert!(
+        AUTH_RS.contains("const MAX_CONCURRENT_VERIFIES: usize = 2;"),
+        "the documented verify concurrency must remain the code's MAX_CONCURRENT_VERIFIES"
+    );
+    assert!(
+        AUTH_RS.contains("const VERIFY_QUEUE_WAIT: Duration = Duration::from_secs(2);"),
+        "the documented queue wait must remain the code's VERIFY_QUEUE_WAIT"
+    );
+
+    // The overclaim is gone from both files, and what replaced it says where the
+    // bound gives rather than only that it is bounded.
+    for (name, body) in [("docs/API.md", API_MD), ("README.md", README_MD)] {
+        assert!(
+            !body.contains("cannot be brute-forced online"),
+            "{name} still claims the deployment cannot be brute-forced online"
+        );
+        assert!(
+            body.contains("impractical"),
+            "{name} must say online guessing is impractical, and where that gives"
+        );
+    }
+}

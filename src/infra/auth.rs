@@ -99,6 +99,14 @@
 //! Argon2 runs on login only; every other authenticated request costs one
 //! HMAC verification. The lockout is checked before the hash is, so a refused
 //! attempt costs nothing at all.
+//!
+//! What the lockout does **not** bound is how many verifies run *at once*: it
+//! prices one source's guesses, and a flood arrives from many. That is
+//! [`MAX_CONCURRENT_VERIFIES`]' job — the verify runs on the blocking pool
+//! under a process-wide slot limit, so `Argon2::default()`'s 19 MiB and 30 ms
+//! are multiplied by a constant this module chose rather than by however many
+//! unauthenticated requests arrived together. An attempt that waits longer
+//! than [`VERIFY_QUEUE_WAIT`] for a slot is refused with the same `429`.
 
 use crate::infra::http::ApiError;
 use argon2::{
@@ -149,6 +157,40 @@ const LOCKOUT_COOLDOWN: Duration = Duration::from_secs(5 * 60);
 /// The most sources tracked at once. See [`LockoutTracker`] for why the state
 /// is capped rather than merely expired.
 const LOCKOUT_MAX_SOURCES: usize = 4096;
+
+/// How many Argon2 verifies may be in flight at once, across every source.
+///
+/// The lockout bounds what *one* source can spend; this bounds what all of them
+/// together can. `Argon2::default()` is m=19 MiB and ~30 ms of CPU, and the
+/// verify used to run inline on the async handler — so N concurrent first-time
+/// attempts from N different sources were N × 19 MiB of transient memory and N
+/// blocked tokio workers, with nothing capping N. Two is enough for a
+/// single-credential deployment (a second is there so the owner's own login is
+/// not queued behind one stranger's) and caps the transient cost at ~38 MiB and
+/// two threads of the blocking pool.
+const MAX_CONCURRENT_VERIFIES: usize = 2;
+/// How long a login waits for one of the [`MAX_CONCURRENT_VERIFIES`] slots
+/// before it is refused `429` instead.
+///
+/// Queueing without a deadline would trade the memory bound for an unbounded
+/// wait — a flood could park every pending login indefinitely, which for the
+/// owner is indistinguishable from the server being down. Two seconds is long
+/// enough to absorb a handful of overlapping attempts (each ~30 ms) and short
+/// enough that a refusal is quick.
+const VERIFY_QUEUE_WAIT: Duration = Duration::from_secs(2);
+
+/// The verify slots [`MAX_CONCURRENT_VERIFIES`] hands out. Process-wide rather
+/// than per-`Auth`: the bound being protected is the host's memory and blocking
+/// pool, which every router in the process shares.
+static VERIFY_SLOTS: std::sync::LazyLock<tokio::sync::Semaphore> =
+    std::sync::LazyLock::new(|| tokio::sync::Semaphore::new(MAX_CONCURRENT_VERIFIES));
+
+/// Verifies running right now, and the most that ever ran at once — the
+/// concurrency bound as the process actually observed it, which is what
+/// `the_concurrent_verifies_are_bounded` asserts on. Two relaxed atomics on a
+/// path that already costs 30 ms of Argon2.
+static VERIFIES_IN_FLIGHT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static VERIFIES_PEAK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 // ---------------------------------------------------------------------------
 // Per-source failed-login lockout
@@ -208,6 +250,20 @@ impl Source {
             Source::Unknown => "<unknown peer>".to_string(),
         }
     }
+}
+
+/// Argon2's constant-time compare of `password` against a stored PHC string.
+///
+/// Free-standing so the [`Auth`]-borrowing sync path and the `spawn_blocking`
+/// closure (which can only own its data) share one implementation of the
+/// compare rather than each carrying a copy.
+fn password_matches(stored_hash: &str, password: &str) -> bool {
+    let Ok(hash) = PasswordHash::new(stored_hash) else {
+        return false; // unreachable: validated in `Auth::new`
+    };
+    Argon2::default()
+        .verify_password(password.as_bytes(), &hash)
+        .is_ok()
 }
 
 /// The `POST /login` handler: reads the peer and the browser/script split off
@@ -589,16 +645,54 @@ impl Auth {
     /// Checks a login attempt. The username compare is not constant-time
     /// (usernames aren't secret); the password compare is constant-time via
     /// Argon2's own verifier.
+    ///
+    /// Synchronous, and the ~30 ms of Argon2 is the whole call — so the login
+    /// handler reaches it through [`Self::verify_password_bounded`], never
+    /// directly, and this is `#[cfg(test)]` because nothing else may: an
+    /// ungated one would be an inline-Argon2 path a future caller could pick up
+    /// by accident, as well as dead code in the non-test build.
+    #[cfg(test)]
     fn verify_password(&self, username: &str, password: &str) -> bool {
         if username != self.username {
             return false;
         }
-        let Ok(hash) = PasswordHash::new(&self.password_hash) else {
-            return false; // unreachable: validated in `new`
-        };
-        Argon2::default()
-            .verify_password(password.as_bytes(), &hash)
-            .is_ok()
+        password_matches(&self.password_hash, password)
+    }
+
+    /// [`Self::verify_password`] off the async runtime and under the
+    /// process-wide slot limit: `Some(verified)`, or `None` when no slot came
+    /// free inside [`VERIFY_QUEUE_WAIT`] and the attempt is to be refused.
+    ///
+    /// Two separate problems, one place. `spawn_blocking` keeps 30 ms of CPU off
+    /// the async worker that would otherwise stop serving every other request
+    /// on it; the semaphore keeps the *number* of those verifies — and so the
+    /// 19 MiB each one allocates — from being whatever an unauthenticated flood
+    /// chooses. The per-source lockout does not cover this: it prices one
+    /// source's guesses, and a flood's whole point is to arrive from many.
+    async fn verify_password_bounded(&self, username: &str, password: &str) -> Option<bool> {
+        use std::sync::atomic::Ordering::Relaxed;
+        let permit = tokio::time::timeout(VERIFY_QUEUE_WAIT, VERIFY_SLOTS.acquire())
+            .await
+            .ok()?
+            .ok()?;
+        let username_matches = username == self.username;
+        let hash = self.password_hash.clone();
+        let password = password.to_string();
+        let verified = tokio::task::spawn_blocking(move || {
+            let in_flight = VERIFIES_IN_FLIGHT.fetch_add(1, Relaxed) + 1;
+            VERIFIES_PEAK.fetch_max(in_flight, Relaxed);
+            // The same two steps `verify_password` takes, in the same order —
+            // the username compare short-circuits, which is a stated decision
+            // there (usernames are not secret) and not something moving the work
+            // to another thread should quietly change.
+            let matched = username_matches && password_matches(&hash, &password);
+            VERIFIES_IN_FLIGHT.fetch_sub(1, Relaxed);
+            matched
+        })
+        .await
+        .unwrap_or(false);
+        drop(permit);
+        Some(verified)
     }
 
     /// Constant-time compare against the configured `api_token`; `false` if
@@ -890,7 +984,31 @@ async fn login_submit(
         };
     }
 
-    if auth.verify_password(&form.username, &form.password) {
+    let Some(verified) = auth
+        .verify_password_bounded(&form.username, &form.password)
+        .await
+    else {
+        // Every verify slot was busy for VERIFY_QUEUE_WAIT. The same `429` the
+        // lockout answers, for the same reason — too many login attempts, just
+        // counted across sources rather than per source — with a one-second
+        // Retry-After, since the queue drains in tens of milliseconds.
+        tracing::warn!(
+            source = %source.label(),
+            "login refused: no Argon2 verify slot free"
+        );
+        let message = "too many login attempts are being verified at once; try again in a moment";
+        return if html {
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                [(header::RETRY_AFTER, "1".to_string())],
+                render_login(&base_path, Some(message)),
+            )
+                .into_response()
+        } else {
+            ApiError::too_many_requests(message.to_string(), 1).into_response()
+        };
+    };
+    if verified {
         auth.record_login_success(source);
         // `?` (Debug quoting) rather than `%`: the username is request text,
         // and the default `fmt` subscriber writes a `%` field verbatim, so a
@@ -1563,6 +1681,64 @@ mod lockout_tests {
         assert_eq!(
             allowed, TEST_BUDGET as usize,
             "exactly the budget may pass the gate, however many race it"
+        );
+    }
+
+    /// The concurrency bound, driven concurrently — which the
+    /// [`the_gate_counts_each_attempt_rather_than_checking_then_acting`] pin
+    /// above deliberately does not (it races the gate's arithmetic, in one
+    /// thread, and says so).
+    ///
+    /// Eight wrong passwords from eight distinct sources are submitted at once
+    /// through the real `login_submit`, so each reaches
+    /// [`Auth::verify_password_bounded`]. Every one of them must be answered,
+    /// and the peak number of Argon2 verifies actually in flight — recorded
+    /// inside the `spawn_blocking` closure, not inferred — must never exceed
+    /// [`MAX_CONCURRENT_VERIFIES`]. Before the semaphore, that peak was however
+    /// many attempts arrived together, each holding 19 MiB.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_concurrent_verifies_are_bounded() {
+        use std::sync::atomic::Ordering::Relaxed;
+        // A shared process-wide watermark, so start from what is there rather
+        // than assuming this test is the only one that has ever verified.
+        VERIFIES_PEAK.store(0, Relaxed);
+        // The production policy, not the test-sized one: eight distinct
+        // sources each spend their first attempt, so no lockout is in play and
+        // every one of them reaches the verify.
+        let auth = auth_with(LockoutPolicy::production());
+        let mut attempts = Vec::new();
+        for n in 0..8u16 {
+            let auth = auth.clone();
+            attempts.push(tokio::spawn(async move {
+                login_submit(
+                    auth,
+                    String::new(),
+                    peer(n + 1),
+                    false,
+                    LoginForm {
+                        username: "evan".to_string(),
+                        password: format!("wrong {n}"),
+                    },
+                )
+                .await
+                .status()
+            }));
+        }
+        for attempt in attempts {
+            let status = attempt.await.expect("the attempt task completes");
+            assert!(
+                // A wrong password re-renders the page with its error (200 — the
+                // documented outcome), and a busy verify queue is the 429.
+                status == StatusCode::OK || status == StatusCode::TOO_MANY_REQUESTS,
+                "a concurrent wrong password is answered, not dropped: {status}"
+            );
+        }
+        let peak = VERIFIES_PEAK.load(Relaxed);
+        assert!(peak > 0, "the watermark saw no verify at all");
+        assert!(
+            peak <= MAX_CONCURRENT_VERIFIES,
+            "{peak} Argon2 verifies ran at once, over the {MAX_CONCURRENT_VERIFIES} slots — each \
+             one is ~19 MiB of transient memory on an unauthenticated path"
         );
     }
 
