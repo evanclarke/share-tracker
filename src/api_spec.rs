@@ -1864,8 +1864,9 @@ fn component_schemas() -> Vec<(String, RefOr<Schema>)> {
 ///
 /// `statuses` is the success set the route can answer. A `PUT` upsert carries
 /// two — `201` with `response` (the created row) and `204` with no content —
-/// because it reports whether it created or replaced. A `201` is the only
-/// status that carries `response`; a `204` never has a body.
+/// because it reports whether it created or replaced. A `200` or `201`
+/// carries `response`; a `204` never has a body, and neither does a `303`
+/// (the login/logout redirect — its `Location` is the whole answer).
 fn operation(
     verb: Verb,
     path: &str,
@@ -1876,7 +1877,11 @@ fn operation(
 ) -> Operation {
     let mut responses = ResponsesBuilder::new();
     for &status in statuses {
-        let body = if status == 201 { response } else { Body::None };
+        let body = if matches!(status, 200 | 201) {
+            response
+        } else {
+            Body::None
+        };
         responses = responses.response(status.to_string(), success_response(status, body));
     }
     // `POST /login` can answer 429 — the failed-attempt lockout
@@ -3639,6 +3644,82 @@ mod tests {
                 "info.description must name the POST-bodied report read {path}"
             );
         }
+    }
+
+    /// The **emitted** document carries every route's success body: each
+    /// `ROUTES` row's response [`Body`] appears under each of its statuses that
+    /// has a body (`200`, `201`), and a `204` or `303` carries no `content`.
+    ///
+    /// The other scans pin the *table* against the handler types; this one
+    /// reads the served document back, which is what caught every `200` (every
+    /// list, GET-one and report) published as a bare `"OK"` with no schema —
+    /// `operation` attached the body to a `201` only. The expected shape is
+    /// spelt out per `Body` variant here rather than by calling
+    /// `success_response`, so a builder bug cannot agree with itself.
+    #[test]
+    fn every_success_response_carries_its_routes_body() {
+        let doc = doc();
+        let mut checked = 0;
+        for &(verb, path, statuses, _, _, response) in ROUTES {
+            let method = match verb {
+                Verb::Get => "get",
+                Verb::Post => "post",
+                Verb::Put => "put",
+                Verb::Delete => "delete",
+            };
+            for status in statuses {
+                let documented = &doc["paths"][path][&method]["responses"][status.to_string()];
+                assert!(
+                    documented.is_object(),
+                    "{method} {path} does not document {status}"
+                );
+                let content = documented.get("content");
+                if matches!(status, 204 | 303) || matches!(response, Body::None) {
+                    assert!(
+                        content.is_none(),
+                        "{method} {path}'s {status} must carry no body, found {content:?}"
+                    );
+                    continue;
+                }
+                let content = content
+                    .unwrap_or_else(|| panic!("{method} {path}'s {status} has lost its body"));
+                let json_schema = &content["application/json"]["schema"];
+                match response {
+                    Body::None | Body::Form(_) => unreachable!("not a response body"),
+                    Body::Json(name) => assert_eq!(
+                        json_schema["$ref"],
+                        format!("#/components/schemas/{name}"),
+                        "{method} {path}'s {status}"
+                    ),
+                    Body::JsonArray(name) => {
+                        assert_eq!(json_schema["type"], "array", "{method} {path}'s {status}");
+                        assert_eq!(
+                            json_schema["items"]["$ref"],
+                            format!("#/components/schemas/{name}"),
+                            "{method} {path}'s {status}"
+                        );
+                    }
+                    Body::JsonIntegers => {
+                        assert_eq!(json_schema["type"], "array", "{method} {path}'s {status}");
+                        assert_eq!(
+                            json_schema["items"]["type"], "integer",
+                            "{method} {path}'s {status}"
+                        );
+                    }
+                    Body::JsonFree(_) => {
+                        assert_eq!(json_schema["type"], "object", "{method} {path}'s {status}")
+                    }
+                    Body::Other(media_type) => assert!(
+                        content.get(media_type).is_some(),
+                        "{method} {path}'s {status} must carry {media_type}"
+                    ),
+                }
+                checked += 1;
+            }
+        }
+        // Lists, GET-ones and reports: far more than the 201s alone, which is
+        // what the bug left documented.
+        assert!(checked > 100, "only {checked} success bodies checked");
     }
 
     /// Every `PUT` route records the statuses it can answer: the create/replace

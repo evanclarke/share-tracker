@@ -37,7 +37,7 @@ actually drive it: Claude Code running `curl` against the deployed server. As wi
 sweep above, the API has no external clients, so nothing here needs a compatibility shim. Ordered
 by value; the first item is a bug.
 
-- [ ] **Every `200` response in the OpenAPI document has lost its schema.** `api_spec::operation`
+- [x] **Every `200` response in the OpenAPI document has lost its schema.** `api_spec::operation`
   (`src/api_spec.rs:1879`) attaches the response body only to a `201` —
   `let body = if status == 201 { response } else { Body::None };` — so 109 success responses
   (every list, every GET-one, every report, every import/backfill summary) are published as a bare
@@ -46,6 +46,13 @@ by value; the first item is a bug.
   back. Introduced by `59bc2e6` (2026-09-25); the intent, per its own comment, was "a `204` never
   has a body". Fix to `status != 204`, and add a test walking the served document: every `ROUTES`
   row's response `Body` appears under each of its non-`204` statuses.
+  *Done 2026-10-04:* `operation` now attaches the body to a `200` or `201` — not `status != 204`,
+  because the login/logout `303` is a redirect with no body either (its row records `text/html`
+  for the `200` page re-render, which is not a listed status). Pinned by
+  `api_spec::tests::every_success_response_carries_its_routes_body`, which reads the emitted
+  document back and checks each row's `Body` per variant (a `$ref`, an array of `$ref`s, integers,
+  a free-form object, or the media type) under every `200`/`201`, and no `content` under a
+  `204`/`303`; it fails on `get /listings's 200 has lost its body` with the old line.
 - [ ] **No `operationId` or `tags` on any operation** (0 of 177). Every OpenAPI-to-tool adapter
   (function calling, MCP bridges) names a tool by its `operationId`. Derive one per route from the
   verb and path (`listTrades`, `getTrade`, `createSell`, `runPortfolioOverview`, …), unique and
