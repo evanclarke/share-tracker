@@ -63,10 +63,11 @@
 
 use crate::entities::listing::{self, Listing, SecurityType};
 use crate::infra::db::write_tx;
+use crate::infra::extract::{Json, Query};
 use crate::infra::http::{ApiError, CrudEntity};
 use axum::{
-    Json, Router,
-    extract::{Path, Query, State},
+    Router,
+    extract::{Path, State},
     http::StatusCode,
     routing::get,
 };

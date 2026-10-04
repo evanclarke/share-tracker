@@ -1,7 +1,8 @@
 use crate::infra::db::write_tx;
+use crate::infra::extract::Json;
 use crate::infra::http::{self, ApiError, CrudEntity, Upsert, UpsertResponse};
 use axum::{
-    Json, Router,
+    Router,
     extract::{Path, State},
     routing::get,
 };

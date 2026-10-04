@@ -46,12 +46,13 @@ use crate::domain::open_parcels;
 use crate::domain::tax_year::tax_year_for;
 use crate::entities::corporate_action::{self, RocEvent};
 use crate::infra::decimal::{parse_dec, to_cents};
+use crate::infra::extract::Json;
 use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
 use crate::reports::export::{self, Cents};
 use crate::reports::parcel_optimiser::{self, DisposalTotals, HypotheticalAllocation, Strategy};
 use axum::{
-    Json, Router,
+    Router,
     extract::State,
     response::Response,
     routing::{get, post},

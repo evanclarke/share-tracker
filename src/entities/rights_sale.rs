@@ -55,10 +55,11 @@ use crate::entities::rights_exercise::{db_held_at_record_date, db_rights_used, e
 use crate::entities::trade::TradeType;
 use crate::infra::db::write_tx;
 use crate::infra::decimal::{Money, parse_dec, row_dec};
+use crate::infra::extract::{Json, Query};
 use crate::infra::http::{self, ApiError};
 use axum::{
-    Json, Router,
-    extract::{Path, Query, State},
+    Router,
+    extract::{Path, State},
     http::StatusCode,
     routing::{get, post},
 };

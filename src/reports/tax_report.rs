@@ -49,6 +49,7 @@ use crate::entities::investment_expense::ExpenseType;
 use crate::entities::listing;
 use crate::entities::trade::Trade;
 use crate::infra::decimal::{OptMoney, mul_div, parse_dec, to_cents};
+use crate::infra::extract::{Json, Query};
 use crate::infra::fx::FxRates;
 use crate::infra::http::ApiError;
 use crate::reports::realised_gains::DisposalSource;
@@ -56,11 +57,7 @@ use crate::reports::{
     activity, amit_adjustment_cross_check, amit_cash_cross_check, e4_cross_check, franking_at_risk,
     net_capital_gain, realised_gains, rollover_consistency, tax_summary,
 };
-use axum::{
-    Json, Router,
-    extract::{Query, State},
-    routing::get,
-};
+use axum::{Router, extract::State, routing::get};
 use chrono::{NaiveDate, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};

@@ -9,10 +9,11 @@ use super::market::{Market, load_market};
 use super::model::{ClosingPrice, PriceOrigin, PriceSource, PriceStatus, UNASSIGNED_ID};
 use crate::entities::listing;
 use crate::infra::db::write_tx;
+use crate::infra::extract::{Json, Query};
 use crate::infra::http::{self, ApiError, Upsert, UpsertResponse};
 use axum::{
-    Extension, Json, Router,
-    extract::{Path, Query, State},
+    Extension, Router,
+    extract::{Path, State},
     http::StatusCode,
     routing::{get, post},
 };

@@ -19,13 +19,10 @@
 //! TR 2008/1 fact pattern, symmetric with the Buy-side provenance exclusions.
 
 use crate::infra::decimal::row_dec;
+use crate::infra::extract::{Json, Query};
 use crate::infra::http::ApiError;
 use crate::reports::realised_gains::{self, DisposalSource};
-use axum::{
-    Json, Router,
-    extract::{Query, State},
-    routing::get,
-};
+use axum::{Router, extract::State, routing::get};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};

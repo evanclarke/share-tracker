@@ -74,10 +74,11 @@
 //! `POST /report_snapshots/regenerate_provisional`.
 
 use crate::infra::db::write_tx;
+use crate::infra::extract::{Json, Query};
 use crate::infra::http::ApiError;
 use axum::{
-    Json, Router,
-    extract::{Path, Query, State},
+    Router,
+    extract::{Path, State},
     routing::{get, post},
 };
 use chrono::{DateTime, Duration, NaiveDate, Utc};

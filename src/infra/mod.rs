@@ -10,6 +10,7 @@ pub mod date;
 pub mod db;
 pub mod decimal;
 pub mod email;
+pub mod extract;
 pub mod fetch;
 pub mod fx;
 pub mod http;

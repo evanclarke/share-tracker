@@ -1,7 +1,8 @@
 //! HTTP helpers shared by entity and report handlers.
 
-use axum::Json;
-use axum::extract::{Path, Query, State};
+use crate::infra::extract::Json;
+use crate::infra::extract::Query;
+use axum::extract::{Path, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use sqlx::error::ErrorKind;

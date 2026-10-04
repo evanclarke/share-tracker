@@ -36,14 +36,11 @@ use crate::entities::investment_expense::InvestmentExpense;
 use crate::entities::trade::{Trade, TradeType};
 use crate::entities::transfer::Transfer;
 use crate::infra::decimal::{mul_div, parse_dec};
+use crate::infra::extract::{Json, Query};
 use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
 use crate::reports::portfolio::{self, HoldingOverview};
-use axum::{
-    Extension, Json, Router,
-    extract::{Query, State},
-    routing::get,
-};
+use axum::{Extension, Router, extract::State, routing::get};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};

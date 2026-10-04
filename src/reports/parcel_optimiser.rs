@@ -38,12 +38,9 @@ use crate::domain::cost_base::ParcelRow;
 use crate::domain::open_parcels;
 use crate::entities::closing_price::{self, SharedFetcher};
 use crate::infra::decimal::mul_div;
+use crate::infra::extract::{Json, Query};
 use crate::infra::http::ApiError;
-use axum::{
-    Extension, Json, Router,
-    extract::{Query, State},
-    routing::get,
-};
+use axum::{Extension, Router, extract::State, routing::get};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};

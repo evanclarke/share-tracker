@@ -1,7 +1,8 @@
 use crate::domain::open_parcels;
 use crate::entities::closing_price::{self, SharedFetcher};
+use crate::infra::extract::Json;
 use crate::infra::http::ApiError;
-use axum::{Extension, Json, Router, extract::State, routing::post};
+use axum::{Extension, Router, extract::State, routing::post};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};

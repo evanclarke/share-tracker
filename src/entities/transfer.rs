@@ -39,9 +39,10 @@ use crate::entities::corporate_action::checked_as_acquired_quantity;
 use crate::entities::sell::{self, AllocationInput};
 use crate::entities::trade::{self, Trade};
 use crate::infra::db::write_tx;
+use crate::infra::extract::Json;
 use crate::infra::http::{self, ApiError, CrudEntity};
 use axum::{
-    Json, Router,
+    Router,
     extract::{Path, State},
     http::StatusCode,
     routing::get,

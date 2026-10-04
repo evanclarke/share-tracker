@@ -15,9 +15,10 @@
 use crate::entities::trade::{self, Trade, TradeType};
 use crate::infra::db::write_tx;
 use crate::infra::decimal::{Money, OptMoney};
+use crate::infra::extract::Json;
 use crate::infra::http::{self, ApiError, Upsert, UpsertResponse};
 use axum::{
-    Json, Router,
+    Router,
     extract::{Path, State},
     http::StatusCode,
     routing::{post, put},

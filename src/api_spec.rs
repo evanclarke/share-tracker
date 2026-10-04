@@ -71,9 +71,8 @@ additionalProperties: false, so a misspelt or unexpected field is a 422 naming \
 the offending field rather than a silently-ignored default writing a zero into \
 a tax figure. A query string is held to the same rule, but the refusal is a 400 \
 naming the field rather than a 422, because it is the query decoder that rejects \
-it before the handler runs (POST /jobs/{name} is the one exception: it reads the \
-rejection itself and answers 422, so a misspelt ?suffix= cannot take an \
-unlabelled backup).
+it before the handler runs. Every such refusal reads 'cannot read the query \
+string: <reason>' (a body: 'cannot read the request body: <reason>').
 
 Errors are never JSON. A rejected request answers either a text/plain; \
 charset=utf-8 body with the reason — 400 (a malformed path parameter, query \

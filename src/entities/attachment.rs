@@ -31,10 +31,11 @@
 use crate::infra::http::{self, ApiError, CrudEntity};
 use std::fmt::Write as _;
 
+use crate::infra::extract::{Json, Query};
 use axum::{
-    Json, Router,
+    Router,
     body::Body,
-    extract::{DefaultBodyLimit, Multipart, Path, Query, State},
+    extract::{DefaultBodyLimit, Multipart, Path, State},
     http::{StatusCode, header},
     response::{IntoResponse, Response},
     routing::get,

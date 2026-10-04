@@ -27,14 +27,11 @@
 //! unhedged and carry no related-payment obligation — stated in `docs/API.md`'s
 //! Known limitations and in the report's own section there.
 
+use crate::infra::extract::{Json, Query};
 use crate::infra::fx::FxRates;
 use crate::infra::http::ApiError;
 use crate::reports::franking;
-use axum::{
-    Json, Router,
-    extract::{Query, State},
-    routing::get,
-};
+use axum::{Router, extract::State, routing::get};
 use chrono::{Duration, NaiveDate};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};

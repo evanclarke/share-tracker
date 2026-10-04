@@ -1,5 +1,6 @@
+use crate::infra::extract::Json;
 use crate::infra::http::ApiError;
-use axum::{Json, Router, extract::State, routing::get};
+use axum::{Router, extract::State, routing::get};
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 

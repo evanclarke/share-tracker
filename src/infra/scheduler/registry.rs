@@ -56,8 +56,8 @@ type Job = Arc<dyn Fn(JobParams) -> JobFuture + Send + Sync>;
 /// `deny_unknown_fields` makes a misspelt parameter a rejection rather than a
 /// silent no-op: without it `POST /jobs/backup?sufix=pre-0.5.1` answered `204`
 /// and took an *unlabelled* backup, so the operator's one-off label was lost
-/// with nothing said (SCENARIOS T-10). The rejection is turned into a `422`
-/// with the reason by [`super::http`]'s trigger handler.
+/// with nothing said (SCENARIOS T-10). The shared `infra::extract::Query`
+/// answers the rejection `400` naming the parameter, as on every route.
 #[derive(Debug, Default, Clone, Deserialize, utoipa::IntoParams)]
 #[serde(deny_unknown_fields)]
 pub struct JobParams {
@@ -70,7 +70,7 @@ pub struct JobParams {
 /// (an empty value) as `true` alongside the spelt-out `=true` / `=false`.
 ///
 /// serde's own `bool` would reject the bare form — the same silent-loss shape
-/// as the misspelt `suffix` above, only louder: a `422` for what every other
+/// as the misspelt `suffix` above, only louder: a `400` for what every other
 /// tool on the box treats as *the* way to write a flag. Anything that is
 /// neither is still an error, so a typo can never read as "off" by accident.
 fn flag<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {

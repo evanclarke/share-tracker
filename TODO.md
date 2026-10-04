@@ -78,11 +78,18 @@ a compatibility shim, alias or deprecation period: rename/re-shape the route, up
   `closing_price::tests::delete::api_get_one_reads_the_row_the_put_and_delete_address`,
   `listing_rename::tests::api_get_one_reads_the_rename_the_undo_addresses`,
   `doc_checks::sells_section_says_why_there_is_no_get_one`.
-- [ ] **One status and wording for an unrecognised query parameter.** `POST /jobs/:name` answers
+- [x] **One status and wording for an unrecognised query parameter.** `POST /jobs/:name` answers
   `422` "cannot read the query string: …" while every other route answers `400` with axum's "Failed
   to deserialize query string: …" (and JSON body rejections keep axum's "Failed to deserialize the
   JSON body into the target type:" prefix). Settle on one status for a query rejection and one
   wording shape, ideally by a shared `Query`/`Json` extractor wrapper rather than per handler.
+  Done: `infra::extract`'s `Query`/`Json` replace axum's in every handler — a query rejection is
+  always `400`, a body keeps axum's status (`422`/`400`/`415`/`413`), and both read
+  `cannot read the query string|request body: <serde reason>`; the job trigger's hand-mapped `422`
+  is gone, and `docs/API.md` gains a "Rejected requests" section. Tests:
+  `infra::extract::tests::every_rejection_reads_cannot_read_the_part` (real routes, query and body),
+  `infra::extract::tests::no_handler_takes_axums_own_query_or_json` (no module imports axum's),
+  `doc_checks::rejected_request_shape_documented`, and the two `scheduler` trigger tests now at `400`.
 - [ ] **Create-like POSTs disagree on `200` vs `201`.** `POST /closing_prices/fetch` and
   `/amma_statements/:id/generate_adjustments` answer `201`; `POST /report_snapshots/generate`,
   `/closing_prices/backfill` and the three `/…/import` feeds answer `200` though they can create rows.

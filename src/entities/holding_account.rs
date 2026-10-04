@@ -14,9 +14,10 @@
 //! reports (tax summary, net capital gain) aggregate across all of them.
 
 use crate::infra::db::write_tx;
+use crate::infra::extract::Json;
 use crate::infra::http::{self, ApiError, CrudEntity, Upsert, UpsertResponse};
 use axum::{
-    Json, Router,
+    Router,
     extract::{Path, State},
     http::StatusCode,
     routing::get,

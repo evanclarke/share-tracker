@@ -25,12 +25,9 @@
 //! Read-only — the trail itself is written by the triggers alone and is
 //! append-only (enforced in the schema), so there is nothing here to write.
 
+use crate::infra::extract::{Json, Query};
 use crate::infra::http::ApiError;
-use axum::{
-    Json, Router,
-    extract::{Query, State},
-    routing::get,
-};
+use axum::{Router, extract::State, routing::get};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sqlx::{Row, SqlitePool};

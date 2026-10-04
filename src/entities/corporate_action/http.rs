@@ -2,9 +2,10 @@
 
 use super::db::{db_create, db_delete, db_upsert};
 use super::model::{CorporateAction, CorporateActionBody};
+use crate::infra::extract::Json;
 use crate::infra::http::{self, ApiError, UpsertResponse};
 use axum::{
-    Json, Router,
+    Router,
     extract::{Path, State},
     http::StatusCode,
     routing::get,

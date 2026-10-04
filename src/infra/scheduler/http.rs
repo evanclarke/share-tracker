@@ -4,9 +4,10 @@
 use super::db::{JobRunRecord, JobRunStatus, db_next_runs, db_run_histories};
 use super::registry::{JobParams, JobRegistry, JobTrigger};
 use super::run::run_job;
+use crate::infra::extract::{Json, Query};
 use axum::{
-    Extension, Json, Router,
-    extract::{Path, Query, State, rejection::QueryRejection},
+    Extension, Router,
+    extract::{Path, State},
     http::StatusCode,
     routing::{get, post},
 };
@@ -100,24 +101,11 @@ async fn trigger(
     State(pool): State<SqlitePool>,
     Extension(registry): Extension<JobRegistry>,
     Path(name): Path<String>,
-    // Taken as a `Result` so the extractor's own rejection — which `Query`
-    // would otherwise answer itself, as a `400` in axum's wording — becomes a
-    // `422` with a reason, the same shape as every other rejected write. That
-    // is what `JobParams`' `deny_unknown_fields` surfaces as.
-    params: Result<Query<JobParams>, QueryRejection>,
+    // An unrecognised parameter is `JobParams`' `deny_unknown_fields`
+    // rejection — the shared `Query` refuses it `400` naming it, so a
+    // misspelt `?sufix=` cannot take an unlabelled backup.
+    Query(params): Query<JobParams>,
 ) -> Result<StatusCode, crate::infra::http::ApiError> {
-    let Query(params) = params.map_err(|e| {
-        // serde's own message ("unknown field `sufix`, expected `suffix`")
-        // rather than axum's "Failed to deserialize query string: …" wrapper,
-        // which prefixes it with framework jargon in a toast that has room
-        // for one line.
-        let detail = std::error::Error::source(&e)
-            .map(|source| source.to_string())
-            .unwrap_or_else(|| e.body_text());
-        crate::infra::http::ApiError::unprocessable(format!(
-            "cannot read the query string: {detail}"
-        ))
-    })?;
     // Reject an invalid suffix before the registry lookup or run_job: a
     // malformed request must not be recorded as a failed job run (only the
     // backup job reads it — as it does `skip_command`, which needs no

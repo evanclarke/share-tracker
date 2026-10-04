@@ -1,10 +1,7 @@
 use crate::domain::open_parcels;
+use crate::infra::extract::{Json, Query};
 use crate::infra::http::ApiError;
-use axum::{
-    Json, Router,
-    extract::{Query, State},
-    routing::get,
-};
+use axum::{Router, extract::State, routing::get};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};

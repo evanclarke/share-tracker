@@ -35,9 +35,10 @@
 //! amount has nowhere correct to go at all. These two produce a defensible
 //! figure, so they are reported rather than blocked.
 
+use crate::infra::extract::Json;
 use crate::infra::fx::FxRates;
 use crate::infra::http::ApiError;
-use axum::{Json, Router, extract::State, routing::get};
+use axum::{Router, extract::State, routing::get};
 use chrono::{Datelike, NaiveDate};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};

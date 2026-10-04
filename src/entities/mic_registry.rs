@@ -1,8 +1,9 @@
 use crate::infra::db::write_tx;
+use crate::infra::extract::Json;
 use crate::infra::fetch::{FeedFetcher, LiveFeedFetcher, SharedFeedFetcher, fetch_feed};
 use crate::infra::http::{self, ApiError, CrudEntity};
 use axum::{
-    Json, Router,
+    Router,
     extract::{Extension, State},
     routing::{get, post},
 };

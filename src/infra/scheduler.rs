@@ -1172,7 +1172,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_unreadable_skip_command_value_is_422_and_runs_nothing() {
+    async fn an_unreadable_skip_command_value_is_400_and_runs_nothing() {
         // The `sufix` lesson (SCENARIOS T-10) applied to the flag: a value that
         // is neither true nor false must not quietly read as "off" and copy a
         // pre-upgrade backup off-machine after all.
@@ -1182,7 +1182,7 @@ mod tests {
         let resp = app.post_empty("/jobs/backup?skip_command=maybe").await;
         let (status, body) = resp.status_and_body();
 
-        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(
             body.contains("maybe") && body.contains("true or false"),
             "the reason must name the bad value: {body}"
@@ -1306,8 +1306,9 @@ mod tests {
     #[tokio::test]
     async fn trigger_with_a_misspelt_query_parameter_is_refused_not_ignored() {
         // SCENARIOS T-10: `?sufix=` used to answer 204 and take an *unlabelled*
-        // backup — the operator's one-off label silently lost. It is now a 422
-        // with a reason, rejected before any run is recorded.
+        // backup — the operator's one-off label silently lost. It is now a 400
+        // with a reason (the query-string shape every route answers), rejected
+        // before any run is recorded.
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("t.db").to_string_lossy().to_string();
         let pool = db::init(&db_path).await.unwrap();
@@ -1324,11 +1325,11 @@ mod tests {
 
         let resp = app.post_empty("/jobs/backup?sufix=pre-0.5.1").await;
 
-        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(resp.status, StatusCode::BAD_REQUEST);
         let body = resp.text();
         assert!(
             body.contains("sufix") && body.contains("suffix"),
-            "the 422 must name the parameter it did not understand: {body}"
+            "the 400 must name the parameter it did not understand: {body}"
         );
         // Nothing ran: no backup file, no recorded run.
         let no_backup = std::fs::read_dir(dir.path())

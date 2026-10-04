@@ -37,14 +37,11 @@
 //! separately, as an informational cross-check (see `docs/API.md`'s Known
 //! limitations entry for this report).
 
+use crate::infra::extract::{Json, Query};
 use crate::infra::fx::{FxError, FxRates};
 use crate::infra::http::ApiError;
 use crate::reports::{performance, realised_gains, valuation};
-use axum::{
-    Json, Router,
-    extract::{Query, State},
-    routing::get,
-};
+use axum::{Router, extract::State, routing::get};
 use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};

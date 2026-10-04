@@ -3173,6 +3173,22 @@ fn backup_skip_command_param_documented() {
     assert!(README_MD.contains("`POST /jobs/backup?skip_command=true`"));
 }
 
+/// The 2026-10-04 sweep's one-rejection-shape item: the Error-body contract
+/// states the shape `infra::extract` gives every unreadable query string and
+/// body (and `infra::extract::tests` pins on the real routes), including that
+/// the job trigger's query rejection is no longer its own `422`.
+#[test]
+fn rejected_request_shape_documented() {
+    assert!(API_MD.contains("### Rejected requests"));
+    assert!(API_MD.contains(
+        "`cannot read the query string: <reason>` or `cannot read the request body: <reason>`"
+    ));
+    assert!(API_MD.contains("**A query string is always `400`.**"));
+    assert!(API_MD.contains("`POST /jobs/:name` included, which used to answer its own `422`"));
+    assert!(API_MD.contains("`422` for JSON that parsed but does not fit the body"));
+    assert!(!API_MD.contains("classifies its own as `422`"));
+}
+
 /// SCENARIOS T-10. `POST /jobs/:name`'s two failures used to be bare status
 /// codes, which the Jobs screen could only toast as "HTTP 404" / "HTTP 500".
 /// The docs pin the bodies they now carry — including that this is the one
@@ -3186,15 +3202,15 @@ fn job_trigger_failure_bodies_documented() {
         "the `500` body carries the job's own error text \u{2014} the same string `job_runs.error` records"
     ));
     assert!(API_MD.contains("This is the one `500` in the API with a body"));
-    assert!(API_MD.contains(
-        "An unrecognised query parameter is refused `422 Unprocessable Entity` naming it"
-    ));
+    assert!(
+        API_MD.contains("An unrecognised query parameter is refused `400 Bad Request` naming it")
+    );
     // The Response codes table says the same in its 404, 422 and 500 rows.
     assert!(
         API_MD.contains("`no job named 'nope'; registered jobs are \u{2026}` (`POST /jobs/:name`)")
     );
     assert!(API_MD.contains(
-        "a misspelt `?sufix=` is refused, not ignored: it would otherwise take an unlabelled backup"
+        "a misspelt `?suffix=` would otherwise answer `204` and take an unlabelled backup"
     ));
     assert!(API_MD.contains(
         "the one `500` that *does* carry a body: the job's own error text, so the UI toast says why"

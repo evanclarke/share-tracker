@@ -1,7 +1,8 @@
 use crate::entities::closing_price::{self, NonTradingReason};
 use crate::entities::exchange_holiday::{coverage_span_for, window_outside_coverage};
+use crate::infra::extract::Json;
 use crate::infra::http::ApiError;
-use axum::{Json, Router, extract::State, routing::get};
+use axum::{Router, extract::State, routing::get};
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;

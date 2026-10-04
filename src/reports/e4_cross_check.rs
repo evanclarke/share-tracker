@@ -1,7 +1,8 @@
 use crate::domain::tax_year::tax_year_for;
 use crate::entities::income::Income;
+use crate::infra::extract::Json;
 use crate::infra::http::ApiError;
-use axum::{Json, Router, extract::State, routing::get};
+use axum::{Router, extract::State, routing::get};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
