@@ -243,7 +243,7 @@ The ISO 10383 Market Identifier Code list imported monthly (and via a manual tri
 
 ### Ticker and exchange-code renames
 
-A rename (e.g. LAAC → LAR) is recorded as a dated, audited event (`POST /listings/:id/rename`) rather than a bare field edit once a listing has any recorded trades, income, or prices: parcels, cost bases, and the 12-month discount clock stay attached across it, price history fetches under the symbol in force on each date (so pre-rename days are recovered under the pre-rename symbol automatically, with a `price_symbol` override still available when the provider simply spells a symbol differently), and the Annual Tax Report and listing activity ledger show the ticker as it stood at each row's own date (see [Listings](API.md#listings))
+A rename (e.g. LAAC → LAR) is recorded as a dated, audited event (`POST /listings/:id/renames`) rather than a bare field edit once a listing has any recorded trades, income, or prices: parcels, cost bases, and the 12-month discount clock stay attached across it, price history fetches under the symbol in force on each date (so pre-rename days are recovered under the pre-rename symbol automatically, with a `price_symbol` override still available when the provider simply spells a symbol differently), and the Annual Tax Report and listing activity ledger show the ticker as it stood at each row's own date (see [Listings](API.md#listings))
 
 ## Cross-checks and alerts
 

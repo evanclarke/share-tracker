@@ -119,7 +119,7 @@ pub struct ParcelDetail {
 //                                       + non_discountable_gain − capital_loss.
 
 pub fn router() -> Router<SqlitePool> {
-    Router::new().route("/portfolio/realised-gains", get(realised_gains_handler))
+    Router::new().route("/portfolio/realised_gains", get(realised_gains_handler))
 }
 
 /// A realisable Sell as the report reads it from `trades`. Each trade carries
@@ -1216,7 +1216,7 @@ mod tests {
 
     /// The finding's own two-screens comparison, end to end through the API:
     /// one disposal's rounded gain must read the same on Realised Gains
-    /// (`GET /portfolio/realised-gains`, which answers the exact decimal the
+    /// (`GET /portfolio/realised_gains`, which answers the exact decimal the
     /// screen rounds) and on the [annual tax
     /// report](crate::reports::tax_report) (`GET /reports/tax_report`, which
     /// cent-rounds each parcel row and prints the sum of those, SCENARIOS
@@ -1258,7 +1258,7 @@ mod tests {
         }
 
         let client = ApiClient::full(&pool);
-        let rows: Vec<RealisedGainLoss> = client.get_json("/portfolio/realised-gains").await;
+        let rows: Vec<RealisedGainLoss> = client.get_json("/portfolio/realised_gains").await;
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].proceeds, dec("69785.05"));
         assert_eq!(rows[0].cost_base, dec("38803.175"));
@@ -1965,7 +1965,7 @@ mod tests {
         allocate(&pool, 1, 2, 1, Decimal::from(100)).await;
 
         let resp = ApiClient::over(router().with_state(pool))
-            .get("/portfolio/realised-gains")
+            .get("/portfolio/realised_gains")
             .await;
         assert_eq!(resp.status, StatusCode::OK);
         let result: Vec<RealisedGainLoss> = resp.json();
@@ -1998,7 +1998,7 @@ mod tests {
         allocate(&pool, 1, 2, 1, Decimal::from(100)).await;
 
         let result: Vec<RealisedGainLoss> = ApiClient::over(router().with_state(pool))
-            .get_json("/portfolio/realised-gains")
+            .get_json("/portfolio/realised_gains")
             .await;
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].taxpayer_basis, crate::reports::TAXPAYER_BASIS);
@@ -3607,7 +3607,7 @@ mod tests {
         allocate(&pool, 1, 2, 1, "10000000000000000000".parse().unwrap()).await;
 
         let rows: Vec<RealisedGainLoss> = ApiClient::over(router().with_state(pool.clone()))
-            .get_json("/portfolio/realised-gains")
+            .get_json("/portfolio/realised_gains")
             .await;
         assert_eq!(rows.len(), 1);
         // Nil proceeds less the whole brokerage: a capital loss of A$1e10.
@@ -3656,7 +3656,7 @@ mod tests {
             .unwrap();
 
         let rows: Vec<RealisedGainLoss> = ApiClient::over(router().with_state(pool.clone()))
-            .get_json("/portfolio/realised-gains")
+            .get_json("/portfolio/realised_gains")
             .await;
         assert_eq!(rows.len(), 1);
         // Exactly half of the 1e26 reduced cost base is on the cash side.
@@ -3725,7 +3725,7 @@ mod tests {
         .unwrap();
 
         let rows: Vec<RealisedGainLoss> = ApiClient::over(router().with_state(pool.clone()))
-            .get_json("/portfolio/realised-gains")
+            .get_json("/portfolio/realised_gains")
             .await;
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].cost_base, "10000000000".parse().unwrap());

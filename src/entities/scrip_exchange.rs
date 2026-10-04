@@ -1613,7 +1613,7 @@ mod tests {
     /// `UnrepresentableReplacementQuantity` check that asks about it is
     /// satisfied — and the replacement listing's own recorded 1000-for-1 split
     /// re-bases the replacement parcel past the range at read time. The
-    /// exchange answered `201`, and `GET /portfolio/open-parcels` and
+    /// exchange answered `201`, and `GET /portfolio/open_parcels` and
     /// `POST /portfolio/overview` were both a logged `500` afterwards. The walk
     /// therefore has to ask about the **destination** listing, not only the
     /// listing the operation is about.
@@ -1651,7 +1651,7 @@ mod tests {
         assert_eq!(n, 1);
         // And the reads the state used to kill still answer.
         let rows: Vec<serde_json::Value> = ApiClient::full(&pool)
-            .get_json("/portfolio/open-parcels")
+            .get_json("/portfolio/open_parcels")
             .await;
         assert_eq!(rows.len(), 1, "{rows:?}");
     }
@@ -1683,7 +1683,7 @@ mod tests {
             .expect_status(StatusCode::CREATED);
 
         let client = ApiClient::full(&pool);
-        let rows: Vec<serde_json::Value> = client.get_json("/portfolio/open-parcels").await;
+        let rows: Vec<serde_json::Value> = client.get_json("/portfolio/open_parcels").await;
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(rows[0]["ticker"], "NEW");
         assert_eq!(rows[0]["original_quantity"], "79000000000000000000000000");

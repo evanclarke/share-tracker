@@ -2644,7 +2644,7 @@ mod tests {
     /// overflow the same way a parcel's cost base can — reachable over a
     /// parcel of 1e15 units, which a nil-priced Buy legitimately writes. It
     /// used to be accepted `204` and then killed `GET
-    /// /portfolio/realised-gains`, `GET /portfolio/net-capital-gain` and the
+    /// /portfolio/realised_gains`, `GET /portfolio/net_capital_gain` and the
     /// annual tax report's year picker with a logged `500`. Refused by the
     /// same `trade::check_amounts` bound the Buy path uses — shared, so the
     /// two sides cannot drift (SCENARIOS W-e).

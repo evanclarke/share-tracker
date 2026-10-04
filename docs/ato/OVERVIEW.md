@@ -131,7 +131,7 @@ implementation — see "How this maps to open TODO items" at the end.
   keeping `cost_base_adjustment` as the driver and treating `tax_deferred_amount` / `tax_free_amount`
   as informational-only (or removing them), and points to **CGT event E10** as the not-yet-modelled
   edge case when the net reduction exceeds the remaining cost base.
-- **CGT discount + loss netting** (already implemented in `/portfolio/net-capital-gain`):
+- **CGT discount + loss netting** (already implemented in `/portfolio/net_capital_gain`):
   [`cgt-using-capital-losses.md`](cgt-using-capital-losses.md) and
   [`cgt-discount.md`](cgt-discount.md) confirm the order the project uses — losses applied to
   non-discountable gains first, then to discount-eligible gains, then halve the remainder.

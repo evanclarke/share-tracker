@@ -3106,8 +3106,8 @@ mod tests {
 
     /// The finding's own trade: `1e15 × 1e15` is `1e30`, past
     /// `rust_decimal`'s ~7.9228e28 ceiling. It used to be accepted `204` and
-    /// then killed `GET /portfolio/open-parcels`, `POST /portfolio/overview`
-    /// and `POST /portfolio/unrealised-gains` — a logged `500` with an empty
+    /// then killed `GET /portfolio/open_parcels`, `POST /portfolio/overview`
+    /// and `POST /portfolio/unrealised_gains` — a logged `500` with an empty
     /// body since W-b's panic layer, a dropped connection before it — leaving
     /// the offending row invisible in exactly the reports that would have
     /// found it. Now refused at the write, naming the product **and** the
@@ -3156,7 +3156,7 @@ mod tests {
     /// The control, measured before the refusal existed and unchanged by it: a
     /// large-but-representable parcel (`price 1 × quantity 1e14`, a cost base
     /// of 1e14) still writes `204` and still reads back through
-    /// `GET /portfolio/open-parcels` at that exact figure. The bound is the
+    /// `GET /portfolio/open_parcels` at that exact figure. The bound is the
     /// type's, so everything the type can hold is still accepted.
     #[tokio::test]
     async fn api_a_large_but_representable_cost_base_still_writes_and_reads_back() {
@@ -3184,7 +3184,7 @@ mod tests {
             .await;
 
         let rows: serde_json::Value = ApiClient::full(&pool)
-            .get_json("/portfolio/open-parcels")
+            .get_json("/portfolio/open_parcels")
             .await;
         assert_eq!(rows[0]["trade_id"], 9601);
         assert_eq!(rows[0]["original_cost_base"], "100000000000000");
@@ -3233,7 +3233,7 @@ mod tests {
             .put_ok("/trades/9600", &correction("10", "100"))
             .await;
         let rows: serde_json::Value = ApiClient::full(&pool)
-            .get_json("/portfolio/open-parcels")
+            .get_json("/portfolio/open_parcels")
             .await;
         assert_eq!(rows[0]["original_cost_base"], "1000");
 
@@ -3308,7 +3308,7 @@ mod tests {
     /// refuse); then a nil-priced parcel of 1e27 units is entered behind it.
     /// W-e's money bound is on `average_price × quantity`, which is nil here,
     /// so nothing used to ask what the listing's recorded ratios do to the
-    /// *quantity* — the parcel landed `204` and `GET /portfolio/open-parcels`
+    /// *quantity* — the parcel landed `204` and `GET /portfolio/open_parcels`
     /// and `POST /portfolio/overview` were both a logged `500` afterwards.
     #[tokio::test]
     async fn api_a_parcel_behind_a_ratio_that_already_fits_is_refused_naming_it() {
@@ -3346,7 +3346,7 @@ mod tests {
             .unwrap();
         assert!(!exists);
         let rows: Vec<serde_json::Value> = ApiClient::full(&pool)
-            .get_json("/portfolio/open-parcels")
+            .get_json("/portfolio/open_parcels")
             .await;
         assert!(rows.is_empty(), "{rows:?}");
     }
@@ -3368,7 +3368,7 @@ mod tests {
             .expect_status(StatusCode::CREATED);
 
         let client = ApiClient::full(&pool);
-        let rows: Vec<serde_json::Value> = client.get_json("/portfolio/open-parcels").await;
+        let rows: Vec<serde_json::Value> = client.get_json("/portfolio/open_parcels").await;
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(rows[0]["original_quantity"], "79000000000000000000000000");
         assert_eq!(
@@ -3410,7 +3410,7 @@ mod tests {
         // logged 500 while it stands.
         assert_eq!(
             ApiClient::full(&pool)
-                .get("/portfolio/open-parcels")
+                .get("/portfolio/open_parcels")
                 .await
                 .status,
             StatusCode::INTERNAL_SERVER_ERROR
@@ -3422,7 +3422,7 @@ mod tests {
             .await
             .expect_status(StatusCode::NO_CONTENT);
         let rows: Vec<serde_json::Value> = ApiClient::full(&pool)
-            .get_json("/portfolio/open-parcels")
+            .get_json("/portfolio/open_parcels")
             .await;
         assert_eq!(
             rows[0]["remaining_quantity"],

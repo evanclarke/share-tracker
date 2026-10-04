@@ -1756,7 +1756,7 @@ mod tests {
     /// **entitlement ratio is 1-for-1**, so the `UnrepresentableDemergedQuantity`
     /// check that asks about it is satisfied — and the demerged listing's own
     /// recorded 1000-for-1 split re-bases the demerged parcel past the range at
-    /// read time. The demerge answered `201`, and `GET /portfolio/open-parcels`
+    /// read time. The demerge answered `201`, and `GET /portfolio/open_parcels`
     /// and `POST /portfolio/overview` were both a logged `500` afterwards. So
     /// the walk asks about the **destination** listing, not the head listing
     /// the operation is about.
@@ -1793,7 +1793,7 @@ mod tests {
             .unwrap();
         assert_eq!(n, 1);
         let rows: Vec<serde_json::Value> = ApiClient::full(&pool)
-            .get_json("/portfolio/open-parcels")
+            .get_json("/portfolio/open_parcels")
             .await;
         assert_eq!(rows.len(), 1, "{rows:?}");
     }
@@ -1825,7 +1825,7 @@ mod tests {
             .expect_status(StatusCode::CREATED);
 
         let rows: Vec<serde_json::Value> = ApiClient::full(&pool)
-            .get_json("/portfolio/open-parcels")
+            .get_json("/portfolio/open_parcels")
             .await;
         assert_eq!(rows.len(), 2, "{rows:?}");
         let head = rows.iter().find(|r| r["ticker"] == "HEAD").unwrap();

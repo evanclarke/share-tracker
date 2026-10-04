@@ -163,10 +163,12 @@ pub enum UpsertError {
     /// A plain `PUT` tried to change `ticker` or `exchange_mic` on a listing
     /// that already has dependent trades, income, or closing prices. Once a
     /// listing has history, an identity change must go through
-    /// `POST /listings/:id/rename` (`entities::listing_rename`) so the change
+    /// `POST /listings/:id/renames` (`entities::listing_rename`) so the change
     /// is recorded as a dated event, not silently lost — a brand-new listing
     /// with no dependents yet stays freely editable.
-    #[error("a ticker or exchange change on a listing with history needs POST /rename")]
+    #[error(
+        "a ticker or exchange change on a listing with history needs POST /listings/:id/renames"
+    )]
     IdentityChangeRequiresRename,
     /// `amit_from` was supplied on a listing that is not an AMIT at all. The
     /// date says *when the fund became* an AMIT; without the flag there is no
@@ -294,7 +296,7 @@ impl From<UpsertError> for ApiError {
                 ))
             }
             UpsertError::IdentityChangeRequiresRename => ApiError::unprocessable(
-                "use POST /listings/:id/rename to record a ticker or exchange change \
+                "use POST /listings/:id/renames to record a ticker or exchange change \
                  on a listing with recorded trades, income, or prices",
             ),
             UpsertError::AmitFromWithoutAmit => ApiError::unprocessable(

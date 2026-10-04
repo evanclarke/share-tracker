@@ -543,7 +543,7 @@ mod tests {
         // exchange — one row, two foreign keys, and it must be counted once.
         client
             .post(
-                "/listings/1/rename",
+                "/listings/1/renames",
                 &json!({ "effective_date": "2024-06-01", "ticker": "NEW" }),
             )
             .await

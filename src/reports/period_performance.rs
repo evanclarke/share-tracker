@@ -488,7 +488,7 @@ async fn period_performance_handler(
 
 pub fn router() -> Router<SqlitePool> {
     Router::new().route(
-        "/portfolio/period-performance",
+        "/portfolio/period_performance",
         get(period_performance_handler),
     )
 }
@@ -997,7 +997,7 @@ mod tests {
         store_price(&pool, 1, to, "15").await;
 
         let resp = ApiClient::over(router().with_state(pool))
-            .get(format!("/portfolio/period-performance?from={from}&to={to}"))
+            .get(format!("/portfolio/period_performance?from={from}&to={to}"))
             .await;
         assert_eq!(resp.status, StatusCode::OK);
         let result: PeriodPerformance = resp.json();
@@ -1008,7 +1008,7 @@ mod tests {
     async fn api_period_performance_invalid_range_is_422() {
         let pool = test_pool().await;
         let resp = ApiClient::over(router().with_state(pool))
-            .get("/portfolio/period-performance?from=2026-07-01&to=2026-06-01")
+            .get("/portfolio/period_performance?from=2026-07-01&to=2026-06-01")
             .await;
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
     }
@@ -1018,7 +1018,7 @@ mod tests {
     /// the currency and month on every report path that converts it, never an
     /// empty-bodied `500`.
     /// `/portfolio/performance` is the reference (it always classified the
-    /// boxed `FxError`); `/portfolio/period-performance` and
+    /// boxed `FxError`); `/portfolio/period_performance` and
     /// `/report_snapshots/generate` used to stringify it in their report error
     /// enums and answer the `500`, losing it before `ApiError::from` could
     /// downcast it. The snapshot path is also the `reports::valuation`
@@ -1068,8 +1068,8 @@ mod tests {
                 .await,
             ),
             (
-                "/portfolio/period-performance",
-                c.get(format!("/portfolio/period-performance?from={from}&to={to}"))
+                "/portfolio/period_performance",
+                c.get(format!("/portfolio/period_performance?from={from}&to={to}"))
                     .await,
             ),
             (
@@ -1081,8 +1081,8 @@ mod tests {
                 .await,
             ),
             (
-                "/portfolio/tax-summary",
-                c.get("/portfolio/tax-summary").await,
+                "/portfolio/tax_summary",
+                c.get("/portfolio/tax_summary").await,
             ),
             (
                 "/reports/tax_report",

@@ -879,7 +879,7 @@ mod tests {
             .await;
         client
             .post(
-                "/listings/1/rename",
+                "/listings/1/renames",
                 &serde_json::json!({ "effective_date": "2026-04-01", "ticker": "NEW" }),
             )
             .await

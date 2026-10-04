@@ -98,8 +98,8 @@ reverse of the web UI, which sorts its own tables newest-first client-side. \
 Second, a read is GET with its parameters in the query string; only four \
 report reads keep a POST body, because their parameter is a map or a list a \
 query string cannot carry: /portfolio/overview, /portfolio/performance and \
-/portfolio/unrealised-gains (a prices price-override map) and \
-/portfolio/net-capital-gain/what-if (an allocations list). Third, \
+/portfolio/unrealised_gains (a prices price-override map) and \
+/portfolio/net_capital_gain/what_if (an allocations list). Third, \
 /reports/row_history is the only paginated endpoint: without row_id it answers \
 {\"entries\":[…],\"page_size\":n,\"next_before_id\":id|null}, where before_id \
 returns entries older than that trail id and limit is 1-1000 (default 100); \
@@ -1216,7 +1216,7 @@ const ROUTES: &[RouteRow] = &[
     ),
     (
         Verb::Post,
-        "/listings/{id}/rename",
+        "/listings/{id}/renames",
         &[201],
         "Rename a listing from a date and return the recorded rename.",
         Body::Json("RenameBody"),
@@ -1328,7 +1328,7 @@ const ROUTES: &[RouteRow] = &[
     ),
     (
         Verb::Get,
-        "/portfolio/period-performance",
+        "/portfolio/period_performance",
         &[200],
         "Portfolio return over a period, with FX attribution; ?from= / ?to= bound the window.",
         Body::None,
@@ -1344,7 +1344,7 @@ const ROUTES: &[RouteRow] = &[
     ),
     (
         Verb::Get,
-        "/portfolio/open-parcels",
+        "/portfolio/open_parcels",
         &[200],
         "Every open parcel, per parcel rather than aggregated; ?as_of_date= is the valuation date (omitted = today's live position).",
         Body::None,
@@ -1352,7 +1352,7 @@ const ROUTES: &[RouteRow] = &[
     ),
     (
         Verb::Post,
-        "/portfolio/unrealised-gains",
+        "/portfolio/unrealised_gains",
         &[200],
         "Unrealised gains and losses; body carries the optional price-override map, live flag and as_of_date (omitted = today's live position).",
         Body::Json("UnrealisedGainsRequest"),
@@ -1360,7 +1360,7 @@ const ROUTES: &[RouteRow] = &[
     ),
     (
         Verb::Get,
-        "/portfolio/realised-gains",
+        "/portfolio/realised_gains",
         &[200],
         "Realised gains and losses per disposal.",
         Body::None,
@@ -1368,7 +1368,7 @@ const ROUTES: &[RouteRow] = &[
     ),
     (
         Verb::Get,
-        "/portfolio/net-capital-gain",
+        "/portfolio/net_capital_gain",
         &[200],
         "Net capital gain per financial year, with the discount and loss-netting order applied.",
         Body::None,
@@ -1376,7 +1376,7 @@ const ROUTES: &[RouteRow] = &[
     ),
     (
         Verb::Get,
-        "/portfolio/net-capital-gain/export",
+        "/portfolio/net_capital_gain/export",
         &[200],
         "The net capital gain report as CSV.",
         Body::None,
@@ -1384,7 +1384,7 @@ const ROUTES: &[RouteRow] = &[
     ),
     (
         Verb::Post,
-        "/portfolio/net-capital-gain/what-if",
+        "/portfolio/net_capital_gain/what_if",
         &[200],
         "What-if net capital gain for a contemplated disposal; the body's allocations are a list of per-parcel inputs.",
         Body::Json("WhatIfRequest"),
@@ -1392,7 +1392,7 @@ const ROUTES: &[RouteRow] = &[
     ),
     (
         Verb::Get,
-        "/portfolio/parcel-optimiser",
+        "/portfolio/parcel_optimiser",
         &[200],
         "Which parcels to sell for a target, under a chosen strategy; ?listing_id=, ?units=, ?sale_date=, ?price= and ?holding_account_id= drive it.",
         Body::None,
@@ -1400,7 +1400,7 @@ const ROUTES: &[RouteRow] = &[
     ),
     (
         Verb::Get,
-        "/portfolio/tax-summary",
+        "/portfolio/tax_summary",
         &[200],
         "The per-financial-year tax summary.",
         Body::None,
@@ -1408,7 +1408,7 @@ const ROUTES: &[RouteRow] = &[
     ),
     (
         Verb::Get,
-        "/portfolio/tax-summary/export",
+        "/portfolio/tax_summary/export",
         &[200],
         "The tax summary as CSV.",
         Body::None,
@@ -1496,7 +1496,7 @@ const ROUTES: &[RouteRow] = &[
     ),
     (
         Verb::Get,
-        "/reports/franking_at_risk/what-if",
+        "/reports/franking_at_risk/what_if",
         &[200],
         "What-if franking-at-risk for a contemplated sale; ?listing_id=, ?sale_date= and ?units= drive it.",
         Body::None,
@@ -2069,19 +2069,16 @@ fn query_parameters(verb: Verb, path: &str) -> Vec<Parameter> {
         "/report_snapshots/series" => of::<crate::reports::snapshot::SeriesParams>(),
         "/report_snapshots/holding_series" => of::<crate::reports::snapshot::HoldingSeriesParams>(),
         "/portfolio/activity" => of::<crate::reports::activity::ActivityRequest>(),
-        "/portfolio/open-parcels" => of::<crate::reports::open_parcels::OpenParcelsQuery>(),
-        "/portfolio/parcel-optimiser" => of::<crate::reports::parcel_optimiser::OptimiserRequest>(),
-        "/portfolio/period-performance" => {
+        "/portfolio/open_parcels" => of::<crate::reports::open_parcels::OpenParcelsQuery>(),
+        "/portfolio/parcel_optimiser" => of::<crate::reports::parcel_optimiser::OptimiserRequest>(),
+        "/portfolio/period_performance" => {
             of::<crate::reports::period_performance::PeriodRequest>()
         }
         "/reports/row_history" => of::<crate::reports::row_history::RowHistoryRequest>(),
         "/reports/tax_report" => of::<crate::reports::tax_report::TaxReportRequest>(),
         "/reports/wash_sales" => of::<crate::reports::wash_sales::WashSalesRequest>(),
-        "/reports/franking_at_risk/what-if" => {
+        "/reports/franking_at_risk/what_if" => {
             of::<crate::reports::franking_at_risk::WhatIfRequest>()
-        }
-        "/reports/net-capital-gain/what-if" => {
-            of::<crate::reports::net_capital_gain::WhatIfRequest>()
         }
         _ => Vec::new(),
     }
@@ -3071,11 +3068,11 @@ mod tests {
              own failures are answered from the same function",
         ),
         (
-            "reports/net_capital_gain.rs: Get /portfolio/net-capital-gain/export",
+            "reports/net_capital_gain.rs: Get /portfolio/net_capital_gain/export",
             "a text/csv download",
         ),
         (
-            "reports/tax_summary.rs: Get /portfolio/tax-summary/export",
+            "reports/tax_summary.rs: Get /portfolio/tax_summary/export",
             "a text/csv download",
         ),
         (
@@ -3496,10 +3493,10 @@ mod tests {
         assert_eq!(
             posts,
             [
-                "/portfolio/net-capital-gain/what-if",
+                "/portfolio/net_capital_gain/what_if",
                 "/portfolio/overview",
                 "/portfolio/performance",
-                "/portfolio/unrealised-gains",
+                "/portfolio/unrealised_gains",
             ],
             "the POST-bodied report reads have changed — the description must name the new set"
         );
@@ -3818,7 +3815,7 @@ mod tests {
         // The report reads the review named, each of which survives only as
         // English in the summary without this.
         for (path, param) in [
-            ("/portfolio/open-parcels", "as_of_date"),
+            ("/portfolio/open_parcels", "as_of_date"),
             ("/reports/tax_report", "tax_year"),
             ("/reports/row_history", "before_id"),
             ("/portfolio/activity", "listing_id"),
@@ -3880,7 +3877,7 @@ mod tests {
         assert_eq!(listing_id["schema"]["type"], serde_json::json!("integer"));
         // …and an `Option` field is optional, so the two are really being told
         // apart rather than everything being stamped the same way.
-        let as_of = param("/portfolio/open-parcels", "as_of_date");
+        let as_of = param("/portfolio/open_parcels", "as_of_date");
         assert_eq!(as_of["required"], serde_json::json!(false));
         let price = param("/portfolio/activity", "price");
         assert_eq!(price["required"], serde_json::json!(false));
@@ -4178,7 +4175,7 @@ mod tests {
         for path in [
             "/portfolio/overview",
             "/portfolio/performance",
-            "/portfolio/unrealised-gains",
+            "/portfolio/unrealised_gains",
         ] {
             let row = ROUTES
                 .iter()
@@ -4197,7 +4194,7 @@ mod tests {
         }
         let open_parcels = ROUTES
             .iter()
-            .find(|(_, p, _, _, _, _)| *p == "/portfolio/open-parcels")
+            .find(|(_, p, _, _, _, _)| *p == "/portfolio/open_parcels")
             .expect("the open-parcels route is documented");
         assert!(
             open_parcels.3.contains("?as_of_date="),

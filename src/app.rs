@@ -210,7 +210,7 @@ mod tests {
         .await;
 
         let client = ApiClient::full(&pool);
-        let resp = client.get("/portfolio/open-parcels").await;
+        let resp = client.get("/portfolio/open_parcels").await;
         assert_eq!(resp.status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(resp.text(), "");
         // The control the finding measured: the reports that never form the

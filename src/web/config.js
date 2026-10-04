@@ -57,7 +57,7 @@ export const ENTITIES = [
     columns: ['id', 'exchange_mic', 'ticker', 'name', 'isin', 'security_type', 'currency', 'amit', 'amit_from', 'unpriced_from', 'unpriced_before', 'preference'],
     // A ticker/exchange change is not a field edit: PUT refuses one on a
     // listing with recorded trades, income or prices (422 naming
-    // POST /listings/:id/rename). Rename is that endpoint, and Rename
+    // POST /listings/:id/renames). Rename is that endpoint, and Rename
     // history is the recorded chain (GET /listings/:id/renames) with the
     // newest entry's undo.
     // Activity is the same drill-down every other table gets from a
@@ -493,7 +493,7 @@ export const REPORTS = [
     ],
   },
   {
-    slug: 'open-parcels', title: 'Open Parcels', api: '/portfolio/open-parcels', method: 'GET',
+    slug: 'open-parcels', title: 'Open Parcels', api: '/portfolio/open_parcels', method: 'GET',
     menu: 'Reports', section: 'Portfolio',
     desc: 'Every open parcel: acquisition date, original cost base, AMIT and return-of-capital reductions, remaining quantity and adjusted cost base (AUD).',
     // The as-of date is the report's one parameter and it is optional, so the
@@ -540,7 +540,7 @@ export const REPORTS = [
     ],
   },
   {
-    slug: 'parcel-optimiser', title: 'Parcel Optimiser', api: '/portfolio/parcel-optimiser', method: 'GET',
+    slug: 'parcel-optimiser', title: 'Parcel Optimiser', api: '/portfolio/parcel_optimiser', method: 'GET',
     menu: 'Reports', section: 'Decision support',
     desc: 'Candidate parcel selections for a contemplated sale — which parcels a sale comes from is your choice, and it changes the tax outcome. Each strategy shows its per-parcel allocations and the resulting gross gain / discountable split. Nothing is recorded: enter the chosen allocations on the real Sell.',
     params: [
@@ -563,9 +563,9 @@ export const REPORTS = [
       },
     ],
   },
-  { slug: 'unrealised-gains', title: 'Unrealised Gains', api: '/portfolio/unrealised-gains', method: 'POST', prices: true, asOfDate: true, menu: 'Reports', section: 'CGT & tax', desc: 'Per-holding (listing × holding account) unrealised gain/loss vs cost base.' },
+  { slug: 'unrealised-gains', title: 'Unrealised Gains', api: '/portfolio/unrealised_gains', method: 'POST', prices: true, asOfDate: true, menu: 'Reports', section: 'CGT & tax', desc: 'Per-holding (listing × holding account) unrealised gain/loss vs cost base.' },
   {
-    slug: 'realised-gains', title: 'Realised Gains', api: '/portfolio/realised-gains', method: 'GET',
+    slug: 'realised-gains', title: 'Realised Gains', api: '/portfolio/realised_gains', method: 'GET',
     menu: 'Reports', section: 'CGT & tax',
     desc: 'Per-disposal capital gain/loss split into CGT buckets — ordinary sales plus rights sales/lapses (source column). Expand a disposal for the individual parcels sold and each one’s own CGT outcome.',
     expand: {
@@ -575,7 +575,7 @@ export const REPORTS = [
   },
   { slug: 'performance', title: 'Performance', api: '/portfolio/performance', method: 'POST', prices: true, asOfDate: true, menu: 'Reports', section: 'Portfolio', desc: 'Investment performance per holding and overall: total return, money-weighted return (% p.a.), trailing-12-month income yield.' },
   {
-    slug: 'net-capital-gain', title: 'Net Capital Gain', api: '/portfolio/net-capital-gain', method: 'GET', export: true,
+    slug: 'net-capital-gain', title: 'Net Capital Gain', api: '/portfolio/net_capital_gain', method: 'GET', export: true,
     menu: 'Reports', section: 'CGT & tax',
     desc: 'Assessable net capital gain per financial year. Expand a year for its realised disposals, and a disposal for its per-parcel breakdown.',
     expand: {
@@ -588,7 +588,7 @@ export const REPORTS = [
     },
   },
   {
-    slug: 'net-capital-gain-what-if', title: 'Pre-Sale What-If', api: '/portfolio/net-capital-gain/what-if', method: 'POST',
+    slug: 'net-capital-gain-what-if', title: 'Pre-Sale What-If', api: '/portfolio/net_capital_gain/what_if', method: 'POST',
     menu: 'Reports', section: 'Decision support',
     desc: 'Dry-run a hypothetical disposal through the Net Capital Gain report: the disposal year’s figures with and without it, using a Parcel Optimiser strategy to pick the parcels (the API also accepts explicit allocations). Nothing is written, and the whole-of-income tax estimate is out of scope — this is the CGT-side delta only.',
     params: [
@@ -630,7 +630,7 @@ export const REPORTS = [
       },
     ],
   },
-  { slug: 'tax-summary', title: 'Tax Summary', api: '/portfolio/tax-summary', method: 'GET', export: true, menu: 'Reports', section: 'CGT & tax', desc: 'Income aggregated by Australian financial year. A dividend from a company reports at 11S/11T; a non-AMIT trust distribution reports at question 13 instead \u2014 unfranked at 13U, franked at 13C \u2014 the same labels the AMMA lines carry. Investment-expense deductions are cut two ways over the same total: by kind of expense (loan interest, management fee, \u2026) and by the question each is claimed at \u2014 13Y for expenses of earning a trust or AMIT distribution (interest on money borrowed to buy the units included), 20M for expenses of earning foreign-source income, D15 for a debt deduction against foreign income (question 20\u2019s worksheet excludes those), and D7/D8 for the ordinary Australian interest and dividend case. An expense attributed to no listing cannot be routed and is reported at D7/D8.' },
+  { slug: 'tax-summary', title: 'Tax Summary', api: '/portfolio/tax_summary', method: 'GET', export: true, menu: 'Reports', section: 'CGT & tax', desc: 'Income aggregated by Australian financial year. A dividend from a company reports at 11S/11T; a non-AMIT trust distribution reports at question 13 instead \u2014 unfranked at 13U, franked at 13C \u2014 the same labels the AMMA lines carry. Investment-expense deductions are cut two ways over the same total: by kind of expense (loan interest, management fee, \u2026) and by the question each is claimed at \u2014 13Y for expenses of earning a trust or AMIT distribution (interest on money borrowed to buy the units included), 20M for expenses of earning foreign-source income, D15 for a debt deduction against foreign income (question 20\u2019s worksheet excludes those), and D7/D8 for the ordinary Australian interest and dividend case. An expense attributed to no listing cannot be routed and is reported at D7/D8.' },
   {
     slug: 'tax-report', title: 'Annual Tax Report', custom: 'tax-report', api: '/reports/tax_report',
     menu: 'Reports', section: 'CGT & tax',
@@ -662,7 +662,7 @@ export const REPORTS = [
   },
   { slug: 'franking-at-risk', title: 'Franking At-Risk', api: '/reports/franking_at_risk', method: 'GET', statusField: 'status', menu: 'Reports', section: 'Cross-checks & alerts', desc: 'Each dividend whose shares fail the 45-day (90 for preference) at-risk holding-period walk: the failing qualification window, the entitled and disqualified units, and the credits denied — or shielded by the year’s under-$5,000 small-shareholder exemption. Denied rows are exactly what the Tax Summary subtracts as franking_credits_denied. A row marked untested_no_ex_date is a dividend the rule could not be applied to at all — no ex date (or trust entitlement date) was recorded to anchor the window — so record that date to resolve it; with none of these, every attached credit is claimable on the tests modelled here. The other two qualified-person conditions — the 30%-at-risk test (hedges, options, futures) and the related payments rule, which the small-shareholder exemption does not excuse — are not modelled and cannot be recorded, so an empty report assumes the holdings are unhedged and under no related-payment obligation.' },
   {
-    slug: 'franking-what-if', title: 'Franking Sale What-If', api: '/reports/franking_at_risk/what-if', method: 'GET', statusField: 'status',
+    slug: 'franking-what-if', title: 'Franking Sale What-If', api: '/reports/franking_at_risk/what_if', method: 'GET', statusField: 'status',
     menu: 'Reports', section: 'Decision support',
     desc: 'Before recording a Sell: which dividends’ franking credits the contemplated sale would put at risk under the 45-day rule. Each row shows the additional credits at stake and the qualification window end — selling after that date cannot disqualify the dividend. Nothing is written.',
     params: [
@@ -790,7 +790,7 @@ export const ACTIONS = [
   // (#/renames/:id) the listing row also links to.
   {
     slug: 'rename', nav: 'listings', ownerApi: '/listings', cancel: '#/e/listings', submit: 'Rename',
-    post: function (id) { return '/listings/' + id + '/rename'; },
+    post: function (id) { return '/listings/' + id + '/renames'; },
     title: function (id, owner, listing) { return 'Rename listing ' + listing(id) + ' (#' + id + ')'; },
     desc: function (l, listing) {
       return 'Records a dated ticker or exchange change for ' + listing(l.id) + ' \u2014 the same security keeps its id, so every trade, distribution, parcel, cost base and acquisition date stays attached. '

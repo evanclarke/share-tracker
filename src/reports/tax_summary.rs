@@ -286,9 +286,9 @@ pub struct TaxYearSummary {
 
 pub fn router() -> Router<SqlitePool> {
     Router::new()
-        .route("/portfolio/tax-summary", get(tax_summary_handler))
+        .route("/portfolio/tax_summary", get(tax_summary_handler))
         .route(
-            "/portfolio/tax-summary/export",
+            "/portfolio/tax_summary/export",
             get(tax_summary_export_handler),
         )
 }
@@ -1619,13 +1619,13 @@ mod tests {
         dist.unfranked_amount = Decimal::from(600);
         income::db_upsert(&pool, &dist).await.unwrap();
 
-        let years: Vec<TaxYearSummary> = client(&pool).get_json("/portfolio/tax-summary").await;
+        let years: Vec<TaxYearSummary> = client(&pool).get_json("/portfolio/tax_summary").await;
         assert_eq!(years[0].dividends_assessable, Decimal::from(800));
         assert_eq!(years[0].trust_income_unfranked, Decimal::from(600));
         assert_eq!(years[0].trust_franked_distributions, Decimal::from(900));
 
         let csv = client(&pool)
-            .get("/portfolio/tax-summary/export")
+            .get("/portfolio/tax_summary/export")
             .await
             .expect_status(StatusCode::OK)
             .text()
@@ -1684,7 +1684,7 @@ mod tests {
 
         // The CSV's ATO-label row is what a return is transcribed from.
         let csv = client(&pool)
-            .get("/portfolio/tax-summary/export")
+            .get("/portfolio/tax_summary/export")
             .await
             .expect_status(StatusCode::OK)
             .text()
@@ -2647,7 +2647,7 @@ mod tests {
         inc.franking_credits = Decimal::from(30);
         income::db_upsert(&pool, &inc).await.unwrap();
 
-        let resp = client(&pool).get("/portfolio/tax-summary").await;
+        let resp = client(&pool).get("/portfolio/tax_summary").await;
         assert_eq!(resp.status, StatusCode::OK);
         let result: Vec<TaxYearSummary> = resp.json();
         assert_eq!(result.len(), 1);
@@ -2666,7 +2666,7 @@ mod tests {
         inc.franking_credits = "30.50".parse().unwrap();
         income::db_upsert(&pool, &inc).await.unwrap();
 
-        let resp = client(&pool).get("/portfolio/tax-summary/export").await;
+        let resp = client(&pool).get("/portfolio/tax_summary/export").await;
         assert_eq!(resp.status, StatusCode::OK);
         assert_eq!(
             resp.headers.get(axum::http::header::CONTENT_TYPE).unwrap(),
@@ -2703,7 +2703,7 @@ mod tests {
         let pool = long_decimal_income().await;
 
         let csv = client(&pool)
-            .get("/portfolio/tax-summary/export")
+            .get("/portfolio/tax_summary/export")
             .await
             .expect_status(StatusCode::OK)
             .text()
@@ -2744,7 +2744,7 @@ mod tests {
     async fn api_the_json_report_keeps_the_precision_the_export_rounds() {
         let pool = long_decimal_income().await;
 
-        let years: Vec<TaxYearSummary> = client(&pool).get_json("/portfolio/tax-summary").await;
+        let years: Vec<TaxYearSummary> = client(&pool).get_json("/portfolio/tax_summary").await;
         let converted = Decimal::from(100) / "0.65".parse::<Decimal>().unwrap();
         assert_eq!(years[0].dividends_assessable, converted);
         // …and that figure really does have more than two decimal places, so
@@ -2776,7 +2776,7 @@ mod tests {
         income::db_upsert(&pool, &inc).await.unwrap();
 
         let csv = client(&pool)
-            .get("/portfolio/tax-summary/export")
+            .get("/portfolio/tax_summary/export")
             .await
             .text()
             .to_string();
@@ -2788,7 +2788,7 @@ mod tests {
         assert_eq!(at("dividends_assessable"), "10.01"); // not 10.00
 
         // The control: the JSON still answers the half-cent itself.
-        let years: Vec<TaxYearSummary> = client(&pool).get_json("/portfolio/tax-summary").await;
+        let years: Vec<TaxYearSummary> = client(&pool).get_json("/portfolio/tax_summary").await;
         assert_eq!(
             years[0].dividends_assessable,
             "10.005".parse::<Decimal>().unwrap()
@@ -2811,7 +2811,7 @@ mod tests {
         let pool = half_cent_income_and_deductions().await;
 
         let csv = client(&pool)
-            .get("/portfolio/tax-summary/export")
+            .get("/portfolio/tax_summary/export")
             .await
             .expect_status(StatusCode::OK)
             .text()
@@ -3858,7 +3858,7 @@ mod tests {
         .unwrap();
 
         let csv = client(&pool)
-            .get("/portfolio/tax-summary/export")
+            .get("/portfolio/tax_summary/export")
             .await
             .text()
             .to_string();
@@ -4354,7 +4354,7 @@ mod tests {
     #[tokio::test]
     async fn api_export_of_empty_report_still_returns_header() {
         let pool = test_pool().await;
-        let resp = client(&pool).get("/portfolio/tax-summary/export").await;
+        let resp = client(&pool).get("/portfolio/tax_summary/export").await;
         assert_eq!(resp.status, StatusCode::OK);
         let csv = resp.text().to_string();
         assert_eq!(
@@ -4486,7 +4486,7 @@ mod tests {
         // The reports that convert an income or AMMA amount, which have no
         // per-record fallback to rest on (a trade always carries its own
         // `fx_rate`, so a disposal never reaches this).
-        for path in ["/portfolio/tax-summary", "/portfolio/tax-summary/export"] {
+        for path in ["/portfolio/tax_summary", "/portfolio/tax_summary/export"] {
             let resp = c.get(path).await;
             let (status, body) = resp.status_and_body();
             assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{path}");
@@ -4504,7 +4504,7 @@ mod tests {
         rba_fx_rate::db_import_rate(&pool, "USD", "2023-05", "0.66".parse().unwrap())
             .await
             .unwrap();
-        c.get("/portfolio/tax-summary")
+        c.get("/portfolio/tax_summary")
             .await
             .expect_status(StatusCode::OK);
     }
@@ -4524,7 +4524,7 @@ mod tests {
         a.foreign_tax_credits_capital_gains = "1000000000000000".parse().unwrap();
         amma::db_upsert(&pool, &a).await.unwrap();
 
-        let years: Vec<TaxYearSummary> = client(&pool).get_json("/portfolio/tax-summary").await;
+        let years: Vec<TaxYearSummary> = client(&pool).get_json("/portfolio/tax_summary").await;
         assert_eq!(years.len(), 1);
         // Discount gains only, so exactly half the tax is claimable and half
         // is the discount reduction. (What is finally *offsettable* is then

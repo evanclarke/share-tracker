@@ -2726,7 +2726,7 @@ mod tests {
         // state that killed them can no longer be written.
         let full = ApiClient::full(&pool);
         assert_eq!(
-            full.get("/portfolio/open-parcels").await.status,
+            full.get("/portfolio/open_parcels").await.status,
             StatusCode::OK
         );
         // The same payment in the parcels' own currency is accepted.
@@ -3693,7 +3693,7 @@ mod tests {
                     .unwrap();
             assert!(!stored);
             let client = ApiClient::full(&pool);
-            let rows: Vec<serde_json::Value> = client.get_json("/portfolio/open-parcels").await;
+            let rows: Vec<serde_json::Value> = client.get_json("/portfolio/open_parcels").await;
             assert_eq!(rows.len(), 1);
             let overview = client
                 .post("/portfolio/overview", &serde_json::json!({}))
@@ -3803,7 +3803,7 @@ mod tests {
         // a logged 500 while it stands.
         assert_eq!(
             ApiClient::full(&pool)
-                .get("/portfolio/open-parcels")
+                .get("/portfolio/open_parcels")
                 .await
                 .status,
             StatusCode::INTERNAL_SERVER_ERROR
@@ -3813,7 +3813,7 @@ mod tests {
         let corrected = split(10, 1, d(2024, 7, 1), "2", "1");
         db_upsert(&pool, &corrected).await.unwrap();
         let rows: Vec<serde_json::Value> = ApiClient::full(&pool)
-            .get_json("/portfolio/open-parcels")
+            .get_json("/portfolio/open_parcels")
             .await;
         assert_eq!(
             rows[0]["remaining_quantity"],
@@ -3851,7 +3851,7 @@ mod tests {
             .unwrap();
 
         let rows: Vec<serde_json::Value> = ApiClient::full(&pool)
-            .get_json("/portfolio/open-parcels")
+            .get_json("/portfolio/open_parcels")
             .await;
         assert_eq!(rows.len(), 1);
         assert_eq!(
@@ -3912,7 +3912,7 @@ mod tests {
         // The parcel is fully consumed, which is what says the allocation was
         // converted back to the parcel's own 1e27 as-acquired units.
         let rows: Vec<serde_json::Value> = ApiClient::full(&pool)
-            .get_json("/portfolio/open-parcels")
+            .get_json("/portfolio/open_parcels")
             .await;
         assert!(rows.is_empty(), "{rows:?}");
     }
@@ -3948,7 +3948,7 @@ mod tests {
         .unwrap();
 
         let rows: Vec<serde_json::Value> = ApiClient::full(&pool)
-            .get_json("/portfolio/open-parcels")
+            .get_json("/portfolio/open_parcels")
             .await;
         assert_eq!(rows.len(), 1);
         assert_eq!(

@@ -51,15 +51,21 @@ a compatibility shim, alias or deprecation period: rename/re-shape the route, up
 - [x] **Stale Error-body row.** `docs/API.md` named `GET /report_snapshots/series` "with an unknown
   report slug" as an empty `404`; that route takes no slug — it is `GET /report_snapshots/{report}/{date}`.
   Pinned by the existing `doc_checks::error_body_matrix_pins_every_status_and_shape` table read.
-- [ ] **One path casing.** Paths mix snake_case (entities, `/reports/*`, `clear_unpriced_before`,
+- [x] **One path casing.** Paths mix snake_case (entities, `/reports/*`, `clear_unpriced_before`,
   `regenerate_all`) with kebab-case (`/portfolio/net-capital-gain`, `parcel-optimiser`,
   `period-performance`), and `/reports/franking_at_risk/what-if` mixes both in one path. Pick one
   (snake_case matches the table/column names and the majority) and rename the rest. While there:
   `api_spec::query_parameters` carries a dead `"/reports/net-capital-gain/what-if"` arm that no route
   matches (the route is `POST /portfolio/net-capital-gain/what-if`).
-- [ ] **Rename routes use two URLs.** A rename is created at `POST /listings/:id/rename` but listed
+  Done: every `/portfolio/*` report and the `what-if` qualifier are snake_case (`/portfolio/net_capital_gain/what_if`,
+  `/reports/franking_at_risk/what_if`, …) and the dead arm is gone. Tests:
+  `reports::tests::report_paths_are_snake_case` (every segment of every report route),
+  `doc_checks::report_path_namespace_case_rule_documented` (the rule, and the old spellings only in its dated note).
+- [x] **Rename routes use two URLs.** A rename is created at `POST /listings/:id/rename` but listed
   at `GET /listings/:id/renames` and undone at `DELETE /listings/:id/renames/:rename_id`. Move the
   create onto the collection (`POST /listings/:id/renames`).
+  Done: `POST`/`GET /listings/:id/renames` share one route. Tests: `api_spec`'s
+  `every_served_route_is_documented_and_nothing_else_is`, and every `listing_rename` API test now posts there.
 - [ ] **Writable URLs that cannot be read.** `PUT`/`DELETE /closing_prices/:listing_id/:price_date`
   and `DELETE /listings/:id/renames/:rename_id` answer `405` to a `GET` of the same URL. Add the
   GET-one (empty `404` when absent, per the contract), or record why not. (`/sells/:id` reading

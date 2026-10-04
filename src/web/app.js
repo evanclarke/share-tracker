@@ -2658,7 +2658,7 @@ async function performancePanel() {
         // moved it off a POST body), built by the same helper the
         // parameterised GET reports use.
         const [result, trends] = await Promise.all([
-          api('GET', '/portfolio/period-performance?'
+          api('GET', '/portfolio/period_performance?'
             + queryString({ from: resolved.from, to: resolved.to })),
           api('GET', '/report_snapshots/holding_series?from='
             + encodeURIComponent(resolved.from) + '&to=' + encodeURIComponent(resolved.to)),

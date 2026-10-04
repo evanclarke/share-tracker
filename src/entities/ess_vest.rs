@@ -975,7 +975,7 @@ mod tests {
 
         db_vest(&pool, 1).await.unwrap();
         let rows: Vec<serde_json::Value> = ApiClient::full(&pool)
-            .get_json("/portfolio/open-parcels")
+            .get_json("/portfolio/open_parcels")
             .await;
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(rows[0]["original_quantity"], "79000000000000000000000000");

@@ -765,7 +765,7 @@ export async function loadOptions(source) {
     // that are actually valid for a given Sell/Transfer (matching listing and
     // account, remaining_quantity > 0 is already enforced by the report).
     case 'openParcels': {
-      return (await api('GET', '/portfolio/open-parcels')).map(function (p) {
+      return (await api('GET', '/portfolio/open_parcels')).map(function (p) {
         return {
           value: p.trade_id,
           label: p.trade_id + ': ' + p.ticker + ' — ' + p.remaining_quantity + ' remaining (acquired ' + p.acquisition_date + ')',

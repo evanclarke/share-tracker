@@ -275,7 +275,7 @@ async fn cgt_how_to_calculate_example_cgt_with_discount() {
     put_buy(&pool, 1, 1, "2023-01-10", "1", "100000", "0").await;
     put_sell(&pool, 2, 1, "2024-07-10", "1", "110000", "0", 1).await; // 18 months later
 
-    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net-capital-gain").await;
+    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net_capital_gain").await;
     assert_eq!(years.len(), 1);
     let y = &years[0];
     assert_eq!(y.tax_year, 2025); // sold July 2024 → FY2024-25
@@ -316,7 +316,7 @@ async fn cgt_how_to_calculate_example_single_asset() {
     // Sale costs: $1,300 conveyancing + $12,500 agent's commission = $13,800 brokerage.
     put_sell(&pool, 2, 1, "2025-06-04", "1", "600000", "13800", 1).await; // 5 years later
 
-    let sales: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised-gains").await;
+    let sales: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised_gains").await;
     assert_eq!(sales.len(), 1);
     let s = &sales[0];
     assert_eq!(
@@ -340,7 +340,7 @@ async fn cgt_how_to_calculate_example_single_asset() {
         "owned at least 12 months"
     );
 
-    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net-capital-gain").await;
+    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net_capital_gain").await;
     assert_eq!(years.len(), 1);
     let y = &years[0];
     assert_eq!(y.tax_year, 2025); // contract dated 4 June 2025 → FY ending 30 June 2025
@@ -380,7 +380,7 @@ async fn cgt_how_to_calculate_example_multiple_assets() {
     put_buy(&pool, 3, 2, "2024-09-02", "1000", "10", "0").await; // $10,000 all-in
     put_sell(&pool, 4, 2, "2025-06-10", "1000", "5.50", "0", 3).await; // $5,500, no sale costs
 
-    let sales: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised-gains").await;
+    let sales: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised_gains").await;
     let shares = sales.iter().find(|s| s.sale_trade_id == 4).unwrap();
     assert_eq!(
         shares.capital_gain_loss,
@@ -389,7 +389,7 @@ async fn cgt_how_to_calculate_example_multiple_assets() {
     );
     assert_eq!(shares.capital_loss, dec("4500"));
 
-    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net-capital-gain").await;
+    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net_capital_gain").await;
     assert_eq!(years.len(), 1);
     let y = &years[0];
     assert_eq!(y.tax_year, 2025);
@@ -474,7 +474,7 @@ async fn drp_example_natalie_reinvested_dividend() {
     );
 
     // The $360 dividend is assessable income in her 2025–26 tax return.
-    let years: Vec<TaxYearSummary> = api_get(&pool, "/portfolio/tax-summary").await;
+    let years: Vec<TaxYearSummary> = api_get(&pool, "/portfolio/tax_summary").await;
     assert_eq!(years.len(), 1);
     assert_eq!(years[0].tax_year, 2026); // paid Dec 2025 → 2025–26
     assert_eq!(
@@ -509,7 +509,7 @@ async fn keeping_records_example_boris_identifying_shares_sold() {
     put_sell(&pool, 3, 1, "2025-05-15", "1500", "8", "0", 2).await;
 
     // The nominated parcel makes it a $3,000 capital loss in the 2025 income year.
-    let sales: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised-gains").await;
+    let sales: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised_gains").await;
     assert_eq!(sales.len(), 1);
     assert_eq!(
         sales[0].cost_base,
@@ -523,7 +523,7 @@ async fn keeping_records_example_boris_identifying_shares_sold() {
         "the claimed capital loss"
     );
     assert_eq!(sales[0].capital_loss, dec("3000"));
-    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net-capital-gain").await;
+    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net_capital_gain").await;
     assert_eq!(
         years[0].tax_year, 2025,
         "loss claimed in the 2025 income year"
@@ -559,7 +559,7 @@ async fn keeping_records_example_boris_optimiser_recommends_the_loss_parcel() {
     // Optimise a sale of 1,500 at $8 on Boris's 2025 sale date.
     let r: OptimiserResponse = api_get(
         &pool,
-        "/portfolio/parcel-optimiser?listing_id=1&holding_account_id=1&units=1500&sale_date=2025-05-15&price=8",
+        "/portfolio/parcel_optimiser?listing_id=1&holding_account_id=1&units=1500&sale_date=2025-05-15&price=8",
     )
     .await;
     let harvest = r
@@ -599,7 +599,7 @@ async fn keeping_records_example_boris_optimiser_recommends_the_loss_parcel() {
     // The what-if previews the 2025 income year for that choice — a dry run.
     let w: WhatIfResponse = api_post(
         &pool,
-        "/portfolio/net-capital-gain/what-if",
+        "/portfolio/net_capital_gain/what_if",
         json!({
             "listing_id": 1, "units": "1500", "proceeds": "12000",
             "date": "2025-05-15", "strategy": "harvest_losses"
@@ -647,7 +647,7 @@ async fn you_and_your_shares_examples_1_2_john_assessable_dividend_income() {
     )
     .await;
 
-    let years: Vec<TaxYearSummary> = api_get(&pool, "/portfolio/tax-summary").await;
+    let years: Vec<TaxYearSummary> = api_get(&pool, "/portfolio/tax_summary").await;
     assert_eq!(years.len(), 1);
     let y = &years[0];
     assert_eq!(y.tax_year, 2025); // paid Feb 2025 → 2024–25
@@ -701,7 +701,7 @@ async fn you_and_your_shares_example_6_matthew_holding_period_rule() {
     .await;
     put_sell(&pool, 2, 1, "2025-04-10", "1000", "50", "0", 1).await;
 
-    let years: Vec<TaxYearSummary> = api_get(&pool, "/portfolio/tax-summary").await;
+    let years: Vec<TaxYearSummary> = api_get(&pool, "/portfolio/tax_summary").await;
     assert_eq!(years.len(), 1);
     let y = &years[0];
     assert_eq!(y.tax_year, 2025);
@@ -765,7 +765,7 @@ async fn you_and_your_shares_example_7_jessica_lifo_identification() {
     // 4,000 sold 20 days after the ex-date, CGT-allocated from the old parcel.
     put_sell(&pool, 3, 1, "2025-04-03", "4000", "8", "0", 1).await;
 
-    let years: Vec<TaxYearSummary> = api_get(&pool, "/portfolio/tax-summary").await;
+    let years: Vec<TaxYearSummary> = api_get(&pool, "/portfolio/tax_summary").await;
     assert_eq!(years.len(), 1);
     let y = &years[0];
     assert_eq!(y.tax_year, 2025);
@@ -828,7 +828,7 @@ async fn cgt_non_assessable_payments_example_45_rob_return_of_capital() {
 
     // The payment is within the cost base, so no capital gain arises (a G1
     // payment can never create a capital loss either).
-    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net-capital-gain").await;
+    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net_capital_gain").await;
     assert!(
         years.iter().all(|y| y.net_capital_gain == Decimal::ZERO),
         "payment not more than cost base → no capital gain"
@@ -872,7 +872,7 @@ async fn td_2000_10_example_1_john_share_split() {
     .await;
 
     let parcels: Vec<crate::reports::open_parcels::OpenParcel> =
-        api_get(&pool, "/portfolio/open-parcels").await;
+        api_get(&pool, "/portfolio/open_parcels").await;
     assert_eq!(parcels.len(), 2);
     // 2,000 → 4,000 shares, acquisition date preserved across the split
     // (the stand-in for the determination's September 1984 date).
@@ -889,7 +889,7 @@ async fn td_2000_10_example_1_john_share_split() {
     );
 
     // No CGT event happens: the conversion itself creates no capital gain.
-    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net-capital-gain").await;
+    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net_capital_gain").await;
     assert!(years.iter().all(|y| y.net_capital_gain == Decimal::ZERO));
 }
 
@@ -926,7 +926,7 @@ async fn td_2000_10_example_2_john_share_consolidation() {
     .await;
 
     let parcels: Vec<crate::reports::open_parcels::OpenParcel> =
-        api_get(&pool, "/portfolio/open-parcels").await;
+        api_get(&pool, "/portfolio/open_parcels").await;
     assert_eq!(parcels.len(), 2);
     // 2,000 → 1,000 shares, acquisition date preserved.
     assert_eq!(parcels[0].remaining_quantity, dec("1000"));
@@ -939,7 +939,7 @@ async fn td_2000_10_example_2_john_share_consolidation() {
         "total cost base unchanged: 1,500 × $2.00"
     );
 
-    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net-capital-gain").await;
+    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net_capital_gain").await;
     assert!(years.iter().all(|y| y.net_capital_gain == Decimal::ZERO));
 }
 
@@ -986,7 +986,7 @@ async fn bonus_shares_example_35_chris_fully_paid_bonus_shares() {
     .await;
 
     let parcels: Vec<crate::reports::open_parcels::OpenParcel> =
-        api_get(&pool, "/portfolio/open-parcels").await;
+        api_get(&pool, "/portfolio/open_parcels").await;
     assert_eq!(parcels.len(), 2);
     // 100 → 200 shares, acquisition date preserved (the ATO's pre-CGT
     // exemption for this parcel is out of scope; its 1 June 1985 date is
@@ -1003,7 +1003,7 @@ async fn bonus_shares_example_35_chris_fully_paid_bonus_shares() {
     );
 
     // The bonus issue itself is no CGT event.
-    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net-capital-gain").await;
+    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net_capital_gain").await;
     assert!(years.iter().all(|y| y.net_capital_gain == Decimal::ZERO));
 }
 
@@ -1072,7 +1072,7 @@ async fn rights_issues_example_39_shanti_sale_of_rights() {
 
     // "she has made a $50 taxable capital gain on their sale" — nil cost
     // base, proceeds 250 × $0.20 = $50.
-    let gains: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised-gains").await;
+    let gains: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised_gains").await;
     assert_eq!(gains.len(), 1);
     assert_eq!(gains[0].source, DisposalSource::RightsSale);
     assert_eq!(gains[0].proceeds, dec("50"));
@@ -1087,7 +1087,7 @@ async fn rights_issues_example_39_shanti_sale_of_rights() {
 
     // Selling the rights does not touch the original shares.
     let parcels: Vec<crate::reports::open_parcels::OpenParcel> =
-        api_get(&pool, "/portfolio/open-parcels").await;
+        api_get(&pool, "/portfolio/open_parcels").await;
     assert_eq!(parcels.len(), 1);
     assert_eq!(parcels[0].remaining_quantity, dec("1000"));
     assert_eq!(parcels[0].remaining_cost_base, dec("2000"));
@@ -1153,7 +1153,7 @@ async fn rights_issues_example_40_shanti_rights_exercised() {
     // The 250 shares are a new parcel acquired at the time of exercise, with
     // a cost base of the amount paid to exercise: 250 × $1.80 = $450.
     let parcels: Vec<crate::reports::open_parcels::OpenParcel> =
-        api_get(&pool, "/portfolio/open-parcels").await;
+        api_get(&pool, "/portfolio/open_parcels").await;
     assert_eq!(parcels.len(), 2);
     assert_eq!(
         parcels[0].remaining_quantity,
@@ -1169,7 +1169,7 @@ async fn rights_issues_example_40_shanti_rights_exercised() {
     );
 
     // "There are no CGT consequences arising from the exercise of the rights."
-    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net-capital-gain").await;
+    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net_capital_gain").await;
     assert!(years.iter().all(|y| y.net_capital_gain == Decimal::ZERO));
 }
 
@@ -1233,7 +1233,7 @@ async fn share_buy_backs_example_ranjini_off_market_buy_back() {
 
     // Capital proceeds $8,800 − cost base $6,000 = $2,800 capital gain
     // (before applying any discount; held > 12 months so it is eligible).
-    let gains: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised-gains").await;
+    let gains: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised_gains").await;
     assert_eq!(gains.len(), 1);
     assert_eq!(
         gains[0].proceeds,
@@ -1254,7 +1254,7 @@ async fn share_buy_backs_example_ranjini_off_market_buy_back() {
 
     // The dividend of $1,400 and franking credit of $600 are reported as
     // income in the same return (paid Nov 2024 → FY2025).
-    let years: Vec<TaxYearSummary> = api_get(&pool, "/portfolio/tax-summary").await;
+    let years: Vec<TaxYearSummary> = api_get(&pool, "/portfolio/tax_summary").await;
     assert_eq!(years.len(), 1);
     assert_eq!(years[0].tax_year, 2025);
     assert_eq!(
@@ -1307,7 +1307,7 @@ async fn lic_capital_gain_deduction_example_resident_individual() {
     )
     .await;
 
-    let years: Vec<TaxYearSummary> = api_get(&pool, "/portfolio/tax-summary").await;
+    let years: Vec<TaxYearSummary> = api_get(&pool, "/portfolio/tax_summary").await;
     assert_eq!(years.len(), 1);
     let y = &years[0];
     assert_eq!(y.tax_year, 2025); // paid Feb 2025 → 2024–25 return
@@ -1383,7 +1383,7 @@ async fn demergers_examples_30_32_anita_bhp_billiton_demerger() {
     // acquisition date (steps 3–4 divide these by 280 and 56 — the ATO's
     // $8.48 and $2.26 are those quotients rounded to the cent).
     let mut parcels: Vec<crate::reports::open_parcels::OpenParcel> =
-        api_get(&pool, "/portfolio/open-parcels").await;
+        api_get(&pool, "/portfolio/open_parcels").await;
     parcels.sort_by_key(|p| p.listing_id);
     assert_eq!(parcels.len(), 2);
     assert_eq!(parcels[0].ticker, "BHP");
@@ -1405,7 +1405,7 @@ async fn demergers_examples_30_32_anita_bhp_billiton_demerger() {
 
     // The demerger itself: no CGT consequences (the rollover disregards any
     // gain made under the demerger).
-    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net-capital-gain").await;
+    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net_capital_gain").await;
     assert!(
         years.is_empty(),
         "the demerger is not a CGT event: {years:?}"
@@ -1415,7 +1415,7 @@ async fn demergers_examples_30_32_anita_bhp_billiton_demerger() {
     // under 12 months after the demerger but over 12 months after the BHP
     // Billiton shares were acquired — and the discount method applies.
     put_sell(&pool, 100, 2, "2002-09-02", "56", "5", "0", demerged_buy_id).await;
-    let gains: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised-gains").await;
+    let gains: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised_gains").await;
     assert_eq!(gains.len(), 1);
     // 56 × $5 = $280 proceeds − $126.575 cost base = $153.425, all
     // discount-eligible.
@@ -1474,7 +1474,7 @@ async fn takeovers_example_27_gunther_partial_scrip_for_scrip_rollover() {
 
     // The cash side is assessed now: $1,000 proceeds against the $300
     // apportioned cost base.
-    let gains: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised-gains").await;
+    let gains: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised_gains").await;
     assert_eq!(gains.len(), 1);
     assert_eq!(gains[0].proceeds, dec("1000"));
     assert_eq!(gains[0].cost_base, dec("300"), "ATO: $300 to the cash");
@@ -1484,7 +1484,7 @@ async fn takeovers_example_27_gunther_partial_scrip_for_scrip_rollover() {
     // The rollover carries the rest: 100 Regal shares at $600 total — the
     // ATO's $6 each — with the original acquisition date.
     let parcels: Vec<crate::reports::open_parcels::OpenParcel> =
-        api_get(&pool, "/portfolio/open-parcels").await;
+        api_get(&pool, "/portfolio/open_parcels").await;
     assert_eq!(parcels.len(), 1);
     assert_eq!(parcels[0].ticker, "RGL");
     assert_eq!(parcels[0].remaining_quantity, dec("100"));
@@ -1492,7 +1492,7 @@ async fn takeovers_example_27_gunther_partial_scrip_for_scrip_rollover() {
     assert_eq!(parcels[0].acquisition_date.to_string(), "2023-01-17");
 
     // FY2025's net capital gain: the $700 discount-eligible gain halves.
-    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net-capital-gain").await;
+    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net_capital_gain").await;
     assert_eq!(years.len(), 1);
     assert_eq!(years[0].tax_year, 2025);
     assert_eq!(years[0].discount_eligible_gains, dec("700"));
@@ -1558,7 +1558,7 @@ async fn crypto_cgt_example_katrina_coin_swap() {
     );
 
     // Katrina's capital proceeds are $6,000 against a $3,000 cost base.
-    let sales: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised-gains").await;
+    let sales: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised_gains").await;
     assert_eq!(sales.len(), 1);
     assert_eq!(
         sales[0].proceeds,
@@ -1575,7 +1575,7 @@ async fn crypto_cgt_example_katrina_coin_swap() {
     assert_eq!(sales[0].discount_eligible_gain, Decimal::ZERO);
 
     // FY2025-26: the $3,000 gain is assessable in full (no discount).
-    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net-capital-gain").await;
+    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net_capital_gain").await;
     assert_eq!(years.len(), 1);
     assert_eq!(years[0].tax_year, 2026);
     assert_eq!(years[0].other_gains, dec("3000"));
@@ -1631,7 +1631,7 @@ async fn crypto_defi_reward_example_craig_stablecoin_tokens() {
     put_buy(&pool, 2, 1, "2025-11-30", "1", "10", "0").await;
 
     // "The income amount Craig declares is $10" — at item 24, and nowhere else.
-    let summary: Vec<TaxYearSummary> = api_get(&pool, "/portfolio/tax-summary").await;
+    let summary: Vec<TaxYearSummary> = api_get(&pool, "/portfolio/tax_summary").await;
     assert_eq!(summary.len(), 1);
     assert_eq!(summary[0].tax_year, 2026);
     assert_eq!(summary[0].other_income, dec("10"));
@@ -1646,7 +1646,7 @@ async fn crypto_defi_reward_example_craig_stablecoin_tokens() {
     // "The cost base of the newly issued tokens is their market value at the
     // time Craig acquires them" — a $10 parcel of its own, clock from receipt.
     let parcels: Vec<crate::reports::open_parcels::OpenParcel> =
-        api_get(&pool, "/portfolio/open-parcels").await;
+        api_get(&pool, "/portfolio/open_parcels").await;
     let reward = parcels.iter().find(|p| p.trade_id == 2).unwrap();
     assert_eq!(reward.remaining_quantity, dec("1"));
     assert_eq!(reward.remaining_cost_base, dec("10"));
@@ -1680,7 +1680,7 @@ async fn crypto_chain_split_example_alex_bitcoin_cash() {
     // 1 August 2017: 10 units of the new asset, nil cost base, no tax event.
     put_buy(&pool, 2, 2, "2017-08-01", "10", "0", "0").await;
 
-    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net-capital-gain").await;
+    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net_capital_gain").await;
     assert!(
         years.is_empty(),
         "receiving the new asset is not a CGT event"
@@ -1689,7 +1689,7 @@ async fn crypto_chain_split_example_alex_bitcoin_cash() {
     // 2 March 2026: 2 units sold for $1,260 against a nil cost base.
     put_sell(&pool, 3, 2, "2026-03-02", "2", "630", "0", 2).await;
 
-    let sales: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised-gains").await;
+    let sales: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised_gains").await;
     assert_eq!(sales.len(), 1);
     assert_eq!(sales[0].proceeds, dec("1260"));
     assert_eq!(sales[0].cost_base, Decimal::ZERO, "ATO: cost base is zero");
@@ -1699,7 +1699,7 @@ async fn crypto_chain_split_example_alex_bitcoin_cash() {
         "ATO: a total discount capital gain of $1,260"
     );
 
-    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net-capital-gain").await;
+    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net_capital_gain").await;
     assert_eq!(years.len(), 1);
     assert_eq!(years[0].tax_year, 2026);
     assert_eq!(years[0].cgt_discount, dec("630"));
@@ -1752,7 +1752,7 @@ async fn crypto_chain_split_example_ming_abandoned_original() {
     )
     .await;
 
-    let sales: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised-gains").await;
+    let sales: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised_gains").await;
     assert_eq!(sales.len(), 1);
     assert_eq!(sales[0].sale_date, "2018-11-15".parse().unwrap());
     assert_eq!(sales[0].proceeds, Decimal::ZERO);
@@ -1763,7 +1763,7 @@ async fn crypto_chain_split_example_ming_abandoned_original() {
     );
 
     // FY2019: a loss carries forward, never discounted.
-    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net-capital-gain").await;
+    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net_capital_gain").await;
     assert_eq!(years[0].tax_year, 2019);
     assert_eq!(years[0].capital_losses, dec("8300"));
     assert_eq!(years[0].net_capital_gain, Decimal::ZERO);
@@ -1801,15 +1801,15 @@ async fn crypto_initial_airdrop_example_josh_cx_tokens() {
     put_buy(&pool, 1, 1, "2024-09-16", "800", "0", "0").await;
 
     // Nothing is assessable on receipt: no income, no capital gain.
-    let summary: Vec<TaxYearSummary> = api_get(&pool, "/portfolio/tax-summary").await;
+    let summary: Vec<TaxYearSummary> = api_get(&pool, "/portfolio/tax_summary").await;
     assert!(summary.is_empty(), "no ordinary income on receipt");
-    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net-capital-gain").await;
+    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net_capital_gain").await;
     assert!(years.is_empty(), "no capital gain on receipt");
 
     // Sold 25 May 2026 for $4,000, held more than 12 months.
     put_sell(&pool, 2, 1, "2026-05-25", "800", "5", "0", 1).await;
 
-    let sales: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised-gains").await;
+    let sales: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised_gains").await;
     assert_eq!(sales.len(), 1);
     assert_eq!(sales[0].cost_base, Decimal::ZERO, "ATO: cost base was zero");
     assert_eq!(
@@ -1818,7 +1818,7 @@ async fn crypto_initial_airdrop_example_josh_cx_tokens() {
         "ATO: a total capital gain of $4,000, discount eligible"
     );
 
-    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net-capital-gain").await;
+    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net_capital_gain").await;
     assert_eq!(years.len(), 1);
     assert_eq!(years[0].tax_year, 2026);
     assert_eq!(years[0].cgt_discount, dec("2000"));
@@ -1876,7 +1876,7 @@ async fn ess_example_matt_taxed_upfront_eligible_reduction() {
 
     // The assessable ESS discount: $2,400 − $1,000 reduction = $1,400, in
     // FY2016 (acquired Aug 2015), reported separately from dividend income.
-    let years: Vec<TaxYearSummary> = api_get(&pool, "/portfolio/tax-summary").await;
+    let years: Vec<TaxYearSummary> = api_get(&pool, "/portfolio/tax_summary").await;
     assert_eq!(years.len(), 1);
     let y = &years[0];
     assert_eq!(y.tax_year, 2016);
@@ -1953,7 +1953,7 @@ async fn ess_30_day_rule_example_11_wyatt_amended_statement() {
 
     // "$1,518 at F item 12 … he also writes $1,518 at B item 12" — in FY2020
     // (a July date is the next financial year), and in no other year.
-    let years: Vec<TaxYearSummary> = api_get(&pool, "/portfolio/tax-summary").await;
+    let years: Vec<TaxYearSummary> = api_get(&pool, "/portfolio/tax_summary").await;
     assert_eq!(years.len(), 1);
     assert_eq!(years[0].tax_year, 2020);
     assert_eq!(years[0].ess_discount_assessable, dec("1518"));
@@ -1965,7 +1965,7 @@ async fn ess_30_day_rule_example_11_wyatt_amended_statement() {
 
     // No separate capital gain: the cost base reset to the same market value
     // the sale realised.
-    let sales: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised-gains").await;
+    let sales: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised_gains").await;
     assert_eq!(sales.len(), 1);
     assert_eq!(sales[0].proceeds, dec("1518.000"));
     assert_eq!(sales[0].cost_base, dec("1518.000"));
@@ -2020,7 +2020,7 @@ async fn worthless_shares_example_dave_capital_loss_on_dissolution() {
 
     // The capital loss equals the reduced cost base: 1,000 × $1.70 = $1,700,
     // recognised (not disregarded), and never discounted.
-    let sales: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised-gains").await;
+    let sales: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised_gains").await;
     assert_eq!(sales.len(), 1);
     assert_eq!(sales[0].proceeds, Decimal::ZERO);
     assert_eq!(sales[0].cost_base, dec("1700"));
@@ -2029,7 +2029,7 @@ async fn worthless_shares_example_dave_capital_loss_on_dissolution() {
 
     // The loss is taken into account for FY2025/26 (year ending 30 June 2026),
     // carried forward as there are no gains to offset.
-    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net-capital-gain").await;
+    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net_capital_gain").await;
     let y = years.iter().find(|y| y.tax_year == 2026).unwrap();
     assert_eq!(y.capital_losses, dec("1700"));
     assert_eq!(y.net_capital_gain, Decimal::ZERO);
@@ -2086,7 +2086,7 @@ async fn inherited_assets_example_maria_antonio_lpr_expenditure() {
     // conveyancing, acquired (for the 12-month discount clock) when Maria
     // acquired it.
     let parcels: Vec<crate::reports::open_parcels::OpenParcel> =
-        api_get(&pool, "/portfolio/open-parcels").await;
+        api_get(&pool, "/portfolio/open_parcels").await;
     assert_eq!(parcels.len(), 1);
     assert_eq!(parcels[0].original_cost_base, dec("305000"));
     assert_eq!(parcels[0].remaining_quantity, dec("1"));
@@ -2139,7 +2139,7 @@ async fn cgt_event_timing_example_sue_contract_date_not_settlement() {
 
     // The gain belongs to FY2023–24 (the contract year) — and no FY2024–25
     // row exists at all, the settlement date having contributed nothing.
-    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net-capital-gain").await;
+    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net_capital_gain").await;
     assert_eq!(years.len(), 1, "one FY only — the contract year");
     assert_eq!(years[0].tax_year, 2024, "FY ending 30 June 2024");
     assert_eq!(years[0].discount_eligible_gains, dec("500"));
@@ -2238,7 +2238,7 @@ async fn forex_example_lisa_usd_share_cost_base_and_proceeds() {
     )
     .await;
 
-    let gains: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised-gains").await;
+    let gains: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised_gains").await;
     assert_eq!(gains.len(), 1);
     let g = &gains[0];
     assert_eq!(g.cost_base, dec("30000"), "US$15,000 / 0.50");
@@ -2341,7 +2341,7 @@ async fn forex_example_lisa_via_spot_rate_overrides() {
     )
     .await;
 
-    let gains: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised-gains").await;
+    let gains: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised_gains").await;
     assert_eq!(gains.len(), 1);
     let g = &gains[0];
     assert_eq!(g.cost_base, dec("30000"), "US$15,000 / 0.50, not / 0.55");
@@ -2412,7 +2412,7 @@ async fn ess_30_day_rule_example_wyatt_taxing_point_moves_to_the_sale() {
 
     // The discount lands in FY2019–20 (Wyatt's 2020 return), label F, with
     // no taxed-upfront reduction.
-    let years: Vec<TaxYearSummary> = api_get(&pool, "/portfolio/tax-summary").await;
+    let years: Vec<TaxYearSummary> = api_get(&pool, "/portfolio/tax_summary").await;
     assert_eq!(years.len(), 1, "no FY2019 income remains once amended");
     assert_eq!(years[0].tax_year, 2020);
     assert_eq!(years[0].ess_discount_assessable, dec("1518"));
@@ -2420,7 +2420,7 @@ async fn ess_30_day_rule_example_wyatt_taxing_point_moves_to_the_sale() {
 
     // The CGT side: cost base reset to the sale-date market value, so the
     // sale realises exactly nil gain and nil loss.
-    let gains: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised-gains").await;
+    let gains: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised_gains").await;
     assert_eq!(gains.len(), 1);
     assert_eq!(gains[0].capital_gain_loss, Decimal::ZERO);
     assert_eq!(gains[0].capital_loss, Decimal::ZERO);
@@ -2479,7 +2479,7 @@ async fn pig_managed_funds_example_26_bob_fund_gains_and_tax_deferred() {
     )
     .await;
 
-    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net-capital-gain").await;
+    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net_capital_gain").await;
     assert_eq!(years.len(), 1);
     assert_eq!(years[0].tax_year, 2025);
     // 18H = grossed-up discount gain + indexation + 'other' = 200 + 103 = 303.
@@ -2547,7 +2547,7 @@ async fn pig_managed_funds_example_27_ilena_own_loss_against_fund_gains() {
     put_buy(&pool, 1, 2, "2024-08-01", "100", "6", "0").await;
     put_sell(&pool, 2, 2, "2025-03-03", "100", "5", "0", 1).await;
 
-    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net-capital-gain").await;
+    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net_capital_gain").await;
     assert_eq!(years.len(), 1);
     assert_eq!(years[0].tax_year, 2025);
     // 18H = grossed-up discount gain (65 × 2) + 'other' + indexation = 220.
@@ -2710,7 +2710,7 @@ async fn tax_return_18_kathleen_loss_order_then_discount() {
     put_buy(&pool, 3, 3, "2025-10-10", "600", "4", "0").await;
     put_sell(&pool, 12, 3, "2026-06-25", "600", "3", "0", 3).await;
 
-    let gains: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised-gains").await;
+    let gains: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised_gains").await;
     let by_sale = |id: i64| gains.iter().find(|g| g.sale_trade_id == id).unwrap();
     assert_eq!(
         by_sale(10).capital_gain_loss,
@@ -2734,7 +2734,7 @@ async fn tax_return_18_kathleen_loss_order_then_discount() {
     );
     assert_eq!(by_sale(12).capital_loss, dec("600"), "$2,400 − $1,800");
 
-    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net-capital-gain").await;
+    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net_capital_gain").await;
     let y = years.iter().find(|y| y.tax_year == 2026).unwrap();
     // Label 18H: total current year capital gains, before losses and discount.
     assert_eq!(y.discount_eligible_gains, dec("3000"));
@@ -2816,7 +2816,7 @@ async fn pig_managed_funds_examples_21_25_tim_gross_up_loss_then_discount() {
     put_buy(&pool, 2, 2, "2024-09-02", "100", "10", "0").await;
     put_sell(&pool, 10, 2, "2025-05-20", "100", "8", "0", 2).await;
 
-    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net-capital-gain").await;
+    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net_capital_gain").await;
     let y = years.iter().find(|y| y.tax_year == 2025).unwrap();
     // Example 21: the distributed discount gain grosses up ×2.
     assert_eq!(y.discount_eligible_gains, dec("800"), "$400 × 2");
@@ -2876,7 +2876,7 @@ async fn takeovers_example_26_desiree_takeover_without_rollover() {
     // …and the new XYZ parcel at its $1.25 market value.
     put_buy(&pool, 2, 2, "2002-03-15", "500", "1.25", "0").await;
 
-    let gains: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised-gains").await;
+    let gains: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised_gains").await;
     assert_eq!(gains.len(), 1);
     assert_eq!(gains[0].proceeds, dec("1000"), "500 × $2 capital proceeds");
     assert_eq!(gains[0].cost_base, dec("750"), "500 × $1.50");
@@ -2894,7 +2894,7 @@ async fn takeovers_example_26_desiree_takeover_without_rollover() {
     // The replacement holding: 500 XYZ shares at $1.25 = $625, acquired at the
     // takeover (no rollover, so no carried acquisition date).
     let parcels: Vec<crate::reports::open_parcels::OpenParcel> =
-        api_get(&pool, "/portfolio/open-parcels").await;
+        api_get(&pool, "/portfolio/open_parcels").await;
     assert_eq!(parcels.len(), 1);
     assert_eq!(parcels[0].ticker, "XYZ");
     assert_eq!(parcels[0].remaining_quantity, dec("500"));

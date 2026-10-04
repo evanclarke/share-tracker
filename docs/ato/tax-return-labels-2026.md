@@ -23,7 +23,7 @@ myTax uses the same labels: a pre-filled or statement-sourced amount is shown in
 its paper label and field name (e.g. "13U Total non-primary production income" on the myTax
 managed-funds screen), so one mapping serves both lodgment paths.
 
-The two CSV exports (`/portfolio/tax-summary/export`, `/portfolio/net-capital-gain/export`)
+The two CSV exports (`/portfolio/tax_summary/export`, `/portfolio/net_capital_gain/export`)
 carry this mapping as their second header row; the full per-column table is in
 [`../API.md`](../API.md).
 

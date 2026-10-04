@@ -87,23 +87,24 @@ fn reading_a_list_section() -> &'static str {
     md_section(API_MD, "## Reading a list")
 }
 
-/// Docs-sync pin for the report-path namespace/case rule (REST API audit
-/// 2026-09-24): `/portfolio/*` names its report in **kebab-case** and
-/// `/reports/*` in **snake_case**, the naming segment using its namespace's
-/// case with no exception — the one kebab report name under `/reports` was
-/// renamed, not excused — and the path, never the report's Rust module name,
-/// is the contract (the two endpoints that spell out more than their module
-/// say so here). Scoped to the section, so a mention elsewhere cannot satisfy
-/// it and deleting the statement fails the test.
+/// Docs-sync pin for the report-path case rule (REST API audit 2026-09-24,
+/// one case since the HTTP API consistency sweep 2026-10-04): every report
+/// path, under `/portfolio/*` and `/reports/*` alike, is **snake_case** in
+/// every segment, qualifiers included — the kebab names were renamed, not
+/// excused — and the path, never the report's Rust module name, is the
+/// contract (the two endpoints that spell out more than their module say so
+/// here). Scoped to the section, so a mention elsewhere cannot satisfy it and
+/// deleting the statement fails the test.
 #[test]
 fn report_path_namespace_case_rule_documented() {
     let section = portfolio_reports_section();
-    assert!(section.contains("**A report path names its report in the case of its namespace.**"));
-    assert!(section.contains("`/portfolio/*` in **kebab-case**"));
-    assert!(section.contains("`/reports/*` in **snake_case**"));
-    assert!(section.contains("uses its namespace's case throughout with no exception in it"));
+    assert!(section.contains("**Every report path is snake_case.**"));
+    assert!(section.contains("(`/what_if`, `/export`, `/years`) — is **snake_case**"));
     assert!(
         section.contains("(`tax-report`) was renamed `/reports/tax_report` rather than excused")
+    );
+    assert!(
+        section.contains("on 2026-10-04 the `/portfolio/*` reports, which had been kebab-case")
     );
     // The path — not the module — is the contract, and the two deliberate
     // divergences are named rather than left to be discovered.
@@ -112,7 +113,7 @@ fn report_path_namespace_case_rule_documented() {
     assert!(section.contains("`settlement_coverage` → `/reports/settlement_holiday_coverage`"));
     // The section's own kebab outlier now obeys the rule it states: its two
     // endpoints are spelled in the snake_case form (the route table itself is
-    // pinned by `reports::tests::report_paths_use_their_namespace_case`).
+    // pinned by `reports::tests::report_paths_are_snake_case`).
     assert!(section.contains("GET  /reports/tax_report/years"));
     assert!(section.contains("GET  /reports/tax_report?tax_year=2026"));
     // …and the old kebab path survives in exactly one place: its dated change
@@ -122,6 +123,27 @@ fn report_path_namespace_case_rule_documented() {
         API_MD.matches("/reports/tax-report").count(),
         1,
         "the pre-audit `/reports/tax-report` path may appear only in its dated change note"
+    );
+    // Likewise the pre-sweep kebab `/portfolio/*` spellings: the two the
+    // change note quotes are the only ones left in the document.
+    let kebab: Vec<&str> = API_MD
+        .match_indices("/portfolio/")
+        .map(|(at, _)| {
+            let path = &API_MD[at..];
+            let end = path
+                .find(|c: char| !(c.is_ascii_alphanumeric() || "/_-".contains(c)))
+                .unwrap_or(path.len());
+            &path[..end]
+        })
+        .filter(|path| path.contains('-'))
+        .collect();
+    assert_eq!(
+        kebab,
+        [
+            "/portfolio/net-capital-gain",
+            "/portfolio/tax-summary/export"
+        ],
+        "a kebab-case `/portfolio/*` path may appear only in its dated change note"
     );
 }
 
@@ -299,8 +321,8 @@ fn list_ordering_post_reads_and_pagination_documented() {
         vec![
             "`/portfolio/overview`",
             "`/portfolio/performance`",
-            "`/portfolio/unrealised-gains`",
-            "`/portfolio/net-capital-gain/what-if`",
+            "`/portfolio/unrealised_gains`",
+            "`/portfolio/net_capital_gain/what_if`",
         ]
     );
     assert!(section.contains("the `prices` price-override map"));
@@ -1020,7 +1042,7 @@ fn creating_a_record_documented() {
 /// Two assertions here were **vacuous** as originally written, and are not now:
 /// a bare `row.contains("vest")` was satisfied by the `vest` inside
 /// `/investment_expenses`, and a `row.contains("/listings")` by the operation
-/// clauses further along the row (`/listings/:id/rename`). The vest is asserted
+/// clauses further along the row (`/listings/:id/renames`). The vest is asserted
 /// as its exact path, and the collection list is sliced out of the row before
 /// the set comparison. The set itself is **derived** from the OpenAPI route
 /// table (which a both-ways test pins to the live router), so a new id-keyed
@@ -2359,7 +2381,7 @@ fn known_limitations_document_foreign_tax_on_a_direct_disposal() {
 /// Known-limitation pin (REQUIREMENTS "Ticker and exchange-code changes",
 /// 2026-07-26; narrowed 2026-07-28 to settlement only, once price collection
 /// started resolving its symbol and calendar as at the date fetched): an
-/// exchange change recorded via `POST /listings/:id/rename` doesn't
+/// exchange change recorded via `POST /listings/:id/renames` doesn't
 /// retroactively pin historical trades to the calendar in force at the time —
 /// re-saving a trade dated before the change without an explicit
 /// `settlement_date` recomputes it against the listing's *current* exchange.
@@ -2466,7 +2488,7 @@ fn known_limitations_document_a_reissued_ticker_cannot_be_recorded() {
 /// all documented in the Listings section, and the feature is in the features doc.
 #[test]
 fn listing_rename_action_documented() {
-    assert!(API_MD.contains("POST /listings/:id/rename"));
+    assert!(API_MD.contains("POST /listings/:id/renames"));
     assert!(API_MD.contains("GET /listings/:id/renames"));
     assert!(API_MD.contains("DELETE /listings/:id/renames/:rename_id"));
     assert!(API_MD.contains("price_symbol"));
@@ -3831,7 +3853,7 @@ fn advisory_ignores_expire() {
 #[test]
 fn period_performance_panel_documented() {
     assert!(API_MD.contains("### Period performance"));
-    assert!(API_MD.contains("GET /portfolio/period-performance?from=2026-04-25&to=2026-07-25"));
+    assert!(API_MD.contains("GET /portfolio/period_performance?from=2026-04-25&to=2026-07-25"));
     assert!(API_MD.contains("half-open `(from, to]`"));
     assert!(
         API_MD.contains("a period-performance request whose `from` is not strictly before `to`")
@@ -4159,7 +4181,7 @@ fn as_of_date_is_the_documented_valuation_date() {
     // Each report's own route row names the parameter and the default.
     assert!(API_MD.contains("as at `as_of_date` (today when omitted"));
     assert!(API_MD.contains("`as_of_date` defaults to **today's live position**"));
-    assert!(API_MD.contains("GET /portfolio/open-parcels?as_of_date=2026-06-30"));
+    assert!(API_MD.contains("GET /portfolio/open_parcels?as_of_date=2026-06-30"));
     assert!(API_MD.contains(
         "{ \"live\": true, \"prices\": { \"<listing_id>\": \"<price>\" }, \"as_of_date\": \
          \"YYYY-MM-DD\" }"
@@ -4998,13 +5020,13 @@ fn price_collection_lookback_window_documented_as_the_constant() {
 /// Docs-sync pin for the rename UI (SCENARIOS R-01/R-05). The Web frontend
 /// paragraph enumerates the UI's screens and actions, so the rename action
 /// and the chain view it is paired with belong in it: the 422 the Listings
-/// form raises names `POST /listings/:id/rename`, and this is where the docs
+/// form raises names `POST /listings/:id/renames`, and this is where the docs
 /// say that endpoint is reachable from.
 #[test]
 fn listing_rename_ui_documented() {
     let frontend = md_section(API_MD, "## Web frontend");
     // The action, and why it exists at all (the PUT refusal it answers).
-    assert!(frontend.contains("a **Rename** action on listing rows (`POST /listings/:id/rename`"));
+    assert!(frontend.contains("a **Rename** action on listing rows (`POST /listings/:id/renames`"));
     assert!(
         frontend.contains("a `PUT` refuses on a listing with recorded trades, income, or prices")
     );

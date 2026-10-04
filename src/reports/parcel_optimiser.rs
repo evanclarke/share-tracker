@@ -452,7 +452,7 @@ pub struct OptimiserResponse {
 }
 
 pub fn router() -> Router<SqlitePool> {
-    Router::new().route("/portfolio/parcel-optimiser", get(optimiser_handler))
+    Router::new().route("/portfolio/parcel_optimiser", get(optimiser_handler))
 }
 
 async fn optimiser_handler(
@@ -1156,7 +1156,7 @@ mod tests {
         }
         let resp = ApiClient::over(router)
             .get(format!(
-                "/portfolio/parcel-optimiser?{}",
+                "/portfolio/parcel_optimiser?{}",
                 query_string(&body)
             ))
             .await;
@@ -1439,7 +1439,7 @@ mod tests {
     // ---- agreeing with the Sell the estimate rehearses ----------------------
 
     /// The sale a matrix cell asks the optimiser to rehearse: it is entered
-    /// twice over, once as a question (`GET /portfolio/parcel-optimiser`) and
+    /// twice over, once as a question (`GET /portfolio/parcel_optimiser`) and
     /// once as the recorded fact the question was about.
     struct Rehearsal {
         units: Decimal,
@@ -1481,7 +1481,7 @@ mod tests {
     /// a decision-support endpoint against the write path it rehearses*.
     ///
     /// Ask the optimiser what a contemplated sale would cost, then record
-    /// **exactly** the Sell it described and read `/portfolio/realised-gains`
+    /// **exactly** the Sell it described and read `/portfolio/realised_gains`
     /// back. The two are separate implementations of one rule
     /// (`domain::cost_base` reached by two different loaders), so the
     /// assertion is that they agree to the last decimal place — per allocation
@@ -1500,7 +1500,7 @@ mod tests {
 
         let estimate: OptimiserResponse = client
             .get_json(format!(
-                "/portfolio/parcel-optimiser?listing_id=1&holding_account_id=1&units={}&sale_date={}&price={}",
+                "/portfolio/parcel_optimiser?listing_id=1&holding_account_id=1&units={}&sale_date={}&price={}",
                 r.units, r.sale_date, r.price
             ))
             .await;
@@ -1538,7 +1538,7 @@ mod tests {
         }
 
         let realised: Vec<crate::reports::realised_gains::RealisedGainLoss> =
-            client.get_json("/portfolio/realised-gains").await;
+            client.get_json("/portfolio/realised_gains").await;
         let recorded = realised
             .iter()
             .find(|row| row.sale_trade_id == SELL_ID)
@@ -1865,7 +1865,7 @@ mod tests {
 
         let estimate: OptimiserResponse = client
             .get_json(
-                "/portfolio/parcel-optimiser?listing_id=1&holding_account_id=1&units=100&sale_date=2026-03-02&price=70",
+                "/portfolio/parcel_optimiser?listing_id=1&holding_account_id=1&units=100&sale_date=2026-03-02&price=70",
             )
             .await;
         let min_gain: Vec<i64> = estimate
@@ -1896,7 +1896,7 @@ mod tests {
 
         let what_if: crate::reports::net_capital_gain::WhatIfResponse = client
             .post_json(
-                "/portfolio/net-capital-gain/what-if",
+                "/portfolio/net_capital_gain/what_if",
                 &serde_json::json!({
                     "listing_id": 1, "holding_account_id": 1, "units": "40",
                     "proceeds": "2800", "date": "2026-03-02", "strategy": "fifo"

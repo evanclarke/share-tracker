@@ -3,7 +3,7 @@
 //! `entities::listing` and `docs/API.md`'s "Ticker or name changes" section
 //! for the full rationale (LAAC -> LAR being the prompting case).
 //!
-//! `POST /listings/:id/rename` is the only path that can change `ticker` or
+//! `POST /listings/:id/renames` is the only path that can change `ticker` or
 //! `exchange_mic` once a listing has any recorded trades, income, or closing
 //! prices (`listing::db_upsert` refuses a bare `PUT` doing that — see
 //! `UpsertError::IdentityChangeRequiresRename`). It records one
@@ -68,7 +68,7 @@ use axum::{
     Json, Router,
     extract::{Path, Query, State},
     http::StatusCode,
-    routing::{get, post},
+    routing::get,
 };
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
@@ -281,8 +281,7 @@ impl From<UndoError> for ApiError {
 
 pub fn router() -> Router<SqlitePool> {
     Router::new()
-        .route("/listings/{id}/rename", post(rename))
-        .route("/listings/{id}/renames", get(list_for_listing))
+        .route("/listings/{id}/renames", get(list_for_listing).post(rename))
         .route(
             "/listings/{id}/renames/{rename_id}",
             axum::routing::delete(undo),
@@ -759,7 +758,7 @@ mod tests {
             .await;
         let resp = client(&pool)
             .post(
-                "/listings/1/rename",
+                "/listings/1/renames",
                 &serde_json::json!({
                     "effective_date": "2024-06-01",
                     "ticker": "CBA",
@@ -1267,7 +1266,7 @@ mod tests {
 
         let resp = client(&pool)
             .post(
-                "/listings/1/rename",
+                "/listings/1/renames",
                 &serde_json::json!({ "effective_date": "2024-06-01", "ticker": "LAR" }),
             )
             .await;
@@ -1299,7 +1298,7 @@ mod tests {
 
         let resp = client(&pool)
             .post(
-                "/listings/1/rename",
+                "/listings/1/renames",
                 &serde_json::json!({ "effective_date": "2024-06-01", "ticker": "ETH" }),
             )
             .await;
@@ -1328,7 +1327,7 @@ mod tests {
 
         let resp = client(&pool)
             .post(
-                "/listings/1/rename",
+                "/listings/1/renames",
                 &serde_json::json!({ "effective_date": "2024-06-01", "ticker": "  " }),
             )
             .await;
@@ -1341,7 +1340,7 @@ mod tests {
 
         let resp = client(&pool)
             .post(
-                "/listings/1/rename",
+                "/listings/1/renames",
                 &serde_json::json!({
                     "effective_date": "2024-06-01", "ticker": "LAR", "name": ""
                 }),
@@ -1362,7 +1361,7 @@ mod tests {
 
         let resp = client(&pool)
             .post(
-                "/listings/1/rename",
+                "/listings/1/renames",
                 &serde_json::json!({ "effective_date": "2024-06-01", "ticker": "LAR" }),
             )
             .await;
@@ -1566,7 +1565,7 @@ mod tests {
 
         let resp = client(&pool)
             .post_raw(
-                "/listings/1/rename",
+                "/listings/1/renames",
                 r#"{"effective_date":"2024-06-01","ticker":"LAR"}"#,
             )
             .await;
@@ -1584,7 +1583,7 @@ mod tests {
         let pool = test_pool().await;
         let resp = client(&pool)
             .post_raw(
-                "/listings/99/rename",
+                "/listings/99/renames",
                 r#"{"effective_date":"2024-06-01","ticker":"LAR"}"#,
             )
             .await;
@@ -1602,7 +1601,7 @@ mod tests {
         let future = today + chrono::Duration::days(365);
         let resp = client(&pool)
             .post(
-                "/listings/1/rename",
+                "/listings/1/renames",
                 &serde_json::json!({ "effective_date": future, "ticker": "FUTURETICK" }),
             )
             .await;

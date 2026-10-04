@@ -2974,7 +2974,7 @@ mod tests {
         assert_eq!(trade.trade_type, TradeType::DRP);
 
         let rows: Vec<serde_json::Value> = ApiClient::full(&pool)
-            .get_json("/portfolio/open-parcels")
+            .get_json("/portfolio/open_parcels")
             .await;
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(rows[0]["original_quantity"], "79000000000000000000000000");

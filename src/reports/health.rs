@@ -899,7 +899,7 @@ pub struct DuplicateInheritance {
 /// documented remedy is a new listing in the right currency plus a
 /// [transfer](crate::entities::transfer) of the parcels to it.
 ///
-/// `POST /listings/:id/rename` refuses to *create* the state
+/// `POST /listings/:id/renames` refuses to *create* the state
 /// (`entities::listing_rename::RenameError::ExchangeCurrencyMismatch`), but a
 /// plain `PUT /listings/:id` can still enter a listing in it directly — no
 /// write path compares the two columns — so it is reported here wherever it

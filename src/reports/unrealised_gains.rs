@@ -71,7 +71,7 @@ pub struct UnrealisedGainsRequest {
 
 pub fn router() -> Router<SqlitePool> {
     Router::new().route(
-        "/portfolio/unrealised-gains",
+        "/portfolio/unrealised_gains",
         post(unrealised_gains_handler),
     )
 }
@@ -469,7 +469,7 @@ mod tests {
 
         let body = serde_json::json!({ "as_of_date": "2025-06-01" });
         let resp = client(&pool)
-            .post("/portfolio/unrealised-gains", &body)
+            .post("/portfolio/unrealised_gains", &body)
             .await;
         assert_eq!(resp.status, StatusCode::OK);
         let gains: Vec<UnrealisedGain> = resp.json();
@@ -488,7 +488,7 @@ mod tests {
 
         let body = serde_json::json!({ "prices": { "1": "15.00" }, "as_of_date": "2025-06-01" });
         let resp = client(&pool)
-            .post("/portfolio/unrealised-gains", &body)
+            .post("/portfolio/unrealised_gains", &body)
             .await;
         assert_eq!(resp.status, StatusCode::OK);
         let gains: Vec<UnrealisedGain> = resp.json();
@@ -516,7 +516,7 @@ mod tests {
         // as_of = 2025-01-02: exactly 12 months, NOT eligible
         let body = serde_json::json!({ "as_of_date": "2025-01-02" });
         let resp = client(&pool)
-            .post("/portfolio/unrealised-gains", &body)
+            .post("/portfolio/unrealised_gains", &body)
             .await;
         let gains: Vec<UnrealisedGain> = resp.json();
         assert_eq!(gains[0].cgt_discount_eligible_quantity, Decimal::ZERO);
@@ -524,7 +524,7 @@ mod tests {
         // as_of = 2025-01-03: one day past 12 months — eligible
         let body = serde_json::json!({ "as_of_date": "2025-01-03" });
         let resp = client(&pool)
-            .post("/portfolio/unrealised-gains", &body)
+            .post("/portfolio/unrealised_gains", &body)
             .await;
         let gains: Vec<UnrealisedGain> = resp.json();
         assert_eq!(gains[0].cgt_discount_eligible_quantity, Decimal::from(100));
@@ -548,7 +548,7 @@ mod tests {
 
         let body = serde_json::json!({ "live": true, "as_of_date": "2026-06-05" });
         let resp = ApiClient::over(router().with_state(pool).layer(axum::Extension(fetcher)))
-            .post("/portfolio/unrealised-gains", &body)
+            .post("/portfolio/unrealised_gains", &body)
             .await;
         assert_eq!(resp.status, StatusCode::OK);
         let gains: Vec<UnrealisedGain> = resp.json();
@@ -576,7 +576,7 @@ mod tests {
 
         let body = serde_json::json!({ "live": true, "as_of_date": "2026-06-05" });
         let resp = ApiClient::over(router().with_state(pool).layer(axum::Extension(fetcher)))
-            .post("/portfolio/unrealised-gains", &body)
+            .post("/portfolio/unrealised_gains", &body)
             .await;
         assert_eq!(resp.status, StatusCode::OK);
         let gains: Vec<UnrealisedGain> = resp.json();

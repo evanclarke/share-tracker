@@ -1283,7 +1283,7 @@ the selected range, which show every figure at zero and bury the holdings that a
 
 ## Annual tax report — printable per-year tax document (2026-07-26)
 
-The Tax Summary screen (`GET /portfolio/tax-summary`) returns one flat row per financial
+The Tax Summary screen (`GET /portfolio/tax_summary`) returns one flat row per financial
 year across every year at once, rendered through the generic `filterableTable`. It answers
 "what goes on the return" but shows no capital-gains working and isn't something to print
 and archive. Add a second, year-selected report built for printing/saving to PDF and filing:
@@ -1329,7 +1329,7 @@ Resolution: a rename becomes an explicit, dated, audited event, not a bare field
   `row_history` like every other fact table. New nullable `listings.price_symbol` column: a
   provider-symbol override used verbatim by `yahoo_symbol` when set, ahead of the derived
   mapping
-- New endpoints: `POST /listings/:id/rename` (records the event and updates the listing
+- New endpoints: `POST /listings/:id/renames` (records the event and updates the listing
   atomically; the server derives `old_ticker`/`old_exchange_mic` from the current row, never
   from the request body), `GET /listings/:id/renames` (the chain, newest first),
   `DELETE /listings/:id/renames/:rename_id` (undo, only the newest rename in the chain).
@@ -1830,7 +1830,7 @@ The Portfolio Overview's two panels, for the week just closed:
   `to` is the last snapshot on or before the run date, `from` the first on or after seven days
   before it. Figures the email states are therefore the figures the screen states for the same
   window, because they are the same stored rows
-- **Headline**: `POST /portfolio/period-performance` over that window — opening and closing
+- **Headline**: `POST /portfolio/period_performance` over that window — opening and closing
   market value, period return and return %, capital growth, FX movement, income, purchases,
   sale proceeds, and the realised capital gain cross-check
 - **Market value and unrealised gain over time**: the window's snapshot series, one row per

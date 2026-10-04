@@ -128,7 +128,7 @@ pub struct FrankingWhatIfAlert {
 pub fn router() -> Router<SqlitePool> {
     Router::new()
         .route("/reports/franking_at_risk", get(report))
-        .route("/reports/franking_at_risk/what-if", get(what_if))
+        .route("/reports/franking_at_risk/what_if", get(what_if))
 }
 
 /// Tickers for the alerts to carry (the required at-risk days come from the
@@ -822,7 +822,7 @@ mod tests {
         insert_dividend(&pool, 1, 1, ymd(2025, 2, 10), ymd(2025, 1, 10), 6000).await;
         ApiClient::full(&pool)
             .post(
-                "/listings/1/rename",
+                "/listings/1/renames",
                 &serde_json::json!({"effective_date": "2025-01-25", "ticker": "NEW"}),
             )
             .await
@@ -863,7 +863,7 @@ mod tests {
             let client = ApiClient::over(router().with_state(pool.clone()));
             async move {
                 client
-                    .get(format!("/reports/franking_at_risk/what-if?{query}"))
+                    .get(format!("/reports/franking_at_risk/what_if?{query}"))
                     .await
             }
         };

@@ -1581,7 +1581,7 @@ mod tests {
         assert!(!exercised);
         // The read the state used to kill still answers.
         ApiClient::full(&pool)
-            .get("/portfolio/open-parcels")
+            .get("/portfolio/open_parcels")
             .await
             .expect_status(StatusCode::OK);
     }
@@ -1606,7 +1606,7 @@ mod tests {
         assert_eq!(status, StatusCode::CREATED, "{detail}");
 
         let rows: Vec<serde_json::Value> = ApiClient::full(&pool)
-            .get_json("/portfolio/open-parcels")
+            .get_json("/portfolio/open_parcels")
             .await;
         let exercised = rows
             .iter()

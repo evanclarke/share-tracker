@@ -1536,7 +1536,7 @@ mod tests {
         assert!(body.contains("recorded in AUD"), "body: {body}");
 
         // And the report the bad state used to break still answers.
-        api.get("/portfolio/open-parcels")
+        api.get("/portfolio/open_parcels")
             .await
             .expect_status(StatusCode::OK);
     }
@@ -2173,7 +2173,7 @@ mod tests {
         assert!(db_get(&pool, 1).await.unwrap().is_none());
         // The read the state used to kill still answers.
         let rows: Vec<serde_json::Value> = ApiClient::full(&pool)
-            .get_json("/portfolio/open-parcels")
+            .get_json("/portfolio/open_parcels")
             .await;
         assert!(rows.is_empty(), "{rows:?}");
     }
@@ -2201,7 +2201,7 @@ mod tests {
             .put_ok("/inheritances/1", &body)
             .await;
         let rows: Vec<serde_json::Value> = ApiClient::full(&pool)
-            .get_json("/portfolio/open-parcels")
+            .get_json("/portfolio/open_parcels")
             .await;
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(rows[0]["original_quantity"], "79000000000000000000000000");

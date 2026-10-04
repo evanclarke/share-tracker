@@ -205,73 +205,69 @@ mod tests {
                 .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == separator)
     }
 
-    /// The one sub-resource qualifier both report namespaces share: it
-    /// qualifies an endpoint (`/what-if`) rather than naming a report, so the
-    /// namespace case rule — which governs how a path names its report — does
-    /// not reach it. Every other segment after the namespace does.
-    const SHARED_QUALIFIER_SEGMENTS: [&str; 1] = ["what-if"];
-
-    /// The report surface's path namespace/case rule (REST API audit
-    /// 2026-09-24), pinned against the route table rather than the prose: a
-    /// report path lives under `/portfolio/*` in **kebab-case** or `/reports/*`
-    /// in **snake_case**, the naming segment and every qualifier after it
-    /// included, so a new route in either namespace that breaks its case fails
-    /// here with the offending path named.
-    ///
-    /// `/report_snapshots/*` is the resource surface over the `report_snapshots`
-    /// table (its own `## Report snapshots` docs section), not a report path —
-    /// but it is **uniformly snake_case** too. Its one kebab segment
-    /// (`holding-series`) was renamed `holding_series` rather than excused, so
-    /// the surface has a single case rule like the other two, and this test
-    /// reaches it instead of skipping it. A report route invented in a fourth
-    /// namespace still fails.
+    /// The report surface's path case rule (REST API audit 2026-09-24,
+    /// narrowed to one case by the HTTP API consistency sweep 2026-10-04),
+    /// pinned against the route table rather than the prose: a report path
+    /// lives under `/portfolio/*`, `/reports/*` or the `/report_snapshots/*`
+    /// resource surface, and **every** segment of it — the report's name and
+    /// each qualifier after it (`what_if`, `export`, `years`) — is
+    /// **snake_case**, matching the table and column names the rest of the API
+    /// is spelled in. The `/portfolio/*` reports were kebab-case until the
+    /// sweep, and the qualifier `what-if` was shared by both namespaces in
+    /// that spelling; both were renamed rather than excused, so a new route
+    /// that breaks the case fails here with the offending path named, and a
+    /// report route invented in a fourth namespace still fails.
     #[test]
-    fn report_paths_use_their_namespace_case() {
+    fn report_paths_are_snake_case() {
         let paths = report_route_paths();
         assert!(!paths.is_empty(), "the walk found no report routes");
 
         for path in &paths {
-            let (namespace, separator, case, rest) =
-                if let Some(rest) = path.strip_prefix("/portfolio/") {
-                    ("/portfolio/", '-', "kebab-case", rest)
-                } else if let Some(rest) = path.strip_prefix("/reports/") {
-                    ("/reports/", '_', "snake_case", rest)
-                } else if let Some(rest) = path.strip_prefix("/report_snapshots") {
-                    ("/report_snapshots", '_', "snake_case", rest)
-                } else {
+            let rest = ["/portfolio/", "/reports/", "/report_snapshots"]
+                .iter()
+                .find_map(|namespace| path.strip_prefix(namespace))
+                .unwrap_or_else(|| {
                     panic!(
                         "report route `{path}` is outside `/portfolio/`, `/reports/` and \
                          `/report_snapshots/`"
-                    );
-                };
+                    )
+                });
             let rest = rest.trim_start_matches('/');
             if rest.is_empty() {
                 continue;
             }
-            for (i, segment) in rest.split('/').enumerate() {
+            for segment in rest.split('/') {
                 // An axum path parameter (`{id}`) names no case — it is a value,
                 // not a segment of the path's spelling — so the case rule does
                 // not reach it and the message below is not about one.
                 if segment.starts_with('{') && segment.ends_with('}') {
                     continue;
                 }
-                if i > 0 && SHARED_QUALIFIER_SEGMENTS.contains(&segment) {
-                    continue;
-                }
                 assert!(
-                    segment_matches(segment, separator),
-                    "report route `{path}`: segment `{segment}` after {namespace} must be {case}"
+                    segment_matches(segment, '_'),
+                    "report route `{path}`: segment `{segment}` must be snake_case"
                 );
             }
         }
 
-        // The endpoints renamed by the audit, named explicitly: the case check
-        // above would already refuse the old spellings, and this pins that the
-        // renames landed rather than the paths having vanished.
+        // The endpoints renamed by the two passes, named explicitly: the case
+        // check above would already refuse the old spellings, and this pins
+        // that the renames landed rather than the paths having vanished.
         for renamed in [
             "/reports/tax_report",
             "/reports/tax_report/years",
             "/report_snapshots/holding_series",
+            "/portfolio/open_parcels",
+            "/portfolio/unrealised_gains",
+            "/portfolio/realised_gains",
+            "/portfolio/period_performance",
+            "/portfolio/net_capital_gain",
+            "/portfolio/net_capital_gain/export",
+            "/portfolio/net_capital_gain/what_if",
+            "/portfolio/parcel_optimiser",
+            "/portfolio/tax_summary",
+            "/portfolio/tax_summary/export",
+            "/reports/franking_at_risk/what_if",
         ] {
             assert!(
                 paths.iter().any(|p| p.as_str() == renamed),
@@ -327,20 +323,20 @@ mod tests {
     /// **map or a list**, not a scalar:
     ///
     /// - `/portfolio/overview`, `/portfolio/performance` and
-    ///   `/portfolio/unrealised-gains` take the price-override map
+    ///   `/portfolio/unrealised_gains` take the price-override map
     ///   (`{"prices": {"<listing_id>": "<price>"}}`) that a what-if run
     ///   supplies, beside `live` and `as_of_date`;
-    /// - `/portfolio/net-capital-gain/what-if` takes a contemplated-disposal
+    /// - `/portfolio/net_capital_gain/what_if` takes a contemplated-disposal
     ///   body whose `allocations` are a list of per-parcel inputs.
     ///
     /// Every other report route is a `GET` — including the scalar-parameter
     /// reads this audit moved off `POST` (`/portfolio/activity` with
-    /// `listing_id`/`price`, `/portfolio/period-performance` with
-    /// `from`/`to`, `/portfolio/parcel-optimiser` with `listing_id`/
+    /// `listing_id`/`price`, `/portfolio/period_performance` with
+    /// `from`/`to`, `/portfolio/parcel_optimiser` with `listing_id`/
     /// `holding_account_id`/`units`/`sale_date`/`price`,
     /// `/reports/wash_sales` with `window_days`, `/reports/row_history` with
     /// its browse parameters, `/reports/tax_report` with `tax_year`, and
-    /// `/reports/franking_at_risk/what-if` with `listing_id`/`sale_date`/
+    /// `/reports/franking_at_risk/what_if` with `listing_id`/`sale_date`/
     /// `units`) — and the newly added ones with it. The offending path is
     /// named on failure.
     #[test]
@@ -357,11 +353,11 @@ mod tests {
                 "the price-override map (beside `live` and `as_of_date`)",
             ),
             (
-                "/portfolio/unrealised-gains",
+                "/portfolio/unrealised_gains",
                 "the price-override map (beside `live` and `as_of_date`)",
             ),
             (
-                "/portfolio/net-capital-gain/what-if",
+                "/portfolio/net_capital_gain/what_if",
                 "a contemplated-disposal body whose allocations are a list",
             ),
         ];
@@ -429,12 +425,12 @@ mod tests {
         // unknown one rather than a missing required one)
         for (path, known) in [
             ("/portfolio/activity", "listing_id=1"),
-            ("/portfolio/parcel-optimiser", "listing_id=1"),
-            ("/portfolio/period-performance", "from=2024-01-02"),
+            ("/portfolio/parcel_optimiser", "listing_id=1"),
+            ("/portfolio/period_performance", "from=2024-01-02"),
             ("/reports/row_history", "table=trades"),
             ("/reports/tax_report", "tax_year=2026"),
             ("/reports/wash_sales", "window_days=30"),
-            ("/portfolio/open-parcels", "as_of_date=2024-01-02"),
+            ("/portfolio/open_parcels", "as_of_date=2024-01-02"),
         ] {
             let resp = client
                 .get(&format!("{path}?{known}&zzz_unrecognised=1"))

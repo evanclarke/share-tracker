@@ -579,7 +579,7 @@ mod tests {
         the_findings_parcel(&pool).await;
         let api = ApiClient::full(&pool);
 
-        let realised: serde_json::Value = api.get_json("/portfolio/realised-gains").await;
+        let realised: serde_json::Value = api.get_json("/portfolio/realised_gains").await;
         assert_eq!(realised[0]["capital_gain_loss"], "10000");
         assert_eq!(realised[0]["discount_eligible_gain"], "10000");
         // The advisory pair rides along on the parcel row, summed into
@@ -589,7 +589,7 @@ mod tests {
         assert_eq!(parcel["indexation_eligible"], serde_json::json!(true));
         assert_eq!(parcel["indexed_cost_base"], "17300.000");
 
-        let ncg: serde_json::Value = api.get_json("/portfolio/net-capital-gain").await;
+        let ncg: serde_json::Value = api.get_json("/portfolio/net_capital_gain").await;
         let year = ncg
             .as_array()
             .unwrap()

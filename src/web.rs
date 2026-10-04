@@ -1057,11 +1057,11 @@ mod tests {
         let js = app_js_body().await;
         // The parcel-optimiser screen drives the optimiser endpoint…
         assert!(js.contains("'parcel-optimiser'"));
-        assert!(js.contains("/portfolio/parcel-optimiser"));
+        assert!(js.contains("/portfolio/parcel_optimiser"));
         // …and the pre-sale what-if screen the dry-run endpoint, with the
         // strategy picker naming each optimiser strategy.
         assert!(js.contains("'net-capital-gain-what-if'"));
-        assert!(js.contains("/portfolio/net-capital-gain/what-if"));
+        assert!(js.contains("/portfolio/net_capital_gain/what_if"));
         // (Which strategies the picker offers is pinned to the endpoint's own
         // `ALL_STRATEGIES` by
         // `select_option_lists_are_pinned_to_their_server_side_source`.)
@@ -1085,8 +1085,8 @@ mod tests {
         assert!(js.contains("rows.taxpayer_basis"));
         assert!(js.contains("'Figures assume '"));
         // The reports it is stated on, by the API paths their screens drive.
-        assert!(js.contains("/portfolio/parcel-optimiser"));
-        assert!(js.contains("/portfolio/realised-gains"));
+        assert!(js.contains("/portfolio/parcel_optimiser"));
+        assert!(js.contains("/portfolio/realised_gains"));
         // The what-if states it on its scenario rows, listed explicitly there.
         assert!(js.contains("'taxpayer_basis'"));
     }
@@ -1201,7 +1201,7 @@ mod tests {
     async fn listing_rename_action_ui_present() {
         let js = app_js_body().await;
         assert!(js.contains("slug: 'rename'"));
-        assert!(js.contains("'/listings/' + id + '/rename'"));
+        assert!(js.contains("'/listings/' + id + '/renames'"));
         // Reached from the listing row itself (and from the chain view).
         assert!(js.contains("{ label: 'Rename', href: '#/rename/' + row.id }"));
         // Every field the endpoint takes, required ones flagged as such.
@@ -2659,9 +2659,9 @@ mod tests {
     #[tokio::test]
     async fn open_parcels_report_ui_present() {
         let js = app_js_body().await;
-        // The Open Parcels report view drives GET /portfolio/open-parcels and
+        // The Open Parcels report view drives GET /portfolio/open_parcels and
         // renders through the shared filterable table like every report.
-        assert!(js.contains("/portfolio/open-parcels"));
+        assert!(js.contains("/portfolio/open_parcels"));
     }
 
     /// The Portfolio Overview offers the same as-of date as the other
@@ -2713,7 +2713,7 @@ mod tests {
     async fn open_parcels_offers_the_as_of_date() {
         let config = module_source("/static/config.js");
         let entry = config
-            .split("api: '/portfolio/open-parcels'")
+            .split("api: '/portfolio/open_parcels'")
             .nth(1)
             .and_then(|rest| rest.split("\n  },").next())
             .expect("config.js has an Open Parcels report entry");
@@ -2777,10 +2777,10 @@ mod tests {
         let config = module_source("/static/config.js");
         for path in [
             "/portfolio/activity",
-            "/portfolio/parcel-optimiser",
+            "/portfolio/parcel_optimiser",
             "/reports/wash_sales",
             "/reports/row_history",
-            "/reports/franking_at_risk/what-if",
+            "/reports/franking_at_risk/what_if",
         ] {
             assert!(
                 config.contains(&format!("api: '{path}', method: 'GET'")),
@@ -2802,8 +2802,8 @@ mod tests {
         for path in [
             "/portfolio/overview",
             "/portfolio/performance",
-            "/portfolio/unrealised-gains",
-            "/portfolio/net-capital-gain/what-if",
+            "/portfolio/unrealised_gains",
+            "/portfolio/net_capital_gain/what_if",
         ] {
             assert!(
                 config.contains(&format!("api: '{path}', method: 'POST'")),
@@ -2821,7 +2821,7 @@ mod tests {
         assert!(js.contains("const qs = queryString(body);"));
         assert!(js.contains("api('GET', qs ? report.api + '?' + qs : report.api)"));
         // The two reads driven outside the generic report runner.
-        assert!(js.contains("'/portfolio/period-performance?'"));
+        assert!(js.contains("'/portfolio/period_performance?'"));
         assert!(js.contains("queryString({ from: resolved.from, to: resolved.to })"));
         assert!(js.contains("'/reports/tax_report?'"));
         assert!(js.contains("queryString({ tax_year: Number(yearSelect.value) })"));
@@ -2847,7 +2847,7 @@ mod tests {
         assert!(js.contains("'franking-at-risk'"));
         assert!(js.contains("/reports/franking_at_risk"));
         assert!(js.contains("'franking-what-if'"));
-        assert!(js.contains("/reports/franking_at_risk/what-if"));
+        assert!(js.contains("/reports/franking_at_risk/what_if"));
         // The report's third status is explained where the report is described
         // (SCENARIOS G-11): a row the rule could not be applied to at all.
         assert!(js.contains("untested_no_ex_date"));
@@ -2872,9 +2872,9 @@ mod tests {
     #[tokio::test]
     async fn gains_report_ui_present() {
         let js = app_js_body().await;
-        assert!(js.contains("/portfolio/unrealised-gains"));
-        assert!(js.contains("/portfolio/realised-gains"));
-        assert!(js.contains("/portfolio/net-capital-gain"));
+        assert!(js.contains("/portfolio/unrealised_gains"));
+        assert!(js.contains("/portfolio/realised_gains"));
+        assert!(js.contains("/portfolio/net_capital_gain"));
     }
 
     /// Wherever a table names a listing — a report row, an entity list row,
@@ -3012,8 +3012,8 @@ mod tests {
         assert!(js.contains("'strategy'"));
         // Both drilldown-bearing reports are still driven by their existing
         // API paths — the feature is additive, not a new endpoint.
-        assert!(js.contains("/portfolio/realised-gains"));
-        assert!(js.contains("/portfolio/net-capital-gain"));
+        assert!(js.contains("/portfolio/realised_gains"));
+        assert!(js.contains("/portfolio/net_capital_gain"));
         // The toggle/detail-row/expand-all styling ships in the bundle too.
         let css = body_string(get("/static/style.css").await).await;
         assert!(css.contains(".expand-toggle"));
@@ -3024,7 +3024,7 @@ mod tests {
     #[tokio::test]
     async fn tax_summary_ui_present() {
         let js = app_js_body().await;
-        assert!(js.contains("/portfolio/tax-summary"));
+        assert!(js.contains("/portfolio/tax_summary"));
     }
 
     /// The Annual Tax Report — a printable per-year document, distinct from

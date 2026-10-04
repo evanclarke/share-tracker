@@ -137,12 +137,12 @@ pub struct NetCapitalGainYear {
 
 pub fn router() -> Router<SqlitePool> {
     Router::new()
-        .route("/portfolio/net-capital-gain", get(net_capital_gain_handler))
+        .route("/portfolio/net_capital_gain", get(net_capital_gain_handler))
         .route(
-            "/portfolio/net-capital-gain/export",
+            "/portfolio/net_capital_gain/export",
             get(net_capital_gain_export_handler),
         )
-        .route("/portfolio/net-capital-gain/what-if", post(what_if_handler))
+        .route("/portfolio/net_capital_gain/what_if", post(what_if_handler))
 }
 
 /// CSV export columns — `NetCapitalGainYear`'s fields in declaration order. The
@@ -3993,7 +3993,7 @@ mod tests {
         .await;
         allocate(&pool, 1, 2, 1, Decimal::from(100)).await;
 
-        let resp = client(&pool).get("/portfolio/net-capital-gain").await;
+        let resp = client(&pool).get("/portfolio/net_capital_gain").await;
         assert_eq!(resp.status, StatusCode::OK);
         let result: Vec<NetCapitalGainYear> = resp.json();
         assert_eq!(result.len(), 1);
@@ -4028,7 +4028,7 @@ mod tests {
         allocate(&pool, 1, 2, 1, Decimal::from(100)).await;
 
         let resp = client(&pool)
-            .get("/portfolio/net-capital-gain/export")
+            .get("/portfolio/net_capital_gain/export")
             .await;
         assert_eq!(resp.status, StatusCode::OK);
         assert_eq!(
@@ -4068,7 +4068,7 @@ mod tests {
         let pool = long_decimal_disposal().await;
 
         let csv = client(&pool)
-            .get("/portfolio/net-capital-gain/export")
+            .get("/portfolio/net_capital_gain/export")
             .await
             .expect_status(StatusCode::OK)
             .text()
@@ -4115,7 +4115,7 @@ mod tests {
         let pool = long_decimal_disposal().await;
 
         let years: Vec<NetCapitalGainYear> =
-            client(&pool).get_json("/portfolio/net-capital-gain").await;
+            client(&pool).get_json("/portfolio/net_capital_gain").await;
         let y = row_for(&years, 2024);
         let cost_base: Decimal = "3021.89".parse::<Decimal>().unwrap() / Decimal::from(3);
         let gain = Decimal::from(1500) - cost_base;
@@ -4151,7 +4151,7 @@ mod tests {
         let pool = odd_cent_disposal().await;
 
         let csv = client(&pool)
-            .get("/portfolio/net-capital-gain/export")
+            .get("/portfolio/net_capital_gain/export")
             .await
             .expect_status(StatusCode::OK)
             .text()
@@ -4175,7 +4175,7 @@ mod tests {
 
         // The JSON report answers the same figures — one worksheet, not two.
         let years: Vec<NetCapitalGainYear> =
-            client(&pool).get_json("/portfolio/net-capital-gain").await;
+            client(&pool).get_json("/portfolio/net_capital_gain").await;
         let y = row_for(&years, 2024);
         assert_eq!(y.discount_eligible_gains, "100.01".parse().unwrap());
         assert_eq!(y.cgt_discount, "50.01".parse().unwrap());
@@ -4216,7 +4216,7 @@ mod tests {
 
         let pool = odd_cent_years().await;
         let years: Vec<NetCapitalGainYear> =
-            client(&pool).get_json("/portfolio/net-capital-gain").await;
+            client(&pool).get_json("/portfolio/net_capital_gain").await;
         assert!(
             years.len() >= 2,
             "the fixture spans a loss year and a gain year"
@@ -4285,11 +4285,11 @@ mod tests {
         let pool = odd_cent_disposal().await;
         let api = ApiClient::full(&pool);
 
-        let years: Vec<NetCapitalGainYear> = api.get_json("/portfolio/net-capital-gain").await;
+        let years: Vec<NetCapitalGainYear> = api.get_json("/portfolio/net_capital_gain").await;
         let y = row_for(&years, 2024);
 
         let csv = api
-            .get("/portfolio/net-capital-gain/export")
+            .get("/portfolio/net_capital_gain/export")
             .await
             .expect_status(StatusCode::OK)
             .text()
@@ -4360,7 +4360,7 @@ mod tests {
         allocate(&pool, 1, 2, 1, Decimal::from(100)).await;
 
         let years: Vec<NetCapitalGainYear> =
-            client(&pool).get_json("/portfolio/net-capital-gain").await;
+            client(&pool).get_json("/portfolio/net_capital_gain").await;
         let y = row_for(&years, 2024);
         assert_eq!(y.discount_eligible_gains, Decimal::from(500));
         assert_eq!(y.net_discount_eligible_gain, Decimal::from(500));
@@ -4368,7 +4368,7 @@ mod tests {
         assert_eq!(y.net_capital_gain, Decimal::from(250));
 
         let csv = client(&pool)
-            .get("/portfolio/net-capital-gain/export")
+            .get("/portfolio/net_capital_gain/export")
             .await
             .expect_status(StatusCode::OK)
             .text()
@@ -4475,7 +4475,7 @@ mod tests {
     async fn api_export_of_empty_report_still_returns_header() {
         let pool = test_pool().await;
         let resp = client(&pool)
-            .get("/portfolio/net-capital-gain/export")
+            .get("/portfolio/net_capital_gain/export")
             .await;
         assert_eq!(resp.status, StatusCode::OK);
         let csv = resp.text().to_string();
@@ -4501,12 +4501,12 @@ mod tests {
         )
         .await;
 
-        let years: Vec<NetCapitalGainYear> = api.get_json("/portfolio/net-capital-gain").await;
+        let years: Vec<NetCapitalGainYear> = api.get_json("/portfolio/net_capital_gain").await;
         assert_eq!(tax_years(&years), vec![current_tax_year()]);
         assert_quiet_year(&years[0], Decimal::from(12345));
 
         let csv = api
-            .get("/portfolio/net-capital-gain/export")
+            .get("/portfolio/net_capital_gain/export")
             .await
             .expect_status(StatusCode::OK)
             .text()
@@ -4558,7 +4558,7 @@ mod tests {
         }
 
         let years: Vec<NetCapitalGainYear> = ApiClient::full(&pool)
-            .get_json("/portfolio/net-capital-gain")
+            .get_json("/portfolio/net_capital_gain")
             .await;
         assert_eq!(
             tax_years(&years),
@@ -4804,7 +4804,7 @@ mod tests {
 
     async fn post_what_if(pool: SqlitePool, body: serde_json::Value) -> (StatusCode, Vec<u8>) {
         let resp = client(&pool)
-            .post("/portfolio/net-capital-gain/what-if", &body)
+            .post("/portfolio/net_capital_gain/what_if", &body)
             .await;
         let status = resp.status;
         (status, resp.body.to_vec())

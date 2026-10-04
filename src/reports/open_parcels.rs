@@ -53,7 +53,7 @@ pub struct OpenParcel {
 }
 
 pub fn router() -> Router<SqlitePool> {
-    Router::new().route("/portfolio/open-parcels", get(open_parcels_handler))
+    Router::new().route("/portfolio/open_parcels", get(open_parcels_handler))
 }
 
 /// The open-parcels report's query string: just the valuation date.
@@ -951,7 +951,7 @@ mod tests {
         allocate(&pool, 1, 2, 1, Decimal::from(40)).await;
 
         let resp = ApiClient::over(router().with_state(pool))
-            .get("/portfolio/open-parcels")
+            .get("/portfolio/open_parcels")
             .await;
         assert_eq!(resp.status, StatusCode::OK);
         let parcels: Vec<OpenParcel> = resp.json();
@@ -994,7 +994,7 @@ mod tests {
 
         // Omitted: today's live schedule — the sale counts.
         let omitted: Vec<OpenParcel> = ApiClient::over(router().with_state(pool.clone()))
-            .get("/portfolio/open-parcels")
+            .get("/portfolio/open_parcels")
             .await
             .json();
         assert_eq!(omitted.len(), 1);
@@ -1002,7 +1002,7 @@ mod tests {
 
         // Explicitly today is identical to the omitted default.
         let at_today: Vec<OpenParcel> = ApiClient::over(router().with_state(pool.clone()))
-            .get(format!("/portfolio/open-parcels?as_of_date={today}"))
+            .get(format!("/portfolio/open_parcels?as_of_date={today}"))
             .await
             .json();
         assert_eq!(
@@ -1016,7 +1016,7 @@ mod tests {
 
         // As at yesterday the sale has not happened yet.
         let as_at: Vec<OpenParcel> = ApiClient::over(router().with_state(pool))
-            .get(format!("/portfolio/open-parcels?as_of_date={yesterday}"))
+            .get(format!("/portfolio/open_parcels?as_of_date={yesterday}"))
             .await
             .json();
         assert_eq!(as_at[0].remaining_quantity, Decimal::from(100));
@@ -1052,7 +1052,7 @@ mod tests {
         allocate(&pool, 1, 2, 1, Decimal::from(40)).await;
 
         let on_the_day: Vec<OpenParcel> = ApiClient::over(router().with_state(pool.clone()))
-            .get(format!("/portfolio/open-parcels?as_of_date={sale_date}"))
+            .get(format!("/portfolio/open_parcels?as_of_date={sale_date}"))
             .await
             .json();
         assert_eq!(on_the_day[0].remaining_quantity, Decimal::from(60));
@@ -1061,7 +1061,7 @@ mod tests {
             .pred_opt()
             .expect("the sale date has a day before");
         let earlier: Vec<OpenParcel> = ApiClient::over(router().with_state(pool))
-            .get(format!("/portfolio/open-parcels?as_of_date={before}"))
+            .get(format!("/portfolio/open_parcels?as_of_date={before}"))
             .await
             .json();
         assert_eq!(earlier[0].remaining_quantity, Decimal::from(100));
@@ -1085,7 +1085,7 @@ mod tests {
         .await;
         for (query, names_param) in [("?as_of_date=lots", true), ("?as_of=2024-06-01", false)] {
             let resp = ApiClient::over(router().with_state(pool.clone()))
-                .get(format!("/portfolio/open-parcels{query}"))
+                .get(format!("/portfolio/open_parcels{query}"))
                 .await;
             let (status, body) = resp.status_and_body();
             assert_eq!(status, StatusCode::BAD_REQUEST, "{query}: {body}");
@@ -1120,7 +1120,7 @@ mod tests {
         allocate(&pool, 1, 2, 1, dec("400000000000000")).await;
 
         let resp = ApiClient::over(router().with_state(pool))
-            .get("/portfolio/open-parcels")
+            .get("/portfolio/open_parcels")
             .await;
         assert_eq!(resp.status, StatusCode::OK);
         let parcels: Vec<OpenParcel> = resp.json();

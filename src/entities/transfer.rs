@@ -2235,7 +2235,7 @@ mod tests {
 
         // And the transfer itself stands, with both legs readable.
         let rows: Vec<serde_json::Value> = ApiClient::full(&pool)
-            .get_json("/portfolio/open-parcels")
+            .get_json("/portfolio/open_parcels")
             .await;
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(rows[0]["holding_account_id"], 1);

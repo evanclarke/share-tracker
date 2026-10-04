@@ -269,7 +269,7 @@ async fn insert_share_split(
 }
 
 /// Record a rename through the entity's own path, so the chain and the
-/// listing row move together exactly as `POST /listings/:id/rename` does.
+/// listing row move together exactly as `POST /listings/:id/renames` does.
 async fn rename_listing(
     pool: &SqlitePool,
     listing_id: i64,
