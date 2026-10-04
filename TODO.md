@@ -80,13 +80,27 @@ by value; the first item is a bug.
   properties) and names any property without a description — counting the `oneOf` `$ref` branch
   where utoipa puts an `Option<Enum>` field's comment. Response schemas (the remaining ~580
   properties) are not held to the rule; `docs/API.md`'s OpenAPI section says so.
-- [ ] **The contract is too large to load.** The OpenAPI document is ~397 KB (~100k tokens) and
+- [x] **The contract is too large to load.** The OpenAPI document is ~397 KB (~100k tokens) and
   `docs/API.md` ~670 KB, so an agent can read neither whole. Add (a) a compact route index — one
   line per route, verb + path + summary, generated from `ROUTES` (a served route or a checked-in
   doc pinned to `ROUTES` by a test), and (b) a `?tag=` filter on `GET /openapi.json` serving just
   that tag's operations plus the schemas they reach (depends on the tags item). Tests: the index
   lists exactly the `ROUTES` rows; a tag slice is a valid document whose every `$ref` resolves and
   that carries no operation from another tag.
+  *Done 2026-10-04:* (a) `GET /openapi/index` serves a plain-text index (~27 KB against the
+  document's ~448 KB): one line per operation — verb, path, `operationId`, summary — grouped under
+  each tag's heading, which names the `?tag=` request for that slice; built by `route_index` from
+  `published_rows`, the same list `document_for` now iterates. (b) `GET /openapi.json?tag=` serves
+  one tag's operations plus every schema they reach through `$ref`, transitively (`slice_where`).
+  Because the `Portfolio reports` tag alone is ~200 KB (half the document), a `?operation=<id>`
+  slice was added beside it — the usual agent path is index → `operationId` → that one operation
+  (~20 KB for `createSells`). An unknown tag/id, or both at once, is `400` with a reason. Pinned by
+  `the_route_index_lists_exactly_the_published_operations` (both `[auth]` shapes),
+  `a_tag_slice_is_a_self_contained_document_of_that_tag_alone`,
+  `an_operation_slice_is_a_self_contained_document_of_that_operation_alone` (every tag / every
+  operation: exactly its operations unchanged, every `$ref` resolves, no unreached schema, same
+  envelope) and `the_tag_slice_and_the_route_index_are_served`. Documented in `docs/API.md`'s
+  OpenAPI section and `400` row, FEATURES and README.
 - [ ] **No way to preview a tax-relevant write before it is committed.** Only
   `POST /amma_statements/:id/generate_adjustments` has a preview (`"preview": true`). An agent
   entering figures from a statement wants to see the stored result first. Add `?dry_run=true` to

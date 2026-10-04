@@ -25,7 +25,10 @@
 //! other one, so `require_auth` gates it and `/openapi.json` is deliberately
 //! *not* on that layer's login-page allowlist.
 
-use axum::{Router, routing::get};
+use axum::{Router, response::IntoResponse, routing::get};
+
+use crate::infra::extract::Query;
+use crate::infra::http::ApiError;
 use sqlx::SqlitePool;
 use utoipa::openapi::{
     Components, ComponentsBuilder, InfoBuilder, OpenApi, OpenApiBuilder, Paths, RefOr, Required,
@@ -137,7 +140,11 @@ executed group, because a bare 204 would hide the created Sell/Buy ids; and \
 (new rates arrive through POST /rba_fx_rates/import).
 
 The document itself is generated from the route table and the serde structs in \
-src/api_spec.rs and is pinned by that module's tests.";
+src/api_spec.rs and is pinned by that module's tests. It can be read in pieces: \
+GET /openapi/index is a compact route index (verb, path, operationId and summary \
+per line), and GET /openapi.json?operation=<operationId> or ?tag=<tag> serves one \
+operation's or one tag's slice, each a whole document carrying only the schemas it \
+reaches.";
 
 /// The four HTTP verbs the server uses, as the table spells them.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1318,9 +1325,17 @@ const ROUTES: &[RouteRow] = &[
         Verb::Get,
         "/openapi.json",
         &[200],
-        "This OpenAPI 3.1 document, generated from the route table and the serde structs. Behind [auth] like every other route.",
+        "This OpenAPI 3.1 document, generated from the route table and the serde structs; ?tag= narrows it to one tag's operations, or ?operation= to one operationId, with the schemas they reach. Behind [auth] like every other route.",
         Body::None,
         Body::JsonFree("The OpenAPI 3.1 document for this API, as described by info above."),
+    ),
+    (
+        Verb::Get,
+        "/openapi/index",
+        &[200],
+        "The compact route index (text/plain): one line per operation — verb, path, operationId, summary — grouped by tag, each group headed by the request for that tag's slice of /openapi.json.",
+        Body::None,
+        Body::Other("text/plain"),
     ),
     // ---- Reports -----------------------------------------------------------
     // Reads: the GET reports take their parameters in the query string; the
@@ -1639,6 +1654,7 @@ const TAGS: &[(&str, &str)] = &[
     ("/", "Web frontend"),
     ("/static", "Web frontend"),
     ("/openapi.json", "OpenAPI description"),
+    ("/openapi", "OpenAPI description"),
     ("/login", "Authentication"),
     ("/logout", "Authentication"),
     ("/exchanges", "Exchanges"),
@@ -1742,6 +1758,191 @@ fn operation_id(verb: Verb, path: &str, statuses: &[u16], response: Body) -> Str
     id
 }
 
+/// Every operation a deployment publishes, in [`ROUTES`] order: the table's
+/// rows (less `/login` and `/logout` without `[auth]`, which such a deployment
+/// does not serve), then one row per `/static/*.js` module. The one list both
+/// the document and the [`route_index`] are built from, so the two cannot
+/// disagree about what is served.
+fn published_rows(auth: bool) -> Vec<RouteRow> {
+    let mut rows: Vec<RouteRow> = ROUTES
+        .iter()
+        .filter(|(_, path, ..)| auth || !matches!(*path, "/login" | "/logout"))
+        .copied()
+        .collect();
+    // The `/static/*.js` routes are registered in a loop over `JS_MODULES`,
+    // so no literal path string exists to scan; read them from that same
+    // list rather than transcribing the paths.
+    for (path, _) in crate::web::JS_MODULES {
+        rows.push((
+            Verb::Get,
+            path,
+            &[200],
+            "A served frontend ES module (JavaScript).",
+            Body::None,
+            Body::Other("text/javascript"),
+        ));
+    }
+    rows
+}
+
+/// The compact route index served at `GET /openapi/index`: one line per
+/// published operation — verb, path, `operationId`, summary — grouped under
+/// its tag in [`TAGS`] order, each group headed by the `?tag=` request that
+/// fetches just that slice of the document.
+///
+/// It exists because the whole document is too large for an agent to read
+/// (~400 KB); this is a few thousand tokens, enough to choose the operation
+/// and then fetch only its tag's slice. It carries no schemas and adds no
+/// facts of its own: every line is read from [`published_rows`], the same
+/// list the document is built from.
+fn route_index(base_path: &str, auth: bool) -> String {
+    let rows = published_rows(auth);
+    let mut out = format!(
+        "share-tracker API {} — route index ({} operations)\n\
+         Paths are relative to {}. The full OpenAPI 3.1 contract is GET /openapi.json; one \
+         operation and the schemas it reaches is GET /openapi.json?operation=<operationId> \
+         (the third column below), and one section's is GET /openapi.json?tag=<tag>, the tag \
+         URL-encoded as each heading shows.\n\
+         Money and quantities are JSON strings, every request body refuses unknown fields, \
+         and a PUT replaces the whole row.\n",
+        env!("CARGO_PKG_VERSION"),
+        rows.len(),
+        if base_path.is_empty() { "/" } else { base_path },
+    );
+    let mut seen: Vec<&str> = Vec::new();
+    for &(_, tag) in TAGS {
+        if seen.contains(&tag) {
+            continue;
+        }
+        seen.push(tag);
+        let group: Vec<&RouteRow> = rows.iter().filter(|row| tag_for(row.1) == tag).collect();
+        if group.is_empty() {
+            continue;
+        }
+        out.push_str(&format!(
+            "\n## {tag} — GET /openapi.json?tag={}\n",
+            tag.replace(' ', "%20")
+        ));
+        for &&(verb, path, statuses, summary, _, response) in &group {
+            out.push_str(&format!(
+                "{:<6} {path}  {} — {summary}\n",
+                format!("{verb:?}").to_uppercase(),
+                operation_id(verb, path, statuses, response),
+            ));
+        }
+    }
+    out
+}
+
+/// A slice of the serialised document: only the operations `keep` accepts,
+/// only the top-level `tags` they carry, and only the component schemas they
+/// reach — followed through every `$ref`, transitively, so the slice is a
+/// whole document on its own. Everything else (`info`, `servers`, the security
+/// schemes and requirement) is kept as is. `None` when `keep` accepts no
+/// operation, which the handler answers `400`.
+fn slice_where(
+    document: &serde_json::Value,
+    keep: impl Fn(&serde_json::Value) -> bool,
+) -> Option<serde_json::Value> {
+    use serde_json::{Map, Value};
+
+    /// Push every `#/components/schemas/<name>` a value refers to.
+    fn refs(value: &Value, out: &mut Vec<String>) {
+        match value {
+            Value::Object(map) => {
+                for (key, child) in map {
+                    if key == "$ref"
+                        && let Some(name) = child
+                            .as_str()
+                            .and_then(|r| r.strip_prefix("#/components/schemas/"))
+                    {
+                        out.push(name.to_string());
+                    }
+                    refs(child, out);
+                }
+            }
+            Value::Array(items) => items.iter().for_each(|item| refs(item, out)),
+            _ => {}
+        }
+    }
+
+    let mut paths = Map::new();
+    for (path, item) in document["paths"].as_object()? {
+        let kept: Map<String, Value> = item
+            .as_object()?
+            .iter()
+            .filter(|(_, op)| keep(op))
+            .map(|(verb, op)| (verb.clone(), op.clone()))
+            .collect();
+        if !kept.is_empty() {
+            paths.insert(path.clone(), Value::Object(kept));
+        }
+    }
+    if paths.is_empty() {
+        return None;
+    }
+    let paths = Value::Object(paths);
+    let used = |tag: &Value| {
+        paths.as_object().into_iter().flatten().any(|(_, item)| {
+            item.as_object().into_iter().flatten().any(|(_, op)| {
+                op["tags"]
+                    .as_array()
+                    .is_some_and(|tags| tags.contains(&tag["name"]))
+            })
+        })
+    };
+    let tags: Vec<Value> = document["tags"]
+        .as_array()?
+        .iter()
+        .filter(|tag| used(tag))
+        .cloned()
+        .collect();
+    let mut pending: Vec<String> = Vec::new();
+    refs(&paths, &mut pending);
+    let all = &document["components"]["schemas"];
+    let mut reached = Map::new();
+    while let Some(name) = pending.pop() {
+        if reached.contains_key(&name) {
+            continue;
+        }
+        if let Some(schema) = all.get(&name) {
+            refs(schema, &mut pending);
+            reached.insert(name, schema.clone());
+        }
+    }
+    let mut slice = Map::new();
+    for (key, value) in document.as_object()? {
+        let value = match key.as_str() {
+            "paths" => paths.clone(),
+            "tags" => Value::Array(tags.clone()),
+            "components" => {
+                let mut components = value.as_object()?.clone();
+                components.insert("schemas".to_string(), Value::Object(reached.clone()));
+                Value::Object(components)
+            }
+            _ => value.clone(),
+        };
+        slice.insert(key.clone(), value);
+    }
+    Some(Value::Object(slice))
+}
+
+/// One tag's slice of the document ([`slice_where`] over the operations
+/// carrying `tag`).
+fn tag_slice(document: &serde_json::Value, tag: &str) -> Option<serde_json::Value> {
+    slice_where(document, |op| {
+        op["tags"]
+            .as_array()
+            .is_some_and(|tags| tags.iter().any(|t| t == tag))
+    })
+}
+
+/// One operation's slice of the document ([`slice_where`] over the operation
+/// whose `operationId` is `id`).
+fn operation_slice(document: &serde_json::Value, id: &str) -> Option<serde_json::Value> {
+    slice_where(document, |op| op["operationId"] == id)
+}
+
 /// The OpenAPI 3.1 document, assembled from [`ROUTES`] and the schemas the
 /// referenced types derive — the auth-on, root-path form the tests read.
 #[cfg(test)]
@@ -1758,27 +1959,9 @@ pub fn document() -> OpenApi {
 pub fn document_for(base_path: &str, auth: bool) -> OpenApi {
     let mut paths = Paths::new();
     let mut used_tags = std::collections::BTreeSet::new();
-    for &(verb, path, statuses, summary, request, response) in ROUTES {
-        if !auth && matches!(path, "/login" | "/logout") {
-            continue;
-        }
+    for (verb, path, statuses, summary, request, response) in published_rows(auth) {
         let operation = operation(verb, path, statuses, summary, request, response);
         paths.add_path_operation(path, vec![verb.http()], operation);
-        used_tags.insert(tag_for(path));
-    }
-    // The `/static/*.js` routes are registered in a loop over `JS_MODULES`,
-    // so no literal path string exists to scan; read them from that same
-    // list rather than transcribing the paths.
-    for (path, _) in crate::web::JS_MODULES {
-        let operation = operation(
-            Verb::Get,
-            path,
-            &[200],
-            "A served frontend ES module (JavaScript).",
-            Body::None,
-            Body::Other("text/javascript"),
-        );
-        paths.add_path_operation(path, vec![HttpMethod::Get], operation);
         used_tags.insert(tag_for(path));
     }
     // The document-level tag list, in `TAGS` order (which is `docs/API.md`'s),
@@ -2188,6 +2371,7 @@ fn query_parameters(verb: Verb, path: &str) -> Vec<Parameter> {
         return Vec::new();
     }
     match path {
+        "/openapi.json" => of::<DocumentQuery>(),
         // Entity lists: the `CrudEntity::Filter` type behind
         // `http::list_handler`, one per filtered list (`entities::LIST_ROUTES`
         // classifies every list route, filtered or not).
@@ -2398,21 +2582,100 @@ fn json_content(schema: RefOr<Schema>) -> utoipa::openapi::Content {
 /// when the router is assembled, and each request clones the finished JSON
 /// string — not rebuilt per request as it was.
 pub fn router(base_path: &str, auth: bool) -> Router<SqlitePool> {
-    let body = std::sync::Arc::new(
-        serde_json::to_string(&document_for(base_path, auth)).expect("the document serialises"),
-    );
-    Router::new().route(
-        "/openapi.json",
-        get(move || {
-            let body = body.clone();
-            async move {
-                (
-                    [(axum::http::header::CONTENT_TYPE, "application/json")],
-                    (*body).clone(),
-                )
-            }
-        }),
+    let document =
+        serde_json::to_value(document_for(base_path, auth)).expect("the document serialises");
+    let served = std::sync::Arc::new(Served {
+        whole: document.to_string(),
+        index: route_index(base_path, auth),
+        document,
+    });
+    Router::new()
+        .route("/openapi.json", get(serve_document))
+        .route("/openapi/index", get(serve_index))
+        .layer(axum::Extension(served))
+}
+
+/// What the two routes answer, built once at router assembly: the whole
+/// document already serialised (the common request only clones a string),
+/// the document as a value for the `?tag=`/`?operation=` slices, and the
+/// route index.
+struct Served {
+    whole: String,
+    document: serde_json::Value,
+    index: String,
+}
+
+/// `GET /openapi.json`'s query string: at most one of the two narrowings.
+#[derive(Debug, serde::Deserialize, utoipa::IntoParams)]
+#[serde(deny_unknown_fields)]
+pub struct DocumentQuery {
+    /// Narrow the document to one tag — a `docs/API.md` section name such as
+    /// `Trades` or `Portfolio reports`, URL-encoded — serving only that tag's
+    /// operations and the component schemas they reach. A tag no operation
+    /// carries is refused `400`, naming the valid tags. Omitted (with
+    /// `operation` omitted too), the whole document.
+    tag: Option<String>,
+    /// Narrow the document to the one operation with this `operationId`
+    /// (`listTrades`, `runPortfolioOverview` — `GET /openapi/index` lists
+    /// them all) and the component schemas it reaches. An id no operation
+    /// carries is refused `400`; so is sending both `tag` and `operation`.
+    operation: Option<String>,
+}
+
+/// `GET /openapi.json`: the whole document, or one tag's or one operation's
+/// slice of it.
+async fn serve_document(
+    axum::Extension(served): axum::Extension<std::sync::Arc<Served>>,
+    Query(query): Query<DocumentQuery>,
+) -> Result<axum::response::Response, ApiError> {
+    let body = match (query.tag, query.operation) {
+        (None, None) => served.whole.clone(),
+        (Some(tag), None) => tag_slice(&served.document, &tag)
+            .ok_or_else(|| {
+                let known: Vec<&str> = served.document["tags"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|t| t["name"].as_str())
+                    .collect();
+                ApiError::BadRequest(format!(
+                    "no operation is tagged `{tag}`; the tags are: {}",
+                    known.join(", ")
+                ))
+            })?
+            .to_string(),
+        (None, Some(id)) => operation_slice(&served.document, &id)
+            .ok_or_else(|| {
+                ApiError::BadRequest(format!(
+                    "no operation has the operationId `{id}`; GET /openapi/index lists them"
+                ))
+            })?
+            .to_string(),
+        (Some(_), Some(_)) => {
+            return Err(ApiError::BadRequest(
+                "send at most one of ?tag= and ?operation=".to_string(),
+            ));
+        }
+    };
+    Ok((
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        body,
     )
+        .into_response())
+}
+
+/// `GET /openapi/index`: the compact route index, as plain text.
+async fn serve_index(
+    axum::Extension(served): axum::Extension<std::sync::Arc<Served>>,
+) -> axum::response::Response {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; charset=utf-8",
+        )],
+        served.index.clone(),
+    )
+        .into_response()
 }
 
 /// Every **id-keyed collection create** the route table documents — a
@@ -3137,16 +3400,12 @@ mod tests {
     /// skipped, so a new unfollowable registration fails here until it is
     /// classified.
     ///
-    /// All five are **closures** rather than named functions, each because the
-    /// route captures something the router was built with (the serialised
-    /// document, the configured base path, the shell HTML) — so there is no
-    /// `fn` whose parameter list could be read, and four of them take no
-    /// request body at all.
+    /// All four are **closures** rather than named functions, each because the
+    /// route captures something the router was built with (the configured base
+    /// path, the auth state, the shell HTML) — so there is no `fn` whose
+    /// parameter list could be read, and three of them take no request body at
+    /// all.
     const UNRESOLVED_HANDLERS: &[(&str, &str)] = &[
-        (
-            "api_spec.rs: Get /openapi.json",
-            "a closure over the document serialised once at router build time; no request body",
-        ),
         (
             "infra/auth.rs: Get /login",
             "a closure over the configured base path, rendering the sign-in page; no request body",
@@ -3318,12 +3577,21 @@ mod tests {
     /// says nothing about the body — each with what it actually answers, which
     /// is what its row records.
     ///
-    /// All five set a content type (and, for the download, a
+    /// All seven set a content type (and, for the download, a
     /// `Content-Disposition`) that no `Json`/`UpsertResponse`/`StatusCode`
     /// return could carry. There is nothing to derive for them; the point of
     /// naming them is that the list is exhaustive — a *new* hand-built response
     /// fails this test rather than joining ~110 rows nothing checks.
     const RESPONSES_NOT_DERIVABLE: &[(&str, &str)] = &[
+        (
+            "api_spec.rs: Get /openapi.json",
+            "the OpenAPI document (or one tag's slice of it) serialised once at router build \
+             time, served as an application/json string rather than re-encoded per request",
+        ),
+        (
+            "api_spec.rs: Get /openapi/index",
+            "the route index as text/plain",
+        ),
         (
             "entities/attachment.rs: Get /attachments/{id}/content",
             "the stored bytes under the content type they were stored with, plus a \
@@ -4565,6 +4833,270 @@ mod tests {
         assert_eq!(body["openapi"].as_str(), Some("3.1.0"));
         assert!(body["info"]["title"].is_string());
         assert!(body["paths"]["/openapi.json"]["get"].is_object());
+    }
+
+    /// The route index lists exactly the operations the document publishes —
+    /// one line each, carrying the document's own `operationId` — under the
+    /// heading of the operation's tag, for both deployment shapes (without
+    /// `[auth]` neither lists `/login`/`/logout`).
+    #[test]
+    fn the_route_index_lists_exactly_the_published_operations() {
+        for auth in [true, false] {
+            let doc = serde_json::to_value(document_for("", auth)).expect("serialises");
+            let index = route_index("", auth);
+            let mut listed: Vec<(String, String)> = Vec::new();
+            let mut heading = String::new();
+            for line in index.lines() {
+                if let Some(rest) = line.strip_prefix("## ") {
+                    heading = rest.split(" — ").next().unwrap_or_default().to_string();
+                    continue;
+                }
+                let mut words = line.split_whitespace();
+                let (Some(verb), Some(path), Some(id)) = (words.next(), words.next(), words.next())
+                else {
+                    continue;
+                };
+                if !matches!(verb, "GET" | "POST" | "PUT" | "DELETE") {
+                    continue;
+                }
+                let op = &doc["paths"][path][verb.to_ascii_lowercase()];
+                assert!(
+                    op.is_object(),
+                    "the index lists {verb} {path}, which is not published"
+                );
+                assert_eq!(
+                    op["operationId"].as_str(),
+                    Some(id),
+                    "{verb} {path}'s operationId"
+                );
+                assert_eq!(
+                    op["tags"][0].as_str(),
+                    Some(heading.as_str()),
+                    "{verb} {path}'s tag"
+                );
+                assert!(
+                    line.contains(op["summary"].as_str().unwrap_or_default()),
+                    "{verb} {path}'s index line must carry its summary"
+                );
+                listed.push((path.to_string(), verb.to_string()));
+            }
+            listed.sort();
+            let before = listed.len();
+            listed.dedup();
+            assert_eq!(before, listed.len(), "the index lists an operation twice");
+            assert_eq!(listed, documented_routes(&doc), "auth = {auth}");
+            assert_eq!(
+                listed.iter().any(|(path, _)| path == "/login"),
+                auth,
+                "/login is listed only when [auth] serves it"
+            );
+        }
+    }
+
+    /// Assert `slice` is a whole document carrying exactly `expected` of
+    /// `doc`'s operations, unchanged: every `$ref` resolves inside it, it
+    /// carries no schema nothing in it reaches, its top-level `tags` are the
+    /// ones those operations use (in the document's order), and the rest of
+    /// the envelope is the document's own.
+    fn assert_self_contained_slice(
+        doc: &Value,
+        slice: &Value,
+        expected: &[(String, String)],
+        what: &str,
+    ) {
+        fn refs(value: &Value, out: &mut std::collections::BTreeSet<String>) {
+            match value {
+                Value::Object(map) => {
+                    for (key, child) in map {
+                        if key == "$ref" {
+                            out.insert(child.as_str().unwrap_or_default().to_string());
+                        }
+                        refs(child, out);
+                    }
+                }
+                Value::Array(items) => items.iter().for_each(|item| refs(item, out)),
+                _ => {}
+            }
+        }
+        let op = |doc: &Value, path: &str, method: &str| -> Value {
+            doc["paths"][path][method.to_ascii_lowercase()].clone()
+        };
+        let routes = documented_routes(slice);
+        assert_eq!(routes, expected, "{what} must carry exactly its operations");
+        let mut used_tags: Vec<Value> = Vec::new();
+        for (path, method) in &routes {
+            assert_eq!(
+                op(slice, path, method),
+                op(doc, path, method),
+                "{what}: {method} {path} must be carried unchanged"
+            );
+            used_tags.push(serde_json::json!({ "name": op(doc, path, method)["tags"][0] }));
+        }
+        let expected_tags: Vec<Value> = doc["tags"]
+            .as_array()
+            .expect("top-level tags")
+            .iter()
+            .filter(|tag| used_tags.contains(tag))
+            .cloned()
+            .collect();
+        assert_eq!(
+            slice["tags"],
+            Value::Array(expected_tags),
+            "{what}'s top-level tags"
+        );
+
+        let mut found = std::collections::BTreeSet::new();
+        refs(slice, &mut found);
+        for reference in &found {
+            let name = reference
+                .strip_prefix("#/components/schemas/")
+                .unwrap_or_else(|| panic!("{what} has a non-schema $ref {reference}"));
+            assert!(
+                slice["components"]["schemas"][name].is_object(),
+                "{what}'s $ref {reference} does not resolve inside it"
+            );
+        }
+        let carried: std::collections::BTreeSet<String> = slice["components"]["schemas"]
+            .as_object()
+            .expect("schemas")
+            .keys()
+            .map(|name| format!("#/components/schemas/{name}"))
+            .collect();
+        assert_eq!(
+            carried, found,
+            "{what} carries a schema nothing in it reaches"
+        );
+        for key in ["openapi", "info", "servers", "security"] {
+            assert_eq!(slice[key], doc[key], "{what}'s {key}");
+        }
+        assert_eq!(
+            slice["components"]["securitySchemes"], doc["components"]["securitySchemes"],
+            "{what}'s security schemes"
+        );
+    }
+
+    /// Every tag's slice is a whole document carrying exactly the full
+    /// document's operations with that tag — so none from another tag — and
+    /// together the slices cover every operation. A tag no operation carries
+    /// has no slice.
+    #[test]
+    fn a_tag_slice_is_a_self_contained_document_of_that_tag_alone() {
+        let doc = doc();
+        let tags: Vec<&str> = doc["tags"]
+            .as_array()
+            .expect("top-level tags")
+            .iter()
+            .map(|t| t["name"].as_str().expect("a tag name"))
+            .collect();
+        assert!(
+            tags.len() > 20,
+            "the document has stopped tagging its operations"
+        );
+        let mut covered: Vec<(String, String)> = Vec::new();
+        for tag in tags {
+            let slice = tag_slice(&doc, tag).unwrap_or_else(|| panic!("{tag} has no slice"));
+            let expected: Vec<(String, String)> = documented_routes(&doc)
+                .into_iter()
+                .filter(|(path, method)| {
+                    doc["paths"][path][method.to_ascii_lowercase()]["tags"][0] == tag
+                })
+                .collect();
+            assert!(!expected.is_empty());
+            assert_self_contained_slice(&doc, &slice, &expected, &format!("the {tag} slice"));
+            covered.extend(expected);
+        }
+        covered.sort();
+        assert_eq!(
+            covered,
+            documented_routes(&doc),
+            "the slices must cover every operation"
+        );
+        assert!(tag_slice(&doc, "Nope").is_none());
+    }
+
+    /// Every operation's slice is a whole document carrying that operation
+    /// alone, and a much smaller one than the document — the point of it is
+    /// that an agent can read one operation's contract whole.
+    #[test]
+    fn an_operation_slice_is_a_self_contained_document_of_that_operation_alone() {
+        let doc = doc();
+        let whole = doc.to_string().len();
+        for (path, method) in documented_routes(&doc) {
+            let id = doc["paths"][&path][method.to_ascii_lowercase()]["operationId"]
+                .as_str()
+                .expect("an operationId")
+                .to_string();
+            let slice = operation_slice(&doc, &id).unwrap_or_else(|| panic!("{id} has no slice"));
+            assert_self_contained_slice(
+                &doc,
+                &slice,
+                &[(path.clone(), method.clone())],
+                &format!("the {id} slice"),
+            );
+            assert!(
+                slice.to_string().len() < whole / 4,
+                "the {id} slice is over a quarter of the whole document"
+            );
+        }
+        assert!(operation_slice(&doc, "nope").is_none());
+    }
+
+    /// Serve check for the agent surface: `?tag=` answers that tag's slice, an
+    /// unknown tag is a `400` naming the real ones, and `GET /openapi/index`
+    /// answers the plain-text index — all through the full application.
+    #[tokio::test]
+    async fn the_tag_slice_and_the_route_index_are_served() {
+        let pool = crate::test_support::test_pool().await;
+        let client = crate::test_support::ApiClient::full(&pool);
+        let slice: Value = client
+            .get_json("/openapi.json?tag=Portfolio%20reports")
+            .await;
+        assert!(slice["paths"]["/portfolio/overview"]["post"].is_object());
+        assert!(slice["paths"]["/trades"].is_null());
+        assert_eq!(
+            slice["tags"],
+            serde_json::json!([{ "name": "Portfolio reports" }])
+        );
+
+        let unknown = client.get("/openapi.json?tag=Nope").await;
+        assert_eq!(unknown.status, axum::http::StatusCode::BAD_REQUEST);
+        assert!(
+            unknown.text().contains("no operation is tagged `Nope`"),
+            "{}",
+            unknown.text()
+        );
+        assert!(unknown.text().contains("Trades"), "{}", unknown.text());
+
+        let typo = client.get("/openapi.json?tags=Trades").await;
+        assert_eq!(typo.status, axum::http::StatusCode::BAD_REQUEST);
+
+        let one: Value = client.get_json("/openapi.json?operation=createSells").await;
+        assert_eq!(
+            documented_routes(&one),
+            [("/sells".to_string(), "POST".to_string())]
+        );
+        assert!(one["components"]["schemas"]["SellBody"].is_object());
+        let unknown = client.get("/openapi.json?operation=nope").await;
+        assert_eq!(unknown.status, axum::http::StatusCode::BAD_REQUEST);
+        assert!(unknown.text().contains("`nope`"), "{}", unknown.text());
+        let both = client
+            .get("/openapi.json?operation=createSells&tag=Sells")
+            .await;
+        assert_eq!(both.status, axum::http::StatusCode::BAD_REQUEST);
+
+        let index = client.get("/openapi/index").await;
+        assert_eq!(index.status, axum::http::StatusCode::OK);
+        assert_eq!(index.headers["content-type"], "text/plain; charset=utf-8");
+        assert!(
+            index.text().contains("GET    /trades  listTrades — "),
+            "{}",
+            index.text()
+        );
+        assert!(
+            index
+                .text()
+                .contains("## Trades — GET /openapi.json?tag=Trades")
+        );
     }
 
     /// The filtering half of the reading-a-list contract — which entity list

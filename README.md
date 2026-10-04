@@ -85,7 +85,7 @@ detail on every one** — what it computes, which ATO rule it follows, and where
 - **[The application itself](docs/FEATURES.md#the-application-itself)** — a no-build-step web UI
   served from the same binary, an append-only audit trail of every edit and deletion, optional
   single-credential authentication, and a generated OpenAPI 3.1 description of the whole HTTP
-  surface at `GET /openapi.json` (see
+  surface at `GET /openapi.json`, with a compact route index at `GET /openapi/index` (see
   [Machine-readable API description](docs/FEATURES.md#machine-readable-api-description)).
 
 **Not in scope**, deliberately: this assumes a share **investor** on capital account (not a trader),
