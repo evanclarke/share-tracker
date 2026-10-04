@@ -226,8 +226,13 @@ async fn put_manual(
 
 /// Re-fetch one (listing, date) on demand — typically to replace an errored
 /// row. Returns the freshly stored row (which itself is errored if the
-/// provider failed again) with `201 Created`, the same signal every other
-/// "returns the created row" POST gives.
+/// provider failed again): `201 Created` when the day had no row and this
+/// created one, `200 OK` when it replaced the stored one — the rule every
+/// `POST` follows (`201` only for the resource the call created; docs/API.md,
+/// Creating a record). The store is an upsert on the natural key that keeps the
+/// stored surrogate id on an update and assigns a fresh one on an insert, so
+/// the id is what tells the two apart — a row deleted and re-created between
+/// the read below and the store still reads as the create it is.
 ///
 /// A **manual** row is rejected 422: a hand-entered price is a deliberate
 /// correction for a day the provider got wrong or cannot serve at all, so the
@@ -244,14 +249,15 @@ async fn fetch_one(
         .ok_or_else(|| ApiError::not_found("no such listing"))?;
     validate_complete_trading_day(&market, body.price_date)?;
     reject_unpriced_date(&market, body.price_date)?;
-    if let Some(stored) = db_get_one(&pool, body.listing_id, body.price_date).await?
+    let before = db_get_one(&pool, body.listing_id, body.price_date).await?;
+    if let Some(stored) = &before
         && stored.origin == PriceOrigin::Manual
     {
         return Err(ApiError::unprocessable(format!(
             "the stored price for {} was entered manually ({}) — re-enter it manually to \
              change it, the provider does not take the day back",
             body.price_date,
-            stored.reason.unwrap_or_default()
+            stored.reason.as_deref().unwrap_or_default()
         )));
     }
 
@@ -262,7 +268,12 @@ async fn fetch_one(
         .await
         .map_err(internal)?
         .ok_or_else(|| internal("stored row vanished"))?;
-    Ok((StatusCode::CREATED, Json(row)))
+    let status = if before.is_some_and(|b| b.id == row.id) {
+        StatusCode::OK
+    } else {
+        StatusCode::CREATED
+    };
+    Ok((status, Json(row)))
 }
 
 /// Backfill a listing's price history over a date range (e.g. after importing

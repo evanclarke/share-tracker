@@ -3189,6 +3189,24 @@ fn rejected_request_shape_documented() {
     assert!(!API_MD.contains("classifies its own as `422`"));
 }
 
+/// 2026-10-04 API sweep: create-like `POST`s disagreed on `200` vs `201`. The
+/// rule — `201` only with the resource the call created, `200` for a batch
+/// summary or a replace — is stated once in "Creating a record", and the
+/// closing-price re-fetch documents its per-call split; `api_spec`'s
+/// `every_201_post_answers_the_resource_it_created` pins the routes to it.
+#[test]
+fn post_status_rule_documented() {
+    assert!(API_MD.contains(
+        "**`201` means \"here is what this call created\"; every other `POST` answers `200`.**"
+    ));
+    assert!(API_MD.contains("answer a count of what they stored"));
+    assert!(API_MD.contains(
+        "`POST /closing_prices/fetch` answers `201` when the day had no stored row and `200` when it replaced one"
+    ));
+    assert!(API_MD.contains("`201` when the day had no stored row, `200` when it replaced one"));
+    assert!(!API_MD.contains("It returns `201` with the freshly stored row"));
+}
+
 /// SCENARIOS T-10. `POST /jobs/:name`'s two failures used to be bare status
 /// codes, which the Jobs screen could only toast as "HTTP 404" / "HTTP 500".
 /// The docs pin the bodies they now carry — including that this is the one

@@ -957,7 +957,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Post,
         "/closing_prices/fetch",
-        &[201],
+        &[200, 201],
         "Fetch and store one day's close from the price provider; the stored row is returned.",
         Body::Json("FetchBody"),
         Body::Json("ClosingPrice"),
@@ -1144,7 +1144,7 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Post,
         "/amma_statements/{id}/generate_adjustments",
-        &[201],
+        &[200, 201],
         "Generate the AMIT adjustments an AMMA statement implies (201; a preview run answers 200 with the same body and writes nothing).",
         Body::Json("AmitGenerateBody"),
         Body::Json("GeneratedAdjustments"),
@@ -2575,6 +2575,73 @@ mod tests {
         }
     }
 
+    /// The `201` rule (docs/API.md, Creating a record): a `POST` answers
+    /// `201 Created` only with the resource it created — a row the API serves
+    /// from a `GET`, or a group of the rows one operation created together.
+    /// Anything else a `POST` answers (a batch summary of what an import,
+    /// backfill or snapshot run stored, a report, a preview) is `200`, because
+    /// it is not a resource a client could read back (2026-10-04 API sweep).
+    #[test]
+    fn every_201_post_answers_the_resource_it_created() {
+        const CREATED_GROUPS: &[(&str, &str)] = &[
+            (
+                "TransferGroup",
+                "the transfer-out Sell and its transfer-in Buys",
+            ),
+            (
+                "Participation",
+                "the buy-back's closing Sell and its dividend income row",
+            ),
+            (
+                "Demerge",
+                "the closing Sell and the head and demerged replacement parcels",
+            ),
+            (
+                "ScripExchange",
+                "the closing Sell and the replacement parcels",
+            ),
+            ("Recognise", "the closing Sell at nil proceeds"),
+            (
+                "GeneratedAdjustments",
+                "the AMIT adjustment rows written for the statement",
+            ),
+        ];
+        let readable: std::collections::BTreeSet<&str> = ROUTES
+            .iter()
+            .filter(|row| row.0 == Verb::Get)
+            .filter_map(|row| match row.5 {
+                Body::Json(name) | Body::JsonArray(name) => Some(name),
+                _ => None,
+            })
+            .collect();
+        let mut offenders = Vec::new();
+        for (verb, path, statuses, _, _, response) in ROUTES {
+            if *verb != Verb::Post || !statuses.contains(&201) {
+                continue;
+            }
+            let created = match response {
+                Body::Json(name) => {
+                    readable.contains(name) || CREATED_GROUPS.iter().any(|(group, _)| group == name)
+                }
+                _ => false,
+            };
+            if !created {
+                offenders.push(*path);
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "POSTs answering 201 with something other than the resource they created — \
+             answer 200, or classify a new created group in CREATED_GROUPS: {offenders:?}"
+        );
+        for (group, _) in CREATED_GROUPS {
+            assert!(
+                !readable.contains(group),
+                "{group} is served by a GET now; drop it from CREATED_GROUPS"
+            );
+        }
+    }
+
     /// The coverage pin, both ways: every `.route(…)` registration the sources
     /// make appears in the document under that method, and the document names
     /// no path/method the sources do not register.
@@ -3283,23 +3350,28 @@ mod tests {
         let (resolved, _) = resolved_handler_routes();
         let mut checked = 0;
         for route in resolved.iter().filter(|r| r.verb == Verb::Post) {
-            let named = [
-                ("StatusCode::CREATED", 201u16),
+            // Every status the handler names, ascending — a handler choosing
+            // between two (a create or a replace, a write or a preview) names
+            // both, and the row must carry both.
+            let named: Vec<u16> = [
+                ("StatusCode::OK", 200u16),
+                ("StatusCode::CREATED", 201),
                 ("StatusCode::NO_CONTENT", 204),
                 ("StatusCode::SEE_OTHER", 303),
             ]
             .into_iter()
-            .find_map(|(spelling, status)| {
-                (route.body.contains(spelling) || route.returns.contains(spelling))
-                    .then_some(status)
-            });
+            .filter(|(spelling, _)| {
+                route.body.contains(spelling) || route.returns.contains(spelling)
+            })
+            .map(|(_, status)| status)
+            .collect();
             // No status in the handler at all: it returns its JSON, which axum
             // answers 200 with.
-            let derived = named.unwrap_or(200);
+            let derived = if named.is_empty() { vec![200] } else { named };
             assert_eq!(
                 row_for(route).2,
-                &[derived],
-                "{}: `{}` answers {derived}",
+                derived.as_slice(),
+                "{}: `{}` answers {derived:?}",
                 route.site,
                 route.handler
             );

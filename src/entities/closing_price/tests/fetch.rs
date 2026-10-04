@@ -214,7 +214,8 @@ async fn api_backfill_records_the_overriding_symbol_on_every_stored_row() {
     }
 
     // Re-fetching without the override moves the record with the figure:
-    // a row must never keep the symbol of a write it is no longer from.
+    // a row must never keep the symbol of a write it is no longer from. (A
+    // replace, so `200`, not the create's `201`.)
     let (status, bytes) = post_json(
         &app,
         "/closing_prices/fetch",
@@ -223,7 +224,7 @@ async fn api_backfill_records_the_overriding_symbol_on_every_stored_row() {
     .await;
     assert_eq!(
         status,
-        StatusCode::CREATED,
+        StatusCode::OK,
         "{}",
         String::from_utf8_lossy(&bytes)
     );
@@ -413,10 +414,11 @@ async fn api_backfill_unknown_listing_404_and_bad_range_422() {
 
 #[tokio::test]
 async fn api_fetch_answers_201_with_the_created_row() {
-    // `POST /closing_prices/fetch` returns the row it fetched and stored, so
-    // it answers `201 Created` — the same "returns the created row" signal
-    // every other such POST gives (REST API audit 2026-09-24), not the `200`
-    // it used to.
+    // `POST /closing_prices/fetch` of a day with no stored row returns the row
+    // it created, so it answers `201 Created` — the same "returns the created
+    // row" signal every other such POST gives (REST API audit 2026-09-24). A
+    // re-fetch of a stored day is a replace and answers `200` (see
+    // `api_fetch_replaces_errored_row_and_returns_it`).
     let pool = test_pool().await;
     insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
     // The stub serves Thu 2026-06-04 and nothing for Fri 2026-06-05.
@@ -463,6 +465,11 @@ async fn api_fetch_answers_201_with_the_created_row() {
     assert_eq!(row.price, None);
 }
 
+/// A re-fetch that replaces the stored row answers `200 OK`, not `201`: the
+/// row it returns is the one that was already there (same id — the upsert
+/// keeps it, which is what carries the row's audit trail across versions), so
+/// nothing was created. The `201`/`200` split is the rule every `POST` follows
+/// (docs/API.md, Creating a record — 2026-10-04 API sweep).
 #[tokio::test]
 async fn api_fetch_replaces_errored_row_and_returns_it() {
     let pool = test_pool().await;
@@ -476,6 +483,12 @@ async fn api_fetch_replaces_errored_row_and_returns_it() {
     .await
     .unwrap_err();
 
+    let errored = db_get_one(&pool, 1, ymd(2026, 6, 5))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(errored.status, PriceStatus::Error);
+
     let fetcher = StubFetcher::default().with_close(1, ymd(2026, 6, 5), "62.48", "AUD");
     let app = full_router(pool.clone(), fetcher);
     let (status, bytes) = post_json(
@@ -484,8 +497,9 @@ async fn api_fetch_replaces_errored_row_and_returns_it() {
         serde_json::json!({ "listing_id": 1, "price_date": "2026-06-05" }),
     )
     .await;
-    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(status, StatusCode::OK, "a replace is not a create");
     let row: ClosingPrice = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(row.id, errored.id, "the replaced row keeps its id");
     assert_eq!(row.status, PriceStatus::Ok);
     assert_eq!(row.price, Some("62.48".parse().unwrap()));
 
