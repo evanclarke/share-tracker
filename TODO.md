@@ -53,11 +53,21 @@ by value; the first item is a bug.
   document back and checks each row's `Body` per variant (a `$ref`, an array of `$ref`s, integers,
   a free-form object, or the media type) under every `200`/`201`, and no `content` under a
   `204`/`303`; it fails on `get /listings's 200 has lost its body` with the old line.
-- [ ] **No `operationId` or `tags` on any operation** (0 of 177). Every OpenAPI-to-tool adapter
+- [x] **No `operationId` or `tags` on any operation** (0 of 177). Every OpenAPI-to-tool adapter
   (function calling, MCP bridges) names a tool by its `operationId`. Derive one per route from the
   verb and path (`listTrades`, `getTrade`, `createSell`, `runPortfolioOverview`, …), unique and
   stable, and tag each operation with its `docs/API.md` section. Test: every operation has an
   `operationId`, they are unique, and every operation carries exactly one tag from a fixed list.
+  *Done 2026-10-04:* `api_spec::operation_id` derives the id from the verb and path — a verb word
+  (`list` for a `GET` answering an array, else `get`; `create` for a `201` `POST`, else `run`;
+  `upsert`; `delete`), the literal segments in PascalCase, then `By` + the path parameters
+  (`getExchangeHolidaysByMicAndDate`) — and `tag_for` files each route under the `docs/API.md`
+  `## ` section of the longest matching prefix in the `TAGS` table (so `/income/{id}/reinvest` is
+  `DRP reinvestment`); the document's top-level `tags` lists the used ones in `docs/API.md` order.
+  Pinned by `every_operation_has_a_unique_id_and_one_documented_tag` (ids present, plain and
+  unique; exactly one tag per operation, each a real `## ` heading of `docs/API.md` and listed
+  once at the top level) and `the_tag_list_follows_the_published_routes` (no Authentication tag
+  without `[auth]`). Documented in `docs/API.md`'s OpenAPI description section.
 - [ ] **775 of 1341 schema properties carry no description.** utoipa takes a field's `///` doc
   comment as its description, so this is doc comments on the struct fields — request bodies first,
   since that is where an agent's mistakes are made. Test: every property of every request-body

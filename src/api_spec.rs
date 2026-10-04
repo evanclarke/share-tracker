@@ -37,6 +37,7 @@ use utoipa::openapi::{
     security::{
         ApiKey, ApiKeyValue, HttpAuthScheme, HttpBuilder, SecurityRequirement, SecurityScheme,
     },
+    tag::{Tag, TagBuilder},
 };
 use utoipa::{PartialSchema, ToSchema};
 
@@ -1623,6 +1624,124 @@ const ROUTES: &[RouteRow] = &[
     ),
 ];
 
+/// Which `docs/API.md` `## ` section documents a route, by path prefix: an
+/// operation's one tag is the tag of the **longest** prefix that matches it on
+/// a segment boundary, so an operation nested under another resource's path
+/// (`/income/{id}/reinvest`, documented under DRP reinvestment) can be filed
+/// under its own section. Read by [`tag_for`]; the order is `docs/API.md`'s,
+/// and is the order of the document's top-level `tags` list.
+///
+/// `every_operation_has_a_unique_id_and_one_documented_tag` pins every value
+/// to a real `## ` heading of `docs/API.md`, so a section rename cannot leave a
+/// tag naming nothing — and an agent slicing the contract by tag lands on the
+/// same grouping as a reader of the prose.
+const TAGS: &[(&str, &str)] = &[
+    ("/", "Web frontend"),
+    ("/static", "Web frontend"),
+    ("/openapi.json", "OpenAPI description"),
+    ("/login", "Authentication"),
+    ("/logout", "Authentication"),
+    ("/exchanges", "Exchanges"),
+    ("/exchange_holidays", "Exchange holidays"),
+    ("/listings", "Listings"),
+    ("/holding_accounts", "Holding accounts"),
+    ("/rba_fx_rates", "RBA FX rates"),
+    ("/mic_registry", "MIC registry"),
+    ("/currencies", "Currencies"),
+    ("/closing_prices", "Closing prices"),
+    ("/distribution_events", "Distribution calendar"),
+    ("/report_snapshots", "Report snapshots"),
+    ("/jobs", "Jobs"),
+    ("/trades", "Trades"),
+    ("/income", "Income"),
+    ("/interest_income", "Interest income"),
+    ("/investment_expenses", "Investment expenses"),
+    ("/amma_statements", "AMMA statements"),
+    ("/amit_adjustments", "AMIT adjustments"),
+    ("/ess_statements", "ESS statements"),
+    ("/attachments", "Attachments"),
+    ("/drp_enrolments", "DRP enrolments"),
+    ("/cgt_settings", "CGT settings"),
+    ("/tax_year_settings", "Tax year settings"),
+    ("/corporate_actions", "Corporate actions"),
+    ("/rights_sales", "Corporate actions"),
+    ("/income/{id}/reinvest", "DRP reinvestment"),
+    ("/sells", "Sells"),
+    ("/transfers", "Transfers"),
+    ("/inheritances", "Inheritances"),
+    ("/parcel_allocations", "Parcel allocations"),
+    ("/portfolio", "Portfolio reports"),
+    ("/reports", "Portfolio reports"),
+];
+
+/// The `docs/API.md` section a route is tagged with: the longest [`TAGS`]
+/// prefix matching `path` on a segment boundary. `/` matches only the root
+/// itself — it is the web frontend's page, not a catch-all. A path no prefix
+/// matches is a route nobody has filed yet, which the tag test fails on by
+/// name; it is tagged with the empty string rather than panicking, because
+/// the document is built while the router is assembled.
+fn tag_for(path: &str) -> &'static str {
+    TAGS.iter()
+        .filter(|(prefix, _)| {
+            path == *prefix
+                || (*prefix != "/"
+                    && path
+                        .strip_prefix(prefix)
+                        .is_some_and(|rest| rest.starts_with('/')))
+        })
+        .max_by_key(|(prefix, _)| prefix.len())
+        .map_or("", |&(_, tag)| tag)
+}
+
+/// The operation's `operationId` — the name an OpenAPI-to-tool adapter gives
+/// the tool — derived from the verb and the path so it is stable and needs no
+/// column of its own: a verb word, the path's literal segments in PascalCase,
+/// then `By` + its path parameters (`getTradesById`,
+/// `getExchangeHolidaysByMicAndDate`, `createCorporateActionsParticipateById`).
+///
+/// The verb word says what the call does rather than repeating the HTTP verb:
+/// a `GET` answering an array is `list`, any other `GET` is `get`; a `POST`
+/// answering `201` is `create` and any other `POST` (a report, an import, a
+/// job trigger) is `run`; `PUT` is `upsert`; `DELETE` is `delete`. The root
+/// page, which has no segment to name it, is `getIndex`. Uniqueness is not
+/// assumed: `every_operation_has_a_unique_id_and_one_documented_tag` pins it.
+fn operation_id(verb: Verb, path: &str, statuses: &[u16], response: Body) -> String {
+    let word = match verb {
+        Verb::Get if matches!(response, Body::JsonArray(_) | Body::JsonIntegers) => "list",
+        Verb::Get => "get",
+        Verb::Post if statuses.contains(&201) => "create",
+        Verb::Post => "run",
+        Verb::Put => "upsert",
+        Verb::Delete => "delete",
+    };
+    let pascal = |segment: &str| -> String {
+        segment
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .filter(|word| !word.is_empty())
+            .map(|word| {
+                let mut chars = word.chars();
+                chars.next().map_or(String::new(), |first| {
+                    first.to_ascii_uppercase().to_string() + chars.as_str()
+                })
+            })
+            .collect()
+    };
+    let segments = path.split('/').filter(|s| !s.is_empty());
+    let (params, literals): (Vec<&str>, Vec<&str>) = segments.partition(|s| s.starts_with('{'));
+    let mut id = word.to_string();
+    if literals.is_empty() {
+        id.push_str("Index");
+    }
+    for literal in literals {
+        id.push_str(&pascal(literal));
+    }
+    for (i, param) in params.iter().enumerate() {
+        id.push_str(if i == 0 { "By" } else { "And" });
+        id.push_str(&pascal(param));
+    }
+    id
+}
+
 /// The OpenAPI 3.1 document, assembled from [`ROUTES`] and the schemas the
 /// referenced types derive — the auth-on, root-path form the tests read.
 #[cfg(test)]
@@ -1638,12 +1757,14 @@ pub fn document() -> OpenApi {
 /// at a 404.
 pub fn document_for(base_path: &str, auth: bool) -> OpenApi {
     let mut paths = Paths::new();
+    let mut used_tags = std::collections::BTreeSet::new();
     for &(verb, path, statuses, summary, request, response) in ROUTES {
         if !auth && matches!(path, "/login" | "/logout") {
             continue;
         }
         let operation = operation(verb, path, statuses, summary, request, response);
         paths.add_path_operation(path, vec![verb.http()], operation);
+        used_tags.insert(tag_for(path));
     }
     // The `/static/*.js` routes are registered in a loop over `JS_MODULES`,
     // so no literal path string exists to scan; read them from that same
@@ -1658,6 +1779,16 @@ pub fn document_for(base_path: &str, auth: bool) -> OpenApi {
             Body::Other("text/javascript"),
         );
         paths.add_path_operation(path, vec![HttpMethod::Get], operation);
+        used_tags.insert(tag_for(path));
+    }
+    // The document-level tag list, in `TAGS` order (which is `docs/API.md`'s),
+    // carrying only the tags this deployment's operations use — without
+    // `[auth]` there is no Authentication route to group.
+    let mut tags: Vec<Tag> = Vec::new();
+    for &(_, tag) in TAGS {
+        if used_tags.contains(tag) && !tags.iter().any(|t| t.name == tag) {
+            tags.push(TagBuilder::new().name(tag).build());
+        }
     }
     let server_url = if base_path.is_empty() { "/" } else { base_path };
     let mut builder = OpenApiBuilder::new()
@@ -1669,6 +1800,7 @@ pub fn document_for(base_path: &str, auth: bool) -> OpenApi {
                 .build(),
         )
         .paths(paths)
+        .tags(Some(tags))
         .components(Some(components(auth)))
         .servers(Some(vec![
             utoipa::openapi::ServerBuilder::new()
@@ -1997,6 +2129,8 @@ fn operation(
         );
     }
     let mut builder = OperationBuilder::new()
+        .operation_id(Some(operation_id(verb, path, statuses, response)))
+        .tag(tag_for(path))
         .summary(Some(summary))
         .parameters(Some(operation_parameters(verb, path)))
         .responses(responses.build());
@@ -3644,6 +3778,109 @@ mod tests {
                 "info.description must name the POST-bodied report read {path}"
             );
         }
+    }
+
+    /// Every operation in the emitted document — auth on, so `/login` and
+    /// `/logout` are included, and the `/static/*.js` modules too — carries an
+    /// `operationId`, the ids are unique across the document, and each carries
+    /// exactly one tag, which is a real `## ` heading of `docs/API.md` and
+    /// appears in the document's top-level `tags` list. That list in turn
+    /// names only tags some operation uses, each once.
+    #[test]
+    fn every_operation_has_a_unique_id_and_one_documented_tag() {
+        let api_md = include_str!("../docs/API.md");
+        let sections: std::collections::HashSet<&str> = api_md
+            .lines()
+            .filter_map(|line| line.strip_prefix("## "))
+            .collect();
+        let doc = doc();
+        let listed: Vec<&str> = doc["tags"]
+            .as_array()
+            .expect("the document lists its tags")
+            .iter()
+            .map(|tag| tag["name"].as_str().expect("a tag has a name"))
+            .collect();
+        let mut ids = std::collections::BTreeMap::new();
+        let mut used = std::collections::BTreeSet::new();
+        let mut operations = 0;
+        for (path, item) in doc["paths"].as_object().expect("paths is an object") {
+            for (method, op) in item.as_object().expect("a path item is an object") {
+                operations += 1;
+                let id = op["operationId"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{method} {path} has no operationId"));
+                assert!(
+                    id.chars().all(|c| c.is_ascii_alphanumeric()),
+                    "{method} {path}'s operationId {id:?} is not a plain identifier"
+                );
+                if let Some(other) = ids.insert(id.to_string(), format!("{method} {path}")) {
+                    panic!("{method} {path} and {other} share the operationId {id}");
+                }
+                let tags = op["tags"]
+                    .as_array()
+                    .unwrap_or_else(|| panic!("{method} {path} has no tags"));
+                assert_eq!(tags.len(), 1, "{method} {path} must carry exactly one tag");
+                let tag = tags[0].as_str().expect("a tag is a string");
+                assert!(
+                    sections.contains(tag),
+                    "{method} {path}'s tag {tag:?} is not a `## ` section of docs/API.md"
+                );
+                assert!(
+                    listed.contains(&tag),
+                    "{method} {path}'s tag {tag:?} is missing from the top-level tags"
+                );
+                used.insert(tag);
+            }
+        }
+        assert!(operations > 150, "only {operations} operations were walked");
+        let mut seen = std::collections::HashSet::new();
+        for tag in &listed {
+            assert!(seen.insert(tag), "the top-level tags list {tag:?} twice");
+            assert!(
+                used.contains(tag),
+                "the top-level tag {tag:?} has no operation"
+            );
+        }
+        // The derivation, spot-checked on each verb word and on a nested
+        // operation filed under its own section.
+        let op = |path: &str, method: &str| doc["paths"][path][method].clone();
+        assert_eq!(op("/trades", "get")["operationId"], "listTrades");
+        assert_eq!(op("/trades/{id}", "get")["operationId"], "getTradesById");
+        assert_eq!(op("/sells", "post")["operationId"], "createSells");
+        assert_eq!(
+            op("/listings/{id}", "put")["operationId"],
+            "upsertListingsById"
+        );
+        assert_eq!(
+            op("/portfolio/overview", "post")["operationId"],
+            "runPortfolioOverview"
+        );
+        assert_eq!(
+            op("/exchange_holidays/{mic}/{date}", "delete")["operationId"],
+            "deleteExchangeHolidaysByMicAndDate"
+        );
+        assert_eq!(op("/", "get")["operationId"], "getIndex");
+        assert_eq!(
+            op("/income/{id}/reinvest", "post")["tags"][0],
+            "DRP reinvestment"
+        );
+        assert_eq!(op("/income/{id}", "get")["tags"][0], "Income");
+        assert_eq!(op("/reports/health", "get")["tags"][0], "Portfolio reports");
+    }
+
+    /// Without `[auth]` the Authentication tag goes with its routes: the
+    /// top-level list names only tags some published operation uses.
+    #[test]
+    fn the_tag_list_follows_the_published_routes() {
+        let doc = serde_json::to_value(document_for("", false)).expect("the document serialises");
+        let listed: Vec<&str> = doc["tags"]
+            .as_array()
+            .expect("the document lists its tags")
+            .iter()
+            .filter_map(|tag| tag["name"].as_str())
+            .collect();
+        assert!(!listed.contains(&"Authentication"), "{listed:?}");
+        assert!(listed.contains(&"Trades"), "{listed:?}");
     }
 
     /// The **emitted** document carries every route's success body: each
