@@ -66,10 +66,18 @@ a compatibility shim, alias or deprecation period: rename/re-shape the route, up
   create onto the collection (`POST /listings/:id/renames`).
   Done: `POST`/`GET /listings/:id/renames` share one route. Tests: `api_spec`'s
   `every_served_route_is_documented_and_nothing_else_is`, and every `listing_rename` API test now posts there.
-- [ ] **Writable URLs that cannot be read.** `PUT`/`DELETE /closing_prices/:listing_id/:price_date`
+- [x] **Writable URLs that cannot be read.** `PUT`/`DELETE /closing_prices/:listing_id/:price_date`
   and `DELETE /listings/:id/renames/:rename_id` answer `405` to a `GET` of the same URL. Add the
   GET-one (empty `404` when absent, per the contract), or record why not. (`/sells/:id` reading
   through `/trades/:id` is deliberate — say so where the Sells section lists its routes.)
+  Done: `GET /closing_prices/:listing_id/:price_date` and `GET /listings/:id/renames/:rename_id`
+  (the rename only under its own listing), both on the empty-`404` contract; the Sells section
+  says why `/sells/:id` has none. Tests: `api_spec`'s `every_writable_url_is_readable` (every
+  `PUT`/`DELETE` path has a `GET`, or is classified with where it is read — `/sells/{id}`,
+  `/income/{id}/reinvest`), `every_get_one_route_answers_the_empty_404`,
+  `closing_price::tests::delete::api_get_one_reads_the_row_the_put_and_delete_address`,
+  `listing_rename::tests::api_get_one_reads_the_rename_the_undo_addresses`,
+  `doc_checks::sells_section_says_why_there_is_no_get_one`.
 - [ ] **One status and wording for an unrecognised query parameter.** `POST /jobs/:name` answers
   `422` "cannot read the query string: …" while every other route answers `400` with axum's "Failed
   to deserialize query string: …" (and JSON body rejections keep axum's "Failed to deserialize the

@@ -284,7 +284,7 @@ pub fn router() -> Router<SqlitePool> {
         .route("/listings/{id}/renames", get(list_for_listing).post(rename))
         .route(
             "/listings/{id}/renames/{rename_id}",
-            axum::routing::delete(undo),
+            get(get_one).delete(undo),
         )
 }
 
@@ -299,6 +299,24 @@ pub async fn db_list_for_listing(
     )
     .bind(listing_id)
     .fetch_all(pool)
+    .await
+}
+
+/// One recorded rename of one listing. A rename id that belongs to another
+/// listing is not found, exactly as `db_undo` treats it — the path names both.
+pub async fn db_get(
+    pool: &SqlitePool,
+    listing_id: i64,
+    rename_id: i64,
+) -> Result<Option<ListingRename>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT id, listing_id, effective_date, old_ticker, new_ticker, \
+                old_exchange_mic, new_exchange_mic, old_name, old_price_symbol, note \
+         FROM listing_renames WHERE id = ? AND listing_id = ?",
+    )
+    .bind(rename_id)
+    .bind(listing_id)
+    .fetch_optional(pool)
     .await
 }
 
@@ -600,6 +618,16 @@ async fn list_for_listing(
     Query(_): Query<crate::infra::http::NoFilter>,
 ) -> Result<Json<Vec<ListingRename>>, ApiError> {
     Ok(Json(db_list_for_listing(&pool, listing_id).await?))
+}
+
+async fn get_one(
+    State(pool): State<SqlitePool>,
+    Path((listing_id, rename_id)): Path<(i64, i64)>,
+) -> Result<Json<ListingRename>, ApiError> {
+    db_get(&pool, listing_id, rename_id)
+        .await?
+        .map(Json)
+        .ok_or(ApiError::NotFound)
 }
 
 async fn undo(
@@ -1665,6 +1693,35 @@ mod tests {
         let raw = resp.text();
         assert!(raw.contains("\"old_name\":\"Old Co\""), "{raw}");
         assert!(raw.contains("\"old_price_symbol\":\"OLD.AX\""), "{raw}");
+    }
+
+    /// The URL the undo addresses is readable: the rename it names, under its
+    /// own listing only, and the bare empty `404` once it has been undone.
+    #[tokio::test]
+    async fn api_get_one_reads_the_rename_the_undo_addresses() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("LAAC").insert(&pool).await;
+        test_support::listing(2).ticker("OTHER").insert(&pool).await;
+        let created = db_rename(&pool, 1, &body("2024-06-01", "LAR"))
+            .await
+            .unwrap();
+        let app = client(&pool);
+        let uri = format!("/listings/1/renames/{}", created.id);
+
+        let read: serde_json::Value = app.get_json(&uri).await;
+        assert_eq!(read["id"], created.id);
+        assert_eq!(read["old_ticker"], "LAAC");
+        assert_eq!(read["new_ticker"], "LAR");
+
+        // Another listing's path does not reach it.
+        let other = app.get(format!("/listings/2/renames/{}", created.id)).await;
+        assert_eq!(other.status, StatusCode::NOT_FOUND);
+        assert_eq!(other.text(), "");
+
+        app.delete(&uri).await.expect_status(StatusCode::NO_CONTENT);
+        let gone = app.get(&uri).await;
+        assert_eq!(gone.status, StatusCode::NOT_FOUND);
+        assert_eq!(gone.text(), "");
     }
 
     #[tokio::test]

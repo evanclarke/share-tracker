@@ -980,6 +980,14 @@ const ROUTES: &[RouteRow] = &[
         Body::Json("ClearSummary"),
     ),
     (
+        Verb::Get,
+        "/closing_prices/{listing_id}/{price_date}",
+        &[200],
+        "Fetch the stored price row for one (listing, day), errored or ok, or 404.",
+        Body::None,
+        Body::Json("ClosingPrice"),
+    ),
+    (
         Verb::Put,
         "/closing_prices/{listing_id}/{price_date}",
         &[201, 204],
@@ -1229,6 +1237,14 @@ const ROUTES: &[RouteRow] = &[
         "List one listing's recorded renames.",
         Body::None,
         Body::JsonArray("ListingRename"),
+    ),
+    (
+        Verb::Get,
+        "/listings/{id}/renames/{rename_id}",
+        &[200],
+        "Fetch one recorded rename of this listing, or 404.",
+        Body::None,
+        Body::Json("ListingRename"),
     ),
     (
         Verb::Delete,
@@ -2513,6 +2529,52 @@ mod tests {
              const, so the module routes are documented from the one list rather than a copy",
         ),
     ];
+
+    /// A URL a client can write to (`PUT`) or remove (`DELETE`) is one it can
+    /// also read with a `GET` — otherwise the only way to see what a write is
+    /// about to replace is to scan a list for it (2026-10-04 API sweep). The
+    /// exceptions are URLs that do not address a stored row of their own, each
+    /// with where its state is read instead.
+    #[test]
+    fn every_writable_url_is_readable() {
+        const NOT_A_READABLE_ROW: &[(&str, &str)] = &[
+            (
+                "/sells/{id}",
+                "a Sell is a trade: it is read at GET /trades/{id} (and its \
+                 allocations at /parcel_allocations); /sells is the write path \
+                 that keeps the trade and its allocations atomic",
+            ),
+            (
+                "/income/{id}/reinvest",
+                "an operation on an income row, not a row: its state is the \
+                 row's reinvest_trade_id, read at GET /income/{id}",
+            ),
+        ];
+        let readable: std::collections::BTreeSet<&str> = ROUTES
+            .iter()
+            .filter(|row| row.0 == Verb::Get)
+            .map(|row| row.1)
+            .collect();
+        let mut unreadable: Vec<&str> = ROUTES
+            .iter()
+            .filter(|row| matches!(row.0, Verb::Put | Verb::Delete))
+            .map(|row| row.1)
+            .filter(|path| !readable.contains(path))
+            .filter(|path| !NOT_A_READABLE_ROW.iter().any(|(p, _)| p == path))
+            .collect();
+        unreadable.dedup();
+        assert!(
+            unreadable.is_empty(),
+            "writable URLs with no GET — add the GET-one or classify them in \
+             NOT_A_READABLE_ROW with where they are read: {unreadable:?}"
+        );
+        for (path, _) in NOT_A_READABLE_ROW {
+            assert!(
+                !readable.contains(path),
+                "{path} is readable now; drop it from NOT_A_READABLE_ROW"
+            );
+        }
+    }
 
     /// The coverage pin, both ways: every `.route(…)` registration the sources
     /// make appears in the document under that method, and the document names

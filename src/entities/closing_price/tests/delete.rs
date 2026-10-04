@@ -186,3 +186,41 @@ async fn a_delete_cannot_race_a_concurrent_manual_price_write() {
         "the price the concurrent write stored is still there"
     );
 }
+
+/// The URL the manual `PUT` and the errored-row `DELETE` address is readable
+/// too: an errored row is answered as itself (its `status` says so), a
+/// hand-entered price replacing it likewise, and once the row is gone the
+/// read is the bare empty `404` every GET-one answers.
+#[tokio::test]
+async fn api_get_one_reads_the_row_the_put_and_delete_address() {
+    let pool = test_pool().await;
+    insert_listing(&pool, 1, "HNDQ", "XASX", "AUD").await;
+    insert_buy(&pool, 1, 1, "100").await;
+    store_errored(&pool, ymd(2026, 6, 2)).await;
+    let app = full_router(pool.clone(), StubFetcher::default());
+
+    let errored: serde_json::Value = app.get_json("/closing_prices/1/2026-06-02").await;
+    assert_eq!(errored["listing_id"], 1);
+    assert_eq!(errored["price_date"], "2026-06-02");
+    assert_eq!(errored["status"], "error");
+    assert!(errored["price"].is_null());
+
+    app.put(
+        "/closing_prices/1/2026-06-02",
+        &serde_json::json!({
+            "price": "41.10",
+            "sourced_from": "asx.com.au closing report",
+            "reason": "provider has no candle for the day",
+        }),
+    )
+    .await
+    .expect_status(StatusCode::NO_CONTENT);
+    let manual: serde_json::Value = app.get_json("/closing_prices/1/2026-06-02").await;
+    assert_eq!(manual["status"], "ok");
+    assert_eq!(manual["origin"], "manual");
+    assert_eq!(manual["price"], "41.10");
+
+    let missing = app.get("/closing_prices/1/2026-06-03").await;
+    assert_eq!(missing.status, StatusCode::NOT_FOUND);
+    assert_eq!(missing.text(), "");
+}

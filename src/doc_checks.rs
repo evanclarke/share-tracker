@@ -6253,3 +6253,23 @@ fn the_login_verify_concurrency_bound_is_documented() {
         );
     }
 }
+
+/// `/sells/:id` is writable but has no `GET` — on purpose, since a Sell is a
+/// trade and is read at `/trades/:id` (2026-10-04 API sweep). The code side is
+/// `api_spec`'s `every_writable_url_is_readable`, which classifies the path;
+/// this pins the Sells section saying so where its routes are listed.
+#[test]
+fn sells_section_says_why_there_is_no_get_one() {
+    let sells = &API_MD[API_MD.find("\n## Sells\n").expect("a Sells section")..];
+    let sells = &sells[..sells[1..].find("\n## ").map_or(sells.len(), |i| i + 1)];
+    for fact in [
+        "deliberately no `GET /sells/:id`",
+        "a Sell **is** a trade",
+        "`GET /trades/:id`",
+    ] {
+        assert!(
+            sells.contains(fact),
+            "docs/API.md's Sells section must state `{fact}`"
+        );
+    }
+}

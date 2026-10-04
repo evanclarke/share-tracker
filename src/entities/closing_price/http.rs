@@ -14,7 +14,7 @@ use axum::{
     Extension, Json, Router,
     extract::{Path, Query, State},
     http::StatusCode,
-    routing::{get, post, put},
+    routing::{get, post},
 };
 use chrono::{Duration, NaiveDate, Utc};
 use rust_decimal::Decimal;
@@ -117,6 +117,21 @@ async fn list(
     .await
     .map(Json)
     .map_err(ApiError::from)
+}
+
+/// One stored row for one (listing, day) — the read half of the URL the
+/// manual `PUT` and the errored-row `DELETE` address, so a client can look at
+/// what it is about to replace or remove. Errored rows are answered like any
+/// other (their own `status` says so); no row at all is the bare empty `404`
+/// every GET-one answers.
+async fn get_one(
+    State(pool): State<SqlitePool>,
+    Path((listing_id, price_date)): Path<(i64, NaiveDate)>,
+) -> Result<Json<ClosingPrice>, ApiError> {
+    db_get_one(&pool, listing_id, price_date)
+        .await?
+        .map(Json)
+        .ok_or(ApiError::NotFound)
 }
 
 /// Store a price entered by hand for one (listing, day), with the provenance
@@ -498,6 +513,6 @@ pub fn router() -> Router<SqlitePool> {
         )
         .route(
             "/closing_prices/{listing_id}/{price_date}",
-            put(put_manual).delete(delete_one),
+            get(get_one).put(put_manual).delete(delete_one),
         )
 }
