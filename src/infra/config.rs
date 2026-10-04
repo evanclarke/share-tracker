@@ -33,6 +33,9 @@ pub struct ConfigFile {
     pub port: Option<u16>,
     pub base_path: Option<String>,
     pub schedule: Option<String>,
+    /// Extra names the server may be reached by while `[auth]` is absent —
+    /// see [`Settings::allowed_hosts`].
+    pub allowed_hosts: Option<Vec<String>>,
     pub auth: Option<AuthConfig>,
     pub email: Option<EmailConfig>,
 }
@@ -148,6 +151,15 @@ pub struct Settings {
     /// path like `/share_tracker`. See [`normalise_base_path`].
     pub base_path: String,
     pub schedule: Option<String>,
+    /// The host names (no port, no scheme) the server answers to beyond
+    /// `localhost` and IP addresses while `[auth]` is absent — the
+    /// DNS-rebinding guard in `infra::request_guard`. Empty by default, which
+    /// serves a browser at `http://127.0.0.1:3000` or `http://localhost:3000`
+    /// and refuses every other name; a LAN deployment reached as
+    /// `http://bigbrain.lan:3000` lists `"bigbrain.lan"`. Ignored once
+    /// `[auth]` is configured. Config-file only, like `[auth]`: it is
+    /// deployment identity, not a per-run switch.
+    pub allowed_hosts: Vec<String>,
     /// `None` (the default) serves the whole application exactly as before —
     /// see `infra::auth`. `Some` only when `[auth]` is present in the config
     /// file; there is no CLI flag for it.
@@ -202,9 +214,35 @@ impl Settings {
             port: args.port.or(file.port).unwrap_or(DEFAULT_PORT),
             base_path: normalise_base_path(args.base_path.or(file.base_path).as_deref())?,
             schedule: args.schedule.or(file.schedule),
+            allowed_hosts: file
+                .allowed_hosts
+                .unwrap_or_default()
+                .into_iter()
+                .map(validate_allowed_host)
+                .collect::<Result<_, _>>()?,
             auth,
             email,
         })
+    }
+}
+
+/// One `allowed_hosts` entry, checked and normalised: a bare host name of
+/// letters, digits, `-` and `.` — not a URL, not `name:port` (the guard
+/// compares names, whatever the port), and not an IP address (those are
+/// always allowed, so listing one is a sign the entry means something else).
+fn validate_allowed_host(raw: String) -> Result<String, String> {
+    let name = raw.trim().trim_end_matches('.').to_ascii_lowercase();
+    let valid = !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.'))
+        && name.parse::<std::net::IpAddr>().is_err();
+    if valid {
+        Ok(name)
+    } else {
+        Err(format!(
+            "invalid allowed_hosts entry {raw:?}: expected a bare host name like              \"bigbrain.lan\" (no scheme or port; IP addresses are always allowed and need no entry)"
+        ))
     }
 }
 
@@ -392,6 +430,7 @@ mod tests {
                 port: 3000,
                 base_path: String::new(),
                 schedule: None,
+                allowed_hosts: Vec::new(),
                 auth: None,
                 email: None,
             }
@@ -399,6 +438,27 @@ mod tests {
         // The default host must parse to a bindable address (the server has no
         // authentication, so the safe default is loopback only).
         assert!(settings.host.parse::<std::net::IpAddr>().is_ok());
+    }
+
+    /// `allowed_hosts` entries are normalised to bare lowercase names, and an
+    /// entry that cannot be one — a URL, a `name:port`, an IP address (always
+    /// allowed anyway) — aborts startup rather than silently matching nothing.
+    #[test]
+    fn allowed_hosts_are_normalised_and_a_non_name_is_rejected() {
+        let resolve =
+            |toml: &str| Settings::resolve(Args::parse_from(["share-tracker"]), parse(toml));
+        let settings =
+            resolve(r#"allowed_hosts = ["BigBrain.lan.", "tracker"]"#).expect("resolves");
+        assert_eq!(settings.allowed_hosts, ["bigbrain.lan", "tracker"]);
+        for bad in [
+            "http://bigbrain.lan",
+            "bigbrain.lan:3000",
+            "192.168.1.2",
+            "",
+        ] {
+            let err = resolve(&format!("allowed_hosts = [{bad:?}]")).unwrap_err();
+            assert!(err.contains("invalid allowed_hosts entry"), "{bad}: {err}");
+        }
     }
 
     #[test]

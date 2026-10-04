@@ -1,6 +1,7 @@
 //! Cross-cutting infrastructure: CLI args, DB pool + backup, logging, decimal
 //! helpers, AUD FX conversion, outbound email, the maintenance-job scheduler,
-//! and the optional shared-credential access control. No domain logic lives
+//! the optional shared-credential access control, and the cross-site/
+//! DNS-rebinding request guard. No domain logic lives
 //! here.
 pub mod args;
 pub mod auth;
@@ -13,4 +14,5 @@ pub mod fetch;
 pub mod fx;
 pub mod http;
 pub mod logging;
+pub mod request_guard;
 pub mod scheduler;

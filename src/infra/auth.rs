@@ -34,10 +34,11 @@
 //!
 //! **CSRF needs no token.** `SameSite=Lax` withholds the cookie from
 //! cross-site requests, and every state-changing route in this app is
-//! `POST`/`PUT`/`DELETE`; `GET` routes are read-only. The residual gap —
-//! login-CSRF on `POST /login` itself — is recorded in `docs/API.md`'s Known
-//! limitations as accepted for a single-credential app rather than papered
-//! over with a token nothing else in the app needs.
+//! `POST`/`PUT`/`DELETE`; `GET` routes are read-only. On top of that, the
+//! request guard (`infra::request_guard`, layered outside this one) refuses a
+//! cross-site write outright — `POST /login` included, which is what narrows
+//! the login-CSRF gap recorded in `docs/API.md`'s Known limitations to a
+//! browser sending neither `Sec-Fetch-Site` nor `Origin`.
 //!
 //! Argon2 throttles each individual guess (~30 ms/attempt on ordinary
 //! hardware, i.e. tens of attempts/sec/core), but that is a per-attempt cost,
@@ -1418,6 +1419,7 @@ mod api_tests {
             registry,
             fetcher,
             Some(auth),
+            &[],
         ))
     }
 
@@ -2180,6 +2182,7 @@ mod lockout_tests {
             registry,
             fetcher,
             Some(auth),
+            &[],
         ))
     }
 

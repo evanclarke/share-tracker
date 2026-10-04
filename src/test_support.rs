@@ -304,6 +304,7 @@ impl ApiClient {
             registry,
             fetcher,
             None,
+            &[],
         ))
     }
 

@@ -113,7 +113,7 @@ cargo build --release
 
 `--version` prints the version (from `Cargo.toml`, the single source of truth for [release numbering](#releases-and-versioning)).
 
-> **Note:** unless [`[auth]`](#authentication) is configured, the server has no authentication, so the default `--host 127.0.0.1` keeps it reachable from this machine only. Passing `--host 0.0.0.0` exposes it to every machine on the network — do that only on trusted networks, or with `[auth]` configured.
+> **Note:** unless [`[auth]`](#authentication) is configured, the server has no authentication, so the default `--host 127.0.0.1` keeps it reachable from this machine only. Passing `--host 0.0.0.0` exposes it to every machine on the network — do that only on trusted networks, or with `[auth]` configured. Without `[auth]`, the server also answers only to `localhost`, IP addresses, and the names in the config file's `allowed_hosts` list (a guard against DNS rebinding) — so reaching it on the LAN as `http://bigbrain.lan:3000` needs `allowed_hosts = ["bigbrain.lan"]`; any other name gets a `403` saying so. Cross-site writes from a browser are always refused. See [Request guard](docs/API.md#request-guard).
 
 The database is created automatically on first run. Migrations are applied in order at startup.
 

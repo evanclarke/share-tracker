@@ -58,14 +58,14 @@ use crate::infra::decimal::{Money, parse_dec, row_dec};
 use crate::infra::http::{self, ApiError};
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     routing::{get, post},
 };
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use sqlx::{Row, SqlitePool, sqlite::SqliteRow};
+use sqlx::{QueryBuilder, Row, SqlitePool, sqlite::SqliteRow};
 use std::collections::HashMap;
 
 #[derive(utoipa::ToSchema, Debug, Clone, Serialize)]
@@ -682,10 +682,35 @@ async fn attach_allocations(
     Ok(())
 }
 
-pub async fn db_list(pool: &SqlitePool) -> Result<Vec<RightsSale>, sqlx::Error> {
-    let rows = sqlx::query("SELECT * FROM rights_sales ORDER BY date, id")
-        .fetch_all(pool)
-        .await?;
+/// `GET /rights_sales` query: the listing (through the rights issue the sale
+/// disposes of — a rights sale records the action, not the listing), the
+/// holding account, the rights issue itself, and an inclusive `date` range.
+/// Every field optional; absent is the whole table.
+#[derive(Debug, Default, Deserialize, utoipa::IntoParams)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ListParams {
+    pub listing_id: Option<i64>,
+    pub holding_account_id: Option<i64>,
+    pub rights_action_id: Option<i64>,
+    pub from: Option<NaiveDate>,
+    pub to: Option<NaiveDate>,
+}
+
+pub(crate) async fn db_list(
+    pool: &SqlitePool,
+    params: &ListParams,
+) -> Result<Vec<RightsSale>, sqlx::Error> {
+    let mut qb = QueryBuilder::new(
+        "SELECT rs.* FROM rights_sales rs \
+         JOIN corporate_actions ca ON ca.id = rs.rights_action_id WHERE 1=1",
+    );
+    http::FilterClauses::over(&mut qb)
+        .eq("ca.listing_id", params.listing_id)
+        .eq("rs.holding_account_id", params.holding_account_id)
+        .eq("rs.rights_action_id", params.rights_action_id)
+        .date_range("rs.date", params.from, params.to);
+    qb.push(" ORDER BY rs.date, rs.id");
+    let rows = qb.build().fetch_all(pool).await?;
     let mut sales = rows
         .iter()
         .map(sale_from_row)
@@ -724,8 +749,11 @@ async fn sell_rights(
     Ok((StatusCode::CREATED, Json(sale)))
 }
 
-async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<RightsSale>>, ApiError> {
-    Ok(Json(db_list(&pool).await?))
+async fn list(
+    State(pool): State<SqlitePool>,
+    Query(params): Query<ListParams>,
+) -> Result<Json<Vec<RightsSale>>, ApiError> {
+    Ok(Json(db_list(&pool, &params).await?))
 }
 
 async fn get_one(
@@ -1375,6 +1403,23 @@ mod tests {
         assert_eq!(resp.status, StatusCode::OK);
         let sales: serde_json::Value = resp.json();
         assert_eq!(sales.as_array().unwrap().len(), 1);
+
+        // The filters narrow — through the rights issue for the listing — and
+        // a filter matching nothing is an empty list, never the whole table.
+        let count = |path: &'static str| {
+            let app = &app;
+            async move { app.get(path).await.json::<Vec<serde_json::Value>>().len() }
+        };
+        assert_eq!(count("/rights_sales?listing_id=1").await, 1);
+        assert_eq!(count("/rights_sales?listing_id=2").await, 0);
+        assert_eq!(count("/rights_sales?rights_action_id=10").await, 1);
+        assert_eq!(count("/rights_sales?holding_account_id=1").await, 1);
+        assert_eq!(count("/rights_sales?holding_account_id=2").await, 0);
+        assert_eq!(
+            count("/rights_sales?from=2024-07-20&to=2024-07-20").await,
+            1
+        );
+        assert_eq!(count("/rights_sales?from=2024-07-21").await, 0);
 
         let resp = app.get(format!("/rights_sales/{id}")).await;
         assert_eq!(resp.status, StatusCode::OK);

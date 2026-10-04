@@ -11,7 +11,7 @@ use crate::infra::db::write_tx;
 use crate::infra::http::{self, ApiError, Upsert, UpsertResponse};
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     routing::get,
 };
@@ -51,24 +51,31 @@ pub fn router() -> Router<SqlitePool> {
         )
 }
 
-pub async fn db_list(pool: &SqlitePool) -> Result<Vec<ExchangeHoliday>, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT id, mic, holiday_date, name FROM exchange_holidays ORDER BY mic, holiday_date",
-    )
-    .fetch_all(pool)
-    .await
+/// `GET /exchange_holidays[/{mic}]` query: an inclusive `holiday_date` range
+/// (a year's calendar is `?from=2026-01-01&to=2026-12-31`). Absent is every
+/// seeded date.
+#[derive(Debug, Default, Deserialize, utoipa::IntoParams)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ListParams {
+    pub from: Option<NaiveDate>,
+    pub to: Option<NaiveDate>,
 }
 
-pub async fn db_list_for_exchange(
+/// Every exchange's holidays, or one exchange's when `mic` is given, within
+/// the requested date range.
+pub(crate) async fn db_list(
     pool: &SqlitePool,
-    mic: &str,
+    mic: Option<&str>,
+    params: &ListParams,
 ) -> Result<Vec<ExchangeHoliday>, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT id, mic, holiday_date, name FROM exchange_holidays WHERE mic = ? ORDER BY holiday_date",
-    )
-    .bind(mic)
-    .fetch_all(pool)
-    .await
+    let mut qb = sqlx::QueryBuilder::new(
+        "SELECT id, mic, holiday_date, name FROM exchange_holidays WHERE 1=1",
+    );
+    http::FilterClauses::over(&mut qb)
+        .eq("mic", mic.map(str::to_string))
+        .date_range("holiday_date", params.from, params.to);
+    qb.push(" ORDER BY mic, holiday_date");
+    qb.build_query_as().fetch_all(pool).await
 }
 
 /// One exchange's public-holiday dates as a lookup set, keyed by MIC rather
@@ -227,15 +234,22 @@ pub(crate) async fn exchange_holidays_for_listing(
     Ok(dates.into_iter().collect())
 }
 
-async fn list(State(pool): State<SqlitePool>) -> Result<Json<Vec<ExchangeHoliday>>, ApiError> {
-    db_list(&pool).await.map(Json).map_err(ApiError::from)
+async fn list(
+    State(pool): State<SqlitePool>,
+    Query(params): Query<ListParams>,
+) -> Result<Json<Vec<ExchangeHoliday>>, ApiError> {
+    db_list(&pool, None, &params)
+        .await
+        .map(Json)
+        .map_err(ApiError::from)
 }
 
 async fn list_for_exchange(
     State(pool): State<SqlitePool>,
     Path(mic): Path<String>,
+    Query(params): Query<ListParams>,
 ) -> Result<Json<Vec<ExchangeHoliday>>, ApiError> {
-    db_list_for_exchange(&pool, &mic)
+    db_list(&pool, Some(&mic), &params)
         .await
         .map(Json)
         .map_err(ApiError::from)
@@ -477,6 +491,27 @@ mod tests {
         let holidays: Vec<ExchangeHoliday> = resp.json();
         assert!(holidays.iter().all(|h| h.mic == "XASX"));
         assert!(holidays.iter().any(|h| h.holiday_date == ymd(2024, 12, 25)));
+    }
+
+    /// `?from=`/`?to=` narrow both the whole calendar and one exchange's,
+    /// inclusive at both ends.
+    #[tokio::test]
+    async fn api_lists_narrow_by_an_inclusive_date_range() {
+        let pool = test_pool().await;
+        for path in ["/exchange_holidays", "/exchange_holidays/XASX"] {
+            let holidays: Vec<ExchangeHoliday> = client(&pool)
+                .get(format!("{path}?from=2024-12-25&to=2024-12-26"))
+                .await
+                .json();
+            assert!(!holidays.is_empty(), "{path}");
+            assert!(
+                holidays
+                    .iter()
+                    .all(|h| (ymd(2024, 12, 25)..=ymd(2024, 12, 26)).contains(&h.holiday_date)),
+                "{path}: {holidays:?}"
+            );
+            assert!(holidays.iter().any(|h| h.holiday_date == ymd(2024, 12, 25)));
+        }
     }
 
     #[tokio::test]

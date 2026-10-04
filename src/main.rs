@@ -147,6 +147,7 @@ async fn main() {
         registry,
         fetcher,
         settings.auth.clone(),
+        &settings.allowed_hosts,
     );
     let ip: std::net::IpAddr = settings.host.parse().expect("invalid host address");
     let addr = std::net::SocketAddr::new(ip, settings.port);

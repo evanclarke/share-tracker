@@ -92,6 +92,11 @@ pub enum ApiError {
     /// failed login itself, naming the peer.
     #[error("{0}")]
     Unauthorized(String),
+    /// 403 with a plain-text reason — the request guard
+    /// (`infra::request_guard`) refusing a cross-site write or an unlisted
+    /// `Host`. Logged at warn by the guard itself, naming the request.
+    #[error("{0}")]
+    Forbidden(String),
     /// 429 with a plain-text reason, the request refused for now — the
     /// failed-login lockout on `POST /login` alone (see `infra::auth`).
     ///
@@ -154,6 +159,11 @@ impl ApiError {
     /// A 401 with the given plain-text explanation.
     pub fn unauthorized(msg: impl Into<String>) -> Self {
         ApiError::Unauthorized(msg.into())
+    }
+
+    /// A 403 with the given plain-text explanation.
+    pub fn forbidden(msg: impl Into<String>) -> Self {
+        ApiError::Forbidden(msg.into())
     }
 
     /// A 429 with the given plain-text explanation and the seconds to wait —
@@ -314,6 +324,7 @@ impl IntoResponse for ApiError {
             ApiError::NotFound => StatusCode::NOT_FOUND.into_response(),
             ApiError::NotFoundWithReason(body) => (StatusCode::NOT_FOUND, body).into_response(),
             ApiError::Unauthorized(body) => (StatusCode::UNAUTHORIZED, body).into_response(),
+            ApiError::Forbidden(body) => (StatusCode::FORBIDDEN, body).into_response(),
             ApiError::TooManyRequests {
                 body,
                 retry_after_secs,
@@ -1027,6 +1038,13 @@ fn error_cases() -> Vec<(&'static str, Response, StatusCode, Option<&'static str
             Some(PLAIN),
         ),
         (
+            "403",
+            ApiError::forbidden("refused a cross-site request (Sec-Fetch-Site: cross-site)")
+                .into_response(),
+            StatusCode::FORBIDDEN,
+            Some(PLAIN),
+        ),
+        (
             "404 with a cause",
             ApiError::not_found("no income with that id").into_response(),
             StatusCode::NOT_FOUND,
@@ -1120,6 +1138,7 @@ fn assert_every_variant_is_sampled(error: &ApiError) {
         | ApiError::NotFound
         | ApiError::NotFoundWithReason(_)
         | ApiError::Unauthorized(_)
+        | ApiError::Forbidden(_)
         | ApiError::TooManyRequests { .. } => {}
     }
 }

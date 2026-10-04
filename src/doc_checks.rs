@@ -352,10 +352,11 @@ fn list_filtering_contract_documented() {
     assert!(section.contains("**inclusive at both ends**"));
     assert!(section.contains("Several filters on one request **AND** together"));
     assert!(section.contains("never a `404`"));
-    assert!(section.contains(
-        "An **unrecognised parameter is refused `400` naming it on every list route that decodes \
-         a query string**"
-    ));
+    assert!(
+        section.contains(
+            "An **unrecognised parameter is refused `400` naming it on every list route**"
+        )
+    );
     assert!(section.contains("cursor paging of the entity lists remains an open item"));
     // The filters table's paths and parameters are **derived** from
     // `entities::filtered_list_routes()` (the classification table the
@@ -415,14 +416,23 @@ fn list_filtering_contract_documented() {
         "`/exchanges`, `/currencies`, `/mic_registry`, `/rba_fx_rates`, `/holding_accounts`, \
          `/cgt_settings` and `/tax_year_settings` are reference or settings tables read whole"
     ));
-    // …and the two hand-written lists that decode no query at all are stated
-    // too, so a client does not read `GET /rights_sales?listing_id=3` as a
-    // narrowed list.
+    // There are no query-ignoring lists any more (`GET /rights_sales?listing_id=3`
+    // once answered the whole table): the section must not describe one.
     assert!(
-        section.contains("Two hand-written lists decode **no query string at all**"),
-        "the filters section must state the query-ignoring lists"
+        !section.contains("decode **no query string at all**"),
+        "the filters section still describes a list that ignores its query string"
     );
-    assert!(section.contains("`/rights_sales` and `/exchange_holidays` return the whole table"));
+    for row in [
+        "| `GET` | `/rights_sales` |",
+        "| `GET` | `/exchange_holidays` |",
+    ] {
+        assert!(
+            API_MD
+                .lines()
+                .any(|line| line.starts_with(row) && line.contains("?from=")),
+            "the `{row}` route row must name its filters"
+        );
+    }
     // Each affected section's own list route names its filters.
     for (row, param) in [
         (

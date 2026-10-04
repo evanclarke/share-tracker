@@ -66,7 +66,7 @@ use crate::infra::db::write_tx;
 use crate::infra::http::{ApiError, CrudEntity};
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     routing::{get, post},
 };
@@ -596,6 +596,9 @@ async fn rename(
 async fn list_for_listing(
     State(pool): State<SqlitePool>,
     Path(listing_id): Path<i64>,
+    // Decoded only so an unrecognised parameter is refused rather than
+    // silently ignored, like every other list.
+    Query(_): Query<crate::infra::http::NoFilter>,
 ) -> Result<Json<Vec<ListingRename>>, ApiError> {
     Ok(Json(db_list_for_listing(&pool, listing_id).await?))
 }

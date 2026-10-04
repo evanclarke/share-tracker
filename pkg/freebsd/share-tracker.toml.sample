@@ -33,6 +33,14 @@ host = "127.0.0.1"
 # HTTP port.
 port = 3000
 
+# Host names the server answers to while [auth] is NOT configured, beyond
+# localhost and IP addresses (which always work). Any other name in a
+# request's Host header is refused 403 — a guard against DNS rebinding, where a
+# web page re-points its own domain at this machine to read the portfolio.
+# List the bare name (no scheme, no port) you type into the browser, e.g.
+# "bigbrain.lan" for http://bigbrain.lan:3000. Ignored once [auth] is set.
+# allowed_hosts = ["bigbrain.lan"]
+
 # URL path prefix to mount the whole application under, for serving it from a
 # sub-path behind a reverse proxy — e.g. "/share_tracker" puts the UI and the
 # API at https://host/share_tracker/... . Every route moves under the prefix

@@ -150,12 +150,11 @@ pub(crate) enum ListKind {
     /// rejection.
     Shared,
     /// A hand-written handler that decodes its own query string — the
-    /// trades list (it presents the row), and the two shared lists that
-    /// already had filters. It refuses an unknown parameter too.
+    /// trades list (it presents the row), and the hand-written lists. It
+    /// refuses an unknown parameter too. There is deliberately no third kind:
+    /// a list that decoded no query string answered `?listing_id=3` with the
+    /// whole table, silently.
     HandWrittenQuery,
-    /// A hand-written list with no query decoding at all, left as it was
-    /// by this item.
-    HandWrittenIgnoringQuery,
 }
 
 #[cfg(test)]
@@ -311,9 +310,7 @@ pub(crate) const LIST_ROUTES: &[ListRoute] = &[
         kind: ListKind::Shared,
         reason: "One row per financial year, read whole; the keyed GET-one is the narrowed read.",
     },
-    // Hand-written lists outside this item's workhorse entity lists.
-    // Their existing filters are unchanged; `/rights_sales` and
-    // `/exchange_holidays` decode no query at all.
+    // Hand-written lists outside the workhorse entity lists.
     ListRoute {
         path: "/closing_prices",
         filters: &["listing_id", "from", "to", "status"],
@@ -336,27 +333,33 @@ pub(crate) const LIST_ROUTES: &[ListRoute] = &[
     },
     ListRoute {
         path: "/rights_sales",
-        filters: &[],
-        kind: ListKind::HandWrittenIgnoringQuery,
-        reason: "Hand-written list outside this item's scope; it decodes no query string.",
+        filters: &[
+            "listing_id",
+            "holding_account_id",
+            "rights_action_id",
+            "from",
+            "to",
+        ],
+        kind: ListKind::HandWrittenQuery,
+        reason: "",
     },
     ListRoute {
         path: "/exchange_holidays",
-        filters: &[],
-        kind: ListKind::HandWrittenIgnoringQuery,
-        reason: "Hand-written list outside this item's scope; it decodes no query string.",
+        filters: &["from", "to"],
+        kind: ListKind::HandWrittenQuery,
+        reason: "",
     },
     ListRoute {
         path: "/exchange_holidays/{mic}",
-        filters: &[],
-        kind: ListKind::HandWrittenIgnoringQuery,
-        reason: "Path-narrowed to one exchange's calendar; outside this item's scope.",
+        filters: &["from", "to"],
+        kind: ListKind::HandWrittenQuery,
+        reason: "",
     },
     ListRoute {
         path: "/listings/{id}/renames",
         filters: &[],
-        kind: ListKind::HandWrittenIgnoringQuery,
-        reason: "Path-narrowed to one listing's rename chain; outside this item's scope.",
+        kind: ListKind::HandWrittenQuery,
+        reason: "Path-narrowed to one listing's rename chain, a handful of rows read whole.",
     },
 ];
 
@@ -1299,8 +1302,8 @@ mod tests {
 
     /// Every classified list route that decodes a query string refuses an
     /// unrecognised parameter with a `400` naming it — the shared generic
-    /// lists (filtered and `NoFilter` alike), the trades list, and the two
-    /// hand-written filtered lists. An unfiltered `NoFilter` route is the
+    /// lists (filtered and `NoFilter` alike), the trades list, and every
+    /// hand-written list, the path-narrowed ones included. An unfiltered `NoFilter` route is the
     /// point of the last case: the empty braced struct does decode the empty
     /// query string a bare `GET` sends, while any parameter at all is the
     /// unknown-field rejection.
@@ -1310,27 +1313,28 @@ mod tests {
         let client = ApiClient::full(&pool);
         let mut checked = 0;
         for route in LIST_ROUTES {
-            if route.kind == ListKind::HandWrittenIgnoringQuery || route.path.contains('{') {
-                continue;
-            }
-            let resp = client.get(route.path).await;
+            // A path-narrowed list is driven at a sample key: the seeded
+            // `XASX` calendar, and listing 1 (absent — an empty chain is
+            // still a `200`).
+            let path = route.path.replace("{mic}", "XASX").replace("{id}", "1");
+            let path = path.as_str();
+            let resp = client.get(path).await;
             assert_eq!(
                 resp.status,
                 StatusCode::OK,
-                "GET {} must list without a query string",
-                route.path
+                "GET {path} must list without a query string"
             );
             for filter in route.filters {
                 let query = format!(
                     "{}?{}={}",
-                    route.path,
+                    path,
                     filter,
                     sample_filter_value(route.path, filter)
                 );
                 let resp = client.get(&query).await;
                 assert_eq!(resp.status, StatusCode::OK, "GET {query}");
             }
-            let query = format!("{}?zzz_unrecognised=1", route.path);
+            let query = format!("{path}?zzz_unrecognised=1");
             let resp = client.get(&query).await;
             let (status, body) = resp.status_and_body();
             assert_eq!(
@@ -1345,7 +1349,7 @@ mod tests {
             checked += 1;
         }
         assert_eq!(
-            checked, 23,
+            checked, 27,
             "every query-decoding list route must be driven here"
         );
     }

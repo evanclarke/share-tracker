@@ -27,13 +27,20 @@ use crate::infra::scheduler::{self, JobRegistry};
 /// routes and applies `infra::auth::require_auth` in front of everything else
 /// merged here (including the web frontend and its `/static` assets, except
 /// the small unauthenticated allowlist `require_auth` itself carves out).
+///
+/// `allowed_hosts` is the config file's list of extra names the server may be
+/// reached by when `[auth]` is absent — see [`crate::infra::request_guard`],
+/// which is layered outside everything else (the login page included) whatever
+/// `auth` is.
 pub fn router(
     base_path: &str,
     pool: SqlitePool,
     registry: JobRegistry,
     fetcher: SharedFetcher,
     auth: Option<Auth>,
+    allowed_hosts: &[String],
 ) -> Router {
+    let guard = crate::infra::request_guard::RequestGuard::new(auth.is_some(), allowed_hosts);
     let mut app = crate::entities::router()
         .merge(crate::reports::router())
         .merge(scheduler::router())
@@ -60,7 +67,7 @@ pub fn router(
         None => app,
     };
     if base_path.is_empty() {
-        return catching_panics(app);
+        return catching_panics(guarded(app, guard));
     }
     // `nest` matches the prefix itself (`/share_tracker`) and everything below
     // it (`/share_tracker/listings`), but *not* the bare prefix with a trailing
@@ -82,7 +89,18 @@ pub fn router(
             }),
         )
         .nest(base_path, app);
-    catching_panics(app)
+    catching_panics(guarded(app, guard))
+}
+
+/// The request guard ([`crate::infra::request_guard`]) around the whole
+/// served surface: outside `require_auth` and the base-path redirect, so a
+/// cross-site write or an unlisted `Host` is refused before anything else
+/// runs, and inside only the panic net.
+fn guarded(app: Router, guard: crate::infra::request_guard::RequestGuard) -> Router {
+    app.layer(axum::middleware::from_fn_with_state(
+        guard,
+        crate::infra::request_guard::guard,
+    ))
 }
 
 /// The outermost layer of both shapes [`router`] returns: a panicking handler
@@ -134,6 +152,7 @@ mod tests {
             registry,
             fetcher,
             auth,
+            &[],
         ))
     }
 

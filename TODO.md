@@ -25,5 +25,53 @@ enforcement it judged out of proportion, and the three decisions it would not ma
 owner's behalf — are closed too, and archived with the review itself in
 [`DONE/reviews.md`](DONE/reviews.md).
 
-**There is no open work.** The next pass starts from a new finding: a REQUIREMENTS entry, a
-[SCENARIOS.md](SCENARIOS.md) section, or a review.
+## 2026-10-04 HTTP API consistency sweep
+
+A sweep of all 171 routes for consistency and common API pitfalls, probed against a live server.
+**The only clients of this API are the web UI and Claude Code**, so none of the items below needs
+a compatibility shim, alias or deprecation period: rename/re-shape the route, update `config.js`,
+`api_spec.rs`'s `ROUTES`, `docs/API.md` and the tests in the same change.
+
+- [x] **Cross-site writes and DNS rebinding with `[auth]` off.** A plain HTML form on any site could
+  `POST` to `http://127.0.0.1:3000` — the bodyless operations (`demerge`, `exchange`, `recognise`,
+  `vest`, `POST /jobs/:name`, `regenerate_provisional`), the text-body imports (a forged
+  `/rba_fx_rates/import` would plant FX rates the import then never overwrites) and the multipart
+  upload all accepted it — and the server answered any `Host`, so a rebinding page could read the
+  whole portfolio. Fixed by `infra::request_guard` (`403` for a write the browser marks
+  cross-site/same-site or whose `Origin` ≠ `Host`; with no `[auth]`, `403` for a `Host` that is not
+  `localhost`, an IP literal or in the new `allowed_hosts` config key). Tests:
+  `infra::request_guard::tests::*`, `infra::config::tests::allowed_hosts_are_normalised_and_a_non_name_is_rejected`.
+- [x] **Three lists silently ignored their query string.** `GET /rights_sales?listing_id=3` answered
+  the whole table; likewise `/exchange_holidays[/:mic]` and `/listings/:id/renames`. `/rights_sales`
+  now filters by `listing_id`/`holding_account_id`/`rights_action_id`/`from`/`to`, the holiday lists
+  by `from`/`to`, and the renames list refuses any parameter; the `HandWrittenIgnoringQuery` list
+  kind is gone. Tests: `entities::tests::every_list_route_refuses_an_unknown_parameter` (now drives
+  the path-narrowed lists too), `rights_sale::tests::api_sell_rights_returns_201_then_lists_gets_and_deletes`,
+  `exchange_holiday::tests::api_lists_narrow_by_an_inclusive_date_range`.
+- [x] **Stale Error-body row.** `docs/API.md` named `GET /report_snapshots/series` "with an unknown
+  report slug" as an empty `404`; that route takes no slug — it is `GET /report_snapshots/{report}/{date}`.
+  Pinned by the existing `doc_checks::error_body_matrix_pins_every_status_and_shape` table read.
+- [ ] **One path casing.** Paths mix snake_case (entities, `/reports/*`, `clear_unpriced_before`,
+  `regenerate_all`) with kebab-case (`/portfolio/net-capital-gain`, `parcel-optimiser`,
+  `period-performance`), and `/reports/franking_at_risk/what-if` mixes both in one path. Pick one
+  (snake_case matches the table/column names and the majority) and rename the rest. While there:
+  `api_spec::query_parameters` carries a dead `"/reports/net-capital-gain/what-if"` arm that no route
+  matches (the route is `POST /portfolio/net-capital-gain/what-if`).
+- [ ] **Rename routes use two URLs.** A rename is created at `POST /listings/:id/rename` but listed
+  at `GET /listings/:id/renames` and undone at `DELETE /listings/:id/renames/:rename_id`. Move the
+  create onto the collection (`POST /listings/:id/renames`).
+- [ ] **Writable URLs that cannot be read.** `PUT`/`DELETE /closing_prices/:listing_id/:price_date`
+  and `DELETE /listings/:id/renames/:rename_id` answer `405` to a `GET` of the same URL. Add the
+  GET-one (empty `404` when absent, per the contract), or record why not. (`/sells/:id` reading
+  through `/trades/:id` is deliberate — say so where the Sells section lists its routes.)
+- [ ] **One status and wording for an unrecognised query parameter.** `POST /jobs/:name` answers
+  `422` "cannot read the query string: …" while every other route answers `400` with axum's "Failed
+  to deserialize query string: …" (and JSON body rejections keep axum's "Failed to deserialize the
+  JSON body into the target type:" prefix). Settle on one status for a query rejection and one
+  wording shape, ideally by a shared `Query`/`Json` extractor wrapper rather than per handler.
+- [ ] **Create-like POSTs disagree on `200` vs `201`.** `POST /closing_prices/fetch` and
+  `/amma_statements/:id/generate_adjustments` answer `201`; `POST /report_snapshots/generate`,
+  `/closing_prices/backfill` and the three `/…/import` feeds answer `200` though they can create rows.
+  Decide the rule (e.g. `201` only when the response is the created resource; `200` for a summary of
+  a batch that may also update) and state it in `docs/API.md`'s "Creating a record", aligning any
+  route that breaks it.

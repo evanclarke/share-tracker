@@ -77,7 +77,9 @@ unlabelled backup).
 
 Errors are never JSON. A rejected request answers either a text/plain; \
 charset=utf-8 body with the reason — 400 (a malformed path parameter, query \
-string or body), 401, 404 on a delete, an operation, or a read whose parameter \
+string or body), 401, 403 (the request guard: a cross-site write, or with no \
+[auth] a Host name that is not localhost, an IP address or in allowed_hosts), \
+404 on a delete, an operation, or a read whose parameter \
 names a missing row (GET /portfolio/activity?listing_id=), 413, 415 (a JSON body sent \
 without Content-Type: application/json), 422, 429 on POST /login once a source \
 has exhausted its failed-attempt budget (the body carries the reason and a \
@@ -112,14 +114,16 @@ account: /trades, /income, /investment_expenses, /amma_statements, \
 /interest_income takes ?holding_account_id= and the date range; \
 /drp_enrolments takes ?listing_id= and ?holding_account_id=; \
 /amit_adjustments takes ?amma_statement_id= and ?trade_id=, and \
-/parcel_allocations ?sale_trade_id= and ?purchase_trade_id=. The \
-long-standing /closing_prices (?listing_id=, ?from=, ?to=, ?status= — ok or \
+/parcel_allocations ?sale_trade_id= and ?purchase_trade_id=. \
+/rights_sales takes ?listing_id= (the rights issue's listing), \
+?holding_account_id=, ?rights_action_id= and the date range; \
+/exchange_holidays and /exchange_holidays/{mic} take the date range over \
+holiday_date. The long-standing /closing_prices (?listing_id=, ?from=, ?to=, ?status= — ok or \
 error, omitted is every row: the rows carrying a price, which is one call \
 rather than two, but not quite the series a valuation reads — a row before \
 its listing's unpriced_before is stored ok and superseded) and /attachments \
 (owner ids, include_linked) filters are unchanged. An unrecognised \
-parameter is a 400 naming it on every list route that decodes a query \
-string — including a list that accepts no filter, which refuses any \
+parameter is a 400 naming it on every list route — including a list that accepts no filter, which refuses any \
 parameter at all rather than silently ignoring it.
 
 A PUT upsert reports its outcome. PUT /<collection>/{id} answers 201 Created \
@@ -765,7 +769,8 @@ const ROUTES: &[RouteRow] = &[
         Verb::Get,
         "/rights_sales",
         &[200],
-        "List every rights sale.",
+        "List rights sales, optionally narrowed by ?listing_id= (the rights issue's listing) / \
+         ?holding_account_id= / ?rights_action_id= / ?from= / ?to= (inclusive, over the sale date).",
         Body::None,
         Body::JsonArray("RightsSale"),
     ),
@@ -789,7 +794,8 @@ const ROUTES: &[RouteRow] = &[
         Verb::Get,
         "/exchange_holidays",
         &[200],
-        "List every exchange holiday.",
+        "List every exchange's holidays, optionally narrowed by ?from= / ?to= (inclusive, over \
+         holiday_date).",
         Body::None,
         Body::JsonArray("ExchangeHoliday"),
     ),
@@ -797,7 +803,8 @@ const ROUTES: &[RouteRow] = &[
         Verb::Get,
         "/exchange_holidays/{mic}",
         &[200],
-        "List one exchange's holiday calendar.",
+        "List one exchange's holiday calendar, optionally narrowed by ?from= / ?to= (inclusive, \
+         over holiday_date).",
         Body::None,
         Body::JsonArray("ExchangeHoliday"),
     ),
@@ -2054,6 +2061,10 @@ fn query_parameters(verb: Verb, path: &str) -> Vec<Parameter> {
         "/attachments" => of::<crate::entities::attachment::ListQuery>(),
         "/attachments/{id}/content" => of::<crate::entities::attachment::ContentQuery>(),
         "/closing_prices" => of::<crate::entities::closing_price::ListParams>(),
+        "/rights_sales" => of::<crate::entities::rights_sale::ListParams>(),
+        "/exchange_holidays" | "/exchange_holidays/{mic}" => {
+            of::<crate::entities::exchange_holiday::ListParams>()
+        }
         "/report_snapshots" => of::<crate::reports::snapshot::ListParams>(),
         "/report_snapshots/series" => of::<crate::reports::snapshot::SeriesParams>(),
         "/report_snapshots/holding_series" => of::<crate::reports::snapshot::HoldingSeriesParams>(),
@@ -4047,8 +4058,10 @@ mod tests {
              than two, but not quite the series a valuation reads — a row before its listing's \
              unpriced_before is stored ok and superseded) and /attachments (owner ids, \
              include_linked) filters are unchanged.",
-            "An unrecognised parameter is a 400 naming it on every list route that decodes a \
-             query string",
+            "/rights_sales takes ?listing_id= (the rights issue's listing)",
+            "/exchange_holidays and /exchange_holidays/{mic} take the date range over \
+             holiday_date.",
+            "An unrecognised parameter is a 400 naming it on every list route —",
             "including a list that accepts no filter, which refuses any parameter at all rather \
              than silently ignoring it.",
         ] {
@@ -4095,7 +4108,7 @@ mod tests {
             filtered += 1;
         }
         assert_eq!(
-            filtered, 16,
+            filtered, 19,
             "the set of filtered list routes has changed; the paragraph must describe the new one"
         );
 
