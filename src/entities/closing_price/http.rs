@@ -40,15 +40,21 @@ pub(crate) struct ListParams {
 #[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FetchBody {
+    /// The listing to re-fetch a closing price for.
     listing_id: i64,
+    /// The trading day to fetch (`YYYY-MM-DD`); whatever is stored for that
+    /// day is replaced.
     price_date: NaiveDate,
 }
 
 #[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BackfillBody {
+    /// The listing to backfill closing prices for.
     listing_id: i64,
+    /// First day of the range (`YYYY-MM-DD`, inclusive).
     from: NaiveDate,
+    /// Last day of the range (`YYYY-MM-DD`, inclusive).
     to: NaiveDate,
     /// One-off provider symbol for this fetch only (not persisted to
     /// `listings.price_symbol`) — recovers a pre-rename date range under the
@@ -79,6 +85,8 @@ pub struct ManualPriceBody {
 #[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClearBody {
+    /// The listing whose stored rows before its `unpriced_before` date are
+    /// cleared.
     listing_id: i64,
 }
 

@@ -73,19 +73,35 @@ pub struct InterestIncome {
 #[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InterestIncomeBody {
+    /// The date the interest was credited (`YYYY-MM-DD`); sets the financial year and FX
+    /// conversion month.
     pub date_paid: NaiveDate,
+    /// Gross interest, including any amount withheld (decimal string, in `currency`; 0 when
+    /// omitted).
     #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub amount: Decimal,
+    /// TFN amount withheld from the gross interest (decimal string, in `currency`; 0 when
+    /// omitted). Australian-source rows only.
     #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub tfn_withholding_tax: Decimal,
+    /// Whether the payer is foreign, e.g. a US broker's cash sweep (default false). Routes
+    /// the row to foreign interest income instead of Australian interest.
     #[serde(default)]
     pub foreign_source: bool,
+    /// Foreign tax withheld from the gross amount, counted toward the foreign income tax
+    /// offset (decimal string, in `currency`, non-negative; 0 when omitted). Foreign-source
+    /// rows only.
     #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub foreign_tax_paid: Decimal,
+    /// ISO 4217 code of the amounts; converted to AUD at the rate for the month of
+    /// `date_paid`. Defaults to `AUD`.
     #[serde(default = "default_currency")]
     pub currency: String,
+    /// Free-text description of the source, e.g. `ANZ savings account`. Informational only.
     #[serde(default)]
     pub source: Option<String>,
+    /// The holding account the interest was paid on, e.g. a broker cash account; omit for
+    /// interest from outside the portfolio's accounts. Informational only.
     #[serde(default)]
     pub holding_account_id: Option<i64>,
 }

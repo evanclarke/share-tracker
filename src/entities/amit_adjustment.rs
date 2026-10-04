@@ -40,8 +40,15 @@ pub struct AmitAdjustment {
 #[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AmitAdjustmentBody {
+    /// The AMMA statement whose per-unit `cost_base_adjustment` is applied.
+    /// One adjustment per statement per parcel.
     pub amma_statement_id: i64,
+    /// The purchase parcel the adjustment reduces: a Buy or DRP trade of the
+    /// statement's listing.
     pub trade_id: i64,
+    /// Units of the parcel the adjustment covers, in the parcel's as-acquired
+    /// units (decimal string, at most the parcel's quantity). A split or bonus
+    /// issue before the statement's year end is re-based automatically.
     #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub quantity: Decimal,
 }

@@ -33,6 +33,8 @@ pub struct CgtSettings {
 #[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CgtSettingsBody {
+    /// Net capital loss carried forward from before the first recorded year
+    /// (decimal string, AUD, not negative).
     #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub opening_capital_loss: Decimal,
 }

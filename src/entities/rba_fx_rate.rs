@@ -123,6 +123,8 @@ impl CrudEntity for RbaFxRate {
 #[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CorrectionBody {
+    /// The corrected rate: foreign currency units per 1 AUD (decimal string, positive), the
+    /// RBA F11 convention. Replaces the stored figure for the row's currency and month.
     #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub rate: Decimal,
 }

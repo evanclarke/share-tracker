@@ -99,22 +99,45 @@ pub struct Listing {
 #[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ListingBody {
+    /// ISO 10383 MIC of the exchange it trades on, e.g. `XASX`. Must be omitted/null
+    /// exactly when `security_type` is `Crypto`.
     #[serde(default)]
     pub exchange_mic: Option<String>,
+    /// Ticker symbol on that exchange, e.g. `VAS`. Unique per exchange; for `Crypto`, a
+    /// recognised digital-token code such as `BTC`.
     pub ticker: String,
+    /// Security name.
     pub name: String,
+    /// ISIN, or null when not known.
     pub isin: Option<String>,
+    /// `Share`, `ETF`, `LIC`, `Trust` or `Crypto`.
     pub security_type: SecurityType,
+    /// ISO 4217 code the security is quoted and traded in.
     pub currency: String,
+    /// Whether the security is an attribution managed investment trust (AMIT), whose AMMA
+    /// statements adjust parcel cost bases.
     pub amit: bool,
+    /// For a trust that converted to an AMIT: the 1 July its first AMIT income year began
+    /// (`YYYY-MM-DD`). Only on an `amit` listing; null applies the flag to the whole
+    /// history.
     #[serde(default)]
     pub amit_from: Option<NaiveDate>,
+    /// The date the price provider stopped quoting the security, e.g. a delisting
+    /// (`YYYY-MM-DD`). From then on prices are not fetched and valuation carries the last
+    /// stored close forward. Null = quoted as usual.
     #[serde(default)]
     pub unpriced_from: Option<NaiveDate>,
+    /// The date the price provider's series begins (`YYYY-MM-DD`); before it prices are not
+    /// fetched and valuation leaves the holding out of the totals. Must fall before
+    /// `unpriced_from` when both are set. Null = full history available.
     #[serde(default)]
     pub unpriced_before: Option<NaiveDate>,
+    /// Whether it is a preference share — franking credits then need 90 (not 45) days at
+    /// risk (default false).
     #[serde(default)]
     pub preference: bool,
+    /// Price-provider symbol override, used verbatim instead of the symbol derived from
+    /// ticker and exchange (e.g. `LAC.TO`). Null = derived.
     #[serde(default)]
     pub price_symbol: Option<String>,
 }

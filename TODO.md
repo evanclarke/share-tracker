@@ -68,10 +68,18 @@ by value; the first item is a bug.
   unique; exactly one tag per operation, each a real `## ` heading of `docs/API.md` and listed
   once at the top level) and `the_tag_list_follows_the_published_routes` (no Authentication tag
   without `[auth]`). Documented in `docs/API.md`'s OpenAPI description section.
-- [ ] **775 of 1341 schema properties carry no description.** utoipa takes a field's `///` doc
+- [x] **775 of 1341 schema properties carry no description.** utoipa takes a field's `///` doc
   comment as its description, so this is doc comments on the struct fields — request bodies first,
   since that is where an agent's mistakes are made. Test: every property of every request-body
   schema (the ones `ROUTES` names as a request `Body`) has a non-empty `description`.
+  *Done 2026-10-04:* 196 undescribed request-body fields across 29 schemas now carry doc comments
+  stating unit/currency, convention, default-when-omitted and validation (each corporate-action
+  field names the action types it belongs to), worded from `docs/SCHEMA.md` and the write-time
+  checks. Pinned by `api_spec::tests::every_request_body_property_is_described`, which walks the
+  served document from each `ROUTES` request body through every schema it `$ref`s (48 schemas, 261
+  properties) and names any property without a description — counting the `oneOf` `$ref` branch
+  where utoipa puts an `Option<Enum>` field's comment. Response schemas (the remaining ~580
+  properties) are not held to the rule; `docs/API.md`'s OpenAPI section says so.
 - [ ] **The contract is too large to load.** The OpenAPI document is ~397 KB (~100k tokens) and
   `docs/API.md` ~670 KB, so an agent can read neither whole. Add (a) a compact route index — one
   line per route, verb + path + summary, generated from `ROUTES` (a served route or a checked-in

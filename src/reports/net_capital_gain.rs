@@ -1207,19 +1207,26 @@ async fn net_capital_gain_export_handler(
 #[derive(utoipa::ToSchema, Debug, Deserialize, utoipa::IntoParams)]
 #[serde(deny_unknown_fields)]
 pub struct WhatIfRequest {
+    /// The listing hypothetically sold.
     pub listing_id: i64,
     /// Restricts strategy-derived (and validates explicit) allocations to
     /// one account's parcels; absent = parcels from any account.
     #[serde(default)]
     pub holding_account_id: Option<i64>,
+    /// Units hypothetically sold (decimal string, positive).
     #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub units: Decimal,
     /// Total capital proceeds in AUD.
     #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub proceeds: Decimal,
+    /// Hypothetical sale date (`YYYY-MM-DD`); decides the financial year and CGT-discount
+    /// eligibility.
     pub date: NaiveDate,
+    /// Explicit parcels to draw the units from. Give exactly one of `allocations` and `strategy`.
     #[serde(default)]
     pub allocations: Option<Vec<WhatIfAllocation>>,
+    /// Parcel-selection strategy to draw the units by: `fifo`, `min_gain`, `max_discount`
+    /// or `harvest_losses`. Give exactly one of `allocations` and `strategy`.
     #[serde(default)]
     pub strategy: Option<Strategy>,
 }
@@ -1227,7 +1234,9 @@ pub struct WhatIfRequest {
 #[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WhatIfAllocation {
+    /// An open Buy or DRP parcel of the listing.
     pub purchase_trade_id: i64,
+    /// Units drawn from that parcel (decimal string, positive).
     #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub units: Decimal,
 }

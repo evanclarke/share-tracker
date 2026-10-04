@@ -110,7 +110,12 @@ fn sale_from_row(row: &SqliteRow) -> Result<RightsSale, sqlx::Error> {
 #[serde(deny_unknown_fields)]
 #[schema(as = SellRightsAllocationInput)]
 pub struct AllocationInput {
+    /// An original Buy or DRP parcel of the issue's listing, acquired before the record
+    /// date, that the sold rights are anchored to (their discount clock runs from its
+    /// acquisition).
     pub purchase_trade_id: i64,
+    /// Rights units anchored to that parcel (decimal string, positive, at most the
+    /// entitlement its record-date units earned).
     #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub units: Decimal,
 }

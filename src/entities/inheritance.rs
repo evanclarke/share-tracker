@@ -177,29 +177,47 @@ pub struct Inheritance {
 #[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InheritanceBody {
+    /// The listing inherited.
     pub listing_id: i64,
-    /// Defaults to the seeded default holding account when omitted.
+    /// The holding account the parcel lands in. Defaults to the seeded
+    /// default holding account when omitted.
     #[serde(default = "crate::entities::holding_account::default_holding_account_id")]
     pub holding_account_id: i64,
+    /// Units inherited, in date-of-death terms (decimal string, positive).
     #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub quantity: Decimal,
+    /// Date of death (`YYYY-MM-DD`); the linked Buy is dated on it. Not before 20 September
+    /// 1985 and not in the future.
     pub date_of_death: NaiveDate,
+    /// Which rule produced `cost_base`: `DeceasedCostBase` (the deceased's cost base at
+    /// death, for an asset they acquired on or after 20 September 1985) or
+    /// `MarketValueAtDeath` (a pre-CGT asset).
     pub cost_base_rule: CostBaseRule,
+    /// The whole parcel's first-element cost base under `cost_base_rule`, in `currency`
+    /// (decimal string).
     #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub cost_base: Decimal,
-    /// Absent/null means no LPR expenditure.
+    /// Expenditure by the legal personal representative the beneficiary may
+    /// include in the cost base (decimal string; AUD estates only). Absent/null
+    /// means no LPR expenditure.
     #[serde(
         default,
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"
     )]
     pub lpr_expenditure: Option<Decimal>,
+    /// When the legal personal representative incurred `lpr_expenditure` (`YYYY-MM-DD`, on
+    /// or after the death); required exactly when that amount is non-zero.
     #[serde(default)]
     pub lpr_expenditure_date: Option<NaiveDate>,
+    /// When the deceased acquired the asset (`YYYY-MM-DD`); required exactly when
+    /// `cost_base_rule` is `DeceasedCostBase`, and starts the CGT discount clock.
     #[serde(default)]
     pub deceased_acquisition_date: Option<NaiveDate>,
+    /// ISO 4217 code of `cost_base`. Defaults to `AUD`.
     #[serde(default = "default_currency")]
     pub currency: String,
-    /// Absent/null means 1 (the AUD case).
+    /// Manual foreign-per-AUD fallback rate (decimal string), used when no ATO
+    /// rate exists for the month. Absent/null means 1 (the AUD case).
     #[serde(
         default,
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"

@@ -85,26 +85,42 @@ pub struct InvestmentExpense {
 #[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InvestmentExpenseBody {
+    /// When the expense was incurred (`YYYY-MM-DD`); sets the financial year it is deducted
+    /// in and the FX conversion month. An expense spread over several years is one row per
+    /// year.
     pub date_incurred: NaiveDate,
+    /// Kind of expense: `LoanInterest`, `ManagementFee`, `AdviceFee`, `AccountKeepingFee`,
+    /// `Subscription` or `Other`.
     pub expense_type: ExpenseType,
+    /// The deductible amount after any apportionment — the figure the tax summary totals
+    /// (decimal string, in `currency`, non-negative; 0 when omitted).
     #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub amount: Decimal,
+    /// Optional provenance: the expense before apportionment (decimal string,
+    /// non-negative). No calculation reads it.
     #[serde(
         default,
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"
     )]
     pub gross_amount: Option<Decimal>,
+    /// Optional provenance: the percentage of `gross_amount` that is deductible (decimal
+    /// string, 0–100). Given with `gross_amount`, gross × pct must cent-round to `amount`.
     #[serde(
         default,
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"
     )]
     pub deductible_percentage: Option<Decimal>,
+    /// ISO 4217 code of the amounts; converted to AUD at the rate for the month of
+    /// `date_incurred`. Defaults to `AUD`.
     #[serde(default = "default_currency")]
     pub currency: String,
+    /// Free-text note.
     #[serde(default)]
     pub description: Option<String>,
+    /// The listing the expense relates to; omit for a portfolio-wide expense.
     #[serde(default)]
     pub listing_id: Option<i64>,
+    /// The holding account the expense relates to; omit for a portfolio-wide expense.
     #[serde(default)]
     pub holding_account_id: Option<i64>,
 }

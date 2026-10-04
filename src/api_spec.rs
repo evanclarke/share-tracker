@@ -3959,6 +3959,101 @@ mod tests {
         assert!(checked > 100, "only {checked} success bodies checked");
     }
 
+    /// Every property of every schema a request body reaches — the bodies
+    /// `ROUTES` names and every schema they `$ref`, transitively (a Sell's
+    /// allocation rows, a what-if's parcels) — carries a non-empty
+    /// `description`. That text is each field's `///` doc comment, and it is
+    /// what an agent filling a body from the OpenAPI document has to go on:
+    /// the unit, the convention (`foreign per 1 AUD`), what an omission
+    /// defaults to. A new body field without one fails here, naming it.
+    ///
+    /// An `Option<Enum>` field is emitted as `oneOf: [{$ref, description},
+    /// {type: null}]` — utoipa puts the comment on the `$ref` branch — so a
+    /// description on any `oneOf`/`allOf`/`anyOf` branch counts too.
+    #[test]
+    fn every_request_body_property_is_described() {
+        fn described(property: &Value) -> bool {
+            let has = |v: &Value| {
+                v.get("description")
+                    .and_then(Value::as_str)
+                    .is_some_and(|d| !d.trim().is_empty())
+            };
+            has(property)
+                || ["oneOf", "allOf", "anyOf"].iter().any(|k| {
+                    property
+                        .get(*k)
+                        .and_then(Value::as_array)
+                        .is_some_and(|branches| branches.iter().any(has))
+                })
+        }
+        /// Every `$ref`'d component name anywhere under `v`, and every
+        /// `properties` map met on the way (a tagged enum's variants each
+        /// carry their own).
+        fn walk<'a>(v: &'a Value, refs: &mut Vec<String>, props: &mut Vec<&'a Value>) {
+            match v {
+                Value::Object(map) => {
+                    if let Some(Value::String(r)) = map.get("$ref") {
+                        refs.push(r.trim_start_matches("#/components/schemas/").to_string());
+                    }
+                    if let Some(properties) = map.get("properties") {
+                        props.push(properties);
+                    }
+                    map.values().for_each(|c| walk(c, refs, props));
+                }
+                Value::Array(items) => items.iter().for_each(|c| walk(c, refs, props)),
+                _ => {}
+            }
+        }
+
+        let doc = doc();
+        let schemas = doc["components"]["schemas"]
+            .as_object()
+            .expect("components.schemas is an object");
+        let mut queue: Vec<String> = ROUTES
+            .iter()
+            .filter_map(|&(_, _, _, _, request, _)| match request {
+                Body::Json(name) | Body::JsonArray(name) | Body::Form(name) => {
+                    Some(name.to_string())
+                }
+                _ => None,
+            })
+            .collect();
+        let mut seen = std::collections::BTreeSet::new();
+        let mut undescribed = std::collections::BTreeSet::new();
+        let mut checked = 0;
+        while let Some(name) = queue.pop() {
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            let schema = schemas
+                .get(&name)
+                .unwrap_or_else(|| panic!("request schema {name} is not a component"));
+            let mut props = Vec::new();
+            walk(schema, &mut queue, &mut props);
+            for properties in props {
+                for (field, property) in properties.as_object().expect("properties is an object") {
+                    checked += 1;
+                    if !described(property) {
+                        undescribed.insert(format!("{name}.{field}"));
+                    }
+                }
+            }
+        }
+        assert!(
+            undescribed.is_empty(),
+            "request-body properties with no description (add a `///` doc comment \
+             to the field): {undescribed:?}"
+        );
+        // The bodies and their nested rows: far more than a handful, so an
+        // empty walk (a renamed `ROUTES` variant) cannot pass vacuously.
+        assert!(
+            seen.len() > 40,
+            "only {} request schemas walked",
+            seen.len()
+        );
+        assert!(checked > 200, "only {checked} request properties checked");
+    }
+
     /// Every `PUT` route records the statuses it can answer: the create/replace
     /// pair `[201, 204]` for the upserts, and the single status the two
     /// documented exceptions can give. A new `PUT` route that records neither

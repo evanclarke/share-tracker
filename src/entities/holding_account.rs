@@ -43,6 +43,7 @@ pub struct HoldingAccount {
 #[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HoldingAccountBody {
+    /// Account name, unique, e.g. `Employer share plan`.
     pub name: String,
 }
 

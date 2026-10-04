@@ -289,15 +289,25 @@ impl Trade {
 #[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TradeBody {
+    /// `Buy` or `DRP` (a dividend reinvestment). A Sell is refused here — record it with
+    /// `PUT /sells/{id}` or `POST /sells` so it carries its parcel allocations.
     pub trade_type: TradeType,
+    /// Trade date (`YYYY-MM-DD`): a trading day of the listing's exchange, between 20
+    /// September 1985 and today.
     pub date: NaiveDate,
+    /// Settlement date (`YYYY-MM-DD`, not before `date`). Omitted: computed T+n business
+    /// days from `date` over the exchange's holiday calendar (same day for Crypto).
     #[serde(default)]
     pub settlement_date: Option<NaiveDate>,
+    /// The listing traded.
     pub listing_id: i64,
+    /// Price per unit, in `currency` (decimal string).
     #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub average_price: Decimal,
+    /// Units traded (decimal string, positive).
     #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub quantity: Decimal,
+    /// ISO 4217 code of the price — the listing's trading currency.
     pub currency: String,
     /// GST-inclusive when `brokerage_includes_gst` is set (the server splits
     /// it; any supplied `gst_on_brokerage` is ignored), ex-GST otherwise.
@@ -305,11 +315,19 @@ pub struct TradeBody {
     /// round-trip is lossless.
     #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub brokerage: Decimal,
+    /// GST on the brokerage (decimal string; 0 when omitted). Ignored when
+    /// `brokerage_includes_gst` is set — the server splits it out.
     #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub gst_on_brokerage: Decimal,
+    /// Whether `brokerage` was entered GST-inclusive; the server then stores it split into
+    /// ex-GST brokerage and GST (amount ÷ 11, to the cent). Default false.
     #[serde(default)]
     pub brokerage_includes_gst: bool,
+    /// ISO 4217 code the brokerage was billed in; must equal `currency` (convert a foreign
+    /// fee before entry).
     pub brokerage_currency: String,
+    /// Manual foreign-per-AUD rate (decimal string; `1` for AUD), the fallback when no
+    /// ATO/RBA monthly rate exists for the trade's month.
     #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub fx_rate: Decimal,
     /// Optional deliberate spot-rate override; see `Trade::spot_fx_rate`.
@@ -318,6 +336,7 @@ pub struct TradeBody {
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"
     )]
     pub spot_fx_rate: Option<Decimal>,
+    /// The broker's contract-note reference. Informational.
     #[serde(default)]
     pub contract_note_ref: Option<String>,
     /// Optional statement cross-check; see `Trade::statement_total`.
@@ -326,10 +345,16 @@ pub struct TradeBody {
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"
     )]
     pub statement_total: Option<Decimal>,
+    /// DRP only: leftover cash carried in from the previous reinvestment (decimal string,
+    /// in `currency`; 0 when omitted).
     #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub residual_brought_forward: Decimal,
+    /// DRP only: leftover cash carried to the next reinvestment (decimal string, in
+    /// `currency`; 0 when omitted).
     #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub residual_carried_forward: Decimal,
+    /// DRP only: leftover cash paid out instead of carried (decimal string, in `currency`;
+    /// 0 when omitted).
     #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub residual_paid_out: Decimal,
     /// Defaults to the seeded default holding account when omitted, so

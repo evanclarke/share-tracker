@@ -957,7 +957,9 @@ fn unauthorized_response(state: &AuthState, headers: &HeaderMap) -> Response {
 #[derive(utoipa::ToSchema, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct LoginForm {
+    /// The configured `[auth]` username.
     username: String,
+    /// The account password.
     password: String,
 }
 

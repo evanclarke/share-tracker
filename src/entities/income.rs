@@ -374,58 +374,95 @@ impl Income {
 #[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IncomeBody {
+    /// The listing that paid the distribution.
     pub listing_id: i64,
+    /// Payment date (`YYYY-MM-DD`). Sets the financial year and FX conversion month unless
+    /// `entitlement_date` governs.
     pub date_paid: NaiveDate,
+    /// Ex-dividend date (`YYYY-MM-DD`), optional; used for the franking-credit
+    /// holding-period test. Rejected on `EmploymentIncome` rows.
     #[serde(default)]
     pub ex_date: Option<NaiveDate>,
+    /// Franked dividend amount, excluding the franking credits (decimal string, in
+    /// `currency`; 0 when omitted).
     #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub franked_amount: Decimal,
+    /// Unfranked amount (decimal string, in `currency`; 0 when omitted). For
+    /// `EmploymentIncome` and `OtherIncome` rows, the whole cash amount.
     #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub unfranked_amount: Decimal,
+    /// Foreign-source income, gross of foreign tax (decimal string, in `currency`; 0 when omitted).
     #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub foreign_source_income: Decimal,
+    /// Foreign tax withheld, counted toward the foreign income tax offset (decimal string,
+    /// in `currency`; 0 when omitted).
     #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub foreign_tax_paid: Decimal,
+    /// TFN amount withheld (decimal string, in `currency`; 0 when omitted).
     #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub tfn_withholding_tax: Decimal,
+    /// Franking credits attached to `franked_amount` (decimal string, in `currency`; 0 when
+    /// omitted).
     #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub franking_credits: Decimal,
+    /// The LIC capital gain amount the listed investment company advises, entered as
+    /// printed — not the deduction; the tax summary deducts 50% of it (decimal string, in
+    /// `currency`; 0 when omitted).
     #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub lic_capital_gain_amount: Decimal,
+    /// Memo: the part of `unfranked_amount` declared conduit foreign income. Within that
+    /// amount, never added to it, so it cannot exceed it (decimal string, in `currency`; 0
+    /// when omitted).
     #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub conduit_foreign_income: Decimal,
+    /// Whether the row is a trust distribution rather than a company dividend (default
+    /// false). Enables `entitlement_date` and `tax_deferred_amount`.
     #[serde(default)]
     pub trust_income: bool,
-    /// See `Income::entitlement_date` — trust rows only.
+    /// Trust rows only: the date the holder became presently entitled
+    /// (`YYYY-MM-DD`, usually the distribution period's end). When set it
+    /// decides the financial year and FX month instead of `date_paid`.
     #[serde(default)]
     pub entitlement_date: Option<NaiveDate>,
     // No `reinvestment_trade_id`: the DRP link is provenance managed by the
     // reinvest operation (see `Income::reinvestment_trade_id`) — a body value
     // is ignored, and an edit preserves an existing link.
+    /// ISO 4217 code the amounts are in; the tax summary converts to AUD at the rate for
+    /// the month of `date_paid` (or `entitlement_date`). Defaults to `AUD`.
     #[serde(default = "default_currency")]
     pub currency: String,
-    /// Defaults to the seeded default holding account when omitted.
+    /// The holding account the distribution was paid to — decides whose DRP
+    /// enrolment applies. Defaults to the seeded default holding account when
+    /// omitted.
     #[serde(default = "crate::entities::holding_account::default_holding_account_id")]
     pub holding_account_id: i64,
-    /// Optional statement cross-check; see `Income::amount_per_security`.
+    /// Optional statement cross-check, given together with `securities_held`:
+    /// the per-security amount. Their product, cent-rounded, must equal
+    /// franked + unfranked + foreign-source income (decimal string).
     #[serde(
         default,
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"
     )]
     pub amount_per_security: Option<Decimal>,
+    /// Optional statement cross-check, given together with `amount_per_security`: the
+    /// statement's securities-held count (decimal string, non-negative).
     #[serde(
         default,
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"
     )]
     pub securities_held: Option<Decimal>,
-    /// See `Income::tax_deferred_amount` — trust rows only, ≥ 0.
+    /// Non-AMIT trust rows only: the statement's tax-deferred amount
+    /// (decimal string, non-negative). Informational — the cost-base
+    /// reduction itself is entered as a ReturnOfCapital corporate action.
     #[serde(
         default,
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"
     )]
     pub tax_deferred_amount: Option<Decimal>,
-    /// See [`IncomeType`]. Omitted means `Dividend`, so every existing client
-    /// keeps writing distributions.
+    /// What kind of payment the row records: `Dividend` (the default, any
+    /// investment distribution), `EmploymentIncome` (a dividend equivalent on
+    /// unvested RSUs — cash in `unfranked_amount` only) or `OtherIncome`
+    /// (ordinary income the holding produced, e.g. a staking reward).
     #[serde(default)]
     pub income_type: IncomeType,
 }

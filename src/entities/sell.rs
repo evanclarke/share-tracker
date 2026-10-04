@@ -32,7 +32,9 @@ use sqlx::{Row, SqlitePool};
 #[serde(deny_unknown_fields)]
 #[schema(as = SellAllocationInput)]
 pub struct AllocationInput {
+    /// The Buy or DRP trade (parcel) the units are taken from.
     pub purchase_trade_id: i64,
+    /// Units taken from that parcel (decimal string, positive, at most its remaining units).
     #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub quantity_allocated: Decimal,
 }
@@ -40,14 +42,22 @@ pub struct AllocationInput {
 #[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SellBody {
+    /// Sale date (`YYYY-MM-DD`): a trading day of the listing's exchange, between 20
+    /// September 1985 and today.
     pub date: NaiveDate,
+    /// Settlement date (`YYYY-MM-DD`, not before `date`). Omitted: computed T+n business
+    /// days from `date` over the exchange's holiday calendar (same day for Crypto).
     #[serde(default)]
     pub settlement_date: Option<NaiveDate>,
+    /// The listing traded.
     pub listing_id: i64,
+    /// Sale price per unit, in `currency` (decimal string).
     #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub average_price: Decimal,
+    /// Units sold (decimal string, positive); the allocations must sum to it.
     #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub quantity: Decimal,
+    /// ISO 4217 code of the price — the listing's trading currency.
     pub currency: String,
     /// GST-inclusive when `brokerage_includes_gst` is set (the server splits
     /// it; any supplied `gst_on_brokerage` is ignored), ex-GST otherwise —
@@ -56,11 +66,19 @@ pub struct SellBody {
     /// the GET → PUT round-trip is lossless (see `trade::Trade::present`).
     #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub brokerage: Decimal,
+    /// GST on the brokerage (decimal string; 0 when omitted). Ignored when
+    /// `brokerage_includes_gst` is set — the server splits it out.
     #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub gst_on_brokerage: Decimal,
+    /// Whether `brokerage` was entered GST-inclusive; the server then stores it split into
+    /// ex-GST brokerage and GST (amount ÷ 11, to the cent). Default false.
     #[serde(default)]
     pub brokerage_includes_gst: bool,
+    /// ISO 4217 code the brokerage was billed in; must equal `currency` (convert a foreign
+    /// fee before entry).
     pub brokerage_currency: String,
+    /// Manual foreign-per-AUD rate (decimal string; `1` for AUD), the fallback when no
+    /// ATO/RBA monthly rate exists for the trade's month.
     #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub fx_rate: Decimal,
     /// Optional deliberate spot-rate override; see `trade::Trade::spot_fx_rate`.
@@ -69,6 +87,7 @@ pub struct SellBody {
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"
     )]
     pub spot_fx_rate: Option<Decimal>,
+    /// The broker's contract-note reference. Informational.
     #[serde(default)]
     pub contract_note_ref: Option<String>,
     /// Optional statement cross-check (net proceeds — quantity × price minus
@@ -83,6 +102,9 @@ pub struct SellBody {
     /// default account when omitted.
     #[serde(default = "crate::entities::holding_account::default_holding_account_id")]
     pub holding_account_id: i64,
+    /// The purchase parcels (Buy/DRP trades in the same listing and holding account) the
+    /// sale consumes, and how many units from each. Their quantities must sum to
+    /// `quantity`.
     #[serde(default)]
     pub allocations: Vec<AllocationInput>,
 }

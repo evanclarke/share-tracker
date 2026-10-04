@@ -1099,7 +1099,11 @@ impl From<GenerateError> for ApiError {
 #[derive(utoipa::ToSchema, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RegenerateBody {
+    /// First date to regenerate (`YYYY-MM-DD`, inclusive). Omitted: the first date anything
+    /// was held.
     from: Option<NaiveDate>,
+    /// Last date to regenerate (`YYYY-MM-DD`, inclusive). Omitted: the latest date the
+    /// portfolio can be valued with final prices.
     to: Option<NaiveDate>,
 }
 

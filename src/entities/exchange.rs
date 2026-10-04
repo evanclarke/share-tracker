@@ -27,11 +27,19 @@ pub struct Exchange {
 #[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExchangeBody {
+    /// Exchange name, e.g. `Australian Securities Exchange`.
     pub name: String,
+    /// Country the exchange is in, e.g. `Australia`.
     pub country: String,
+    /// ISO 4217 code of the exchange's default trading currency.
     pub currency: String,
+    /// IANA timezone the exchange trades in, e.g. `Australia/Sydney`; `close_time` is read
+    /// on this clock.
     pub timezone: String,
+    /// Business days from trade to settlement — the n in T+n, e.g. 2 for the ASX (0 to 365).
     pub settlement_days: i64,
+    /// Local end of the regular session, `HH:MM` 24-hour (default `16:00`); a day's closing
+    /// price is collected only after it.
     #[serde(default = "default_close_time")]
     pub close_time: String,
 }

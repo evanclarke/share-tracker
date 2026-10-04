@@ -128,55 +128,90 @@ pub struct EssStatement {
 #[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EssStatementBody {
+    /// The listed share the interests are in; the statement must be in its currency.
     pub listing_id: i64,
+    /// The holding account the interests vest into. Defaults to the seeded default holding
+    /// account when omitted.
     #[serde(default = "crate::entities::holding_account::default_holding_account_id")]
     pub holding_account_id: i64,
+    /// The ESS taxing point (`YYYY-MM-DD`): sets the financial year the discount is
+    /// assessed in and the date of the vest Buy. Not before 20 September 1985 and not in
+    /// the future.
     pub taxing_point_date: NaiveDate,
+    /// Shares that vest — the quantity of the Buy `POST /ess_statements/{id}/vest` creates
+    /// (decimal string, non-negative; 0 when omitted, an income-only statement).
     #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub quantity: Decimal,
+    /// Market value per share at the taxing point, in `currency` — the vest Buy's price and
+    /// reset cost base (decimal string, non-negative; 0 when omitted). With a positive
+    /// quantity, `quantity × market_value_per_share` caps the discounts D+E+F+G.
     #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub market_value_per_share: Decimal,
+    /// Item 12 label D: taxed-upfront discount eligible for the $1,000 reduction (decimal
+    /// string, in `currency`, non-negative; 0 when omitted).
     #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub taxed_upfront_eligible: Decimal,
+    /// Item 12 label E: taxed-upfront discount not eligible for the reduction (decimal
+    /// string, in `currency`, non-negative; 0 when omitted).
     #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub taxed_upfront_not_eligible: Decimal,
+    /// Item 12 label F: deferral-scheme discount — the RSU case (decimal string, in
+    /// `currency`, non-negative; 0 when omitted).
     #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub deferral_discount: Decimal,
+    /// Item 12 label G: pre-1 July 2009 cessation discounts assessable this year (decimal
+    /// string, in `currency`, non-negative; 0 when omitted).
     #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub pre_2009_cessation_discount: Decimal,
+    /// Item 12 label A: the foreign-source portion of the discounts above — a memo within
+    /// them, not added on top, so it cannot exceed D+E+F+G (decimal string, in `currency`,
+    /// non-negative; 0 when omitted).
     #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub foreign_source_discount: Decimal,
+    /// Item 12 label C: TFN amounts withheld from the discounts (decimal string, in
+    /// `currency`, non-negative; 0 when omitted).
     #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub tfn_withholding: Decimal,
+    /// ISO 4217 code the amounts are stated in — must be the listing's currency. Defaults to `AUD`.
     #[serde(default = "default_currency")]
     pub currency: String,
-    /// Absent/null means none stated (the AUD case, and the non-AUD case that
-    /// relies on the imported ATO rate).
+    /// The rate the taxpayer states for the statement, foreign units per 1 AUD
+    /// (decimal string, positive), used when the taxing point's month has no
+    /// imported ATO rate. Absent/null means none stated (the AUD case, and the
+    /// non-AUD case that relies on the imported ATO rate).
     #[serde(
         default,
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"
     )]
     pub fx_rate: Option<Decimal>,
+    /// Optional override of label D in AUD, as the employer statement states it; reported
+    /// verbatim instead of converting `taxed_upfront_eligible` at the RBA rate. Non-AUD
+    /// statements only (decimal string).
     #[serde(
         default,
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"
     )]
     pub aud_taxed_upfront_eligible: Option<Decimal>,
+    /// Optional AUD override of label E (as `aud_taxed_upfront_eligible`).
     #[serde(
         default,
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"
     )]
     pub aud_taxed_upfront_not_eligible: Option<Decimal>,
+    /// Optional AUD override of label F (as `aud_taxed_upfront_eligible`).
     #[serde(
         default,
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"
     )]
     pub aud_deferral_discount: Option<Decimal>,
+    /// Optional AUD override of label G (as `aud_taxed_upfront_eligible`).
     #[serde(
         default,
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"
     )]
     pub aud_pre_2009_cessation_discount: Option<Decimal>,
+    /// Optional AUD override of the label A memo (as `aud_taxed_upfront_eligible`); cannot
+    /// exceed the sum of the other overrides where they fix the total.
     #[serde(
         default,
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"

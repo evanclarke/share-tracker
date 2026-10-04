@@ -61,6 +61,8 @@ pub struct UnrealisedGainsRequest {
         deserialize_with = "crate::infra::decimal::strict_decimal_map"
     )]
     pub prices: HashMap<i64, Decimal>,
+    /// The date to report the position at (`YYYY-MM-DD`); later facts are excluded and the
+    /// CGT discount is judged at it. Omitted: today.
     #[serde(default)]
     pub as_of_date: Option<NaiveDate>,
     /// Fetch the current price live from the price source for every held

@@ -97,7 +97,9 @@ pub struct ListingRename {
 #[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RenameBody {
+    /// First trading day under the new identity (`YYYY-MM-DD`); unique per listing.
     pub effective_date: NaiveDate,
+    /// The new ticker (may equal the current one when only the exchange changes).
     pub ticker: String,
     /// Omitted keeps the listing's current exchange (see the module doc).
     #[serde(default)]
@@ -108,6 +110,7 @@ pub struct RenameBody {
     /// Omitted leaves `price_symbol` exactly as it was.
     #[serde(default)]
     pub price_symbol: Option<String>,
+    /// Free-text note, e.g. the announcement reference.
     #[serde(default)]
     pub note: Option<String>,
 }

@@ -108,48 +108,96 @@ pub struct AmmaStatement {
 #[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AmmaStatementBody {
+    /// The listed trust the statement attributes; the statement must be in its currency.
     pub listing_id: i64,
+    /// End of the financial year the statement attributes (`YYYY-MM-DD`); must be a 30 June
+    /// date, e.g. `2024-06-30` for FY2024.
     pub tax_year_end_date: NaiveDate,
+    /// Units held as the statement reports them (decimal string; 0 when omitted). Must not
+    /// be negative.
     #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub units_held: Decimal,
+    /// When the statement was received (`YYYY-MM-DD`). Informational only — no calculation
+    /// reads it.
     pub date_received: NaiveDate,
+    /// Part A Australian interest component (decimal string, in `currency`; 0 when
+    /// omitted). Must not be negative.
     #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub australian_interest: Decimal,
+    /// Part A unfranked Australian dividends component (decimal string, in `currency`; 0
+    /// when omitted). Must not be negative.
     #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub australian_dividends_unfranked: Decimal,
+    /// Part A franked Australian dividends component, excluding the franking credits
+    /// (decimal string, in `currency`; 0 when omitted). Must not be negative.
     #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub franked_dividends: Decimal,
+    /// Franking credits attached to the franked dividends (decimal string, in `currency`; 0
+    /// when omitted). Must not be negative.
     #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub franking_credits: Decimal,
+    /// Net rent and other Australian income component (decimal string, in `currency`; 0
+    /// when omitted). Must not be negative.
     #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub net_rent: Decimal,
+    /// Assessable foreign-source income component (decimal string, in `currency`; 0 when
+    /// omitted). Must not be negative.
     #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub foreign_income: Decimal,
+    /// Part C foreign income tax offset on foreign **income**, claimable in full (decimal
+    /// string, in `currency`; 0 when omitted). Must not be negative.
     #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub foreign_tax_credits: Decimal,
+    /// Part C foreign income tax offset on the statement's **capital gains**, grossed up as
+    /// the trustee reports it; the tax summary apportions it to the assessable part of the
+    /// gains. Additional to `foreign_tax_credits`, not a split of it (decimal string, in
+    /// `currency`; 0 when omitted). Rejected when the statement states no CGT gains.
     #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub foreign_tax_credits_capital_gains: Decimal,
+    /// Other assessable income component not covered by another field (decimal string, in
+    /// `currency`; 0 when omitted). Must not be negative.
     #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub other_income: Decimal,
+    /// Discounted capital gains, as the statement reports them (the trust-level discount
+    /// already applied; decimal string, in `currency`; 0 when omitted). Must not be
+    /// negative.
     #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub cgt_discount_gains: Decimal,
+    /// Capital gains calculated by the indexation method (decimal string, in `currency`; 0
+    /// when omitted). Must not be negative.
     #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub cgt_indexation_gains: Decimal,
+    /// Capital gains calculated by the other method — non-discountable (decimal string, in
+    /// `currency`; 0 when omitted). Must not be negative.
     #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub cgt_other_gains: Decimal,
+    /// Informational only: trust-level capital losses the stated gains are already net of
+    /// (decimal string; 0 when omitted). No calculation reads it. Must not be negative.
     #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub capital_losses_applied: Decimal,
+    /// Informational only: the tax-deferred amount; its cost-base effect is carried by
+    /// `cost_base_adjustment` (decimal string; 0 when omitted). Must not be negative.
     #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub tax_deferred_amount: Decimal,
+    /// Informational only: the tax-free amount; its cost-base effect is carried by
+    /// `cost_base_adjustment` (decimal string; 0 when omitted). Must not be negative.
     #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub tax_free_amount: Decimal,
+    /// The AMIT cost base net amount **per unit** for the year — the sole cost-base driver,
+    /// applied to parcels through `/amit_adjustments`. Signed: positive reduces the cost
+    /// base, negative increases it (decimal string, in `currency`; 0 when omitted).
     #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub cost_base_adjustment: Decimal,
+    /// TFN amounts withheld (decimal string, in `currency`; 0 when omitted). Must not be negative.
     #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub tfn_withholding_tax: Decimal,
+    /// ISO 4217 code the amounts are stated in — must be the listing's
+    /// currency. The tax summary converts to AUD at the rate for the month of
+    /// `tax_year_end_date`. Defaults to `AUD`.
     #[serde(default = "default_currency")]
     pub currency: String,
-    /// Defaults to the seeded default holding account when omitted.
+    /// The holding account the statement covers. Defaults to the seeded
+    /// default holding account when omitted.
     #[serde(default = "crate::entities::holding_account::default_holding_account_id")]
     pub holding_account_id: i64,
 }

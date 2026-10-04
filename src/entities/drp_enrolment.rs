@@ -84,13 +84,20 @@ pub struct DrpEnrolment {
 #[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DrpEnrolmentBody {
+    /// The listing enrolled in its dividend reinvestment plan.
     pub listing_id: i64,
     /// Defaults to the seeded default holding account when omitted.
     #[serde(default = "crate::entities::holding_account::default_holding_account_id")]
     pub holding_account_id: i64,
+    /// First day of the enrolment period (`YYYY-MM-DD`, inclusive). Periods of one listing
+    /// and holding account must not overlap.
     pub enrolment_date: NaiveDate,
+    /// Day the unenrolment takes effect (`YYYY-MM-DD`, exclusive), after `enrolment_date`.
+    /// Omit or null for an open-ended (current) enrolment.
     #[serde(default)]
     pub unenrolment_date: Option<NaiveDate>,
+    /// What happens to leftover cash after each reinvestment in the period: `CarryForward`
+    /// (the default) to the next reinvestment, or `PayOut`.
     #[serde(default)]
     pub residual_handling: ResidualHandling,
 }

@@ -340,127 +340,203 @@ enum ActionType {
 #[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CorporateActionBody {
+    /// The action type; the row must carry exactly that type's payload fields — a field
+    /// belonging to another type is refused.
     action_type: ActionType,
+    /// The listing the action applies to (the original holding for ScripForScrip, the head
+    /// entity for Demerger).
     pub listing_id: i64,
+    /// `YYYY-MM-DD`. ReturnOfCapital: payment date. ShareSplit: conversion date (parcels
+    /// acquired before it are converted). BonusIssue: issue date. RightsIssue: record date
+    /// (units held before it earn the entitlement). BuyBack: buy-back date. ScripForScrip /
+    /// Demerger: exchange / demerger date (every parcel still open on it takes part).
+    /// WorthlessShares: declaration (G3) or deregistration (C2) date.
     pub date: NaiveDate,
+    /// ReturnOfCapital only (required): per-unit non-assessable payment in `currency`
+    /// (decimal string, positive); reduces affected parcels' cost bases.
     #[serde(
         default,
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"
     )]
     amount_per_unit: Option<Decimal>,
+    /// ISO 4217 code. Required by ReturnOfCapital (must match the affected parcels'
+    /// currency), RightsIssue (the exercise price's currency) and BuyBack (the buy-back
+    /// price's currency); refused on every other type.
     #[serde(default)]
     currency: Option<String>,
+    /// ReturnOfCapital only (optional): the date entitlement was fixed, on or before
+    /// `date`. Parcels acquired before it earn the payment; omitted, the payment date
+    /// decides.
     #[serde(default)]
     record_date: Option<NaiveDate>,
+    /// ShareSplit only (required): every `split_old_units` existing units become
+    /// `split_new_units` units (decimal string, positive; a consolidation has new < old).
     #[serde(
         default,
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"
     )]
     split_new_units: Option<Decimal>,
+    /// ShareSplit only (required): see `split_new_units`.
     #[serde(
         default,
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"
     )]
     split_old_units: Option<Decimal>,
+    /// BonusIssue only (required): every `bonus_held_units` units held receive
+    /// `bonus_units` additional units (decimal string, positive; a 1-for-10 issue is 1 /
+    /// 10).
     #[serde(
         default,
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"
     )]
     bonus_units: Option<Decimal>,
+    /// BonusIssue only (required): see `bonus_units`.
     #[serde(
         default,
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"
     )]
     bonus_held_units: Option<Decimal>,
+    /// RightsIssue only (required): every `rights_held_units` units held at the record date
+    /// entitle the holder to `rights_units` new units (decimal string, positive; a 1-for-4
+    /// issue is 1 / 4).
     #[serde(
         default,
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"
     )]
     rights_units: Option<Decimal>,
+    /// RightsIssue only (required): see `rights_units`.
     #[serde(
         default,
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"
     )]
     rights_held_units: Option<Decimal>,
+    /// RightsIssue only (required): price paid per new unit on exercise, in `currency`
+    /// (decimal string, positive).
     #[serde(
         default,
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"
     )]
     exercise_price: Option<Decimal>,
+    /// RightsIssue only (required): whether the rights could be traded. Decides how a
+    /// retail premium is taxed — renounceable: capital proceeds via `sell_rights`;
+    /// non-renounceable: unfranked dividend income.
     #[serde(default)]
     renounceable: Option<bool>,
+    /// BuyBack only (required): per-unit buy-back price in `currency` (decimal string, positive).
     #[serde(
         default,
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"
     )]
     buyback_price: Option<Decimal>,
+    /// BuyBack only (optional, 0 when omitted): per-unit dividend component of the price
+    /// (decimal string, non-negative, at most the price; 0 for a listed-company buy-back
+    /// announced after 25 Oct 2022). Assessable income, excluded from capital proceeds.
     #[serde(
         default,
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"
     )]
     buyback_dividend: Option<Decimal>,
+    /// BuyBack only (optional, 0 when omitted): per-unit franking credit attached to the
+    /// dividend component (decimal string, non-negative; must be 0 when there is no
+    /// dividend).
     #[serde(
         default,
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"
     )]
     buyback_franking_credit: Option<Decimal>,
+    /// BuyBack only (optional): per-unit market value had the buy-back not been proposed
+    /// (decimal string, positive); capital proceeds cannot be less than it. Omit when the
+    /// price is at or above market value.
     #[serde(
         default,
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"
     )]
     buyback_market_value: Option<Decimal>,
+    /// ScripForScrip only (required): the replacement listing the holding converts into;
+    /// must differ from `listing_id`.
     #[serde(default)]
     scrip_listing_id: Option<i64>,
+    /// ScripForScrip only (required): every `scrip_old_units` units held at the exchange
+    /// date become `scrip_new_units` units of `scrip_listing_id` (decimal string,
+    /// positive).
     #[serde(
         default,
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"
     )]
     scrip_new_units: Option<Decimal>,
+    /// ScripForScrip only (required): see `scrip_new_units`.
     #[serde(
         default,
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"
     )]
     scrip_old_units: Option<Decimal>,
+    /// ScripForScrip only (optional): cash received per OLD unit exchanged, in
+    /// `scrip_cash_currency` (decimal string, positive) — a partial rollover. The three
+    /// `scrip_cash_*`/`scrip_market_value` fields are given together or all omitted.
     #[serde(
         default,
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"
     )]
     scrip_cash_per_unit: Option<Decimal>,
+    /// ScripForScrip only (with `scrip_cash_per_unit`): market value of one NEW unit just
+    /// after issue, in `scrip_cash_currency` (decimal string, positive) — the scrip side of
+    /// the cost-base apportionment.
     #[serde(
         default,
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"
     )]
     scrip_market_value: Option<Decimal>,
+    /// ScripForScrip only (with `scrip_cash_per_unit`): ISO 4217 code of the cash and market value.
     #[serde(default)]
     scrip_cash_currency: Option<String>,
+    /// Demerger only (required): the demerged entity's listing; must differ from `listing_id`.
     #[serde(default)]
     demerger_listing_id: Option<i64>,
+    /// Demerger only (required): every `demerger_held_units` units of the head entity held
+    /// at the demerger date receive `demerger_new_units` units of `demerger_listing_id`
+    /// (decimal string, positive).
     #[serde(
         default,
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"
     )]
     demerger_new_units: Option<Decimal>,
+    /// Demerger only (required): see `demerger_new_units`.
     #[serde(
         default,
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"
     )]
     demerger_held_units: Option<Decimal>,
+    /// Demerger only (required): percentage of each parcel's cost base apportioned to the
+    /// demerged entity, as the head entity advises (decimal string, 0 < pct < 100); the
+    /// head parcels keep the rest.
     #[serde(
         default,
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"
     )]
     demerger_cost_base_pct: Option<Decimal>,
+    /// Demerger only (optional): the last pre-demerger trading day, strictly before `date`.
+    /// With `demerger_close_price` it re-bases the listing's pre-demerger closing prices.
+    /// The four `demerger_close_*` fields are given together or all omitted.
     #[serde(default)]
     demerger_close_date: Option<NaiveDate>,
+    /// Demerger only (with `demerger_close_date`): what the head listing actually closed at
+    /// on that day, in its quote currency (decimal string, positive).
     #[serde(
         default,
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"
     )]
     demerger_close_price: Option<Decimal>,
+    /// Demerger only (with `demerger_close_date`): where the stated close was taken from.
+    /// Informational provenance.
     #[serde(default)]
     demerger_close_sourced_from: Option<String>,
+    /// Demerger only (with `demerger_close_date`): why the close had to be stated.
+    /// Informational provenance.
     #[serde(default)]
     demerger_close_reason: Option<String>,
+    /// WorthlessShares only (required): the CGT event the loss is recognised under —
+    /// `G3Declaration` (liquidator/administrator declaration) or `C2Cancellation`
+    /// (deregistration).
     #[serde(default)]
     worthless_event: Option<WorthlessEvent>,
 }

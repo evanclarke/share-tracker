@@ -72,9 +72,14 @@ pub struct Transfer {
 #[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TransferBody {
+    /// The listing whose parcels move between accounts.
     pub listing_id: i64,
+    /// Transfer date (`YYYY-MM-DD`); the transfer-out Sell and transfer-in Buys are dated
+    /// on it. Not a CGT event.
     pub date: NaiveDate,
+    /// Holding account the parcels move out of.
     pub from_account_id: i64,
+    /// Holding account the parcels move into; must differ from `from_account_id`.
     pub to_account_id: i64,
     /// The parcels to move and how many units of each (in transfer-date
     /// units, like a Sell's allocations) — partial parcels allowed.

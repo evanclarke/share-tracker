@@ -39,6 +39,8 @@ pub struct ExchangeHoliday {
 #[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExchangeHolidayBody {
+    /// Holiday name, e.g. `Christmas Day`. Informational; the date in the path is what
+    /// closes the exchange.
     pub name: String,
 }
 
