@@ -142,12 +142,21 @@ by value; the first item is a bug.
   recipes (missing FX rate, quarterly ICE statement, annual VDHG AMMA). `.gitignore` excludes
   `/.claude/skills/live-api/`, pinned by `doc_checks::the_live_api_skill_is_never_committed`
   (the line is present and no later `!` rule re-includes it).
-- [ ] **A missing body field is reported one at a time.** serde stops at the first
+- [x] **A missing body field is reported one at a time.** serde stops at the first
   (`missing field 'trade_type'`), so an agent filling a large body may take several round trips.
   The `required` lists in the schemas largely answer this once the first item is fixed; decide
   whether that is enough or whether a body rejection should name every missing field. Test: either
   every request-body schema's `required` list matches its struct's non-`Option`, non-defaulted
   fields, or a rejection test names two missing fields at once.
+  *Decided 2026-10-05: the `required` lists are enough.* Naming every missing field would mean
+  re-deriving serde's requirement outside serde; the schema already states the whole list, and an
+  agent reaches it in one `GET /openapi.json?operation=<id>`. What was missing was any proof the
+  list is right, so `api_spec::tests::every_request_body_schemas_required_list_is_what_the_decoder_requires`
+  now drives every JSON request body through the real router: a body with every property set
+  (one item per array, recursively) must decode, and removing any one property must answer
+  `missing field` naming it exactly when the schema lists it as required — 15 mismatches reported
+  when `ReinvestBody`'s and `SellAllocationInput`'s lists were deliberately corrupted; none
+  today. Documented in `docs/API.md`'s OpenAPI section.
 - [ ] **A GET-one for a missing row is an empty `404`**, so an agent cannot tell a mistyped path
   from an absent row (an unmatched path is an empty `404` too). Decide whether the GET-one `404`
   should carry a plain-text reason (`no trade with that id`, the DELETE wording) — this reverses

@@ -5374,6 +5374,210 @@ mod tests {
         );
     }
 
+    /// Every request-body schema's `required` list is exactly the fields the
+    /// decoder requires. serde reports a missing field one at a time (it stops
+    /// at the first), so the schema is where a client learns the whole list in
+    /// one read — `GET /openapi.json?operation=<id>` — and this is what makes
+    /// that list trustworthy.
+    ///
+    /// Empirical, through the real router rather than read off the structs: a
+    /// body built from the schema with **every** property set (one item per
+    /// array, recursively) must decode — the handler may refuse it on its
+    /// merits, but never with `cannot read the request body` — and removing any
+    /// one property from it must give `missing field` naming it exactly when the
+    /// schema lists it as required, at whatever depth it sits.
+    #[tokio::test]
+    async fn every_request_body_schemas_required_list_is_what_the_decoder_requires() {
+        use crate::test_support::{ApiClient, test_pool};
+        use serde_json::{Map, json};
+
+        fn resolve<'a>(schemas: &'a Map<String, Value>, v: &'a Value) -> &'a Value {
+            match v.get("$ref").and_then(Value::as_str) {
+                Some(r) => resolve(
+                    schemas,
+                    &schemas[r.trim_start_matches("#/components/schemas/")],
+                ),
+                None => v,
+            }
+        }
+        /// A decodable value of `schema`, every property present.
+        fn sample(schemas: &Map<String, Value>, schema: &Value) -> Value {
+            let schema = resolve(schemas, schema);
+            if let Some(values) = schema.get("enum").and_then(Value::as_array) {
+                return values
+                    .iter()
+                    .find(|v| !v.is_null())
+                    .cloned()
+                    .unwrap_or(Value::Null);
+            }
+            for key in ["oneOf", "anyOf", "allOf"] {
+                if let Some(branches) = schema.get(key).and_then(Value::as_array) {
+                    let branch = branches
+                        .iter()
+                        .find(|b| b.get("type").and_then(Value::as_str) != Some("null"))
+                        .expect("a non-null branch");
+                    return sample(schemas, branch);
+                }
+            }
+            let ty = match &schema["type"] {
+                Value::String(t) => t.as_str(),
+                Value::Array(ts) => ts
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .find(|t| *t != "null")
+                    .expect("a non-null type"),
+                other => panic!("schema without a type: {other} in {schema}"),
+            };
+            match ty {
+                "object" => Value::Object(
+                    schema["properties"]
+                        .as_object()
+                        .map(|props| {
+                            props
+                                .iter()
+                                .map(|(k, p)| (k.clone(), sample(schemas, p)))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                ),
+                "array" => json!([sample(schemas, &schema["items"])]),
+                "boolean" => json!(false),
+                "integer" | "number" => json!(1),
+                "string" => match schema.get("format").and_then(Value::as_str) {
+                    Some("date") => json!("2024-01-02"),
+                    Some("date-time") => json!("2024-01-02T00:00:00Z"),
+                    _ => json!("1"),
+                },
+                other => panic!("unhandled schema type {other}"),
+            }
+        }
+        /// Every property in `value` (built by `sample` from `schema`), as the
+        /// JSON-pointer path to it, its name, and whether its object's schema
+        /// requires it.
+        fn properties(
+            schemas: &Map<String, Value>,
+            schema: &Value,
+            value: &Value,
+            at: &str,
+            out: &mut Vec<(String, String, bool)>,
+        ) {
+            let schema = resolve(schemas, schema);
+            for key in ["oneOf", "anyOf", "allOf"] {
+                if let Some(branches) = schema.get(key).and_then(Value::as_array) {
+                    if let Some(b) = branches
+                        .iter()
+                        .find(|b| b.get("type").and_then(Value::as_str) != Some("null"))
+                    {
+                        properties(schemas, b, value, at, out);
+                    }
+                    return;
+                }
+            }
+            match value {
+                Value::Object(map) => {
+                    let required: Vec<&str> = schema
+                        .get("required")
+                        .and_then(Value::as_array)
+                        .map(|r| r.iter().filter_map(Value::as_str).collect())
+                        .unwrap_or_default();
+                    for (k, v) in map {
+                        let path = format!("{at}/{k}");
+                        out.push((path.clone(), k.clone(), required.contains(&k.as_str())));
+                        properties(schemas, &schema["properties"][k], v, &path, out);
+                    }
+                }
+                Value::Array(items) => {
+                    for (i, v) in items.iter().enumerate() {
+                        properties(schemas, &schema["items"], v, &format!("{at}/{i}"), out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        fn remove(value: &mut Value, path: &str) {
+            let (parent, last) = path.rsplit_once('/').expect("a property path");
+            value
+                .pointer_mut(parent)
+                .and_then(Value::as_object_mut)
+                .expect("the property's object")
+                .remove(last);
+        }
+
+        let doc = doc();
+        let schemas = doc["components"]["schemas"]
+            .as_object()
+            .expect("components.schemas is an object");
+        let pool = test_pool().await;
+        let client = ApiClient::full(&pool);
+        let mut wrong = Vec::new();
+        let mut checked = 0;
+        for &(verb, path, _, _, request, _) in ROUTES {
+            let schema = match request {
+                Body::Json(name) => json!({ "$ref": format!("#/components/schemas/{name}") }),
+                Body::JsonArray(name) => json!({
+                    "type": "array",
+                    "items": { "$ref": format!("#/components/schemas/{name}") },
+                }),
+                _ => continue,
+            };
+            let mut uri = path.to_string();
+            for (name, value) in [
+                ("{mic}", "XASX"),
+                ("{date}", "2024-01-02"),
+                ("{price_date}", "2024-01-02"),
+                ("{tax_year}", "2024"),
+                ("{listing_id}", "1"),
+                ("{id}", "1"),
+            ] {
+                uri = uri.replace(name, value);
+            }
+            assert!(!uri.contains('{'), "unsubstituted parameter in {uri}");
+            // Only whether the body *decodes* is asked: a sample the handler
+            // goes on to accept (and store) disturbs nothing that question
+            // reads.
+            let send = |body: Value| {
+                let client = &client;
+                let uri = uri.clone();
+                async move {
+                    let resp = match verb {
+                        Verb::Put => client.put(&uri, &body).await,
+                        Verb::Post => client.post(&uri, &body).await,
+                        other => panic!("a request body on a {other:?}"),
+                    };
+                    resp.text().to_string()
+                }
+            };
+            let full = sample(schemas, &schema);
+            let reply = send(full.clone()).await;
+            if reply.starts_with("cannot read the request body") {
+                wrong.push(format!("{verb:?} {path}: every property set → {reply}"));
+                continue;
+            }
+            let mut props = Vec::new();
+            properties(schemas, &schema, &full, "", &mut props);
+            for (pointer, name, required) in props {
+                let mut body = full.clone();
+                remove(&mut body, &pointer);
+                let reply = send(body).await;
+                let missing = reply.starts_with("cannot read the request body")
+                    && reply.contains(&format!("missing field `{name}`"));
+                if missing != required {
+                    wrong.push(format!(
+                        "{verb:?} {path} {pointer}: schema says required={required}, \
+                         without it → {reply:?}"
+                    ));
+                }
+                checked += 1;
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "request-body `required` lists disagree with the decoder:\n{}",
+            wrong.join("\n")
+        );
+        assert!(checked > 300, "only {checked} properties checked");
+    }
+
     /// Every `GET`-one answers a missing key with a bare `404` whose body is
     /// **empty** — the contract the web UI and a machine client both read as
     /// "no such row", and the one `72046a0` moved `GET /rights_sales/{id}` onto.
