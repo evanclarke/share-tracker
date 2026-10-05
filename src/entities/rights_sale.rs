@@ -53,10 +53,10 @@ use crate::entities::corporate_action::{
 };
 use crate::entities::rights_exercise::{db_held_at_record_date, db_rights_used, entitled_units};
 use crate::entities::trade::TradeType;
-use crate::infra::db::write_tx;
+use crate::infra::db::{WriteMode, write_tx};
 use crate::infra::decimal::{Money, parse_dec, row_dec};
 use crate::infra::extract::{Json, Query};
-use crate::infra::http::{self, ApiError};
+use crate::infra::http::{self, ApiError, DryRunQuery};
 use axum::{
     Router,
     extract::{Path, State},
@@ -66,7 +66,7 @@ use axum::{
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use sqlx::{QueryBuilder, Row, SqlitePool, sqlite::SqliteRow};
+use sqlx::{QueryBuilder, Row, SqliteConnection, SqlitePool, sqlite::SqliteRow};
 use std::collections::HashMap;
 
 #[derive(utoipa::ToSchema, Debug, Clone, Serialize)]
@@ -542,10 +542,22 @@ async fn resolve_fx_rate(
 /// rate and the insert. Every check above the insert is a pure validation
 /// pass: none of them produces a figure the write stores, so the whole walk
 /// separates from it.
+#[cfg(test)]
 pub async fn db_sell_rights(
     pool: &SqlitePool,
     action_id: i64,
     body: &SellRightsBody,
+) -> Result<RightsSale, SellRightsError> {
+    execute(pool, action_id, body, WriteMode::Commit).await
+}
+
+/// The write behind [`db_sell_rights`], ending as `mode` says: committed, or rolled
+/// back for a `?dry_run=true` preview once every row it returns has been read.
+async fn execute(
+    pool: &SqlitePool,
+    action_id: i64,
+    body: &SellRightsBody,
+    mode: WriteMode,
 ) -> Result<RightsSale, SellRightsError> {
     let amounts = check_body(body)?;
 
@@ -654,23 +666,24 @@ pub async fn db_sell_rights(
         .await?;
     }
 
-    tx.commit().await?;
-
-    // Read the freshly created sale back so the response is exactly what was
-    // stored.
-    db_get(pool, new_id)
+    // Read the freshly created sale back inside the transaction, so the
+    // response is exactly what was stored — and a dry run, rolled back below,
+    // still has it.
+    let sale = db_get(&mut tx, new_id)
         .await?
-        .ok_or(SellRightsError::Db(sqlx::Error::RowNotFound))
+        .ok_or(SellRightsError::Db(sqlx::Error::RowNotFound))?;
+    mode.finish(tx).await?;
+    Ok(sale)
 }
 
 async fn attach_allocations(
-    pool: &SqlitePool,
+    conn: &mut SqliteConnection,
     sales: &mut [RightsSale],
 ) -> Result<(), sqlx::Error> {
     let rows = sqlx::query(
         "SELECT rights_sale_id, purchase_trade_id, units FROM rights_sale_allocations ORDER BY id",
     )
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await?;
     let mut by_sale: HashMap<i64, Vec<RightsSaleAllocation>> = HashMap::new();
     for row in &rows {
@@ -716,23 +729,29 @@ pub(crate) async fn db_list(
         .eq("rs.rights_action_id", params.rights_action_id)
         .date_range("rs.date", params.from, params.to);
     qb.push(" ORDER BY rs.date, rs.id");
-    let rows = qb.build().fetch_all(pool).await?;
+    let mut conn = pool.acquire().await?;
+    let rows = qb.build().fetch_all(&mut *conn).await?;
     let mut sales = rows
         .iter()
         .map(sale_from_row)
         .collect::<Result<Vec<_>, _>>()?;
-    attach_allocations(pool, &mut sales).await?;
+    attach_allocations(&mut conn, &mut sales).await?;
     Ok(sales)
 }
 
-pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<RightsSale>, sqlx::Error> {
+/// One rights sale with its allocations, read on `conn` — the pool's for a
+/// `GET`, the write's own transaction for the sale it just created.
+pub async fn db_get(
+    conn: &mut SqliteConnection,
+    id: i64,
+) -> Result<Option<RightsSale>, sqlx::Error> {
     let row = sqlx::query("SELECT * FROM rights_sales WHERE id = ?")
         .bind(id)
-        .fetch_optional(pool)
+        .fetch_optional(&mut *conn)
         .await?;
     let Some(row) = row else { return Ok(None) };
     let mut sales = vec![sale_from_row(&row)?];
-    attach_allocations(pool, &mut sales).await?;
+    attach_allocations(conn, &mut sales).await?;
     Ok(sales.pop())
 }
 
@@ -749,10 +768,16 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<bool, sqlx::Error> 
 async fn sell_rights(
     State(pool): State<SqlitePool>,
     Path(action_id): Path<i64>,
+    Query(query): Query<DryRunQuery>,
     Json(body): Json<SellRightsBody>,
 ) -> Result<(StatusCode, Json<RightsSale>), ApiError> {
-    let sale = db_sell_rights(&pool, action_id, &body).await?;
-    Ok((StatusCode::CREATED, Json(sale)))
+    let sale = execute(&pool, action_id, &body, query.mode()).await?;
+    let status = if query.dry_run {
+        StatusCode::OK
+    } else {
+        StatusCode::CREATED
+    };
+    Ok((status, Json(sale)))
 }
 
 async fn list(
@@ -766,7 +791,10 @@ async fn get_one(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
 ) -> Result<Json<RightsSale>, ApiError> {
-    db_get(&pool, id).await?.map(Json).ok_or(ApiError::NotFound)
+    db_get(&mut *pool.acquire().await?, id)
+        .await?
+        .map(Json)
+        .ok_or(ApiError::NotFound)
 }
 
 async fn delete_one(
@@ -1806,5 +1834,32 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(sale.fx_rate, Decimal::ONE);
+    }
+
+    /// `POST /corporate_actions/:id/sell_rights?dry_run=true` previews the
+    /// rights sale: `200` with the body the real sale then answers `201` with
+    /// (its allocations included), nothing stored — and a sale whose
+    /// allocations do not cover its units is refused identically either way.
+    #[tokio::test]
+    async fn api_sell_rights_dry_run_previews_without_storing() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        insert_buy(&pool, 1, d(2024, 1, 16), "1000").await;
+        insert_rights_issue(&pool, 10, d(2024, 7, 1)).await;
+        let app = client(&pool);
+
+        let mut body = serde_json::json!({
+            "date": "2024-07-20",
+            "units": "250",
+            "proceeds_per_right": "0.20",
+            "allocations": [{ "purchase_trade_id": 1, "units": "100" }],
+        });
+        app.assert_dry_run_refuses_alike(&pool, "/corporate_actions/10/sell_rights", Some(&body))
+            .await;
+        body["allocations"][0]["units"] = serde_json::json!("250");
+        let created = app
+            .assert_dry_run_previews(&pool, "/corporate_actions/10/sell_rights", Some(&body))
+            .await;
+        assert_eq!(created["allocations"][0]["units"], "250");
     }
 }

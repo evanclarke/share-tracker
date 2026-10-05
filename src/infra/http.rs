@@ -285,6 +285,35 @@ pub enum UpsertResponse<E> {
     Replaced,
 }
 
+/// The query string of a computed write that can be previewed:
+/// `?dry_run=true` runs the whole write and its write-time validation inside
+/// the write transaction, reads the created rows back inside it, and rolls it
+/// back (`infra::db::WriteMode::DryRun`). The handler then answers `200` with
+/// the body a real run would have answered `201` with — a dry run created
+/// nothing, so by the `200`/`201` rule (docs/API.md, "Creating a record") it
+/// is not a `201`. A refused body is refused identically either way.
+#[derive(Debug, Default, serde::Deserialize, utoipa::IntoParams)]
+#[serde(deny_unknown_fields)]
+pub struct DryRunQuery {
+    /// `true` previews the write: the full write and its validation run and
+    /// the created rows are returned with `200`, but nothing is stored (no row,
+    /// no `row_history` entry). Omitted or `false`, the write is committed and
+    /// answered `201`.
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+impl DryRunQuery {
+    /// How the write's transaction ends.
+    pub fn mode(&self) -> crate::infra::db::WriteMode {
+        if self.dry_run {
+            crate::infra::db::WriteMode::DryRun
+        } else {
+            crate::infra::db::WriteMode::Commit
+        }
+    }
+}
+
 impl<E: serde::Serialize> IntoResponse for UpsertResponse<E> {
     fn into_response(self) -> Response {
         match self {

@@ -30,13 +30,13 @@
 //! shares held on revenue account.
 
 use crate::entities::corporate_action::{self, ActionKind};
-use crate::entities::income::{self, Income};
+use crate::entities::income::Income;
 use crate::entities::sell::{self, AllocationInput, SellBody};
 use crate::entities::trade::{self, Trade};
-use crate::infra::db::write_tx;
+use crate::infra::db::{WriteMode, write_tx};
 use crate::infra::decimal::Money;
-use crate::infra::extract::Json;
-use crate::infra::http::ApiError;
+use crate::infra::extract::{Json, Query};
+use crate::infra::http::{self, ApiError, DryRunQuery};
 use axum::{
     Router,
     extract::{Path, State},
@@ -173,10 +173,22 @@ pub fn router() -> Router<SqlitePool> {
 
 /// Create the Sell trade (with its allocations) and the dividend-component
 /// income row for a buy-back participation, atomically.
+#[cfg(test)]
 pub async fn db_participate(
     pool: &SqlitePool,
     action_id: i64,
     body: &ParticipationBody,
+) -> Result<Participation, ParticipationError> {
+    execute(pool, action_id, body, WriteMode::Commit).await
+}
+
+/// The write behind [`db_participate`], ending as `mode` says: committed, or rolled
+/// back for a `?dry_run=true` preview once every row it returns has been read.
+async fn execute(
+    pool: &SqlitePool,
+    action_id: i64,
+    body: &ParticipationBody,
+    mode: WriteMode,
 ) -> Result<Participation, ParticipationError> {
     if body.units <= Decimal::ZERO {
         return Err(ParticipationError::NonPositiveUnits);
@@ -299,38 +311,44 @@ pub async fn db_participate(
         None
     };
 
-    tx.commit().await?;
-
-    // Read the freshly created rows back so the response is exactly what was
-    // stored.
-    let trade = trade::db_get(pool, sell_id)
+    // Read the freshly created rows back inside the transaction, so the
+    // response is exactly what was stored — and a dry run, rolled back below,
+    // still has them.
+    let trade = trade::db_get(&mut *tx, sell_id)
         .await?
         .ok_or_else(|| ParticipationError::Db(sqlx::Error::RowNotFound))?;
     let income = match income_id {
         Some(id) => Some(
-            income::db_get(pool, id)
+            http::crud_get::<Income, _>(&mut *tx, id)
                 .await?
                 .ok_or_else(|| ParticipationError::Db(sqlx::Error::RowNotFound))?,
         ),
         None => None,
     };
+    mode.finish(tx).await?;
     Ok(Participation { trade, income })
 }
 
 async fn participate(
     State(pool): State<SqlitePool>,
     Path(action_id): Path<i64>,
+    Query(query): Query<DryRunQuery>,
     Json(body): Json<ParticipationBody>,
 ) -> Result<(StatusCode, Json<Participation>), ApiError> {
-    let participation = db_participate(&pool, action_id, &body).await?;
-    Ok((StatusCode::CREATED, Json(participation)))
+    let participation = execute(&pool, action_id, &body, query.mode()).await?;
+    let status = if query.dry_run {
+        StatusCode::OK
+    } else {
+        StatusCode::CREATED
+    };
+    Ok((status, Json(participation)))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::entities::trade::TradeType;
-    use crate::entities::{corporate_action::CorporateAction, listing};
+    use crate::entities::{corporate_action::CorporateAction, income, listing};
     use crate::test_support::{self, ApiClient, dec, test_pool};
 
     /// Client over this module's own routes.
@@ -1057,5 +1075,40 @@ mod tests {
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
         let resp = app.delete(format!("/income/{income_id}")).await;
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    /// `POST /corporate_actions/:id/participate?dry_run=true` previews the
+    /// closing Sell and its dividend-component income row: `200` with the
+    /// body the real participation then answers `201` with, nothing stored —
+    /// and an allocation that does not cover the units is refused identically
+    /// either way.
+    #[tokio::test]
+    async fn api_participate_dry_run_previews_without_storing() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        insert_buy(&pool, 1, d(2020, 1, 15), "10000", "6.00").await;
+        insert_buyback(&pool, 10, d(2024, 7, 1)).await;
+        let client = client(&pool);
+
+        let short = serde_json::json!({
+            "date": "2024-07-10",
+            "units": "1000",
+            "allocations": [ { "purchase_trade_id": 1, "quantity_allocated": "600" } ],
+        });
+        client
+            .assert_dry_run_refuses_alike(&pool, "/corporate_actions/10/participate", Some(&short))
+            .await;
+        let ok = serde_json::json!({
+            "date": "2024-07-10",
+            "units": "1000",
+            "allocations": [ { "purchase_trade_id": 1, "quantity_allocated": "1000" } ],
+        });
+        let created = client
+            .assert_dry_run_previews(&pool, "/corporate_actions/10/participate", Some(&ok))
+            .await;
+        assert_eq!(
+            created["income"]["buyback_trade_id"],
+            created["trade"]["id"]
+        );
     }
 }

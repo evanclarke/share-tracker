@@ -13,10 +13,10 @@
 //! is refused rather than rewritten as a disposal in place (SCENARIOS Z-b).
 
 use crate::entities::trade::{self, Trade, TradeType};
-use crate::infra::db::write_tx;
+use crate::infra::db::{WriteMode, write_tx};
 use crate::infra::decimal::{Money, OptMoney};
-use crate::infra::extract::Json;
-use crate::infra::http::{self, ApiError, Upsert, UpsertResponse};
+use crate::infra::extract::{Json, Query};
+use crate::infra::http::{self, ApiError, DryRunQuery, Upsert, UpsertResponse};
 use axum::{
     Router,
     extract::{Path, State},
@@ -506,6 +506,7 @@ async fn write(
     pool: &SqlitePool,
     id: Option<i64>,
     body: &SellBody,
+    mode: WriteMode,
 ) -> Result<(i64, Upsert, Option<Trade>), SellError> {
     let mut tx = write_tx(pool).await?;
 
@@ -626,7 +627,7 @@ async fn write(
     } else {
         http::crud_get::<Trade, _>(&mut *tx, written).await?
     };
-    tx.commit().await?;
+    mode.finish(tx).await?;
     let outcome = if existed {
         Upsert::Replaced
     } else {
@@ -646,7 +647,7 @@ pub async fn db_upsert_sell(
     id: i64,
     body: &SellBody,
 ) -> Result<http::Upserted<Trade>, SellError> {
-    let (_, outcome, row) = write(pool, Some(id), body).await?;
+    let (_, outcome, row) = write(pool, Some(id), body, WriteMode::Commit).await?;
     Ok((outcome, row))
 }
 
@@ -656,8 +657,15 @@ pub async fn db_upsert_sell(
 /// [`upsert_sell_in_tx`] writes the parcel allocations against that assigned
 /// id, all in the one transaction. The created row is returned so the caller
 /// can act on the id at once.
-pub async fn db_create_sell(pool: &SqlitePool, body: &SellBody) -> Result<Trade, SellError> {
-    let (_, _, stored) = write(pool, None, body).await?;
+///
+/// `mode` is [`WriteMode::DryRun`] for a `?dry_run=true` preview: the same
+/// write, validation and read-back, rolled back instead of committed.
+pub async fn db_create_sell(
+    pool: &SqlitePool,
+    body: &SellBody,
+    mode: WriteMode,
+) -> Result<Trade, SellError> {
+    let (_, _, stored) = write(pool, None, body, mode).await?;
     stored.ok_or(SellError::VanishedAfterCreate)
 }
 
@@ -1019,13 +1027,20 @@ async fn upsert(
 /// assigns one and its allocations are written against that assigned id. The
 /// created row is returned (presented exactly as `GET /trades/:id` would) so
 /// the caller can act on its id at once with no `max(id) + 1` guess between
-/// the two calls.
+/// the two calls. `?dry_run=true` previews it: the same body answered `200`,
+/// nothing stored.
 async fn create(
     State(pool): State<SqlitePool>,
+    Query(query): Query<DryRunQuery>,
     Json(body): Json<SellBody>,
 ) -> Result<(StatusCode, Json<Trade>), ApiError> {
-    let created = db_create_sell(&pool, &body).await?;
-    Ok((StatusCode::CREATED, Json(created.present())))
+    let created = db_create_sell(&pool, &body, query.mode()).await?;
+    let status = if query.dry_run {
+        StatusCode::OK
+    } else {
+        StatusCode::CREATED
+    };
+    Ok((status, Json(created.present())))
 }
 
 async fn delete(
@@ -3306,5 +3321,33 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(allocations, 0, "and writes no allocation rows");
+    }
+
+    /// `POST /sells?dry_run=true` previews the Sell: `200` with the body the
+    /// real create then answers `201` with, nothing stored (no trade, no
+    /// allocation, no `row_history` entry) — and a bad allocation set is
+    /// refused identically either way.
+    #[tokio::test]
+    async fn post_sell_dry_run_previews_without_storing() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+        let client = client(&pool);
+
+        let created = client
+            .assert_dry_run_previews(&pool, "/sells", Some(&partial_sell_json("40")))
+            .await;
+        assert_eq!(created["quantity"], "40");
+        assert_eq!(
+            count_allocations(&pool, created["id"].as_i64().unwrap()).await,
+            1
+        );
+
+        let mut bad = partial_sell_json("100");
+        bad["allocations"] =
+            serde_json::json!([{ "purchase_trade_id": 1, "quantity_allocated": "40" }]);
+        client
+            .assert_dry_run_refuses_alike(&pool, "/sells", Some(&bad))
+            .await;
     }
 }

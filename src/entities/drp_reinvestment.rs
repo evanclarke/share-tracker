@@ -99,10 +99,10 @@ use crate::entities::{
     income::{Income, IncomeType},
     trade::{self, Trade},
 };
-use crate::infra::db::write_tx;
+use crate::infra::db::{WriteMode, write_tx};
 use crate::infra::decimal::{Money, parse_dec};
-use crate::infra::extract::Json;
-use crate::infra::http::ApiError;
+use crate::infra::extract::{Json, Query};
+use crate::infra::http::{ApiError, DryRunQuery};
 use axum::{
     Router,
     extract::{Path, State},
@@ -324,10 +324,22 @@ pub fn router() -> Router<SqlitePool> {
 }
 
 /// Create the DRP trade for a distribution and link it, atomically.
+#[cfg(test)]
 pub async fn db_reinvest(
     pool: &SqlitePool,
     income_id: i64,
     body: &ReinvestBody,
+) -> Result<Trade, ReinvestError> {
+    execute(pool, income_id, body, WriteMode::Commit).await
+}
+
+/// The write behind [`db_reinvest`], ending as `mode` says: committed, or rolled
+/// back for a `?dry_run=true` preview once every row it returns has been read.
+async fn execute(
+    pool: &SqlitePool,
+    income_id: i64,
+    body: &ReinvestBody,
+    mode: WriteMode,
 ) -> Result<Trade, ReinvestError> {
     if body.reinvestment_price <= Decimal::ZERO {
         return Err(ReinvestError::NonPositivePrice);
@@ -660,12 +672,13 @@ pub async fn db_reinvest(
         return Err(ReinvestError::UnrepresentableRebasedQuantity(beyond));
     }
 
-    tx.commit().await?;
-
-    // Read the freshly created trade back so the response is exactly what was stored.
-    trade::db_get(pool, new_id)
+    // Read the created trade back inside the transaction, so the response is
+    // exactly what was stored — and a dry run, rolled back below, still has it.
+    let trade = trade::db_get(&mut *tx, new_id)
         .await?
-        .ok_or_else(|| ReinvestError::Db(sqlx::Error::RowNotFound))
+        .ok_or_else(|| ReinvestError::Db(sqlx::Error::RowNotFound))?;
+    mode.finish(tx).await?;
+    Ok(trade)
 }
 
 /// Undo a reinvestment: delete the DRP trade and clear the distribution's
@@ -741,10 +754,16 @@ pub async fn db_unreinvest(pool: &SqlitePool, income_id: i64) -> Result<(), Rein
 async fn reinvest(
     State(pool): State<SqlitePool>,
     Path(income_id): Path<i64>,
+    Query(query): Query<DryRunQuery>,
     Json(body): Json<ReinvestBody>,
 ) -> Result<(StatusCode, Json<Trade>), ApiError> {
-    let trade = db_reinvest(&pool, income_id, &body).await?;
-    Ok((StatusCode::CREATED, Json(trade)))
+    let trade = execute(&pool, income_id, &body, query.mode()).await?;
+    let status = if query.dry_run {
+        StatusCode::OK
+    } else {
+        StatusCode::CREATED
+    };
+    Ok((status, Json(trade)))
 }
 
 async fn unreinvest(
@@ -2987,5 +3006,34 @@ mod tests {
             rows[0]["original_cost_base"],
             "0.0079000000000000000000000000"
         );
+    }
+
+    /// `POST /income/:id/reinvest?dry_run=true` previews the DRP trade: `200`
+    /// with the body the real reinvest then answers `201` with, nothing stored
+    /// (no trade, no income link, no residual carried) — and a units/cash
+    /// mismatch is refused identically either way.
+    #[tokio::test]
+    async fn api_reinvest_dry_run_previews_without_storing() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "USD").await;
+        enrol(&pool, 1, ResidualHandling::CarryForward).await;
+        insert_distribution(&pool, 1, 1, "68.66".parse().unwrap(), Decimal::ZERO).await;
+        let client = client(&pool);
+
+        client
+            .assert_dry_run_refuses_alike(
+                &pool,
+                "/income/1/reinvest",
+                Some(&serde_json::json!({"reinvestment_price": "137.05", "units": "0.600"})),
+            )
+            .await;
+        let created = client
+            .assert_dry_run_previews(
+                &pool,
+                "/income/1/reinvest",
+                Some(&serde_json::json!({"reinvestment_price": "137.32", "units": "0.500"})),
+            )
+            .await;
+        assert_eq!(created["trade_type"], "DRP");
     }
 }

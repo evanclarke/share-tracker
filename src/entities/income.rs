@@ -515,6 +515,7 @@ pub fn router() -> Router<SqlitePool> {
         )
 }
 
+#[cfg(test)]
 pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<Income>, sqlx::Error> {
     http::crud_get(pool, id).await
 }

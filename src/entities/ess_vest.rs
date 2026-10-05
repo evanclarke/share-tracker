@@ -83,10 +83,10 @@
 //! `reports::health`'s `non_trading_day_trades`.
 
 use crate::entities::trade::{self, Trade};
-use crate::infra::db::write_tx;
+use crate::infra::db::{WriteMode, write_tx};
 use crate::infra::decimal::Money;
-use crate::infra::extract::Json;
-use crate::infra::http::ApiError;
+use crate::infra::extract::{Json, Query};
+use crate::infra::http::{ApiError, DryRunQuery};
 use axum::{
     Router,
     extract::{Path, State},
@@ -140,7 +140,18 @@ pub fn router() -> Router<SqlitePool> {
 }
 
 /// Create the statement's cost-base-reset Buy and link it, atomically.
+#[cfg(test)]
 pub async fn db_vest(pool: &SqlitePool, statement_id: i64) -> Result<Trade, VestError> {
+    execute(pool, statement_id, WriteMode::Commit).await
+}
+
+/// The write behind [`db_vest`], ending as `mode` says: committed, or rolled
+/// back for a `?dry_run=true` preview once every row it returns has been read.
+async fn execute(
+    pool: &SqlitePool,
+    statement_id: i64,
+    mode: WriteMode,
+) -> Result<Trade, VestError> {
     let mut tx = write_tx(pool).await?;
 
     let row = sqlx::query(
@@ -261,19 +272,27 @@ pub async fn db_vest(pool: &SqlitePool, statement_id: i64) -> Result<Trade, Vest
         return Err(VestError::UnrepresentableRebasedQuantity(beyond));
     }
 
-    tx.commit().await?;
-
-    trade::db_get(pool, new_id)
+    // Read the created trade back inside the transaction, so the response is
+    // exactly what was stored — and a dry run, rolled back below, still has it.
+    let trade = trade::db_get(&mut *tx, new_id)
         .await?
-        .ok_or_else(|| VestError::Db(sqlx::Error::RowNotFound))
+        .ok_or_else(|| VestError::Db(sqlx::Error::RowNotFound))?;
+    mode.finish(tx).await?;
+    Ok(trade)
 }
 
 async fn vest(
     State(pool): State<SqlitePool>,
     Path(statement_id): Path<i64>,
+    Query(query): Query<DryRunQuery>,
 ) -> Result<(StatusCode, Json<Trade>), ApiError> {
-    let trade = db_vest(&pool, statement_id).await?;
-    Ok((StatusCode::CREATED, Json(trade)))
+    let trade = execute(&pool, statement_id, query.mode()).await?;
+    let status = if query.dry_run {
+        StatusCode::OK
+    } else {
+        StatusCode::CREATED
+    };
+    Ok((status, Json(trade)))
 }
 
 impl From<VestError> for ApiError {
@@ -988,5 +1007,27 @@ mod tests {
             rows[0]["original_cost_base"],
             "0.0079000000000000000000000000"
         );
+    }
+
+    /// `POST /ess_statements/:id/vest?dry_run=true` previews the vest Buy:
+    /// `200` with the body the real vest then answers `201` with, nothing
+    /// stored — and a vest refused for a missing FX month is refused
+    /// identically either way.
+    #[tokio::test]
+    async fn api_vest_dry_run_previews_without_storing() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        insert_statement(&pool, 1, "100", "6", "AUD").await;
+        let created = ApiClient::over(router().with_state(pool.clone()))
+            .assert_dry_run_previews(&pool, "/ess_statements/1/vest", None)
+            .await;
+        assert_eq!(created["quantity"], "100");
+
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "USD").await;
+        insert_statement(&pool, 1, "100", "150", "USD").await;
+        ApiClient::over(router().with_state(pool.clone()))
+            .assert_dry_run_refuses_alike(&pool, "/ess_statements/1/vest", None)
+            .await;
     }
 }

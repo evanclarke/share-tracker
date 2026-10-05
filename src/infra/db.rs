@@ -155,6 +155,31 @@ pub async fn write_tx(pool: &SqlitePool) -> Result<Transaction<'static, Sqlite>,
     pool.begin_with("BEGIN IMMEDIATE").await
 }
 
+/// How a computed write ends: committed, or — for a `?dry_run=true` preview —
+/// rolled back after the whole write, its write-time validation and the
+/// read-back of the rows it created have all run on the transaction.
+///
+/// The rollback discards everything the transaction did, triggers included:
+/// no `row_history` entry, no staled snapshot, and no `AUTOINCREMENT` sequence
+/// bump — so a dry run answers the very ids the real run then takes (barring a
+/// concurrent writer in between). The write paths that take one call
+/// [`WriteMode::finish`] exactly where they used to call `tx.commit()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteMode {
+    Commit,
+    DryRun,
+}
+
+impl WriteMode {
+    /// Commit the transaction, or roll it back for a dry run.
+    pub async fn finish(self, tx: Transaction<'_, Sqlite>) -> Result<(), sqlx::Error> {
+        match self {
+            WriteMode::Commit => tx.commit().await,
+            WriteMode::DryRun => tx.rollback().await,
+        }
+    }
+}
+
 /// Build the INSERT an entity's write path needs, binding the row's id only
 /// when the caller named one.
 ///

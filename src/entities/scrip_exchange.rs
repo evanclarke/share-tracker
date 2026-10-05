@@ -55,10 +55,10 @@ use crate::domain::rollover;
 use crate::entities::corporate_action::{self, ActionKind};
 use crate::entities::sell::{self, AllocationInput};
 use crate::entities::trade::{self, Trade};
-use crate::infra::db::write_tx;
+use crate::infra::db::{WriteMode, write_tx};
 use crate::infra::decimal::mul_div;
-use crate::infra::extract::Json;
-use crate::infra::http::ApiError;
+use crate::infra::extract::{Json, Query};
+use crate::infra::http::{ApiError, DryRunQuery};
 use axum::{
     Router,
     extract::{Path, State},
@@ -168,7 +168,18 @@ pub fn router() -> Router<SqlitePool> {
 /// Substitute every open parcel of the action's original listing with
 /// replacement-listing parcels, atomically. The exchange takes no parameters:
 /// the action's terms and the holdings at its date determine everything.
+#[cfg(test)]
 pub async fn db_exchange(pool: &SqlitePool, action_id: i64) -> Result<Exchange, ExchangeError> {
+    execute(pool, action_id, WriteMode::Commit).await
+}
+
+/// The write behind [`db_exchange`], ending as `mode` says: committed, or rolled
+/// back for a `?dry_run=true` preview once every row it returns has been read.
+async fn execute(
+    pool: &SqlitePool,
+    action_id: i64,
+    mode: WriteMode,
+) -> Result<Exchange, ExchangeError> {
     let mut tx = write_tx(pool).await?;
 
     let action = match corporate_action::db_get_tx(&mut *tx, action_id).await? {
@@ -323,7 +334,7 @@ pub async fn db_exchange(pool: &SqlitePool, action_id: i64) -> Result<Exchange, 
         .await?
         .ok_or(sqlx::Error::RowNotFound)?;
     let replacements = rollover::created_trades(&mut tx, replacement_ids).await?;
-    tx.commit().await?;
+    mode.finish(tx).await?;
     Ok(Exchange { sell, replacements })
 }
 
@@ -473,9 +484,15 @@ async fn check_exchangeable(
 async fn exchange(
     State(pool): State<SqlitePool>,
     Path(action_id): Path<i64>,
+    Query(query): Query<DryRunQuery>,
 ) -> Result<(StatusCode, Json<Exchange>), ApiError> {
-    let exchange = db_exchange(&pool, action_id).await?;
-    Ok((StatusCode::CREATED, Json(exchange)))
+    let exchange = execute(&pool, action_id, query.mode()).await?;
+    let status = if query.dry_run {
+        StatusCode::OK
+    } else {
+        StatusCode::CREATED
+    };
+    Ok((status, Json(exchange)))
 }
 
 impl From<ExchangeError> for ApiError {
@@ -1808,5 +1825,26 @@ mod tests {
         let ex = db_exchange(&pool, 10).await.unwrap();
         assert_eq!(ex.sell.average_price, Decimal::ZERO);
         assert_eq!(ex.sell.fx_rate, Decimal::ONE);
+    }
+
+    /// `POST /corporate_actions/:id/exchange?dry_run=true` previews the
+    /// scrip-for-scrip exchange: `200` with the body the real run then answers `201` with
+    /// (the same Sell and replacement ids), nothing stored — and a run with
+    /// nothing held is refused identically either way.
+    #[tokio::test]
+    async fn api_exchange_dry_run_previews_without_storing() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "OLD").await;
+        insert_listing(&pool, 2, "NEW").await;
+        insert_scrip(&pool, 10, d(2024, 7, 1)).await;
+        client(&pool)
+            .assert_dry_run_refuses_alike(&pool, "/corporate_actions/10/exchange", None)
+            .await;
+
+        insert_buy(&pool, 1, 1, d(2020, 10, 1), "1000", "1.50").await;
+        let created = client(&pool)
+            .assert_dry_run_previews(&pool, "/corporate_actions/10/exchange", None)
+            .await;
+        assert_eq!(created["replacements"][0]["quantity"], "2000");
     }
 }

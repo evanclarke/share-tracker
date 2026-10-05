@@ -37,10 +37,10 @@ use crate::entities::corporate_action::{
     split_adjusted_quantity,
 };
 use crate::entities::trade::{self, Trade, TradeType};
-use crate::infra::db::write_tx;
+use crate::infra::db::{WriteMode, write_tx};
 use crate::infra::decimal::{Money, parse_dec};
-use crate::infra::extract::Json;
-use crate::infra::http::ApiError;
+use crate::infra::extract::{Json, Query};
+use crate::infra::http::{ApiError, DryRunQuery};
 use axum::{
     Router,
     extract::{Path, State},
@@ -303,10 +303,22 @@ pub(crate) async fn db_rights_used(
 }
 
 /// Create the Buy trade for a rights exercise, atomically.
+#[cfg(test)]
 pub async fn db_exercise(
     pool: &SqlitePool,
     action_id: i64,
     body: &ExerciseBody,
+) -> Result<Trade, ExerciseError> {
+    execute(pool, action_id, body, WriteMode::Commit).await
+}
+
+/// The write behind [`db_exercise`], ending as `mode` says: committed, or rolled
+/// back for a `?dry_run=true` preview once every row it returns has been read.
+async fn execute(
+    pool: &SqlitePool,
+    action_id: i64,
+    body: &ExerciseBody,
+    mode: WriteMode,
 ) -> Result<Trade, ExerciseError> {
     if body.units <= Decimal::ZERO {
         return Err(ExerciseError::NonPositiveUnits);
@@ -467,21 +479,28 @@ pub async fn db_exercise(
         return Err(ExerciseError::UnrepresentableRebasedQuantity(beyond));
     }
 
-    tx.commit().await?;
-
-    // Read the freshly created trade back so the response is exactly what was stored.
-    trade::db_get(pool, new_id)
+    // Read the created trade back inside the transaction, so the response is
+    // exactly what was stored — and a dry run, rolled back below, still has it.
+    let trade = trade::db_get(&mut *tx, new_id)
         .await?
-        .ok_or_else(|| ExerciseError::Db(sqlx::Error::RowNotFound))
+        .ok_or_else(|| ExerciseError::Db(sqlx::Error::RowNotFound))?;
+    mode.finish(tx).await?;
+    Ok(trade)
 }
 
 async fn exercise(
     State(pool): State<SqlitePool>,
     Path(action_id): Path<i64>,
+    Query(query): Query<DryRunQuery>,
     Json(body): Json<ExerciseBody>,
 ) -> Result<(StatusCode, Json<Trade>), ApiError> {
-    let trade = db_exercise(&pool, action_id, &body).await?;
-    Ok((StatusCode::CREATED, Json(trade)))
+    let trade = execute(&pool, action_id, &body, query.mode()).await?;
+    let status = if query.dry_run {
+        StatusCode::OK
+    } else {
+        StatusCode::CREATED
+    };
+    Ok((status, Json(trade)))
 }
 
 #[cfg(test)]
@@ -1758,5 +1777,41 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(trade.fx_rate, Decimal::ONE);
+    }
+
+    /// `POST /corporate_actions/:id/exercise?dry_run=true` previews the
+    /// exercise Buy: `200` with the body the real exercise then answers `201`
+    /// with, nothing stored — and an exercise beyond the entitlement is
+    /// refused identically either way.
+    #[tokio::test]
+    async fn api_exercise_dry_run_previews_without_storing() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        insert_buy(&pool, 1, d(2024, 1, 15), "1000", "2.00").await;
+        insert_rights_issue(&pool, 10, d(2024, 7, 1)).await;
+        let app = ApiClient::over(router().with_state(pool.clone()));
+
+        app.assert_dry_run_refuses_alike(
+            &pool,
+            "/corporate_actions/10/exercise",
+            Some(&serde_json::json!({
+                "date": "2024-08-01",
+                "units": "100000",
+                "rights_cost": "10.50",
+            })),
+        )
+        .await;
+        let created = app
+            .assert_dry_run_previews(
+                &pool,
+                "/corporate_actions/10/exercise",
+                Some(&serde_json::json!({
+                    "date": "2024-08-01",
+                    "units": "250",
+                    "rights_cost": "10.50",
+                })),
+            )
+            .await;
+        assert_eq!(created["rights_action_id"], 10);
     }
 }

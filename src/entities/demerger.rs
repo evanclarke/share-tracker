@@ -56,10 +56,10 @@ use crate::domain::rollover;
 use crate::entities::corporate_action::{self, ActionKind};
 use crate::entities::sell::{self, AllocationInput};
 use crate::entities::trade::{self, Trade};
-use crate::infra::db::write_tx;
+use crate::infra::db::{WriteMode, write_tx};
 use crate::infra::decimal::mul_div;
-use crate::infra::extract::Json;
-use crate::infra::http::ApiError;
+use crate::infra::extract::{Json, Query};
+use crate::infra::http::{ApiError, DryRunQuery};
 use axum::{
     Router,
     extract::{Path, State},
@@ -166,7 +166,18 @@ pub fn router() -> Router<SqlitePool> {
 /// entity and the demerged entity, atomically. The demerge takes no
 /// parameters: the action's terms and the holdings at its date determine
 /// everything.
+#[cfg(test)]
 pub async fn db_demerge(pool: &SqlitePool, action_id: i64) -> Result<Demerge, DemergeError> {
+    execute(pool, action_id, WriteMode::Commit).await
+}
+
+/// The write behind [`db_demerge`], ending as `mode` says: committed, or rolled
+/// back for a `?dry_run=true` preview once every row it returns has been read.
+async fn execute(
+    pool: &SqlitePool,
+    action_id: i64,
+    mode: WriteMode,
+) -> Result<Demerge, DemergeError> {
     let mut tx = write_tx(pool).await?;
 
     let action = match corporate_action::db_get_tx(&mut *tx, action_id).await? {
@@ -361,7 +372,7 @@ pub async fn db_demerge(pool: &SqlitePool, action_id: i64) -> Result<Demerge, De
         .ok_or(sqlx::Error::RowNotFound)?;
     let head_replacements = rollover::created_trades(&mut tx, head_ids).await?;
     let demerged_replacements = rollover::created_trades(&mut tx, demerged_ids).await?;
-    tx.commit().await?;
+    mode.finish(tx).await?;
     Ok(Demerge {
         sell,
         head_replacements,
@@ -425,9 +436,15 @@ async fn check_demergeable(
 async fn demerge(
     State(pool): State<SqlitePool>,
     Path(action_id): Path<i64>,
+    Query(query): Query<DryRunQuery>,
 ) -> Result<(StatusCode, Json<Demerge>), ApiError> {
-    let demerge = db_demerge(&pool, action_id).await?;
-    Ok((StatusCode::CREATED, Json(demerge)))
+    let demerge = execute(&pool, action_id, query.mode()).await?;
+    let status = if query.dry_run {
+        StatusCode::OK
+    } else {
+        StatusCode::CREATED
+    };
+    Ok((status, Json(demerge)))
 }
 
 impl From<DemergeError> for ApiError {
@@ -1836,5 +1853,26 @@ mod tests {
         assert_eq!(spin["original_quantity"], "79000000000000000000000000");
         assert_eq!(spin["remaining_quantity"], "79000000000000000000000000000");
         assert_eq!(spin["original_cost_base"], "100");
+    }
+
+    /// `POST /corporate_actions/:id/demerge?dry_run=true` previews the
+    /// demerger: `200` with the body the real run then answers `201` with
+    /// (the same Sell and replacement ids), nothing stored — and a run with
+    /// nothing held is refused identically either way.
+    #[tokio::test]
+    async fn api_demerge_dry_run_previews_without_storing() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "HEAD").await;
+        insert_listing(&pool, 2, "DEM").await;
+        insert_demerger(&pool, 10, d(2024, 7, 1)).await;
+        client(&pool)
+            .assert_dry_run_refuses_alike(&pool, "/corporate_actions/10/demerge", None)
+            .await;
+
+        insert_buy(&pool, 1, 1, d(2020, 10, 1), "1000", "1.50").await;
+        let created = client(&pool)
+            .assert_dry_run_previews(&pool, "/corporate_actions/10/demerge", None)
+            .await;
+        assert_eq!(created["head_replacements"][0]["quantity"], "1000");
     }
 }

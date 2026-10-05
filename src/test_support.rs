@@ -418,6 +418,74 @@ impl ApiClient {
         .await
     }
 
+    /// POST `body` as JSON, or with no body at all for the operations that
+    /// take none (`demerge`, `exchange`, `recognise`, `vest`).
+    async fn post_maybe(&self, path: &str, body: Option<&serde_json::Value>) -> ApiResponse {
+        match body {
+            Some(body) => self.post(path, body).await,
+            None => self.post_empty(path).await,
+        }
+    }
+
+    /// Pin the `?dry_run=true` contract (`infra::http::DryRunQuery`) on one
+    /// computed write that should succeed: the dry run answers `200` and
+    /// leaves the whole database — every table, `row_history` and
+    /// `sqlite_sequence` included — byte-for-byte as it was, and the real run
+    /// then answers `201` with exactly the dry run's body (the same ids too,
+    /// since the rollback also undid the `AUTOINCREMENT` bump). Answers the
+    /// created body for the caller's own assertions.
+    pub async fn assert_dry_run_previews(
+        &self,
+        pool: &SqlitePool,
+        path: &str,
+        body: Option<&serde_json::Value>,
+    ) -> serde_json::Value {
+        let before = dump_database(pool).await;
+        let dry = self
+            .post_maybe(&format!("{path}?dry_run=true"), body)
+            .await
+            .expect_status(StatusCode::OK);
+        assert!(
+            dump_database(pool).await == before,
+            "POST {path}?dry_run=true stored something"
+        );
+        let real = self
+            .post_maybe(path, body)
+            .await
+            .expect_status(StatusCode::CREATED);
+        let created: serde_json::Value = real.json();
+        assert_eq!(
+            dry.json::<serde_json::Value>(),
+            created,
+            "POST {path}: the dry run's body differs from the real run's"
+        );
+        created
+    }
+
+    /// Pin that `?dry_run=true` refuses a bad body exactly as the real write
+    /// does — same `422`, same reason — and that neither stores anything.
+    pub async fn assert_dry_run_refuses_alike(
+        &self,
+        pool: &SqlitePool,
+        path: &str,
+        body: Option<&serde_json::Value>,
+    ) {
+        let before = dump_database(pool).await;
+        let dry = self
+            .post_maybe(&format!("{path}?dry_run=true"), body)
+            .await
+            .expect_status(StatusCode::UNPROCESSABLE_ENTITY);
+        let real = self
+            .post_maybe(path, body)
+            .await
+            .expect_status(StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(dry.text(), real.text(), "POST {path}: the refusals differ");
+        assert!(
+            dump_database(pool).await == before,
+            "a refused POST {path} stored something"
+        );
+    }
+
     pub async fn delete(&self, path: impl AsRef<str>) -> ApiResponse {
         self.send(
             Request::builder()

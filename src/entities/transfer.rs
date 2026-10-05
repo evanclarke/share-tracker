@@ -38,9 +38,9 @@ use crate::domain::rollover;
 use crate::entities::corporate_action::checked_as_acquired_quantity;
 use crate::entities::sell::{self, AllocationInput};
 use crate::entities::trade::{self, Trade};
-use crate::infra::db::write_tx;
-use crate::infra::extract::Json;
-use crate::infra::http::{self, ApiError, CrudEntity};
+use crate::infra::db::{WriteMode, write_tx};
+use crate::infra::extract::{Json, Query};
+use crate::infra::http::{self, ApiError, CrudEntity, DryRunQuery};
 use axum::{
     Router,
     extract::{Path, State},
@@ -384,18 +384,7 @@ pub async fn db_transfer(
     id: i64,
     body: &TransferBody,
 ) -> Result<TransferGroup, TransferError> {
-    write(pool, Some(id), body).await
-}
-
-/// `POST /transfers` — execute a transfer without naming an id: the database
-/// assigns the transfer row's id (see [`write`]), and the transfer-out Sell and
-/// transfer-in Buys it creates carry that assigned id as their provenance, so
-/// the whole group belongs to the row that names it.
-pub async fn db_create(
-    pool: &SqlitePool,
-    body: &TransferBody,
-) -> Result<TransferGroup, TransferError> {
-    write(pool, None, body).await
+    write(pool, Some(id), body, WriteMode::Commit).await
 }
 
 /// The shared write behind both entry points, allocating the transfer row's id
@@ -408,10 +397,14 @@ pub async fn db_create(
 /// group it returns is built from the Sell and transfer-in Buy ids the write
 /// itself created, which exist only here. So the write reads the group back
 /// (exactly what the upsert path always did) and both entry points return it.
+///
+/// `mode` is [`WriteMode::DryRun`] for a `?dry_run=true` preview of the
+/// create: the group is built on the transaction as always, then rolled back.
 async fn write(
     pool: &SqlitePool,
     id: Option<i64>,
     body: &TransferBody,
+    mode: WriteMode,
 ) -> Result<TransferGroup, TransferError> {
     if body.from_account_id == body.to_account_id {
         return Err(TransferError::SameAccount);
@@ -573,7 +566,7 @@ async fn write(
         None => None,
     };
     let transfer_ins = rollover::created_trades(&mut tx, transfer_in_ids).await?;
-    tx.commit().await?;
+    mode.finish(tx).await?;
     Ok(TransferGroup {
         transfer,
         sell,
@@ -846,13 +839,22 @@ async fn upsert(
 /// assigns the transfer row's id (see [`write`]) and the group's Sell and
 /// transfer-in Buys are written against it, so the caller gets the whole
 /// executed group — its own id included — from one request rather than
-/// guessing `max(id) + 1` first.
+/// guessing `max(id) + 1` first. The transfer-out Sell and transfer-in Buys
+/// carry that assigned id as their provenance, so the whole group belongs to
+/// the row that names it. `?dry_run=true` previews it: the same group
+/// answered `200`, nothing stored.
 async fn create(
     State(pool): State<SqlitePool>,
+    Query(query): Query<DryRunQuery>,
     Json(body): Json<TransferBody>,
 ) -> Result<(StatusCode, Json<TransferGroup>), ApiError> {
-    let group = db_create(&pool, &body).await?;
-    Ok((StatusCode::CREATED, Json(group)))
+    let group = write(&pool, None, &body, query.mode()).await?;
+    let status = if query.dry_run {
+        StatusCode::OK
+    } else {
+        StatusCode::CREATED
+    };
+    Ok((status, Json(group)))
 }
 
 async fn delete(
@@ -2569,5 +2571,35 @@ mod tests {
             ],
         )
         .await;
+    }
+
+    /// `POST /transfers?dry_run=true` previews the group: `200` with the body
+    /// the real create then answers `201` with (the same transfer, Sell and
+    /// transfer-in ids), nothing stored — and a transfer between one account
+    /// and itself is refused identically either way.
+    #[tokio::test]
+    async fn post_transfer_dry_run_previews_without_storing() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "ICE").await;
+        insert_vest(&pool, 1, d(2023, 3, 1), "100", "120").await;
+        let client = client(&pool);
+
+        let body = serde_json::json!({
+            "listing_id": 1,
+            "date": "2024-06-01",
+            "from_account_id": 2,
+            "to_account_id": 1,
+            "allocations": [ { "purchase_trade_id": 1, "quantity_allocated": "100" } ]
+        });
+        let created = client
+            .assert_dry_run_previews(&pool, "/transfers", Some(&body))
+            .await;
+        assert_eq!(created["sell"]["transfer_id"], created["transfer"]["id"]);
+
+        let mut same_account = body.clone();
+        same_account["to_account_id"] = serde_json::json!(2);
+        client
+            .assert_dry_run_refuses_alike(&pool, "/transfers", Some(&same_account))
+            .await;
     }
 }

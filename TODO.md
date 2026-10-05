@@ -101,7 +101,7 @@ by value; the first item is a bug.
   operation: exactly its operations unchanged, every `$ref` resolves, no unreached schema, same
   envelope) and `the_tag_slice_and_the_route_index_are_served`. Documented in `docs/API.md`'s
   OpenAPI section and `400` row, FEATURES and README.
-- [ ] **No way to preview a tax-relevant write before it is committed.** Only
+- [x] **No way to preview a tax-relevant write before it is committed.** Only
   `POST /amma_statements/:id/generate_adjustments` has a preview (`"preview": true`). An agent
   entering figures from a statement wants to see the stored result first. Add `?dry_run=true` to
   the writes whose result is computed rather than echoed — `POST /sells`, the corporate-action
@@ -112,6 +112,20 @@ by value; the first item is a bug.
   with (the `200`/`201` rule in `docs/API.md`'s "Creating a record"). Tests: per route, a dry run
   answers `200` with the body a real run then answers `201` with, writes no row (and no
   `row_history` entry), and refuses a bad body with the same `422`.
+  *Done 2026-10-05:* `infra::db::WriteMode` ends each of the ten writes' transactions — `finish`
+  commits, or rolls back for a dry run — decoded from `?dry_run=` by `infra::http::DryRunQuery`;
+  each handler answers `200` or `201` by it. Six of the ten (vest, reinvest, exercise,
+  sell_rights, recognise, participate) read their created rows back on the pool *after* the
+  commit, against the CLAUDE.md read-inside-the-transaction rule; they now read inside it, which
+  the dry run needs (`rights_sale::db_get` now takes a connection). The rollback also undoes the
+  `AUTOINCREMENT` bump, so the preview's ids are the real run's. Pinned per route by
+  `*_dry_run_previews_without_storing` in each module, over `ApiClient::assert_dry_run_previews`
+  (dry run `200`, the whole database — `row_history` and `sqlite_sequence` included —
+  byte-identical afterwards, the real run `201` with the same body) and
+  `assert_dry_run_refuses_alike` (the same `422` text both ways, nothing stored); all ten fail
+  with `WriteMode::DryRun` committing. The OpenAPI rows carry `[200, 201]` and a `dry_run` query
+  parameter. Documented in `docs/API.md`'s new "Previewing a write" section, the `200`/`201`
+  rule, and FEATURES. The AMMA generation keeps its body-level `"preview": true`.
 - [ ] **The live-database recipes live only in one user's agent memory.** The data-entry recipes
   (the annual VDHG AMMA entry, the quarterly ICE E*TRADE statement entry, triggering
   `rba-fx-import` when the tax summary `422`s), the deployed server's address, the bearer-token

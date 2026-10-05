@@ -39,10 +39,10 @@ use crate::entities::corporate_action::{
 };
 use crate::entities::sell::{self, AllocationInput, SellBody};
 use crate::entities::trade::{self, Trade};
-use crate::infra::db::write_tx;
+use crate::infra::db::{WriteMode, write_tx};
 use crate::infra::decimal::parse_dec;
-use crate::infra::extract::Json;
-use crate::infra::http::ApiError;
+use crate::infra::extract::{Json, Query};
+use crate::infra::http::{ApiError, DryRunQuery};
 use axum::{
     Router,
     extract::{Path, State},
@@ -109,7 +109,18 @@ pub fn router() -> Router<SqlitePool> {
 /// Close every open parcel of the action's listing through a single Sell at nil
 /// proceeds, recognising the capital loss, atomically. The recognise takes no
 /// parameters: the action and the holdings at its date determine everything.
+#[cfg(test)]
 pub async fn db_recognise(pool: &SqlitePool, action_id: i64) -> Result<Recognise, RecogniseError> {
+    execute(pool, action_id, WriteMode::Commit).await
+}
+
+/// The write behind [`db_recognise`], ending as `mode` says: committed, or rolled
+/// back for a `?dry_run=true` preview once every row it returns has been read.
+async fn execute(
+    pool: &SqlitePool,
+    action_id: i64,
+    mode: WriteMode,
+) -> Result<Recognise, RecogniseError> {
     let mut tx = write_tx(pool).await?;
 
     let action = match corporate_action::db_get_tx(&mut *tx, action_id).await? {
@@ -250,20 +261,26 @@ pub async fn db_recognise(pool: &SqlitePool, action_id: i64) -> Result<Recognise
     )
     .await?;
 
-    tx.commit().await?;
-
-    let sell = trade::db_get(pool, sell_id)
+    // Read inside the transaction, so a dry run (rolled back below) has it too.
+    let sell = trade::db_get(&mut *tx, sell_id)
         .await?
         .ok_or_else(|| RecogniseError::Db(sqlx::Error::RowNotFound))?;
+    mode.finish(tx).await?;
     Ok(Recognise { sell })
 }
 
 async fn recognise(
     State(pool): State<SqlitePool>,
     Path(action_id): Path<i64>,
+    Query(query): Query<DryRunQuery>,
 ) -> Result<(StatusCode, Json<Recognise>), ApiError> {
-    let recognise = db_recognise(&pool, action_id).await?;
-    Ok((StatusCode::CREATED, Json(recognise)))
+    let recognise = execute(&pool, action_id, query.mode()).await?;
+    let status = if query.dry_run {
+        StatusCode::OK
+    } else {
+        StatusCode::CREATED
+    };
+    Ok((status, Json(recognise)))
 }
 
 impl From<RecogniseError> for ApiError {
@@ -857,5 +874,25 @@ mod tests {
             0,
             "nothing persisted"
         );
+    }
+
+    /// `POST /corporate_actions/:id/recognise?dry_run=true` previews the
+    /// closing Sell: `200` with the body the real recognise then answers
+    /// `201` with, nothing stored — and a recognise with nothing held is
+    /// refused identically either way.
+    #[tokio::test]
+    async fn api_recognise_dry_run_previews_without_storing() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "DEAD").await;
+        insert_worthless(&pool, 10, 1, d(2025, 3, 31), WorthlessEvent::G3Declaration).await;
+        client(&pool)
+            .assert_dry_run_refuses_alike(&pool, "/corporate_actions/10/recognise", None)
+            .await;
+
+        insert_buy(&pool, 1, 1, d(2020, 10, 1), "1000", "1.50").await;
+        let created = client(&pool)
+            .assert_dry_run_previews(&pool, "/corporate_actions/10/recognise", None)
+            .await;
+        assert_eq!(created["sell"]["worthless_action_id"], 10);
     }
 }

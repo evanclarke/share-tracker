@@ -304,8 +304,8 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Post,
         "/sells",
-        &[201],
-        "Create a Sell with its parcel allocations; the created row is returned as GET /trades/{id} would present it.",
+        &[200, 201],
+        "Create a Sell with its parcel allocations; the created row is returned as GET /trades/{id} would present it (?dry_run=true previews it: 200 with the same body, nothing stored).",
         Body::Json("SellBody"),
         Body::Json("Trade"),
     ),
@@ -703,8 +703,8 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Post,
         "/transfers",
-        &[201],
-        "Execute a transfer: the Sell and transfer-in Buys are written atomically and the whole group is returned.",
+        &[200, 201],
+        "Execute a transfer: the Sell and transfer-in Buys are written atomically and the whole group is returned (?dry_run=true previews it: 200 with the same body, nothing stored).",
         Body::Json("TransferBody"),
         Body::Json("TransferGroup"),
     ),
@@ -1160,56 +1160,56 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Post,
         "/corporate_actions/{id}/participate",
-        &[201],
-        "Participate in a buy-back: the closing Sell and its dividend-component income row are written together and returned.",
+        &[200, 201],
+        "Participate in a buy-back: the closing Sell and its dividend-component income row are written together and returned (?dry_run=true previews it: 200 with the same body, nothing stored).",
         Body::Json("ParticipationBody"),
         Body::Json("Participation"),
     ),
     (
         Verb::Post,
         "/corporate_actions/{id}/demerge",
-        &[201],
-        "Apportion the head listing's open parcels between head and demerged listing, and return the created replacement parcels.",
+        &[200, 201],
+        "Apportion the head listing's open parcels between head and demerged listing, and return the created replacement parcels (?dry_run=true previews it: 200 with the same body, nothing stored).",
         Body::None,
         Body::Json("Demerge"),
     ),
     (
         Verb::Post,
         "/corporate_actions/{id}/exchange",
-        &[201],
-        "Substitute every open parcel of a scrip-for-scrip action's original listing, and return the created replacement parcels.",
+        &[200, 201],
+        "Substitute every open parcel of a scrip-for-scrip action's original listing, and return the created replacement parcels (?dry_run=true previews it: 200 with the same body, nothing stored).",
         Body::None,
         Body::Json("ScripExchange"),
     ),
     (
         Verb::Post,
         "/corporate_actions/{id}/exercise",
-        &[201],
-        "Exercise a rights issue into a new Buy carrying the rights cost, and return the created trade.",
+        &[200, 201],
+        "Exercise a rights issue into a new Buy carrying the rights cost, and return the created trade (?dry_run=true previews it: 200 with the same body, nothing stored).",
         Body::Json("ExerciseBody"),
         Body::Json("Trade"),
     ),
     (
         Verb::Post,
         "/corporate_actions/{id}/sell_rights",
-        &[201],
-        "Sell the rights of a renounceable issue and return the created rights sale.",
+        &[200, 201],
+        "Sell the rights of a renounceable issue and return the created rights sale (?dry_run=true previews it: 200 with the same body, nothing stored).",
         Body::Json("SellRightsBody"),
         Body::Json("RightsSale"),
     ),
     (
         Verb::Post,
         "/corporate_actions/{id}/recognise",
-        &[201],
-        "Recognise a worthless-shares loss by closing every open parcel at nil, and return the closing Sell.",
+        &[200, 201],
+        "Recognise a worthless-shares loss by closing every open parcel at nil, and return the closing Sell (?dry_run=true previews it: 200 with the same body, nothing stored).",
         Body::None,
         Body::Json("Recognise"),
     ),
     (
         Verb::Post,
         "/income/{id}/reinvest",
-        &[201],
-        "Create the DRP trade for a distribution and link it; the created trade is returned.",
+        &[200, 201],
+        "Create the DRP trade for a distribution and link it; the created trade is returned (?dry_run=true previews it: 200 with the same body, nothing stored).",
         Body::Json("ReinvestBody"),
         Body::Json("Trade"),
     ),
@@ -1224,8 +1224,8 @@ const ROUTES: &[RouteRow] = &[
     (
         Verb::Post,
         "/ess_statements/{id}/vest",
-        &[201],
-        "Vest an ESS statement into the cost-base-reset Buy it implies, and return the created trade.",
+        &[200, 201],
+        "Vest an ESS statement into the cost-base-reset Buy it implies, and return the created trade (?dry_run=true previews it: 200 with the same body, nothing stored).",
         Body::None,
         Body::Json("Trade"),
     ),
@@ -2359,11 +2359,23 @@ fn query_parameters(verb: Verb, path: &str) -> Vec<Parameter> {
         T::into_params(|| Some(ParameterIn::Query))
     }
 
-    // Keyed on the verb too, because one query-decoding route is not a GET:
-    // `POST /jobs/{name}` takes `?suffix=`/`?skip_command=`.
+    // Keyed on the verb too, because some query-decoding routes are not a
+    // GET: `POST /jobs/{name}` takes `?suffix=`/`?skip_command=`, and the
+    // previewable writes take `?dry_run=`.
     if verb == Verb::Post {
         return match path {
             "/jobs/{name}" => of::<crate::infra::scheduler::JobParams>(),
+            // The computed writes a `?dry_run=true` previews.
+            "/sells"
+            | "/transfers"
+            | "/corporate_actions/{id}/participate"
+            | "/corporate_actions/{id}/demerge"
+            | "/corporate_actions/{id}/exchange"
+            | "/corporate_actions/{id}/exercise"
+            | "/corporate_actions/{id}/sell_rights"
+            | "/corporate_actions/{id}/recognise"
+            | "/income/{id}/reinvest"
+            | "/ess_statements/{id}/vest" => of::<crate::infra::http::DryRunQuery>(),
             _ => Vec::new(),
         };
     }
