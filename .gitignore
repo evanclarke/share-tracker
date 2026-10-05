@@ -1,6 +1,9 @@
 /target
 /.idea
 /.claude/*.local.*
+# The live-API skill names the private deployment host and describes the real
+# portfolio, so it stays on the owner's machine (doc_checks pins this line)
+/.claude/skills/live-api/
 
 # Runtime SQLite database and dated backups
 /share-tracker.db

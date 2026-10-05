@@ -6307,3 +6307,25 @@ fn sells_section_says_why_there_is_no_get_one() {
         );
     }
 }
+
+/// The `live-api` Claude Code skill (`.claude/skills/live-api/`) names the
+/// private deployment host and describes the real portfolio's recipes, so it
+/// lives only on the owner's machine. The skill itself is outside the
+/// repository; what the repository owns is the exclusion — this pins it, and
+/// that no later `!` rule re-includes anything under the directory.
+#[test]
+fn the_live_api_skill_is_never_committed() {
+    const GITIGNORE: &str = include_str!("../.gitignore");
+    const SKILL_DIR: &str = "/.claude/skills/live-api/";
+    let lines: Vec<&str> = GITIGNORE.lines().map(str::trim).collect();
+    let at = lines
+        .iter()
+        .position(|l| *l == SKILL_DIR)
+        .unwrap_or_else(|| panic!(".gitignore must exclude {SKILL_DIR} on a line of its own"));
+    for negation in lines[at + 1..].iter().filter(|l| l.starts_with('!')) {
+        assert!(
+            !negation.contains("live-api") && !negation.contains(".claude"),
+            ".gitignore's {negation:?} re-includes part of the excluded live-api skill"
+        );
+    }
+}

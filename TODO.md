@@ -126,7 +126,7 @@ by value; the first item is a bug.
   with `WriteMode::DryRun` committing. The OpenAPI rows carry `[200, 201]` and a `dry_run` query
   parameter. Documented in `docs/API.md`'s new "Previewing a write" section, the `200`/`201`
   rule, and FEATURES. The AMMA generation keeps its body-level `"preview": true`.
-- [ ] **The live-database recipes live only in one user's agent memory.** The data-entry recipes
+- [x] **The live-database recipes live only in one user's agent memory.** The data-entry recipes
   (the annual VDHG AMMA entry, the quarterly ICE E*TRADE statement entry, triggering
   `rba-fx-import` when the tax summary `422`s), the deployed server's address, the bearer-token
   auth and the request rules an agent trips on (money/quantity as JSON strings, unknown fields
@@ -135,6 +135,13 @@ by value; the first item is a bug.
   `/.claude/skills/live-api/` to `.gitignore`. Test (the skill itself is outside the repository,
   so the test pins only the exclusion): a `doc_checks` test that `.gitignore` excludes the
   skill's directory.
+  *Done 2026-10-05:* `.claude/skills/live-api/SKILL.md` written on the owner's machine — the
+  deployed address, bearer auth read from `$SHARE_TRACKER_TOKEN` (never written down), the
+  `/openapi/index` → `?operation=` lookup path, the request rules (string decimals, unknown
+  fields refused, `PUT` replaces, `?dry_run=true`, backup before bulk changes) and the three
+  recipes (missing FX rate, quarterly ICE statement, annual VDHG AMMA). `.gitignore` excludes
+  `/.claude/skills/live-api/`, pinned by `doc_checks::the_live_api_skill_is_never_committed`
+  (the line is present and no later `!` rule re-includes it).
 - [ ] **A missing body field is reported one at a time.** serde stops at the first
   (`missing field 'trade_type'`), so an agent filling a large body may take several round trips.
   The `required` lists in the schemas largely answer this once the first item is fixed; decide
