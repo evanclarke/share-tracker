@@ -2053,8 +2053,14 @@ that changed?
 - **L-03** Staking rewards entered as income + a Buy at receipt-date value,
   then sold.
 - **L-04** An airdrop of an established token vs an initial-allocation airdrop.
+  *(Re-verified 2026-10-08: QC 69950 was rewritten on 19 August 2026 with Draft
+  TR 2026/D1 — an airdrop merely received is now no income and a Buy at its
+  receipt-date market value, a reward for services is the income case, and a
+  pre-final-ruling initial allocation keeps its nil cost base; see
+  [`docs/ato/OVERVIEW.md`](docs/ato/OVERVIEW.md#ato-reference-documentation--overview).)*
 - **L-05** A chain split / fork (documented out of scope).
-- **L-06** Wrapping ETH → WETH.
+- **L-06** Wrapping ETH → WETH. *(The ATO's own ETH → WETH wrap and unwrap —
+  Kal, QC 73649 since 19 August 2026 — reproduced in `src/ato_examples.rs`.)*
 - **L-07** A transfer between the taxpayer's own exchange accounts (not a
   disposal) entered as a holding-account transfer.
 - **L-08** An exchange fee denominated in the crypto asset itself.

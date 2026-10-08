@@ -41,9 +41,9 @@ pub enum IncomeType {
     /// without any surface calling it a dividend.
     EmploymentIncome,
     /// Ordinary income produced *by* the holding that is not a distribution of
-    /// it — a crypto **staking reward**, or an airdrop of an **established**
-    /// token, whose money value is ordinary income when the tokens are
-    /// received (QC 69950, `docs/ato/crypto-staking-airdrops.md`,
+    /// it — a crypto **staking reward**, or an airdrop received **as a reward
+    /// for goods or services**, whose money value is ordinary income when the
+    /// tokens are received (QC 69950, `docs/ato/crypto-staking-airdrops.md`,
     /// SCENARIOS L-03/L-04). The tokens themselves are then a parcel costed at
     /// that same market value, entered as an ordinary Buy.
     ///
@@ -51,8 +51,10 @@ pub enum IncomeType {
     /// unlike [`Self::EmploymentIncome`] it *is* counted in the tax summary's
     /// gross assessable investment income, on its own line and in no dividend
     /// total. Like that kind, the row carries the cash and nothing else: an
-    /// initial-allocation airdrop, by contrast, is no income at all and is
-    /// entered only as a nil-cost-base Buy.
+    /// airdrop a capital-account holder merely receives, by contrast, is no
+    /// income at all (Draft TR 2026/D1) and is entered only as a Buy at its
+    /// receipt-date market value — nil for a pre-final-ruling initial
+    /// allocation.
     OtherIncome,
 }
 
@@ -69,7 +71,8 @@ impl IncomeType {
                 Some("a dividend equivalent is remuneration, not a payment of the holding")
             }
             IncomeType::OtherIncome => Some(
-                "a staking reward or established-token airdrop is ordinary income at item 24 \
+                "a staking reward or an airdrop received for goods or services is ordinary \
+                 income at item 24 \
                  (other income), not a payment of the holding",
             ),
         }
@@ -2841,8 +2844,8 @@ mod tests {
         }
     }
 
-    /// SCENARIOS L-03/L-04. A staking reward or an established-token airdrop
-    /// is ordinary income at item 24 — a third kind, carrying the cash and
+    /// SCENARIOS L-03/L-04. A staking reward or an airdrop received for goods
+    /// or services is ordinary income at item 24 — a third kind, carrying the cash and
     /// nothing else exactly as the employment kind does, and refused the same
     /// distribution fields in its own words.
     #[tokio::test]

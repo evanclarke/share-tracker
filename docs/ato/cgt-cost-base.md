@@ -1,7 +1,7 @@
 # Cost base of assets
 
 > Source: https://www.ato.gov.au/individuals-and-families/investments-and-assets/capital-gains-tax/calculating-your-cgt/cost-base-of-asset
-> Retrieved: 2026-06-01 from the Australian Taxation Office (ato.gov.au)
+> Retrieved: 2026-06-01 from the Australian Taxation Office (ato.gov.au); example dates rolled forward 2026-10-08 (last updated 29 June 2026)
 > This is a local copy of ATO guidance for reference. The ATO site is authoritative.
 
 ---
@@ -117,7 +117,7 @@ The cost base and reduced cost base don’t include any costs you can claim as a
 
 Danuta acquired a new income-producing asset on 28 September 2012 for \$100,000.
 
-She sold it for \$90,000 in November 2024
+She sold it for \$90,000 in November 2025
 
 While she owned it, she claimed capital works deductions of \$7,500 for expenditure incurred by the previous owner.
 

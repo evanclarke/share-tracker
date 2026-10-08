@@ -1712,7 +1712,9 @@ mod tests {
         assert!(js.contains("if (row.income_type && row.income_type !== 'Dividend') return [];"));
         // The third kind: ordinary income at item 24, with its own table in the
         // printed document (SCENARIOS L-03/L-04).
-        assert!(js.contains("a crypto staking reward, or an airdrop of an established token"));
+        assert!(
+            js.contains("a crypto staking reward, or an airdrop received for goods or services")
+        );
         assert!(js.contains("Other income (item 24)"));
         // The simple form can't describe one, so a stored row opens advanced.
         assert!(js.contains("existing.income_type !== 'Dividend'"));

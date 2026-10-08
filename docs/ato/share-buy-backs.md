@@ -2,7 +2,7 @@
 
 > **Source:**
 > https://www.ato.gov.au/individuals-and-families/investments-and-assets/capital-gains-tax/shares-and-similar-investments/share-buy-backs
-> ("Share buy-backs", QC 66049, last updated 23 June 2025)
+> ("Share buy-backs", QC 66049, last updated 22 June 2026)
 > **Retrieved:** 2026-06-06
 > The live ATO site is authoritative; this is a convenience mirror.
 

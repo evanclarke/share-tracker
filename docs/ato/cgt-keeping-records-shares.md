@@ -1,7 +1,7 @@
 # Keeping records of shares and units
 
 > Source: https://www.ato.gov.au/individuals-and-families/investments-and-assets/capital-gains-tax/shares-and-similar-investments/keeping-records-of-shares-and-units
-> Retrieved: 2026-06-06 from the Australian Taxation Office (ato.gov.au), last updated 23 June 2025
+> Retrieved: 2026-06-06 from the Australian Taxation Office (ato.gov.au); example years rolled forward 2026-10-08 (last updated 22 June 2026)
 > This is a local copy of ATO guidance for reference (excerpt). The ATO site is authoritative.
 
 ---
@@ -32,13 +32,13 @@ Share transactions through the Australian Stock Exchange are recorded in the Cle
 
 Boris is an investor. He:
 
-- bought 1,000 shares in a company in 2023 for \$5 each
-- bought 3,000 shares in the same company in 2024 for \$10 each
-- sold 1,500 of the shares in 2025 for \$8 each.
+- bought 1,000 shares in a company in 2024 for \$5 each
+- bought 3,000 shares in the same company in 2025 for \$10 each
+- sold 1,500 of the shares in 2026 for \$8 each.
 
 Boris must decide which of his shares in the company he is selling and which he is retaining.
 
-He decides to sell 1,500 of the shares he bought in 2024 in order to claim a capital loss in the 2025 income year. As a result, Boris will still have:
+He decides to sell 1,500 of the shares he bought in 2025 in order to claim a capital loss in the 2026 income year. As a result, Boris will still have:
 
 - 1,000 shares with an acquisition cost of \$5
 - 1,500 shares with an acquisition cost of \$10.

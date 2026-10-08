@@ -409,7 +409,7 @@ function incomeSection(inc, summaryLines) {
     inc.other_income && inc.other_income.length
       ? el('p', { class: 'hint' },
           'Ordinary income produced by a holding but paid as no distribution of it \u2014 a crypto '
-          + 'staking reward, or an airdrop of an established token, assessable at the tokens\u2019 '
+          + 'staking reward, or an airdrop received for goods or services, assessable at the tokens\u2019 '
           + 'market value when they were received (QC 69950). It belongs at item 24, other income, '
           + 'which nothing prefills, and is counted in the assessable investment income above; the '
           + 'tokens themselves are a parcel costed at that same value.') : null,

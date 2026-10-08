@@ -13,14 +13,15 @@
 //! Worked examples in the docs that are NOT reproduced here at all, and why:
 //! - `docs/ato/cgt-cost-base.md` "Example: effect of capital works deduction on
 //!   reduced cost base" and "Example: recouped expenditure" — both need the
-//!   reduced cost base and cost-base elements 3–5, which are not modelled yet
-//!   (TODO "Reduced cost base and the five cost-base elements", NEEDS
-//!   CLARIFICATION). What the asserted outcome looks like depends on that
-//!   clarification, so no meaningful ignored test can be written yet.
+//!   reduced cost base and cost-base elements 3–5, which are decided out of
+//!   scope ("Reduced cost base and the five cost-base elements",
+//!   `DONE/tax-domain.md`: only elements 1–2 are captured, so cost base and
+//!   reduced cost base are identical by construction — a Known limitation).
 //! - `docs/ato/lic-capital-gain-deduction.md` "Example: Beneficiary of a trust or
 //!   partner in partnership" — needs partnership/trust taxpayer entities,
-//!   which are not modelled (TODO "Taxpayer entity type and CGT discount
-//!   rate", NEEDS CLARIFICATION).
+//!   which are decided out of scope ("Taxpayer entity type and CGT discount
+//!   rate", `DONE/tax-domain.md`: the individual-resident basis is stated on
+//!   every report row instead).
 //! - `docs/ato/bonus-shares.md` Examples 36–37 (Klaus, Mark) — both turn on
 //!   partly paid bonus shares and call payments (and pre-CGT original
 //!   shares), which are not modelled; Example 35's post-CGT parcel is
@@ -57,19 +58,20 @@
 //!   either way the swap is entered as a manual Sell at the swap's market
 //!   value, and which side supplies that valuation is a judgement made
 //!   before entry, so the example would exercise nothing new.
-//! - `docs/ato/crypto-wrapping.md` "Example: CGT treatment when exchanging
-//!   wrapped tokens" (Kal's BTC → WBTC) — wrapping *is* a crypto-to-crypto
-//!   swap, so it is entered exactly as Katrina's example already reproduced
-//!   below (a Sell at the exchange's market value plus a Buy of the wrapped
-//!   token at the same value); the example would exercise nothing new, and no
-//!   wrapped token is a seeded digital-token code.
-//! - `docs/ato/crypto-staking-airdrops.md` Anastasia and Merindah stop at
-//!   "the money value … is ordinary assessable income" without stating one, so
-//!   there is no figure to assert; the rule they state — ordinary income at
-//!   the receipt-date market value, and that value as the tokens' cost base —
-//!   is reproduced through Craig's example below, which does carry figures.
-//!   Calista's paid initial allocation is Josh's example with a non-zero
-//!   purchase price, exercising nothing new.
+//! - `docs/ato/crypto-wrapping.md`'s superseded capture (Kal's BTC → WBTC,
+//!   the page's example until 19 August 2026) — replaced on the live page by
+//!   the ETH → WETH wrap and unwrap reproduced below; the rule is the same.
+//! - `docs/ato/crypto-staking-airdrops.md` Anastasia (staking) and, in the
+//!   superseded capture, Merindah stop at "the money value … is ordinary
+//!   assessable income" without stating one, so there is no figure to
+//!   assert; the staking rule — ordinary income at the receipt-date market
+//!   value, and that value as the tokens' cost base — is reproduced through
+//!   Craig's and Bobbi's examples below, which do carry figures. Carlos
+//!   (hobby) and Divina (a scam never accepted) are outcomes of *nothing to
+//!   enter*. Eloise's unsolicited airdrop states its cost base but no
+//!   disposal; Francisco (Draft TR 2026/D1) is the same rule with figures,
+//!   reproduced below. Calista's paid initial allocation is Josh's example
+//!   with a non-zero purchase price, exercising nothing new.
 //! - `docs/ato/crypto-chain-splits.md` "Example: protocol change" (Bree) —
 //!   definitional: which of two post-split assets is the *new* one is a
 //!   judgement made before entry, and it states no figures.
@@ -108,9 +110,42 @@
 //!   ato.gov.au law view SAV/FOROFFSET/00004) — the FITO offset-limit
 //!   calculation compares personal income-tax liabilities with and without the
 //!   foreign income (employment income, deductions, Medicare levy), which is
-//!   outside this system's data model; the TODO "Foreign income tax offset
-//!   (FITO) cap" item covers only the $1,000 de-minimis cap this system can
-//!   apply from its own data.
+//!   outside this system's data model; the "Foreign income tax offset (FITO)
+//!   cap" section (`DONE/tax-domain.md`) covers only the $1,000 de-minimis cap
+//!   this system can apply from its own data.
+//! - `docs/ato/allocating-franking-credits.md` Examples 1–2 (Pederman
+//!   Plastics, Dillmore Manufacture) are the *company's* side of the maximum
+//!   franking credit; they are reproduced against the ceiling itself in
+//!   `domain::franking_credit`'s tests rather than here, because no member
+//!   entry path takes the company's tax rate. The franking-percentage example
+//!   (Marlyn) states a company-side ratio this system never computes.
+//! - `docs/ato/attributing-amounts-to-members.md` Examples 1A–4 — the trust's
+//!   deemed-payment and attribution arithmetic, done before the member's AMMA
+//!   statement exists; Examples 3–4 instead bracket the statement-coverage
+//!   rule in `reports::tax_report` (pinned by `doc_checks`).
+//! - `docs/ato/capital-proceeds-market-value-substitution.md` "Example:
+//!   gifting an asset" (Martha and Stephen) — the market-value substitution
+//!   is a valuation made before entry; a gift is entered as a manual Sell at
+//!   market value (a Known limitation), which is Katrina's swap shape.
+//! - `docs/ato/expense-time-apportionment.md` (Martin, Jasmin) — one
+//!   `investment_expenses` row is one financial year, so Martin's $572 / $678
+//!   are two rows the user computes (a Known limitation) and Jasmin's
+//!   immediately deductible $1,750 is a single ordinary row.
+//! - `docs/ato/forex-average-rates.md` Examples 1–7 — which translation rate
+//!   is a reasonable approximation is a policy question; Examples 5 and 7 are
+//!   what the spot-rate override answers, exercised by Lisa's spot-rate test.
+//! - `docs/ato/share-investing-versus-share-trading.md` (George) and
+//!   `docs/ato/wash-sales.md`'s TR 2008/1 examples — characterisation (investor
+//!   or trader; Part IVA's dominant purpose) judged outside the system; the
+//!   wash-sale *pattern* is surfaced by `reports::wash_sales`.
+//! - `docs/ato/ess-dividend-equivalents.md` (TD 2017/26) — the examples
+//!   classify a payment; once classified it is one `EmploymentIncome` row.
+//! - `docs/ato/fito-capital-gains-apportionment.md` Examples 11–12 — both turn
+//!   on which gains carry foreign tax through the loss netting, which the
+//!   net-capital-gain report does not track (documented beside the mirror).
+//! - `docs/ato/indexing-the-cost-base.md` (Val) — reproduced against the
+//!   seeded CPI table in `domain::indexation`'s tests, not here, because the
+//!   election it informs is not modelled.
 //!
 //! The ATO examples use real property (land, an investment property); the data
 //! model records every asset as a listing traded in units, so each property is
@@ -488,33 +523,33 @@ async fn drp_example_natalie_reinvested_dividend() {
 /// units were acquired".
 ///
 /// > Boris is an investor. He:
-/// > - bought 1,000 shares in a company in 2023 for $5 each
-/// > - bought 3,000 shares in the same company in 2024 for $10 each
-/// > - sold 1,500 of the shares in 2025 for $8 each.
-/// > He decides to sell 1,500 of the shares he bought in 2024 in order to claim
-/// > a capital loss in the 2025 income year. As a result, Boris will still have:
+/// > - bought 1,000 shares in a company in 2024 for $5 each
+/// > - bought 3,000 shares in the same company in 2025 for $10 each
+/// > - sold 1,500 of the shares in 2026 for $8 each.
+/// > He decides to sell 1,500 of the shares he bought in 2025 in order to claim
+/// > a capital loss in the 2026 income year. As a result, Boris will still have:
 /// > - 1,000 shares with an acquisition cost of $5
 /// > - 1,500 shares with an acquisition cost of $10.
 ///
 /// Specific parcel identification is exactly what `PUT /sells` parcel
-/// allocations record: the sale is allocated against the 2024 parcel, producing
-/// the (8 − 10) × 1,500 = $3,000 capital loss and leaving the 2023 parcel intact.
+/// allocations record: the sale is allocated against the 2025 parcel, producing
+/// the (8 − 10) × 1,500 = $3,000 capital loss and leaving the 2024 parcel intact.
 #[tokio::test]
 async fn keeping_records_example_boris_identifying_shares_sold() {
     let pool = test_pool().await;
     put_listing(&pool, 1, "BORI").await;
-    put_buy(&pool, 1, 1, "2023-05-15", "1000", "5", "0").await;
-    put_buy(&pool, 2, 1, "2024-05-15", "3000", "10", "0").await;
-    // Sell 1,500 in 2025 for $8, nominating the 2024 parcel (trade 2).
-    put_sell(&pool, 3, 1, "2025-05-15", "1500", "8", "0", 2).await;
+    put_buy(&pool, 1, 1, "2024-05-15", "1000", "5", "0").await;
+    put_buy(&pool, 2, 1, "2025-05-15", "3000", "10", "0").await;
+    // Sell 1,500 in 2026 for $8, nominating the 2025 parcel (trade 2).
+    put_sell(&pool, 3, 1, "2026-05-15", "1500", "8", "0", 2).await;
 
-    // The nominated parcel makes it a $3,000 capital loss in the 2025 income year.
+    // The nominated parcel makes it a $3,000 capital loss in the 2026 income year.
     let sales: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised_gains").await;
     assert_eq!(sales.len(), 1);
     assert_eq!(
         sales[0].cost_base,
         dec("15000"),
-        "1,500 of the $10 (2024) shares"
+        "1,500 of the $10 (2025) shares"
     );
     assert_eq!(sales[0].proceeds, dec("12000"), "1,500 × $8");
     assert_eq!(
@@ -525,8 +560,8 @@ async fn keeping_records_example_boris_identifying_shares_sold() {
     assert_eq!(sales[0].capital_loss, dec("3000"));
     let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net_capital_gain").await;
     assert_eq!(
-        years[0].tax_year, 2025,
-        "loss claimed in the 2025 income year"
+        years[0].tax_year, 2026,
+        "loss claimed in the 2026 income year"
     );
     assert_eq!(years[0].capital_losses, dec("3000"));
 
@@ -544,8 +579,8 @@ async fn keeping_records_example_boris_identifying_shares_sold() {
 /// The same facts as `keeping_records_example_boris_identifying_shares_sold`,
 /// but *before* the sale is entered: the parcel-selection optimiser's
 /// harvest-losses candidate makes Boris's choice — sell 1,500 of the $10
-/// (2024) shares to claim the $3,000 capital loss — and the pre-sale what-if
-/// previews the 2025 income year with and without that disposal, all without
+/// (2025) shares to claim the $3,000 capital loss — and the pre-sale what-if
+/// previews the 2026 income year with and without that disposal, all without
 /// writing a row.
 #[tokio::test]
 async fn keeping_records_example_boris_optimiser_recommends_the_loss_parcel() {
@@ -553,13 +588,13 @@ async fn keeping_records_example_boris_optimiser_recommends_the_loss_parcel() {
     use crate::reports::parcel_optimiser::{OptimiserResponse, Strategy};
     let pool = test_pool().await;
     put_listing(&pool, 1, "BORI").await;
-    put_buy(&pool, 1, 1, "2023-05-15", "1000", "5", "0").await;
-    put_buy(&pool, 2, 1, "2024-05-15", "3000", "10", "0").await;
+    put_buy(&pool, 1, 1, "2024-05-15", "1000", "5", "0").await;
+    put_buy(&pool, 2, 1, "2025-05-15", "3000", "10", "0").await;
 
-    // Optimise a sale of 1,500 at $8 on Boris's 2025 sale date.
+    // Optimise a sale of 1,500 at $8 on Boris's 2026 sale date.
     let r: OptimiserResponse = api_get(
         &pool,
-        "/portfolio/parcel_optimiser?listing_id=1&holding_account_id=1&units=1500&sale_date=2025-05-15&price=8",
+        "/portfolio/parcel_optimiser?listing_id=1&holding_account_id=1&units=1500&sale_date=2026-05-15&price=8",
     )
     .await;
     let harvest = r
@@ -581,7 +616,7 @@ async fn keeping_records_example_boris_optimiser_recommends_the_loss_parcel() {
     assert_eq!(harvest_allocs.len(), 1, "all 1,500 from one parcel");
     assert_eq!(
         harvest_allocs[0].allocation.purchase_trade_id, 2,
-        "the 2024 ($10) parcel"
+        "the 2025 ($10) parcel"
     );
     assert_eq!(harvest_allocs[0].allocation.units, dec("1500"));
     // The FIFO baseline would instead realise a gain on the $5 shares.
@@ -596,18 +631,18 @@ async fn keeping_records_example_boris_optimiser_recommends_the_loss_parcel() {
         "FIFO: 1,000 × $3 gain − 500 × $2 loss"
     );
 
-    // The what-if previews the 2025 income year for that choice — a dry run.
+    // The what-if previews the 2026 income year for that choice — a dry run.
     let w: WhatIfResponse = api_post(
         &pool,
         "/portfolio/net_capital_gain/what_if",
         json!({
             "listing_id": 1, "units": "1500", "proceeds": "12000",
-            "date": "2025-05-15", "strategy": "harvest_losses"
+            "date": "2026-05-15", "strategy": "harvest_losses"
         }),
         StatusCode::OK,
     )
     .await;
-    assert_eq!(w.tax_year, 2025, "loss claimed in the 2025 income year");
+    assert_eq!(w.tax_year, 2026, "loss claimed in the 2026 income year");
     assert_eq!(w.years[0].year.capital_losses, dec("0"));
     assert_eq!(w.years[1].year.capital_losses, dec("3000"));
     assert_eq!(w.years[1].year.net_capital_gain, dec("0"));
@@ -1279,9 +1314,9 @@ async fn share_buy_backs_example_ranjini_off_market_buy_back() {
 /// `docs/ato/lic-capital-gain-deduction.md` — "Example: Resident individual".
 ///
 /// > Ben, an Australian resident, is a shareholder in XYZ Ltd, a LIC. On
-/// > 21 February 2025, Ben received a fully franked dividend from XYZ Ltd of
+/// > 21 February 2026, Ben received a fully franked dividend from XYZ Ltd of
 /// > $70, with an eligible capital gain amount (attributable part) of $50.
-/// > Ben includes the following amounts in his 2024–25 tax return:
+/// > Ben includes the following amounts in his 2025–26 tax return:
 /// > - Dividends – Franked amount: $70.
 /// > - Dividends – Franking credit: $30.
 /// > - Dividend deductions: $25 (50% deduction for LIC capital gain).
@@ -1298,7 +1333,7 @@ async fn lic_capital_gain_deduction_example_resident_individual() {
         "/income/1",
         json!({
             "listing_id": 1,
-            "date_paid": "2025-02-21",
+            "date_paid": "2026-02-21",
             "franked_amount": "70",
             "franking_credits": "30",
             "lic_capital_gain_amount": "50",
@@ -1310,7 +1345,7 @@ async fn lic_capital_gain_deduction_example_resident_individual() {
     let years: Vec<TaxYearSummary> = api_get(&pool, "/portfolio/tax_summary").await;
     assert_eq!(years.len(), 1);
     let y = &years[0];
-    assert_eq!(y.tax_year, 2025); // paid Feb 2025 → 2024–25 return
+    assert_eq!(y.tax_year, 2026); // paid Feb 2026 → 2025–26 return
     assert_eq!(
         y.dividends_assessable,
         dec("70"),
@@ -1593,7 +1628,84 @@ async fn crypto_cgt_example_katrina_coin_swap() {
     assert_eq!(holdings[1].total_cost_base, dec("6000"));
 }
 
-/// `docs/ato/crypto-wrapping.md` (QC 73649) — "Example: crypto asset reward
+/// `docs/ato/crypto-wrapping.md` (QC 73649) — "Example 5: CGT treatment when
+/// wrapping contracts using a smart contract" and "Example 6: CGT treatment
+/// when unwrapping crypto assets using a smart contract" (Kal; the same
+/// figures as Finella in Draft TD 2026/D2's Example 1).
+///
+/// > Kal bought 5 ETH for $10,000. Four years later, Kal decides to wrap the
+/// > ETH to receive WETH. … The market value of ETH at the time of wrapping
+/// > was $30,000. CGT event C2 happens when the ETH is sent to the smart
+/// > contract. … Kal will have a capital gain of $20,000 … The 5 WETH Kal now
+/// > holds have a cost base of $30,000.
+/// >
+/// > After a few months, Kal … unwraps it to receive ETH. … 5 ETH valued at
+/// > $28,000 are sent to Kal's wallet address. … Kal makes a capital loss of
+/// > $2,000 ($30,000 − $28,000). The cost base of the 5 ETH that Kal receives
+/// > is $28,000.
+///
+/// Each leg is a crypto-to-crypto swap, entered as Katrina's is: a Sell of
+/// what was sent at the market value of what came back, and a Buy of what
+/// came back at that same value. WETH is not a seeded digital-token code, so
+/// the seeded BTC stands in for it. The ATO dates neither leg; the wrap is
+/// placed four years and a few days after the purchase (discount-eligible)
+/// and the unwrap four months later, in the next income year, so each leg's
+/// outcome reads on its own year.
+#[tokio::test]
+async fn crypto_wrapping_examples_5_6_kal_wrap_and_unwrap() {
+    let pool = test_pool().await;
+    put_crypto_listing(&pool, 1, "ETH").await;
+    put_crypto_listing(&pool, 2, "BTC").await; // stands in for WETH
+    put_buy(&pool, 1, 1, "2021-03-05", "5", "2000", "0").await; // 5 ETH for $10,000
+    // The wrap: 5 ETH out at the $30,000 the 5 WETH received are worth.
+    put_sell(&pool, 2, 1, "2025-03-10", "5", "6000", "0", 1).await;
+    put_buy(&pool, 3, 2, "2025-03-10", "5", "6000", "0").await;
+    // The unwrap: 5 WETH burnt for 5 ETH worth $28,000.
+    put_sell(&pool, 4, 2, "2025-07-10", "5", "5600", "0", 3).await;
+    put_buy(&pool, 5, 1, "2025-07-10", "5", "5600", "0").await;
+
+    let mut sales: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised_gains").await;
+    sales.sort_by_key(|s| s.sale_date);
+    assert_eq!(sales.len(), 2);
+    let (wrap, unwrap) = (&sales[0], &sales[1]);
+    assert_eq!(wrap.proceeds, dec("30000"), "the WETH's market value");
+    assert_eq!(wrap.cost_base, dec("10000"));
+    assert_eq!(
+        wrap.capital_gain_loss,
+        dec("20000"),
+        "ATO: a capital gain of $20,000"
+    );
+    assert_eq!(wrap.discount_eligible_gain, dec("20000"), "held four years");
+    assert_eq!(unwrap.proceeds, dec("28000"), "the ETH's market value");
+    assert_eq!(unwrap.cost_base, dec("30000"), "ATO: the WETH's $30,000");
+    assert_eq!(
+        unwrap.capital_loss,
+        dec("2000"),
+        "ATO: a capital loss of $2,000"
+    );
+
+    let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net_capital_gain").await;
+    let fy = |y: i32| years.iter().find(|r| r.tax_year == y).unwrap();
+    assert_eq!(
+        fy(2025).net_capital_gain,
+        dec("10000"),
+        "the discounted wrap gain"
+    );
+    assert_eq!(fy(2026).capital_losses, dec("2000"));
+    assert_eq!(fy(2026).net_capital_gain, Decimal::ZERO);
+    assert_eq!(fy(2026).capital_loss_carried_forward, dec("2000"));
+
+    // "The cost base of the 5 ETH that Kal receives is $28,000" — the only
+    // parcel left open, acquired at the unwrap.
+    let parcels: Vec<crate::reports::open_parcels::OpenParcel> =
+        api_get(&pool, "/portfolio/open_parcels").await;
+    assert_eq!(parcels.len(), 1);
+    assert_eq!(parcels[0].trade_id, 5);
+    assert_eq!(parcels[0].remaining_cost_base, dec("28000"));
+    assert_eq!(parcels[0].acquisition_date, "2025-07-10".parse().unwrap());
+}
+
+/// `docs/ato/crypto-wrapping.md` (QC 73649) — "Example 4: crypto asset reward
 /// from DeFi platform" (Craig).
 ///
 /// > Craig 'lends' 100 stablecoin tokens valued at $10 per token through the
@@ -1605,10 +1717,10 @@ async fn crypto_cgt_example_katrina_coin_swap() {
 /// The reward is **ordinary income** at the tokens' receipt-date market value
 /// — an `income_type: "OtherIncome"` row, reported at item 24, in no dividend
 /// total — and the tokens themselves are a parcel costed at that same value,
-/// entered as an ordinary Buy. The same pair records a staking reward or an
-/// established-token airdrop (`docs/ato/crypto-staking-airdrops.md`), whose
-/// own examples state no figures. The stablecoin is represented by the seeded
-/// ETH token code.
+/// entered as an ordinary Buy. The same pair records a staking reward, whose
+/// own example (Anastasia, `docs/ato/crypto-staking-airdrops.md`) states no
+/// figures, and an airdrop received for services (Bobbi, below). The
+/// stablecoin is represented by the seeded ETH token code.
 #[tokio::test]
 async fn crypto_defi_reward_example_craig_stablecoin_tokens() {
     let pool = test_pool().await;
@@ -1779,7 +1891,11 @@ async fn crypto_chain_split_example_ming_abandoned_original() {
 }
 
 /// `docs/ato/crypto-staking-airdrops.md` (QC 69950) — "Example: capital gain
-/// and CGT discount on initial airdrop token" (Josh).
+/// and CGT discount on initial airdrop token" (Josh), in the file's
+/// **superseded capture**: the live page dropped the example on 19 August
+/// 2026, but Draft TR 2026/D1's date of effect (paragraph 66) applies the new
+/// view only to initial-allocation airdrops *after* the final ruling issues,
+/// so this is still the treatment of one received before it.
 ///
 /// > Josh is an eligible account holder of the Cswap protocol and received an
 /// > initial allocation of 800 CX tokens on 16 September 2024. Josh doesn't
@@ -1792,8 +1908,8 @@ async fn crypto_chain_split_example_ming_abandoned_original() {
 /// An **initial-allocation** airdrop is not the ordinary-income case: nothing
 /// is assessable on receipt and the tokens carry a nil cost base, so the entry
 /// is a Buy at a price of zero dated the allocation — the same shape as a
-/// chain split's new asset, and *not* the income row an established-token
-/// airdrop needs. CX is represented by the seeded BTC token code.
+/// chain split's new asset, and *not* the income row an airdrop received for
+/// services needs. CX is represented by the seeded BTC token code.
 #[tokio::test]
 async fn crypto_initial_airdrop_example_josh_cx_tokens() {
     let pool = test_pool().await;
@@ -1823,6 +1939,109 @@ async fn crypto_initial_airdrop_example_josh_cx_tokens() {
     assert_eq!(years[0].tax_year, 2026);
     assert_eq!(years[0].cgt_discount, dec("2000"));
     assert_eq!(years[0].net_capital_gain, dec("2000"));
+}
+
+/// `docs/ato/crypto-staking-airdrops.md` — Draft TR 2026/D1, "Example 6 –
+/// airdrop of crypto assets received as a result of holding a different
+/// established crypto asset" (Francisco).
+///
+/// > The market value of Partnership coin at the time Francisco receives his
+/// > allocation is $0.025 each. … As the conditions in section 112-20 are
+/// > satisfied, the first element of the cost base of Francisco's
+/// > Partnership coins is $250 (10,000 × $0.025). … 3 years later, Francisco
+/// > sells his Partnership coins for $1.50 each. … Francisco will make a
+/// > capital gain of $14,750 ((10,000 × $1.50) − $250.00) …
+///
+/// The ATO's current view of an airdrop a capital-account holder simply
+/// receives (live page, Eloise; the draft's paragraph 16): no ordinary income,
+/// and a separate CGT asset costed at its market value on receipt — so the
+/// whole entry is a Buy at that value, with **no** income row. The ATO dates
+/// neither event; the coins are placed three years and a few days apart.
+/// Partnership coin is represented by the seeded ETH token code.
+#[tokio::test]
+async fn crypto_airdrop_draft_tr_2026_d1_example_6_francisco() {
+    let pool = test_pool().await;
+    put_crypto_listing(&pool, 1, "ETH").await;
+    put_buy(&pool, 1, 1, "2022-08-01", "10000", "0.025", "0").await;
+
+    // No income on receipt: there is nothing for the tax summary to report.
+    let summary: Vec<TaxYearSummary> = api_get(&pool, "/portfolio/tax_summary").await;
+    assert!(
+        summary.is_empty(),
+        "an airdrop simply received is not income"
+    );
+    let parcels: Vec<crate::reports::open_parcels::OpenParcel> =
+        api_get(&pool, "/portfolio/open_parcels").await;
+    assert_eq!(parcels[0].remaining_cost_base, dec("250"), "ATO: $250");
+
+    put_sell(&pool, 2, 1, "2025-08-05", "10000", "1.50", "0", 1).await;
+    let sales: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised_gains").await;
+    assert_eq!(sales.len(), 1);
+    assert_eq!(sales[0].proceeds, dec("15000"));
+    assert_eq!(
+        sales[0].capital_gain_loss,
+        dec("14750"),
+        "ATO: a capital gain of $14,750"
+    );
+    assert_eq!(
+        sales[0].discount_eligible_gain,
+        dec("14750"),
+        "held 3 years"
+    );
+}
+
+/// `docs/ato/crypto-staking-airdrops.md` (QC 69950) — "Example 2: airdrop of
+/// new crypto assets received as a reward for services" (Bobbi).
+///
+/// > As part of the launch of a new crypto asset platform, Bobbi receives
+/// > 100,000 'cooler coins' as a reward for her actively promoting the coins
+/// > to her social media followers. At the time Bobbi receives the 'cooler
+/// > coins' they have a market value of AUD $0.001 each. Bobbi should include
+/// > the market value of the 'cooler coins' of $100.00 (100,000 x $0.001) in
+/// > her assessable income in the income year in which they are received.
+/// > Bobbi's 'cooler coins' will have a cost base of AUD $0.001 each.
+///
+/// The one airdrop that *is* income: a reward for services, entered as
+/// Craig's DeFi reward is — an `OtherIncome` row for the money value, at
+/// item 24, plus a Buy at the same value. The ATO gives no date; the receipt
+/// is placed in FY2026. Cooler coins are represented by the seeded ETH token
+/// code.
+#[tokio::test]
+async fn crypto_airdrop_example_2_bobbi_reward_for_services() {
+    let pool = test_pool().await;
+    put_crypto_listing(&pool, 1, "ETH").await;
+    api_put(
+        &pool,
+        "/income/1",
+        json!({
+            "listing_id": 1,
+            "date_paid": "2025-10-01",
+            "unfranked_amount": "100",
+            "income_type": "OtherIncome",
+            "currency": "AUD",
+        }),
+    )
+    .await;
+    put_buy(&pool, 1, 1, "2025-10-01", "100000", "0.001", "0").await;
+
+    let summary: Vec<TaxYearSummary> = api_get(&pool, "/portfolio/tax_summary").await;
+    assert_eq!(summary.len(), 1);
+    assert_eq!(summary[0].tax_year, 2026);
+    assert_eq!(
+        summary[0].other_income,
+        dec("100"),
+        "ATO: $100.00 at item 24"
+    );
+    assert_eq!(summary[0].dividends_assessable, Decimal::ZERO);
+
+    let parcels: Vec<crate::reports::open_parcels::OpenParcel> =
+        api_get(&pool, "/portfolio/open_parcels").await;
+    assert_eq!(parcels[0].remaining_quantity, dec("100000"));
+    assert_eq!(
+        parcels[0].remaining_cost_base,
+        dec("100"),
+        "ATO: a cost base of $0.001 each"
+    );
 }
 
 /// `docs/ato/employee-share-schemes.md` (QC 47628) — "Example: Taxed-upfront
@@ -2098,10 +2317,10 @@ async fn inherited_assets_example_maria_antonio_lpr_expenditure() {
 
 /// `docs/ato/cgt-event-timing.md` (QC 66016) — "Example: contract of sale" (Sue).
 ///
-/// > In June 2024, Sue entered into a contract to sell land she owned. The
-/// > contract settled in October 2024. Sue made the capital gain in the
-/// > 2023–24 income year (the year she entered into the contract), not the
-/// > 2024–25 income year (the year settlement took place).
+/// > In June 2025, Sue entered into a contract to sell land she owned. The
+/// > contract settled in October 2025. Sue made the capital gain in the
+/// > 2024–25 income year (the year she entered into the contract), not the
+/// > 2025–26 income year (the year settlement took place).
 ///
 /// A Sell's `date` is the contract date and `settlement_date` is recorded
 /// separately, so the FY-keyed reports must bucket the gain by the contract
@@ -2113,15 +2332,15 @@ async fn inherited_assets_example_maria_antonio_lpr_expenditure() {
 async fn cgt_event_timing_example_sue_contract_date_not_settlement() {
     let pool = test_pool().await;
     put_listing(&pool, 1, "LND").await;
-    put_buy(&pool, 1, 1, "2022-05-02", "1", "1000", "0").await;
+    put_buy(&pool, 1, 1, "2023-05-02", "1", "1000", "0").await;
 
-    // Contracted June 2024, settled October 2024.
+    // Contracted June 2025, settled October 2025.
     api_put(
         &pool,
         "/sells/2",
         json!({
-            "date": "2024-06-14",
-            "settlement_date": "2024-10-15",
+            "date": "2025-06-13",
+            "settlement_date": "2025-10-15",
             "listing_id": 1,
             "average_price": "1500",
             "quantity": "1",
@@ -2137,11 +2356,11 @@ async fn cgt_event_timing_example_sue_contract_date_not_settlement() {
     )
     .await;
 
-    // The gain belongs to FY2023–24 (the contract year) — and no FY2024–25
+    // The gain belongs to FY2024–25 (the contract year) — and no FY2025–26
     // row exists at all, the settlement date having contributed nothing.
     let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net_capital_gain").await;
     assert_eq!(years.len(), 1, "one FY only — the contract year");
-    assert_eq!(years[0].tax_year, 2024, "FY ending 30 June 2024");
+    assert_eq!(years[0].tax_year, 2025, "FY ending 30 June 2025");
     assert_eq!(years[0].discount_eligible_gains, dec("500"));
 }
 

@@ -395,7 +395,7 @@ impl Sources {
                 } else if i.income_type == IncomeType::OtherIncome {
                     // Ordinary income produced by the holding but paid as no
                     // distribution of it — a staking reward or an
-                    // established-token airdrop (QC 69950, SCENARIOS L-03).
+                    // airdrop received for goods or services (QC 69950, SCENARIOS L-03).
                     "Other income (staking reward / airdrop)"
                 } else if i.buyback_trade_id.is_some() {
                     "Dividend (buy-back component)"

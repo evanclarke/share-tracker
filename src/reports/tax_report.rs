@@ -1202,8 +1202,8 @@ pub struct EmploymentIncomeRow {
 }
 
 /// An [`IncomeType::OtherIncome`] row: ordinary income produced by the holding
-/// that is not a distribution of it — a crypto staking reward or an
-/// established-token airdrop, assessable at the tokens' market value on
+/// that is not a distribution of it — a crypto staking reward or an airdrop
+/// received for goods or services, assessable at the tokens' market value on
 /// receipt (QC 69950, `docs/ato/crypto-staking-airdrops.md`, SCENARIOS
 /// L-03/L-04). Printed in its own table against **item 24**, never among the
 /// dividends.

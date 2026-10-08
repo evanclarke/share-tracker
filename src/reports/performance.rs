@@ -512,9 +512,9 @@ async fn accumulate_on(
         // is paid for services, not by the shares, and counting it would
         // inflate the income yield of whatever listing it was recorded against.
         // An `OtherIncome` row is the opposite case and is deliberately *not*
-        // skipped: a staking reward or an established-token airdrop is a
-        // return the holding itself produced (SCENARIOS L-03), so it belongs
-        // in the yield exactly as a distribution does.
+        // skipped: a staking reward is a return the holding itself produced
+        // (SCENARIOS L-03), so it belongs in the yield exactly as a
+        // distribution does.
         if income.income_type == IncomeType::EmploymentIncome {
             continue;
         }

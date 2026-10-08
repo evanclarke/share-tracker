@@ -144,6 +144,22 @@ mod tests {
         assert!(credit_above_ceiling(dec("13066"), dec("5600"), paid).is_none());
     }
 
+    /// The page's own two worked examples
+    /// (`docs/ato/allocating-franking-credits.md`, QC 47305), each a $100,000
+    /// distribution. Example 1 (Pederman Plastics, 27.5%): a maximum of
+    /// $37,930.51, under the 30% ceiling. Example 2 (Dillmore Manufacture,
+    /// 30%): a maximum of **$42,857.75** — the ATO divides by a gross-up rate
+    /// rounded to 2.3333, landing 61 cents above the exact 30/70 figure, so a
+    /// statement that follows the ATO's own arithmetic must not be refused.
+    #[test]
+    fn the_pages_worked_examples_are_accepted() {
+        let paid = ymd(2020, 3, 31); // both examples frank 2019–20 distributions
+        let distribution = dec("100000");
+        assert_eq!(maximum_franking_credit(distribution), dec("42857.14"));
+        assert!(credit_above_ceiling(distribution, dec("37930.51"), paid).is_none());
+        assert!(credit_above_ceiling(distribution, dec("42857.75"), paid).is_none());
+    }
+
     /// The cent floor covers a dividend too small for the percentage to reach
     /// one ($10.00 franked → $4.2857…, printed $4.29).
     #[test]

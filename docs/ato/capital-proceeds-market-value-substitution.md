@@ -1,7 +1,7 @@
 # Capital proceeds from disposing of assets (market-value substitution)
 
 > **Source:** https://www.ato.gov.au/individuals-and-families/investments-and-assets/capital-gains-tax/calculating-your-cgt/capital-proceeds-from-disposing-of-assets
-> (QC 66021, last updated 23 June 2025)
+> (QC 66021, last updated 22 June 2026)
 > **Retrieved:** 2026-06-11
 > The live ATO site is authoritative; this is a convenience mirror.
 

@@ -1,8 +1,8 @@
 # Indexing the cost base
 
 > **Source:** https://www.ato.gov.au/individuals-and-families/investments-and-assets/capital-gains-tax/calculating-your-cgt/indexing-the-cost-base
-> (QC 66024, last updated 23 June 2025)
-> **Retrieved:** 2026-06-11
+> (QC 66024, last updated 29 June 2026)
+> **Retrieved:** 2026-06-11; example dates rolled forward 2026-10-08
 > The live ATO site is authoritative; this is a convenience mirror.
 
 ## How indexation works
@@ -64,7 +64,7 @@ Val bought an investment property for \$150,000 under a contract dated
 - stamp duty of \$5,000 on 20 July 1991
 - solicitor's fees of \$2,000 on 5 August 1991 as part of settlement.
 
-Val sold the property on 15 October 2024 (the day contracts were exchanged)
+Val sold the property on 15 October 2025 (the day contracts were exchanged)
 for \$600,000. She incurred costs of \$1,500 in solicitor's fees and \$15,000 in
 agent's commission.
 

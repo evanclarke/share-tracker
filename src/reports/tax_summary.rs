@@ -198,8 +198,8 @@ pub struct TaxYearSummary {
     /// **Other income** (AUD, ATO label **24**): an
     /// [`IncomeType::OtherIncome`] row — ordinary income produced by a holding
     /// that is not a distribution of it, i.e. a crypto staking reward or an
-    /// established-token airdrop, assessable at the tokens' market value when
-    /// received (QC 69950, `docs/ato/crypto-staking-airdrops.md`,
+    /// airdrop received for goods or services, assessable at the tokens'
+    /// market value when received (QC 69950, `docs/ato/crypto-staking-airdrops.md`,
     /// SCENARIOS L-03/L-04).
     ///
     /// Unlike [`Self::employment_income`], which the ATO prefills at item 1/2
@@ -380,7 +380,7 @@ pub(crate) const CSV_ATO_LABELS: &[&str] = &[
     "",             // ess_taxed_upfront_reduction (inside 12B vs 12D)
     "12A",          // ess_foreign_source_discount
     "",             // employment_income (1/2, prefilled by the employer — informational)
-    "24",           // other_income (staking rewards / established-token airdrops)
+    "24",           // other_income (staking rewards / airdrops received for goods or services)
     "",             // gross_assessable_investment_income (derived)
     "",             // deductions_loan_interest (by kind: see the destination lines)
     "",             // deductions_management_fee
@@ -777,7 +777,7 @@ fn accumulate_income(
         }
         // An other-income row is ordinary income produced by the holding but
         // not paid *as* a distribution — a staking reward or an
-        // established-token airdrop (QC 69950, SCENARIOS L-03/L-04). It
+        // airdrop received for goods or services (QC 69950, SCENARIOS L-03/L-04). It
         // reports at item 24, which nothing prefills, so unlike the
         // employment kind it joins the gross assessable total below; the
         // write-time rule leaves it only the cash in `unfranked_amount`.

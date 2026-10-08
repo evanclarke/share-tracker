@@ -29,4 +29,26 @@ The 2026-10-04 HTTP API consistency sweep — cross-site write and DNS-rebinding
 one path casing, readable writable URLs, one rejection shape, and the `200`/`201` rule — is closed
 and archived in [`DONE/api.md`](DONE/api.md), and so is the 2026-10-04 agent-usability pass that
 followed it (OpenAPI bodies, ids, descriptions and slices, `?dry_run=true`, the live-API skill,
-trustworthy `required` lists, and reasoned GET-one `404`s). `TODO.md` has no open work.
+trustworthy `required` lists, and reasoned GET-one `404`s). The one open section below came from the
+2026-10-08 sweep of the ATO mirrors (`docs/ato/OVERVIEW.md`, *Full sweep, 2026-10-08*).
+
+## 2026–27 Budget CGT changes — announced, not law (ATO mirror sweep 2026-10-08)
+The ATO's CGT discount, cost base, how-to-calculate and indexation pages have carried a banner
+since 29 June 2026: "Recent changes to capital gains tax (CGT) announced in the 2026–27 Federal
+Budget don't apply to Tax Time 2026", with "Resources will be available at a later date". As
+reported (not yet ATO guidance), the measure replaces the 50% discount with **cost-base indexation
+plus a 30% minimum tax** on real gains for assets held 12 months or more, from **1 July 2027**,
+with an asset bought before and sold after that date taxed under the existing rules for the gain
+accrued to 1 July 2027 and the new rules after it. Nothing is modelled or mirrored yet: there is
+no legislation or ATO guidance to implement against, and every disposal this system can hold today
+falls under the existing rules.
+- [ ] Watch: when the measure is legislated and the ATO publishes guidance, mirror it into
+  `docs/ato/` and index it in `docs/ato/OVERVIEW.md` (re-fetch the four bannered pages then too)
+- [ ] NEEDS DECISION (owner), once the rules are known: whether and how to model the 1 July 2027
+  split. Known shape of the inputs: a per-parcel **market value at 1 July 2027** to divide the gain
+  (the closing-price table is the natural source); a CPI series that runs past September 1999
+  (`cpi_quarters` is frozen at the 1999 freeze today); and the 30% minimum tax, which turns on the
+  taxpayer's marginal rate — outside the data model, like the FITO offset limit
+- [ ] Whatever is decided, make sure a closing price is stored for every held listing on the last
+  trading day before 1 July 2027 (the scheduled price import plus `closing_price`'s held-days
+  backfill), since a missing one cannot be fetched reliably years later

@@ -3252,8 +3252,11 @@ fn known_limitations_document_the_crypto_entry_paths() {
 
     // Swap, and wrapping as the same swap.
     assert!(limitations.contains("**Wrapping or unwrapping** a token is that same swap"));
+    assert!(limitations.contains("it *is* a CGT event (C2)"));
     assert!(limitations.contains("docs/ato/crypto-wrapping.md"));
-    assert!(include_str!("../docs/ato/crypto-wrapping.md").contains("QC 73649"));
+    let wrapping = include_str!("../docs/ato/crypto-wrapping.md");
+    assert!(wrapping.contains("QC 73649"));
+    assert!(wrapping.contains("TD 2026/D2"));
 
     // Chain split: the nil-cost-base new asset, and the C2 close of an
     // abandoned original.
@@ -3263,15 +3266,31 @@ fn known_limitations_document_the_crypto_entry_paths() {
     assert!(limitations.contains("docs/ato/crypto-chain-splits.md"));
     assert!(include_str!("../docs/ato/crypto-chain-splits.md").contains("QC 69953"));
 
-    // The two airdrops are opposite entries, and the income half's open limit.
-    assert!(limitations.contains("**initial-allocation airdrop** is the same nil-cost-base Buy"));
-    assert!(limitations.contains("**Staking rewards and established-token airdrops**"));
+    // An airdrop simply received is a Buy at market value and no income (Draft
+    // TR 2026/D1); a pre-final-ruling initial allocation keeps its nil cost
+    // base; only a reward for goods or services is income — and the income
+    // half's open limit.
+    assert!(
+        limitations.contains("it is a separate CGT asset acquired at its market value on receipt")
+    );
+    assert!(
+        limitations
+            .contains("**initial-allocation airdrop** received before TR 2026/D1 is finalised")
+    );
+    assert!(
+        limitations.contains(
+            "**Staking rewards, and airdrops received as a reward for goods or services**"
+        )
+    );
     assert!(limitations.contains("**item 24, other income**"));
     assert!(limitations.contains("`income_type: \"OtherIncome\"`"));
     // What is genuinely left: item 24 is one figure, with no source split.
     assert!(limitations.contains("not* modelled is any split of that income by source"));
     assert!(limitations.contains("docs/ato/crypto-staking-airdrops.md"));
-    assert!(include_str!("../docs/ato/crypto-staking-airdrops.md").contains("QC 69950"));
+    let airdrops = ato(include_str!("../docs/ato/crypto-staking-airdrops.md"));
+    assert!(airdrops.contains("QC 69950"));
+    assert!(airdrops.contains("you do not include its market value in your\nassessable income.**"));
+    assert!(airdrops.contains("However, in relation to initial allocation airdrops, the Ruling\n> will only apply to the airdrops that occurred after the date of issue of the final\n> Ruling."));
 
     // What genuinely is not modelled stays named as such.
     assert!(limitations.contains("**personal-use-asset exemption** is not modelled"));

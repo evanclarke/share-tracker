@@ -1,7 +1,7 @@
 # CGT events — timing (contract date, not settlement)
 
 > Source: https://www.ato.gov.au/individuals-and-families/investments-and-assets/capital-gains-tax/cgt-events
-> Retrieved: 2026-06-12 from the Australian Taxation Office (ato.gov.au), QC 66016, last updated 23 June 2025
+> Retrieved: 2026-06-12 from the Australian Taxation Office (ato.gov.au), QC 66016; example years rolled forward 2026-10-08 (last updated 22 June 2026)
 > This is a local copy of ATO guidance for reference. The ATO site is authoritative.
 > Excerpted: the event-timing rule and its worked examples.
 
@@ -24,21 +24,21 @@ usually when you stop being the asset's owner.
 
 ### Example: contract of sale (Sue)
 
-In June 2024, Sue entered into a contract to sell land she owned. The contract settled
-in October 2024.
+In June 2025, Sue entered into a contract to sell land she owned. The contract settled
+in October 2025.
 
-**Sue made the capital gain in the 2023–24 income year (the year she entered into the
-contract), not the 2024–25 income year (the year settlement took place).**
+**Sue made the capital gain in the 2024–25 income year (the year she entered into the
+contract), not the 2025–26 income year (the year settlement took place).**
 
 ### Example: insurance policy (Laurie)
 
-Laurie's rental property was destroyed by fire in June 2024. He received compensation
-under an insurance policy in October 2024. The CGT event happened in October 2024 when
+Laurie's rental property was destroyed by fire in June 2025. He received compensation
+under an insurance policy in October 2025. The CGT event happened in October 2025 when
 he received the compensation.
 
 ### Example: no compensation or insurance policy (Christine)
 
-Christine owned a rental property that was damaged by floods in May 2024. The local
-council deemed the property uninhabitable in August 2024. The property was demolished in
-November 2024 and Christine did not receive any compensation. The CGT event happened in
-May 2024 when the damage happened.
+Christine owned a rental property that was damaged by floods in May 2025. The local
+council deemed the property uninhabitable in August 2025. The property was demolished in
+November 2025 and Christine did not receive any compensation. The CGT event happened in
+May 2025 when the damage happened.

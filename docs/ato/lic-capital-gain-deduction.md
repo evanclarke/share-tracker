@@ -1,7 +1,7 @@
 # CGT listed investment companies concession
 
 > Source: https://www.ato.gov.au/individuals-and-families/investments-and-assets/capital-gains-tax/shares-and-similar-investments/cgt-listed-investment-companies-concession
-> Retrieved: 2026-06-01 from the Australian Taxation Office (ato.gov.au)
+> Retrieved: 2026-06-01 from the Australian Taxation Office (ato.gov.au); example dates rolled forward 2026-10-08 (last updated 22 June 2026)
 > This is a local copy of ATO guidance for reference. The ATO site is authoritative.
 
 ---
@@ -18,7 +18,7 @@ An individual can deduct 50% of the attributable part advised by the LIC.
 
 ### Example: Resident individual
 
-Ben, an Australian resident, is a shareholder in XYZ Ltd, a LIC. On 21 February 2025, Ben received a fully franked dividend from XYZ Ltd of \$70, with an eligible capital gain amount (attributable part) of \$50. Ben includes the following amounts in his 2024–25 tax return at the following questions:
+Ben, an Australian resident, is a shareholder in XYZ Ltd, a LIC. On 21 February 2026, Ben received a fully franked dividend from XYZ Ltd of \$70, with an eligible capital gain amount (attributable part) of \$50. Ben includes the following amounts in his 2025–26 tax return at the following questions:
 
 - Dividends – Franked amount: \$70.
 - Dividends – Franking credit: \$30.

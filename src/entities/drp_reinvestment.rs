@@ -164,7 +164,7 @@ pub enum ReinvestError {
     AlreadyReinvested,
     /// The income row is not a distribution at all — an employment-income row
     /// (a dividend equivalent on unvested RSUs; TD 2017/26, SCENARIOS J-10) or
-    /// an other-income row (a staking reward or established-token airdrop;
+    /// an other-income row (a staking reward or an airdrop received for goods or services;
     /// SCENARIOS L-03). A DRP reinvests a payment *of* the holding into more of
     /// it; remuneration is paid for services and a staking reward is paid in
     /// the tokens themselves — no registry plan applies either to shares.
