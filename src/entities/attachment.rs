@@ -465,7 +465,7 @@ async fn download(
     let (content_type, filename, bytes) = db_get_content(&pool, id)
         .await
         .map_err(ApiError::from)?
-        .ok_or(ApiError::NotFound)?;
+        .ok_or_else(|| ApiError::not_found(Attachment::missing_row_body()))?;
     // Strip any quotes from the filename so it can't break out of the header.
     let safe_name = filename.replace(['"', '\\'], "");
     Response::builder()

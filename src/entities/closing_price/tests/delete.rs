@@ -222,5 +222,5 @@ async fn api_get_one_reads_the_row_the_put_and_delete_address() {
 
     let missing = app.get("/closing_prices/1/2026-06-03").await;
     assert_eq!(missing.status, StatusCode::NOT_FOUND);
-    assert_eq!(missing.text(), "");
+    assert_eq!(missing.text(), "no stored price for that listing and date");
 }

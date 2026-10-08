@@ -1371,9 +1371,10 @@ fn error_body_matrix_rows() -> Vec<(String, String)> {
 /// - `400` — `ApiError::BadRequest`, and axum's `Path`/`Query`/JSON-syntax
 ///   extractor rejections, all `text/plain; charset=utf-8`;
 /// - `401` — `ApiError::Unauthorized` (the `[auth]` layer);
-/// - `404` empty — `ApiError::NotFound` (an entity `GET`, an unrouted path);
-/// - `404` text — `ApiError::NotFoundWithReason` (`ApiError::not_found`), the
-///   delete/operation/job 404;
+/// - `404` empty — axum's, for a path no route matches (no `ApiError` variant
+///   answers it, so an empty `404` always means the URL is wrong);
+/// - `404` text — `ApiError::NotFound` (`ApiError::not_found`): a missing row
+///   on a GET-one or DELETE, and the operation/job/report 404;
 /// - `405` empty — axum's `MethodRouter` on a read-only path;
 /// - `413` — `ApiError::PayloadTooLarge` and axum's body-length ceiling;
 /// - `415` — axum's `Json` extractor with no `application/json` content type;
@@ -1416,9 +1417,11 @@ fn error_body_matrix_pins_every_status_and_shape() {
             )
         })
         .collect();
-    // …plus the two statuses axum itself produces and no `ApiError` variant
-    // can: an unmatched method on a read-only path (`405`, empty) and the `Json`
-    // extractor's missing or wrong content type (`415`, text).
+    // …plus the three shapes axum itself produces and no `ApiError` variant
+    // can: a path no route matches (`404`, empty), an unmatched method on a
+    // read-only path (`405`, empty) and the `Json` extractor's missing or wrong
+    // content type (`415`, text).
+    expected.push(("404".to_string(), "empty".to_string()));
     expected.push(("405".to_string(), "empty".to_string()));
     expected.push(("415".to_string(), "text".to_string()));
     expected.sort();
@@ -3934,32 +3937,36 @@ fn top_menu_bar_documented() {
     assert!(FEATURES_MD.contains("New trade/income/sell/transfer shortcut buttons"));
 }
 
-/// Docs-sync pin for the uniform DELETE 404 contract (2026-07-29 Rust review):
-/// the Response-codes table states that a `DELETE` of a missing row answers
-/// with a plain-text reason, and the Error-bodies paragraph counts deletes
-/// among the reasoned 404s. The behaviour itself is pinned by
-/// `entities::tests::deleting_a_missing_row_is_404_naming_what_was_missing`.
-///
-/// A `GET` aimed at one missing row still answers empty — but that is not the
-/// same as "every `GET`", which is what these tables used to imply: a read whose
-/// *parameter* names a missing row carries the reason, so the table has to say
-/// so. `api_spec::tests::a_read_whose_parameter_names_a_missing_row_answers_a_text_404`
-/// drives the one such read and keeps the list of them exhaustive.
+/// Docs-sync pin for the uniform missing-row 404 contract (the DELETE half from
+/// the 2026-07-29 Rust review, the GET-one half from the 2026-10-04 agent
+/// usability pass): the Response-codes table states that a `GET` or `DELETE`
+/// of a missing row answers with a plain-text reason, and that only a path no
+/// route matches is empty — the signal a client tells a mistyped URL from an
+/// absent row by. The behaviour is pinned by
+/// `entities::tests::deleting_a_missing_row_is_404_naming_what_was_missing`
+/// and `api_spec::tests::every_get_one_route_names_the_missing_row_in_its_404`.
 #[test]
-fn delete_404_reason_documented() {
-    assert!(API_MD.contains("A `GET` of a missing row answers with an empty body"));
+fn missing_row_404_reason_documented() {
+    assert!(API_MD.contains("Every `GET` or `DELETE` of a missing row"));
     assert!(
         API_MD.contains("any read whose *parameter* names a row that is not there"),
-        "the Response-codes 404 row must not imply every GET's 404 is empty"
+        "the Response-codes 404 row must name the parameter case"
     );
     assert!(
-        API_MD
-            .contains("a **read whose named prerequisite is missing rather than its own subject**"),
-        "the Error-body matrix's text-carrying 404 row must name the parameter case"
+        API_MD.contains("A path no route matches answers an **empty** `404`"),
+        "the Response-codes 404 row must say which 404 is empty"
     );
-    assert!(API_MD.contains("every `DELETE` of a missing row"));
+    assert!(
+        API_MD.contains(
+            "| `404 Not Found` | **empty** | A path no route matches — the URL itself is wrong"
+        ),
+        "the Error-body matrix's empty 404 row must be the unrouted path alone"
+    );
     assert!(API_MD.contains("no AMMA statement with that id"));
-    assert!(API_MD.contains("`404`-with-a-cause — which includes every `DELETE` of a row"));
+    assert!(API_MD.contains(
+        "`404`-with-a-cause — which is every `404` but a path no route matches, including \
+         every `GET` or `DELETE` of a row"
+    ));
 }
 
 /// Docs-sync pin for the delete-time guard on the three read-time corporate

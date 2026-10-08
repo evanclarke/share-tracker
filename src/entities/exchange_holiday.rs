@@ -269,7 +269,7 @@ async fn get_one(
         .await
         .map_err(ApiError::from)?
         .map(Json)
-        .ok_or(ApiError::NotFound)
+        .ok_or_else(|| ApiError::not_found("no exchange holiday on that date for that exchange"))
 }
 
 async fn upsert(

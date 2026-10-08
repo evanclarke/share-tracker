@@ -24,7 +24,9 @@ pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 /// - [`ApiError::Unprocessable`] is the client's fault: `422` with a short,
 ///   plain-text body explaining the rejection, so the web UI can show *why*
 ///   a request failed instead of a bare "HTTP 422".
-/// - [`ApiError::NotFound`] is a plain `404` with an empty body.
+/// - [`ApiError::NotFound`] is a `404` whose plain-text body names what was
+///   missing — so a client can tell an absent row from a mistyped path, whose
+///   `404` (axum's, no route matched) is the only empty one.
 ///
 /// Per-entity error enums stay (they document each operation's failure modes
 /// and keep DB-level tests precise) and convert via `impl From<EntityError>
@@ -77,15 +79,13 @@ pub enum ApiError {
     /// nothing is swallowed.
     #[error("{reason}")]
     JobFailed { job: String, reason: String },
-    /// 404, empty body — entity GETs, where the URL itself names what is
-    /// missing.
-    #[error("not found")]
-    NotFound,
-    /// 404 with a plain-text reason for the UI toast — operation endpoints
-    /// (exercise, reinvest, delete), where the missing prerequisite deserves
-    /// naming. Construct via [`ApiError::not_found`].
+    /// 404 with a plain-text reason naming what was missing — a GET-one's or a
+    /// DELETE's row (`no trade with that id`), or an operation's prerequisite.
+    /// Construct via [`ApiError::not_found`]. There is deliberately no empty
+    /// variant: the one empty `404` is axum's for a path no route matches, so
+    /// an empty body always means the URL itself is wrong.
     #[error("{0}")]
-    NotFoundWithReason(String),
+    NotFound(String),
     /// 401 — no valid session cookie or bearer token, or a login attempt
     /// with the wrong credentials. Never logged as an error: an
     /// unauthenticated request is expected traffic (a browser without a
@@ -154,7 +154,7 @@ impl ApiError {
 
     /// A 404 whose body names what was missing.
     pub fn not_found(msg: impl Into<String>) -> Self {
-        ApiError::NotFoundWithReason(msg.into())
+        ApiError::NotFound(msg.into())
     }
 
     /// A 401 with the given plain-text explanation.
@@ -351,8 +351,7 @@ impl IntoResponse for ApiError {
                 tracing::warn!(job = %job, "manual job trigger failed: {reason}");
                 (StatusCode::INTERNAL_SERVER_ERROR, reason).into_response()
             }
-            ApiError::NotFound => StatusCode::NOT_FOUND.into_response(),
-            ApiError::NotFoundWithReason(body) => (StatusCode::NOT_FOUND, body).into_response(),
+            ApiError::NotFound(body) => (StatusCode::NOT_FOUND, body).into_response(),
             ApiError::Unauthorized(body) => (StatusCode::UNAUTHORIZED, body).into_response(),
             ApiError::Forbidden(body) => (StatusCode::FORBIDDEN, body).into_response(),
             ApiError::TooManyRequests {
@@ -569,8 +568,8 @@ pub trait CrudEntity:
     /// total (a list whose order can change between identical requests makes
     /// the UI's row positions unstable).
     const ORDER_BY: &'static str = "id";
-    /// What a 404 from [`delete_handler`] calls the missing row, e.g.
-    /// `"AMMA statement"` → `no AMMA statement with that id`.
+    /// What a 404 from [`get_handler`] or [`delete_handler`] calls the missing
+    /// row, e.g. `"AMMA statement"` → `no AMMA statement with that id`.
     const NOUN: &'static str;
 
     /// The query filters this entity's list route accepts, applied by
@@ -580,15 +579,15 @@ pub trait CrudEntity:
     /// filter the server drops.
     type Filter: CrudListFilter;
 
-    /// The plain-text `404` body [`delete_handler`] answers with when `key`
-    /// matched no row: `no <noun> with that id` by default.
+    /// The plain-text `404` body [`get_handler`] and [`delete_handler`]
+    /// answer with when `key` matched no row: `no <noun> with that
+    /// <key column>` by default — `no trade with that id`, `no currency with
+    /// that code`, `no exchange with that mic`.
     ///
-    /// That default names the `id` column, which every rowid-keyed entity's
-    /// URL carries. An entity keyed on a natural key overrides it, because
-    /// "that id" names a column its URL never mentions — `no exchange with
-    /// that mic`, `no tax year settings row for that year`.
+    /// An entity whose key column is not a word its URL reads naturally
+    /// overrides it (`no tax year settings row for that year`).
     fn missing_row_body() -> String {
-        format!("no {} with that id", Self::NOUN)
+        format!("no {} with that {}", Self::NOUN, Self::KEY_COLUMN)
     }
 
     /// The presentation a row gets before it goes on the wire, applied by the
@@ -716,8 +715,8 @@ pub async fn list_handler<E: CrudEntity>(
         .map_err(ApiError::from)
 }
 
-/// `GET /<entities>/{id}` → 200 with the row, or an empty-bodied 404 (the URL
-/// itself names what is missing).
+/// `GET /<entities>/{id}` → 200 with the row, or a 404 naming the missing row
+/// ([`CrudEntity::missing_row_body`], the same wording its DELETE answers).
 pub async fn get_handler<E: CrudEntity>(
     State(pool): State<SqlitePool>,
     Path(key): Path<E::Key>,
@@ -726,7 +725,7 @@ pub async fn get_handler<E: CrudEntity>(
         .await
         .map_err(ApiError::from)?
         .map(Json)
-        .ok_or(ApiError::NotFound)
+        .ok_or_else(|| ApiError::not_found(E::missing_row_body()))
 }
 
 /// `DELETE /<entities>/{id}` → 204, or a 404 naming the missing row. A row
@@ -1127,12 +1126,6 @@ fn error_cases() -> Vec<(&'static str, Response, StatusCode, Option<&'static str
             Some(PLAIN),
         ),
         (
-            "bare 404",
-            ApiError::NotFound.into_response(),
-            StatusCode::NOT_FOUND,
-            None,
-        ),
-        (
             "internal 500",
             ApiError::internal("boom").into_response(),
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1165,8 +1158,7 @@ fn assert_every_variant_is_sampled(error: &ApiError) {
         | ApiError::Busy { .. }
         | ApiError::BadGateway { .. }
         | ApiError::JobFailed { .. }
-        | ApiError::NotFound
-        | ApiError::NotFoundWithReason(_)
+        | ApiError::NotFound(_)
         | ApiError::Unauthorized(_)
         | ApiError::Forbidden(_)
         | ApiError::TooManyRequests { .. } => {}
@@ -1449,10 +1441,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn not_found_is_404_with_an_empty_body() {
-        let resp = ApiError::NotFound.into_response();
+    async fn not_found_is_404_with_the_reason_as_body() {
+        let resp = ApiError::not_found("no trade with that id").into_response();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-        assert_eq!(body_of(resp).await, "");
+        assert_eq!(body_of(resp).await, "no trade with that id");
     }
 
     #[tokio::test]

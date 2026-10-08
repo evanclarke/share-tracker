@@ -631,7 +631,7 @@ async fn get_one(
     db_get(&pool, listing_id, rename_id)
         .await?
         .map(Json)
-        .ok_or(ApiError::NotFound)
+        .ok_or_else(|| ApiError::not_found("no rename of that listing with that id"))
 }
 
 async fn undo(
@@ -1720,12 +1720,12 @@ mod tests {
         // Another listing's path does not reach it.
         let other = app.get(format!("/listings/2/renames/{}", created.id)).await;
         assert_eq!(other.status, StatusCode::NOT_FOUND);
-        assert_eq!(other.text(), "");
+        assert_eq!(other.text(), "no rename of that listing with that id");
 
         app.delete(&uri).await.expect_status(StatusCode::NO_CONTENT);
         let gone = app.get(&uri).await;
         assert_eq!(gone.status, StatusCode::NOT_FOUND);
-        assert_eq!(gone.text(), "");
+        assert_eq!(gone.text(), "no rename of that listing with that id");
     }
 
     #[tokio::test]

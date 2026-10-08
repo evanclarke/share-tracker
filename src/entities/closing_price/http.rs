@@ -131,8 +131,8 @@ async fn list(
 /// One stored row for one (listing, day) — the read half of the URL the
 /// manual `PUT` and the errored-row `DELETE` address, so a client can look at
 /// what it is about to replace or remove. Errored rows are answered like any
-/// other (their own `status` says so); no row at all is the bare empty `404`
-/// every GET-one answers.
+/// other (their own `status` says so); no row at all is a `404` naming what
+/// is missing, as every GET-one answers.
 async fn get_one(
     State(pool): State<SqlitePool>,
     Path((listing_id, price_date)): Path<(i64, NaiveDate)>,
@@ -140,7 +140,7 @@ async fn get_one(
     db_get_one(&pool, listing_id, price_date)
         .await?
         .map(Json)
-        .ok_or(ApiError::NotFound)
+        .ok_or_else(|| ApiError::not_found("no stored price for that listing and date"))
 }
 
 /// Store a price entered by hand for one (listing, day), with the provenance

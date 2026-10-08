@@ -44,7 +44,7 @@ async fn get_one(
         .await
         .map_err(ApiError::from)?
         .map(|t| Json(t.present()))
-        .ok_or(ApiError::NotFound)
+        .ok_or_else(|| ApiError::not_found(<Trade as http::CrudEntity>::missing_row_body()))
 }
 
 /// The row a request body describes. `id` is the path's on an upsert and

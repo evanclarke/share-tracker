@@ -1058,12 +1058,13 @@ async fn get_one(
     State(pool): State<SqlitePool>,
     Path((report, date)): Path<(String, NaiveDate)>,
 ) -> Result<Json<Snapshot>, ApiError> {
-    let report = ReportKind::from_slug(&report).ok_or(ApiError::NotFound)?;
-    db_get(&pool, report, date)
+    let kind = ReportKind::from_slug(&report)
+        .ok_or_else(|| ApiError::not_found(format!("no snapshotted report named {report:?}")))?;
+    db_get(&pool, kind, date)
         .await
         .map_err(ApiError::from)?
         .map(Json)
-        .ok_or(ApiError::NotFound)
+        .ok_or_else(|| ApiError::not_found(format!("no {report} snapshot for that date")))
 }
 
 /// Generate (or regenerate a stale) day's snapshots on demand — e.g. a past

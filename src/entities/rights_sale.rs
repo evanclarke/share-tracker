@@ -794,7 +794,7 @@ async fn get_one(
     db_get(&mut *pool.acquire().await?, id)
         .await?
         .map(Json)
-        .ok_or(ApiError::NotFound)
+        .ok_or_else(|| ApiError::not_found("no rights sale with that id"))
 }
 
 async fn delete_one(
@@ -1464,23 +1464,17 @@ mod tests {
         assert_eq!(resp.status, StatusCode::NOT_FOUND);
     }
 
-    /// A GET-one 404 is deliberately **empty** — the URL itself names what is
-    /// missing — the contract `infra::http::get_handler` gives every other
-    /// entity, and what the web UI can render without a body. Only a `DELETE`
-    /// (fired from a list row, where the toast is the only thing to read) or an
-    /// operation whose prerequisite is missing carries a plain-text reason.
+    /// A GET-one 404 names the missing row, the same wording its `DELETE`
+    /// answers — the contract `infra::http::get_handler` gives every other
+    /// entity, so a client can tell an absent row from a mistyped path.
     #[tokio::test]
-    async fn api_get_missing_rights_sale_answers_empty_404() {
+    async fn api_get_missing_rights_sale_answers_404_naming_it() {
         let pool = test_pool().await;
         let app = client(&pool);
 
         let resp = app.get("/rights_sales/9999").await;
         assert_eq!(resp.status, StatusCode::NOT_FOUND);
-        assert_eq!(
-            resp.text(),
-            "",
-            "a GET-one 404 must carry no body: its URL already names what is missing"
-        );
+        assert_eq!(resp.text(), "no rights sale with that id");
     }
 
     #[tokio::test]

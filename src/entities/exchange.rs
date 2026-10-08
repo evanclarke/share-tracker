@@ -132,12 +132,6 @@ impl CrudEntity for Exchange {
     const KEY_COLUMN: &'static str = "mic";
     const ORDER_BY: &'static str = "mic";
     const NOUN: &'static str = "exchange";
-
-    /// Keyed by MIC, so the default body's "with that id" would name a column
-    /// the route's URL never carries.
-    fn missing_row_body() -> String {
-        "no exchange with that mic".to_string()
-    }
 }
 
 pub fn router() -> Router<SqlitePool> {

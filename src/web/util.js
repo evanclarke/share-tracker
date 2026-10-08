@@ -690,7 +690,7 @@ export async function api(method, path, body) {
 }
 
 // Whether a `GET`-one finds a row: `true` when it does, `false` on the
-// documented empty 404, and a throw on anything else — a 500 or an outage must
+// 404 (whose body names the missing row), and a throw on anything else — a 500 or an outage must
 // never read as "absent" and let a create PUT clobber the row it could not
 // see.
 export async function apiRowExists(path) {

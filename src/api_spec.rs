@@ -82,14 +82,15 @@ Errors are never JSON. A rejected request answers either a text/plain; \
 charset=utf-8 body with the reason — 400 (a malformed path parameter, query \
 string or body), 401, 403 (the request guard: a cross-site write, or with no \
 [auth] a Host name that is not localhost, an IP address or in allowed_hosts), \
-404 on a delete, an operation, or a read whose parameter \
-names a missing row (GET /portfolio/activity?listing_id=), 413, 415 (a JSON body sent \
+404 naming the missing row or prerequisite (a GET or DELETE of one row, an \
+operation, or a read whose parameter names a missing row), 413, 415 (a JSON body sent \
 without Content-Type: application/json), 422, 429 on POST /login once a source \
 has exhausted its failed-attempt budget (the body carries the reason and a \
 Retry-After header the remaining whole seconds; a browser login POST is refused \
 429 too, with the sign-in page as the body instead of the plain-text reason), a \
 failed POST /jobs/{name}'s 500, 502, 503 — or a deliberately empty body: the 404 \
-of a GET addressed at one missing row, a 405, and an internal 500. docs/API.md's \
+of a path no route matches (so an empty 404 means the URL is wrong, a text one \
+that the row is absent), a 405, and an internal 500. docs/API.md's \
 \"Error-body contract\" section carries the full matrix.
 
 Reading a collection is one more contract, stated here and in docs/API.md's \
@@ -2250,18 +2251,14 @@ fn operation(
         );
     }
     // A route addressed by a path parameter can answer 404 — the row the path
-    // names does not exist. A GET-one's is the **empty** body; a DELETE's or an
-    // operation's carries the plain-text reason. Recorded here rather than in
-    // every row, and by description because neither shape is a schema.
+    // names does not exist — with the plain-text reason naming it, whatever
+    // the verb. Recorded here rather than in every row, and by description
+    // because the shape is not a schema.
     if path.contains('{') && matches!(verb, Verb::Get | Verb::Post | Verb::Delete) {
         responses = responses.response(
             "404".to_string(),
             ResponseBuilder::new()
-                .description(if verb == Verb::Get {
-                    "No such row. The body is empty."
-                } else {
-                    "No such row: the body is the plain-text reason."
-                })
+                .description("No such row: the body is the plain-text reason naming it.")
                 .build(),
         );
     }
@@ -2707,7 +2704,7 @@ async fn serve_index(
 /// Every **`GET`-one** route the document carries: a `GET` on a path with a
 /// parameter whose success body is a single object (not an array, which is how
 /// a path-narrowed list like `/exchange_holidays/{mic}` is told apart). Read by
-/// the empty-404 test below so a new GET-one is covered without a hand-kept
+/// the missing-row 404 test below so a new GET-one is covered without a hand-kept
 /// list.
 #[cfg(test)]
 pub(crate) fn documented_get_one_routes() -> Vec<String> {
@@ -3955,19 +3952,20 @@ mod tests {
         );
         // …and the empty-bodied ones, both 404s and both 500s named apart. The
         // 404 is qualified on both sides, because the two shapes are told apart
-        // by *what the URL addresses*, not by the verb: a GET aimed at one
-        // missing row is empty, while a read whose parameter names a missing row
-        // carries the reason (`a_read_whose_parameter_names_a_missing_row_…`
-        // drives that one).
+        // by whether a route matched: a missing row is named in the body
+        // (`every_get_one_route_names_the_missing_row_in_its_404` drives the
+        // GETs), while only a path no route matches is empty.
         assert!(description.contains(
-            "a deliberately empty body: the 404 of a GET addressed at one missing row, \
-             a 405, and an internal 500"
+            "a deliberately empty body: the 404 of a path no route matches (so an empty \
+             404 means the URL is wrong, a text one that the row is absent), a 405, and an \
+             internal 500"
         ));
         assert!(
             description.contains(
-                "404 on a delete, an operation, or a read whose parameter names a missing row"
+                "404 naming the missing row or prerequisite (a GET or DELETE of one row, an \
+                 operation, or a read whose parameter names a missing row)"
             ),
-            "info.description must not claim every GET's 404 is empty: {description}"
+            "info.description must say a missing row's 404 carries its reason: {description}"
         );
     }
 
@@ -5315,16 +5313,12 @@ mod tests {
         }
     }
 
-    /// The other half of the `404` contract: a read whose **parameter** names a
-    /// row that is not there answers a `404` **with** a plain-text reason, not
-    /// the empty body a `GET`-one gives. `GET /portfolio/activity?listing_id=`
-    /// is the only such read, and the Error-body matrix used to say flatly that
-    /// "a `GET`'s 404" is empty — so a client generated from the document
-    /// discarded "listing 42 not found" as a body that could not exist.
-    ///
-    /// The scan keeps that "only" honest: a new report that answers
-    /// `ApiError::not_found` is a second case the matrix would not cover, so it
-    /// fails here until it is classified.
+    /// A read whose **parameter** (not its path) names a row that is not there
+    /// answers a `404` with a plain-text reason too —
+    /// `GET /portfolio/activity?listing_id=` is the one such read. Driven
+    /// beside the GET-one walk below because the generic `404` response
+    /// `operation` attaches is keyed off a path parameter, which this route
+    /// does not have.
     #[tokio::test]
     async fn a_read_whose_parameter_names_a_missing_row_answers_a_text_404() {
         use crate::test_support::{ApiClient, test_pool};
@@ -5338,39 +5332,6 @@ mod tests {
             resp.text(),
             "listing 9999 not found",
             "a read whose parameter names a missing row must say which one"
-        );
-
-        // Exhaustiveness: `src/reports` may answer a text 404 from exactly one
-        // file. Recursive, because a report that outgrows one file becomes a
-        // directory (`trade.rs`/`closing_price.rs` set that precedent).
-        fn sources(dir: &std::path::Path, found: &mut Vec<String>) {
-            for entry in std::fs::read_dir(dir).expect("src/reports must be readable") {
-                let path = entry.expect("a readable dir entry").path();
-                if path.is_dir() {
-                    sources(&path, found);
-                } else if path.extension().is_some_and(|e| e == "rs") {
-                    let body = std::fs::read_to_string(&path).expect("a readable source");
-                    // The declaration itself lives in `infra::http`; here only
-                    // call sites matter.
-                    if body.contains("ApiError::not_found(") {
-                        found.push(
-                            path.file_name()
-                                .expect("a named file")
-                                .to_string_lossy()
-                                .into_owned(),
-                        );
-                    }
-                }
-            }
-        }
-        let mut found = Vec::new();
-        sources(std::path::Path::new("src/reports"), &mut found);
-        found.sort();
-        assert_eq!(
-            found,
-            vec!["activity.rs".to_string()],
-            "a report answering a text 404 must be named in the Error-body \
-             matrix's text-carrying 404 row, then added here"
         );
     }
 
@@ -5578,18 +5539,26 @@ mod tests {
         assert!(checked > 300, "only {checked} properties checked");
     }
 
-    /// Every `GET`-one answers a missing key with a bare `404` whose body is
-    /// **empty** — the contract the web UI and a machine client both read as
-    /// "no such row", and the one `72046a0` moved `GET /rights_sales/{id}` onto.
+    /// Every `GET`-one answers a missing key with a `404` whose plain-text body
+    /// names what was missing — so a client can tell an absent row from a
+    /// mistyped path, whose `404` (no route matched) is the only empty one.
     /// Driven from the route table, so a new GET-one is covered without a
     /// hand-kept list.
     #[tokio::test]
-    async fn every_get_one_route_answers_the_empty_404() {
+    async fn every_get_one_route_names_the_missing_row_in_its_404() {
         use crate::test_support::{ApiClient, test_pool};
         use axum::http::StatusCode;
 
         let pool = test_pool().await;
         let client = ApiClient::full(&pool);
+        let unrouted = client.get("/no-such-collection/9999").await;
+        assert_eq!(unrouted.status, StatusCode::NOT_FOUND);
+        assert_eq!(unrouted.text(), "", "a path no route matches stays empty");
+        // The one path-addressed GET whose success body is not JSON, so the
+        // table walk below does not reach it.
+        let content = client.get("/attachments/9999/content").await;
+        assert_eq!(content.status, StatusCode::NOT_FOUND);
+        assert_eq!(content.text(), "no attachment with that id");
         let mut checked = 0;
         for template in documented_get_one_routes() {
             let mut uri = template.clone();
@@ -5610,9 +5579,16 @@ mod tests {
             let resp = client.get(&uri).await;
             assert_eq!(resp.status, StatusCode::NOT_FOUND, "GET {uri}");
             assert_eq!(
-                resp.text(),
-                "",
-                "a GET-one's 404 must have an empty body: GET {uri}"
+                resp.headers
+                    .get("content-type")
+                    .and_then(|v| v.to_str().ok()),
+                Some("text/plain; charset=utf-8"),
+                "GET {uri}"
+            );
+            assert!(
+                resp.text().starts_with("no "),
+                "a GET-one's 404 must name the missing row: GET {uri} → {:?}",
+                resp.text()
             );
             checked += 1;
         }
