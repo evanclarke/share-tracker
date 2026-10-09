@@ -1263,6 +1263,36 @@ pub struct MissingDividendEntry {
     /// income row would carry.
     pub expected_amount: Decimal,
     pub currency: String,
+    /// The date the distribution is expected to have been **paid** by: the
+    /// ex-date plus the longest ex-date-to-payment gap this listing's entered
+    /// distributions show (see [`expected_payment_lag_days`]). The calendar
+    /// stores no payment date, so this is the listing's own record standing in
+    /// for one.
+    pub expected_payment_by: NaiveDate,
+    /// True while `today` is on or before [`Self::expected_payment_by`]: the
+    /// registry has not paid yet, so there is no payment advice to enter the
+    /// row from and nothing is wrong. The entry is still reported — a
+    /// question is never silently retired — but as a "due by" note rather
+    /// than a problem.
+    pub awaiting_payment: bool,
+}
+
+/// How many days after its ex-date a listing's distribution is expected to be
+/// paid by: the **longest** ex-date-to-`date_paid` gap among the distributions
+/// of that listing already matched to an income row, or
+/// [`DIVIDEND_MATCH_AFTER_DAYS`] when none has been — the far edge of the
+/// window a payment is matched in at all, so a listing with no history is
+/// never judged late before its payment could have been recognised.
+///
+/// The longest rather than the typical gap, because the cost of the two errors
+/// is not symmetric: calling a distribution late a few days early is a false
+/// alarm on the banner, which is what teaches a reader to ignore it. Each gap
+/// is clamped to the matching window, so one mistyped `date_paid` cannot push
+/// every later alert out by a year.
+fn expected_payment_lag_days(lags: &HashMap<i64, i64>, listing_id: i64) -> i64 {
+    lags.get(&listing_id)
+        .copied()
+        .unwrap_or(DIVIDEND_MATCH_AFTER_DAYS)
 }
 
 /// A recorded distribution whose gross does not match what the provider's
@@ -2995,6 +3025,7 @@ async fn db_stalled_jobs(
 /// recorded between the ex-date and the fetch cannot skew it.
 async fn db_distribution_calendar(
     conn: &mut sqlx::SqliteConnection,
+    today: NaiveDate,
 ) -> Result<(Vec<MissingDividendEntry>, Vec<DividendAmountMismatch>), sqlx::Error> {
     let events: Vec<CalendarEventRow> = sqlx::query_as(
         "SELECT de.listing_id AS listing_id, l.ticker AS ticker, de.ex_date AS ex_date, \
@@ -3067,6 +3098,10 @@ async fn db_distribution_calendar(
     // whose two events fall inside one row's window would report the second as
     // missing *and* match it, saying opposite things about the same fact.
     let mut claimed: HashSet<i64> = HashSet::new();
+    // The longest ex-date-to-payment gap per listing among the matched
+    // distributions — what each missing entry's due date is read from once the
+    // walk has seen every match (see [`expected_payment_lag_days`]).
+    let mut payment_lags: HashMap<i64, i64> = HashMap::new();
     for event in &events {
         let basis_at = DateTime::parse_from_rfc3339(&event.fetched_at)
             .map_err(|e| {
@@ -3117,10 +3152,20 @@ async fn db_distribution_calendar(
                     amount_per_unit: event.amount_per_unit,
                     expected_amount: expected,
                     currency: event.currency.clone(),
+                    // Filled in after the walk, once every match is known.
+                    expected_payment_by: event.ex_date,
+                    awaiting_payment: false,
                 });
                 continue;
             };
             claimed.insert(row.id);
+            let lag = (row.date_paid - event.ex_date)
+                .num_days()
+                .clamp(0, DIVIDEND_MATCH_AFTER_DAYS);
+            payment_lags
+                .entry(event.listing_id)
+                .and_modify(|longest| *longest = (*longest).max(lag))
+                .or_insert(lag);
             // The row **is** this distribution's record — so it is claimed,
             // and the event is not reported missing — but its gross can only
             // be compared against the calendar's when the two are in the same
@@ -3159,6 +3204,11 @@ async fn db_distribution_calendar(
                 });
             }
         }
+    }
+    for entry in &mut missing {
+        entry.expected_payment_by = entry.ex_date
+            + Duration::days(expected_payment_lag_days(&payment_lags, entry.listing_id));
+        entry.awaiting_payment = today <= entry.expected_payment_by;
     }
     Ok((missing, mismatches))
 }
@@ -3229,7 +3279,7 @@ pub async fn db_health(
     let non_trading_day_trades = db_non_trading_day_trades(&mut tx).await?;
     let nil_proceeds_disposals = db_nil_proceeds_disposals(&mut tx).await?;
     let (missing_dividend_entries, dividend_amount_mismatches) =
-        db_distribution_calendar(&mut tx).await?;
+        db_distribution_calendar(&mut tx, today).await?;
     tx.commit().await?;
     let unpriced_days = db_unpriced_days(pool, now).await?;
 
@@ -7102,6 +7152,73 @@ mod tests {
             })
             .insert(pool)
             .await;
+    }
+
+    /// The listing's own record is what says when a distribution is due: two
+    /// entered distributions paid 15 and 19 days after going ex put the next
+    /// one due 19 days after its ex-date — the longest gap, not the typical
+    /// one — and it is a note until that day passes, a problem the day after.
+    #[tokio::test]
+    async fn a_distribution_not_yet_due_is_awaiting_payment_until_its_listings_longest_gap() {
+        let pool = test_pool().await;
+        holding_before_the_ex_date(&pool).await;
+        for (id, ex, paid) in [
+            (1, ymd(2025, 7, 1), ymd(2025, 7, 16)),
+            (2, ymd(2025, 10, 1), ymd(2025, 10, 20)),
+        ] {
+            insert_event(&pool, 1, ex, "0.5", "2026-10-02T00:00:00Z").await;
+            test_support::income(id, 1, paid)
+                .with(|i| i.unfranked_amount = dec("50"))
+                .insert(&pool)
+                .await;
+        }
+        insert_event(&pool, 1, ymd(2026, 10, 1), "0.5", "2026-10-02T00:00:00Z").await;
+
+        let h = health(&pool, ymd(2026, 10, 9)).await;
+        assert_eq!(h.missing_dividend_entries.len(), 1);
+        let m = &h.missing_dividend_entries[0];
+        assert_eq!(m.ex_date, ymd(2026, 10, 1));
+        assert_eq!(m.expected_payment_by, ymd(2026, 10, 20));
+        assert!(m.awaiting_payment);
+
+        let on_the_day = health(&pool, ymd(2026, 10, 20)).await;
+        assert!(
+            on_the_day.missing_dividend_entries[0].awaiting_payment,
+            "the due date itself is still within the expected gap"
+        );
+
+        let after = health(&pool, ymd(2026, 10, 21)).await;
+        assert_eq!(after.missing_dividend_entries.len(), 1);
+        assert!(!after.missing_dividend_entries[0].awaiting_payment);
+    }
+
+    /// A listing with nothing entered to learn from falls back to the far
+    /// edge of the matching window, so it is never called late before its
+    /// payment could even have been recognised as its own.
+    #[tokio::test]
+    async fn a_listing_with_no_payment_history_is_due_at_the_end_of_the_match_window() {
+        let pool = test_pool().await;
+        holding_before_the_ex_date(&pool).await;
+        insert_event(&pool, 1, ymd(2026, 10, 1), "0.5", "2026-10-02T00:00:00Z").await;
+
+        let h = health(&pool, ymd(2026, 10, 9)).await;
+        let m = &h.missing_dividend_entries[0];
+        assert_eq!(
+            m.expected_payment_by,
+            ymd(2026, 10, 1) + Duration::days(DIVIDEND_MATCH_AFTER_DAYS)
+        );
+        assert!(m.awaiting_payment);
+    }
+
+    /// A listing's learned gap wins; a listing with none gets the window.
+    #[test]
+    fn the_expected_payment_lag_falls_back_to_the_match_window() {
+        let lags = HashMap::from([(1, 19)]);
+        assert_eq!(expected_payment_lag_days(&lags, 1), 19);
+        assert_eq!(
+            expected_payment_lag_days(&lags, 2),
+            DIVIDEND_MATCH_AFTER_DAYS
+        );
     }
 
     #[tokio::test]

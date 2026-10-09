@@ -1674,7 +1674,19 @@ async function refreshHealthBanner(seq = navigationToken()) {
     // other, so a distribution nobody ever entered is invisible to all of
     // them. Advisory by decision — no tax figure is computed from the feed —
     // so the wording asks rather than asserts.
+    // A distribution not yet paid is a note, not a problem: there is no
+    // payment advice to enter it from until the registry pays, so it says when
+    // that is due (the listing's own longest ex-date-to-payment gap) and only
+    // joins the problems once that date has passed.
+    const notes = [];
     (h.missing_dividend_entries || []).forEach(function (d) {
+      if (d.awaiting_payment) {
+        notes.push(d.ticker + ' went ex-distribution on ' + d.ex_date + ' (' + d.holding_account
+          + ', ' + d.units_held + ' units, about ' + moneyText(d.expected_amount) + ' ' + d.currency
+          + ') — payment expected by ' + d.expected_payment_by
+          + '; enter it from the payment advice once it arrives.');
+        return;
+      }
       problems.push(d.ticker + ' went ex-distribution on ' + d.ex_date + ' while '
         + d.holding_account + ' held ' + d.units_held + ' units, but no income row matches it.'
         + ' At ' + d.amount_per_unit + ' per unit that is about '
@@ -1689,14 +1701,21 @@ async function refreshHealthBanner(seq = navigationToken()) {
         + ' \u2014 a difference of ' + moneyText(d.amount_difference) + '. Check the figure'
         + ' against the payment advice; the gross is compared, never the components.');
     });
-    if (problems.length === 0) {
+    if (problems.length === 0 && notes.length === 0) {
       banner.hidden = true;
       banner.innerHTML = '';
       return;
     }
     banner.innerHTML = '';
-    banner.appendChild(el('span', null, '⚠ ' + problems.join(' ')));
-    banner.appendChild(el('a', { href: '#/jobs' }, 'Open Jobs →'));
+    // Notes alone are not a warning, so the strip drops its warning colours.
+    banner.classList.toggle('notes-only', problems.length === 0);
+    if (problems.length > 0) {
+      banner.appendChild(el('span', null, '⚠ ' + problems.join(' ')));
+      banner.appendChild(el('a', { href: '#/jobs' }, 'Open Jobs →'));
+    }
+    if (notes.length > 0) {
+      banner.appendChild(el('span', { class: 'health-note' }, 'ℹ ' + notes.join(' ')));
+    }
     if (erroredPrices.length > 0 || (h.duplicate_price_series || []).length > 0) {
       banner.appendChild(el('a', { href: '#/prices' }, 'Open Closing Prices →'));
     }
@@ -1707,7 +1726,7 @@ async function refreshHealthBanner(seq = navigationToken()) {
     if (duplicateAmma.length > 0) {
       banner.appendChild(el('a', { href: '#/e/amma_statements' }, 'Open AMMA Statements →'));
     }
-    if (duplicateIncome.length > 0) {
+    if (duplicateIncome.length > 0 || notes.length > 0) {
       banner.appendChild(el('a', { href: '#/e/income' }, 'Open Income →'));
     }
     if (duplicateInterest.length > 0) {

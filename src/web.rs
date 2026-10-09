@@ -3630,6 +3630,13 @@ mod tests {
         // `hidden` until a real problem is found, and it must paint nothing
         // (not an empty coloured strip) until then.
         assert!(css.contains("#health-banner[hidden] { display: none; }"));
+        // A distribution not yet paid is shown with its due date as a note,
+        // not a problem, and a strip of notes alone drops the warning colours.
+        assert!(js.contains("d.awaiting_payment"));
+        assert!(js.contains("payment expected by ' + d.expected_payment_by"));
+        assert!(js.contains("banner.classList.toggle('notes-only', problems.length === 0)"));
+        assert!(css.contains("#health-banner.notes-only"));
+        assert!(css.contains("#health-banner .health-note"));
     }
 
     #[tokio::test]

@@ -152,6 +152,11 @@ body {
   font-size: 13px;
 }
 #health-banner a { color: var(--warn); font-weight: 600; white-space: nowrap; }
+/* A "due by" note (a distribution not yet paid) is information, not a
+   warning: muted beside problems, and the whole strip neutral when alone. */
+#health-banner .health-note { color: var(--muted); }
+#health-banner.notes-only { background: var(--neutral-soft); border-bottom-color: var(--line); }
+#health-banner.notes-only a { color: var(--accent); }
 /* #health-banner's own `display: flex` outweighs the UA stylesheet's
    `[hidden] { display: none }` (an id selector beats an attribute selector),
    so the `hidden` attribute alone doesn't collapse it — it painted an empty
