@@ -728,10 +728,13 @@ async function viewEntityForm(entity, keyParts, seq = navigationToken()) {
     }
   });
 
+  const card = el('div', { class: 'card' }, form);
   setMainIfCurrent(seq, el('div', null, [
     el('h2', null, (editing ? 'Edit ' : 'New ') + entity.title.replace(/s$/, '')),
     el('p', { class: 'view-desc' }, entity.desc),
-    el('div', { class: 'card' }, form),
+    editing && entity.attachOwner
+      ? await withDocumentPane(card, entity.attachOwner, keyParts[0])
+      : card,
   ]));
 }
 
@@ -877,7 +880,9 @@ async function viewSellForm(id, seq = navigationToken()) {
   setMainIfCurrent(seq, el('div', null, [
     el('h2', null, editing ? 'Edit Sell' : 'New Sell'),
     sellForesightLinks(),
-    el('div', { class: 'card' }, form),
+    editing
+      ? await withDocumentPane(el('div', { class: 'card' }, form), 'trade_id', id)
+      : el('div', { class: 'card' }, form),
   ]));
 }
 
@@ -1213,6 +1218,81 @@ async function openOwnerRecord(ownerField, ownerId) {
   location.replace('#/e/' + spec.slug + '/edit/' + pathSeg(ownerId));
 }
 
+// On a trade's attachments (fetched with include_linked), a row whose
+// trade_id is null is a linked document — find which owner field carries it.
+function linkedAttachmentOwner(row) {
+  if (row.trade_id !== null) return null;
+  for (const field in ATTACH_OWNER) {
+    if (field !== 'trade_id' && row[field] !== null && row[field] !== undefined) {
+      return { field: field, id: row[field] };
+    }
+  }
+  return null;
+}
+
+// The document pane beside an edit form: the record's attachments rendered
+// in place (GET /attachments/:id/content?disposition=inline), so the figures
+// being entered can be read straight off the statement. A trade's pane also
+// shows its linked source documents (a DRP's funding distribution, …), as
+// its Attachments view does. Images render as an <img>; PDF and text in an
+// <iframe> — deliberately not sandboxed, since Chrome refuses to load its
+// PDF viewer in a sandboxed frame (the content is the allowlisted types
+// only, served `nosniff`). Several documents get a picker; none gets a link
+// to the Attachments view to upload one. A failed listing degrades to a
+// note rather than costing the form.
+async function withDocumentPane(card, ownerField, ownerId) {
+  const manage = el('a', { href: '#/attachments/' + ownerField + '/' + pathSeg(ownerId) }, 'Manage attachments');
+  const pane = el('aside', { class: 'doc-pane' });
+  let rows;
+  try {
+    rows = await api('GET', '/attachments?' + encodeURIComponent(ownerField) + '=' + encodeURIComponent(ownerId)
+      + (ownerField === 'trade_id' ? '&include_linked=true' : ''));
+  } catch (e) {
+    pane.append(el('div', { class: 'empty' }, 'Could not list attachments: ' + e.message));
+    return el('div', { class: 'doc-split' }, [card, pane]);
+  }
+  if (rows.length === 0) {
+    pane.append(el('div', { class: 'doc-empty' }, [
+      el('p', null, 'No documents attached to this record.'),
+      manage,
+    ]));
+    return el('div', { class: 'doc-split' }, [card, pane]);
+  }
+
+  const frame = el('div', { class: 'doc-frame' });
+  const openLink = el('a', { target: '_blank' }, 'Open in new tab');
+  function show(row) {
+    const src = apiUrl('/attachments/' + row.id + '/content?disposition=inline');
+    openLink.href = src;
+    // A PDF opens fitted to the pane's width with the thumbnail sidebar
+    // closed — the pane is too narrow to spend a third of it on page previews.
+    frame.replaceChildren(row.content_type.startsWith('image/')
+      ? el('img', { src: src, alt: row.filename })
+      : el('iframe', {
+        src: row.content_type === 'application/pdf' ? src + '#navpanes=0&view=FitH' : src,
+        title: row.filename,
+      }));
+  }
+  function label(row) {
+    const link = ownerField === 'trade_id' ? linkedAttachmentOwner(row) : null;
+    return row.filename + (link ? ' (from ' + ATTACH_OWNER[link.field].noun + ' #' + link.id + ')' : '');
+  }
+
+  const bar = el('div', { class: 'doc-bar' });
+  if (rows.length > 1) {
+    const picker = el('select', { 'aria-label': 'Document' },
+      rows.map(function (r, i) { return el('option', { value: String(i) }, label(r)); }));
+    picker.addEventListener('change', function () { show(rows[Number(picker.value)]); });
+    bar.append(picker);
+  } else {
+    bar.append(el('span', { class: 'doc-name' }, label(rows[0])));
+  }
+  bar.append(openLink, manage);
+  show(rows[0]);
+  pane.append(bar, frame);
+  return el('div', { class: 'doc-split' }, [card, pane]);
+}
+
 async function viewAttachments(ownerField, ownerId, seq = navigationToken()) {
   // A trade's view also lists the documents of the record the trade was
   // created from (a DRP trade's funding distribution, a buy-back Sell's
@@ -1239,17 +1319,7 @@ async function viewAttachments(ownerField, ownerId, seq = navigationToken()) {
     } catch (e) { /* fall back to the noun + id wording */ }
   }
 
-  // On a trade's view, a row whose trade_id is null is a linked document —
-  // find which owner field carries it.
-  function linkedOwner(row) {
-    if (!isTrade || row.trade_id !== null) return null;
-    for (const field in ATTACH_OWNER) {
-      if (field !== 'trade_id' && row[field] !== null && row[field] !== undefined) {
-        return { field: field, id: row[field] };
-      }
-    }
-    return null;
-  }
+  function linkedOwner(row) { return isTrade ? linkedAttachmentOwner(row) : null; }
   const anyLinked = rows.some(function (r) { return linkedOwner(r) !== null; });
   rows.forEach(function (r) {
     const link = linkedOwner(r);

@@ -3307,6 +3307,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn edit_forms_show_the_records_documents_beside_them() {
+        let js = app_js_body().await;
+        // Editing an attachable record (any entity with `attachOwner`, and a
+        // Sell, which is a trade) splits the screen: the form on the left, its
+        // documents rendered in place on the right — only when editing, since
+        // a record being created has no id to attach to yet.
+        assert!(js.contains("async function withDocumentPane(card, ownerField, ownerId)"));
+        assert!(js.contains(
+            "editing && entity.attachOwner\n      ? await withDocumentPane(card, entity.attachOwner, keyParts[0])"
+        ));
+        assert!(js.contains(
+            "await withDocumentPane(el('div', { class: 'card' }, form), 'trade_id', id)"
+        ));
+        // It lists the record's attachments (a trade's linked source documents
+        // too) and renders the chosen one inline — an <img> for an image, an
+        // unsandboxed <iframe> (Chrome's PDF viewer refuses a sandboxed frame)
+        // for PDF/text.
+        assert!(js.contains("(ownerField === 'trade_id' ? '&include_linked=true' : '')"));
+        assert!(js.contains("'/content?disposition=inline'"));
+        assert!(js.contains("el('iframe', {"));
+        assert!(js.contains("src + '#navpanes=0&view=FitH'"));
+        // Only a trade's pane carries linked documents to label.
+        assert!(js.contains("ownerField === 'trade_id' ? linkedAttachmentOwner(row) : null"));
+        assert!(js.contains("el('img', { src: src, alt: row.filename })"));
+        // Several documents get a picker; none links to the Attachments view.
+        assert!(js.contains("'aria-label': 'Document'"));
+        assert!(js.contains("No documents attached to this record."));
+        assert!(js.contains("'Manage attachments'"));
+        // The pane sticks to the viewport beside the form, which needs #app's
+        // overflow released (an overflow container would capture the sticky).
+        assert!(STYLE_CSS.contains("#app:has(.doc-split) { overflow-x: visible; }"));
+        assert!(STYLE_CSS.contains("position: sticky;"));
+    }
+
+    #[tokio::test]
     async fn attachments_report_ui_present() {
         let js = app_js_body().await;
         // The whole-portfolio attachments index report: a plain GET report
