@@ -177,6 +177,9 @@ pub use held::{HeldTimeline, db_held_listing_ids, db_held_listing_ids_on};
 pub(crate) use http::ListParams;
 pub use http::router;
 pub use live::resolve_live_prices;
+/// Named outside `market` only by the tests that pin the lag's boundary.
+#[cfg(test)]
+pub(crate) use market::CRYPTO_PUBLICATION_LAG_HOURS;
 pub use market::{Market, NonTradingReason, load_market};
 /// Asked of a market on the caller's own connection: the trade and sell write
 /// paths reject a trade dated on a day its exchange was shut, and the

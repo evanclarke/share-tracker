@@ -232,7 +232,9 @@ pub(super) async fn fetch_and_store(
 pub const COLLECTION_LOOKBACK_DAYS: i64 = 14;
 
 /// The listing's trading days over the last [`COLLECTION_LOOKBACK_DAYS`]
-/// calendar days ending at its latest complete trading day at `now`, oldest
+/// calendar days ending at its latest *published* trading day at `now`
+/// (`Market::latest_published_trading_day` — a crypto candle that is final but
+/// not yet served is left for a later run rather than stored errored), oldest
 /// first. `None` when the market has no complete trading day (calendar
 /// misconfiguration). Each day is tested against the calendar in force *then*
 /// (`Market::identity_at`), so a window spanning an exchange change mixes both
@@ -241,7 +243,7 @@ fn lookback_trading_days(
     market: &Market,
     now: DateTime<Utc>,
 ) -> Result<Option<Vec<NaiveDate>>, String> {
-    let Some(latest) = market.latest_complete_trading_day(now)? else {
+    let Some(latest) = market.latest_published_trading_day(now)? else {
         return Ok(None);
     };
     let earliest = latest - Duration::days(COLLECTION_LOOKBACK_DAYS - 1);

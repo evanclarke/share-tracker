@@ -190,7 +190,44 @@ impl Market {
         };
         Ok(self.latest_trading_day_on_or_before(candidate))
     }
+
+    /// The most recent trading day the provider can be expected to **serve** a
+    /// close for at `now` — [`Self::latest_complete_trading_day`] less the
+    /// provider's publication lag. This is the day collection fetches up to and
+    /// the day the health report's unpriced-day walk stops at, so a close that
+    /// is final but not yet published is neither stored as an errored row (and
+    /// the run recorded as failed) nor reported as a hole.
+    ///
+    /// Exchange-listed markets have no lag here: every exchange's run is
+    /// scheduled well after its close, in the exchange's own timezone. Crypto
+    /// does — see [`CRYPTO_PUBLICATION_LAG_HOURS`]. A manual price entry
+    /// deliberately stays on the finality rule instead: a close the user has
+    /// in hand need not wait for the provider.
+    pub fn latest_published_trading_day(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<Option<NaiveDate>, String> {
+        let lag = match self.current().exchange {
+            None => Duration::hours(CRYPTO_PUBLICATION_LAG_HOURS),
+            Some(_) => Duration::zero(),
+        };
+        self.latest_complete_trading_day(now - lag)
+    }
 }
+
+/// How long after the 00:00 UTC cut-off the provider's daily crypto candle
+/// can be relied on to be published.
+///
+/// Production `job_runs` history showed the candle consistently missing well
+/// after the cut-off (a 00:30 UTC run failed on every run; the ASX run, once
+/// Sydney's daylight saving moved it from 07:30 to 06:30 UTC, failed every
+/// weekday from 2026-10-05), and reliably present by 07:30 UTC. Every price-
+/// import run walks every held listing, so without this the ASX run asked for
+/// a candle that did not exist yet, stored errored rows and was recorded as
+/// failed — a job-failure banner that the 08:00 UTC crypto run then cleared.
+/// Seven hours keeps the 06:30 UTC run off the unpublished candle and leaves
+/// the 08:00 UTC crypto run (`schedule.cron`) an hour's margin past the lag.
+pub const CRYPTO_PUBLICATION_LAG_HOURS: i64 = 7;
 
 #[cfg(test)]
 impl Market {

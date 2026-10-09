@@ -1669,8 +1669,10 @@ fn previous_month(today: NaiveDate) -> String {
 /// Deliberately shaped as the exact question `reports::valuation` asks, so
 /// there are no false positives: for every calendar date a listing was held,
 /// the valuation day it resolves to must have a row. Days whose close is not
-/// final yet (today's, an unsettled crypto candle) are out of scope — the
-/// walk stops at each market's `latest_complete_trading_day`.
+/// final yet (today's, an unsettled crypto candle) or final but not yet
+/// published by the provider are out of scope — the walk stops at each
+/// market's `latest_published_trading_day`, the same day collection fetches up
+/// to, so a candle the next run will collect is never reported as a hole.
 ///
 /// One holdings load and one stored-date query per listing, then an in-memory
 /// walk: six years of history per listing is thousands of dates, so a per-day
@@ -1694,7 +1696,7 @@ async fn db_unpriced_days(
         // has nothing this check can say about it; the price-import job fails
         // loudly on the same listing.
         let Some(final_day) = market
-            .latest_complete_trading_day(now)
+            .latest_published_trading_day(now)
             .map_err(sqlx::Error::Protocol)?
         else {
             continue;
@@ -3962,6 +3964,39 @@ mod tests {
         let h = health(&pool, ymd(2026, 7, 13)).await;
         assert_eq!(h.unpriced_days.len(), 1);
         assert_eq!(h.unpriced_days[0].latest_date, ymd(2026, 7, 13));
+    }
+
+    /// The crypto counterpart: a UTC candle that is final but not yet
+    /// published is the one the next price-import run will collect, so it is
+    /// not a hole either until the provider's publication lag has passed.
+    #[tokio::test]
+    async fn a_crypto_candle_not_yet_published_is_not_unpriced() {
+        let pool = test_pool().await;
+        test_support::listing(1)
+            .crypto()
+            .ticker("BTC")
+            .name("Bitcoin")
+            .insert(&pool)
+            .await;
+        test_support::buy(1, 1)
+            .date(ymd(2026, 10, 6))
+            .insert(&pool)
+            .await;
+        for day in ["2026-10-06", "2026-10-07"] {
+            insert_ok_price(&pool, 1, day).await;
+        }
+
+        // 06:30 UTC Fri 2026-10-09: Thursday's candle is final, unpublished.
+        let before_publication = "2026-10-09T06:30:00Z".parse::<DateTime<Utc>>().unwrap();
+        let h = db_health(&pool, ymd(2026, 10, 9), before_publication)
+            .await
+            .unwrap();
+        assert!(h.unpriced_days.is_empty());
+
+        // At noon UTC it is published, and still unstored: a hole.
+        let h = health(&pool, ymd(2026, 10, 9)).await;
+        assert_eq!(h.unpriced_days.len(), 1);
+        assert_eq!(h.unpriced_days[0].latest_date, ymd(2026, 10, 8));
     }
 
     /// Nothing is held after the last unit is sold, so the span ends there —

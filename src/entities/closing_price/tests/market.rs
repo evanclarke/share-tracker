@@ -73,6 +73,54 @@ async fn db_crypto_cutoff_is_utc_midnight_with_no_holiday_calendar() {
     );
 }
 
+/// A crypto candle is final at 00:00 UTC but the provider publishes it hours
+/// later, so the day collection fetches up to trails the final one until
+/// `CRYPTO_PUBLICATION_LAG_HOURS` have passed. Exchange-listed markets have no
+/// lag: the two answers agree.
+#[tokio::test]
+async fn db_crypto_published_day_trails_the_cutoff_by_the_publication_lag() {
+    let pool = test_pool().await;
+    insert_crypto_listing(&pool, 1, "BTC").await;
+    insert_listing(&pool, 2, "BHP", "XASX", "AUD").await;
+    let crypto = load_market(&pool, 1).await.unwrap().unwrap();
+    let asx = load_market(&pool, 2).await.unwrap().unwrap();
+
+    // Fri 2026-10-09 06:30 UTC — the ASX run's slot under Sydney daylight
+    // saving: Thursday's candle is final but not yet published.
+    let asx_run = utc(2026, 10, 9, 6, 30);
+    assert_eq!(
+        crypto.latest_complete_trading_day(asx_run).unwrap(),
+        Some(ymd(2026, 10, 8))
+    );
+    assert_eq!(
+        crypto.latest_published_trading_day(asx_run).unwrap(),
+        Some(ymd(2026, 10, 7))
+    );
+    // Exactly the lag past the cut-off, and the crypto run's 08:00 UTC slot:
+    // Thursday is published.
+    let lag_hours = u32::try_from(CRYPTO_PUBLICATION_LAG_HOURS).unwrap();
+    for now in [utc(2026, 10, 9, lag_hours, 0), utc(2026, 10, 9, 8, 0)] {
+        assert_eq!(
+            crypto.latest_published_trading_day(now).unwrap(),
+            Some(ymd(2026, 10, 8))
+        );
+    }
+    // Before the lag has passed the published day is a day further back.
+    assert_eq!(
+        crypto
+            .latest_published_trading_day(utc(2026, 10, 9, lag_hours - 1, 59))
+            .unwrap(),
+        Some(ymd(2026, 10, 7))
+    );
+
+    for now in [asx_run, utc(2026, 10, 9, 8, 0), friday_evening_sydney()] {
+        assert_eq!(
+            asx.latest_published_trading_day(now).unwrap(),
+            asx.latest_complete_trading_day(now).unwrap()
+        );
+    }
+}
+
 /// The prompting case (LAAC → LAR): a fetch of a date *before* the rename
 /// asks the provider for the symbol the security was actually quoted
 /// under then, with no `symbol` override supplied by the caller.

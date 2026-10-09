@@ -188,7 +188,7 @@ async fn collection_records_currency_mismatch_as_error() {
 }
 
 #[tokio::test]
-async fn collection_crypto_collected_daily_at_utc_cutoff() {
+async fn collection_crypto_collected_daily_after_the_publication_lag() {
     let pool = test_pool().await;
     insert_crypto_listing(&pool, 1, "BTC").await;
     insert_buy(&pool, 1, 1, "0.5").await;
@@ -200,8 +200,9 @@ async fn collection_crypto_collected_daily_at_utc_cutoff() {
     }
     let fetcher = StubFetcher::default().with_close(1, ymd(2026, 6, 6), "86378.35", "AUD");
 
-    // Sunday 01:30 UTC: Saturday 2026-06-06 is a complete crypto day.
-    run_collection(&pool, &fetcher, utc(2026, 6, 7, 1, 30))
+    // Sunday 08:00 UTC: Saturday 2026-06-06's candle is complete and past the
+    // provider's publication lag.
+    run_collection(&pool, &fetcher, utc(2026, 6, 7, 8, 0))
         .await
         .unwrap();
     let row = db_get_one(&pool, 1, ymd(2026, 6, 6))
@@ -211,4 +212,51 @@ async fn collection_crypto_collected_daily_at_utc_cutoff() {
     assert_eq!(row.status, PriceStatus::Ok);
     assert_eq!(row.price, Some("86378.35".parse().unwrap()));
     assert_eq!(fetcher.calls(), vec![(1, ymd(2026, 6, 6), ymd(2026, 6, 6))]);
+}
+
+/// The production failure from 2026-10-05 on: under Sydney daylight saving the
+/// ASX run lands at 06:30 UTC, before the provider has published the previous
+/// UTC day's crypto candle. Every run walks every held listing, so that run
+/// used to ask for the missing candle, store an errored row and fail — a
+/// job-failure banner the 08:00 UTC crypto run then cleared. The unpublished
+/// day is now simply not due: nothing is fetched, nothing errored, the run
+/// succeeds, and the crypto run collects the day.
+#[tokio::test]
+async fn collection_does_not_ask_for_a_crypto_candle_before_it_is_published() {
+    let pool = test_pool().await;
+    insert_crypto_listing(&pool, 1, "BTC").await;
+    insert_buy(&pool, 1, 1, "0.5").await;
+    // Every day of the window up to Wednesday 2026-10-07 is already stored.
+    for i in 0..COLLECTION_LOOKBACK_DAYS {
+        seed_ok_price(&pool, 1, ymd(2026, 10, 7) - Duration::days(i)).await;
+    }
+    // A provider that has not published Thursday's candle: asked for it, it
+    // answers nothing, which would store an errored row.
+    let unpublished = StubFetcher::default();
+
+    run_collection(&pool, &unpublished, utc(2026, 10, 9, 6, 30))
+        .await
+        .unwrap();
+    assert!(unpublished.calls().is_empty());
+    assert!(
+        db_get_one(&pool, 1, ymd(2026, 10, 8))
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // The 08:00 UTC crypto run collects it.
+    let published = StubFetcher::default().with_close(1, ymd(2026, 10, 8), "95000", "AUD");
+    run_collection(&pool, &published, utc(2026, 10, 9, 8, 0))
+        .await
+        .unwrap();
+    assert_eq!(
+        published.calls(),
+        vec![(1, ymd(2026, 10, 8), ymd(2026, 10, 8))]
+    );
+    let row = db_get_one(&pool, 1, ymd(2026, 10, 8))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.status, PriceStatus::Ok);
 }
