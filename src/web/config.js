@@ -478,6 +478,12 @@ export const ENTITIES = [
 // entry appears under (shared with ENTITIES' `menu` field — Reports, unlike
 // Activity/Reference Data/Jobs, also groups into titled columns via
 // `section`, since it holds far more entries) — see nav.js's navModel.
+// The Attachments report's owner cells: app.js's `#/record/` route opens the
+// owning row's edit form, whichever of the six owner tables it lives in.
+function ownerRecordHref(row) {
+  return '#/record/' + row.owner_field + '/' + row.owner_id;
+}
+
 export const REPORTS = [
   {
     slug: 'overview', title: 'Portfolio Overview', api: '/portfolio/overview', method: 'POST', prices: true, asOfDate: true, performancePanel: true,
@@ -510,14 +516,20 @@ export const REPORTS = [
   {
     slug: 'attachments', title: 'Attachments', api: '/reports/attachments', method: 'GET',
     menu: 'Reports', section: 'Portfolio',
-    desc: 'Every stored document — the file, the activity it is attached to, and that activity’s listing. Download saves the file; View opens it in a new tab; Record opens the owning activity’s own attachments view, where a file can be deleted or another uploaded.',
+    desc: 'Every stored document — the file, the activity it is attached to, and that activity’s listing. Click the owner type or description to open the owning record itself. Download saves the file; View opens it in a new tab; Owner’s attachments opens the owning activity’s own attachments view, where a file can be deleted or another uploaded.',
     columns: ['id', 'filename', 'content_type', 'byte_size', 'uploaded_at', 'owner_type', 'listing_id', 'owner_description'],
     rowActions: function (row) {
       return [
         { label: 'Download', href: apiUrl('/attachments/' + row.id + '/content'), newTab: true },
         { label: 'View', href: apiUrl('/attachments/' + row.id + '/content?disposition=inline'), newTab: true },
-        { label: 'Record', href: '#/attachments/' + row.owner_field + '/' + row.owner_id },
+        { label: "Owner's attachments", href: '#/attachments/' + row.owner_field + '/' + row.owner_id },
       ];
+    },
+    // The owner cells open the owning record's own edit form (app.js's
+    // `#/record/` route resolves the entity, and a Sell to the Sells screen).
+    links: {
+      owner_type: ownerRecordHref,
+      owner_description: ownerRecordHref,
     },
   },
   {

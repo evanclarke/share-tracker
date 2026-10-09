@@ -3319,7 +3319,29 @@ mod tests {
         assert!(js.contains("disposition=inline"));
         assert!(js.contains("'Download'"));
         assert!(js.contains("'View'"));
-        assert!(js.contains("'Record'"));
+        assert!(js.contains("\"Owner's attachments\""));
+        // The owner cells drill through to the owning record itself, via the
+        // `#/record/<owner_field>/<owner_id>` route…
+        assert!(js.contains("'#/record/' + row.owner_field + '/' + row.owner_id"));
+        assert!(js.contains("owner_type: ownerRecordHref"));
+        assert!(js.contains("owner_description: ownerRecordHref"));
+        assert!(js.contains("parts[0] === 'record'"));
+        // …which opens the owner's edit form, a Sell on the Sells screen
+        // rather than the Buy-only trades form.
+        assert!(js.contains("'#/sells/edit/' + pathSeg(ownerId)"));
+        assert!(js.contains("'#/e/' + spec.slug + '/edit/' + pathSeg(ownerId)"));
+        for slug in [
+            "slug: 'trades'",
+            "slug: 'income'",
+            "slug: 'amma_statements'",
+            "slug: 'ess_statements'",
+            "slug: 'interest_income'",
+            "slug: 'corporate_actions'",
+        ] {
+            assert!(js.contains(&format!("', {slug}")), "{slug}");
+        }
+        // A report's `links` add to the derived listing links, not replace them.
+        assert!(js.contains("links: report.links"));
     }
 
     #[tokio::test]

@@ -424,14 +424,16 @@ function rowActionLink(a) {
 
 // Report tables: read-only — no per-row Edit/Delete — but a report may still
 // declare `rowActions` (config.js) for link-only actions (e.g. the
-// Attachments report's Download/View/Record links); `dataTable` renders them
+// Attachments report's Download/View/Owner's attachments links); `dataTable` renders them
 // the same way the entity list's Actions column does, via `rowActionLink`.
 // Foreign-key id columns render the referenced row's name (per
 // FK_COLUMN_SOURCES), same as the entity lists. `cfg` carries the rest, all
 // optional: `columns`, `statusField`, `expand` (a REPORTS `expand` entry,
 // turning each row into an expand-to-a-child-table row — see `buildExpand`),
 // `context` (the whole multi-`tables` response object, needed only for an
-// expand config's `from` sibling lookup), `rowActions`, `selfRoute` (the
+// expand config's `from` sibling lookup), `rowActions`, `links` (a REPORTS
+// `links` entry, `{col: row => href}`, on top of the derived listing links),
+// `selfRoute` (the
 // '#/r/<slug>' of the screen being rendered, passed to every level so the
 // listing drill-down `filterableTable` derives never points at the screen the
 // reader is already on — the activity report's own holding summary).
@@ -449,6 +451,9 @@ async function dataTable(rows, cfg) {
   const opts = {
     statusField: cfg.statusField, labels: labels, selfRoute: cfg.selfRoute, cells: cfg.cells,
   };
+  // `links` adds drill-downs to the derived listing links rather than
+  // replacing them (filterableTable's own `opts.links` replaces outright).
+  if (cfg.links) opts.links = Object.assign(columnLinks(cols, cfg.selfRoute), cfg.links);
   if (expandCfg) opts.expand = buildExpand(expandCfg, labels, cfg.context, cfg.selfRoute);
   // The Actions column appears only where some row actually has an action:
   // a report answering rows of more than one shape (Row History, whose browse
@@ -1182,13 +1187,31 @@ async function viewListingRenames(listingId, seq = navigationToken()) {
 // amma_statement_id / ess_statement_id / interest_income_id) is carried in
 // the route.
 const ATTACH_OWNER = {
-  trade_id: { noun: 'trade', api: '/trades', name: function (o, listing) { return describeTrade(o, listing); } },
-  income_id: { noun: 'distribution', api: '/income', name: function (o, listing) { return listing(o.listing_id) + ' on ' + o.date_paid; } },
-  amma_statement_id: { noun: 'AMMA statement', api: '/amma_statements', name: function (o, listing) { return listing(o.listing_id) + ' FY' + o.tax_year_end_date; } },
-  ess_statement_id: { noun: 'ESS statement', api: '/ess_statements', name: function (o, listing) { return listing(o.listing_id) + ' taxing point ' + o.taxing_point_date; } },
-  interest_income_id: { noun: 'interest income', api: '/interest_income', name: function (o) { return (o.source ? o.source + ' ' : '') + 'on ' + o.date_paid; } },
-  corporate_action_id: { noun: 'corporate action', api: '/corporate_actions', name: function (o, listing) { return o.action_type + ' ' + listing(o.listing_id) + ' on ' + o.date; } },
+  trade_id: { noun: 'trade', api: '/trades', slug: 'trades', name: function (o, listing) { return describeTrade(o, listing); } },
+  income_id: { noun: 'distribution', api: '/income', slug: 'income', name: function (o, listing) { return listing(o.listing_id) + ' on ' + o.date_paid; } },
+  amma_statement_id: { noun: 'AMMA statement', api: '/amma_statements', slug: 'amma_statements', name: function (o, listing) { return listing(o.listing_id) + ' FY' + o.tax_year_end_date; } },
+  ess_statement_id: { noun: 'ESS statement', api: '/ess_statements', slug: 'ess_statements', name: function (o, listing) { return listing(o.listing_id) + ' taxing point ' + o.taxing_point_date; } },
+  interest_income_id: { noun: 'interest income', api: '/interest_income', slug: 'interest_income', name: function (o) { return (o.source ? o.source + ' ' : '') + 'on ' + o.date_paid; } },
+  corporate_action_id: { noun: 'corporate action', api: '/corporate_actions', slug: 'corporate_actions', name: function (o, listing) { return o.action_type + ' ' + listing(o.listing_id) + ' on ' + o.date; } },
 };
+
+// `#/record/<owner_field>/<owner_id>` — the owning record itself, for a
+// table that knows an attachment's owner only by its owner field (the
+// Attachments report's owner cells). It resolves to that record's own edit
+// form: the entity named by ATTACH_OWNER's `slug`, except that a Sell trade
+// is edited on the Sells screen (with its allocations), never the Buy-only
+// trades form — which is why a trade owner is read before the redirect.
+// `location.replace` keeps this hop out of history, so Back returns to the
+// table the link was clicked from.
+async function openOwnerRecord(ownerField, ownerId) {
+  const spec = ATTACH_OWNER[ownerField];
+  if (!spec || !ownerId) throw new Error('Unknown view');
+  if (ownerField === 'trade_id') {
+    const trade = await api('GET', '/trades/' + pathSeg(ownerId));
+    if (trade.trade_type === 'Sell') return location.replace('#/sells/edit/' + pathSeg(ownerId));
+  }
+  location.replace('#/e/' + spec.slug + '/edit/' + pathSeg(ownerId));
+}
 
 async function viewAttachments(ownerField, ownerId, seq = navigationToken()) {
   // A trade's view also lists the documents of the record the trade was
@@ -2904,7 +2927,7 @@ async function viewReport(report, args, seq = navigationToken()) {
         if (s.desc) result.appendChild(el('p', { class: 'hint' }, s.desc));
         result.appendChild(await dataTable(s.rows, {
           columns: s.columns, statusField: report.statusField, rowActions: report.rowActions,
-          selfRoute: selfRoute,
+          links: report.links, selfRoute: selfRoute,
         }));
       }
       if (more) result.appendChild(more);
@@ -2925,7 +2948,7 @@ async function viewReport(report, args, seq = navigationToken()) {
         // main report, not the hypothetical dry-run).
         result.appendChild(await dataTable(arr, {
           columns: t.columns, statusField: report.statusField, expand: t.expand, context: rows,
-          rowActions: report.rowActions, selfRoute: selfRoute,
+          rowActions: report.rowActions, links: report.links, selfRoute: selfRoute,
         }));
         // The collapsed params panel sits under the table `paramsPanel.after`
         // names — the price override below the holding summary it re-values,
@@ -2939,7 +2962,7 @@ async function viewReport(report, args, seq = navigationToken()) {
     }
     result.appendChild(await dataTable(rows, {
       columns: report.columns, statusField: report.statusField, expand: report.expand,
-      rowActions: report.rowActions, selfRoute: selfRoute,
+      rowActions: report.rowActions, links: report.links, selfRoute: selfRoute,
     }));
     if (more) result.appendChild(more);
   }
@@ -3203,6 +3226,7 @@ async function render() {
     // #/rename/:listing_id action that records one.
     if (parts[0] === 'renames') return await viewListingRenames(parts[1], seq);
     if (parts[0] === 'attachments') return await viewAttachments(parts[1], parts[2], seq);
+    if (parts[0] === 'record') return await openOwnerRecord(parts[1], parts[2]);
     if (parts[0] === 'jobs') return await viewJobs(seq);
     if (parts[0] === 'prices') return await viewClosingPrices(seq);
     if (parts[0] === 'r') {

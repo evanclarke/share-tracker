@@ -55,7 +55,7 @@ Move parcels (whole or partial) between two accounts of the same owner, e.g. ves
 
 ### Document attachments
 
-Attach a supporting file (trade confirmation, dividend/AMMA/ESS statement, demerger booklet, plain-text exchange record) to a trade, income row, AMMA/ESS statement, interest-income row, or corporate action; stored as a database BLOB (so the weekly backup covers it, no separate file store), one file per row shown from that row's own Attachments action. An **Attachments report** lists every stored document portfolio-wide against the activity and listing it belongs to, with Download, View-in-new-tab, and a link back to the owning record (see [Attachments](API.md#attachments), [Attachments index](API.md#attachments-index))
+Attach a supporting file (trade confirmation, dividend/AMMA/ESS statement, demerger booklet, plain-text exchange record) to a trade, income row, AMMA/ESS statement, interest-income row, or corporate action; stored as a database BLOB (so the weekly backup covers it, no separate file store), one file per row shown from that row's own Attachments action. An **Attachments report** lists every stored document portfolio-wide against the activity and listing it belongs to, with Download, View-in-new-tab, the owner cells opening the owning record's edit form, and a link to that record's own attachments (see [Attachments](API.md#attachments), [Attachments index](API.md#attachments-index))
 
 ## Capital gains and corporate actions
 
