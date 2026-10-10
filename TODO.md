@@ -29,8 +29,11 @@ The 2026-10-04 HTTP API consistency sweep — cross-site write and DNS-rebinding
 one path casing, readable writable URLs, one rejection shape, and the `200`/`201` rule — is closed
 and archived in [`DONE/api.md`](DONE/api.md), and so is the 2026-10-04 agent-usability pass that
 followed it (OpenAPI bodies, ids, descriptions and slices, `?dry_run=true`, the live-API skill,
-trustworthy `required` lists, and reasoned GET-one `404`s). The one open section below came from the
-2026-10-08 sweep of the ATO mirrors (`docs/ato/OVERVIEW.md`, *Full sweep, 2026-10-08*).
+trustworthy `required` lists, and reasoned GET-one `404`s). The Budget section below came from the
+2026-10-08 sweep of the ATO mirrors (`docs/ato/OVERVIEW.md`, *Full sweep, 2026-10-08*); the sections
+after it are the findings of the 2026-10-10 metric-scored code review (financial correctness 8,
+error handling 8.5, concurrency/integrity/performance 8, security 8.5, architecture 6, tests 8,
+hygiene 9 — out of 10), most severe first.
 
 ## 2026–27 Budget CGT changes — announced, not law (ATO mirror sweep 2026-10-08)
 The ATO's CGT discount, cost base, how-to-calculate and indexation pages have carried a banner
@@ -52,3 +55,165 @@ falls under the existing rules.
 - [ ] Whatever is decided, make sure a closing price is stored for every held listing on the last
   trading day before 1 July 2027 (the scheduled price import plus `closing_price`'s held-days
   backfill), since a missing one cannot be fetched reliably years later
+
+## A partial transfer under-applies the AMIT (E10) reduction on the units left behind (2026-10-10 review, financial correctness — high)
+`AmitReductionEvent::reduction_for_units` (`src/domain/cost_base.rs`) divides a row's coverage over
+`held = parcel_quantity − disposed_by_year_end`, and `disposed_by_year_end`
+(`amit_adjustment::db_cost_base_reduction_events`) counts `Counted::DisposalsOnly`, so units a
+rollover (transfer, scrip exchange, demerger) carried *out* of the parcel still count as held there.
+Scenario: buy 100 (2023-08-01), FY2024 AMMA statement at \$1/unit, transfer 40 to another account on
+2024-08-15. Generation writes 40 against the replacement parcel and 60 against the original — both
+right — but the original's 60 units are reduced by **\$36** (`1 × 60 × 60 / 100`) instead of \$60;
+\$24 of the statement's reduction is lost and the cost base is overstated in unrealised, realised and
+net-capital-gain (E10 walk) figures alike. The existing
+`a_transfers_closing_sell_is_not_a_disposal_in_the_held_spill_split` pins only the
+`disposed_by_year_end` figure, never the resulting cost base.
+- [ ] Failing test first: the scenario above through the generation endpoint, asserting the original
+  parcel's `amit_reduction` is 60.00 and the replacement's 40.00 (the statement's 100.00 in total),
+  in open-parcels, unrealised gains, and realised gains on a later sale of the 60
+- [ ] Fix the held/spill split so units moved out by a rollover are neither "held" in the original
+  parcel nor "sold" from it (they are covered by the replacement parcel's own row) — without
+  reintroducing the bug the `DisposalsOnly` choice fixed (a rollover flipping an earlier real
+  Sell's spill share)
+- [ ] Same check by hand-entered row: buy 100, transfer 40, a manual 60-unit row → reduction 60 × rate
+
+## An AMIT row can reduce the cost base of units sold in an earlier, already-lodged year (2026-10-10 review, financial correctness — medium)
+The write-time cap on an adjustment row's `quantity` (`src/entities/amit_adjustment.rs`, ~line 348)
+is the parcel's trade quantity, and `reduction_for_units` spills any coverage beyond the held units
+onto every unit sold before the statement's year end — with no lower bound at the start of that
+income year. Scenario: buy 100 (2022-01-10), sell 60 (2022-03-03, FY2022), an FY2025 statement at
+\$1/unit with a 100-unit row: the write is accepted and the FY2022 sale's cost base drops 6000 →
+5940, changing a lodged year's gain.
+- [ ] Failing test: the scenario above is rejected `422` (or the FY2022 sale's cost base is unchanged)
+- [ ] Cap a row's coverage at the units of the parcel held at some point during the statement's
+  income year (quantity less disposals before its 1 July start), and confine the spill to units
+  disposed of within that year; document in `docs/API.md`
+
+## Return-of-capital and rights entitlement compare the trade date with the record date (2026-10-10 review, financial correctness — medium)
+`corporate_action/adjustments.rs` (~line 132, `registered_from < record_date`; the SQL at ~248) and the
+C2 test in `reports/net_capital_gain.rs` (~595) decide entitlement on the trade date. Under ASX T+2
+the ex-date is one business day before the record date, so a buy *on* the ex-date is wrongly
+entitled (cost base reduced) and a sale on the ex-date is wrongly unentitled (its C2 gain missed).
+The rights-issue "dated on or after the record date is ex-rights" cut-off has the same off-by-one.
+The behaviour is documented today, but trades already carry `settlement_date`.
+- [ ] Tests at the boundary: a buy and a sell on the ex-date (record date − 1 business day) and on
+  the business day before it, for a ROC, a rights issue and the C2 check
+- [ ] Decide on the entitlement date per registration (settlement date vs record date, or an explicit
+  ex-date on the corporate action), implement it consistently across ROC, rights and C2, and update
+  the Known-limitations entry
+
+## Smaller financial-correctness inconsistencies (2026-10-10 review, financial correctness — low)
+- [ ] E10 and G1 excess gains are translated to AUD differently (`reports/net_capital_gain.rs`
+  ~640–650): the E10 excess converts wholly at the acquisition-month rate, the G1 excess uses the
+  payment-date rate for the payment and the acquisition rate for the cost base. Make the two
+  consistent (or document why they differ) with a non-AUD AMIT-fund test covering both
+- [ ] "Gross assessable investment income" (`reports/tax_summary.rs` ~1097–1111) includes the
+  franking credits inside trust 13C/AMMA franked lines but excludes company-dividend (11U) credits,
+  so it is neither a cash nor an assessable total. Make it one or the other (or split it into two
+  labelled totals), with a test pinning the figure
+
+## The post-backup command has no timeout and holds the backup job's lock (2026-10-10 review, robustness)
+`run_backup_command` (`src/infra/db.rs`) awaits `sh -c … .output()` with no bound, inside `run_job`'s
+per-job lock. A hook that hangs (`scp` to an unreachable host, `rclone` waiting on a prompt) never
+returns: the scheduled loop is stuck and every later `POST /jobs/backup` queues behind it, so no
+backup is taken again until restart.
+- [ ] Bound it with `tokio::time::timeout` + `kill_on_drop(true)` (a fixed generous default, or a
+  config key), failing the run with a `BackupError::Command` naming the timeout; test with a
+  `sleep` hook against a short test timeout
+- [ ] Shell-quote the substituted `{BACKUP_FILE}` path so a database/backup directory containing
+  spaces or shell metacharacters reaches the hook as one argument; test with such a path
+
+## A backup is renamed into place without reaching stable storage (2026-10-10 review, data integrity)
+`VACUUM INTO` does not fsync its output, and `backup` (`src/infra/db.rs` ~424–429) verifies the
+staging file (from the page cache) then `std::fs::rename`s it with no `sync_all` on the file or its
+directory. A power cut shortly after can leave a "verified" backup that never reached disk — the
+case the staging-file design (SCENARIOS T-11) exists to rule out — and pruning may count it as a
+keeper.
+- [ ] `sync_all` the staging file before the rename and fsync the destination directory after it;
+  a test that the backup path calls both (or a seam proving the order), and note it in SCENARIOS T-11
+
+## A manual job is cancelled when its HTTP client disconnects (2026-10-10 review, robustness)
+`POST /jobs/{name}` (`scheduler/http.rs` ~131) awaits `run_job` inline, so closing the tab or
+Ctrl-C in curl drops the future between commits and leaves the `job_runs` row `running`.
+- [ ] Run the job on a `tokio::spawn`ed task and await its handle, so a disconnect detaches from the
+  run rather than cancelling it; test by dropping the request future mid-job and asserting the run
+  finishes and records `finished`
+
+## A panic in a scheduled job ends that job's schedule until restart (2026-10-10 review, robustness)
+`schedule::spawn` spawns `run_entry` with no `catch_unwind`; `CatchPanicLayer` covers HTTP only, so
+one panic ends the timer loop for that job.
+- [ ] Catch a panicking run (`FutureExt::catch_unwind` / a `JoinHandle` per run), record it as a failed
+  run with its message, release the job lock and keep the loop scheduling; test with a registry
+  containing a job that panics once
+
+## Price collection re-bases prices outside a transaction (2026-10-10 review, data integrity)
+`closing_price/collection.rs` (~212) calls `db_rebase_listing_prices` on a bare pooled connection, so
+its read and per-row `UPDATE`s autocommit one by one; the other three callers run it inside
+`write_tx`. A failure part-way leaves a listing's prices in mixed bases until the next run.
+- [ ] Run it inside `infra::db::write_tx`, and extend the deferred-`BEGIN`/write scan (or add a test)
+  so an autocommit multi-statement write on a pooled connection is caught
+
+## Server-side constraint failures are reported as the client's fault (2026-10-10 review, error handling)
+`From<sqlx::Error> for ApiError` (`src/infra/http.rs` ~1019–1034) maps every CHECK/UNIQUE/NOT NULL
+violation to a `422` worded as a bad request — including one raised by a server-owned write
+(`report_snapshots`, `job_runs`), where it is a bug that should be a logged `500`.
+- [ ] Classify violations from server-owned writes as `Internal` (e.g. those paths map their own
+  errors before `?`, or the constraint's table decides); test that a constraint failure in a
+  snapshot write answers `500` and logs, while a client write still answers `422`
+
+## No anti-framing header (2026-10-10 review, security — low-medium)
+Nothing sets `X-Frame-Options` or a CSP. With `[auth]` off (the default) a hostile page can frame the
+app and trick a click on a delete or job button; the clicks are same-origin inside the frame, so
+`request_guard`'s `Sec-Fetch-Site` check passes them.
+- [ ] Add a response-header layer in `app::router`: `X-Frame-Options: DENY` and
+  `Content-Security-Policy: frame-ancestors 'none'` (consider a full `default-src 'self'` CSP — the
+  frontend loads nothing third-party; check the inline-SVG chart and theme script still work under
+  it via `scripts/ui-smoke.sh`); test the headers on `/`, a JSON route and the login page
+
+## Login lockout: proxied source read from the first `X-Forwarded-For` line, and no global ceiling (2026-10-10 review, security — low)
+- [ ] `auth.rs` (~659) reads `headers.get("x-forwarded-for")`, the **first** header line, then its
+  rightmost entry. A proxy that appends a separate XFF line leaves the client's forged line first,
+  so a client can rotate its lockout bucket. Read the last line (`get_all(..).iter().last()`); test
+  with two XFF lines from a trusted proxy
+- [ ] The lockout is per IPv4 / IPv6 /64 only; an attacker with an IPv6 /48 has ~65k buckets and is
+  bounded only by Argon2 throughput (~130 guesses/s at 4 concurrent verifies). Add a process-wide
+  failure ceiling (e.g. N failures per hour slows or refuses every login), with a test, and
+  document it beside the per-source lockout
+
+## Bulk snapshot regeneration and the health banner repeat whole-table reads (2026-10-10 review, performance)
+- [ ] `reports/snapshot.rs` (~953–962) calls `closing_price::db_held_listing_ids(pool, Some(date))`
+  once per calendar day, each rebuilding `HeldTimeline` from every trade (~1,800 full reads for five
+  years). Build the timeline once and ask it per day; test that the per-day held sets are unchanged
+- [ ] The health report (`reports/health.rs` ~1689–1716), refreshed on every navigation, runs
+  `load_market` (listing, rename history, holidays) and a full `closing_prices` date scan per held
+  listing. Batch them into set-based reads; a test that the report's output is unchanged
+
+## Architecture: domain↔entities cycle, mega-files, and conventions enforced by source scans (2026-10-10 review, maintainability)
+Scored 6/10 — the weakest dimension. The operation modules are well factored, but:
+- [ ] `domain` imports `entities` (`cost_base.rs` uses `corporate_action::{RocEvent, SplitEvent,
+  RolloverOrigin}`; `open_parcels`/`rollover`/`contemplated_disposal`/`deduction_destination` call
+  entity db functions), so it is not a lower layer. Move the event types and their loaders into
+  `domain` (or a repository layer) so `domain` depends on nothing in `entities`; a scan test pins it
+- [ ] Split `reports/health.rs` (~3,300 prod lines, ~25 checks) into a `health/` directory by check
+  family, and fold the ~10 `Duplicate*` checks (`same_x_entry` + `db_duplicate_x` pairs) into one
+  generic duplicate detector — the existing health tests unchanged are the proof
+- [ ] `trade/db.rs` `write`: replace the seven per-provenance-column `is_some()` guards with one lookup
+  over `TRADE_PROVENANCE`, and drop the duplicated "is this trade referenced?" `EXISTS` query
+- [ ] NEEDS DECISION (owner): replace source-scanning conventions with compile-time ones where the
+  type system can carry them — `utoipa-axum` (`#[utoipa::path]`/`OpenApiRouter`) instead of the
+  hand-kept `ROUTES` table and its ~3,700 lines of Rust-parsing tests; a `ReadPool`/`WritePool` split
+  instead of the deferred-`BEGIN` text scan; a `Currency` type instead of `String` + `== "AUD"`;
+  id newtypes (`ListingId`, `TradeId`, …) instead of bare `i64`. Each is a large mechanical change —
+  decide which (if any) are worth it
+- [ ] NEEDS DECISION (owner): prune `doc_checks.rs` phrase pins (~150 tests asserting exact prose,
+  which break on rewording without protecting behaviour) down to the structural checks (link
+  resolution, advisory-ignore expiry, QC headers)
+
+## Test-suite gaps (2026-10-10 review, tests)
+- [ ] Add `proptest` for the invariants the suite currently pins with hand-picked cases: cost-base
+  apportionment sums exactly (demerger/scrip percentages), parcel allocations conserve quantity,
+  split re-basing round-trips, `tax_year_for` boundaries, AMIT coverage totals equal the statement
+  amount across any transfer/sale sequence (would have caught the partial-transfer finding above)
+- [ ] Replace the 11 fixed `sleep` grace periods in concurrency tests with a deterministic signal
+  (e.g. wait until the competing task is observed blocked on the busy handler)
+- [ ] Remove the 10 local `fn dec(s: &str)` copies in favour of `test_support::dec`
