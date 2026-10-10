@@ -51,6 +51,7 @@ use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
 use crate::reports::export::{self, Cents};
 use crate::reports::parcel_optimiser::{self, DisposalTotals, HypotheticalAllocation, Strategy};
+use crate::reports::tax_summary::aud_field;
 use axum::{
     Router,
     extract::State,
@@ -210,21 +211,6 @@ struct GrossBuckets {
     /// E10/G1 gain, since a capital loss is applied to the combined total
     /// either way.
     amma_discount_grossed_up: Decimal,
-}
-
-/// Read a TEXT decimal column and convert it to AUD via the pre-loaded ATO
-/// rate for `currency` and the month of `date`. AMMA records carry no manual
-/// fx override, so a non-AUD amount with no ATO rate fails loudly (the
-/// `FxError` surfaces as a decode error).
-fn aud_field(
-    fx: &FxRates,
-    row: &sqlx::sqlite::SqliteRow,
-    field: &str,
-    currency: &str,
-    date: NaiveDate,
-) -> Result<Decimal, sqlx::Error> {
-    let value = parse_dec(field, row.try_get(field)?)?;
-    Ok(fx.to_aud(value, currency, date, FxOverride::None)?)
 }
 
 /// One cost-base reduction against a parcel, **per as-acquired unit** and in
