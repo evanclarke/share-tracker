@@ -92,20 +92,8 @@ impl HeldTimeline {
         .await?;
 
         // sale-date-basis units allocated out of each purchase parcel
-        let allocs = sqlx::query(
-            "SELECT pa.purchase_trade_id, pa.quantity_allocated, s.date AS sale_date \
-             FROM parcel_allocations pa JOIN trades s ON s.id = pa.sale_trade_id",
-        )
-        .fetch_all(&mut *conn)
-        .await?;
-        let mut qty_sold: HashMap<i64, Vec<(NaiveDate, Decimal)>> = HashMap::new();
-        for row in &allocs {
-            let trade_id: i64 = row.try_get("purchase_trade_id")?;
-            qty_sold.entry(trade_id).or_default().push((
-                row.try_get("sale_date")?,
-                parse_dec("quantity_allocated", row.try_get("quantity_allocated")?)?,
-            ));
-        }
+        let qty_sold =
+            crate::entities::parcel_allocation::db_sales_by_parcel(&mut *conn, None).await?;
 
         let split_events =
             crate::entities::corporate_action::db_share_split_events(&mut *conn).await?;

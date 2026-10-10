@@ -53,7 +53,6 @@ use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::Serialize;
 use sqlx::{Row, SqlitePool};
-use std::collections::HashMap;
 
 /// The result of recognising a worthless holding: the closing Sell that
 /// consumed every open parcel at nil proceeds.
@@ -167,24 +166,9 @@ async fn execute(
     .fetch_all(&mut *tx)
     .await?;
 
-    let alloc_rows = sqlx::query(
-        "SELECT pa.purchase_trade_id, pa.quantity_allocated, s.date AS sale_date \
-         FROM parcel_allocations pa \
-         JOIN trades s ON s.id = pa.sale_trade_id \
-         JOIN trades p ON p.id = pa.purchase_trade_id \
-         WHERE p.listing_id = ?",
-    )
-    .bind(action.listing_id)
-    .fetch_all(&mut *tx)
-    .await?;
-    let mut qty_sold: HashMap<i64, Vec<(NaiveDate, Decimal)>> = HashMap::new();
-    for row in &alloc_rows {
-        let tid: i64 = row.try_get("purchase_trade_id")?;
-        qty_sold.entry(tid).or_default().push((
-            row.try_get("sale_date")?,
-            parse_dec("quantity_allocated", row.try_get("quantity_allocated")?)?,
-        ));
-    }
+    let qty_sold =
+        crate::entities::parcel_allocation::db_sales_by_parcel(&mut tx, Some(action.listing_id))
+            .await?;
 
     let splits = corporate_action::db_splits_for_listing(&mut *tx, action.listing_id).await?;
 

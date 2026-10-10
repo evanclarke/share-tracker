@@ -413,24 +413,12 @@ async fn parcel_units_at_record_date(
     }
     let parcel_qty = parse_dec("quantity", parcel.try_get("quantity")?)?;
 
-    let sold_rows = sqlx::query(
-        "SELECT s.date AS sale_date, pa.quantity_allocated \
-         FROM parcel_allocations pa JOIN trades s ON s.id = pa.sale_trade_id \
-         WHERE pa.purchase_trade_id = ? AND s.date < ?",
-    )
-    .bind(purchase_trade_id)
-    .bind(anchoring.record_date)
-    .fetch_all(&mut *conn)
-    .await?;
-    let mut sold: Vec<(NaiveDate, Decimal)> = Vec::with_capacity(sold_rows.len());
-    for row in &sold_rows {
-        sold.push((
-            row.try_get("sale_date")?,
-            parse_dec("quantity_allocated", row.try_get("quantity_allocated")?)?,
-        ));
-    }
-    let remaining =
-        parcel_qty - sold_in_acquired_units(sold.iter().copied(), anchoring.splits, parcel_date);
+    // Only the sales before the record date reduce the units it entitled.
+    let sold = crate::entities::parcel_allocation::db_parcel_sales(&mut *conn, purchase_trade_id)
+        .await?
+        .into_iter()
+        .filter(|&(sale_date, _)| sale_date < anchoring.record_date);
+    let remaining = parcel_qty - sold_in_acquired_units(sold, anchoring.splits, parcel_date);
     Ok(split_adjusted_quantity(
         remaining,
         anchoring.splits,

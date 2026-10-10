@@ -1,14 +1,11 @@
-use crate::infra::decimal::Money;
-#[cfg(test)]
-use crate::infra::decimal::parse_dec;
+use crate::infra::decimal::{Money, parse_dec};
 use crate::infra::http::{self, CrudEntity};
 use axum::{Router, routing::get};
+use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use sqlx::SqlitePool;
-// Only the test-fixture write path below reads columns off a raw row.
-#[cfg(test)]
-use sqlx::Row;
+use sqlx::{Row, SqlitePool};
+use std::collections::HashMap;
 
 #[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct ParcelAllocation {
@@ -84,6 +81,58 @@ pub enum UpsertError {
     PurchaseQuantityExceeded,
     #[error("the allocations exceed the sale's quantity")]
     SaleQuantityExceeded,
+}
+
+/// Every allocation drawn on parcel `parcel_id`, as `(sale_date, quantity)`
+/// with the quantity in its own **sale date's** unit basis — re-base it to the
+/// parcel's as-acquired basis with `corporate_action::sold_in_acquired_units`
+/// (TD 2000/10) before comparing it with the parcel's quantity.
+pub async fn db_parcel_sales(
+    conn: &mut sqlx::SqliteConnection,
+    parcel_id: i64,
+) -> Result<Vec<(NaiveDate, Decimal)>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT s.date AS sale_date, pa.quantity_allocated \
+         FROM parcel_allocations pa JOIN trades s ON s.id = pa.sale_trade_id \
+         WHERE pa.purchase_trade_id = ?",
+    )
+    .bind(parcel_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    rows.iter().map(sale_of).collect()
+}
+
+/// [`db_parcel_sales`] for every parcel at once, keyed by `purchase_trade_id`
+/// — narrowed to the parcels of one listing, or `None` for every listing.
+pub async fn db_sales_by_parcel(
+    conn: &mut sqlx::SqliteConnection,
+    listing_id: Option<i64>,
+) -> Result<HashMap<i64, Vec<(NaiveDate, Decimal)>>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT pa.purchase_trade_id, s.date AS sale_date, pa.quantity_allocated \
+         FROM parcel_allocations pa \
+         JOIN trades s ON s.id = pa.sale_trade_id \
+         JOIN trades p ON p.id = pa.purchase_trade_id \
+         WHERE ?1 IS NULL OR p.listing_id = ?1",
+    )
+    .bind(listing_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut sales: HashMap<i64, Vec<(NaiveDate, Decimal)>> = HashMap::new();
+    for row in &rows {
+        sales
+            .entry(row.try_get("purchase_trade_id")?)
+            .or_default()
+            .push(sale_of(row)?);
+    }
+    Ok(sales)
+}
+
+fn sale_of(row: &sqlx::sqlite::SqliteRow) -> Result<(NaiveDate, Decimal), sqlx::Error> {
+    Ok((
+        row.try_get("sale_date")?,
+        parse_dec("quantity_allocated", row.try_get("quantity_allocated")?)?,
+    ))
 }
 
 #[cfg(test)]

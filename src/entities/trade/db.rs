@@ -13,8 +13,7 @@ use crate::infra::db::write_tx;
 use crate::infra::decimal::{Money, OptMoney, parse_dec};
 use crate::infra::http::{self, ApiError, CrudEntity, Upsert};
 use chrono::NaiveDate;
-use rust_decimal::Decimal;
-use sqlx::{Row, SqlitePool};
+use sqlx::SqlitePool;
 
 /// The `/trades` list filters: the two owning columns and the trade
 /// date range, inclusive at both ends (the convention
@@ -684,31 +683,23 @@ async fn write(
     }
 
     // Sum is computed in Decimal (the column is TEXT; SQL SUM would coerce to
-    // float). For a new id both dependant sets are empty, so the checks pass.
-    // Each allocation is in its own sale date's unit basis while the trade's
-    // quantity is as-acquired, so allocations are re-based back across any
-    // share splits/consolidations (TD 2000/10) before comparing.
-    let splits =
-        crate::entities::corporate_action::db_splits_for_listing(&mut *tx, trade.listing_id)
-            .await?;
-    let allocated = sqlx::query(
-        "SELECT pa.quantity_allocated, s.date AS sale_date \
-         FROM parcel_allocations pa JOIN trades s ON s.id = pa.sale_trade_id \
-         WHERE pa.purchase_trade_id = ?",
-    )
-    .bind(id)
-    .fetch_all(&mut *tx)
-    .await?;
-    let mut allocated_total = Decimal::ZERO;
-    for row in &allocated {
-        let qty = parse_dec("quantity_allocated", row.try_get("quantity_allocated")?)?;
-        let sale_date: chrono::NaiveDate = row.try_get("sale_date")?;
-        allocated_total += crate::entities::corporate_action::as_acquired_quantity(
-            qty, &splits, trade.date, sale_date,
+    // float). A create (no id) has nothing allocated yet, and neither does a
+    // fresh id, so the check passes. Each allocation is in its own sale date's
+    // unit basis while the trade's quantity is as-acquired, so allocations are
+    // re-based back across any share splits/consolidations (TD 2000/10)
+    // before comparing.
+    if let Some(id) = id {
+        let splits =
+            crate::entities::corporate_action::db_splits_for_listing(&mut *tx, trade.listing_id)
+                .await?;
+        let allocated_total = crate::entities::corporate_action::sold_in_acquired_units(
+            crate::entities::parcel_allocation::db_parcel_sales(&mut tx, id).await?,
+            &splits,
+            trade.date,
         );
-    }
-    if trade.quantity < allocated_total {
-        return Err(UpsertError::QuantityBelowAllocated);
+        if trade.quantity < allocated_total {
+            return Err(UpsertError::QuantityBelowAllocated);
+        }
     }
 
     let amit_quantities: Vec<String> =

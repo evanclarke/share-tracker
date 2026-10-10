@@ -33,7 +33,7 @@ use crate::entities::corporate_action::{
 };
 use crate::entities::sell::{AllocationInput, SellBody};
 use crate::entities::trade::{self, Trade};
-use crate::infra::decimal::{Money, OptMoney, parse_dec};
+use crate::infra::decimal::{Money, OptMoney};
 
 /// The reference data one listing's parcels are costed against: splits re-base
 /// units, AMIT adjustments (CGT event E10) and return-of-capital payments (G1)
@@ -124,24 +124,9 @@ impl CostBaseInputs {
         .fetch_all(&mut *conn)
         .await?;
 
-        let alloc_rows = sqlx::query(
-            "SELECT pa.purchase_trade_id, pa.quantity_allocated, s.date AS sale_date \
-             FROM parcel_allocations pa \
-             JOIN trades s ON s.id = pa.sale_trade_id \
-             JOIN trades p ON p.id = pa.purchase_trade_id \
-             WHERE p.listing_id = ?",
-        )
-        .bind(listing_id)
-        .fetch_all(&mut *conn)
-        .await?;
-        let mut qty_sold: HashMap<i64, Vec<(NaiveDate, Decimal)>> = HashMap::new();
-        for row in &alloc_rows {
-            let tid: i64 = row.try_get("purchase_trade_id")?;
-            qty_sold.entry(tid).or_default().push((
-                row.try_get("sale_date")?,
-                parse_dec("quantity_allocated", row.try_get("quantity_allocated")?)?,
-            ));
-        }
+        let qty_sold =
+            crate::entities::parcel_allocation::db_sales_by_parcel(&mut *conn, Some(listing_id))
+                .await?;
 
         let mut open = Vec::with_capacity(parcel_rows.len());
         for parcel in parcel_rows {

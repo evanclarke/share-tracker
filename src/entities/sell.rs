@@ -966,30 +966,12 @@ pub(crate) async fn upsert_sell_in_tx(
         let splits =
             crate::entities::corporate_action::db_splits_for_listing(&mut *tx, purchase_listing)
                 .await?;
-        let rows = sqlx::query(
-            "SELECT pa.quantity_allocated, s.date AS sale_date \
-             FROM parcel_allocations pa JOIN trades s ON s.id = pa.sale_trade_id \
-             WHERE pa.purchase_trade_id = ?",
-        )
-        .bind(alloc.purchase_trade_id)
-        .fetch_all(&mut *tx)
-        .await?;
-        let mut total = Decimal::ZERO;
-        for row in &rows {
-            let qty: Decimal = row
-                .try_get::<String, _>("quantity_allocated")?
-                .parse()
-                .map_err(|_| {
-                    SellError::Db(sqlx::Error::Decode("invalid allocated quantity".into()))
-                })?;
-            let sale_date: NaiveDate = row.try_get("sale_date")?;
-            total += crate::entities::corporate_action::as_acquired_quantity(
-                qty,
-                &splits,
-                purchase_date,
-                sale_date,
-            );
-        }
+        let total = crate::entities::corporate_action::sold_in_acquired_units(
+            crate::entities::parcel_allocation::db_parcel_sales(&mut *tx, alloc.purchase_trade_id)
+                .await?,
+            &splits,
+            purchase_date,
+        );
         if total > purchase_qty {
             return Err(SellError::PurchaseQuantityExceeded);
         }
