@@ -442,6 +442,27 @@ function deleteButton(label, confirmText, path, seq, okMsg, refresh) {
   }, label);
 }
 
+// ---- screen building blocks ---------------------------------------------
+// The pieces every hand-built screen assembles the same way: the page shell
+// (heading, optional description, then the screen's own parts — null parts
+// are skipped by `el`), the primary "+ New …" link-button a list's toolbar
+// leads with, and a list's table — the empty-state line when there are no
+// rows, otherwise the shared `filterableTable` with its foreign-key columns
+// named (`columnLabelMaps`) and the caller's `opts` on top.
+function pageShell(title, desc, parts) {
+  return el('div', null,
+    [el('h2', null, title), desc ? el('p', { class: 'view-desc' }, desc) : null].concat(parts));
+}
+
+function newButton(href, label) {
+  return el('a', { href: href }, el('button', { class: 'primary' }, label));
+}
+
+async function listTable(rows, cols, emptyText, opts) {
+  if (rows.length === 0) return el('div', { class: 'empty' }, emptyText);
+  return filterableTable(rows, cols, Object.assign({ labels: await columnLabelMaps(cols) }, opts));
+}
+
 // Report tables: read-only — no per-row Edit/Delete — but a report may still
 // declare `rowActions` (config.js) for link-only actions (e.g. the
 // Attachments report's Download/View/Owner's attachments links); `dataTable` renders them
@@ -509,18 +530,11 @@ async function viewEntityList(entity, seq = navigationToken()) {
   // client-side from fields the API already returns on the row.
   if (entity.deriveRow) rows.forEach(entity.deriveRow);
 
-  const header = el('div', null, [
-    el('h2', null, entity.title),
-    el('p', { class: 'view-desc' }, entity.desc),
-  ]);
-
-  const toolbar = el('div', { class: 'toolbar' });
   // deleteOnly: rows are created by an operation and immutable — no New or
   // Edit, but Delete stays as the undo path (e.g. rights sales).
-  if (!entity.readonly && !entity.deleteOnly) {
-    toolbar.appendChild(el('a', { href: '#/e/' + entity.slug + '/new' },
-      el('button', { class: 'primary' }, '+ New ' + entity.title.replace(/s$/, ''))));
-  }
+  const toolbar = el('div', { class: 'toolbar' }, !entity.readonly && !entity.deleteOnly
+    ? newButton('#/e/' + entity.slug + '/new', '+ New ' + entity.title.replace(/s$/, ''))
+    : null);
 
   // A columns-less entity (no `columns` in config.js) with an *empty* table
   // has no first row to derive the columns from, so the fallback reads the
@@ -531,43 +545,35 @@ async function viewEntityList(entity, seq = navigationToken()) {
   const cols = entity.columns || (rows[0]
     ? Object.keys(rows[0])
     : ((entity.keyFields || []).concat(entity.fields || [])).map(function (f) { return f.name; }));
-  let table;
-  if (rows.length === 0) {
-    table = el('div', { class: 'empty' }, 'No records yet.');
-  } else {
-    // Foreign-key id columns render the referenced row's name, not the raw
-    // id — resolved by column name, so a column with no editable field
-    // (e.g. income's reinvestment_trade_id) is named too.
-    const labels = await columnLabelMaps(cols);
-    function refresh() { reload(seq, viewEntityList, entity, seq); }
-    const actions = entity.readonly ? null : function (row) {
-      const keyPath = entity.keyFields.map(function (kf) { return row[kf.name]; }).join('/');
-      const td = el('td', { class: 'actions' });
-      // A row action is a link (`href`) or an API DELETE (`del` + `confirm`)
-      // — e.g. income's Undo reinvest, which drives DELETE /income/:id/reinvest.
-      (entity.rowActions ? entity.rowActions(row) : []).forEach(function (a) {
-        if (a.del) {
-          td.appendChild(deleteButton(a.label, a.confirm, a.del, seq, a.label + ': done.', refresh));
-        } else {
-          td.appendChild(rowActionLink(a));
-        }
-      });
-      if (entity.attachOwner) {
-        td.appendChild(el('a', { href: '#/attachments/' + entity.attachOwner + '/' + row.id },
-          el('button', { class: 'link small' }, 'Attachments')));
+  // Foreign-key id columns render the referenced row's name, not the raw id
+  // (`listTable`) — resolved by column name, so a column with no editable
+  // field (e.g. income's reinvestment_trade_id) is named too.
+  function refresh() { reload(seq, viewEntityList, entity, seq); }
+  const actions = entity.readonly ? null : function (row) {
+    const keyPath = entity.keyFields.map(function (kf) { return row[kf.name]; }).join('/');
+    const td = el('td', { class: 'actions' });
+    // A row action is a link (`href`) or an API DELETE (`del` + `confirm`)
+    // — e.g. income's Undo reinvest, which drives DELETE /income/:id/reinvest.
+    (entity.rowActions ? entity.rowActions(row) : []).forEach(function (a) {
+      if (a.del) {
+        td.appendChild(deleteButton(a.label, a.confirm, a.del, seq, a.label + ': done.', refresh));
+      } else {
+        td.appendChild(rowActionLink(a));
       }
-      if (!entity.deleteOnly) {
-        td.appendChild(el('a', { href: '#/e/' + entity.slug + '/edit/' + keyPath },
-          el('button', { class: 'link small' }, 'Edit')));
-      }
-      td.appendChild(deleteButton('Delete', 'Delete this ' + entity.title.replace(/s$/, '') + '?',
-        entity.api + '/' + keyPath, seq, 'Deleted.', refresh));
-      return td;
-    };
-    table = filterableTable(rows, cols, { actions: actions, labels: labels });
-  }
+    });
+    if (entity.attachOwner) {
+      td.appendChild(rowActionLink({ href: '#/attachments/' + entity.attachOwner + '/' + row.id, label: 'Attachments' }));
+    }
+    if (!entity.deleteOnly) {
+      td.appendChild(rowActionLink({ href: '#/e/' + entity.slug + '/edit/' + keyPath, label: 'Edit' }));
+    }
+    td.appendChild(deleteButton('Delete', 'Delete this ' + entity.title.replace(/s$/, '') + '?',
+      entity.api + '/' + keyPath, seq, 'Deleted.', refresh));
+    return td;
+  };
+  const table = await listTable(rows, cols, 'No records yet.', { actions: actions });
 
-  setMainIfCurrent(seq, el('div', null, [header, toolbar, table]));
+  setMainIfCurrent(seq, pageShell(entity.title, entity.desc, [toolbar, table]));
 }
 
 // ---- entity form view -------------------------------------------------
@@ -732,9 +738,7 @@ async function viewEntityForm(entity, keyParts, seq = navigationToken()) {
   });
 
   const card = el('div', { class: 'card' }, form);
-  setMainIfCurrent(seq, el('div', null, [
-    el('h2', null, (editing ? 'Edit ' : 'New ') + entity.title.replace(/s$/, '')),
-    el('p', { class: 'view-desc' }, entity.desc),
+  setMainIfCurrent(seq, pageShell((editing ? 'Edit ' : 'New ') + entity.title.replace(/s$/, ''), entity.desc, [
     editing && entity.attachOwner
       ? await withDocumentPane(card, entity.attachOwner, keyParts[0])
       : card,
@@ -768,31 +772,19 @@ async function viewSellsList(seq = navigationToken()) {
   // Trades list, so a price-0 transfer leg never reads as a real disposal.
   sells.forEach(function (t) { t.origin = tradeOrigin(t); });
   const cols = ['id', 'origin', 'date', 'settlement_date', 'listing_id', 'average_price', 'quantity', 'currency', 'statement_total', 'holding_account_id'];
-  const toolbar = el('div', { class: 'toolbar' }, [
-    el('a', { href: '#/sells/new' }, el('button', { class: 'primary' }, '+ New Sell')),
-  ]);
-  let table;
-  if (sells.length === 0) {
-    table = el('div', { class: 'empty' }, 'No sell trades yet.');
-  } else {
-    table = filterableTable(sells, cols, {
-      labels: await columnLabelMaps(cols),
-      actions: function (row) {
-        return el('td', { class: 'actions' }, [
-          el('a', { href: '#/attachments/trade_id/' + row.id }, el('button', { class: 'link small' }, 'Attachments')),
-          el('a', { href: '#/sells/edit/' + row.id }, el('button', { class: 'link small' }, 'Edit')),
-          deleteButton('Delete', 'Delete this Sell and its allocations?', '/sells/' + row.id, seq,
-            'Deleted.', function () { reload(seq, viewSellsList, seq); }),
-        ]);
-      },
-    });
-  }
-  setMainIfCurrent(seq, el('div', null, [
-    el('h2', null, 'Sells'),
-    el('p', { class: 'view-desc' }, 'Sell trades, each persisted atomically with parcel allocations that must sum exactly to the sell quantity.'),
-    sellForesightLinks(),
-    toolbar, table,
-  ]));
+  const table = await listTable(sells, cols, 'No sell trades yet.', {
+    actions: function (row) {
+      return el('td', { class: 'actions' }, [
+        rowActionLink({ href: '#/attachments/trade_id/' + row.id, label: 'Attachments' }),
+        rowActionLink({ href: '#/sells/edit/' + row.id, label: 'Edit' }),
+        deleteButton('Delete', 'Delete this Sell and its allocations?', '/sells/' + row.id, seq,
+          'Deleted.', function () { reload(seq, viewSellsList, seq); }),
+      ]);
+    },
+  });
+  setMainIfCurrent(seq, pageShell('Sells',
+    'Sell trades, each persisted atomically with parcel allocations that must sum exactly to the sell quantity.',
+    [sellForesightLinks(), el('div', { class: 'toolbar' }, newButton('#/sells/new', '+ New Sell')), table]));
 }
 
 // Foresight reports surfaced in the Sell flow: what a contemplated sale
@@ -874,8 +866,7 @@ async function viewSellForm(id, seq = navigationToken()) {
     }
   });
 
-  setMainIfCurrent(seq, el('div', null, [
-    el('h2', null, editing ? 'Edit Sell' : 'New Sell'),
+  setMainIfCurrent(seq, pageShell(editing ? 'Edit Sell' : 'New Sell', null, [
     sellForesightLinks(),
     editing
       ? await withDocumentPane(el('div', { class: 'card' }, form), 'trade_id', id)
@@ -895,28 +886,17 @@ async function viewTransfersList(seq = navigationToken()) {
   setActiveNav('transfers');
   const rows = await api('GET', '/transfers');
   const cols = ['id', 'listing_id', 'date', 'from_account_id', 'to_account_id'];
-  const toolbar = el('div', { class: 'toolbar' }, [
-    el('a', { href: '#/transfers/new' }, el('button', { class: 'primary' }, '+ New Transfer')),
-  ]);
-  let table;
-  if (rows.length === 0) {
-    table = el('div', { class: 'empty' }, 'No transfers yet.');
-  } else {
-    table = filterableTable(rows, cols, {
-      labels: await columnLabelMaps(cols),
-      actions: function (row) {
-        return el('td', { class: 'actions' }, [
-          deleteButton('Delete', 'Delete this transfer and restore the pre-transfer holding?',
-            '/transfers/' + row.id, seq, 'Deleted.', function () { reload(seq, viewTransfersList, seq); }),
-        ]);
-      },
-    });
-  }
-  setMainIfCurrent(seq, el('div', null, [
-    el('h2', null, 'Transfers'),
-    el('p', { class: 'view-desc' }, entityBySlug.transfers.desc + ' Each parcel keeps its cost base and acquisition date; deleting a transfer restores the pre-transfer holding.'),
-    toolbar, table,
-  ]));
+  const table = await listTable(rows, cols, 'No transfers yet.', {
+    actions: function (row) {
+      return el('td', { class: 'actions' }, [
+        deleteButton('Delete', 'Delete this transfer and restore the pre-transfer holding?',
+          '/transfers/' + row.id, seq, 'Deleted.', function () { reload(seq, viewTransfersList, seq); }),
+      ]);
+    },
+  });
+  setMainIfCurrent(seq, pageShell('Transfers',
+    entityBySlug.transfers.desc + ' Each parcel keeps its cost base and acquisition date; deleting a transfer restores the pre-transfer holding.',
+    [el('div', { class: 'toolbar' }, newButton('#/transfers/new', '+ New Transfer')), table]));
 }
 
 async function viewTransferForm(seq = navigationToken()) {
@@ -1012,11 +992,8 @@ async function viewTransferForm(seq = navigationToken()) {
       toastIfCurrent(seq, e.message, true);
     }
   });
-  setMainIfCurrent(seq, el('div', null, [
-    el('h2', null, 'New Transfer'),
-    el('p', { class: 'view-desc' }, 'Moves units between two holding accounts of the same owner — not a CGT event: nothing appears in the gains reports and each moved parcel keeps its cost base and acquisition date. An optional crypto network fee, paid in the transferred crypto, is the exception: those units are disposed of at market value and do surface a capital gain/loss.'),
-    el('div', { class: 'card' }, form),
-  ]));
+  setMainIfCurrent(seq, pageShell('New Transfer', 'Moves units between two holding accounts of the same owner — not a CGT event: nothing appears in the gains reports and each moved parcel keeps its cost base and acquisition date. An optional crypto network fee, paid in the transferred crypto, is the exception: those units are disposed of at market value and do surface a capital gain/loss.',
+  [el('div', { class: 'card' }, form)]));
 }
 
 // ---- generic post-action view ------------------------------------------
@@ -1100,11 +1077,8 @@ async function viewAction(action, id, seq = navigationToken()) {
       toastIfCurrent(seq, e.message, true);
     }
   });
-  setMainIfCurrent(seq, el('div', null, [
-    el('h2', null, action.title(id, owner, listingName)),
-    el('p', { class: 'view-desc' }, action.desc(owner, listingName)),
-    el('div', { class: 'card' }, form),
-  ]));
+  setMainIfCurrent(seq, pageShell(action.title(id, owner, listingName), action.desc(owner, listingName),
+    [el('div', { class: 'card' }, form)]));
 }
 
 // ---- listing rename chain ----------------------------------------------
@@ -1127,38 +1101,31 @@ async function viewListingRenames(listingId, seq = navigationToken()) {
   const cols = ['id', 'effective_date', 'old_ticker', 'new_ticker', 'old_exchange_mic',
     'new_exchange_mic', 'old_name', 'old_price_symbol', 'note'];
 
-  let table;
-  if (rows.length === 0) {
-    table = el('div', { class: 'empty' }, 'No ticker or exchange changes recorded.');
-  } else {
-    // Identity, not position: the table can be re-sorted, and the newest
-    // entry stays the only undoable one wherever it lands.
-    const newest = rows[0];
-    table = filterableTable(rows, cols, {
-      actions: function (row) {
-        const td = el('td', { class: 'actions' });
-        if (row !== newest) return td;
-        td.appendChild(deleteButton('Undo',
-          'Undo this rename? The listing goes back to '
-            + (row.old_exchange_mic || 'Crypto') + ':' + row.old_ticker
-            + ', with the name and price symbol it had before.',
-          '/listings/' + pathSeg(listingId) + '/renames/' + row.id, seq, 'Rename undone.',
-          function () { reload(seq, viewListingRenames, listingId, seq); }));
-        return td;
-      },
-    });
-  }
+  // Identity, not position: the table can be re-sorted, and the newest
+  // entry stays the only undoable one wherever it lands.
+  const newest = rows[0];
+  const table = await listTable(rows, cols, 'No ticker or exchange changes recorded.', {
+    actions: function (row) {
+      const td = el('td', { class: 'actions' });
+      if (row !== newest) return td;
+      td.appendChild(deleteButton('Undo',
+        'Undo this rename? The listing goes back to '
+          + (row.old_exchange_mic || 'Crypto') + ':' + row.old_ticker
+          + ', with the name and price symbol it had before.',
+        '/listings/' + pathSeg(listingId) + '/renames/' + row.id, seq, 'Rename undone.',
+        function () { reload(seq, viewListingRenames, listingId, seq); }));
+      return td;
+    },
+  });
 
-  setMainIfCurrent(seq, el('div', null, [
-    el('h2', null, 'Rename history — ' + listingName(listingId)),
-    el('p', { class: 'view-desc' },
+  setMainIfCurrent(seq, pageShell('Rename history — ' + listingName(listingId),
       'Every recorded ticker or exchange change for this listing, newest first. A rename is the '
       + 'same security under a new name, so nothing moves: the id every trade, distribution and '
       + 'parcel references is unchanged, and price collection resolves each date under the symbol '
       + 'in force then. Undo restores the ticker, exchange, name and price symbol the rename '
-      + 'overwrote, and is offered on the newest entry only — the chain unwinds last-in-first-out.'),
+      + 'overwrote, and is offered on the newest entry only — the chain unwinds last-in-first-out.', [
     el('div', { class: 'toolbar' }, [
-      el('a', { href: '#/rename/' + pathSeg(listingId) }, el('button', { class: 'primary' }, '+ Record a rename')),
+      newButton('#/rename/' + pathSeg(listingId), '+ Record a rename'),
       el('a', { href: '#/e/listings' }, el('button', null, 'Back to Listings')),
     ]),
     table,
@@ -1314,32 +1281,21 @@ async function viewAttachments(ownerField, ownerId, seq = navigationToken()) {
   const cols = ['id', 'filename', 'content_type', 'byte_size', 'uploaded_at']
     .concat(anyLinked ? ['attached_to'] : []);
 
-  const container = el('div');
   function refresh() { reload(seq, viewAttachments, ownerField, ownerId, seq); }
 
-  let table;
-  if (rows.length === 0) {
-    table = el('div', { class: 'empty' }, 'No attachments yet.');
-  } else {
-    table = filterableTable(rows, cols, {
-      actions: function (row) {
-        const link = linkedOwner(row);
-        const actions = [
-          el('a', { href: apiUrl('/attachments/' + row.id + '/content'), target: '_blank' },
-            el('button', { class: 'link small' }, 'Download')),
-        ];
-        if (link) {
-          // Delete stays on the owning record's view — link to it instead.
-          actions.push(el('a', { href: '#/attachments/' + link.field + '/' + link.id },
-            el('button', { class: 'link small' }, "Owner's attachments")));
-        } else {
-          actions.push(deleteButton('Delete', 'Delete this attachment?', '/attachments/' + row.id,
-            seq, 'Deleted.', refresh));
-        }
-        return el('td', { class: 'actions' }, actions);
-      },
-    });
-  }
+  const table = await listTable(rows, cols, 'No attachments yet.', {
+    actions: function (row) {
+      const link = linkedOwner(row);
+      return el('td', { class: 'actions' }, [
+        rowActionLink({ href: apiUrl('/attachments/' + row.id + '/content'), newTab: true, label: 'Download' }),
+        // Delete stays on the owning record's view — link to it instead.
+        link
+          ? rowActionLink({ href: '#/attachments/' + link.field + '/' + link.id, label: "Owner's attachments" })
+          : deleteButton('Delete', 'Delete this attachment?', '/attachments/' + row.id,
+            seq, 'Deleted.', refresh),
+      ]);
+    },
+  });
 
   // Upload form: a single file input posted as multipart/form-data. The
   // browser sets the multipart boundary and the part's Content-Type; the
@@ -1368,13 +1324,10 @@ async function viewAttachments(ownerField, ownerId, seq = navigationToken()) {
     }
   });
 
-  container.appendChild(el('h2', null, 'Attachments'));
-  container.appendChild(el('p', { class: 'view-desc' },
+  setMainIfCurrent(seq, pageShell('Attachments',
     'Files attached to ' + ownerName + '. Stored in the database.'
-    + (anyLinked ? ' Rows marked (linked) belong to the record this trade was created from; uploads here attach to the trade, and a linked document is deleted from its own record\'s view.' : '')));
-  container.appendChild(uploadForm);
-  container.appendChild(table);
-  setMainIfCurrent(seq, container);
+    + (anyLinked ? ' Rows marked (linked) belong to the record this trade was created from; uploads here attach to the trade, and a linked document is deleted from its own record\'s view.' : ''),
+    [uploadForm, table]));
 }
 
 // ---- health banner ------------------------------------------------------

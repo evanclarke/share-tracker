@@ -1234,7 +1234,7 @@ mod tests {
         assert!(js.contains("'/listings/' + pathSeg(listingId) + '/renames'"));
         assert!(js.contains("'/listings/' + pathSeg(listingId) + '/renames/' + row.id"));
         // Rendered through the shared table, with the before/after columns.
-        assert!(js.contains("table = filterableTable(rows, cols, {"));
+        assert!(js.contains("listTable(rows, cols, 'No ticker or exchange changes recorded.', {"));
         for col in [
             "'effective_date'",
             "'old_ticker'",
@@ -1292,7 +1292,9 @@ mod tests {
         assert!(js.contains("sale_trade_id: 'trades', purchase_trade_id: 'trades'"));
         assert!(js.contains("amma_statement_id: 'amma'"));
         // The generic entity list and the report tables both go through it.
-        assert!(js.contains("const labels = await columnLabelMaps(cols);"));
+        assert!(js.contains(
+            "const labels = await columnLabelMaps(cols.concat(expandColumns(expandCfg)));"
+        ));
         assert!(js.contains("labels: await columnLabelMaps(cols)"));
         // The raw id stays reachable on the cell tooltip.
         assert!(js.contains("'id ' + cellText(v)"));
