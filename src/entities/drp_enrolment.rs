@@ -276,25 +276,12 @@ async fn write(
         return Err(UpsertError::Overlap);
     }
 
-    // A create (`id` is `None`, from `POST /drp_enrolments`) omits the id
-    // column altogether, so the database's `AUTOINCREMENT` sequence assigns
-    // one it has never issued — a server-computed id could hand the new row a
-    // deleted row's id and, with it, that row's `row_history` trail
-    // (SCENARIOS U-a). The upsert branch is otherwise byte-identical, so a
-    // `PUT` on an explicit id stays the upsert it has always been.
-    let query = crate::insert_with_optional_id!(
+    // A create (`id` is `None`) binds a NULL id, so the database picks one
+    // it has never issued (`infra::db::insert_with_optional_id`, SCENARIOS U-a).
+    let query = crate::infra::db::insert_with_optional_id(
         "INSERT INTO drp_enrolments \
          (id, listing_id, holding_account_id, enrolment_date, unenrolment_date, residual_handling) \
          VALUES (?, ?, ?, ?, ?, ?) \
-         ON CONFLICT(id) DO UPDATE SET \
-           listing_id = excluded.listing_id, \
-           holding_account_id = excluded.holding_account_id, \
-           enrolment_date = excluded.enrolment_date, \
-           unenrolment_date = excluded.unenrolment_date, \
-           residual_handling = excluded.residual_handling",
-        "INSERT INTO drp_enrolments \
-         (listing_id, holding_account_id, enrolment_date, unenrolment_date, residual_handling) \
-         VALUES (?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET \
            listing_id = excluded.listing_id, \
            holding_account_id = excluded.holding_account_id, \

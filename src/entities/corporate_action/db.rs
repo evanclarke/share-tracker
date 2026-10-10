@@ -732,13 +732,9 @@ async fn write(
     // stream it is removed from has to hold up too). `None` for an insert.
     let previous_listing_id: Option<i64> = stored.as_ref().map(|stored| stored.listing_id);
 
-    // A create (`id` is `None`, from `POST /corporate_actions`) omits the id
-    // column altogether, so the database's `AUTOINCREMENT` sequence assigns
-    // one it has never issued — a server-computed id could hand the new row a
-    // deleted action's id and, with it, that row's `row_history` trail
-    // (SCENARIOS U-a). The upsert branch is otherwise byte-identical, so a
-    // `PUT` on an explicit id stays the upsert it has always been.
-    let query = crate::insert_with_optional_id!(
+    // A create (`id` is `None`) binds a NULL id, so the database picks one
+    // it has never issued (`infra::db::insert_with_optional_id`, SCENARIOS U-a).
+    let query = crate::infra::db::insert_with_optional_id(
         "INSERT INTO corporate_actions \
          (id, action_type, listing_id, date, amount_per_unit, currency, \
           split_new_units, split_old_units, bonus_units, bonus_held_units, \
@@ -752,53 +748,6 @@ async fn write(
           demerger_close_reason, renounceable) \
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \
                  ?, ?, ?, ?, ?, ?) \
-         ON CONFLICT(id) DO UPDATE SET \
-             action_type       = excluded.action_type, \
-             listing_id        = excluded.listing_id, \
-             date              = excluded.date, \
-             amount_per_unit   = excluded.amount_per_unit, \
-             currency          = excluded.currency, \
-             split_new_units   = excluded.split_new_units, \
-             split_old_units   = excluded.split_old_units, \
-             bonus_units       = excluded.bonus_units, \
-             bonus_held_units  = excluded.bonus_held_units, \
-             rights_units      = excluded.rights_units, \
-             rights_held_units = excluded.rights_held_units, \
-             exercise_price    = excluded.exercise_price, \
-             buyback_price           = excluded.buyback_price, \
-             buyback_dividend        = excluded.buyback_dividend, \
-             buyback_franking_credit = excluded.buyback_franking_credit, \
-             buyback_market_value    = excluded.buyback_market_value, \
-             scrip_listing_id  = excluded.scrip_listing_id, \
-             scrip_new_units   = excluded.scrip_new_units, \
-             scrip_old_units   = excluded.scrip_old_units, \
-             scrip_cash_per_unit = excluded.scrip_cash_per_unit, \
-             scrip_market_value  = excluded.scrip_market_value, \
-             scrip_cash_currency = excluded.scrip_cash_currency, \
-             demerger_listing_id    = excluded.demerger_listing_id, \
-             demerger_new_units     = excluded.demerger_new_units, \
-             demerger_held_units    = excluded.demerger_held_units, \
-             demerger_cost_base_pct = excluded.demerger_cost_base_pct, \
-             worthless_event        = excluded.worthless_event, \
-             record_date            = excluded.record_date, \
-             demerger_close_date         = excluded.demerger_close_date, \
-             demerger_close_price        = excluded.demerger_close_price, \
-             demerger_close_sourced_from = excluded.demerger_close_sourced_from, \
-             demerger_close_reason       = excluded.demerger_close_reason, \
-             renounceable                = excluded.renounceable",
-        "INSERT INTO corporate_actions \
-         (action_type, listing_id, date, amount_per_unit, currency, \
-          split_new_units, split_old_units, bonus_units, bonus_held_units, \
-          rights_units, rights_held_units, exercise_price, \
-          buyback_price, buyback_dividend, buyback_franking_credit, buyback_market_value, \
-          scrip_listing_id, scrip_new_units, scrip_old_units, \
-          scrip_cash_per_unit, scrip_market_value, scrip_cash_currency, \
-          demerger_listing_id, demerger_new_units, demerger_held_units, \
-          demerger_cost_base_pct, worthless_event, record_date, \
-          demerger_close_date, demerger_close_price, demerger_close_sourced_from, \
-          demerger_close_reason, renounceable) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \
-                 ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET \
              action_type       = excluded.action_type, \
              listing_id        = excluded.listing_id, \

@@ -717,35 +717,14 @@ async fn write(
         return Err(UpsertError::ParcelDrawnOn);
     }
 
-    // A create (`id` is `None`, from `POST /inheritances`) omits the id column
-    // altogether, so the database's `AUTOINCREMENT` sequence assigns one it has
-    // never issued — a server-computed id could hand the new row a deleted
-    // row's id and, with it, that row's `row_history` trail (SCENARIOS U-a).
-    // The upsert branch is otherwise byte-identical, so a `PUT` on an explicit
-    // id stays the upsert it has always been.
-    let query = crate::insert_with_optional_id!(
+    // A create (`id` is `None`) binds a NULL id, so the database picks one
+    // it has never issued (`infra::db::insert_with_optional_id`, SCENARIOS U-a).
+    let query = crate::infra::db::insert_with_optional_id(
         "INSERT INTO inheritances \
          (id, listing_id, holding_account_id, quantity, date_of_death, cost_base_rule, \
           cost_base, lpr_expenditure, lpr_expenditure_date, deceased_acquisition_date, \
           currency, fx_rate) \
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
-         ON CONFLICT(id) DO UPDATE SET \
-             listing_id                = excluded.listing_id, \
-             holding_account_id        = excluded.holding_account_id, \
-             quantity                  = excluded.quantity, \
-             date_of_death             = excluded.date_of_death, \
-             cost_base_rule            = excluded.cost_base_rule, \
-             cost_base                 = excluded.cost_base, \
-             lpr_expenditure           = excluded.lpr_expenditure, \
-             lpr_expenditure_date      = excluded.lpr_expenditure_date, \
-             deceased_acquisition_date = excluded.deceased_acquisition_date, \
-             currency                  = excluded.currency, \
-             fx_rate                   = excluded.fx_rate",
-        "INSERT INTO inheritances \
-         (listing_id, holding_account_id, quantity, date_of_death, cost_base_rule, \
-          cost_base, lpr_expenditure, lpr_expenditure_date, deceased_acquisition_date, \
-          currency, fx_rate) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET \
              listing_id                = excluded.listing_id, \
              holding_account_id        = excluded.holding_account_id, \

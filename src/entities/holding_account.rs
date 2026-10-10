@@ -124,19 +124,14 @@ async fn write(
     id: Option<i64>,
     account: &HoldingAccount,
 ) -> Result<(i64, Upsert, Option<HoldingAccount>), sqlx::Error> {
-    // A create (`id` is `None`, from `POST /holding_accounts`) omits the id
-    // column altogether, so the database — not the caller — chooses the new
-    // row's id (SCENARIOS U-a). The upsert branch is otherwise byte-identical,
-    // so a `PUT` on an explicit id stays the upsert it has always been.
-    //
-    // `holding_accounts` is the one table here that is not `AUTOINCREMENT` (it
-    // sits outside the audit scope), so a deleted *highest* id can be
-    // re-issued; see
+    // A create (`id` is `None`) binds a NULL id, so the database — not the
+    // caller — picks the new row's id (`infra::db::insert_with_optional_id`,
+    // SCENARIOS U-a). `holding_accounts` is the one table here that is not
+    // `AUTOINCREMENT` (it sits outside the audit scope), so a deleted
+    // *highest* id can be re-issued; see
     // `post_holding_account_lands_on_an_unheld_id_and_never_overwrites`.
-    let query = crate::insert_with_optional_id!(
+    let query = crate::infra::db::insert_with_optional_id(
         "INSERT INTO holding_accounts (id, name) VALUES (?, ?) \
-         ON CONFLICT(id) DO UPDATE SET name = excluded.name",
-        "INSERT INTO holding_accounts (name) VALUES (?) \
          ON CONFLICT(id) DO UPDATE SET name = excluded.name",
         id,
     );

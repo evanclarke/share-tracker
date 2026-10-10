@@ -450,11 +450,9 @@ async fn write(
     // A bad listing or account id fails the FK here (→ 422 via the shared map).
     // The create branch omits the id column (one placeholder fewer); the upsert
     // branch is otherwise byte-identical.
-    let query = crate::insert_with_optional_id!(
+    let query = crate::infra::db::insert_with_optional_id(
         "INSERT INTO transfers (id, listing_id, date, from_account_id, to_account_id) \
          VALUES (?, ?, ?, ?, ?)",
-        "INSERT INTO transfers (listing_id, date, from_account_id, to_account_id) \
-         VALUES (?, ?, ?, ?)",
         id,
     );
     let result = query

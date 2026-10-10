@@ -180,43 +180,31 @@ impl WriteMode {
     }
 }
 
-/// Build the INSERT an entity's write path needs, binding the row's id only
-/// when the caller named one.
+/// Start the INSERT an entity's write path needs, with the row's id bound
+/// first — the caller's id for an upsert, `NULL` for a create.
 ///
-/// An entity write has two entry points with one statement each: `PUT /x/:id`
+/// An entity write has two entry points over one statement: `PUT /x/:id`
 /// upserts on a caller-chosen id, and `POST /x` creates a row the database
-/// assigns an id to. They differ in exactly one column, so the two SQL strings
-/// live at the call site and this macro picks between them, binding `id` first
-/// (the id column leads every one of these INSERTs) only for the upsert.
+/// assigns an id to. `sql` leads its column list with `id` (and carries its
+/// own `ON CONFLICT(id) DO UPDATE` where a `PUT` replaces); the remaining
+/// binds follow in column order. Reach the assigned id through
+/// [`sqlx::sqlite::SqliteQueryResult::last_insert_rowid`].
 ///
-/// Why the create must omit the column rather than bind a value: `AUTOINCREMENT`
-/// governs only the ids SQLite itself picks, so a create that bound even a
-/// deliberately-unused number could be handed a deleted row's id — and inherit
-/// that row's `row_history` trail with it. `reports::row_history`'s occupant
-/// marking exists to expose the re-use a *user* can still cause with an explicit
+/// Why a create binds `NULL` rather than an id of its own choosing: a `NULL`
+/// into an `INTEGER PRIMARY KEY` column is SQLite picking the id, and
+/// `AUTOINCREMENT` governs only the ids SQLite itself picks — so it is one the
+/// sequence has never issued. A create that bound even a deliberately-unused
+/// number could be handed a deleted row's id, and inherit that row's
+/// `row_history` trail with it. `reports::row_history`'s occupant marking
+/// exists to expose the re-use a *user* can still cause with an explicit
 /// `PUT`; the server half must not add any (SCENARIOS U-a, migration 0045,
-/// SCHEMA.md).
-///
-/// `$upsert` and `$create` are the two complete INSERT statements and `$id` is
-/// `Option<i64>`; the remaining `$values` are the non-id binds, in column
-/// order. Use it as
-/// `db::insert_with_optional_id!(sql_with_id, sql_without_id, id).bind(a).bind(b)`,
-/// and reach the assigned id through [`sqlx::query::QueryResult::last_insert_rowid`].
-///
-/// The trailing-comma arm is not decoration: an `expr` fragment cannot be
-/// followed by a comma without one, and `rustfmt` formats a multi-line macro
-/// invocation with a trailing comma, so without it the formatted call site
-/// stops compiling.
-#[macro_export]
-macro_rules! insert_with_optional_id {
-    ($upsert:expr, $create:expr, $id:expr $(,)?) => {{
-        let id: Option<i64> = $id;
-        let mut query = sqlx::query(if id.is_some() { $upsert } else { $create });
-        if let Some(id) = id {
-            query = query.bind(id);
-        }
-        query
-    }};
+/// SCHEMA.md). Each entity's `post_*_never_reuses_a_deleted_rows_id` test pins
+/// it.
+pub fn insert_with_optional_id(
+    sql: &'static str,
+    id: Option<i64>,
+) -> sqlx::query::Query<'static, sqlx::Sqlite, sqlx::sqlite::SqliteArguments> {
+    sqlx::query(sql).bind(id)
 }
 
 pub async fn init(db_path: &str) -> Result<SqlitePool, sqlx::Error> {

@@ -651,13 +651,9 @@ async fn write(
         }
     }
 
-    // A create (`id` is `None`, from `POST /ess_statements`) omits the id
-    // column altogether, so the database's `AUTOINCREMENT` sequence assigns
-    // one it has never issued — a server-computed id could hand the new row a
-    // deleted statement's id and, with it, that row's `row_history` trail
-    // (SCENARIOS U-a). The upsert branch is otherwise byte-identical, so a
-    // `PUT` on an explicit id stays the upsert it has always been.
-    let query = crate::insert_with_optional_id!(
+    // A create (`id` is `None`) binds a NULL id, so the database picks one
+    // it has never issued (`infra::db::insert_with_optional_id`, SCENARIOS U-a).
+    let query = crate::infra::db::insert_with_optional_id(
         "INSERT INTO ess_statements \
          (id, listing_id, holding_account_id, taxing_point_date, quantity, \
           market_value_per_share, taxed_upfront_eligible, taxed_upfront_not_eligible, \
@@ -666,33 +662,6 @@ async fn write(
           aud_taxed_upfront_not_eligible, aud_deferral_discount, \
           aud_pre_2009_cessation_discount, aud_foreign_source_discount) \
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
-         ON CONFLICT(id) DO UPDATE SET \
-             listing_id                      = excluded.listing_id, \
-             holding_account_id              = excluded.holding_account_id, \
-             taxing_point_date               = excluded.taxing_point_date, \
-             quantity                        = excluded.quantity, \
-             market_value_per_share          = excluded.market_value_per_share, \
-             taxed_upfront_eligible          = excluded.taxed_upfront_eligible, \
-             taxed_upfront_not_eligible      = excluded.taxed_upfront_not_eligible, \
-             deferral_discount               = excluded.deferral_discount, \
-             pre_2009_cessation_discount     = excluded.pre_2009_cessation_discount, \
-             foreign_source_discount         = excluded.foreign_source_discount, \
-             tfn_withholding                 = excluded.tfn_withholding, \
-             currency                        = excluded.currency, \
-             fx_rate                         = excluded.fx_rate, \
-             aud_taxed_upfront_eligible      = excluded.aud_taxed_upfront_eligible, \
-             aud_taxed_upfront_not_eligible  = excluded.aud_taxed_upfront_not_eligible, \
-             aud_deferral_discount           = excluded.aud_deferral_discount, \
-             aud_pre_2009_cessation_discount = excluded.aud_pre_2009_cessation_discount, \
-             aud_foreign_source_discount     = excluded.aud_foreign_source_discount",
-        "INSERT INTO ess_statements \
-         (listing_id, holding_account_id, taxing_point_date, quantity, \
-          market_value_per_share, taxed_upfront_eligible, taxed_upfront_not_eligible, \
-          deferral_discount, pre_2009_cessation_discount, foreign_source_discount, \
-          tfn_withholding, currency, fx_rate, aud_taxed_upfront_eligible, \
-          aud_taxed_upfront_not_eligible, aud_deferral_discount, \
-          aud_pre_2009_cessation_discount, aud_foreign_source_discount) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET \
              listing_id                      = excluded.listing_id, \
              holding_account_id              = excluded.holding_account_id, \

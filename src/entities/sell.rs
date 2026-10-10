@@ -833,10 +833,10 @@ pub(crate) async fn upsert_sell_in_tx(
     // Sell whose amounts actually convert.
     trade::validate_spot_fx_rate(&body.currency, body.spot_fx_rate)
         .map_err(SellError::SpotFxRate)?;
-    // Upsert the Sell trade row. A NULL id (every server-created Sell) is an
-    // omitted one: SQLite assigns the next id the AUTOINCREMENT column has
-    // never issued, so the row cannot land on a deleted trade's id.
-    let result = sqlx::query(
+    // Upsert the Sell trade row. A NULL id (every server-created Sell) is the
+    // database picking one it has never issued
+    // (`infra::db::insert_with_optional_id`, SCENARIOS U-a).
+    let result = crate::infra::db::insert_with_optional_id(
         "INSERT INTO trades \
          (id, trade_type, date, settlement_date, settlement_date_source, listing_id, \
           average_price, quantity, \
@@ -868,8 +868,8 @@ pub(crate) async fn upsert_sell_in_tx(
              holding_account_id     = excluded.holding_account_id, \
              transfer_id            = excluded.transfer_id, \
              worthless_action_id    = excluded.worthless_action_id",
+        id,
     )
-    .bind(id)
     .bind(body.date)
     .bind(settlement.date)
     .bind(settlement.source)

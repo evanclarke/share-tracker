@@ -248,30 +248,13 @@ async fn write(
     if i.foreign_source && i.tfn_withholding_tax > Decimal::ZERO {
         return Err(UpsertError::TfnWithholdingOnForeignSource);
     }
-    // A create (`id` is `None`, from `POST /interest_income`) omits the id
-    // column altogether, so the database's `AUTOINCREMENT` sequence assigns one
-    // it has never issued — a server-computed id could hand the new row a
-    // deleted row's id and, with it, that row's `row_history` trail
-    // (SCENARIOS U-a). The upsert branch is otherwise byte-identical, so a
-    // `PUT` on an explicit id stays the upsert it has always been.
-    let query = crate::insert_with_optional_id!(
+    // A create (`id` is `None`) binds a NULL id, so the database picks one
+    // it has never issued (`infra::db::insert_with_optional_id`, SCENARIOS U-a).
+    let query = crate::infra::db::insert_with_optional_id(
         "INSERT INTO interest_income \
          (id, date_paid, amount, tfn_withholding_tax, foreign_source, foreign_tax_paid, \
           currency, source, holding_account_id) \
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
-         ON CONFLICT(id) DO UPDATE SET \
-             date_paid           = excluded.date_paid, \
-             amount              = excluded.amount, \
-             tfn_withholding_tax = excluded.tfn_withholding_tax, \
-             foreign_source      = excluded.foreign_source, \
-             foreign_tax_paid    = excluded.foreign_tax_paid, \
-             currency            = excluded.currency, \
-             source              = excluded.source, \
-             holding_account_id  = excluded.holding_account_id",
-        "INSERT INTO interest_income \
-         (date_paid, amount, tfn_withholding_tax, foreign_source, foreign_tax_paid, \
-          currency, source, holding_account_id) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET \
              date_paid           = excluded.date_paid, \
              amount              = excluded.amount, \

@@ -978,13 +978,9 @@ async fn write(
     // preserves an existing link): the DRP link is written only by the
     // reinvest operation, in its own transaction.
     //
-    // A create (`id` is `None`, from `POST /income`) omits the id column
-    // altogether, so the database's `AUTOINCREMENT` sequence assigns one it
-    // has never issued — a server-computed id could hand the new row a
-    // deleted row's id and, with it, that row's `row_history` trail
-    // (SCENARIOS U-a). The upsert branch is otherwise byte-identical, so a
-    // `PUT` on an explicit id stays the upsert it has always been.
-    let query = crate::insert_with_optional_id!(
+    // A create (`id` is `None`) binds a NULL id, so the database picks one
+    // it has never issued (`infra::db::insert_with_optional_id`, SCENARIOS U-a).
+    let query = crate::infra::db::insert_with_optional_id(
         "INSERT INTO income \
          (id, listing_id, date_paid, ex_date, franked_amount, unfranked_amount, \
           foreign_source_income, foreign_tax_paid, tfn_withholding_tax, franking_credits, \
@@ -992,33 +988,6 @@ async fn write(
           currency, holding_account_id, amount_per_security, \
           securities_held, tax_deferred_amount, income_type) \
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
-         ON CONFLICT(id) DO UPDATE SET \
-             listing_id                 = excluded.listing_id, \
-             date_paid                  = excluded.date_paid, \
-             ex_date                    = excluded.ex_date, \
-             franked_amount             = excluded.franked_amount, \
-             unfranked_amount           = excluded.unfranked_amount, \
-             foreign_source_income      = excluded.foreign_source_income, \
-             foreign_tax_paid           = excluded.foreign_tax_paid, \
-             tfn_withholding_tax        = excluded.tfn_withholding_tax, \
-             franking_credits           = excluded.franking_credits, \
-             lic_capital_gain_amount = excluded.lic_capital_gain_amount, \
-             conduit_foreign_income     = excluded.conduit_foreign_income, \
-             trust_income               = excluded.trust_income, \
-             entitlement_date           = excluded.entitlement_date, \
-             currency                   = excluded.currency, \
-             holding_account_id         = excluded.holding_account_id, \
-             amount_per_security        = excluded.amount_per_security, \
-             securities_held            = excluded.securities_held, \
-             tax_deferred_amount        = excluded.tax_deferred_amount, \
-             income_type                = excluded.income_type",
-        "INSERT INTO income \
-         (listing_id, date_paid, ex_date, franked_amount, unfranked_amount, \
-          foreign_source_income, foreign_tax_paid, tfn_withholding_tax, franking_credits, \
-          lic_capital_gain_amount, conduit_foreign_income, trust_income, entitlement_date, \
-          currency, holding_account_id, amount_per_security, \
-          securities_held, tax_deferred_amount, income_type) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET \
              listing_id                 = excluded.listing_id, \
              date_paid                  = excluded.date_paid, \

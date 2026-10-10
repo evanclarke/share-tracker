@@ -465,13 +465,9 @@ async fn write(
         None => false,
     };
 
-    // A create (`id` is `None`, from `POST /amma_statements`) omits the id
-    // column altogether, so the database's `AUTOINCREMENT` sequence assigns
-    // one it has never issued — a server-computed id could hand the new row a
-    // deleted row's id and, with it, that row's `row_history` trail
-    // (SCENARIOS U-a). The upsert branch is otherwise byte-identical, so a
-    // `PUT` on an explicit id stays the upsert it has always been.
-    let query = crate::insert_with_optional_id!(
+    // A create (`id` is `None`) binds a NULL id, so the database picks one
+    // it has never issued (`infra::db::insert_with_optional_id`, SCENARIOS U-a).
+    let query = crate::infra::db::insert_with_optional_id(
         "INSERT INTO amma_statements \
          (id, listing_id, tax_year_end_date, units_held, date_received, \
           australian_interest, australian_dividends_unfranked, franked_dividends, \
@@ -481,39 +477,6 @@ async fn write(
           tax_deferred_amount, tax_free_amount, cost_base_adjustment, tfn_withholding_tax, \
           currency, holding_account_id) \
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
-         ON CONFLICT(id) DO UPDATE SET \
-             listing_id                      = excluded.listing_id, \
-             tax_year_end_date               = excluded.tax_year_end_date, \
-             units_held                      = excluded.units_held, \
-             date_received                   = excluded.date_received, \
-             australian_interest             = excluded.australian_interest, \
-             australian_dividends_unfranked  = excluded.australian_dividends_unfranked, \
-             franked_dividends               = excluded.franked_dividends, \
-             franking_credits                = excluded.franking_credits, \
-             net_rent                        = excluded.net_rent, \
-             foreign_income                  = excluded.foreign_income, \
-             foreign_tax_credits             = excluded.foreign_tax_credits, \
-             foreign_tax_credits_capital_gains = excluded.foreign_tax_credits_capital_gains, \
-             other_income                    = excluded.other_income, \
-             cgt_discount_gains              = excluded.cgt_discount_gains, \
-             cgt_indexation_gains            = excluded.cgt_indexation_gains, \
-             cgt_other_gains                 = excluded.cgt_other_gains, \
-             capital_losses_applied          = excluded.capital_losses_applied, \
-             tax_deferred_amount             = excluded.tax_deferred_amount, \
-             tax_free_amount                 = excluded.tax_free_amount, \
-             cost_base_adjustment            = excluded.cost_base_adjustment, \
-             tfn_withholding_tax             = excluded.tfn_withholding_tax, \
-             currency                        = excluded.currency, \
-             holding_account_id              = excluded.holding_account_id",
-        "INSERT INTO amma_statements \
-         (listing_id, tax_year_end_date, units_held, date_received, \
-          australian_interest, australian_dividends_unfranked, franked_dividends, \
-          franking_credits, net_rent, foreign_income, foreign_tax_credits, \
-         foreign_tax_credits_capital_gains, other_income, \
-          cgt_discount_gains, cgt_indexation_gains, cgt_other_gains, capital_losses_applied, \
-          tax_deferred_amount, tax_free_amount, cost_base_adjustment, tfn_withholding_tax, \
-          currency, holding_account_id) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET \
              listing_id                      = excluded.listing_id, \
              tax_year_end_date               = excluded.tax_year_end_date, \

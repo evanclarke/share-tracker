@@ -446,22 +446,11 @@ async fn db_write_on(
         return Err(UpsertError::DuplicateParcel);
     }
 
-    // A create (`id` is `None` — `POST /amit_adjustments`, and the AMMA
-    // statement's generator) omits the id column altogether, so the database's
-    // `AUTOINCREMENT` sequence assigns one it has never issued: an id computed
-    // in Rust could hand the new row a deleted row's id and, with it, that
-    // row's `row_history` trail (SCENARIOS U-a). The upsert branch is otherwise
-    // byte-identical, so a `PUT` on an explicit id stays the upsert it has
-    // always been.
-    let query = crate::insert_with_optional_id!(
+    // A create (`id` is `None`) binds a NULL id, so the database picks one
+    // it has never issued (`infra::db::insert_with_optional_id`, SCENARIOS U-a).
+    let query = crate::infra::db::insert_with_optional_id(
         "INSERT INTO amit_adjustments (id, amma_statement_id, trade_id, quantity) \
          VALUES (?, ?, ?, ?) \
-         ON CONFLICT(id) DO UPDATE SET \
-             amma_statement_id = excluded.amma_statement_id, \
-             trade_id          = excluded.trade_id, \
-             quantity          = excluded.quantity",
-        "INSERT INTO amit_adjustments (amma_statement_id, trade_id, quantity) \
-         VALUES (?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET \
              amma_statement_id = excluded.amma_statement_id, \
              trade_id          = excluded.trade_id, \
