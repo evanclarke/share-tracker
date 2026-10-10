@@ -69,6 +69,48 @@ pub struct ActivityEvent {
     /// The row's own money figure in AUD (see the API docs for what each row
     /// kind reports); absent where the row has no single amount.
     pub amount_aud: Option<Decimal>,
+    /// The table the row was read from — with `record_id`, the record itself,
+    /// which the web UI's Event cell opens.
+    pub record_table: RecordTable,
+    /// The row's id in `record_table` (a DRP enrolment's two rows share it).
+    pub record_id: i64,
+}
+
+/// The table a ledger row comes from. The declaration order is also the
+/// same-date, same-rank tie-break, so it must not be reordered casually.
+#[derive(
+    utoipa::ToSchema, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum RecordTable {
+    CorporateActions,
+    Transfers,
+    Income,
+    AmmaStatements,
+    EssStatements,
+    RightsSales,
+    DrpEnrolments,
+    InvestmentExpenses,
+    Trades,
+    ListingRenames,
+}
+
+#[cfg(test)]
+impl RecordTable {
+    /// Every variant, for the web test pinning the UI's link map to them. A
+    /// new ledger source adds its variant here too.
+    pub const ALL: [RecordTable; 10] = [
+        Self::CorporateActions,
+        Self::Transfers,
+        Self::Income,
+        Self::AmmaStatements,
+        Self::EssStatements,
+        Self::RightsSales,
+        Self::DrpEnrolments,
+        Self::InvestmentExpenses,
+        Self::Trades,
+        Self::ListingRenames,
+    ];
 }
 
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
@@ -123,8 +165,9 @@ struct Proto {
     /// (2) — a trade dated on a split's conversion date is already in
     /// post-split units — with the statement-ish rows (1) between.
     rank: u8,
-    /// Stable tie-break across source tables sharing a rank.
-    src: u8,
+    /// The source table — also the stable tie-break across tables sharing a
+    /// rank, in [`RecordTable`]'s declaration order.
+    record: RecordTable,
     id: i64,
     event: String,
     detail: String,
@@ -332,7 +375,7 @@ impl Sources {
                 Proto {
                     date: a.date,
                     rank: 0,
-                    src: 0,
+                    record: RecordTable::CorporateActions,
                     id: a.id,
                     event,
                     detail,
@@ -371,7 +414,7 @@ impl Sources {
                 Proto {
                     date: t.date,
                     rank: 1,
-                    src: 1,
+                    record: RecordTable::Transfers,
                     id: t.id,
                     event: "Transfer between accounts".to_string(),
                     detail,
@@ -421,7 +464,7 @@ impl Sources {
                 Ok(Proto {
                     date: i.date_paid,
                     rank: 1,
-                    src: 2,
+                    record: RecordTable::Income,
                     id: i.id,
                     event: event.to_string(),
                     detail,
@@ -440,7 +483,7 @@ impl Sources {
         let ammas = self.ammas.iter().map(|a| Proto {
             date: a.tax_year_end_date,
             rank: 1,
-            src: 3,
+            record: RecordTable::AmmaStatements,
             id: a.id,
             event: "AMMA statement".to_string(),
             detail: format!(
@@ -460,7 +503,7 @@ impl Sources {
         let esses = self.esses.iter().map(|s| Proto {
             date: s.taxing_point_date,
             rank: 1,
-            src: 4,
+            record: RecordTable::EssStatements,
             id: s.id,
             event: "ESS statement".to_string(),
             detail: format!(
@@ -489,7 +532,7 @@ impl Sources {
                 Ok(Proto {
                     date: rs.date,
                     rank: 1,
-                    src: 5,
+                    record: RecordTable::RightsSales,
                     id: rs.id,
                     event: "Rights sale/lapse".to_string(),
                     detail: format!(
@@ -520,7 +563,7 @@ impl Sources {
                 Proto {
                     date: r.effective_date,
                     rank: 1,
-                    src: 9,
+                    record: RecordTable::ListingRenames,
                     id: r.id,
                     event: "Ticker/exchange change".to_string(),
                     detail,
@@ -541,7 +584,7 @@ impl Sources {
                 let started = Proto {
                     date: e.enrolment_date,
                     rank: 1,
-                    src: 6,
+                    record: RecordTable::DrpEnrolments,
                     id: e.id,
                     event: "DRP enrolment".to_string(),
                     detail: format!("residual handling: {:?}", e.residual_handling),
@@ -553,7 +596,7 @@ impl Sources {
                 let ended = e.unenrolment_date.map(|end| Proto {
                     date: end,
                     rank: 1,
-                    src: 6,
+                    record: RecordTable::DrpEnrolments,
                     id: e.id,
                     event: "DRP unenrolment".to_string(),
                     detail: format!("enrolled since {}", e.enrolment_date),
@@ -581,7 +624,7 @@ impl Sources {
                 Ok(Proto {
                     date: e.date_incurred,
                     rank: 1,
-                    src: 7,
+                    record: RecordTable::InvestmentExpenses,
                     id: e.id,
                     event: "Investment expense".to_string(),
                     detail,
@@ -625,7 +668,7 @@ impl Sources {
                 Ok(Proto {
                     date: t.date,
                     rank: 2,
-                    src: 8,
+                    record: RecordTable::Trades,
                     id: t.id,
                     event: trade_event(t, &fee_sale_ids),
                     detail: format!("{} @ {} {}", t.quantity, t.average_price, t.currency),
@@ -643,7 +686,7 @@ impl Sources {
 /// units-held balance that a split/bonus re-bases in place before the day's
 /// trades (TD 2000/10).
 fn ledger(mut rows: Vec<Proto>) -> Vec<ActivityEvent> {
-    rows.sort_by_key(|r| (r.date, r.rank, r.src, r.id));
+    rows.sort_by_key(|r| (r.date, r.rank, r.record, r.id));
     let mut balance = Decimal::ZERO;
     rows.into_iter()
         .map(|r| {
@@ -661,6 +704,8 @@ fn ledger(mut rows: Vec<Proto>) -> Vec<ActivityEvent> {
                 quantity: r.quantity,
                 units_after: balance,
                 amount_aud: r.amount_aud,
+                record_table: r.record,
+                record_id: r.id,
             }
         })
         .collect()
@@ -1006,6 +1051,11 @@ mod tests {
         assert_eq!(events[2].units_after, dec("200"));
         assert_eq!(events[2].amount_aud, Some(dec("70")));
         assert!(events[2].detail.contains("franking credits 30"));
+        assert_eq!(events[2].record_table, RecordTable::Income);
+        assert_eq!(
+            (events[3].record_table, events[3].record_id),
+            (RecordTable::Trades, 2)
+        );
         // The sell is signed and in its own date's (post-split) units.
         assert_eq!(events[3].quantity, Some(dec("-80")));
         assert_eq!(events[3].units_after, dec("120"));
@@ -1063,6 +1113,11 @@ mod tests {
             "40 unit(s) from account 'Default' to account 'Personal'"
         );
         assert_eq!(events[1].quantity, None);
+        assert_eq!(
+            (events[1].record_table, events[1].record_id),
+            (RecordTable::Transfers, 1),
+            "the collapsed row names the transfer, not one of its trades"
+        );
         assert_eq!(
             events[1].units_after,
             dec("100"),
@@ -1311,6 +1366,31 @@ mod tests {
                 .iter()
                 .all(|e| e.event == "Buy" || e.quantity.is_none())
         );
+        // Every row names the record it was read from, which the web UI's
+        // Event cell opens.
+        let record = |name: &str| {
+            let e = by_event(name);
+            (e.record_table, e.record_id)
+        };
+        assert_eq!(record("Buy"), (RecordTable::Trades, 1));
+        assert_eq!(
+            record("Return of capital"),
+            (RecordTable::CorporateActions, 1)
+        );
+        assert_eq!(record("Rights issue"), (RecordTable::CorporateActions, 2));
+        assert_eq!(record("AMMA statement"), (RecordTable::AmmaStatements, 1));
+        assert_eq!(record("ESS statement"), (RecordTable::EssStatements, 1));
+        assert_eq!(record("DRP enrolment"), (RecordTable::DrpEnrolments, 1));
+        assert_eq!(record("DRP unenrolment"), (RecordTable::DrpEnrolments, 1));
+        assert_eq!(
+            record("Investment expense"),
+            (RecordTable::InvestmentExpenses, 1)
+        );
+        assert_eq!(
+            serde_json::to_value(RecordTable::AmmaStatements).unwrap(),
+            "amma_statements",
+            "serialised as the table name the UI's link map keys on"
+        );
     }
 
     /// The AMMA row's FY label is `domain::tax_year::tax_year_for`'s reading of
@@ -1503,6 +1583,7 @@ mod tests {
             .find(|r| r.event == "Ticker/exchange change")
             .expect("rename event present");
         assert_eq!(rename_row.date, ymd(2024, 6, 1));
+        assert_eq!(rename_row.record_table, RecordTable::ListingRenames);
         assert!(
             rename_row.detail.contains("LAAC -> LAR"),
             "detail: {}",

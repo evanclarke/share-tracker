@@ -484,6 +484,30 @@ function ownerRecordHref(row) {
   return '#/record/' + row.owner_field + '/' + row.owner_id;
 }
 
+// The Listing Activity ledger's Event cell opens the record the row was read
+// from (`record_table`/`record_id`), on the screen that edits it. A trade goes
+// through `#/record/` so a Sell lands on the Sells screen with its
+// allocations; a transfer and a rights sale have no edit form (both are
+// deleted and re-run), so they open their list; a rename opens the listing's
+// rename chain, named by the response's own `listing_id`.
+const ACTIVITY_RECORD_ROUTES = {
+  trades: function (id) { return '#/record/trade_id/' + id; },
+  transfers: function () { return '#/transfers'; },
+  income: function (id) { return '#/e/income/edit/' + id; },
+  corporate_actions: function (id) { return '#/e/corporate_actions/edit/' + id; },
+  amma_statements: function (id) { return '#/e/amma_statements/edit/' + id; },
+  ess_statements: function (id) { return '#/e/ess_statements/edit/' + id; },
+  rights_sales: function () { return '#/e/rights_sales'; },
+  drp_enrolments: function (id) { return '#/e/drp_enrolments/edit/' + id; },
+  investment_expenses: function (id) { return '#/e/investment_expenses/edit/' + id; },
+  listing_renames: function (id, response) { return '#/renames/' + response.listing_id; },
+};
+
+function activityRecordHref(row, response) {
+  const route = ACTIVITY_RECORD_ROUTES[row.record_table];
+  return route ? route(row.record_id, response) : null;
+}
+
 export const REPORTS = [
   {
     slug: 'overview', title: 'Portfolio Overview', api: '/portfolio/overview', method: 'POST', prices: true, asOfDate: true, performancePanel: true,
@@ -535,7 +559,7 @@ export const REPORTS = [
   {
     slug: 'activity', title: 'Listing Activity', api: '/portfolio/activity', method: 'GET',
     menu: 'Reports', section: 'Portfolio',
-    desc: 'One listing, laid out like the Portfolio Overview: its market-value or unrealised-gain graph over a selectable date range, then the holding summary per account (units held, cost base, market value), then everything ever recorded against it, newest first — trades labelled with the operation that created them, transfers, income, corporate actions, statements — each with the units held after it, so the top row is the holding as it stands. Sort the Date column to read it forwards.',
+    desc: 'One listing, laid out like the Portfolio Overview: its market-value or unrealised-gain graph over a selectable date range, then the holding summary per account (units held, cost base, market value), then everything ever recorded against it, newest first — trades labelled with the operation that created them, transfers, income, corporate actions, statements — each with the units held after it, so the top row is the holding as it stands. Click an Event to open that record. Sort the Date column to read it forwards.',
     params: [
       fk('listing_id', 'Listing', 'listings', { required: true }),
       dec('price', 'Current price per unit (AUD)', { optional: true, default: '', hint: 'Blank = the live price from the price source; a fetch failure leaves the summary unvalued (never zero).' }),
@@ -548,7 +572,13 @@ export const REPORTS = [
     paramsPanel: { fields: ['price'], after: 'holdings', summary: 'Manual Price Override' },
     tables: [
       { key: 'holdings', title: 'Holding summary' },
-      { key: 'events', title: 'Activity' },
+      {
+        key: 'events', title: 'Activity',
+        // record_table/record_id say which record the row is; they drive the
+        // Event link rather than taking columns of their own.
+        columns: ['date', 'event', 'detail', 'holding_account_id', 'quantity', 'units_after', 'amount_aud'],
+        links: { event: activityRecordHref },
+      },
     ],
   },
   {

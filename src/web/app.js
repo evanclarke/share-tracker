@@ -453,7 +453,14 @@ async function dataTable(rows, cfg) {
   };
   // `links` adds drill-downs to the derived listing links rather than
   // replacing them (filterableTable's own `opts.links` replaces outright).
-  if (cfg.links) opts.links = Object.assign(columnLinks(cols, cfg.selfRoute), cfg.links);
+  // Each is called as `(row, context)`, so a `tables` entry's link can read
+  // the response it sits in (the activity ledger's rows name no listing; the
+  // response does).
+  if (cfg.links) {
+    const extra = {};
+    for (const c in cfg.links) extra[c] = function (row) { return cfg.links[c](row, cfg.context); };
+    opts.links = Object.assign(columnLinks(cols, cfg.selfRoute), extra);
+  }
   if (expandCfg) opts.expand = buildExpand(expandCfg, labels, cfg.context, cfg.selfRoute);
   // The Actions column appears only where some row actually has an action:
   // a report answering rows of more than one shape (Row History, whose browse
@@ -3037,7 +3044,7 @@ async function viewReport(report, args, seq = navigationToken()) {
         // main report, not the hypothetical dry-run).
         result.appendChild(await dataTable(arr, {
           columns: t.columns, statusField: report.statusField, expand: t.expand, context: rows,
-          rowActions: report.rowActions, links: report.links, selfRoute: selfRoute,
+          rowActions: report.rowActions, links: t.links || report.links, selfRoute: selfRoute,
         }));
         // The collapsed params panel sits under the table `paramsPanel.after`
         // names — the price override below the holding summary it re-values,

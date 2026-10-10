@@ -2953,7 +2953,7 @@ mod tests {
         assert!(js.contains("if (cmp === 0) cmp = given.get(a) - given.get(b);"));
         let config = body_string(get("/static/config.js").await).await;
         assert!(!config.contains("keepOrder"));
-        assert!(config.contains("{ key: 'events', title: 'Activity' }"));
+        assert!(config.contains("key: 'events', title: 'Activity',"));
     }
 
     /// A numeric column sorts through the exact decimal-string comparator
@@ -3191,7 +3191,7 @@ mod tests {
         // than a bespoke view.
         let config = body_string(get("/static/config.js").await).await;
         let holdings = config.find("{ key: 'holdings', title: 'Holding summary' }");
-        let events = config.find("{ key: 'events', title: 'Activity' }");
+        let events = config.find("key: 'events', title: 'Activity',");
         assert!(holdings.is_some() && events.is_some());
         assert!(holdings < events, "the holding summary is above the ledger");
         assert!(config.contains("chart: 'listing_id'"));
@@ -3213,6 +3213,34 @@ mod tests {
         // the body a run submits is read from whichever form holds the field.
         assert!(js.contains("report.paramsPanel.after === t.key"));
         assert!(js.contains("readFieldValue(f, fieldOwner(f))"));
+    }
+
+    /// Each ledger row's Event cell opens the record it was read from: every
+    /// table the report reads a row from has a route in config.js's
+    /// `ACTIVITY_RECORD_ROUTES`, keyed by the name the API serialises it as,
+    /// and the events table links its `event` column through it.
+    #[tokio::test]
+    async fn listing_activity_events_link_to_their_records() {
+        let config = body_string(get("/static/config.js").await).await;
+        let start = config
+            .find("const ACTIVITY_RECORD_ROUTES = {")
+            .expect("the record route map");
+        let map = &config[start..start + config[start..].find("\n};").unwrap()];
+        for table in crate::reports::activity::RecordTable::ALL {
+            let key = serde_json::to_value(table).unwrap();
+            let key = key.as_str().unwrap();
+            assert!(
+                map.contains(&format!("\n  {key}: function")),
+                "no Listing Activity route for record_table {key}"
+            );
+        }
+        assert!(config.contains("links: { event: activityRecordHref }"));
+        // A Sell opens on the Sells screen, via the owner-record resolver.
+        assert!(map.contains("'#/record/trade_id/' + id"));
+        // The link is handed the response so a rename can name its listing.
+        let js = app_js_body().await;
+        assert!(js.contains("links: t.links || report.links"));
+        assert!(js.contains("return cfg.links[c](row, cfg.context);"));
     }
 
     #[tokio::test]
