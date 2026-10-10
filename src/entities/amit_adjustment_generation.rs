@@ -354,7 +354,7 @@ pub async fn db_generate(
 
     // Parcels either side of a split reach the year end on different unit
     // bases, and that is fine: the statement's per-unit figure is per unit as
-    // the statement year saw them, and `amit_adjustment::reduction_for`
+    // the statement year saw them, and `domain::cost_base::reduction_for`
     // re-bases each parcel's stored as-acquired quantity into that basis
     // before multiplying. Splits are still needed here to store each
     // quantity in the parcel's own as-acquired basis.
@@ -1043,7 +1043,7 @@ mod tests {
 
         // 100 units × 50c — the post-split 200 units never enter it.
         let mut conn = pool.acquire().await.unwrap();
-        let events = amit_adjustment::db_cost_base_reduction_events(&mut conn, None)
+        let events = crate::domain::cost_base::db_cost_base_reduction_events(&mut conn, None)
             .await
             .unwrap();
         let stated: Decimal = events[&1].iter().map(|e| e.amount()).sum();
@@ -1054,7 +1054,7 @@ mod tests {
     /// leaves the parcels on different unit bases at that date — which is the
     /// basis the statement's per-unit figure is stated in. Both are covered,
     /// each stored in its own as-acquired units, and the **money** is right
-    /// on each because `amit_adjustment::reduction_for` re-bases the stored
+    /// on each because `domain::cost_base::reduction_for` re-bases the stored
     /// quantity into the year-end basis before multiplying. (Asserting only
     /// the quantities is what let SCENARIOS B-24 through: the counts
     /// reconciled while the reductions were halved.)
@@ -1144,7 +1144,7 @@ mod tests {
         // units are 200 units at the year end, so $100 — not the $50 a naive
         // quantity × per-unit multiplication gives.
         let mut conn = pool.acquire().await.unwrap();
-        let events = amit_adjustment::db_cost_base_reduction_events(&mut conn, None)
+        let events = crate::domain::cost_base::db_cost_base_reduction_events(&mut conn, None)
             .await
             .unwrap();
         let stated =

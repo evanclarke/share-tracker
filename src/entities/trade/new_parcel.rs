@@ -4,7 +4,7 @@
 //!
 //! Six paths construct a Buy (or a DRP) on the taxpayer's behalf: the
 //! scrip-for-scrip exchange, demerger and holding-account transfer replacement
-//! Buys (`domain::rollover::insert_replacement_buy`), the ESS vest, the rights
+//! Buys (`entities::rollover::insert_replacement_buy`), the ESS vest, the rights
 //! exercise, the inherited parcel and the DRP reinvestment. They differ in
 //! which figures they carry and which record they point back to, and agree on
 //! everything else — the row is dated and settled on one stated date, carries

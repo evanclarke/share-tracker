@@ -2762,60 +2762,6 @@ mod tests {
         routes
     }
 
-    /// Blank `#[cfg(test)] mod …{ … }` blocks, so a route registered by a
-    /// test (the panic layer's `/boom`) is not mistaken for a served one.
-    ///
-    /// Blanked byte-for-byte, like [`crate::test_support::code_only`] (which
-    /// the handler scans compose over this): a caller that finds a token in the
-    /// result reads the surrounding source out of the raw text at the same
-    /// offset, and the route path it wants is a string literal only the raw
-    /// text still has.
-    fn strip_test_modules(source: &str) -> String {
-        let bytes = source.as_bytes();
-        let mut out = String::with_capacity(source.len());
-        let mut i = 0;
-        while i < bytes.len() {
-            if source[i..].starts_with("#[cfg(test)]")
-                && let Some(brace) = source[i..].find('{')
-            {
-                let between = &source[i..i + brace];
-                if between.contains("mod ") && !between.contains(';') {
-                    let mut depth = 0i32;
-                    let mut j = i + brace;
-                    while j < bytes.len() {
-                        match bytes[j] {
-                            b'{' => depth += 1,
-                            b'}' => {
-                                depth -= 1;
-                                if depth == 0 {
-                                    j += 1;
-                                    break;
-                                }
-                            }
-                            _ => {}
-                        }
-                        j += 1;
-                    }
-                    for c in source[i..j].chars() {
-                        if c == '\n' {
-                            out.push('\n');
-                        } else {
-                            for _ in 0..c.len_utf8() {
-                                out.push(' ');
-                            }
-                        }
-                    }
-                    i = j;
-                    continue;
-                }
-            }
-            let ch = source[i..].chars().next().expect("a char boundary");
-            out.push(ch);
-            i += ch.len_utf8();
-        }
-        out
-    }
-
     /// Every `.rs` file under `src`, path relative to `src`.
     fn source_files() -> Vec<(String, String)> {
         let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -2870,7 +2816,7 @@ mod tests {
         ];
         let mut found = Vec::new();
         for (file, raw) in source_files() {
-            let body = strip_test_modules(&raw);
+            let body = crate::test_support::strip_test_modules(&raw);
             let mut rest = body.as_str();
             while let Some(at) = rest.find(&needle) {
                 rest = &rest[at + needle.len()..];
@@ -3476,7 +3422,9 @@ mod tests {
             // Test modules blanked first (the panic layer's `/boom` is not a
             // served route), then comments and string literals — both
             // byte-for-byte, so an offset into `code` is an offset into `raw`.
-            let code = std::rc::Rc::new(crate::test_support::code_only(&strip_test_modules(&raw)));
+            let code = std::rc::Rc::new(crate::test_support::code_only(
+                &crate::test_support::strip_test_modules(&raw),
+            ));
             let needle = format!(".{}(", "route");
             let mut at = 0;
             while let Some(found) = code[at..].find(&needle) {

@@ -37,6 +37,7 @@ pub mod price_alert;
 pub mod rba_fx_rate;
 pub mod rights_exercise;
 pub mod rights_sale;
+pub mod rollover;
 pub mod scrip_exchange;
 pub mod sell;
 pub mod tax_year_settings;

@@ -530,7 +530,7 @@ pub fn router() -> Router<SqlitePool> {
 /// exactly like any other trust's. Dropping them because the fund is an AMIT
 /// *now* would silently delete a year of income from the return (SCENARIOS
 /// F-23). The year is the row's [`Income::assessment_date`] year, judged by
-/// [`listing::amit_in_tax_year`](crate::entities::listing::amit_in_tax_year).
+/// [`tax_year::amit_in_tax_year`](crate::domain::tax_year::amit_in_tax_year).
 ///
 /// The tax summary's totals, the annual tax report's printed rows and the
 /// franking loader's candidate dividends all read through this, so the three
@@ -548,7 +548,7 @@ pub async fn db_assessable_cash_income(
     let mut assessable = Vec::with_capacity(rows.len());
     for row in &rows {
         let income = Income::from_row(row)?;
-        let amit_year = crate::entities::listing::amit_in_tax_year(
+        let amit_year = crate::domain::tax_year::amit_in_tax_year(
             row.try_get("listing_amit")?,
             row.try_get("listing_amit_from")?,
             crate::domain::tax_year::tax_year_for(income.assessment_date()),
@@ -949,9 +949,9 @@ async fn write(
     // A fund that converted mid-history is an AMIT only from its first AMIT
     // income year: the pre-conversion years' rows are ordinary trust
     // distributions, notional components and tax-deferred amounts included
-    // (SCENARIOS F-23). `listing::amit_in_tax_year` is the shared rule.
+    // (SCENARIOS F-23). `domain::tax_year::amit_in_tax_year` is the shared rule.
     let row_is_amit = listing_amit.is_some_and(|(amit, amit_from)| {
-        crate::entities::listing::amit_in_tax_year(
+        crate::domain::tax_year::amit_in_tax_year(
             amit,
             amit_from,
             crate::domain::tax_year::tax_year_for(income.assessment_date()),

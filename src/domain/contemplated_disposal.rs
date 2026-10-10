@@ -46,9 +46,8 @@ use std::collections::HashMap;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 
+use crate::domain::adjustments::{self, RocEvent, SplitEvent};
 use crate::domain::cost_base::{self, AmitReductionEvent, ParcelRow};
-use crate::entities::amit_adjustment;
-use crate::entities::corporate_action::{self, RocEvent, SplitEvent};
 use crate::infra::fx::FxRates;
 
 /// The reference data a contemplated disposal is costed against — the same
@@ -73,9 +72,9 @@ pub struct Costing {
 impl Costing {
     pub async fn load(conn: &mut sqlx::SqliteConnection) -> Result<Self, sqlx::Error> {
         Ok(Costing {
-            amit: amit_adjustment::db_cost_base_reduction_events(&mut *conn, None).await?,
-            roc: corporate_action::db_return_of_capital_events(&mut *conn).await?,
-            splits: corporate_action::db_share_split_events(&mut *conn).await?,
+            amit: crate::domain::cost_base::db_cost_base_reduction_events(&mut *conn, None).await?,
+            roc: adjustments::db_return_of_capital_events(&mut *conn).await?,
+            splits: adjustments::db_share_split_events(&mut *conn).await?,
             fx: FxRates::load(&mut *conn).await?,
         })
     }
@@ -97,7 +96,7 @@ impl Costing {
     ) -> Result<Decimal, sqlx::Error> {
         let splits = self.splits.get(&parcel.listing_id).map_or(&[][..], |v| v);
         let units_acquired =
-            corporate_action::as_acquired_quantity(units, splits, parcel.date, sale_date);
+            adjustments::as_acquired_quantity(units, splits, parcel.date, sale_date);
         let amit = events_with_disposal(
             self.amit.get(&parcel.id).map_or(&[][..], |v| v),
             units_acquired,
@@ -125,7 +124,7 @@ impl Costing {
 /// `units_acquired` as-acquired units on `sale_date` has been recorded: the
 /// units join `disposed_by_year_end` for every statement whose year end the
 /// sale falls on or before, which is the same boundary
-/// `amit_adjustment::db_cost_base_reduction_events` counts the recorded
+/// `crate::domain::cost_base::db_cost_base_reduction_events` counts the recorded
 /// allocations on (`sale_date <= tax_year_end_date`).
 fn events_with_disposal(
     events: &[AmitReductionEvent],

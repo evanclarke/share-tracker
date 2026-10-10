@@ -693,7 +693,7 @@ async fn write(
             crate::entities::corporate_action::db_splits_for_listing(&mut *tx, trade.listing_id)
                 .await?;
         let allocated_total = crate::entities::corporate_action::sold_in_acquired_units(
-            crate::entities::parcel_allocation::db_parcel_sales(&mut tx, id).await?,
+            crate::domain::open_parcels::db_parcel_sales(&mut tx, id).await?,
             &splits,
             trade.date,
         );

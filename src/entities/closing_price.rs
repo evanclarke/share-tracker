@@ -67,7 +67,7 @@
 //!
 //! - **Which corporate actions restate the price series** — the set is a
 //!   strict *superset* of the actions that re-base quantities
-//!   (`corporate_action::adjustments`, whose module docs carry the same
+//!   (`domain::adjustments`, whose module docs carry the same
 //!   statement from the other side, and whose separate
 //!   [`PriceBasisEvent`](crate::entities::corporate_action::PriceBasisEvent)
 //!   type keeps the two apart at every call site):

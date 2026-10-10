@@ -51,8 +51,8 @@
 //! crystallise a capital loss (the law does not allow rolling over a loss).
 
 use crate::domain::cost_base;
-use crate::domain::rollover;
 use crate::entities::corporate_action::{self, ActionKind};
+use crate::entities::rollover;
 use crate::entities::sell::{self, AllocationInput};
 use crate::entities::trade::{self, Trade};
 use crate::infra::db::{WriteMode, write_tx};

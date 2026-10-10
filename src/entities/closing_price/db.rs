@@ -242,7 +242,7 @@ fn observation_date(fetched_at: &str) -> Result<NaiveDate, sqlx::Error> {
 /// Every event that restated the provider's **price** series for one listing:
 /// its `ShareSplit`/`BonusIssue` ratios, plus a derived factor for each
 /// `Demerger` that carries a stated pre-demerger close (module docs, and
-/// `corporate_action::adjustments` for why this is a different set from the
+/// `domain::adjustments` for why this is a different set from the
 /// quantity one).
 ///
 /// A split states its own factor. A demerger does not — the provider's

@@ -128,16 +128,19 @@
 //! `ActionKind` is the extension point for future corporate actions, each
 //! widening the enum and its CHECK.
 
-mod adjustments;
 mod db;
 mod http;
 mod model;
 
-pub use adjustments::{
-    PriceBasisEvent, RocEvent, RolloverOrigin, SplitEvent, as_acquired_quantity,
-    checked_as_acquired_quantity, contemporaneous_price, db_demerger_price_statements,
-    db_payment_currency_conflict, db_return_of_capital_events, db_share_split_events,
-    db_splits_for_listing, sold_in_acquired_units, split_adjusted_quantity,
+/// The cost-base/quantity adjustment events derived from corporate actions
+/// live in `domain::adjustments` — the cost-base pipeline reads them, and
+/// `domain` depends on nothing in `entities` — and are re-exported here so the
+/// entity's callers keep one path to everything about a corporate action.
+pub use crate::domain::adjustments::{
+    PriceBasisEvent, RocEvent, SplitEvent, as_acquired_quantity, checked_as_acquired_quantity,
+    contemporaneous_price, db_demerger_price_statements, db_payment_currency_conflict,
+    db_return_of_capital_events, db_share_split_events, db_splits_for_listing,
+    sold_in_acquired_units, split_adjusted_quantity,
 };
 /// The list route's filter type — `api_spec` reads its fields through
 /// `utoipa::IntoParams` so the OpenAPI document's query parameters come from
@@ -163,7 +166,7 @@ pub use db::{DeleteError, WriteError, db_delete, db_get, db_list, db_upsert};
 /// [`RocEvent::per_unit_for`] for a payment) — so the re-export is test-gated
 /// for its own unit tests, keeping the non-test build warning-free.
 #[cfg(test)]
-pub use adjustments::split_ratio;
+pub use crate::domain::adjustments::split_ratio;
 
 #[cfg(test)]
 use crate::infra::http::Upsert;
@@ -1387,7 +1390,7 @@ mod tests {
                 .expect("same currency")
         };
 
-        let transfer = RolloverOrigin {
+        let transfer = crate::domain::adjustments::RolloverOrigin {
             on: operation,
             registered_from: acquired,
         };
@@ -1397,7 +1400,7 @@ mod tests {
         );
 
         // A scrip exchange's replacement: registered only from the operation.
-        let scrip = RolloverOrigin {
+        let scrip = crate::domain::adjustments::RolloverOrigin {
             on: operation,
             registered_from: operation,
         };
@@ -2736,7 +2739,7 @@ mod tests {
     /// Re-denominate a parcel the way a **rollover** does: a scrip-for-scrip
     /// or demerger replacement Buy carries its consumed parcel's currency and
     /// FX rate onto the new listing, so the carried cost base is unchanged by
-    /// the substitution (`domain::rollover::insert_replacement_buy`, which
+    /// the substitution (`entities::rollover::insert_replacement_buy`, which
     /// writes the row itself). That is the one writer that can leave a parcel
     /// in a currency other than its listing's — `trade::db_upsert` refuses the
     /// pair (SCENARIOS M-08) — and it is exactly the state this check exists

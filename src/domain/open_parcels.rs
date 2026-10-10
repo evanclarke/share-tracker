@@ -37,8 +37,8 @@ use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use sqlx::Row;
 
+use crate::domain::adjustments;
 use crate::domain::cost_base::{self, CostBase, ParcelRow};
-use crate::entities::corporate_action;
 use crate::infra::date::{as_of_or_open, as_of_or_today};
 use crate::infra::decimal::parse_dec;
 use crate::infra::fx::FxRates;
@@ -84,7 +84,7 @@ pub struct UnitsConsumed {
     pub quantity: Decimal,
     /// False for a rollover's closing Sell — a transfer's, a scrip-for-scrip
     /// exchange's or a demerger's, the trades carrying a
-    /// `rollover::Provenance` column.
+    /// `entities::rollover::Provenance` column.
     pub disposal: bool,
 }
 
@@ -100,7 +100,7 @@ impl UnitsConsumed {
 /// Units allocated out of each purchase parcel by a Sell on or before
 /// `as_of`, keyed by `purchase_trade_id` and carrying each sale's date: the
 /// allocated quantity is in *sale-date* units, so a caller must re-base it to
-/// the parcel's as-acquired basis (`corporate_action::sold_in_acquired_units`,
+/// the parcel's as-acquired basis (`adjustments::sold_in_acquired_units`,
 /// or `as_acquired_quantity` per sale where the sale date matters on its own)
 /// rather than subtracting it directly. `None` bounds nothing. Every
 /// consumption tallies — a rollover's closing Sell (a transfer's, a
@@ -181,11 +181,11 @@ pub async fn load(
     // after `as_of` excluded — the adjustment arises at its statement's year
     // end).
     let amit_events =
-        crate::entities::amit_adjustment::db_cost_base_reduction_events(&mut *conn, as_of).await?;
+        crate::domain::cost_base::db_cost_base_reduction_events(&mut *conn, as_of).await?;
     // Return-of-capital payments (CGT event G1) per listing.
-    let roc_events = corporate_action::db_return_of_capital_events(&mut *conn).await?;
+    let roc_events = adjustments::db_return_of_capital_events(&mut *conn).await?;
     // Share splits/consolidations per listing (quantity re-basing).
-    let split_events = corporate_action::db_share_split_events(&mut *conn).await?;
+    let split_events = adjustments::db_share_split_events(&mut *conn).await?;
     // Every imported ATO FX rate — the per-parcel conversion below is then a
     // map lookup, not one DB round-trip each.
     let fx = FxRates::load(&mut *conn).await?;
@@ -196,7 +196,7 @@ pub async fn load(
         // Cost-base arithmetic stays in the parcel's as-acquired units; each
         // sale's allocated quantity is re-based back across any splits
         // between acquisition and that sale.
-        let sold = corporate_action::sold_in_acquired_units(
+        let sold = adjustments::sold_in_acquired_units(
             qty_sold
                 .get(&parcel.id)
                 .map_or(&[][..], |v| v)
@@ -232,12 +232,8 @@ pub async fn load(
         // Reported in the unit basis of `as_of` (live view: current units,
         // after every recorded split) so it lines up with a price for that
         // date.
-        let remaining_as_of = corporate_action::split_adjusted_quantity(
-            remaining_as_acquired,
-            splits,
-            parcel.date,
-            as_of,
-        );
+        let remaining_as_of =
+            adjustments::split_adjusted_quantity(remaining_as_acquired, splits, parcel.date, as_of);
 
         open.push(OpenParcel {
             parcel,
@@ -246,6 +242,58 @@ pub async fn load(
         });
     }
     Ok(open)
+}
+
+/// Every allocation drawn on parcel `parcel_id`, as `(sale_date, quantity)`
+/// with the quantity in its own **sale date's** unit basis — re-base it to the
+/// parcel's as-acquired basis with `adjustments::sold_in_acquired_units`
+/// (TD 2000/10) before comparing it with the parcel's quantity.
+pub async fn db_parcel_sales(
+    conn: &mut sqlx::SqliteConnection,
+    parcel_id: i64,
+) -> Result<Vec<(NaiveDate, Decimal)>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT s.date AS sale_date, pa.quantity_allocated \
+         FROM parcel_allocations pa JOIN trades s ON s.id = pa.sale_trade_id \
+         WHERE pa.purchase_trade_id = ?",
+    )
+    .bind(parcel_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    rows.iter().map(sale_of).collect()
+}
+
+/// [`db_parcel_sales`] for every parcel at once, keyed by `purchase_trade_id`
+/// — narrowed to the parcels of one listing, or `None` for every listing.
+pub async fn db_sales_by_parcel(
+    conn: &mut sqlx::SqliteConnection,
+    listing_id: Option<i64>,
+) -> Result<HashMap<i64, Vec<(NaiveDate, Decimal)>>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT pa.purchase_trade_id, s.date AS sale_date, pa.quantity_allocated \
+         FROM parcel_allocations pa \
+         JOIN trades s ON s.id = pa.sale_trade_id \
+         JOIN trades p ON p.id = pa.purchase_trade_id \
+         WHERE ?1 IS NULL OR p.listing_id = ?1",
+    )
+    .bind(listing_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut sales: HashMap<i64, Vec<(NaiveDate, Decimal)>> = HashMap::new();
+    for row in &rows {
+        sales
+            .entry(row.try_get("purchase_trade_id")?)
+            .or_default()
+            .push(sale_of(row)?);
+    }
+    Ok(sales)
+}
+
+fn sale_of(row: &sqlx::sqlite::SqliteRow) -> Result<(NaiveDate, Decimal), sqlx::Error> {
+    Ok((
+        row.try_get("sale_date")?,
+        parse_dec("quantity_allocated", row.try_get("quantity_allocated")?)?,
+    ))
 }
 
 #[cfg(test)]

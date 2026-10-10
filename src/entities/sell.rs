@@ -655,7 +655,7 @@ pub async fn db_create_sell(
 
 /// Which operation created a server-created Sell: the `trades` column linking
 /// it back to the row that did, so the group can be found, frozen and deleted
-/// as one. The twin of [`domain::rollover::Provenance`](crate::domain::rollover::Provenance),
+/// as one. The twin of [`rollover::Provenance`](crate::entities::rollover::Provenance),
 /// which does the same job for the replacement *Buys* — this side has two more
 /// variants, since a buy-back participation and a worthless-shares recognise
 /// close parcels without substituting any.
@@ -967,8 +967,7 @@ pub(crate) async fn upsert_sell_in_tx(
             crate::entities::corporate_action::db_splits_for_listing(&mut *tx, purchase_listing)
                 .await?;
         let total = crate::entities::corporate_action::sold_in_acquired_units(
-            crate::entities::parcel_allocation::db_parcel_sales(&mut *tx, alloc.purchase_trade_id)
-                .await?,
+            crate::domain::open_parcels::db_parcel_sales(&mut *tx, alloc.purchase_trade_id).await?,
             &splits,
             purchase_date,
         );

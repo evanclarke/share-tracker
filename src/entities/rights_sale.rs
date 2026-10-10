@@ -414,7 +414,7 @@ async fn parcel_units_at_record_date(
     let parcel_qty = parse_dec("quantity", parcel.try_get("quantity")?)?;
 
     // Only the sales before the record date reduce the units it entitled.
-    let sold = crate::entities::parcel_allocation::db_parcel_sales(&mut *conn, purchase_trade_id)
+    let sold = crate::domain::open_parcels::db_parcel_sales(&mut *conn, purchase_trade_id)
         .await?
         .into_iter()
         .filter(|&(sale_date, _)| sale_date < anchoring.record_date);

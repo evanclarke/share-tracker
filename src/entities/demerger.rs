@@ -52,8 +52,8 @@
 //! separate capital returns, and registry cash-in-lieu of fractional
 //! entitlements (the demerge keeps exact fractional unit counts).
 
-use crate::domain::rollover;
 use crate::entities::corporate_action::{self, ActionKind};
+use crate::entities::rollover;
 use crate::entities::sell::{self, AllocationInput};
 use crate::entities::trade::{self, Trade};
 use crate::infra::db::{WriteMode, write_tx};

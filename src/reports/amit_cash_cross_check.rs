@@ -1,6 +1,5 @@
-use crate::domain::tax_year::tax_year_for;
+use crate::domain::tax_year::{amit_in_tax_year, tax_year_for};
 use crate::entities::income::Income;
-use crate::entities::listing;
 use crate::infra::extract::Json;
 use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
@@ -106,7 +105,7 @@ pub async fn db_amit_cash_alerts(pool: &SqlitePool) -> Result<Vec<AmitCashAlert>
         // the tax summary as such (SCENARIOS F-23). The `l.amit` filter above
         // narrows to listings that are an AMIT at all; this is the year-level
         // half of the same question.
-        if !listing::amit_in_tax_year(true, row.try_get("amit_from")?, tax_year) {
+        if !amit_in_tax_year(true, row.try_get("amit_from")?, tax_year) {
             continue;
         }
         if covered.contains(&(income.listing_id, income.holding_account_id, tax_year)) {

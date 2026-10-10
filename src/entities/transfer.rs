@@ -34,8 +34,8 @@
 //! A recorded transfer is immutable — delete it and re-transfer instead.
 
 use crate::domain::cost_base::ParcelRow;
-use crate::domain::rollover;
 use crate::entities::corporate_action::checked_as_acquired_quantity;
+use crate::entities::rollover;
 use crate::entities::sell::{self, AllocationInput};
 use crate::entities::trade::{self, Trade};
 use crate::infra::db::{WriteMode, write_tx};

@@ -167,8 +167,7 @@ async fn execute(
     .await?;
 
     let qty_sold =
-        crate::entities::parcel_allocation::db_sales_by_parcel(&mut tx, Some(action.listing_id))
-            .await?;
+        crate::domain::open_parcels::db_sales_by_parcel(&mut tx, Some(action.listing_id)).await?;
 
     let splits = corporate_action::db_splits_for_listing(&mut *tx, action.listing_id).await?;
 

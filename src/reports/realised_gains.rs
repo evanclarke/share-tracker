@@ -367,7 +367,7 @@ async fn load_report_data(conn: &mut sqlx::SqliteConnection) -> Result<ReportDat
     .await?;
 
     let cba_reduction =
-        crate::entities::amit_adjustment::db_cost_base_reduction_events(&mut *conn, None).await?;
+        crate::domain::cost_base::db_cost_base_reduction_events(&mut *conn, None).await?;
     let roc_events =
         crate::entities::corporate_action::db_return_of_capital_events(&mut *conn).await?;
     // share splits/consolidations per listing (quantity re-basing)

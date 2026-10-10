@@ -1,4 +1,3 @@
-use crate::domain::cost_base::AmitReductionEvent;
 use crate::domain::rollover;
 use crate::domain::tax_year::fy_start;
 use crate::entities::corporate_action;
@@ -15,7 +14,6 @@ use axum::{
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
-use std::collections::HashMap;
 
 #[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct AmitAdjustment {
@@ -26,7 +24,7 @@ pub struct AmitAdjustment {
     /// expressed in the parcel's *as-acquired* units (the same basis as
     /// `trade.quantity`, which caps it). A share split/consolidation between
     /// the parcel's acquisition and the statement's year end is handled by
-    /// [`reduction_for`], which re-bases this quantity into the statement
+    /// [`reduction_for`](crate::domain::cost_base::reduction_for), which re-bases this quantity into the statement
     /// year's basis before multiplying — enter the statement's per-unit figure
     /// exactly as the fund states it.
     ///
@@ -535,159 +533,6 @@ pub async fn db_upsert(
     Ok(upserted)
 }
 
-/// The cost-base reduction one AMMA statement applies to `quantity` units of
-/// one parcel — *the* place the two figures are multiplied, so no caller can
-/// pair them on mismatched unit bases. [`db_cost_base_reduction_events`] calls
-/// it with a single unit, since it stores the per-unit figure and lets the
-/// pipeline decide which units it reaches.
-///
-/// `quantity` is in the parcel's
-/// *as-acquired* basis (the basis `trades.quantity` caps), while the
-/// statement's per-unit `cost_base_adjustment` is stated per unit as the
-/// statement's own tax year saw them. A share split/consolidation or bonus
-/// issue between the parcel's acquisition and `tax_year_end_date` leaves those
-/// two on different bases, so the quantity is re-based into the year-end basis
-/// before multiplying (TD 2000/10: a split scales the unit count, never the
-/// parcel's cost base). This is the AMIT counterpart of
-/// [`corporate_action::RocEvent::per_unit_for`]'s re-basing of a
-/// return-of-capital payment.
-pub fn reduction_for(
-    quantity: Decimal,
-    cost_base_adjustment: Decimal,
-    splits: &[corporate_action::SplitEvent],
-    acquired: chrono::NaiveDate,
-    tax_year_end_date: chrono::NaiveDate,
-) -> Decimal {
-    // The re-basing runs in whichever direction the two dates sit. Ordinarily
-    // the parcel predates the year end and its units are scaled *forward* into
-    // the year-end basis. A **rollover replacement** parcel can postdate it
-    // (SCENARIOS N-06: an AMMA statement arrives after a transfer has moved the
-    // units it covers, and the reduction belongs on the parcel now holding
-    // them), and then the parcel's own basis is the later one — a split between
-    // the year end and the operation date has already scaled it — so the
-    // quantity is converted *back* to the year-end basis instead. Multiplying
-    // by 1 in that case, which a one-directional window would do, would apply
-    // the statement's per-unit figure to post-split units.
-    let in_year_end_basis = if acquired <= tax_year_end_date {
-        corporate_action::split_adjusted_quantity(
-            quantity,
-            splits,
-            acquired,
-            Some(tax_year_end_date),
-        )
-    } else {
-        corporate_action::as_acquired_quantity(quantity, splits, tax_year_end_date, acquired)
-    };
-    in_year_end_basis * cost_base_adjustment
-}
-
-/// Every AMMA statement adjusting a purchase parcel, keyed by `trade_id` — the
-/// [`AmitReductionEvent`] input the shared cost-base pipeline
-/// (`domain::cost_base::adjusted_cost_base` / `adjustment_detail`) and the
-/// net-capital-gain report's E10 walk all read. Sorted by `tax_year_end_date`
-/// (then statement id) within each trade, matching the year order those walks'
-/// running floor assumes.
-///
-/// `up_to` bounds the statements to years ending on or before it: an
-/// adjustment arises at its statement's year end, so a report valued as at an
-/// earlier date (a snapshot of a past day) must not include it. `None` = no
-/// bound.
-///
-/// Each event carries the statement's reduction **per as-acquired unit** and
-/// the units the adjustment row covers, rather than one pre-multiplied
-/// whole-parcel total, so the pipeline can apply it to the units the row
-/// actually covers (see [`AmitReductionEvent::per_unit_for`]) instead of
-/// pooling it across the parcel. `disposed_by_year_end` — the units of the
-/// parcel already sold when the statement's year ended — and `carried_out` —
-/// the units a rollover has moved into a replacement parcel, up to `up_to` —
-/// are what tell the groups apart, so the allocations are read here too
-/// (`domain::open_parcels::db_units_sold`, the shared allocations read).
-///
-/// Takes the caller's own connection so the scrip-for-scrip exchange
-/// (`entities::scrip_exchange`) and every report can run it inside their own
-/// transaction.
-pub async fn db_cost_base_reduction_events(
-    conn: &mut sqlx::SqliteConnection,
-    up_to: Option<chrono::NaiveDate>,
-) -> Result<HashMap<i64, Vec<AmitReductionEvent>>, sqlx::Error> {
-    let cutoff = crate::infra::date::as_of_or_open(up_to);
-    let splits = corporate_action::db_share_split_events(&mut *conn).await?;
-    let rows = sqlx::query(
-        "SELECT aa.trade_id, a.id AS amma_statement_id, a.tax_year_end_date, aa.quantity, \
-                a.cost_base_adjustment, t.listing_id, t.date AS trade_date \
-         FROM amit_adjustments aa \
-         JOIN amma_statements a ON a.id = aa.amma_statement_id \
-         JOIN trades t ON t.id = aa.trade_id \
-         WHERE a.tax_year_end_date <= ? \
-         ORDER BY aa.trade_id, a.tax_year_end_date, a.id",
-    )
-    .bind(cutoff)
-    .fetch_all(&mut *conn)
-    .await?;
-
-    if rows.is_empty() {
-        return Ok(HashMap::new());
-    }
-    // Every consumption, each tagged with whether it was a real disposal: the
-    // two kinds land in different groups of the held/spill split. A real
-    // disposal by the year end is "sold"; a rollover's closing Sell — a
-    // transfer above all — is an account move, not a disposal, so its units
-    // are "carried out" (`AmitReductionEvent::carried_out`) rather than either
-    // still held here or sold. Counting them as sold flipped a
-    // partial-coverage row's split onto an earlier real Sell; counting them
-    // as held diluted the units left behind by the ones that moved.
-    let consumed = crate::domain::open_parcels::db_units_sold(&mut *conn, up_to).await?;
-
-    let mut map: HashMap<i64, Vec<AmitReductionEvent>> = HashMap::new();
-    for row in &rows {
-        let trade_id: i64 = row.try_get("trade_id")?;
-        let listing_id: i64 = row.try_get("listing_id")?;
-        let amma_statement_id: i64 = row.try_get("amma_statement_id")?;
-        let tax_year_end_date: chrono::NaiveDate = row.try_get("tax_year_end_date")?;
-        let trade_date: chrono::NaiveDate = row.try_get("trade_date")?;
-        let covered = parse_dec("quantity", row.try_get("quantity")?)?;
-        let cba = parse_dec("cost_base_adjustment", row.try_get("cost_base_adjustment")?)?;
-        let splits = splits.get(&listing_id).map_or(&[][..], |v| v);
-        // Units of the parcel already disposed of when the statement's year
-        // ended, re-based back to the parcel's as-acquired basis (an
-        // allocation is in its own sale date's units).
-        let as_acquired = |c: &crate::domain::open_parcels::UnitsConsumed| {
-            corporate_action::as_acquired_quantity(c.quantity, splits, trade_date, c.date)
-        };
-        let consumed = consumed.get(&trade_id).map_or(&[][..], |v| v);
-        let disposed_by_year_end = consumed
-            .iter()
-            .filter(|c| c.disposal && c.date <= tax_year_end_date)
-            .map(as_acquired)
-            .sum();
-        // Of those, the units gone before the income year began: the
-        // statement's coverage never reaches them.
-        let year_start = fy_start(tax_year_end_date);
-        let disposed_before_year_start = consumed
-            .iter()
-            .filter(|c| c.disposal && c.date < year_start)
-            .map(as_acquired)
-            .sum();
-        // Whenever the move ran, up to the read's own cutoff: a view as at a
-        // date before the move still sees those units in this parcel.
-        let carried_out = consumed
-            .iter()
-            .filter(|c| !c.disposal)
-            .map(as_acquired)
-            .sum();
-        map.entry(trade_id).or_default().push(AmitReductionEvent {
-            amma_statement_id,
-            tax_year_end_date,
-            per_unit: reduction_for(Decimal::ONE, cba, splits, trade_date, tax_year_end_date),
-            covered,
-            disposed_by_year_end,
-            disposed_before_year_start,
-            carried_out,
-        });
-    }
-    Ok(map)
-}
-
 /// The row a request body describes. `id` is the path's on an upsert and
 /// ignored on a create (the database assigns one), so both entry points build
 /// their `AmitAdjustment` through this one mapping and cannot drift.
@@ -787,10 +632,12 @@ impl From<UpsertError> for ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::cost_base::{AmitReductionEvent, db_cost_base_reduction_events};
     use crate::entities::holding_account::{self, HoldingAccount};
     use crate::entities::sell::AllocationInput;
     use crate::entities::transfer::{self, TransferBody};
     use crate::test_support::{self, ApiClient, allocate, dec, test_pool, ymd};
+    use std::collections::HashMap;
 
     /// Client over this module's own routes.
     fn client(pool: &SqlitePool) -> ApiClient {
@@ -812,7 +659,7 @@ mod tests {
             .collect()
     }
 
-    /// [`db_cost_base_reduction_events`] over a pool-acquired connection
+    /// [`db_cost_base_reduction_events`](crate::domain::cost_base::db_cost_base_reduction_events) over a pool-acquired connection
     /// (reports call it on their own read transaction).
     async fn events(pool: &SqlitePool) -> HashMap<i64, Vec<AmitReductionEvent>> {
         let mut conn = pool.acquire().await.unwrap();

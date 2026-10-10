@@ -34,8 +34,7 @@
 //! so the archived document and the CSV can never disagree about where a
 //! figure goes (SCENARIOS P-08).
 
-use crate::entities::investment_expense::ExpenseType;
-use crate::entities::listing;
+use crate::domain::tax_year::amit_in_tax_year;
 use crate::infra::decimal::row_dec;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
@@ -72,15 +71,6 @@ impl DeductionDestination {
             Self::DividendAndInterest => "D7 / D8",
         }
     }
-}
-
-/// Is this expense kind a **debt deduction** — interest or borrowing costs?
-/// Only [`ExpenseType::LoanInterest`] is: it is the one type the enum defines
-/// as interest on borrowed money. A borrowing cost recorded as
-/// [`ExpenseType::Other`] is not distinguishable from any other "other"
-/// expense and follows the non-debt routing.
-fn is_debt_deduction(expense_type: ExpenseType) -> bool {
-    matches!(expense_type, ExpenseType::LoanInterest)
 }
 
 /// What a listing's recorded history says about the income an expense
@@ -150,8 +140,10 @@ impl DeductionRouting {
         Ok(Self { listings })
     }
 
-    /// The question an expense of `expense_type`, attributed to `listing_id`
-    /// and incurred in `tax_year`, is claimed at.
+    /// The question an expense attributed to `listing_id` and incurred in
+    /// `tax_year` is claimed at — `debt_deduction` being its kind's
+    /// [`ExpenseType::is_debt_deduction`](crate::entities::investment_expense::ExpenseType::is_debt_deduction),
+    /// the one fact about the expense the routing reads.
     ///
     /// Two cases are **not decidable** from what is recorded and take the
     /// D7/D8 default, which is where the ATO puts an ordinary share-investment
@@ -177,7 +169,7 @@ impl DeductionRouting {
     pub fn destination(
         &self,
         listing_id: Option<i64>,
-        expense_type: ExpenseType,
+        debt_deduction: bool,
         tax_year: i32,
     ) -> DeductionDestination {
         let Some(facts) = listing_id.and_then(|id| self.listings.get(&id)) else {
@@ -191,14 +183,14 @@ impl DeductionRouting {
         // route to 13Y. Reading the flag per year rather than flatly is what
         // keeps a converted fund's pre-conversion years from being described
         // as AMIT years here (SCENARIOS F-23, P-01/P-07).
-        let amit_year = listing::amit_in_tax_year(facts.amit, facts.amit_from, tax_year);
+        let amit_year = amit_in_tax_year(facts.amit, facts.amit_from, tax_year);
         let ordinary_trust_year = facts.amit && !amit_year;
         if amit_year || ordinary_trust_year || facts.trust_income {
             return DeductionDestination::TrustDistributions;
         }
 
         if facts.foreign_income || (!facts.any_income && facts.non_aud) {
-            return if is_debt_deduction(expense_type) {
+            return if debt_deduction {
                 DeductionDestination::ForeignDebt
             } else {
                 DeductionDestination::ForeignIncome
@@ -212,6 +204,7 @@ impl DeductionRouting {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entities::investment_expense::ExpenseType;
     use crate::test_support::{listing, test_pool};
 
     /// Every destination names the label it reports at, and no two share one
@@ -241,13 +234,21 @@ mod tests {
         let routing = DeductionRouting::load(&mut conn).await.unwrap();
         for listing_id in [None, Some(999)] {
             assert_eq!(
-                routing.destination(listing_id, ExpenseType::ManagementFee, 2026),
+                routing.destination(
+                    listing_id,
+                    ExpenseType::ManagementFee.is_debt_deduction(),
+                    2026
+                ),
                 DeductionDestination::DividendAndInterest
             );
             // Not even a debt deduction moves off the default: with no holding
             // to characterise, there is no foreign income to net it against.
             assert_eq!(
-                routing.destination(listing_id, ExpenseType::LoanInterest, 2026),
+                routing.destination(
+                    listing_id,
+                    ExpenseType::LoanInterest.is_debt_deduction(),
+                    2026
+                ),
                 DeductionDestination::DividendAndInterest
             );
         }

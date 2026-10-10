@@ -4,10 +4,10 @@
 //! and the matching delete-time guard for the three types that re-base or
 //! reduce parcels at read time instead of creating trades ([`DeleteError`]).
 
-use super::adjustments::{
+use super::model::{ActionKind, CorporateAction};
+use crate::domain::adjustments::{
     as_acquired_quantity, db_payment_currency_conflict, db_splits_for_listing,
 };
-use super::model::{ActionKind, CorporateAction};
 use crate::infra::db::write_tx;
 use crate::infra::decimal::{OptMoney, parse_dec};
 use crate::infra::http::{self, ApiError, CrudEntity, Upsert};
@@ -381,7 +381,8 @@ pub async fn rebased_quantity_beyond_range(
         let acquired: NaiveDate = row.try_get("acquired")?;
         let sale_date: NaiveDate = row.try_get("sale_date")?;
         let allocated = parse_dec("quantity_allocated", row.try_get("quantity_allocated")?)?;
-        let (new, old) = super::adjustments::split_ratio(&splits, acquired, Some(sale_date));
+        let (new, old) =
+            crate::domain::adjustments::split_ratio(&splits, acquired, Some(sale_date));
         if let Err(e) = crate::domain::cost_base::checked_rebased_quantity(
             ("quantity_allocated", allocated),
             ("old units", old),
@@ -680,9 +681,9 @@ async fn write(
         // through a holding paid its pre-conversion tax-deferred amounts as an
         // ordinary trust, and those years' E4 reductions must stay
         // recordable — and editable — after the flag goes on
-        // (SCENARIOS F-23). `listing::amit_in_tax_year` is the shared rule.
+        // (SCENARIOS F-23). `domain::tax_year::amit_in_tax_year` is the shared rule.
         let amit_year = amit.is_some_and(|(amit, amit_from)| {
-            crate::entities::listing::amit_in_tax_year(
+            crate::domain::tax_year::amit_in_tax_year(
                 amit,
                 amit_from,
                 crate::domain::tax_year::tax_year_for(action.date),
@@ -694,7 +695,7 @@ async fn write(
     }
 
     // A rollover of this listing that has already run froze the cost base and
-    // quantity its replacement parcels carry (`domain::rollover` stores both),
+    // quantity its replacement parcels carry (`entities::rollover` stores both),
     // so an event dated on or before it can no longer reach them while it does
     // still restate the parcels the operation consumed. Refused for the three
     // action types that retroactively restate a parcel — a return of capital

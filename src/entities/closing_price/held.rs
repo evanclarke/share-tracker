@@ -92,8 +92,7 @@ impl HeldTimeline {
         .await?;
 
         // sale-date-basis units allocated out of each purchase parcel
-        let qty_sold =
-            crate::entities::parcel_allocation::db_sales_by_parcel(&mut *conn, None).await?;
+        let qty_sold = crate::domain::open_parcels::db_sales_by_parcel(&mut *conn, None).await?;
 
         let split_events =
             crate::entities::corporate_action::db_share_split_events(&mut *conn).await?;

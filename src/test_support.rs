@@ -1436,6 +1436,62 @@ pub fn rust_sources() -> Vec<(String, String)> {
     found
 }
 
+/// Blank `#[cfg(test)] mod …{ … }` blocks, so a scan of production code does
+/// not read a test's own scaffolding — a route registered by a test (the panic
+/// layer's `/boom`) mistaken for a served one, or a test fixture's import
+/// mistaken for a layering violation (`domain`'s no-`entities` scan).
+///
+/// Blanked byte-for-byte, like [`crate::test_support::code_only`] (which
+/// the handler scans compose over this): a caller that finds a token in the
+/// result reads the surrounding source out of the raw text at the same
+/// offset, and the route path it wants is a string literal only the raw
+/// text still has.
+pub fn strip_test_modules(source: &str) -> String {
+    let bytes = source.as_bytes();
+    let mut out = String::with_capacity(source.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if source[i..].starts_with("#[cfg(test)]")
+            && let Some(brace) = source[i..].find('{')
+        {
+            let between = &source[i..i + brace];
+            if between.contains("mod ") && !between.contains(';') {
+                let mut depth = 0i32;
+                let mut j = i + brace;
+                while j < bytes.len() {
+                    match bytes[j] {
+                        b'{' => depth += 1,
+                        b'}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                j += 1;
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    j += 1;
+                }
+                for c in source[i..j].chars() {
+                    if c == '\n' {
+                        out.push('\n');
+                    } else {
+                        for _ in 0..c.len_utf8() {
+                            out.push(' ');
+                        }
+                    }
+                }
+                i = j;
+                continue;
+            }
+        }
+        let ch = source[i..].chars().next().expect("a char boundary");
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
 /// `source` with every comment and every string / char literal blanked out,
 /// **byte-for-byte**: the result has the same length and the same newlines, so
 /// a byte offset into it addresses the same place in the original — a scan can

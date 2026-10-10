@@ -157,10 +157,17 @@ app and trick a click on a delete or job button; the clicks are same-origin insi
 
 ## Architecture: domain↔entities cycle, mega-files, and conventions enforced by source scans (2026-10-10 review, maintainability)
 Scored 6/10 — the weakest dimension. The operation modules are well factored, but:
-- [ ] `domain` imports `entities` (`cost_base.rs` uses `corporate_action::{RocEvent, SplitEvent,
+- [x] `domain` imports `entities` (`cost_base.rs` uses `corporate_action::{RocEvent, SplitEvent,
   RolloverOrigin}`; `open_parcels`/`rollover`/`contemplated_disposal`/`deduction_destination` call
   entity db functions), so it is not a lower layer. Move the event types and their loaders into
   `domain` (or a repository layer) so `domain` depends on nothing in `entities`; a scan test pins it
+  — done 2026-10-10: `corporate_action/adjustments.rs` → `domain/adjustments.rs` (re-exported from
+  `corporate_action`); `reduction_for`/`db_cost_base_reduction_events` → `domain::cost_base`;
+  `db_parcel_sales`/`db_sales_by_parcel` → `domain::open_parcels`; `amit_in_tax_year` →
+  `domain::tax_year`; `deduction_destination` takes `debt_deduction: bool`
+  (`ExpenseType::is_debt_deduction`); rollover's write half → new `entities::rollover`. Pinned by
+  `domain::tests::domain_depends_on_nothing_in_entities` (`strip_test_modules` moved to
+  `test_support` to share it)
 - [ ] Split `reports/health.rs` (~3,300 prod lines, ~25 checks) into a `health/` directory by check
   family, and fold the ~10 `Duplicate*` checks (`same_x_entry` + `db_duplicate_x` pairs) into one
   generic duplicate detector — the existing health tests unchanged are the proof

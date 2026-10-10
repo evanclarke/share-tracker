@@ -169,7 +169,7 @@ pub enum ActionKind {
         /// whole pre-demerger series by a spin-off adjustment factor all the
         /// same, so without this every stored pre-demerger close is the
         /// current adjusted level (`entities::closing_price`,
-        /// [`PriceBasisEvent`](super::adjustments::PriceBasisEvent)).
+        /// [`PriceBasisEvent`](crate::domain::adjustments::PriceBasisEvent)).
         ///
         /// Optional: a demerger whose head listing has no fetched
         /// pre-demerger prices needs none, and an action recorded before this

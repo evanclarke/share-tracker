@@ -221,7 +221,7 @@ struct GrossBuckets {
 /// statement's adjustment row reaches only the units it covers.
 enum Reduction {
     /// An AMMA statement's AMIT cost-base decrease (CGT event E10), read
-    /// through the same `amit_adjustment::db_cost_base_reduction_events` the
+    /// through the same `crate::domain::cost_base::db_cost_base_reduction_events` the
     /// cost-base pipeline reads — so this walk applies it to exactly the units
     /// the cost base it is walking down applies it to.
     Amit(cost_base::AmitReductionEvent),
@@ -457,7 +457,7 @@ async fn non_disposal_gains(
     .fetch_all(&mut *conn)
     .await?;
     let amit_events =
-        crate::entities::amit_adjustment::db_cost_base_reduction_events(&mut *conn, None).await?;
+        crate::domain::cost_base::db_cost_base_reduction_events(&mut *conn, None).await?;
 
     for parcel in amit_parcels {
         let Some(events) = amit_events.get(&parcel.id) else {

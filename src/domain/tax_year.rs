@@ -22,6 +22,28 @@ pub fn fy_start(date: NaiveDate) -> NaiveDate {
     NaiveDate::from_ymd_opt(tax_year_for(date) - 1, 7, 1).expect("1 July is a valid date")
 }
 
+/// Was this listing an AMIT in the Australian financial year `tax_year`
+/// (identified by the calendar year of its 30 June end)?
+///
+/// *The* rule behind every reader of the flag — the income entity's
+/// write-time checks, the [tax summary](crate::reports::tax_summary)'s
+/// whole-row exclusion, the [AMIT cash
+/// cross-check](crate::reports::amit_cash_cross_check), the annual tax
+/// report's completeness section *and* its printed income rows, the
+/// [franking](crate::reports::franking) loader's candidate dividends, and the
+/// `ReturnOfCapital` refusal — so a fund that converted part-way through a
+/// holding cannot be an AMIT to one reader and an ordinary trust to another
+/// (SCENARIOS F-23, P-01/P-07).
+///
+/// `amit_from` is a 1 July date (write-time enforced), so this is a
+/// whole-year comparison: AMIT status is elected for an income year
+/// (`docs/ato/amit-reporting-requirements.md`), never for part of one. `None`
+/// means the flag applies to the whole recorded history — the ordinary case,
+/// a fund that has always been an AMIT.
+pub fn amit_in_tax_year(amit: bool, amit_from: Option<NaiveDate>, tax_year: i32) -> bool {
+    amit && amit_from.is_none_or(|from| tax_year_for(from) <= tax_year)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -41,5 +63,20 @@ mod tests {
         assert_eq!(fy_start(d(2025, 6, 30)), d(2024, 7, 1));
         assert_eq!(fy_start(d(2024, 7, 1)), d(2024, 7, 1));
         assert_eq!(fy_start(d(2024, 12, 31)), d(2024, 7, 1));
+    }
+
+    /// The shared rule every reader of the flag asks: an undated flag covers
+    /// the whole history, and a dated one turns on with its own financial
+    /// year — 1 July 2023 makes FY2024 the first AMIT year.
+    #[test]
+    fn amit_in_tax_year_turns_on_with_the_dated_financial_year() {
+        assert!(amit_in_tax_year(true, None, 2019));
+        assert!(!amit_in_tax_year(false, None, 2019));
+
+        let from = Some(NaiveDate::from_ymd_opt(2023, 7, 1).unwrap());
+        assert!(!amit_in_tax_year(true, from, 2022));
+        assert!(!amit_in_tax_year(true, from, 2023));
+        assert!(amit_in_tax_year(true, from, 2024));
+        assert!(amit_in_tax_year(true, from, 2025));
     }
 }

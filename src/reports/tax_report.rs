@@ -41,12 +41,11 @@
 use crate::domain::cost_base::{self, CostBaseAdjustment, ParcelRow};
 use crate::domain::deduction_destination::{DeductionDestination, DeductionRouting};
 use crate::domain::listing_identity::RenameHistory;
-use crate::domain::tax_year::tax_year_for;
+use crate::domain::tax_year::{amit_in_tax_year, tax_year_for};
 use crate::entities::closing_price::HeldTimeline;
 use crate::entities::corporate_action::{RocEvent, SplitEvent};
 use crate::entities::income::{Income, IncomeType};
 use crate::entities::investment_expense::ExpenseType;
-use crate::entities::listing;
 use crate::entities::trade::Trade;
 use crate::infra::decimal::{OptMoney, mul_div, parse_dec, to_cents};
 use crate::infra::extract::{Json, Query};
@@ -286,11 +285,7 @@ async fn amma_coverage(
                 Ok::<_, sqlx::Error>((
                     r.try_get("id")?,
                     r.try_get("ticker")?,
-                    listing::amit_in_tax_year(
-                        r.try_get("amit")?,
-                        r.try_get("amit_from")?,
-                        tax_year.year(),
-                    ),
+                    amit_in_tax_year(r.try_get("amit")?, r.try_get("amit_from")?, tax_year.year()),
                 ))
             })
             .collect::<Result<Vec<_>, _>>()?
@@ -714,7 +709,7 @@ async fn load_disposal_inputs(
         .collect::<Result<HashMap<_, _>, _>>()?;
 
     let amit_events =
-        crate::entities::amit_adjustment::db_cost_base_reduction_events(&mut *conn, None).await?;
+        crate::domain::cost_base::db_cost_base_reduction_events(&mut *conn, None).await?;
     let roc_events =
         crate::entities::corporate_action::db_return_of_capital_events(&mut *conn).await?;
     let split_events = crate::entities::corporate_action::db_share_split_events(&mut *conn).await?;
@@ -1841,7 +1836,8 @@ async fn push_deduction_rows(
         let currency: String = row.try_get("currency")?;
         let listing_id: Option<i64> = row.try_get("listing_id")?;
         let expense_type: ExpenseType = row.try_get("expense_type")?;
-        let destination = routing.destination(listing_id, expense_type, tax_year);
+        let destination =
+            routing.destination(listing_id, expense_type.is_debt_deduction(), tax_year);
         out.deductions.push(DeductionRow {
             investment_expense_id: row.try_get("id")?,
             date_incurred,
@@ -5331,7 +5327,7 @@ mod tests {
 
         let pool = test_support::test_pool().await;
         // An AMIT from FY2024 only, so the FY2023 return of capital is
-        // recordable (`listing::amit_in_tax_year`).
+        // recordable (`domain::tax_year::amit_in_tax_year`).
         test_support::listing(1)
             .ticker("CNV")
             .name("CNV")

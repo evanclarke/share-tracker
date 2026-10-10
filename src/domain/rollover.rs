@@ -1,16 +1,19 @@
-//! The machinery the three parcel-substituting operations share: the
+//! The read side of the three parcel-substituting operations: the
 //! scrip-for-scrip exchange (`entities::scrip_exchange`), the demerger
 //! (`entities::demerger`) and the inter-account transfer
-//! (`entities::transfer`).
+//! (`entities::transfer`) — plus the rollover-chain walks the reports and the
+//! AMIT checks follow back and forth through what those operations wrote.
 //!
-//! All three do the same four things in one transaction — validate, walk the
-//! source listing's open parcels costing each one, write a closing Sell that
-//! consumes them, and write the replacement Buys that carry their cost base
-//! and acquisition date forward. Only what happens *between* the walk and the
-//! writes differs (the rollover apportionment, the demerger percentage, the
-//! moved quantity), so everything else lives here rather than in three copies
-//! that a fix to (say) the split/ROC re-basing would have to land in
-//! separately.
+//! All three operations do the same four things in one transaction —
+//! validate, walk the source listing's open parcels costing each one, write a
+//! closing Sell that consumes them, and write the replacement Buys that carry
+//! their cost base and acquisition date forward. Only what happens *between*
+//! the walk and the writes differs (the rollover apportionment, the demerger
+//! percentage, the moved quantity), so everything else is shared rather than
+//! copied three times where a fix to (say) the split/ROC re-basing would have
+//! to land separately. The walk ([`CostBaseInputs`]) is here; the two writes
+//! are `entities::rollover`'s, since `domain` depends on nothing in
+//! `entities`.
 //!
 //! This is deliberately *not* built on [`domain::open_parcels`](super::open_parcels),
 //! which every open-holdings *report* is: that loader converts each parcel's
@@ -27,12 +30,10 @@ use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use sqlx::Row;
 
-use crate::domain::cost_base::{self, ParcelRow};
-use crate::entities::corporate_action::{
+use crate::domain::adjustments::{
     self, RocEvent, SplitEvent, sold_in_acquired_units, split_adjusted_quantity,
 };
-use crate::entities::sell::{AllocationInput, SellBody};
-use crate::entities::trade::{self, Trade};
+use crate::domain::cost_base::{self, ParcelRow};
 
 /// The reference data one listing's parcels are costed against: splits re-base
 /// units, AMIT adjustments (CGT event E10) and return-of-capital payments (G1)
@@ -61,8 +62,8 @@ impl CostBaseInputs {
         listing_id: i64,
         up_to: NaiveDate,
     ) -> Result<Self, sqlx::Error> {
-        let splits = corporate_action::db_splits_for_listing(&mut *conn, listing_id).await?;
-        let roc_events = corporate_action::db_return_of_capital_events(&mut *conn)
+        let splits = adjustments::db_splits_for_listing(&mut *conn, listing_id).await?;
+        let roc_events = adjustments::db_return_of_capital_events(&mut *conn)
             .await?
             .remove(&listing_id)
             .unwrap_or_default();
@@ -70,11 +71,9 @@ impl CostBaseInputs {
         // exactly as `domain::open_parcels::load` bounds its view of the same
         // events — so the carried cost base and the open-parcels reports can
         // never disagree about which statements have taken effect by a date.
-        let amit_events = crate::entities::amit_adjustment::db_cost_base_reduction_events(
-            &mut *conn,
-            Some(up_to),
-        )
-        .await?;
+        let amit_events =
+            crate::domain::cost_base::db_cost_base_reduction_events(&mut *conn, Some(up_to))
+                .await?;
         Ok(Self {
             splits,
             roc_events,
@@ -124,8 +123,7 @@ impl CostBaseInputs {
         .await?;
 
         let qty_sold =
-            crate::entities::parcel_allocation::db_sales_by_parcel(&mut *conn, Some(listing_id))
-                .await?;
+            crate::domain::open_parcels::db_sales_by_parcel(&mut *conn, Some(listing_id)).await?;
 
         let mut open = Vec::with_capacity(parcel_rows.len());
         for parcel in parcel_rows {
@@ -170,62 +168,6 @@ pub struct RolledParcel {
     pub at_date_units: Decimal,
 }
 
-/// The closing Sell every rollover writes: it consumes the substituted
-/// parcels, carries no brokerage, and settles on the operation's own date
-/// (nothing market-settles). Proceeds are zero unless the operation pays cash
-/// — an all-scrip exchange, a demerger and a transfer are not disposals, and
-/// the provenance column the caller passes to
-/// [`sell::upsert_sell_in_tx`](crate::entities::sell::upsert_sell_in_tx) is
-/// what keeps the Sell out of the gains reports.
-pub fn closing_sell_body(
-    date: NaiveDate,
-    listing_id: i64,
-    holding_account_id: i64,
-    average_price: Decimal,
-    currency: String,
-    fx_rate: Decimal,
-    allocations: Vec<AllocationInput>,
-) -> SellBody {
-    SellBody {
-        brokerage_includes_gst: false,
-        statement_total: None,
-        holding_account_id,
-        date,
-        settlement_date: Some(date),
-        listing_id,
-        average_price,
-        quantity: allocations.iter().map(|a| a.quantity_allocated).sum(),
-        brokerage: Decimal::ZERO,
-        gst_on_brokerage: Decimal::ZERO,
-        brokerage_currency: currency.clone(),
-        currency,
-        fx_rate,
-        spot_fx_rate: None,
-        contract_note_ref: None,
-        allocations,
-    }
-}
-
-/// Which operation created a replacement Buy: the trades column linking it
-/// back to the row that did, so the group can be found, frozen and deleted as
-/// one.
-#[derive(Debug, Clone, Copy)]
-pub enum Provenance {
-    ScripAction(i64),
-    DemergerAction(i64),
-    Transfer(i64),
-}
-
-impl Provenance {
-    fn origin(self) -> trade::ParcelOrigin {
-        match self {
-            Provenance::ScripAction(id) => trade::ParcelOrigin::ScripExchange(id),
-            Provenance::DemergerAction(id) => trade::ParcelOrigin::Demerger(id),
-            Provenance::Transfer(id) => trade::ParcelOrigin::Transfer(id),
-        }
-    }
-}
-
 /// How deep a chain of rollovers [`replacement_descendants`],
 /// [`source_ancestors`] and `domain::cost_base::ParcelRow`'s register walk
 /// will follow. A parcel transferred between accounts, caught in a takeover
@@ -235,7 +177,7 @@ impl Provenance {
 pub const MAX_ROLLOVER_DEPTH: usize = 10;
 
 /// The provenance columns a replacement Buy and its closing Sell share, in the
-/// order [`Provenance`] lists them. The chain walks are the only readers that
+/// order `entities::rollover::Provenance` lists them. The chain walks are the only readers that
 /// need all three at once — a specific operation always knows its own.
 const PROVENANCE_COLUMNS: [&str; 3] = ["scrip_action_id", "demerger_action_id", "transfer_id"];
 
@@ -413,76 +355,12 @@ pub async fn replacement_descendants(
     Ok(found)
 }
 
-/// A replacement Buy to write: the substituted parcel's units and the cost
-/// base they carry forward. It carries no id — the database assigns one (see
-/// [`insert_replacement_buy`]).
-pub struct ReplacementBuy<'a> {
-    pub date: NaiveDate,
-    pub listing_id: i64,
-    pub quantity: Decimal,
-    /// The carried cost base, in the original parcel's currency.
-    pub cost_base: Decimal,
-    pub currency: &'a str,
-    pub fx_rate: Decimal,
-    pub spot_fx_rate: Option<Decimal>,
-    /// The original parcel's (possibly already deemed) acquisition date: the
-    /// discount clock and the cost base's AUD translation month both run from
-    /// it, so a rollover chain always dates back to the first acquisition.
-    pub deemed_acquisition_date: NaiveDate,
-    pub holding_account_id: i64,
-}
-
-/// Writes one replacement Buy and answers the id the database gave it. The
-/// carried cost base goes on the `brokerage` column with a zero price —
-/// numerically part of the one cost base everywhere, with no division — and
-/// the row carries `provenance` so it can be recognised as part of the
-/// operation's group. The row itself is `trade::NewParcel`'s, whose
-/// database-assigned id is why a caller writing several rows takes each id
-/// from this call, never by adding to the previous one (SCENARIOS U-a).
-pub async fn insert_replacement_buy(
-    conn: &mut sqlx::SqliteConnection,
-    buy: &ReplacementBuy<'_>,
-    provenance: Provenance,
-) -> Result<i64, sqlx::Error> {
-    trade::NewParcel::new(
-        provenance.origin(),
-        buy.date,
-        buy.listing_id,
-        buy.holding_account_id,
-        buy.quantity,
-        buy.currency,
-    )
-    .brokerage(buy.cost_base)
-    .fx_rate(buy.fx_rate)
-    .spot_fx_rate(buy.spot_fx_rate)
-    .deemed_acquisition_date(Some(buy.deemed_acquisition_date))
-    .insert(conn)
-    .await
-}
-
-/// Reads freshly created trades back, in the order written, so an operation's
-/// response is exactly what was stored. A missing row is a bug, not a
-/// not-found: the ids were just inserted in the committed transaction.
-pub async fn created_trades(
-    conn: &mut sqlx::SqliteConnection,
-    ids: impl IntoIterator<Item = i64>,
-) -> Result<Vec<Trade>, sqlx::Error> {
-    let mut out = Vec::new();
-    for id in ids {
-        out.push(
-            trade::db_get(&mut *conn, id)
-                .await?
-                .ok_or(sqlx::Error::RowNotFound)?,
-        );
-    }
-    Ok(out)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::domain::open_parcels;
     use crate::entities::amit_adjustment_generation::{self, GenerateBody};
+    use crate::entities::corporate_action;
     use crate::entities::corporate_action::{ActionKind, CorporateAction};
     use crate::entities::holding_account::{self, HoldingAccount};
     use crate::entities::sell::AllocationInput;

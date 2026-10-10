@@ -47,6 +47,19 @@ pub enum ExpenseType {
     Other,
 }
 
+impl ExpenseType {
+    /// Is this expense kind a **debt deduction** — interest or borrowing
+    /// costs? `domain::deduction_destination` routes on it (question D15 vs
+    /// 20M for foreign income). Only [`ExpenseType::LoanInterest`] is: it is
+    /// the one type the enum defines as interest on borrowed money. A
+    /// borrowing cost recorded as [`ExpenseType::Other`] is not
+    /// distinguishable from any other "other" expense and follows the non-debt
+    /// routing.
+    pub fn is_debt_deduction(self) -> bool {
+        matches!(self, ExpenseType::LoanInterest)
+    }
+}
+
 #[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct InvestmentExpense {
     pub id: i64,

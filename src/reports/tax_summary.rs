@@ -1009,7 +1009,7 @@ fn accumulate_expenses(
         // on a trust holding is both a `ManagementFee` and a 13Y deduction.
         // Each amount lands on exactly one line of each cut, so the two groups
         // sum to `deductions_total` independently.
-        let destination = routing.destination(listing_id, kind, tax_year);
+        let destination = routing.destination(listing_id, kind.is_debt_deduction(), tax_year);
 
         let s = year_entry(map, tax_year);
         let line = match kind {
@@ -3750,7 +3750,7 @@ mod tests {
     /// *both* sides of the conversion — an AMIT attributing on an AMMA
     /// statement after `amit_from`, the ordinary trust it was before — and
     /// question 13 reports both, so its deductions report at 13Y in every
-    /// year. The per-year rule (`listing::amit_in_tax_year`) says which kind
+    /// year. The per-year rule (`domain::tax_year::amit_in_tax_year`) says which kind
     /// it was, not whether the deduction is a trust deduction.
     #[tokio::test]
     async fn db_a_converted_funds_pre_amit_year_deduction_still_reports_at_13y() {

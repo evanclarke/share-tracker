@@ -88,7 +88,7 @@ pub struct AmmaStatement {
     pub tax_free_amount: Decimal,
     /// The AMIT cost base net amount **per unit** for the year — the sole driver of the
     /// cost base adjustment applied to affected parcels (see
-    /// `amit_adjustment::db_cost_base_reductions`). A positive value reduces the cost base;
+    /// `domain::cost_base::db_cost_base_reduction_events`). A positive value reduces the cost base;
     /// a negative value increases it (upward adjustments are permitted under the AMIT
     /// regime). See `docs/ato/amit-cost-base-adjustments.md`.
     #[sqlx(try_from = "Money")]
