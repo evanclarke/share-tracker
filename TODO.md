@@ -56,27 +56,6 @@ falls under the existing rules.
   trading day before 1 July 2027 (the scheduled price import plus `closing_price`'s held-days
   backfill), since a missing one cannot be fetched reliably years later
 
-## A partial transfer under-applies the AMIT (E10) reduction on the units left behind (2026-10-10 review, financial correctness — high)
-`AmitReductionEvent::reduction_for_units` (`src/domain/cost_base.rs`) divides a row's coverage over
-`held = parcel_quantity − disposed_by_year_end`, and `disposed_by_year_end`
-(`amit_adjustment::db_cost_base_reduction_events`) counts `Counted::DisposalsOnly`, so units a
-rollover (transfer, scrip exchange, demerger) carried *out* of the parcel still count as held there.
-Scenario: buy 100 (2023-08-01), FY2024 AMMA statement at \$1/unit, transfer 40 to another account on
-2024-08-15. Generation writes 40 against the replacement parcel and 60 against the original — both
-right — but the original's 60 units are reduced by **\$36** (`1 × 60 × 60 / 100`) instead of \$60;
-\$24 of the statement's reduction is lost and the cost base is overstated in unrealised, realised and
-net-capital-gain (E10 walk) figures alike. The existing
-`a_transfers_closing_sell_is_not_a_disposal_in_the_held_spill_split` pins only the
-`disposed_by_year_end` figure, never the resulting cost base.
-- [ ] Failing test first: the scenario above through the generation endpoint, asserting the original
-  parcel's `amit_reduction` is 60.00 and the replacement's 40.00 (the statement's 100.00 in total),
-  in open-parcels, unrealised gains, and realised gains on a later sale of the 60
-- [ ] Fix the held/spill split so units moved out by a rollover are neither "held" in the original
-  parcel nor "sold" from it (they are covered by the replacement parcel's own row) — without
-  reintroducing the bug the `DisposalsOnly` choice fixed (a rollover flipping an earlier real
-  Sell's spill share)
-- [ ] Same check by hand-entered row: buy 100, transfer 40, a manual 60-unit row → reduction 60 × rate
-
 ## An AMIT row can reduce the cost base of units sold in an earlier, already-lodged year (2026-10-10 review, financial correctness — medium)
 The write-time cap on an adjustment row's `quantity` (`src/entities/amit_adjustment.rs`, ~line 348)
 is the parcel's trade quantity, and `reduction_for_units` spills any coverage beyond the held units

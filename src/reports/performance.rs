@@ -392,12 +392,7 @@ async fn accumulate_on(
     // as a real disposal does — the moved units re-enter through the
     // replacement Buys this walk also sees, so counting anything less would
     // double the holding.
-    let qty_sold = open_parcels::db_units_sold(
-        &mut *conn,
-        Some(as_of),
-        open_parcels::Counted::AllConsumptions,
-    )
-    .await?;
+    let qty_sold = open_parcels::db_units_sold(&mut *conn, Some(as_of)).await?;
 
     let split_events = crate::entities::corporate_action::db_share_split_events(&mut *conn).await?;
     let tickers = crate::entities::listing::db_tickers(&mut *conn).await?;

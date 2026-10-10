@@ -1632,4 +1632,168 @@ mod tests {
         assert_eq!(parcels[0].amit_cost_base_reduction, dec("50"));
         assert_eq!(parcels[0].remaining_cost_base, dec("950"));
     }
+
+    /// The partial-transfer scenario of the 2026-10-10 review: 100 units
+    /// bought, an FY2024 statement at \$1 per unit, and 40 of the units moved
+    /// to another account in August 2024 — after the year end, before the
+    /// statement was entered. Returns the transfer's replacement parcel id.
+    async fn partial_transfer_after_the_year_end(pool: &SqlitePool) -> i64 {
+        use crate::entities::holding_account::{self, HoldingAccount};
+        use crate::entities::sell::AllocationInput;
+        use crate::entities::transfer::{self, TransferBody};
+
+        amit_listing(pool, 1, "HNDQ").await;
+        test_support::buy(1, 1)
+            .date(ymd(2023, 8, 1))
+            .qty(dec("100"))
+            .price(dec("10"))
+            .insert(pool)
+            .await;
+        test_support::amma(6, 1)
+            .units(dec("100"))
+            .cost_base_adjustment(dec("1"))
+            .with(|a| {
+                a.tax_year_end_date = ymd(2024, 6, 30);
+                a.date_received = ymd(2024, 9, 10);
+            })
+            .insert(pool)
+            .await;
+        holding_account::db_upsert(
+            pool,
+            &HoldingAccount {
+                id: 2,
+                name: "Second".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        transfer::db_transfer(
+            pool,
+            1,
+            &TransferBody {
+                listing_id: 1,
+                date: ymd(2024, 8, 15),
+                from_account_id: 1,
+                to_account_id: 2,
+                allocations: vec![AllocationInput {
+                    purchase_trade_id: 1,
+                    quantity_allocated: dec("40"),
+                }],
+                fee_allocations: Vec::new(),
+                fee_market_price: None,
+                fee_fx_rate: None,
+            },
+        )
+        .await
+        .unwrap()
+        .transfer_ins[0]
+            .id
+    }
+
+    /// One decimal field of a report row, as a `Decimal`.
+    fn dec_field(row: &serde_json::Value, field: &str) -> Decimal {
+        dec(row[field]
+            .as_str()
+            .unwrap_or_else(|| panic!("{field} in {row}")))
+    }
+
+    /// Units a rollover carried *out* of a parcel are neither held in it nor
+    /// sold from it: generation writes 60 units against the original and 40
+    /// against the replacement, and each parcel takes its own row's full
+    /// \$1 per unit. Counting the moved 40 as still held in the original
+    /// diluted its 60-unit row over 100 units and took only \$36 off the
+    /// units left behind — \$24 of the statement's reduction lost, in every
+    /// report built on the cost base.
+    #[tokio::test]
+    async fn api_a_partial_transfer_leaves_the_full_reduction_on_the_units_left_behind() {
+        let pool = test_pool().await;
+        let replacement = partial_transfer_after_the_year_end(&pool).await;
+        let api = ApiClient::full(&pool);
+        let generated: serde_json::Value = api
+            .post(
+                "/amma_statements/6/generate_adjustments",
+                &serde_json::json!({}),
+            )
+            .await
+            .expect_status(StatusCode::CREATED)
+            .json();
+        assert_eq!(dec_field(&generated, "units_adjusted"), dec("100"));
+
+        // Open parcels: 60 + 40, the statement's 100 in total.
+        let parcels: serde_json::Value = api.get_json("/portfolio/open_parcels").await;
+        let parcel = |id: i64| {
+            parcels
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p["trade_id"] == id)
+                .unwrap_or_else(|| panic!("parcel {id} is open"))
+                .clone()
+        };
+        assert_eq!(dec_field(&parcel(1), "amit_cost_base_reduction"), dec("60"));
+        assert_eq!(dec_field(&parcel(1), "remaining_cost_base"), dec("540"));
+        assert_eq!(
+            dec_field(&parcel(replacement), "amit_cost_base_reduction"),
+            dec("40")
+        );
+        assert_eq!(
+            dec_field(&parcel(replacement), "remaining_cost_base"),
+            dec("360")
+        );
+
+        // Unrealised gains: one row per holding account.
+        let gains: serde_json::Value = api
+            .post_json(
+                "/portfolio/unrealised_gains",
+                &serde_json::json!({"prices": {"1": "12"}}),
+            )
+            .await;
+        let cost_base_in = |account: i64| {
+            gains
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|g| g["holding_account_id"] == account)
+                .map(|g| dec_field(g, "total_cost_base"))
+                .unwrap()
+        };
+        assert_eq!(cost_base_in(1), dec("540"));
+        assert_eq!(cost_base_in(2), dec("360"));
+
+        // Realised gains on a later sale of the 60 left behind.
+        test_support::sell(10, 1)
+            .date(ymd(2025, 1, 10))
+            .qty(dec("60"))
+            .price(dec("12"))
+            .insert(&pool)
+            .await;
+        allocate(&pool, 10, 10, 1, dec("60")).await;
+        let realised: serde_json::Value = api.get_json("/portfolio/realised_gains").await;
+        let sale = &realised.as_array().unwrap()[0];
+        assert_eq!(dec_field(sale, "cost_base"), dec("540"));
+        assert_eq!(dec_field(sale, "capital_gain_loss"), dec("180"));
+    }
+
+    /// The same coverage by a hand-entered row: once 40 of the 100 units have
+    /// moved, a 60-unit row against the original reduces the 60 left behind
+    /// by 60 × the statement's rate.
+    #[tokio::test]
+    async fn api_a_hand_entered_row_after_a_partial_transfer_reaches_the_units_left_behind() {
+        let pool = test_pool().await;
+        partial_transfer_after_the_year_end(&pool).await;
+        let api = ApiClient::full(&pool);
+        api.put_ok(
+            "/amit_adjustments/1",
+            &serde_json::json!({"amma_statement_id": 6, "trade_id": 1, "quantity": "60"}),
+        )
+        .await;
+        let parcels: serde_json::Value = api.get_json("/portfolio/open_parcels").await;
+        let original = parcels
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["trade_id"] == 1)
+            .unwrap();
+        assert_eq!(dec_field(original, "amit_cost_base_reduction"), dec("60"));
+    }
 }

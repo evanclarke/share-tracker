@@ -541,8 +541,9 @@ pub fn reduction_for(
 /// whole-parcel total, so the pipeline can apply it to the units the row
 /// actually covers (see [`AmitReductionEvent::per_unit_for`]) instead of
 /// pooling it across the parcel. `disposed_by_year_end` — the units of the
-/// parcel already sold when the statement's year ended — is what tells those
-/// two groups apart, so the allocations are read here too
+/// parcel already sold when the statement's year ended — and `carried_out` —
+/// the units a rollover has moved into a replacement parcel, up to `up_to` —
+/// are what tell the groups apart, so the allocations are read here too
 /// (`domain::open_parcels::db_units_sold`, the shared allocations read).
 ///
 /// Takes the caller's own connection so the scrip-for-scrip exchange
@@ -570,20 +571,15 @@ pub async fn db_cost_base_reduction_events(
     if rows.is_empty() {
         return Ok(HashMap::new());
     }
-    // Sales after `up_to` are already excluded by the year-end filter above
-    // (a statement's year end is never after the cutoff), so this read needs
-    // no bound of its own. Disposals only: a rollover's closing Sell — a
-    // transfer above all — is an account move, not a disposal, and its units
-    // are still held (in the replacement parcels) at the year end. Counting
-    // it flipped a partial-coverage row's held/spill split and retroactively
-    // changed an earlier real Sell's cost base, while the same reduction also
-    // reaches the replacement through its own adjustment row.
-    let sold = crate::domain::open_parcels::db_units_sold(
-        &mut *conn,
-        None,
-        crate::domain::open_parcels::Counted::DisposalsOnly,
-    )
-    .await?;
+    // Every consumption, each tagged with whether it was a real disposal: the
+    // two kinds land in different groups of the held/spill split. A real
+    // disposal by the year end is "sold"; a rollover's closing Sell — a
+    // transfer above all — is an account move, not a disposal, so its units
+    // are "carried out" (`AmitReductionEvent::carried_out`) rather than either
+    // still held here or sold. Counting them as sold flipped a
+    // partial-coverage row's split onto an earlier real Sell; counting them
+    // as held diluted the units left behind by the ones that moved.
+    let consumed = crate::domain::open_parcels::db_units_sold(&mut *conn, up_to).await?;
 
     let mut map: HashMap<i64, Vec<AmitReductionEvent>> = HashMap::new();
     for row in &rows {
@@ -598,21 +594,29 @@ pub async fn db_cost_base_reduction_events(
         // Units of the parcel already disposed of when the statement's year
         // ended, re-based back to the parcel's as-acquired basis (an
         // allocation is in its own sale date's units).
-        let disposed_by_year_end = sold.get(&trade_id).map_or(Decimal::ZERO, |sales| {
-            sales
-                .iter()
-                .filter(|c| c.date <= tax_year_end_date)
-                .map(|c| {
-                    corporate_action::as_acquired_quantity(c.quantity, splits, trade_date, c.date)
-                })
-                .sum()
-        });
+        let as_acquired = |c: &crate::domain::open_parcels::UnitsConsumed| {
+            corporate_action::as_acquired_quantity(c.quantity, splits, trade_date, c.date)
+        };
+        let consumed = consumed.get(&trade_id).map_or(&[][..], |v| v);
+        let disposed_by_year_end = consumed
+            .iter()
+            .filter(|c| c.disposal && c.date <= tax_year_end_date)
+            .map(as_acquired)
+            .sum();
+        // Whenever the move ran, up to the read's own cutoff: a view as at a
+        // date before the move still sees those units in this parcel.
+        let carried_out = consumed
+            .iter()
+            .filter(|c| !c.disposal)
+            .map(as_acquired)
+            .sum();
         map.entry(trade_id).or_default().push(AmitReductionEvent {
             amma_statement_id,
             tax_year_end_date,
             per_unit: reduction_for(Decimal::ONE, cba, splits, trade_date, tax_year_end_date),
             covered,
             disposed_by_year_end,
+            carried_out,
         });
     }
     Ok(map)
@@ -808,6 +812,73 @@ mod tests {
         // closing Sell does not — the row's 600 covered units stay on the
         // held side of the split.
         assert_eq!(events[&1][0].disposed_by_year_end, dec("400"));
+        // The moved units are carried out instead — neither held nor sold.
+        assert_eq!(events[&1][0].carried_out, dec("600"));
+    }
+
+    /// `carried_out` is bounded by the read's own cutoff: a view as at a date
+    /// before the move still sees the units in the parcel. Here the row was
+    /// written before a later transfer moved the whole parcel, so as at the
+    /// day before the transfer the parcel's 100 units carry the row's whole
+    /// \$100 — counting the not-yet-run move would have left no units "in the
+    /// parcel" for the row to reach.
+    #[tokio::test]
+    async fn a_view_before_a_rollover_still_sees_its_units_in_the_parcel() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("VDHG").insert(&pool).await;
+        holding_account::db_upsert(
+            &pool,
+            &HoldingAccount {
+                id: 2,
+                name: "Broker".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        test_support::buy(1, 1)
+            .date(ymd(2023, 8, 1))
+            .qty(dec("100"))
+            .insert(&pool)
+            .await;
+        test_support::amma(6, 1)
+            .units(dec("100"))
+            .cost_base_adjustment(dec("1"))
+            .with(|a| a.tax_year_end_date = ymd(2024, 6, 30))
+            .insert(&pool)
+            .await;
+        test_support::amit_adjustment(&pool, 1, 6, 1, dec("100")).await;
+        transfer::db_transfer(
+            &pool,
+            1,
+            &TransferBody {
+                listing_id: 1,
+                date: ymd(2024, 8, 15),
+                from_account_id: 1,
+                to_account_id: 2,
+                allocations: vec![AllocationInput {
+                    purchase_trade_id: 1,
+                    quantity_allocated: dec("100"),
+                }],
+                fee_allocations: Vec::new(),
+                fee_market_price: None,
+                fee_fx_rate: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let mut conn = pool.acquire().await.unwrap();
+        let before = crate::domain::open_parcels::load(&mut conn, Some(ymd(2024, 8, 14)))
+            .await
+            .unwrap();
+        let original = before.iter().find(|p| p.parcel.id == 1).unwrap();
+        assert_eq!(original.cost_base.amit_reduction, dec("100"));
+        // And the replacement carried that reduced cost base forward.
+        let after = crate::domain::open_parcels::load(&mut conn, None)
+            .await
+            .unwrap();
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].cost_base.adjusted, dec("900"));
     }
 
     async fn insert_test_listing(pool: &SqlitePool, id: i64, exchange_mic: &str, ticker: &str) {

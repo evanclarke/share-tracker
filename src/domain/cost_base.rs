@@ -577,23 +577,45 @@ impl Held {
         }
     }
 
-    /// The disposal date, where these units were disposed of at all.
-    pub fn disposed_on(self) -> Option<NaiveDate> {
+    /// Where these units stand for an AMIT row's coverage split. Units being
+    /// costed through this pipeline are either still in the parcel or a real
+    /// disposal's: a rollover's carried units are costed by the operation
+    /// *before* its closing Sell is written (`domain::rollover`), so they are
+    /// still in the parcel when it runs.
+    pub fn whereabouts(self) -> Whereabouts {
         match self {
-            Held::AsAt(_) => None,
-            Held::DisposedOn(date) => Some(date),
+            Held::AsAt(_) => Whereabouts::InParcel,
+            Held::DisposedOn(date) => Whereabouts::DisposedOn(date),
         }
     }
+}
+
+/// Which of a parcel's three groups of units an AMIT row's coverage is being
+/// asked about ([`AmitReductionEvent::reduction_for_units`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Whereabouts {
+    /// Still in this parcel.
+    InParcel,
+    /// Disposed of on this date — a real disposal (an ordinary Sell, a
+    /// buy-back participation, a worthless recognise). One after the
+    /// statement's year end was still in the parcel when the year ended, and
+    /// is treated as [`Self::InParcel`].
+    DisposedOn(NaiveDate),
+    /// Carried into a replacement parcel by a rollover (a transfer, a
+    /// scrip-for-scrip exchange, a demerger) — never a disposal, and no longer
+    /// in this parcel.
+    CarriedOut,
 }
 
 /// One AMMA statement's AMIT cost-base reduction against one parcel, as
 /// `entities::amit_adjustment::db_cost_base_reduction_events` reads it: the
 /// statement's per-unit figure, the units of the parcel the adjustment row
-/// covers, and how much of the parcel had already been disposed of by the
-/// statement's year end — everything [`Self::per_unit_for`] needs to answer
-/// *which* units the reduction reaches.
+/// covers, how much of the parcel had already been disposed of by the
+/// statement's year end, and how much a rollover carried out of it —
+/// everything [`Self::per_unit_for`] needs to answer *which* units the
+/// reduction reaches.
 ///
-/// All three quantities are in the parcel's **as-acquired** unit basis; the
+/// All four quantities are in the parcel's **as-acquired** unit basis; the
 /// per-unit figure is likewise re-based into it, so a split between
 /// acquisition and the statement's year end is already accounted for
 /// (TD 2000/10 — see `entities::amit_adjustment::reduction_for`).
@@ -605,8 +627,16 @@ pub struct AmitReductionEvent {
     pub per_unit: Decimal,
     /// Units of the parcel this adjustment row covers.
     pub covered: Decimal,
-    /// Units of the parcel disposed of on or before `tax_year_end_date`.
+    /// Units of the parcel disposed of on or before `tax_year_end_date` —
+    /// real disposals only.
     pub disposed_by_year_end: Decimal,
+    /// Units of the parcel a rollover has carried into a replacement parcel,
+    /// whenever it ran. They are neither held in this parcel nor disposed of
+    /// from it: a row generated after the move covers them on the
+    /// replacement's own row, and one written before it covered them here and
+    /// was frozen into the replacement's carried cost base when the operation
+    /// ran.
+    pub carried_out: Decimal,
 }
 
 impl AmitReductionEvent {
@@ -633,55 +663,67 @@ impl AmitReductionEvent {
     /// para 13).
     ///
     /// A row covering less than the whole parcel covers the units still held
-    /// at the year end **first** — that is what
+    /// in the parcel **first** — that is what
     /// `entities::amit_adjustment_generation` means when it writes
-    /// `quantity = remaining_as_of` — and only spills onto the units disposed
-    /// of earlier once it covers more than those. Within each of the two
-    /// groups the coverage is spread evenly, since units of one parcel are
-    /// otherwise indistinguishable. The two rates always reconstruct
-    /// [`Self::amount`] exactly, so which units a row reaches never changes
-    /// how much it takes off in total. The single division comes last so that
-    /// identity holds to the last decimal place even where the covered units
-    /// don't divide evenly into the group — which is exactly what [`mul_div`]
-    /// preserves, while giving an answer rather than a panic where one of the
-    /// two products is too large for `rust_decimal` (a per-unit adjustment
-    /// against a holding of 1e15 units).
+    /// `quantity = remaining_as_of` — then the units a rollover carried out of
+    /// it, and only spills onto the units disposed of by the year end once it
+    /// covers more than both. The carried units come second because which of
+    /// the two rows covers them depends on the order of entry: a row generated
+    /// after the move leaves them to the replacement's own row (so this row
+    /// covers exactly the units left, and they take its full per-unit
+    /// figure), while one written before the move covered them here. Counting
+    /// them as held instead diluted the units left behind by the moved ones
+    /// (a 60-unit row over 100 units of which 40 moved reduced the 60 left by
+    /// only 36); counting them as sold spilled a row's coverage onto an
+    /// earlier real Sell and changed its realised gain.
+    ///
+    /// Within each group the coverage is spread evenly, since units of one
+    /// parcel are otherwise indistinguishable. The three rates always
+    /// reconstruct [`Self::amount`] exactly (for a row within the parcel's
+    /// units, which the write path enforces), so which units a row reaches
+    /// never changes how much it takes off in total. The single division
+    /// comes last so that identity holds to the last decimal place even where
+    /// the covered units don't divide evenly into the group — which is exactly
+    /// what [`mul_div`] preserves, while giving an answer rather than a panic
+    /// where one of the two products is too large for `rust_decimal` (a
+    /// per-unit adjustment against a holding of 1e15 units).
     pub fn reduction_for_units(
         &self,
         parcel_quantity: Decimal,
         units: Decimal,
-        disposed_on: Option<NaiveDate>,
+        whereabouts: Whereabouts,
     ) -> Decimal {
-        let held = (parcel_quantity - self.disposed_by_year_end).max(Decimal::ZERO);
-        let sold = parcel_quantity - held;
+        let carried = self.carried_out.min(parcel_quantity).max(Decimal::ZERO);
+        let sold = self
+            .disposed_by_year_end
+            .min(parcel_quantity - carried)
+            .max(Decimal::ZERO);
+        let held = parcel_quantity - carried - sold;
         // `disposed_on` on the year end itself counts as sold by it: the
         // statement's year-end position no longer includes those units, which
         // is the same boundary `disposed_by_year_end` was counted on.
-        let still_held = disposed_on.is_none_or(|d| d > self.tax_year_end_date);
-        if still_held {
-            if held <= Decimal::ZERO {
-                return Decimal::ZERO;
+        let (coverage, group) = match whereabouts {
+            Whereabouts::DisposedOn(d) if d <= self.tax_year_end_date => {
+                ((self.covered - held - carried).max(Decimal::ZERO), sold)
             }
-            mul_div(&[self.per_unit, self.covered.min(held), units], held)
-        } else {
-            let spill = (self.covered - held).max(Decimal::ZERO);
-            if sold <= Decimal::ZERO {
-                return Decimal::ZERO;
-            }
-            mul_div(&[self.per_unit, spill, units], sold)
+            Whereabouts::CarriedOut => (
+                (self.covered - held).max(Decimal::ZERO).min(carried),
+                carried,
+            ),
+            Whereabouts::InParcel | Whereabouts::DisposedOn(_) => (self.covered.min(held), held),
+        };
+        if group <= Decimal::ZERO {
+            return Decimal::ZERO;
         }
+        mul_div(&[self.per_unit, coverage, units], group)
     }
 
     /// [`Self::reduction_for_units`] for a single unit — the per-unit figure
     /// the itemised adjustment rows display. Presentation only: the amounts
     /// themselves go through `reduction_for_units`, which keeps its division
     /// to the end rather than rounding a rate and multiplying it back up.
-    pub fn per_unit_for(
-        &self,
-        parcel_quantity: Decimal,
-        disposed_on: Option<NaiveDate>,
-    ) -> Decimal {
-        self.reduction_for_units(parcel_quantity, Decimal::ONE, disposed_on)
+    pub fn per_unit_for(&self, parcel_quantity: Decimal, whereabouts: Whereabouts) -> Decimal {
+        self.reduction_for_units(parcel_quantity, Decimal::ONE, whereabouts)
     }
 }
 
@@ -922,8 +964,8 @@ fn reduction_walk(
     for e in amit_events {
         // The reduction reaching *these* units, which is the statement's own
         // per-unit figure only where its row covers them.
-        let amount = e.reduction_for_units(parcel.quantity, units, held.disposed_on());
-        let per_unit = e.per_unit_for(parcel.quantity, held.disposed_on());
+        let amount = e.reduction_for_units(parcel.quantity, units, held.whereabouts());
+        let per_unit = e.per_unit_for(parcel.quantity, held.whereabouts());
         rows.push(CostBaseAdjustment {
             kind: AdjustmentKind::AmitCostBase,
             date: e.tax_year_end_date,
@@ -1106,6 +1148,7 @@ mod tests {
             per_unit: per_unit.parse().unwrap(),
             covered: Decimal::from(covered),
             disposed_by_year_end: Decimal::from(disposed),
+            carried_out: Decimal::ZERO,
         }
     }
 
@@ -1481,11 +1524,12 @@ mod tests {
     fn the_stated_reduction_is_conserved_however_it_is_split() {
         for covered in [0, 20, 40, 60, 100] {
             let e = amit(1, 2024, "0.50", covered, 40);
-            let held = e.reduction_for_units(Decimal::from(100), Decimal::from(60), None);
+            let held =
+                e.reduction_for_units(Decimal::from(100), Decimal::from(60), Whereabouts::InParcel);
             let sold = e.reduction_for_units(
                 Decimal::from(100),
                 Decimal::from(40),
-                Some(date(2024, 3, 1)),
+                Whereabouts::DisposedOn(date(2024, 3, 1)),
             );
             assert_eq!(held + sold, e.amount(), "covered {covered}");
         }
@@ -1509,7 +1553,7 @@ mod tests {
             ..amit(1, 2024, "0.05", 0, 0)
         };
         assert_eq!(
-            small.reduction_for_units(units, units, None),
+            small.reduction_for_units(units, units, Whereabouts::InParcel),
             "50000000000000".parse::<Decimal>().unwrap()
         );
         // The second multiplication overflows (5e14 × 1e15 = 5e29).
@@ -1519,7 +1563,7 @@ mod tests {
             ..amit(1, 2024, "0.5", 0, 0)
         };
         assert_eq!(
-            big.reduction_for_units(units, units, None),
+            big.reduction_for_units(units, units, Whereabouts::InParcel),
             "500000000000000".parse::<Decimal>().unwrap()
         );
         // The first one overflows on its own (1e15 × 1e15 = 1e30) — a
@@ -1529,7 +1573,7 @@ mod tests {
             covered: units,
             ..amit(1, 2024, "1", 0, 0)
         };
-        assert_eq!(huge.per_unit_for(units, None), units);
+        assert_eq!(huge.per_unit_for(units, Whereabouts::InParcel), units);
         // The sold branch divides by its own denominator and overflows the
         // same way: the whole 1e15-unit parcel was sold during the year, so
         // all of the coverage spills onto it.
@@ -1540,7 +1584,7 @@ mod tests {
             ..amit(1, 2024, "0.5", 0, 0)
         };
         assert_eq!(
-            sold.reduction_for_units(units, units, Some(date(2024, 3, 1))),
+            sold.reduction_for_units(units, units, Whereabouts::DisposedOn(date(2024, 3, 1))),
             "500000000000000".parse::<Decimal>().unwrap()
         );
     }
@@ -1553,14 +1597,18 @@ mod tests {
     fn a_reduction_that_fits_keeps_its_multiply_first_figure() {
         let held = amit(1, 2024, "39.95", 2, 0);
         assert_eq!(
-            held.reduction_for_units(Decimal::from(3), Decimal::ONE, None),
+            held.reduction_for_units(Decimal::from(3), Decimal::ONE, Whereabouts::InParcel),
             "26.633333333333333333333333333".parse::<Decimal>().unwrap()
         );
         // 5 units, 3 sold by the year end, 4 covered: 2 units of coverage
         // spill onto the 3 sold ones.
         let sold = amit(1, 2024, "39.95", 4, 3);
         assert_eq!(
-            sold.reduction_for_units(Decimal::from(5), Decimal::ONE, Some(date(2024, 3, 1))),
+            sold.reduction_for_units(
+                Decimal::from(5),
+                Decimal::ONE,
+                Whereabouts::DisposedOn(date(2024, 3, 1))
+            ),
             "26.633333333333333333333333333".parse::<Decimal>().unwrap()
         );
         // Divide-first would have given …334 in both.
@@ -1580,12 +1628,61 @@ mod tests {
         // sold ones at 25c each.
         let e = amit(1, 2024, "0.50", 80, 40);
         assert_eq!(
-            e.per_unit_for(Decimal::from(100), None),
+            e.per_unit_for(Decimal::from(100), Whereabouts::InParcel),
             "0.50".parse().unwrap()
         );
         assert_eq!(
-            e.per_unit_for(Decimal::from(100), Some(date(2024, 3, 1))),
+            e.per_unit_for(
+                Decimal::from(100),
+                Whereabouts::DisposedOn(date(2024, 3, 1))
+            ),
             "0.25".parse().unwrap()
+        );
+    }
+
+    /// Units a rollover carried out of the parcel are a third group, covered
+    /// after the units still in it and before the ones sold by the year end.
+    /// 100 units, 40 carried out, 20 sold: a row generated after the move
+    /// covers the 40 left and takes the full rate off them, leaving the
+    /// carried units to the replacement's own row and the sold ones alone;
+    /// a row written before the move (covering the 80 held at the year end)
+    /// reaches the carried units too — at the rate frozen into the
+    /// replacement's carried cost base — and still spills nothing onto the
+    /// sale. Either way the groups sum back to the row's own amount.
+    #[test]
+    fn units_carried_out_by_a_rollover_are_covered_after_those_left_and_before_the_sold() {
+        let after_the_move = AmitReductionEvent {
+            carried_out: Decimal::from(40),
+            ..amit(1, 2024, "1", 40, 20)
+        };
+        let before_the_move = AmitReductionEvent {
+            carried_out: Decimal::from(40),
+            ..amit(1, 2024, "1", 80, 20)
+        };
+        let sold = Whereabouts::DisposedOn(date(2024, 3, 1));
+        for (e, left, carried, spilled) in [
+            (after_the_move, "1", "0", "0"),
+            (before_the_move, "1", "1", "0"),
+        ] {
+            let q = Decimal::from(100);
+            assert_eq!(e.per_unit_for(q, Whereabouts::InParcel), dec(left));
+            assert_eq!(e.per_unit_for(q, Whereabouts::CarriedOut), dec(carried));
+            assert_eq!(e.per_unit_for(q, sold), dec(spilled));
+            assert_eq!(
+                e.reduction_for_units(q, Decimal::from(40), Whereabouts::InParcel)
+                    + e.reduction_for_units(q, Decimal::from(40), Whereabouts::CarriedOut)
+                    + e.reduction_for_units(q, Decimal::from(20), sold),
+                e.amount()
+            );
+        }
+        // Coverage past both spills onto the sold units, as it always has.
+        let over = AmitReductionEvent {
+            carried_out: Decimal::from(40),
+            ..amit(1, 2024, "1", 90, 20)
+        };
+        assert_eq!(
+            over.per_unit_for(Decimal::from(100), sold),
+            "0.5".parse::<Decimal>().unwrap()
         );
     }
 
@@ -1595,12 +1692,18 @@ mod tests {
     fn a_disposal_on_the_year_end_itself_counts_as_sold_by_it() {
         let e = amit(1, 2024, "0.50", 60, 40);
         assert_eq!(
-            e.per_unit_for(Decimal::from(100), Some(date(2024, 6, 30))),
+            e.per_unit_for(
+                Decimal::from(100),
+                Whereabouts::DisposedOn(date(2024, 6, 30))
+            ),
             Decimal::ZERO
         );
         // A sale the next day was still held at the year end.
         assert_eq!(
-            e.per_unit_for(Decimal::from(100), Some(date(2024, 7, 1))),
+            e.per_unit_for(
+                Decimal::from(100),
+                Whereabouts::DisposedOn(date(2024, 7, 1))
+            ),
             "0.50".parse().unwrap()
         );
     }

@@ -249,18 +249,26 @@ impl Reduction {
     }
 
     /// The reduction reaching `units` as-acquired units of a
-    /// `parcel_quantity`-unit parcel disposed of on `disposed_on` (`None` =
-    /// still held) — [`cost_base::AmitReductionEvent::reduction_for_units`]'s
-    /// coverage rule for an AMMA statement, and "was it still held?" for a
-    /// payment.
+    /// `parcel_quantity`-unit parcel that left it on `disposed_on` (`None` =
+    /// still held), by a real disposal where `disposal` —
+    /// [`cost_base::AmitReductionEvent::reduction_for_units`]'s coverage rule
+    /// for an AMMA statement, and "was it still held?" for a payment.
     fn reduction_for_units(
         &self,
         parcel_quantity: Decimal,
         units: Decimal,
         disposed_on: Option<NaiveDate>,
+        disposal: bool,
     ) -> Decimal {
         match self {
-            Reduction::Amit(e) => e.reduction_for_units(parcel_quantity, units, disposed_on),
+            Reduction::Amit(e) => {
+                let whereabouts = match disposed_on {
+                    None => cost_base::Whereabouts::InParcel,
+                    Some(d) if disposal => cost_base::Whereabouts::DisposedOn(d),
+                    Some(_) => cost_base::Whereabouts::CarriedOut,
+                };
+                e.reduction_for_units(parcel_quantity, units, whereabouts)
+            }
             Reduction::Roc { date, per_unit, .. } => {
                 // A unit sold before the payment was not held for it — the
                 // same boundary the cost-base pipeline's `up_to` bound draws
@@ -533,9 +541,7 @@ async fn non_disposal_gains(
     // ones do — their later reductions run against the replacement parcel's
     // own chain. Treating them as still held here would apply those later
     // events to them twice.
-    let sold =
-        open_parcels::db_units_sold(&mut *conn, None, open_parcels::Counted::AllConsumptions)
-            .await?;
+    let sold = open_parcels::db_units_sold(&mut *conn, None).await?;
 
     let mut out = Vec::new();
     for trade_id in order {
@@ -603,7 +609,7 @@ async fn non_disposal_gains(
                         ),
                     });
                 }
-                let amount = event.reduction_for_units(trade_qty, units, disposed_on);
+                let amount = event.reduction_for_units(trade_qty, units, disposed_on, disposal);
                 if amount <= remaining {
                     remaining -= amount;
                     continue;

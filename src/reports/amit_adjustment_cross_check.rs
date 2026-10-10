@@ -163,8 +163,7 @@ pub async fn db_amit_adjustment_alerts(
     // statement's account* during its year, and a rollover's closing Sell is
     // exactly such a departure (SCENARIOS Z-g — a fund taken over mid-year
     // must not flag its honest rows as excess coverage forever).
-    let sold =
-        open_parcels::db_units_sold(&mut tx, None, open_parcels::Counted::AllConsumptions).await?;
+    let sold = open_parcels::db_units_sold(&mut tx, None).await?;
     // What was *actually* held at each statement's year end, keyed by
     // (year end, listing, holding account). One `load` per distinct year end
     // — the same shared read [generation](crate::entities::amit_adjustment_generation)

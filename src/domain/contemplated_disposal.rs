@@ -156,6 +156,7 @@ mod tests {
             per_unit: dec("1.30"),
             covered: dec("100"),
             disposed_by_year_end: disposed,
+            carried_out: Decimal::ZERO,
         }
     }
 

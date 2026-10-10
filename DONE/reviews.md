@@ -7175,3 +7175,44 @@ it rather than rediscover it.
       (`GET /reports/tax_report?tax_year=N`, `GET /reports/tax_report/years`) and why it
       moved; `doc_checks::the_superseded_tax_report_endpoints_are_marked_as_such` pins both
       halves.
+
+## A partial transfer under-applies the AMIT (E10) reduction on the units left behind (2026-10-10 review, financial correctness — high)
+`AmitReductionEvent::reduction_for_units` (`src/domain/cost_base.rs`) divides a row's coverage over
+`held = parcel_quantity − disposed_by_year_end`, and `disposed_by_year_end`
+(`amit_adjustment::db_cost_base_reduction_events`) counts `Counted::DisposalsOnly`, so units a
+rollover (transfer, scrip exchange, demerger) carried *out* of the parcel still count as held there.
+Scenario: buy 100 (2023-08-01), FY2024 AMMA statement at \$1/unit, transfer 40 to another account on
+2024-08-15. Generation writes 40 against the replacement parcel and 60 against the original — both
+right — but the original's 60 units are reduced by **\$36** (`1 × 60 × 60 / 100`) instead of \$60;
+\$24 of the statement's reduction is lost and the cost base is overstated in unrealised, realised and
+net-capital-gain (E10 walk) figures alike. The existing
+`a_transfers_closing_sell_is_not_a_disposal_in_the_held_spill_split` pins only the
+`disposed_by_year_end` figure, never the resulting cost base.
+- [x] Failing test first: the scenario above through the generation endpoint, asserting the original
+  parcel's `amit_reduction` is 60.00 and the replacement's 40.00 (the statement's 100.00 in total),
+  in open-parcels, unrealised gains, and realised gains on a later sale of the 60
+- [x] Fix the held/spill split so units moved out by a rollover are neither "held" in the original
+  parcel nor "sold" from it (they are covered by the replacement parcel's own row) — without
+  reintroducing the bug the `DisposalsOnly` choice fixed (a rollover flipping an earlier real
+  Sell's spill share)
+- [x] Same check by hand-entered row: buy 100, transfer 40, a manual 60-unit row → reduction 60 × rate
+
+**Done 2026-10-10.** Units a rollover carried out of a parcel are now a third group in the
+held/spill split — `AmitReductionEvent::carried_out` beside `disposed_by_year_end`, read in
+`db_cost_base_reduction_events` from the one all-consumptions allocations read (so
+`open_parcels::Counted` and its `DisposalsOnly` variant are gone; `UnitsConsumed::disposal` tells the
+kinds apart) and bounded by the read's own cutoff, so a view as at a date before the move still sees
+the units in the parcel. `reduction_for_units` takes a `cost_base::Whereabouts`
+(`InParcel`/`DisposedOn`/`CarriedOut`) and covers the units left first, then the carried ones, then
+spills onto the sold — a row written after the move takes its full rate off the units left behind,
+one written before it still reaches the moved units at the figure frozen into the replacement, and
+neither can spill onto an earlier real Sell. The net-capital-gain E10 walk maps a non-disposal cohort
+to `CarriedOut`. Tests: `amit_adjustment_generation`'s
+`api_a_partial_transfer_leaves_the_full_reduction_on_the_units_left_behind` (open parcels 60 + 40,
+unrealised 540/360, realised cost base 540 on a later sale of the 60) and
+`api_a_hand_entered_row_after_a_partial_transfer_reaches_the_units_left_behind` (both 36 before the
+fix); `cost_base`'s
+`units_carried_out_by_a_rollover_are_covered_after_those_left_and_before_the_sold`;
+`amit_adjustment`'s `a_view_before_a_rollover_still_sees_its_units_in_the_parcel`, and the existing
+held/spill test now pins `carried_out` too. `docs/API.md`'s AMIT coverage paragraph describes the
+three groups.
