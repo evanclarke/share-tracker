@@ -27,7 +27,7 @@
 
 use crate::domain::listing_identity::RenameHistory;
 use crate::domain::tax_year::tax_year_for;
-use crate::entities::closing_price::{self, SharedFetcher};
+use crate::entities::closing_price::SharedFetcher;
 use crate::entities::corporate_action::{ActionKind, CorporateAction, WorthlessEvent};
 use crate::entities::drp_enrolment::DrpEnrolment;
 use crate::entities::ess_statement::EssStatement;
@@ -914,31 +914,7 @@ async fn activity_handler(
         .price
         .map(|p| HashMap::from([(req.listing_id, p)]))
         .unwrap_or_default();
-    let live = closing_price::resolve_live_prices(
-        &pool,
-        fetcher.as_ref().map(|f| f.0.as_ref()),
-        true,
-        &prices,
-        holdings.iter().map(|h| h.listing_id),
-    )
-    .await
-    .map_err(ApiError::from)?;
-    for h in &mut holdings {
-        if let Some(&price) = prices.get(&h.listing_id) {
-            h.current_price = Some(price);
-            h.market_value = Some(h.quantity * price);
-        } else if let Some(result) = live.get(&h.listing_id) {
-            match result {
-                Ok(v) => {
-                    h.current_price = Some(v.aud_price);
-                    h.market_value = Some(h.quantity * v.aud_price);
-                    h.price_as_of = Some(v.as_of.clone());
-                    h.fx_provisional = v.fx_provisional;
-                }
-                Err(reason) => h.price_unavailable = Some(reason.clone()),
-            }
-        }
-    }
+    portfolio::price_holdings(&pool, fetcher.as_deref(), true, &prices, &mut holdings).await?;
 
     Ok(Json(ActivityResponse {
         listing_id: req.listing_id,

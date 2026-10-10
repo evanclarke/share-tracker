@@ -189,23 +189,43 @@ async fn overview(
         .await
         .map_err(ApiError::from)?;
 
-    // Live-fetch a current price for every held listing without an explicit
-    // override (when requested); an explicit price always wins.
-    let live = closing_price::resolve_live_prices(
+    price_holdings(
         &pool,
-        fetcher.as_ref().map(|f| f.0.as_ref()),
+        fetcher.as_deref(),
         req.live,
         &req.prices,
+        &mut holdings,
+    )
+    .await?;
+    Ok(Json(holdings))
+}
+
+/// Value `holdings` at a current price: an explicit `prices` entry (AUD per
+/// unit) always wins and is never fetched; otherwise, when `live`, the live
+/// quote — degrading per holding to a `price_unavailable` reason rather than
+/// failing the whole read. Shared by the overview and the activity ledger's
+/// holdings summary, so the two value a holding identically.
+pub(crate) async fn price_holdings(
+    pool: &SqlitePool,
+    fetcher: Option<&SharedFetcher>,
+    live: bool,
+    prices: &HashMap<i64, Decimal>,
+    holdings: &mut [HoldingOverview],
+) -> Result<(), ApiError> {
+    let quotes = closing_price::resolve_live_prices(
+        pool,
+        fetcher.map(|f| f.as_ref()),
+        live,
+        prices,
         holdings.iter().map(|h| h.listing_id),
     )
     .await
     .map_err(ApiError::from)?;
-
-    for h in &mut holdings {
-        if let Some(&price) = req.prices.get(&h.listing_id) {
+    for h in holdings {
+        if let Some(&price) = prices.get(&h.listing_id) {
             h.current_price = Some(price);
             h.market_value = Some(h.quantity * price);
-        } else if let Some(result) = live.get(&h.listing_id) {
+        } else if let Some(result) = quotes.get(&h.listing_id) {
             match result {
                 Ok(v) => {
                     h.current_price = Some(v.aud_price);
@@ -217,8 +237,7 @@ async fn overview(
             }
         }
     }
-
-    Ok(Json(holdings))
+    Ok(())
 }
 
 #[cfg(test)]
