@@ -442,6 +442,28 @@ function deleteButton(label, confirmText, path, seq, okMsg, refresh) {
   }, label);
 }
 
+// A button for a slow server action that repaints its screen afterwards —
+// Run now, Re-fetch, Regenerate. While `run()` is in flight it is disabled and
+// relabelled `busyLabel`, so a second click cannot start a second run; `run`
+// toasts its own outcome, a rejection toasts the error, and `refresh` (the
+// view's own `reload(seq, …)`) repaints whichever way it went, because the
+// screen's rows record the attempt either way. `type: 'button'` keeps it
+// inert inside a form.
+function busyButton(label, busyLabel, cls, seq, run, refresh) {
+  const btn = el('button', { type: 'button', class: cls }, label);
+  btn.addEventListener('click', async function () {
+    btn.disabled = true;
+    btn.textContent = busyLabel;
+    try {
+      await run();
+    } catch (e) {
+      toastIfCurrent(seq, e.message, true);
+    }
+    refresh();
+  });
+  return btn;
+}
+
 // ---- screen building blocks ---------------------------------------------
 // The pieces every hand-built screen assembles the same way: the page shell
 // (heading, optional description, then the screen's own parts — null parts
@@ -1764,21 +1786,13 @@ async function viewJobs(seq = navigationToken()) {
       };
     },
     actions: function (row) {
-      const btn = el('button', { class: 'small primary' }, 'Run now');
-      btn.addEventListener('click', async function () {
-        btn.disabled = true;
-        btn.textContent = 'Running…';
-        try {
+      // The reload shows the freshly recorded last run, failed or not.
+      return el('td', { class: 'actions' }, busyButton('Run now', 'Running…', 'small primary', seq,
+        async function () {
           await api('POST', '/jobs/' + row.job);
           toastIfCurrent(seq, "Job '" + row.job + "' completed.");
-        } catch (e) {
-          toastIfCurrent(seq, e.message, true);
-        } finally {
-          // Reload so the table reflects the freshly recorded last run.
-          reload(seq, viewJobs, seq);
-        }
-      });
-      return el('td', { class: 'actions' }, btn);
+        },
+        function () { reload(seq, viewJobs, seq); }));
     },
   });
   setMainIfCurrent(seq, el('div', null, [
@@ -1874,20 +1888,12 @@ async function viewClosingPrices(seq = navigationToken()) {
         return el('td', { class: 'actions' },
           el('span', { class: 'hint' }, 'Manual — re-enter to change'));
       }
-      const btn = el('button', { class: 'small' }, 'Re-fetch');
-      btn.addEventListener('click', async function () {
-        btn.disabled = true;
-        btn.textContent = 'Fetching…';
-        try {
-          const stored = await api('POST', '/closing_prices/fetch',
-            { listing_id: row._listing_id, price_date: row.date });
-          if (stored.status === 'ok') toastIfCurrent(seq, 'Stored ' + stored.price + ' for ' + row.date + '.');
-          else toastIfCurrent(seq, 'Fetch failed again: ' + stored.error, true);
-        } catch (e) {
-          toastIfCurrent(seq, e.message, true);
-        }
-        reload(seq, viewClosingPrices, seq);
-      });
+      const btn = busyButton('Re-fetch', 'Fetching…', 'small', seq, async function () {
+        const stored = await api('POST', '/closing_prices/fetch',
+          { listing_id: row._listing_id, price_date: row.date });
+        if (stored.status === 'ok') toastIfCurrent(seq, 'Stored ' + stored.price + ' for ' + row.date + '.');
+        else toastIfCurrent(seq, 'Fetch failed again: ' + stored.error, true);
+      }, function () { reload(seq, viewClosingPrices, seq); });
       // An errored day no re-fetch can ever fix — before the security's first
       // trading day, or a permanent hole in the provider's series — is
       // discarded so it stops being reported by the health banner. So is any
@@ -2135,6 +2141,7 @@ async function viewSnapshots(seq = navigationToken()) {
   setActiveNav('r:snapshots');
   const metas = await api('GET', '/report_snapshots');
   const defaultRange = await api('GET', '/report_snapshots/regenerate_range');
+  function refresh() { reload(seq, viewSnapshots, seq); }
 
   // On-demand generation: a past date whose prices have been backfilled, a
   // stale date after recording a back-dated fact, or (date blank) the
@@ -2154,7 +2161,7 @@ async function viewSnapshots(seq = navigationToken()) {
       const body = dateInp.value ? { date: dateInp.value } : {};
       const stored = await api('POST', '/report_snapshots/generate', body);
       toastIfCurrent(seq, 'Stored ' + stored.length + ' snapshot(s) for ' + stored[0].snapshot_date + '.');
-      reload(seq, viewSnapshots, seq);
+      refresh();
     } catch (e) {
       toastIfCurrent(seq, e.message, true);
     }
@@ -2175,27 +2182,18 @@ async function viewSnapshots(seq = navigationToken()) {
     'Defaults to the first-ever holding through the latest date with final prices. Every date in range is regenerated, including one with no stored snapshot yet; a date with nothing held is skipped, and a date whose prices aren’t backfilled is reported blocked.'));
 
   function bulkButton(label, path, buildBody) {
-    const btn = el('button', { type: 'button' }, label);
-    btn.addEventListener('click', async function () {
-      btn.disabled = true;
-      btn.textContent = 'Regenerating…';
-      try {
-        const summary = await api('POST', path, buildBody ? buildBody() : undefined);
-        let msg = 'Regenerated ' + summary.regenerated.length + ' date(s).';
-        if (summary.blocked.length > 0) {
-          const shown = summary.blocked.slice(0, 5).map(function (b) {
-            return b.date + ' (' + b.reason + ')';
-          }).join('; ');
-          const more = summary.blocked.length > 5 ? '; … and ' + (summary.blocked.length - 5) + ' more' : '';
-          msg += ' Blocked: ' + shown + more;
-        }
-        toastIfCurrent(seq, msg, summary.blocked.length > 0);
-      } catch (e) {
-        toastIfCurrent(seq, e.message, true);
+    return busyButton(label, 'Regenerating…', null, seq, async function () {
+      const summary = await api('POST', path, buildBody ? buildBody() : undefined);
+      let msg = 'Regenerated ' + summary.regenerated.length + ' date(s).';
+      if (summary.blocked.length > 0) {
+        const shown = summary.blocked.slice(0, 5).map(function (b) {
+          return b.date + ' (' + b.reason + ')';
+        }).join('; ');
+        const more = summary.blocked.length > 5 ? '; … and ' + (summary.blocked.length - 5) + ' more' : '';
+        msg += ' Blocked: ' + shown + more;
       }
-      reload(seq, viewSnapshots, seq);
-    });
-    return btn;
+      toastIfCurrent(seq, msg, summary.blocked.length > 0);
+    }, refresh);
   }
   genForm.appendChild(el('div', { class: 'form-actions' }, [
     bulkButton('Regenerate all', '/report_snapshots/regenerate_all', function () {
@@ -2225,18 +2223,10 @@ async function viewSnapshots(seq = navigationToken()) {
     statusField: 'status',
     actions: function (row) {
       const view = el('a', { href: '#/r/snapshots/' + row.report + '/' + row.date }, 'View');
-      const regen = el('button', { class: 'small' }, 'Regenerate');
-      regen.addEventListener('click', async function () {
-        regen.disabled = true;
-        regen.textContent = 'Generating…';
-        try {
-          await api('POST', '/report_snapshots/generate', { date: row.date });
-          toastIfCurrent(seq, 'Regenerated ' + row.date + '.');
-        } catch (e) {
-          toastIfCurrent(seq, e.message, true);
-        }
-        reload(seq, viewSnapshots, seq);
-      });
+      const regen = busyButton('Regenerate', 'Generating…', 'small', seq, async function () {
+        await api('POST', '/report_snapshots/generate', { date: row.date });
+        toastIfCurrent(seq, 'Regenerated ' + row.date + '.');
+      }, refresh);
       return el('td', { class: 'actions' }, [view, ' ', regen]);
     },
   });
