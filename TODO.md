@@ -171,8 +171,12 @@ Scored 6/10 — the weakest dimension. The operation modules are well factored, 
 - [ ] Split `reports/health.rs` (~3,300 prod lines, ~25 checks) into a `health/` directory by check
   family, and fold the ~10 `Duplicate*` checks (`same_x_entry` + `db_duplicate_x` pairs) into one
   generic duplicate detector — the existing health tests unchanged are the proof
-- [ ] `trade/db.rs` `write`: replace the seven per-provenance-column `is_some()` guards with one lookup
+- [x] `trade/db.rs` `write`: replace the seven per-provenance-column `is_some()` guards with one lookup
   over `TRADE_PROVENANCE`, and drop the duplicated "is this trade referenced?" `EXISTS` query
+  — done 2026-10-10: each `TRADE_PROVENANCE` row carries its `edit_refusal` and `deleted_alone`
+  policy, the upsert and delete guards read the row's one column via `provenance_column_sql`
+  (so `every_trades_foreign_key_is_classified` makes a new link choose both), and the listing- and
+  account-change freezes share `drawn_on`; the existing refusal tests pass unchanged
 - [ ] NEEDS DECISION (owner): replace source-scanning conventions with compile-time ones where the
   type system can carry them — `utoipa-axum` (`#[utoipa::path]`/`OpenApiRouter`) instead of the
   hand-kept `ROUTES` table and its ~3,700 lines of Rust-parsing tests; a `ReadPool`/`WritePool` split

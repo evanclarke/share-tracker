@@ -8,6 +8,7 @@ use super::checks::{
     statement_total_detail, validate_spot_fx_rate,
 };
 use super::model::Trade;
+use super::provenance::{provenance_column_sql, provenance_named};
 use super::{Settlement, SettlementError};
 use crate::infra::db::write_tx;
 use crate::infra::decimal::{Money, OptMoney, parse_dec};
@@ -336,13 +337,21 @@ struct ExistingTrade {
     listing_id: i64,
     date: chrono::NaiveDate,
     holding_account_id: i64,
-    rights_action_id: Option<i64>,
-    buyback_action_id: Option<i64>,
-    scrip_action_id: Option<i64>,
-    demerger_action_id: Option<i64>,
-    transfer_id: Option<i64>,
-    ess_statement_id: Option<i64>,
-    inheritance_id: Option<i64>,
+    /// The provenance column the row carries, if any
+    /// (`provenance::provenance_column_sql`).
+    provenance: Option<String>,
+}
+
+/// Does a Sell allocation or an AMIT adjustment reference parcel `id`? The
+/// dependants that freeze a parcel's listing and holding account alike.
+async fn drawn_on(conn: &mut sqlx::SqliteConnection, id: Option<i64>) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM parcel_allocations WHERE purchase_trade_id = ?1) \
+             OR EXISTS(SELECT 1 FROM amit_adjustments WHERE trade_id = ?1)",
+    )
+    .bind(id)
+    .fetch_one(conn)
+    .await
 }
 
 /// Create or update a trade. Validated and written in one transaction
@@ -519,37 +528,20 @@ async fn write(
     // so all of them bind `id`: on a create (`None`) each lookup asks for a
     // NULL id, matches nothing, and the guards fall away exactly as they
     // should for a row that does not exist yet.
-    let existing: Option<ExistingTrade> = sqlx::query_as(
-        "SELECT trade_type, listing_id, date, holding_account_id, \
-                rights_action_id, buyback_action_id, scrip_action_id, \
-                demerger_action_id, transfer_id, ess_statement_id, inheritance_id \
+    let existing: Option<ExistingTrade> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT trade_type, listing_id, date, holding_account_id, {} AS provenance \
          FROM trades WHERE id = ?",
-    )
+        provenance_column_sql("trades")
+    )))
     .bind(id)
     .fetch_optional(&mut *tx)
     .await?;
-    if let Some(existing) = &existing {
-        if existing.rights_action_id.is_some() {
-            return Err(UpsertError::RightsExerciseTrade);
-        }
-        if existing.buyback_action_id.is_some() {
-            return Err(UpsertError::BuyBackTrade);
-        }
-        if existing.scrip_action_id.is_some() {
-            return Err(UpsertError::ScripExchangeTrade);
-        }
-        if existing.demerger_action_id.is_some() {
-            return Err(UpsertError::DemergerTrade);
-        }
-        if existing.transfer_id.is_some() {
-            return Err(UpsertError::TransferTrade);
-        }
-        if existing.ess_statement_id.is_some() {
-            return Err(UpsertError::EssVestTrade);
-        }
-        if existing.inheritance_id.is_some() {
-            return Err(UpsertError::InheritedParcelTrade);
-        }
+    if let Some(refusal) = existing
+        .as_ref()
+        .and_then(|e| e.provenance.as_deref())
+        .and_then(|column| provenance_named(column).edit_refusal)
+    {
+        return Err(refusal());
     }
     // A parcel anchoring a rights sale is immutable too: the sale's
     // record-date anchoring caps were validated against this trade's date and
@@ -625,17 +617,9 @@ async fn write(
     if existing
         .as_ref()
         .is_some_and(|e| e.listing_id != trade.listing_id)
+        && drawn_on(&mut tx, id).await?
     {
-        let referenced: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM parcel_allocations WHERE purchase_trade_id = ?1) \
-                 OR EXISTS(SELECT 1 FROM amit_adjustments WHERE trade_id = ?1)",
-        )
-        .bind(id)
-        .fetch_one(&mut *tx)
-        .await?;
-        if referenced {
-            return Err(UpsertError::ListingChangeReferenced);
-        }
+        return Err(UpsertError::ListingChangeReferenced);
     }
 
     // The holding account is frozen on the same terms: a Sell allocation only
@@ -648,17 +632,9 @@ async fn write(
     if existing
         .as_ref()
         .is_some_and(|e| e.holding_account_id != trade.holding_account_id)
+        && drawn_on(&mut tx, id).await?
     {
-        let referenced: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM parcel_allocations WHERE purchase_trade_id = ?1) \
-                 OR EXISTS(SELECT 1 FROM amit_adjustments WHERE trade_id = ?1)",
-        )
-        .bind(id)
-        .fetch_one(&mut *tx)
-        .await?;
-        if referenced {
-            return Err(UpsertError::AccountChangeReferenced);
-        }
+        return Err(UpsertError::AccountChangeReferenced);
     }
 
     // Moving the parcel's date later must not carry it past a Sell that
@@ -889,30 +865,18 @@ pub enum DeleteOutcome {
     Referenced,
 }
 
-/// The provenance links a trade may carry that block deleting it on its own.
-/// Read by [`db_delete`] and mapped by column name via `FromRow`.
-#[derive(sqlx::FromRow)]
-struct DeleteGuard {
-    scrip_action_id: Option<i64>,
-    demerger_action_id: Option<i64>,
-    transfer_id: Option<i64>,
-    ess_statement_id: Option<i64>,
-    worthless_action_id: Option<i64>,
-    inheritance_id: Option<i64>,
-}
-
 pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome, sqlx::Error> {
     let mut tx = write_tx(pool).await?;
 
-    let guard: Option<DeleteGuard> = sqlx::query_as(
-        "SELECT scrip_action_id, demerger_action_id, transfer_id, ess_statement_id, \
-                worthless_action_id, inheritance_id \
-         FROM trades WHERE id = ?",
-    )
+    // The outer `Option` is the row, the inner its provenance column.
+    let provenance: Option<Option<String>> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT {} FROM trades WHERE id = ?",
+        provenance_column_sql("trades")
+    )))
     .bind(id)
     .fetch_optional(&mut *tx)
     .await?;
-    let Some(guard) = guard else {
+    let Some(provenance) = provenance else {
         return Ok(DeleteOutcome::NotFound);
     };
     // A scrip-for-scrip exchange, demerger, or holding-account transfer trade
@@ -925,13 +889,8 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome, sqlx
     // (which restores the holding). An inherited-parcel Buy is removed via
     // DELETE /inheritances/:id (which deletes the inheritance and its Buy
     // together).
-    if guard.scrip_action_id.is_some()
-        || guard.demerger_action_id.is_some()
-        || guard.transfer_id.is_some()
-        || guard.ess_statement_id.is_some()
-        || guard.worthless_action_id.is_some()
-        || guard.inheritance_id.is_some()
-    {
+    // (`TradeProvenance::deleted_alone` records which.)
+    if provenance.is_some_and(|column| !provenance_named(&column).deleted_alone) {
         return Ok(DeleteOutcome::Referenced);
     }
 

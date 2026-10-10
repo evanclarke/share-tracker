@@ -23,6 +23,8 @@
 //! its own error message ("this Sell belongs to a demerger"), which is a
 //! different question from "was this constructed?".
 
+use super::db::UpsertError;
+
 /// One provenance link a `trades` row may carry: a nullable column pointing at
 /// the record whose operation wrote the trade.
 pub(crate) struct TradeProvenance {
@@ -31,6 +33,18 @@ pub(crate) struct TradeProvenance {
     /// The write path that sets it, in plain English and article-first (`an
     /// ESS vest`), for a sentence reading "… (a demerger)".
     pub source: &'static str,
+    /// What `PUT /trades/:id` answers for a row this operation wrote: each is
+    /// refused with its own reason, since the row's figures derive from the
+    /// operation's terms. `None` only where the operation writes nothing that
+    /// path could reach — a worthless-shares recognise writes a closing Sell,
+    /// which the type-change guard refuses with the endpoint that does edit it.
+    pub edit_refusal: Option<fn() -> UpsertError>,
+    /// Whether `DELETE /trades/:id` may remove the row on its own. A row
+    /// that is one side of a group (a rollover's closing Sell and replacement
+    /// Buys, a vest with its statement, an inherited parcel with its
+    /// inheritance, a recognise Sell restoring the holding) is only ever
+    /// removed with that group, through the operation's own delete.
+    pub deleted_alone: bool,
 }
 
 /// Every provenance link on `trades`, in the order a `CASE` should test them
@@ -39,36 +53,73 @@ pub(crate) const TRADE_PROVENANCE: &[TradeProvenance] = &[
     TradeProvenance {
         column: "ess_statement_id",
         source: "an ESS vest",
+        edit_refusal: Some(|| UpsertError::EssVestTrade),
+        deleted_alone: false,
     },
     TradeProvenance {
         column: "inheritance_id",
         source: "an inherited parcel",
+        edit_refusal: Some(|| UpsertError::InheritedParcelTrade),
+        deleted_alone: false,
     },
     TradeProvenance {
         column: "rights_action_id",
         source: "a rights exercise",
+        edit_refusal: Some(|| UpsertError::RightsExerciseTrade),
+        deleted_alone: true,
     },
     TradeProvenance {
         column: "buyback_action_id",
         source: "a buy-back participation",
+        edit_refusal: Some(|| UpsertError::BuyBackTrade),
+        deleted_alone: true,
     },
     TradeProvenance {
         column: "scrip_action_id",
         source: "a scrip-for-scrip exchange",
+        edit_refusal: Some(|| UpsertError::ScripExchangeTrade),
+        deleted_alone: false,
     },
     TradeProvenance {
         column: "demerger_action_id",
         source: "a demerger",
+        edit_refusal: Some(|| UpsertError::DemergerTrade),
+        deleted_alone: false,
     },
     TradeProvenance {
         column: "transfer_id",
         source: "a holding-account transfer",
+        edit_refusal: Some(|| UpsertError::TransferTrade),
+        deleted_alone: false,
     },
     TradeProvenance {
         column: "worthless_action_id",
         source: "a worthless-shares recognise",
+        edit_refusal: None,
+        deleted_alone: false,
     },
 ];
+
+/// The provenance link named by a [`provenance_column_sql`] result.
+pub(crate) fn provenance_named(column: &str) -> &'static TradeProvenance {
+    TRADE_PROVENANCE
+        .iter()
+        .find(|p| p.column == column)
+        .expect("provenance_column_sql only ever names a TRADE_PROVENANCE column")
+}
+
+/// SQL expression naming the one provenance column a trade row (aliased
+/// `alias`) carries, or NULL for a row entered by hand — read back through
+/// [`provenance_named`]. The write guards in `trade::db` ask it once instead
+/// of testing each column in turn, so a new provenance link brings its edit
+/// and delete policy with it.
+pub(crate) fn provenance_column_sql(alias: &str) -> String {
+    let arms: Vec<String> = TRADE_PROVENANCE
+        .iter()
+        .map(|p| format!("WHEN {alias}.{0} IS NOT NULL THEN '{0}'", p.column))
+        .collect();
+    format!("CASE {} END", arms.join(" "))
+}
 
 /// The label for a trade nothing constructed.
 const ENTERED_DIRECTLY: &str = "entered directly";
