@@ -1695,7 +1695,8 @@ mod tests {
         // (confirm + DELETE + list refresh).
         assert!(js.contains("Undo reinvest"));
         assert!(js.contains("del: '/income/' + row.id + '/reinvest'"));
-        assert!(js.contains("await api('DELETE', a.del)"));
+        assert!(js.contains("deleteButton(a.label, a.confirm, a.del, seq,"));
+        assert!(js.contains("await api('DELETE', path);"));
     }
 
     /// An income row states its kind (SCENARIOS J-10): the selector, its

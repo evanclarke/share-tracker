@@ -422,6 +422,26 @@ function rowActionLink(a) {
     el('button', { class: 'link small' }, a.label));
 }
 
+// A destructive row action — Delete, Undo — as every list screen offers it:
+// ask `confirmText`, `DELETE path`, toast `okMsg` and call `refresh` (the
+// view's own `reload(seq, …)`), or toast the refusal and leave the screen as
+// it was. Both toasts go through the stale-render guard under `seq`.
+function deleteButton(label, confirmText, path, seq, okMsg, refresh) {
+  return el('button', {
+    class: 'link small danger',
+    onclick: async function () {
+      if (!confirm(confirmText)) return;
+      try {
+        await api('DELETE', path);
+        toastIfCurrent(seq, okMsg);
+        refresh();
+      } catch (e) {
+        toastIfCurrent(seq, e.message, true);
+      }
+    },
+  }, label);
+}
+
 // Report tables: read-only — no per-row Edit/Delete — but a report may still
 // declare `rowActions` (config.js) for link-only actions (e.g. the
 // Attachments report's Download/View/Owner's attachments links); `dataTable` renders them
@@ -519,6 +539,7 @@ async function viewEntityList(entity, seq = navigationToken()) {
     // id — resolved by column name, so a column with no editable field
     // (e.g. income's reinvestment_trade_id) is named too.
     const labels = await columnLabelMaps(cols);
+    function refresh() { reload(seq, viewEntityList, entity, seq); }
     const actions = entity.readonly ? null : function (row) {
       const keyPath = entity.keyFields.map(function (kf) { return row[kf.name]; }).join('/');
       const td = el('td', { class: 'actions' });
@@ -526,19 +547,7 @@ async function viewEntityList(entity, seq = navigationToken()) {
       // — e.g. income's Undo reinvest, which drives DELETE /income/:id/reinvest.
       (entity.rowActions ? entity.rowActions(row) : []).forEach(function (a) {
         if (a.del) {
-          td.appendChild(el('button', {
-            class: 'link small danger',
-            onclick: async function () {
-              if (!confirm(a.confirm)) return;
-              try {
-                await api('DELETE', a.del);
-                toastIfCurrent(seq, a.label + ': done.');
-                reload(seq, viewEntityList, entity, seq);
-              } catch (e) {
-                toastIfCurrent(seq, e.message, true);
-              }
-            },
-          }, a.label));
+          td.appendChild(deleteButton(a.label, a.confirm, a.del, seq, a.label + ': done.', refresh));
         } else {
           td.appendChild(rowActionLink(a));
         }
@@ -551,27 +560,14 @@ async function viewEntityList(entity, seq = navigationToken()) {
         td.appendChild(el('a', { href: '#/e/' + entity.slug + '/edit/' + keyPath },
           el('button', { class: 'link small' }, 'Edit')));
       }
-      td.appendChild(el('button', {
-        class: 'link small danger',
-        onclick: function () { deleteEntity(entity, keyPath, row, seq); },
-      }, 'Delete'));
+      td.appendChild(deleteButton('Delete', 'Delete this ' + entity.title.replace(/s$/, '') + '?',
+        entity.api + '/' + keyPath, seq, 'Deleted.', refresh));
       return td;
     };
     table = filterableTable(rows, cols, { actions: actions, labels: labels });
   }
 
   setMainIfCurrent(seq, el('div', null, [header, toolbar, table]));
-}
-
-async function deleteEntity(entity, keyPath, row, seq = navigationToken()) {
-  if (!confirm('Delete this ' + entity.title.replace(/s$/, '') + '?')) return;
-  try {
-    await api('DELETE', entity.api + '/' + keyPath);
-    toastIfCurrent(seq, 'Deleted.');
-    reload(seq, viewEntityList, entity, seq);
-  } catch (e) {
-    toastIfCurrent(seq, e.message, true);
-  }
 }
 
 // ---- entity form view -------------------------------------------------
@@ -785,14 +781,8 @@ async function viewSellsList(seq = navigationToken()) {
         return el('td', { class: 'actions' }, [
           el('a', { href: '#/attachments/trade_id/' + row.id }, el('button', { class: 'link small' }, 'Attachments')),
           el('a', { href: '#/sells/edit/' + row.id }, el('button', { class: 'link small' }, 'Edit')),
-          el('button', {
-            class: 'link small danger',
-            onclick: async function () {
-              if (!confirm('Delete this Sell and its allocations?')) return;
-              try { await api('DELETE', '/sells/' + row.id); toastIfCurrent(seq, 'Deleted.'); reload(seq, viewSellsList, seq); }
-              catch (e) { toastIfCurrent(seq, e.message, true); }
-            },
-          }, 'Delete'),
+          deleteButton('Delete', 'Delete this Sell and its allocations?', '/sells/' + row.id, seq,
+            'Deleted.', function () { reload(seq, viewSellsList, seq); }),
         ]);
       },
     });
@@ -916,14 +906,8 @@ async function viewTransfersList(seq = navigationToken()) {
       labels: await columnLabelMaps(cols),
       actions: function (row) {
         return el('td', { class: 'actions' }, [
-          el('button', {
-            class: 'link small danger',
-            onclick: async function () {
-              if (!confirm('Delete this transfer and restore the pre-transfer holding?')) return;
-              try { await api('DELETE', '/transfers/' + row.id); toastIfCurrent(seq, 'Deleted.'); reload(seq, viewTransfersList, seq); }
-              catch (e) { toastIfCurrent(seq, e.message, true); }
-            },
-          }, 'Delete'),
+          deleteButton('Delete', 'Delete this transfer and restore the pre-transfer holding?',
+            '/transfers/' + row.id, seq, 'Deleted.', function () { reload(seq, viewTransfersList, seq); }),
         ]);
       },
     });
@@ -1154,21 +1138,12 @@ async function viewListingRenames(listingId, seq = navigationToken()) {
       actions: function (row) {
         const td = el('td', { class: 'actions' });
         if (row !== newest) return td;
-        td.appendChild(el('button', {
-          class: 'link small danger',
-          onclick: async function () {
-            if (!confirm('Undo this rename? The listing goes back to '
-              + (row.old_exchange_mic || 'Crypto') + ':' + row.old_ticker
-              + ', with the name and price symbol it had before.')) return;
-            try {
-              await api('DELETE', '/listings/' + pathSeg(listingId) + '/renames/' + row.id);
-              toastIfCurrent(seq, 'Rename undone.');
-              reload(seq, viewListingRenames, listingId, seq);
-            } catch (e) {
-              toastIfCurrent(seq, e.message, true);
-            }
-          },
-        }, 'Undo'));
+        td.appendChild(deleteButton('Undo',
+          'Undo this rename? The listing goes back to '
+            + (row.old_exchange_mic || 'Crypto') + ':' + row.old_ticker
+            + ', with the name and price symbol it had before.',
+          '/listings/' + pathSeg(listingId) + '/renames/' + row.id, seq, 'Rename undone.',
+          function () { reload(seq, viewListingRenames, listingId, seq); }));
         return td;
       },
     });
@@ -1358,14 +1333,8 @@ async function viewAttachments(ownerField, ownerId, seq = navigationToken()) {
           actions.push(el('a', { href: '#/attachments/' + link.field + '/' + link.id },
             el('button', { class: 'link small' }, "Owner's attachments")));
         } else {
-          actions.push(el('button', {
-            class: 'link small danger',
-            onclick: async function () {
-              if (!confirm('Delete this attachment?')) return;
-              try { await api('DELETE', '/attachments/' + row.id); toastIfCurrent(seq, 'Deleted.'); refresh(); }
-              catch (e) { toastIfCurrent(seq, e.message, true); }
-            },
-          }, 'Delete'));
+          actions.push(deleteButton('Delete', 'Delete this attachment?', '/attachments/' + row.id,
+            seq, 'Deleted.', refresh));
         }
         return el('td', { class: 'actions' }, actions);
       },
