@@ -45,6 +45,7 @@ use crate::domain::cost_base::{self, ParcelRow};
 use crate::domain::open_parcels;
 use crate::domain::tax_year::tax_year_for;
 use crate::entities::corporate_action::{self, RocEvent};
+use crate::infra::currency::CurrencyCode;
 use crate::infra::decimal::{parse_dec, to_cents};
 use crate::infra::extract::Json;
 use crate::infra::fx::{FxOverride, FxRates};
@@ -229,7 +230,7 @@ enum Reduction {
     /// figure `RocEvent::per_unit_for` produced.
     Roc {
         date: NaiveDate,
-        currency: String,
+        currency: CurrencyCode,
         per_unit: Decimal,
         /// The payment's record date where recorded — what decides whether
         /// units sold before the payment were nonetheless entitled to it, and
@@ -2411,7 +2412,7 @@ mod tests {
                     rights_units: Decimal::ONE,
                     rights_held_units: Decimal::from(4),
                     exercise_price: "1.80".parse().unwrap(),
-                    currency: "AUD".to_string(),
+                    currency: "AUD".into(),
                     renounceable: true,
                 },
             },
@@ -2455,7 +2456,7 @@ mod tests {
             .await
             .unwrap();
         let mut a = make_amma(1, 1, NaiveDate::from_ymd_opt(2024, 6, 30).unwrap());
-        a.currency = "USD".to_string();
+        a.currency = "USD".into();
         a.cgt_discount_gains = Decimal::from(50);
         amma::db_upsert(&pool, &a).await.unwrap();
 
@@ -2470,7 +2471,7 @@ mod tests {
         let pool = test_pool().await;
         insert_usd_listing(&pool, 1, "VAF").await;
         let mut a = make_amma(1, 1, NaiveDate::from_ymd_opt(2024, 6, 30).unwrap());
-        a.currency = "USD".to_string();
+        a.currency = "USD".into();
         a.cgt_discount_gains = Decimal::from(50);
         amma::db_upsert(&pool, &a).await.unwrap();
 
@@ -2863,7 +2864,7 @@ mod tests {
                 date,
                 kind: corporate_action::ActionKind::ReturnOfCapital {
                     amount_per_unit: amount.parse().unwrap(),
-                    currency: currency.to_string(),
+                    currency: currency.to_string().into(),
                     record_date,
                 },
             },

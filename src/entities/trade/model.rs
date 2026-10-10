@@ -1,6 +1,7 @@
 //! The trade model: the stored row (`Trade`), its wire presentation, the
 //! `PUT` request body (`TradeBody`), and the `TradeType` enum.
 
+use crate::infra::currency::CurrencyCode;
 use crate::infra::decimal::{Money, OptMoney};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
@@ -89,7 +90,7 @@ pub struct Trade {
     pub average_price: Decimal,
     #[sqlx(try_from = "Money")]
     pub quantity: Decimal,
-    pub currency: String,
+    pub currency: CurrencyCode,
     /// Always stored ex-GST: when a request flags `brokerage_includes_gst`,
     /// the entered inclusive amount is split at write time (see
     /// `split_gst_inclusive`) before it lands here, so the cost-base
@@ -107,7 +108,7 @@ pub struct Trade {
     /// same split semantics; the stored money columns are already split, so
     /// nothing else reads it.
     pub brokerage_includes_gst: bool,
-    pub brokerage_currency: String,
+    pub brokerage_currency: CurrencyCode,
     /// Manual foreign-per-AUD override (same convention as the ATO rate: AUD =
     /// foreign / fx_rate). Reports prefer the ATO RBA rate for the trade's month
     /// and fall back to this field only when no ATO rate exists (see `infra::fx`).
@@ -308,7 +309,7 @@ pub struct TradeBody {
     #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub quantity: Decimal,
     /// ISO 4217 code of the price — the listing's trading currency.
-    pub currency: String,
+    pub currency: CurrencyCode,
     /// GST-inclusive when `brokerage_includes_gst` is set (the server splits
     /// it; any supplied `gst_on_brokerage` is ignored), ex-GST otherwise.
     /// Reads present the same shape (see [`Trade::present`]), so a GET → PUT
@@ -325,7 +326,7 @@ pub struct TradeBody {
     pub brokerage_includes_gst: bool,
     /// ISO 4217 code the brokerage was billed in; must equal `currency` (convert a foreign
     /// fee before entry).
-    pub brokerage_currency: String,
+    pub brokerage_currency: CurrencyCode,
     /// Manual foreign-per-AUD rate (decimal string; `1` for AUD), the fallback when no
     /// ATO/RBA monthly rate exists for the trade's month.
     #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]

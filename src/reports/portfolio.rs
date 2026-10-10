@@ -519,7 +519,7 @@ mod tests {
                 date,
                 kind: corporate_action::ActionKind::ReturnOfCapital {
                     amount_per_unit: amount.parse().unwrap(),
-                    currency: "AUD".to_string(),
+                    currency: "AUD".into(),
                     record_date: None,
                 },
             },

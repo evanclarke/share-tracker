@@ -275,7 +275,7 @@ mod tests {
                 mic: "XLON".to_string(),
                 name: "LSE".to_string(),
                 country: "GB".to_string(),
-                currency: "AUD".to_string(),
+                currency: "AUD".into(),
                 timezone: "Europe/London".to_string(),
                 settlement_days: 2,
                 close_time: "16:00".to_string(),

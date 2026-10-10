@@ -1,3 +1,4 @@
+use crate::infra::currency::CurrencyCode;
 use crate::infra::db::write_tx;
 use crate::infra::extract::Json;
 use crate::infra::http::{self, ApiError, CrudEntity, Upsert, UpsertResponse};
@@ -39,7 +40,7 @@ pub struct Listing {
     pub name: String,
     pub isin: Option<String>,
     pub security_type: SecurityType,
-    pub currency: String,
+    pub currency: CurrencyCode,
     pub amit: bool,
     /// The date the fund *became* an AMIT, when it was not always one: every
     /// reader of `amit` compares its record's own date against this, so a
@@ -112,7 +113,7 @@ pub struct ListingBody {
     /// `Share`, `ETF`, `LIC`, `Trust` or `Crypto`.
     pub security_type: SecurityType,
     /// ISO 4217 code the security is quoted and traded in.
-    pub currency: String,
+    pub currency: CurrencyCode,
     /// Whether the security is an attribution managed investment trust (AMIT), whose AMMA
     /// statements adjust parcel cost bases.
     pub amit: bool,
@@ -221,7 +222,10 @@ pub enum UpsertError {
     ///
     /// [closing price]: crate::entities::closing_price
     #[error("a currency change from {from} to {to} on a listing with history")]
-    CurrencyChangeWithHistory { from: String, to: String },
+    CurrencyChangeWithHistory {
+        from: CurrencyCode,
+        to: CurrencyCode,
+    },
     /// `unpriced_from` was set on a listing with no stored **ok** closing
     /// price before it (carries the rejected date). That earlier close is
     /// exactly what valuation carries forward from the date on, so without
@@ -463,7 +467,7 @@ async fn write(
     // brand-new listing with no dependents yet stays freely editable here.
     // A create (`id` is `None`) has no stored row, so there is nothing whose
     // identity the write could change; the lookup binds NULL and finds none.
-    let current: Option<(String, Option<String>, String)> =
+    let current: Option<(String, Option<String>, CurrencyCode)> =
         sqlx::query_as("SELECT ticker, exchange_mic, currency FROM listings WHERE id = ?")
             .bind(id)
             .fetch_optional(&mut *tx)
@@ -1159,7 +1163,7 @@ mod tests {
 
         // No history yet: still a plain field edit.
         let mut to_usd = xtest();
-        to_usd.currency = "USD".to_string();
+        to_usd.currency = "USD".into();
         db_upsert(&pool, &to_usd).await.unwrap();
         assert_eq!(db_get(&pool, 1).await.unwrap().unwrap().currency, "USD");
 
@@ -1168,7 +1172,7 @@ mod tests {
             .insert(&pool)
             .await;
         let mut to_eur = xtest();
-        to_eur.currency = "EUR".to_string();
+        to_eur.currency = "EUR".into();
         let err = db_upsert(&pool, &to_eur).await.unwrap_err();
         assert!(
             matches!(&err, UpsertError::CurrencyChangeWithHistory { from, to }
@@ -1234,7 +1238,7 @@ mod tests {
         // The currency denominates every stored price.
         fresh(pool.clone()).await;
         let mut recurrencied = renamed.clone();
-        recurrencied.currency = "USD".to_string();
+        recurrencied.currency = "USD".into();
         db_upsert(&pool, &recurrencied).await.unwrap();
         assert!(stale(pool.clone()).await);
 
@@ -1306,7 +1310,7 @@ mod tests {
         let pool = test_pool().await;
         // 'ZZZ' is not a recognised currency (no row in `currencies`).
         let mut bad = xtest();
-        bad.currency = "ZZZ".to_string();
+        bad.currency = "ZZZ".into();
         let UpsertError::Db(err) = db_upsert(&pool, &bad).await.unwrap_err() else {
             panic!("expected a DB error");
         };
@@ -1316,7 +1320,7 @@ mod tests {
         );
         // A seeded currency is accepted.
         let mut ok = xtest();
-        ok.currency = "AUD".to_string();
+        ok.currency = "AUD".into();
         db_upsert(&pool, &ok).await.unwrap();
     }
 

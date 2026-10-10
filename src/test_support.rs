@@ -650,7 +650,7 @@ pub fn listing(id: i64) -> ListingBuilder {
             name: format!("Test {id}"),
             isin: None,
             security_type: listing::SecurityType::ETF,
-            currency: "AUD".to_string(),
+            currency: "AUD".into(),
             amit: false,
             amit_from: None,
             unpriced_from: None,
@@ -682,7 +682,7 @@ impl ListingBuilder {
     }
 
     pub fn currency(mut self, currency: &str) -> Self {
-        self.l.currency = currency.to_string();
+        self.l.currency = currency.into();
         self
     }
 
@@ -1029,11 +1029,11 @@ impl TradeBuilder {
                 listing_id,
                 average_price: Decimal::from(10),
                 quantity: Decimal::from(100),
-                currency: "AUD".to_string(),
+                currency: "AUD".into(),
                 brokerage: Decimal::ZERO,
                 gst_on_brokerage: Decimal::ZERO,
                 brokerage_includes_gst: false,
-                brokerage_currency: "AUD".to_string(),
+                brokerage_currency: "AUD".into(),
                 fx_rate: Decimal::ONE,
                 spot_fx_rate: None,
                 contract_note_ref: None,
@@ -1096,8 +1096,8 @@ impl TradeBuilder {
     /// can never differ: a brokerage billed in another currency is rejected at
     /// write time, see `trade::AmountsError::BrokerageCurrencyMismatch`).
     pub fn currency(mut self, currency: &str) -> Self {
-        self.t.currency = currency.to_string();
-        self.t.brokerage_currency = currency.to_string();
+        self.t.currency = currency.into();
+        self.t.brokerage_currency = currency.into();
         self.currency_overridden = true;
         self
     }
@@ -1154,8 +1154,8 @@ impl TradeBuilder {
                     .await
                     .unwrap()
         {
-            self.t.currency = listing.clone();
-            self.t.brokerage_currency = listing;
+            self.t.currency = listing.clone().into();
+            self.t.brokerage_currency = listing.into();
         }
         trade::db_upsert(pool, &self.t).await.unwrap();
     }
@@ -1188,7 +1188,7 @@ pub fn amma(id: i64, listing_id: i64) -> AmmaBuilder {
             tax_free_amount: Decimal::ZERO,
             cost_base_adjustment: Decimal::ZERO,
             tfn_withholding_tax: Decimal::ZERO,
-            currency: "AUD".to_string(),
+            currency: "AUD".into(),
             holding_account_id: 1,
         },
     }
@@ -1236,7 +1236,7 @@ impl AmmaBuilder {
                     .await
                     .unwrap()
         {
-            self.a.currency = listing;
+            self.a.currency = listing.into();
         }
         amma::db_upsert(pool, &self.a).await.unwrap();
     }
@@ -1262,7 +1262,7 @@ pub fn income(id: i64, listing_id: i64, date_paid: NaiveDate) -> IncomeBuilder {
             trust_income: false,
             entitlement_date: None,
             reinvestment_trade_id: None,
-            currency: "AUD".to_string(),
+            currency: "AUD".into(),
             buyback_trade_id: None,
             holding_account_id: 1,
             amount_per_security: None,
@@ -1330,7 +1330,7 @@ pub fn ess_statement(id: i64, listing_id: i64, taxing_point: NaiveDate) -> EssSt
             pre_2009_cessation_discount: Decimal::ZERO,
             foreign_source_discount: Decimal::ZERO,
             tfn_withholding: Decimal::ZERO,
-            currency: "AUD".to_string(),
+            currency: "AUD".into(),
             fx_rate: None,
             aud_taxed_upfront_eligible: None,
             aud_taxed_upfront_not_eligible: None,

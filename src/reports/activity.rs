@@ -35,6 +35,7 @@ use crate::entities::income::{Income, IncomeType};
 use crate::entities::investment_expense::InvestmentExpense;
 use crate::entities::trade::{Trade, TradeType};
 use crate::entities::transfer::Transfer;
+use crate::infra::currency::CurrencyCode;
 use crate::infra::decimal::{mul_div, parse_dec};
 use crate::infra::extract::{Json, Query};
 use crate::infra::fx::{FxOverride, FxRates};
@@ -155,7 +156,7 @@ struct RightsSaleRow {
     proceeds_per_right: Decimal,
     fx_rate: Decimal,
     holding_account_id: i64,
-    currency: String,
+    currency: CurrencyCode,
 }
 
 /// A ledger row before sorting: the sort key plus the row's unit effect.
@@ -1187,7 +1188,7 @@ mod tests {
                 i.trust_income = true;
                 i.entitlement_date = Some(ymd(2025, 6, 30));
                 i.unfranked_amount = dec("100");
-                i.currency = "USD".to_string();
+                i.currency = "USD".into();
             })
             .insert(&pool)
             .await;
@@ -1219,7 +1220,7 @@ mod tests {
                 date: ymd(2024, 2, 1),
                 kind: ActionKind::ReturnOfCapital {
                     amount_per_unit: dec("0.50"),
-                    currency: "AUD".to_string(),
+                    currency: "AUD".into(),
                     record_date: None,
                 },
             },
@@ -1236,7 +1237,7 @@ mod tests {
                     rights_units: dec("1"),
                     rights_held_units: dec("4"),
                     exercise_price: dec("5"),
-                    currency: "AUD".to_string(),
+                    currency: "AUD".into(),
                     renounceable: true,
                 },
             },
@@ -1290,7 +1291,7 @@ mod tests {
                 amount: dec("99"),
                 gross_amount: None,
                 deductible_percentage: None,
-                currency: "AUD".to_string(),
+                currency: "AUD".into(),
                 description: Some("adviser".to_string()),
                 listing_id: Some(1),
                 holding_account_id: None,
@@ -1515,7 +1516,7 @@ mod tests {
                 mic: "CXAX".to_string(),
                 name: "Second AUD market".to_string(),
                 country: "Australia".to_string(),
-                currency: "AUD".to_string(),
+                currency: "AUD".into(),
                 timezone: "Australia/Sydney".to_string(),
                 settlement_days: 2,
                 close_time: "16:00".to_string(),

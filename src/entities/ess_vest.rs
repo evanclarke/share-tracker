@@ -330,7 +330,7 @@ mod tests {
                 s.quantity = qty.parse().unwrap();
                 s.market_value_per_share = price.parse().unwrap();
                 s.deferral_discount = Decimal::from(600);
-                s.currency = currency.to_string();
+                s.currency = currency.into();
             })
             .insert(pool)
             .await;
@@ -386,10 +386,10 @@ mod tests {
                 listing_id: 1,
                 average_price: Decimal::from(10),
                 quantity: Decimal::from(100),
-                currency: "AUD".to_string(),
+                currency: "AUD".into(),
                 brokerage: Decimal::ZERO,
                 gst_on_brokerage: Decimal::ZERO,
-                brokerage_currency: "AUD".to_string(),
+                brokerage_currency: "AUD".into(),
                 fx_rate: Decimal::ONE,
                 spot_fx_rate: None,
                 contract_note_ref: None,
@@ -558,10 +558,10 @@ mod tests {
                 listing_id: parcel.listing_id,
                 average_price: Decimal::from(10),
                 quantity: qty,
-                currency: "AUD".to_string(),
+                currency: "AUD".into(),
                 brokerage: Decimal::ZERO,
                 gst_on_brokerage: Decimal::ZERO,
-                brokerage_currency: "AUD".to_string(),
+                brokerage_currency: "AUD".into(),
                 fx_rate: Decimal::ONE,
                 spot_fx_rate: None,
                 contract_note_ref: None,
@@ -652,7 +652,7 @@ mod tests {
             .with(|s| {
                 s.quantity = Decimal::from(100);
                 s.market_value_per_share = Decimal::from(150);
-                s.currency = "USD".to_string();
+                s.currency = "USD".into();
                 s.fx_rate = Some("0.6".parse().unwrap());
             })
             .insert(&pool)
@@ -803,10 +803,10 @@ mod tests {
                 listing_id: 1,
                 average_price: Decimal::from(9),
                 quantity: Decimal::from(40),
-                currency: "AUD".to_string(),
+                currency: "AUD".into(),
                 brokerage: Decimal::ZERO,
                 gst_on_brokerage: Decimal::ZERO,
-                brokerage_currency: "AUD".to_string(),
+                brokerage_currency: "AUD".into(),
                 fx_rate: Decimal::ONE,
                 spot_fx_rate: None,
                 contract_note_ref: None,

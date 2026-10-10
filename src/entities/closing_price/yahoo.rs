@@ -127,7 +127,7 @@ impl PriceFetcher for YahooFetcher {
                 .map(|c| FetchedClose {
                     date: c.ts.with_timezone(&tz).date_naive(),
                     price: clean_price(c.ohlc.close.into_inner()),
-                    currency: c.currency.to_string(),
+                    currency: c.currency.to_string().into(),
                 })
                 .collect())
         })
@@ -241,7 +241,7 @@ pub(super) fn yahoo_quote_named(
         .ok_or_else(|| format!("yahoo quote for {symbol} carries no timestamp"))?;
     Ok(LatestQuote {
         price: clean_price(*price.as_decimal()),
-        currency: quote.currency.to_string(),
+        currency: quote.currency.to_string().into(),
         as_of,
     })
 }

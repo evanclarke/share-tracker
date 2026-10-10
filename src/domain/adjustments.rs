@@ -26,6 +26,7 @@
 //! type, its own ratio walk ([`price_basis_ratio`]) and its own loader
 //! (`entities::closing_price::db_price_basis_events`).
 
+use crate::infra::currency::CurrencyCode;
 use crate::infra::decimal::{mul_div, parse_dec};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
@@ -38,7 +39,7 @@ pub struct RocEvent {
     /// The payment date.
     pub date: NaiveDate,
     pub amount_per_unit: Decimal,
-    pub currency: String,
+    pub currency: CurrencyCode,
     /// The date entitlement to the payment was fixed, when recorded (always on
     /// or before [`Self::date`]). `None` = not recorded, and entitlement falls
     /// back to the payment date — see [`Self::per_unit_for`].
@@ -151,7 +152,7 @@ impl RocEvent {
         if rollover.is_some_and(|r| self.date <= r.on) {
             return Ok(None);
         }
-        if self.currency != parcel_currency {
+        if *self.currency != *parcel_currency {
             return Err(sqlx::Error::Decode(
                 format!(
                     "return-of-capital currency {} differs from the parcel's currency {}",
@@ -208,8 +209,8 @@ where
 #[derive(Debug, Clone)]
 pub struct CurrencyConflict {
     pub payment_date: NaiveDate,
-    pub payment_currency: String,
-    pub parcel_currency: String,
+    pub payment_currency: CurrencyCode,
+    pub parcel_currency: CurrencyCode,
 }
 
 /// The first (if any) return-of-capital payment on `listing_id` whose currency

@@ -1,3 +1,4 @@
+use crate::infra::currency::CurrencyCode;
 use crate::infra::db::write_tx;
 use crate::infra::extract::Json;
 use crate::infra::http::{self, ApiError, CrudEntity, UpsertResponse};
@@ -15,7 +16,7 @@ pub struct Exchange {
     pub mic: String,
     pub name: String,
     pub country: String,
-    pub currency: String,
+    pub currency: CurrencyCode,
     pub timezone: String,
     pub settlement_days: i64,
     /// Local-time end of the regular trading session (`HH:MM`, in `timezone`).
@@ -32,7 +33,7 @@ pub struct ExchangeBody {
     /// Country the exchange is in, e.g. `Australia`.
     pub country: String,
     /// ISO 4217 code of the exchange's default trading currency.
-    pub currency: String,
+    pub currency: CurrencyCode,
     /// IANA timezone the exchange trades in, e.g. `Australia/Sydney`; `close_time` is read
     /// on this clock.
     pub timezone: String,
@@ -266,7 +267,7 @@ mod tests {
             mic: "XTES".to_string(),
             name: "Test Exchange".to_string(),
             country: "Testland".to_string(),
-            currency: "AUD".to_string(),
+            currency: "AUD".into(),
             timezone: "UTC".to_string(),
             settlement_days: 2,
             close_time: "16:00".to_string(),

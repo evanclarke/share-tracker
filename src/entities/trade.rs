@@ -145,10 +145,10 @@ mod tests {
                 listing_id: 1,
                 average_price: Decimal::from(120),
                 quantity: qty,
-                currency: "AUD".to_string(),
+                currency: "AUD".into(),
                 brokerage: Decimal::ZERO,
                 gst_on_brokerage: Decimal::ZERO,
-                brokerage_currency: "AUD".to_string(),
+                brokerage_currency: "AUD".into(),
                 fx_rate: Decimal::ONE,
                 spot_fx_rate: None,
                 contract_note_ref: None,
@@ -225,8 +225,8 @@ mod tests {
         // to match (SCENARIOS B-02), so an unrecognised code can only ever
         // reach the database on both at once.
         let mut bad_currency = buy_trade();
-        bad_currency.currency = "ZZZ".to_string();
-        bad_currency.brokerage_currency = "ZZZ".to_string();
+        bad_currency.currency = "ZZZ".into();
+        bad_currency.brokerage_currency = "ZZZ".into();
         assert_fk_error(
             db_upsert(&pool, &bad_currency).await.unwrap_err(),
             "currency",
@@ -255,8 +255,8 @@ mod tests {
         let mut btc = buy_trade();
         btc.id = 2;
         btc.listing_id = 2;
-        btc.currency = "BTC".to_string();
-        btc.brokerage_currency = "BTC".to_string();
+        btc.currency = "BTC".into();
+        btc.brokerage_currency = "BTC".into();
         db_upsert(&pool, &btc).await.unwrap();
     }
 
@@ -2610,7 +2610,7 @@ mod tests {
                 date: ymd(2024, 5, 1),
                 kind: ActionKind::ReturnOfCapital {
                     amount_per_unit: dec("0.50"),
-                    currency: "USD".to_string(),
+                    currency: "USD".into(),
                     record_date: None,
                 },
             },

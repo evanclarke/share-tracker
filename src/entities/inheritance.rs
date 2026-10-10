@@ -103,6 +103,7 @@
 //! parcel dated on a closed day is surfaced instead, non-blockingly, by
 //! `reports::health`'s `non_trading_day_trades`.
 
+use crate::infra::currency::CurrencyCode;
 use crate::infra::db::write_tx;
 use crate::infra::decimal::Money;
 use crate::infra::extract::Json;
@@ -167,7 +168,7 @@ pub struct Inheritance {
     /// [`CostBaseRule::DeceasedCostBase`] (it starts the discount clock),
     /// absent with [`CostBaseRule::MarketValueAtDeath`].
     pub deceased_acquisition_date: Option<NaiveDate>,
-    pub currency: String,
+    pub currency: CurrencyCode,
     /// Manual foreign-per-AUD fallback rate (same convention as
     /// `trades.fx_rate`). 1 for AUD.
     #[sqlx(try_from = "Money")]
@@ -214,8 +215,8 @@ pub struct InheritanceBody {
     #[serde(default)]
     pub deceased_acquisition_date: Option<NaiveDate>,
     /// ISO 4217 code of `cost_base`. Defaults to `AUD`.
-    #[serde(default = "default_currency")]
-    pub currency: String,
+    #[serde(default = "CurrencyCode::aud")]
+    pub currency: CurrencyCode,
     /// Manual foreign-per-AUD fallback rate (decimal string), used when no ATO
     /// rate exists for the month. Absent/null means 1 (the AUD case).
     #[serde(
@@ -232,10 +233,6 @@ pub(crate) const COLUMNS: &str = "id, listing_id, holding_account_id, quantity, 
                                   cost_base_rule, cost_base, lpr_expenditure, \
                                   lpr_expenditure_date, deceased_acquisition_date, currency, \
                                   fx_rate";
-
-fn default_currency() -> String {
-    "AUD".to_string()
-}
 
 /// The `/inheritances` list filters: the owning columns and the
 /// `date_of_death` range, inclusive at both ends.
@@ -377,8 +374,8 @@ pub enum UpsertError {
     /// and DRP reinvest paths.
     #[error("the inheritance is in {inheritance} but its listing is in {listing}")]
     CurrencyNotListings {
-        inheritance: String,
-        listing: String,
+        inheritance: CurrencyCode,
+        listing: CurrencyCode,
     },
     /// A non-AUD inheritance whose acquisition month has no imported ATO rate
     /// and that states no rate of its own — `fx_rate` still at its default 1.
@@ -398,8 +395,8 @@ pub enum UpsertError {
     #[error("this parcel's currency differs from a return of capital recorded on its listing")]
     PaymentCurrencyMismatch {
         payment_date: NaiveDate,
-        payment_currency: String,
-        parcel_currency: String,
+        payment_currency: CurrencyCode,
+        parcel_currency: CurrencyCode,
     },
     /// The inherited parcel is dated (date of death) on or before an executed
     /// whole-holding operation of its listing — a scrip-for-scrip exchange, a
@@ -570,7 +567,7 @@ async fn check_listing_currency(
     tx: &mut sqlx::SqliteConnection,
     inh: &Inheritance,
 ) -> Result<(), UpsertError> {
-    let listing_currency: Option<String> =
+    let listing_currency: Option<CurrencyCode> =
         sqlx::query_scalar("SELECT currency FROM listings WHERE id = ?")
             .bind(inh.listing_id)
             .fetch_optional(tx)
@@ -590,7 +587,7 @@ async fn check_convertible(
     tx: &mut sqlx::SqliteConnection,
     inh: &Inheritance,
 ) -> Result<(), UpsertError> {
-    if inh.currency.eq_ignore_ascii_case("AUD") || inh.fx_rate != Decimal::ONE {
+    if inh.currency.is_aud() || inh.fx_rate != Decimal::ONE {
         return Ok(());
     }
     // The strict resolution rule (`infra::fx::pick_rate`) with no override —
@@ -607,7 +604,7 @@ async fn check_convertible(
             crate::infra::fx::FxOverride::None,
         )
         .map_err(|_| UpsertError::MissingFxRate {
-            currency: inh.currency.clone(),
+            currency: inh.currency.to_string(),
             month: conversion_date(inh).format("%Y-%m").to_string(),
         })?;
     Ok(())
@@ -645,7 +642,7 @@ fn validate(inh: &Inheritance) -> Result<(), UpsertError> {
         (CostBaseRule::MarketValueAtDeath, None) => {}
         _ => return Err(UpsertError::RuleAcquisitionDateMismatch),
     }
-    if inh.lpr_expenditure != Decimal::ZERO && !inh.currency.eq_ignore_ascii_case("AUD") {
+    if inh.lpr_expenditure != Decimal::ZERO && !inh.currency.is_aud() {
         return Err(UpsertError::LprExpenditureOnForeignParcel);
     }
     match inh.lpr_expenditure_date {
@@ -998,7 +995,7 @@ mod tests {
             lpr_expenditure: dec("200"),
             lpr_expenditure_date: Some(ymd(2025, 3, 1)),
             deceased_acquisition_date: Some(ymd(2020, 2, 1)),
-            currency: "AUD".to_string(),
+            currency: "AUD".into(),
             fx_rate: Decimal::ONE,
         }
     }
@@ -1022,7 +1019,7 @@ mod tests {
     /// while the parcel converts at its acquisition month).
     fn post_cgt_usd(id: i64) -> Inheritance {
         Inheritance {
-            currency: "USD".to_string(),
+            currency: "USD".into(),
             lpr_expenditure: Decimal::ZERO,
             lpr_expenditure_date: None,
             ..post_cgt(id)
@@ -1049,10 +1046,10 @@ mod tests {
             listing_id: 1,
             average_price: dec(price),
             quantity: dec(qty),
-            currency: "AUD".to_string(),
+            currency: "AUD".into(),
             brokerage: Decimal::ZERO,
             gst_on_brokerage: Decimal::ZERO,
-            brokerage_currency: "AUD".to_string(),
+            brokerage_currency: "AUD".into(),
             fx_rate: Decimal::ONE,
             spot_fx_rate: None,
             contract_note_ref: None,
@@ -1544,7 +1541,7 @@ mod tests {
             &Inheritance {
                 id: 2,
                 listing_id: 2,
-                currency: "AUD".to_string(),
+                currency: "AUD".into(),
                 fx_rate: Decimal::ONE,
                 ..post_cgt(2)
             },

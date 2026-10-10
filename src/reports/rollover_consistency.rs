@@ -61,6 +61,7 @@ use crate::domain::open_parcels;
 use crate::domain::rollover::CostBaseInputs;
 use crate::domain::whole_holding;
 use crate::entities::corporate_action::as_acquired_quantity;
+use crate::infra::currency::CurrencyCode;
 use crate::infra::decimal::row_dec;
 use crate::infra::extract::Json;
 use crate::infra::http::ApiError;
@@ -152,7 +153,7 @@ struct Group {
 /// A replacement parcel's stored figures.
 struct Replacement {
     id: i64,
-    currency: String,
+    currency: CurrencyCode,
     quantity: Decimal,
     cost_base: Decimal,
 }
@@ -320,7 +321,7 @@ async fn problems_for(
     .fetch_all(&mut *conn)
     .await?;
 
-    let mut expected_cost_base: HashMap<String, Decimal> = HashMap::new();
+    let mut expected_cost_base: HashMap<CurrencyCode, Decimal> = HashMap::new();
     let mut expected_units = Decimal::ZERO;
     for row in &allocation_rows {
         let allocated = row_dec(row, "quantity_allocated")?;
@@ -332,7 +333,7 @@ async fn problems_for(
         expected_units += allocated;
     }
 
-    let mut stored_cost_base: HashMap<String, Decimal> = HashMap::new();
+    let mut stored_cost_base: HashMap<CurrencyCode, Decimal> = HashMap::new();
     let mut stored_units = Decimal::ZERO;
     for replacement in &replacements {
         *stored_cost_base
@@ -341,7 +342,7 @@ async fn problems_for(
         stored_units += replacement.quantity;
     }
 
-    let mut currencies: Vec<&String> = expected_cost_base
+    let mut currencies: Vec<&CurrencyCode> = expected_cost_base
         .keys()
         .chain(stored_cost_base.keys())
         .collect();
@@ -544,7 +545,7 @@ mod tests {
                     scrip_old_units: Decimal::ONE,
                     scrip_cash_per_unit: Some(dec("2")),
                     scrip_market_value: Some(dec("18")),
-                    scrip_cash_currency: Some("AUD".to_string()),
+                    scrip_cash_currency: Some("AUD".into()),
                 },
             },
         )

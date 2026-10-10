@@ -62,6 +62,7 @@
 //! undone).
 
 use crate::entities::listing::{self, Listing, SecurityType};
+use crate::infra::currency::CurrencyCode;
 use crate::infra::db::write_tx;
 use crate::infra::extract::{Json, Query};
 use crate::infra::http::{ApiError, CrudEntity};
@@ -173,8 +174,8 @@ pub enum RenameError {
     )]
     ExchangeCurrencyMismatch {
         mic: String,
-        listing_currency: String,
-        exchange_currency: String,
+        listing_currency: CurrencyCode,
+        exchange_currency: CurrencyCode,
     },
     /// The resulting identity — `(exchange_mic, ticker)`, or the bare
     /// ticker for an exchange-less (Crypto) listing — is already another
@@ -400,7 +401,7 @@ pub async fn db_rename(
     if new_exchange_mic != current.exchange_mic
         && let Some(mic) = new_exchange_mic.as_deref()
     {
-        let exchange_currency: Option<String> =
+        let exchange_currency: Option<CurrencyCode> =
             sqlx::query_scalar("SELECT currency FROM exchanges WHERE mic = ?")
                 .bind(mic)
                 .fetch_optional(&mut *tx)
@@ -675,7 +676,7 @@ mod tests {
                 mic: mic.to_string(),
                 name: format!("{mic} test market"),
                 country: "Australia".to_string(),
-                currency: "AUD".to_string(),
+                currency: "AUD".into(),
                 timezone: "Australia/Sydney".to_string(),
                 settlement_days: 2,
                 close_time: "16:00".to_string(),

@@ -580,7 +580,7 @@ mod tests {
                 date: ymd(2026, 8, 1),
                 kind: ActionKind::ReturnOfCapital {
                     amount_per_unit: dec("0.05"),
-                    currency: "AUD".to_string(),
+                    currency: "AUD".into(),
                     record_date: Some(ymd(2022, 6, 25)),
                 },
             },

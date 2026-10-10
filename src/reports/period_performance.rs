@@ -37,6 +37,7 @@
 //! separately, as an informational cross-check (see `docs/API.md`'s Known
 //! limitations entry for this report).
 
+use crate::infra::currency::CurrencyCode;
 use crate::infra::extract::{Json, Query};
 use crate::infra::fx::{FxError, FxRates};
 use crate::infra::http::ApiError;
@@ -71,7 +72,7 @@ pub struct HoldingPeriod {
 
 #[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize)]
 pub struct CurrencyFx {
-    pub currency: String,
+    pub currency: CurrencyCode,
     pub fx_movement: Decimal,
     /// The opening/closing FX rates used, when every listing in this
     /// currency resolved the same pair — omitted (not zeroed) when they
@@ -315,7 +316,7 @@ pub async fn compute(
     let fx = FxRates::load(&mut *tx).await?;
 
     let mut holdings = Vec::with_capacity(by_key.len());
-    let mut currency_acc: BTreeMap<String, CurrencyAcc> = BTreeMap::new();
+    let mut currency_acc: BTreeMap<CurrencyCode, CurrencyAcc> = BTreeMap::new();
     let mut opening_total = Decimal::ZERO;
     let mut closing_total = Decimal::ZERO;
     let mut purchases_total = Decimal::ZERO;
@@ -346,7 +347,7 @@ pub async fn compute(
         let fx_movement = if qty1.is_zero() {
             Decimal::ZERO
         } else if let Some(val_to) = val_to_by_listing.get(&listing_id) {
-            if val_to.currency.eq_ignore_ascii_case("AUD") {
+            if val_to.currency.is_aud() {
                 Decimal::ZERO
             } else {
                 let (rate_from, from_provisional) = match val_from_by_listing.get(&listing_id) {
@@ -1039,7 +1040,7 @@ mod tests {
         // 2026-05 USD amount is a genuinely required conversion.
         test_support::income(1, 1, ymd(2026, 5, 10))
             .with(|i| {
-                i.currency = "USD".to_string();
+                i.currency = "USD".into();
                 i.franked_amount = Decimal::ZERO;
                 i.unfranked_amount = dec("100");
                 i.franking_credits = Decimal::ZERO;

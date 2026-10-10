@@ -9,6 +9,7 @@
 
 use super::market::Market;
 use super::model::PriceSource;
+use crate::infra::currency::CurrencyCode;
 use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use std::{
@@ -26,7 +27,7 @@ pub struct FetchedClose {
     pub price: Decimal,
     /// The quote currency the provider reports — cross-checked against the
     /// listing's currency before the price is stored.
-    pub currency: String,
+    pub currency: CurrencyCode,
 }
 
 /// Why a [`PriceFetcher::daily_closes`] call failed, in the only distinction
@@ -83,7 +84,7 @@ pub struct LatestQuote {
     pub price: Decimal,
     /// The quote currency the provider reports — cross-checked against the
     /// listing's currency before the price is used.
-    pub currency: String,
+    pub currency: CurrencyCode,
     /// The provider's quote timestamp (the as-of moment).
     pub as_of: DateTime<Utc>,
 }

@@ -623,7 +623,7 @@ async fn the_list_narrows_by_listing_and_ex_date_range() {
             &FetchedDistribution {
                 ex_date,
                 amount_per_unit: dec(amount),
-                currency: "AUD".to_string(),
+                currency: "AUD".into(),
             },
             "AUD",
             DistributionSource::Yahoo,

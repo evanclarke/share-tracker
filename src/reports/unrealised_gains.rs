@@ -398,7 +398,7 @@ mod tests {
                 date: NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
                 kind: corporate_action::ActionKind::ReturnOfCapital {
                     amount_per_unit: "0.50".parse().unwrap(),
-                    currency: "AUD".to_string(),
+                    currency: "AUD".into(),
                     record_date: None,
                 },
             },

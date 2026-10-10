@@ -14,6 +14,7 @@
 //! ATO rate for the month of `date_paid` (failing loudly when no rate
 //! exists).
 
+use crate::infra::currency::CurrencyCode;
 use crate::infra::db::write_tx;
 use crate::infra::decimal::Money;
 use crate::infra::extract::Json;
@@ -60,7 +61,7 @@ pub struct InterestIncome {
     /// ISO 4217 currency the amounts are denominated in. The tax summary
     /// converts a non-AUD amount to AUD via the ATO rate for this currency and
     /// the month of `date_paid` (see `infra::fx::to_aud`). Defaults to AUD.
-    pub currency: String,
+    pub currency: CurrencyCode,
     /// Free-text source description (e.g. "ANZ savings account").
     /// Informational only — no calculation reads it.
     pub source: Option<String>,
@@ -95,8 +96,8 @@ pub struct InterestIncomeBody {
     pub foreign_tax_paid: Decimal,
     /// ISO 4217 code of the amounts; converted to AUD at the rate for the month of
     /// `date_paid`. Defaults to `AUD`.
-    #[serde(default = "default_currency")]
-    pub currency: String,
+    #[serde(default = "CurrencyCode::aud")]
+    pub currency: CurrencyCode,
     /// Free-text description of the source, e.g. `ANZ savings account`. Informational only.
     #[serde(default)]
     pub source: Option<String>,
@@ -104,10 +105,6 @@ pub struct InterestIncomeBody {
     /// interest from outside the portfolio's accounts. Informational only.
     #[serde(default)]
     pub holding_account_id: Option<i64>,
-}
-
-fn default_currency() -> String {
-    "AUD".to_string()
 }
 
 /// The `/interest_income` list filters: the owning account and the
@@ -371,7 +368,7 @@ mod tests {
             tfn_withholding_tax: Decimal::ZERO,
             foreign_source: false,
             foreign_tax_paid: Decimal::ZERO,
-            currency: "AUD".to_string(),
+            currency: "AUD".into(),
             source: Some("savings account".to_string()),
             holding_account_id: None,
         }
@@ -404,7 +401,7 @@ mod tests {
         let mut i = sample(1);
         i.foreign_source = true;
         i.foreign_tax_paid = "37.50".parse().unwrap();
-        i.currency = "USD".to_string();
+        i.currency = "USD".into();
         db_upsert(&pool, &i).await.unwrap();
         let got = db_get(&pool, 1).await.unwrap().unwrap();
         assert!(got.foreign_source);

@@ -38,6 +38,7 @@ use crate::entities::corporate_action::checked_as_acquired_quantity;
 use crate::entities::rollover;
 use crate::entities::sell::{self, AllocationInput};
 use crate::entities::trade::{self, Trade};
+use crate::infra::currency::CurrencyCode;
 use crate::infra::db::{WriteMode, write_tx};
 use crate::infra::extract::{Json, Query};
 use crate::infra::http::{self, ApiError, CrudEntity, DryRunQuery};
@@ -476,10 +477,11 @@ async fn write(
     // The transfer-out Sell: zero proceeds (nothing is disposed of; the
     // transfer_id keeps it out of every gains report), consuming the chosen
     // parcels in the source account.
-    let listing_currency: String = sqlx::query_scalar("SELECT currency FROM listings WHERE id = ?")
-        .bind(body.listing_id)
-        .fetch_one(&mut *tx)
-        .await?;
+    let listing_currency: CurrencyCode =
+        sqlx::query_scalar("SELECT currency FROM listings WHERE id = ?")
+            .bind(body.listing_id)
+            .fetch_one(&mut *tx)
+            .await?;
     let sell_body = rollover::closing_sell_body(
         body.date,
         body.listing_id,
@@ -579,7 +581,7 @@ async fn write(
 struct TransferIn {
     quantity: Decimal,
     carried_cost_base: Decimal,
-    currency: String,
+    currency: CurrencyCode,
     fx_rate: Decimal,
     spot_fx_rate: Option<Decimal>,
     deemed_acquisition_date: NaiveDate,
@@ -652,7 +654,7 @@ async fn write_fee_sale(
     conn: &mut sqlx::SqliteConnection,
     transfer_id: i64,
     body: &TransferBody,
-    listing_currency: String,
+    listing_currency: CurrencyCode,
 ) -> Result<Option<i64>, TransferError> {
     if body.fee_allocations.is_empty() {
         return Ok(None);
@@ -697,7 +699,7 @@ async fn write_fee_sale(
                 crate::infra::fx::FxOverride::None,
             )
             .map_err(|_| TransferError::MissingFeeFxRate {
-                currency: listing_currency.clone(),
+                currency: listing_currency.to_string(),
                 month: body.date.format("%Y-%m").to_string(),
             })?
         }
@@ -1069,10 +1071,10 @@ mod tests {
                 listing_id: 1,
                 average_price: dec("15"),
                 quantity: dec("100"),
-                currency: "AUD".to_string(),
+                currency: "AUD".into(),
                 brokerage: Decimal::ZERO,
                 gst_on_brokerage: Decimal::ZERO,
-                brokerage_currency: "AUD".to_string(),
+                brokerage_currency: "AUD".into(),
                 fx_rate: Decimal::ONE,
                 spot_fx_rate: None,
                 contract_note_ref: None,
@@ -1369,10 +1371,10 @@ mod tests {
                 listing_id: 1,
                 average_price: dec("99"),
                 quantity: dec("0.001"),
-                currency: "AUD".to_string(),
+                currency: "AUD".into(),
                 brokerage: Decimal::ZERO,
                 gst_on_brokerage: Decimal::ZERO,
-                brokerage_currency: "AUD".to_string(),
+                brokerage_currency: "AUD".into(),
                 fx_rate: Decimal::ONE,
                 spot_fx_rate: None,
                 contract_note_ref: None,
@@ -1432,10 +1434,10 @@ mod tests {
                 listing_id: 1,
                 average_price: dec("130"),
                 quantity: dec("60"),
-                currency: "USD".to_string(),
+                currency: "USD".into(),
                 brokerage: Decimal::ZERO,
                 gst_on_brokerage: Decimal::ZERO,
-                brokerage_currency: "USD".to_string(),
+                brokerage_currency: "USD".into(),
                 fx_rate: dec("1.5"),
                 spot_fx_rate: None,
                 contract_note_ref: None,
@@ -1526,10 +1528,10 @@ mod tests {
                 listing_id: 1,
                 average_price: dec("130"),
                 quantity: dec("50"),
-                currency: "USD".to_string(),
+                currency: "USD".into(),
                 brokerage: Decimal::ZERO,
                 gst_on_brokerage: Decimal::ZERO,
-                brokerage_currency: "USD".to_string(),
+                brokerage_currency: "USD".into(),
                 fx_rate: dec("1.5"),
                 spot_fx_rate: None,
                 contract_note_ref: None,
@@ -1579,10 +1581,10 @@ mod tests {
                 listing_id: 1,
                 average_price: dec("9.99"),
                 quantity: dec("100"),
-                currency: "USD".to_string(),
+                currency: "USD".into(),
                 brokerage: Decimal::ZERO,
                 gst_on_brokerage: Decimal::ZERO,
-                brokerage_currency: "USD".to_string(),
+                brokerage_currency: "USD".into(),
                 fx_rate: Decimal::ONE,
                 spot_fx_rate: None,
                 contract_note_ref: None,
@@ -1703,7 +1705,7 @@ mod tests {
                 a.holding_account_id = 2;
                 a.tax_year_end_date = d(2023, 6, 30);
                 a.date_received = d(2023, 7, 15);
-                a.currency = "USD".to_string();
+                a.currency = "USD".into();
             })
             .insert(&pool)
             .await;
@@ -1718,7 +1720,7 @@ mod tests {
                 date: d(2024, 3, 1),
                 kind: corporate_action::ActionKind::ReturnOfCapital {
                     amount_per_unit: dec("2"),
-                    currency: "USD".to_string(),
+                    currency: "USD".into(),
                     record_date: None,
                 },
             },
@@ -1762,7 +1764,7 @@ mod tests {
                     date: payment_date,
                     kind: corporate_action::ActionKind::ReturnOfCapital {
                         amount_per_unit: dec("2"),
-                        currency: "USD".to_string(),
+                        currency: "USD".into(),
                         record_date: None,
                     },
                 },

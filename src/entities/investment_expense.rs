@@ -16,6 +16,7 @@
 //! investment income, converting a non-AUD amount to AUD via the ATO rate for the
 //! month of `date_incurred` (failing loudly when no rate exists).
 
+use crate::infra::currency::CurrencyCode;
 use crate::infra::db::write_tx;
 use crate::infra::decimal::{Money, OptMoney, mul_div};
 use crate::infra::extract::Json;
@@ -85,7 +86,7 @@ pub struct InvestmentExpense {
     /// ISO 4217 currency the amount is denominated in. The tax summary converts a
     /// non-AUD amount to AUD via the ATO rate for this currency and the month of
     /// `date_incurred` (see `infra::fx::to_aud`). Defaults to AUD.
-    pub currency: String,
+    pub currency: CurrencyCode,
     /// Free-text note.
     pub description: Option<String>,
     /// Optional link to the listing the expense relates to (NULL = portfolio-wide).
@@ -125,8 +126,8 @@ pub struct InvestmentExpenseBody {
     pub deductible_percentage: Option<Decimal>,
     /// ISO 4217 code of the amounts; converted to AUD at the rate for the month of
     /// `date_incurred`. Defaults to `AUD`.
-    #[serde(default = "default_currency")]
-    pub currency: String,
+    #[serde(default = "CurrencyCode::aud")]
+    pub currency: CurrencyCode,
     /// Free-text note.
     #[serde(default)]
     pub description: Option<String>,
@@ -136,10 +137,6 @@ pub struct InvestmentExpenseBody {
     /// The holding account the expense relates to; omit for a portfolio-wide expense.
     #[serde(default)]
     pub holding_account_id: Option<i64>,
-}
-
-fn default_currency() -> String {
-    "AUD".to_string()
 }
 
 /// The `/investment_expenses` list filters: the owning columns and the
@@ -444,7 +441,7 @@ mod tests {
             amount: Decimal::from(500),
             gross_amount: None,
             deductible_percentage: None,
-            currency: "AUD".to_string(),
+            currency: "AUD".into(),
             description: Some("margin loan interest".to_string()),
             listing_id: None,
             holding_account_id: None,

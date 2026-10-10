@@ -383,7 +383,7 @@ mod tests {
                         buyback_dividend: Decimal::ONE,
                         buyback_franking_credit: "0.43".parse().unwrap(),
                         buyback_market_value: None,
-                        currency: "AUD".to_string(),
+                        currency: "AUD".into(),
                     },
                 },
             )

@@ -713,7 +713,7 @@ async fn a_hole_straddling_a_rename_uses_the_calendar_of_the_date() {
             mic: "CXAX".to_string(),
             name: "Second AUD market".to_string(),
             country: "Australia".to_string(),
-            currency: "AUD".to_string(),
+            currency: "AUD".into(),
             timezone: "Australia/Sydney".to_string(),
             settlement_days: 2,
             close_time: "16:00".to_string(),
@@ -811,7 +811,7 @@ async fn insert_roc(pool: &SqlitePool, id: i64, listing_id: i64, date: NaiveDate
         date,
         corporate_action::ActionKind::ReturnOfCapital {
             amount_per_unit: dec("0.50"),
-            currency: "AUD".to_string(),
+            currency: "AUD".into(),
             record_date: None,
         },
     )
@@ -2112,7 +2112,7 @@ async fn insert_interest(
             tfn_withholding_tax: Decimal::ZERO,
             foreign_source: false,
             foreign_tax_paid: Decimal::ZERO,
-            currency: "AUD".to_string(),
+            currency: "AUD".into(),
             source: source.map(str::to_string),
             holding_account_id: None,
         },
@@ -2134,7 +2134,7 @@ fn an_expense(
         amount,
         gross_amount: None,
         deductible_percentage: None,
-        currency: "AUD".to_string(),
+        currency: "AUD".into(),
         description: None,
         listing_id: None,
         holding_account_id: None,
@@ -2214,7 +2214,7 @@ async fn interest_differing_in_any_key_field_is_not_a_duplicate() {
             tfn_withholding_tax: Decimal::ZERO,
             foreign_source: false,
             foreign_tax_paid: Decimal::ZERO,
-            currency: "AUD".to_string(),
+            currency: "AUD".into(),
             source: Some("ANZ savings".to_string()),
             holding_account_id: Some(2),
         },
@@ -2232,7 +2232,7 @@ async fn interest_differing_in_any_key_field_is_not_a_duplicate() {
             tfn_withholding_tax: dec("117.50"),
             foreign_source: false,
             foreign_tax_paid: Decimal::ZERO,
-            currency: "AUD".to_string(),
+            currency: "AUD".into(),
             source: Some("ANZ savings".to_string()),
             holding_account_id: None,
         },
@@ -2820,7 +2820,7 @@ async fn insert_inheritance(
             lpr_expenditure: Decimal::ZERO,
             lpr_expenditure_date: None,
             deceased_acquisition_date: Some(ymd(2015, 5, 5)),
-            currency: "AUD".to_string(),
+            currency: "AUD".into(),
             fx_rate: Decimal::ONE,
         },
     )
@@ -3222,7 +3222,7 @@ async fn operation_written_closing_sells_are_never_flagged() {
                 rights_units: Decimal::ONE,
                 rights_held_units: Decimal::from(4),
                 exercise_price: dec("1.80"),
-                currency: "AUD".to_string(),
+                currency: "AUD".into(),
                 renounceable: true,
             },
         },
@@ -3291,7 +3291,7 @@ async fn only_a_paid_for_right_disposed_of_at_nil_is_flagged() {
                 rights_units: Decimal::ONE,
                 rights_held_units: Decimal::from(4),
                 exercise_price: dec("1.80"),
-                currency: "AUD".to_string(),
+                currency: "AUD".into(),
                 renounceable: true,
             },
         },
@@ -3971,7 +3971,7 @@ async fn a_gross_in_another_currency_is_not_compared_against_the_calendar() {
     test_support::income(1, 1, ymd(2024, 7, 16))
         .with(|i| {
             i.unfranked_amount = dec("110.00");
-            i.currency = "AUD".to_string();
+            i.currency = "AUD".into();
         })
         .insert(&pool)
         .await;
@@ -4016,7 +4016,7 @@ async fn the_same_divergence_inside_one_currency_is_still_reported() {
     test_support::income(1, 1, ymd(2024, 7, 16))
         .with(|i| {
             i.unfranked_amount = dec("110.00");
-            i.currency = "USD".to_string();
+            i.currency = "USD".into();
         })
         .insert(&pool)
         .await;

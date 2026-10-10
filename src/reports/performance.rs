@@ -1090,7 +1090,7 @@ mod tests {
                     scrip_old_units: Decimal::ONE,
                     scrip_cash_per_unit: Some(Decimal::from(2)),
                     scrip_market_value: Some(Decimal::from(18)),
-                    scrip_cash_currency: Some("AUD".to_string()),
+                    scrip_cash_currency: Some("AUD".into()),
                 },
             },
         )

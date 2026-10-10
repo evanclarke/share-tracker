@@ -1834,7 +1834,7 @@ mod tests {
                 date: ymd(2026, 6, 4),
                 kind: corporate_action::ActionKind::ReturnOfCapital {
                     amount_per_unit: "0.50".parse().unwrap(),
-                    currency: "AUD".to_string(),
+                    currency: "AUD".into(),
                     record_date: None,
                 },
             },

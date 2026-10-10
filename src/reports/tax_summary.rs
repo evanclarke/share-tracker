@@ -1319,7 +1319,7 @@ mod tests {
             amount,
             gross_amount: None,
             deductible_percentage: None,
-            currency: "AUD".to_string(),
+            currency: "AUD".into(),
             description: None,
             listing_id: None,
             holding_account_id: None,
@@ -1451,7 +1451,7 @@ mod tests {
         let mut trust = make_income(1, 1, NaiveDate::from_ymd_opt(2026, 7, 15).unwrap());
         trust.trust_income = true;
         trust.entitlement_date = Some(NaiveDate::from_ymd_opt(2026, 6, 30).unwrap());
-        trust.currency = "USD".to_string();
+        trust.currency = "USD".into();
         trust.unfranked_amount = Decimal::from(100);
         income::db_upsert(&pool, &trust).await.unwrap();
 
@@ -2219,7 +2219,7 @@ mod tests {
             .await
             .unwrap();
         let mut inc = make_income(1, 1, NaiveDate::from_ymd_opt(2024, 1, 15).unwrap());
-        inc.currency = "USD".to_string();
+        inc.currency = "USD".into();
         inc.franked_amount = Decimal::from(70);
         inc.unfranked_amount = Decimal::from(30);
         inc.franking_credits = Decimal::from(30);
@@ -2248,7 +2248,7 @@ mod tests {
             .await
             .unwrap();
         let mut a = make_amma(1, 1, NaiveDate::from_ymd_opt(2024, 6, 30).unwrap());
-        a.currency = "USD".to_string();
+        a.currency = "USD".into();
         a.foreign_income = Decimal::from(5);
         a.foreign_tax_credits = Decimal::from(2);
         a.cgt_discount_gains = Decimal::from(50);
@@ -2268,7 +2268,7 @@ mod tests {
         insert_listing(&pool, 1).await;
         // No USD rate imported for the month → conversion must fail, not zero/pass through.
         let mut inc = make_income(1, 1, NaiveDate::from_ymd_opt(2024, 1, 15).unwrap());
-        inc.currency = "USD".to_string();
+        inc.currency = "USD".into();
         inc.unfranked_amount = Decimal::from(100);
         income::db_upsert(&pool, &inc).await.unwrap();
 
@@ -2965,7 +2965,7 @@ mod tests {
                 tfn_withholding_tax: Decimal::ZERO,
                 foreign_source: false,
                 foreign_tax_paid: Decimal::ZERO,
-                currency: "AUD".to_string(),
+                currency: "AUD".into(),
                 source: None,
                 holding_account_id: None,
             },
@@ -3004,7 +3004,7 @@ mod tests {
             .await
             .unwrap();
         let mut inc = make_income(1, 1, NaiveDate::from_ymd_opt(2024, 3, 15).unwrap());
-        inc.currency = "USD".to_string();
+        inc.currency = "USD".into();
         inc.unfranked_amount = Decimal::from(100);
         income::db_upsert(&pool, &inc).await.unwrap();
         pool
@@ -3325,7 +3325,7 @@ mod tests {
             .await
             .unwrap();
         let mut e = make_ess(1, 1, NaiveDate::from_ymd_opt(2024, 9, 1).unwrap());
-        e.currency = "USD".to_string();
+        e.currency = "USD".into();
         e.deferral_discount = Decimal::from(1000); // USD → 2000 AUD
         e.foreign_source_discount = Decimal::from(1000); // the whole discount is foreign
         ess_statement::db_upsert(&pool, &e).await.unwrap();
@@ -3348,7 +3348,7 @@ mod tests {
             .await
             .unwrap();
         let mut e = make_ess(1, 1, NaiveDate::from_ymd_opt(2024, 9, 1).unwrap());
-        e.currency = "USD".to_string();
+        e.currency = "USD".into();
         e.deferral_discount = Decimal::from(1000); // USD; RBA would say 2000 AUD
         e.aud_deferral_discount = Some("1403.40".parse().unwrap()); // employer's AUD figure
         e.foreign_source_discount = Decimal::from(1000); // no override → RBA converts
@@ -3373,7 +3373,7 @@ mod tests {
             .await
             .unwrap();
         let mut e = make_ess(1, 1, NaiveDate::from_ymd_opt(2024, 9, 1).unwrap());
-        e.currency = "USD".to_string();
+        e.currency = "USD".into();
         e.taxed_upfront_eligible = Decimal::from(1000); // USD; RBA would say 2000 AUD
         e.aud_taxed_upfront_eligible = Some(Decimal::from(800)); // employer's AUD figure
         ess_statement::db_upsert(&pool, &e).await.unwrap();
@@ -3410,7 +3410,7 @@ mod tests {
                 .await
                 .unwrap();
             let mut e = make_ess(i as i64 + 1, 1, *taxing_point);
-            e.currency = "USD".to_string();
+            e.currency = "USD".into();
             e.deferral_discount = usd.parse().unwrap();
             e.aud_deferral_discount = aud.map(|a| a.parse().unwrap());
             ess_statement::db_upsert(&pool, &e).await.unwrap();
@@ -3448,7 +3448,7 @@ mod tests {
         let pool = test_pool().await;
         insert_usd_listing(&pool, 1).await;
         let mut e = make_ess(1, 1, NaiveDate::from_ymd_opt(2024, 9, 1).unwrap());
-        e.currency = "USD".to_string();
+        e.currency = "USD".into();
         e.fx_rate = Some("0.50".parse().unwrap());
         e.deferral_discount = Decimal::from(1000); // USD → 2000 AUD at the stated rate
         e.tfn_withholding = Decimal::from(100); // → 200 AUD
@@ -3473,7 +3473,7 @@ mod tests {
         let pool = test_pool().await;
         insert_usd_listing(&pool, 1).await;
         let mut e = make_ess(1, 1, NaiveDate::from_ymd_opt(2024, 9, 1).unwrap());
-        e.currency = "USD".to_string();
+        e.currency = "USD".into();
         e.deferral_discount = Decimal::from(1000);
         ess_statement::db_upsert(&pool, &e).await.unwrap();
         assert!(db_tax_summary(&pool).await.is_err());
@@ -3663,7 +3663,7 @@ mod tests {
             .unwrap();
         insert_usd_listing(&pool, 4).await;
         let mut foreign = make_income(4, 4, march);
-        foreign.currency = "USD".to_string();
+        foreign.currency = "USD".into();
         foreign.foreign_source_income = Decimal::from(100);
         income::db_upsert(&pool, &foreign).await.unwrap();
 
@@ -3957,7 +3957,7 @@ mod tests {
             ExpenseType::AdviceFee,
             Decimal::from(100),
         );
-        e.currency = "USD".to_string();
+        e.currency = "USD".into();
         investment_expense::db_upsert(&pool, &e).await.unwrap();
 
         let result = db_tax_summary(&pool).await.unwrap();
@@ -4015,7 +4015,7 @@ mod tests {
             ExpenseType::LoanInterest,
             Decimal::from(100),
         );
-        e.currency = "USD".to_string();
+        e.currency = "USD".into();
         investment_expense::db_upsert(&pool, &e).await.unwrap();
         assert!(db_tax_summary(&pool).await.is_err());
     }
@@ -4033,7 +4033,7 @@ mod tests {
             tfn_withholding_tax: Decimal::ZERO,
             foreign_source: false,
             foreign_tax_paid: Decimal::ZERO,
-            currency: "AUD".to_string(),
+            currency: "AUD".into(),
             source: None,
             holding_account_id: None,
         }
@@ -4216,7 +4216,7 @@ mod tests {
         );
         foreign.foreign_source = true;
         foreign.foreign_tax_paid = Decimal::from(15);
-        foreign.currency = "USD".to_string();
+        foreign.currency = "USD".into();
         interest_income::db_upsert(&pool, &foreign).await.unwrap();
 
         let result = db_tax_summary(&pool).await.unwrap();
@@ -4238,7 +4238,7 @@ mod tests {
             NaiveDate::from_ymd_opt(2024, 3, 15).unwrap(),
             Decimal::from(100),
         );
-        int.currency = "USD".to_string();
+        int.currency = "USD".into();
         int.tfn_withholding_tax = Decimal::from(10);
         interest_income::db_upsert(&pool, &int).await.unwrap();
 
@@ -4256,7 +4256,7 @@ mod tests {
             NaiveDate::from_ymd_opt(2024, 3, 15).unwrap(),
             Decimal::from(100),
         );
-        int.currency = "USD".to_string();
+        int.currency = "USD".into();
         interest_income::db_upsert(&pool, &int).await.unwrap();
         assert!(db_tax_summary(&pool).await.is_err());
     }
@@ -4444,7 +4444,7 @@ mod tests {
             .await;
         test_support::income(1, 1, ymd(2023, 5, 10))
             .with(|i| {
-                i.currency = "USD".to_string();
+                i.currency = "USD".into();
                 i.franked_amount = Decimal::ZERO;
                 i.unfranked_amount = Decimal::from(100);
                 i.franking_credits = Decimal::ZERO;

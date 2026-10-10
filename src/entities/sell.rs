@@ -13,6 +13,7 @@
 //! is refused rather than rewritten as a disposal in place (SCENARIOS Z-b).
 
 use crate::entities::trade::{self, Trade, TradeType};
+use crate::infra::currency::CurrencyCode;
 use crate::infra::db::{WriteMode, write_tx};
 use crate::infra::decimal::{Money, OptMoney};
 use crate::infra::extract::{Json, Query};
@@ -58,7 +59,7 @@ pub struct SellBody {
     #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub quantity: Decimal,
     /// ISO 4217 code of the price — the listing's trading currency.
-    pub currency: String,
+    pub currency: CurrencyCode,
     /// GST-inclusive when `brokerage_includes_gst` is set (the server splits
     /// it; any supplied `gst_on_brokerage` is ignored), ex-GST otherwise —
     /// same contract as `trade::TradeBody`. A flagged Sell also reads back
@@ -76,7 +77,7 @@ pub struct SellBody {
     pub brokerage_includes_gst: bool,
     /// ISO 4217 code the brokerage was billed in; must equal `currency` (convert a foreign
     /// fee before entry).
-    pub brokerage_currency: String,
+    pub brokerage_currency: CurrencyCode,
     /// Manual foreign-per-AUD rate (decimal string; `1` for AUD), the fallback when no
     /// ATO/RBA monthly rate exists for the trade's month.
     #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]
@@ -226,7 +227,10 @@ pub enum SellError {
     /// `trade::UpsertError::CurrencyNotListings` applies to a parcel, for the
     /// same reason: `average_price` is the price of that listed security.
     #[error("the Sell is in {sale} but its listing is quoted in {listing}")]
-    CurrencyNotListings { sale: String, listing: String },
+    CurrencyNotListings {
+        sale: CurrencyCode,
+        listing: CurrencyCode,
+    },
     /// An allocation's `quantity_allocated` is zero or negative. A negative
     /// allocation would pass both the sum check and the per-parcel capacity
     /// check while quietly increasing another parcel's capacity (e.g. −5 on
@@ -1059,10 +1063,10 @@ mod tests {
             listing_id: 1,
             average_price: Decimal::from(15),
             quantity: qty,
-            currency: "AUD".to_string(),
+            currency: "AUD".into(),
             brokerage: Decimal::ZERO,
             gst_on_brokerage: Decimal::ZERO,
-            brokerage_currency: "AUD".to_string(),
+            brokerage_currency: "AUD".into(),
             fx_rate: Decimal::ONE,
             spot_fx_rate: None,
             contract_note_ref: None,
@@ -2899,7 +2903,7 @@ mod tests {
                     rights_units: Decimal::ONE,
                     rights_held_units: Decimal::from(4),
                     exercise_price: "1.80".parse().unwrap(),
-                    currency: "AUD".to_string(),
+                    currency: "AUD".into(),
                     renounceable: true,
                 },
             },
@@ -2978,7 +2982,7 @@ mod tests {
                 lpr_expenditure: Decimal::ZERO,
                 lpr_expenditure_date: None,
                 deceased_acquisition_date: None,
-                currency: "AUD".to_string(),
+                currency: "AUD".into(),
                 fx_rate: Decimal::ONE,
             },
         )

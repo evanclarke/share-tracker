@@ -2,6 +2,7 @@
 //! (the row/JSON model) and [`CorporateActionBody`] (the PUT body, validated
 //! into an `ActionKind` by [`CorporateActionBody::kind`]).
 
+use crate::infra::currency::CurrencyCode;
 use crate::infra::decimal::{row_dec, row_opt_dec};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
@@ -52,7 +53,7 @@ pub enum ActionKind {
     ReturnOfCapital {
         /// Per-unit payment amount in `currency` (positive).
         amount_per_unit: Decimal,
-        currency: String,
+        currency: CurrencyCode,
         /// Optional record date — the date entitlement to the payment was
         /// fixed, always on or before the action's own (payment) `date`. Units
         /// held *before* it earn the payment (a parcel acquired on it is
@@ -84,7 +85,7 @@ pub enum ActionKind {
         rights_held_units: Decimal,
         /// Per-new-unit price paid on exercise, in `currency` (positive).
         exercise_price: Decimal,
-        currency: String,
+        currency: CurrencyCode,
         /// Whether the offer was **renounceable** — the rights can be taken
         /// up, left to lapse, *or traded in the market*. Where they cannot be
         /// traded, transferred or assigned, the offer is non-renounceable
@@ -114,7 +115,7 @@ pub enum ActionKind {
         /// (positive). Capital proceeds can't be less than it; `None` when
         /// the buy-back price is at or above market value (the price is used).
         buyback_market_value: Option<Decimal>,
-        currency: String,
+        currency: CurrencyCode,
     },
     ScripForScrip {
         /// The replacement listing the original holding converts into (must
@@ -144,7 +145,7 @@ pub enum ActionKind {
         /// Currency of the cash and market value. Its own column: the shared
         /// `currency` column stays NULL for ScripForScrip.
         #[serde(default)]
-        scrip_cash_currency: Option<String>,
+        scrip_cash_currency: Option<CurrencyCode>,
     },
     Demerger {
         /// The demerged entity's listing (must differ from the action's own
@@ -363,7 +364,7 @@ pub struct CorporateActionBody {
     /// currency), RightsIssue (the exercise price's currency) and BuyBack (the buy-back
     /// price's currency); refused on every other type.
     #[serde(default)]
-    currency: Option<String>,
+    currency: Option<CurrencyCode>,
     /// ReturnOfCapital only (optional): the date entitlement was fixed, on or before
     /// `date`. Parcels acquired before it earn the payment; omitted, the payment date
     /// decides.
@@ -488,7 +489,7 @@ pub struct CorporateActionBody {
     scrip_market_value: Option<Decimal>,
     /// ScripForScrip only (with `scrip_cash_per_unit`): ISO 4217 code of the cash and market value.
     #[serde(default)]
-    scrip_cash_currency: Option<String>,
+    scrip_cash_currency: Option<CurrencyCode>,
     /// Demerger only (required): the demerged entity's listing; must differ from `listing_id`.
     #[serde(default)]
     demerger_listing_id: Option<i64>,

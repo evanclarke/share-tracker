@@ -1249,7 +1249,7 @@ mod tests {
     #[tokio::test]
     async fn a_missing_fx_rate_is_a_422_naming_the_currency_and_month() {
         let missing = || crate::infra::fx::FxError::MissingRate {
-            currency: "USD".to_string(),
+            currency: "USD".into(),
             month: "2023-05".to_string(),
         };
         for (label, error) in [

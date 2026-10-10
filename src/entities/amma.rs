@@ -1,3 +1,4 @@
+use crate::infra::currency::CurrencyCode;
 use crate::infra::db::write_tx;
 use crate::infra::decimal::Money;
 use crate::infra::extract::Json;
@@ -98,7 +99,7 @@ pub struct AmmaStatement {
     /// ISO 4217 currency the attributed amounts are denominated in. The tax summary
     /// converts non-AUD amounts to AUD via the ATO rate for this currency and the
     /// month of `tax_year_end_date` (see `infra::fx::to_aud`). Defaults to AUD.
-    pub currency: String,
+    pub currency: CurrencyCode,
     /// The holding account the statement covers (a registry issues one AMMA
     /// statement per holder account; see `entities::holding_account`).
     /// Defaults to the seeded default account when omitted from a request.
@@ -194,16 +195,12 @@ pub struct AmmaStatementBody {
     /// ISO 4217 code the amounts are stated in — must be the listing's
     /// currency. The tax summary converts to AUD at the rate for the month of
     /// `tax_year_end_date`. Defaults to `AUD`.
-    #[serde(default = "default_currency")]
-    pub currency: String,
+    #[serde(default = "CurrencyCode::aud")]
+    pub currency: CurrencyCode,
     /// The holding account the statement covers. Defaults to the seeded
     /// default holding account when omitted.
     #[serde(default = "crate::entities::holding_account::default_holding_account_id")]
     pub holding_account_id: i64,
-}
-
-fn default_currency() -> String {
-    "AUD".to_string()
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -231,7 +228,10 @@ pub enum UpsertError {
     /// statement's per-share market value and
     /// [`trade`](crate::entities::trade) to a parcel's price. Mapped to `422`.
     #[error("the AMMA statement is in {statement} but its listing is quoted in {listing}")]
-    CurrencyNotListings { statement: String, listing: String },
+    CurrencyNotListings {
+        statement: CurrencyCode,
+        listing: CurrencyCode,
+    },
     /// A negative component (carries the field name). Every figure an AMMA
     /// attributes is the fund's own member component, and the guidance notes
     /// state the rule outright: "An AMIT or attribution CCIV sub-fund trust

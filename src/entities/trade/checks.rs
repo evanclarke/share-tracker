@@ -61,7 +61,7 @@ pub(crate) fn validate_spot_fx_rate(
     if rate <= Decimal::ZERO {
         return Err(SpotFxRateError::NotPositive);
     }
-    if currency.eq_ignore_ascii_case("AUD") {
+    if crate::infra::currency::is_aud(currency) {
         return Err(SpotFxRateError::AudTrade);
     }
     Ok(())

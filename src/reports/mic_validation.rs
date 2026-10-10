@@ -109,7 +109,7 @@ mod tests {
                 mic: "XBOG".to_string(),
                 name: "Bogus".to_string(),
                 country: "Nowhere".to_string(),
-                currency: "AUD".to_string(),
+                currency: "AUD".into(),
                 timezone: "UTC".to_string(),
                 settlement_days: 2,
                 close_time: "16:00".to_string(),

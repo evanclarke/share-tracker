@@ -22,6 +22,7 @@
 //! where *every* held listing is excluded is a blocker, not an empty
 //! valuation — zero of zero is not a portfolio total.
 
+use crate::infra::currency::CurrencyCode;
 use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -61,7 +62,7 @@ pub enum ValuationError {
 #[derive(Debug, Clone)]
 pub struct ListingValuation {
     pub listing_id: i64,
-    pub currency: String,
+    pub currency: CurrencyCode,
     /// The stored closing price, in the listing's quote currency (not AUD).
     pub native_price: Decimal,
     /// Foreign currency units per 1 AUD, at the valuation FX rate.

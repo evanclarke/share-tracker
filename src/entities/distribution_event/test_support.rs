@@ -52,7 +52,7 @@ impl DistributionStub {
             .push(FetchedDistribution {
                 ex_date,
                 amount_per_unit,
-                currency: currency.to_string(),
+                currency: currency.into(),
             });
         self
     }

@@ -1,3 +1,4 @@
+use crate::infra::currency::CurrencyCode;
 use crate::infra::extract::Json;
 use crate::infra::fetch::{FeedFetcher, LiveFeedFetcher, SharedFeedFetcher, fetch_feed};
 use crate::infra::http::{self, ApiError, CrudEntity};
@@ -26,7 +27,7 @@ const RBA_FX_RATES_URL: &str = "https://www.rba.gov.au/statistics/tables/csv/f11
 #[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct RbaFxRate {
     pub id: i64,
-    pub currency: String,
+    pub currency: CurrencyCode,
     pub month: String, // 'YYYY-MM'
     #[sqlx(try_from = "Money")]
     pub rate: Decimal,
@@ -52,7 +53,7 @@ pub enum ImportError {
 #[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RateConflict {
     pub id: i64,
-    pub currency: String,
+    pub currency: CurrencyCode,
     pub month: String,
     /// The rate already stored, which every figure in that month rests on.
     pub stored: Decimal,
@@ -251,7 +252,7 @@ pub async fn db_import_rate(
     }
     Ok(ImportOutcomeRow::Conflicted(RateConflict {
         id: stored.0,
-        currency: currency.to_string(),
+        currency: currency.into(),
         month: month.to_string(),
         stored: stored_rate,
         feed: rate,
@@ -639,7 +640,7 @@ mod tests {
             second.conflicted,
             vec![RateConflict {
                 id: 1,
-                currency: "USD".to_string(),
+                currency: "USD".into(),
                 month: "2010-01".to_string(),
                 stored: "0.8909".parse().unwrap(),
                 feed: "9.9999".parse().unwrap(),

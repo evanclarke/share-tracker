@@ -1,3 +1,4 @@
+use crate::infra::currency::CurrencyCode;
 use crate::infra::db::write_tx;
 use crate::infra::decimal::{Money, OptMoney};
 use crate::infra::extract::Json;
@@ -163,7 +164,7 @@ pub struct Income {
     /// non-AUD amounts to AUD via the ATO rate for this currency and the month of
     /// the assessment date — `date_paid`, or `entitlement_date` when that governs
     /// a trust row (see `infra::fx::to_aud`). Defaults to AUD.
-    pub currency: String,
+    pub currency: CurrencyCode,
     /// Provenance link from a buy-back dividend-component row to the buy-back
     /// Sell trade it was created with (`None` for every other row). Set only
     /// by `POST /corporate_actions/:id/participate`
@@ -432,8 +433,8 @@ pub struct IncomeBody {
     // is ignored, and an edit preserves an existing link.
     /// ISO 4217 code the amounts are in; the tax summary converts to AUD at the rate for
     /// the month of `date_paid` (or `entitlement_date`). Defaults to `AUD`.
-    #[serde(default = "default_currency")]
-    pub currency: String,
+    #[serde(default = "CurrencyCode::aud")]
+    pub currency: CurrencyCode,
     /// The holding account the distribution was paid to — decides whose DRP
     /// enrolment applies. Defaults to the seeded default holding account when
     /// omitted.
@@ -468,10 +469,6 @@ pub struct IncomeBody {
     /// (ordinary income the holding produced, e.g. a staking reward).
     #[serde(default)]
     pub income_type: IncomeType,
-}
-
-fn default_currency() -> String {
-    "AUD".to_string()
 }
 
 /// The `/income` list filters: the owning columns and the `date_paid`
@@ -1483,7 +1480,7 @@ mod tests {
         // A US-listed holding's dividend, entered the way the statement reads.
         let foreign = test_support::income(1, 1, ymd(2024, 3, 31))
             .with(|i| {
-                i.currency = "USD".to_string();
+                i.currency = "USD".into();
                 i.foreign_source_income = Decimal::from(100);
                 i.foreign_tax_paid = Decimal::from(15);
             })
@@ -1877,7 +1874,7 @@ mod tests {
             ("holding_account_id", |i: &mut Income| {
                 i.holding_account_id = 2
             }),
-            ("currency", |i: &mut Income| i.currency = "USD".to_string()),
+            ("currency", |i: &mut Income| i.currency = "USD".into()),
             ("date_paid", |i: &mut Income| {
                 i.date_paid = NaiveDate::from_ymd_opt(2024, 4, 15).unwrap()
             }),

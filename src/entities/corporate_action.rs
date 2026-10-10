@@ -207,7 +207,7 @@ mod tests {
             date,
             kind: ActionKind::ReturnOfCapital {
                 amount_per_unit: amount.parse().unwrap(),
-                currency: "AUD".to_string(),
+                currency: "AUD".into(),
                 record_date: None,
             },
         }
@@ -224,7 +224,7 @@ mod tests {
         CorporateAction {
             kind: ActionKind::ReturnOfCapital {
                 amount_per_unit: amount.parse().unwrap(),
-                currency: "AUD".to_string(),
+                currency: "AUD".into(),
                 record_date: Some(record),
             },
             ..roc(id, listing_id, date, amount)
@@ -277,7 +277,7 @@ mod tests {
                 rights_units: units.parse().unwrap(),
                 rights_held_units: held.parse().unwrap(),
                 exercise_price: price.parse().unwrap(),
-                currency: "AUD".to_string(),
+                currency: "AUD".into(),
                 renounceable: true,
             },
         }
@@ -301,7 +301,7 @@ mod tests {
                 buyback_dividend: dividend.parse().unwrap(),
                 buyback_franking_credit: credit.parse().unwrap(),
                 buyback_market_value: market_value.map(|v| v.parse().unwrap()),
-                currency: "AUD".to_string(),
+                currency: "AUD".into(),
             },
         }
     }
@@ -408,7 +408,7 @@ mod tests {
             got.kind,
             ActionKind::ReturnOfCapital {
                 amount_per_unit: "0.505".parse().unwrap(),
-                currency: "AUD".to_string(),
+                currency: "AUD".into(),
                 record_date: None,
             }
         );
@@ -468,7 +468,7 @@ mod tests {
                 rights_units: Decimal::from(3),
                 rights_held_units: Decimal::from(7),
                 exercise_price: "1.805".parse().unwrap(),
-                currency: "AUD".to_string(),
+                currency: "AUD".into(),
                 renounceable: true,
             }
         );
@@ -502,7 +502,7 @@ mod tests {
                 buyback_dividend: "1.405".parse().unwrap(),
                 buyback_franking_credit: "0.605".parse().unwrap(),
                 buyback_market_value: Some("10.20".parse().unwrap()),
-                currency: "AUD".to_string(),
+                currency: "AUD".into(),
             }
         );
 
@@ -1701,7 +1701,7 @@ mod tests {
                 rights_units: Decimal::ONE,
                 rights_held_units: Decimal::from(4),
                 exercise_price: "1.80".parse().unwrap(),
-                currency: "AUD".to_string(),
+                currency: "AUD".into(),
                 renounceable: true,
             }
         );
@@ -1737,7 +1737,7 @@ mod tests {
                 rights_units: Decimal::ONE,
                 rights_held_units: Decimal::from(4),
                 exercise_price: "1.80".parse().unwrap(),
-                currency: "AUD".to_string(),
+                currency: "AUD".into(),
                 renounceable: false,
             }
         );
@@ -1871,7 +1871,7 @@ mod tests {
                 buyback_dividend: "1.40".parse().unwrap(),
                 buyback_franking_credit: "0.60".parse().unwrap(),
                 buyback_market_value: Some("10.20".parse().unwrap()),
-                currency: "AUD".to_string(),
+                currency: "AUD".into(),
             }
         );
 
@@ -1898,7 +1898,7 @@ mod tests {
                 buyback_dividend: Decimal::ZERO,
                 buyback_franking_credit: Decimal::ZERO,
                 buyback_market_value: None,
-                currency: "AUD".to_string(),
+                currency: "AUD".into(),
             }
         );
     }
@@ -2070,7 +2070,7 @@ mod tests {
                 scrip_old_units: Decimal::ONE,
                 scrip_cash_per_unit: Some("10.005".parse().unwrap()),
                 scrip_market_value: Some("20.105".parse().unwrap()),
-                scrip_cash_currency: Some("AUD".to_string()),
+                scrip_cash_currency: Some("AUD".into()),
             }
         );
     }
@@ -3081,10 +3081,10 @@ mod tests {
                 listing_id: 1,
                 average_price: "6".parse().unwrap(),
                 quantity: qty.parse().unwrap(),
-                currency: "AUD".to_string(),
+                currency: "AUD".into(),
                 brokerage: Decimal::ZERO,
                 gst_on_brokerage: Decimal::ZERO,
-                brokerage_currency: "AUD".to_string(),
+                brokerage_currency: "AUD".into(),
                 fx_rate: Decimal::ONE,
                 spot_fx_rate: None,
                 contract_note_ref: None,
@@ -3736,10 +3736,10 @@ mod tests {
                 listing_id: 1,
                 average_price: Decimal::ZERO,
                 quantity: "1000000000000000000000000000".parse().unwrap(),
-                currency: "AUD".to_string(),
+                currency: "AUD".into(),
                 brokerage: Decimal::ZERO,
                 gst_on_brokerage: Decimal::ZERO,
-                brokerage_currency: "AUD".to_string(),
+                brokerage_currency: "AUD".into(),
                 fx_rate: Decimal::ONE,
                 spot_fx_rate: None,
                 contract_note_ref: None,
@@ -3896,10 +3896,10 @@ mod tests {
                 listing_id: 1,
                 average_price: Decimal::ZERO,
                 quantity: "1000000000000000000000000".parse().unwrap(),
-                currency: "AUD".to_string(),
+                currency: "AUD".into(),
                 brokerage: Decimal::ZERO,
                 gst_on_brokerage: Decimal::ZERO,
-                brokerage_currency: "AUD".to_string(),
+                brokerage_currency: "AUD".into(),
                 fx_rate: Decimal::ONE,
                 spot_fx_rate: None,
                 contract_note_ref: None,
@@ -4011,7 +4011,7 @@ mod tests {
             created.kind,
             ActionKind::ReturnOfCapital {
                 amount_per_unit: "0.50".parse().unwrap(),
-                currency: "AUD".to_string(),
+                currency: "AUD".into(),
                 record_date: None,
             }
         );

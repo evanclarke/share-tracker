@@ -106,7 +106,7 @@ fn place(
         out.events.push(FetchedDistribution {
             ex_date,
             amount_per_unit,
-            currency,
+            currency: currency.into(),
         });
     }
     out.events.sort_by_key(|e| e.ex_date);

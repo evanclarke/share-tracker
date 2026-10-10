@@ -35,6 +35,7 @@
 //! amount has nowhere correct to go at all. These two produce a defensible
 //! figure, so they are reported rather than blocked.
 
+use crate::infra::currency::CurrencyCode;
 use crate::infra::extract::Json;
 use crate::infra::fx::FxRates;
 use crate::infra::http::ApiError;
@@ -58,7 +59,7 @@ pub struct FxCoverageAlert {
     pub ticker: Option<String>,
     /// The record's own date — the one whose month anchors its conversion.
     pub date: NaiveDate,
-    pub currency: String,
+    pub currency: CurrencyCode,
     /// The conversion month (`YYYY-MM`) the alert is about: the missing one,
     /// the settlement month, or the reduction's own month.
     pub month: String,
@@ -83,7 +84,7 @@ struct Convertible {
     listing_id: Option<i64>,
     ticker: Option<String>,
     date: NaiveDate,
-    currency: String,
+    currency: CurrencyCode,
     /// The per-record fallback, when the record has one and it is set.
     fallback: Option<Decimal>,
     /// Whether that fallback is a deliberate spot override rather than a
@@ -272,7 +273,7 @@ pub async fn db_fx_coverage(pool: &SqlitePool) -> Result<Vec<FxCoverageAlert>, s
     for row in &settlements {
         let date: NaiveDate = row.try_get("date")?;
         let settlement_date: NaiveDate = row.try_get("settlement_date")?;
-        let currency: String = row.try_get("currency")?;
+        let currency: CurrencyCode = row.try_get("currency")?;
         alerts.push(FxCoverageAlert {
             kind: "settlement_crosses_rate_month".to_string(),
             record: "trade".to_string(),
@@ -324,7 +325,7 @@ pub async fn db_fx_coverage(pool: &SqlitePool) -> Result<Vec<FxCoverageAlert>, s
     for row in &reductions {
         let date: NaiveDate = row.try_get("date")?;
         let reduction_date: NaiveDate = row.try_get("reduction_date")?;
-        let currency: String = row.try_get("currency")?;
+        let currency: CurrencyCode = row.try_get("currency")?;
         let reduction: String = row.try_get("reduction")?;
         // Both rates where they resolve, so the row says what the difference
         // actually costs rather than only that one exists.
@@ -441,7 +442,7 @@ mod tests {
             .await;
         // Income has no fallback: the report fails until the month lands.
         test_support::income(1, 1, ymd(2024, 2, 20))
-            .with(|i| i.currency = "USD".to_string())
+            .with(|i| i.currency = "USD".into())
             .insert(&pool)
             .await;
         // A trade in an imported month is not mentioned.
@@ -624,7 +625,7 @@ mod tests {
                 date: ymd(2024, 5, 1),
                 kind: corporate_action::ActionKind::ReturnOfCapital {
                     amount_per_unit: dec("0.50"),
-                    currency: "USD".to_string(),
+                    currency: "USD".into(),
                     record_date: None,
                 },
             },
@@ -669,7 +670,7 @@ mod tests {
                     rights_units: Decimal::ONE,
                     rights_held_units: Decimal::ONE,
                     exercise_price: dec("1.80"),
-                    currency: "USD".to_string(),
+                    currency: "USD".into(),
                     renounceable: true,
                 },
             },

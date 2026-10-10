@@ -47,6 +47,7 @@ use crate::entities::corporate_action::{RocEvent, SplitEvent};
 use crate::entities::income::{Income, IncomeType};
 use crate::entities::investment_expense::ExpenseType;
 use crate::entities::trade::Trade;
+use crate::infra::currency::CurrencyCode;
 use crate::infra::decimal::{OptMoney, mul_div, parse_dec, to_cents};
 use crate::infra::extract::{Json, Query};
 use crate::infra::fx::FxRates;
@@ -542,7 +543,7 @@ pub struct DisposalParcelRow {
     pub gain_after_discount_aud: Decimal,
 
     // FX detail — populated only for a non-AUD parcel.
-    pub currency: String,
+    pub currency: CurrencyCode,
     pub buy_month_fx_rate: Option<Decimal>,
     pub sell_month_fx_rate: Option<Decimal>,
 }
@@ -781,7 +782,7 @@ fn disposal_parcel_rows(
             };
             let currency = buy_trade
                 .map(|t| t.currency.clone())
-                .unwrap_or_else(|| "AUD".to_string());
+                .unwrap_or_else(CurrencyCode::aud);
 
             // Both calls below feed `cost_base::adjusted_cost_base` /
             // `adjustment_detail` the exact same inputs `realised_gains` used
@@ -990,8 +991,8 @@ fn disposal_parcel_rows(
                 cgt_discount_amount_aud: discount_amount,
                 gain_after_discount_aud: p.capital_gain_loss - discount_amount,
                 currency: currency.clone(),
-                buy_month_fx_rate: if currency == "AUD" { None } else { buy_rate },
-                sell_month_fx_rate: if currency == "AUD" { None } else { sell_rate },
+                buy_month_fx_rate: if currency.is_aud() { None } else { buy_rate },
+                sell_month_fx_rate: if currency.is_aud() { None } else { sell_rate },
             };
             // Once, here, so every figure printed *and* every figure summed
             // into a subtotal is the same rounded one (SCENARIOS W-d).
@@ -2368,7 +2369,7 @@ mod tests {
                 tfn_withholding_tax: Decimal::ZERO,
                 foreign_source: false,
                 foreign_tax_paid: Decimal::ZERO,
-                currency: "AUD".to_string(),
+                currency: "AUD".into(),
                 source: None,
                 holding_account_id: None,
             },
@@ -2384,7 +2385,7 @@ mod tests {
                 amount: dec("5"),
                 gross_amount: None,
                 deductible_percentage: None,
-                currency: "AUD".to_string(),
+                currency: "AUD".into(),
                 description: None,
                 listing_id: None,
                 holding_account_id: None,
@@ -2636,7 +2637,7 @@ mod tests {
                     amount: dec(amount),
                     gross_amount: None,
                     deductible_percentage: None,
-                    currency: "AUD".to_string(),
+                    currency: "AUD".into(),
                     description: None,
                     listing_id: None,
                     holding_account_id: None,
@@ -2696,7 +2697,7 @@ mod tests {
             .unwrap();
         test_support::income(1, 1, ymd(2024, 3, 31))
             .with(|i| {
-                i.currency = "USD".to_string();
+                i.currency = "USD".into();
                 i.foreign_source_income = dec("22.42");
                 i.foreign_tax_paid = dec("3.36");
             })
@@ -2776,7 +2777,7 @@ mod tests {
                 tfn_withholding_tax: Decimal::ZERO,
                 foreign_source: true,
                 foreign_tax_paid: dec("6"),
-                currency: "AUD".to_string(),
+                currency: "AUD".into(),
                 source: Some("US broker sweep".to_string()),
                 holding_account_id: None,
             },
@@ -2850,7 +2851,7 @@ mod tests {
             .unwrap();
         test_support::income(1, 1, ymd(2024, 3, 31))
             .with(|i| {
-                i.currency = "USD".to_string();
+                i.currency = "USD".into();
                 i.foreign_source_income = dec("20.01");
             })
             .insert(&pool)
@@ -2864,7 +2865,7 @@ mod tests {
                 tfn_withholding_tax: Decimal::ZERO,
                 foreign_source: true,
                 foreign_tax_paid: Decimal::ZERO,
-                currency: "USD".to_string(),
+                currency: "USD".into(),
                 source: None,
                 holding_account_id: None,
             },
@@ -3698,7 +3699,7 @@ mod tests {
                 amount: dec("450"),
                 gross_amount: None,
                 deductible_percentage: None,
-                currency: "AUD".to_string(),
+                currency: "AUD".into(),
                 description: Some("margin loan interest".to_string()),
                 listing_id: None,
                 holding_account_id: None,
@@ -3759,7 +3760,7 @@ mod tests {
             .await
             .unwrap();
         let mut foreign = test_support::income(1, 3, march).build();
-        foreign.currency = "USD".to_string();
+        foreign.currency = "USD".into();
         foreign.foreign_source_income = dec("100");
         crate::entities::income::db_upsert(&pool, &foreign)
             .await
@@ -3773,7 +3774,7 @@ mod tests {
                 amount: dec(amount),
                 gross_amount: None,
                 deductible_percentage: None,
-                currency: "AUD".to_string(),
+                currency: "AUD".into(),
                 description: None,
                 listing_id,
                 holding_account_id: None,
@@ -3887,7 +3888,7 @@ mod tests {
                 amount: dec("200"),
                 gross_amount: None,
                 deductible_percentage: None,
-                currency: "AUD".to_string(),
+                currency: "AUD".into(),
                 description: None,
                 listing_id,
                 holding_account_id: None,
@@ -3981,10 +3982,10 @@ mod tests {
                 listing_id: 1,
                 average_price: dec("15"),
                 quantity: dec("100"),
-                currency: "AUD".to_string(),
+                currency: "AUD".into(),
                 brokerage: Decimal::ZERO,
                 gst_on_brokerage: Decimal::ZERO,
-                brokerage_currency: "AUD".to_string(),
+                brokerage_currency: "AUD".into(),
                 fx_rate: Decimal::ONE,
                 spot_fx_rate: None,
                 contract_note_ref: None,
@@ -4082,7 +4083,7 @@ mod tests {
                 tfn_withholding_tax: Decimal::ZERO,
                 foreign_source: false,
                 foreign_tax_paid: Decimal::ZERO,
-                currency: "AUD".to_string(),
+                currency: "AUD".into(),
                 source: None,
                 holding_account_id: None,
             },
@@ -4100,7 +4101,7 @@ mod tests {
                 tfn_withholding_tax: Decimal::ZERO,
                 foreign_source: false,
                 foreign_tax_paid: Decimal::ZERO,
-                currency: "AUD".to_string(),
+                currency: "AUD".into(),
                 source: None,
                 holding_account_id: None,
             },
@@ -4182,7 +4183,7 @@ mod tests {
                 date: ymd(2025, 9, 15),
                 kind: corporate_action::ActionKind::ReturnOfCapital {
                     amount_per_unit: dec("3"),
-                    currency: "AUD".to_string(),
+                    currency: "AUD".into(),
                     record_date: None,
                 },
             },
@@ -4232,7 +4233,7 @@ mod tests {
                     rights_units: dec("1"),
                     rights_held_units: dec("4"),
                     exercise_price: dec("1.80"),
-                    currency: "AUD".to_string(),
+                    currency: "AUD".into(),
                     renounceable: true,
                 },
             },
@@ -5123,7 +5124,7 @@ mod tests {
                 date: ymd(2023, 9, 1),
                 kind: corporate_action::ActionKind::ReturnOfCapital {
                     amount_per_unit: dec("0.25"),
-                    currency: "AUD".to_string(),
+                    currency: "AUD".into(),
                     record_date: None,
                 },
             },
@@ -5238,7 +5239,7 @@ mod tests {
                 date: ymd(2024, 3, 1),
                 kind: corporate_action::ActionKind::ReturnOfCapital {
                     amount_per_unit: dec("1"),
-                    currency: "AUD".to_string(),
+                    currency: "AUD".into(),
                     record_date: None,
                 },
             },
@@ -5349,7 +5350,7 @@ mod tests {
                 date: ymd(2023, 5, 1),
                 kind: corporate_action::ActionKind::ReturnOfCapital {
                     amount_per_unit: dec("0.60"),
-                    currency: "AUD".to_string(),
+                    currency: "AUD".into(),
                     record_date: None,
                 },
             },
@@ -5547,7 +5548,7 @@ mod tests {
             .await;
         test_support::income(1, 1, ymd(2026, 5, 10))
             .with(|i| {
-                i.currency = "USD".to_string();
+                i.currency = "USD".into();
                 i.franked_amount = Decimal::ZERO;
                 i.unfranked_amount = dec("100");
                 i.franking_credits = Decimal::ZERO;
@@ -5594,7 +5595,7 @@ mod tests {
             average_price: dec("10"),
             brokerage: Decimal::ZERO,
             gst_on_brokerage: Decimal::ZERO,
-            currency: "USD".to_string(),
+            currency: "USD".into(),
             fx_rate: Decimal::ONE,
             spot_fx_rate: None,
             deemed_acquisition_date: None,
@@ -5614,7 +5615,7 @@ mod tests {
                 vec![RocEvent {
                     date: ymd(2026, 3, 1),
                     amount_per_unit: dec("1"),
-                    currency: "AUD".to_string(),
+                    currency: "AUD".into(),
                     record_date: None,
                 }],
             )]),

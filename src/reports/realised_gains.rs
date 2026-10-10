@@ -2,6 +2,7 @@ use crate::domain::cgt_discount;
 use crate::domain::cost_base::{self, ParcelRow};
 use crate::domain::indexation;
 use crate::entities::corporate_action::{RocEvent, SplitEvent};
+use crate::infra::currency::CurrencyCode;
 use crate::infra::decimal::{Money, OptMoney, mul_div};
 use crate::infra::extract::Json;
 use crate::infra::fx::{FxOverride, FxRates};
@@ -143,7 +144,7 @@ struct SellInfo {
     brokerage: Decimal,
     #[sqlx(try_from = "Money")]
     gst_on_brokerage: Decimal,
-    currency: String,
+    currency: CurrencyCode,
     #[sqlx(try_from = "Money")]
     fx_rate: Decimal,
     #[sqlx(try_from = "OptMoney")]
@@ -259,7 +260,7 @@ struct RightsSaleInfo {
     proceeds_per_right: Decimal,
     #[sqlx(try_from = "Money")]
     rights_cost: Decimal,
-    currency: String,
+    currency: CurrencyCode,
     #[sqlx(try_from = "Money")]
     fx_rate: Decimal,
 }
@@ -864,7 +865,7 @@ mod tests {
             average_price: Decimal::from(price),
             brokerage: Decimal::ZERO,
             gst_on_brokerage: Decimal::ZERO,
-            currency: currency.to_string(),
+            currency: currency.to_string().into(),
             fx_rate: Decimal::ONE,
             spot_fx_rate: None,
             scrip_cash_per_unit: None,
@@ -884,7 +885,7 @@ mod tests {
             average_price: Decimal::from(price),
             brokerage: Decimal::ZERO,
             gst_on_brokerage: Decimal::ZERO,
-            currency: currency.to_string(),
+            currency: currency.to_string().into(),
             fx_rate: Decimal::ONE,
             spot_fx_rate: None,
             deemed_acquisition_date: None,
@@ -1191,7 +1192,7 @@ mod tests {
         for (i, qty) in [517i64, 517, 517].into_iter().enumerate() {
             let id = i as i64 + 1;
             let mut buy = mem_buy(id, d(2015, 3, 4), qty, 20, "USD");
-            buy.currency = "USD".to_string();
+            buy.currency = "USD".into();
             buys.insert(id, buy);
             allocations.push(mem_alloc(5, id, qty));
         }
@@ -2029,7 +2030,7 @@ mod tests {
                 date,
                 kind: corporate_action::ActionKind::ReturnOfCapital {
                     amount_per_unit: amount.parse().unwrap(),
-                    currency: "AUD".to_string(),
+                    currency: "AUD".into(),
                     record_date,
                 },
             },
@@ -2722,7 +2723,7 @@ mod tests {
                     scrip_old_units: Decimal::ONE,
                     scrip_cash_per_unit: Some(Decimal::from(10)),
                     scrip_market_value: Some(Decimal::from(20)),
-                    scrip_cash_currency: Some("AUD".to_string()),
+                    scrip_cash_currency: Some("AUD".into()),
                 },
             },
         )
@@ -3086,7 +3087,7 @@ mod tests {
             units: Decimal::from(units),
             proceeds_per_right: proceeds_per_right.parse().unwrap(),
             rights_cost: rights_cost.parse().unwrap(),
-            currency: "AUD".to_string(),
+            currency: "AUD".into(),
             fx_rate: Decimal::ONE,
         }
     }
@@ -3153,7 +3154,7 @@ mod tests {
     fn pure_non_aud_rights_sale_shares_sum_exactly_to_the_converted_totals() {
         let d = |y, m, day| NaiveDate::from_ymd_opt(y, m, day).unwrap();
         let mut sale = mem_rights_sale(7, d(2024, 8, 1), 3, "0.20", "10");
-        sale.currency = "USD".to_string();
+        sale.currency = "USD".into();
         let data = ReportData {
             buys: [
                 (1, mem_buy(1, d(2024, 1, 1), 100, 2, "AUD")),
@@ -3241,7 +3242,7 @@ mod tests {
                     rights_units: Decimal::ONE,
                     rights_held_units: Decimal::from(4),
                     exercise_price: "1.80".parse().unwrap(),
-                    currency: "AUD".to_string(),
+                    currency: "AUD".into(),
                     renounceable: true,
                 },
             },
@@ -3646,7 +3647,7 @@ mod tests {
                     scrip_old_units: Decimal::from(100),
                     scrip_cash_per_unit: Some("10000000000".parse().unwrap()),
                     scrip_market_value: Some("1000000000000".parse().unwrap()),
-                    scrip_cash_currency: Some("AUD".to_string()),
+                    scrip_cash_currency: Some("AUD".into()),
                 },
             },
         )
@@ -3698,7 +3699,7 @@ mod tests {
                     rights_units: Decimal::ONE,
                     rights_held_units: Decimal::from(4),
                     exercise_price: "1.80".parse().unwrap(),
-                    currency: "AUD".to_string(),
+                    currency: "AUD".into(),
                     renounceable: true,
                 },
             },

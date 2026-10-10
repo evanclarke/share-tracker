@@ -189,7 +189,11 @@ Scored 6/10 — the weakest dimension. The operation modules are well factored, 
   instead of the deferred-`BEGIN` text scan; a `Currency` type instead of `String` + `== "AUD"`;
   id newtypes (`ListingId`, `TradeId`, …) instead of bare `i64`. Each is a large mechanical change —
   decide which (if any) are worth it
-  - [ ] `Currency` type in place of `String` + `== "AUD"` (do first: financial-correctness value)
+  - [x] `Currency` type in place of `String` + `== "AUD"` (do first: financial-correctness value)
+    — done 2026-10-10 as `infra::currency::CurrencyCode` (the `currencies` entity already owns the
+    name `Currency`): all 79 currency fields, the local currency reads and the currency-carrying
+    error payloads; `is_aud()` is the one AUD test, and production code cannot compile a `== "AUD"`
+    (test-only `PartialEq<&str>`); pinned by `infra::currency`'s tests and the type itself
   - [ ] `ReadPool`/`WritePool` split, retiring the deferred-`BEGIN` text scan
   - [ ] Id newtypes (`ListingId`, `TradeId`, …) in place of bare `i64`
   - [ ] `utoipa-axum` (`#[utoipa::path]`/`OpenApiRouter`) in place of the `ROUTES` table and its

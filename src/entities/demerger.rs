@@ -56,6 +56,7 @@ use crate::entities::corporate_action::{self, ActionKind};
 use crate::entities::rollover;
 use crate::entities::sell::{self, AllocationInput};
 use crate::entities::trade::{self, Trade};
+use crate::infra::currency::CurrencyCode;
 use crate::infra::db::{WriteMode, write_tx};
 use crate::infra::decimal::mul_div;
 use crate::infra::extract::{Json, Query};
@@ -271,10 +272,11 @@ async fn execute(
     // The closing Sell: zero proceeds (the rollover disregards any gain and
     // this Sell never reaches the realised-gains report), consuming every
     // open parcel.
-    let listing_currency: String = sqlx::query_scalar("SELECT currency FROM listings WHERE id = ?")
-        .bind(action.listing_id)
-        .fetch_one(&mut *tx)
-        .await?;
+    let listing_currency: CurrencyCode =
+        sqlx::query_scalar("SELECT currency FROM listings WHERE id = ?")
+            .bind(action.listing_id)
+            .fetch_one(&mut *tx)
+            .await?;
     let sell_body = rollover::closing_sell_body(
         action.date,
         action.listing_id,
@@ -390,7 +392,7 @@ struct Replacement {
     demerged_quantity: Decimal,
     head_cost_base: Decimal,
     demerged_cost_base: Decimal,
-    currency: String,
+    currency: CurrencyCode,
     fx_rate: Decimal,
     spot_fx_rate: Option<Decimal>,
     deemed_acquisition_date: NaiveDate,
@@ -624,10 +626,10 @@ mod tests {
                 listing_id,
                 average_price: dec(price),
                 quantity: dec(qty),
-                currency: "AUD".to_string(),
+                currency: "AUD".into(),
                 brokerage: Decimal::ZERO,
                 gst_on_brokerage: Decimal::ZERO,
-                brokerage_currency: "AUD".to_string(),
+                brokerage_currency: "AUD".into(),
                 fx_rate: Decimal::ONE,
                 spot_fx_rate: None,
                 contract_note_ref: None,
@@ -660,10 +662,10 @@ mod tests {
                 listing_id: 1,
                 average_price: dec("10"),
                 quantity: dec(qty),
-                currency: "AUD".to_string(),
+                currency: "AUD".into(),
                 brokerage: Decimal::ZERO,
                 gst_on_brokerage: Decimal::ZERO,
-                brokerage_currency: "AUD".to_string(),
+                brokerage_currency: "AUD".into(),
                 fx_rate: Decimal::ONE,
                 spot_fx_rate: None,
                 contract_note_ref: None,
@@ -851,7 +853,7 @@ mod tests {
                 lpr_expenditure: Decimal::ZERO,
                 lpr_expenditure_date: None,
                 deceased_acquisition_date: None,
-                currency: "AUD".to_string(),
+                currency: "AUD".into(),
                 fx_rate: Decimal::ONE,
             },
         )
@@ -942,7 +944,7 @@ mod tests {
                 date: d(2022, 3, 1),
                 kind: ActionKind::ReturnOfCapital {
                     amount_per_unit: dec("0.05"),
-                    currency: "AUD".to_string(),
+                    currency: "AUD".into(),
                     record_date: None,
                 },
             },
@@ -986,7 +988,7 @@ mod tests {
                     date: d(2024, 8, 1),
                     kind: ActionKind::ReturnOfCapital {
                         amount_per_unit: dec("0.05"),
-                        currency: "AUD".to_string(),
+                        currency: "AUD".into(),
                         record_date: Some(d(2024, 6, 25)),
                     },
                 },
@@ -1271,10 +1273,10 @@ mod tests {
                 listing_id: 1,
                 average_price: dec("9.99"),
                 quantity: dec("1000"),
-                currency: "AUD".to_string(),
+                currency: "AUD".into(),
                 brokerage: Decimal::ZERO,
                 gst_on_brokerage: Decimal::ZERO,
-                brokerage_currency: "AUD".to_string(),
+                brokerage_currency: "AUD".into(),
                 fx_rate: Decimal::ONE,
                 spot_fx_rate: None,
                 contract_note_ref: None,
@@ -1335,10 +1337,10 @@ mod tests {
                 listing_id: 2,
                 average_price: dec("3.00"),
                 quantity: dec("100"),
-                currency: "AUD".to_string(),
+                currency: "AUD".into(),
                 brokerage: Decimal::ZERO,
                 gst_on_brokerage: Decimal::ZERO,
-                brokerage_currency: "AUD".to_string(),
+                brokerage_currency: "AUD".into(),
                 fx_rate: Decimal::ONE,
                 spot_fx_rate: None,
                 contract_note_ref: None,

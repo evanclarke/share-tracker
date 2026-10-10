@@ -55,6 +55,7 @@ use crate::entities::corporate_action::{self, ActionKind};
 use crate::entities::rollover;
 use crate::entities::sell::{self, AllocationInput};
 use crate::entities::trade::{self, Trade};
+use crate::infra::currency::CurrencyCode;
 use crate::infra::db::{WriteMode, write_tx};
 use crate::infra::decimal::mul_div;
 use crate::infra::extract::{Json, Query};
@@ -225,10 +226,11 @@ async fn execute(
     // unit is the Sell's price, and the realised-gains/net-capital-gain
     // reports assess its gain over the cash-apportioned cost base (the
     // AUD conversion prefers the ATO monthly rate for the cash currency).
-    let listing_currency: String = sqlx::query_scalar("SELECT currency FROM listings WHERE id = ?")
-        .bind(action.listing_id)
-        .fetch_one(&mut *tx)
-        .await?;
+    let listing_currency: CurrencyCode =
+        sqlx::query_scalar("SELECT currency FROM listings WHERE id = ?")
+            .bind(action.listing_id)
+            .fetch_one(&mut *tx)
+            .await?;
     let (sell_price, sell_currency) = match &terms.cash {
         Some((cash_per_unit, _, currency)) => (*cash_per_unit, currency.clone()),
         None => (Decimal::ZERO, listing_currency),
@@ -255,7 +257,7 @@ async fn execute(
         Err(_) if sell_price == Decimal::ZERO => Decimal::ONE,
         Err(_) => {
             return Err(ExchangeError::MissingFxRate {
-                currency: sell_currency.clone(),
+                currency: sell_currency.to_string(),
                 month: action.date.format("%Y-%m").to_string(),
             });
         }
@@ -347,7 +349,7 @@ struct Terms {
     /// `(cash per old unit, replacement market value, cash currency)` — all
     /// three present together or all absent (body validation + table CHECKs),
     /// so a partial set never reaches here.
-    cash: Option<(Decimal, Decimal, String)>,
+    cash: Option<(Decimal, Decimal, CurrencyCode)>,
     /// Partial rollover (Example 27): the cash side's share of each parcel's
     /// remaining reduced cost base, apportioned by the consideration's market
     /// values. Per old unit the holder receives `cash` plus `mv × new/old` of
@@ -441,7 +443,7 @@ struct Replacement {
     at_date_units: Decimal,
     new_quantity: Decimal,
     carried_cost_base: Decimal,
-    currency: String,
+    currency: CurrencyCode,
     fx_rate: Decimal,
     spot_fx_rate: Option<Decimal>,
     deemed_acquisition_date: NaiveDate,
@@ -661,7 +663,7 @@ mod tests {
                     scrip_old_units: old.parse().unwrap(),
                     scrip_cash_per_unit: cash.map(|(c, _)| c.parse().unwrap()),
                     scrip_market_value: cash.map(|(_, mv)| mv.parse().unwrap()),
-                    scrip_cash_currency: cash.map(|_| "AUD".to_string()),
+                    scrip_cash_currency: cash.map(|_| "AUD".to_string()).map(CurrencyCode::from),
                 },
             },
         )
@@ -688,10 +690,10 @@ mod tests {
                 listing_id: 1,
                 average_price: dec("10"),
                 quantity: dec(qty),
-                currency: "AUD".to_string(),
+                currency: "AUD".into(),
                 brokerage: Decimal::ZERO,
                 gst_on_brokerage: Decimal::ZERO,
-                brokerage_currency: "AUD".to_string(),
+                brokerage_currency: "AUD".into(),
                 fx_rate: Decimal::ONE,
                 spot_fx_rate: None,
                 contract_note_ref: None,
@@ -783,7 +785,7 @@ mod tests {
                 date: d(2024, 8, 1),
                 kind: ActionKind::ReturnOfCapital {
                     amount_per_unit: dec("0.05"),
-                    currency: "AUD".to_string(),
+                    currency: "AUD".into(),
                     record_date: Some(d(2024, 6, 25)),
                 },
             },
@@ -862,7 +864,7 @@ mod tests {
                 date: d(2022, 3, 1),
                 kind: ActionKind::ReturnOfCapital {
                     amount_per_unit: dec("0.05"),
-                    currency: "AUD".to_string(),
+                    currency: "AUD".into(),
                     record_date: None,
                 },
             },
@@ -1125,10 +1127,10 @@ mod tests {
                 listing_id: 1,
                 average_price: dec("9.99"),
                 quantity: dec("1000"),
-                currency: "AUD".to_string(),
+                currency: "AUD".into(),
                 brokerage: Decimal::ZERO,
                 gst_on_brokerage: Decimal::ZERO,
-                brokerage_currency: "AUD".to_string(),
+                brokerage_currency: "AUD".into(),
                 fx_rate: Decimal::ONE,
                 spot_fx_rate: None,
                 contract_note_ref: None,
@@ -1187,10 +1189,10 @@ mod tests {
                 listing_id: 2,
                 average_price: dec("3.00"),
                 quantity: dec("500"),
-                currency: "AUD".to_string(),
+                currency: "AUD".into(),
                 brokerage: Decimal::ZERO,
                 gst_on_brokerage: Decimal::ZERO,
-                brokerage_currency: "AUD".to_string(),
+                brokerage_currency: "AUD".into(),
                 fx_rate: Decimal::ONE,
                 spot_fx_rate: None,
                 contract_note_ref: None,
@@ -1379,10 +1381,10 @@ mod tests {
                 listing_id: 1,
                 average_price: dec("15"),
                 quantity: dec("100"),
-                currency: "AUD".to_string(),
+                currency: "AUD".into(),
                 brokerage: Decimal::ZERO,
                 gst_on_brokerage: Decimal::ZERO,
-                brokerage_currency: "AUD".to_string(),
+                brokerage_currency: "AUD".into(),
                 fx_rate: Decimal::ONE,
                 spot_fx_rate: None,
                 contract_note_ref: None,
@@ -1751,7 +1753,7 @@ mod tests {
                     scrip_old_units: Decimal::ONE,
                     scrip_cash_per_unit: Some(cash.0.parse().unwrap()),
                     scrip_market_value: Some(cash.1.parse().unwrap()),
-                    scrip_cash_currency: Some("USD".to_string()),
+                    scrip_cash_currency: Some("USD".into()),
                 },
             },
         )

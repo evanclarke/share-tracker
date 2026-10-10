@@ -34,7 +34,7 @@ impl QuoteStub {
                 .map(|(date, price)| FetchedClose {
                     date: *date,
                     price: price.parse().unwrap(),
-                    currency: currency.to_string(),
+                    currency: currency.to_string().into(),
                 })
                 .collect(),
         );
@@ -52,7 +52,7 @@ impl QuoteStub {
             listing_id,
             LatestQuote {
                 price: price.parse().unwrap(),
-                currency: currency.to_string(),
+                currency: currency.to_string().into(),
                 as_of,
             },
         );

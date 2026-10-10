@@ -7,6 +7,7 @@ use crate::domain::tax_year::tax_year_for;
 use crate::entities::closing_price::{self, NonTradingReason};
 use crate::entities::ess_statement::{self, EssStatement};
 use crate::entities::trade;
+use crate::infra::currency::CurrencyCode;
 use crate::infra::decimal::Money;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
@@ -51,10 +52,10 @@ pub struct ExchangeCurrencyMismatch {
     pub ticker: String,
     /// The listing's own `currency` — what every stored closing price for it
     /// is denominated in.
-    pub currency: String,
+    pub currency: CurrencyCode,
     pub exchange_mic: String,
     /// The currency that exchange quotes in (`exchanges.currency`).
-    pub exchange_currency: String,
+    pub exchange_currency: CurrencyCode,
 }
 
 /// A trade dated on a day its own exchange did not trade — a weekend, or a
@@ -174,7 +175,7 @@ pub struct EssThirtyDaySale {
     /// ([`ESS_THIRTY_DAY_WINDOW`]).
     pub days_after: i64,
     /// ISO 4217 currency `statement_discount` is stated in (the statement's).
-    pub currency: String,
+    pub currency: CurrencyCode,
     /// The discount the statement currently declares (D + E + F + the pre-2009
     /// cessation label, in `currency`) — the figure the rule re-measures.
     pub statement_discount: Decimal,
@@ -289,7 +290,7 @@ pub struct NilProceedsDisposal {
     /// Units disposed of: the Sell's `quantity`, or the rights sale's `units`.
     pub quantity: Decimal,
     /// ISO 4217 currency of the record (the trade's, or the rights issue's).
-    pub currency: String,
+    pub currency: CurrencyCode,
     /// `RightsSale` only: the `rights_cost` the nil proceeds realise as a
     /// capital loss, in `currency`. Always positive when set — a nil cost is
     /// the free-right non-event and is not listed. `None` for a Sell, whose
@@ -324,7 +325,7 @@ pub(super) struct NilProceedsSellRow {
     average_price: Decimal,
     #[sqlx(try_from = "Money")]
     quantity: Decimal,
-    currency: String,
+    currency: CurrencyCode,
 }
 
 /// A candidate rights disposal for [`NilProceedsDisposal`], compared in Rust
@@ -337,7 +338,7 @@ pub(super) struct NilProceedsRightsSaleRow {
     date: NaiveDate,
     #[sqlx(try_from = "Money")]
     units: Decimal,
-    currency: String,
+    currency: CurrencyCode,
     #[sqlx(try_from = "Money")]
     proceeds_per_right: Decimal,
     #[sqlx(try_from = "Money")]

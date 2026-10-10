@@ -1723,7 +1723,7 @@ mod tests {
                     date: ymd(2025, 3, 3),
                     kind: crate::entities::corporate_action::ActionKind::ReturnOfCapital {
                         amount_per_unit: dec("0.15"),
-                        currency: "AUD".to_string(),
+                        currency: "AUD".into(),
                         record_date: None,
                     },
                 },
@@ -1789,7 +1789,7 @@ mod tests {
                     date: ymd(2025, 3, 3),
                     kind: crate::entities::corporate_action::ActionKind::ReturnOfCapital {
                         amount_per_unit: dec("0.25"),
-                        currency: "AUD".to_string(),
+                        currency: "AUD".into(),
                         record_date: None,
                     },
                 },

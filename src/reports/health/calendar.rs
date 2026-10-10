@@ -2,6 +2,7 @@
 //! and entries whose amount disagrees with the announcement.
 
 use crate::entities::closing_price::HeldTimeline;
+use crate::infra::currency::CurrencyCode;
 use crate::infra::decimal::Money;
 use chrono::{DateTime, Duration, NaiveDate};
 use rust_decimal::Decimal;
@@ -76,7 +77,7 @@ pub struct MissingDividendEntry {
     /// `amount_per_unit × units_held`, in `currency` — the gross the missing
     /// income row would carry.
     pub expected_amount: Decimal,
-    pub currency: String,
+    pub currency: CurrencyCode,
     /// The date the distribution is expected to have been **paid** by: the
     /// ex-date plus the longest ex-date-to-payment gap this listing's entered
     /// distributions show (see [`expected_payment_lag_days`]). The calendar
@@ -137,7 +138,7 @@ pub struct DividendAmountMismatch {
     /// `difference` is already the AMIT generation's units figure — one name
     /// cannot be both money and a quantity.
     pub amount_difference: Decimal,
-    pub currency: String,
+    pub currency: CurrencyCode,
 }
 
 /// A stored calendar event with its listing's ticker.
@@ -148,7 +149,7 @@ pub(super) struct CalendarEventRow {
     ex_date: NaiveDate,
     #[sqlx(try_from = "Money")]
     amount_per_unit: Decimal,
-    currency: String,
+    currency: CurrencyCode,
     fetched_at: String,
 }
 
@@ -173,7 +174,7 @@ pub(super) struct CalendarIncomeRow {
     /// `'AUD'` and the entity's write path never consults the listing — so it
     /// has to be read and compared, not assumed. See the amount check in
     /// [`db_distribution_calendar`].
-    currency: String,
+    currency: CurrencyCode,
 }
 
 /// One DRP reinvestment's place in the registry's own running cash surplus:

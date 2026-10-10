@@ -137,7 +137,7 @@ mod tests {
                 date,
                 kind: corporate_action::ActionKind::ReturnOfCapital {
                     amount_per_unit: "0.10".parse().unwrap(),
-                    currency: "AUD".to_string(),
+                    currency: "AUD".into(),
                     record_date: None,
                 },
             },
@@ -241,7 +241,7 @@ mod tests {
                 date: ymd(2025, 5, 1),
                 kind: corporate_action::ActionKind::ReturnOfCapital {
                     amount_per_unit: "0.10".parse().unwrap(),
-                    currency: "AUD".to_string(),
+                    currency: "AUD".into(),
                     record_date: None,
                 },
             },

@@ -6,6 +6,7 @@
 pub mod args;
 pub mod auth;
 pub mod config;
+pub mod currency;
 pub mod date;
 pub mod db;
 pub mod decimal;

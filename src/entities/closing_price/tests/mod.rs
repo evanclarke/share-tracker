@@ -119,7 +119,7 @@ impl StubFetcher {
             .push(FetchedClose {
                 date,
                 price: price.parse().unwrap(),
-                currency: ccy.to_string(),
+                currency: ccy.into(),
             });
         self
     }
@@ -129,7 +129,7 @@ impl StubFetcher {
             listing_id,
             LatestQuote {
                 price: price.parse().unwrap(),
-                currency: ccy.to_string(),
+                currency: ccy.into(),
                 as_of,
             },
         );

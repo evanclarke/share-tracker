@@ -7,6 +7,7 @@ use crate::entities::income::Income;
 use crate::entities::inheritance::{self, Inheritance};
 use crate::entities::interest_income::InterestIncome;
 use crate::entities::investment_expense::{ExpenseType, InvestmentExpense};
+use crate::infra::currency::CurrencyCode;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -158,7 +159,7 @@ pub struct DuplicateIncome {
     /// ISO 4217 currency the shared amounts are stated in (part of the key —
     /// two rows stating the same figures in different currencies are not the
     /// same payment).
-    pub currency: String,
+    pub currency: CurrencyCode,
     /// The gross cash the duplicated rows each declare
     /// (`Income::gross_cash_income`, in `currency`), so the warning names the
     /// distribution rather than only its date.
@@ -186,7 +187,7 @@ pub struct DuplicateIncome {
 pub struct DuplicateInterest {
     pub date_paid: NaiveDate,
     /// ISO 4217 currency the shared amount is stated in (part of the key).
-    pub currency: String,
+    pub currency: CurrencyCode,
     /// The gross interest each duplicated row declares, in `currency`.
     pub amount: Decimal,
     /// The free-text source the rows share (part of the key); `None` when none
@@ -221,7 +222,7 @@ pub struct DuplicateExpense {
     pub date_incurred: NaiveDate,
     pub expense_type: ExpenseType,
     /// ISO 4217 currency the shared amount is stated in (part of the key).
-    pub currency: String,
+    pub currency: CurrencyCode,
     /// The deductible amount each duplicated row claims, in `currency`.
     pub amount: Decimal,
     /// The free-text description the rows share (part of the key).
@@ -266,7 +267,7 @@ pub struct DuplicateEssStatement {
     pub holding_account_id: i64,
     pub taxing_point_date: NaiveDate,
     /// ISO 4217 currency the shared figures are stated in (part of the key).
-    pub currency: String,
+    pub currency: CurrencyCode,
     /// The shares each duplicated statement vests, so the warning names the
     /// grant rather than only its date.
     pub quantity: Decimal,
@@ -303,7 +304,7 @@ pub struct DuplicateInheritance {
     pub holding_account_id: i64,
     pub date_of_death: NaiveDate,
     /// ISO 4217 currency the shared figures are stated in (part of the key).
-    pub currency: String,
+    pub currency: CurrencyCode,
     /// The units each duplicated row inherits, so the warning names the parcel
     /// rather than only its date.
     pub quantity: Decimal,

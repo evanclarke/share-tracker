@@ -8,6 +8,7 @@ use super::model::{ActionKind, CorporateAction};
 use crate::domain::adjustments::{
     as_acquired_quantity, db_payment_currency_conflict, db_splits_for_listing,
 };
+use crate::infra::currency::CurrencyCode;
 use crate::infra::db::write_tx;
 use crate::infra::decimal::{OptMoney, parse_dec};
 use crate::infra::http::{self, ApiError, CrudEntity, Upsert};
@@ -143,8 +144,8 @@ pub enum WriteError {
     /// the state is unrepresentable. Mapped to `422`.
     #[error("this payment's currency differs from that of the parcels it reduces")]
     PaymentCurrencyMismatch {
-        payment_currency: String,
-        parcel_currency: String,
+        payment_currency: CurrencyCode,
+        parcel_currency: CurrencyCode,
     },
     /// A `ReturnOfCapital` / `ShareSplit` / `BonusIssue` dated on or before a
     /// rollover of the same listing that has already run — a transfer, a
@@ -496,7 +497,7 @@ async fn write(
     #[derive(Default)]
     struct Cols {
         amount_per_unit: OptMoney,
-        currency: Option<String>,
+        currency: Option<CurrencyCode>,
         record_date: Option<NaiveDate>,
         split_new_units: OptMoney,
         split_old_units: OptMoney,
@@ -515,7 +516,7 @@ async fn write(
         scrip_old_units: OptMoney,
         scrip_cash_per_unit: OptMoney,
         scrip_market_value: OptMoney,
-        scrip_cash_currency: Option<String>,
+        scrip_cash_currency: Option<CurrencyCode>,
         demerger_listing_id: Option<i64>,
         demerger_new_units: OptMoney,
         demerger_held_units: OptMoney,

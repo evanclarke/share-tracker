@@ -35,6 +35,7 @@
 //! figure goes (SCENARIOS P-08).
 
 use crate::domain::tax_year::amit_in_tax_year;
+use crate::infra::currency::CurrencyCode;
 use crate::infra::decimal::row_dec;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
@@ -109,7 +110,7 @@ impl DeductionRouting {
                         ListingFacts {
                             amit: row.try_get("amit")?,
                             amit_from: row.try_get("amit_from")?,
-                            non_aud: row.try_get::<String, _>("currency")? != "AUD",
+                            non_aud: !row.try_get::<CurrencyCode, _>("currency")?.is_aud(),
                             trust_income: false,
                             foreign_income: false,
                             any_income: false,

@@ -39,6 +39,7 @@ use crate::entities::corporate_action::{
 };
 use crate::entities::sell::{self, AllocationInput, SellBody};
 use crate::entities::trade::{self, Trade};
+use crate::infra::currency::CurrencyCode;
 use crate::infra::db::{WriteMode, write_tx};
 use crate::infra::decimal::parse_dec;
 use crate::infra::extract::{Json, Query};
@@ -208,10 +209,11 @@ async fn execute(
     // Like the scrip/demerger closing Sells it is exempt from the per-account
     // allocation check (it closes the whole holding); the loss rows identify
     // this Sell's account, with totals unchanged for the one taxpayer.
-    let listing_currency: String = sqlx::query_scalar("SELECT currency FROM listings WHERE id = ?")
-        .bind(action.listing_id)
-        .fetch_one(&mut *tx)
-        .await?;
+    let listing_currency: CurrencyCode =
+        sqlx::query_scalar("SELECT currency FROM listings WHERE id = ?")
+            .bind(action.listing_id)
+            .fetch_one(&mut *tx)
+            .await?;
     let sell_body = SellBody {
         brokerage_includes_gst: false,
         statement_total: None,
@@ -450,10 +452,10 @@ mod tests {
                 listing_id: 1,
                 average_price: dec("2.00"),
                 quantity: dec("400"),
-                currency: "AUD".to_string(),
+                currency: "AUD".into(),
                 brokerage: Decimal::ZERO,
                 gst_on_brokerage: Decimal::ZERO,
-                brokerage_currency: "AUD".to_string(),
+                brokerage_currency: "AUD".into(),
                 fx_rate: Decimal::ONE,
                 spot_fx_rate: None,
                 contract_note_ref: None,
@@ -552,7 +554,7 @@ mod tests {
                 date: d(2023, 5, 15),
                 kind: ActionKind::ReturnOfCapital {
                     amount_per_unit: dec("0.05"),
-                    currency: "AUD".to_string(),
+                    currency: "AUD".into(),
                     record_date: None,
                 },
             },
@@ -582,7 +584,7 @@ mod tests {
                 date: d(2023, 7, 15),
                 kind: ActionKind::ReturnOfCapital {
                     amount_per_unit: dec("0.05"),
-                    currency: "AUD".to_string(),
+                    currency: "AUD".into(),
                     record_date: Some(d(2023, 5, 20)),
                 },
             },
@@ -690,10 +692,10 @@ mod tests {
                 listing_id: 1,
                 average_price: dec("9.99"),
                 quantity: dec("1000"),
-                currency: "AUD".to_string(),
+                currency: "AUD".into(),
                 brokerage: Decimal::ZERO,
                 gst_on_brokerage: Decimal::ZERO,
-                brokerage_currency: "AUD".to_string(),
+                brokerage_currency: "AUD".into(),
                 fx_rate: Decimal::ONE,
                 spot_fx_rate: None,
                 contract_note_ref: None,

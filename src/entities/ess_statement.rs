@@ -31,6 +31,7 @@
 //! transaction — **refused** (422) while that Buy is drawn on by a Sell
 //! allocation or AMIT adjustment.
 
+use crate::infra::currency::CurrencyCode;
 use crate::infra::db::write_tx;
 use crate::infra::decimal::{Money, OptMoney};
 use crate::infra::extract::Json;
@@ -89,7 +90,7 @@ pub struct EssStatement {
     /// the month of `taxing_point_date` (see `infra::fx::to_aud`). Defaults to AUD.
     /// Must be the **listing's** currency: `market_value_per_share` is the market
     /// value of that listed share, so the two are the same money (422 otherwise).
-    pub currency: String,
+    pub currency: CurrencyCode,
     /// The foreign-per-AUD rate the taxpayer states for this statement (same
     /// convention as `trades.fx_rate` / `inheritances.fx_rate`: AUD = foreign /
     /// rate), used as the **fallback** when no ATO monthly rate exists for the
@@ -173,8 +174,8 @@ pub struct EssStatementBody {
     #[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub tfn_withholding: Decimal,
     /// ISO 4217 code the amounts are stated in — must be the listing's currency. Defaults to `AUD`.
-    #[serde(default = "default_currency")]
-    pub currency: String,
+    #[serde(default = "CurrencyCode::aud")]
+    pub currency: CurrencyCode,
     /// The rate the taxpayer states for the statement, foreign units per 1 AUD
     /// (decimal string, positive), used when the taxing point's month has no
     /// imported ATO rate. Absent/null means none stated (the AUD case, and the
@@ -217,10 +218,6 @@ pub struct EssStatementBody {
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"
     )]
     pub aud_foreign_source_discount: Option<Decimal>,
-}
-
-fn default_currency() -> String {
-    "AUD".to_string()
 }
 
 /// The `/ess_statements` list filters: the owning columns and the
@@ -328,7 +325,10 @@ pub enum UpsertError {
     /// the statement's currency onto a parcel of a listing priced in another).
     /// Mapped to 422. Same rule as the DRP reinvest path.
     #[error("the ESS statement is in {statement} but its listing is in {listing}")]
-    CurrencyNotListings { statement: String, listing: String },
+    CurrencyNotListings {
+        statement: CurrencyCode,
+        listing: CurrencyCode,
+    },
     /// A negative amount on the statement (carries the field name): an
     /// employer's statement reports positive (or zero) figures. A negative
     /// discount label nets against the year's other statements, a negative TFN
@@ -565,7 +565,7 @@ async fn write(
         || s.aud_deferral_discount.is_some()
         || s.aud_pre_2009_cessation_discount.is_some()
         || s.aud_foreign_source_discount.is_some();
-    if has_override && s.currency == "AUD" {
+    if has_override && s.currency.is_aud() {
         return Err(UpsertError::AudOverrideOnAudStatement);
     }
 
@@ -575,7 +575,7 @@ async fn write(
         if rate <= Decimal::ZERO {
             return Err(UpsertError::FxRateNotPositive);
         }
-        if s.currency == "AUD" {
+        if s.currency.is_aud() {
             return Err(UpsertError::FxRateOnAudStatement);
         }
     }
@@ -593,7 +593,7 @@ async fn write(
     // currencies in one calculation, which CLAUDE.md forbids. The same
     // argument the DRP reinvest path makes about a distribution's cash.
     // (An unknown listing_id falls through to the foreign-key rejection.)
-    let listing_currency: Option<String> =
+    let listing_currency: Option<CurrencyCode> =
         sqlx::query_scalar("SELECT currency FROM listings WHERE id = ?")
             .bind(s.listing_id)
             .fetch_optional(&mut *tx)
@@ -996,7 +996,7 @@ mod tests {
         let pool = test_pool().await;
         insert_listing_in(&pool, 1, "USD").await;
         let mut s = sample(1);
-        s.currency = "USD".to_string();
+        s.currency = "USD".into();
         s.aud_deferral_discount = Some("10572.45".parse().unwrap());
         db_upsert(&pool, &s).await.unwrap();
         let got = db_get(&pool, 1).await.unwrap().unwrap();
@@ -1058,7 +1058,7 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await; // AUD
         let mut s = sample(1);
-        s.currency = "USD".to_string();
+        s.currency = "USD".into();
         assert!(matches!(
             db_upsert(&pool, &s).await,
             Err(UpsertError::CurrencyNotListings { ref statement, ref listing })
@@ -1099,7 +1099,7 @@ mod tests {
         let pool = test_pool().await;
         insert_listing_in(&pool, 1, "USD").await;
         let mut s = sample(1);
-        s.currency = "USD".to_string();
+        s.currency = "USD".into();
         s.fx_rate = Some(Decimal::ZERO);
         assert!(matches!(
             db_upsert(&pool, &s).await,
@@ -1137,7 +1137,7 @@ mod tests {
         let pool = test_pool().await;
         insert_listing_in(&pool, 1, "USD").await;
         let mut s = sample(1);
-        s.currency = "USD".to_string();
+        s.currency = "USD".into();
         s.fx_rate = Some("0.65".parse().unwrap());
         db_upsert(&pool, &s).await.unwrap();
         crate::entities::ess_vest::db_vest(&pool, 1).await.unwrap();
@@ -1217,7 +1217,7 @@ mod tests {
         ];
         for (field, set) in cases {
             let mut s = sample(1);
-            s.currency = "USD".to_string();
+            s.currency = "USD".into();
             set(&mut s, negative);
             assert!(
                 matches!(db_upsert(&pool, &s).await, Err(UpsertError::NegativeAmount(f)) if f == field),
@@ -1375,7 +1375,7 @@ mod tests {
         insert_listing_in(&pool, 1, "USD").await;
 
         let mut s = sample(1); // deferral_discount 600, the only non-zero label
-        s.currency = "USD".to_string();
+        s.currency = "USD".into();
         s.aud_deferral_discount = Some(Decimal::from(900));
         s.foreign_source_discount = Decimal::from(600);
         s.aud_foreign_source_discount = Some(Decimal::from(1200));
@@ -1395,7 +1395,7 @@ mod tests {
         // not knowable at write time (it converts at the RBA rate), so the memo
         // override passes unchecked rather than being compared against nothing.
         let mut unknowable = sample(2);
-        unknowable.currency = "USD".to_string();
+        unknowable.currency = "USD".into();
         unknowable.foreign_source_discount = Decimal::from(600);
         unknowable.aud_deferral_discount = None;
         unknowable.aud_foreign_source_discount = Some(Decimal::from(1200));

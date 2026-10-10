@@ -45,6 +45,7 @@
 //! The emails are the surface it exists for.
 
 use crate::entities::closing_price::{db_held_listing_ids_on, db_price_basis_events};
+use crate::infra::currency::CurrencyCode;
 use crate::infra::db::write_tx;
 use crate::infra::decimal::{Money, row_dec};
 use crate::infra::email::{self, Document, Notifier, Section, Table};
@@ -90,7 +91,7 @@ pub struct Mover {
     pub listing_id: i64,
     pub ticker: String,
     pub name: String,
-    pub currency: String,
+    pub currency: CurrencyCode,
     pub previous_date: NaiveDate,
     pub previous_price: Decimal,
     pub price_date: NaiveDate,
@@ -136,7 +137,7 @@ async fn db_latest_two_closes_on(
 async fn db_listing_identity_on(
     conn: &mut sqlx::SqliteConnection,
     listing_id: i64,
-) -> Result<Option<(String, String, String)>, sqlx::Error> {
+) -> Result<Option<(String, String, CurrencyCode)>, sqlx::Error> {
     let row = sqlx::query("SELECT ticker, name, currency FROM listings WHERE id = ?")
         .bind(listing_id)
         .fetch_optional(&mut *conn)
@@ -329,7 +330,7 @@ pub fn message(movers: &[Mover], threshold_pct: Decimal, skipped: &[String]) -> 
     for mover in movers {
         table.row(vec![
             format!("{} — {}", mover.ticker, mover.name),
-            mover.currency.clone(),
+            mover.currency.to_string(),
             mover.previous_date.to_string(),
             email::unit_price(mover.previous_price),
             mover.price_date.to_string(),

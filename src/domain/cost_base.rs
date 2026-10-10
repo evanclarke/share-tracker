@@ -48,6 +48,7 @@
 //!    see Known limitations in `docs/API.md`), material only for a non-AUD
 //!    holding receiving non-AUD reductions.
 
+use crate::infra::currency::CurrencyCode;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::Serialize;
@@ -302,7 +303,7 @@ pub struct ParcelRow {
     pub brokerage: Decimal,
     #[sqlx(try_from = "Money")]
     pub gst_on_brokerage: Decimal,
-    pub currency: String,
+    pub currency: CurrencyCode,
     #[sqlx(try_from = "Money")]
     pub fx_rate: Decimal,
     /// Deliberate transaction-date spot-rate override: when set it wins over
@@ -1348,7 +1349,7 @@ mod tests {
             average_price: Decimal::ONE,
             brokerage: Decimal::ZERO,
             gst_on_brokerage: Decimal::ZERO,
-            currency: "AUD".to_string(),
+            currency: "AUD".into(),
             fx_rate: Decimal::ONE,
             spot_fx_rate: None,
             deemed_acquisition_date: Some(acquired),
@@ -1997,7 +1998,7 @@ mod tests {
         let roc = |amount: &str, d: NaiveDate| RocEvent {
             date: d,
             amount_per_unit: amount.parse().unwrap(),
-            currency: "AUD".to_string(),
+            currency: "AUD".into(),
             record_date: None,
         };
         // 50c per unit on 100 units held: cost base 1000 → 950.
@@ -2032,7 +2033,7 @@ mod tests {
         let roc = RocEvent {
             date: date(2024, 7, 1),
             amount_per_unit: "0.50".parse().unwrap(),
-            currency: "AUD".to_string(),
+            currency: "AUD".into(),
             record_date: None,
         };
         // Payment after the sale date: the units were no longer held.
@@ -2057,7 +2058,7 @@ mod tests {
         let roc = RocEvent {
             date: date(2024, 4, 1),
             amount_per_unit: "0.25".parse().unwrap(),
-            currency: "AUD".to_string(),
+            currency: "AUD".into(),
             record_date: None,
         };
         let cb = adjusted_cost_base(
@@ -2085,7 +2086,7 @@ mod tests {
         let roc = |amount: &str, d: NaiveDate| RocEvent {
             date: d,
             amount_per_unit: amount.parse().unwrap(),
-            currency: "AUD".to_string(),
+            currency: "AUD".into(),
             record_date: None,
         };
         let events = [roc("0.25", date(2024, 4, 1)), roc("5", date(2024, 5, 1))];
@@ -2154,7 +2155,7 @@ mod tests {
         let roc = RocEvent {
             date: date(2023, 9, 15),
             amount_per_unit: "0.60".parse().unwrap(),
-            currency: "AUD".to_string(),
+            currency: "AUD".into(),
             record_date: None,
         };
         let rows = adjustment_detail(
@@ -2380,7 +2381,7 @@ mod tests {
         let roc = |amount: &str, d: NaiveDate| RocEvent {
             date: d,
             amount_per_unit: amount.parse().unwrap(),
-            currency: "AUD".to_string(),
+            currency: "AUD".into(),
             record_date: None,
         };
         // 100 as-acquired units → 110 after the bonus issue → 55 after the
@@ -2432,7 +2433,7 @@ mod tests {
         let roc = RocEvent {
             date: date(2024, 3, 1),
             amount_per_unit: "0.50".parse().unwrap(),
-            currency: "USD".to_string(),
+            currency: "USD".into(),
             record_date: None,
         };
         let err = adjusted_cost_base(
@@ -2501,7 +2502,7 @@ mod tests {
         let roc = RocEvent {
             date: date(2024, 3, 1),
             amount_per_unit: "0.50".parse().unwrap(),
-            currency: "USD".to_string(),
+            currency: "USD".into(),
             record_date: None,
         };
         let cb = adjusted_cost_base(
@@ -2557,7 +2558,7 @@ mod tests {
         let roc = RocEvent {
             date: date(2024, 6, 1),
             amount_per_unit: "0.50".parse().unwrap(),
-            currency: "USD".to_string(),
+            currency: "USD".into(),
             record_date: None,
         };
         let cb = adjusted_cost_base(

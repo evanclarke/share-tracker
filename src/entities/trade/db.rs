@@ -10,6 +10,7 @@ use super::checks::{
 use super::model::Trade;
 use super::provenance::{provenance_column_sql, provenance_named};
 use super::{Settlement, SettlementError};
+use crate::infra::currency::CurrencyCode;
 use crate::infra::db::write_tx;
 use crate::infra::decimal::{Money, OptMoney, parse_dec};
 use crate::infra::http::{self, ApiError, CrudEntity, Upsert};
@@ -245,8 +246,8 @@ pub enum UpsertError {
     #[error("this parcel's currency differs from a return of capital recorded on its listing")]
     PaymentCurrencyMismatch {
         payment_date: chrono::NaiveDate,
-        payment_currency: String,
-        parcel_currency: String,
+        payment_currency: CurrencyCode,
+        parcel_currency: CurrencyCode,
     },
     /// The trade's currency is not its listing's. `average_price` is the
     /// price of that listed security, so the two are the same money — the
@@ -255,7 +256,10 @@ pub enum UpsertError {
     /// [DRP reinvest](crate::entities::drp_reinvestment) path to a
     /// distribution's cash. Mapped to 422.
     #[error("the trade is in {trade} but its listing is quoted in {listing}")]
-    CurrencyNotListings { trade: String, listing: String },
+    CurrencyNotListings {
+        trade: CurrencyCode,
+        listing: CurrencyCode,
+    },
     /// A degenerate core figure was rejected (see [`check_amounts`]):
     /// non-positive quantity or FX rate, negative price/brokerage/GST, a
     /// brokerage currency differing from the trade's, or a settlement before
@@ -379,12 +383,13 @@ pub(crate) async fn listing_currency_mismatch(
     conn: &mut sqlx::SqliteConnection,
     listing_id: i64,
     currency: &str,
-) -> Result<Option<String>, sqlx::Error> {
-    let listing: Option<String> = sqlx::query_scalar("SELECT currency FROM listings WHERE id = ?")
-        .bind(listing_id)
-        .fetch_optional(conn)
-        .await?;
-    Ok(listing.filter(|l| l != currency))
+) -> Result<Option<CurrencyCode>, sqlx::Error> {
+    let listing: Option<CurrencyCode> =
+        sqlx::query_scalar("SELECT currency FROM listings WHERE id = ?")
+            .bind(listing_id)
+            .fetch_optional(conn)
+            .await?;
+    Ok(listing.filter(|l| **l != *currency))
 }
 
 /// How [`write`] settles the row's `settlement_date` and

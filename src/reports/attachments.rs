@@ -334,7 +334,7 @@ mod tests {
                 tfn_withholding_tax: Decimal::ZERO,
                 foreign_source: false,
                 foreign_tax_paid: Decimal::ZERO,
-                currency: "AUD".to_string(),
+                currency: "AUD".into(),
                 source: Some("ANZ savings".to_string()),
                 holding_account_id: None,
             },
@@ -372,7 +372,7 @@ mod tests {
                 date: ymd(2024, 6, 30),
                 kind: corporate_action::ActionKind::ReturnOfCapital {
                     amount_per_unit: "0.10".parse().unwrap(),
-                    currency: "AUD".to_string(),
+                    currency: "AUD".into(),
                     record_date: None,
                 },
             },

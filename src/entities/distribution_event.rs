@@ -91,6 +91,7 @@
 //!   answer.
 
 use crate::entities::closing_price::{self, FetchError, Market};
+use crate::infra::currency::CurrencyCode;
 use crate::infra::decimal::Money;
 use crate::infra::http::{self, ApiError, CrudEntity};
 use axum::{Router, routing::get};
@@ -154,7 +155,7 @@ pub struct DistributionEvent {
     /// its own parameter for exactly this).
     #[sqlx(try_from = "Money")]
     pub amount_per_unit: Decimal,
-    pub currency: String,
+    pub currency: CurrencyCode,
     /// Provider that produced the row, e.g. `"yahoo"` — [`DistributionSource`],
     /// the typed enum the schema CHECK (0051) constrains the column to.
     pub source: DistributionSource,
@@ -215,7 +216,7 @@ pub struct FetchedDistribution {
     pub amount_per_unit: Decimal,
     /// The quote currency the provider reports — cross-checked against the
     /// listing's before the row is stored.
-    pub currency: String,
+    pub currency: CurrencyCode,
 }
 
 /// What one provider call answered: the events it dated, and the ones it could
@@ -316,8 +317,8 @@ pub enum StoreError {
     CurrencyMismatch {
         listing_id: i64,
         ex_date: NaiveDate,
-        provider: String,
-        listing: String,
+        provider: CurrencyCode,
+        listing: CurrencyCode,
     },
     #[error("distribution event write failed: {0}")]
     Db(#[from] sqlx::Error),
@@ -385,7 +386,7 @@ pub async fn db_store(
             listing_id,
             ex_date: event.ex_date,
             provider: event.currency.clone(),
-            listing: listing_currency.to_string(),
+            listing: listing_currency.into(),
         });
     }
     // ON CONFLICT over the natural key, so the surrogate id — and with it the

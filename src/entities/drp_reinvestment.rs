@@ -99,6 +99,7 @@ use crate::entities::{
     income::{Income, IncomeType},
     trade::{self, Trade},
 };
+use crate::infra::currency::CurrencyCode;
 use crate::infra::db::{WriteMode, write_tx};
 use crate::infra::decimal::parse_dec;
 use crate::infra::extract::{Json, Query};
@@ -175,8 +176,8 @@ pub enum ReinvestError {
     /// reinvestment price are different money and cannot be divided.
     #[error("the distribution is in {distribution} but the listing trades in {listing}")]
     CurrencyMismatch {
-        distribution: String,
-        listing: String,
+        distribution: CurrencyCode,
+        listing: CurrencyCode,
     },
     /// The reinvestment price is not strictly positive.
     #[error("the reinvestment price must be greater than zero")]
@@ -437,7 +438,7 @@ async fn execute(
     };
 
     // The DRP trade is denominated in the holding's currency.
-    let currency: String = sqlx::query_scalar("SELECT currency FROM listings WHERE id = ?")
+    let currency: CurrencyCode = sqlx::query_scalar("SELECT currency FROM listings WHERE id = ?")
         .bind(listing_id)
         .fetch_one(&mut *tx)
         .await?;
@@ -839,11 +840,12 @@ mod tests {
         // In the listing's own currency: a distribution is paid in the money
         // the holding trades in, and reinvesting one that is not is refused
         // (`ReinvestError::CurrencyMismatch`).
-        let currency: String = sqlx::query_scalar("SELECT currency FROM listings WHERE id = ?")
-            .bind(listing_id)
-            .fetch_one(pool)
-            .await
-            .unwrap();
+        let currency: CurrencyCode =
+            sqlx::query_scalar("SELECT currency FROM listings WHERE id = ?")
+                .bind(listing_id)
+                .fetch_one(pool)
+                .await
+                .unwrap();
         test_support::income(id, listing_id, date_paid.parse().unwrap())
             .with(|i| {
                 i.ex_date = ex_date.map(|d| d.parse().unwrap());
@@ -1009,10 +1011,10 @@ mod tests {
                 listing_id: 1,
                 average_price: Decimal::from(15),
                 quantity: Decimal::from(200),
-                currency: "AUD".to_string(),
+                currency: "AUD".into(),
                 brokerage: Decimal::ZERO,
                 gst_on_brokerage: Decimal::ZERO,
-                brokerage_currency: "AUD".to_string(),
+                brokerage_currency: "AUD".into(),
                 fx_rate: Decimal::ONE,
                 spot_fx_rate: None,
                 contract_note_ref: None,
@@ -1272,7 +1274,7 @@ mod tests {
         test_support::income(1, 1, "2024-03-31".parse().unwrap())
             .with(|i| {
                 i.foreign_source_income = Decimal::from(100);
-                i.currency = "USD".to_string();
+                i.currency = "USD".into();
             })
             .insert(&pool)
             .await;
@@ -1655,7 +1657,7 @@ mod tests {
                 .with(|inc| {
                     inc.foreign_source_income = gross.parse().unwrap();
                     inc.foreign_tax_paid = withheld.parse().unwrap();
-                    inc.currency = "USD".to_string();
+                    inc.currency = "USD".into();
                 })
                 .insert(&pool)
                 .await;
@@ -2175,11 +2177,11 @@ mod tests {
                 listing_id: 1,
                 average_price: Decimal::from(12),
                 quantity: Decimal::from(5),
-                currency: "AUD".to_string(),
+                currency: "AUD".into(),
                 brokerage: Decimal::ZERO,
                 gst_on_brokerage: Decimal::ZERO,
                 brokerage_includes_gst: false,
-                brokerage_currency: "AUD".to_string(),
+                brokerage_currency: "AUD".into(),
                 fx_rate: Decimal::ONE,
                 spot_fx_rate: None,
                 contract_note_ref: None,

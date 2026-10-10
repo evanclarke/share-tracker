@@ -12,6 +12,7 @@
 //! follows the layering: `domain` reads and calculates and depends on nothing
 //! in `entities`, while writing a Sell or a Buy is an entity's business.
 
+use crate::infra::currency::CurrencyCode;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 
@@ -31,7 +32,7 @@ pub fn closing_sell_body(
     listing_id: i64,
     holding_account_id: i64,
     average_price: Decimal,
-    currency: String,
+    currency: CurrencyCode,
     fx_rate: Decimal,
     allocations: Vec<AllocationInput>,
 ) -> SellBody {

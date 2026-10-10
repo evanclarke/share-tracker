@@ -133,7 +133,7 @@ pub async fn resolve_rate(
     date: NaiveDate,
     manual: FxOverride,
 ) -> Result<Decimal, FxError> {
-    if currency.eq_ignore_ascii_case("AUD") {
+    if crate::infra::currency::is_aud(currency) {
         return Ok(Decimal::ONE);
     }
     let month = date.format("%Y-%m").to_string();
@@ -225,7 +225,7 @@ pub async fn resolve_valuation_rate(
     currency: &str,
     date: NaiveDate,
 ) -> Result<ValuationRate, FxError> {
-    if currency.eq_ignore_ascii_case("AUD") {
+    if crate::infra::currency::is_aud(currency) {
         return Ok(ValuationRate {
             rate: Decimal::ONE,
             provisional: false,
@@ -301,7 +301,7 @@ impl FxRates {
         date: NaiveDate,
         manual: FxOverride,
     ) -> Result<Decimal, FxError> {
-        if currency.eq_ignore_ascii_case("AUD") {
+        if crate::infra::currency::is_aud(currency) {
             return Ok(Decimal::ONE);
         }
         let month = date.format("%Y-%m").to_string();
@@ -321,7 +321,7 @@ impl FxRates {
         currency: &str,
         date: NaiveDate,
     ) -> Result<ValuationRate, FxError> {
-        if currency.eq_ignore_ascii_case("AUD") {
+        if crate::infra::currency::is_aud(currency) {
             return Ok(ValuationRate {
                 rate: Decimal::ONE,
                 provisional: false,
@@ -347,7 +347,7 @@ impl FxRates {
     /// the [FX coverage cross-check](crate::reports::fx_coverage), whose whole
     /// question is which months are *not* imported.
     pub fn rate_for(&self, currency: &str, month: &str) -> Option<Decimal> {
-        if currency.eq_ignore_ascii_case("AUD") {
+        if crate::infra::currency::is_aud(currency) {
             return Some(Decimal::ONE);
         }
         self.rates
