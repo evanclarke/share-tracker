@@ -854,8 +854,9 @@ mod tests {
         );
     }
 
-    /// Insert a DRP trade directly (the shape `drp_reinvestment` creates) so the
-    /// unenrolment settlement has a residual chain to act on.
+    /// Insert a DRP trade through the INSERT `drp_reinvestment` writes it with
+    /// (`trade::NewParcel`), so the unenrolment settlement has a residual
+    /// chain to act on.
     async fn insert_drp_trade(
         pool: &SqlitePool,
         id: i64,
@@ -864,20 +865,22 @@ mod tests {
         carried: &str,
         paid: &str,
     ) {
-        sqlx::query(
-            "INSERT INTO trades \
-             (id, trade_type, date, settlement_date, listing_id, average_price, quantity, currency, \
-              brokerage, gst_on_brokerage, brokerage_currency, fx_rate, contract_note_ref, \
-              residual_brought_forward, residual_carried_forward, residual_paid_out) \
-             VALUES (?, 'DRP', ?, ?, ?, '9', '11', 'AUD', '0', '0', 'AUD', '1', NULL, '0', ?, ?)",
+        let mut conn = pool.acquire().await.unwrap();
+        crate::entities::trade::NewParcel::new(
+            crate::entities::trade::ParcelOrigin::DrpReinvestment,
+            date.parse().unwrap(),
+            listing_id,
+            1,
+            test_support::dec("11"),
+            "AUD",
         )
-        .bind(id)
-        .bind(date)
-        .bind(date)
-        .bind(listing_id)
-        .bind(carried)
-        .bind(paid)
-        .execute(pool)
+        .price(test_support::dec("9"))
+        .residuals(crate::entities::trade::Residuals {
+            carried_forward: test_support::dec(carried),
+            paid_out: test_support::dec(paid),
+            ..Default::default()
+        })
+        .write(&mut conn, Some(id))
         .await
         .unwrap();
         // …together with the distribution that funded it: a DRP trade only

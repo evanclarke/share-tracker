@@ -488,7 +488,8 @@ async fn download(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{ApiClient, ApiResponse, test_pool};
+    use crate::entities::trade;
+    use crate::test_support::{self, ApiClient, ApiResponse, dec, test_pool, ymd};
 
     /// Client over this module's own routes.
     fn client(pool: &SqlitePool) -> ApiClient {
@@ -508,16 +509,27 @@ mod tests {
         .unwrap();
     }
 
+    /// The id [`insert_trade`] writes its Buy at.
+    const TRADE_ID: i64 = 1;
+
+    /// An ordinary Buy for an attachment to belong to, written through the
+    /// trade path like any other.
     async fn insert_trade(pool: &SqlitePool) -> i64 {
         insert_listing(pool).await;
-        let (id,): (i64,) = sqlx::query_as(
-            "INSERT INTO trades (trade_type, date, settlement_date, listing_id, average_price, quantity, currency, brokerage_currency) \
-             VALUES ('Buy', '2024-01-01', '2024-01-03', 1, '1', '1', 'AUD', 'AUD') RETURNING id",
-        )
-        .fetch_one(pool)
-        .await
-        .unwrap();
-        id
+        test_support::buy(TRADE_ID, 1).insert(pool).await;
+        TRADE_ID
+    }
+
+    /// A parcel an operation wrote, carrying `origin`'s provenance link —
+    /// the shape the linked-attachment traversal follows.
+    async fn insert_parcel(pool: &SqlitePool, origin: trade::ParcelOrigin) -> i64 {
+        insert_listing(pool).await;
+        let mut conn = pool.acquire().await.unwrap();
+        trade::NewParcel::new(origin, ymd(2024, 1, 2), 1, 1, dec("1"), "AUD")
+            .price(dec("1"))
+            .insert(&mut conn)
+            .await
+            .unwrap()
     }
 
     async fn insert_income(pool: &SqlitePool) -> i64 {
@@ -911,13 +923,7 @@ mod tests {
         insert_listing(&pool).await;
         // A DRP trade whose funding distribution links to it via
         // income.reinvestment_trade_id — the reinvest operation's shape.
-        let (drp_id,): (i64,) = sqlx::query_as(
-            "INSERT INTO trades (trade_type, date, settlement_date, listing_id, average_price, quantity, currency, brokerage_currency) \
-             VALUES ('DRP', '2024-01-01', '2024-01-01', 1, '1', '1', 'AUD', 'AUD') RETURNING id",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let drp_id = insert_parcel(&pool, trade::ParcelOrigin::DrpReinvestment).await;
         let (income_id,): (i64,) = sqlx::query_as(
             "INSERT INTO income (listing_id, date_paid, reinvestment_trade_id) \
              VALUES (1, '2024-01-01', ?) RETURNING id",
@@ -969,13 +975,13 @@ mod tests {
         insert_listing(&pool).await;
         // A buy-back participation Sell whose dividend-component income row
         // links to it via income.buyback_trade_id.
-        let (sell_id,): (i64,) = sqlx::query_as(
-            "INSERT INTO trades (trade_type, date, settlement_date, listing_id, average_price, quantity, currency, brokerage_currency) \
-             VALUES ('Sell', '2024-03-01', '2024-03-01', 1, '1', '1', 'AUD', 'AUD') RETURNING id",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let sell_id = 2;
+        test_support::buy(1, 1).insert(&pool).await;
+        test_support::sell(sell_id, 1)
+            .date(ymd(2024, 3, 1))
+            .qty(dec("1"))
+            .insert(&pool)
+            .await;
         let (income_id,): (i64,) = sqlx::query_as(
             "INSERT INTO income (listing_id, date_paid, buyback_trade_id) \
              VALUES (1, '2024-03-01', ?) RETURNING id",
@@ -993,16 +999,12 @@ mod tests {
     #[tokio::test]
     async fn api_list_include_linked_returns_ess_statement_attachments() {
         let pool = test_pool().await;
+        // A trade with no provenance link, to check below — written first, so
+        // the vest Buy's database-assigned id cannot land on its fixed one.
+        let plain_id = insert_trade(&pool).await;
         // An ESS vest Buy links to its statement via trades.ess_statement_id.
         let ess_id = insert_ess_statement(&pool).await;
-        let (buy_id,): (i64,) = sqlx::query_as(
-            "INSERT INTO trades (trade_type, date, settlement_date, listing_id, average_price, quantity, currency, brokerage_currency, ess_statement_id) \
-             VALUES ('Buy', '2024-02-01', '2024-02-01', 1, '1', '1', 'AUD', 'AUD', ?) RETURNING id",
-        )
-        .bind(ess_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let buy_id = insert_parcel(&pool, trade::ParcelOrigin::EssVest(ess_id)).await;
         insert_owned(&pool, None, None, Some(ess_id), "ess-annual.pdf").await;
 
         let names = list_filenames(
@@ -1014,7 +1016,6 @@ mod tests {
 
         // A trade with no provenance link returns only its own attachments —
         // the NULL ess_statement_id must not match anything.
-        let plain_id = insert_trade(&pool).await;
         let names = list_filenames(pool, &format!("trade_id={plain_id}&include_linked=true")).await;
         assert!(names.is_empty());
     }
