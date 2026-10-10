@@ -5,8 +5,7 @@ use axum::{Router, extract::State, routing::get};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use sqlx::{Row, SqlitePool};
-use std::collections::HashMap;
+use sqlx::SqlitePool;
 
 /// One open (not fully sold) purchase parcel — the per-parcel schedule a user
 /// reconciles against a broker statement. All monetary figures are AUD,
@@ -109,13 +108,7 @@ pub async fn db_open_parcels_on(
     // Ticker per listing, as a separate lookup rather than a join option on
     // the shared loader (only this report wants it). Every trade's listing_id
     // is a foreign key, so the map always has the row.
-    let ticker_rows = sqlx::query("SELECT id, ticker FROM listings")
-        .fetch_all(&mut *conn)
-        .await?;
-    let mut tickers: HashMap<i64, String> = HashMap::new();
-    for row in &ticker_rows {
-        tickers.insert(row.try_get("id")?, row.try_get("ticker")?);
-    }
+    let tickers = crate::entities::listing::db_tickers(&mut *conn).await?;
 
     let mut parcels = Vec::with_capacity(open.len());
     for p in &open {

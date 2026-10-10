@@ -301,11 +301,7 @@ impl Sources {
                 .await?
                 .into_iter()
                 .collect();
-        let tickers: HashMap<i64, String> = sqlx::query_as("SELECT id, ticker FROM listings")
-            .fetch_all(&mut *conn)
-            .await?
-            .into_iter()
-            .collect();
+        let tickers = crate::entities::listing::db_tickers(&mut *conn).await?;
         let rename_history = RenameHistory::load(&mut *conn).await?;
         let holdings: Vec<HoldingOverview> = portfolio::db_holdings_on(&mut *conn, None)
             .await?

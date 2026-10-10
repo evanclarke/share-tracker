@@ -400,13 +400,7 @@ async fn accumulate_on(
     .await?;
 
     let split_events = crate::entities::corporate_action::db_share_split_events(&mut *conn).await?;
-    let ticker_rows = sqlx::query("SELECT id, ticker FROM listings")
-        .fetch_all(&mut *conn)
-        .await?;
-    let mut tickers: HashMap<i64, String> = HashMap::new();
-    for row in &ticker_rows {
-        tickers.insert(row.try_get("id")?, row.try_get("ticker")?);
-    }
+    let tickers = crate::entities::listing::db_tickers(&mut *conn).await?;
     // every imported ATO FX rate — per-row conversions below are map lookups,
     // not one DB round-trip each
     let fx = FxRates::load(&mut *conn).await?;

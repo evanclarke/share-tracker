@@ -392,6 +392,19 @@ impl CrudEntity for Listing {
     const NOUN: &'static str = "listing";
 }
 
+/// Every listing's ticker by id — the label the reports put beside a listing.
+pub async fn db_tickers<'e, X>(
+    executor: X,
+) -> Result<std::collections::HashMap<i64, String>, sqlx::Error>
+where
+    X: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    let rows: Vec<(i64, String)> = sqlx::query_as("SELECT id, ticker FROM listings")
+        .fetch_all(executor)
+        .await?;
+    Ok(rows.into_iter().collect())
+}
+
 /// Was this listing an AMIT in the Australian financial year `tax_year`
 /// (identified by the calendar year of its 30 June end)?
 ///

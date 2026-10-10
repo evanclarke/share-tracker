@@ -1953,12 +1953,7 @@ async fn db_duplicate_price_series(
     for row in rows {
         series.entry(row.listing_id).or_default().push(row);
     }
-    let tickers: HashMap<i64, String> =
-        sqlx::query_as::<_, (i64, String)>("SELECT id, ticker FROM listings")
-            .fetch_all(&mut *conn)
-            .await?
-            .into_iter()
-            .collect();
+    let tickers = crate::entities::listing::db_tickers(&mut *conn).await?;
     // The FK guarantees the listing exists; a row written between the two
     // queries is the only way to miss one, and an empty ticker still names the
     // ids to open.
@@ -2193,12 +2188,7 @@ async fn db_duplicate_income(
     if rows.is_empty() {
         return Ok(Vec::new());
     }
-    let tickers: HashMap<i64, String> =
-        sqlx::query_as::<_, (i64, String)>("SELECT id, ticker FROM listings")
-            .fetch_all(&mut *conn)
-            .await?
-            .into_iter()
-            .collect();
+    let tickers = crate::entities::listing::db_tickers(&mut *conn).await?;
 
     // Grouped by scanning: the rows here are already narrowed to same-day
     // clusters, so the quadratic worst case is a handful of comparisons.
@@ -2356,12 +2346,7 @@ async fn db_duplicate_expenses(
     if rows.is_empty() {
         return Ok(Vec::new());
     }
-    let tickers: HashMap<i64, String> =
-        sqlx::query_as::<_, (i64, String)>("SELECT id, ticker FROM listings")
-            .fetch_all(&mut *conn)
-            .await?
-            .into_iter()
-            .collect();
+    let tickers = crate::entities::listing::db_tickers(&mut *conn).await?;
 
     let mut groups: Vec<Vec<InvestmentExpense>> = Vec::new();
     for row in rows {
@@ -2460,12 +2445,7 @@ async fn db_duplicate_ess_statements(
     if rows.is_empty() {
         return Ok(Vec::new());
     }
-    let tickers: HashMap<i64, String> =
-        sqlx::query_as::<_, (i64, String)>("SELECT id, ticker FROM listings")
-            .fetch_all(&mut *conn)
-            .await?
-            .into_iter()
-            .collect();
+    let tickers = crate::entities::listing::db_tickers(&mut *conn).await?;
 
     // Grouped by scanning, read in id order so each group's ids come out
     // ascending (the same shape as `db_duplicate_income`).
@@ -2560,12 +2540,7 @@ async fn db_duplicate_inheritances(
     if rows.is_empty() {
         return Ok(Vec::new());
     }
-    let tickers: HashMap<i64, String> =
-        sqlx::query_as::<_, (i64, String)>("SELECT id, ticker FROM listings")
-            .fetch_all(&mut *conn)
-            .await?
-            .into_iter()
-            .collect();
+    let tickers = crate::entities::listing::db_tickers(&mut *conn).await?;
 
     let mut groups: Vec<Vec<Inheritance>> = Vec::new();
     for row in rows {

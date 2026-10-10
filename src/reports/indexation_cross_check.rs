@@ -208,19 +208,13 @@ pub async fn db_indexation_cross_check(
     let parcel_rows = sqlx::query("SELECT id, date FROM trades WHERE trade_type IN ('Buy', 'DRP')")
         .fetch_all(&mut *tx)
         .await?;
-    let ticker_rows = sqlx::query("SELECT id, ticker FROM listings")
-        .fetch_all(&mut *tx)
-        .await?;
+    let tickers = crate::entities::listing::db_tickers(&mut *tx).await?;
     let cpi = CpiQuarters::load(&mut tx).await?;
     tx.commit().await?;
 
     let mut incurred: HashMap<i64, NaiveDate> = HashMap::with_capacity(parcel_rows.len());
     for row in &parcel_rows {
         incurred.insert(row.try_get("id")?, row.try_get("date")?);
-    }
-    let mut tickers: HashMap<i64, String> = HashMap::with_capacity(ticker_rows.len());
-    for row in &ticker_rows {
-        tickers.insert(row.try_get("id")?, row.try_get("ticker")?);
     }
 
     let mut comparisons = Vec::new();

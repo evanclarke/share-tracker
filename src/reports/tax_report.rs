@@ -1433,12 +1433,7 @@ impl IncomeContext {
         tax_year: TaxYear,
         fx: FxRates,
     ) -> Result<Self, sqlx::Error> {
-        let tickers: HashMap<i64, String> = sqlx::query("SELECT id, ticker FROM listings")
-            .fetch_all(&mut *conn)
-            .await?
-            .into_iter()
-            .map(|r| Ok::<_, sqlx::Error>((r.try_get("id")?, r.try_get("ticker")?)))
-            .collect::<Result<_, _>>()?;
+        let tickers = crate::entities::listing::db_tickers(&mut *conn).await?;
         let renames = RenameHistory::load(&mut *conn).await?;
         Ok(Self {
             tax_year,

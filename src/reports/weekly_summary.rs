@@ -116,12 +116,7 @@ pub async fn resolve_window(
 async fn db_names(
     pool: &SqlitePool,
 ) -> Result<(HashMap<i64, String>, HashMap<i64, String>), sqlx::Error> {
-    let listings = sqlx::query("SELECT id, ticker FROM listings")
-        .fetch_all(pool)
-        .await?
-        .iter()
-        .map(|row| Ok((row.try_get("id")?, row.try_get("ticker")?)))
-        .collect::<Result<HashMap<i64, String>, sqlx::Error>>()?;
+    let listings = crate::entities::listing::db_tickers(pool).await?;
     let accounts = sqlx::query("SELECT id, name FROM holding_accounts")
         .fetch_all(pool)
         .await?

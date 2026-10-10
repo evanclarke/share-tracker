@@ -35,8 +35,7 @@ use axum::{Router, extract::State, routing::get};
 use chrono::{Duration, NaiveDate};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use sqlx::{Row, SqlitePool};
-use std::collections::HashMap;
+use sqlx::SqlitePool;
 
 /// A dividend whose entitled shares fail the holding-period walk — its
 /// credits are denied, unless the year's small-shareholder exemption shields
@@ -128,19 +127,6 @@ pub fn router() -> Router<SqlitePool> {
         .route("/reports/franking_at_risk/what_if", get(what_if))
 }
 
-/// Tickers for the alerts to carry (the required at-risk days come from the
-/// loaded walks themselves).
-async fn listing_tickers(
-    conn: &mut sqlx::SqliteConnection,
-) -> Result<HashMap<i64, String>, sqlx::Error> {
-    let rows = sqlx::query("SELECT id, ticker FROM listings")
-        .fetch_all(conn)
-        .await?;
-    rows.iter()
-        .map(|r| Ok((r.try_get("id")?, r.try_get("ticker")?)))
-        .collect()
-}
-
 /// Every franked dividend whose entitled shares fail the holding-period walk,
 /// with the failing window and the denied amount. The candidates and per-year
 /// attached totals come from the loader shared with the tax summary
@@ -155,7 +141,7 @@ pub async fn db_franking_at_risk(
     let mut tx = pool.begin().await?;
     let fx = FxRates::load(&mut *tx).await?;
     let (dividends, attached_by_year) = franking::db_franked_dividends(&mut tx, &fx).await?;
-    let tickers = listing_tickers(&mut tx).await?;
+    let tickers = crate::entities::listing::db_tickers(&mut *tx).await?;
     let walks = franking::HoldingWalks::load(&mut tx).await?;
     tx.commit().await?;
 
@@ -215,7 +201,7 @@ pub async fn db_franking_what_if(
     let mut tx = pool.begin().await?;
     let fx = FxRates::load(&mut *tx).await?;
     let (dividends, attached_by_year) = franking::db_franked_dividends(&mut tx, &fx).await?;
-    let tickers = listing_tickers(&mut tx).await?;
+    let tickers = crate::entities::listing::db_tickers(&mut *tx).await?;
     let walks = franking::HoldingWalks::load(&mut tx).await?;
     tx.commit().await?;
 
