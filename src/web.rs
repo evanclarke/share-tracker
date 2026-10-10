@@ -3699,6 +3699,16 @@ mod tests {
         assert!(js.contains("banner.classList.toggle('notes-only', problems.length === 0)"));
         assert!(css.contains("#health-banner.notes-only"));
         assert!(css.contains("#health-banner .health-note"));
+        // Every distribution-calendar alert — the note, the overdue missing
+        // entry and the amount mismatch — is remedied on Income, so each links
+        // there (the overdue one used to link nowhere unless a note did too).
+        assert!(js.contains(
+            "{ rows: missingDividends.filter(function (d) { return d.awaiting_payment; }), link: 'income', note: true,"
+        ));
+        assert!(js.contains(
+            "{ rows: missingDividends.filter(function (d) { return !d.awaiting_payment; }), link: 'income',"
+        ));
+        assert!(js.contains("{ rows: h.dividend_amount_mismatches, link: 'income', say:"));
     }
 
     #[tokio::test]

@@ -1380,244 +1380,278 @@ async function refreshHealthBanner(seq = navigationToken()) {
     // navigation: a superseded navigation's health fetch must not overwrite
     // the banner the reader's newer screen has already refreshed.
     if (!isCurrentNavigation(seq)) return;
-    const problems = [];
-    if (h.prices_stale) {
-      problems.push('Closing prices are stale — latest is ' + h.latest_price_date
-        + '; check the price-import job.');
-    }
-    if (h.fx_stale) {
-      problems.push('RBA FX rates are stale — latest month is ' + h.latest_fx_month
-        + '; check the rba-fx-import job.');
-    }
-    (h.failed_jobs || []).forEach(function (j) {
-      problems.push("Job '" + j.name + "' failed" + (j.error ? ': ' + j.error : '') + '.');
-    });
-    // A job that has *stopped running* records nothing at all, so failed_jobs
-    // above can never see it: the last successful run stays in place and this
-    // screen keeps reading ok. The scheduler's own stored next-run instant is
-    // what ages instead.
-    (h.overdue_jobs || []).forEach(function (j) {
-      problems.push("Job '" + j.name + "' is overdue by " + j.overdue_hours + ' hour(s) — it was'
-        + ' due at ' + j.next_run_at + ' (schedule ' + j.cron + ', '
-        + (j.timezone || 'server local time') + ') and its scheduler has not moved on, so nothing'
-        + ' is going to run it. Check the schedule file and the server log, then restart the'
-        + ' server; run it from Jobs meanwhile.');
-    });
-    // The other half of the same question: a run that started and never
-    // finished is what a restart, a kill or a power cut mid-run leaves behind,
-    // and it is indistinguishable from one in flight until it has been open
-    // longer than any run takes.
-    (h.stalled_jobs || []).forEach(function (j) {
-      problems.push("Job '" + j.name + "' has been running since " + j.started_at + ' ('
-        + j.running_hours + ' hour(s)) — a run that started and never finished, which is what a'
-        + ' restart, a kill or a power cut mid-run leaves behind rather than a run still in'
-        + ' flight. Check the server log, then re-run it from Jobs.');
-    });
+    // Every alert the banner can raise, in the order its sentences read. Each
+    // entry is the report rows it is raised for (`once(cond)` for a one-off
+    // sentence rather than one per row), the sentence `say(d)` for each, and
+    // the screen its remedy is on — a `LINKS` key, or a function of the row
+    // where the row says which screen (a nil-proceeds Sell vs a rights sale).
+    // `note: true` makes the sentences notes rather than problems: something
+    // to expect, not something wrong, so a banner of notes alone drops its
+    // warning colours. Keeping the alert, its wording and its link in one row
+    // is what stops a new alert landing without the link to fix it.
+    function once(cond) { return cond ? [h] : []; }
     const erroredPrices = h.errored_prices || [];
-    if (erroredPrices.length > 0) {
-      problems.push(erroredPrices.length + ' listing(s) have errored closing prices ('
-        + erroredPrices.map(function (r) { return r.ticker; }).join(', ') + ').');
-    }
-    // A demerger the price provider adjusted for but nothing re-bases back:
-    // the stored pre-demerger closes are silently the current level, and no
-    // other alarm sees them (the rows are ok, not errored).
-    (h.demergers_missing_close || []).forEach(function (d) {
-      problems.push(d.adjusted_days + ' pre-demerger closing price(s) for ' + d.ticker + ' ('
-        + d.earliest_date + '–' + d.latest_date
-        + ') were served after the ' + d.demerger_date + ' demerger, so they carry the provider’s'
-        + ' spin-off adjustment — state the actual close of the last pre-demerger trading day on'
-        + ' corporate action ' + d.action_id + ' to re-base them.'
-        // The second figure, so the first is never read as the whole span: a
-        // hand-entered price is never re-based, so a stated close leaves these
-        // exactly as they are and they need checking on their own.
-        + (d.manual_days > 0
-          ? ' A further ' + d.manual_days + ' hand-entered price(s) (' + d.manual_earliest_date
-            + '–' + d.manual_latest_date + ') sit in the same pre-demerger span; the stated close'
-            + ' does not re-base those, so check them separately.'
-          : ''));
-    });
-    // A demerger whose two sides are the wrong way round: the head listing is
-    // the entity the demerger *created*, not the one that continued. No tax
-    // figure moves and no write-time check can see it — the only trace is the
-    // price series, where the head's own history begins at the demerger while
-    // the listing it supposedly created has one running back before it.
-    const demergerHeads = h.demergers_head_not_continuing || [];
-    demergerHeads.forEach(function (d) {
-      problems.push('Demerger ' + d.action_id + ' (' + d.demerger_date + ') has ' + d.ticker
-        + ' as its head listing, but ' + d.ticker + ' has no stored closing price before that date'
-        + (d.head_unpriced_before ? ' (its series begins ' + d.head_unpriced_before + ')' : '')
-        + ' while ' + d.demerger_ticker + ', the listing it demerged, has ' + d.demerged_priced_days
-        + ' (' + d.demerged_earliest_date + '–' + d.demerged_latest_date + ') — and the '
-        + d.ticker + ' parcel is held from ' + d.head_held_from + '. The continuing entity is the'
-        + ' one with the earlier series, so this looks like the head and the new entity swapped.'
-        + ' Check the company’s demerger notice; if they are the wrong way round, re-record the'
-        + ' action with ' + d.demerger_ticker + ' as the head listing.');
-    });
-    // One security's price series stored under two listings — what a series
-    // fetched or copied under the wrong symbol looks like afterwards. Like the
-    // demerger warning above, every row is ok, so nothing else here sees it;
-    // unlike it, this is the *only* signal a fetched row that recorded no
-    // symbol leaves behind.
-    (h.duplicate_price_series || []).forEach(function (d) {
-      problems.push(d.ticker + ' and ' + d.other_ticker + ' closed at exactly the same price on '
-        + d.identical_days + ' consecutive trading day(s) (' + d.earliest_date + '–'
-        + d.latest_date + ') — that is one price series stored under two listings, not two'
-        + ' securities. On ' + d.ticker + ': ' + d.fetched_days + ' fetched, ' + d.manual_days
-        + ' hand-entered; on ' + d.other_ticker + ': ' + d.other_fetched_days + ' fetched, '
-        + d.other_manual_days + ' hand-entered. A hand-entered row states where it came from;'
-        + ' a fetched one may not. Work out which listing the run belongs to and clear the'
-        + ' borrowed rows.');
-    });
-    // One broker confirmation entered twice — the duplication a bulk
-    // back-entry of history produces most easily. Keyed on the contract note
-    // reference the two rows share, so there is nothing to judge: a doubled
-    // Buy inflates the holding and its cost base, a doubled Sell inflates the
-    // realised gain and consumes a second parcel.
-    const duplicateTrades = h.duplicate_trades || [];
-    duplicateTrades.forEach(function (d) {
-      problems.push(d.trade_count + ' trades on ' + d.ticker + ' share contract note '
-        + d.contract_note_ref + ' (ids ' + d.trade_ids.join(', ') + ', latest dated ' + d.date
-        + ') — one confirmation entered twice doubles the parcel and its cost base;'
-        + ' delete the surplus trade unless the note really covers both.');
-    });
-    const duplicateActions = h.duplicate_actions || [];
-    duplicateActions.forEach(function (d) {
-      problems.push(d.action_count + ' ' + d.action_type + ' actions on ' + d.ticker + ' dated '
-        + d.date + ' (ids ' + d.action_ids.join(', ')
-        + ') — each is applied separately; delete the duplicate unless both are real.');
-    });
-    const duplicateAmma = h.duplicate_amma_statements || [];
-    duplicateAmma.forEach(function (d) {
-      problems.push(d.statement_count + ' AMMA statements for ' + d.ticker + ' FY'
-        + (d.tax_year - 1) + '/' + String(d.tax_year).slice(-2) + ' in one holding account (ids '
-        + d.statement_ids.join(', ')
-        + ') — every figure is counted once per statement; delete the superseded one unless both are real.');
-    });
-    const duplicateIncome = h.duplicate_income || [];
-    duplicateIncome.forEach(function (d) {
-      problems.push(d.income_count + ' identical income rows of ' + moneyText(d.gross_amount) + ' '
-        + d.currency + ' for ' + d.ticker + ' paid ' + d.date_paid + ' into one holding account (ids '
-        + d.income_ids.join(', ')
-        + ') — the dividend and its franking credits are counted once per row; delete the duplicate unless both are real.');
-    });
-    const duplicateInterest = h.duplicate_interest || [];
-    duplicateInterest.forEach(function (d) {
-      problems.push(d.interest_count + ' identical interest rows of ' + moneyText(d.amount) + ' ' + d.currency
-        + (d.source ? ' from ' + d.source : '') + ' credited ' + d.date_paid + ' (ids '
-        + d.interest_ids.join(', ')
-        + ') — the year’s gross interest counts each row; delete the duplicate unless both are real.');
-    });
-    const duplicateExpenses = h.duplicate_expenses || [];
-    duplicateExpenses.forEach(function (d) {
-      problems.push(d.expense_count + ' identical ' + d.expense_type + ' expenses of ' + moneyText(d.amount)
-        + ' ' + d.currency + (d.ticker ? ' for ' + d.ticker : '') + ' incurred ' + d.date_incurred
-        + ' (ids ' + d.expense_ids.join(', ')
-        + ') — the deduction is claimed once per row; delete the duplicate unless both are real.');
-    });
-    const duplicateEss = h.duplicate_ess_statements || [];
-    duplicateEss.forEach(function (d) {
-      problems.push(d.statement_count + ' identical ESS statements for ' + d.ticker + ' vesting '
-        + d.quantity + ' shares at ' + d.taxing_point_date + ' with a ' + moneyText(d.discount_total) + ' '
-        + d.currency + ' discount (ids ' + d.statement_ids.join(', ')
-        + ') — the discount is assessed and the parcel vested once per statement;'
-        + ' delete the superseded one unless both are real.');
-    });
-    const duplicateInheritances = h.duplicate_inheritances || [];
-    duplicateInheritances.forEach(function (d) {
-      problems.push(d.inheritance_count + ' identical inheritances of ' + d.quantity + ' '
-        + d.ticker + ' from the death on ' + d.date_of_death + ', each carrying a '
-        + moneyText(d.cost_base_total) + ' ' + d.currency + ' cost base (ids '
-        + d.inheritance_ids.join(', ')
-        + ') — each creates its own parcel, so the holding and its cost base are doubled until'
-        + ' the surplus row is deleted.');
-    });
-    // A listing quoting money its own exchange does not: unpriceable from that
-    // moment (the provider serves nothing, or serves a series in the wrong
-    // currency, which the cross-check refuses) and uncorrectable in place once
-    // it has history, since the currency freeze bites.
-    const currencyMismatches = h.exchange_currency_mismatches || [];
-    currencyMismatches.forEach(function (d) {
-      problems.push(d.ticker + ' is recorded in ' + d.currency + ' but trades on ' + d.exchange_mic
-        + ', which quotes in ' + d.exchange_currency + ' — so its prices cannot be collected, and'
-        + ' the listing’s currency cannot be changed once it has trades, income or prices. Record a'
-        + ' redenomination as a new listing in ' + d.exchange_currency + ' and transfer the parcels'
-        + ' to it, or correct the exchange.');
-    });
-    const ess30Day = h.ess_30_day_rule || [];
-    ess30Day.forEach(function (d) {
-      problems.push('Sale of ' + d.units_sold + ' ' + d.ticker + ' ESS shares on ' + d.sale_date
-        + ' is ' + d.days_after + ' day(s) after the taxing point of statement ' + d.ess_statement_id
-        + ' (' + d.taxing_point_date + ') — the 30-day rule moves the taxing point to the sale date,'
-        + ' so the ' + moneyText(d.statement_discount) + ' ' + d.currency + ' discount is re-measured at the'
-        + ' sale proceeds'
-        + (d.disposal_tax_year === d.statement_tax_year
-          ? '' : ' and moves from FY' + d.statement_tax_year + ' to FY' + d.disposal_tax_year)
-        + ', and there is no separate capital gain. Enter the employer’s amended statement over the'
-        + ' original.');
-    });
-    // A trade dated on a day its exchange was shut. `PUT /trades/:id` and
-    // `PUT /sells/:id` refuse one outright, so anything listed here came from
-    // a derived path (a vest, an inheritance, a DRP, a corporate action) or
-    // predates the rule — non-blocking, and fixed at the fact behind it.
-    const nonTradingDays = h.non_trading_day_trades || [];
-    nonTradingDays.forEach(function (d) {
-      problems.push(d.trade_type + ' ' + d.trade_id + ' on ' + d.ticker + ' is dated ' + d.date
-        + ', ' + (d.reason === 'weekend' ? 'a weekend' : 'a public holiday') + ' on '
-        + d.exchange_mic + ' — the market was shut (' + d.source + '). The trade date is the CGT'
-        + ' event date, so it sets the discount clock, the financial year and the settlement'
-        + ' count; correct it to the day the trade actually executed.');
-    });
-    // A disposal recorded at nil proceeds. The market-value substitution rule
-    // puts the asset's market value in place of the nothing that was received,
-    // so entering the nothing (the shape a gift takes) fabricates a capital
-    // loss the size of the whole cost base. Advisory: a burn, an abandonment
-    // or a paid-for right left to lapse is legitimately nil, and no stored
-    // fact says which this is. The operation-written closing Sells — a
-    // worthless-shares recognise above all — never reach here.
-    const nilProceeds = h.nil_proceeds_disposals || [];
-    nilProceeds.forEach(function (d) {
-      problems.push((d.kind === 'RightsSale'
-        ? 'Rights sale ' + d.record_id + ' disposes of ' + d.quantity + ' ' + d.ticker
-          + ' rights that cost ' + moneyText(d.rights_cost) + ' ' + d.currency
-        : 'Sell ' + d.record_id + ' disposes of ' + d.quantity + ' ' + d.ticker)
-        + ' on ' + d.date + ' at nil proceeds — if this was a gift or another'
-        + ' non-arm\u2019s-length transfer, the market-value substitution rule makes the proceeds'
-        + ' the market value on that date, not the nothing received, and entering the nothing'
-        + ' records a capital loss that does not exist. Correct the proceeds, or leave it if the'
-        + ' disposal really did realise nothing.');
-    });
-    // The distribution calendar's two advisory alerts. Both are external
-    // evidence about the *books*, which nothing else here provides: every
-    // other duplicate/completeness check compares recorded facts against each
-    // other, so a distribution nobody ever entered is invisible to all of
-    // them. Advisory by decision — no tax figure is computed from the feed —
-    // so the wording asks rather than asserts.
-    // A distribution not yet paid is a note, not a problem: there is no
-    // payment advice to enter it from until the registry pays, so it says when
-    // that is due (the listing's own longest ex-date-to-payment gap) and only
-    // joins the problems once that date has passed.
+    const missingDividends = h.missing_dividend_entries || [];
+    const ALERTS = [
+      { rows: once(h.prices_stale), say: function () {
+        return 'Closing prices are stale — latest is ' + h.latest_price_date
+          + '; check the price-import job.';
+      } },
+      { rows: once(h.fx_stale), say: function () {
+        return 'RBA FX rates are stale — latest month is ' + h.latest_fx_month
+          + '; check the rba-fx-import job.';
+      } },
+      { rows: h.failed_jobs, say: function (j) {
+        return "Job '" + j.name + "' failed" + (j.error ? ': ' + j.error : '') + '.';
+      } },
+      // A job that has *stopped running* records nothing at all, so
+      // failed_jobs above can never see it: the last successful run stays in
+      // place and this screen keeps reading ok. The scheduler's own stored
+      // next-run instant is what ages instead.
+      { rows: h.overdue_jobs, say: function (j) {
+        return "Job '" + j.name + "' is overdue by " + j.overdue_hours + ' hour(s) — it was'
+          + ' due at ' + j.next_run_at + ' (schedule ' + j.cron + ', '
+          + (j.timezone || 'server local time') + ') and its scheduler has not moved on, so nothing'
+          + ' is going to run it. Check the schedule file and the server log, then restart the'
+          + ' server; run it from Jobs meanwhile.';
+      } },
+      // The other half of the same question: a run that started and never
+      // finished is what a restart, a kill or a power cut mid-run leaves
+      // behind, and it is indistinguishable from one in flight until it has
+      // been open longer than any run takes.
+      { rows: h.stalled_jobs, say: function (j) {
+        return "Job '" + j.name + "' has been running since " + j.started_at + ' ('
+          + j.running_hours + ' hour(s)) — a run that started and never finished, which is what a'
+          + ' restart, a kill or a power cut mid-run leaves behind rather than a run still in'
+          + ' flight. Check the server log, then re-run it from Jobs.';
+      } },
+      { rows: once(erroredPrices.length > 0), link: 'prices', say: function () {
+        return erroredPrices.length + ' listing(s) have errored closing prices ('
+          + erroredPrices.map(function (r) { return r.ticker; }).join(', ') + ').';
+      } },
+      // A demerger the price provider adjusted for but nothing re-bases back:
+      // the stored pre-demerger closes are silently the current level, and no
+      // other alarm sees them (the rows are ok, not errored).
+      { rows: h.demergers_missing_close, link: 'corporate_actions', say: function (d) {
+        return d.adjusted_days + ' pre-demerger closing price(s) for ' + d.ticker + ' ('
+          + d.earliest_date + '–' + d.latest_date
+          + ') were served after the ' + d.demerger_date + ' demerger, so they carry the provider’s'
+          + ' spin-off adjustment — state the actual close of the last pre-demerger trading day on'
+          + ' corporate action ' + d.action_id + ' to re-base them.'
+          // The second figure, so the first is never read as the whole span: a
+          // hand-entered price is never re-based, so a stated close leaves
+          // these exactly as they are and they need checking on their own.
+          + (d.manual_days > 0
+            ? ' A further ' + d.manual_days + ' hand-entered price(s) (' + d.manual_earliest_date
+              + '–' + d.manual_latest_date + ') sit in the same pre-demerger span; the stated close'
+              + ' does not re-base those, so check them separately.'
+            : '');
+      } },
+      // A demerger whose two sides are the wrong way round: the head listing
+      // is the entity the demerger *created*, not the one that continued. No
+      // tax figure moves and no write-time check can see it — the only trace
+      // is the price series, where the head's own history begins at the
+      // demerger while the listing it supposedly created has one running back
+      // before it.
+      { rows: h.demergers_head_not_continuing, link: 'corporate_actions', say: function (d) {
+        return 'Demerger ' + d.action_id + ' (' + d.demerger_date + ') has ' + d.ticker
+          + ' as its head listing, but ' + d.ticker + ' has no stored closing price before that date'
+          + (d.head_unpriced_before ? ' (its series begins ' + d.head_unpriced_before + ')' : '')
+          + ' while ' + d.demerger_ticker + ', the listing it demerged, has ' + d.demerged_priced_days
+          + ' (' + d.demerged_earliest_date + '–' + d.demerged_latest_date + ') — and the '
+          + d.ticker + ' parcel is held from ' + d.head_held_from + '. The continuing entity is the'
+          + ' one with the earlier series, so this looks like the head and the new entity swapped.'
+          + ' Check the company’s demerger notice; if they are the wrong way round, re-record the'
+          + ' action with ' + d.demerger_ticker + ' as the head listing.';
+      } },
+      // One security's price series stored under two listings — what a series
+      // fetched or copied under the wrong symbol looks like afterwards. Like
+      // the demerger warning above, every row is ok, so nothing else here sees
+      // it; unlike it, this is the *only* signal a fetched row that recorded
+      // no symbol leaves behind.
+      { rows: h.duplicate_price_series, link: 'prices', say: function (d) {
+        return d.ticker + ' and ' + d.other_ticker + ' closed at exactly the same price on '
+          + d.identical_days + ' consecutive trading day(s) (' + d.earliest_date + '–'
+          + d.latest_date + ') — that is one price series stored under two listings, not two'
+          + ' securities. On ' + d.ticker + ': ' + d.fetched_days + ' fetched, ' + d.manual_days
+          + ' hand-entered; on ' + d.other_ticker + ': ' + d.other_fetched_days + ' fetched, '
+          + d.other_manual_days + ' hand-entered. A hand-entered row states where it came from;'
+          + ' a fetched one may not. Work out which listing the run belongs to and clear the'
+          + ' borrowed rows.';
+      } },
+      // One broker confirmation entered twice — the duplication a bulk
+      // back-entry of history produces most easily. Keyed on the contract note
+      // reference the two rows share, so there is nothing to judge: a doubled
+      // Buy inflates the holding and its cost base, a doubled Sell inflates
+      // the realised gain and consumes a second parcel.
+      { rows: h.duplicate_trades, link: 'trades', say: function (d) {
+        return d.trade_count + ' trades on ' + d.ticker + ' share contract note '
+          + d.contract_note_ref + ' (ids ' + d.trade_ids.join(', ') + ', latest dated ' + d.date
+          + ') — one confirmation entered twice doubles the parcel and its cost base;'
+          + ' delete the surplus trade unless the note really covers both.';
+      } },
+      { rows: h.duplicate_actions, link: 'corporate_actions', say: function (d) {
+        return d.action_count + ' ' + d.action_type + ' actions on ' + d.ticker + ' dated '
+          + d.date + ' (ids ' + d.action_ids.join(', ')
+          + ') — each is applied separately; delete the duplicate unless both are real.';
+      } },
+      { rows: h.duplicate_amma_statements, link: 'amma_statements', say: function (d) {
+        return d.statement_count + ' AMMA statements for ' + d.ticker + ' FY'
+          + (d.tax_year - 1) + '/' + String(d.tax_year).slice(-2) + ' in one holding account (ids '
+          + d.statement_ids.join(', ')
+          + ') — every figure is counted once per statement; delete the superseded one unless both are real.';
+      } },
+      { rows: h.duplicate_income, link: 'income', say: function (d) {
+        return d.income_count + ' identical income rows of ' + moneyText(d.gross_amount) + ' '
+          + d.currency + ' for ' + d.ticker + ' paid ' + d.date_paid + ' into one holding account (ids '
+          + d.income_ids.join(', ')
+          + ') — the dividend and its franking credits are counted once per row; delete the duplicate unless both are real.';
+      } },
+      { rows: h.duplicate_interest, link: 'interest_income', say: function (d) {
+        return d.interest_count + ' identical interest rows of ' + moneyText(d.amount) + ' ' + d.currency
+          + (d.source ? ' from ' + d.source : '') + ' credited ' + d.date_paid + ' (ids '
+          + d.interest_ids.join(', ')
+          + ') — the year’s gross interest counts each row; delete the duplicate unless both are real.';
+      } },
+      { rows: h.duplicate_expenses, link: 'investment_expenses', say: function (d) {
+        return d.expense_count + ' identical ' + d.expense_type + ' expenses of ' + moneyText(d.amount)
+          + ' ' + d.currency + (d.ticker ? ' for ' + d.ticker : '') + ' incurred ' + d.date_incurred
+          + ' (ids ' + d.expense_ids.join(', ')
+          + ') — the deduction is claimed once per row; delete the duplicate unless both are real.';
+      } },
+      { rows: h.duplicate_ess_statements, link: 'ess_statements', say: function (d) {
+        return d.statement_count + ' identical ESS statements for ' + d.ticker + ' vesting '
+          + d.quantity + ' shares at ' + d.taxing_point_date + ' with a ' + moneyText(d.discount_total) + ' '
+          + d.currency + ' discount (ids ' + d.statement_ids.join(', ')
+          + ') — the discount is assessed and the parcel vested once per statement;'
+          + ' delete the superseded one unless both are real.';
+      } },
+      { rows: h.duplicate_inheritances, link: 'inheritances', say: function (d) {
+        return d.inheritance_count + ' identical inheritances of ' + d.quantity + ' '
+          + d.ticker + ' from the death on ' + d.date_of_death + ', each carrying a '
+          + moneyText(d.cost_base_total) + ' ' + d.currency + ' cost base (ids '
+          + d.inheritance_ids.join(', ')
+          + ') — each creates its own parcel, so the holding and its cost base are doubled until'
+          + ' the surplus row is deleted.';
+      } },
+      // A listing quoting money its own exchange does not: unpriceable from
+      // that moment (the provider serves nothing, or serves a series in the
+      // wrong currency, which the cross-check refuses) and uncorrectable in
+      // place once it has history, since the currency freeze bites.
+      { rows: h.exchange_currency_mismatches, link: 'listings', say: function (d) {
+        return d.ticker + ' is recorded in ' + d.currency + ' but trades on ' + d.exchange_mic
+          + ', which quotes in ' + d.exchange_currency + ' — so its prices cannot be collected, and'
+          + ' the listing’s currency cannot be changed once it has trades, income or prices. Record a'
+          + ' redenomination as a new listing in ' + d.exchange_currency + ' and transfer the parcels'
+          + ' to it, or correct the exchange.';
+      } },
+      { rows: h.ess_30_day_rule, link: 'ess_statements', say: function (d) {
+        return 'Sale of ' + d.units_sold + ' ' + d.ticker + ' ESS shares on ' + d.sale_date
+          + ' is ' + d.days_after + ' day(s) after the taxing point of statement ' + d.ess_statement_id
+          + ' (' + d.taxing_point_date + ') — the 30-day rule moves the taxing point to the sale date,'
+          + ' so the ' + moneyText(d.statement_discount) + ' ' + d.currency + ' discount is re-measured at the'
+          + ' sale proceeds'
+          + (d.disposal_tax_year === d.statement_tax_year
+            ? '' : ' and moves from FY' + d.statement_tax_year + ' to FY' + d.disposal_tax_year)
+          + ', and there is no separate capital gain. Enter the employer’s amended statement over the'
+          + ' original.';
+      } },
+      // A trade dated on a day its exchange was shut. `PUT /trades/:id` and
+      // `PUT /sells/:id` refuse one outright, so anything listed here came
+      // from a derived path (a vest, an inheritance, a DRP, a corporate
+      // action) or predates the rule — non-blocking, and fixed at the fact
+      // behind it.
+      { rows: h.non_trading_day_trades, link: 'trades', say: function (d) {
+        return d.trade_type + ' ' + d.trade_id + ' on ' + d.ticker + ' is dated ' + d.date
+          + ', ' + (d.reason === 'weekend' ? 'a weekend' : 'a public holiday') + ' on '
+          + d.exchange_mic + ' — the market was shut (' + d.source + '). The trade date is the CGT'
+          + ' event date, so it sets the discount clock, the financial year and the settlement'
+          + ' count; correct it to the day the trade actually executed.';
+      } },
+      // A disposal recorded at nil proceeds. The market-value substitution
+      // rule puts the asset's market value in place of the nothing that was
+      // received, so entering the nothing (the shape a gift takes) fabricates
+      // a capital loss the size of the whole cost base. Advisory: a burn, an
+      // abandonment or a paid-for right left to lapse is legitimately nil, and
+      // no stored fact says which this is. The operation-written closing Sells
+      // — a worthless-shares recognise above all — never reach here. The
+      // proceeds are corrected on the Sell itself (or on the rights sale,
+      // which is delete-and-re-enter), so each kind links to its own screen.
+      { rows: h.nil_proceeds_disposals,
+        link: function (d) { return d.kind === 'RightsSale' ? 'rights_sales' : 'sells'; },
+        say: function (d) {
+          return (d.kind === 'RightsSale'
+            ? 'Rights sale ' + d.record_id + ' disposes of ' + d.quantity + ' ' + d.ticker
+              + ' rights that cost ' + moneyText(d.rights_cost) + ' ' + d.currency
+            : 'Sell ' + d.record_id + ' disposes of ' + d.quantity + ' ' + d.ticker)
+            + ' on ' + d.date + ' at nil proceeds — if this was a gift or another'
+            + ' non-arm’s-length transfer, the market-value substitution rule makes the proceeds'
+            + ' the market value on that date, not the nothing received, and entering the nothing'
+            + ' records a capital loss that does not exist. Correct the proceeds, or leave it if the'
+            + ' disposal really did realise nothing.';
+        } },
+      // The distribution calendar's two advisory alerts. Both are external
+      // evidence about the *books*, which nothing else here provides: every
+      // other duplicate/completeness check compares recorded facts against
+      // each other, so a distribution nobody ever entered is invisible to all
+      // of them. Advisory by decision — no tax figure is computed from the
+      // feed — so the wording asks rather than asserts. Both are remedied on
+      // Income, where the distribution is entered or corrected.
+      // A distribution not yet paid is a note, not a problem: there is no
+      // payment advice to enter it from until the registry pays, so it says
+      // when that is due (the listing's own longest ex-date-to-payment gap)
+      // and only joins the problems once that date has passed.
+      { rows: missingDividends.filter(function (d) { return d.awaiting_payment; }), link: 'income', note: true,
+        say: function (d) {
+          return d.ticker + ' went ex-distribution on ' + d.ex_date + ' (' + d.holding_account
+            + ', ' + d.units_held + ' units, about ' + moneyText(d.expected_amount) + ' ' + d.currency
+            + ') — payment expected by ' + d.expected_payment_by
+            + '; enter it from the payment advice once it arrives.';
+        } },
+      { rows: missingDividends.filter(function (d) { return !d.awaiting_payment; }), link: 'income',
+        say: function (d) {
+          return d.ticker + ' went ex-distribution on ' + d.ex_date + ' while '
+            + d.holding_account + ' held ' + d.units_held + ' units, but no income row matches it.'
+            + ' At ' + d.amount_per_unit + ' per unit that is about '
+            + moneyText(d.expected_amount) + ' ' + d.currency + ' — enter the distribution from its'
+            + ' payment advice, or ignore this if the registry paid nothing.';
+        } },
+      { rows: h.dividend_amount_mismatches, link: 'income', say: function (d) {
+        return 'Income ' + d.income_id + ' records ' + moneyText(d.recorded_amount) + ' '
+          + d.currency + ' gross for ' + d.ticker + '’s ' + d.ex_date + ' distribution ('
+          + d.holding_account + ', paid ' + d.date_paid + '), but ' + d.amount_per_unit
+          + ' per unit on ' + d.units_held + ' units held is ' + moneyText(d.expected_amount)
+          + ' — a difference of ' + moneyText(d.amount_difference) + '. Check the figure'
+          + ' against the payment advice; the gross is compared, never the components.';
+      } },
+    ];
+    // Where each remedy is, in the order the banner offers the links. Jobs
+    // leads whenever anything is wrong — every job alert is fixed there, and
+    // it is where a stale feed's import is re-run.
+    const LINKS = [
+      ['prices', '#/prices', 'Open Closing Prices →'],
+      ['corporate_actions', '#/e/corporate_actions', 'Open Corporate Actions →'],
+      ['amma_statements', '#/e/amma_statements', 'Open AMMA Statements →'],
+      ['income', '#/e/income', 'Open Income →'],
+      ['interest_income', '#/e/interest_income', 'Open Interest Income →'],
+      ['investment_expenses', '#/e/investment_expenses', 'Open Investment Expenses →'],
+      ['inheritances', '#/e/inheritances', 'Open Inheritances →'],
+      ['ess_statements', '#/e/ess_statements', 'Open ESS Statements →'],
+      ['listings', '#/e/listings', 'Open Listings →'],
+      ['trades', '#/e/trades', 'Open Trades →'],
+      ['sells', '#/sells', 'Open Sells →'],
+      ['rights_sales', '#/e/rights_sales', 'Open Rights Sales →'],
+    ];
+
+    const problems = [];
     const notes = [];
-    (h.missing_dividend_entries || []).forEach(function (d) {
-      if (d.awaiting_payment) {
-        notes.push(d.ticker + ' went ex-distribution on ' + d.ex_date + ' (' + d.holding_account
-          + ', ' + d.units_held + ' units, about ' + moneyText(d.expected_amount) + ' ' + d.currency
-          + ') — payment expected by ' + d.expected_payment_by
-          + '; enter it from the payment advice once it arrives.');
-        return;
-      }
-      problems.push(d.ticker + ' went ex-distribution on ' + d.ex_date + ' while '
-        + d.holding_account + ' held ' + d.units_held + ' units, but no income row matches it.'
-        + ' At ' + d.amount_per_unit + ' per unit that is about '
-        + moneyText(d.expected_amount) + ' ' + d.currency + ' — enter the distribution from its'
-        + ' payment advice, or ignore this if the registry paid nothing.');
-    });
-    (h.dividend_amount_mismatches || []).forEach(function (d) {
-      problems.push('Income ' + d.income_id + ' records ' + moneyText(d.recorded_amount) + ' '
-        + d.currency + ' gross for ' + d.ticker + '\u2019s ' + d.ex_date + ' distribution ('
-        + d.holding_account + ', paid ' + d.date_paid + '), but ' + d.amount_per_unit
-        + ' per unit on ' + d.units_held + ' units held is ' + moneyText(d.expected_amount)
-        + ' \u2014 a difference of ' + moneyText(d.amount_difference) + '. Check the figure'
-        + ' against the payment advice; the gross is compared, never the components.');
+    const linked = {};
+    ALERTS.forEach(function (a) {
+      (a.rows || []).forEach(function (d) {
+        (a.note ? notes : problems).push(a.say(d));
+        const link = typeof a.link === 'function' ? a.link(d) : a.link;
+        if (link) linked[link] = true;
+      });
     });
     if (problems.length === 0 && notes.length === 0) {
       banner.hidden = true;
@@ -1634,45 +1668,9 @@ async function refreshHealthBanner(seq = navigationToken()) {
     if (notes.length > 0) {
       banner.appendChild(el('span', { class: 'health-note' }, 'ℹ ' + notes.join(' ')));
     }
-    if (erroredPrices.length > 0 || (h.duplicate_price_series || []).length > 0) {
-      banner.appendChild(el('a', { href: '#/prices' }, 'Open Closing Prices →'));
-    }
-    if (duplicateActions.length > 0 || demergerHeads.length > 0
-        || (h.demergers_missing_close || []).length > 0) {
-      banner.appendChild(el('a', { href: '#/e/corporate_actions' }, 'Open Corporate Actions →'));
-    }
-    if (duplicateAmma.length > 0) {
-      banner.appendChild(el('a', { href: '#/e/amma_statements' }, 'Open AMMA Statements →'));
-    }
-    if (duplicateIncome.length > 0 || notes.length > 0) {
-      banner.appendChild(el('a', { href: '#/e/income' }, 'Open Income →'));
-    }
-    if (duplicateInterest.length > 0) {
-      banner.appendChild(el('a', { href: '#/e/interest_income' }, 'Open Interest Income →'));
-    }
-    if (duplicateExpenses.length > 0) {
-      banner.appendChild(el('a', { href: '#/e/investment_expenses' }, 'Open Investment Expenses →'));
-    }
-    if (duplicateInheritances.length > 0) {
-      banner.appendChild(el('a', { href: '#/e/inheritances' }, 'Open Inheritances →'));
-    }
-    if (duplicateEss.length > 0 || ess30Day.length > 0) {
-      banner.appendChild(el('a', { href: '#/e/ess_statements' }, 'Open ESS Statements →'));
-    }
-    if (currencyMismatches.length > 0) {
-      banner.appendChild(el('a', { href: '#/e/listings' }, 'Open Listings →'));
-    }
-    if (nonTradingDays.length > 0 || duplicateTrades.length > 0) {
-      banner.appendChild(el('a', { href: '#/e/trades' }, 'Open Trades →'));
-    }
-    // The proceeds are corrected on the Sell itself (or on the rights sale,
-    // which is delete-and-re-enter), so each kind links to its own screen.
-    if (nilProceeds.some(function (d) { return d.kind === 'Sell'; })) {
-      banner.appendChild(el('a', { href: '#/sells' }, 'Open Sells →'));
-    }
-    if (nilProceeds.some(function (d) { return d.kind === 'RightsSale'; })) {
-      banner.appendChild(el('a', { href: '#/e/rights_sales' }, 'Open Rights Sales →'));
-    }
+    LINKS.forEach(function (l) {
+      if (linked[l[0]]) banner.appendChild(el('a', { href: l[1] }, l[2]));
+    });
     banner.hidden = false;
   } catch (e) {
     // Same guard as the success path: a failing fetch hides the banner rather
