@@ -1389,12 +1389,9 @@ async function viewAttachments(ownerField, ownerId, seq = navigationToken()) {
       const fd = new FormData();
       fd.append(ownerField, String(ownerId));
       fd.append('file', fileInput.files[0]);
-      const res = await fetch(apiUrl('/attachments'), { method: 'POST', body: fd });
-      if (!res.ok) {
-        let detail = '';
-        try { detail = (await res.text()).trim(); } catch (e) { /* ignore */ }
-        throw new Error('HTTP ' + res.status + (detail ? ': ' + detail : ''));
-      }
+      // Through `api`, not a bare fetch, so an expired session redirects to
+      // sign-in rather than toasting "HTTP 401".
+      await api('POST', '/attachments', fd);
       toastIfCurrent(seq, 'Uploaded.');
       refresh();
     } catch (e) {

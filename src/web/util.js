@@ -654,9 +654,16 @@ export function authEnabled() {
 // `PUT`'s status *is* the create-vs-replace signal (`201` created, `204`
 // replaced — see docs/API.md), and the entity form has to read it to tell a
 // create from a clobber, so `api` below is this with the status dropped.
+//
+// A `FormData` body (the attachment upload) is sent as-is: the browser writes
+// the multipart Content-Type with its boundary, so none is set here. It goes
+// through this one path rather than a bare `fetch` so the upload shares the
+// error shape and the expired-session redirect below.
 export async function apiResponse(method, path, body) {
   const opts = { method: method, headers: {} };
-  if (body !== undefined) {
+  if (typeof FormData !== 'undefined' && body instanceof FormData) {
+    opts.body = body;
+  } else if (body !== undefined) {
     opts.headers['Content-Type'] = 'application/json';
     opts.body = JSON.stringify(body);
   }

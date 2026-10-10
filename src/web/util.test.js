@@ -1303,6 +1303,37 @@ test('replaceConfirmText names the noun and key, singularised, and asks', () => 
     'Exchange Holiday XASX/2024-01-01 already exists. Replace it?');
 });
 
+test('apiResponse sends a FormData body untouched, with no JSON content type', async () => {
+  const realFetch = globalThis.fetch;
+  let seen = null;
+  try {
+    globalThis.fetch = async (url, opts) => {
+      seen = opts;
+      return { ok: true, status: 201, headers: { get: () => '' }, text: async () => '' };
+    };
+    const fd = new FormData();
+    fd.append('trade_id', '5');
+    await apiResponse('POST', '/attachments', fd);
+    assert.equal(seen.body, fd);
+    assert.equal(seen.headers['Content-Type'], undefined);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test('apiResponse turns a refused FormData upload into the same error shape', async () => {
+  const realFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => ({
+      ok: false, status: 413, headers: { get: () => '' }, text: async () => 'file too large\n',
+    });
+    await assert.rejects(() => apiResponse('POST', '/attachments', new FormData()),
+      (e) => e.status === 413 && e.message === 'HTTP 413: file too large');
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
 test('apiRowExists maps only a 404 to absent and propagates any other failure', async () => {
   const realFetch = globalThis.fetch;
   const res = (status, body, ct) => ({
