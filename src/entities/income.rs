@@ -518,6 +518,48 @@ pub fn router() -> Router<SqlitePool> {
         )
 }
 
+/// Every income row assessable as cash income — each row except those of a
+/// year in which its listing was an AMIT.
+///
+/// For an AMIT the AMMA statement's attribution is the only assessable record,
+/// so its cash rows would double the year's income (write-time validation
+/// already keeps the notional components off them). The exclusion is per
+/// *year*, not per listing: a fund that converted to an AMIT part-way through
+/// a holding was an ordinary trust before its first AMIT income year, and
+/// those years' distributions are assessable — and carry franking credits —
+/// exactly like any other trust's. Dropping them because the fund is an AMIT
+/// *now* would silently delete a year of income from the return (SCENARIOS
+/// F-23). The year is the row's [`Income::assessment_date`] year, judged by
+/// [`listing::amit_in_tax_year`](crate::entities::listing::amit_in_tax_year).
+///
+/// The tax summary's totals, the annual tax report's printed rows and the
+/// franking loader's candidate dividends all read through this, so the three
+/// can never disagree on which rows a year holds.
+pub async fn db_assessable_cash_income(
+    conn: &mut sqlx::SqliteConnection,
+) -> Result<Vec<Income>, sqlx::Error> {
+    use sqlx::{FromRow, Row};
+    let rows = sqlx::query(
+        "SELECT i.*, l.amit AS listing_amit, l.amit_from AS listing_amit_from \
+         FROM income i JOIN listings l ON l.id = i.listing_id",
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut assessable = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let income = Income::from_row(row)?;
+        let amit_year = crate::entities::listing::amit_in_tax_year(
+            row.try_get("listing_amit")?,
+            row.try_get("listing_amit_from")?,
+            crate::domain::tax_year::tax_year_for(income.assessment_date()),
+        );
+        if !amit_year {
+            assessable.push(income);
+        }
+    }
+    Ok(assessable)
+}
+
 #[cfg(test)]
 pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<Income>, sqlx::Error> {
     http::crud_get(pool, id).await

@@ -2,7 +2,6 @@ use crate::domain::deduction_destination::{DeductionDestination, DeductionRoutin
 use crate::domain::tax_year::tax_year_for;
 use crate::entities::income::{Income, IncomeType};
 use crate::entities::investment_expense::ExpenseType;
-use crate::entities::listing;
 use crate::entities::tax_year_settings;
 use crate::infra::decimal::{mul_div, parse_dec, row_opt_dec, to_cents};
 use crate::infra::extract::Json;
@@ -14,7 +13,7 @@ use axum::{Router, extract::State, response::Response, routing::get};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use sqlx::{FromRow, Row, SqlitePool};
+use sqlx::{Row, SqlitePool};
 use std::collections::{HashMap, HashSet};
 
 #[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize)]
@@ -614,40 +613,10 @@ fn year_entry(map: &mut Summaries, tax_year: i32) -> &mut TaxYearSummary {
 pub(crate) async fn db_tax_summary_on(
     tx: &mut sqlx::SqliteConnection,
 ) -> Result<Vec<TaxYearSummary>, sqlx::Error> {
-    // An AMIT listing's cash rows are excluded outright: for an AMIT the AMMA
-    // attribution is the only assessable record — the cash advice exists to
-    // drive the DRP chain, and counting its cash alongside the AMMA components
-    // would double the year's income (write-time validation already keeps the
-    // notional components off these rows, `entities::income`).
-    //
-    // The exclusion is per *year*, not per listing: a fund that converted to
-    // an AMIT part-way through a holding was an ordinary trust before its
-    // first AMIT income year, and those years' distributions are assessable
-    // here exactly like any other trust's — dropping them because the fund is
-    // an AMIT *now* would silently delete a year of income from the return
-    // (SCENARIOS F-23). `listing::amit_in_tax_year` is the shared rule.
-    let income_rows: Vec<(Income, bool, Option<NaiveDate>)> = sqlx::query(
-        "SELECT i.*, l.amit AS listing_amit, l.amit_from AS listing_amit_from \
-         FROM income i JOIN listings l ON l.id = i.listing_id",
-    )
-    .fetch_all(&mut *tx)
-    .await?
-    .iter()
-    .map(|row| {
-        Ok::<_, sqlx::Error>((
-            Income::from_row(row)?,
-            row.try_get("listing_amit")?,
-            row.try_get("listing_amit_from")?,
-        ))
-    })
-    .collect::<Result<_, _>>()?;
-    let income_rows: Vec<&Income> = income_rows
-        .iter()
-        .filter(|(income, amit, amit_from)| {
-            !listing::amit_in_tax_year(*amit, *amit_from, tax_year_for(income.assessment_date()))
-        })
-        .map(|(income, _, _)| income)
-        .collect();
+    // An AMIT year's cash rows are excluded — its AMMA attribution is the
+    // only assessable record (`income::db_assessable_cash_income`, SCENARIOS
+    // F-23).
+    let income_rows = crate::entities::income::db_assessable_cash_income(&mut *tx).await?;
 
     let interest_rows = sqlx::query(
         "SELECT date_paid, amount, tfn_withholding_tax, foreign_source, foreign_tax_paid, \
@@ -739,7 +708,7 @@ pub(crate) async fn db_tax_summary_on(
 /// caller's query drops them.
 fn accumulate_income(
     map: &mut Summaries,
-    income_rows: &[&Income],
+    income_rows: &[Income],
     fx: &FxRates,
 ) -> Result<(), sqlx::Error> {
     for income in income_rows {

@@ -1487,36 +1487,11 @@ async fn push_income_rows(
     out: &mut IncomeSections,
 ) -> Result<(), sqlx::Error> {
     let (tax_year, fx) = (ctx.tax_year.year(), &ctx.fx);
-    // An AMIT listing's cash rows are excluded: for an AMIT the AMMA
-    // attribution is the only assessable record, and it prints below.
-    //
-    // The exclusion is per *year*, not per listing: a fund that converted to
-    // an AMIT part-way through a holding was an ordinary trust before its
-    // first AMIT income year, and those years' distributions print here
-    // exactly like any other trust's — dropping them because the fund is an
-    // AMIT *now* would leave the year's tax-summary income total with no rows
-    // behind it (SCENARIOS F-23). `listing::amit_in_tax_year` is the shared
-    // rule, applied exactly as `tax_summary::db_tax_summary_on` applies it.
-    let income_rows: Vec<(Income, bool, Option<NaiveDate>)> = sqlx::query(
-        "SELECT i.*, l.amit AS listing_amit, l.amit_from AS listing_amit_from \
-         FROM income i JOIN listings l ON l.id = i.listing_id",
-    )
-    .fetch_all(&mut *conn)
-    .await?
-    .iter()
-    .map(|row| {
-        Ok::<_, sqlx::Error>((
-            Income::from_row(row)?,
-            row.try_get("listing_amit")?,
-            row.try_get("listing_amit_from")?,
-        ))
-    })
-    .collect::<Result<_, _>>()?;
-
-    for (income, amit, amit_from) in &income_rows {
-        if listing::amit_in_tax_year(*amit, *amit_from, tax_year_for(income.assessment_date())) {
-            continue;
-        }
+    // An AMIT year's cash rows are excluded — its AMMA attribution prints
+    // below — and a pre-AMIT year's print like any other trust's: the same
+    // rows behind the tax summary's income total
+    // (`income::db_assessable_cash_income`, SCENARIOS F-23).
+    for income in &crate::entities::income::db_assessable_cash_income(&mut *conn).await? {
         let Income {
             id: income_id,
             listing_id,

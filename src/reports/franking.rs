@@ -18,14 +18,12 @@
 
 use crate::domain::tax_year::tax_year_for;
 use crate::entities::corporate_action::{self, SplitEvent};
-use crate::entities::income::Income;
-use crate::entities::listing;
 use crate::entities::trade::TradeType;
 use crate::infra::decimal::{mul_div, parse_dec};
 use crate::infra::fx::{FxOverride, FxRates};
 use chrono::{Duration, NaiveDate};
 use rust_decimal::Decimal;
-use sqlx::{FromRow, Row, SqliteConnection};
+use sqlx::{Row, SqliteConnection};
 use std::collections::HashMap;
 
 /// Small-shareholder exemption threshold (A$): with total franking credits in
@@ -327,36 +325,12 @@ pub async fn db_franked_dividends(
     let mut dividends = Vec::new();
     let mut attached_by_year: HashMap<i32, Decimal> = HashMap::new();
 
-    // AMIT listings' cash rows carry no attributable credits (write-time
-    // validated; the fund's credits arrive via its AMMA statement below), so
-    // they are excluded here just as the tax summary excludes them.
-    //
-    // The exclusion is per *year*, not per listing: a fund that converted to
-    // an AMIT part-way through a holding was an ordinary trust before its
-    // first AMIT income year, so its earlier years' distributions do carry
-    // attached credits — credits that must be holding-period tested and must
-    // count toward that year's small-shareholder total (SCENARIOS F-23).
-    // `listing::amit_in_tax_year` is the shared rule, applied exactly as
-    // `tax_summary::db_tax_summary_on` applies it.
-    let income_rows: Vec<(Income, bool, Option<NaiveDate>)> = sqlx::query(
-        "SELECT i.*, l.amit AS listing_amit, l.amit_from AS listing_amit_from \
-         FROM income i JOIN listings l ON l.id = i.listing_id",
-    )
-    .fetch_all(&mut *conn)
-    .await?
-    .iter()
-    .map(|row| {
-        Ok::<_, sqlx::Error>((
-            Income::from_row(row)?,
-            row.try_get("listing_amit")?,
-            row.try_get("listing_amit_from")?,
-        ))
-    })
-    .collect::<Result<_, _>>()?;
-    for (income, amit, amit_from) in &income_rows {
-        if listing::amit_in_tax_year(*amit, *amit_from, tax_year_for(income.assessment_date())) {
-            continue;
-        }
+    // An AMIT year's cash rows carry no attributable credits (the fund's
+    // credits arrive via its AMMA statement below); an earlier, pre-AMIT
+    // year's do, and must be holding-period tested and count toward that
+    // year's small-shareholder total — the same rows the tax summary assesses
+    // (`income::db_assessable_cash_income`, SCENARIOS F-23).
+    for income in &crate::entities::income::db_assessable_cash_income(&mut *conn).await? {
         // Assessed per `Income::assessment_date` — present entitlement for a
         // trust row, payment otherwise — the same attribution the tax summary
         // applies to every component.
