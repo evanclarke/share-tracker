@@ -744,8 +744,9 @@ async fn you_and_your_shares_examples_1_2_john_assessable_dividend_income() {
         "unfranked $200 + franked $700"
     );
     assert_eq!(y.franking_credits, dec("300"), "franking credit $300");
+    assert_eq!(y.dividend_franking_credits, dec("300"), "11U");
     assert_eq!(
-        y.dividends_assessable + y.franking_credits,
+        y.gross_assessable_investment_income,
         dec("1200"),
         "total assessable dividend income $1,200 (the franking-credit gross-up)"
     );

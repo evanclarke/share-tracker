@@ -1164,7 +1164,7 @@ const COLUMN_KINDS = (function () {
     'capital_losses', 'capital_loss_brought_forward', 'capital_loss_carried_forward',
     'cgt_discount', 'net_capital_gain', 'cgt_event_e10_gain', 'cgt_event_g1_gain',
     'cgt_event_c2_gain', 'dividends_assessable', 'interest_income',
-    'foreign_interest_income', 'franking_credits_denied',
+    'foreign_interest_income', 'franking_credits_denied', 'dividend_franking_credits',
     'foreign_tax_offsets', 'foreign_tax_offset_excess',
     // The FITO capital-gains apportionment memo and the dividend-equivalent
     // (item 1/2) cash line: both AUD money on the tax summary, and both read

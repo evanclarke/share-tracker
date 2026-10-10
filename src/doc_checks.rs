@@ -2984,8 +2984,9 @@ fn fx_spot_rate_override_documented() {
 /// simplification of the s 960-50(6) per-transaction translation timing. The
 /// Known-limitations entry states the rule, the G1 excess's two-date
 /// translation (the payment at the payment month, the cost base it overran at
-/// the acquisition month) against the E10 excess's remaining buy-month
-/// conversion, and when it bites (a non-AUD holding with non-AUD reductions —
+/// the acquisition month) and the E10 excess translated the same way (revised
+/// 2026-10-10: the reduction at the statement's year-end month), and when it
+/// bites (a non-AUD holding with non-AUD reductions —
 /// none in practice); cites the QC 18322 mirror; is cross-linked from the
 /// FX-conversion section; and the features doc surfaces it.
 #[test]
@@ -3003,6 +3004,9 @@ fn known_limitations_document_cost_base_fx_timing() {
     // The G1 excess's two-date translation, both halves.
     assert!(limitations.contains("converts at the **payment month**"));
     assert!(limitations.contains("converts at the **acquisition month**"));
+    // The E10 excess translates alike — no longer wholly at the buy month.
+    assert!(limitations.contains("The E10 excess is translated the same way"));
+    assert!(limitations.contains("**statement's year-end month** rate"));
     // When it bites.
     assert!(
         limitations

@@ -7348,3 +7348,36 @@ The behaviour is documented today, but trades already carry `settlement_date`.
   failed settlements are invisible), pinned by
   `doc_checks::known_limitations_document_entitlement_read_off_settlement_dates`; API.md, SCHEMA.md,
   FEATURES.md and the UI form hints restated.
+
+## Smaller financial-correctness inconsistencies (2026-10-10 review, financial correctness — low)
+- [x] E10 and G1 excess gains are translated to AUD differently (`reports/net_capital_gain.rs`
+  ~640–650): the E10 excess converts wholly at the acquisition-month rate, the G1 excess uses the
+  payment-date rate for the payment and the acquisition rate for the cost base. Make the two
+  consistent (or document why they differ) with a non-AUD AMIT-fund test covering both
+  — **Done 2026-10-10:** made consistent. `non_disposal_gains` now translates both excesses through
+  one path: the reduction at the date it arose (an AMMA statement's year-end month, in the
+  statement's currency — which the write path already pins to the listing's; a payment at its
+  payment month), the cost base it overran at the acquisition month with the parcel's
+  `spot_fx_rate` override, floored at nil. Tests:
+  `db_e10_and_g1_excesses_translate_alike_on_a_non_aud_fund` (one USD parcel with an E10 and a
+  later G1 excess: E10 = 800/1.25 − 600/1.5 = 240, where the old one-step translation gave
+  133.33) and `db_e10_excess_is_floored_at_nil_when_the_aud_value_inverts`. `docs/API.md`'s CGT
+  event E10 paragraph and the *Cost-base FX timing* known limitation (no longer naming E10 as the
+  remaining asymmetry) are updated, pinned by `doc_checks::known_limitations_document_cost_base_fx_timing`
+- [x] "Gross assessable investment income" (`reports/tax_summary.rs` ~1097–1111) includes the
+  franking credits inside trust 13C/AMMA franked lines but excludes company-dividend (11U) credits,
+  so it is neither a cash nor an assessable total. Make it one or the other (or split it into two
+  labelled totals), with a test pinning the figure
+  — **Done 2026-10-10:** made it an **assessable** total, the definition the ATO gives (*You and
+  your shares* Example 2: unfranked 200 + franked 700 + franking credit 300 = total assessable
+  dividend income 1,200). A new `dividend_franking_credits` line (CSV label `11U`) carries the
+  company-dividend part of the claimable `franking_credits`, net of holding-period denials
+  (`franking::FrankedDividend` now carries `trust_income` so a denial comes off the line its credit
+  was counted on), and the gross total adds it — keeping the printed column summable (SCENARIOS
+  W-f). The 13C lines already include the trust route's credit, so both routes now count alike.
+  Tests: `ato_examples::you_and_your_shares_examples_1_2_john_assessable_dividend_income` now
+  asserts the gross total itself is 1,200;
+  `db_gross_counts_the_claimable_company_credit_and_not_a_denied_one` (a denied 5,600 credit stays
+  out, a claimable 300 goes in); the trust-denial test pins that a trust denial leaves 11U alone;
+  the two tests that had pinned "credits excluded" were updated. `docs/API.md` (label table and the
+  gross-total definition) and `util.js`'s money classification updated

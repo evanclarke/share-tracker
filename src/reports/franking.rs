@@ -315,6 +315,10 @@ pub struct FrankedDividend {
     pub ex_date_recorded: bool,
     /// Attached franking credits, converted to AUD at the assessment month.
     pub credits_aud: Decimal,
+    /// Whether the row is a trust distribution: its credit is then inside the
+    /// tax summary's 13C line, a company dividend's on its own 11U line — so a
+    /// denial must come off the line the credit was counted on.
+    pub trust_income: bool,
 }
 
 /// Load every franked dividend (income rows with attached credits, assessed
@@ -358,6 +362,7 @@ pub async fn db_franked_dividends(
             ex_date: income.ex_or_pay_date(),
             ex_date_recorded: income.ex_date_recorded(),
             credits_aud,
+            trust_income: income.trust_income,
         });
         *attached_by_year.entry(tax_year).or_default() += credits_aud;
     }

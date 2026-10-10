@@ -56,16 +56,6 @@ falls under the existing rules.
   trading day before 1 July 2027 (the scheduled price import plus `closing_price`'s held-days
   backfill), since a missing one cannot be fetched reliably years later
 
-## Smaller financial-correctness inconsistencies (2026-10-10 review, financial correctness — low)
-- [ ] E10 and G1 excess gains are translated to AUD differently (`reports/net_capital_gain.rs`
-  ~640–650): the E10 excess converts wholly at the acquisition-month rate, the G1 excess uses the
-  payment-date rate for the payment and the acquisition rate for the cost base. Make the two
-  consistent (or document why they differ) with a non-AUD AMIT-fund test covering both
-- [ ] "Gross assessable investment income" (`reports/tax_summary.rs` ~1097–1111) includes the
-  franking credits inside trust 13C/AMMA franked lines but excludes company-dividend (11U) credits,
-  so it is neither a cash nor an assessable total. Make it one or the other (or split it into two
-  labelled totals), with a test pinning the figure
-
 ## The post-backup command has no timeout and holds the backup job's lock (2026-10-10 review, robustness)
 `run_backup_command` (`src/infra/db.rs`) awaits `sh -c … .output()` with no bound, inside `run_job`'s
 per-job lock. A hook that hangs (`scp` to an unreachable host, `rclone` waiting on a prompt) never

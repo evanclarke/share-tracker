@@ -398,10 +398,11 @@ struct EventGain {
 /// own conventions:
 ///
 /// - **E10** falls in the income year the reducing AMMA statement applies to,
-///   is converted to AUD at the parcel's buy-month ATO rate (matching how the
-///   cost base itself is converted in the realised report), and is
-///   discount-eligible when the units were held more than 12 months as at the
-///   statement's `tax_year_end_date`.
+///   and is discount-eligible when the units were held more than 12 months as
+///   at the statement's `tax_year_end_date`. It is translated exactly as G1
+///   is (below): the reduction — in the parcel's own currency — at the
+///   statement's year-end month, the cost base it overran at the acquisition
+///   month with the parcel's override, floored at nil.
 /// - **G1** falls in the payment's income year, covers only the units still
 ///   held at the payment date (units sold earlier were not held for it; the
 ///   whole-parcel totals here keep any division until that final pro-rating),
@@ -411,8 +412,9 @@ struct EventGain {
 ///   month's ATO rate (no manual fallback — a non-AUD payment with no rate
 ///   fails loudly), and the cost base it overran at the parcel's
 ///   acquisition-month rate with the parcel's own override, exactly as the
-///   cost base itself was converted. G1 can never produce a capital loss, so an
-///   excess that does not survive the two translations is floored at nil.
+///   cost base itself was converted. Neither E10 nor G1 can produce a capital
+///   loss, so an excess that does not survive the two translations is floored
+///   at nil.
 /// - **C2** falls in the payment's income year too, covers the units entitled
 ///   at the payment's **record date** — still registered then, so sold by a
 ///   Sell settling after it — but sold before the payment date, is the
@@ -629,66 +631,65 @@ async fn non_disposal_gains(
                     remaining -= amount;
                     continue;
                 }
-                let excess = amount - remaining;
                 // The native cost base these units still carried when the event
-                // ran past it — the second element of a G1 excess, which is
-                // translated at its own date rather than the payment's (below).
+                // ran past it.
                 let exhausted = remaining;
                 remaining = Decimal::ZERO;
-                match event {
-                    Reduction::Amit(e) => out.push(EventGain {
-                        kind: CgtEventKind::E10,
-                        // The statement's FY by the one shared rule: its year
-                        // end is 30 June through the write path, but a row a
-                        // hand-entered database holds at another date must
-                        // still bucket where `tax_year_for` puts it.
-                        tax_year: tax_year_for(e.tax_year_end_date),
-                        amount: fx.to_aud(
-                            excess,
-                            &parcel.currency,
-                            acquired,
-                            parcel.fx_override(),
-                        )?,
-                        discount_eligible: crate::domain::cgt_discount::discount_eligible(
-                            acquired,
-                            e.tax_year_end_date,
-                        ),
-                    }),
-                    Reduction::Roc { date, currency, .. } => {
-                        // A G1 gain is the difference between two amounts
-                        // arising on two different dates, so each is translated
-                        // at its own: the payment at the payment date, the cost
-                        // base it overran at the parcel's acquisition-month
-                        // rate — with the parcel's own override, the same rate
-                        // `CostBase::into_aud_with` converted that cost base
-                        // with. Converting the native excess in one step
-                        // translated the cost-base element at the payment's
-                        // rate, overstating the gain whenever the AUD had
-                        // strengthened since acquisition (and understating it
-                        // when the AUD had weakened); an AUD parcel collapses to
-                        // parity whichever way it is done.
-                        let payment = fx.to_aud(amount, currency, *date, FxOverride::None)?;
-                        let cost_base = if exhausted == Decimal::ZERO {
-                            // An earlier event already exhausted the cost base:
-                            // the whole payment is the gain, and there is no
-                            // cost-base figure whose rate could be missing.
-                            Decimal::ZERO
-                        } else {
-                            fx.to_aud(exhausted, &parcel.currency, acquired, parcel.fx_override())?
-                        };
-                        out.push(EventGain {
-                            kind: CgtEventKind::G1,
-                            tax_year: tax_year_for(*date),
-                            // Floored at nil: G1 can never produce a capital
-                            // loss, so an excess whose AUD value does not
-                            // survive the two translations is no gain.
-                            amount: (payment - cost_base).max(Decimal::ZERO),
-                            discount_eligible: crate::domain::cgt_discount::discount_eligible(
-                                acquired, *date,
-                            ),
-                        });
-                    }
-                }
+                // An E10 or G1 gain is the difference between two amounts
+                // arising on two different dates, so each is translated at its
+                // own (s 960-50(6), `docs/ato/forex-common-transactions.md`):
+                // the reduction at the date it arose — an AMMA statement's
+                // year end, in the parcel's own currency (the statement states
+                // its per-unit figure in the units' currency), or the payment
+                // date in the payment's currency — and the cost base it overran
+                // at the parcel's acquisition-month rate, with the parcel's
+                // own override: the same rate `CostBase::into_aud_with`
+                // converted that cost base with. Converting the native excess
+                // in one step translated the cost-base element at a rate it
+                // was never converted at (the payment's, for G1) or the
+                // reduction at one it never arose at (the acquisition month's,
+                // for E10). An AUD parcel collapses to parity either way.
+                let (kind, arose, reduction_currency, tax_year, discount_from) = match event {
+                    // The statement's FY by the one shared rule: its year end
+                    // is 30 June through the write path, but a row a
+                    // hand-entered database holds at another date must still
+                    // bucket where `tax_year_for` puts it.
+                    Reduction::Amit(e) => (
+                        CgtEventKind::E10,
+                        e.tax_year_end_date,
+                        &parcel.currency,
+                        tax_year_for(e.tax_year_end_date),
+                        e.tax_year_end_date,
+                    ),
+                    Reduction::Roc { date, currency, .. } => (
+                        CgtEventKind::G1,
+                        *date,
+                        currency,
+                        tax_year_for(*date),
+                        *date,
+                    ),
+                };
+                let reduction = fx.to_aud(amount, reduction_currency, arose, FxOverride::None)?;
+                let cost_base = if exhausted == Decimal::ZERO {
+                    // An earlier event already exhausted the cost base: the
+                    // whole reduction is the gain, and there is no cost-base
+                    // figure whose rate could be missing.
+                    Decimal::ZERO
+                } else {
+                    fx.to_aud(exhausted, &parcel.currency, acquired, parcel.fx_override())?
+                };
+                out.push(EventGain {
+                    kind,
+                    tax_year,
+                    // Floored at nil: neither E10 nor G1 can produce a capital
+                    // loss, so an excess whose AUD value does not survive the
+                    // two translations is no gain.
+                    amount: (reduction - cost_base).max(Decimal::ZERO),
+                    discount_eligible: crate::domain::cgt_discount::discount_eligible(
+                        acquired,
+                        discount_from,
+                    ),
+                });
             }
         }
     }
@@ -3850,6 +3851,103 @@ mod tests {
                 && y.capital_losses == Decimal::ZERO
                 && y.net_capital_gain == Decimal::ZERO),
             "a payment worth less in AUD than the cost base is no G1 gain: {r:?}"
+        );
+    }
+
+    /// E10 and G1 excesses on a non-AUD fund are translated the same way: the
+    /// reduction at the date it arose (the AMMA statement's year end, the
+    /// payment date), the cost base it overran at the acquisition month. One
+    /// parcel carries both, so the two kinds are pinned side by side (2026-10-10
+    /// review: E10 used to convert its whole native excess at the acquisition
+    /// month, G1 its two elements at their own dates).
+    #[tokio::test]
+    async fn db_e10_and_g1_excesses_translate_alike_on_a_non_aud_fund() {
+        let pool = test_pool().await;
+        insert_usd_listing(&pool, 1, "VAF").await;
+        // A$1 = 1.5 USD at acquisition, 1.25 at the statement's year end, 2.0
+        // at the later payment.
+        for (month, rate) in [("2023-01", "1.5"), ("2024-06", "1.25"), ("2025-07", "2.0")] {
+            rba_fx_rate::db_import_rate(&pool, "USD", month, rate.parse().unwrap())
+                .await
+                .unwrap();
+        }
+        // USD 600 cost base (100 @ USD 6), acquired January 2023.
+        test_support::trade(1, 1, trade::TradeType::Buy)
+            .date(NaiveDate::from_ymd_opt(2023, 1, 10).unwrap())
+            .qty(Decimal::from(100))
+            .price(Decimal::from(6))
+            .insert(&pool)
+            .await;
+        // FY2024 AMMA: USD 8/unit × 100 = USD 800 against the USD 600 base.
+        let mut a = make_amma(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2024, 6, 30).unwrap(),
+        );
+        a.cost_base_adjustment = Decimal::from(8);
+        a.currency = CurrencyCode::from("USD");
+        amma::db_upsert(&pool, &a).await.unwrap();
+        link_adjustment(&pool, 1, 1, TradeId(1), Decimal::from(100)).await;
+        // USD 1,000 return of capital paid July 2025, onto a nil cost base.
+        apply_roc_full(
+            &pool,
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2025, 7, 1).unwrap(),
+            "10",
+            "USD",
+            None,
+        )
+        .await;
+
+        let r = db_net_capital_gain(&pool).await.unwrap();
+        // E10: 800/1.25 − 600/1.5 = 640 − 400 = 240. The old one-step
+        // translation reported the native (800 − 600)/1.5 = 133.33….
+        let fy2024 = row_for(&r, 2024);
+        assert_eq!(fy2024.cgt_event_e10_gain, Decimal::from(240));
+        assert_eq!(fy2024.discount_eligible_gains, Decimal::from(240));
+        // G1: the cost base is already nil, so the whole 1000/2.0 = 500.
+        let fy2026 = row_for(&r, 2026);
+        assert_eq!(fy2026.cgt_event_g1_gain, Decimal::from(500));
+        assert_eq!(fy2026.cgt_event_e10_gain, Decimal::ZERO);
+    }
+
+    /// The E10 counterpart of the floor above: an AMIT excess worth less in
+    /// AUD at the statement's year end than the cost base it overran is worth
+    /// at acquisition is no gain, never a loss.
+    #[tokio::test]
+    async fn db_e10_excess_is_floored_at_nil_when_the_aud_value_inverts() {
+        let pool = test_pool().await;
+        insert_usd_listing(&pool, 1, "VAF").await;
+        rba_fx_rate::db_import_rate(&pool, "USD", "2023-01", "1.0".parse().unwrap())
+            .await
+            .unwrap();
+        rba_fx_rate::db_import_rate(&pool, "USD", "2024-06", "2.0".parse().unwrap())
+            .await
+            .unwrap();
+        test_support::trade(1, 1, trade::TradeType::Buy)
+            .date(NaiveDate::from_ymd_opt(2023, 1, 10).unwrap())
+            .qty(Decimal::from(100))
+            .price(Decimal::from(6))
+            .insert(&pool)
+            .await;
+        // USD 800 reduction (A$400 at year end) against a USD 600 / A$600 base.
+        let mut a = make_amma(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2024, 6, 30).unwrap(),
+        );
+        a.cost_base_adjustment = Decimal::from(8);
+        a.currency = CurrencyCode::from("USD");
+        amma::db_upsert(&pool, &a).await.unwrap();
+        link_adjustment(&pool, 1, 1, TradeId(1), Decimal::from(100)).await;
+
+        let r = db_net_capital_gain(&pool).await.unwrap();
+        assert!(
+            r.iter().all(|y| y.cgt_event_e10_gain == Decimal::ZERO
+                && y.capital_losses == Decimal::ZERO
+                && y.net_capital_gain == Decimal::ZERO),
+            "an AMIT excess worth less in AUD than the cost base is no E10 gain: {r:?}"
         );
     }
 

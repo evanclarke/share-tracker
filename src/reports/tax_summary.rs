@@ -144,6 +144,22 @@ pub struct TaxYearSummary {
     /// 13C component and the allowable credit at 13Q, and the two may differ —
     /// a denied credit here, or a trust's own deductions reducing 13C's credit.
     pub franking_credits: Decimal,
+    /// The **company-dividend** part of [`Self::franking_credits`] — question
+    /// 11 label **U**: the claimable credits on income rows that are not
+    /// `trust_income`, net of the holding-period denials on those rows.
+    ///
+    /// Unlike the trust route's credit, which is already *inside* the 13C
+    /// lines (`trust_franked_distributions`, `amma_franked_dividends`), a
+    /// company dividend's credit is carried on a label of its own beside
+    /// 11S/11T — and it is assessable income all the same (the franking-credit
+    /// gross-up: "unfranked $200 + franked $700 + franking credit $300 =
+    /// total assessable dividend income $1,200",
+    /// `docs/ato/you-and-your-shares-dividends.md` Example 2). So this line is
+    /// what [`Self::gross_assessable_investment_income`] adds for the company
+    /// route, making that total assessable on both routes alike. It is not a
+    /// second offset: the offset entitlement is still the one
+    /// `franking_credits` figure (11U + 13Q), of which this is a part.
+    pub dividend_franking_credits: Decimal,
     /// Franking credits attached but denied by the holding-period rule (the
     /// amount excluded from `franking_credits`).
     pub franking_credits_denied: Decimal,
@@ -218,18 +234,22 @@ pub struct TaxYearSummary {
     /// AMMA income components (`amma_australian_interest`,
     /// `amma_dividends_unfranked`, `amma_franked_dividends`, `amma_net_rent`,
     /// `amma_foreign_income`, `amma_other_income`) + `other_income` (item 24,
-    /// which nothing prefills). Because the 13C lines' own label definition
-    /// includes their attached franking credits, those credits are inside the
-    /// two trust/AMMA lines and so inside this total — while the company
-    /// route's credit stays out (11S/11T carry the dividend alone, the credit
-    /// reporting at 11U). It also excludes FITO (an offset line), the recorded
+    /// which nothing prefills) + `dividend_franking_credits` (11U).
+    ///
+    /// It is an **assessable** total, not a cash one, on both franking routes
+    /// alike: the 13C lines' own label definition includes their attached
+    /// franking credits, so the trust route's credits are inside the two
+    /// trust/AMMA lines, and the company route's claimable credit — which
+    /// 11S/11T leave out because it reports on its own label, 11U — is added
+    /// as `dividend_franking_credits`. A denied company-dividend credit is not
+    /// assessable (it is excluded from 11U) and so is not in it. It excludes FITO (an offset line), the recorded
     /// conduit foreign income memo (already inside `dividends_assessable`, or
     /// inside `trust_income_unfranked`, as part of `unfranked_amount`), the ESS
     /// discount (employment income, Item 12), and capital gains
     /// (the net-capital-gain report). `net_assessable_investment_income`
     /// subtracts the investment-expense deductions from this.
     ///
-    /// Summed **at the cent**: it is the sum of those thirteen lines rounded to
+    /// Summed **at the cent**: it is the sum of those fourteen lines rounded to
     /// the cent, so the column adds up wherever the lines are printed beside
     /// it (SCENARIOS W-f). The lines themselves keep full precision.
     pub gross_assessable_investment_income: Decimal,
@@ -276,9 +296,11 @@ pub struct TaxYearSummary {
     /// or not (SCENARIOS W-f).
     pub deductions_total: Decimal,
     /// Net assessable investment income: `gross_assessable_investment_income −
-    /// deductions_total` (AUD) — both already at the cent, so this is too. The LIC capital gain deduction, franking-credit
-    /// gross-up, and FITO are distinct and tracked on their own lines, so they
-    /// are not folded in here.
+    /// deductions_total` (AUD) — both already at the cent, so this is too.
+    /// The franking-credit gross-up is already inside the gross figure (13C's
+    /// credit in its component, 11U's on `dividend_franking_credits`); the
+    /// LIC capital gain deduction and FITO are distinct and tracked on their
+    /// own lines, so they are not folded in here.
     pub net_assessable_investment_income: Decimal,
     /// Informational: the taxpayer assumption behind the hard-wired rates
     /// (always [`crate::reports::TAXPAYER_BASIS`]) — the LIC capital gain
@@ -316,6 +338,7 @@ pub(crate) const CSV_HEADER: &[&str] = &[
     "amma_cgt_other_gains",
     "amma_capital_losses_applied",
     "franking_credits",
+    "dividend_franking_credits",
     "franking_credits_denied",
     "foreign_tax_offsets",
     "foreign_tax_offset_excess",
@@ -370,6 +393,7 @@ pub(crate) const CSV_ATO_LABELS: &[&str] = &[
     "18 (working)", // amma_cgt_other_gains
     "",             // amma_capital_losses_applied (trust-level, informational)
     "11U / 13Q",    // franking_credits
+    "11U",          // dividend_franking_credits (the company-dividend part, in the gross total)
     "",             // franking_credits_denied (informational)
     "20O",          // foreign_tax_offsets
     "",             // foreign_tax_offset_excess (informational)
@@ -417,6 +441,7 @@ fn zero_summary(tax_year: i32) -> TaxYearSummary {
         amma_cgt_other_gains: Decimal::ZERO,
         amma_capital_losses_applied: Decimal::ZERO,
         franking_credits: Decimal::ZERO,
+        dividend_franking_credits: Decimal::ZERO,
         franking_credits_denied: Decimal::ZERO,
         foreign_tax_offsets: Decimal::ZERO,
         foreign_tax_offset_excess: Decimal::ZERO,
@@ -782,6 +807,10 @@ fn accumulate_income(
             s.trust_franked_distributions += franked;
         } else {
             s.dividends_assessable += franked + unfranked;
+            // The company route's credit reports at 11U beside 11S/11T rather
+            // than inside them, so it is tracked here for the gross total —
+            // the trust route's is already inside 13C above.
+            s.dividend_franking_credits += fc;
         }
         s.foreign_source_income += foreign_income;
         s.lic_capital_gain_deduction += lic;
@@ -1056,6 +1085,9 @@ fn apply_franking_denials(
                 .expect("year inserted with the income row");
             s.franking_credits -= denied;
             s.franking_credits_denied += denied;
+            if !div.trust_income {
+                s.dividend_franking_credits -= denied;
+            }
         }
     }
 }
@@ -1078,7 +1110,7 @@ fn apply_fito_de_minimis(map: &mut Summaries) {
 /// last so every income, AMMA and deduction line is already aggregated.
 ///
 /// **Summed at the cent** (SCENARIOS W-f): this column is printed beside
-/// the eleven it totals — on the tax-summary screen, in
+/// the fourteen lines it totals — on the tax-summary screen, in
 /// `tax-summary.csv`, and in the annual tax report's tax-summary section —
 /// and every one of those surfaces shows money to the cent, so the total
 /// has to be the sum of the figures *as shown* or the printed column does
@@ -1108,7 +1140,8 @@ fn total_assessable_income(map: &mut Summaries) {
             + to_cents(s.amma_net_rent)
             + to_cents(s.amma_foreign_income)
             + to_cents(s.amma_other_income)
-            + to_cents(s.other_income);
+            + to_cents(s.other_income)
+            + to_cents(s.dividend_franking_credits);
         s.net_assessable_investment_income =
             s.gross_assessable_investment_income - s.deductions_total;
     }
@@ -1156,6 +1189,7 @@ struct TaxYearSummaryCsv {
     amma_cgt_other_gains: Cents,
     amma_capital_losses_applied: Cents,
     franking_credits: Cents,
+    dividend_franking_credits: Cents,
     franking_credits_denied: Cents,
     foreign_tax_offsets: Cents,
     foreign_tax_offset_excess: Cents,
@@ -1204,6 +1238,7 @@ impl From<&TaxYearSummary> for TaxYearSummaryCsv {
             amma_cgt_other_gains: s.amma_cgt_other_gains.into(),
             amma_capital_losses_applied: s.amma_capital_losses_applied.into(),
             franking_credits: s.franking_credits.into(),
+            dividend_franking_credits: s.dividend_franking_credits.into(),
             franking_credits_denied: s.franking_credits_denied.into(),
             foreign_tax_offsets: s.foreign_tax_offsets.into(),
             foreign_tax_offset_excess: s.foreign_tax_offset_excess.into(),
@@ -1834,11 +1869,82 @@ mod tests {
         // exactly as the label notes they may.
         assert_eq!(s.franking_credits, Decimal::ZERO);
         assert_eq!(s.franking_credits_denied, Decimal::from(5600));
+        // A trust's credit is inside 13C, never on the company route's 11U
+        // line — so its denial comes off nothing there either.
+        assert_eq!(s.dividend_franking_credits, Decimal::ZERO);
         // The member's own trust deduction is its own 13Y line.
         assert_eq!(s.deductions_trust_distributions, Decimal::from(100));
         assert_eq!(
             s.net_assessable_investment_income,
             Decimal::from(18666 - 100)
+        );
+    }
+
+    /// The 2026-10-10 review's finding: the gross total counted the trust
+    /// route's franking credits (inside 13C) but not the company route's
+    /// (11U), so it was neither a cash nor an assessable figure. It is the
+    /// assessable one now on both routes — a company dividend's claimable
+    /// credit is grossed up into it (`docs/ato/you-and-your-shares-dividends.md`
+    /// Example 2), and a credit the holding-period rule **denies** is neither
+    /// claimable nor assessable, so it leaves 11U and the gross total alike.
+    #[tokio::test]
+    async fn db_gross_counts_the_claimable_company_credit_and_not_a_denied_one() {
+        let pool = test_pool().await;
+        // Listing 1: units bought and sold inside the 45-day window, so the
+        // dividend's 5,600 credit (over the A$5,000 small-shareholder
+        // threshold on its own) is denied.
+        insert_listing(&pool, 1).await;
+        insert_trade(
+            &pool,
+            1,
+            ListingId(1),
+            trade::TradeType::Buy,
+            ymd(2025, 3, 3),
+            1000,
+        )
+        .await;
+        insert_trade(
+            &pool,
+            2,
+            ListingId(1),
+            trade::TradeType::Sell,
+            ymd(2025, 4, 10),
+            1000,
+        )
+        .await;
+        let mut denied = make_income(1, ListingId(1), ymd(2025, 4, 8));
+        denied.ex_date = Some(ymd(2025, 3, 14));
+        denied.franked_amount = Decimal::from(13066);
+        denied.franking_credits = Decimal::from(5600);
+        income::db_upsert(&pool, &denied).await.unwrap();
+        // Listing 2: held long before and after its dividend → entitled.
+        insert_listing(&pool, 2).await;
+        insert_trade(
+            &pool,
+            3,
+            ListingId(2),
+            trade::TradeType::Buy,
+            ymd(2024, 1, 2),
+            1000,
+        )
+        .await;
+        let mut kept = make_income(2, ListingId(2), ymd(2025, 4, 8));
+        kept.ex_date = Some(ymd(2025, 3, 14));
+        kept.franked_amount = Decimal::from(700);
+        kept.unfranked_amount = Decimal::from(200);
+        kept.franking_credits = Decimal::from(300);
+        income::db_upsert(&pool, &kept).await.unwrap();
+
+        let s = &db_tax_summary(&pool).await.unwrap()[0];
+        assert_eq!(s.tax_year, 2025);
+        assert_eq!(s.dividends_assessable, Decimal::from(13066 + 900));
+        assert_eq!(s.franking_credits, Decimal::from(300));
+        assert_eq!(s.franking_credits_denied, Decimal::from(5600));
+        // 11U: only the claimable credit.
+        assert_eq!(s.dividend_franking_credits, Decimal::from(300));
+        assert_eq!(
+            s.gross_assessable_investment_income,
+            Decimal::from(13066 + 900 + 300)
         );
     }
 
@@ -2263,10 +2369,12 @@ mod tests {
         // attached credit already inside it.
         assert_eq!(s.amma_franked_dividends, Decimal::from(300));
         assert_eq!(s.amma_foreign_income, Decimal::from(40));
-        // Gross assessable = dividend + AMMA components, no cash.
+        // Gross assessable = dividend + its 11U credit + AMMA components
+        // (13C's credit already inside the 300), no cash.
+        assert_eq!(s.dividend_franking_credits, Decimal::from(30));
         assert_eq!(
             s.gross_assessable_investment_income,
-            Decimal::from(70 + 300 + 40)
+            Decimal::from(70 + 30 + 300 + 40)
         );
     }
 
@@ -3011,7 +3119,7 @@ mod tests {
 
     /// SCENARIOS W-f, the `tax-summary.csv` half. Three columns of this
     /// export are sums of other columns — `gross_assessable_investment_income`
-    /// over the thirteen income lines, `deductions_total` over *two* different
+    /// over the fourteen income lines, `deductions_total` over *two* different
     /// cuts of the deductions, and `net_assessable_investment_income` over
     /// those two — and each of those columns used to be the cent-rounding of
     /// an exact total, which need not equal the total of the cent-rounded
@@ -3150,7 +3258,7 @@ mod tests {
         assert_eq!(s.net_assessable_investment_income, Decimal::from(130));
     }
 
-    /// The thirteen assessable income lines
+    /// The fourteen assessable income lines
     /// `gross_assessable_investment_income` totals, and the two cuts
     /// `deductions_total` totals — the export's own column names.
     const GROSS_INCOME_COLUMNS: &[&str] = &[
@@ -3167,6 +3275,7 @@ mod tests {
         "amma_foreign_income",
         "amma_other_income",
         "other_income",
+        "dividend_franking_credits",
     ];
     const DEDUCTION_KIND_COLUMNS: &[&str] = &[
         "deductions_loan_interest",
@@ -3800,7 +3909,7 @@ mod tests {
         );
         div.franked_amount = Decimal::from(140);
         div.unfranked_amount = Decimal::from(60);
-        div.franking_credits = Decimal::from(60); // an offset line, not in gross
+        div.franking_credits = Decimal::from(60); // 11U: assessable, so in gross
         income::db_upsert(&pool, &div).await.unwrap();
         // Loan interest 500 + management fee 120 = 620 deductions.
         investment_expense::db_upsert(
@@ -3830,13 +3939,14 @@ mod tests {
         assert_eq!(result.len(), 1);
         let s = &result[0];
         assert_eq!(s.tax_year, 2024);
-        // Gross is the cash assessable lines only (franking credits excluded).
-        assert_eq!(s.gross_assessable_investment_income, Decimal::from(200));
+        // Gross is the dividend plus its 11U franking credit gross-up.
+        assert_eq!(s.dividend_franking_credits, Decimal::from(60));
+        assert_eq!(s.gross_assessable_investment_income, Decimal::from(260));
         assert_eq!(s.deductions_loan_interest, Decimal::from(500));
         assert_eq!(s.deductions_management_fee, Decimal::from(120));
         assert_eq!(s.deductions_total, Decimal::from(620));
-        // Net = 200 − 620 = −420 (deductions can exceed income → a loss).
-        assert_eq!(s.net_assessable_investment_income, Decimal::from(-420));
+        // Net = 260 − 620 = −360 (deductions can exceed income → a loss).
+        assert_eq!(s.net_assessable_investment_income, Decimal::from(-360));
         // The gross dividend line is retained unchanged.
         assert_eq!(s.dividends_assessable, Decimal::from(200));
     }
