@@ -56,18 +56,6 @@ falls under the existing rules.
   trading day before 1 July 2027 (the scheduled price import plus `closing_price`'s held-days
   backfill), since a missing one cannot be fetched reliably years later
 
-## An AMIT row can reduce the cost base of units sold in an earlier, already-lodged year (2026-10-10 review, financial correctness — medium)
-The write-time cap on an adjustment row's `quantity` (`src/entities/amit_adjustment.rs`, ~line 348)
-is the parcel's trade quantity, and `reduction_for_units` spills any coverage beyond the held units
-onto every unit sold before the statement's year end — with no lower bound at the start of that
-income year. Scenario: buy 100 (2022-01-10), sell 60 (2022-03-03, FY2022), an FY2025 statement at
-\$1/unit with a 100-unit row: the write is accepted and the FY2022 sale's cost base drops 6000 →
-5940, changing a lodged year's gain.
-- [ ] Failing test: the scenario above is rejected `422` (or the FY2022 sale's cost base is unchanged)
-- [ ] Cap a row's coverage at the units of the parcel held at some point during the statement's
-  income year (quantity less disposals before its 1 July start), and confine the spill to units
-  disposed of within that year; document in `docs/API.md`
-
 ## Return-of-capital and rights entitlement compare the trade date with the record date (2026-10-10 review, financial correctness — medium)
 `corporate_action/adjustments.rs` (~line 132, `registered_from < record_date`; the SQL at ~248) and the
 C2 test in `reports/net_capital_gain.rs` (~595) decide entitlement on the trade date. Under ASX T+2

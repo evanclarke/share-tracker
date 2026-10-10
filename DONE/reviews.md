@@ -7216,3 +7216,33 @@ fix); `cost_base`'s
 `amit_adjustment`'s `a_view_before_a_rollover_still_sees_its_units_in_the_parcel`, and the existing
 held/spill test now pins `carried_out` too. `docs/API.md`'s AMIT coverage paragraph describes the
 three groups.
+
+## An AMIT row can reduce the cost base of units sold in an earlier, already-lodged year (2026-10-10 review, financial correctness — medium)
+The write-time cap on an adjustment row's `quantity` (`src/entities/amit_adjustment.rs`, ~line 348)
+is the parcel's trade quantity, and `reduction_for_units` spills any coverage beyond the held units
+onto every unit sold before the statement's year end — with no lower bound at the start of that
+income year. Scenario: buy 100 (2022-01-10), sell 60 (2022-03-03, FY2022), an FY2025 statement at
+\$1/unit with a 100-unit row: the write is accepted and the FY2022 sale's cost base drops 6000 →
+5940, changing a lodged year's gain.
+- [x] Failing test: the scenario above is rejected `422` (or the FY2022 sale's cost base is unchanged)
+- [x] Cap a row's coverage at the units of the parcel held at some point during the statement's
+  income year (quantity less disposals before its 1 July start), and confine the spill to units
+  disposed of within that year; document in `docs/API.md`
+
+**Done 2026-10-10.** Both halves. The write path (`amit_adjustment::db_write_on`) now caps a row's
+`quantity` at the parcel's units held at some point during the statement's income year — the trade
+quantity less every allocation (real disposal or rollover, split-re-based to the as-acquired basis)
+dated before that year's start — and refuses more with a `422` naming the figure
+(`UpsertError::QuantityExceedsUnitsHeldInYear`). The read side confines the spill too, so a row
+written *before* a sale was back-dated into an earlier year still cannot reach it:
+`AmitReductionEvent` carries `disposed_before_year_start`, and `reduction_for_units` gives a
+disposal before the year nothing and spreads coverage beyond the held and carried units over the
+year's own disposals only (capped at them). The year's start is the new shared
+`domain::tax_year::fy_start` — the 1 July before the `tax_year_for` year end — which the
+AMIT-adjustment cross-check's coverage band now uses as well, so the two cannot disagree for a
+non-30-June year end. Tests: `amit_adjustment::a_row_cannot_reach_units_sold_before_its_income_year`
+(the review's scenario through the API: 100 → `422`, 41 → `422`, 40 → `201`, the FY2022 sale's
+reduction nil), `cost_base::units_disposed_before_the_income_year_take_no_spill` (the spill split
+and its 1 July boundary, conserving the row's amount), `tax_year::a_financial_year_starts_on_the_1_july_before_its_30_june_end`;
+three cross-check tests now write their row before the back-dated sale, the only way to reach that
+state. `docs/API.md` (AMIT adjustments) documents the cap and the spill confinement.

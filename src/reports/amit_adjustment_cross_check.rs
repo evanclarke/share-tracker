@@ -33,7 +33,7 @@
 
 use crate::domain::open_parcels;
 use crate::domain::rollover;
-use crate::domain::tax_year::tax_year_for;
+use crate::domain::tax_year::{fy_start, tax_year_for};
 use crate::entities::corporate_action::{self, SplitEvent};
 use crate::infra::decimal::row_dec;
 use crate::infra::extract::Json;
@@ -355,8 +355,7 @@ fn problems_for(
     // unchanged; a row a hand-entered database holds at another date gets the
     // year `tax_year_for` names on the alert, not a window derived from its
     // calendar year.
-    let year_start =
-        NaiveDate::from_ymd_opt(tax_year_for(year_end) - 1, 7, 1).expect("valid FY start");
+    let year_start = fy_start(year_end);
     let disposed_in_year = disposed_between(adjustments, splits, sold, year_start, year_end);
     if units_adjusted < units_held {
         let difference = units_adjusted - units_held;
@@ -828,14 +827,17 @@ mod tests {
             .qty(dec("509"))
             .insert(&pool)
             .await;
+        // The row is written before the sale is recorded: the write path
+        // refuses coverage of units gone before the statement's year, so the
+        // state is only reachable by entering a back-dated sale afterwards.
+        amma(&pool, 1, 1, ymd(2024, 6, 30), "509").await;
+        test_support::amit_adjustment(&pool, 1, 1, 1, dec("509")).await;
         test_support::sell(2, 1)
             .date(ymd(2023, 2, 1)) // before 1 July 2023
             .qty(dec("509"))
             .insert(&pool)
             .await;
         allocate(&pool, 1, 2, 1, dec("509")).await;
-        amma(&pool, 1, 1, ymd(2024, 6, 30), "509").await;
-        test_support::amit_adjustment(&pool, 1, 1, 1, dec("509")).await;
 
         let alerts = db_amit_adjustment_alerts(&pool).await.unwrap();
         assert_eq!(alerts.len(), 1);
@@ -1448,6 +1450,11 @@ mod tests {
             .qty(dec("100"))
             .insert(&pool)
             .await;
+        // Rows first (see `db_a_parcel_sold_out_before_the_year_began_is_flagged`:
+        // the write path refuses them once the sale is recorded).
+        amma(&pool, 1, 1, ymd(2024, 6, 30), "100").await;
+        test_support::amit_adjustment(&pool, 1, 1, 1, dec("509")).await;
+        test_support::amit_adjustment(&pool, 2, 1, 2, dec("100")).await;
         // Sold in FY2023, a year before the statement's.
         test_support::sell(3, 1)
             .date(ymd(2023, 2, 1))
@@ -1455,9 +1462,6 @@ mod tests {
             .insert(&pool)
             .await;
         allocate(&pool, 1, 3, 1, dec("509")).await;
-        amma(&pool, 1, 1, ymd(2024, 6, 30), "100").await;
-        test_support::amit_adjustment(&pool, 1, 1, 1, dec("509")).await;
-        test_support::amit_adjustment(&pool, 2, 1, 2, dec("100")).await;
 
         let alerts = db_amit_adjustment_alerts(&pool).await.unwrap();
         assert_eq!(alerts.len(), 1);
@@ -1490,14 +1494,6 @@ mod tests {
             .qty(dec("509"))
             .insert(&pool)
             .await;
-        // Sold in FY2024 — before the 1 July 2024 start of the FY the
-        // 31 Dec 2024 statement's year end belongs to.
-        test_support::sell(2, 1)
-            .date(ymd(2024, 2, 1))
-            .qty(dec("509"))
-            .insert(&pool)
-            .await;
-        allocate(&pool, 1, 2, 1, dec("509")).await;
         let year_end = ymd(2024, 12, 31);
         assert_eq!(tax_year_for(year_end), 2025);
         let a = test_support::amma(1, 1)
@@ -1509,7 +1505,17 @@ mod tests {
             })
             .build();
         test_support::insert_amma_bypassing_checks(&pool, &a).await;
+        // The row before the sale: the write path refuses it after, by the
+        // same FY rule this test pins for the band.
         test_support::amit_adjustment(&pool, 1, 1, 1, dec("509")).await;
+        // Sold in FY2024 — before the 1 July 2024 start of the FY the
+        // 31 Dec 2024 statement's year end belongs to.
+        test_support::sell(2, 1)
+            .date(ymd(2024, 2, 1))
+            .qty(dec("509"))
+            .insert(&pool)
+            .await;
+        allocate(&pool, 1, 2, 1, dec("509")).await;
 
         let alerts = db_amit_adjustment_alerts(&pool).await.unwrap();
         assert_eq!(alerts.len(), 1);

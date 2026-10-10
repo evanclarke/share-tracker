@@ -139,6 +139,9 @@ fn events_with_disposal(
             if sale_date <= e.tax_year_end_date {
                 e.disposed_by_year_end += units_acquired;
             }
+            if sale_date < crate::domain::tax_year::fy_start(e.tax_year_end_date) {
+                e.disposed_before_year_start += units_acquired;
+            }
             e
         })
         .collect()
@@ -156,6 +159,7 @@ mod tests {
             per_unit: dec("1.30"),
             covered: dec("100"),
             disposed_by_year_end: disposed,
+            disposed_before_year_start: Decimal::ZERO,
             carried_out: Decimal::ZERO,
         }
     }

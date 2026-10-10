@@ -630,6 +630,12 @@ pub struct AmitReductionEvent {
     /// Units of the parcel disposed of on or before `tax_year_end_date` —
     /// real disposals only.
     pub disposed_by_year_end: Decimal,
+    /// The part of [`Self::disposed_by_year_end`] disposed of **before the
+    /// statement's income year began** (`domain::tax_year::fy_start`). Those units
+    /// were never held during the year the statement reports on, so no
+    /// coverage reaches them — a spill onto them would change the gain of an
+    /// earlier, already-lodged year.
+    pub disposed_before_year_start: Decimal,
     /// Units of the parcel a rollover has carried into a replacement parcel,
     /// whenever it ran. They are neither held in this parcel nor disposed of
     /// from it: a row generated after the move covers them on the
@@ -666,8 +672,11 @@ impl AmitReductionEvent {
     /// in the parcel **first** — that is what
     /// `entities::amit_adjustment_generation` means when it writes
     /// `quantity = remaining_as_of` — then the units a rollover carried out of
-    /// it, and only spills onto the units disposed of by the year end once it
-    /// covers more than both. The carried units come second because which of
+    /// it, and only spills onto the units disposed of **during the
+    /// statement's income year** once it covers more than both. Units
+    /// disposed of before that year began (`tax_year::fy_start`) take nothing:
+    /// they were never held in the year the statement reports on, and a spill
+    /// onto them would change an earlier, already-lodged year's gain. The carried units come second because which of
     /// the two rows covers them depends on the order of entry: a row generated
     /// after the move leaves them to the replacement's own row (so this row
     /// covers exactly the units left, and they take its full per-unit
@@ -679,9 +688,9 @@ impl AmitReductionEvent {
     ///
     /// Within each group the coverage is spread evenly, since units of one
     /// parcel are otherwise indistinguishable. The three rates always
-    /// reconstruct [`Self::amount`] exactly (for a row within the parcel's
-    /// units, which the write path enforces), so which units a row reaches
-    /// never changes how much it takes off in total. The single division
+    /// reconstruct [`Self::amount`] exactly (for a row within the units held
+    /// during the year, which the write path enforces), so which units a row
+    /// reaches never changes how much it takes off in total. The single division
     /// comes last so that identity holds to the last decimal place even where
     /// the covered units don't divide evenly into the group — which is exactly
     /// what [`mul_div`] preserves, while giving an answer rather than a panic
@@ -694,18 +703,29 @@ impl AmitReductionEvent {
         whereabouts: Whereabouts,
     ) -> Decimal {
         let carried = self.carried_out.min(parcel_quantity).max(Decimal::ZERO);
-        let sold = self
+        let disposed = self
             .disposed_by_year_end
             .min(parcel_quantity - carried)
             .max(Decimal::ZERO);
-        let held = parcel_quantity - carried - sold;
+        let held = parcel_quantity - carried - disposed;
+        // Only the units disposed of *during* the statement's income year can
+        // take a spill: those sold before it began were never held in the
+        // year the statement reports on.
+        let sold =
+            (disposed - self.disposed_before_year_start.max(Decimal::ZERO)).max(Decimal::ZERO);
         // `disposed_on` on the year end itself counts as sold by it: the
         // statement's year-end position no longer includes those units, which
         // is the same boundary `disposed_by_year_end` was counted on.
         let (coverage, group) = match whereabouts {
-            Whereabouts::DisposedOn(d) if d <= self.tax_year_end_date => {
-                ((self.covered - held - carried).max(Decimal::ZERO), sold)
+            Whereabouts::DisposedOn(d)
+                if d < crate::domain::tax_year::fy_start(self.tax_year_end_date) =>
+            {
+                return Decimal::ZERO;
             }
+            Whereabouts::DisposedOn(d) if d <= self.tax_year_end_date => (
+                (self.covered - held - carried).max(Decimal::ZERO).min(sold),
+                sold,
+            ),
             Whereabouts::CarriedOut => (
                 (self.covered - held).max(Decimal::ZERO).min(carried),
                 carried,
@@ -1148,6 +1168,7 @@ mod tests {
             per_unit: per_unit.parse().unwrap(),
             covered: Decimal::from(covered),
             disposed_by_year_end: Decimal::from(disposed),
+            disposed_before_year_start: Decimal::ZERO,
             carried_out: Decimal::ZERO,
         }
     }
@@ -1581,6 +1602,7 @@ mod tests {
             per_unit: "0.5".parse().unwrap(),
             covered: units,
             disposed_by_year_end: units,
+            disposed_before_year_start: Decimal::ZERO,
             ..amit(1, 2024, "0.5", 0, 0)
         };
         assert_eq!(
@@ -1637,6 +1659,41 @@ mod tests {
                 Whereabouts::DisposedOn(date(2024, 3, 1))
             ),
             "0.25".parse().unwrap()
+        );
+    }
+
+    /// Units disposed of before the statement's income year began were never
+    /// held during it: no spill reaches them, however much the row covers, so
+    /// an earlier — already-lodged — year's gain is never changed. 100 units,
+    /// 60 sold in FY2022, 20 more during FY2025: a FY2025 row covering the 40
+    /// held in the year takes the full rate off the 20 left and the 20 sold in
+    /// the year, and nothing off the FY2022 sale.
+    #[test]
+    fn units_disposed_before_the_income_year_take_no_spill() {
+        let e = AmitReductionEvent {
+            disposed_before_year_start: Decimal::from(60),
+            ..amit(1, 2025, "1", 40, 80)
+        };
+        let q = Decimal::from(100);
+        let fy2022 = Whereabouts::DisposedOn(date(2022, 3, 3));
+        let fy2025 = Whereabouts::DisposedOn(date(2024, 9, 1));
+        assert_eq!(e.per_unit_for(q, fy2022), Decimal::ZERO);
+        assert_eq!(e.per_unit_for(q, Whereabouts::InParcel), Decimal::ONE);
+        assert_eq!(e.per_unit_for(q, fy2025), Decimal::ONE);
+        assert_eq!(
+            e.reduction_for_units(q, Decimal::from(20), Whereabouts::InParcel)
+                + e.reduction_for_units(q, Decimal::from(20), fy2025)
+                + e.reduction_for_units(q, Decimal::from(60), fy2022),
+            e.amount()
+        );
+        // The year's first day is inside it; the day before is not.
+        assert_eq!(
+            e.per_unit_for(q, Whereabouts::DisposedOn(date(2024, 7, 1))),
+            Decimal::ONE
+        );
+        assert_eq!(
+            e.per_unit_for(q, Whereabouts::DisposedOn(date(2024, 6, 30))),
+            Decimal::ZERO
         );
     }
 

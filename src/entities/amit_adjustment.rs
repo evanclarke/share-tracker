@@ -1,5 +1,6 @@
 use crate::domain::cost_base::AmitReductionEvent;
 use crate::domain::rollover;
+use crate::domain::tax_year::fy_start;
 use crate::entities::corporate_action;
 use crate::infra::db::write_tx;
 use crate::infra::decimal::{Money, parse_dec};
@@ -146,6 +147,14 @@ pub enum UpsertError {
         /// The replacement parcels the units went into, ascending.
         replacements: Vec<i64>,
     },
+    /// The row covers more units than the parcel held at any point during
+    /// the statement's income year — the excess could only reach units
+    /// disposed of in an earlier year, whose gain is already lodged.
+    #[error("the adjusted quantity exceeds the units held during the statement's income year")]
+    QuantityExceedsUnitsHeldInYear {
+        /// The parcel's units still held when the income year began.
+        held_in_year: Decimal,
+    },
     /// Another row already adjusts this parcel on this statement. Applying
     /// the statement's per-unit figure to the same parcel twice reduces its
     /// cost base twice, and CGT event E10's nil floor turns an over-reduction
@@ -249,6 +258,21 @@ async fn traces_back_to(
         }
     }
     Ok(false)
+}
+
+/// The parcel's trade date and its listing's splits — what re-bases an
+/// allocation (in its sale date's units) back to the parcel's as-acquired ones.
+async fn trade_date_and_splits(
+    conn: &mut sqlx::SqliteConnection,
+    trade_id: i64,
+    listing_id: i64,
+) -> Result<(chrono::NaiveDate, Vec<corporate_action::SplitEvent>), sqlx::Error> {
+    let trade_date: chrono::NaiveDate = sqlx::query_scalar("SELECT date FROM trades WHERE id = ?")
+        .bind(trade_id)
+        .fetch_one(&mut *conn)
+        .await?;
+    let splits = corporate_action::db_splits_for_listing(&mut *conn, listing_id).await?;
+    Ok((trade_date, splits))
 }
 
 /// The shared write core of both: `id` is `Some` on the client-supplied-id
@@ -374,12 +398,8 @@ async fn db_write_on(
     .fetch_all(&mut *conn)
     .await?;
     if !rollover_rows.is_empty() {
-        let trade_date: chrono::NaiveDate =
-            sqlx::query_scalar("SELECT date FROM trades WHERE id = ?")
-                .bind(adj.trade_id)
-                .fetch_one(&mut *conn)
-                .await?;
-        let splits = corporate_action::db_splits_for_listing(&mut *conn, trade_listing_id).await?;
+        let (trade_date, splits) =
+            trade_date_and_splits(&mut *conn, adj.trade_id, trade_listing_id).await?;
         let mut sales = Vec::with_capacity(rollover_rows.len());
         let mut groups = Vec::new();
         for row in &rollover_rows {
@@ -419,6 +439,43 @@ async fn db_write_on(
                 adjustable,
                 replacements,
             });
+        }
+    }
+
+    // A statement reports on one income year, so its row can cover at most
+    // the parcel's units held at some point *during* that year: the trade's
+    // quantity less every unit gone before the year began. The trade quantity
+    // alone let a row's coverage spill onto a sale of an earlier — already
+    // lodged — year and change its gain (2026-10-10 review). Disposals and
+    // rollovers both count: neither kind of unit was in this parcel for the
+    // year. `reduction_for_units` confines the spill to the year's own
+    // disposals to match.
+    let year_end: chrono::NaiveDate =
+        sqlx::query_scalar("SELECT tax_year_end_date FROM amma_statements WHERE id = ?")
+            .bind(adj.amma_statement_id)
+            .fetch_one(&mut *conn)
+            .await?;
+    let gone_rows: Vec<(chrono::NaiveDate, String)> = sqlx::query_as(
+        "SELECT s.date, pa.quantity_allocated \
+         FROM parcel_allocations pa JOIN trades s ON s.id = pa.sale_trade_id \
+         WHERE pa.purchase_trade_id = ? AND s.date < ?",
+    )
+    .bind(adj.trade_id)
+    .bind(fy_start(year_end))
+    .fetch_all(&mut *conn)
+    .await?;
+    if !gone_rows.is_empty() {
+        let (trade_date, splits) =
+            trade_date_and_splits(&mut *conn, adj.trade_id, trade_listing_id).await?;
+        let mut gone = Vec::with_capacity(gone_rows.len());
+        for (date, qty) in gone_rows {
+            gone.push((date, parse_dec("quantity_allocated", qty)?));
+        }
+        let held_in_year = (trade_qty
+            - corporate_action::sold_in_acquired_units(gone, &splits, trade_date))
+        .max(Decimal::ZERO);
+        if adj.quantity > held_in_year {
+            return Err(UpsertError::QuantityExceedsUnitsHeldInYear { held_in_year });
         }
     }
 
@@ -603,6 +660,14 @@ pub async fn db_cost_base_reduction_events(
             .filter(|c| c.disposal && c.date <= tax_year_end_date)
             .map(as_acquired)
             .sum();
+        // Of those, the units gone before the income year began: the
+        // statement's coverage never reaches them.
+        let year_start = fy_start(tax_year_end_date);
+        let disposed_before_year_start = consumed
+            .iter()
+            .filter(|c| c.disposal && c.date < year_start)
+            .map(as_acquired)
+            .sum();
         // Whenever the move ran, up to the read's own cutoff: a view as at a
         // date before the move still sees those units in this parcel.
         let carried_out = consumed
@@ -616,6 +681,7 @@ pub async fn db_cost_base_reduction_events(
             per_unit: reduction_for(Decimal::ONE, cba, splits, trade_date, tax_year_end_date),
             covered,
             disposed_by_year_end,
+            disposed_before_year_start,
             carried_out,
         });
     }
@@ -676,6 +742,14 @@ impl From<UpsertError> for ApiError {
             ),
             UpsertError::QuantityExceedsTrade => {
                 ApiError::unprocessable("the adjusted quantity exceeds the trade's quantity")
+            }
+            UpsertError::QuantityExceedsUnitsHeldInYear { held_in_year } => {
+                ApiError::unprocessable(format!(
+                    "the adjusted quantity exceeds the {held_in_year} unit(s) of the parcel held \
+                     during the statement's income year — the rest were disposed of before the \
+                     year began, and a reduction reaching them would change an earlier year's \
+                     capital gain"
+                ))
             }
             UpsertError::UnitsCarriedIntoReplacement {
                 adjustable,
@@ -814,6 +888,75 @@ mod tests {
         assert_eq!(events[&1][0].disposed_by_year_end, dec("400"));
         // The moved units are carried out instead — neither held nor sold.
         assert_eq!(events[&1][0].carried_out, dec("600"));
+    }
+
+    /// 2026-10-10 review: a row's coverage is capped at the units of the
+    /// parcel held during the statement's income year, not at its trade
+    /// quantity. Buy 100, sell 60 in FY2022, then a FY2025 statement at \$1:
+    /// a 100-unit row would have spilled \$60 onto the FY2022 sale and taken
+    /// its cost base from 6000 to 5940, changing a lodged year's gain. It is
+    /// refused `422`; the 40 units actually held in FY2025 are accepted, and
+    /// the FY2022 sale's cost base is unchanged.
+    #[tokio::test]
+    async fn a_row_cannot_reach_units_sold_before_its_income_year() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("VDHG").insert(&pool).await;
+        test_support::buy(1, 1)
+            .date(ymd(2022, 1, 10))
+            .qty(dec("100"))
+            .price(dec("100"))
+            .brokerage(Decimal::ZERO)
+            .gst_on_brokerage(Decimal::ZERO)
+            .insert(&pool)
+            .await;
+        test_support::sell(2, 1)
+            .date(ymd(2022, 3, 3))
+            .qty(dec("60"))
+            .insert(&pool)
+            .await;
+        allocate(&pool, 1, 2, 1, dec("60")).await;
+        test_support::amma(6, 1)
+            .units(dec("40"))
+            .cost_base_adjustment(dec("1"))
+            .with(|a| a.tax_year_end_date = ymd(2025, 6, 30))
+            .insert(&pool)
+            .await;
+
+        let body = |quantity: &str| serde_json::json!({"amma_statement_id": 6, "trade_id": 1, "quantity": quantity});
+        let refused = client(&pool).post("/amit_adjustments", &body("100")).await;
+        let (status, text) = refused.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            text.contains("exceeds the 40 unit(s) of the parcel held"),
+            "{text}"
+        );
+        client(&pool)
+            .post("/amit_adjustments", &body("41"))
+            .await
+            .expect_status(StatusCode::UNPROCESSABLE_ENTITY);
+        client(&pool)
+            .post("/amit_adjustments", &body("40"))
+            .await
+            .expect_status(StatusCode::CREATED);
+
+        // The FY2022 sale's cost base is the untouched 60 × \$100.
+        let mut conn = pool.acquire().await.unwrap();
+        let events = db_cost_base_reduction_events(&mut conn, None)
+            .await
+            .unwrap();
+        let e = events[&1][0];
+        assert_eq!(e.disposed_before_year_start, dec("60"));
+        let sold = crate::domain::cost_base::Whereabouts::DisposedOn(ymd(2022, 3, 3));
+        assert_eq!(
+            e.reduction_for_units(dec("100"), dec("60"), sold),
+            Decimal::ZERO
+        );
+        // …and the 40 held in the year carry the whole \$40.
+        let held = crate::domain::cost_base::Whereabouts::InParcel;
+        assert_eq!(
+            e.reduction_for_units(dec("100"), dec("40"), held),
+            dec("40")
+        );
     }
 
     /// `carried_out` is bounded by the read's own cutoff: a view as at a date
