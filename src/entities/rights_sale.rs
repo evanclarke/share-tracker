@@ -380,13 +380,16 @@ struct Anchoring<'a> {
     splits: &'a [SplitEvent],
 }
 
-/// The allocated parcel's units still held when the record date arrived, in
-/// record-date units — its as-acquired quantity minus the units consumed by
-/// sales dated *before* the record date, re-based across any splits. That is
-/// what decides the entitlement the parcel earned.
+/// The allocated parcel's units still registered when the record date
+/// arrived, in record-date units — its as-acquired quantity minus the units
+/// consumed by sales that had *settled* by the record date, re-based across
+/// any splits. That is what decides the entitlement the parcel earned: the
+/// register at the record date is what the issuer reads, and a sale on or
+/// after the ex-date settles after it (`db_held_at_record_date` applies the
+/// same test to the whole holding).
 ///
 /// Errors with [`SellRightsError::NotAnOriginalParcel`] unless the trade is a
-/// Buy/DRP of the issue's own listing dated before the record date: a parcel
+/// Buy/DRP of the issue's own listing settled by the record date: a parcel
 /// that is none of those earned no rights, so no sold right can borrow its
 /// acquisition date for the 12-month discount clock.
 async fn parcel_units_at_record_date(
@@ -394,30 +397,49 @@ async fn parcel_units_at_record_date(
     anchoring: &Anchoring<'_>,
     purchase_trade_id: TradeId,
 ) -> Result<Decimal, SellRightsError> {
-    let parcel =
-        sqlx::query("SELECT trade_type, listing_id, date, quantity FROM trades WHERE id = ?")
-            .bind(purchase_trade_id)
-            .fetch_optional(&mut *conn)
-            .await?;
+    let parcel = sqlx::query(
+        "SELECT trade_type, listing_id, date, settlement_date, quantity, rights_action_id \
+         FROM trades WHERE id = ?",
+    )
+    .bind(purchase_trade_id)
+    .fetch_optional(&mut *conn)
+    .await?;
     let Some(parcel) = parcel else {
         return Err(SellRightsError::NotAnOriginalParcel);
     };
     let parcel_listing: ListingId = parcel.try_get("listing_id")?;
     let parcel_date: NaiveDate = parcel.try_get("date")?;
+    let parcel_settled: NaiveDate = parcel.try_get("settlement_date")?;
     let parcel_type: TradeType = parcel.try_get("trade_type")?;
+    let exercised_from: Option<i64> = parcel.try_get("rights_action_id")?;
     if !parcel_type.is_acquisition()
         || parcel_listing != anchoring.listing_id
-        || parcel_date >= anchoring.record_date
+        || parcel_settled > anchoring.record_date
+        || exercised_from == Some(anchoring.action_id)
     {
         return Err(SellRightsError::NotAnOriginalParcel);
     }
     let parcel_qty = parse_dec("quantity", parcel.try_get("quantity")?)?;
 
-    // Only the sales before the record date reduce the units it entitled.
-    let sold = crate::domain::open_parcels::db_parcel_sales(&mut *conn, purchase_trade_id)
-        .await?
-        .into_iter()
-        .filter(|&(sale_date, _)| sale_date < anchoring.record_date);
+    // Only the sales settled by the record date reduce the units it entitled.
+    let sold_rows = sqlx::query(
+        "SELECT s.date AS sale_date, pa.quantity_allocated \
+         FROM parcel_allocations pa JOIN trades s ON s.id = pa.sale_trade_id \
+         WHERE pa.purchase_trade_id = ? AND s.settlement_date <= ?",
+    )
+    .bind(purchase_trade_id)
+    .bind(anchoring.record_date)
+    .fetch_all(&mut *conn)
+    .await?;
+    let sold = sold_rows
+        .iter()
+        .map(|row| {
+            Ok((
+                row.try_get("sale_date")?,
+                row_dec(row, "quantity_allocated")?,
+            ))
+        })
+        .collect::<Result<Vec<(NaiveDate, Decimal)>, sqlx::Error>>()?;
     let remaining = parcel_qty - sold_in_acquired_units(sold, anchoring.splits, parcel_date);
     Ok(split_adjusted_quantity(
         remaining,
@@ -595,7 +617,8 @@ async fn execute(
 
     // Total cap, shared with the exercise operation: every right used against
     // the action — exercised or sold — comes out of one entitlement.
-    let held = db_held_at_record_date(&mut tx, action.listing_id, record_date, &splits).await?;
+    let held =
+        db_held_at_record_date(&mut tx, action.listing_id, action_id, record_date, &splits).await?;
     let entitled = entitled_units(held, rights_units, rights_held_units);
     let used = db_rights_used(&mut tx, action_id, record_date, &splits).await? + body.units;
     // `None` means the entitlement is past `Decimal`'s range, so nothing the
@@ -840,7 +863,6 @@ mod tests {
     async fn insert_buy(pool: &SqlitePool, id: i64, date: NaiveDate, qty: &str) {
         test_support::buy(id, 1)
             .date(date)
-            .settlement(date)
             .qty(qty.parse().unwrap())
             .price("2.00".parse().unwrap())
             .insert(pool)

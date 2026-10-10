@@ -67,7 +67,7 @@ Explicit parcel allocations link sell trades to the parcels they came from; cost
 
 ### Return of capital (CGT event G1)
 
-Record a company's non-assessable payment as a corporate action; the per-unit amount reduces the cost base of every parcel held on the payment date across all reports, and a payment in excess of a parcel's cost base becomes a capital gain in the net capital gain report (the cost base floors at nil — G1 never produces a loss)
+Record a company's non-assessable payment as a corporate action; the per-unit amount reduces the cost base of every parcel held on the payment date and on the register at its record date — read off each trade's settlement date, so a buy on the ex-date is ex-entitlement and a sale on the ex-date keeps the right to the payment (CGT event C2) — across all reports, and a payment in excess of a parcel's cost base becomes a capital gain in the net capital gain report (the cost base floors at nil — G1 never produces a loss)
 
 ### Share splits and consolidations (TD 2000/10)
 

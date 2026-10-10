@@ -1455,7 +1455,7 @@ mod tests {
         ];
         let per_unit = |i: usize, acquired| {
             events[i]
-                .per_unit_for(&[], "AUD", acquired, None, None)
+                .per_unit_for(&[], "AUD", acquired, acquired, None, None)
                 .expect("same currency")
         };
         // Acquired between the first and second events: the first doesn't apply.
@@ -1489,7 +1489,7 @@ mod tests {
         let acquired = d(2023, 1, 10);
         let per_unit = |event: &RocEvent, rollover| {
             event
-                .per_unit_for(&[], "AUD", operation, Some(rollover), None)
+                .per_unit_for(&[], "AUD", operation, operation, Some(rollover), None)
                 .expect("same currency")
         };
 
@@ -1536,7 +1536,7 @@ mod tests {
         ];
         let per_unit = |i: usize, up_to| {
             events[i]
-                .per_unit_for(&[], "AUD", d(2024, 1, 1), None, up_to)
+                .per_unit_for(&[], "AUD", d(2024, 1, 1), d(2024, 1, 1), None, up_to)
                 .expect("same currency")
         };
         // Sold between the payments: only the one received while held applies.
@@ -1579,7 +1579,7 @@ mod tests {
         let splits = vec![split_event(d(2024, 6, 1), "2", "1")];
         let per_unit = |i: usize, acquired| {
             events[i]
-                .per_unit_for(&splits, "AUD", acquired, None, None)
+                .per_unit_for(&splits, "AUD", acquired, acquired, None, None)
                 .expect("same currency")
         };
         // 0.30 + 0.20 × 2 = 0.70 per as-acquired unit across the two payments.
@@ -1611,14 +1611,14 @@ mod tests {
         // Never net amounts across currencies: fail loudly, don't skip or zero.
         assert!(
             payment
-                .per_unit_for(&[], "AUD", d(2024, 1, 1), None, None)
+                .per_unit_for(&[], "AUD", d(2024, 1, 1), d(2024, 1, 1), None, None)
                 .is_err()
         );
         // An out-of-range payment in another currency is not an error — it
         // doesn't participate in the calculation at all.
         assert!(
             payment
-                .per_unit_for(&[], "AUD", d(2024, 7, 1), None, None)
+                .per_unit_for(&[], "AUD", d(2024, 7, 1), d(2024, 7, 1), None, None)
                 .is_ok()
         );
     }
@@ -1639,7 +1639,7 @@ mod tests {
         };
         let pu = |acquired, up_to| {
             payment
-                .per_unit_for(&[], "AUD", acquired, None, up_to)
+                .per_unit_for(&[], "AUD", acquired, acquired, None, up_to)
                 .expect("same currency")
         };
         assert_eq!(pu(d(2024, 1, 1), None), Some("0.20".parse().unwrap()));
@@ -1652,8 +1652,11 @@ mod tests {
     }
 
     /// Entitlement to a return of capital is fixed at its **record date**, weeks
-    /// before the money arrives (SCENARIOS B-09): a parcel bought inside that
-    /// window receives nothing, so nothing reduces it. Without a record date the
+    /// before the money arrives (SCENARIOS B-09): a parcel registered after
+    /// it receives nothing, so nothing reduces it. "Registered" is the
+    /// parcel's **settlement** date, not its trade date — under T+2 the
+    /// ex-date is the business day before the record date, and a buy on it
+    /// settles the day after the record date. Without a record date the
     /// payment date stands in — the behaviour of every action recorded before
     /// the field existed.
     #[test]
@@ -1664,27 +1667,49 @@ mod tests {
             currency: "AUD".into(),
             record_date,
         };
+        // Monday 10 Feb 2025: ex-date Friday 7 Feb.
         let record = d(2025, 2, 10);
-        let pu = |event: RocEvent, acquired, up_to| {
+        let pu = |event: RocEvent, acquired, settled, up_to| {
             event
-                .per_unit_for(&[], "AUD", acquired, None, up_to)
+                .per_unit_for(&[], "AUD", acquired, settled, None, up_to)
                 .expect("same currency")
         };
         let paid = Some("0.50".parse::<Decimal>().unwrap());
 
-        // Held before the record date: entitled.
-        assert_eq!(pu(payment(Some(record)), d(2025, 2, 9), None), paid);
-        // Bought on the record date, or anywhere in the window up to the
-        // payment: ex-entitlement, so untouched.
-        assert_eq!(pu(payment(Some(record)), record, None), None);
-        assert_eq!(pu(payment(Some(record)), d(2025, 2, 15), None), None);
-        // No record date recorded: the payment date decides, as before.
-        assert_eq!(pu(payment(None), d(2025, 2, 15), None), paid);
+        // Bought the business day before the ex-date (Thu 6 Feb), settled on
+        // the record date: registered for it, so entitled.
+        assert_eq!(pu(payment(Some(record)), d(2025, 2, 6), record, None), paid);
+        // Bought on the ex-date (Fri 7 Feb), settled Tue 11 Feb — after the
+        // record date — ex-entitlement, though traded before it.
+        assert_eq!(
+            pu(payment(Some(record)), d(2025, 2, 7), d(2025, 2, 11), None),
+            None
+        );
+        // Bought anywhere in the window up to the payment: ex-entitlement.
+        assert_eq!(
+            pu(payment(Some(record)), d(2025, 2, 15), d(2025, 2, 18), None),
+            None
+        );
+        // A same-day-settled parcel (a DRP, an ESS vest) on the record date
+        // itself is on the register at it.
+        assert_eq!(pu(payment(Some(record)), record, record, None), paid);
+        // No record date recorded: the payment date decides, against the
+        // settlement date too.
+        assert_eq!(
+            pu(payment(None), d(2025, 2, 15), d(2025, 2, 18), None),
+            paid
+        );
+        assert_eq!(pu(payment(None), d(2025, 2, 27), d(2025, 3, 3), None), None);
         // The other half of the test is unchanged by a record date: a parcel
         // entitled at the record date but sold before the payment is still not
         // reduced (G1 adjusts the shares owned at the time of the payment).
         assert_eq!(
-            pu(payment(Some(record)), d(2025, 2, 9), Some(d(2025, 2, 20))),
+            pu(
+                payment(Some(record)),
+                d(2025, 2, 6),
+                record,
+                Some(d(2025, 2, 20))
+            ),
             None,
             "sold between the record date and the payment"
         );
@@ -2931,8 +2956,10 @@ mod tests {
             StatusCode::CREATED,
         )
         .await;
-        // With a record date it is entitlement at *that* date that decides: a
-        // parcel acquired on the record date is ex-entitlement …
+        // With a record date it is entitlement at *that* date that decides,
+        // and a parcel joins the register when it *settles*: bought Mon 6 Jan
+        // 2025 and settled Wed 8 Jan, it is ex-entitlement to a record date
+        // of 7 Jan though traded before it …
         let payment = |record: &str| {
             serde_json::json!({
                 "action_type": "ReturnOfCapital",
@@ -2944,19 +2971,20 @@ mod tests {
             })
         };
         let resp = client(&pool)
-            .put("/corporate_actions/2", &payment("2025-01-06"))
+            .put("/corporate_actions/2", &payment("2025-01-07"))
             .await;
         assert_eq!(resp.status, StatusCode::CREATED);
-        // … while one acquired the day before it is not, and the same edit is
-        // refused — the check runs over the state the write would leave.
+        // … while with the record date on its settlement date it is entitled,
+        // and the same edit is refused — the check runs over the state the
+        // write would leave.
         let resp = client(&pool)
-            .put("/corporate_actions/2", &payment("2025-01-07"))
+            .put("/corporate_actions/2", &payment("2025-01-08"))
             .await;
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
         let stored = db_get(&pool, 2).await.unwrap().unwrap();
         assert_eq!(
             stored.kind,
-            roc_with_record(2, ListingId(1), d(2025, 6, 1), "0.50", d(2025, 1, 6)).kind,
+            roc_with_record(2, ListingId(1), d(2025, 6, 1), "0.50", d(2025, 1, 7)).kind,
             "the refused edit left the stored terms untouched"
         );
     }
@@ -3373,21 +3401,23 @@ mod tests {
         assert!(db_delete(&pool, 11).await.unwrap());
 
         // Nor does a payment the parcel was never entitled to: its record date
-        // (not the payment date) is what decides which parcels it reached, so
-        // the guard bounds the acquisitions it looks for by the same date the
-        // cost-base pipeline does.
+        // (not the payment date) is what decides which parcels it reached, and
+        // the parcel — bought 10 Jan, settled 12 Jan — was not yet registered
+        // on 11 Jan, so the guard bounds the acquisitions it looks for by the
+        // same settlement test the cost-base pipeline does.
         db_upsert(
             &pool,
-            &roc_with_record(12, ListingId(1), d(2023, 6, 1), "0.50", d(2023, 1, 5)),
+            &roc_with_record(12, ListingId(1), d(2023, 6, 1), "0.50", d(2023, 1, 11)),
         )
         .await
         .unwrap();
         assert!(db_delete(&pool, 12).await.unwrap());
 
-        // One day later the parcel *is* entitled, and the guard holds again.
+        // On its settlement date the parcel *is* entitled, and the guard holds
+        // again.
         db_upsert(
             &pool,
-            &roc_with_record(13, ListingId(1), d(2023, 6, 1), "0.50", d(2023, 1, 11)),
+            &roc_with_record(13, ListingId(1), d(2023, 6, 1), "0.50", d(2023, 1, 12)),
         )
         .await
         .unwrap();

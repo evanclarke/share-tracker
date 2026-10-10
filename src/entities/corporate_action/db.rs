@@ -986,8 +986,8 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<bool, DeleteError> 
             action.date,
             DeleteError::RebasedTrades,
         )),
-        // Which acquisitions the payment actually reached: those held before
-        // its record date, or — with none recorded — those made on or before
+        // Which acquisitions the payment actually reached: those settled
+        // (registered) on or before its record date, or — with none recorded —
         // the payment date, the same entitlement test the cost-base pipeline
         // applies (`RocEvent::per_unit_for`). A parcel bought ex-entitlement
         // was never reduced, so deleting the action restates nothing about it.
@@ -996,7 +996,8 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<bool, DeleteError> 
             ..
         } => Some((
             "SELECT EXISTS(SELECT 1 FROM trades \
-                           WHERE listing_id = ? AND date < ? AND trade_type IN ('Buy', 'DRP'))",
+                           WHERE listing_id = ? AND settlement_date <= ? \
+                             AND trade_type IN ('Buy', 'DRP'))",
             *record_date,
             DeleteError::ReducedParcels,
         )),
@@ -1004,7 +1005,8 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<bool, DeleteError> 
             record_date: None, ..
         } => Some((
             "SELECT EXISTS(SELECT 1 FROM trades \
-                           WHERE listing_id = ? AND date <= ? AND trade_type IN ('Buy', 'DRP'))",
+                           WHERE listing_id = ? AND settlement_date <= ? \
+                             AND trade_type IN ('Buy', 'DRP'))",
             action.date,
             DeleteError::ReducedParcels,
         )),

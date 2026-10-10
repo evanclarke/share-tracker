@@ -890,6 +890,7 @@ mod tests {
             listing_id: ListingId(1),
             holding_account_id: HoldingAccountId(1),
             date,
+            settlement_date: date,
             quantity: Decimal::from(qty),
             average_price: Decimal::from(price),
             brokerage: Decimal::ZERO,

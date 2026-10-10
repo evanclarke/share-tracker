@@ -7316,3 +7316,35 @@ Scored 6/10 — the weakest dimension. The operation modules are well factored, 
   resolution, advisory-ignore expiry, QC headers)
   The pins are the passing test CLAUDE.md requires before a doc-only TODO item can be checked off;
   rewording costs a test edit, which is the intended friction
+
+## Return-of-capital and rights entitlement compare the trade date with the record date (2026-10-10 review, financial correctness — medium)
+`corporate_action/adjustments.rs` (~line 132, `registered_from < record_date`; the SQL at ~248) and the
+C2 test in `reports/net_capital_gain.rs` (~595) decide entitlement on the trade date. Under ASX T+2
+the ex-date is one business day before the record date, so a buy *on* the ex-date is wrongly
+entitled (cost base reduced) and a sale on the ex-date is wrongly unentitled (its C2 gain missed).
+The rights-issue "dated on or after the record date is ex-rights" cut-off has the same off-by-one.
+The behaviour is documented today, but trades already carry `settlement_date`.
+- [x] Tests at the boundary: a buy and a sell on the ex-date (record date − 1 business day) and on
+  the business day before it, for a ROC, a rights issue and the C2 check
+- [x] Decide on the entitlement date per registration (settlement date vs record date, or an explicit
+  ex-date on the corporate action), implement it consistently across ROC, rights and C2, and update
+  the Known-limitations entry
+  DONE 2026-10-10: **settlement date** — entitlement is the register at the record date, and a parcel
+  joins it when its Buy settles and leaves it when its Sell settles. That needs no new column (every
+  trade already carries a NOT NULL `settlement_date`) and is right for any settlement cycle (T+2 ASX,
+  T+3 before March 2016, T+1 US) without recording an ex-date; same-day-settled parcels (DRP, ESS
+  vest, rights exercise) register on their own date. Applied consistently: `RocEvent::per_unit_for`
+  takes the parcel's settled date (`Parcel::settled` / `ParcelRow::settlement_date`); the rollover
+  register-date walk terminates at the source parcel's settlement date; the C2 test asks whether the
+  Sell *settled* after the record date (`UnitsConsumed::settled`) while "sold before the payment"
+  keeps the contract date; the currency-conflict and delete-guard SQL, `db_held_at_record_date` (now
+  excluding the issue's own exercises) and the rights-sale per-parcel cap all read settlement dates.
+  The no-record-date fallback compares the settlement date with the payment date. Tests:
+  `net_capital_gain::api_return_of_capital_entitlement_turns_on_settlement_at_the_ex_date` (server-
+  computed T+2 across a weekend: buy/sell Thu 6 Feb vs Fri 7 Feb 2025 against record date Mon 10 Feb
+  — cost base 950 vs 1000, C2 $25 from the ex-date sale only) and
+  `rights_exercise::entitlement_turns_on_settlement_at_the_ex_date`; new Known-limitations entry
+  *Entitlement at a record date is read off settlement dates* (wrong stored settlement dates and
+  failed settlements are invisible), pinned by
+  `doc_checks::known_limitations_document_entitlement_read_off_settlement_dates`; API.md, SCHEMA.md,
+  FEATURES.md and the UI form hints restated.

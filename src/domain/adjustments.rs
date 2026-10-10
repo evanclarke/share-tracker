@@ -83,21 +83,26 @@ pub struct RolloverOrigin {
 
 impl RocEvent {
     /// What this payment reduces the cost base by, per *as-acquired* unit of
-    /// a parcel acquired on `acquired` and still held at `up_to` (`None` =
+    /// a parcel acquired on `acquired`, settled (so registered) on `settled`,
+    /// and still held at `up_to` (`None` =
     /// held today) — or `None` when the payment does not reach those units at
     /// all.
     ///
     /// Two independent tests, one at each end of the window:
     ///
-    /// - **Entitlement** — a parcel acquired after the payment was fixed never
-    ///   received it. When the action records a [record date](Self::record_date)
-    ///   that is what fixes it: units held *before* it earn the payment, so a
-    ///   parcel acquired on or after it is ex-entitlement (the convention a
-    ///   `RightsIssue`'s own date already uses). With none recorded the payment
-    ///   date stands in, so a parcel acquired on or before it is treated as
-    ///   entitled — the behaviour every action carried before record dates were
-    ///   modelled, and an over-reduction for a parcel bought inside the
-    ///   record-to-payment window (`docs/API.md`, Corporate actions).
+    /// - **Entitlement** — only units on the register when the payment was
+    ///   fixed receive it. When the action records a
+    ///   [record date](Self::record_date) that is what fixes it: a parcel
+    ///   whose units joined the register — its `settled` date, the day a
+    ///   market purchase is registered — on or before the record date earns
+    ///   the payment, and one settling after it is ex-entitlement. That is the
+    ///   exchange's ex-date convention without needing the ex-date: under T+2
+    ///   a buy on the ex-date (one business day before the record date)
+    ///   settles the day after it, and a same-day-settled parcel (a DRP, an
+    ///   ESS vest) is registered on its own date. With no record date recorded
+    ///   the payment date stands in, so a parcel settled on or before it is
+    ///   treated as entitled — an over-reduction for a parcel settled inside
+    ///   the record-to-payment window (`docs/API.md`, Corporate actions).
     /// - **Still held** — a unit sold before the payment was not held for it
     ///   (CGT event G1 adjusts the cost base of shares owned *at the time of
     ///   the payment*, `docs/ato/cgt-non-assessable-payments.md`), so a payment
@@ -121,20 +126,22 @@ impl RocEvent {
         splits: &[SplitEvent],
         parcel_currency: &str,
         acquired: NaiveDate,
+        settled: NaiveDate,
         rollover: Option<RolloverOrigin>,
         up_to: Option<NaiveDate>,
     ) -> Result<Option<Decimal>, sqlx::Error> {
-        // Entitlement asks when the units joined *this listing's* register,
-        // which for a rollover replacement parcel is not its own trade date:
-        // a transfer between the taxpayer's accounts leaves them registered
-        // throughout (see `RolloverOrigin::registered_from`). The split
-        // re-basing below still runs from `acquired`, the parcel's own trade
-        // date, because that is the basis its quantity is stated in.
-        let registered_from = rollover.map_or(acquired, |r| r.registered_from);
-        let entitled = match self.record_date {
-            Some(record_date) => registered_from < record_date,
-            None => registered_from <= self.date,
-        };
+        // Entitlement asks when the units joined *this listing's* register.
+        // For an ordinary parcel that is its settlement date, not its trade
+        // date: a market purchase is registered when it settles, which is what
+        // the exchange's ex-date convention encodes (under T+2 a buy on the
+        // ex-date, one business day before the record date, settles after it
+        // and is ex-entitlement). For a rollover replacement parcel it is
+        // neither: a transfer between the taxpayer's accounts leaves the
+        // units registered throughout (see `RolloverOrigin::registered_from`).
+        // The split re-basing below still runs from `acquired`, the parcel's
+        // own trade date, because that is the basis its quantity is stated in.
+        let registered_from = rollover.map_or(settled, |r| r.registered_from);
+        let entitled = registered_from <= self.record_date.unwrap_or(self.date);
         if !entitled || up_to.is_some_and(|d| self.date > d) {
             return Ok(None);
         }
@@ -227,8 +234,8 @@ pub struct CurrencyConflict {
 /// brokerage-currency invariant (`trade::checks::check_amounts`).
 ///
 /// Which parcels a payment reaches is [`RocEvent::per_unit_for`]'s entitlement
-/// test, expressed in SQL: units held *before* a recorded record date, or —
-/// with none recorded — acquired on or before the payment date (the same test
+/// test, expressed in SQL: units settled (registered) on or before a recorded
+/// record date, or — with none recorded — the payment date (the same test
 /// the delete guard in `db.rs` applies). A parcel acquired ex-entitlement was
 /// never reduced by the payment, so its currency is free to differ. The
 /// "still held" half of the window is deliberately *not* applied: a parcel
@@ -247,8 +254,7 @@ where
          FROM corporate_actions ca JOIN trades t ON t.listing_id = ca.listing_id \
          WHERE ca.action_type = 'ReturnOfCapital' AND ca.listing_id = ? \
            AND t.trade_type IN ('Buy', 'DRP') \
-           AND (CASE WHEN ca.record_date IS NOT NULL \
-                     THEN t.date < ca.record_date ELSE t.date <= ca.date END) \
+           AND t.settlement_date <= COALESCE(ca.record_date, ca.date) \
            AND upper(t.currency) <> upper(ca.currency) \
          ORDER BY ca.date, ca.id, t.date, t.id LIMIT 1",
     )

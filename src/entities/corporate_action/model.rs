@@ -234,14 +234,16 @@ impl ActionKind {
 pub struct CorporateAction {
     pub id: i64,
     pub listing_id: ListingId,
-    /// ReturnOfCapital: payment date — parcels acquired on/before it are
-    /// affected, unless the action carries a `record_date`, which then decides
-    /// entitlement instead. ShareSplit: conversion date — parcels acquired before it are
+    /// ReturnOfCapital: payment date — parcels settled (registered) on/before
+    /// it are affected, unless the action carries a `record_date`, which then
+    /// decides entitlement instead (settled on/before the record date). ShareSplit: conversion date — parcels acquired before it are
     /// converted (a trade dated on the conversion date is already in
     /// post-split units). BonusIssue: issue date — parcels acquired before it
     /// receive bonus units (a trade dated on the issue date is ex-bonus).
-    /// RightsIssue: record date — units held before it earn the entitlement
-    /// (a trade dated on it is ex-rights); exercises are dated on/after it.
+    /// RightsIssue: record date — units on the register at it earn the
+    /// entitlement (a buy settled on/before it, less sales settled on/before
+    /// it, so a trade on the ex-date is ex-rights to the buyer and cum-rights
+    /// to the seller); exercises are dated on/after it.
     /// ScripForScrip: exchange date — every parcel still open on it is
     /// exchanged; the closing Sell and replacement Buys are dated on it.
     /// Demerger: demerger date — every head parcel still open on it

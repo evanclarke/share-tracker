@@ -5611,6 +5611,7 @@ mod tests {
             listing_id: ListingId(1),
             holding_account_id: HoldingAccountId(1),
             date: ymd(2026, 1, 5),
+            settlement_date: ymd(2026, 1, 5),
             quantity: dec("100"),
             average_price: dec("10"),
             brokerage: Decimal::ZERO,

@@ -82,6 +82,11 @@ pub struct Parcel<'a> {
     /// parcels), where different, only drives the discount clock and the AUD
     /// translation month, never which events touch the parcel.
     pub trade_date: NaiveDate,
+    /// The settlement date — when the units joined the listing's register,
+    /// which is what decides entitlement to a return of capital (see
+    /// `RocEvent::per_unit_for`). Equal to the trade date for a parcel that
+    /// settles same-day (a DRP, an ESS vest, an exchange-less listing).
+    pub settled: NaiveDate,
     /// Set when a rollover created this parcel, carrying the operation date
     /// and the date the units joined this listing's register — see
     /// [`RolloverOrigin`], and `RocEvent::per_unit_for`, its only reader.
@@ -298,6 +303,9 @@ pub struct ParcelRow {
     /// The actual trade date — drives split and return-of-capital
     /// applicability (see [`Parcel::trade_date`]).
     pub date: NaiveDate,
+    /// When the units were registered — entitlement to a return of capital
+    /// asks this, not the trade date (see [`Parcel::settled`]).
+    pub settlement_date: NaiveDate,
     #[sqlx(try_from = "Money")]
     pub quantity: Decimal,
     #[sqlx(try_from = "Money")]
@@ -354,7 +362,8 @@ impl ParcelRow {
     /// own — the mapping also carries [`Self::demerger_head_listing_id`],
     /// which is read off another table; build the list with [`Self::columns`]
     /// or [`Self::columns_qualified`].
-    const TRADE_COLUMNS: &'static str = "id, listing_id, holding_account_id, date, quantity, \
+    const TRADE_COLUMNS: &'static str = "id, listing_id, holding_account_id, date, \
+         settlement_date, quantity, \
          average_price, brokerage, gst_on_brokerage, currency, fx_rate, spot_fx_rate, \
          deemed_acquisition_date, scrip_action_id, demerger_action_id, transfer_id";
 
@@ -400,8 +409,9 @@ impl ParcelRow {
     /// allocations. Anything else terminates it: a **scrip exchange** or a
     /// **demerger's spun-off parcel** put the units on a register they were
     /// not on before, so the answer is that operation's own date, and an
-    /// ordinary parcel's is its [`Self::acquired`] — the two cases the
-    /// `MAX(CASE …)` picks between. Bounded by
+    /// ordinary parcel's is its settlement date — the day a market purchase
+    /// joins the register — or, for an inherited parcel, its deemed
+    /// acquisition date: the two cases the `MAX(CASE …)` picks between. Bounded by
     /// [`rollover::MAX_ROLLOVER_DEPTH`](crate::domain::rollover::MAX_ROLLOVER_DEPTH),
     /// the same bound the two id walks beside it observe.
     ///
@@ -426,16 +436,16 @@ impl ParcelRow {
         format!(
             "CASE WHEN {alias}.transfer_id IS NOT NULL OR {alias}.demerger_action_id IS NOT NULL \
              THEN (WITH RECURSIVE chain_parcel(\
-                     listing_id, date, deemed_acquisition_date, scrip_action_id, \
+                     listing_id, date, settlement_date, deemed_acquisition_date, scrip_action_id, \
                      demerger_action_id, transfer_id, head_listing_id, depth) AS (\
-                   SELECT chain_start.listing_id, chain_start.date, \
+                   SELECT chain_start.listing_id, chain_start.date, chain_start.settlement_date, \
                           chain_start.deemed_acquisition_date, chain_start.scrip_action_id, \
                           chain_start.demerger_action_id, chain_start.transfer_id, \
                           (SELECT chain_action.listing_id FROM corporate_actions chain_action \
                             WHERE chain_action.id = chain_start.demerger_action_id), 0 \
                      FROM trades chain_start WHERE chain_start.id = {alias}.id \
                    UNION ALL \
-                   SELECT chain_source.listing_id, chain_source.date, \
+                   SELECT chain_source.listing_id, chain_source.date, chain_source.settlement_date, \
                           chain_source.deemed_acquisition_date, chain_source.scrip_action_id, \
                           chain_source.demerger_action_id, chain_source.transfer_id, \
                           (SELECT chain_action.listing_id FROM corporate_actions chain_action \
@@ -458,7 +468,7 @@ impl ParcelRow {
                                      OR chain_parcel.demerger_action_id IS NOT NULL \
                                    THEN chain_parcel.date \
                                    ELSE COALESCE(chain_parcel.deemed_acquisition_date, \
-                                                 chain_parcel.date) END) \
+                                                 chain_parcel.settlement_date) END) \
                      FROM chain_parcel \
                     WHERE chain_parcel.transfer_id IS NULL \
                       AND chain_parcel.head_listing_id IS NOT chain_parcel.listing_id) \
@@ -549,6 +559,7 @@ impl ParcelRow {
             gst_on_brokerage: self.gst_on_brokerage,
             currency: &self.currency,
             trade_date: self.date,
+            settled: self.settlement_date,
             rollover: self.rollover(),
         }
     }
@@ -1016,6 +1027,7 @@ fn reduction_walk(
             splits,
             parcel.currency,
             parcel.trade_date,
+            parcel.settled,
             parcel.rollover,
             held.up_to(),
         )?
@@ -1308,6 +1320,7 @@ mod tests {
             gst_on_brokerage: Decimal::ZERO,
             currency: "AUD",
             trade_date: date(2024, 1, 1),
+            settled: date(2024, 1, 1),
             rollover: None,
         }
     }
@@ -1348,6 +1361,7 @@ mod tests {
             listing_id,
             holding_account_id: HoldingAccountId(1),
             date: operated,
+            settlement_date: operated,
             quantity: Decimal::from(100),
             average_price: Decimal::ONE,
             brokerage: Decimal::ZERO,
@@ -2158,6 +2172,7 @@ mod tests {
     fn capped_flags_apply_events_in_the_walks_date_order_across_kinds() {
         let p = Parcel {
             trade_date: date(2023, 1, 1),
+            settled: date(2023, 1, 3),
             ..parcel(100, 1)
         };
         let amit_events = [whole(1, 2024, "0.60", 100)];

@@ -82,6 +82,11 @@ pub struct OpenParcel {
 pub struct UnitsConsumed {
     /// The Sell's date.
     pub date: NaiveDate,
+    /// The Sell's settlement date — when the units left the register, which
+    /// is what decides whether they were still registered at a payment's
+    /// record date (the C2 test in `reports::net_capital_gain`). Every
+    /// "were these units still held?" question asks [`Self::date`] instead.
+    pub settled: NaiveDate,
     /// Units allocated, in *sale-date* units (see [`db_units_sold`]).
     pub quantity: Decimal,
     /// False for a rollover's closing Sell — a transfer's, a scrip-for-scrip
@@ -118,7 +123,7 @@ pub async fn db_units_sold(
     let no_provenance = crate::domain::rollover::no_provenance_sql("s");
     let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
         "SELECT pa.purchase_trade_id, pa.quantity_allocated, s.date AS sale_date, \
-                ({no_provenance}) AS is_disposal \
+                s.settlement_date AS sale_settlement_date, ({no_provenance}) AS is_disposal \
          FROM parcel_allocations pa JOIN trades s ON s.id = pa.sale_trade_id \
          WHERE s.date <= ?",
     )))
@@ -133,6 +138,7 @@ pub async fn db_units_sold(
             .or_default()
             .push(UnitsConsumed {
                 date: row.try_get("sale_date")?,
+                settled: row.try_get("sale_settlement_date")?,
                 quantity: parse_dec("quantity_allocated", row.try_get("quantity_allocated")?)?,
                 disposal: row.try_get::<i64, _>("is_disposal")? != 0,
             });

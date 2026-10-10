@@ -298,6 +298,10 @@ struct Cohort {
     /// cost-base reduction asks only this — a rollover's closing Sell ends the
     /// parcel's hold exactly as a real Sell does.
     left_on: Option<NaiveDate>,
+    /// When the units left the register — the leaving Sell's settlement date,
+    /// `None` while still held. Only the C2 branch reads it: units sold on or
+    /// after a payment's ex-date are still registered at its record date.
+    left_register_on: Option<NaiveDate>,
     /// Whether leaving was a **disposal**. False while still held, and false
     /// for a rollover's closing Sell — the units went into a replacement
     /// parcel, still the taxpayer's, so no CGT event happened to them. Only
@@ -326,6 +330,7 @@ fn unit_cohorts(
         .iter()
         .map(|c| Cohort {
             left_on: Some(c.date),
+            left_register_on: Some(c.settled),
             disposal: c.disposal,
             units: corporate_action::as_acquired_quantity(c.quantity, splits, parcel.date, c.date),
         })
@@ -335,6 +340,7 @@ fn unit_cohorts(
     if still_held > Decimal::ZERO {
         cohorts.push(Cohort {
             left_on: None,
+            left_register_on: None,
             disposal: false,
             units: still_held,
         });
@@ -408,7 +414,8 @@ struct EventGain {
 ///   cost base itself was converted. G1 can never produce a capital loss, so an
 ///   excess that does not survive the two translations is floored at nil.
 /// - **C2** falls in the payment's income year too, covers the units entitled
-///   at the payment's **record date** but sold before the payment date, is the
+///   at the payment's **record date** — still registered then, so sold by a
+///   Sell settling after it — but sold before the payment date, is the
 ///   whole payment on those units (the right to receive has a nil cost base
 ///   wherever the share's own was fully applied on disposal, which an ordinary
 ///   Sell always does), is converted at the payment month's rate like G1, and
@@ -503,6 +510,7 @@ async fn non_disposal_gains(
             splits_of(&splits, parcel.listing_id),
             &parcel.currency,
             parcel.date,
+            parcel.settlement_date,
             // A payment already inside a replacement parcel's carried cost base
             // is not a G1 reduction of it (SCENARIOS N-06) — the same call the
             // cost-base pipeline makes, so this walk cannot describe a different
@@ -565,6 +573,7 @@ async fn non_disposal_gains(
         // proportional to each other and add back up to the pooled one.
         for Cohort {
             left_on: disposed_on,
+            left_register_on,
             disposal,
             units,
         } in unit_cohorts(
@@ -582,6 +591,13 @@ async fn non_disposal_gains(
                 // So the whole payment is the gain, and it is discountable on
                 // the share's holding period exactly as a G1 gain would be.
                 //
+                // "Entitled at its record date" is a register question, so it
+                // asks the Sell's *settlement* date: units sold on the ex-date
+                // (under T+2, the business day before the record date) settle
+                // after the record date and so are still registered then,
+                // while "no longer held at the payment" is the CGT ownership
+                // question, answered by the Sell's contract date.
+                //
                 // Only a real disposal ends the right: a rollover's closing
                 // Sell moves the units into a replacement parcel that is still
                 // the taxpayer's, so nothing was disposed of and the payment
@@ -596,7 +612,8 @@ async fn non_disposal_gains(
                     record_date: Some(record_date),
                 } = event
                     && disposal
-                    && disposed_on.is_some_and(|d| d >= *record_date && d < *date)
+                    && left_register_on.is_some_and(|s| s > *record_date)
+                    && disposed_on.is_some_and(|d| d < *date)
                 {
                     out.push(EventGain {
                         kind: CgtEventKind::C2,
@@ -1564,6 +1581,7 @@ mod tests {
             gst_on_brokerage: Decimal::ZERO,
             currency: "AUD",
             trade_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            settled: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             rollover: None,
         };
         let units = dec("2");
@@ -2907,6 +2925,110 @@ mod tests {
             .unwrap();
         assert_eq!(parcels.len(), 1);
         assert_eq!(parcels[0].remaining_cost_base, Decimal::ZERO);
+    }
+
+    /// Entitlement to a return of capital is a **register** question, so it
+    /// turns on the settlement date, not the trade date (2026-10-10 review).
+    /// Record date Monday 10 Feb 2025; under T+2 the ex-date is Friday 7 Feb.
+    /// Every trade goes through `PUT /trades` / `PUT /sells` without a
+    /// settlement date, so the server computes it in ASX business days — the
+    /// Friday trades settle on Tuesday 11 Feb, after the record date, where
+    /// calendar-day arithmetic would put them on the Sunday before it.
+    ///
+    /// - a **buy** the business day before the ex-date (Thu 6 Feb, settled on
+    ///   the record date) is entitled, so the payment reduces its cost base;
+    /// - a **buy** on the ex-date (Fri 7 Feb) is not, though traded before
+    ///   the record date;
+    /// - a **sell** the business day before the ex-date left the register on
+    ///   the record date, so those units earned nothing — no C2 gain;
+    /// - a **sell** on the ex-date was still registered at the record date
+    ///   and sold before the payment: CGT event C2 on the whole payment.
+    #[tokio::test]
+    async fn api_return_of_capital_entitlement_turns_on_settlement_at_the_ex_date() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "RAP").await;
+        let api = ApiClient::full(&pool);
+        let trade = |date: &str| {
+            serde_json::json!({
+                "trade_type": "Buy",
+                "date": date,
+                "listing_id": 1,
+                "average_price": "10",
+                "quantity": "100",
+                "currency": "AUD",
+                "brokerage": "0",
+                "gst_on_brokerage": "0",
+                "brokerage_currency": "AUD",
+                "fx_rate": "1",
+            })
+        };
+        let sell = |date: &str| {
+            serde_json::json!({
+                "date": date,
+                "listing_id": 1,
+                "average_price": "12",
+                "quantity": "50",
+                "currency": "AUD",
+                "brokerage": "0",
+                "gst_on_brokerage": "0",
+                "brokerage_currency": "AUD",
+                "fx_rate": "1",
+                "allocations": [{ "purchase_trade_id": 1, "quantity_allocated": "50" }],
+            })
+        };
+        api.put_ok("/trades/1", &trade("2024-01-10")).await;
+        api.put_ok("/trades/2", &trade("2025-02-06")).await; // day before ex
+        api.put_ok("/trades/3", &trade("2025-02-07")).await; // ex-date
+        api.put_ok("/sells/4", &sell("2025-02-06")).await; // day before ex
+        api.put_ok("/sells/5", &sell("2025-02-07")).await; // ex-date
+        api.put_ok(
+            "/corporate_actions/1",
+            &serde_json::json!({
+                "action_type": "ReturnOfCapital",
+                "listing_id": 1,
+                "date": "2025-03-03",
+                "amount_per_unit": "0.50",
+                "currency": "AUD",
+                "record_date": "2025-02-10",
+            }),
+        )
+        .await;
+
+        // The server's own settlement dates are what the boundary rests on.
+        for (id, settled) in [
+            (2, "2025-02-10"),
+            (3, "2025-02-11"),
+            (4, "2025-02-10"),
+            (5, "2025-02-11"),
+        ] {
+            let t: serde_json::Value = api.get_json(&format!("/trades/{id}")).await;
+            assert_eq!(t["settlement_date"], settled, "trade {id}");
+        }
+
+        let parcels: Vec<serde_json::Value> = api.get_json("/portfolio/open_parcels").await;
+        let cost_base = |id: i64| {
+            let p = parcels
+                .iter()
+                .find(|p| p["trade_id"] == id)
+                .unwrap_or_else(|| panic!("no open parcel {id}"));
+            p["remaining_cost_base"]
+                .as_str()
+                .unwrap()
+                .parse::<Decimal>()
+                .unwrap()
+        };
+        // Registered on the record date: $1,000 less 100 × 50c.
+        assert_eq!(cost_base(2), Decimal::from(950));
+        // Settled after it: ex-entitlement, untouched.
+        assert_eq!(cost_base(3), Decimal::from(1000));
+        // Parcel 1 was wholly sold before the payment: no G1 reduction.
+        assert!(parcels.iter().all(|p| p["trade_id"] != 1));
+
+        let years: Vec<NetCapitalGainYear> = api.get_json("/portfolio/net_capital_gain").await;
+        let fy2025 = row_for(&years, 2025);
+        // Only the ex-date sale's 50 units carried the right to the payment.
+        assert_eq!(fy2025.cgt_event_c2_gain, Decimal::from(25));
+        assert_eq!(fy2025.cgt_event_g1_gain, Decimal::ZERO);
     }
 
     async fn apply_roc(

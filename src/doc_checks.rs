@@ -2402,6 +2402,28 @@ fn known_limitations_document_exchange_change_recomputation() {
     assert!(limitations.contains("no longer shares this limitation"));
 }
 
+/// Known-limitation pin (2026-10-10 review, "Return-of-capital and rights
+/// entitlement compare the trade date with the record date"): entitlement at a
+/// record date is the register's answer, read off settlement dates, and the
+/// entry says what that cannot see — a wrong stored settlement date, and a
+/// failed or late settlement. The behaviour itself is pinned by
+/// `net_capital_gain`'s and `rights_exercise`'s ex-date boundary tests.
+#[test]
+fn known_limitations_document_entitlement_read_off_settlement_dates() {
+    let limitations = known_limitations();
+    assert!(limitations.contains("**Entitlement at a record date is read off settlement dates**"));
+    assert!(limitations.contains("a trade on the ex-date (the business day before the record date) is ex-entitlement to the buyer and cum-entitlement to the seller"));
+    assert!(limitations.contains("**A wrong settlement date moves entitlement with it**"));
+    assert!(limitations.contains("**a failed or late settlement is invisible**"));
+    // The reference sections state the same rule as the limitation.
+    assert!(API_MD.contains("whose trade had **settled** on or before it — earns the payment"));
+    assert!(API_MD.contains("Buy/DRP trades **settled** on or before the action's `date`"));
+    assert!(
+        SCHEMA_MD.contains("so it is what decides entitlement at a corporate action's record date")
+    );
+    assert!(FEATURES_MD.contains("read off each trade's settlement date"));
+}
+
 /// Price collection resolves the provider symbol and the trading calendar as
 /// at the date being fetched, from the rename chain (2026-07-28) — the fix
 /// that made the fetch and snapshot-valuation paths agree across a rename.
@@ -3054,7 +3076,7 @@ fn return_of_capital_currency_invariant_documented() {
     ));
     assert!(API_MD.contains("a differing pair is rejected with `422` naming both currencies"));
     assert!(API_MD.contains(
-        "those acquired before its `record_date`, or on or before the payment date when none is \
+        "those settled on or before its `record_date`, or on or before the payment date when none is \
          recorded"
     ));
     // A rollover-created parcel keeps the original's currency, so the listed
@@ -3999,7 +4021,7 @@ fn missing_row_404_reason_documented() {
 fn corporate_action_delete_guard_documented() {
     assert!(API_MD.contains("**Deleting an action that is already depended on.**"));
     assert!(API_MD.contains("**any trade dated on or after** the action's `date`"));
-    assert!(API_MD.contains("**any parcel acquired on or before** the payment `date`"));
+    assert!(API_MD.contains("**any parcel settled on or before** the payment `date`"));
     assert!(API_MD.contains("deleting a ShareSplit or BonusIssue whose listing has a trade"));
     assert!(API_MD.contains("deleting a ReturnOfCapital whose listing has a parcel"));
     // The edit path stays open by decision, so it is documented as such —

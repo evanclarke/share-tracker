@@ -56,19 +56,6 @@ falls under the existing rules.
   trading day before 1 July 2027 (the scheduled price import plus `closing_price`'s held-days
   backfill), since a missing one cannot be fetched reliably years later
 
-## Return-of-capital and rights entitlement compare the trade date with the record date (2026-10-10 review, financial correctness — medium)
-`corporate_action/adjustments.rs` (~line 132, `registered_from < record_date`; the SQL at ~248) and the
-C2 test in `reports/net_capital_gain.rs` (~595) decide entitlement on the trade date. Under ASX T+2
-the ex-date is one business day before the record date, so a buy *on* the ex-date is wrongly
-entitled (cost base reduced) and a sale on the ex-date is wrongly unentitled (its C2 gain missed).
-The rights-issue "dated on or after the record date is ex-rights" cut-off has the same off-by-one.
-The behaviour is documented today, but trades already carry `settlement_date`.
-- [ ] Tests at the boundary: a buy and a sell on the ex-date (record date − 1 business day) and on
-  the business day before it, for a ROC, a rights issue and the C2 check
-- [ ] Decide on the entitlement date per registration (settlement date vs record date, or an explicit
-  ex-date on the corporate action), implement it consistently across ROC, rights and C2, and update
-  the Known-limitations entry
-
 ## Smaller financial-correctness inconsistencies (2026-10-10 review, financial correctness — low)
 - [ ] E10 and G1 excess gains are translated to AUD differently (`reports/net_capital_gain.rs`
   ~640–650): the E10 excess converts wholly at the acquisition-month rate, the G1 excess uses the

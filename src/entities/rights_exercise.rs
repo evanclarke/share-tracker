@@ -207,24 +207,32 @@ pub fn router() -> OpenApiRouter<SqlitePool> {
     OpenApiRouter::new().routes(routes!(exercise))
 }
 
-/// Units of the listing held when the issue's record date arrived, in
-/// record-date units. Trades dated before the record date count (one dated on
-/// it is ex-rights — the same half-open convention as splits/bonus issues);
-/// each quantity is re-based to record-date units across any
+/// Units of the listing on the register when the issue's record date arrived,
+/// in record-date units. A trade counts once it has *settled*: a buy settled
+/// on or before the record date was registered for it, and a sale settling
+/// after it was still registered — under T+2 that is the exchange's ex-date
+/// convention (a trade on the ex-date, the business day before the record
+/// date, is ex-rights for a buyer and cum-rights for a seller), and it holds
+/// for any settlement cycle. The issue's own exercises are never counted:
+/// they are allotted on or after the record date, out of the entitlement this
+/// figure caps. Each quantity is re-based to record-date units across any
 /// splits/consolidations so buys, sells, prior usage, and the cap all
 /// compare in one basis.
 pub(crate) async fn db_held_at_record_date(
     conn: &mut sqlx::SqliteConnection,
     listing_id: ListingId,
+    action_id: i64,
     record_date: NaiveDate,
     splits: &[SplitEvent],
 ) -> Result<Decimal, sqlx::Error> {
     let held_rows = sqlx::query(
         "SELECT trade_type, date, quantity FROM trades \
-         WHERE listing_id = ? AND date < ?",
+         WHERE listing_id = ? AND settlement_date <= ? \
+           AND rights_action_id IS NOT ?",
     )
     .bind(listing_id)
     .bind(record_date)
+    .bind(action_id)
     .fetch_all(&mut *conn)
     .await?;
     let mut held = Decimal::ZERO;
@@ -386,7 +394,8 @@ async fn execute(
     }
 
     let splits = corporate_action::db_splits_for_listing(&mut *tx, action.listing_id).await?;
-    let held = db_held_at_record_date(&mut tx, action.listing_id, record_date, &splits).await?;
+    let held =
+        db_held_at_record_date(&mut tx, action.listing_id, action_id, record_date, &splits).await?;
     let entitled = entitled_units(held, rights_units, rights_held_units);
 
     // Rights already used against this action (prior exercises + rights
@@ -518,7 +527,6 @@ mod tests {
     async fn insert_buy(pool: &SqlitePool, id: i64, date: NaiveDate, qty: &str, price: &str) {
         test_support::buy(id, 1)
             .date(date)
-            .settlement(date)
             .qty(qty.parse().unwrap())
             .price(price.parse().unwrap())
             .insert(pool)
@@ -540,7 +548,9 @@ mod tests {
                 statement_total: None,
                 holding_account_id: HoldingAccountId(1),
                 date,
-                settlement_date: Some(date),
+                // Omitted, so the server settles it T+2 in ASX business days —
+                // the register date the entitlement tests read.
+                settlement_date: None,
                 listing_id: ListingId(1),
                 average_price: "2.00".parse().unwrap(),
                 quantity: qty.parse().unwrap(),
@@ -766,9 +776,9 @@ mod tests {
         assert_eq!(n, 2);
     }
 
-    /// Entitlement counts units held when the record date arrives: a sale
-    /// before it reduces the holding, and a buy dated *on* the record date is
-    /// ex-rights (the same half-open convention as splits/bonus issues).
+    /// Entitlement counts units registered when the record date arrives: a
+    /// sale settled before it reduces the holding, and a buy dated *on* the
+    /// record date settles after it, so is ex-rights.
     #[tokio::test]
     async fn entitlement_reflects_holdings_at_the_record_date() {
         let pool = test_pool().await;
@@ -788,6 +798,47 @@ mod tests {
 
     /// A split between acquisition and the record date re-bases the holding
     /// into record-date units before the entitlement ratio applies.
+    /// The ex-date boundary (2026-10-10 review): the register at the record
+    /// date is what earns rights, and a trade joins or leaves it when it
+    /// *settles*. Record date Monday 10 Feb 2025, so under T+2 the ex-date is
+    /// Friday 7 Feb. A buy the business day before (Thu 6 Feb, settled on the
+    /// record date) earns rights; a buy on the ex-date (settled Tue 11 Feb)
+    /// does not, though traded before the record date. A sell the business
+    /// day before reduces the holding; a sell on the ex-date does not — the
+    /// seller is still registered at the record date and keeps the rights.
+    #[tokio::test]
+    async fn entitlement_turns_on_settlement_at_the_ex_date() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        let buy = |id, date, settled| {
+            test_support::buy(id, 1)
+                .date(date)
+                .settlement(settled)
+                .qty("400".parse().unwrap())
+                .price("2.00".parse().unwrap())
+        };
+        buy(1, d(2024, 1, 15), d(2024, 1, 17)).insert(&pool).await;
+        buy(2, d(2025, 2, 6), d(2025, 2, 10)).insert(&pool).await; // day before ex
+        buy(3, d(2025, 2, 7), d(2025, 2, 11)).insert(&pool).await; // ex-date
+        // Settled by the server: Thu → Mon 10 Feb, Fri → Tue 11 Feb.
+        insert_sell(&pool, 4, d(2025, 2, 6), "100", TradeId(1)).await; // day before ex
+        insert_sell(&pool, 5, d(2025, 2, 7), "100", TradeId(1)).await; // ex-date
+        let settled: Vec<NaiveDate> =
+            sqlx::query_scalar("SELECT settlement_date FROM trades WHERE id IN (4, 5) ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(settled, [d(2025, 2, 10), d(2025, 2, 11)]);
+        insert_rights_issue(&pool, 10, d(2025, 2, 10)).await;
+
+        // Registered at the record date: 400 + 400 − 100 = 700 → 175 rights.
+        let err = db_exercise(&pool, 10, &body(d(2025, 3, 1), "176")).await;
+        assert!(matches!(err, Err(ExerciseError::ExceedsEntitlement)));
+        db_exercise(&pool, 10, &body(d(2025, 3, 1), "175"))
+            .await
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn split_before_the_record_date_rebases_the_entitlement() {
         let pool = test_pool().await;
