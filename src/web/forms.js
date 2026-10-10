@@ -3,7 +3,7 @@
 // entity/action configs are written in, the generic field input builder and
 // reader the engine renders them with, the entity-specific form wiring hooks
 // (GST-inclusive brokerage, the income form's simple-first entry), and the
-// shared parcel-allocation editor.
+// shared parcel-allocation editor with the parcel filter that feeds it.
 //
 import {
   el, api, toastIfCurrent, loadOptions, listingNamer, describeTrade,
@@ -511,4 +511,38 @@ export function allocationEditor(parcelOptions, existingAllocs, labels) {
     });
   }
   return { section: section, read: read, setOptions: setOptions, refreshTotal: refreshTotal };
+}
+
+// ---- parcel choices for an allocation editor ----------------------------
+// Every screen that allocates parcels (Sell, Transfer, the parcel-taking
+// ACTIONS) narrows the parcels it offers to what the server itself will
+// accept, and re-narrows them live as the form's choices change. `spec` says
+// what to match: the listing named by the form field `listingField`, or the
+// fixed `listingId` when there is no such field; the holding account named by
+// `accountField`, when the server constrains it; and `before`, a date every
+// offered parcel must precede. Returns the filter as a function, read again on
+// every change.
+export function parcelFilter(form, parcels, spec) {
+  function fieldValue(name) { return form.querySelector('[name="' + name + '"]').value; }
+  return function () {
+    const listingId = spec.listingField ? fieldValue(spec.listingField) : String(spec.listingId);
+    const accountId = spec.accountField ? fieldValue(spec.accountField) : null;
+    return parcels.filter(function (p) {
+      if (String(p.listing_id) !== listingId) return false;
+      if (accountId !== null && String(p.holding_account_id) !== accountId) return false;
+      if (spec.before && !(p.date < spec.before)) return false;
+      return true;
+    });
+  };
+}
+
+// Re-offer `options()` to each of `editors` whenever a field `spec` filters on
+// changes — the other half of `parcelFilter`, wired once the editors exist.
+export function refilterOnChange(form, spec, options, editors) {
+  [spec.listingField, spec.accountField].forEach(function (name) {
+    if (!name) return;
+    form.querySelector('[name="' + name + '"]').addEventListener('change', function () {
+      editors.forEach(function (e) { e.setOptions(options()); });
+    });
+  });
 }

@@ -25,7 +25,7 @@ import {
 import {
   field, dt, fk,
   buildFieldInput, readFieldValue, wireGstBrokerage, allocationEditor,
-  labelledField, labelControl,
+  parcelFilter, refilterOnChange, labelledField, labelControl,
 } from './forms.js';
 import { ENTITIES, REPORTS, ACTIONS } from './config.js';
 import {
@@ -821,14 +821,8 @@ async function viewSellForm(id, seq = navigationToken()) {
   // narrowed to open parcels matching the chosen listing + holding account —
   // the two things the server itself requires a parcel to match
   // (`entities::sell`) — re-filtered live as either field changes.
-  const openParcels = await loadOptions('openParcels');
-  function validParcelOptions() {
-    const listingId = form.querySelector('[name="listing_id"]').value;
-    const accountId = form.querySelector('[name="holding_account_id"]').value;
-    return openParcels.filter(function (p) {
-      return String(p.listing_id) === listingId && String(p.holding_account_id) === accountId;
-    });
-  }
+  const parcelSpec = { listingField: 'listing_id', accountField: 'holding_account_id' };
+  const validParcelOptions = parcelFilter(form, await loadOptions('openParcels'), parcelSpec);
   const allocEditor = allocationEditor(validParcelOptions(), existingAllocs, {
     hint: 'Allocations must sum exactly to the sell quantity. Each parcel must be a Buy/DRP with enough remaining units, in the chosen listing and holding account.',
     // The figure the rows must reach: the Sell's own quantity, read live so
@@ -836,8 +830,7 @@ async function viewSellForm(id, seq = navigationToken()) {
     requiredTotal: function () { return form.querySelector('[name="quantity"]').value; },
   });
   form.querySelector('[name="quantity"]').addEventListener('input', function () { allocEditor.refreshTotal(); });
-  form.querySelector('[name="listing_id"]').addEventListener('change', function () { allocEditor.setOptions(validParcelOptions()); });
-  form.querySelector('[name="holding_account_id"]').addEventListener('change', function () { allocEditor.setOptions(validParcelOptions()); });
+  refilterOnChange(form, parcelSpec, validParcelOptions, [allocEditor]);
 
   const actions = el('div', { class: 'form-actions' }, [
     el('button', { type: 'submit', class: 'primary' }, editing ? 'Save Sell' : 'Create Sell'),
@@ -918,14 +911,8 @@ async function viewTransferForm(seq = navigationToken()) {
   // chosen listing + source account — the two things the server itself
   // requires a parcel to match (`entities::transfer`) — re-filtered live as
   // either field changes.
-  const openParcels = await loadOptions('openParcels');
-  function validParcelOptions() {
-    const listingId = form.querySelector('[name="listing_id"]').value;
-    const accountId = form.querySelector('[name="from_account_id"]').value;
-    return openParcels.filter(function (p) {
-      return String(p.listing_id) === listingId && String(p.holding_account_id) === accountId;
-    });
-  }
+  const parcelSpec = { listingField: 'listing_id', accountField: 'from_account_id' };
+  const validParcelOptions = parcelFilter(form, await loadOptions('openParcels'), parcelSpec);
   const allocEditor = allocationEditor(validParcelOptions(), null, {
     heading: 'Parcels to move',
     hint: 'Each parcel must be a Buy/DRP of the chosen listing held in the source account, with enough remaining units. Moved units keep their cost base and acquisition date.',
@@ -947,14 +934,7 @@ async function viewTransferForm(seq = navigationToken()) {
     addLabel: '+ Add fee parcel',
   });
   form.appendChild(feeEditor.section);
-  form.querySelector('[name="listing_id"]').addEventListener('change', function () {
-    allocEditor.setOptions(validParcelOptions());
-    feeEditor.setOptions(validParcelOptions());
-  });
-  form.querySelector('[name="from_account_id"]').addEventListener('change', function () {
-    allocEditor.setOptions(validParcelOptions());
-    feeEditor.setOptions(validParcelOptions());
-  });
+  refilterOnChange(form, parcelSpec, validParcelOptions, [allocEditor, feeEditor]);
   const feePrice = field('fee_market_price', 'Fee market value per unit (AUD)', 'decimal',
     { required: false, hint: "The fee crypto's market value per unit at the transfer date — the disposal's capital proceeds. Required only when a fee parcel is set." });
   form.appendChild(await buildFieldInput(feePrice, null, false));
@@ -1019,19 +999,12 @@ async function viewAction(action, id, seq = navigationToken()) {
   let allocEditor = null;
   if (action.allocations) {
     const filter = action.allocations.filter || {};
-    const parcels = await loadOptions(filter.source === 'buy' ? 'buyParcels' : 'openParcels');
-    function currentParcelOptions() {
-      const listingId = filter.listingField
-        ? form.querySelector('[name="' + filter.listingField + '"]').value
-        : String(owner.listing_id);
-      return parcels.filter(function (p) {
-        if (String(p.listing_id) !== listingId) return false;
-        if (filter.accountField
-          && String(p.holding_account_id) !== form.querySelector('[name="' + filter.accountField + '"]').value) return false;
-        if (filter.beforeOwnerDate && !(p.date < owner.date)) return false;
-        return true;
-      });
-    }
+    const parcelSpec = {
+      listingField: filter.listingField, listingId: owner.listing_id,
+      accountField: filter.accountField, before: filter.beforeOwnerDate ? owner.date : null,
+    };
+    const currentParcelOptions = parcelFilter(form,
+      await loadOptions(filter.source === 'buy' ? 'buyParcels' : 'openParcels'), parcelSpec);
     // `requiredField` names the action field the rows must sum to (the
     // buy-back's / rights sale's `units`) — turned into the editor's live
     // `requiredTotal` so its running total is measured against it.
@@ -1044,10 +1017,7 @@ async function viewAction(action, id, seq = navigationToken()) {
     if (labels.requiredField) {
       form.querySelector('[name="' + labels.requiredField + '"]').addEventListener('input', function () { allocEditor.refreshTotal(); });
     }
-    [filter.listingField, filter.accountField].forEach(function (name) {
-      if (!name) return;
-      form.querySelector('[name="' + name + '"]').addEventListener('change', function () { allocEditor.setOptions(currentParcelOptions()); });
-    });
+    refilterOnChange(form, parcelSpec, currentParcelOptions, [allocEditor]);
   }
   form.appendChild(el('div', { class: 'form-actions' }, [
     el('button', { type: 'submit', class: 'primary' }, action.submit),

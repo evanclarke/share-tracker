@@ -10,7 +10,9 @@
 //
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { entitlementDefaultHint, fieldId, labelControl, labelledField } from './forms.js';
+import {
+  entitlementDefaultHint, fieldId, labelControl, labelledField, parcelFilter, refilterOnChange,
+} from './forms.js';
 
 // A stand-in element: `el` needs `document.createElement`, `setAttribute`,
 // `append` (its children are checked with `instanceof Node`), and the
@@ -96,4 +98,56 @@ test('labelControl keeps each repeated row its own id', () => {
     assert.equal(secondLabel.attrs.for, second.attrs.id);
     assert.notEqual(first.attrs.id, second.attrs.id);
   });
+});
+
+// A form stand-in for the parcel filter: named inputs with a `value` and a
+// `change` listener, which is all `parcelFilter`/`refilterOnChange` read.
+function stubForm(values) {
+  const inputs = {};
+  Object.keys(values).forEach(function (name) {
+    inputs[name] = {
+      value: values[name], listeners: [],
+      addEventListener: function (type, fn) { if (type === 'change') this.listeners.push(fn); },
+      change: function (v) { this.value = v; this.listeners.forEach(function (fn) { fn(); }); },
+    };
+  });
+  return {
+    inputs: inputs,
+    querySelector: function (sel) { return inputs[/\[name="(.+)"\]/.exec(sel)[1]]; },
+  };
+}
+
+const PARCELS = [
+  { id: 1, listing_id: 7, holding_account_id: 1, date: '2024-01-10' },
+  { id: 2, listing_id: 7, holding_account_id: 2, date: '2024-02-10' },
+  { id: 3, listing_id: 8, holding_account_id: 1, date: '2024-03-10' },
+  { id: 4, listing_id: 7, holding_account_id: 1, date: '2024-06-30' },
+];
+const ids = function (ps) { return ps.map(function (p) { return p.id; }); };
+
+test('parcelFilter: the listing and account the form names, read on every call', () => {
+  const form = stubForm({ listing_id: '7', holding_account_id: '1' });
+  const options = parcelFilter(form, PARCELS, { listingField: 'listing_id', accountField: 'holding_account_id' });
+  assert.deepEqual(ids(options()), [1, 4]);
+  form.inputs.holding_account_id.value = '2';
+  assert.deepEqual(ids(options()), [2]);
+});
+
+test('parcelFilter: a fixed listing, no account constraint, and a strict before-date', () => {
+  const form = stubForm({});
+  const options = parcelFilter(form, PARCELS, { listingId: 7, before: '2024-06-30' });
+  // Any account; the parcel dated on the cut-off itself is not before it.
+  assert.deepEqual(ids(options()), [1, 2]);
+});
+
+test('refilterOnChange: every editor is re-offered the filter when a watched field changes', () => {
+  const form = stubForm({ listing_id: '7', from_account_id: '1' });
+  const spec = { listingField: 'listing_id', accountField: 'from_account_id' };
+  const options = parcelFilter(form, PARCELS, spec);
+  const offered = [[], []];
+  const editors = offered.map(function (log) { return { setOptions: function (o) { log.push(ids(o)); } }; });
+  refilterOnChange(form, spec, options, editors);
+  form.inputs.from_account_id.change('2');
+  form.inputs.listing_id.change('8');
+  assert.deepEqual(offered, [[[2], []], [[2], []]]);
 });
