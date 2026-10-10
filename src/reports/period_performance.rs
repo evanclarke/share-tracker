@@ -41,6 +41,7 @@ use crate::infra::currency::CurrencyCode;
 use crate::infra::extract::{Json, Query};
 use crate::infra::fx::{FxError, FxRates};
 use crate::infra::http::ApiError;
+use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use crate::reports::{performance, realised_gains, valuation};
 use axum::{Router, extract::State, routing::get};
@@ -60,7 +61,7 @@ pub struct PeriodRequest {
 #[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize)]
 pub struct HoldingPeriod {
     pub listing_id: ListingId,
-    pub holding_account_id: i64,
+    pub holding_account_id: HoldingAccountId,
     pub opening_market_value: Decimal,
     pub closing_market_value: Decimal,
     pub purchases: Decimal,
@@ -299,7 +300,7 @@ pub async fn compute(
         Option<&'a performance::HoldingPerformance>,
         Option<&'a performance::HoldingPerformance>,
     );
-    let mut by_key: BTreeMap<(ListingId, i64), Endpoints> = BTreeMap::new();
+    let mut by_key: BTreeMap<(ListingId, HoldingAccountId), Endpoints> = BTreeMap::new();
     for r in &perf_from {
         if let (Some(l), Some(a)) = (r.listing_id, r.holding_account_id) {
             by_key.entry((l, a)).or_default().0 = Some(r);

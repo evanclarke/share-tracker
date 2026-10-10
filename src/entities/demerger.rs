@@ -61,6 +61,7 @@ use crate::infra::db::{WriteMode, write_tx};
 use crate::infra::decimal::mul_div;
 use crate::infra::extract::{Json, Query};
 use crate::infra::http::{ApiError, DryRunQuery};
+use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use axum::{
     Router,
@@ -281,7 +282,7 @@ async fn execute(
     let sell_body = rollover::closing_sell_body(
         action.date,
         action.listing_id,
-        1,
+        crate::entities::holding_account::DEFAULT_HOLDING_ACCOUNT_ID,
         Decimal::ZERO,
         listing_currency,
         Decimal::ONE,
@@ -399,7 +400,7 @@ struct Replacement {
     deemed_acquisition_date: NaiveDate,
     /// Replacement parcels stay in the account of the parcel that produced
     /// them.
-    holding_account_id: i64,
+    holding_account_id: HoldingAccountId,
 }
 
 /// The two write-time checks: the demerge has not already been applied, and
@@ -621,7 +622,7 @@ mod tests {
             &SellBody {
                 brokerage_includes_gst: false,
                 statement_total: None,
-                holding_account_id: 1,
+                holding_account_id: HoldingAccountId(1),
                 date,
                 settlement_date: Some(date),
                 listing_id,
@@ -657,7 +658,7 @@ mod tests {
             &SellBody {
                 brokerage_includes_gst: false,
                 statement_total: None,
-                holding_account_id: 1,
+                holding_account_id: HoldingAccountId(1),
                 date,
                 settlement_date: Some(date),
                 listing_id: ListingId(1),
@@ -866,7 +867,7 @@ mod tests {
             &Inheritance {
                 id: 1,
                 listing_id: ListingId(1),
-                holding_account_id: 1,
+                holding_account_id: HoldingAccountId(1),
                 quantity: dec("500"),
                 date_of_death: d(2023, 5, 10),
                 cost_base_rule: CostBaseRule::MarketValueAtDeath,
@@ -1316,7 +1317,7 @@ mod tests {
             &SellBody {
                 brokerage_includes_gst: false,
                 statement_total: None,
-                holding_account_id: 1,
+                holding_account_id: HoldingAccountId(1),
                 date: d(2024, 7, 1),
                 settlement_date: Some(d(2024, 7, 1)),
                 listing_id: ListingId(1),
@@ -1380,7 +1381,7 @@ mod tests {
             &SellBody {
                 brokerage_includes_gst: false,
                 statement_total: None,
-                holding_account_id: 1,
+                holding_account_id: HoldingAccountId(1),
                 date: d(2025, 1, 10),
                 settlement_date: Some(d(2025, 1, 12)),
                 listing_id: ListingId(2),
@@ -1540,7 +1541,7 @@ mod tests {
         holding_account::db_upsert(
             &pool,
             &HoldingAccount {
-                id: 2,
+                id: HoldingAccountId(2),
                 name: "ICE Employee Plan".to_string(),
             },
         )

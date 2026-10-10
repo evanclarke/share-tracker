@@ -21,6 +21,8 @@ use crate::entities::corporate_action::{self, SplitEvent};
 use crate::entities::trade::TradeType;
 use crate::infra::decimal::{mul_div, parse_dec};
 use crate::infra::fx::{FxOverride, FxRates};
+#[cfg(test)]
+use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use chrono::{Duration, NaiveDate};
 use rust_decimal::Decimal;
@@ -1051,7 +1053,7 @@ mod tests {
         crate::entities::holding_account::db_upsert(
             &pool,
             &crate::entities::holding_account::HoldingAccount {
-                id: 2,
+                id: HoldingAccountId(2),
                 name: "Second".into(),
             },
         )
@@ -1065,8 +1067,8 @@ mod tests {
             &crate::entities::transfer::TransferBody {
                 listing_id: ListingId(1),
                 date: d("2025-04-01"),
-                from_account_id: 1,
-                to_account_id: 2,
+                from_account_id: HoldingAccountId(1),
+                to_account_id: HoldingAccountId(2),
                 allocations: vec![crate::entities::sell::AllocationInput {
                     purchase_trade_id: 1,
                     quantity_allocated: Decimal::from(1000),

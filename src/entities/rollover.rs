@@ -13,6 +13,7 @@
 //! in `entities`, while writing a Sell or a Buy is an entity's business.
 
 use crate::infra::currency::CurrencyCode;
+use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
@@ -31,7 +32,7 @@ use crate::entities::trade::{self, Trade};
 pub fn closing_sell_body(
     date: NaiveDate,
     listing_id: ListingId,
-    holding_account_id: i64,
+    holding_account_id: HoldingAccountId,
     average_price: Decimal,
     currency: CurrencyCode,
     fx_rate: Decimal,
@@ -93,7 +94,7 @@ pub struct ReplacementBuy<'a> {
     /// discount clock and the cost base's AUD translation month both run from
     /// it, so a rollover chain always dates back to the first acquisition.
     pub deemed_acquisition_date: NaiveDate,
-    pub holding_account_id: i64,
+    pub holding_account_id: HoldingAccountId,
 }
 
 /// Writes one replacement Buy and answers the id the database gave it. The

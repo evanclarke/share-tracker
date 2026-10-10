@@ -47,6 +47,7 @@ use crate::entities::trade::TradeType;
 use crate::infra::extract::Json;
 use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
+use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use axum::{Extension, Router, extract::State, routing::post};
 use chrono::{Months, NaiveDate};
@@ -62,7 +63,7 @@ pub struct HoldingPerformance {
     /// The listing's ticker, or `"OVERALL"` on the portfolio-total row.
     pub ticker: String,
     /// `None` on the OVERALL row.
-    pub holding_account_id: Option<i64>,
+    pub holding_account_id: Option<HoldingAccountId>,
     /// Units held at `as_of_date` (in as-of units, after splits). `None` on
     /// the OVERALL row — units don't aggregate across listings.
     pub quantity_held: Option<Decimal>,
@@ -292,7 +293,7 @@ pub(crate) fn money_weighted_annual_return(flows: &[(NaiveDate, Decimal)]) -> Op
 struct RowKey {
     listing_id: Option<ListingId>,
     ticker: String,
-    holding_account_id: Option<i64>,
+    holding_account_id: Option<HoldingAccountId>,
 }
 
 /// Assemble one report row from accumulated figures. `open` = units are still
@@ -350,7 +351,7 @@ fn build_row(
 /// return) — the trade/income processing (internal-movement exclusion,
 /// AUD conversion, carried cost) needs to happen exactly once either way.
 struct Accumulated {
-    holdings: BTreeMap<(ListingId, i64), Acc>,
+    holdings: BTreeMap<(ListingId, HoldingAccountId), Acc>,
     overall: Acc,
     tickers: HashMap<ListingId, String>,
 }
@@ -401,7 +402,7 @@ async fn accumulate_on(
     // not one DB round-trip each
     let fx = FxRates::load(&mut *conn).await?;
 
-    let mut holdings: BTreeMap<(ListingId, i64), Acc> = BTreeMap::new();
+    let mut holdings: BTreeMap<(ListingId, HoldingAccountId), Acc> = BTreeMap::new();
     let mut overall = Acc::default();
     // Carried AUD cost per internal-movement group: what the replacement
     // parcels took with them, which is what the closing Sell is worth.
@@ -727,7 +728,7 @@ mod tests {
         id: i64,
         trade_type: trade::TradeType,
         listing_id: ListingId,
-        account_id: i64,
+        account_id: HoldingAccountId,
         date: NaiveDate,
         qty: Decimal,
         price: Decimal,
@@ -735,7 +736,7 @@ mod tests {
         fx_rate: Decimal,
     ) {
         test_support::trade(id, listing_id.0, trade_type)
-            .account(account_id)
+            .account(account_id.0)
             .date(date)
             .qty(qty)
             .price(price)
@@ -751,7 +752,7 @@ mod tests {
             id,
             trade::TradeType::Buy,
             ListingId(listing),
-            1,
+            HoldingAccountId(1),
             date,
             Decimal::from(qty),
             Decimal::from(price),
@@ -767,7 +768,7 @@ mod tests {
             id,
             trade::TradeType::Sell,
             ListingId(listing),
-            1,
+            HoldingAccountId(1),
             date,
             Decimal::from(qty),
             Decimal::from(price),
@@ -823,7 +824,7 @@ mod tests {
         assert_eq!(rows.len(), 2);
         let h = &rows[0];
         assert_eq!(
-            (h.listing_id.map(|l| l.0), h.holding_account_id),
+            (h.listing_id.map(|l| l.0), h.holding_account_id.map(|a| a.0)),
             (Some(1), Some(1))
         );
         assert_eq!(h.ticker, "VAS");
@@ -1010,7 +1011,7 @@ mod tests {
         holding_account::db_upsert(
             &pool,
             &holding_account::HoldingAccount {
-                id: 2,
+                id: HoldingAccountId(2),
                 name: "Broker".to_string(),
             },
         )
@@ -1023,8 +1024,8 @@ mod tests {
             &transfer::TransferBody {
                 listing_id: ListingId(1),
                 date: d(2023, 7, 1),
-                from_account_id: 1,
-                to_account_id: 2,
+                from_account_id: HoldingAccountId(1),
+                to_account_id: HoldingAccountId(2),
                 allocations: vec![sell_mod::AllocationInput {
                     purchase_trade_id: 1,
                     quantity_allocated: Decimal::from(100),
@@ -1045,7 +1046,10 @@ mod tests {
         // Source holding: closed at the carried cost — zero return.
         let src = &rows[0];
         assert_eq!(
-            (src.listing_id.map(|l| l.0), src.holding_account_id),
+            (
+                src.listing_id.map(|l| l.0),
+                src.holding_account_id.map(|a| a.0)
+            ),
             (Some(1), Some(1))
         );
         assert_eq!(src.quantity_held, Some(Decimal::ZERO));
@@ -1056,7 +1060,10 @@ mod tests {
         // Destination holding: carries the cost base and shows the gain.
         let dst = &rows[1];
         assert_eq!(
-            (dst.listing_id.map(|l| l.0), dst.holding_account_id),
+            (
+                dst.listing_id.map(|l| l.0),
+                dst.holding_account_id.map(|a| a.0)
+            ),
             (Some(1), Some(2))
         );
         assert_eq!(dst.quantity_held, Some(Decimal::from(100)));
@@ -1116,7 +1123,10 @@ mod tests {
         // Source holding: exits at the carried $900 plus the $200 cash.
         let src = &rows[0];
         assert_eq!(
-            (src.listing_id.map(|l| l.0), src.holding_account_id),
+            (
+                src.listing_id.map(|l| l.0),
+                src.holding_account_id.map(|a| a.0)
+            ),
             (Some(1), Some(1))
         );
         assert_eq!(src.invested, Decimal::from(1000));
@@ -1125,7 +1135,10 @@ mod tests {
         // Replacement holding: invested at the carried cost only.
         let dst = &rows[1];
         assert_eq!(
-            (dst.listing_id.map(|l| l.0), dst.holding_account_id),
+            (
+                dst.listing_id.map(|l| l.0),
+                dst.holding_account_id.map(|a| a.0)
+            ),
             (Some(2), Some(1))
         );
         assert_eq!(dst.invested, Decimal::from(900));
@@ -1153,7 +1166,7 @@ mod tests {
             1,
             trade::TradeType::Buy,
             ListingId(1),
-            1,
+            HoldingAccountId(1),
             d(2024, 1, 2),
             Decimal::from(100),
             Decimal::from(10),

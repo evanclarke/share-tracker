@@ -15,6 +15,7 @@
 //! type rather than a column name typed at each call site.
 
 use crate::infra::decimal::{Money, OptMoney};
+use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
@@ -95,7 +96,7 @@ pub(crate) struct NewParcel<'a> {
     origin: ParcelOrigin,
     date: NaiveDate,
     listing_id: ListingId,
-    holding_account_id: i64,
+    holding_account_id: HoldingAccountId,
     quantity: Decimal,
     currency: &'a str,
     average_price: Decimal,
@@ -114,7 +115,7 @@ impl<'a> NewParcel<'a> {
         origin: ParcelOrigin,
         date: NaiveDate,
         listing_id: ListingId,
-        holding_account_id: i64,
+        holding_account_id: HoldingAccountId,
         quantity: Decimal,
         currency: &'a str,
     ) -> Self {
@@ -306,11 +307,18 @@ mod tests {
             .await
             .unwrap();
         for origin in ALL_ORIGINS {
-            let id = NewParcel::new(origin, ymd(2024, 1, 2), ListingId(1), 1, dec("10"), "AUD")
-                .price(dec("1.5"))
-                .insert(&mut conn)
-                .await
-                .unwrap();
+            let id = NewParcel::new(
+                origin,
+                ymd(2024, 1, 2),
+                ListingId(1),
+                HoldingAccountId(1),
+                dec("10"),
+                "AUD",
+            )
+            .price(dec("1.5"))
+            .insert(&mut conn)
+            .await
+            .unwrap();
             let trade = crate::entities::trade::db_get(&mut *conn, id)
                 .await
                 .unwrap()

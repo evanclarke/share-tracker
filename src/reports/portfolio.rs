@@ -2,6 +2,7 @@ use crate::domain::open_parcels;
 use crate::entities::closing_price::{self, SharedFetcher};
 use crate::infra::extract::Json;
 use crate::infra::http::ApiError;
+use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use axum::{Extension, Router, extract::State, routing::post};
 use chrono::NaiveDate;
@@ -18,7 +19,7 @@ pub struct HoldingOverview {
     /// The holding account the parcels sit in: the same listing held in two
     /// accounts (e.g. an employer share plan and a personal broker account)
     /// reports as two holdings.
-    pub holding_account_id: i64,
+    pub holding_account_id: HoldingAccountId,
     pub quantity: Decimal,
     pub avg_cost_base_per_unit: Decimal,
     pub total_cost_base: Decimal,
@@ -128,8 +129,8 @@ pub async fn db_holdings_on(
     // aggregation per (listing, holding account).
     let open = open_parcels::load(conn, as_of).await?;
 
-    let mut holding_qty: HashMap<(ListingId, i64), Decimal> = HashMap::new();
-    let mut holding_cost_base: HashMap<(ListingId, i64), Decimal> = HashMap::new();
+    let mut holding_qty: HashMap<(ListingId, HoldingAccountId), Decimal> = HashMap::new();
+    let mut holding_cost_base: HashMap<(ListingId, HoldingAccountId), Decimal> = HashMap::new();
 
     for p in &open {
         let key = (p.parcel.listing_id, p.parcel.holding_account_id);
@@ -1354,7 +1355,7 @@ mod tests {
         holding_account::db_upsert(
             &pool,
             &HoldingAccount {
-                id: 2,
+                id: HoldingAccountId(2),
                 name: "ICE Employee Plan".to_string(),
             },
         )
@@ -1378,12 +1379,12 @@ mod tests {
         let holdings = db_holdings(&pool, None).await.unwrap();
         assert_eq!(holdings.len(), 2);
         assert_eq!(
-            (holdings[0].listing_id.0, holdings[0].holding_account_id),
+            (holdings[0].listing_id.0, holdings[0].holding_account_id.0),
             (1, 1)
         );
         assert_eq!(holdings[0].quantity, Decimal::from(100));
         assert_eq!(
-            (holdings[1].listing_id.0, holdings[1].holding_account_id),
+            (holdings[1].listing_id.0, holdings[1].holding_account_id.0),
             (1, 2)
         );
         assert_eq!(holdings[1].quantity, Decimal::from(50));

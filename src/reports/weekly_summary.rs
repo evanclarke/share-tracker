@@ -37,6 +37,7 @@
 //! account's name) that no figure depends on.
 
 use crate::infra::email::{self, Document, Notifier, Section, Table};
+use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use crate::infra::scheduler::JobOutcome;
 use crate::reports::{period_performance, snapshot};
@@ -116,14 +117,20 @@ pub async fn resolve_window(
 /// read is cheaper than a lookup per row.
 async fn db_names(
     pool: &SqlitePool,
-) -> Result<(HashMap<ListingId, String>, HashMap<i64, String>), sqlx::Error> {
+) -> Result<
+    (
+        HashMap<ListingId, String>,
+        HashMap<HoldingAccountId, String>,
+    ),
+    sqlx::Error,
+> {
     let listings = crate::entities::listing::db_tickers(pool).await?;
     let accounts = sqlx::query("SELECT id, name FROM holding_accounts")
         .fetch_all(pool)
         .await?
         .iter()
         .map(|row| Ok((row.try_get("id")?, row.try_get("name")?)))
-        .collect::<Result<HashMap<i64, String>, sqlx::Error>>()?;
+        .collect::<Result<HashMap<HoldingAccountId, String>, sqlx::Error>>()?;
     Ok((listings, accounts))
 }
 
@@ -256,7 +263,7 @@ fn contributions_section(
     period: &period_performance::PeriodPerformance,
     trends: &[snapshot::HoldingSeries],
     tickers: &HashMap<ListingId, String>,
-    accounts: &HashMap<i64, String>,
+    accounts: &HashMap<HoldingAccountId, String>,
 ) -> Section {
     let mut table = Table::new(&[
         ("Holding", false),

@@ -3,6 +3,7 @@
 
 use crate::infra::currency::CurrencyCode;
 use crate::infra::decimal::{Money, OptMoney};
+use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
@@ -197,7 +198,7 @@ pub struct Trade {
     /// than one account at once — e.g. RSU-vested shares in an employer plan
     /// account alongside DRP-enrolled shares in a personal broker account.
     /// Defaults to the seeded default account when omitted from a request.
-    pub holding_account_id: i64,
+    pub holding_account_id: HoldingAccountId,
     /// Provenance link from a transfer-out Sell / transfer-in Buy back to its
     /// holding-account transfer (`None` for every other trade). Set only by
     /// `PUT /transfers/:id` (`entities::transfer`). The trades carrying one
@@ -362,5 +363,5 @@ pub struct TradeBody {
     /// Defaults to the seeded default holding account when omitted, so
     /// single-account clients never see the dimension.
     #[serde(default = "crate::entities::holding_account::default_holding_account_id")]
-    pub holding_account_id: i64,
+    pub holding_account_id: HoldingAccountId,
 }

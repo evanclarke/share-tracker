@@ -16,6 +16,7 @@
 use crate::infra::db::write_tx;
 use crate::infra::extract::Json;
 use crate::infra::http::{self, ApiError, CrudEntity, Upsert, UpsertResponse};
+use crate::infra::id::HoldingAccountId;
 use axum::{
     Router,
     extract::{Path, State},
@@ -27,16 +28,16 @@ use sqlx::SqlitePool;
 
 /// The account every row migrated to and every write that omits
 /// `holding_account_id` lands in (seeded as 'Default' by migration 0016).
-pub const DEFAULT_HOLDING_ACCOUNT_ID: i64 = 1;
+pub const DEFAULT_HOLDING_ACCOUNT_ID: HoldingAccountId = HoldingAccountId(1);
 
 /// Serde default for `holding_account_id` body fields.
-pub fn default_holding_account_id() -> i64 {
+pub fn default_holding_account_id() -> HoldingAccountId {
     DEFAULT_HOLDING_ACCOUNT_ID
 }
 
 #[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct HoldingAccount {
-    pub id: i64,
+    pub id: HoldingAccountId,
     pub name: String,
 }
 
@@ -48,7 +49,7 @@ pub struct HoldingAccountBody {
 }
 
 impl CrudEntity for HoldingAccount {
-    type Key = i64;
+    type Key = HoldingAccountId;
     type Filter = crate::infra::http::NoFilter;
     const TABLE: &'static str = "holding_accounts";
     const COLUMNS: &'static str = "id, name";
@@ -78,7 +79,10 @@ pub async fn db_list(pool: &SqlitePool) -> Result<Vec<HoldingAccount>, sqlx::Err
 /// reads the created row back; the route reaches the same query through
 /// `get_handler` (see CLAUDE.md's entity-module pattern).
 #[cfg(test)]
-pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<HoldingAccount>, sqlx::Error> {
+pub async fn db_get(
+    pool: &SqlitePool,
+    id: HoldingAccountId,
+) -> Result<Option<HoldingAccount>, sqlx::Error> {
     http::crud_get(pool, id).await
 }
 
@@ -121,9 +125,9 @@ impl From<UpsertError> for ApiError {
 /// the UNIQUE `name` is the only validation and the database applies it.
 async fn write(
     pool: &SqlitePool,
-    id: Option<i64>,
+    id: Option<HoldingAccountId>,
     account: &HoldingAccount,
-) -> Result<(i64, Upsert, Option<HoldingAccount>), sqlx::Error> {
+) -> Result<(HoldingAccountId, Upsert, Option<HoldingAccount>), sqlx::Error> {
     // A create (`id` is `None`) binds a NULL id, so the database — not the
     // caller — picks the new row's id (`infra::db::insert_with_optional_id`,
     // SCENARIOS U-a). `holding_accounts` is the one table here that is not
@@ -133,7 +137,7 @@ async fn write(
     let query = crate::infra::db::insert_with_optional_id(
         "INSERT INTO holding_accounts (id, name) VALUES (?, ?) \
          ON CONFLICT(id) DO UPDATE SET name = excluded.name",
-        id,
+        id.map(|id| id.0),
     );
     let mut tx = write_tx(pool).await?;
     // The create-vs-replace decision is made inside the write's own
@@ -143,7 +147,7 @@ async fn write(
     // An id-less INSERT was given one by the database; an upsert wrote the
     // explicit one it was handed. Either way the caller gets the id the row
     // actually holds.
-    let assigned_id = id.unwrap_or_else(|| result.last_insert_rowid());
+    let assigned_id = id.unwrap_or_else(|| HoldingAccountId(result.last_insert_rowid()));
     let (outcome, stored) =
         http::crud_upserted::<HoldingAccount, _>(&mut *tx, existed, assigned_id).await?;
     tx.commit().await?;
@@ -181,7 +185,10 @@ pub enum DeleteOutcome {
     Referenced,
 }
 
-pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome, sqlx::Error> {
+pub async fn db_delete(
+    pool: &SqlitePool,
+    id: HoldingAccountId,
+) -> Result<DeleteOutcome, sqlx::Error> {
     let mut tx = write_tx(pool).await?;
 
     let exists: bool =
@@ -224,7 +231,7 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome, sqlx
 /// The row a request body describes. `id` is the path's on an upsert and
 /// ignored on a create (the database assigns one), so both entry points build
 /// their `HoldingAccount` through this one mapping and cannot drift.
-fn holding_account_from_body(id: i64, body: HoldingAccountBody) -> HoldingAccount {
+fn holding_account_from_body(id: HoldingAccountId, body: HoldingAccountBody) -> HoldingAccount {
     HoldingAccount {
         id,
         name: body.name,
@@ -233,7 +240,7 @@ fn holding_account_from_body(id: i64, body: HoldingAccountBody) -> HoldingAccoun
 
 async fn upsert(
     State(pool): State<SqlitePool>,
-    Path(id): Path<i64>,
+    Path(id): Path<HoldingAccountId>,
     Json(body): Json<HoldingAccountBody>,
 ) -> Result<UpsertResponse<HoldingAccount>, ApiError> {
     // A duplicate name violates the UNIQUE constraint → 422.
@@ -249,13 +256,13 @@ async fn create(
     State(pool): State<SqlitePool>,
     Json(body): Json<HoldingAccountBody>,
 ) -> Result<(StatusCode, Json<HoldingAccount>), ApiError> {
-    let created = db_create(&pool, &holding_account_from_body(0, body)).await?;
+    let created = db_create(&pool, &holding_account_from_body(HoldingAccountId(0), body)).await?;
     Ok((StatusCode::CREATED, Json(created)))
 }
 
 async fn delete(
     State(pool): State<SqlitePool>,
-    Path(id): Path<i64>,
+    Path(id): Path<HoldingAccountId>,
 ) -> Result<StatusCode, ApiError> {
     match db_delete(&pool, id).await? {
         DeleteOutcome::Deleted => Ok(StatusCode::NO_CONTENT),
@@ -295,28 +302,36 @@ mod tests {
         db_upsert(
             &pool,
             &HoldingAccount {
-                id: 2,
+                id: HoldingAccountId(2),
                 name: "ICE Employee Plan".into(),
             },
         )
         .await
         .unwrap();
         assert_eq!(
-            db_get(&pool, 2).await.unwrap().unwrap().name,
+            db_get(&pool, HoldingAccountId(2))
+                .await
+                .unwrap()
+                .unwrap()
+                .name,
             "ICE Employee Plan"
         );
 
         db_upsert(
             &pool,
             &HoldingAccount {
-                id: 2,
+                id: HoldingAccountId(2),
                 name: "Personal CHESS".into(),
             },
         )
         .await
         .unwrap();
         assert_eq!(
-            db_get(&pool, 2).await.unwrap().unwrap().name,
+            db_get(&pool, HoldingAccountId(2))
+                .await
+                .unwrap()
+                .unwrap()
+                .name,
             "Personal CHESS"
         );
         assert_eq!(db_list(&pool).await.unwrap().len(), 2);
@@ -328,7 +343,7 @@ mod tests {
         db_upsert(
             &pool,
             &HoldingAccount {
-                id: 2,
+                id: HoldingAccountId(2),
                 name: "Plan".into(),
             },
         )
@@ -337,7 +352,7 @@ mod tests {
         let err = db_upsert(
             &pool,
             &HoldingAccount {
-                id: 3,
+                id: HoldingAccountId(3),
                 name: "Plan".into(),
             },
         )
@@ -355,14 +370,20 @@ mod tests {
         db_upsert(
             &pool,
             &HoldingAccount {
-                id: 2,
+                id: HoldingAccountId(2),
                 name: "Plan".into(),
             },
         )
         .await
         .unwrap();
-        assert_eq!(db_delete(&pool, 2).await.unwrap(), DeleteOutcome::Deleted);
-        assert_eq!(db_delete(&pool, 2).await.unwrap(), DeleteOutcome::NotFound);
+        assert_eq!(
+            db_delete(&pool, HoldingAccountId(2)).await.unwrap(),
+            DeleteOutcome::Deleted
+        );
+        assert_eq!(
+            db_delete(&pool, HoldingAccountId(2)).await.unwrap(),
+            DeleteOutcome::NotFound
+        );
     }
 
     #[tokio::test]
@@ -489,7 +510,12 @@ mod tests {
             .await
             .expect_status(StatusCode::NO_CONTENT);
 
-        let before: Vec<i64> = db_list(&pool).await.unwrap().iter().map(|a| a.id).collect();
+        let before: Vec<i64> = db_list(&pool)
+            .await
+            .unwrap()
+            .iter()
+            .map(|a| a.id.0)
+            .collect();
         let third: HoldingAccount = client
             .post("/holding_accounts", &serde_json::json!({ "name": "Third" }))
             .await
@@ -500,7 +526,7 @@ mod tests {
             "the create took a deleted id back: live ids were {before:?}"
         );
         assert!(
-            !before.contains(&third.id),
+            !before.contains(&third.id.0),
             "the create landed on an id a live row already holds: {before:?}"
         );
         assert_eq!(third.name, "Third");
@@ -540,7 +566,7 @@ mod tests {
 
         let all = db_list(&pool).await.unwrap();
         assert_eq!(all.len(), 3, "the seed plus both creates: {all:?}");
-        let mut ids: Vec<i64> = all.iter().map(|a| a.id).collect();
+        let mut ids: Vec<i64> = all.iter().map(|a| a.id.0).collect();
         ids.sort_unstable();
         ids.dedup();
         assert_eq!(ids.len(), 3, "the ids are distinct: {all:?}");

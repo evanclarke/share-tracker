@@ -200,9 +200,9 @@ Scored 6/10 — the weakest dimension. The operation modules are well factored, 
     `ReadTx` under `PRAGMA query_only` that SQLite refuses to write through; `sqlx::Pool::begin` is
     in `clippy.toml`'s `disallowed-methods`; the pool's release hook resets `query_only`. The
     `DEFERRED_BEGIN_ALLOWED` scan is gone; pinned by `a_read_transaction_refuses_every_write`
-  - [ ] Id newtypes (`ListingId`, `TradeId`, …) in place of bare `i64` — `ListingId` done 2026-10-10
-    (`infra::id`, every listing-id field, param and listing-keyed map); `HoldingAccountId` and
-    `TradeId` remain, the same way (`id_type!` + the compiler-driven pass)
+  - [ ] Id newtypes (`ListingId`, `TradeId`, …) in place of bare `i64` — `ListingId` and
+    `HoldingAccountId` done 2026-10-10 (`infra::id`, every such field, param, route path and keyed
+    map); `TradeId` remains, the same way (`id_type!` + the compiler-driven pass)
   - [ ] `utoipa-axum` (`#[utoipa::path]`/`OpenApiRouter`) in place of the `ROUTES` table and its
     Rust-parsing tests
 - [x] DECIDED 2026-10-10 (owner): keep them — N/A. prune `doc_checks.rs` phrase pins (~150 tests asserting exact prose,

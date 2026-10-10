@@ -3,6 +3,7 @@ use crate::entities::income::Income;
 use crate::infra::extract::Json;
 use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
+use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use axum::{Router, extract::State, routing::get};
 use chrono::NaiveDate;
@@ -37,7 +38,7 @@ pub struct AmitCashAlert {
     /// why generation narrows to it — so coverage is asked per account too: a
     /// fund held in two accounts needs two statements, and one of them
     /// leaves the other account's income unattributed (SCENARIOS F-03, F-08).
-    pub holding_account_id: i64,
+    pub holding_account_id: HoldingAccountId,
     /// How many cash income rows the year has on this listing in this account.
     pub cash_rows: i64,
     /// The year's gross cash (franked + unfranked + foreign components) in
@@ -83,14 +84,15 @@ pub async fn db_amit_cash_alerts(pool: &SqlitePool) -> Result<Vec<AmitCashAlert>
     let mut covered = HashSet::new();
     for row in &amma_rows {
         let listing_id: ListingId = row.try_get("listing_id")?;
-        let holding_account_id: i64 = row.try_get("holding_account_id")?;
+        let holding_account_id: HoldingAccountId = row.try_get("holding_account_id")?;
         let year_end: NaiveDate = row.try_get("tax_year_end_date")?;
         covered.insert((listing_id, holding_account_id, tax_year_for(year_end)));
     }
 
     // Aggregate the cash rows per (ticker, listing, FY, account); BTreeMap
     // keeps the report ordered by ticker, then year, then account.
-    let mut by_year: BTreeMap<(String, ListingId, i32, i64), (i64, Decimal)> = BTreeMap::new();
+    let mut by_year: BTreeMap<(String, ListingId, i32, HoldingAccountId), (i64, Decimal)> =
+        BTreeMap::new();
     for row in &cash_rows {
         // The joined ticker aside, every field comes off the income model, so
         // the assessment-date rule and the gross-cash definition are the
@@ -180,7 +182,7 @@ mod tests {
     }
 
     async fn insert_amma(pool: &SqlitePool, id: i64, listing_id: ListingId, year_end: NaiveDate) {
-        insert_amma_in(pool, id, listing_id, year_end, 1).await;
+        insert_amma_in(pool, id, listing_id, year_end, HoldingAccountId(1)).await;
     }
 
     async fn insert_amma_in(
@@ -188,7 +190,7 @@ mod tests {
         id: i64,
         listing_id: ListingId,
         year_end: NaiveDate,
-        holding_account_id: i64,
+        holding_account_id: HoldingAccountId,
     ) {
         test_support::amma(id, listing_id.0)
             .with(|a| {
@@ -205,7 +207,7 @@ mod tests {
         crate::entities::holding_account::db_upsert(
             pool,
             &crate::entities::holding_account::HoldingAccount {
-                id: 2,
+                id: HoldingAccountId(2),
                 name: "Second".to_string(),
             },
         )
@@ -218,7 +220,7 @@ mod tests {
         id: i64,
         listing_id: ListingId,
         date_paid: NaiveDate,
-        holding_account_id: i64,
+        holding_account_id: HoldingAccountId,
     ) {
         test_support::income(id, listing_id.0, date_paid)
             .with(|i| {
@@ -306,8 +308,22 @@ mod tests {
         let pool = test_pool().await;
         insert_amit_listing(&pool, 1, "VDHG").await;
         second_account(&pool).await;
-        insert_cash_in(&pool, 1, ListingId(1), ymd(2024, 10, 16), 1).await;
-        insert_amma_in(&pool, 1, ListingId(1), ymd(2025, 6, 30), 2).await;
+        insert_cash_in(
+            &pool,
+            1,
+            ListingId(1),
+            ymd(2024, 10, 16),
+            HoldingAccountId(1),
+        )
+        .await;
+        insert_amma_in(
+            &pool,
+            1,
+            ListingId(1),
+            ymd(2025, 6, 30),
+            HoldingAccountId(2),
+        )
+        .await;
 
         let alerts = db_amit_cash_alerts(&pool).await.unwrap();
         assert_eq!(alerts.len(), 1);
@@ -322,24 +338,52 @@ mod tests {
         let pool = test_pool().await;
         insert_amit_listing(&pool, 1, "VDHG").await;
         second_account(&pool).await;
-        insert_cash_in(&pool, 1, ListingId(1), ymd(2024, 10, 16), 1).await;
-        insert_cash_in(&pool, 2, ListingId(1), ymd(2024, 10, 16), 2).await;
+        insert_cash_in(
+            &pool,
+            1,
+            ListingId(1),
+            ymd(2024, 10, 16),
+            HoldingAccountId(1),
+        )
+        .await;
+        insert_cash_in(
+            &pool,
+            2,
+            ListingId(1),
+            ymd(2024, 10, 16),
+            HoldingAccountId(2),
+        )
+        .await;
 
         let alerts = db_amit_cash_alerts(&pool).await.unwrap();
         assert_eq!(
             alerts
                 .iter()
-                .map(|a| (a.holding_account_id, a.cash_rows, a.cash_total_aud))
+                .map(|a| (a.holding_account_id.0, a.cash_rows, a.cash_total_aud))
                 .collect::<Vec<_>>(),
             vec![(1, 1, Decimal::from(100)), (2, 1, Decimal::from(100))]
         );
 
-        insert_amma_in(&pool, 1, ListingId(1), ymd(2025, 6, 30), 1).await;
+        insert_amma_in(
+            &pool,
+            1,
+            ListingId(1),
+            ymd(2025, 6, 30),
+            HoldingAccountId(1),
+        )
+        .await;
         let remaining = db_amit_cash_alerts(&pool).await.unwrap();
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].holding_account_id, 2);
 
-        insert_amma_in(&pool, 2, ListingId(1), ymd(2025, 6, 30), 2).await;
+        insert_amma_in(
+            &pool,
+            2,
+            ListingId(1),
+            ymd(2025, 6, 30),
+            HoldingAccountId(2),
+        )
+        .await;
         assert!(db_amit_cash_alerts(&pool).await.unwrap().is_empty());
     }
 

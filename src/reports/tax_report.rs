@@ -52,6 +52,7 @@ use crate::infra::decimal::{OptMoney, mul_div, parse_dec, to_cents};
 use crate::infra::extract::{Json, Query};
 use crate::infra::fx::FxRates;
 use crate::infra::http::ApiError;
+use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use crate::reports::realised_gains::DisposalSource;
 use crate::reports::{
@@ -161,7 +162,7 @@ pub struct AmmaMissingAlert {
     /// statement per holder account, so a fund held in two accounts needs two
     /// statements and each account is asked for its own (the same rule the
     /// [AMIT cash cross-check](super::amit_cash_cross_check) applies).
-    pub holding_account_id: i64,
+    pub holding_account_id: HoldingAccountId,
 }
 
 /// An AMIT (listing, holding account) whose units were still held at 30 June
@@ -175,7 +176,7 @@ pub struct AmmaMissingAlert {
 pub struct AmmaNothingRecordedAlert {
     pub listing_id: ListingId,
     pub ticker: String,
-    pub holding_account_id: i64,
+    pub holding_account_id: HoldingAccountId,
     /// Units held at 30 June, so the line can say what position is unaccounted
     /// for rather than just naming the fund.
     pub units_held: Decimal,
@@ -310,7 +311,7 @@ async fn amma_coverage(
     // Both dates are `end`: the holding is the fact at 30 June, and the units
     // are wanted in that day's own basis, which is what the alert displays.
     let timeline = HeldTimeline::load_on(&mut *conn).await?;
-    let closing: HashMap<(ListingId, i64), Decimal> = tickers
+    let closing: HashMap<(ListingId, HoldingAccountId), Decimal> = tickers
         .keys()
         .flat_map(|listing_id| {
             timeline
@@ -329,7 +330,7 @@ async fn amma_coverage(
         sqlx::query("SELECT i.* FROM income i JOIN listings l ON l.id = i.listing_id WHERE l.amit")
             .fetch_all(&mut *conn)
             .await?;
-    let mut attributed: HashSet<(ListingId, i64)> = HashSet::new();
+    let mut attributed: HashSet<(ListingId, HoldingAccountId)> = HashSet::new();
     let mut fund_attributed: HashSet<ListingId> = HashSet::new();
     for row in &income_rows {
         let income = Income::from_row(row)?;
@@ -343,7 +344,7 @@ async fn amma_coverage(
         }
     }
 
-    let mut covered: HashSet<(ListingId, i64)> = HashSet::new();
+    let mut covered: HashSet<(ListingId, HoldingAccountId)> = HashSet::new();
     for row in sqlx::query(
         "SELECT listing_id, holding_account_id FROM amma_statements \
          WHERE tax_year_end_date BETWEEN ? AND ?",
@@ -363,11 +364,11 @@ async fn amma_coverage(
 
     // Sorted by ticker, then account, so both sections read in the same order
     // as the cross-check alerts beside them.
-    let sort_key = |listing_id: &ListingId, account_id: &i64| {
+    let sort_key = |listing_id: &ListingId, account_id: &HoldingAccountId| {
         (tickers.get(listing_id).cloned(), *account_id, *listing_id)
     };
 
-    let mut missing: Vec<(ListingId, i64)> = attributed
+    let mut missing: Vec<(ListingId, HoldingAccountId)> = attributed
         .iter()
         .copied()
         .chain(
@@ -381,7 +382,7 @@ async fn amma_coverage(
     missing.sort_unstable_by_key(|(listing_id, account_id)| sort_key(listing_id, account_id));
     missing.dedup();
 
-    let mut unrecorded: Vec<((ListingId, i64), Decimal)> = closing
+    let mut unrecorded: Vec<((ListingId, HoldingAccountId), Decimal)> = closing
         .iter()
         .filter(|(key, qty)| {
             **qty > Decimal::ZERO && !fund_attributed.contains(&key.0) && !covered.contains(key)
@@ -451,7 +452,7 @@ pub struct DisposalParcelRow {
     pub source: DisposalSource,
     pub sale_trade_id: i64,
     pub purchase_trade_id: i64,
-    pub holding_account_id: i64,
+    pub holding_account_id: HoldingAccountId,
 
     // Acquisition / traceability
     pub acquisition_date: NaiveDate,
@@ -3249,7 +3250,7 @@ mod tests {
         crate::entities::holding_account::db_upsert(
             &pool,
             &crate::entities::holding_account::HoldingAccount {
-                id: 2,
+                id: HoldingAccountId(2),
                 name: "Second".to_string(),
             },
         )
@@ -3286,7 +3287,7 @@ mod tests {
                 .completeness
                 .amma_missing
                 .iter()
-                .map(|a| (a.listing_id.0, a.holding_account_id))
+                .map(|a| (a.listing_id.0, a.holding_account_id.0))
                 .collect::<Vec<_>>(),
             vec![(1, 1), (1, 2)]
         );
@@ -3306,7 +3307,7 @@ mod tests {
         assert!(!partly.completeness.complete);
 
         test_support::amma(2, 1)
-            .with(|a| a.holding_account_id = 2)
+            .with(|a| a.holding_account_id = HoldingAccountId(2))
             .insert(&pool)
             .await;
         let cleared = db_tax_report(&pool, 2024).await.unwrap();
@@ -3982,7 +3983,7 @@ mod tests {
             &crate::entities::sell::SellBody {
                 brokerage_includes_gst: false,
                 statement_total: None,
-                holding_account_id: 1,
+                holding_account_id: HoldingAccountId(1),
                 date: ymd(2025, 5, 1),
                 settlement_date: None,
                 listing_id: ListingId(1),
@@ -4257,7 +4258,7 @@ mod tests {
                 proceeds_per_right: Some(dec("0.20")),
                 rights_cost: None,
                 fx_rate: None,
-                holding_account_id: 1,
+                holding_account_id: HoldingAccountId(1),
                 allocations: vec![rights_sale::AllocationInput {
                     purchase_trade_id: 1,
                     units: dec("250"),
@@ -5595,7 +5596,7 @@ mod tests {
         let parcel = ParcelRow {
             id: 1,
             listing_id: ListingId(1),
-            holding_account_id: 1,
+            holding_account_id: HoldingAccountId(1),
             date: ymd(2026, 1, 5),
             quantity: dec("100"),
             average_price: dec("10"),
@@ -5634,7 +5635,7 @@ mod tests {
             source: DisposalSource::Sell,
             sale_trade_id: 2,
             listing_id: ListingId(1),
-            holding_account_id: 1,
+            holding_account_id: HoldingAccountId(1),
             sale_date: ymd(2026, 6, 1),
             proceeds: dec("2000"),
             cost_base: dec("1000"),

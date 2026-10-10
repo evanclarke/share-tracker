@@ -39,6 +39,8 @@ use crate::infra::currency::CurrencyCode;
 use crate::infra::extract::Json;
 use crate::infra::fx::FxRates;
 use crate::infra::http::ApiError;
+#[cfg(test)]
+use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use axum::{Router, extract::State, routing::get};
 use chrono::{Datelike, NaiveDate};
@@ -687,7 +689,7 @@ mod tests {
                 proceeds_per_right: Some(dec("0.20")),
                 rights_cost: None,
                 fx_rate: Some(dec("0.99")),
-                holding_account_id: 1,
+                holding_account_id: HoldingAccountId(1),
                 allocations: vec![crate::entities::rights_sale::AllocationInput {
                     purchase_trade_id: 1,
                     units: dec("50"),

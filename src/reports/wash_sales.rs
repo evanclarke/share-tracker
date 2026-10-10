@@ -21,6 +21,7 @@
 use crate::infra::decimal::row_dec;
 use crate::infra::extract::{Json, Query};
 use crate::infra::http::ApiError;
+use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use crate::reports::realised_gains::{self, DisposalSource};
 use axum::{Router, extract::State, routing::get};
@@ -42,7 +43,7 @@ pub struct WashSaleAlert {
     pub sale_trade_id: i64,
     pub listing_id: ListingId,
     pub ticker: String,
-    pub sale_holding_account_id: i64,
+    pub sale_holding_account_id: HoldingAccountId,
     pub sale_date: NaiveDate,
     /// The sale's realised capital loss across its loss-making allocations
     /// (AUD, positive) — the figure Part IVA would cancel.
@@ -292,7 +293,7 @@ mod tests {
         holding_account::db_upsert(
             &pool,
             &holding_account::HoldingAccount {
-                id: 2,
+                id: HoldingAccountId(2),
                 name: "Second broker".to_string(),
             },
         )
@@ -421,7 +422,7 @@ mod tests {
         holding_account::db_upsert(
             &pool,
             &holding_account::HoldingAccount {
-                id: 2,
+                id: HoldingAccountId(2),
                 name: "Second broker".to_string(),
             },
         )
@@ -441,8 +442,8 @@ mod tests {
             &crate::entities::transfer::TransferBody {
                 listing_id: ListingId(1),
                 date: ymd(2025, 6, 16),
-                from_account_id: 1,
-                to_account_id: 2,
+                from_account_id: HoldingAccountId(1),
+                to_account_id: HoldingAccountId(2),
                 allocations: vec![crate::entities::sell::AllocationInput {
                     purchase_trade_id: 3,
                     quantity_allocated: Decimal::from(50),
@@ -475,7 +476,7 @@ mod tests {
         holding_account::db_upsert(
             &pool,
             &holding_account::HoldingAccount {
-                id: 2,
+                id: HoldingAccountId(2),
                 name: "Second wallet".to_string(),
             },
         )
@@ -496,8 +497,8 @@ mod tests {
             &crate::entities::transfer::TransferBody {
                 listing_id: ListingId(1),
                 date: ymd(2025, 6, 12),
-                from_account_id: 1,
-                to_account_id: 2,
+                from_account_id: HoldingAccountId(1),
+                to_account_id: HoldingAccountId(2),
                 allocations: vec![crate::entities::sell::AllocationInput {
                     purchase_trade_id: 3,
                     quantity_allocated: Decimal::from(50),

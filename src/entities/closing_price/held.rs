@@ -6,6 +6,7 @@
 //! the health report both ask questions of.
 
 use crate::infra::decimal::parse_dec;
+use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use chrono::{Duration, NaiveDate};
 use rust_decimal::Decimal;
@@ -21,7 +22,7 @@ struct ParcelHolding {
     /// here is about the listing as a whole — but a holding *is* per account
     /// (an entitlement is paid to a registered holder, not to a security), so
     /// the split has to survive the load.
-    holding_account_id: i64,
+    holding_account_id: HoldingAccountId,
     acquired: NaiveDate,
     qty: Decimal,
     /// `(sale date, units sold)`, each already re-based to this parcel's
@@ -160,12 +161,12 @@ impl HeldTimeline {
         listing_id: ListingId,
         held_on: NaiveDate,
         unit_basis_at: NaiveDate,
-    ) -> Vec<(i64, Decimal)> {
+    ) -> Vec<(HoldingAccountId, Decimal)> {
         let Some(parcels) = self.parcels.get(&listing_id) else {
             return Vec::new();
         };
         let splits = self.splits.get(&listing_id).map_or(&[][..], |v| v);
-        let mut by_account: HashMap<i64, Decimal> = HashMap::new();
+        let mut by_account: HashMap<HoldingAccountId, Decimal> = HashMap::new();
         for p in parcels {
             let remaining = p.remaining_on(held_on);
             if remaining <= Decimal::ZERO {
@@ -179,7 +180,7 @@ impl HeldTimeline {
                     Some(unit_basis_at),
                 );
         }
-        let mut out: Vec<(i64, Decimal)> = by_account
+        let mut out: Vec<(HoldingAccountId, Decimal)> = by_account
             .into_iter()
             .filter(|(_, qty)| *qty > Decimal::ZERO)
             .collect();

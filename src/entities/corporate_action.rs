@@ -171,6 +171,8 @@ pub use crate::domain::adjustments::split_ratio;
 #[cfg(test)]
 use crate::infra::http::Upsert;
 #[cfg(test)]
+use crate::infra::id::HoldingAccountId;
+#[cfg(test)]
 use crate::infra::id::ListingId;
 #[cfg(test)]
 use axum::http::StatusCode;
@@ -3178,7 +3180,7 @@ mod tests {
             &SellBody {
                 brokerage_includes_gst: false,
                 statement_total: None,
-                holding_account_id: 1,
+                holding_account_id: HoldingAccountId(1),
                 date,
                 settlement_date: Some(date),
                 listing_id: ListingId(1),
@@ -3640,7 +3642,7 @@ mod tests {
         crate::entities::holding_account::db_upsert(
             &pool,
             &crate::entities::holding_account::HoldingAccount {
-                id: 2,
+                id: HoldingAccountId(2),
                 name: "Broker".to_string(),
             },
         )
@@ -3658,8 +3660,8 @@ mod tests {
             &crate::entities::transfer::TransferBody {
                 listing_id: ListingId(1),
                 date: d(2023, 8, 1),
-                from_account_id: 1,
-                to_account_id: 2,
+                from_account_id: HoldingAccountId(1),
+                to_account_id: HoldingAccountId(2),
                 allocations: vec![AllocationInput {
                     purchase_trade_id: 1,
                     quantity_allocated: Decimal::from(100),
@@ -3836,7 +3838,7 @@ mod tests {
             &SellBody {
                 brokerage_includes_gst: false,
                 statement_total: None,
-                holding_account_id: 1,
+                holding_account_id: HoldingAccountId(1),
                 date: d(2024, 6, 3),
                 settlement_date: Some(d(2024, 6, 5)),
                 listing_id: ListingId(1),
@@ -4002,7 +4004,7 @@ mod tests {
             &SellBody {
                 brokerage_includes_gst: false,
                 statement_total: None,
-                holding_account_id: 1,
+                holding_account_id: HoldingAccountId(1),
                 date: d(2024, 9, 2),
                 settlement_date: Some(d(2024, 9, 2)),
                 listing_id: ListingId(1),

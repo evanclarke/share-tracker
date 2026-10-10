@@ -5,6 +5,7 @@ use crate::entities::corporate_action;
 use crate::entities::holding_account;
 use crate::entities::inheritance::Inheritance;
 use crate::entities::investment_expense::{ExpenseType, InvestmentExpense};
+use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use crate::test_support::{self, ApiClient, dec, test_pool, ymd};
 use axum::http::StatusCode;
@@ -840,7 +841,7 @@ async fn insert_amma(
     id: i64,
     listing_id: ListingId,
     year_end: NaiveDate,
-    holding_account_id: i64,
+    holding_account_id: HoldingAccountId,
 ) {
     test_support::amma(id, listing_id.0)
         .with(|a| {
@@ -1751,7 +1752,7 @@ async fn one_reference_keyed_into_two_accounts_is_still_a_duplicate() {
     crate::entities::holding_account::db_upsert(
         &pool,
         &crate::entities::holding_account::HoldingAccount {
-            id: 2,
+            id: HoldingAccountId(2),
             name: "Second".to_string(),
         },
     )
@@ -1888,11 +1889,39 @@ async fn duplicated_amma_statements_are_reported_with_their_ids() {
     amit_listing(&pool, 1, "VDHG").await;
     amit_listing(&pool, 2, "HNDQ").await;
     // VDHG FY2025: the original and its amendment.
-    insert_amma(&pool, 1, ListingId(1), ymd(2025, 6, 30), 1).await;
-    insert_amma(&pool, 2, ListingId(1), ymd(2025, 6, 30), 1).await;
+    insert_amma(
+        &pool,
+        1,
+        ListingId(1),
+        ymd(2025, 6, 30),
+        HoldingAccountId(1),
+    )
+    .await;
+    insert_amma(
+        &pool,
+        2,
+        ListingId(1),
+        ymd(2025, 6, 30),
+        HoldingAccountId(1),
+    )
+    .await;
     // HNDQ FY2024: the same mistake a year earlier.
-    insert_amma(&pool, 3, ListingId(2), ymd(2024, 6, 30), 1).await;
-    insert_amma(&pool, 4, ListingId(2), ymd(2024, 6, 30), 1).await;
+    insert_amma(
+        &pool,
+        3,
+        ListingId(2),
+        ymd(2024, 6, 30),
+        HoldingAccountId(1),
+    )
+    .await;
+    insert_amma(
+        &pool,
+        4,
+        ListingId(2),
+        ymd(2024, 6, 30),
+        HoldingAccountId(1),
+    )
+    .await;
 
     let h = health(&pool, ymd(2026, 7, 13)).await;
     assert_eq!(h.duplicate_amma_statements.len(), 2);
@@ -1921,19 +1950,47 @@ async fn statements_differing_in_listing_year_or_account_are_not_duplicates() {
     crate::entities::holding_account::db_upsert(
         &pool,
         &crate::entities::holding_account::HoldingAccount {
-            id: 2,
+            id: HoldingAccountId(2),
             name: "Second".to_string(),
         },
     )
     .await
     .unwrap();
     // Same listing and year, different holding account.
-    insert_amma(&pool, 1, ListingId(1), ymd(2025, 6, 30), 1).await;
-    insert_amma(&pool, 2, ListingId(1), ymd(2025, 6, 30), 2).await;
+    insert_amma(
+        &pool,
+        1,
+        ListingId(1),
+        ymd(2025, 6, 30),
+        HoldingAccountId(1),
+    )
+    .await;
+    insert_amma(
+        &pool,
+        2,
+        ListingId(1),
+        ymd(2025, 6, 30),
+        HoldingAccountId(2),
+    )
+    .await;
     // Same listing and account, different year.
-    insert_amma(&pool, 3, ListingId(1), ymd(2024, 6, 30), 1).await;
+    insert_amma(
+        &pool,
+        3,
+        ListingId(1),
+        ymd(2024, 6, 30),
+        HoldingAccountId(1),
+    )
+    .await;
     // Same year and account, different listing.
-    insert_amma(&pool, 4, ListingId(2), ymd(2025, 6, 30), 1).await;
+    insert_amma(
+        &pool,
+        4,
+        ListingId(2),
+        ymd(2025, 6, 30),
+        HoldingAccountId(1),
+    )
+    .await;
 
     let h = health(&pool, ymd(2026, 7, 13)).await;
     assert!(h.duplicate_amma_statements.is_empty());
@@ -1944,9 +2001,30 @@ async fn statements_differing_in_listing_year_or_account_are_not_duplicates() {
 async fn three_statements_for_one_fund_year_are_one_row_counting_three() {
     let pool = test_pool().await;
     amit_listing(&pool, 1, "VDHG").await;
-    insert_amma(&pool, 7, ListingId(1), ymd(2025, 6, 30), 1).await;
-    insert_amma(&pool, 8, ListingId(1), ymd(2025, 6, 30), 1).await;
-    insert_amma(&pool, 9, ListingId(1), ymd(2025, 6, 30), 1).await;
+    insert_amma(
+        &pool,
+        7,
+        ListingId(1),
+        ymd(2025, 6, 30),
+        HoldingAccountId(1),
+    )
+    .await;
+    insert_amma(
+        &pool,
+        8,
+        ListingId(1),
+        ymd(2025, 6, 30),
+        HoldingAccountId(1),
+    )
+    .await;
+    insert_amma(
+        &pool,
+        9,
+        ListingId(1),
+        ymd(2025, 6, 30),
+        HoldingAccountId(1),
+    )
+    .await;
 
     let h = health(&pool, ymd(2026, 7, 13)).await;
     assert_eq!(h.duplicate_amma_statements.len(), 1);
@@ -1979,7 +2057,7 @@ async fn insert_dividend_amount(
 ) {
     test_support::income(id, listing_id.0, date)
         .with(|i| {
-            i.holding_account_id = account;
+            i.holding_account_id = HoldingAccountId(account);
             i.franked_amount = franked;
         })
         .insert(pool)
@@ -2032,7 +2110,7 @@ async fn income_differing_in_listing_account_date_or_amount_is_not_a_duplicate()
     crate::entities::holding_account::db_upsert(
         &pool,
         &crate::entities::holding_account::HoldingAccount {
-            id: 2,
+            id: HoldingAccountId(2),
             name: "Second".to_string(),
         },
     )
@@ -2191,7 +2269,7 @@ async fn interest_differing_in_any_key_field_is_not_a_duplicate() {
     crate::entities::holding_account::db_upsert(
         &pool,
         &crate::entities::holding_account::HoldingAccount {
-            id: 2,
+            id: HoldingAccountId(2),
             name: "Second".to_string(),
         },
     )
@@ -2223,7 +2301,7 @@ async fn interest_differing_in_any_key_field_is_not_a_duplicate() {
             foreign_tax_paid: Decimal::ZERO,
             currency: "AUD".into(),
             source: Some("ANZ savings".to_string()),
-            holding_account_id: Some(2),
+            holding_account_id: Some(HoldingAccountId(2)),
         },
     )
     .await
@@ -2430,7 +2508,7 @@ async fn ess_statements_differing_in_any_key_field_are_not_duplicates() {
     crate::entities::holding_account::db_upsert(
         &pool,
         &crate::entities::holding_account::HoldingAccount {
-            id: 2,
+            id: HoldingAccountId(2),
             name: "Second".to_string(),
         },
     )
@@ -2442,7 +2520,7 @@ async fn ess_statements_differing_in_any_key_field_are_not_duplicates() {
     // Same listing, taxing point and figures, different holding account.
     test_support::ess_statement(3, 1, ymd(2026, 3, 10))
         .with(|s| {
-            s.holding_account_id = 2;
+            s.holding_account_id = HoldingAccountId(2);
             s.quantity = dec("100");
             s.market_value_per_share = dec("10");
             s.deferral_discount = dec("1000");
@@ -2709,7 +2787,7 @@ async fn a_holding_account_transfer_inside_the_window_is_not_a_disposal() {
     holding_account::db_upsert(
         &pool,
         &holding_account::HoldingAccount {
-            id: 2,
+            id: HoldingAccountId(2),
             name: "ICE Employee Plan".to_string(),
         },
     )
@@ -2723,8 +2801,8 @@ async fn a_holding_account_transfer_inside_the_window_is_not_a_disposal() {
         &crate::entities::transfer::TransferBody {
             listing_id: ListingId(1),
             date: ymd(2024, 3, 11),
-            from_account_id: 1,
-            to_account_id: 2,
+            from_account_id: HoldingAccountId(1),
+            to_account_id: HoldingAccountId(2),
             allocations: vec![crate::entities::sell::AllocationInput {
                 purchase_trade_id: vest,
                 quantity_allocated: dec("400"),
@@ -2827,7 +2905,7 @@ async fn insert_inheritance(
         &Inheritance {
             id,
             listing_id,
-            holding_account_id: account,
+            holding_account_id: HoldingAccountId(account),
             quantity: dec(quantity),
             date_of_death: ymd(2024, 3, 1),
             cost_base_rule: crate::entities::inheritance::CostBaseRule::DeceasedCostBase,
@@ -2875,7 +2953,7 @@ async fn inheritances_from_one_death_that_differ_are_not_reported() {
     crate::entities::holding_account::db_upsert(
         &pool,
         &crate::entities::holding_account::HoldingAccount {
-            id: 2,
+            id: HoldingAccountId(2),
             name: "Broker".to_string(),
         },
     )
@@ -3247,7 +3325,7 @@ async fn operation_written_closing_sells_are_never_flagged() {
     holding_account::db_upsert(
         &pool,
         &holding_account::HoldingAccount {
-            id: 2,
+            id: HoldingAccountId(2),
             name: "Broker".to_string(),
         },
     )
@@ -3320,7 +3398,7 @@ async fn only_a_paid_for_right_disposed_of_at_nil_is_flagged() {
             proceeds_per_right: Some(Decimal::ZERO),
             rights_cost: cost,
             fx_rate: None,
-            holding_account_id: 1,
+            holding_account_id: HoldingAccountId(1),
             allocations: vec![crate::entities::rights_sale::AllocationInput {
                 purchase_trade_id: 1,
                 units: units.parse().unwrap(),
@@ -3574,7 +3652,7 @@ async fn each_holding_account_is_asked_separately() {
     holding_account::db_upsert(
         &pool,
         &holding_account::HoldingAccount {
-            id: 2,
+            id: HoldingAccountId(2),
             name: "Second".to_string(),
         },
     )

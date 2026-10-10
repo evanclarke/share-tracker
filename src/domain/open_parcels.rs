@@ -740,12 +740,14 @@ mod tests {
         let mut by_key: HashMap<(i64, i64), Decimal> = HashMap::new();
         for p in &parcels {
             *by_key
-                .entry((p.listing_id.0, p.holding_account_id))
+                .entry((p.listing_id.0, p.holding_account_id.0))
                 .or_insert(Decimal::ZERO) += p.remaining_quantity;
         }
         for h in &holdings {
             assert_eq!(
-                by_key.get(&(h.listing_id.0, h.holding_account_id)).copied(),
+                by_key
+                    .get(&(h.listing_id.0, h.holding_account_id.0))
+                    .copied(),
                 Some(h.quantity)
             );
         }

@@ -18,6 +18,7 @@ use crate::infra::db::{WriteMode, write_tx};
 use crate::infra::decimal::{Money, OptMoney};
 use crate::infra::extract::{Json, Query};
 use crate::infra::http::{self, ApiError, DryRunQuery, Upsert, UpsertResponse};
+use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use axum::{
     Router,
@@ -103,7 +104,7 @@ pub struct SellBody {
     /// consume parcels held in the same account. Defaults to the seeded
     /// default account when omitted.
     #[serde(default = "crate::entities::holding_account::default_holding_account_id")]
-    pub holding_account_id: i64,
+    pub holding_account_id: HoldingAccountId,
     /// The purchase parcels (Buy/DRP trades in the same listing and holding account) the
     /// sale consumes, and how many units from each. Their quantities must sum to
     /// `quantity`.
@@ -929,7 +930,7 @@ pub(crate) async fn upsert_sell_in_tx(
         // account (the rollover replacement Buys stay in each consumed parcel's
         // account; a worthless recognise has no replacements — the loss rows
         // identify the closing Sell's account, totals unchanged).
-        let purchase_account: i64 = purchase_row.try_get("holding_account_id")?;
+        let purchase_account: HoldingAccountId = purchase_row.try_get("holding_account_id")?;
         if !provenance.is_some_and(SellProvenance::closes_whole_holding)
             && purchase_account != body.holding_account_id
         {
@@ -1058,7 +1059,7 @@ mod tests {
         SellBody {
             brokerage_includes_gst: false,
             statement_total: None,
-            holding_account_id: 1,
+            holding_account_id: HoldingAccountId(1),
             date: NaiveDate::from_ymd_opt(2024, 6, 3).unwrap(),
             settlement_date: None,
             listing_id: ListingId(1),
@@ -1406,7 +1407,7 @@ mod tests {
         holding_account::db_upsert(
             &pool,
             &HoldingAccount {
-                id: 2,
+                id: HoldingAccountId(2),
                 name: "ICE Employee Plan".to_string(),
             },
         )
@@ -1439,7 +1440,7 @@ mod tests {
                 quantity_allocated: Decimal::from(100),
             }],
         );
-        body.holding_account_id = 2;
+        body.holding_account_id = HoldingAccountId(2);
         db_upsert_sell(&pool, 2, &body).await.unwrap();
         assert!(trade_exists(&pool, 2).await);
     }
@@ -1452,7 +1453,7 @@ mod tests {
         holding_account::db_upsert(
             &pool,
             &HoldingAccount {
-                id: 2,
+                id: HoldingAccountId(2),
                 name: "ICE Employee Plan".to_string(),
             },
         )
@@ -2494,7 +2495,7 @@ mod tests {
             holding_account::db_upsert(
                 &pool,
                 &HoldingAccount {
-                    id,
+                    id: HoldingAccountId(id),
                     name: name.to_string(),
                 },
             )
@@ -2535,7 +2536,7 @@ mod tests {
                     quantity_allocated: Decimal::from(100),
                 }],
             );
-            body.holding_account_id = account;
+            body.holding_account_id = HoldingAccountId(account);
             db_upsert_sell(&pool, 20 + account, &body).await.unwrap();
         }
         assert!(remaining_quantities(&pool).await.is_empty());
@@ -2852,7 +2853,7 @@ mod tests {
             &drp_enrolment::DrpEnrolment {
                 id: 1,
                 listing_id: ListingId(1),
-                holding_account_id: 1,
+                holding_account_id: HoldingAccountId(1),
                 enrolment_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
                 unenrolment_date: None,
                 residual_handling: drp_enrolment::ResidualHandling::CarryForward,
@@ -2931,7 +2932,7 @@ mod tests {
                 units: Decimal::from(25),
                 rights_cost: None,
                 fx_rate: None,
-                holding_account_id: 1,
+                holding_account_id: HoldingAccountId(1),
             },
         )
         .await
@@ -2987,7 +2988,7 @@ mod tests {
             &Inheritance {
                 id: 1,
                 listing_id: ListingId(1),
-                holding_account_id: 1,
+                holding_account_id: HoldingAccountId(1),
                 quantity: Decimal::from(50),
                 date_of_death: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
                 cost_base_rule: CostBaseRule::MarketValueAtDeath,
@@ -3061,7 +3062,7 @@ mod tests {
         holding_account::db_upsert(
             &pool,
             &HoldingAccount {
-                id: 2,
+                id: HoldingAccountId(2),
                 name: "ICE Employee Plan".to_string(),
             },
         )
@@ -3073,8 +3074,8 @@ mod tests {
             &TransferBody {
                 listing_id: ListingId(1),
                 date: NaiveDate::from_ymd_opt(2024, 5, 1).unwrap(),
-                from_account_id: 1,
-                to_account_id: 2,
+                from_account_id: HoldingAccountId(1),
+                to_account_id: HoldingAccountId(2),
                 allocations: vec![AllocationInput {
                     purchase_trade_id: 1,
                     quantity_allocated: Decimal::from(100),

@@ -32,6 +32,7 @@ use crate::infra::db::write_tx;
 use crate::infra::decimal::row_dec;
 use crate::infra::extract::Json;
 use crate::infra::http::ApiError;
+use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use axum::{
     Router,
@@ -326,7 +327,7 @@ pub async fn db_generate(
         return Err(GenerateError::StatementNotFound);
     };
     let listing_id: ListingId = row.try_get("listing_id")?;
-    let holding_account_id: i64 = row.try_get("holding_account_id")?;
+    let holding_account_id: HoldingAccountId = row.try_get("holding_account_id")?;
     let year_end: NaiveDate = row.try_get("tax_year_end_date")?;
     let units_held = row_dec(&row, "units_held")?;
 
@@ -848,7 +849,7 @@ mod tests {
             holding_account::db_upsert(
                 &pool,
                 &HoldingAccount {
-                    id,
+                    id: HoldingAccountId(id),
                     name: name.to_string(),
                 },
             )
@@ -877,8 +878,8 @@ mod tests {
                 &TransferBody {
                     listing_id: ListingId(1),
                     date,
-                    from_account_id: from,
-                    to_account_id: to,
+                    from_account_id: HoldingAccountId(from),
+                    to_account_id: HoldingAccountId(to),
                     allocations: vec![AllocationInput {
                         purchase_trade_id: moved_from,
                         quantity_allocated: dec("100"),
@@ -966,7 +967,7 @@ mod tests {
         holding_account::db_upsert(
             &pool,
             &HoldingAccount {
-                id: 2,
+                id: HoldingAccountId(2),
                 name: "Second".to_string(),
             },
         )
@@ -980,7 +981,7 @@ mod tests {
         test_support::buy(2, 1)
             .date(ymd(2024, 3, 1))
             .qty(dec("50"))
-            .with(|t| t.holding_account_id = 2)
+            .with(|t| t.holding_account_id = HoldingAccountId(2))
             .insert(&pool)
             .await;
         amma(&pool, 6, ListingId(1), ymd(2024, 6, 30), "100").await;
@@ -1317,7 +1318,7 @@ mod tests {
         holding_account::db_upsert(
             &pool,
             &HoldingAccount {
-                id: 2,
+                id: HoldingAccountId(2),
                 name: "Second".to_string(),
             },
         )
@@ -1331,8 +1332,8 @@ mod tests {
             &TransferBody {
                 listing_id: ListingId(1),
                 date: ymd(2024, 8, 15),
-                from_account_id: 1,
-                to_account_id: 2,
+                from_account_id: HoldingAccountId(1),
+                to_account_id: HoldingAccountId(2),
                 allocations: vec![AllocationInput {
                     purchase_trade_id: 1,
                     quantity_allocated: dec("100"),
@@ -1573,7 +1574,7 @@ mod tests {
         holding_account::db_upsert(
             &pool,
             &HoldingAccount {
-                id: 2,
+                id: HoldingAccountId(2),
                 name: "Second".to_string(),
             },
         )
@@ -1591,8 +1592,8 @@ mod tests {
             &TransferBody {
                 listing_id: ListingId(1),
                 date: ymd(2024, 2, 1),
-                from_account_id: 1,
-                to_account_id: 2,
+                from_account_id: HoldingAccountId(1),
+                to_account_id: HoldingAccountId(2),
                 allocations: vec![AllocationInput {
                     purchase_trade_id: 1,
                     quantity_allocated: dec("100"),
@@ -1612,7 +1613,7 @@ mod tests {
             .with(|a| {
                 a.tax_year_end_date = ymd(2024, 6, 30);
                 a.date_received = ymd(2024, 8, 29);
-                a.holding_account_id = 2;
+                a.holding_account_id = HoldingAccountId(2);
             })
             .insert(&pool)
             .await;
@@ -1668,7 +1669,7 @@ mod tests {
         holding_account::db_upsert(
             pool,
             &HoldingAccount {
-                id: 2,
+                id: HoldingAccountId(2),
                 name: "Second".to_string(),
             },
         )
@@ -1680,8 +1681,8 @@ mod tests {
             &TransferBody {
                 listing_id: ListingId(1),
                 date: ymd(2024, 8, 15),
-                from_account_id: 1,
-                to_account_id: 2,
+                from_account_id: HoldingAccountId(1),
+                to_account_id: HoldingAccountId(2),
                 allocations: vec![AllocationInput {
                     purchase_trade_id: 1,
                     quantity_allocated: dec("40"),

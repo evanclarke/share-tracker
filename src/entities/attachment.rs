@@ -29,6 +29,8 @@
 //! - `DELETE /attachments/{id}` removes one attachment.
 
 use crate::infra::http::{self, ApiError, CrudEntity};
+#[cfg(test)]
+use crate::infra::id::HoldingAccountId;
 use std::fmt::Write as _;
 
 use crate::infra::extract::{Json, Query};
@@ -526,11 +528,18 @@ mod tests {
     async fn insert_parcel(pool: &SqlitePool, origin: trade::ParcelOrigin) -> i64 {
         insert_listing(pool).await;
         let mut conn = pool.acquire().await.unwrap();
-        trade::NewParcel::new(origin, ymd(2024, 1, 2), ListingId(1), 1, dec("1"), "AUD")
-            .price(dec("1"))
-            .insert(&mut conn)
-            .await
-            .unwrap()
+        trade::NewParcel::new(
+            origin,
+            ymd(2024, 1, 2),
+            ListingId(1),
+            HoldingAccountId(1),
+            dec("1"),
+            "AUD",
+        )
+        .price(dec("1"))
+        .insert(&mut conn)
+        .await
+        .unwrap()
     }
 
     async fn insert_income(pool: &SqlitePool) -> i64 {

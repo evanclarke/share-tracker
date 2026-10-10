@@ -7,6 +7,7 @@ use crate::infra::decimal::{Money, OptMoney, mul_div};
 use crate::infra::extract::Json;
 use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
+use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use axum::{Router, extract::State, routing::get};
 use chrono::NaiveDate;
@@ -38,7 +39,7 @@ pub struct RealisedGainLoss {
     pub listing_id: ListingId,
     /// The holding account the Sell happened in (the same taxpayer either
     /// way — totals are unchanged; rows identify the account).
-    pub holding_account_id: i64,
+    pub holding_account_id: HoldingAccountId,
     pub sale_date: NaiveDate,
     /// Net proceeds from the allocated portion (sale price × qty − pro-rated
     /// brokerage), converted to AUD at the sale's ATO FX rate.
@@ -135,7 +136,7 @@ pub fn router() -> Router<SqlitePool> {
 struct SellInfo {
     id: i64,
     listing_id: ListingId,
-    holding_account_id: i64,
+    holding_account_id: HoldingAccountId,
     date: NaiveDate,
     #[sqlx(try_from = "Money")]
     quantity: Decimal,
@@ -253,7 +254,7 @@ struct Allocation {
 struct RightsSaleInfo {
     id: i64,
     listing_id: ListingId,
-    holding_account_id: i64,
+    holding_account_id: HoldingAccountId,
     date: NaiveDate,
     #[sqlx(try_from = "Money")]
     units: Decimal,
@@ -860,7 +861,7 @@ mod tests {
         SellInfo {
             id,
             listing_id: ListingId(1),
-            holding_account_id: 1,
+            holding_account_id: HoldingAccountId(1),
             date,
             quantity: Decimal::from(qty),
             average_price: Decimal::from(price),
@@ -880,7 +881,7 @@ mod tests {
         ParcelRow {
             id,
             listing_id: ListingId(1),
-            holding_account_id: 1,
+            holding_account_id: HoldingAccountId(1),
             date,
             quantity: Decimal::from(qty),
             average_price: Decimal::from(price),
@@ -1949,7 +1950,7 @@ mod tests {
         crate::entities::holding_account::db_upsert(
             &pool,
             &crate::entities::holding_account::HoldingAccount {
-                id: 2,
+                id: HoldingAccountId(2),
                 name: "Broker".to_string(),
             },
         )
@@ -1995,8 +1996,8 @@ mod tests {
             &crate::entities::transfer::TransferBody {
                 listing_id: ListingId(1),
                 date: d(2025, 5, 1),
-                from_account_id: 1,
-                to_account_id: 2,
+                from_account_id: HoldingAccountId(1),
+                to_account_id: HoldingAccountId(2),
                 allocations: vec![crate::entities::sell::AllocationInput {
                     purchase_trade_id: 1,
                     quantity_allocated: dec("600"),
@@ -3249,7 +3250,7 @@ mod tests {
         RightsSaleInfo {
             id,
             listing_id: ListingId(1),
-            holding_account_id: 1,
+            holding_account_id: HoldingAccountId(1),
             date,
             units: Decimal::from(units),
             proceeds_per_right: proceeds_per_right.parse().unwrap(),
@@ -3425,7 +3426,7 @@ mod tests {
                 proceeds_per_right: Some("0.20".parse().unwrap()),
                 rights_cost: None,
                 fx_rate: None,
-                holding_account_id: 1,
+                holding_account_id: HoldingAccountId(1),
                 allocations: vec![rights_sale::AllocationInput {
                     purchase_trade_id: 1,
                     units: Decimal::from(250),
@@ -3907,7 +3908,7 @@ mod tests {
                 proceeds_per_right: Some(Decimal::ZERO),
                 rights_cost: Some("10000000000".parse().unwrap()),
                 fx_rate: None,
-                holding_account_id: 1,
+                holding_account_id: HoldingAccountId(1),
                 allocations: vec![rights_sale::AllocationInput {
                     purchase_trade_id: 1,
                     units: "10000000000000000000".parse().unwrap(),

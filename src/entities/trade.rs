@@ -76,6 +76,8 @@ pub(crate) use settlement::auto_settlement_date;
 pub use settlement::run_recompute;
 
 #[cfg(test)]
+use crate::infra::id::HoldingAccountId;
+#[cfg(test)]
 use crate::infra::id::ListingId;
 #[cfg(test)]
 use axum::http::StatusCode;
@@ -141,7 +143,7 @@ mod tests {
             &sell::SellBody {
                 brokerage_includes_gst: false,
                 statement_total: None,
-                holding_account_id: 1,
+                holding_account_id: HoldingAccountId(1),
                 date: NaiveDate::from_ymd_opt(2024, 6, 3).unwrap(),
                 settlement_date: Some(NaiveDate::from_ymd_opt(2024, 6, 3).unwrap()),
                 listing_id: ListingId(1),
@@ -170,7 +172,7 @@ mod tests {
         holding_account::db_upsert(
             pool,
             &HoldingAccount {
-                id: 2,
+                id: HoldingAccountId(2),
                 name: "ICE Employee Plan".to_string(),
             },
         )
@@ -693,7 +695,7 @@ mod tests {
         insert_sell_consuming(&pool, 2, 1, Decimal::from(5)).await;
 
         let mut moved = buy_trade();
-        moved.holding_account_id = 2;
+        moved.holding_account_id = HoldingAccountId(2);
         let err = db_upsert(&pool, &moved).await.unwrap_err();
         assert!(
             matches!(err, UpsertError::AccountChangeReferenced),
@@ -717,7 +719,7 @@ mod tests {
         insert_amit_adjustment_covering(&pool, 1, Decimal::from(8)).await;
 
         let mut moved = buy_trade();
-        moved.holding_account_id = 2;
+        moved.holding_account_id = HoldingAccountId(2);
         let err = db_upsert(&pool, &moved).await.unwrap_err();
         assert!(
             matches!(err, UpsertError::AccountChangeReferenced),
@@ -3637,7 +3639,7 @@ mod tests {
         crate::entities::holding_account::db_upsert(
             &pool,
             &crate::entities::holding_account::HoldingAccount {
-                id: 2,
+                id: HoldingAccountId(2),
                 name: "Second".to_string(),
             },
         )

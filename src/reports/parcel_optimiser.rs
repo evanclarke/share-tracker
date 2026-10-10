@@ -40,6 +40,7 @@ use crate::entities::closing_price::{self, SharedFetcher};
 use crate::infra::decimal::mul_div;
 use crate::infra::extract::{Json, Query};
 use crate::infra::http::ApiError;
+use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use axum::{Extension, Router, extract::State, routing::get};
 use chrono::NaiveDate;
@@ -82,7 +83,7 @@ pub const ALL_STRATEGIES: [Strategy; 4] = [
 #[derive(Debug, Clone)]
 pub struct CandidateParcel {
     pub trade_id: i64,
-    pub holding_account_id: i64,
+    pub holding_account_id: HoldingAccountId,
     pub acquisition_date: NaiveDate,
     pub remaining_quantity: Decimal,
     /// Adjusted cost base of the remaining units, AUD — costed as **disposed
@@ -153,7 +154,7 @@ impl Candidates {
 pub async fn db_candidate_parcels(
     pool: &SqlitePool,
     listing_id: ListingId,
-    holding_account_id: Option<i64>,
+    holding_account_id: Option<HoldingAccountId>,
     sale_date: NaiveDate,
 ) -> Result<Candidates, sqlx::Error> {
     let mut tx = crate::infra::db::read_tx(pool).await?;
@@ -168,7 +169,7 @@ pub async fn db_candidate_parcels(
 pub async fn db_candidate_parcels_on(
     conn: &mut sqlx::SqliteConnection,
     listing_id: ListingId,
-    holding_account_id: Option<i64>,
+    holding_account_id: Option<HoldingAccountId>,
     sale_date: NaiveDate,
 ) -> Result<Candidates, sqlx::Error> {
     // The candidate *set* and the remaining quantities are the shared
@@ -292,7 +293,7 @@ pub fn allocate_strategy(
 #[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize)]
 pub struct HypotheticalAllocation {
     pub purchase_trade_id: i64,
-    pub holding_account_id: i64,
+    pub holding_account_id: HoldingAccountId,
     pub acquisition_date: NaiveDate,
     pub units: Decimal,
     /// Adjusted cost base of the allocated units, AUD.
@@ -392,7 +393,7 @@ pub struct OptimiserRequest {
     pub listing_id: ListingId,
     /// The account the contemplated Sell would happen in — a real Sell's
     /// allocations may only consume its own account's parcels.
-    pub holding_account_id: i64,
+    pub holding_account_id: HoldingAccountId,
     #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub units: Decimal,
     /// Defaults to today.
@@ -426,7 +427,7 @@ pub struct StrategyAllocation {
 #[derive(utoipa::ToSchema, Debug, Serialize, Deserialize)]
 pub struct OptimiserResponse {
     pub listing_id: ListingId,
-    pub holding_account_id: i64,
+    pub holding_account_id: HoldingAccountId,
     pub units: Decimal,
     pub sale_date: NaiveDate,
     /// The per-unit AUD price the candidates were valued at.
@@ -669,7 +670,7 @@ mod tests {
     fn max_discount_treats_a_parcel_one_day_short_as_non_discountable() {
         let parcel = |trade_id, acquired| CandidateParcel {
             trade_id,
-            holding_account_id: 1,
+            holding_account_id: HoldingAccountId(1),
             acquisition_date: acquired,
             remaining_quantity: Decimal::from(10),
             remaining_cost_base: Decimal::from(100),
@@ -848,13 +849,13 @@ mod tests {
         allocate(&pool, 1, 4, 3, Decimal::from(40)).await;
 
         let today = crate::infra::date::today();
-        let parcels = db_candidate_parcels(&pool, ListingId(1), Some(1), today)
+        let parcels = db_candidate_parcels(&pool, ListingId(1), Some(HoldingAccountId(1)), today)
             .await
             .unwrap();
         assert_eq!(parcels.parcels().len(), 1);
         assert_eq!(parcels.parcels()[0].trade_id, 1);
         // Wrong account: nothing.
-        let parcels = db_candidate_parcels(&pool, ListingId(1), Some(99), today)
+        let parcels = db_candidate_parcels(&pool, ListingId(1), Some(HoldingAccountId(99)), today)
             .await
             .unwrap();
         assert!(parcels.parcels().is_empty());

@@ -36,6 +36,7 @@ use crate::infra::db::write_tx;
 use crate::infra::decimal::{Money, OptMoney};
 use crate::infra::extract::Json;
 use crate::infra::http::{self, ApiError, CrudEntity, Upsert, UpsertResponse};
+use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use axum::{
     Router,
@@ -54,7 +55,7 @@ pub struct EssStatement {
     pub listing_id: ListingId,
     /// The account the ESS interests vest into (an employer-plan account,
     /// typically). Defaults to the seeded default account when omitted.
-    pub holding_account_id: i64,
+    pub holding_account_id: HoldingAccountId,
     /// The taxing point: the Australian financial year this date falls in is the
     /// assessable year, and the vest Buy's acquisition/settlement date.
     pub taxing_point_date: NaiveDate,
@@ -135,7 +136,7 @@ pub struct EssStatementBody {
     /// The holding account the interests vest into. Defaults to the seeded default holding
     /// account when omitted.
     #[serde(default = "crate::entities::holding_account::default_holding_account_id")]
-    pub holding_account_id: i64,
+    pub holding_account_id: HoldingAccountId,
     /// The ESS taxing point (`YYYY-MM-DD`): sets the financial year the discount is
     /// assessed in and the date of the vest Buy. Not before 20 September 1985 and not in
     /// the future.
@@ -230,7 +231,7 @@ pub struct EssStatementBody {
 #[serde(deny_unknown_fields)]
 pub struct EssStatementListQuery {
     pub listing_id: Option<ListingId>,
-    pub holding_account_id: Option<i64>,
+    pub holding_account_id: Option<HoldingAccountId>,
     pub from: Option<NaiveDate>,
     pub to: Option<NaiveDate>,
 }
@@ -1761,7 +1762,7 @@ mod tests {
         crate::entities::holding_account::db_upsert(
             &pool,
             &crate::entities::holding_account::HoldingAccount {
-                id: 2,
+                id: HoldingAccountId(2),
                 name: "Second".to_string(),
             },
         )
@@ -1775,7 +1776,7 @@ mod tests {
             (4, 2, 2, ymd(2025, 2, 10)),
         ] {
             test_support::ess_statement(id, listing_id, taxing_point)
-                .with(|s| s.holding_account_id = account)
+                .with(|s| s.holding_account_id = HoldingAccountId(account))
                 .insert(&pool)
                 .await;
         }

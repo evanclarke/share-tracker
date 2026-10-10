@@ -108,6 +108,7 @@ use crate::infra::db::write_tx;
 use crate::infra::decimal::Money;
 use crate::infra::extract::Json;
 use crate::infra::http::{self, ApiError, CrudEntity, Upsert, UpsertResponse};
+use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use axum::{
     Router,
@@ -148,7 +149,7 @@ use super::trade::CGT_START;
 pub struct Inheritance {
     pub id: i64,
     pub listing_id: ListingId,
-    pub holding_account_id: i64,
+    pub holding_account_id: HoldingAccountId,
     /// Units inherited, in date-of-death terms.
     #[sqlx(try_from = "Money")]
     pub quantity: Decimal,
@@ -184,7 +185,7 @@ pub struct InheritanceBody {
     /// The holding account the parcel lands in. Defaults to the seeded
     /// default holding account when omitted.
     #[serde(default = "crate::entities::holding_account::default_holding_account_id")]
-    pub holding_account_id: i64,
+    pub holding_account_id: HoldingAccountId,
     /// Units inherited, in date-of-death terms (decimal string, positive).
     #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub quantity: Decimal,
@@ -244,7 +245,7 @@ pub(crate) const COLUMNS: &str = "id, listing_id, holding_account_id, quantity, 
 #[serde(deny_unknown_fields)]
 pub struct InheritanceListQuery {
     pub listing_id: Option<ListingId>,
-    pub holding_account_id: Option<i64>,
+    pub holding_account_id: Option<HoldingAccountId>,
     pub from: Option<NaiveDate>,
     pub to: Option<NaiveDate>,
 }
@@ -988,7 +989,7 @@ mod tests {
         Inheritance {
             id,
             listing_id: ListingId(1),
-            holding_account_id: 1,
+            holding_account_id: HoldingAccountId(1),
             quantity: dec("100"),
             date_of_death: ymd(2025, 1, 10),
             cost_base_rule: CostBaseRule::DeceasedCostBase,
@@ -1054,7 +1055,7 @@ mod tests {
             fx_rate: Decimal::ONE,
             spot_fx_rate: None,
             contract_note_ref: None,
-            holding_account_id: 1,
+            holding_account_id: HoldingAccountId(1),
             allocations: vec![AllocationInput {
                 purchase_trade_id: buy_id,
                 quantity_allocated: dec(qty),
@@ -2357,7 +2358,7 @@ mod tests {
         crate::entities::holding_account::db_upsert(
             &pool,
             &crate::entities::holding_account::HoldingAccount {
-                id: 2,
+                id: HoldingAccountId(2),
                 name: "Second".to_string(),
             },
         )
@@ -2372,7 +2373,7 @@ mod tests {
         ] {
             let mut row = post_cgt(id);
             row.listing_id = ListingId(listing_id);
-            row.holding_account_id = account;
+            row.holding_account_id = HoldingAccountId(account);
             row.date_of_death = date;
             // The LPR fee must be incurred after the death, and each row here
             // carries its own death date — so it is left out rather than

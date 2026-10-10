@@ -40,6 +40,7 @@ use crate::infra::decimal::{mul_div, parse_dec};
 use crate::infra::extract::{Json, Query};
 use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
+use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use crate::reports::portfolio::{self, HoldingOverview};
 use axum::{Extension, Router, extract::State, routing::get};
@@ -65,7 +66,7 @@ pub struct ActivityEvent {
     pub detail: String,
     /// The account the row belongs to; absent where none applies (corporate
     /// actions and transfers span accounts).
-    pub holding_account_id: Option<i64>,
+    pub holding_account_id: Option<HoldingAccountId>,
     pub quantity: Option<Decimal>,
     pub units_after: Decimal,
     /// The row's own money figure in AUD (see the API docs for what each row
@@ -156,7 +157,7 @@ struct RightsSaleRow {
     units: Decimal,
     proceeds_per_right: Decimal,
     fx_rate: Decimal,
-    holding_account_id: i64,
+    holding_account_id: HoldingAccountId,
     currency: CurrencyCode,
 }
 
@@ -173,7 +174,7 @@ struct Proto {
     id: i64,
     event: String,
     detail: String,
-    holding_account_id: Option<i64>,
+    holding_account_id: Option<HoldingAccountId>,
     quantity: Option<Decimal>,
     /// `(new, old)` unit re-basing from a split/consolidation/bonus issue.
     rebase: Option<(Decimal, Decimal)>,
@@ -196,7 +197,7 @@ struct Sources {
     fx: FxRates,
     /// Names for the detail texts: accounts and (scrip/demerger counterpart)
     /// listings read as names/tickers, never raw foreign-key ids.
-    account_names: HashMap<i64, String>,
+    account_names: HashMap<HoldingAccountId, String>,
     /// Every listing's *current* ticker — the fallback
     /// [`RenameHistory::ticker_as_at`] resolves back from.
     tickers: HashMap<ListingId, String>,
@@ -297,7 +298,7 @@ impl Sources {
         })
         .collect::<Result<_, sqlx::Error>>()?;
         let fx = FxRates::load(&mut *conn).await?;
-        let account_names: HashMap<i64, String> =
+        let account_names: HashMap<HoldingAccountId, String> =
             sqlx::query_as("SELECT id, name FROM holding_accounts")
                 .fetch_all(&mut *conn)
                 .await?
@@ -347,7 +348,7 @@ impl Sources {
 
     /// `account 'Name'` for the detail texts, falling back to the raw id only
     /// when the account has since gone.
-    fn account(&self, id: i64) -> String {
+    fn account(&self, id: HoldingAccountId) -> String {
         self.account_names
             .get(&id)
             .map_or_else(|| format!("account {id}"), |n| format!("account '{n}'"))
@@ -1051,7 +1052,7 @@ mod tests {
         crate::entities::holding_account::db_upsert(
             &pool,
             &crate::entities::holding_account::HoldingAccount {
-                id: 2,
+                id: HoldingAccountId(2),
                 name: "Personal".to_string(),
             },
         )
@@ -1064,8 +1065,8 @@ mod tests {
             &transfer::TransferBody {
                 listing_id: ListingId(1),
                 date: ymd(2024, 5, 1),
-                from_account_id: 1,
-                to_account_id: 2,
+                from_account_id: HoldingAccountId(1),
+                to_account_id: HoldingAccountId(2),
                 allocations: vec![crate::entities::sell::AllocationInput {
                     purchase_trade_id: 1,
                     quantity_allocated: dec("40"),
@@ -1275,7 +1276,7 @@ mod tests {
             &DrpEnrolment {
                 id: 1,
                 listing_id: ListingId(1),
-                holding_account_id: 1,
+                holding_account_id: HoldingAccountId(1),
                 enrolment_date: ymd(2024, 1, 10),
                 unenrolment_date: Some(ymd(2024, 10, 1)),
                 residual_handling: crate::entities::drp_enrolment::ResidualHandling::CarryForward,

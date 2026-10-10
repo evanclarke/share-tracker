@@ -38,6 +38,7 @@ use crate::entities::corporate_action::{self, SplitEvent};
 use crate::infra::decimal::row_dec;
 use crate::infra::extract::Json;
 use crate::infra::http::ApiError;
+use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use axum::{Router, extract::State, routing::get};
 use chrono::NaiveDate;
@@ -57,7 +58,7 @@ pub struct AmitAdjustmentAlert {
     /// The financial year the statement attributes, identified by the
     /// calendar year of its 30 June end (`domain::tax_year`).
     pub tax_year: i32,
-    pub holding_account_id: i64,
+    pub holding_account_id: HoldingAccountId,
     /// The statement's own `units_held`, verbatim.
     pub units_held: Decimal,
     /// Σ of the adjustment quantities, **re-based into the statement year's
@@ -170,7 +171,7 @@ pub async fn db_amit_adjustment_alerts(
     // — the same shared read [generation](crate::entities::amit_adjustment_generation)
     // derives its set from, so this report cannot disagree with it about what
     // was open — still on the report's own read transaction.
-    let mut open_at: HashMap<(NaiveDate, ListingId, i64), Decimal> = HashMap::new();
+    let mut open_at: HashMap<(NaiveDate, ListingId, HoldingAccountId), Decimal> = HashMap::new();
     let mut year_ends: Vec<NaiveDate> = statement_rows
         .iter()
         .map(|r| r.try_get("tax_year_end_date"))
@@ -218,7 +219,7 @@ pub async fn db_amit_adjustment_alerts(
         let adjustments = by_statement.get(&amma_statement_id).map_or(&[][..], |v| v);
         let listing_splits = splits.get(&listing_id).map_or(&[][..], |v| v);
 
-        let holding_account_id: i64 = row.try_get("holding_account_id")?;
+        let holding_account_id: HoldingAccountId = row.try_get("holding_account_id")?;
         let units_open_at_year_end = open_at
             .get(&(year_end, listing_id, holding_account_id))
             .copied()
@@ -539,7 +540,7 @@ mod tests {
         holding_account::db_upsert(
             pool,
             &HoldingAccount {
-                id: 2,
+                id: HoldingAccountId(2),
                 name: "Second".to_string(),
             },
         )
@@ -561,8 +562,8 @@ mod tests {
             &TransferBody {
                 listing_id: ListingId(1),
                 date,
-                from_account_id: 1,
-                to_account_id: 2,
+                from_account_id: HoldingAccountId(1),
+                to_account_id: HoldingAccountId(2),
                 allocations: vec![AllocationInput {
                     purchase_trade_id,
                     quantity_allocated: qty,
@@ -1006,7 +1007,7 @@ mod tests {
         holding_account::db_upsert(
             &pool,
             &HoldingAccount {
-                id: 2,
+                id: HoldingAccountId(2),
                 name: "Second".to_string(),
             },
         )
@@ -1023,7 +1024,7 @@ mod tests {
             .with(|a| {
                 a.tax_year_end_date = ymd(2024, 6, 30);
                 a.date_received = ymd(2024, 8, 29);
-                a.holding_account_id = 2;
+                a.holding_account_id = HoldingAccountId(2);
             })
             .insert(&pool)
             .await;

@@ -3,6 +3,7 @@ use crate::infra::db::write_tx;
 use crate::infra::decimal::Money;
 use crate::infra::extract::Json;
 use crate::infra::http::{self, ApiError, CrudEntity, Upsert, UpsertResponse};
+use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use axum::{
     Router,
@@ -104,7 +105,7 @@ pub struct AmmaStatement {
     /// The holding account the statement covers (a registry issues one AMMA
     /// statement per holder account; see `entities::holding_account`).
     /// Defaults to the seeded default account when omitted from a request.
-    pub holding_account_id: i64,
+    pub holding_account_id: HoldingAccountId,
 }
 
 #[derive(utoipa::ToSchema, Debug, Deserialize)]
@@ -201,7 +202,7 @@ pub struct AmmaStatementBody {
     /// The holding account the statement covers. Defaults to the seeded
     /// default holding account when omitted.
     #[serde(default = "crate::entities::holding_account::default_holding_account_id")]
-    pub holding_account_id: i64,
+    pub holding_account_id: HoldingAccountId,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -310,7 +311,7 @@ impl From<UpsertError> for ApiError {
 #[serde(deny_unknown_fields)]
 pub struct AmmaListQuery {
     pub listing_id: Option<ListingId>,
-    pub holding_account_id: Option<i64>,
+    pub holding_account_id: Option<HoldingAccountId>,
     pub from: Option<NaiveDate>,
     pub to: Option<NaiveDate>,
 }
@@ -1171,7 +1172,7 @@ mod tests {
         crate::entities::holding_account::db_upsert(
             &pool,
             &crate::entities::holding_account::HoldingAccount {
-                id: 2,
+                id: HoldingAccountId(2),
                 name: "Second".to_string(),
             },
         )
@@ -1186,7 +1187,7 @@ mod tests {
         ] {
             test_support::amma(id, listing_id)
                 .with(|a| {
-                    a.holding_account_id = account;
+                    a.holding_account_id = HoldingAccountId(account);
                     a.tax_year_end_date = year_end;
                 })
                 .insert(&pool)

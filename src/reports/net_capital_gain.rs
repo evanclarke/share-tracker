@@ -50,6 +50,7 @@ use crate::infra::decimal::{parse_dec, to_cents};
 use crate::infra::extract::Json;
 use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
+use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use crate::reports::export::{self, Cents};
 use crate::reports::parcel_optimiser::{self, DisposalTotals, HypotheticalAllocation, Strategy};
@@ -1206,7 +1207,7 @@ pub struct WhatIfRequest {
     /// Restricts strategy-derived (and validates explicit) allocations to
     /// one account's parcels; absent = parcels from any account.
     #[serde(default)]
-    pub holding_account_id: Option<i64>,
+    pub holding_account_id: Option<HoldingAccountId>,
     /// Units hypothetically sold (decimal string, positive).
     #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub units: Decimal,
@@ -2452,7 +2453,7 @@ mod tests {
                 proceeds_per_right: Some("0.20".parse().unwrap()),
                 rights_cost: None,
                 fx_rate: None,
-                holding_account_id: 1,
+                holding_account_id: HoldingAccountId(1),
                 allocations: vec![rights_sale::AllocationInput {
                     purchase_trade_id: 1,
                     units: Decimal::from(250),
@@ -3313,7 +3314,7 @@ mod tests {
         crate::entities::holding_account::db_upsert(
             &pool,
             &crate::entities::holding_account::HoldingAccount {
-                id: 2,
+                id: HoldingAccountId(2),
                 name: "Second".to_string(),
             },
         )
@@ -3337,8 +3338,8 @@ mod tests {
             &TransferBody {
                 listing_id: ListingId(1),
                 date: NaiveDate::from_ymd_opt(2023, 10, 3).unwrap(),
-                from_account_id: 1,
-                to_account_id: 2,
+                from_account_id: HoldingAccountId(1),
+                to_account_id: HoldingAccountId(2),
                 allocations: vec![crate::entities::sell::AllocationInput {
                     purchase_trade_id: 1,
                     quantity_allocated: Decimal::from(100),
@@ -3392,7 +3393,7 @@ mod tests {
         crate::entities::holding_account::db_upsert(
             &pool,
             &crate::entities::holding_account::HoldingAccount {
-                id: 2,
+                id: HoldingAccountId(2),
                 name: "Second".to_string(),
             },
         )
@@ -3425,8 +3426,8 @@ mod tests {
             &TransferBody {
                 listing_id: ListingId(1),
                 date: NaiveDate::from_ymd_opt(2023, 10, 10).unwrap(),
-                from_account_id: 1,
-                to_account_id: 2,
+                from_account_id: HoldingAccountId(1),
+                to_account_id: HoldingAccountId(2),
                 allocations: vec![crate::entities::sell::AllocationInput {
                     purchase_trade_id: 1,
                     quantity_allocated: Decimal::from(40),
@@ -5166,7 +5167,7 @@ mod tests {
         holding_account::db_upsert(
             pool,
             &HoldingAccount {
-                id: 2,
+                id: HoldingAccountId(2),
                 name: "ICE Employee Plan".to_string(),
             },
         )

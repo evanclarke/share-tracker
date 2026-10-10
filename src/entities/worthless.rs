@@ -44,6 +44,8 @@ use crate::infra::db::{WriteMode, write_tx};
 use crate::infra::decimal::parse_dec;
 use crate::infra::extract::{Json, Query};
 use crate::infra::http::{ApiError, DryRunQuery};
+#[cfg(test)]
+use crate::infra::id::HoldingAccountId;
 use axum::{
     Router,
     extract::{Path, State},
@@ -217,7 +219,7 @@ async fn execute(
     let sell_body = SellBody {
         brokerage_includes_gst: false,
         statement_total: None,
-        holding_account_id: 1,
+        holding_account_id: crate::entities::holding_account::DEFAULT_HOLDING_ACCOUNT_ID,
         date: action.date,
         settlement_date: Some(action.date),
         listing_id: action.listing_id,
@@ -454,7 +456,7 @@ mod tests {
             &SellBody {
                 brokerage_includes_gst: false,
                 statement_total: None,
-                holding_account_id: 1,
+                holding_account_id: HoldingAccountId(1),
                 date: d(2022, 5, 2),
                 settlement_date: Some(d(2022, 5, 2)),
                 listing_id: ListingId(1),
@@ -750,7 +752,7 @@ mod tests {
             &SellBody {
                 brokerage_includes_gst: false,
                 statement_total: None,
-                holding_account_id: 1,
+                holding_account_id: HoldingAccountId(1),
                 date: d(2025, 3, 31),
                 settlement_date: Some(d(2025, 3, 31)),
                 listing_id: ListingId(1),
@@ -848,7 +850,7 @@ mod tests {
         holding_account::db_upsert(
             &pool,
             &HoldingAccount {
-                id: 2,
+                id: HoldingAccountId(2),
                 name: "ICE Employee Plan".to_string(),
             },
         )

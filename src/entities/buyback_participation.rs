@@ -37,6 +37,7 @@ use crate::infra::db::{WriteMode, write_tx};
 use crate::infra::decimal::Money;
 use crate::infra::extract::{Json, Query};
 use crate::infra::http::{self, ApiError, DryRunQuery};
+use crate::infra::id::HoldingAccountId;
 use axum::{
     Router,
     extract::{Path, State},
@@ -74,7 +75,7 @@ pub struct ParticipationBody {
     /// parcels held in it, and the Sell and dividend-component income row
     /// land in it. Defaults to the seeded default account when omitted.
     #[serde(default = "crate::entities::holding_account::default_holding_account_id")]
-    pub holding_account_id: i64,
+    pub holding_account_id: HoldingAccountId,
 }
 
 /// The two sides of a participation: the Sell carrying the capital proceeds,
@@ -417,7 +418,7 @@ mod tests {
 
     fn body(date: NaiveDate, units: &str, parcel: i64) -> ParticipationBody {
         ParticipationBody {
-            holding_account_id: 1,
+            holding_account_id: HoldingAccountId(1),
             date,
             units: units.parse().unwrap(),
             allocations: vec![AllocationInput {
@@ -761,7 +762,7 @@ mod tests {
         let edit = sell::SellBody {
             brokerage_includes_gst: false,
             statement_total: None,
-            holding_account_id: 1,
+            holding_account_id: HoldingAccountId(1),
             date: p.trade.date,
             settlement_date: Some(p.trade.settlement_date),
             listing_id: ListingId(1),
@@ -865,7 +866,7 @@ mod tests {
         holding_account::db_upsert(
             &pool,
             &HoldingAccount {
-                id: 2,
+                id: HoldingAccountId(2),
                 name: "Personal CHESS".to_string(),
             },
         )
@@ -890,7 +891,7 @@ mod tests {
 
         // In account 2, the Sell and the dividend income both land there.
         let mut b = body(d(2024, 7, 10), "1000", 1);
-        b.holding_account_id = 2;
+        b.holding_account_id = HoldingAccountId(2);
         let p = db_participate(&pool, 10, &b).await.unwrap();
         assert_eq!(p.trade.holding_account_id, 2);
         assert_eq!(p.income.unwrap().holding_account_id, 2);
@@ -938,7 +939,7 @@ mod tests {
         holding_account::db_upsert(
             &pool,
             &HoldingAccount {
-                id: 2,
+                id: HoldingAccountId(2),
                 name: "Personal CHESS".to_string(),
             },
         )

@@ -21,6 +21,7 @@ use crate::infra::db::write_tx;
 use crate::infra::decimal::{Money, OptMoney, mul_div};
 use crate::infra::extract::Json;
 use crate::infra::http::{self, ApiError, CrudEntity, Upsert, UpsertResponse};
+use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use axum::{
     Router,
@@ -94,7 +95,7 @@ pub struct InvestmentExpense {
     pub listing_id: Option<ListingId>,
     /// Optional link to the holding account the expense relates to
     /// (NULL = portfolio-wide).
-    pub holding_account_id: Option<i64>,
+    pub holding_account_id: Option<HoldingAccountId>,
 }
 
 #[derive(utoipa::ToSchema, Debug, Deserialize)]
@@ -137,7 +138,7 @@ pub struct InvestmentExpenseBody {
     pub listing_id: Option<ListingId>,
     /// The holding account the expense relates to; omit for a portfolio-wide expense.
     #[serde(default)]
-    pub holding_account_id: Option<i64>,
+    pub holding_account_id: Option<HoldingAccountId>,
 }
 
 /// The `/investment_expenses` list filters: the owning columns and the
@@ -149,7 +150,7 @@ pub struct InvestmentExpenseBody {
 #[serde(deny_unknown_fields)]
 pub struct InvestmentExpenseListQuery {
     pub listing_id: Option<ListingId>,
-    pub holding_account_id: Option<i64>,
+    pub holding_account_id: Option<HoldingAccountId>,
     pub from: Option<NaiveDate>,
     pub to: Option<NaiveDate>,
 }
@@ -474,11 +475,11 @@ mod tests {
         insert_listing(&pool, 1).await;
         let mut e = sample(1);
         e.listing_id = Some(ListingId(1));
-        e.holding_account_id = Some(1);
+        e.holding_account_id = Some(HoldingAccountId(1));
         db_upsert(&pool, &e).await.unwrap();
         let got = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(got.listing_id, Some(ListingId(1)));
-        assert_eq!(got.holding_account_id, Some(1));
+        assert_eq!(got.holding_account_id, Some(HoldingAccountId(1)));
     }
 
     #[tokio::test]
@@ -1080,7 +1081,7 @@ mod tests {
         ] {
             let mut row = sample(id);
             row.listing_id = listing.map(ListingId);
-            row.holding_account_id = account;
+            row.holding_account_id = account.map(HoldingAccountId);
             row.date_incurred = date;
             db_upsert(&pool, &row).await.unwrap();
         }

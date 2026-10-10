@@ -76,6 +76,7 @@
 use crate::infra::db::write_tx;
 use crate::infra::extract::{Json, Query};
 use crate::infra::http::ApiError;
+use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use axum::{
     Router,
@@ -230,7 +231,7 @@ pub struct HoldingSeriesPoint {
 #[derive(utoipa::ToSchema, Debug, Serialize, Deserialize)]
 pub struct HoldingSeries {
     pub listing_id: ListingId,
-    pub holding_account_id: i64,
+    pub holding_account_id: HoldingAccountId,
     pub points: Vec<HoldingSeriesPoint>,
 }
 
@@ -459,7 +460,8 @@ pub async fn db_holding_series(
 
     // Keyed order, so the response is stable run to run (listing, then
     // account) rather than however the first snapshot happened to list them.
-    let mut by_holding: BTreeMap<(ListingId, i64), Vec<HoldingSeriesPoint>> = BTreeMap::new();
+    let mut by_holding: BTreeMap<(ListingId, HoldingAccountId), Vec<HoldingSeriesPoint>> =
+        BTreeMap::new();
     for row in &rows {
         let snapshot_date: NaiveDate = row.try_get("snapshot_date")?;
         let rows_json: String = row.try_get("rows_json")?;
@@ -2762,7 +2764,7 @@ mod tests {
         let series = db_holding_series(&pool, None, None).await.unwrap();
         let keys: Vec<(i64, i64)> = series
             .iter()
-            .map(|h| (h.listing_id.0, h.holding_account_id))
+            .map(|h| (h.listing_id.0, h.holding_account_id.0))
             .collect();
         assert_eq!(
             keys,

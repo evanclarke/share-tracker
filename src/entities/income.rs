@@ -3,6 +3,7 @@ use crate::infra::db::write_tx;
 use crate::infra::decimal::{Money, OptMoney};
 use crate::infra::extract::Json;
 use crate::infra::http::{self, ApiError, CrudEntity, Upsert, UpsertResponse};
+use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use axum::{
     Router,
@@ -177,7 +178,7 @@ pub struct Income {
     /// `entities::holding_account`): decides whose DRP enrolment applies and
     /// which account a reinvestment trade lands in. Defaults to the seeded
     /// default account when omitted from a request.
-    pub holding_account_id: i64,
+    pub holding_account_id: HoldingAccountId,
     /// Optional per-share figure from the registry statement, supplied only
     /// together with `securities_held`: their product, cent-rounded, must
     /// equal the gross cash components (see `check_per_share`). Informational
@@ -440,7 +441,7 @@ pub struct IncomeBody {
     /// enrolment applies. Defaults to the seeded default holding account when
     /// omitted.
     #[serde(default = "crate::entities::holding_account::default_holding_account_id")]
-    pub holding_account_id: i64,
+    pub holding_account_id: HoldingAccountId,
     /// Optional statement cross-check, given together with `securities_held`:
     /// the per-security amount. Their product, cent-rounded, must equal
     /// franked + unfranked + foreign-source income (decimal string).
@@ -481,7 +482,7 @@ pub struct IncomeBody {
 #[serde(deny_unknown_fields)]
 pub struct IncomeListQuery {
     pub listing_id: Option<ListingId>,
-    pub holding_account_id: Option<i64>,
+    pub holding_account_id: Option<HoldingAccountId>,
     pub from: Option<NaiveDate>,
     pub to: Option<NaiveDate>,
 }
@@ -1828,7 +1829,7 @@ mod tests {
         crate::entities::holding_account::db_upsert(
             &pool,
             &crate::entities::holding_account::HoldingAccount {
-                id: 2,
+                id: HoldingAccountId(2),
                 name: "Broker".to_string(),
             },
         )
@@ -1839,7 +1840,7 @@ mod tests {
             &crate::entities::drp_enrolment::DrpEnrolment {
                 id: 1,
                 listing_id: ListingId(1),
-                holding_account_id: 1,
+                holding_account_id: HoldingAccountId(1),
                 enrolment_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
                 unenrolment_date: None,
                 residual_handling: Default::default(),
@@ -1873,7 +1874,7 @@ mod tests {
                 (|i: &mut Income| i.listing_id = ListingId(2)) as fn(&mut Income),
             ),
             ("holding_account_id", |i: &mut Income| {
-                i.holding_account_id = 2
+                i.holding_account_id = HoldingAccountId(2)
             }),
             ("currency", |i: &mut Income| i.currency = "USD".into()),
             ("date_paid", |i: &mut Income| {
@@ -3167,7 +3168,7 @@ mod tests {
         crate::entities::holding_account::db_upsert(
             &pool,
             &crate::entities::holding_account::HoldingAccount {
-                id: 2,
+                id: HoldingAccountId(2),
                 name: "Second".to_string(),
             },
         )
@@ -3181,7 +3182,7 @@ mod tests {
             (4, 2, 2, ymd(2024, 9, 4)),
         ] {
             test_support::income(id, listing_id, date)
-                .with(|i| i.holding_account_id = account)
+                .with(|i| i.holding_account_id = HoldingAccountId(account))
                 .insert(&pool)
                 .await;
         }

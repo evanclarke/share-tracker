@@ -42,6 +42,7 @@ use crate::infra::currency::CurrencyCode;
 use crate::infra::db::{WriteMode, write_tx};
 use crate::infra::extract::{Json, Query};
 use crate::infra::http::{self, ApiError, CrudEntity, DryRunQuery};
+use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use axum::{
     Router,
@@ -61,8 +62,8 @@ pub struct Transfer {
     /// The date the holding moves: the transfer-out Sell and transfer-in
     /// Buys are dated on it.
     pub date: NaiveDate,
-    pub from_account_id: i64,
-    pub to_account_id: i64,
+    pub from_account_id: HoldingAccountId,
+    pub to_account_id: HoldingAccountId,
     /// The id of the network-fee disposal Sell, when the transfer incurred a
     /// fee paid in the crypto (NULL otherwise). Unlike the transfer-out Sell,
     /// this Sell is a real disposal and IS counted by the gains reports — it is
@@ -80,9 +81,9 @@ pub struct TransferBody {
     /// on it. Not a CGT event.
     pub date: NaiveDate,
     /// Holding account the parcels move out of.
-    pub from_account_id: i64,
+    pub from_account_id: HoldingAccountId,
     /// Holding account the parcels move into; must differ from `from_account_id`.
-    pub to_account_id: i64,
+    pub to_account_id: HoldingAccountId,
     /// The parcels to move and how many units of each (in transfer-date
     /// units, like a Sell's allocations) — partial parcels allowed.
     pub allocations: Vec<AllocationInput>,
@@ -888,7 +889,7 @@ mod tests {
         holding_account::db_upsert(
             &pool,
             &HoldingAccount {
-                id: 2,
+                id: HoldingAccountId(2),
                 name: "ICE Employee Plan".to_string(),
             },
         )
@@ -931,8 +932,8 @@ mod tests {
         TransferBody {
             listing_id: ListingId(1),
             date,
-            from_account_id: from,
-            to_account_id: to,
+            from_account_id: HoldingAccountId(from),
+            to_account_id: HoldingAccountId(to),
             allocations: allocations
                 .into_iter()
                 .map(|(id, q)| AllocationInput {
@@ -1066,7 +1067,7 @@ mod tests {
             &SellBody {
                 brokerage_includes_gst: false,
                 statement_total: None,
-                holding_account_id: 1,
+                holding_account_id: HoldingAccountId(1),
                 date: d(2024, 9, 3),
                 settlement_date: Some(d(2024, 9, 3)),
                 listing_id: ListingId(1),
@@ -1144,8 +1145,8 @@ mod tests {
         TransferBody {
             listing_id: ListingId(1),
             date,
-            from_account_id: from,
-            to_account_id: to,
+            from_account_id: HoldingAccountId(from),
+            to_account_id: HoldingAccountId(to),
             allocations: map(allocations),
             fee_allocations: map(fee_allocations),
             fee_market_price: Some(dec(fee_price)),
@@ -1379,7 +1380,7 @@ mod tests {
                 fx_rate: Decimal::ONE,
                 spot_fx_rate: None,
                 contract_note_ref: None,
-                holding_account_id: 2,
+                holding_account_id: HoldingAccountId(2),
                 allocations: vec![AllocationInput {
                     purchase_trade_id: 1,
                     quantity_allocated: dec("0.001"),
@@ -1442,7 +1443,7 @@ mod tests {
                 fx_rate: dec("1.5"),
                 spot_fx_rate: None,
                 contract_note_ref: None,
-                holding_account_id: 2,
+                holding_account_id: HoldingAccountId(2),
                 allocations: vec![AllocationInput {
                     purchase_trade_id: 1,
                     quantity_allocated: dec("60"),
@@ -1536,7 +1537,7 @@ mod tests {
                 fx_rate: dec("1.5"),
                 spot_fx_rate: None,
                 contract_note_ref: None,
-                holding_account_id: 1,
+                holding_account_id: HoldingAccountId(1),
                 allocations: vec![AllocationInput {
                     purchase_trade_id: group.transfer_ins[0].id,
                     quantity_allocated: dec("50"),
@@ -1589,7 +1590,7 @@ mod tests {
                 fx_rate: Decimal::ONE,
                 spot_fx_rate: None,
                 contract_note_ref: None,
-                holding_account_id: 2,
+                holding_account_id: HoldingAccountId(2),
                 allocations: vec![AllocationInput {
                     purchase_trade_id: 1,
                     quantity_allocated: dec("100"),
@@ -1703,7 +1704,7 @@ mod tests {
             .units(dec("100"))
             .cost_base_adjustment(dec("1"))
             .with(|a| {
-                a.holding_account_id = 2;
+                a.holding_account_id = HoldingAccountId(2);
                 a.tax_year_end_date = d(2023, 6, 30);
                 a.date_received = d(2023, 7, 15);
                 a.currency = "USD".into();
@@ -1994,8 +1995,8 @@ mod tests {
             &TransferBody {
                 listing_id: ListingId(1),
                 date: d(2024, 4, 2),
-                from_account_id: 1,
-                to_account_id: 2,
+                from_account_id: HoldingAccountId(1),
+                to_account_id: HoldingAccountId(2),
                 allocations: vec![AllocationInput {
                     purchase_trade_id: 500,
                     quantity_allocated: dec("40"),

@@ -4,6 +4,7 @@
 use crate::entities::closing_price::HeldTimeline;
 use crate::infra::currency::CurrencyCode;
 use crate::infra::decimal::Money;
+use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use chrono::{DateTime, Duration, NaiveDate};
 use rust_decimal::Decimal;
@@ -66,7 +67,7 @@ pub(super) const DIVIDEND_AMOUNT_TOLERANCE_FLOOR: i64 = 1;
 pub struct MissingDividendEntry {
     pub listing_id: ListingId,
     pub ticker: String,
-    pub holding_account_id: i64,
+    pub holding_account_id: HoldingAccountId,
     pub holding_account: String,
     /// The ex-date, as stored by the distribution calendar.
     pub ex_date: NaiveDate,
@@ -122,7 +123,7 @@ pub struct DividendAmountMismatch {
     pub income_id: i64,
     pub listing_id: ListingId,
     pub ticker: String,
-    pub holding_account_id: i64,
+    pub holding_account_id: HoldingAccountId,
     pub holding_account: String,
     pub ex_date: NaiveDate,
     pub date_paid: NaiveDate,
@@ -163,7 +164,7 @@ pub(super) struct CalendarEventRow {
 pub(super) struct CalendarIncomeRow {
     id: i64,
     listing_id: ListingId,
-    holding_account_id: i64,
+    holding_account_id: HoldingAccountId,
     date_paid: NaiveDate,
     ex_date: Option<NaiveDate>,
     entitlement_date: Option<NaiveDate>,
@@ -187,7 +188,7 @@ pub(super) struct CalendarIncomeRow {
 #[derive(sqlx::FromRow)]
 pub(super) struct DrpReinvestmentRow {
     listing_id: ListingId,
-    holding_account_id: i64,
+    holding_account_id: HoldingAccountId,
     /// The reinvestment trade's date — the distribution's **payment** date,
     /// which is a couple of weeks after its own ex-date.
     date: NaiveDate,
@@ -215,7 +216,7 @@ pub(super) struct DrpReinvestmentRow {
 /// there was never a row to enter.
 pub(super) struct DrpChain {
     /// Ascending by date.
-    payments: HashMap<(ListingId, i64), Vec<DrpReinvestmentRow>>,
+    payments: HashMap<(ListingId, HoldingAccountId), Vec<DrpReinvestmentRow>>,
 }
 
 impl DrpChain {
@@ -235,7 +236,12 @@ impl DrpChain {
     /// reader to ignore the banner, the failure this project guards against
     /// everywhere else — for a false negative that needs the registry to have
     /// distributed while leaving an enrolled holder's DRP surplus untouched.
-    fn closes_across(&self, listing_id: ListingId, account_id: i64, ex_date: NaiveDate) -> bool {
+    fn closes_across(
+        &self,
+        listing_id: ListingId,
+        account_id: HoldingAccountId,
+        ex_date: NaiveDate,
+    ) -> bool {
         let Some(payments) = self.payments.get(&(listing_id, account_id)) else {
             return false;
         };
@@ -392,8 +398,8 @@ pub(super) async fn db_distribution_calendar(
     )
     .fetch_all(&mut *conn)
     .await?;
-    let accounts: HashMap<i64, String> =
-        sqlx::query_as::<_, (i64, String)>("SELECT id, name FROM holding_accounts")
+    let accounts: HashMap<HoldingAccountId, String> =
+        sqlx::query_as::<_, (HoldingAccountId, String)>("SELECT id, name FROM holding_accounts")
             .fetch_all(&mut *conn)
             .await?
             .into_iter()
@@ -427,7 +433,8 @@ pub(super) async fn db_distribution_calendar(
     // Income rows by (listing, account), so the match is run one registered
     // holder at a time — the same listing in two accounts pays two
     // distributions and is entered as two rows.
-    let mut by_holder: HashMap<(ListingId, i64), Vec<&CalendarIncomeRow>> = HashMap::new();
+    let mut by_holder: HashMap<(ListingId, HoldingAccountId), Vec<&CalendarIncomeRow>> =
+        HashMap::new();
     for row in &income {
         by_holder
             .entry((row.listing_id, row.holding_account_id))

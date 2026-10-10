@@ -14,6 +14,7 @@ use crate::entities::{
 };
 use crate::infra::db;
 use crate::infra::decimal::Money;
+use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use axum::body::{Body, Bytes};
 use axum::http::{HeaderMap, Request, StatusCode};
@@ -1048,7 +1049,7 @@ impl TradeBuilder {
                 demerger_action_id: None,
                 worthless_action_id: None,
                 deemed_acquisition_date: None,
-                holding_account_id: 1,
+                holding_account_id: HoldingAccountId(1),
                 transfer_id: None,
                 ess_statement_id: None,
                 inheritance_id: None,
@@ -1126,7 +1127,7 @@ impl TradeBuilder {
     }
 
     pub fn account(mut self, holding_account_id: i64) -> Self {
-        self.t.holding_account_id = holding_account_id;
+        self.t.holding_account_id = HoldingAccountId(holding_account_id);
         self
     }
 
@@ -1190,7 +1191,7 @@ pub fn amma(id: i64, listing_id: i64) -> AmmaBuilder {
             cost_base_adjustment: Decimal::ZERO,
             tfn_withholding_tax: Decimal::ZERO,
             currency: "AUD".into(),
-            holding_account_id: 1,
+            holding_account_id: HoldingAccountId(1),
         },
     }
 }
@@ -1265,7 +1266,7 @@ pub fn income(id: i64, listing_id: i64, date_paid: NaiveDate) -> IncomeBuilder {
             reinvestment_trade_id: None,
             currency: "AUD".into(),
             buyback_trade_id: None,
-            holding_account_id: 1,
+            holding_account_id: HoldingAccountId(1),
             amount_per_security: None,
             securities_held: None,
             tax_deferred_amount: None,
@@ -1321,7 +1322,7 @@ pub fn ess_statement(id: i64, listing_id: i64, taxing_point: NaiveDate) -> EssSt
         s: ess_statement::EssStatement {
             id,
             listing_id: ListingId(listing_id),
-            holding_account_id: 1,
+            holding_account_id: HoldingAccountId(1),
             taxing_point_date: taxing_point,
             quantity: Decimal::ZERO,
             market_value_per_share: Decimal::ZERO,

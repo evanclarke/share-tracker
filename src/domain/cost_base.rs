@@ -49,6 +49,7 @@
 //!    holding receiving non-AUD reductions.
 
 use crate::infra::currency::CurrencyCode;
+use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
@@ -292,7 +293,7 @@ pub fn checked_cost_base(terms: &[Term<'_>]) -> Result<Decimal, UnrepresentableC
 pub struct ParcelRow {
     pub id: i64,
     pub listing_id: ListingId,
-    pub holding_account_id: i64,
+    pub holding_account_id: HoldingAccountId,
     /// The actual trade date — drives split and return-of-capital
     /// applicability (see [`Parcel::trade_date`]).
     pub date: NaiveDate,
@@ -1344,7 +1345,7 @@ mod tests {
         let mut row = ParcelRow {
             id: 1,
             listing_id,
-            holding_account_id: 1,
+            holding_account_id: HoldingAccountId(1),
             date: operated,
             quantity: Decimal::from(100),
             average_price: Decimal::ONE,

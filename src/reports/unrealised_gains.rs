@@ -3,6 +3,7 @@ use crate::domain::open_parcels;
 use crate::entities::closing_price::{self, SharedFetcher};
 use crate::infra::extract::Json;
 use crate::infra::http::ApiError;
+use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use axum::{Extension, Router, extract::State, routing::post};
 use chrono::NaiveDate;
@@ -19,7 +20,7 @@ pub struct UnrealisedGain {
     pub listing_id: ListingId,
     /// The holding account the parcels sit in: the same listing held in two
     /// accounts reports as two rows.
-    pub holding_account_id: i64,
+    pub holding_account_id: HoldingAccountId,
     pub quantity: Decimal,
     pub total_cost_base: Decimal,
     pub current_price: Option<Decimal>,
@@ -112,9 +113,10 @@ pub async fn db_unrealised_gains_on(
     // excluded and quantities come back in that date's unit basis.
     let open = open_parcels::load(conn, Some(as_of_date)).await?;
 
-    let mut holding_qty: HashMap<(ListingId, i64), Decimal> = HashMap::new();
-    let mut holding_cost_base: HashMap<(ListingId, i64), Decimal> = HashMap::new();
-    let mut holding_cgt_eligible_qty: HashMap<(ListingId, i64), Decimal> = HashMap::new();
+    let mut holding_qty: HashMap<(ListingId, HoldingAccountId), Decimal> = HashMap::new();
+    let mut holding_cost_base: HashMap<(ListingId, HoldingAccountId), Decimal> = HashMap::new();
+    let mut holding_cgt_eligible_qty: HashMap<(ListingId, HoldingAccountId), Decimal> =
+        HashMap::new();
 
     for p in &open {
         let key = (p.parcel.listing_id, p.parcel.holding_account_id);

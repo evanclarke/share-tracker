@@ -30,6 +30,8 @@
 use crate::infra::extract::{Json, Query};
 use crate::infra::fx::FxRates;
 use crate::infra::http::ApiError;
+#[cfg(test)]
+use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use crate::reports::franking;
 use axum::{Router, extract::State, routing::get};
@@ -422,7 +424,7 @@ mod tests {
                 pool,
                 10,
                 &ParticipationBody {
-                    holding_account_id: 1,
+                    holding_account_id: HoldingAccountId(1),
                     date: ymd(2025, 6, 15),
                     units: Decimal::from(20000),
                     allocations: vec![AllocationInput {

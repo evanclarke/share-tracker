@@ -38,6 +38,7 @@ use crate::infra::db::write_tx;
 use crate::infra::decimal::{Money, parse_dec};
 use crate::infra::extract::Json;
 use crate::infra::http::{self, ApiError, CrudEntity, Upsert, UpsertResponse};
+use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use axum::{
     Router,
@@ -72,7 +73,7 @@ pub struct DrpEnrolment {
     /// account and unenrolled in another (e.g. an employer share-plan account
     /// that cannot DRP alongside an enrolled personal account). Defaults to
     /// the seeded default account when omitted from a request.
-    pub holding_account_id: i64,
+    pub holding_account_id: HoldingAccountId,
     /// First day of the period (inclusive).
     pub enrolment_date: NaiveDate,
     /// Day the unenrolment takes effect (exclusive): distributions with an ex
@@ -89,7 +90,7 @@ pub struct DrpEnrolmentBody {
     pub listing_id: ListingId,
     /// Defaults to the seeded default holding account when omitted.
     #[serde(default = "crate::entities::holding_account::default_holding_account_id")]
-    pub holding_account_id: i64,
+    pub holding_account_id: HoldingAccountId,
     /// First day of the enrolment period (`YYYY-MM-DD`, inclusive). Periods of one listing
     /// and holding account must not overlap.
     pub enrolment_date: NaiveDate,
@@ -161,7 +162,7 @@ pub(crate) static PERIOD_TRADES_FROM_WHERE: LazyLock<String> = LazyLock::new(|| 
 #[serde(deny_unknown_fields)]
 pub struct DrpEnrolmentListQuery {
     pub listing_id: Option<ListingId>,
-    pub holding_account_id: Option<i64>,
+    pub holding_account_id: Option<HoldingAccountId>,
 }
 
 impl crate::infra::http::CrudListFilter for DrpEnrolmentListQuery {
@@ -612,7 +613,7 @@ mod tests {
         handling: ResidualHandling,
     ) -> DrpEnrolment {
         DrpEnrolment {
-            holding_account_id: 1,
+            holding_account_id: HoldingAccountId(1),
             id,
             listing_id,
             enrolment_date: d(from),
@@ -925,7 +926,7 @@ mod tests {
             crate::entities::trade::ParcelOrigin::DrpReinvestment,
             date.parse().unwrap(),
             listing_id,
-            1,
+            HoldingAccountId(1),
             test_support::dec("11"),
             "AUD",
         )
@@ -964,7 +965,7 @@ mod tests {
             .with(|i| {
                 i.ex_date = Some(ex_date.parse().unwrap());
                 i.unfranked_amount = Decimal::from(100);
-                i.holding_account_id = account;
+                i.holding_account_id = HoldingAccountId(account);
             })
             .insert(pool)
             .await;
@@ -1085,7 +1086,7 @@ mod tests {
         crate::entities::holding_account::db_upsert(
             &pool,
             &crate::entities::holding_account::HoldingAccount {
-                id: 2,
+                id: HoldingAccountId(2),
                 name: "ICE Employee Plan".to_string(),
             },
         )
@@ -1113,7 +1114,7 @@ mod tests {
             None,
             ResidualHandling::PayOut,
         );
-        other_account.holding_account_id = 2;
+        other_account.holding_account_id = HoldingAccountId(2);
         db_upsert(&pool, &other_account).await.unwrap();
 
         // A second open period within account 2 still overlaps.
@@ -1124,7 +1125,7 @@ mod tests {
             None,
             ResidualHandling::PayOut,
         );
-        doubly_open.holding_account_id = 2;
+        doubly_open.holding_account_id = HoldingAccountId(2);
         assert!(matches!(
             db_upsert(&pool, &doubly_open).await,
             Err(UpsertError::Overlap)
@@ -1141,7 +1142,7 @@ mod tests {
         crate::entities::holding_account::db_upsert(
             &pool,
             &crate::entities::holding_account::HoldingAccount {
-                id: 2,
+                id: HoldingAccountId(2),
                 name: "Personal CHESS".to_string(),
             },
         )
@@ -1393,7 +1394,7 @@ mod tests {
         crate::entities::holding_account::db_upsert(
             &pool,
             &crate::entities::holding_account::HoldingAccount {
-                id: 2,
+                id: HoldingAccountId(2),
                 name: "Personal CHESS".to_string(),
             },
         )
@@ -1695,7 +1696,7 @@ mod tests {
         crate::entities::holding_account::db_upsert(
             &pool,
             &crate::entities::holding_account::HoldingAccount {
-                id: 2,
+                id: HoldingAccountId(2),
                 name: "Second".to_string(),
             },
         )
@@ -1713,7 +1714,7 @@ mod tests {
                 &DrpEnrolment {
                     id,
                     listing_id: ListingId(listing_id),
-                    holding_account_id: account,
+                    holding_account_id: HoldingAccountId(account),
                     enrolment_date: start,
                     unenrolment_date: None,
                     residual_handling: ResidualHandling::CarryForward,

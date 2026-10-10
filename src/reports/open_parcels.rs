@@ -1,6 +1,7 @@
 use crate::domain::open_parcels;
 use crate::infra::extract::{Json, Query};
 use crate::infra::http::ApiError;
+use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use axum::{Router, extract::State, routing::get};
 use chrono::NaiveDate;
@@ -17,7 +18,7 @@ pub struct OpenParcel {
     pub trade_id: i64,
     pub listing_id: ListingId,
     /// The holding account the parcel sits in.
-    pub holding_account_id: i64,
+    pub holding_account_id: HoldingAccountId,
     pub ticker: String,
     /// Original acquisition date — preserved across share splits/consolidations
     /// (TD 2000/10), so the 12-month discount clock keeps running from here.
@@ -1511,7 +1512,7 @@ mod tests {
                 spot_fx_rate: None,
                 contract_note_ref: None,
                 statement_total: None,
-                holding_account_id: 1,
+                holding_account_id: HoldingAccountId(1),
                 allocations: vec![
                     AllocationInput {
                         purchase_trade_id: 1,

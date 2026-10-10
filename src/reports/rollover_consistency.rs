@@ -65,6 +65,8 @@ use crate::infra::currency::CurrencyCode;
 use crate::infra::decimal::row_dec;
 use crate::infra::extract::Json;
 use crate::infra::http::ApiError;
+#[cfg(test)]
+use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use axum::{Router, extract::State, routing::get};
 use chrono::NaiveDate;
@@ -449,7 +451,7 @@ mod tests {
         holding_account::db_upsert(
             &pool,
             &HoldingAccount {
-                id: 2,
+                id: HoldingAccountId(2),
                 name: "Broker".to_string(),
             },
         )
@@ -467,8 +469,8 @@ mod tests {
             &TransferBody {
                 listing_id: ListingId(1),
                 date: ymd(2023, 8, 1),
-                from_account_id: 1,
-                to_account_id: 2,
+                from_account_id: HoldingAccountId(1),
+                to_account_id: HoldingAccountId(2),
                 allocations: vec![AllocationInput {
                     purchase_trade_id: 1,
                     quantity_allocated: dec("100"),
@@ -790,7 +792,7 @@ mod tests {
         holding_account::db_upsert(
             &pool,
             &HoldingAccount {
-                id: 2,
+                id: HoldingAccountId(2),
                 name: "Broker".to_string(),
             },
         )
@@ -808,8 +810,8 @@ mod tests {
             &TransferBody {
                 listing_id: ListingId(1),
                 date: ymd(2023, 8, 1),
-                from_account_id: 1,
-                to_account_id: 2,
+                from_account_id: HoldingAccountId(1),
+                to_account_id: HoldingAccountId(2),
                 allocations: vec![AllocationInput {
                     purchase_trade_id: 1,
                     quantity_allocated: dec("40"),

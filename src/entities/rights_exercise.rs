@@ -41,6 +41,7 @@ use crate::infra::db::{WriteMode, write_tx};
 use crate::infra::decimal::parse_dec;
 use crate::infra::extract::{Json, Query};
 use crate::infra::http::{ApiError, DryRunQuery};
+use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use axum::{
     Router,
@@ -84,7 +85,7 @@ pub struct ExerciseBody {
     /// The holding account the exercised parcel lands in. Defaults to the
     /// seeded default account when omitted.
     #[serde(default = "crate::entities::holding_account::default_holding_account_id")]
-    pub holding_account_id: i64,
+    pub holding_account_id: HoldingAccountId,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -536,7 +537,7 @@ mod tests {
             &sell::SellBody {
                 brokerage_includes_gst: false,
                 statement_total: None,
-                holding_account_id: 1,
+                holding_account_id: HoldingAccountId(1),
                 date,
                 settlement_date: Some(date),
                 listing_id: ListingId(1),
@@ -606,7 +607,7 @@ mod tests {
 
     fn body(date: NaiveDate, units: &str) -> ExerciseBody {
         ExerciseBody {
-            holding_account_id: 1,
+            holding_account_id: HoldingAccountId(1),
             date,
             units: units.parse().unwrap(),
             rights_cost: None,
@@ -659,7 +660,7 @@ mod tests {
         insert_rights_issue(&pool, 10, d(2024, 7, 1)).await;
 
         let exercise = ExerciseBody {
-            holding_account_id: 1,
+            holding_account_id: HoldingAccountId(1),
             date: d(2024, 8, 1),
             units: "250".parse().unwrap(),
             rights_cost: Some("50.05".parse().unwrap()),
@@ -918,7 +919,7 @@ mod tests {
         let err = db_exercise(&pool, 10, &body(d(2024, 8, 1), "-5")).await;
         assert!(matches!(err, Err(ExerciseError::NonPositiveUnits)));
         let exercise = ExerciseBody {
-            holding_account_id: 1,
+            holding_account_id: HoldingAccountId(1),
             date: d(2024, 8, 1),
             units: "10".parse().unwrap(),
             rights_cost: Some("-1".parse().unwrap()),
@@ -1032,7 +1033,7 @@ mod tests {
         holding_account::db_upsert(
             &pool,
             &HoldingAccount {
-                id: 2,
+                id: HoldingAccountId(2),
                 name: "Personal CHESS".to_string(),
             },
         )
@@ -1042,7 +1043,7 @@ mod tests {
         insert_rights_issue(&pool, 10, d(2024, 3, 1)).await;
 
         let mut exercise = body(d(2024, 4, 1), "100");
-        exercise.holding_account_id = 2;
+        exercise.holding_account_id = HoldingAccountId(2);
         let trade = db_exercise(&pool, 10, &exercise).await.unwrap();
         assert_eq!(trade.holding_account_id, 2);
     }
@@ -1271,7 +1272,7 @@ mod tests {
             units: Decimal::from(10),
             rights_cost: None,
             fx_rate: None,
-            holding_account_id: 1,
+            holding_account_id: HoldingAccountId(1),
         };
         let err = db_exercise(&pool, 91, &body).await.unwrap_err();
         assert!(

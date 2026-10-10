@@ -104,6 +104,8 @@ use crate::infra::db::{WriteMode, write_tx};
 use crate::infra::decimal::parse_dec;
 use crate::infra::extract::{Json, Query};
 use crate::infra::http::{ApiError, DryRunQuery};
+#[cfg(test)]
+use crate::infra::id::HoldingAccountId;
 use axum::{
     Router,
     extract::{Path, State},
@@ -800,7 +802,7 @@ mod tests {
         drp_enrolment::db_upsert(
             pool,
             &drp_enrolment::DrpEnrolment {
-                holding_account_id: 1,
+                holding_account_id: HoldingAccountId(1),
                 id,
                 listing_id,
                 enrolment_date: from.parse().unwrap(),
@@ -882,7 +884,7 @@ mod tests {
         crate::entities::holding_account::db_upsert(
             pool,
             &crate::entities::holding_account::HoldingAccount {
-                id,
+                id: HoldingAccountId(id),
                 name: name.to_string(),
             },
         )
@@ -895,7 +897,7 @@ mod tests {
         pool: &SqlitePool,
         id: i64,
         listing_id: ListingId,
-        account_id: i64,
+        account_id: HoldingAccountId,
         handling: ResidualHandling,
     ) {
         drp_enrolment::db_upsert(
@@ -918,7 +920,7 @@ mod tests {
         pool: &SqlitePool,
         id: i64,
         listing_id: ListingId,
-        account_id: i64,
+        account_id: HoldingAccountId,
         cash: Decimal,
     ) {
         test_support::income(id, listing_id.0, "2024-03-31".parse().unwrap())
@@ -1013,7 +1015,7 @@ mod tests {
             &crate::entities::sell::SellBody {
                 brokerage_includes_gst: false,
                 statement_total: None,
-                holding_account_id: 1,
+                holding_account_id: HoldingAccountId(1),
                 date: "2025-06-25".parse().unwrap(),
                 settlement_date: Some("2025-06-27".parse().unwrap()),
                 listing_id: ListingId(1),
@@ -2023,16 +2025,37 @@ mod tests {
         insert_listing(&pool, 1, "AUD").await;
         insert_account(&pool, 2, "ICE Employee Plan").await;
         // Only the default (personal) account is enrolled.
-        enrol_in_account(&pool, 1, ListingId(1), 1, ResidualHandling::CarryForward).await;
+        enrol_in_account(
+            &pool,
+            1,
+            ListingId(1),
+            HoldingAccountId(1),
+            ResidualHandling::CarryForward,
+        )
+        .await;
 
         // Personal-account distribution reinvests, into the personal account.
-        insert_distribution_in_account(&pool, 1, ListingId(1), 1, Decimal::from(100)).await;
+        insert_distribution_in_account(
+            &pool,
+            1,
+            ListingId(1),
+            HoldingAccountId(1),
+            Decimal::from(100),
+        )
+        .await;
         let trade = db_reinvest(&pool, 1, &body("9")).await.unwrap();
         assert_eq!(trade.quantity, Decimal::from(11));
         assert_eq!(trade.holding_account_id, 1);
 
         // The plan account's distribution on the same listing is rejected.
-        insert_distribution_in_account(&pool, 2, ListingId(1), 2, Decimal::from(100)).await;
+        insert_distribution_in_account(
+            &pool,
+            2,
+            ListingId(1),
+            HoldingAccountId(2),
+            Decimal::from(100),
+        )
+        .await;
         let err = db_reinvest(&pool, 2, &body("9")).await.unwrap_err();
         assert!(matches!(err, ReinvestError::NotEnrolled { .. }));
     }
@@ -2044,8 +2067,22 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "AUD").await;
         insert_account(&pool, 2, "Personal CHESS").await;
-        enrol_in_account(&pool, 1, ListingId(1), 2, ResidualHandling::CarryForward).await;
-        insert_distribution_in_account(&pool, 1, ListingId(1), 2, Decimal::from(100)).await;
+        enrol_in_account(
+            &pool,
+            1,
+            ListingId(1),
+            HoldingAccountId(2),
+            ResidualHandling::CarryForward,
+        )
+        .await;
+        insert_distribution_in_account(
+            &pool,
+            1,
+            ListingId(1),
+            HoldingAccountId(2),
+            Decimal::from(100),
+        )
+        .await;
 
         let trade = db_reinvest(&pool, 1, &body("9")).await.unwrap();
         assert_eq!(trade.holding_account_id, 2);
@@ -2059,22 +2096,57 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "AUD").await;
         insert_account(&pool, 2, "Personal CHESS").await;
-        enrol_in_account(&pool, 1, ListingId(1), 1, ResidualHandling::CarryForward).await;
-        enrol_in_account(&pool, 2, ListingId(1), 2, ResidualHandling::CarryForward).await;
+        enrol_in_account(
+            &pool,
+            1,
+            ListingId(1),
+            HoldingAccountId(1),
+            ResidualHandling::CarryForward,
+        )
+        .await;
+        enrol_in_account(
+            &pool,
+            2,
+            ListingId(1),
+            HoldingAccountId(2),
+            ResidualHandling::CarryForward,
+        )
+        .await;
 
         // Account 1: $100 at $9 → 11 shares, $1 carried forward.
-        insert_distribution_in_account(&pool, 1, ListingId(1), 1, Decimal::from(100)).await;
+        insert_distribution_in_account(
+            &pool,
+            1,
+            ListingId(1),
+            HoldingAccountId(1),
+            Decimal::from(100),
+        )
+        .await;
         let first = db_reinvest(&pool, 1, &body("9")).await.unwrap();
         assert_eq!(first.residual_carried_forward, Decimal::ONE);
 
         // Account 2's next reinvestment brings nothing forward from account 1.
-        insert_distribution_in_account(&pool, 2, ListingId(1), 2, Decimal::from(8)).await;
+        insert_distribution_in_account(
+            &pool,
+            2,
+            ListingId(1),
+            HoldingAccountId(2),
+            Decimal::from(8),
+        )
+        .await;
         let other = db_reinvest(&pool, 2, &body("9")).await.unwrap();
         assert_eq!(other.residual_brought_forward, Decimal::ZERO);
         assert_eq!(other.quantity, Decimal::ZERO); // 8 < 9, no whole share
 
         // Account 1's own chain still picks its $1 up.
-        insert_distribution_in_account(&pool, 3, ListingId(1), 1, Decimal::from(8)).await;
+        insert_distribution_in_account(
+            &pool,
+            3,
+            ListingId(1),
+            HoldingAccountId(1),
+            Decimal::from(8),
+        )
+        .await;
         let next = db_reinvest(&pool, 3, &body("9")).await.unwrap();
         assert_eq!(next.residual_brought_forward, Decimal::ONE);
         assert_eq!(next.quantity, Decimal::from(1));
@@ -2259,7 +2331,7 @@ mod tests {
                 spot_fx_rate: None,
                 contract_note_ref: None,
                 statement_total: None,
-                holding_account_id: 1,
+                holding_account_id: HoldingAccountId(1),
                 allocations: vec![crate::entities::sell::AllocationInput {
                     purchase_trade_id: trade.id,
                     quantity_allocated: Decimal::from(5),

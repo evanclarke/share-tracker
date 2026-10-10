@@ -11,6 +11,8 @@
 //! `.bind(x.to_string())`. Both directions then go through one type the compiler checks,
 //! rather than through per-column hand-written code that review has to police.
 
+#[cfg(test)]
+use crate::infra::id::HoldingAccountId;
 use rust_decimal::Decimal;
 use serde::Deserialize as _;
 use serde::de::{self, Deserializer, Visitor};
@@ -919,7 +921,7 @@ mod tests {
         let row = OpenParcel {
             trade_id: 7,
             listing_id: ListingId(3),
-            holding_account_id: 1,
+            holding_account_id: HoldingAccountId(1),
             ticker: "VDHG".to_string(),
             acquisition_date: NaiveDate::from_ymd_opt(2024, 1, 2).expect("a valid date"),
             // A deliberate mix of whole and fractional figures, so either

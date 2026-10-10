@@ -60,6 +60,12 @@ id_type!(
     ListingId
 );
 
+id_type!(
+    /// The id of a `holding_accounts` row: the broker account or registry
+    /// holding a parcel is held in.
+    HoldingAccountId
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;

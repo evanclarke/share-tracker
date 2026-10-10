@@ -14,6 +14,7 @@ use crate::infra::currency::CurrencyCode;
 use crate::infra::db::write_tx;
 use crate::infra::decimal::{Money, OptMoney, parse_dec};
 use crate::infra::http::{self, ApiError, CrudEntity, Upsert};
+use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use chrono::NaiveDate;
 use sqlx::SqlitePool;
@@ -28,7 +29,7 @@ use sqlx::SqlitePool;
 #[serde(deny_unknown_fields)]
 pub struct TradeListQuery {
     pub listing_id: Option<ListingId>,
-    pub holding_account_id: Option<i64>,
+    pub holding_account_id: Option<HoldingAccountId>,
     pub from: Option<NaiveDate>,
     pub to: Option<NaiveDate>,
 }
@@ -341,7 +342,7 @@ struct ExistingTrade {
     trade_type: super::model::TradeType,
     listing_id: ListingId,
     date: chrono::NaiveDate,
-    holding_account_id: i64,
+    holding_account_id: HoldingAccountId,
     /// The provenance column the row carries, if any
     /// (`provenance::provenance_column_sql`).
     provenance: Option<String>,

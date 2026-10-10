@@ -57,6 +57,7 @@ use crate::infra::db::{WriteMode, write_tx};
 use crate::infra::decimal::{Money, parse_dec, row_dec};
 use crate::infra::extract::{Json, Query};
 use crate::infra::http::{self, ApiError, DryRunQuery};
+use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use axum::{
     Router,
@@ -83,7 +84,7 @@ pub struct RightsSale {
     /// Total paid to acquire the disposed rights (0 for rights issued free).
     pub rights_cost: Decimal,
     pub fx_rate: Decimal,
-    pub holding_account_id: i64,
+    pub holding_account_id: HoldingAccountId,
     pub allocations: Vec<RightsSaleAllocation>,
 }
 
@@ -155,7 +156,7 @@ pub struct SellRightsBody {
     /// The holding account the disposal is reported under. Defaults to the
     /// seeded default account when omitted.
     #[serde(default = "crate::entities::holding_account::default_holding_account_id")]
-    pub holding_account_id: i64,
+    pub holding_account_id: HoldingAccountId,
     /// Which original parcels the sold rights are anchored to; must sum
     /// exactly to `units`.
     pub allocations: Vec<AllocationInput>,
@@ -698,7 +699,7 @@ async fn attach_allocations(
 #[serde(deny_unknown_fields)]
 pub(crate) struct ListParams {
     pub listing_id: Option<ListingId>,
-    pub holding_account_id: Option<i64>,
+    pub holding_account_id: Option<HoldingAccountId>,
     pub rights_action_id: Option<i64>,
     pub from: Option<NaiveDate>,
     pub to: Option<NaiveDate>,
@@ -882,7 +883,7 @@ mod tests {
             proceeds_per_right: Some("0.20".parse().unwrap()),
             rights_cost: None,
             fx_rate: None,
-            holding_account_id: 1,
+            holding_account_id: HoldingAccountId(1),
             allocations: vec![AllocationInput {
                 purchase_trade_id: parcel,
                 units: units.parse().unwrap(),
@@ -972,7 +973,7 @@ mod tests {
                 units: Decimal::ONE,
                 rights_cost: None,
                 fx_rate: None,
-                holding_account_id: 1,
+                holding_account_id: HoldingAccountId(1),
             },
         )
         .await;
@@ -1000,7 +1001,7 @@ mod tests {
                 units: "100".parse().unwrap(),
                 rights_cost: None,
                 fx_rate: None,
-                holding_account_id: 1,
+                holding_account_id: HoldingAccountId(1),
             },
         )
         .await
@@ -1020,7 +1021,7 @@ mod tests {
                 units: Decimal::ONE,
                 rights_cost: None,
                 fx_rate: None,
-                holding_account_id: 1,
+                holding_account_id: HoldingAccountId(1),
             },
         )
         .await;
@@ -1747,7 +1748,7 @@ mod tests {
                 proceeds_per_right: Some(dec("0.20")),
                 rights_cost: None,
                 fx_rate: None,
-                holding_account_id: 1,
+                holding_account_id: HoldingAccountId(1),
                 allocations: vec![AllocationInput {
                     purchase_trade_id: 1,
                     units: dec("250"),
@@ -1777,7 +1778,7 @@ mod tests {
                 proceeds_per_right: Some(dec("0.20")),
                 rights_cost: None,
                 fx_rate: Some(dec("0.62")),
-                holding_account_id: 1,
+                holding_account_id: HoldingAccountId(1),
                 allocations: vec![AllocationInput {
                     purchase_trade_id: 1,
                     units: dec("250"),
@@ -1807,7 +1808,7 @@ mod tests {
                 proceeds_per_right: None,
                 rights_cost: None,
                 fx_rate: None,
-                holding_account_id: 1,
+                holding_account_id: HoldingAccountId(1),
                 allocations: vec![AllocationInput {
                     purchase_trade_id: 1,
                     units: dec("250"),

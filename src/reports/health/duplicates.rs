@@ -8,6 +8,7 @@ use crate::entities::inheritance::{self, Inheritance};
 use crate::entities::interest_income::InterestIncome;
 use crate::entities::investment_expense::{ExpenseType, InvestmentExpense};
 use crate::infra::currency::CurrencyCode;
+use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
@@ -124,7 +125,7 @@ pub struct DuplicateAmmaStatement {
     /// The financial year the statements attribute, identified by the
     /// calendar year of their shared 30 June end (`domain::tax_year`).
     pub tax_year: i32,
-    pub holding_account_id: i64,
+    pub holding_account_id: HoldingAccountId,
     /// How many statements share this (listing, year, account) — always ≥ 2.
     pub statement_count: i64,
     /// The ids sharing it, ascending, so the superseded row can be found and
@@ -155,7 +156,7 @@ pub struct DuplicateAmmaStatement {
 pub struct DuplicateIncome {
     pub listing_id: ListingId,
     pub ticker: String,
-    pub holding_account_id: i64,
+    pub holding_account_id: HoldingAccountId,
     pub date_paid: NaiveDate,
     /// ISO 4217 currency the shared amounts are stated in (part of the key —
     /// two rows stating the same figures in different currencies are not the
@@ -196,7 +197,7 @@ pub struct DuplicateInterest {
     pub source: Option<String>,
     /// The holding account the rows share (part of the key); `None` for
     /// interest from outside the portfolio's accounts.
-    pub holding_account_id: Option<i64>,
+    pub holding_account_id: Option<HoldingAccountId>,
     /// How many rows share the whole key — always ≥ 2.
     pub interest_count: i64,
     /// The ids sharing it, ascending, so the surplus row can be opened and
@@ -236,7 +237,7 @@ pub struct DuplicateExpense {
     pub ticker: Option<String>,
     /// The holding account the rows are attributed to (part of the key);
     /// `None` for a portfolio-wide expense.
-    pub holding_account_id: Option<i64>,
+    pub holding_account_id: Option<HoldingAccountId>,
     /// How many rows share the whole key — always ≥ 2.
     pub expense_count: i64,
     /// The ids sharing it, ascending, so the surplus row can be opened and
@@ -265,7 +266,7 @@ pub struct DuplicateExpense {
 pub struct DuplicateEssStatement {
     pub listing_id: ListingId,
     pub ticker: String,
-    pub holding_account_id: i64,
+    pub holding_account_id: HoldingAccountId,
     pub taxing_point_date: NaiveDate,
     /// ISO 4217 currency the shared figures are stated in (part of the key).
     pub currency: CurrencyCode,
@@ -302,7 +303,7 @@ pub struct DuplicateEssStatement {
 pub struct DuplicateInheritance {
     pub listing_id: ListingId,
     pub ticker: String,
-    pub holding_account_id: i64,
+    pub holding_account_id: HoldingAccountId,
     pub date_of_death: NaiveDate,
     /// ISO 4217 currency the shared figures are stated in (part of the key).
     pub currency: CurrencyCode,
@@ -554,7 +555,7 @@ struct AmmaEntry {
     id: i64,
     listing_id: ListingId,
     tax_year_end_date: NaiveDate,
-    holding_account_id: i64,
+    holding_account_id: HoldingAccountId,
 }
 
 impl DuplicateCheck for AmmaEntry {

@@ -86,6 +86,7 @@ use crate::entities::trade::{self, Trade};
 use crate::infra::db::{WriteMode, write_tx};
 use crate::infra::extract::{Json, Query};
 use crate::infra::http::{ApiError, DryRunQuery};
+use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use axum::{
     Router,
@@ -177,7 +178,7 @@ async fn execute(
     }
 
     let listing_id: ListingId = row.try_get("listing_id")?;
-    let holding_account_id: i64 = row.try_get("holding_account_id")?;
+    let holding_account_id: HoldingAccountId = row.try_get("holding_account_id")?;
     let taxing_point_date: chrono::NaiveDate = row.try_get("taxing_point_date")?;
     let quantity = crate::infra::decimal::parse_dec("quantity", row.try_get("quantity")?)?;
     let price = crate::infra::decimal::parse_dec(
@@ -472,7 +473,7 @@ mod tests {
         crate::entities::holding_account::db_upsert(
             &pool,
             &crate::entities::holding_account::HoldingAccount {
-                id: 2,
+                id: HoldingAccountId(2),
                 name: "Broker".to_string(),
             },
         )
@@ -484,8 +485,8 @@ mod tests {
             &crate::entities::transfer::TransferBody {
                 listing_id: ListingId(1),
                 date: ymd(2024, 10, 1),
-                from_account_id: 1,
-                to_account_id: 2,
+                from_account_id: HoldingAccountId(1),
+                to_account_id: HoldingAccountId(2),
                 allocations: vec![crate::entities::sell::AllocationInput {
                     purchase_trade_id: vest.id,
                     quantity_allocated: Decimal::from(100),
@@ -798,7 +799,7 @@ mod tests {
             &SellBody {
                 brokerage_includes_gst: false,
                 statement_total: None,
-                holding_account_id: 1,
+                holding_account_id: HoldingAccountId(1),
                 date: NaiveDate::from_ymd_opt(2025, 1, 10).unwrap(),
                 settlement_date: Some(NaiveDate::from_ymd_opt(2025, 1, 12).unwrap()),
                 listing_id: ListingId(1),

@@ -19,6 +19,7 @@ use crate::infra::db::write_tx;
 use crate::infra::decimal::Money;
 use crate::infra::extract::Json;
 use crate::infra::http::{self, ApiError, CrudEntity, Upsert, UpsertResponse};
+use crate::infra::id::HoldingAccountId;
 use axum::{
     Router,
     extract::{Path, State},
@@ -68,7 +69,7 @@ pub struct InterestIncome {
     /// Optional link to the holding account the interest was paid on (e.g. a
     /// broker cash account); NULL for interest from outside the portfolio's
     /// accounts. Informational only — no calculation reads it.
-    pub holding_account_id: Option<i64>,
+    pub holding_account_id: Option<HoldingAccountId>,
 }
 
 #[derive(utoipa::ToSchema, Debug, Deserialize)]
@@ -104,7 +105,7 @@ pub struct InterestIncomeBody {
     /// The holding account the interest was paid on, e.g. a broker cash account; omit for
     /// interest from outside the portfolio's accounts. Informational only.
     #[serde(default)]
-    pub holding_account_id: Option<i64>,
+    pub holding_account_id: Option<HoldingAccountId>,
 }
 
 /// The `/interest_income` list filters: the owning account and the
@@ -116,7 +117,7 @@ pub struct InterestIncomeBody {
 #[derive(Debug, Default, serde::Deserialize, utoipa::IntoParams)]
 #[serde(deny_unknown_fields)]
 pub struct InterestIncomeListQuery {
-    pub holding_account_id: Option<i64>,
+    pub holding_account_id: Option<HoldingAccountId>,
     pub from: Option<NaiveDate>,
     pub to: Option<NaiveDate>,
 }
@@ -418,10 +419,10 @@ mod tests {
     async fn db_optional_holding_account_round_trips() {
         let pool = test_pool().await;
         let mut i = sample(1);
-        i.holding_account_id = Some(1); // the seeded default account
+        i.holding_account_id = Some(HoldingAccountId(1)); // the seeded default account
         db_upsert(&pool, &i).await.unwrap();
         let got = db_get(&pool, 1).await.unwrap().unwrap();
-        assert_eq!(got.holding_account_id, Some(1));
+        assert_eq!(got.holding_account_id, Some(HoldingAccountId(1)));
     }
 
     #[tokio::test]
@@ -761,7 +762,7 @@ mod tests {
             (4, None, crate::test_support::ymd(2025, 2, 10)),
         ] {
             let mut row = sample(id);
-            row.holding_account_id = account;
+            row.holding_account_id = account.map(HoldingAccountId);
             row.date_paid = date;
             db_upsert(&pool, &row).await.unwrap();
         }

@@ -24,6 +24,8 @@
 //! underneath — [`cost_base::adjusted_cost_base`] — which neither
 //! re-implements.
 
+#[cfg(test)]
+use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use std::collections::HashMap;
 
@@ -385,7 +387,7 @@ mod tests {
         holding_account::db_upsert(
             &pool,
             &HoldingAccount {
-                id: 2,
+                id: HoldingAccountId(2),
                 name: "Broker".to_string(),
             },
         )
@@ -416,8 +418,8 @@ mod tests {
             &TransferBody {
                 listing_id: ListingId(1),
                 date: ymd(2025, 5, 1),
-                from_account_id: 1,
-                to_account_id: 2,
+                from_account_id: HoldingAccountId(1),
+                to_account_id: HoldingAccountId(2),
                 allocations: vec![AllocationInput {
                     purchase_trade_id: 1,
                     quantity_allocated: dec("1000"),
@@ -476,7 +478,7 @@ mod tests {
             holding_account::db_upsert(
                 &pool,
                 &HoldingAccount {
-                    id,
+                    id: HoldingAccountId(id),
                     name: name.to_string(),
                 },
             )
@@ -496,8 +498,8 @@ mod tests {
                 &TransferBody {
                     listing_id: ListingId(1),
                     date,
-                    from_account_id: from,
-                    to_account_id: to,
+                    from_account_id: HoldingAccountId(from),
+                    to_account_id: HoldingAccountId(to),
                     allocations: vec![AllocationInput {
                         purchase_trade_id: parcel,
                         quantity_allocated: dec("100"),
@@ -640,7 +642,7 @@ mod tests {
         holding_account::db_upsert(
             &pool,
             &HoldingAccount {
-                id: 2,
+                id: HoldingAccountId(2),
                 name: "Broker".to_string(),
             },
         )
@@ -654,8 +656,8 @@ mod tests {
             &TransferBody {
                 listing_id: ListingId(2),
                 date: ymd(2025, 4, 1),
-                from_account_id: 1,
-                to_account_id: 2,
+                from_account_id: HoldingAccountId(1),
+                to_account_id: HoldingAccountId(2),
                 allocations: vec![AllocationInput {
                     purchase_trade_id: exchanged,
                     quantity_allocated: dec("2000"),

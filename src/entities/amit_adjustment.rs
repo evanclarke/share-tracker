@@ -5,6 +5,7 @@ use crate::infra::db::write_tx;
 use crate::infra::decimal::{Money, parse_dec};
 use crate::infra::extract::Json;
 use crate::infra::http::{self, ApiError, CrudEntity, Upsert, UpsertResponse};
+use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use axum::{
     Router,
@@ -244,10 +245,10 @@ async fn traces_back_to(
     conn: &mut sqlx::SqliteConnection,
     parcel_id: i64,
     listing_id: ListingId,
-    account_id: i64,
+    account_id: HoldingAccountId,
 ) -> Result<bool, sqlx::Error> {
     for ancestor in rollover::source_ancestors(&mut *conn, parcel_id).await? {
-        let holding: Option<(ListingId, i64)> =
+        let holding: Option<(ListingId, HoldingAccountId)> =
             sqlx::query_as("SELECT listing_id, holding_account_id FROM trades WHERE id = ?")
                 .bind(ancestor)
                 .fetch_optional(&mut *conn)
@@ -292,12 +293,12 @@ async fn db_write_on(
         return Err(UpsertError::TradeNotBuyOrDrp);
     }
 
-    let (trade_listing_id, trade_account_id): (ListingId, i64) =
+    let (trade_listing_id, trade_account_id): (ListingId, HoldingAccountId) =
         sqlx::query_as("SELECT listing_id, holding_account_id FROM trades WHERE id = ?")
             .bind(adj.trade_id)
             .fetch_one(&mut *conn)
             .await?;
-    let (amma_listing_id, amma_account_id): (ListingId, i64) =
+    let (amma_listing_id, amma_account_id): (ListingId, HoldingAccountId) =
         sqlx::query_as("SELECT listing_id, holding_account_id FROM amma_statements WHERE id = ?")
             .bind(adj.amma_statement_id)
             .fetch_one(&mut *conn)
@@ -681,7 +682,7 @@ mod tests {
         holding_account::db_upsert(
             &pool,
             &HoldingAccount {
-                id: 2,
+                id: HoldingAccountId(2),
                 name: "Broker".to_string(),
             },
         )
@@ -715,8 +716,8 @@ mod tests {
             &TransferBody {
                 listing_id: ListingId(1),
                 date: ymd(2025, 5, 1),
-                from_account_id: 1,
-                to_account_id: 2,
+                from_account_id: HoldingAccountId(1),
+                to_account_id: HoldingAccountId(2),
                 allocations: vec![AllocationInput {
                     purchase_trade_id: 1,
                     quantity_allocated: dec("600"),
@@ -820,7 +821,7 @@ mod tests {
         holding_account::db_upsert(
             &pool,
             &HoldingAccount {
-                id: 2,
+                id: HoldingAccountId(2),
                 name: "Broker".to_string(),
             },
         )
@@ -844,8 +845,8 @@ mod tests {
             &TransferBody {
                 listing_id: ListingId(1),
                 date: ymd(2024, 8, 15),
-                from_account_id: 1,
-                to_account_id: 2,
+                from_account_id: HoldingAccountId(1),
+                to_account_id: HoldingAccountId(2),
                 allocations: vec![AllocationInput {
                     purchase_trade_id: 1,
                     quantity_allocated: dec("100"),
@@ -1003,7 +1004,7 @@ mod tests {
         holding_account::db_upsert(
             &pool,
             &HoldingAccount {
-                id: 2,
+                id: HoldingAccountId(2),
                 name: "ICE Employee Plan".to_string(),
             },
         )
@@ -1515,7 +1516,7 @@ mod tests {
         holding_account::db_upsert(
             pool,
             &HoldingAccount {
-                id: 2,
+                id: HoldingAccountId(2),
                 name: "Second".to_string(),
             },
         )
@@ -1532,8 +1533,8 @@ mod tests {
             &TransferBody {
                 listing_id: ListingId(1),
                 date: ymd(2024, 8, 1),
-                from_account_id: 1,
-                to_account_id: 2,
+                from_account_id: HoldingAccountId(1),
+                to_account_id: HoldingAccountId(2),
                 allocations: vec![AllocationInput {
                     purchase_trade_id: trade_id,
                     quantity_allocated: quantity,
@@ -1999,7 +2000,7 @@ mod tests {
         holding_account::db_upsert(
             &pool,
             &HoldingAccount {
-                id: 2,
+                id: HoldingAccountId(2),
                 name: "Second".to_string(),
             },
         )
@@ -2011,8 +2012,8 @@ mod tests {
             &TransferBody {
                 listing_id: ListingId(2),
                 date: ymd(2025, 8, 1),
-                from_account_id: 1,
-                to_account_id: 2,
+                from_account_id: HoldingAccountId(1),
+                to_account_id: HoldingAccountId(2),
                 allocations: vec![AllocationInput {
                     purchase_trade_id: exchanged,
                     quantity_allocated: Decimal::from(10_000),
