@@ -685,10 +685,7 @@ async fn write(
     let mut tx = write_tx(pool).await?;
     // The create-vs-replace decision is made inside the write's own
     // `BEGIN IMMEDIATE` transaction (CLAUDE.md, "Data integrity").
-    let existed = match id {
-        Some(id) => http::crud_exists::<Inheritance, _>(&mut *tx, id).await?,
-        None => false,
-    };
+    let existed = http::crud_exists_opt::<Inheritance, _>(&mut *tx, id).await?;
 
     check_listing_currency(&mut tx, inh).await?;
     check_convertible(&mut tx, inh).await?;
@@ -869,21 +866,9 @@ async fn write(
         });
     }
 
-    // Read the created row inside this transaction (a replace answers `204`
-    // with no body): reading it after the commit let a concurrent DELETE turn
-    // a committed create into a 500, or made the `201` report the other
-    // writer's row.
-    let stored = if existed {
-        None
-    } else {
-        http::crud_get::<Inheritance, _>(&mut *tx, assigned_id).await?
-    };
+    let (outcome, stored) =
+        http::crud_upserted::<Inheritance, _>(&mut *tx, existed, assigned_id).await?;
     tx.commit().await?;
-    let outcome = if existed {
-        Upsert::Replaced
-    } else {
-        Upsert::Created
-    };
     Ok((assigned_id, outcome, stored))
 }
 

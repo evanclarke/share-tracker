@@ -10,7 +10,7 @@
 use crate::infra::db::write_tx;
 use crate::infra::decimal::Money;
 use crate::infra::extract::Json;
-use crate::infra::http::{self, ApiError, CrudEntity, Upsert, UpsertResponse};
+use crate::infra::http::{self, ApiError, CrudEntity, UpsertResponse};
 use axum::{
     Router,
     extract::{Path, State},
@@ -80,23 +80,9 @@ pub async fn db_upsert(
     .bind(Money(settings.opening_capital_loss))
     .execute(&mut *tx)
     .await?;
-    // Read the created row inside this transaction: after the commit a
-    // concurrent DELETE or replace could turn the `201` into a 500 or report
-    // the other writer's row.
-    let stored = if existed {
-        None
-    } else {
-        http::crud_get::<CgtSettings, _>(&mut *tx, settings.id).await?
-    };
+    let upserted = http::crud_upserted::<CgtSettings, _>(&mut *tx, existed, settings.id).await?;
     tx.commit().await?;
-    Ok((
-        if existed {
-            Upsert::Replaced
-        } else {
-            Upsert::Created
-        },
-        stored,
-    ))
+    Ok(upserted)
 }
 
 /// The opening carried-forward capital loss, or zero when no settings row exists.

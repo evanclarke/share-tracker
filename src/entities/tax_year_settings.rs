@@ -18,7 +18,7 @@
 
 use crate::infra::db::write_tx;
 use crate::infra::extract::Json;
-use crate::infra::http::{self, ApiError, CrudEntity, Upsert, UpsertResponse};
+use crate::infra::http::{self, ApiError, CrudEntity, UpsertResponse};
 use axum::{
     Router,
     extract::{Path, State},
@@ -112,23 +112,10 @@ pub async fn db_upsert(
     .bind(settings.ess_taxed_upfront_reduction_eligible)
     .execute(&mut *tx)
     .await?;
-    // Read the created row inside this transaction: after the commit a
-    // concurrent DELETE or replace could turn the `201` into a 500 or report
-    // the other writer's row.
-    let stored = if existed {
-        None
-    } else {
-        http::crud_get::<TaxYearSettings, _>(&mut *tx, settings.tax_year).await?
-    };
+    let upserted =
+        http::crud_upserted::<TaxYearSettings, _>(&mut *tx, existed, settings.tax_year).await?;
     tx.commit().await?;
-    Ok((
-        if existed {
-            Upsert::Replaced
-        } else {
-            Upsert::Created
-        },
-        stored,
-    ))
+    Ok(upserted)
 }
 
 /// The financial years recorded as **not** eligible for the $1,000 taxed-upfront

@@ -465,10 +465,7 @@ async fn write(
     let mut tx = write_tx(pool).await?;
     // The create-vs-replace decision is made inside the write's own
     // `BEGIN IMMEDIATE` transaction (CLAUDE.md, "Data integrity").
-    let existed = match id {
-        Some(id) => http::crud_exists::<Listing, _>(&mut *tx, id).await?,
-        None => false,
-    };
+    let existed = http::crud_exists_opt::<Listing, _>(&mut *tx, id).await?;
 
     // An identity change (ticker or exchange) on a listing that already has
     // history must go through the rename action instead of a bare field
@@ -655,21 +652,9 @@ async fn write(
     // explicit one it was handed. Either way the caller gets the id the row
     // actually holds.
     let assigned_id = id.unwrap_or_else(|| result.last_insert_rowid());
-    // Read the stored row **inside this transaction** (a create only — a
-    // replace answers `204` with no body): reading it after the commit let a
-    // concurrent DELETE turn a committed create into a 500 and a concurrent
-    // replace report the other writer's row.
-    let stored = if existed {
-        None
-    } else {
-        http::crud_get::<Listing, _>(&mut *tx, assigned_id).await?
-    };
+    let (outcome, stored) =
+        http::crud_upserted::<Listing, _>(&mut *tx, existed, assigned_id).await?;
     tx.commit().await?;
-    let outcome = if existed {
-        Upsert::Replaced
-    } else {
-        Upsert::Created
-    };
     Ok((assigned_id, outcome, stored))
 }
 

@@ -1,6 +1,6 @@
 use crate::infra::db::write_tx;
 use crate::infra::extract::Json;
-use crate::infra::http::{self, ApiError, CrudEntity, Upsert, UpsertResponse};
+use crate::infra::http::{self, ApiError, CrudEntity, UpsertResponse};
 use axum::{
     Router,
     extract::{Path, State},
@@ -211,23 +211,10 @@ pub async fn db_upsert(
     .bind(&exchange.close_time)
     .execute(&mut *tx)
     .await?;
-    // Read the created row inside this transaction: after the commit a
-    // concurrent DELETE or replace could turn the `201` into a 500 or report
-    // the other writer's row.
-    let stored = if existed {
-        None
-    } else {
-        http::crud_get::<Exchange, _>(&mut *tx, exchange.mic.clone()).await?
-    };
+    let upserted =
+        http::crud_upserted::<Exchange, _>(&mut *tx, existed, exchange.mic.clone()).await?;
     tx.commit().await?;
-    Ok((
-        if existed {
-            Upsert::Replaced
-        } else {
-            Upsert::Created
-        },
-        stored,
-    ))
+    Ok(upserted)
 }
 
 /// Is `s` an `HH:MM` local time — exactly two digits, a colon, two digits, in

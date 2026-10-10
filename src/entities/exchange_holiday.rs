@@ -162,14 +162,7 @@ pub async fn db_upsert(
         None
     };
     tx.commit().await?;
-    Ok((
-        if created {
-            Upsert::Created
-        } else {
-            Upsert::Replaced
-        },
-        stored,
-    ))
+    Ok((Upsert::of(!created), stored))
 }
 
 pub async fn db_delete(pool: &SqlitePool, mic: &str, date: NaiveDate) -> Result<bool, sqlx::Error> {

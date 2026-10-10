@@ -513,10 +513,7 @@ async fn write(
     // The create-vs-replace decision is made inside the write's own
     // `BEGIN IMMEDIATE` transaction (CLAUDE.md, "Data integrity"). A Sell is a
     // `trades` row, so the check is against that table.
-    let existed = match id {
-        Some(id) => http::crud_exists::<Trade, _>(&mut *tx, id).await?,
-        None => false,
-    };
+    let existed = http::crud_exists_opt::<Trade, _>(&mut *tx, id).await?;
 
     // Recorded with the date, as on the trade path: a supplied value is the
     // taxpayer's assertion and is never rewritten; a computed one is
@@ -618,21 +615,8 @@ async fn write(
         return Err(SellError::NonTradingDay(shut.describe(body.date)));
     }
 
-    // Read the created row inside this transaction (a replace answers `204`
-    // with no body): reading it after the commit let a concurrent DELETE turn
-    // a committed create into a 500, or made the `201` report the other
-    // writer's row.
-    let stored = if existed {
-        None
-    } else {
-        http::crud_get::<Trade, _>(&mut *tx, written).await?
-    };
+    let (outcome, stored) = http::crud_upserted::<Trade, _>(&mut *tx, existed, written).await?;
     mode.finish(tx).await?;
-    let outcome = if existed {
-        Upsert::Replaced
-    } else {
-        Upsert::Created
-    };
     Ok((written, outcome, stored))
 }
 

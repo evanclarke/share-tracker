@@ -255,6 +255,18 @@ pub fn upsert_response<E: CrudEntity>(
 /// return shape of every entity's `db_upsert` (see [`upsert_response`]).
 pub type Upserted<E> = (Upsert, Option<E>);
 
+impl Upsert {
+    /// The outcome of a write whose in-transaction existence check (see
+    /// [`crud_exists`]) found `existed`.
+    pub fn of(existed: bool) -> Self {
+        if existed {
+            Upsert::Replaced
+        } else {
+            Upsert::Created
+        }
+    }
+}
+
 /// The `PUT` response for an upsert keyed on a natural key rather than a
 /// `CrudEntity` id (`PUT /exchange_holidays/{mic}/{date}` and
 /// `PUT /closing_prices/{listing_id}/{price_date}`), where the caller reads the
@@ -680,6 +692,46 @@ where
     .fetch_one(executor)
     .await?;
     Ok(found != 0)
+}
+
+/// [`crud_exists`] for a write that may not have an id yet: a create without
+/// one (`POST /x`, `key` is `None`) addresses no stored row.
+pub async fn crud_exists_opt<'e, E, X>(
+    executor: X,
+    key: Option<E::Key>,
+) -> Result<bool, sqlx::Error>
+where
+    E: CrudEntity,
+    X: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    match key {
+        Some(key) => crud_exists::<E, X>(executor, key).await,
+        None => Ok(false),
+    }
+}
+
+/// An upsert's [`Upserted`] result — its outcome, and for a create the row it
+/// stored — read **inside the write's own transaction**, between its last
+/// statement and its `commit` (a replace answers `204` with no body, so reads
+/// nothing). Reading the row after the commit let a concurrent `DELETE` turn a
+/// committed create into a `500`, or made the `201` report another writer's
+/// row; see [`upsert_response`]. `existed` is the write's [`crud_exists`]
+/// answer, taken in the same transaction before it wrote.
+pub async fn crud_upserted<'e, E, X>(
+    executor: X,
+    existed: bool,
+    key: E::Key,
+) -> Result<Upserted<E>, sqlx::Error>
+where
+    E: CrudEntity,
+    X: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    let stored = if existed {
+        None
+    } else {
+        crud_get::<E, X>(executor, key).await?
+    };
+    Ok((Upsert::of(existed), stored))
 }
 
 /// Delete one row of `E`'s table by primary key; `true` if a row went.

@@ -224,12 +224,7 @@ async fn put_manual(
         db_get_one(&mut *tx, listing_id, price_date).await?
     };
     tx.commit().await?;
-    let outcome = if existed {
-        Upsert::Replaced
-    } else {
-        Upsert::Created
-    };
-    http::upsert_response_of(outcome, stored)
+    http::upsert_response_of(Upsert::of(existed), stored)
 }
 
 /// Re-fetch one (listing, date) on demand — typically to replace an errored
