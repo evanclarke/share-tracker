@@ -56,15 +56,6 @@ falls under the existing rules.
   trading day before 1 July 2027 (the scheduled price import plus `closing_price`'s held-days
   backfill), since a missing one cannot be fetched reliably years later
 
-## A backup is renamed into place without reaching stable storage (2026-10-10 review, data integrity)
-`VACUUM INTO` does not fsync its output, and `backup` (`src/infra/db.rs` ~424–429) verifies the
-staging file (from the page cache) then `std::fs::rename`s it with no `sync_all` on the file or its
-directory. A power cut shortly after can leave a "verified" backup that never reached disk — the
-case the staging-file design (SCENARIOS T-11) exists to rule out — and pruning may count it as a
-keeper.
-- [ ] `sync_all` the staging file before the rename and fsync the destination directory after it;
-  a test that the backup path calls both (or a seam proving the order), and note it in SCENARIOS T-11
-
 ## A manual job is cancelled when its HTTP client disconnects (2026-10-10 review, robustness)
 `POST /jobs/{name}` (`scheduler/http.rs` ~131) awaits `run_job` inline, so closing the tab or
 Ctrl-C in curl drops the future between commits and leaves the `job_runs` row `running`.

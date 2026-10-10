@@ -469,9 +469,10 @@ const QUARANTINE_SUFFIX: &str = ".bad";
 /// existed).
 ///
 /// The copy is written to `<dest>.partial` and moved onto `dest` only once it
-/// has **verified** — write, verify, rename, in that order and never any other.
-/// A rename within a directory is atomic, so `dest` either does not exist or is
-/// a file that passed verification in this process; a run the process does not
+/// has **verified** — write, verify, flush, rename, in that order and never any
+/// other ([`install`] fsyncs the copy before the rename and the directory after
+/// it). A rename within a directory is atomic, so `dest` either does not exist or
+/// is a file that passed verification in this process; a run the process does not
 /// survive (a restart landing on the weekly backup's own slot, a `SIGKILL`, a
 /// power cut) leaves its half-written copy under the staging name, where nothing
 /// mistakes it for a backup (SCENARIOS T-11). Before this, the copy was written
@@ -499,9 +500,54 @@ async fn backup_to(pool: &SqlitePool, dest: &str) -> Result<bool, BackupError> {
         .execute(pool)
         .await?;
     verify_or_quarantine(pool, &staging, dest).await?;
-    std::fs::rename(&staging, dest)?;
+    install(&mut Disk, Path::new(&staging), Path::new(dest))?;
     tracing::info!(path = dest, "backup complete and verified");
     Ok(true)
+}
+
+/// The three filesystem steps that put a verified staging copy in place under
+/// its backup name — a seam so a test can pin their order ([`install`]).
+trait InstallSteps {
+    fn sync_file(&mut self, path: &Path) -> std::io::Result<()>;
+    fn rename(&mut self, from: &Path, to: &Path) -> std::io::Result<()>;
+    fn sync_dir(&mut self, dir: &Path) -> std::io::Result<()>;
+}
+
+/// The real filesystem.
+struct Disk;
+
+impl InstallSteps for Disk {
+    fn sync_file(&mut self, path: &Path) -> std::io::Result<()> {
+        std::fs::File::open(path)?.sync_all()
+    }
+    fn rename(&mut self, from: &Path, to: &Path) -> std::io::Result<()> {
+        std::fs::rename(from, to)
+    }
+    fn sync_dir(&mut self, dir: &Path) -> std::io::Result<()> {
+        std::fs::File::open(dir)?.sync_all()
+    }
+}
+
+/// Move a verified staging copy onto `dest` so that the backup name, once it
+/// survives a power cut, names a file whose contents survived too. `VACUUM
+/// INTO` does not fsync its output and verification reads it back from the page
+/// cache, so without the first step a crash shortly after the rename could
+/// leave `dest` naming a file whose data never reached the disk — a "verified"
+/// backup that is not there, which pruning would count as a keeper. The
+/// directory fsync after the rename is what makes the rename itself durable
+/// (SCENARIOS T-11). Each step runs only after the previous one succeeded.
+fn install(steps: &mut impl InstallSteps, staging: &Path, dest: &Path) -> std::io::Result<()> {
+    steps.sync_file(staging)?;
+    steps.rename(staging, dest)?;
+    steps.sync_dir(containing_dir(dest))
+}
+
+/// The directory `path` names an entry of — `.` for a bare file name.
+fn containing_dir(path: &Path) -> &Path {
+    match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => Path::new("."),
+    }
 }
 
 /// Run the operator-configured `backup_command` after a fresh, verified backup,
@@ -3301,6 +3347,83 @@ mod tests {
         );
         assert!(!Path::new(&format!("{dest}.bad")).exists());
         verify_backup(&pool, &dest).await.unwrap();
+    }
+
+    /// Records the order [`install`] takes its steps in, failing the one named.
+    #[derive(Default)]
+    struct RecordedSteps {
+        taken: Vec<String>,
+        fail: Option<&'static str>,
+    }
+
+    impl RecordedSteps {
+        fn take(&mut self, step: &'static str, detail: String) -> std::io::Result<()> {
+            self.taken.push(format!("{step} {detail}"));
+            if self.fail == Some(step) {
+                return Err(std::io::Error::other(format!("{step} failed")));
+            }
+            Ok(())
+        }
+    }
+
+    impl InstallSteps for RecordedSteps {
+        fn sync_file(&mut self, path: &Path) -> std::io::Result<()> {
+            self.take("sync_file", path.display().to_string())
+        }
+        fn rename(&mut self, from: &Path, to: &Path) -> std::io::Result<()> {
+            self.take("rename", format!("{} -> {}", from.display(), to.display()))
+        }
+        fn sync_dir(&mut self, dir: &Path) -> std::io::Result<()> {
+            self.take("sync_dir", dir.display().to_string())
+        }
+    }
+
+    #[test]
+    fn a_backup_is_flushed_to_disk_before_its_rename_and_the_rename_after() {
+        let staging = Path::new("/backups/db-2026-01-04-000000.db.partial");
+        let dest = Path::new("/backups/db-2026-01-04-000000.db");
+        let mut steps = RecordedSteps::default();
+        install(&mut steps, staging, dest).unwrap();
+        assert_eq!(
+            steps.taken,
+            [
+                "sync_file /backups/db-2026-01-04-000000.db.partial",
+                "rename /backups/db-2026-01-04-000000.db.partial -> /backups/db-2026-01-04-000000.db",
+                "sync_dir /backups",
+            ]
+        );
+
+        // A bare file name lives in the working directory, which is what is synced.
+        let mut steps = RecordedSteps::default();
+        install(&mut steps, Path::new("db.db.partial"), Path::new("db.db")).unwrap();
+        assert_eq!(steps.taken.last().unwrap(), "sync_dir .");
+    }
+
+    #[test]
+    fn a_staging_copy_that_cannot_be_flushed_is_never_renamed_onto_a_backup_name() {
+        let mut steps = RecordedSteps {
+            fail: Some("sync_file"),
+            ..Default::default()
+        };
+        let err = install(
+            &mut steps,
+            Path::new("/b/db.db.partial"),
+            Path::new("/b/db.db"),
+        )
+        .unwrap_err();
+        assert_eq!(err.to_string(), "sync_file failed");
+        assert_eq!(steps.taken, ["sync_file /b/db.db.partial"]);
+    }
+
+    #[test]
+    fn installing_on_the_real_disk_moves_the_file_into_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let staging = dir.path().join("db.db.partial");
+        let dest = dir.path().join("db.db");
+        std::fs::write(&staging, b"copy").unwrap();
+        install(&mut Disk, &staging, &dest).unwrap();
+        assert!(!staging.exists());
+        assert_eq!(std::fs::read(&dest).unwrap(), b"copy");
     }
 
     #[tokio::test]

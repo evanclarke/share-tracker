@@ -975,6 +975,13 @@ line (T-09/schedule).
 
 All six are archived in [`DONE/infra.md`](DONE/infra.md) under headings naming their scenario ids.
 
+The 2026-10-10 code review added a seventh, on the power-cut half of T-11: the staging copy was
+verified and renamed into place without ever being fsynced (`VACUUM INTO` does not flush its
+output, and verification reads it back from the page cache), so a power cut soon after could leave
+a backup name pointing at data that never reached the disk. `backup_to` now fsyncs the copy before
+the rename and the directory after it (`infra::db::install`, whose step order a test pins); it is
+archived in [`DONE/infra.md`](DONE/infra.md) with the review's heading.
+
 | Finding | Scenarios | Fixed by |
 | --- | --- | --- |
 | Three jobs record their failure as a Rust `Debug` string, losing both the message and the cause | T-06 | `8dfb6a4` |

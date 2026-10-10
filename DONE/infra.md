@@ -1743,3 +1743,18 @@ times. That drive found two defects no test had: the message announced itself `t
 carrying a MIME multipart body (every client would have shown the raw part boundaries), now pinned
 by `the_message_is_a_multipart_alternative_carrying_both_parts`; and a zero change rendered `+0.00`,
 claiming a rise — every FX-movement figure in an AUD-only portfolio is that case.
+
+## A backup is renamed into place without reaching stable storage (2026-10-10 review, data integrity)
+`VACUUM INTO` does not fsync its output, and `backup` (`src/infra/db.rs` ~424–429) verifies the
+staging file (from the page cache) then `std::fs::rename`s it with no `sync_all` on the file or its
+directory. A power cut shortly after can leave a "verified" backup that never reached disk — the
+case the staging-file design (SCENARIOS T-11) exists to rule out — and pruning may count it as a
+keeper.
+- [x] `sync_all` the staging file before the rename and fsync the destination directory after it;
+  a test that the backup path calls both (or a seam proving the order), and note it in SCENARIOS T-11
+  — done 2026-10-11: `backup_to` now moves the verified copy through `install` (fsync the staging
+  file → rename → fsync the containing directory, each step only after the previous succeeded),
+  over an `InstallSteps` seam; `a_backup_is_flushed_to_disk_before_its_rename_and_the_rename_after`
+  and `a_staging_copy_that_cannot_be_flushed_is_never_renamed_onto_a_backup_name` pin the order,
+  `installing_on_the_real_disk_moves_the_file_into_place` the real-disk path; noted under
+  SCENARIOS.md's Section T findings
