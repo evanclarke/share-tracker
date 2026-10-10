@@ -517,27 +517,82 @@ async fn backup_to(pool: &SqlitePool, dest: &str) -> Result<bool, BackupError> {
 /// ([`redact_url_credentials`]): a hook like `curl https://user:pass@…` must not
 /// carry the password into the response, the database, or a log line. The
 /// **executed** command is the unredacted one: the mask is for the report only.
+///
+/// The path is substituted **shell-quoted**, so a database or backup directory
+/// whose name holds spaces or shell metacharacters reaches the hook as one
+/// argument rather than being split or interpreted; the token is therefore
+/// written bare in the configured command, never inside quotes of its own.
+///
+/// The run is bounded by [`BACKUP_COMMAND_TIMEOUT`]: this runs inside
+/// `run_job`'s per-job lock, so a hook that never returns (an `scp` to an
+/// unreachable host, an `rclone` waiting on a prompt) would otherwise park the
+/// backup job — the scheduled loop and every later `POST /jobs/backup` behind
+/// it — until restart. stdin is closed, so a prompt reads end-of-file instead
+/// of waiting.
 async fn run_backup_command(command: &str, dest: &str) -> Result<(), BackupError> {
+    run_backup_command_within(command, dest, BACKUP_COMMAND_TIMEOUT).await
+}
+
+/// How long a post-backup command may run before it is killed and the run
+/// failed. Generous — shipping a whole database copy over a slow link takes
+/// as long as it takes — but finite, so a hung hook cannot hold the backup
+/// job's lock forever.
+const BACKUP_COMMAND_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+
+/// [`run_backup_command`] with the time limit as a parameter, so a test can
+/// prove the bound with a short one.
+async fn run_backup_command_within(
+    command: &str,
+    dest: &str,
+    limit: Duration,
+) -> Result<(), BackupError> {
     // Absolute so the hook works regardless of the server's working directory
     // (dest may be a relative path when no --backup-dir is configured).
     let abs_dest = std::fs::canonicalize(dest)
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| dest.to_string());
-    let substituted = command.replace("{BACKUP_FILE}", &abs_dest);
+    let substituted = command.replace("{BACKUP_FILE}", &shell_quote(&abs_dest));
     // What is logged and recorded, never what is run: the operator's hook must
     // receive the credential it was configured with.
     let redacted = redact_url_credentials(&substituted);
 
     tracing::info!(command = %redacted, "running post-backup command");
-    let output = tokio::process::Command::new("sh")
+    // Its own process group, so a timeout can kill everything the shell
+    // started (`a && scp …` leaves `scp` a grandchild that killing `sh` alone
+    // would orphan, still running), not just the shell.
+    let child = tokio::process::Command::new("sh")
         .arg("-c")
         .arg(&substituted)
-        .output()
-        .await
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .process_group(0)
+        .kill_on_drop(true)
+        .spawn()
         .map_err(|e| BackupError::Command {
             command: redacted.clone(),
             reason: format!("failed to spawn: {e}"),
         })?;
+    let group = child.id();
+    let output = match tokio::time::timeout(limit, child.wait_with_output()).await {
+        Ok(output) => output.map_err(|e| BackupError::Command {
+            command: redacted.clone(),
+            reason: format!("failed to wait for it: {e}"),
+        })?,
+        // The elapsed timeout dropped the wait, and with it the child:
+        // `kill_on_drop` has killed the shell. Its group goes too.
+        Err(_) => {
+            if let Some(group) = group {
+                kill_process_group(group).await;
+            }
+            let reason = format!("timed out after {}s and was killed", limit.as_secs_f64());
+            tracing::error!(command = %redacted, reason, "post-backup command failed");
+            return Err(BackupError::Command {
+                command: redacted,
+                reason,
+            });
+        }
+    };
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -554,6 +609,34 @@ async fn run_backup_command(command: &str, dest: &str) -> Result<(), BackupError
     }
     tracing::info!(command = %redacted, "post-backup command succeeded");
     Ok(())
+}
+
+/// `SIGKILL` every process in the group a timed-out post-backup command was
+/// started in. Through the `kill` utility rather than a signal call, which
+/// would be the crate's only `unsafe`. Best effort: a failure is logged, and
+/// the run is failed for its timeout either way.
+async fn kill_process_group(group: u32) {
+    let killed = tokio::process::Command::new("kill")
+        .args(["-s", "KILL", &format!("-{group}")])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await;
+    match killed {
+        // A non-zero exit is the group already being gone — nothing to kill.
+        Ok(_) => {}
+        Err(e) => tracing::warn!(
+            group,
+            "could not kill the post-backup command's processes: {e}"
+        ),
+    }
+}
+
+/// Quote `s` as one POSIX shell word: wrapped in single quotes, inside which
+/// nothing is special, with each embedded `'` closed, escaped and reopened.
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
 }
 
 /// Mask the userinfo of every URL in a command: `https://user:pass@host/…`
@@ -3731,6 +3814,84 @@ mod tests {
         assert!(
             Path::new(seen.trim()).is_absolute(),
             "expected an absolute path, got {seen:?}"
+        );
+    }
+
+    /// A hook that never returns must not hold the backup job's lock forever:
+    /// past its limit it is killed — the shell and everything it started — and
+    /// the run fails with a `Command` error naming the timeout. The hook here
+    /// backgrounds a grandchild that would touch a marker after the limit, so
+    /// killing only `sh` would leave it running to write it.
+    #[tokio::test]
+    async fn backup_command_is_killed_and_fails_the_run_past_its_time_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("outlived-the-timeout");
+        let command = format!(
+            "(sleep 1; touch {}) & sleep 30",
+            shell_quote(&marker.to_string_lossy())
+        );
+        let started = std::time::Instant::now();
+        let err =
+            run_backup_command_within(&command, "/nonexistent/b.db", Duration::from_millis(200))
+                .await
+                .unwrap_err();
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the limit, not the hook, must end the wait: {:?}",
+            started.elapsed()
+        );
+        let BackupError::Command { reason, .. } = err else {
+            panic!("expected a Command error, got {err:?}");
+        };
+        assert!(
+            reason.contains("timed out"),
+            "the error names the timeout: {reason}"
+        );
+
+        // Past the grandchild's own sleep: it was killed with its group.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert!(
+            !marker.exists(),
+            "every process the hook started must have been killed"
+        );
+    }
+
+    /// The production limit is the one hour the README and `docs/API.md` state.
+    #[test]
+    fn backup_command_time_limit_is_the_documented_hour() {
+        assert_eq!(BACKUP_COMMAND_TIMEOUT, Duration::from_secs(60 * 60));
+    }
+
+    /// A backup directory whose name holds spaces and shell metacharacters must
+    /// reach the hook as one argument — neither split at the space nor run as
+    /// shell syntax.
+    #[tokio::test]
+    async fn backup_command_receives_a_path_with_shell_metacharacters_as_one_argument() {
+        let dir = tempfile::tempdir().unwrap();
+        let odd = dir.path().join("my backups; it's $HOME `x` & \"y\"");
+        std::fs::create_dir_all(&odd).unwrap();
+        let dest = odd.join("test-2026-10-10-000000.db");
+        std::fs::write(&dest, b"backup bytes").unwrap();
+
+        let seen = dir.path().join("args-seen.txt");
+        let command = format!(
+            "printf '%s\\n' \"$#\" {{BACKUP_FILE}} > {seen}; set -- {{BACKUP_FILE}}; \
+             printf '%s\\n' \"$#\" >> {seen}; cp {{BACKUP_FILE}} {copy}",
+            seen = shell_quote(&seen.to_string_lossy()),
+            copy = shell_quote(&dir.path().join("copy.db").to_string_lossy()),
+        );
+        run_backup_command(&command, &dest.to_string_lossy())
+            .await
+            .unwrap();
+
+        let abs = std::fs::canonicalize(&dest).unwrap();
+        let lines = std::fs::read_to_string(&seen).unwrap();
+        let lines: Vec<&str> = lines.lines().collect();
+        assert_eq!(lines[1], abs.to_string_lossy(), "the path arrives verbatim");
+        assert_eq!(lines[2], "1", "the path is exactly one argument");
+        assert_eq!(
+            std::fs::read(dir.path().join("copy.db")).unwrap(),
+            b"backup bytes"
         );
     }
 

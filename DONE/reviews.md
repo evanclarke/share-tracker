@@ -7381,3 +7381,26 @@ The behaviour is documented today, but trades already carry `settlement_date`.
   out, a claimable 300 goes in); the trust-denial test pins that a trust denial leaves 11U alone;
   the two tests that had pinned "credits excluded" were updated. `docs/API.md` (label table and the
   gross-total definition) and `util.js`'s money classification updated
+
+## The post-backup command has no timeout and holds the backup job's lock (2026-10-10 review, robustness)
+`run_backup_command` (`src/infra/db.rs`) awaits `sh -c … .output()` with no bound, inside `run_job`'s
+per-job lock. A hook that hangs (`scp` to an unreachable host, `rclone` waiting on a prompt) never
+returns: the scheduled loop is stuck and every later `POST /jobs/backup` queues behind it, so no
+backup is taken again until restart.
+- [x] Bound it with `tokio::time::timeout` + `kill_on_drop(true)` (a fixed generous default, or a
+  config key), failing the run with a `BackupError::Command` naming the timeout; test with a
+  `sleep` hook against a short test timeout
+  — done 2026-10-10: fixed `BACKUP_COMMAND_TIMEOUT` of one hour (`run_backup_command_within` takes
+  the limit so the test can pass 200 ms). The hook runs in its own process group with stdin closed;
+  on timeout `kill_on_drop` kills `sh` and `kill -s KILL -<pgid>` the rest, since `a && scp …`
+  leaves `scp` a grandchild killing `sh` alone would orphan.
+  `backup_command_is_killed_and_fails_the_run_past_its_time_limit` backgrounds a marker-touching
+  grandchild and asserts it never fires (verified to fail with the group kill removed);
+  `backup_command_time_limit_is_the_documented_hour` pins the constant. README + `docs/API.md`
+  document the hour, pinned by `doc_checks::backup_command_timeout_and_quoting_documented`
+- [x] Shell-quote the substituted `{BACKUP_FILE}` path so a database/backup directory containing
+  spaces or shell metacharacters reaches the hook as one argument; test with such a path
+  — done 2026-10-10: `shell_quote` (single quotes, each `'` as `'\''`).
+  `backup_command_receives_a_path_with_shell_metacharacters_as_one_argument` uses a directory named
+  ``my backups; it's $HOME `x` & "y"`` and asserts the hook sees it verbatim as exactly one
+  argument. The README now says to write the token bare, not inside quotes of one's own

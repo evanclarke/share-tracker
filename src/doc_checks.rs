@@ -3163,6 +3163,18 @@ fn backup_command_credential_redaction_documented() {
     assert!(API_MD.contains("`https://***@host/…`"));
 }
 
+/// The post-backup command is bounded and its path substitution is quoted
+/// (`infra::db::run_backup_command`): the README, where the hook is
+/// configured, says to write the token bare and that a hung hook is killed
+/// after an hour; the jobs API says the timeout fails the run.
+#[test]
+fn backup_command_timeout_and_quoting_documented() {
+    assert!(README_MD.contains("The substituted path is shell-quoted"));
+    assert!(README_MD.contains("write the token bare"));
+    assert!(README_MD.contains("it is given **one hour**"));
+    assert!(API_MD.contains("or is still running after one hour"));
+}
+
 /// Docs-sync pin for the `?suffix=` param on `POST /jobs/:name` (the
 /// update.sh pre-upgrade backup): the jobs API documents its allowed
 /// characters and the `422` it produces when invalid, that a suffixed backup

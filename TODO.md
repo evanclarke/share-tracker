@@ -56,17 +56,6 @@ falls under the existing rules.
   trading day before 1 July 2027 (the scheduled price import plus `closing_price`'s held-days
   backfill), since a missing one cannot be fetched reliably years later
 
-## The post-backup command has no timeout and holds the backup job's lock (2026-10-10 review, robustness)
-`run_backup_command` (`src/infra/db.rs`) awaits `sh -c … .output()` with no bound, inside `run_job`'s
-per-job lock. A hook that hangs (`scp` to an unreachable host, `rclone` waiting on a prompt) never
-returns: the scheduled loop is stuck and every later `POST /jobs/backup` queues behind it, so no
-backup is taken again until restart.
-- [ ] Bound it with `tokio::time::timeout` + `kill_on_drop(true)` (a fixed generous default, or a
-  config key), failing the run with a `BackupError::Command` naming the timeout; test with a
-  `sleep` hook against a short test timeout
-- [ ] Shell-quote the substituted `{BACKUP_FILE}` path so a database/backup directory containing
-  spaces or shell metacharacters reaches the hook as one argument; test with such a path
-
 ## A backup is renamed into place without reaching stable storage (2026-10-10 review, data integrity)
 `VACUUM INTO` does not fsync its output, and `backup` (`src/infra/db.rs` ~424–429) verifies the
 staging file (from the page cache) then `std::fs::rename`s it with no `sync_all` on the file or its
