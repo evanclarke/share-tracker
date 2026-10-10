@@ -2,6 +2,7 @@
 
 use crate::infra::extract::Json;
 use crate::infra::extract::Query;
+use crate::infra::respond::NoContent;
 use axum::extract::{Path, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -188,16 +189,16 @@ impl ApiError {
 /// [`CrudEntity::missing_row_body`], which an entity keyed on a natural key
 /// overrides; this helper is what a hand-written delete uses, and a delete
 /// with its own outcome enum returns the same wording by hand.
-pub fn deleted(found: bool, noun: &str) -> Result<StatusCode, ApiError> {
+pub fn deleted(found: bool, noun: &str) -> Result<NoContent, ApiError> {
     deleted_with_body(found, format!("no {noun} with that id"))
 }
 
 /// [`deleted`]'s twin where the `404` body comes ready-made instead of being
 /// built from a noun — the shared outcome used by [`delete_handler`], whose
 /// body is [`CrudEntity::missing_row_body`]'s.
-fn deleted_with_body(found: bool, body: String) -> Result<StatusCode, ApiError> {
+fn deleted_with_body(found: bool, body: String) -> Result<NoContent, ApiError> {
     if found {
-        Ok(StatusCode::NO_CONTENT)
+        Ok(NoContent)
     } else {
         Err(ApiError::not_found(body))
     }
@@ -523,7 +524,7 @@ impl<'a> FilterClauses<'a> {
 /// turns into the documented `400` naming it. Both halves are pinned against
 /// the real routes by
 /// `entities::tests::every_list_route_refuses_an_unknown_parameter`.
-#[derive(Debug, Default, serde::Deserialize)]
+#[derive(Debug, Default, serde::Deserialize, utoipa::IntoParams)]
 #[serde(deny_unknown_fields)]
 pub struct NoFilter {}
 
@@ -785,7 +786,7 @@ pub async fn get_handler<E: CrudEntity>(
 pub async fn delete_handler<E: CrudEntity>(
     State(pool): State<SqlitePool>,
     Path(key): Path<E::Key>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<NoContent, ApiError> {
     match crud_delete::<E>(&pool, key.clone()).await {
         Ok(found) => deleted_with_body(found, E::missing_row_body()),
         Err(err) => {
@@ -797,6 +798,60 @@ pub async fn delete_handler<E: CrudEntity>(
         }
     }
 }
+
+/// The documented, concrete `GET /<entities>` route over [`list_handler`]:
+/// `crud_list_route!(fn_name, Model, Filter, "/path", "summary")`.
+///
+/// `#[utoipa::path]` cannot annotate a generic function — the document needs
+/// one operation per entity, with that entity's schema — so each entity's
+/// registration is a one-line instantiation of this, which writes the
+/// annotated wrapper. The model and filter are identifiers in scope at the
+/// call site — the one `$filter` token is both the `Query<Filter>` axum
+/// decodes and the `params(Filter)` the document lists, and the response is
+/// read off `Json<Vec<Model>>` — and the path and summary are literals.
+macro_rules! crud_list_route {
+    ($name:ident, $model:ident, $filter:ident, $path:tt, $summary:tt) => {
+        #[utoipa::path(get, path = $path, summary = $summary, params($filter))]
+        async fn $name(
+            state: axum::extract::State<sqlx::SqlitePool>,
+            query: crate::infra::extract::Query<$filter>,
+        ) -> Result<crate::infra::extract::Json<Vec<$model>>, crate::infra::http::ApiError> {
+            crate::infra::http::list_handler::<$model>(state, query).await
+        }
+    };
+}
+pub(crate) use crud_list_route;
+
+/// The documented `GET /<entities>/{id}` route over [`get_handler`]:
+/// `crud_get_route!(fn_name, Model, Key, "/path/{id}", "summary")`. See [`crud_list_route`].
+macro_rules! crud_get_route {
+    ($name:ident, $model:ident, $key:ident, $path:tt, $summary:tt) => {
+        #[utoipa::path(get, path = $path, summary = $summary)]
+        async fn $name(
+            state: axum::extract::State<sqlx::SqlitePool>,
+            key: axum::extract::Path<$key>,
+        ) -> Result<crate::infra::extract::Json<$model>, crate::infra::http::ApiError> {
+            crate::infra::http::get_handler::<$model>(state, key).await
+        }
+    };
+}
+pub(crate) use crud_get_route;
+
+/// The documented `DELETE /<entities>/{id}` route over [`delete_handler`]:
+/// `crud_delete_route!(fn_name, Model, Key, "/path/{id}", "summary")`. See
+/// [`crud_list_route`].
+macro_rules! crud_delete_route {
+    ($name:ident, $model:ident, $key:ident, $path:tt, $summary:tt) => {
+        #[utoipa::path(delete, path = $path, summary = $summary)]
+        async fn $name(
+            state: axum::extract::State<sqlx::SqlitePool>,
+            key: axum::extract::Path<$key>,
+        ) -> Result<crate::infra::respond::NoContent, crate::infra::http::ApiError> {
+            crate::infra::http::delete_handler::<$model>(state, key).await
+        }
+    };
+}
+pub(crate) use crud_delete_route;
 
 /// The plain-text `422` body for a DELETE a foreign key blocked, or `None`
 /// when `err` is any other failure (the caller then classifies it the shared

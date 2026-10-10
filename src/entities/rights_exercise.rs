@@ -45,16 +45,13 @@ use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 #[cfg(test)]
 use crate::infra::id::TradeId;
-use axum::{
-    Router,
-    extract::{Path, State},
-    http::StatusCode,
-    routing::post,
-};
+use crate::infra::respond::Written;
+use axum::extract::{Path, State};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::Deserialize;
 use sqlx::{Row, SqlitePool};
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 #[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -206,8 +203,8 @@ impl From<ExerciseError> for ApiError {
     }
 }
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new().route("/corporate_actions/{id}/exercise", post(exercise))
+pub fn router() -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new().routes(routes!(exercise))
 }
 
 /// Units of the listing held when the issue's record date arrived, in
@@ -482,19 +479,20 @@ async fn execute(
     Ok(trade)
 }
 
+#[utoipa::path(
+    post,
+    path = "/corporate_actions/{id}/exercise",
+    summary = "Exercise a rights issue into a new Buy carrying the rights cost, and return the created trade (?dry_run=true previews it: 200 with the same body, nothing stored).",
+    params(DryRunQuery)
+)]
 async fn exercise(
     State(pool): State<SqlitePool>,
     Path(action_id): Path<i64>,
     Query(query): Query<DryRunQuery>,
     Json(body): Json<ExerciseBody>,
-) -> Result<(StatusCode, Json<Trade>), ApiError> {
+) -> Result<Written<Trade>, ApiError> {
     let trade = execute(&pool, action_id, &body, query.mode()).await?;
-    let status = if query.dry_run {
-        StatusCode::OK
-    } else {
-        StatusCode::CREATED
-    };
-    Ok((status, Json(trade)))
+    Ok(Written::new(query.dry_run, trade))
 }
 
 #[cfg(test)]
@@ -502,6 +500,7 @@ mod tests {
     use super::*;
     use crate::entities::{corporate_action::CorporateAction, listing, sell};
     use crate::test_support::{self, ApiClient, dec, test_pool};
+    use axum::http::StatusCode;
 
     fn d(y: i32, m: u32, day: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(y, m, day).unwrap()

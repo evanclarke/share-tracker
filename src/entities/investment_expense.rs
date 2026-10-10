@@ -23,16 +23,13 @@ use crate::infra::extract::Json;
 use crate::infra::http::{self, ApiError, CrudEntity, Upsert, UpsertResponse};
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
-use axum::{
-    Router,
-    extract::{Path, State},
-    http::StatusCode,
-    routing::get,
-};
+use crate::infra::respond::Created;
+use axum::extract::{Path, State};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 #[derive(utoipa::ToSchema, Debug, Clone, Copy, PartialEq, Serialize, Deserialize, sqlx::Type)]
 pub enum ExpenseType {
@@ -173,18 +170,32 @@ impl CrudEntity for InvestmentExpense {
     const NOUN: &'static str = "investment expense";
 }
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new()
-        .route(
-            "/investment_expenses",
-            get(http::list_handler::<InvestmentExpense>).post(create),
-        )
-        .route(
-            "/investment_expenses/{id}",
-            get(http::get_handler::<InvestmentExpense>)
-                .put(upsert)
-                .delete(http::delete_handler::<InvestmentExpense>),
-        )
+http::crud_list_route!(
+    list,
+    InvestmentExpense,
+    InvestmentExpenseListQuery,
+    "/investment_expenses",
+    "List every investment-expense row, optionally narrowed by ?listing_id=, ?holding_account_id= and an inclusive ?from=/?to= over date_incurred. An owner filter matches recorded values only: both owner columns are nullable for a portfolio-wide expense (an adviser's whole-of-portfolio fee), and such a row is in no ?listing_id= or ?holding_account_id= slice — so summing the slices is less than the unfiltered list."
+);
+http::crud_get_route!(
+    get_one,
+    InvestmentExpense,
+    i64,
+    "/investment_expenses/{id}",
+    "Fetch one investment-expense row, or 404."
+);
+http::crud_delete_route!(
+    delete_one,
+    InvestmentExpense,
+    i64,
+    "/investment_expenses/{id}",
+    "Delete the investment-expense row."
+);
+
+pub fn router() -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new()
+        .routes(routes!(list, create))
+        .routes(routes!(get_one, upsert, delete_one))
 }
 
 /// One-line delegation to the shared CRUD read, through which `db_create`
@@ -394,6 +405,11 @@ fn investment_expense_from_body(id: i64, body: InvestmentExpenseBody) -> Investm
     }
 }
 
+#[utoipa::path(
+    put,
+    path = "/investment_expenses/{id}",
+    summary = "Create or replace the investment-expense row at this id."
+)]
 async fn upsert(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
@@ -407,12 +423,17 @@ async fn upsert(
 /// database assigns one (see [`write`]), and the created row is returned so the
 /// caller can use its id immediately with no `max(id) + 1` guess between the
 /// two calls.
+#[utoipa::path(
+    post,
+    path = "/investment_expenses",
+    summary = "Create an investment-expense row; the created row is returned."
+)]
 async fn create(
     State(pool): State<SqlitePool>,
     Json(body): Json<InvestmentExpenseBody>,
-) -> Result<(StatusCode, Json<InvestmentExpense>), ApiError> {
+) -> Result<Created<InvestmentExpense>, ApiError> {
     let created = db_create(&pool, &investment_expense_from_body(0, body)).await?;
-    Ok((StatusCode::CREATED, Json(created)))
+    Ok(Created(created))
 }
 
 #[cfg(test)]
@@ -420,6 +441,7 @@ mod tests {
     use super::*;
     use crate::entities::listing;
     use crate::test_support::{self, ApiClient, test_pool};
+    use axum::http::StatusCode;
 
     /// Client over this module's own routes.
     fn client(pool: &SqlitePool) -> ApiClient {

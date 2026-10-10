@@ -42,17 +42,14 @@ use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 #[cfg(test)]
 use crate::infra::id::TradeId;
-use axum::{
-    Router,
-    extract::{Path, State},
-    http::StatusCode,
-    routing::get,
-};
+use crate::infra::respond::{Created, NoContent};
+use axum::extract::{Path, State};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::sync::LazyLock;
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 #[derive(
     utoipa::ToSchema, Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize, sqlx::Type,
@@ -184,20 +181,27 @@ impl CrudEntity for DrpEnrolment {
     const NOUN: &'static str = "DRP enrolment";
 }
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new()
-        .route(
-            "/drp_enrolments",
-            get(http::list_handler::<DrpEnrolment>).post(create),
-        )
-        .route(
-            "/drp_enrolments/{id}",
-            get(http::get_handler::<DrpEnrolment>)
-                .put(upsert)
-                // Hand-written: a period covering a reinvestment is refused
-                // rather than deleted (see `db_delete`).
-                .delete(delete),
-        )
+http::crud_list_route!(
+    list,
+    DrpEnrolment,
+    DrpEnrolmentListQuery,
+    "/drp_enrolments",
+    "List every DRP enrolment period, optionally narrowed by ?listing_id= and ?holding_account_id=."
+);
+http::crud_get_route!(
+    get_one,
+    DrpEnrolment,
+    i64,
+    "/drp_enrolments/{id}",
+    "Fetch one DRP enrolment period, or 404."
+);
+
+pub fn router() -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new()
+        .routes(routes!(list, create))
+        // Hand-written: a period covering a reinvestment is refused
+        // rather than deleted (see `db_delete`).
+        .routes(routes!(get_one, upsert, delete))
 }
 
 #[cfg(test)]
@@ -520,6 +524,11 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<bool, DeleteError> 
     Ok(true)
 }
 
+#[utoipa::path(
+    put,
+    path = "/drp_enrolments/{id}",
+    summary = "Create or replace the DRP enrolment period at this id."
+)]
 async fn upsert(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
@@ -533,12 +542,17 @@ async fn upsert(
 /// database assigns one (see [`write`]), and the created row is returned so the
 /// caller can act on its id at once — unenrolling it, for one — with no
 /// `max(id) + 1` guess between the two calls.
+#[utoipa::path(
+    post,
+    path = "/drp_enrolments",
+    summary = "Create a DRP enrolment period; the created row is returned."
+)]
 async fn create(
     State(pool): State<SqlitePool>,
     Json(body): Json<DrpEnrolmentBody>,
-) -> Result<(StatusCode, Json<DrpEnrolment>), ApiError> {
+) -> Result<Created<DrpEnrolment>, ApiError> {
     let created = db_create(&pool, &drp_enrolment_from_body(0, body)).await?;
-    Ok((StatusCode::CREATED, Json(created)))
+    Ok(Created(created))
 }
 
 /// The row a request body describes. `id` is the path's on an upsert and
@@ -555,10 +569,15 @@ fn drp_enrolment_from_body(id: i64, body: DrpEnrolmentBody) -> DrpEnrolment {
     }
 }
 
+#[utoipa::path(
+    delete,
+    path = "/drp_enrolments/{id}",
+    summary = "Delete the DRP enrolment period."
+)]
 async fn delete(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<NoContent, ApiError> {
     http::deleted(
         db_delete(&pool, id).await?,
         <DrpEnrolment as CrudEntity>::NOUN,
@@ -590,6 +609,7 @@ mod tests {
     use super::*;
     use crate::entities::listing;
     use crate::test_support::{self, ApiClient, test_pool};
+    use axum::http::StatusCode;
 
     /// Client over this module's own routes.
     fn client(pool: &SqlitePool) -> ApiClient {

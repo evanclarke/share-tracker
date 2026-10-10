@@ -111,16 +111,13 @@ use crate::infra::http::{self, ApiError, CrudEntity, Upsert, UpsertResponse};
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use crate::infra::id::TradeId;
-use axum::{
-    Router,
-    extract::{Path, State},
-    http::StatusCode,
-    routing::get,
-};
+use crate::infra::respond::{Created, NoContent};
+use axum::extract::{Path, State};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 /// Which QC 66053 rule produced the inheritance's first-element cost base.
 /// Serialized verbatim to JSON and to the CHECK-constrained TEXT
@@ -268,20 +265,27 @@ impl CrudEntity for Inheritance {
     const NOUN: &'static str = "inheritance";
 }
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new()
-        .route(
-            "/inheritances",
-            get(http::list_handler::<Inheritance>).post(create),
-        )
-        .route(
-            "/inheritances/{id}",
-            get(http::get_handler::<Inheritance>)
-                .put(upsert)
-                // Hand-written: deleting the inheritance deletes its linked
-                // parcel Buy in the same transaction (see `db_delete`).
-                .delete(delete),
-        )
+http::crud_list_route!(
+    list,
+    Inheritance,
+    InheritanceListQuery,
+    "/inheritances",
+    "List every inheritance record, optionally narrowed by ?listing_id=, ?holding_account_id= and an inclusive ?from=/?to= over date_of_death."
+);
+http::crud_get_route!(
+    get_one,
+    Inheritance,
+    i64,
+    "/inheritances/{id}",
+    "Fetch one inheritance record, or 404."
+);
+
+pub fn router() -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new()
+        .routes(routes!(list, create))
+        // Hand-written: deleting the inheritance deletes its linked
+        // parcel Buy in the same transaction (see `db_delete`).
+        .routes(routes!(get_one, upsert, delete))
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -929,6 +933,11 @@ fn inheritance_from_body(id: i64, body: InheritanceBody) -> Inheritance {
     }
 }
 
+#[utoipa::path(
+    put,
+    path = "/inheritances/{id}",
+    summary = "Create or replace the inheritance record at this id."
+)]
 async fn upsert(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
@@ -942,20 +951,30 @@ async fn upsert(
 /// without naming an id. The database assigns one (see [`write`]), and the
 /// created row is returned so the caller can use its id immediately with no
 /// `max(id) + 1` guess between the two calls.
+#[utoipa::path(
+    post,
+    path = "/inheritances",
+    summary = "Create an inheritance record; the created row is returned."
+)]
 async fn create(
     State(pool): State<SqlitePool>,
     Json(body): Json<InheritanceBody>,
-) -> Result<(StatusCode, Json<Inheritance>), ApiError> {
+) -> Result<Created<Inheritance>, ApiError> {
     let created = db_create(&pool, &inheritance_from_body(0, body)).await?;
-    Ok((StatusCode::CREATED, Json(created)))
+    Ok(Created(created))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/inheritances/{id}",
+    summary = "Delete the inheritance record."
+)]
 async fn delete(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<NoContent, ApiError> {
     match db_delete(&pool, id).await? {
-        DeleteOutcome::Deleted => Ok(StatusCode::NO_CONTENT),
+        DeleteOutcome::Deleted => Ok(NoContent),
         DeleteOutcome::NotFound => Err(ApiError::not_found("no inheritance with that id")),
         DeleteOutcome::ParcelDrawnOn => Err(ApiError::unprocessable(
             "the inherited parcel is drawn on by a sale allocation or AMIT adjustment — \
@@ -971,6 +990,7 @@ mod tests {
     use crate::entities::sell::{self, AllocationInput, SellBody};
     use crate::entities::trade::{self, TradeType};
     use crate::test_support::{self, ApiClient, dec, test_pool, ymd};
+    use axum::http::StatusCode;
 
     /// Client over this module's own routes.
     fn client(pool: &SqlitePool) -> ApiClient {

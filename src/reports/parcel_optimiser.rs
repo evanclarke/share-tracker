@@ -43,13 +43,14 @@ use crate::infra::http::ApiError;
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use crate::infra::id::TradeId;
-use axum::{Extension, Router, extract::State, routing::get};
+use axum::{Extension, extract::State};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::cmp::Ordering;
 use std::collections::HashMap;
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 /// A parcel-selection strategy: the order in which open parcels are consumed
 /// by a hypothetical sale.
@@ -451,10 +452,16 @@ pub struct OptimiserResponse {
     pub taxpayer_basis: String,
 }
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new().route("/portfolio/parcel_optimiser", get(optimiser_handler))
+pub fn router() -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new().routes(routes!(optimiser_handler))
 }
 
+#[utoipa::path(
+    get,
+    path = "/portfolio/parcel_optimiser",
+    summary = "Which parcels to sell for a target, under a chosen strategy; ?listing_id=, ?units=, ?sale_date=, ?price= and ?holding_account_id= drive it.",
+    params(OptimiserRequest)
+)]
 async fn optimiser_handler(
     State(pool): State<SqlitePool>,
     fetcher: Option<Extension<SharedFetcher>>,

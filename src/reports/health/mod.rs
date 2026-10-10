@@ -100,10 +100,11 @@
 
 use crate::infra::extract::Json;
 use crate::infra::http::ApiError;
-use axum::{Router, extract::State, routing::get};
+use axum::extract::State;
 use chrono::{DateTime, Datelike, NaiveDate, Utc, Weekday};
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 mod calendar;
 mod duplicates;
@@ -364,6 +365,11 @@ pub async fn db_health(
     })
 }
 
+#[utoipa::path(
+    get,
+    path = "/reports/health",
+    summary = "The data-health report behind the UI's banner: stale prices and FX, failed and stalled jobs, unpriced days, duplicates and more."
+)]
 async fn report(State(pool): State<SqlitePool>) -> Result<Json<HealthReport>, ApiError> {
     let today = chrono::Local::now().date_naive();
     db_health(&pool, today, Utc::now())
@@ -372,8 +378,8 @@ async fn report(State(pool): State<SqlitePool>) -> Result<Json<HealthReport>, Ap
         .map_err(ApiError::from)
 }
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new().route("/reports/health", get(report))
+pub fn router() -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new().routes(routes!(report))
 }
 
 #[cfg(test)]

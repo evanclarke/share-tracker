@@ -18,15 +18,13 @@
 
 use crate::infra::db::write_tx;
 use crate::infra::extract::Json;
+use crate::infra::http::NoFilter;
 use crate::infra::http::{self, ApiError, CrudEntity, UpsertResponse};
-use axum::{
-    Router,
-    extract::{Path, State},
-    routing::get,
-};
+use axum::extract::{Path, State};
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::collections::HashSet;
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 /// The first financial year that can carry settings: CGT starts 20 September
 /// 1985, inside FY1986. Pinned by the table's CHECK too.
@@ -71,18 +69,32 @@ impl CrudEntity for TaxYearSettings {
     }
 }
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new()
-        .route(
-            "/tax_year_settings",
-            get(http::list_handler::<TaxYearSettings>),
-        )
-        .route(
-            "/tax_year_settings/{tax_year}",
-            get(http::get_handler::<TaxYearSettings>)
-                .put(upsert)
-                .delete(http::delete_handler::<TaxYearSettings>),
-        )
+http::crud_list_route!(
+    list,
+    TaxYearSettings,
+    NoFilter,
+    "/tax_year_settings",
+    "List the per-tax-year eligibility settings."
+);
+http::crud_get_route!(
+    get_one,
+    TaxYearSettings,
+    i64,
+    "/tax_year_settings/{tax_year}",
+    "Fetch one tax year's settings, or 404."
+);
+http::crud_delete_route!(
+    delete_one,
+    TaxYearSettings,
+    i64,
+    "/tax_year_settings/{tax_year}",
+    "Delete the settings for this tax year."
+);
+
+pub fn router() -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new()
+        .routes(routes!(list))
+        .routes(routes!(get_one, upsert, delete_one))
 }
 
 #[cfg(test)]
@@ -139,6 +151,11 @@ where
     Ok(years.into_iter().map(|y| y as i32).collect())
 }
 
+#[utoipa::path(
+    put,
+    path = "/tax_year_settings/{tax_year}",
+    summary = "Create or replace the settings for this tax year."
+)]
 async fn upsert(
     State(pool): State<SqlitePool>,
     Path(tax_year): Path<i64>,

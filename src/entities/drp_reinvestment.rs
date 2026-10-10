@@ -108,16 +108,13 @@ use crate::infra::http::{ApiError, DryRunQuery};
 use crate::infra::id::HoldingAccountId;
 #[cfg(test)]
 use crate::infra::id::TradeId;
-use axum::{
-    Router,
-    extract::{Path, State},
-    http::StatusCode,
-    routing::post,
-};
+use crate::infra::respond::{NoContent, Written};
+use axum::extract::{Path, State};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::Deserialize;
 use sqlx::SqlitePool;
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 #[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -324,8 +321,8 @@ impl From<ReinvestError> for ApiError {
     }
 }
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new().route("/income/{id}/reinvest", post(reinvest).delete(unreinvest))
+pub fn router() -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new().routes(routes!(reinvest, unreinvest))
 }
 
 /// Create the DRP trade for a distribution and link it, atomically.
@@ -749,27 +746,33 @@ pub async fn db_unreinvest(pool: &SqlitePool, income_id: i64) -> Result<(), Rein
     Ok(())
 }
 
+#[utoipa::path(
+    post,
+    path = "/income/{id}/reinvest",
+    summary = "Create the DRP trade for a distribution and link it; the created trade is returned (?dry_run=true previews it: 200 with the same body, nothing stored).",
+    params(DryRunQuery)
+)]
 async fn reinvest(
     State(pool): State<SqlitePool>,
     Path(income_id): Path<i64>,
     Query(query): Query<DryRunQuery>,
     Json(body): Json<ReinvestBody>,
-) -> Result<(StatusCode, Json<Trade>), ApiError> {
+) -> Result<Written<Trade>, ApiError> {
     let trade = execute(&pool, income_id, &body, query.mode()).await?;
-    let status = if query.dry_run {
-        StatusCode::OK
-    } else {
-        StatusCode::CREATED
-    };
-    Ok((status, Json(trade)))
+    Ok(Written::new(query.dry_run, trade))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/income/{id}/reinvest",
+    summary = "Undo the DRP reinvestment; 422 if a later trade drew on it."
+)]
 async fn unreinvest(
     State(pool): State<SqlitePool>,
     Path(income_id): Path<i64>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<NoContent, ApiError> {
     db_unreinvest(&pool, income_id).await?;
-    Ok(StatusCode::NO_CONTENT)
+    Ok(NoContent)
 }
 
 #[cfg(test)]
@@ -778,6 +781,7 @@ mod tests {
     use crate::entities::{drp_enrolment, income, listing, trade::TradeType};
     use crate::infra::id::ListingId;
     use crate::test_support::{self, ApiClient, test_pool};
+    use axum::http::StatusCode;
 
     /// Client over this module's own routes.
     fn client(pool: &SqlitePool) -> ApiClient {

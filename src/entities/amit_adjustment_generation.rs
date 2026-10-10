@@ -35,16 +35,13 @@ use crate::infra::http::ApiError;
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use crate::infra::id::TradeId;
-use axum::{
-    Router,
-    extract::{Path, State},
-    http::StatusCode,
-    routing::post,
-};
+use crate::infra::respond::Written;
+use axum::extract::{Path, State};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 #[derive(utoipa::ToSchema, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -160,8 +157,8 @@ pub enum GenerateError {
     Upsert(#[from] amit_adjustment::UpsertError),
 }
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new().route("/amma_statements/{id}/generate_adjustments", post(generate))
+pub fn router() -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new().routes(routes!(generate))
 }
 
 /// One rollover that carried units out of a parcel: the operation's date, the
@@ -480,19 +477,19 @@ pub async fn db_generate(
     })
 }
 
+#[utoipa::path(
+    post,
+    path = "/amma_statements/{id}/generate_adjustments",
+    summary = "Generate the AMIT adjustments an AMMA statement implies (201; a preview run answers 200 with the same body and writes nothing)."
+)]
 async fn generate(
     State(pool): State<SqlitePool>,
     Path(statement_id): Path<i64>,
     body: Option<Json<GenerateBody>>,
-) -> Result<(StatusCode, Json<GeneratedAdjustments>), ApiError> {
+) -> Result<Written<GeneratedAdjustments>, ApiError> {
     let body = body.map(|Json(b)| b).unwrap_or_default();
     let result = db_generate(&pool, statement_id, &body).await?;
-    let status = if result.preview {
-        StatusCode::OK
-    } else {
-        StatusCode::CREATED
-    };
-    Ok((status, Json(result)))
+    Ok(Written::new(result.preview, result))
 }
 
 impl From<GenerateError> for ApiError {
@@ -526,6 +523,7 @@ mod tests {
     use super::*;
     use crate::entities::corporate_action::{ActionKind, CorporateAction};
     use crate::test_support::{self, ApiClient, allocate, dec, test_pool, ymd};
+    use axum::http::StatusCode;
 
     fn client(pool: &SqlitePool) -> ApiClient {
         ApiClient::over(router().with_state(pool.clone()))

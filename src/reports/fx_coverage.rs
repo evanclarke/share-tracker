@@ -44,11 +44,12 @@ use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 #[cfg(test)]
 use crate::infra::id::TradeId;
-use axum::{Router, extract::State, routing::get};
+use axum::extract::State;
 use chrono::{Datelike, NaiveDate};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 /// One recorded amount worth a second look before a tax figure rests on it.
 #[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,8 +79,8 @@ pub struct FxCoverageAlert {
     pub detail: String,
 }
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new().route("/reports/fx_coverage", get(report))
+pub fn router() -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new().routes(routes!(report))
 }
 
 /// One record that needs an AUD conversion, as the union query below reads it.
@@ -368,6 +369,11 @@ pub async fn db_fx_coverage(pool: &SqlitePool) -> Result<Vec<FxCoverageAlert>, s
     Ok(alerts)
 }
 
+#[utoipa::path(
+    get,
+    path = "/reports/fx_coverage",
+    summary = "Every record that needs an AUD conversion and the rate it resolves to."
+)]
 async fn report(State(pool): State<SqlitePool>) -> Result<Json<Vec<FxCoverageAlert>>, ApiError> {
     db_fx_coverage(&pool)
         .await

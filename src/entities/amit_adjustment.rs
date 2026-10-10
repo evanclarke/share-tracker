@@ -8,15 +8,12 @@ use crate::infra::http::{self, ApiError, CrudEntity, Upsert, UpsertResponse};
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use crate::infra::id::TradeId;
-use axum::{
-    Router,
-    extract::{Path, State},
-    http::StatusCode,
-    routing::get,
-};
+use crate::infra::respond::Created;
+use axum::extract::{Path, State};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 #[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct AmitAdjustment {
@@ -82,18 +79,32 @@ impl CrudEntity for AmitAdjustment {
     const NOUN: &'static str = "AMIT adjustment";
 }
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new()
-        .route(
-            "/amit_adjustments",
-            get(http::list_handler::<AmitAdjustment>).post(create),
-        )
-        .route(
-            "/amit_adjustments/{id}",
-            get(http::get_handler::<AmitAdjustment>)
-                .put(upsert)
-                .delete(http::delete_handler::<AmitAdjustment>),
-        )
+http::crud_list_route!(
+    list,
+    AmitAdjustment,
+    AmitAdjustmentListQuery,
+    "/amit_adjustments",
+    "List every AMIT cost-base adjustment, optionally narrowed by ?amma_statement_id= and ?trade_id=."
+);
+http::crud_get_route!(
+    get_one,
+    AmitAdjustment,
+    i64,
+    "/amit_adjustments/{id}",
+    "Fetch one AMIT adjustment, or 404."
+);
+http::crud_delete_route!(
+    delete_one,
+    AmitAdjustment,
+    i64,
+    "/amit_adjustments/{id}",
+    "Delete the AMIT adjustment."
+);
+
+pub fn router() -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new()
+        .routes(routes!(list, create))
+        .routes(routes!(get_one, upsert, delete_one))
 }
 
 pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<AmitAdjustment>, sqlx::Error> {
@@ -548,6 +559,11 @@ fn amit_adjustment_from_body(id: i64, body: AmitAdjustmentBody) -> AmitAdjustmen
     }
 }
 
+#[utoipa::path(
+    put,
+    path = "/amit_adjustments/{id}",
+    summary = "Create or replace the AMIT adjustment at this id."
+)]
 async fn upsert(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
@@ -562,12 +578,17 @@ async fn upsert(
 /// database assigns one (see [`db_insert_on`]), and the created row is returned
 /// so the caller can act on its id at once with no `max(id) + 1` guess between
 /// the two calls.
+#[utoipa::path(
+    post,
+    path = "/amit_adjustments",
+    summary = "Create an AMIT adjustment; the created row is returned."
+)]
 async fn create(
     State(pool): State<SqlitePool>,
     Json(body): Json<AmitAdjustmentBody>,
-) -> Result<(StatusCode, Json<AmitAdjustment>), ApiError> {
+) -> Result<Created<AmitAdjustment>, ApiError> {
     let created = db_create(&pool, &amit_adjustment_from_body(0, body)).await?;
-    Ok((StatusCode::CREATED, Json(created)))
+    Ok(Created(created))
 }
 
 impl From<UpsertError> for ApiError {
@@ -640,6 +661,7 @@ mod tests {
     use crate::entities::sell::AllocationInput;
     use crate::entities::transfer::{self, TransferBody};
     use crate::test_support::{self, ApiClient, allocate, dec, test_pool, ymd};
+    use axum::http::StatusCode;
     use std::collections::HashMap;
 
     /// Client over this module's own routes.

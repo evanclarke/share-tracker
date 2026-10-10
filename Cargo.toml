@@ -92,7 +92,14 @@ tower-http = { version = "0.7", default-features = false, features = ["catch-pan
 # renders rust_decimal::Decimal as a JSON **string** (utoipa's default with
 # that feature is String, matching what the API actually sends) rather than a
 # number — the two global rules the spec has to carry.
-utoipa = { version = "6.0.0", features = ["chrono", "decimal"] }
+utoipa = { version = "6.0.0", features = ["chrono", "decimal", "axum_extras", "auto_into_responses"] }
+# The routes are registered through `utoipa_axum::router::OpenApiRouter` + `routes!`,
+# which takes each handler's path and verb from its `#[utoipa::path]` — so the
+# route served and the route documented are one declaration. `axum_extras`
+# reads the request body, path and query parameters off the handler's own
+# extractors, and `auto_into_responses` its success responses off its return
+# type (see `infra::respond`).
+utoipa-axum = "0.3"
 
 [dev-dependencies]
 http-body-util = "0.1"

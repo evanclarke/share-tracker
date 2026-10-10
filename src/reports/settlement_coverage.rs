@@ -4,11 +4,12 @@ use crate::infra::extract::Json;
 use crate::infra::http::ApiError;
 use crate::infra::id::ListingId;
 use crate::infra::id::TradeId;
-use axum::{Router, extract::State, routing::get};
+use axum::extract::State;
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::collections::{HashMap, HashSet};
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 /// A trade whose settlement date cannot be trusted, for either of two
 /// independent reasons — and a trade can carry both at once, which is why they
@@ -75,8 +76,8 @@ struct CoverageCandidate {
     latest: Option<NaiveDate>,
 }
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new().route("/reports/settlement_holiday_coverage", get(report))
+pub fn router() -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new().routes(routes!(report))
 }
 
 /// Flag every trade whose settlement date is not trustworthy: either its
@@ -170,6 +171,11 @@ pub async fn db_coverage_alerts(
     Ok(alerts)
 }
 
+#[utoipa::path(
+    get,
+    path = "/reports/settlement_holiday_coverage",
+    summary = "Flag every trade whose settlement date cannot be trusted (no calendar, or a missing holiday)."
+)]
 async fn report(
     State(pool): State<SqlitePool>,
 ) -> Result<Json<Vec<SettlementCoverageAlert>>, ApiError> {

@@ -11,24 +11,27 @@ use super::{
 use crate::infra::extract::{Json, Query};
 use crate::infra::http::{self, ApiError, UpsertResponse};
 use crate::infra::id::TradeId;
-use axum::{
-    Router,
-    extract::{Path, State},
-    http::StatusCode,
-    routing::get,
-};
+use crate::infra::respond::{Created, NoContent};
+use axum::extract::{Path, State};
 use sqlx::SqlitePool;
+use utoipa_axum::{router::OpenApiRouter, routes};
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new()
-        .route("/trades", get(list).post(create))
-        .route("/trades/{id}", get(get_one).put(upsert).delete(delete))
+pub fn router() -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new()
+        .routes(routes!(list, create))
+        .routes(routes!(get_one, upsert, delete))
 }
 
 /// The trade list is hand-written only because a trade is *presented* through
 /// [`Trade::present`] (its GST-inclusive brokerage recombined); the filtering
 /// itself is the shared [`http::crud_list_filtered`], over the same
 /// [`TradeListQuery`] every other entity's list takes.
+#[utoipa::path(
+    get,
+    path = "/trades",
+    summary = "List every trade (Buys, DRPs, Sells), ascending date then id, optionally narrowed by ?listing_id=, ?holding_account_id= and an inclusive ?from=/?to= over the trade date.",
+    params(TradeListQuery)
+)]
 async fn list(
     State(pool): State<SqlitePool>,
     Query(filter): Query<TradeListQuery>,
@@ -37,6 +40,7 @@ async fn list(
     Ok(Json(trades.into_iter().map(Trade::present).collect()))
 }
 
+#[utoipa::path(get, path = "/trades/{id}", summary = "Fetch one trade, or 404.")]
 async fn get_one(
     State(pool): State<SqlitePool>,
     Path(id): Path<TradeId>,
@@ -126,6 +130,11 @@ fn trade_from_body(id: TradeId, body: TradeBody) -> Result<Trade, ApiError> {
     })
 }
 
+#[utoipa::path(
+    put,
+    path = "/trades/{id}",
+    summary = "Create or replace the trade at this id (the Buy/DRP parcel path)."
+)]
 async fn upsert(
     State(pool): State<SqlitePool>,
     Path(id): Path<TradeId>,
@@ -143,22 +152,32 @@ async fn upsert(
 /// create runs the full write-time validation (settlement resolution,
 /// holding-account/currency checks, rollover guards, parcel re-basing) exactly
 /// as the upsert does, so it is not a way round any of it.
+#[utoipa::path(
+    post,
+    path = "/trades",
+    summary = "Create a trade; the database assigns the id and the created row is returned."
+)]
 async fn create(
     State(pool): State<SqlitePool>,
     Json(body): Json<TradeBody>,
-) -> Result<(StatusCode, Json<Trade>), ApiError> {
+) -> Result<Created<Trade>, ApiError> {
     let supplied = body.settlement_date;
     let trade = trade_from_body(TradeId(0), body)?;
     let created = db_create(&pool, &trade, supplied).await?;
-    Ok((StatusCode::CREATED, Json(created.present())))
+    Ok(Created(created.present()))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/trades/{id}",
+    summary = "Delete the trade; 422 while a sale allocation or a derived row still depends on it."
+)]
 async fn delete(
     State(pool): State<SqlitePool>,
     Path(id): Path<TradeId>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<NoContent, ApiError> {
     match db_delete(&pool, id).await? {
-        DeleteOutcome::Deleted => Ok(StatusCode::NO_CONTENT),
+        DeleteOutcome::Deleted => Ok(NoContent),
         DeleteOutcome::NotFound => Err(ApiError::not_found("no trade with that id")),
         DeleteOutcome::Referenced => Err(ApiError::unprocessable(
             "this trade is referenced by a sale allocation, AMIT adjustment, reinvestment, or \

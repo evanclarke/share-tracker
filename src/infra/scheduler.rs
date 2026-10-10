@@ -44,10 +44,6 @@ pub use db::JobRunStatus;
 #[cfg(test)]
 use db::{db_record_run, db_run_histories, db_start_run};
 pub use http::JobStatus;
-/// `POST /jobs/{name}`'s query type. Not test-gated like its neighbours:
-/// `api_spec` reads its fields through `utoipa::IntoParams`, so the OpenAPI
-/// document's `?suffix=`/`?skip_command=` come from the struct axum decodes.
-pub use registry::JobParams;
 #[cfg(test)]
 pub use registry::{JobTrigger, RegisteredJob};
 #[cfg(test)]
@@ -59,6 +55,7 @@ use schedule::{ScheduleEntry, parse};
 
 #[cfg(test)]
 mod tests {
+    use super::registry::JobParams;
     use super::*;
     use crate::infra::db;
     use crate::test_support::ApiClient;

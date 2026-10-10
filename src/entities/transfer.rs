@@ -45,16 +45,13 @@ use crate::infra::http::{self, ApiError, CrudEntity, DryRunQuery};
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use crate::infra::id::TradeId;
-use axum::{
-    Router,
-    extract::{Path, State},
-    http::StatusCode,
-    routing::get,
-};
+use crate::infra::respond::{Created, NoContent, Written};
+use axum::extract::{Path, State};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 #[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Transfer {
@@ -357,18 +354,25 @@ impl CrudEntity for Transfer {
     const NOUN: &'static str = "transfer";
 }
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new()
-        .route(
-            "/transfers",
-            get(http::list_handler::<Transfer>).post(create),
-        )
-        .route(
-            "/transfers/{id}",
-            get(http::get_handler::<Transfer>)
-                .put(upsert)
-                .delete(delete),
-        )
+http::crud_list_route!(
+    list,
+    Transfer,
+    TransferListQuery,
+    "/transfers",
+    "List every holding-account transfer, optionally narrowed by ?listing_id= and an inclusive ?from=/?to= over the transfer date."
+);
+http::crud_get_route!(
+    get_one,
+    Transfer,
+    i64,
+    "/transfers/{id}",
+    "Fetch one transfer, or 404."
+);
+
+pub fn router() -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new()
+        .routes(routes!(list, create))
+        .routes(routes!(get_one, upsert, delete))
 }
 
 pub async fn db_get<'e, X>(executor: X, id: i64) -> Result<Option<Transfer>, sqlx::Error>
@@ -827,15 +831,20 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome, sqlx
     Ok(DeleteOutcome::Deleted)
 }
 
+#[utoipa::path(
+    put,
+    path = "/transfers/{id}",
+    summary = "Create the transfer at this id; the executed group is returned. The one PUT that is always 201: a transfer is create-only (a re-PUT is 422), and the response must carry the created Sell/Buy ids a bare 204 would hide."
+)]
 async fn upsert(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
     Json(body): Json<TransferBody>,
-) -> Result<(StatusCode, Json<TransferGroup>), ApiError> {
+) -> Result<Created<TransferGroup>, ApiError> {
     // 201 with the created group (like the scrip exchange): the client
     // needs the created trade ids, which a bare 204 would hide.
     let group = db_transfer(&pool, id, &body).await?;
-    Ok((StatusCode::CREATED, Json(group)))
+    Ok(Created(group))
 }
 
 /// `POST /transfers` — execute the transfer without naming an id. The database
@@ -846,26 +855,32 @@ async fn upsert(
 /// carry that assigned id as their provenance, so the whole group belongs to
 /// the row that names it. `?dry_run=true` previews it: the same group
 /// answered `200`, nothing stored.
+#[utoipa::path(
+    post,
+    path = "/transfers",
+    summary = "Execute a transfer: the Sell and transfer-in Buys are written atomically and the whole group is returned (?dry_run=true previews it: 200 with the same body, nothing stored).",
+    params(DryRunQuery)
+)]
 async fn create(
     State(pool): State<SqlitePool>,
     Query(query): Query<DryRunQuery>,
     Json(body): Json<TransferBody>,
-) -> Result<(StatusCode, Json<TransferGroup>), ApiError> {
+) -> Result<Written<TransferGroup>, ApiError> {
     let group = write(&pool, None, &body, query.mode()).await?;
-    let status = if query.dry_run {
-        StatusCode::OK
-    } else {
-        StatusCode::CREATED
-    };
-    Ok((status, Json(group)))
+    Ok(Written::new(query.dry_run, group))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/transfers/{id}",
+    summary = "Delete the transfer and its derived trades; 422 while a transferred-in parcel is consumed later."
+)]
 async fn delete(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<NoContent, ApiError> {
     match db_delete(&pool, id).await? {
-        DeleteOutcome::Deleted => Ok(StatusCode::NO_CONTENT),
+        DeleteOutcome::Deleted => Ok(NoContent),
         DeleteOutcome::NotFound => Err(ApiError::not_found("no transfer with that id")),
         DeleteOutcome::TransferInReferenced => Err(ApiError::unprocessable(
             "a transferred-in parcel is consumed by a later sale, AMIT adjustment, or income \
@@ -882,6 +897,7 @@ mod tests {
     use crate::entities::sell::{SellBody, SellError};
     use crate::entities::trade::TradeType;
     use crate::test_support::{self, ApiClient, dec};
+    use axum::http::StatusCode;
 
     async fn test_pool() -> SqlitePool {
         let pool = test_support::test_pool().await;

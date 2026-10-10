@@ -21,16 +21,13 @@ use crate::infra::http::{self, ApiError, DryRunQuery, Upsert, UpsertResponse};
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use crate::infra::id::TradeId;
-use axum::{
-    Router,
-    extract::{Path, State},
-    http::StatusCode,
-    routing::{post, put},
-};
+use crate::infra::respond::{NoContent, Written};
+use axum::extract::{Path, State};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::Deserialize;
 use sqlx::{Row, SqlitePool};
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 #[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -349,10 +346,10 @@ impl From<SellError> for ApiError {
     }
 }
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new()
-        .route("/sells", post(create))
-        .route("/sells/{id}", put(upsert).delete(delete))
+pub fn router() -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new()
+        .routes(routes!(create))
+        .routes(routes!(upsert, delete))
 }
 
 /// Outcome of a delete request, so the handler can map to the right status.
@@ -986,6 +983,11 @@ pub(crate) async fn upsert_sell_in_tx(
     Ok(id)
 }
 
+#[utoipa::path(
+    put,
+    path = "/sells/{id}",
+    summary = "Create or replace the Sell at this id."
+)]
 async fn upsert(
     State(pool): State<SqlitePool>,
     Path(id): Path<TradeId>,
@@ -1001,26 +1003,32 @@ async fn upsert(
 /// the caller can act on its id at once with no `max(id) + 1` guess between
 /// the two calls. `?dry_run=true` previews it: the same body answered `200`,
 /// nothing stored.
+#[utoipa::path(
+    post,
+    path = "/sells",
+    summary = "Create a Sell with its parcel allocations; the created row is returned as GET /trades/{id} would present it (?dry_run=true previews it: 200 with the same body, nothing stored).",
+    params(DryRunQuery)
+)]
 async fn create(
     State(pool): State<SqlitePool>,
     Query(query): Query<DryRunQuery>,
     Json(body): Json<SellBody>,
-) -> Result<(StatusCode, Json<Trade>), ApiError> {
+) -> Result<Written<Trade>, ApiError> {
     let created = db_create_sell(&pool, &body, query.mode()).await?;
-    let status = if query.dry_run {
-        StatusCode::OK
-    } else {
-        StatusCode::CREATED
-    };
-    Ok((status, Json(created.present())))
+    Ok(Written::new(query.dry_run, created.present()))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/sells/{id}",
+    summary = "Delete the Sell; 422 if it is not a Sell, or a replacement parcel it created is consumed later."
+)]
 async fn delete(
     State(pool): State<SqlitePool>,
     Path(id): Path<TradeId>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<NoContent, ApiError> {
     match db_delete_sell(&pool, id).await? {
-        DeleteOutcome::Deleted => Ok(StatusCode::NO_CONTENT),
+        DeleteOutcome::Deleted => Ok(NoContent),
         DeleteOutcome::NotFound => Err(ApiError::not_found("no sell with that id")),
         DeleteOutcome::NotASell => Err(ApiError::unprocessable(
             "that trade is not a Sell — a Buy/DRP parcel cannot be deleted through this endpoint",
@@ -1039,6 +1047,7 @@ async fn delete(
 mod tests {
     use super::*;
     use crate::test_support::{self, ApiClient, test_pool};
+    use axum::http::StatusCode;
 
     /// Client over this module's own routes.
     fn client(pool: &SqlitePool) -> ApiClient {

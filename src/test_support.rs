@@ -242,9 +242,9 @@ pub struct ApiClient {
 impl ApiClient {
     /// Client over an already-assembled router, e.g. one module's
     /// `router().with_state(pool)`.
-    pub fn over(app: axum::Router) -> Self {
+    pub fn over(app: impl Into<axum::Router>) -> Self {
         ApiClient {
-            app,
+            app: app.into(),
             headers: Vec::new(),
             peer: None,
         }

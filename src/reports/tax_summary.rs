@@ -8,14 +8,16 @@ use crate::infra::extract::Json;
 use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
 use crate::infra::id::ListingId;
+use crate::infra::respond::{Csv, Payload};
 use crate::reports::export::{self, Cents};
 use crate::reports::franking;
-use axum::{Router, extract::State, response::Response, routing::get};
+use axum::extract::State;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 use std::collections::{HashMap, HashSet};
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 #[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize)]
 pub struct TaxYearSummary {
@@ -285,13 +287,10 @@ pub struct TaxYearSummary {
     pub taxpayer_basis: String,
 }
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new()
-        .route("/portfolio/tax_summary", get(tax_summary_handler))
-        .route(
-            "/portfolio/tax_summary/export",
-            get(tax_summary_export_handler),
-        )
+pub fn router() -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new()
+        .routes(routes!(tax_summary_handler))
+        .routes(routes!(tax_summary_export_handler))
 }
 
 /// CSV export columns — `TaxYearSummary`'s fields in declaration order. The csv
@@ -1115,6 +1114,11 @@ fn total_assessable_income(map: &mut Summaries) {
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/portfolio/tax_summary",
+    summary = "The per-financial-year tax summary."
+)]
 async fn tax_summary_handler(
     State(pool): State<SqlitePool>,
 ) -> Result<Json<Vec<TaxYearSummary>>, ApiError> {
@@ -1231,7 +1235,14 @@ impl From<&TaxYearSummary> for TaxYearSummaryCsv {
 }
 
 /// The same per-year rows as the JSON report, as a downloadable tax-return-ready CSV.
-async fn tax_summary_export_handler(State(pool): State<SqlitePool>) -> Result<Response, ApiError> {
+#[utoipa::path(
+    get,
+    path = "/portfolio/tax_summary/export",
+    summary = "The tax summary as CSV."
+)]
+async fn tax_summary_export_handler(
+    State(pool): State<SqlitePool>,
+) -> Result<Payload<Csv>, ApiError> {
     let rows = db_tax_summary(&pool).await.map_err(ApiError::from)?;
     let csv_rows: Vec<TaxYearSummaryCsv> = rows.iter().map(Into::into).collect();
     export::csv_response("tax-summary.csv", CSV_HEADER, CSV_ATO_LABELS, &csv_rows)

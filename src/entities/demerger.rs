@@ -59,21 +59,18 @@ use crate::entities::trade::{self, Trade};
 use crate::infra::currency::CurrencyCode;
 use crate::infra::db::{WriteMode, write_tx};
 use crate::infra::decimal::mul_div;
-use crate::infra::extract::{Json, Query};
+use crate::infra::extract::Query;
 use crate::infra::http::{ApiError, DryRunQuery};
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use crate::infra::id::TradeId;
-use axum::{
-    Router,
-    extract::{Path, State},
-    http::StatusCode,
-    routing::post,
-};
+use crate::infra::respond::Written;
+use axum::extract::{Path, State};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::Serialize;
 use sqlx::SqlitePool;
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 /// The sides of a demerge: the closing Sell on the head listing, the head
 /// replacement Buys, and the demerged-entity Buys (the latter two one per
@@ -162,8 +159,8 @@ impl From<sell::SellError> for DemergeError {
     }
 }
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new().route("/corporate_actions/{id}/demerge", post(demerge))
+pub fn router() -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new().routes(routes!(demerge))
 }
 
 /// Apportion every open parcel of the action's head listing between the head
@@ -438,18 +435,19 @@ async fn check_demergeable(
     Ok(())
 }
 
+#[utoipa::path(
+    post,
+    path = "/corporate_actions/{id}/demerge",
+    summary = "Apportion the head listing's open parcels between head and demerged listing, and return the created replacement parcels (?dry_run=true previews it: 200 with the same body, nothing stored).",
+    params(DryRunQuery)
+)]
 async fn demerge(
     State(pool): State<SqlitePool>,
     Path(action_id): Path<i64>,
     Query(query): Query<DryRunQuery>,
-) -> Result<(StatusCode, Json<Demerge>), ApiError> {
+) -> Result<Written<Demerge>, ApiError> {
     let demerge = execute(&pool, action_id, query.mode()).await?;
-    let status = if query.dry_run {
-        StatusCode::OK
-    } else {
-        StatusCode::CREATED
-    };
-    Ok((status, Json(demerge)))
+    Ok(Written::new(query.dry_run, demerge))
 }
 
 impl From<DemergeError> for ApiError {
@@ -512,6 +510,7 @@ mod tests {
     use crate::entities::trade::TradeType;
     use crate::entities::{corporate_action::CorporateAction, listing};
     use crate::test_support::{self, ApiClient, test_pool};
+    use axum::http::StatusCode;
 
     /// Client over this module's own routes.
     fn client(pool: &SqlitePool) -> ApiClient {

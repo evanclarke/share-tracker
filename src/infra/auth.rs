@@ -114,17 +114,17 @@
 //! than [`VERIFY_QUEUE_WAIT`] for a slot is refused with the same `429`.
 
 use crate::infra::http::ApiError;
+use crate::infra::respond::{Html as HtmlPage, Payload, SeeOther};
 use argon2::{
     Argon2,
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng},
 };
 use axum::{
-    Router,
+    Extension,
     extract::{ConnectInfo, FromRequest, Request, State},
     http::{HeaderMap, StatusCode, header},
     middleware::Next,
     response::{Html, IntoResponse, Redirect, Response},
-    routing::{get, post},
 };
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
@@ -134,6 +134,7 @@ use std::fmt::Write as _;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 const LOGIN_HTML: &str = include_str!("auth/login.html");
 const COOKIE_NAME: &str = "st_session";
@@ -965,7 +966,10 @@ pub(crate) struct LoginForm {
 
 /// `GET /login`, `POST /login` and `POST /logout` — merged into the app
 /// alongside `web::router` only when `[auth]` is configured, so these routes
-/// (and the `Auth` they need) simply don't exist otherwise.
+/// simply don't exist otherwise. The [`AuthState`] they need (the `Auth` and
+/// the base path) reaches them as an extension `app::router` layers on when it
+/// merges them, which is what lets the OpenAPI document be generated from these
+/// same registrations without a configured credential.
 ///
 /// `POST /login` keys its lockout on the request's peer address, which `main`
 /// installs by serving through
@@ -973,34 +977,79 @@ pub(crate) struct LoginForm {
 /// **optionally** (see [`login_handler`]): the in-process test client, and any
 /// listener built without that call, has no such extension and still serves the
 /// login page, sharing the one documented [`Source::Unknown`] bucket.
-pub fn router(auth: Auth, base_path: &str) -> Router<SqlitePool> {
-    let base_path = base_path.to_string();
-    let get_base = base_path.clone();
-    let post_auth = auth.clone();
-    let post_base = base_path.clone();
-    let logout_auth = auth;
-    let logout_base = base_path;
-    Router::new()
-        .route(
-            "/login",
-            get(move || {
-                let base_path = get_base.clone();
-                async move { render_login(&base_path, None) }
-            })
-            .post(move |req: Request| {
-                let auth = post_auth.clone();
-                let base_path = post_base.clone();
-                async move { login_handler(auth, base_path, req).await }
-            }),
-        )
-        .route(
-            "/logout",
-            post(move || {
-                let auth = logout_auth.clone();
-                let base_path = logout_base.clone();
-                async move { logout(auth, base_path).await }
-            }),
-        )
+pub fn routes() -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new()
+        .routes(routes!(login_page, login))
+        .routes(routes!(log_out))
+}
+
+#[utoipa::path(
+    get,
+    path = "/login",
+    summary = "The sign-in page (HTML). Unauthenticated: on require_auth's allowlist."
+)]
+async fn login_page(Extension(state): Extension<AuthState>) -> Payload<HtmlPage> {
+    Payload::from_response(render_login(&state.base_path, None).into_response())
+}
+
+#[utoipa::path(
+    post,
+    path = "/login",
+    summary = "Verify credentials; 303 to the home path with the session cookie, or 200 re-rendering the page with the error. A source over its failed-attempt budget is refused 429 with a Retry-After (a browser gets the page carrying the lockout message instead). Unauthenticated: on the allowlist.",
+    request_body(content = LoginForm, content_type = "application/x-www-form-urlencoded")
+)]
+async fn login(Extension(state): Extension<AuthState>, req: Request) -> LoginOutcome {
+    LoginOutcome(login_handler(state.auth, state.base_path, req).await)
+}
+
+#[utoipa::path(
+    post,
+    path = "/logout",
+    summary = "Tell the browser to drop the session cookie (the page itself is not gated)."
+)]
+async fn log_out(Extension(state): Extension<AuthState>) -> SeeOther {
+    SeeOther(logout(state.auth, state.base_path).await)
+}
+
+/// What `POST /login` answers. The handler decodes `Form::<LoginForm>` itself
+/// (it has to own the failure, to answer either the page or a plain-text reason
+/// by `Accept`), so the response is built inside [`login_handler`]; this type
+/// is what documents it: `303` to the home path on success, and the `429`
+/// lockout — which is not a JSON body, so it is recorded by description. The
+/// browser path is refused `429` too, differing only in rendering the sign-in
+/// page as the body; both shapes are stated in `docs/API.md`'s Error-body
+/// contract.
+struct LoginOutcome(Response);
+
+impl IntoResponse for LoginOutcome {
+    fn into_response(self) -> Response {
+        self.0
+    }
+}
+
+impl utoipa::IntoResponses for LoginOutcome {
+    fn responses() -> std::collections::BTreeMap<
+        String,
+        utoipa::openapi::RefOr<utoipa::openapi::response::Response>,
+    > {
+        let mut responses = <SeeOther as utoipa::IntoResponses>::responses();
+        responses.insert(
+            "429".to_string(),
+            utoipa::openapi::ResponseBuilder::new()
+                .description(
+                    "This source has exhausted its failed-attempt budget: the body is the \
+                     plain-text reason and Retry-After names the remaining whole seconds, rounded \
+                     up. A browser login POST (Accept: text/html) is refused 429 too, with the \
+                     sign-in page as the body instead of the plain-text reason. The same 429 \
+                     answers when every password-verify slot is busy — the server verifies at \
+                     most two passwords at once, so a flood cannot allocate unbounded memory on \
+                     this unauthenticated path — and then Retry-After is 1.",
+                )
+                .build()
+                .into(),
+        );
+        responses
+    }
 }
 
 fn render_login(base_path: &str, error: Option<&str>) -> Html<String> {

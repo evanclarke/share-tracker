@@ -15,16 +15,14 @@
 
 use crate::infra::db::write_tx;
 use crate::infra::extract::Json;
+use crate::infra::http::NoFilter;
 use crate::infra::http::{self, ApiError, CrudEntity, Upsert, UpsertResponse};
 use crate::infra::id::HoldingAccountId;
-use axum::{
-    Router,
-    extract::{Path, State},
-    http::StatusCode,
-    routing::get,
-};
+use crate::infra::respond::{Created, NoContent};
+use axum::extract::{Path, State};
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 /// The account every row migrated to and every write that omits
 /// `holding_account_id` lands in (seeded as 'Default' by migration 0016).
@@ -56,18 +54,25 @@ impl CrudEntity for HoldingAccount {
     const NOUN: &'static str = "holding account";
 }
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new()
-        .route(
-            "/holding_accounts",
-            get(http::list_handler::<HoldingAccount>).post(create),
-        )
-        .route(
-            "/holding_accounts/{id}",
-            get(http::get_handler::<HoldingAccount>)
-                .put(upsert)
-                .delete(delete),
-        )
+http::crud_list_route!(
+    list,
+    HoldingAccount,
+    NoFilter,
+    "/holding_accounts",
+    "List every holding account."
+);
+http::crud_get_route!(
+    get_one,
+    HoldingAccount,
+    HoldingAccountId,
+    "/holding_accounts/{id}",
+    "Fetch one holding account, or 404."
+);
+
+pub fn router() -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new()
+        .routes(routes!(list, create))
+        .routes(routes!(get_one, upsert, delete))
 }
 
 #[cfg(test)]
@@ -238,6 +243,11 @@ fn holding_account_from_body(id: HoldingAccountId, body: HoldingAccountBody) -> 
     }
 }
 
+#[utoipa::path(
+    put,
+    path = "/holding_accounts/{id}",
+    summary = "Create or replace the holding account at this id."
+)]
 async fn upsert(
     State(pool): State<SqlitePool>,
     Path(id): Path<HoldingAccountId>,
@@ -252,20 +262,30 @@ async fn upsert(
 /// database assigns one (see [`write`]), and the created row is returned so the
 /// caller can use its id immediately with no `max(id) + 1` guess between the
 /// two calls.
+#[utoipa::path(
+    post,
+    path = "/holding_accounts",
+    summary = "Create a holding account; the created row is returned."
+)]
 async fn create(
     State(pool): State<SqlitePool>,
     Json(body): Json<HoldingAccountBody>,
-) -> Result<(StatusCode, Json<HoldingAccount>), ApiError> {
+) -> Result<Created<HoldingAccount>, ApiError> {
     let created = db_create(&pool, &holding_account_from_body(HoldingAccountId(0), body)).await?;
-    Ok((StatusCode::CREATED, Json(created)))
+    Ok(Created(created))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/holding_accounts/{id}",
+    summary = "Delete the holding account; 422 while a trade or statement still references it."
+)]
 async fn delete(
     State(pool): State<SqlitePool>,
     Path(id): Path<HoldingAccountId>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<NoContent, ApiError> {
     match db_delete(&pool, id).await? {
-        DeleteOutcome::Deleted => Ok(StatusCode::NO_CONTENT),
+        DeleteOutcome::Deleted => Ok(NoContent),
         DeleteOutcome::NotFound => Err(ApiError::not_found("no holding account with that id")),
         DeleteOutcome::Referenced => Err(ApiError::unprocessable(
             "this account still has trades, income, AMMA statements, DRP enrolments, or \
@@ -279,6 +299,7 @@ async fn delete(
 mod tests {
     use super::*;
     use crate::test_support::{ApiClient, test_pool};
+    use axum::http::StatusCode;
 
     /// Client over this module's own routes.
     fn client(pool: &SqlitePool) -> ApiClient {

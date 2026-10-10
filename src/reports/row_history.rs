@@ -29,10 +29,11 @@ use crate::infra::extract::{Json, Query};
 use crate::infra::http::ApiError;
 #[cfg(test)]
 use crate::infra::id::TradeId;
-use axum::{Router, extract::State, routing::get};
+use axum::extract::State;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sqlx::{Row, SqlitePool};
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 /// The audited tables, exactly as migration 0013 enumerates them in the
 /// `row_history.table_name` CHECK and its per-table trigger pairs — a test
@@ -219,8 +220,8 @@ pub struct RowHistoryRequest {
     pub limit: Option<i64>,
 }
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new().route("/reports/row_history", get(report))
+pub fn router() -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new().routes(routes!(report))
 }
 
 /// One browse entry: the trail's own uniform columns, and nothing else.
@@ -380,6 +381,12 @@ pub async fn db_browse_row_history(
     })
 }
 
+#[utoipa::path(
+    get,
+    path = "/reports/row_history",
+    summary = "The append-only audit trail; a browse array, or the cursor-paginated {entries, page_size, next_before_id} shape. ?table=, ?row_id=, ?before_id= and ?limit= drive it.",
+    params(RowHistoryRequest)
+)]
 async fn report(
     State(pool): State<SqlitePool>,
     Query(req): Query<RowHistoryRequest>,

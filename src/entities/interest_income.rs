@@ -20,16 +20,13 @@ use crate::infra::decimal::Money;
 use crate::infra::extract::Json;
 use crate::infra::http::{self, ApiError, CrudEntity, Upsert, UpsertResponse};
 use crate::infra::id::HoldingAccountId;
-use axum::{
-    Router,
-    extract::{Path, State},
-    http::StatusCode,
-    routing::get,
-};
+use crate::infra::respond::Created;
+use axum::extract::{Path, State};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 #[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct InterestIncome {
@@ -139,18 +136,32 @@ impl CrudEntity for InterestIncome {
     const NOUN: &'static str = "interest income";
 }
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new()
-        .route(
-            "/interest_income",
-            get(http::list_handler::<InterestIncome>).post(create),
-        )
-        .route(
-            "/interest_income/{id}",
-            get(http::get_handler::<InterestIncome>)
-                .put(upsert)
-                .delete(http::delete_handler::<InterestIncome>),
-        )
+http::crud_list_route!(
+    list,
+    InterestIncome,
+    InterestIncomeListQuery,
+    "/interest_income",
+    "List every interest-income row, optionally narrowed by ?holding_account_id= and an inclusive ?from=/?to= over date_paid. An owner filter matches recorded values only: holding_account_id is nullable, and a row without one is in no ?holding_account_id= slice — so summing the slices is less than the unfiltered list."
+);
+http::crud_get_route!(
+    get_one,
+    InterestIncome,
+    i64,
+    "/interest_income/{id}",
+    "Fetch one interest-income row, or 404."
+);
+http::crud_delete_route!(
+    delete_one,
+    InterestIncome,
+    i64,
+    "/interest_income/{id}",
+    "Delete the interest-income row."
+);
+
+pub fn router() -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new()
+        .routes(routes!(list, create))
+        .routes(routes!(get_one, upsert, delete_one))
 }
 
 /// One-line delegation to the shared CRUD read, through which `db_create`
@@ -330,6 +341,11 @@ fn interest_income_from_body(id: i64, body: InterestIncomeBody) -> InterestIncom
     }
 }
 
+#[utoipa::path(
+    put,
+    path = "/interest_income/{id}",
+    summary = "Create or replace the interest-income row at this id."
+)]
 async fn upsert(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
@@ -343,18 +359,24 @@ async fn upsert(
 /// assigns one (see [`write`]), and the created row is returned so the caller
 /// can use its id immediately with no `max(id) + 1` guess between the two
 /// calls.
+#[utoipa::path(
+    post,
+    path = "/interest_income",
+    summary = "Create an interest-income row; the created row is returned."
+)]
 async fn create(
     State(pool): State<SqlitePool>,
     Json(body): Json<InterestIncomeBody>,
-) -> Result<(StatusCode, Json<InterestIncome>), ApiError> {
+) -> Result<Created<InterestIncome>, ApiError> {
     let created = db_create(&pool, &interest_income_from_body(0, body)).await?;
-    Ok((StatusCode::CREATED, Json(created)))
+    Ok(Created(created))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_support::{ApiClient, test_pool};
+    use axum::http::StatusCode;
 
     /// Client over this module's own routes.
     fn client(pool: &SqlitePool) -> ApiClient {

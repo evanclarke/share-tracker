@@ -2,6 +2,7 @@
 //! routers. Kept separate from `main` so the wiring is unit-testable.
 use axum::{Extension, Router};
 use sqlx::SqlitePool;
+use utoipa_axum::router::OpenApiRouter;
 
 use crate::entities::closing_price::SharedFetcher;
 use crate::infra::auth::Auth;
@@ -41,13 +42,24 @@ pub fn router(
     allowed_hosts: &[String],
 ) -> Router {
     let guard = crate::infra::request_guard::RequestGuard::new(auth.is_some(), allowed_hosts);
-    let mut app = crate::entities::router()
-        .merge(crate::reports::router())
-        .merge(scheduler::router())
-        .merge(crate::api_spec::router(base_path, auth.is_some()))
-        .merge(crate::web::router(base_path, auth.is_some()));
+    // One registration per route: `split_for_parts` hands back the axum router
+    // and the OpenAPI operations utoipa generated from the very same
+    // `#[utoipa::path]` handlers, which `api_spec` completes into the served
+    // document — so a route cannot be served undocumented, or documented
+    // unserved.
+    let (app, generated) = api_routes(base_path, auth.is_some()).split_for_parts();
+    let mut app = app.merge(crate::api_spec::router(
+        generated,
+        base_path,
+        auth.is_some(),
+    ));
     if let Some(auth) = &auth {
-        app = app.merge(crate::infra::auth::router(auth.clone(), base_path));
+        // What the login routes need — the credential and the base path the
+        // redirects are built from — as the extension their handlers read.
+        app = app.layer(Extension(crate::infra::auth::AuthState::new(
+            auth.clone(),
+            base_path.to_string(),
+        )));
     }
     let app = app
         .with_state(pool)
@@ -90,6 +102,24 @@ pub fn router(
         )
         .nest(base_path, app);
     catching_panics(guarded(app, guard))
+}
+
+/// Every documented route the application serves — the entity, report,
+/// scheduler and web-frontend routers, plus the login routes when `[auth]` is
+/// configured — as the one `OpenApiRouter` [`router`] serves and
+/// `api_spec` documents. The login routes are merged without the
+/// [`AuthState`](crate::infra::auth::AuthState) they read, which [`router`]
+/// layers on, so the document can be generated without a credential.
+pub fn api_routes(base_path: &str, auth: bool) -> OpenApiRouter<SqlitePool> {
+    let routes = crate::entities::router()
+        .merge(crate::reports::router())
+        .merge(scheduler::router())
+        .merge(crate::web::router(base_path, auth));
+    if auth {
+        routes.merge(crate::infra::auth::routes())
+    } else {
+        routes
+    }
 }
 
 /// The request guard ([`crate::infra::request_guard`]) around the whole

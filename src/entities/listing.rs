@@ -3,15 +3,12 @@ use crate::infra::db::write_tx;
 use crate::infra::extract::Json;
 use crate::infra::http::{self, ApiError, CrudEntity, Upsert, UpsertResponse};
 use crate::infra::id::ListingId;
-use axum::{
-    Router,
-    extract::{Path, State},
-    http::StatusCode,
-    routing::get,
-};
+use crate::infra::respond::Created;
+use axum::extract::{Path, State};
 use chrono::{Datelike, NaiveDate};
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 // Variants are serialized verbatim to JSON and persisted to the TEXT
 // `security_type` column (matched by a CHECK constraint), so the acronym
@@ -409,16 +406,33 @@ where
     Ok(rows.into_iter().collect())
 }
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new()
-        .route("/listings", get(http::list_handler::<Listing>).post(create))
-        .route(
-            "/listings/{id}",
-            get(http::get_handler::<Listing>)
-                .put(upsert)
-                // Deleting a listing still referenced by trades/income violates an FK → 422.
-                .delete(http::delete_handler::<Listing>),
-        )
+http::crud_list_route!(
+    list,
+    Listing,
+    ListingListQuery,
+    "/listings",
+    "List every listing, optionally narrowed by ?exchange_mic= or ?security_type=."
+);
+http::crud_get_route!(
+    get_one,
+    Listing,
+    ListingId,
+    "/listings/{id}",
+    "Fetch one listing, or 404."
+);
+// Deleting a listing still referenced by trades/income violates an FK → 422.
+http::crud_delete_route!(
+    delete,
+    Listing,
+    ListingId,
+    "/listings/{id}",
+    "Delete the listing; 422 while a trade or other row still references it."
+);
+
+pub fn router() -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new()
+        .routes(routes!(list, create))
+        .routes(routes!(get_one, upsert, delete))
 }
 
 /// Executor-generic so the row can be read on a caller's transaction as well
@@ -695,6 +709,11 @@ fn listing_from_body(id: ListingId, body: ListingBody) -> Listing {
     }
 }
 
+#[utoipa::path(
+    put,
+    path = "/listings/{id}",
+    summary = "Create or replace the listing at this id."
+)]
 async fn upsert(
     State(pool): State<SqlitePool>,
     Path(id): Path<ListingId>,
@@ -710,17 +729,24 @@ async fn upsert(
 /// calls. A listing's ticker and exchange decide the price provider's symbol,
 /// but a create writes no history for the rename guard to protect — it simply
 /// lands the id the database issues.
+#[utoipa::path(
+    post,
+    path = "/listings",
+    summary = "Create a listing; the database assigns the id and the created row is returned."
+)]
 async fn create(
     State(pool): State<SqlitePool>,
     Json(body): Json<ListingBody>,
-) -> Result<(StatusCode, Json<Listing>), ApiError> {
+) -> Result<Created<Listing>, ApiError> {
     let created = db_create(&pool, &listing_from_body(ListingId(0), body)).await?;
-    Ok((StatusCode::CREATED, Json(created)))
+    Ok(Created(created))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::StatusCode;
+
     use crate::test_support::{ApiClient, test_pool, ymd};
 
     /// Client over this module's own routes.

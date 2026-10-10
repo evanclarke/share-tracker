@@ -60,17 +60,18 @@ use crate::reports::{
     activity, amit_adjustment_cross_check, amit_cash_cross_check, e4_cross_check, franking_at_risk,
     net_capital_gain, realised_gains, rollover_consistency, tax_summary,
 };
-use axum::{Router, extract::State, routing::get};
+use axum::extract::State;
 use chrono::{NaiveDate, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, Row, SqlitePool};
 use std::collections::{HashMap, HashSet};
+use utoipa_axum::{router::OpenApiRouter, routes};
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new()
-        .route("/reports/tax_report/years", get(years_handler))
-        .route("/reports/tax_report", get(tax_report_handler))
+pub fn router() -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new()
+        .routes(routes!(years_handler))
+        .routes(routes!(tax_report_handler))
 }
 
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
@@ -1999,6 +2000,12 @@ pub async fn db_tax_report(pool: &SqlitePool, tax_year: i32) -> Result<TaxReport
     })
 }
 
+#[utoipa::path(
+    get,
+    path = "/reports/tax_report",
+    summary = "The Annual Tax Report for one financial year; ?tax_year= selects it and is required.",
+    params(TaxReportRequest)
+)]
 async fn tax_report_handler(
     State(pool): State<SqlitePool>,
     Query(req): Query<TaxReportRequest>,
@@ -2086,6 +2093,11 @@ async fn db_tax_report_years(pool: &SqlitePool) -> Result<Vec<i32>, sqlx::Error>
     Ok(years)
 }
 
+#[utoipa::path(
+    get,
+    path = "/reports/tax_report/years",
+    summary = "Every financial year with a recorded fact, for the annual report's year picker."
+)]
 async fn years_handler(State(pool): State<SqlitePool>) -> Result<Json<Vec<i32>>, ApiError> {
     db_tax_report_years(&pool)
         .await

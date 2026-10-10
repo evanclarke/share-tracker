@@ -3,11 +3,12 @@ use crate::entities::income::Income;
 use crate::infra::extract::Json;
 use crate::infra::http::ApiError;
 use crate::infra::id::ListingId;
-use axum::{Router, extract::State, routing::get};
+use axum::extract::State;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, Row, SqlitePool};
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 /// A trust income row whose statement reported a tax-deferred amount with no
 /// `ReturnOfCapital` corporate action on the listing in the same financial
@@ -31,8 +32,8 @@ pub struct E4CrossCheckAlert {
     pub tax_year: i32,
 }
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new().route("/reports/e4_cross_check", get(report))
+pub fn router() -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new().routes(routes!(report))
 }
 
 /// Flag every trust income row carrying a non-zero `tax_deferred_amount`
@@ -102,6 +103,11 @@ pub async fn db_e4_alerts(pool: &SqlitePool) -> Result<Vec<E4CrossCheckAlert>, s
     Ok(alerts)
 }
 
+#[utoipa::path(
+    get,
+    path = "/reports/e4_cross_check",
+    summary = "Cross-check the CGT event E4 amounts against the trust income rows."
+)]
 async fn report(State(pool): State<SqlitePool>) -> Result<Json<Vec<E4CrossCheckAlert>>, ApiError> {
     db_e4_alerts(&pool).await.map(Json).map_err(ApiError::from)
 }

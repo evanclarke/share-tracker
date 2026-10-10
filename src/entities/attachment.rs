@@ -35,17 +35,17 @@ use crate::infra::id::TradeId;
 use std::fmt::Write as _;
 
 use crate::infra::extract::{Json, Query};
+use crate::infra::respond::{Created, OctetStream, Payload};
 use axum::{
-    Router,
     body::Body,
     extract::{DefaultBodyLimit, Multipart, Path, State},
-    http::{StatusCode, header},
-    response::{IntoResponse, Response},
-    routing::get,
+    http::header,
+    response::Response,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::{QueryBuilder, Sqlite, SqlitePool};
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 /// Per-file upload ceiling (25 MB). Enforced explicitly so an oversized upload is
 /// rejected with `413`; the route's body limit is set a little higher so this
@@ -183,14 +183,26 @@ impl CrudEntity for Attachment {
     const NOUN: &'static str = "attachment";
 }
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new()
-        .route("/attachments", get(list).post(upload))
-        .route(
-            "/attachments/{id}",
-            get(http::get_handler::<Attachment>).delete(http::delete_handler::<Attachment>),
-        )
-        .route("/attachments/{id}/content", get(download))
+http::crud_get_route!(
+    get_one,
+    Attachment,
+    i64,
+    "/attachments/{id}",
+    "Fetch one attachment's metadata, or 404."
+);
+http::crud_delete_route!(
+    delete_one,
+    Attachment,
+    i64,
+    "/attachments/{id}",
+    "Delete the attachment and its stored bytes."
+);
+
+pub fn router() -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new()
+        .routes(routes!(list, upload))
+        .routes(routes!(get_one, delete_one))
+        .routes(routes!(download))
         // Raise the body limit above the per-file ceiling so the explicit
         // size check (below) is what rejects an oversized file with 413,
         // rather than axum's default 2 MB limit silently rejecting everything.
@@ -300,6 +312,12 @@ pub async fn db_insert(pool: &SqlitePool, att: &NewAttachment<'_>) -> Result<i64
     Ok(row.0)
 }
 
+#[utoipa::path(
+    get,
+    path = "/attachments",
+    summary = "List stored attachments, optionally filtered by owner (?trade_id=, ?income_id=, ?amma_statement_id=, ?ess_statement_id=, ?interest_income_id=, ?corporate_action_id=) or request an owner's linked documents (?include_linked=true, with ?trade_id=).",
+    params(ListQuery)
+)]
 async fn list(
     State(pool): State<SqlitePool>,
     Query(q): Query<ListQuery>,
@@ -327,10 +345,16 @@ async fn list(
     db_list(&pool, &q).await.map(Json).map_err(ApiError::from)
 }
 
+#[utoipa::path(
+    post,
+    path = "/attachments",
+    summary = "Upload an attachment; multipart/form-data carrying the file and exactly one owner field. The stored row is returned.",
+    request_body(content = String, content_type = "multipart/form-data")
+)]
 async fn upload(
     State(pool): State<SqlitePool>,
     mut multipart: Multipart,
-) -> Result<Response, ApiError> {
+) -> Result<Created<Attachment>, ApiError> {
     let bad_request = |msg: &str| ApiError::bad_request(msg);
     let mut trade_id: Option<TradeId> = None;
     let mut income_id: Option<i64> = None;
@@ -421,7 +445,7 @@ async fn upload(
     let stored = db_get(&pool, id)
         .await?
         .ok_or_else(|| ApiError::internal("the stored attachment row vanished".to_string()))?;
-    Ok((StatusCode::CREATED, Json(stored)).into_response())
+    Ok(Created(stored))
 }
 
 async fn read_owner_field(
@@ -451,11 +475,17 @@ pub(crate) struct ContentQuery {
     disposition: Option<String>,
 }
 
+#[utoipa::path(
+    get,
+    path = "/attachments/{id}/content",
+    summary = "Download an attachment's bytes under the content type it was stored with; ?disposition=inline lets the browser render it in place.",
+    params(ContentQuery)
+)]
 async fn download(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
     Query(query): Query<ContentQuery>,
-) -> Result<Response, ApiError> {
+) -> Result<Payload<OctetStream>, ApiError> {
     let disposition = match query.disposition.as_deref() {
         None | Some("attachment") => "attachment",
         Some("inline") => "inline",
@@ -485,6 +515,7 @@ async fn download(
             "nosniff",
         )
         .body(Body::from(bytes))
+        .map(Payload::from_response)
         .map_err(ApiError::internal)
 }
 
@@ -494,6 +525,7 @@ mod tests {
     use crate::entities::trade;
     use crate::infra::id::ListingId;
     use crate::test_support::{self, ApiClient, ApiResponse, dec, test_pool, ymd};
+    use axum::http::StatusCode;
 
     /// Client over this module's own routes.
     fn client(pool: &SqlitePool) -> ApiClient {

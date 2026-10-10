@@ -112,7 +112,7 @@ fn report_path_namespace_case_rule_documented() {
     assert!(section.contains("`mic_validation` → `/reports/exchange_mic_validation`"));
     assert!(section.contains("`settlement_coverage` → `/reports/settlement_holiday_coverage`"));
     // The section's own kebab outlier now obeys the rule it states: its two
-    // endpoints are spelled in the snake_case form (the route table itself is
+    // endpoints are spelled in the snake_case form (the routes themselves are
     // pinned by `reports::tests::report_paths_are_snake_case`).
     assert!(section.contains("GET  /reports/tax_report/years"));
     assert!(section.contains("GET  /reports/tax_report?tax_year=2026"));
@@ -1080,7 +1080,7 @@ fn created_response_row_names_collection_creates_and_vest() {
     assert_eq!(
         named,
         crate::api_spec::documented_id_keyed_collection_creates(),
-        "the `201` row's collection list and the route table disagree; the row is: {row}"
+        "the `201` row's collection list and the generated document disagree; the row is: {row}"
     );
 }
 

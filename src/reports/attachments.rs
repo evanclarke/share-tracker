@@ -3,9 +3,10 @@ use crate::infra::http::ApiError;
 use crate::infra::id::ListingId;
 #[cfg(test)]
 use crate::infra::id::TradeId;
-use axum::{Router, extract::State, routing::get};
+use axum::extract::State;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 /// One stored document, joined out to the activity it is attached to (see
 /// `entities::attachment` — ownership is six nullable FKs with a DB CHECK
@@ -41,8 +42,8 @@ pub struct AttachmentIndexRow {
     pub listing_id: Option<ListingId>,
 }
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new().route("/reports/attachments", get(report))
+pub fn router() -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new().routes(routes!(report))
 }
 
 /// Every stored attachment joined out to its owning activity (all six owner
@@ -165,6 +166,11 @@ pub async fn db_attachments(pool: &SqlitePool) -> Result<Vec<AttachmentIndexRow>
     Ok(out)
 }
 
+#[utoipa::path(
+    get,
+    path = "/reports/attachments",
+    summary = "Every stored attachment joined out to its owning activity."
+)]
 async fn report(State(pool): State<SqlitePool>) -> Result<Json<Vec<AttachmentIndexRow>>, ApiError> {
     db_attachments(&pool)
         .await

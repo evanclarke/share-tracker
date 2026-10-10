@@ -78,16 +78,13 @@ use crate::infra::extract::{Json, Query};
 use crate::infra::http::ApiError;
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
-use axum::{
-    Router,
-    extract::{Path, State},
-    routing::{get, post},
-};
+use axum::extract::{Path, State};
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{QueryBuilder, Row, SqlitePool, sqlite::SqliteRow};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 use crate::entities::closing_price::{self, Market};
 use crate::reports::{performance, portfolio, unrealised_gains, valuation};
@@ -1027,6 +1024,12 @@ pub(crate) struct GenerateBody {
     date: Option<NaiveDate>,
 }
 
+#[utoipa::path(
+    get,
+    path = "/report_snapshots",
+    summary = "List stored report snapshots, optionally narrowed by ?report= and ?from= / ?to=.",
+    params(ListParams)
+)]
 async fn list(
     State(pool): State<SqlitePool>,
     Query(params): Query<ListParams>,
@@ -1037,6 +1040,12 @@ async fn list(
         .map_err(ApiError::from)
 }
 
+#[utoipa::path(
+    get,
+    path = "/report_snapshots/series",
+    summary = "The portfolio's stored snapshot totals as a time series, oldest first; narrow it to one listing with ?listing_id=.",
+    params(SeriesParams)
+)]
 async fn series(
     State(pool): State<SqlitePool>,
     Query(params): Query<SeriesParams>,
@@ -1047,6 +1056,12 @@ async fn series(
         .map_err(ApiError::from)
 }
 
+#[utoipa::path(
+    get,
+    path = "/report_snapshots/holding_series",
+    summary = "Each holding's stored unit-price series; ?from=/?to= bound the snapshot dates read.",
+    params(HoldingSeriesParams)
+)]
 async fn holding_series(
     State(pool): State<SqlitePool>,
     Query(params): Query<HoldingSeriesParams>,
@@ -1057,6 +1072,11 @@ async fn holding_series(
         .map_err(ApiError::from)
 }
 
+#[utoipa::path(
+    get,
+    path = "/report_snapshots/{report}/{date}",
+    summary = "Fetch one stored snapshot's payload, or 404."
+)]
 async fn get_one(
     State(pool): State<SqlitePool>,
     Path((report, date)): Path<(String, NaiveDate)>,
@@ -1074,6 +1094,11 @@ async fn get_one(
 /// date after backfilling its prices, or today's after recording a back-dated
 /// fact. 422 carries the blocker detail (missing/errored price, close not
 /// final, nothing held).
+#[utoipa::path(
+    post,
+    path = "/report_snapshots/generate",
+    summary = "Generate (or re-generate) snapshots for a date range; the resulting snapshot metadata is returned."
+)]
 async fn generate_handler(
     State(pool): State<SqlitePool>,
     body: Option<Json<GenerateBody>>,
@@ -1113,6 +1138,11 @@ pub(crate) struct RegenerateBody {
 
 /// The default bulk-regeneration bounds, for the UI to prefill the range
 /// boxes before the user submits.
+#[utoipa::path(
+    get,
+    path = "/report_snapshots/regenerate_range",
+    summary = "The default bulk-regeneration bounds, for the UI to prefill before submitting."
+)]
 async fn regenerate_range_handler(
     State(pool): State<SqlitePool>,
 ) -> Result<Json<RegenerateRange>, ApiError> {
@@ -1129,6 +1159,11 @@ async fn regenerate_range_handler(
 /// ones. 200 with the summary — per-date blockers are reported in it, not as
 /// an error, so unblocked dates still regenerate. 422 if `from` is after
 /// `to`.
+#[utoipa::path(
+    post,
+    path = "/report_snapshots/regenerate_all",
+    summary = "Regenerate every held date in a range (default: first-ever-held through the latest valuable date), reporting per-date blockers in the summary."
+)]
 async fn regenerate_all_handler(
     State(pool): State<SqlitePool>,
     body: Option<Json<RegenerateBody>>,
@@ -1143,31 +1178,27 @@ async fn regenerate_all_handler(
 
 /// The manual counterpart of the post-import true-up: regenerate only the
 /// provisional snapshot dates. Same summary shape as regenerate-all.
+#[utoipa::path(
+    post,
+    path = "/report_snapshots/regenerate_provisional",
+    summary = "Regenerate every snapshot flagged provisional, now that a later FX rate may have arrived."
+)]
 async fn regenerate_provisional_handler(
     State(pool): State<SqlitePool>,
 ) -> Result<Json<RegenerateSummary>, ApiError> {
     Ok(Json(regenerate_provisional(&pool, Utc::now()).await?))
 }
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new()
-        .route("/report_snapshots", get(list))
-        .route("/report_snapshots/series", get(series))
-        .route("/report_snapshots/holding_series", get(holding_series))
-        .route("/report_snapshots/generate", post(generate_handler))
-        .route(
-            "/report_snapshots/regenerate_all",
-            post(regenerate_all_handler),
-        )
-        .route(
-            "/report_snapshots/regenerate_range",
-            get(regenerate_range_handler),
-        )
-        .route(
-            "/report_snapshots/regenerate_provisional",
-            post(regenerate_provisional_handler),
-        )
-        .route("/report_snapshots/{report}/{date}", get(get_one))
+pub fn router() -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new()
+        .routes(routes!(list))
+        .routes(routes!(series))
+        .routes(routes!(holding_series))
+        .routes(routes!(generate_handler))
+        .routes(routes!(regenerate_all_handler))
+        .routes(routes!(regenerate_range_handler))
+        .routes(routes!(regenerate_provisional_handler))
+        .routes(routes!(get_one))
 }
 
 #[cfg(test)]

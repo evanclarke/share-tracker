@@ -10,15 +10,13 @@
 use crate::infra::db::write_tx;
 use crate::infra::decimal::Money;
 use crate::infra::extract::Json;
+use crate::infra::http::NoFilter;
 use crate::infra::http::{self, ApiError, CrudEntity, UpsertResponse};
-use axum::{
-    Router,
-    extract::{Path, State},
-    routing::get,
-};
+use axum::extract::{Path, State};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 #[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct CgtSettings {
@@ -47,15 +45,32 @@ impl CrudEntity for CgtSettings {
     const NOUN: &'static str = "CGT settings row";
 }
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new()
-        .route("/cgt_settings", get(http::list_handler::<CgtSettings>))
-        .route(
-            "/cgt_settings/{id}",
-            get(http::get_handler::<CgtSettings>)
-                .put(upsert)
-                .delete(http::delete_handler::<CgtSettings>),
-        )
+http::crud_list_route!(
+    list,
+    CgtSettings,
+    NoFilter,
+    "/cgt_settings",
+    "List the CGT settings rows."
+);
+http::crud_get_route!(
+    get_one,
+    CgtSettings,
+    i64,
+    "/cgt_settings/{id}",
+    "Fetch one CGT settings row, or 404."
+);
+http::crud_delete_route!(
+    delete_one,
+    CgtSettings,
+    i64,
+    "/cgt_settings/{id}",
+    "Delete the CGT settings row."
+);
+
+pub fn router() -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new()
+        .routes(routes!(list))
+        .routes(routes!(get_one, upsert, delete_one))
 }
 
 #[cfg(test)]
@@ -100,6 +115,11 @@ where
     Ok(settings.map_or(Decimal::ZERO, |s| s.opening_capital_loss))
 }
 
+#[utoipa::path(
+    put,
+    path = "/cgt_settings/{id}",
+    summary = "Create or replace the CGT settings row at this id."
+)]
 async fn upsert(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,

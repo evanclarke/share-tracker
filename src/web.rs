@@ -22,13 +22,15 @@
 //! `JS_MODULES` allowlist is the only route table, and the
 //! `js_test_files_are_not_served_and_every_module_is` test pins that no
 //! `*.test.js` file is listed on it (and that every non-test module is).
+use crate::infra::respond::{Css, Html, Payload};
 use axum::{
-    Router,
+    Extension,
     http::header,
     response::{IntoResponse, Response},
     routing::get,
 };
 use sqlx::SqlitePool;
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 const INDEX_HTML: &str = include_str!("web/index.html");
 const STYLE_CSS: &str = include_str!("web/style.css");
@@ -105,22 +107,23 @@ pub(crate) fn served_js_bundle() -> String {
 /// knows a 401 means "go to `/login`" rather than some other failure — the
 /// frontend has no other way to learn whether `[auth]` is configured. The
 /// shell is templated once at startup, not per request.
-pub fn router(base_path: &str, auth_enabled: bool) -> Router<SqlitePool> {
-    let shell = index_html(base_path, auth_enabled);
-    let mut router = Router::new()
-        .route(
-            "/",
-            get(move || {
-                let shell = shell.clone();
-                async move { html_asset(shell) }
-            }),
-        )
-        .route("/static/style.css", get(style_css));
+pub fn router(base_path: &str, auth_enabled: bool) -> OpenApiRouter<SqlitePool> {
+    let mut router = OpenApiRouter::new()
+        .routes(routes!(index))
+        .routes(routes!(style_css));
+    // Registered in a loop over `JS_MODULES`, so there is no handler function
+    // per module for a `#[utoipa::path]` to annotate: `api_spec` documents the
+    // module routes from this same list.
     for (path, source) in JS_MODULES {
         router = router.route(path, get(move || async move { js_asset(source) }));
     }
-    router
+    router.layer(Extension(Shell(index_html(base_path, auth_enabled))))
 }
+
+/// The SPA shell, templated once at startup ([`index_html`]) and handed to
+/// [`index`] as an extension.
+#[derive(Clone)]
+struct Shell(String);
 
 /// The SPA shell with its build-time placeholders filled in: the crate
 /// version shown in the header; the base path, which the shell carries in
@@ -144,12 +147,18 @@ fn js_asset(body: &'static str) -> Response {
     asset("text/javascript; charset=utf-8", body)
 }
 
-fn html_asset(body: String) -> Response {
-    ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], body).into_response()
+#[utoipa::path(get, path = "/", summary = "The single-page app shell (HTML).")]
+async fn index(Extension(shell): Extension<Shell>) -> Payload<Html> {
+    Payload::new("text/html; charset=utf-8", shell.0)
 }
 
-async fn style_css() -> Response {
-    asset("text/css; charset=utf-8", STYLE_CSS)
+#[utoipa::path(
+    get,
+    path = "/static/style.css",
+    summary = "The app stylesheet. Unauthenticated: on require_auth's allowlist."
+)]
+async fn style_css() -> Payload<Css> {
+    Payload::new("text/css; charset=utf-8", STYLE_CSS)
 }
 
 #[cfg(test)]

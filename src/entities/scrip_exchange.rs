@@ -58,21 +58,18 @@ use crate::entities::trade::{self, Trade};
 use crate::infra::currency::CurrencyCode;
 use crate::infra::db::{WriteMode, write_tx};
 use crate::infra::decimal::mul_div;
-use crate::infra::extract::{Json, Query};
+use crate::infra::extract::Query;
 use crate::infra::http::{ApiError, DryRunQuery};
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use crate::infra::id::TradeId;
-use axum::{
-    Router,
-    extract::{Path, State},
-    http::StatusCode,
-    routing::post,
-};
+use crate::infra::respond::Written;
+use axum::extract::{Path, State};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::Serialize;
 use sqlx::SqlitePool;
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 /// The two sides of an exchange: the closing Sell on the original listing
 /// and the replacement Buys it was substituted with (one per consumed
@@ -165,8 +162,8 @@ impl From<sell::SellError> for ExchangeError {
     }
 }
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new().route("/corporate_actions/{id}/exchange", post(exchange))
+pub fn router() -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new().routes(routes!(exchange))
 }
 
 /// Substitute every open parcel of the action's original listing with
@@ -486,18 +483,19 @@ async fn check_exchangeable(
     Ok(())
 }
 
+#[utoipa::path(
+    post,
+    path = "/corporate_actions/{id}/exchange",
+    summary = "Substitute every open parcel of a scrip-for-scrip action's original listing, and return the created replacement parcels (?dry_run=true previews it: 200 with the same body, nothing stored).",
+    params(DryRunQuery)
+)]
 async fn exchange(
     State(pool): State<SqlitePool>,
     Path(action_id): Path<i64>,
     Query(query): Query<DryRunQuery>,
-) -> Result<(StatusCode, Json<Exchange>), ApiError> {
+) -> Result<Written<Exchange>, ApiError> {
     let exchange = execute(&pool, action_id, query.mode()).await?;
-    let status = if query.dry_run {
-        StatusCode::OK
-    } else {
-        StatusCode::CREATED
-    };
-    Ok((status, Json(exchange)))
+    Ok(Written::new(query.dry_run, exchange))
 }
 
 impl From<ExchangeError> for ApiError {
@@ -571,6 +569,7 @@ mod tests {
     use crate::entities::trade::TradeType;
     use crate::entities::{corporate_action::CorporateAction, listing};
     use crate::test_support::{self, ApiClient, test_pool};
+    use axum::http::StatusCode;
 
     /// Client over this module's own routes.
     fn client(pool: &SqlitePool) -> ApiClient {

@@ -10,12 +10,13 @@ use crate::infra::http::ApiError;
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use crate::infra::id::TradeId;
-use axum::{Router, extract::State, routing::get};
+use axum::extract::State;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::collections::HashMap;
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 /// Where a realised disposal came from.
 #[derive(
@@ -123,8 +124,8 @@ pub struct ParcelDetail {
 // Per-sale identity: capital_gain_loss == discount_eligible_gain
 //                                       + non_discountable_gain − capital_loss.
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new().route("/portfolio/realised_gains", get(realised_gains_handler))
+pub fn router() -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new().routes(routes!(realised_gains_handler))
 }
 
 /// A realisable Sell as the report reads it from `trades`. Each trade carries
@@ -766,6 +767,11 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
     Ok(result)
 }
 
+#[utoipa::path(
+    get,
+    path = "/portfolio/realised_gains",
+    summary = "Realised gains and losses per disposal."
+)]
 async fn realised_gains_handler(
     State(pool): State<SqlitePool>,
 ) -> Result<Json<Vec<RealisedGainLoss>>, ApiError> {

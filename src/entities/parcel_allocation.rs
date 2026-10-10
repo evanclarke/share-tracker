@@ -5,12 +5,12 @@ use crate::infra::http::{self, CrudEntity};
 #[cfg(test)]
 use crate::infra::id::ListingId;
 use crate::infra::id::TradeId;
-use axum::{Router, routing::get};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use sqlx::Row;
 use sqlx::SqlitePool;
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 #[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct ParcelAllocation {
@@ -53,16 +53,25 @@ impl CrudEntity for ParcelAllocation {
     const NOUN: &'static str = "parcel allocation";
 }
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new()
-        .route(
-            "/parcel_allocations",
-            get(http::list_handler::<ParcelAllocation>),
-        )
-        .route(
-            "/parcel_allocations/{id}",
-            get(http::get_handler::<ParcelAllocation>),
-        )
+http::crud_list_route!(
+    list,
+    ParcelAllocation,
+    ParcelAllocationListQuery,
+    "/parcel_allocations",
+    "List every sale's parcel allocations, optionally narrowed by ?sale_trade_id= and ?purchase_trade_id=."
+);
+http::crud_get_route!(
+    get_one,
+    ParcelAllocation,
+    i64,
+    "/parcel_allocations/{id}",
+    "Fetch one parcel allocation, or 404."
+);
+
+pub fn router() -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new()
+        .routes(routes!(list))
+        .routes(routes!(get_one))
 }
 
 #[cfg(test)]

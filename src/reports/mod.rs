@@ -5,7 +5,6 @@
 //! reports' daily results to `report_snapshots`.
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
-use axum::Router;
 use sqlx::SqlitePool;
 
 /// Taxpayer assumption stated on every tax-report row: the rates are hard-wired
@@ -80,7 +79,7 @@ pub(crate) async fn account_label(
 }
 
 /// Merge every report's routes into a single router.
-pub fn router() -> Router<SqlitePool> {
+pub fn router() -> utoipa_axum::router::OpenApiRouter<SqlitePool> {
     portfolio::router()
         .merge(activity::router())
         .merge(open_parcels::router())
@@ -110,87 +109,37 @@ pub fn router() -> Router<SqlitePool> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
 
-    /// Every route registered under `src/reports/**/*.rs` as a `(path, verb)`
-    /// pair, sorted and de-duplicated. The verb is whichever of
-    /// `get(...)`/`post(...)` the route registration itself names, so the
-    /// table is read out of the route registration rather than kept by hand.
-    /// The path literal may sit on the route call's own line or the next one,
-    /// so this reads the first string literal after each route call and then
-    /// the first routing fn **inside that same call** (bounded at the next
-    /// route registration, so a call carrying two verbs cannot be mis-read from
-    /// a later route's verb). The needle is assembled rather than written out so
-    /// this module does not match itself (it walks `mod.rs` too).
-    ///
-    /// The walk is **recursive**: an entity module split into submodules
-    /// (`trade.rs` → `trade/…`) is the documented growth path, and a
-    /// non-recursive scan would silently stop seeing a report that had been
-    /// split into `reports/<name>/http.rs`.
+    /// Every route `reports::router` serves as a `(path, verb)` pair, sorted —
+    /// read off the operations utoipa generated from the report handlers'
+    /// own `#[utoipa::path]` registrations, so the table is the router's,
+    /// not a copy of it.
     fn report_routes() -> Vec<(String, &'static str)> {
-        let needle = format!(".{}(", "route");
-        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/reports");
-        let mut sources = Vec::new();
-        collect_report_sources(&dir, &mut sources);
-        assert!(
-            sources.len() >= 30,
-            "the walk found only {} report sources — it has stopped reading the directory",
-            sources.len()
-        );
+        let doc = serde_json::to_value(super::router().into_openapi()).expect("serialises");
         let mut routes = Vec::new();
-        for (file, body) in &sources {
-            let mut rest = body.as_str();
-            while let Some(at) = rest.find(&needle) {
-                rest = &rest[at + needle.len()..];
-                let Some(open) = rest.find('"') else { break };
-                let after = &rest[open + 1..];
-                let Some(close) = after.find('"') else { break };
-                let route = after[..close].to_string();
-                let tail = &after[close..];
-                let call = &tail[..tail.find(&needle).unwrap_or(tail.len())];
-                let verb = match (call.find("get("), call.find("post(")) {
-                    (Some(g), Some(p)) => {
-                        if g < p {
-                            "GET"
-                        } else {
-                            "POST"
-                        }
-                    }
-                    (Some(_), None) => "GET",
-                    (None, Some(_)) => "POST",
-                    (None, None) => panic!(
-                        "report route `{route}` in {file} registers neither `get(...)` nor \
-                         `post(...)` — the reports surface should have no other verb"
+        for (path, item) in doc["paths"].as_object().expect("paths") {
+            for verb in item.as_object().expect("a path item").keys() {
+                let verb = match verb.as_str() {
+                    "get" => "GET",
+                    "post" => "POST",
+                    other => panic!(
+                        "report route `{path}` answers {other} — the reports surface should have \
+                         no verb but GET and POST"
                     ),
                 };
-                routes.push((route, verb));
-                rest = tail;
+                routes.push((path.clone(), verb));
             }
         }
+        assert!(
+            routes.len() >= 30,
+            "only {} report routes are documented",
+            routes.len()
+        );
         routes.sort();
-        routes.dedup();
         routes
     }
 
-    /// Every `.rs` file under `dir`, recursively, as `(path, contents)`.
-    fn collect_report_sources(dir: &std::path::Path, out: &mut Vec<(String, String)>) {
-        for entry in std::fs::read_dir(dir)
-            .expect("src/reports should be readable")
-            .flatten()
-        {
-            let path = entry.path();
-            if path.is_dir() {
-                collect_report_sources(&path, out);
-            } else if path.extension().is_some_and(|x| x == "rs") {
-                out.push((
-                    path.display().to_string(),
-                    std::fs::read_to_string(&path).expect("report source should be readable"),
-                ));
-            }
-        }
-    }
-
-    /// Every route path string in `src/reports/*.rs`, sorted and de-duplicated.
+    /// Every report route's path, sorted and de-duplicated.
     fn report_route_paths() -> Vec<String> {
         let mut paths: Vec<String> = report_routes().into_iter().map(|(path, _)| path).collect();
         paths.sort();

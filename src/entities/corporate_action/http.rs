@@ -1,33 +1,38 @@
 //! HTTP routes: list/get/upsert/delete over the corporate_actions table.
 
+use super::CorporateActionListQuery;
 use super::db::{db_create, db_delete, db_upsert};
 use super::model::{CorporateAction, CorporateActionBody};
 use crate::infra::extract::Json;
 use crate::infra::http::{self, ApiError, UpsertResponse};
-use axum::{
-    Router,
-    extract::{Path, State},
-    http::StatusCode,
-    routing::get,
-};
+use crate::infra::respond::{Created, NoContent};
+use axum::extract::{Path, State};
 use sqlx::SqlitePool;
+use utoipa_axum::{router::OpenApiRouter, routes};
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new()
-        .route(
-            "/corporate_actions",
-            get(http::list_handler::<CorporateAction>).post(create),
-        )
-        .route(
-            "/corporate_actions/{id}",
-            get(http::get_handler::<CorporateAction>)
-                .put(upsert)
-                // Deleting an action still referenced by rights-exercise trades
-                // violates the trades.rights_action_id FK → 422 (delete those
-                // first); the types that create no trades carry their own
-                // delete-time guard in `db_delete`.
-                .delete(delete),
-        )
+http::crud_list_route!(
+    list,
+    CorporateAction,
+    CorporateActionListQuery,
+    "/corporate_actions",
+    "List every corporate action, optionally narrowed by ?listing_id= and an inclusive ?from=/?to= over the action date."
+);
+http::crud_get_route!(
+    get_one,
+    CorporateAction,
+    i64,
+    "/corporate_actions/{id}",
+    "Fetch one corporate action, or 404."
+);
+
+pub fn router() -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new()
+        .routes(routes!(list, create))
+        // Deleting an action still referenced by rights-exercise trades
+        // violates the trades.rights_action_id FK → 422 (delete those
+        // first); the types that create no trades carry their own
+        // delete-time guard in `db_delete`.
+        .routes(routes!(get_one, upsert, delete))
 }
 
 /// The action a request body describes. `id` is the path's on an upsert and
@@ -53,6 +58,11 @@ fn corporate_action_from_body(
     })
 }
 
+#[utoipa::path(
+    put,
+    path = "/corporate_actions/{id}",
+    summary = "Create or replace the corporate action at this id."
+)]
 async fn upsert(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
@@ -66,17 +76,27 @@ async fn upsert(
 /// database assigns one (see `db::write`), and the created row is returned so
 /// a client can act on its id immediately — participating, exercising,
 /// demerging — instead of guessing `max(id) + 1` between the two calls.
+#[utoipa::path(
+    post,
+    path = "/corporate_actions",
+    summary = "Create a corporate action; the created row is returned."
+)]
 async fn create(
     State(pool): State<SqlitePool>,
     Json(body): Json<CorporateActionBody>,
-) -> Result<(StatusCode, Json<CorporateAction>), ApiError> {
+) -> Result<Created<CorporateAction>, ApiError> {
     let created = db_create(&pool, &corporate_action_from_body(0, body)?).await?;
-    Ok((StatusCode::CREATED, Json(created)))
+    Ok(Created(created))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/corporate_actions/{id}",
+    summary = "Delete the corporate action; 422 while a trade references it."
+)]
 async fn delete(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<NoContent, ApiError> {
     http::deleted(db_delete(&pool, id).await?, "corporate action")
 }

@@ -5,14 +5,14 @@ use super::db::{JobRunRecord, JobRunStatus, db_next_runs, db_run_histories};
 use super::registry::{JobParams, JobRegistry, JobTrigger};
 use super::run::run_job;
 use crate::infra::extract::{Json, Query};
+use crate::infra::respond::NoContent;
 use axum::{
-    Extension, Router,
+    Extension,
     extract::{Path, State},
-    http::StatusCode,
-    routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 /// A job's status, surfaced by `GET /jobs` and the Jobs UI. Every registered
 /// job appears in the list; the `last_*` fields are `None` (and `runs` empty)
@@ -62,6 +62,11 @@ pub struct JobStatus {
 /// List every registered job (sorted) with its bounded run history (most
 /// recent first). Jobs that have never run carry `None` in the `last_*` fields
 /// and an empty `runs`.
+#[utoipa::path(
+    get,
+    path = "/jobs",
+    summary = "List the registered maintenance jobs with their schedule, trigger kind and run history."
+)]
 async fn list(
     State(pool): State<SqlitePool>,
     Extension(registry): Extension<JobRegistry>,
@@ -97,6 +102,12 @@ async fn list(
 /// Run one job now. Every failure answers with a plain-text body the Jobs
 /// screen can toast — a bare status code left the operator reading "HTTP 404"
 /// or "HTTP 500" with the reason nowhere in the response (SCENARIOS T-10).
+#[utoipa::path(
+    post,
+    path = "/jobs/{name}",
+    summary = "Trigger a registered job by name now; 404 naming the registered names, or 500 carrying the job's own failure text. Takes an optional ?suffix= / ?skip_command= in the query string, not a body.",
+    params(JobParams)
+)]
 async fn trigger(
     State(pool): State<SqlitePool>,
     Extension(registry): Extension<JobRegistry>,
@@ -105,7 +116,7 @@ async fn trigger(
     // rejection — the shared `Query` refuses it `400` naming it, so a
     // misspelt `?sufix=` cannot take an unlabelled backup.
     Query(params): Query<JobParams>,
-) -> Result<StatusCode, crate::infra::http::ApiError> {
+) -> Result<NoContent, crate::infra::http::ApiError> {
     // Reject an invalid suffix before the registry lookup or run_job: a
     // malformed request must not be recorded as a failed job run (only the
     // backup job reads it — as it does `skip_command`, which needs no
@@ -128,7 +139,7 @@ async fn trigger(
             )))
         }
         Some(job) => match run_job(&pool, &name, job, params).await {
-            Ok(()) => Ok(StatusCode::NO_CONTENT),
+            Ok(()) => Ok(NoContent),
             // The job's own error text (what `job_runs.error` records) rides
             // out in the 500's body, so the toast says what went wrong.
             Err(e) => Err(crate::infra::http::ApiError::job_failed(&name, e)),
@@ -139,8 +150,8 @@ async fn trigger(
 /// Routes for inspecting and manually triggering jobs. The `JobRegistry` is
 /// supplied to handlers via an `Extension` layer (added in `main`), so this
 /// router shares the common `SqlitePool` state and merges with the others.
-pub fn router() -> Router<SqlitePool> {
-    Router::new()
-        .route("/jobs", get(list))
-        .route("/jobs/{name}", post(trigger))
+pub fn router() -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new()
+        .routes(routes!(list))
+        .routes(routes!(trigger))
 }

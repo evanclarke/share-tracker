@@ -11,16 +11,13 @@ use crate::infra::db::write_tx;
 use crate::infra::extract::{Json, Query};
 use crate::infra::http::{self, ApiError, Upsert, UpsertResponse};
 use crate::infra::id::ListingId;
-use axum::{
-    Router,
-    extract::{Path, State},
-    http::StatusCode,
-    routing::get,
-};
+use crate::infra::respond::NoContent;
+use axum::extract::{Path, State};
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::collections::HashSet;
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 #[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct ExchangeHoliday {
@@ -45,14 +42,11 @@ pub struct ExchangeHolidayBody {
     pub name: String,
 }
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new()
-        .route("/exchange_holidays", get(list))
-        .route("/exchange_holidays/{mic}", get(list_for_exchange))
-        .route(
-            "/exchange_holidays/{mic}/{date}",
-            get(get_one).put(upsert).delete(delete),
-        )
+pub fn router() -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new()
+        .routes(routes!(list))
+        .routes(routes!(list_for_exchange))
+        .routes(routes!(get_one, upsert, delete))
 }
 
 /// `GET /exchange_holidays[/{mic}]` query: an inclusive `holiday_date` range
@@ -231,6 +225,12 @@ pub(crate) async fn exchange_holidays_for_listing(
     Ok(dates.into_iter().collect())
 }
 
+#[utoipa::path(
+    get,
+    path = "/exchange_holidays",
+    summary = "List every exchange's holidays, optionally narrowed by ?from= / ?to= (inclusive, over holiday_date).",
+    params(ListParams)
+)]
 async fn list(
     State(pool): State<SqlitePool>,
     Query(params): Query<ListParams>,
@@ -241,6 +241,12 @@ async fn list(
         .map_err(ApiError::from)
 }
 
+#[utoipa::path(
+    get,
+    path = "/exchange_holidays/{mic}",
+    summary = "List one exchange's holiday calendar, optionally narrowed by ?from= / ?to= (inclusive, over holiday_date).",
+    params(ListParams)
+)]
 async fn list_for_exchange(
     State(pool): State<SqlitePool>,
     Path(mic): Path<String>,
@@ -252,6 +258,11 @@ async fn list_for_exchange(
         .map_err(ApiError::from)
 }
 
+#[utoipa::path(
+    get,
+    path = "/exchange_holidays/{mic}/{date}",
+    summary = "Fetch one holiday, or 404."
+)]
 async fn get_one(
     State(pool): State<SqlitePool>,
     Path((mic, date)): Path<(String, String)>,
@@ -266,6 +277,11 @@ async fn get_one(
         .ok_or_else(|| ApiError::not_found("no exchange holiday on that date for that exchange"))
 }
 
+#[utoipa::path(
+    put,
+    path = "/exchange_holidays/{mic}/{date}",
+    summary = "Create or replace the holiday at this exchange and date."
+)]
 async fn upsert(
     State(pool): State<SqlitePool>,
     Path((mic, date)): Path<(String, String)>,
@@ -286,15 +302,20 @@ async fn upsert(
     http::upsert_response_of(outcome, row)
 }
 
+#[utoipa::path(
+    delete,
+    path = "/exchange_holidays/{mic}/{date}",
+    summary = "Delete the holiday."
+)]
 async fn delete(
     State(pool): State<SqlitePool>,
     Path((mic, date)): Path<(String, String)>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<NoContent, ApiError> {
     let date: NaiveDate = date
         .parse()
         .map_err(|_| ApiError::bad_request("the holiday date is not a valid date"))?;
     if db_delete(&pool, &mic, date).await? {
-        Ok(StatusCode::NO_CONTENT)
+        Ok(NoContent)
     } else {
         // Keyed by exchange + date rather than an id, so this one names both
         // instead of going through `infra::http::deleted`.
@@ -308,6 +329,7 @@ async fn delete(
 mod tests {
     use super::*;
     use crate::test_support::{self, ApiClient, test_pool, ymd};
+    use axum::http::StatusCode;
 
     /// Client over this module's own routes.
     fn client(pool: &SqlitePool) -> ApiClient {

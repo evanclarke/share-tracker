@@ -53,20 +53,17 @@ use crate::infra::http::ApiError;
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use crate::infra::id::TradeId;
+use crate::infra::respond::{Csv, Payload};
 use crate::reports::export::{self, Cents};
 use crate::reports::parcel_optimiser::{self, DisposalTotals, HypotheticalAllocation, Strategy};
 use crate::reports::tax_summary::aud_field;
-use axum::{
-    Router,
-    extract::State,
-    response::Response,
-    routing::{get, post},
-};
+use axum::extract::State;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, Row, SqlitePool};
 use std::collections::HashMap;
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 #[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize)]
 pub struct NetCapitalGainYear {
@@ -141,14 +138,11 @@ pub struct NetCapitalGainYear {
     pub disposals: Vec<super::realised_gains::RealisedGainLoss>,
 }
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new()
-        .route("/portfolio/net_capital_gain", get(net_capital_gain_handler))
-        .route(
-            "/portfolio/net_capital_gain/export",
-            get(net_capital_gain_export_handler),
-        )
-        .route("/portfolio/net_capital_gain/what_if", post(what_if_handler))
+pub fn router() -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new()
+        .routes(routes!(net_capital_gain_handler))
+        .routes(routes!(net_capital_gain_export_handler))
+        .routes(routes!(what_if_handler))
 }
 
 /// CSV export columns — `NetCapitalGainYear`'s fields in declaration order. The
@@ -1122,6 +1116,11 @@ pub(crate) async fn db_cgt_summary_year(
     }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/portfolio/net_capital_gain",
+    summary = "Net capital gain per financial year, with the discount and loss-netting order applied."
+)]
 async fn net_capital_gain_handler(
     State(pool): State<SqlitePool>,
 ) -> Result<Json<Vec<NetCapitalGainYear>>, ApiError> {
@@ -1178,9 +1177,14 @@ impl From<&NetCapitalGainYear> for NetCapitalGainYearCsv {
 }
 
 /// The same per-year rows as the JSON report, as a downloadable tax-return-ready CSV.
+#[utoipa::path(
+    get,
+    path = "/portfolio/net_capital_gain/export",
+    summary = "The net capital gain report as CSV."
+)]
 async fn net_capital_gain_export_handler(
     State(pool): State<SqlitePool>,
-) -> Result<Response, ApiError> {
+) -> Result<Payload<Csv>, ApiError> {
     let rows = db_net_capital_gain(&pool).await.map_err(ApiError::from)?;
     let csv_rows: Vec<NetCapitalGainYearCsv> = rows.iter().map(Into::into).collect();
     export::csv_response(
@@ -1267,6 +1271,11 @@ pub struct WhatIfResponse {
 /// the disposal's gain/loss buckets are injected into its tax year and the
 /// netting walk re-run — nothing is written. The whole-of-income tax estimate
 /// is out of scope; this is the CGT-side delta only.
+#[utoipa::path(
+    post,
+    path = "/portfolio/net_capital_gain/what_if",
+    summary = "What-if net capital gain for a contemplated disposal; the body's allocations are a list of per-parcel inputs."
+)]
 async fn what_if_handler(
     State(pool): State<SqlitePool>,
     Json(req): Json<WhatIfRequest>,

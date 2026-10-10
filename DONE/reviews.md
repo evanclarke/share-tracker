@@ -7246,3 +7246,73 @@ reduction nil), `cost_base::units_disposed_before_the_income_year_take_no_spill`
 and its 1 July boundary, conserving the row's amount), `tax_year::a_financial_year_starts_on_the_1_july_before_its_30_june_end`;
 three cross-check tests now write their row before the back-dated sale, the only way to reach that
 state. `docs/API.md` (AMIT adjustments) documents the cap and the spill confinement.
+
+## Architecture: domain↔entities cycle, mega-files, and conventions enforced by source scans (2026-10-10 review, maintainability)
+Scored 6/10 — the weakest dimension. The operation modules are well factored, but:
+- [x] `domain` imports `entities` (`cost_base.rs` uses `corporate_action::{RocEvent, SplitEvent,
+  RolloverOrigin}`; `open_parcels`/`rollover`/`contemplated_disposal`/`deduction_destination` call
+  entity db functions), so it is not a lower layer. Move the event types and their loaders into
+  `domain` (or a repository layer) so `domain` depends on nothing in `entities`; a scan test pins it
+  — done 2026-10-10: `corporate_action/adjustments.rs` → `domain/adjustments.rs` (re-exported from
+  `corporate_action`); `reduction_for`/`db_cost_base_reduction_events` → `domain::cost_base`;
+  `db_parcel_sales`/`db_sales_by_parcel` → `domain::open_parcels`; `amit_in_tax_year` →
+  `domain::tax_year`; `deduction_destination` takes `debt_deduction: bool`
+  (`ExpenseType::is_debt_deduction`); rollover's write half → new `entities::rollover`. Pinned by
+  `domain::tests::domain_depends_on_nothing_in_entities` (`strip_test_modules` moved to
+  `test_support` to share it)
+- [x] Split `reports/health.rs` (~3,300 prod lines, ~25 checks) into a `health/` directory by check
+  family, and fold the ~10 `Duplicate*` checks (`same_x_entry` + `db_duplicate_x` pairs) into one
+  generic duplicate detector — the existing health tests unchanged are the proof
+  — done 2026-10-10: `reports/health/` = `mod.rs` (report, freshness, `db_health`, route) over
+  `jobs`/`prices`/`duplicates`/`trades`/`calendar`, tests moved verbatim to `health/tests.rs`
+  (split committed alone first); the eight `duplicate_*` checks are one `DuplicateCheck` trait
+  (candidate SQL, `same_entry`, report, newest-first order) run by `find_duplicates`, the three
+  formerly SQL-grouped ones (trades/actions/AMMA) included — 2714 tests pass with the health
+  tests unchanged. (The price-series pair check stays separate: it is a run walk, not a group)
+- [x] `trade/db.rs` `write`: replace the seven per-provenance-column `is_some()` guards with one lookup
+  over `TRADE_PROVENANCE`, and drop the duplicated "is this trade referenced?" `EXISTS` query
+  — done 2026-10-10: each `TRADE_PROVENANCE` row carries its `edit_refusal` and `deleted_alone`
+  policy, the upsert and delete guards read the row's one column via `provenance_column_sql`
+  (so `every_trades_foreign_key_is_classified` makes a new link choose both), and the listing- and
+  account-change freezes share `drawn_on`; the existing refusal tests pass unchanged
+- [x] DECIDED 2026-10-10 (owner: all four): replace source-scanning conventions with compile-time ones where the
+  type system can carry them — `utoipa-axum` (`#[utoipa::path]`/`OpenApiRouter`) instead of the
+  hand-kept `ROUTES` table and its ~3,700 lines of Rust-parsing tests; a `ReadPool`/`WritePool` split
+  instead of the deferred-`BEGIN` text scan; a `Currency` type instead of `String` + `== "AUD"`;
+  id newtypes (`ListingId`, `TradeId`, …) instead of bare `i64`. Each is a large mechanical change —
+  decide which (if any) are worth it
+  - [x] `Currency` type in place of `String` + `== "AUD"` (do first: financial-correctness value)
+    — done 2026-10-10 as `infra::currency::CurrencyCode` (the `currencies` entity already owns the
+    name `Currency`): all 79 currency fields, the local currency reads and the currency-carrying
+    error payloads; `is_aud()` is the one AUD test, and production code cannot compile a `== "AUD"`
+    (test-only `PartialEq<&str>`); pinned by `infra::currency`'s tests and the type itself
+  - [x] `ReadPool`/`WritePool` split, retiring the deferred-`BEGIN` text scan
+    — done 2026-10-10, at the transaction rather than the pool (two pool types would have rethreaded
+    ~940 `SqlitePool` mentions for the same guarantee): reads begin with `infra::db::read_tx`, a
+    `ReadTx` under `PRAGMA query_only` that SQLite refuses to write through; `sqlx::Pool::begin` is
+    in `clippy.toml`'s `disallowed-methods`; the pool's release hook resets `query_only`. The
+    `DEFERRED_BEGIN_ALLOWED` scan is gone; pinned by `a_read_transaction_refuses_every_write`
+  - [x] Id newtypes (`ListingId`, `TradeId`, …) in place of bare `i64` — done 2026-10-10 for the
+    three ids that get crossed: `ListingId`, `HoldingAccountId`, `TradeId` (`infra::id`'s `id_type!`;
+    every such field, param, route path and keyed map). The less-shared ids (statement, income,
+    action) stay `i64`; adding one is a line in `infra::id` plus the same compiler-driven pass.
+    `RealisedGainLoss::sale_trade_id` stays bare — it is a trade id *or* a rights-sale id by
+    `source`, and its consumers all check `source` first
+  - [x] `utoipa-axum` (`#[utoipa::path]`/`OpenApiRouter`) in place of the `ROUTES` table and its
+    Rust-parsing tests — done 2026-10-10: every handler is a `#[utoipa::path]` function registered
+    by `routes!`, so the served route and the documented operation are one declaration; utoipa
+    reads the request body and query parameters off the extractors and the success responses off
+    the return type, now always an `infra::respond` type carrying its status (`Created`,
+    `Written`, `NoContent`, `Payload<Csv>`, …). The 50 generic CRUD registrations are one-line
+    `http::crud_{list,get,delete}_route!` wrappers. `ROUTES` (174 rows) and the ~900 lines of
+    source-parsing tests are gone; the generated document is identical to the table-built one
+    bar one summary's wording (diffed both auth shapes). What the types cannot carry stays pinned
+    against the document: `every_route_is_registered_through_routes` (no plain `.route(…)`
+    outside the two classified sites), `every_success_response_carries_its_body`, the summary ⇄
+    query-parameter check both ways, and `LIST_ROUTES`' filters against each list's documented
+    parameters
+- [x] DECIDED 2026-10-10 (owner): keep them — N/A. prune `doc_checks.rs` phrase pins (~150 tests asserting exact prose,
+  which break on rewording without protecting behaviour) down to the structural checks (link
+  resolution, advisory-ignore expiry, QC headers)
+  The pins are the passing test CLAUDE.md requires before a doc-only TODO item can be checked off;
+  rewording costs a test edit, which is the intended friction

@@ -5,16 +5,13 @@ use crate::infra::extract::Json;
 use crate::infra::http::{self, ApiError, CrudEntity, Upsert, UpsertResponse};
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
-use axum::{
-    Router,
-    extract::{Path, State},
-    http::StatusCode,
-    routing::get,
-};
+use crate::infra::respond::Created;
+use axum::extract::{Path, State};
 use chrono::{Datelike, NaiveDate};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 #[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct AmmaStatement {
@@ -339,20 +336,34 @@ impl CrudEntity for AmmaStatement {
     const NOUN: &'static str = "AMMA statement";
 }
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new()
-        .route(
-            "/amma_statements",
-            get(http::list_handler::<AmmaStatement>).post(create),
-        )
-        .route(
-            "/amma_statements/{id}",
-            get(http::get_handler::<AmmaStatement>)
-                .put(upsert)
-                // Deleting a statement still referenced by AMIT adjustments
-                // violates an FK → 422.
-                .delete(http::delete_handler::<AmmaStatement>),
-        )
+http::crud_list_route!(
+    list,
+    AmmaStatement,
+    AmmaListQuery,
+    "/amma_statements",
+    "List every AMMA statement, optionally narrowed by ?listing_id=, ?holding_account_id= and an inclusive ?from=/?to= over tax_year_end_date."
+);
+http::crud_get_route!(
+    get_one,
+    AmmaStatement,
+    i64,
+    "/amma_statements/{id}",
+    "Fetch one AMMA statement, or 404."
+);
+http::crud_delete_route!(
+    delete_one,
+    AmmaStatement,
+    i64,
+    "/amma_statements/{id}",
+    "Delete the AMMA statement."
+);
+
+pub fn router() -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new()
+        .routes(routes!(list, create))
+        // Deleting a statement still referenced by AMIT adjustments
+        // violates an FK → 422.
+        .routes(routes!(get_one, upsert, delete_one))
 }
 
 #[cfg(test)]
@@ -585,6 +596,11 @@ fn amma_from_body(id: i64, body: AmmaStatementBody) -> AmmaStatement {
     }
 }
 
+#[utoipa::path(
+    put,
+    path = "/amma_statements/{id}",
+    summary = "Create or replace the AMMA statement at this id."
+)]
 async fn upsert(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
@@ -599,18 +615,24 @@ async fn upsert(
 /// caller can act on its id at once — attaching the AMMA's generated AMIT
 /// adjustments to it, for one — with no `max(id) + 1` guess between the two
 /// calls.
+#[utoipa::path(
+    post,
+    path = "/amma_statements",
+    summary = "Create an AMMA statement; the created row is returned."
+)]
 async fn create(
     State(pool): State<SqlitePool>,
     Json(body): Json<AmmaStatementBody>,
-) -> Result<(StatusCode, Json<AmmaStatement>), ApiError> {
+) -> Result<Created<AmmaStatement>, ApiError> {
     let created = db_create(&pool, &amma_from_body(0, body)).await?;
-    Ok((StatusCode::CREATED, Json(created)))
+    Ok(Created(created))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_support::{self, ApiClient, dec, test_pool};
+    use axum::http::StatusCode;
 
     /// Client over this module's own routes.
     fn client(pool: &SqlitePool) -> ApiClient {

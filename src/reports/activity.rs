@@ -44,12 +44,13 @@ use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use crate::infra::id::TradeId;
 use crate::reports::portfolio::{self, HoldingOverview};
-use axum::{Extension, Router, extract::State, routing::get};
+use axum::{Extension, extract::State};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 use std::collections::{HashMap, HashSet};
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 /// One dated row of the ledger. `quantity` is the row's signed unit effect in
 /// its own date's unit basis (absent for rows that move no units), and
@@ -889,10 +890,16 @@ fn describe_action(
     }
 }
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new().route("/portfolio/activity", get(activity_handler))
+pub fn router() -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new().routes(routes!(activity_handler))
 }
 
+#[utoipa::path(
+    get,
+    path = "/portfolio/activity",
+    summary = "One listing's activity ledger; ?listing_id= is required, with an optional ?price= for the holding summary (absent, it is live-fetched).",
+    params(ActivityRequest)
+)]
 async fn activity_handler(
     State(pool): State<SqlitePool>,
     fetcher: Option<Extension<SharedFetcher>>,

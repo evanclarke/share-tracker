@@ -1,15 +1,13 @@
 use crate::infra::currency::CurrencyCode;
 use crate::infra::db::write_tx;
 use crate::infra::extract::Json;
+use crate::infra::http::NoFilter;
 use crate::infra::http::{self, ApiError, CrudEntity, UpsertResponse};
-use axum::{
-    Router,
-    extract::{Path, State},
-    routing::get,
-};
+use axum::extract::{Path, State};
 use chrono::NaiveTime;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 #[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Exchange {
@@ -135,17 +133,34 @@ impl CrudEntity for Exchange {
     const NOUN: &'static str = "exchange";
 }
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new()
-        .route("/exchanges", get(http::list_handler::<Exchange>))
-        .route(
-            "/exchanges/{mic}",
-            get(http::get_handler::<Exchange>)
-                .put(upsert)
-                // Deleting an exchange still referenced by listings/holidays
-                // violates an FK → 422.
-                .delete(http::delete_handler::<Exchange>),
-        )
+http::crud_list_route!(
+    list,
+    Exchange,
+    NoFilter,
+    "/exchanges",
+    "List every curated exchange."
+);
+http::crud_get_route!(
+    get_one,
+    Exchange,
+    String,
+    "/exchanges/{mic}",
+    "Fetch one exchange, or 404."
+);
+http::crud_delete_route!(
+    delete_one,
+    Exchange,
+    String,
+    "/exchanges/{mic}",
+    "Delete the exchange."
+);
+
+pub fn router() -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new()
+        .routes(routes!(list))
+        // Deleting an exchange still referenced by listings/holidays
+        // violates an FK → 422.
+        .routes(routes!(get_one, upsert, delete_one))
 }
 
 /// Executor-generic for the same reason [`listing::db_get`] is: the trading
@@ -234,6 +249,11 @@ pub async fn db_delete(pool: &SqlitePool, mic: &str) -> Result<bool, sqlx::Error
     http::crud_delete::<Exchange>(pool, mic.to_string()).await
 }
 
+#[utoipa::path(
+    put,
+    path = "/exchanges/{mic}",
+    summary = "Create or replace the exchange at this MIC."
+)]
 async fn upsert(
     State(pool): State<SqlitePool>,
     Path(mic): Path<String>,

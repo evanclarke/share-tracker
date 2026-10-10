@@ -1,8 +1,9 @@
 use crate::infra::extract::Json;
 use crate::infra::http::ApiError;
-use axum::{Router, extract::State, routing::get};
+use axum::extract::State;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 /// Validation status of a curated exchange's MIC against the ISO 10383 registry.
 /// Non-blocking: writes to `exchanges` are never rejected — this report only
@@ -19,8 +20,8 @@ pub struct ExchangeMicStatus {
     pub expiry_date: Option<String>,
 }
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new().route("/reports/exchange_mic_validation", get(report))
+pub fn router() -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new().routes(routes!(report))
 }
 
 /// Classify each curated exchange's MIC against the registry. An exchange with no
@@ -57,6 +58,11 @@ pub async fn db_validate(pool: &SqlitePool) -> Result<Vec<ExchangeMicStatus>, sq
     Ok(out)
 }
 
+#[utoipa::path(
+    get,
+    path = "/reports/exchange_mic_validation",
+    summary = "Validate every curated exchange's MIC against the registry."
+)]
 async fn report(State(pool): State<SqlitePool>) -> Result<Json<Vec<ExchangeMicStatus>>, ApiError> {
     db_validate(&pool).await.map(Json).map_err(ApiError::from)
 }

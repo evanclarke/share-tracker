@@ -4,11 +4,12 @@ use crate::infra::http::ApiError;
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use crate::infra::id::TradeId;
-use axum::{Router, extract::State, routing::get};
+use axum::extract::State;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 /// One open (not fully sold) purchase parcel — the per-parcel schedule a user
 /// reconciles against a broker statement. All monetary figures are AUD,
@@ -51,8 +52,8 @@ pub struct OpenParcel {
     pub remaining_cost_base: Decimal,
 }
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new().route("/portfolio/open_parcels", get(open_parcels_handler))
+pub fn router() -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new().routes(routes!(open_parcels_handler))
 }
 
 /// The open-parcels report's query string: just the valuation date.
@@ -156,6 +157,12 @@ pub async fn db_open_parcels_on(
     Ok(parcels)
 }
 
+#[utoipa::path(
+    get,
+    path = "/portfolio/open_parcels",
+    summary = "Every open parcel, per parcel rather than aggregated; ?as_of_date= is the valuation date (omitted = today's live position).",
+    params(OpenParcelsQuery)
+)]
 async fn open_parcels_handler(
     State(pool): State<SqlitePool>,
     Query(q): Query<OpenParcelsQuery>,

@@ -44,12 +44,13 @@ use crate::infra::http::ApiError;
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use crate::reports::{performance, realised_gains, valuation};
-use axum::{Router, extract::State, routing::get};
+use axum::extract::State;
 use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::collections::{BTreeMap, HashMap};
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
 #[serde(deny_unknown_fields)]
@@ -478,6 +479,12 @@ pub async fn compute(
     })
 }
 
+#[utoipa::path(
+    get,
+    path = "/portfolio/period_performance",
+    summary = "Portfolio return over a period, with FX attribution; ?from= / ?to= bound the window.",
+    params(PeriodRequest)
+)]
 async fn period_performance_handler(
     State(pool): State<SqlitePool>,
     Query(req): Query<PeriodRequest>,
@@ -486,11 +493,8 @@ async fn period_performance_handler(
     Ok(Json(result))
 }
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new().route(
-        "/portfolio/period_performance",
-        get(period_performance_handler),
-    )
+pub fn router() -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new().routes(routes!(period_performance_handler))
 }
 
 #[cfg(test)]

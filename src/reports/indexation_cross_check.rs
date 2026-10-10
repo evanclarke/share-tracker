@@ -99,12 +99,13 @@ use crate::infra::extract::Json;
 use crate::infra::http::ApiError;
 use crate::infra::id::ListingId;
 use crate::infra::id::TradeId;
-use axum::{Router, extract::State, routing::get};
+use axum::extract::State;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 use std::collections::HashMap;
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 /// One parcel allocation of one disposal, with the two methods' assessable
 /// gains set against each other. Every figure is AUD.
@@ -191,8 +192,8 @@ pub struct IndexationCrossCheck {
     pub years: Vec<IndexationYear>,
 }
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new().route("/reports/indexation_cross_check", get(report))
+pub fn router() -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new().routes(routes!(report))
 }
 
 /// Build the report. Every input is read on **one** read transaction — the
@@ -339,6 +340,11 @@ fn comparison_sentence(capital_losses_realised: Decimal) -> String {
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/reports/indexation_cross_check",
+    summary = "Cross-check the indexation factors against the ATO's published table."
+)]
 async fn report(State(pool): State<SqlitePool>) -> Result<Json<IndexationCrossCheck>, ApiError> {
     db_indexation_cross_check(&pool)
         .await

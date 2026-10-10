@@ -36,11 +36,12 @@ use crate::infra::id::ListingId;
 #[cfg(test)]
 use crate::infra::id::TradeId;
 use crate::reports::franking;
-use axum::{Router, extract::State, routing::get};
+use axum::extract::State;
 use chrono::{Duration, NaiveDate};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 /// A dividend whose entitled shares fail the holding-period walk — its
 /// credits are denied, unless the year's small-shareholder exemption shields
@@ -126,10 +127,10 @@ pub struct FrankingWhatIfAlert {
     pub status: String,
 }
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new()
-        .route("/reports/franking_at_risk", get(report))
-        .route("/reports/franking_at_risk/what_if", get(what_if))
+pub fn router() -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new()
+        .routes(routes!(report))
+        .routes(routes!(what_if))
 }
 
 /// Every franked dividend whose entitled shares fail the holding-period walk,
@@ -249,6 +250,11 @@ pub async fn db_franking_what_if(
     Ok(alerts)
 }
 
+#[utoipa::path(
+    get,
+    path = "/reports/franking_at_risk",
+    summary = "Franking credits at risk from the holding-period rule."
+)]
 async fn report(
     State(pool): State<SqlitePool>,
 ) -> Result<Json<Vec<FrankingAtRiskAlert>>, ApiError> {
@@ -258,6 +264,12 @@ async fn report(
         .map_err(ApiError::from)
 }
 
+#[utoipa::path(
+    get,
+    path = "/reports/franking_at_risk/what_if",
+    summary = "What-if franking-at-risk for a contemplated sale; ?listing_id=, ?sale_date= and ?units= drive it.",
+    params(WhatIfRequest)
+)]
 async fn what_if(
     State(pool): State<SqlitePool>,
     Query(req): Query<WhatIfRequest>,

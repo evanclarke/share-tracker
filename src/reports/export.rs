@@ -18,8 +18,9 @@
 //! UI's `COLUMN_KINDS`. The JSON reports keep the exact figure; a `Decimal`
 //! field left as a `Decimal` (a rate, a quantity) still exports verbatim.
 use crate::infra::decimal::to_cents;
+use crate::infra::respond::{Csv, Payload};
 use axum::http::header;
-use axum::response::{IntoResponse, Response};
+use axum::response::IntoResponse;
 use rust_decimal::Decimal;
 use serde::{Serialize, Serializer};
 use std::fmt;
@@ -84,7 +85,7 @@ pub fn csv_response<T: Serialize>(
     header: &[&str],
     labels: &[&str],
     rows: &[T],
-) -> Result<Response, csv::Error> {
+) -> Result<Payload<Csv>, csv::Error> {
     let mut wtr = csv::WriterBuilder::new()
         .has_headers(false) // the explicit header records below are the only ones
         .from_writer(Vec::new());
@@ -96,22 +97,25 @@ pub fn csv_response<T: Serialize>(
     let body = wtr
         .into_inner()
         .expect("flushing a CSV into an in-memory Vec cannot fail");
-    Ok((
-        [
-            (header::CONTENT_TYPE, "text/csv; charset=utf-8".to_string()),
-            (
-                header::CONTENT_DISPOSITION,
-                format!("attachment; filename=\"{filename}\""),
-            ),
-        ],
-        body,
-    )
-        .into_response())
+    Ok(Payload::from_response(
+        (
+            [
+                (header::CONTENT_TYPE, "text/csv; charset=utf-8".to_string()),
+                (
+                    header::CONTENT_DISPOSITION,
+                    format!("attachment; filename=\"{filename}\""),
+                ),
+            ],
+            body,
+        )
+            .into_response(),
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::response::Response;
     use http_body_util::BodyExt;
 
     #[derive(Serialize)]
@@ -150,7 +154,8 @@ mod tests {
             &[ATO_LABELS_MARKER, "18A"],
             &rows,
         )
-        .unwrap();
+        .unwrap()
+        .into_response();
         assert_eq!(
             resp.headers().get(header::CONTENT_TYPE).unwrap(),
             "text/csv; charset=utf-8"
@@ -184,7 +189,8 @@ mod tests {
             &[ATO_LABELS_MARKER, "18A", ""],
             &rows,
         )
-        .unwrap();
+        .unwrap()
+        .into_response();
         assert_eq!(
             body_string(resp).await,
             "year,amount,fx_rate\nato_labels_2026,18A,\n2026,39592.12,0.657123\n"
@@ -236,7 +242,8 @@ mod tests {
             &[ATO_LABELS_MARKER, ""],
             &Vec::<Row>::new(),
         )
-        .unwrap();
+        .unwrap()
+        .into_response();
         assert_eq!(body_string(resp).await, "year,amount\nato_labels_2026,\n");
     }
 

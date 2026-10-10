@@ -12,16 +12,16 @@ use crate::infra::db::write_tx;
 use crate::infra::extract::{Json, Query};
 use crate::infra::http::{self, ApiError, Upsert, UpsertResponse};
 use crate::infra::id::ListingId;
+use crate::infra::respond::{NoContent, Written};
 use axum::{
-    Extension, Router,
+    Extension,
     extract::{Path, State},
-    http::StatusCode,
-    routing::{get, post},
 };
 use chrono::{Duration, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
 #[serde(deny_unknown_fields)]
@@ -113,6 +113,12 @@ pub struct BackfillSummary {
     pub errored: usize,
 }
 
+#[utoipa::path(
+    get,
+    path = "/closing_prices",
+    summary = "List stored closing prices, optionally narrowed by ?listing_id= / ?from= / ?to= / ?status= (ok or error; omitted is every row). ?status=ok is the rows that carry a price, which is not the same as the rows a valuation reads: a row before its listing's unpriced_before is stored ok and superseded, and no valuation uses it.",
+    params(ListParams)
+)]
 async fn list(
     State(pool): State<SqlitePool>,
     Query(params): Query<ListParams>,
@@ -134,6 +140,11 @@ async fn list(
 /// what it is about to replace or remove. Errored rows are answered like any
 /// other (their own `status` says so); no row at all is a `404` naming what
 /// is missing, as every GET-one answers.
+#[utoipa::path(
+    get,
+    path = "/closing_prices/{listing_id}/{price_date}",
+    summary = "Fetch the stored price row for one (listing, day), errored or ok, or 404."
+)]
 async fn get_one(
     State(pool): State<SqlitePool>,
     Path((listing_id, price_date)): Path<(ListingId, NaiveDate)>,
@@ -156,6 +167,11 @@ async fn get_one(
 /// manual price may deliberately replace a stored provider price that is
 /// wrong; that is an ordinary UPDATE, so the staleness trigger regenerates
 /// the snapshots that used the old figure.
+#[utoipa::path(
+    put,
+    path = "/closing_prices/{listing_id}/{price_date}",
+    summary = "Store a hand-entered price for one (listing, day) with its provenance: 201 with the stored row when no price was there, 204 when one was replaced."
+)]
 async fn put_manual(
     State(pool): State<SqlitePool>,
     Path((listing_id, price_date)): Path<(ListingId, NaiveDate)>,
@@ -242,11 +258,16 @@ async fn put_manual(
 /// correction for a day the provider got wrong or cannot serve at all, so the
 /// provider never takes the day back — the price is changed by entering
 /// another one.
+#[utoipa::path(
+    post,
+    path = "/closing_prices/fetch",
+    summary = "Fetch and store one day's close from the price provider; the stored row is returned."
+)]
 async fn fetch_one(
     State(pool): State<SqlitePool>,
     Extension(fetcher): Extension<SharedFetcher>,
     Json(body): Json<FetchBody>,
-) -> Result<(StatusCode, Json<ClosingPrice>), ApiError> {
+) -> Result<Written<ClosingPrice>, ApiError> {
     let market = load_market(&pool, body.listing_id)
         .await
         .map_err(internal)?
@@ -272,18 +293,18 @@ async fn fetch_one(
         .await
         .map_err(internal)?
         .ok_or_else(|| internal("stored row vanished"))?;
-    let status = if before.is_some_and(|b| b.id == row.id) {
-        StatusCode::OK
-    } else {
-        StatusCode::CREATED
-    };
-    Ok((status, Json(row)))
+    Ok(Written::new(before.is_some_and(|b| b.id == row.id), row))
 }
 
 /// Backfill a listing's price history over a date range (e.g. after importing
 /// an old trade, or recovering pre-rename history under the old symbol via
 /// the optional `symbol` override): trading days only, skipping dates
 /// already stored ok, in one provider call.
+#[utoipa::path(
+    post,
+    path = "/closing_prices/backfill",
+    summary = "Backfill a listing's price history over a date range and report what was stored."
+)]
 async fn backfill(
     State(pool): State<SqlitePool>,
     Extension(fetcher): Extension<SharedFetcher>,
@@ -374,10 +395,15 @@ async fn backfill(
 /// `unpriced_from` gets **no** such relaxation: a date on or after it *is*
 /// valued, at the last stored ok close carried forward, so a delete there
 /// could remove the very figure being carried.
+#[utoipa::path(
+    delete,
+    path = "/closing_prices/{listing_id}/{price_date}",
+    summary = "Delete a stored price row that is errored or superseded; 422 for an ok row."
+)]
 async fn delete_one(
     State(pool): State<SqlitePool>,
     Path((listing_id, price_date)): Path<(ListingId, NaiveDate)>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<NoContent, ApiError> {
     // The guard and the delete share one connection inside one write
     // transaction. Read on the pool and deleted in a separate statement, a
     // concurrent manual `PUT` or re-fetch could store an ok price for this
@@ -406,7 +432,7 @@ async fn delete_one(
     }
     db_delete(&mut *tx, listing_id, price_date).await?;
     tx.commit().await?;
-    Ok(StatusCode::NO_CONTENT)
+    Ok(NoContent)
 }
 
 /// Clear a listing's whole superseded price span in one request: every row
@@ -423,6 +449,11 @@ async fn delete_one(
 ///
 /// `404` for an unknown listing; `422` for a listing that declares no
 /// `unpriced_before`, since without one there is no superseded span at all.
+#[utoipa::path(
+    post,
+    path = "/closing_prices/clear_unpriced_before",
+    summary = "Clear the span of a listing's stored prices that its own unpriced_before marker declares superseded, and report how many rows were removed."
+)]
 async fn clear_unpriced_before(
     State(pool): State<SqlitePool>,
     Json(body): Json<ClearBody>,
@@ -518,17 +549,11 @@ fn unprocessable(e: impl std::fmt::Display) -> ApiError {
     ApiError::unprocessable(e.to_string())
 }
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new()
-        .route("/closing_prices", get(list))
-        .route("/closing_prices/fetch", post(fetch_one))
-        .route("/closing_prices/backfill", post(backfill))
-        .route(
-            "/closing_prices/clear_unpriced_before",
-            post(clear_unpriced_before),
-        )
-        .route(
-            "/closing_prices/{listing_id}/{price_date}",
-            get(get_one).put(put_manual).delete(delete_one),
-        )
+pub fn router() -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new()
+        .routes(routes!(list))
+        .routes(routes!(fetch_one))
+        .routes(routes!(backfill))
+        .routes(routes!(clear_unpriced_before))
+        .routes(routes!(get_one, put_manual, delete_one))
 }

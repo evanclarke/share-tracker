@@ -42,21 +42,18 @@ use crate::entities::trade::{self, Trade};
 use crate::infra::currency::CurrencyCode;
 use crate::infra::db::{WriteMode, write_tx};
 use crate::infra::decimal::parse_dec;
-use crate::infra::extract::{Json, Query};
+use crate::infra::extract::Query;
 use crate::infra::http::{ApiError, DryRunQuery};
 #[cfg(test)]
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::TradeId;
-use axum::{
-    Router,
-    extract::{Path, State},
-    http::StatusCode,
-    routing::post,
-};
+use crate::infra::respond::Written;
+use axum::extract::{Path, State};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::Serialize;
 use sqlx::{Row, SqlitePool};
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 /// The result of recognising a worthless holding: the closing Sell that
 /// consumed every open parcel at nil proceeds.
@@ -105,8 +102,8 @@ impl From<sell::SellError> for RecogniseError {
     }
 }
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new().route("/corporate_actions/{id}/recognise", post(recognise))
+pub fn router() -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new().routes(routes!(recognise))
 }
 
 /// Close every open parcel of the action's listing through a single Sell at nil
@@ -257,18 +254,19 @@ async fn execute(
     Ok(Recognise { sell })
 }
 
+#[utoipa::path(
+    post,
+    path = "/corporate_actions/{id}/recognise",
+    summary = "Recognise a worthless-shares loss by closing every open parcel at nil, and return the closing Sell (?dry_run=true previews it: 200 with the same body, nothing stored).",
+    params(DryRunQuery)
+)]
 async fn recognise(
     State(pool): State<SqlitePool>,
     Path(action_id): Path<i64>,
     Query(query): Query<DryRunQuery>,
-) -> Result<(StatusCode, Json<Recognise>), ApiError> {
+) -> Result<Written<Recognise>, ApiError> {
     let recognise = execute(&pool, action_id, query.mode()).await?;
-    let status = if query.dry_run {
-        StatusCode::OK
-    } else {
-        StatusCode::CREATED
-    };
-    Ok((status, Json(recognise)))
+    Ok(Written::new(query.dry_run, recognise))
 }
 
 impl From<RecogniseError> for ApiError {
@@ -325,6 +323,7 @@ mod tests {
     use crate::entities::trade::TradeType;
     use crate::infra::id::ListingId;
     use crate::test_support::{self, ApiClient, test_pool};
+    use axum::http::StatusCode;
 
     /// Client over this module's own routes.
     fn client(pool: &SqlitePool) -> ApiClient {

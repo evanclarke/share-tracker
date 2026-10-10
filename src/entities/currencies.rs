@@ -14,12 +14,9 @@
 use crate::infra::db::write_tx;
 use crate::infra::extract::Json;
 use crate::infra::fetch::{FeedFetcher, LiveFeedFetcher, SharedFeedFetcher, fetch_feed};
+use crate::infra::http::NoFilter;
 use crate::infra::http::{self, ApiError, CrudEntity};
-use axum::{
-    Router,
-    extract::{Extension, State},
-    routing::{get, post},
-};
+use axum::extract::{Extension, State};
 use quick_xml::events::Event;
 use quick_xml::reader::Reader;
 use serde::{Deserialize, Serialize};
@@ -27,6 +24,7 @@ use serde_json::Value;
 use sqlx::SqlitePool;
 use std::collections::HashSet;
 use std::sync::Arc;
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 /// SIX Group "List One" — the official machine-readable ISO 4217 currency list.
 /// SIX is the ISO 4217 Maintenance Agency (on behalf of the SNV) and publishes
@@ -181,19 +179,34 @@ impl CrudEntity for Currency {
     const NOUN: &'static str = "currency";
 }
 
-pub fn router() -> Router<SqlitePool> {
+http::crud_list_route!(
+    list,
+    Currency,
+    NoFilter,
+    "/currencies",
+    "List every currency."
+);
+http::crud_get_route!(
+    get_one,
+    Currency,
+    String,
+    "/currencies/{code}",
+    "Fetch one currency by ISO 4217 code, or 404."
+);
+
+pub fn router() -> OpenApiRouter<SqlitePool> {
     router_with(Arc::new(LiveFeedFetcher))
 }
 
 /// [`router`] over a caller-supplied transport. The production `router` is the
 /// live one; the tests inject a stalled/oversized stub so the timeout and
 /// size-cap paths are exercised with no socket in play.
-fn router_with(fetcher: SharedFeedFetcher) -> Router<SqlitePool> {
-    Router::new()
-        .route("/currencies", get(http::list_handler::<Currency>))
-        .route("/currencies/{code}", get(http::get_handler::<Currency>))
+fn router_with(fetcher: SharedFeedFetcher) -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new()
+        .routes(routes!(list))
+        .routes(routes!(get_one))
         // Manual trigger for retries / missed runs. Read-only for clients otherwise.
-        .route("/currencies/import", post(import))
+        .routes(routes!(import))
         .layer(Extension(fetcher))
 }
 
@@ -548,6 +561,12 @@ async fn fetch(
 /// the DTIF snapshot without server credentials); with an empty body, fetches from
 /// the live sources. Both share `import_from_content`, and both answer the same
 /// per-feed [`ImportSummary`] — a pasted body reporting only the feed it is.
+#[utoipa::path(
+    post,
+    path = "/currencies/import",
+    summary = "Import the currency reference data; the body is a bare (text) ISO 4217 XML or ISO 24165 JSON document, and an empty body fetches the live sources.",
+    request_body(content = String, content_type = "text/plain")
+)]
 async fn import(
     State(pool): State<SqlitePool>,
     Extension(fetcher): Extension<SharedFeedFetcher>,

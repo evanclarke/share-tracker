@@ -5,12 +5,13 @@ use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
-use axum::{Router, extract::State, routing::get};
+use axum::extract::State;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, Row, SqlitePool};
 use std::collections::{BTreeMap, HashSet};
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 /// A financial year in which an AMIT listing received cash distributions into
 /// one holding account but has no AMMA statement covering that account and
@@ -46,8 +47,8 @@ pub struct AmitCashAlert {
     pub cash_total_aud: Decimal,
 }
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new().route("/reports/amit_cash_cross_check", get(report))
+pub fn router() -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new().routes(routes!(report))
 }
 
 /// Flag every (AMIT listing, holding account, financial year) with cash
@@ -150,6 +151,11 @@ pub async fn db_amit_cash_alerts(pool: &SqlitePool) -> Result<Vec<AmitCashAlert>
         .collect())
 }
 
+#[utoipa::path(
+    get,
+    path = "/reports/amit_cash_cross_check",
+    summary = "Flag (AMIT listing, account, financial year) combinations with cash that no statement accounts for."
+)]
 async fn report(State(pool): State<SqlitePool>) -> Result<Json<Vec<AmitCashAlert>>, ApiError> {
     db_amit_cash_alerts(&pool)
         .await

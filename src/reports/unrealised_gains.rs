@@ -5,12 +5,13 @@ use crate::infra::extract::Json;
 use crate::infra::http::ApiError;
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
-use axum::{Extension, Router, extract::State, routing::post};
+use axum::{Extension, extract::State};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::collections::HashMap;
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 /// Cost base is in AUD (each parcel converted via the ATO FX rate). The supplied
 /// `current_price` is taken as AUD too, so `market_value` and
@@ -74,11 +75,8 @@ pub struct UnrealisedGainsRequest {
     pub live: bool,
 }
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new().route(
-        "/portfolio/unrealised_gains",
-        post(unrealised_gains_handler),
-    )
+pub fn router() -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new().routes(routes!(unrealised_gains_handler))
 }
 
 /// The report is the position *as at* `as_of_date`: trades, sales, corporate
@@ -167,6 +165,11 @@ pub async fn db_unrealised_gains_on(
     Ok(result)
 }
 
+#[utoipa::path(
+    post,
+    path = "/portfolio/unrealised_gains",
+    summary = "Unrealised gains and losses; body carries the optional price-override map, live flag and as_of_date (omitted = today's live position)."
+)]
 async fn unrealised_gains_handler(
     State(pool): State<SqlitePool>,
     fetcher: Option<Extension<SharedFetcher>>,

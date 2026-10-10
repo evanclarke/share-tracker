@@ -39,16 +39,13 @@ use crate::infra::http::{self, ApiError, CrudEntity, Upsert, UpsertResponse};
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use crate::infra::id::TradeId;
-use axum::{
-    Router,
-    extract::{Path, State},
-    http::StatusCode,
-    routing::get,
-};
+use crate::infra::respond::{Created, NoContent};
+use axum::extract::{Path, State};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 #[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct EssStatement {
@@ -254,18 +251,25 @@ impl CrudEntity for EssStatement {
     const NOUN: &'static str = "ESS statement";
 }
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new()
-        .route(
-            "/ess_statements",
-            get(http::list_handler::<EssStatement>).post(create),
-        )
-        .route(
-            "/ess_statements/{id}",
-            get(http::get_handler::<EssStatement>)
-                .put(upsert)
-                .delete(delete),
-        )
+http::crud_list_route!(
+    list,
+    EssStatement,
+    EssStatementListQuery,
+    "/ess_statements",
+    "List every ESS statement, optionally narrowed by ?listing_id=, ?holding_account_id= and an inclusive ?from=/?to= over taxing_point_date."
+);
+http::crud_get_route!(
+    get_one,
+    EssStatement,
+    i64,
+    "/ess_statements/{id}",
+    "Fetch one ESS statement, or 404."
+);
+
+pub fn router() -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new()
+        .routes(routes!(list, create))
+        .routes(routes!(get_one, upsert, delete))
 }
 
 /// The SELECT list `EssStatement::from_row` maps — includes the derived
@@ -816,6 +820,11 @@ fn ess_statement_from_body(id: i64, body: EssStatementBody) -> EssStatement {
     }
 }
 
+#[utoipa::path(
+    put,
+    path = "/ess_statements/{id}",
+    summary = "Create or replace the ESS statement at this id."
+)]
 async fn upsert(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
@@ -829,12 +838,17 @@ async fn upsert(
 /// database assigns one (see [`write`]), and the created row is returned so
 /// `POST /ess_statements/:id/vest` can follow on the same call's id with no
 /// `max(id) + 1` guess between the two.
+#[utoipa::path(
+    post,
+    path = "/ess_statements",
+    summary = "Create an ESS statement; the created row is returned."
+)]
 async fn create(
     State(pool): State<SqlitePool>,
     Json(body): Json<EssStatementBody>,
-) -> Result<(StatusCode, Json<EssStatement>), ApiError> {
+) -> Result<Created<EssStatement>, ApiError> {
     let created = db_create(&pool, &ess_statement_from_body(0, body)).await?;
-    Ok((StatusCode::CREATED, Json(created)))
+    Ok(Created(created))
 }
 
 impl From<UpsertError> for ApiError {
@@ -918,12 +932,17 @@ impl From<UpsertError> for ApiError {
     }
 }
 
+#[utoipa::path(
+    delete,
+    path = "/ess_statements/{id}",
+    summary = "Delete the ESS statement; 422 while its vested Buy is still there."
+)]
 async fn delete(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<NoContent, ApiError> {
     match db_delete(&pool, id).await? {
-        DeleteOutcome::Deleted => Ok(StatusCode::NO_CONTENT),
+        DeleteOutcome::Deleted => Ok(NoContent),
         DeleteOutcome::NotFound => Err(ApiError::not_found("no ESS statement with that id")),
         DeleteOutcome::VestDrawnOn => Err(ApiError::unprocessable(
             "this ESS statement's vest Buy is drawn on by a sale allocation or AMIT \
@@ -937,6 +956,7 @@ mod tests {
     use super::*;
     use crate::entities::listing;
     use crate::test_support::{self, ApiClient, test_pool, ymd};
+    use axum::http::StatusCode;
 
     /// Client over this module's own routes.
     fn client(pool: &SqlitePool) -> ApiClient {

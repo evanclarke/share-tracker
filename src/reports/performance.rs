@@ -51,12 +51,13 @@ use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 #[cfg(test)]
 use crate::infra::id::TradeId;
-use axum::{Extension, Router, extract::State, routing::post};
+use axum::{Extension, extract::State};
 use chrono::{Months, NaiveDate};
 use rust_decimal::{Decimal, MathematicalOps};
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 use std::collections::{BTreeMap, HashMap};
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 #[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize)]
 pub struct HoldingPerformance {
@@ -141,8 +142,8 @@ pub struct PerformanceRequest {
     pub live: bool,
 }
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new().route("/portfolio/performance", post(performance_handler))
+pub fn router() -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new().routes(routes!(performance_handler))
 }
 
 /// One holding's accumulated AUD figures and dated cash flows
@@ -637,6 +638,11 @@ pub async fn db_performance_on(
     Ok(result)
 }
 
+#[utoipa::path(
+    post,
+    path = "/portfolio/performance",
+    summary = "Per-holding performance: accumulated figures and dated cash flows; body carries the optional price-override map, live flag and as_of_date (omitted = today's live position)."
+)]
 async fn performance_handler(
     State(pool): State<SqlitePool>,
     fetcher: Option<Extension<SharedFetcher>>,

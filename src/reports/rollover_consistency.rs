@@ -69,12 +69,13 @@ use crate::infra::http::ApiError;
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use crate::infra::id::TradeId;
-use axum::{Router, extract::State, routing::get};
+use axum::extract::State;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, Row, SqlitePool};
 use std::collections::HashMap;
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 /// Which operation a flagged group is.
 #[derive(utoipa::ToSchema, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -133,8 +134,8 @@ pub struct RolloverAlert {
     pub problems: Vec<String>,
 }
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new().route("/reports/rollover_consistency", get(report))
+pub fn router() -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new().routes(routes!(report))
 }
 
 /// One rollover group as read from `trades`.
@@ -433,6 +434,11 @@ async fn unconsumed_problems(
         .collect())
 }
 
+#[utoipa::path(
+    get,
+    path = "/reports/rollover_consistency",
+    summary = "Flag rollover groups whose replacement parcels do not reconcile."
+)]
 async fn report(State(pool): State<SqlitePool>) -> Result<Json<Vec<RolloverAlert>>, ApiError> {
     Ok(Json(db_rollover_alerts(&pool).await?))
 }

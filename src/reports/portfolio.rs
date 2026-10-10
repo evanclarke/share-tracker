@@ -6,12 +6,13 @@ use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 #[cfg(test)]
 use crate::infra::id::TradeId;
-use axum::{Extension, Router, extract::State, routing::post};
+use axum::{Extension, extract::State};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::collections::HashMap;
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 /// Cost base figures are in AUD (each parcel converted via the ATO FX rate). The
 /// supplied `current_price` is taken as AUD too, so `market_value` is AUD.
@@ -83,8 +84,8 @@ pub struct OverviewRequest {
     pub live: bool,
 }
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new().route("/portfolio/overview", post(overview))
+pub fn router() -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new().routes(routes!(overview))
 }
 
 /// Returns open holdings per (listing, holding account): quantity, cost base,
@@ -176,6 +177,11 @@ pub async fn db_holdings_on(
     Ok(result)
 }
 
+#[utoipa::path(
+    post,
+    path = "/portfolio/overview",
+    summary = "Open holdings per (listing, holding account) with quantity, cost base and value; body carries the optional price-override map, live flag and as_of_date (omitted = today's live position)."
+)]
 async fn overview(
     State(pool): State<SqlitePool>,
     fetcher: Option<Extension<SharedFetcher>>,

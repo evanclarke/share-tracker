@@ -69,15 +69,12 @@ use crate::infra::http::{ApiError, CrudEntity};
 use crate::infra::id::ListingId;
 #[cfg(test)]
 use crate::infra::id::TradeId;
-use axum::{
-    Router,
-    extract::{Path, State},
-    http::StatusCode,
-    routing::get,
-};
+use crate::infra::respond::{Created, NoContent};
+use axum::extract::{Path, State};
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 #[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct ListingRename {
@@ -287,13 +284,10 @@ impl From<UndoError> for ApiError {
     }
 }
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new()
-        .route("/listings/{id}/renames", get(list_for_listing).post(rename))
-        .route(
-            "/listings/{id}/renames/{rename_id}",
-            get(get_one).delete(undo),
-        )
+pub fn router() -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new()
+        .routes(routes!(list_for_listing, rename))
+        .routes(routes!(get_one, undo))
 }
 
 pub async fn db_list_for_listing(
@@ -613,25 +607,41 @@ pub async fn db_undo(
     Ok(())
 }
 
+#[utoipa::path(
+    post,
+    path = "/listings/{id}/renames",
+    summary = "Rename a listing from a date and return the recorded rename."
+)]
 async fn rename(
     State(pool): State<SqlitePool>,
     Path(listing_id): Path<ListingId>,
     Json(body): Json<RenameBody>,
-) -> Result<(StatusCode, Json<ListingRename>), ApiError> {
+) -> Result<Created<ListingRename>, ApiError> {
     let created = db_rename(&pool, listing_id, &body).await?;
-    Ok((StatusCode::CREATED, Json(created)))
+    Ok(Created(created))
 }
 
+#[utoipa::path(
+    get,
+    path = "/listings/{id}/renames",
+    summary = "List one listing's recorded renames.",
+    params(crate::infra::http::NoFilter)
+)]
 async fn list_for_listing(
     State(pool): State<SqlitePool>,
     Path(listing_id): Path<ListingId>,
     // Decoded only so an unrecognised parameter is refused rather than
     // silently ignored, like every other list.
-    Query(_): Query<crate::infra::http::NoFilter>,
+    Query(_no_filter): Query<crate::infra::http::NoFilter>,
 ) -> Result<Json<Vec<ListingRename>>, ApiError> {
     Ok(Json(db_list_for_listing(&pool, listing_id).await?))
 }
 
+#[utoipa::path(
+    get,
+    path = "/listings/{id}/renames/{rename_id}",
+    summary = "Fetch one recorded rename of this listing, or 404."
+)]
 async fn get_one(
     State(pool): State<SqlitePool>,
     Path((listing_id, rename_id)): Path<(ListingId, i64)>,
@@ -642,12 +652,17 @@ async fn get_one(
         .ok_or_else(|| ApiError::not_found("no rename of that listing with that id"))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/listings/{id}/renames/{rename_id}",
+    summary = "Undo a recorded rename."
+)]
 async fn undo(
     State(pool): State<SqlitePool>,
     Path((listing_id, rename_id)): Path<(ListingId, i64)>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<NoContent, ApiError> {
     db_undo(&pool, listing_id, rename_id).await?;
-    Ok(StatusCode::NO_CONTENT)
+    Ok(NoContent)
 }
 
 #[cfg(test)]
@@ -655,6 +670,7 @@ mod tests {
     use super::*;
     use crate::entities::listing;
     use crate::test_support::{self, ApiClient, test_pool};
+    use axum::http::StatusCode;
 
     /// Client over this module's own routes.
     fn client(pool: &SqlitePool) -> ApiClient {

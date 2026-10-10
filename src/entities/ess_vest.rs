@@ -84,20 +84,17 @@
 
 use crate::entities::trade::{self, Trade};
 use crate::infra::db::{WriteMode, write_tx};
-use crate::infra::extract::{Json, Query};
+use crate::infra::extract::Query;
 use crate::infra::http::{ApiError, DryRunQuery};
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 #[cfg(test)]
 use crate::infra::id::TradeId;
-use axum::{
-    Router,
-    extract::{Path, State},
-    http::StatusCode,
-    routing::post,
-};
+use crate::infra::respond::Written;
+use axum::extract::{Path, State};
 use rust_decimal::Decimal;
 use sqlx::{Row, SqlitePool};
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 #[derive(thiserror::Error, Debug)]
 pub enum VestError {
@@ -138,8 +135,8 @@ pub enum VestError {
     UnrepresentableRebasedQuantity(#[source] crate::domain::cost_base::UnrepresentableQuantity),
 }
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new().route("/ess_statements/{id}/vest", post(vest))
+pub fn router() -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new().routes(routes!(vest))
 }
 
 /// Create the statement's cost-base-reset Buy and link it, atomically.
@@ -271,18 +268,19 @@ async fn execute(
     Ok(trade)
 }
 
+#[utoipa::path(
+    post,
+    path = "/ess_statements/{id}/vest",
+    summary = "Vest an ESS statement into the cost-base-reset Buy it implies, and return the created trade (?dry_run=true previews it: 200 with the same body, nothing stored).",
+    params(DryRunQuery)
+)]
 async fn vest(
     State(pool): State<SqlitePool>,
     Path(statement_id): Path<i64>,
     Query(query): Query<DryRunQuery>,
-) -> Result<(StatusCode, Json<Trade>), ApiError> {
+) -> Result<Written<Trade>, ApiError> {
     let trade = execute(&pool, statement_id, query.mode()).await?;
-    let status = if query.dry_run {
-        StatusCode::OK
-    } else {
-        StatusCode::CREATED
-    };
-    Ok((status, Json(trade)))
+    Ok(Written::new(query.dry_run, trade))
 }
 
 impl From<VestError> for ApiError {
@@ -316,6 +314,7 @@ mod tests {
     use crate::entities::trade::TradeType;
     use crate::entities::{ess_statement, listing};
     use crate::test_support::{self, ApiClient, test_pool, ymd};
+    use axum::http::StatusCode;
     use chrono::NaiveDate;
 
     async fn insert_listing(pool: &SqlitePool, id: i64, currency: &str) {

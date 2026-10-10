@@ -1,16 +1,14 @@
 use crate::infra::db::write_tx;
 use crate::infra::extract::Json;
 use crate::infra::fetch::{FeedFetcher, LiveFeedFetcher, SharedFeedFetcher, fetch_feed};
+use crate::infra::http::NoFilter;
 use crate::infra::http::{self, ApiError, CrudEntity};
-use axum::{
-    Router,
-    extract::{Extension, State},
-    routing::{get, post},
-};
+use axum::extract::{Extension, State};
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::sync::Arc;
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 /// Source of the ISO 10383 Market Identifier Code registry: the official
 /// ISO20022 published list. It carries no trading currency, timezone, or
@@ -95,19 +93,34 @@ impl CrudEntity for MicEntry {
     const NOUN: &'static str = "MIC registry entry";
 }
 
-pub fn router() -> Router<SqlitePool> {
+http::crud_list_route!(
+    list,
+    MicEntry,
+    NoFilter,
+    "/mic_registry",
+    "List every exchange MIC registry entry."
+);
+http::crud_get_route!(
+    get_one,
+    MicEntry,
+    String,
+    "/mic_registry/{mic}",
+    "Fetch one MIC registry entry, or 404."
+);
+
+pub fn router() -> OpenApiRouter<SqlitePool> {
     router_with(Arc::new(LiveFeedFetcher))
 }
 
 /// [`router`] over a caller-supplied transport. The production `router` is the
 /// live one; the tests inject a stalled stub so the timeout path is exercised
 /// with no socket in play.
-fn router_with(fetcher: SharedFeedFetcher) -> Router<SqlitePool> {
-    Router::new()
-        .route("/mic_registry", get(http::list_handler::<MicEntry>))
-        .route("/mic_registry/{mic}", get(http::get_handler::<MicEntry>))
+fn router_with(fetcher: SharedFeedFetcher) -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new()
+        .routes(routes!(list))
+        .routes(routes!(get_one))
         // Manual trigger for retries / missed runs. Read-only for clients otherwise.
-        .route("/mic_registry/import", post(import))
+        .routes(routes!(import))
         .layer(Extension(fetcher))
 }
 
@@ -272,6 +285,12 @@ async fn fetch(fetcher: &dyn FeedFetcher, url: &str) -> Result<String, ImportErr
 /// Manually trigger the import. With a non-empty request body, imports that body
 /// (a downloaded ISO10383_MIC CSV — useful for retries when ISO is unreachable);
 /// with an empty body, fetches from ISO. Both share `import_from_content`.
+#[utoipa::path(
+    post,
+    path = "/mic_registry/import",
+    summary = "Import the ISO 10383 MIC registry; the body is a bare (text) CSV document, and an empty body fetches the live source.",
+    request_body(content = String, content_type = "text/plain")
+)]
 async fn import(
     State(pool): State<SqlitePool>,
     Extension(fetcher): Extension<SharedFeedFetcher>,

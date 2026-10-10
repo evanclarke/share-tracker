@@ -6,16 +6,13 @@ use crate::infra::http::{self, ApiError, CrudEntity, Upsert, UpsertResponse};
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use crate::infra::id::TradeId;
-use axum::{
-    Router,
-    extract::{Path, State},
-    http::StatusCode,
-    routing::get,
-};
+use crate::infra::respond::{Created, NoContent};
+use axum::extract::{Path, State};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 /// What kind of payment an income row records — where the amount belongs on
 /// the return (SCENARIOS J-10, migration 0028).
@@ -509,13 +506,25 @@ impl CrudEntity for Income {
     const NOUN: &'static str = "income";
 }
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new()
-        .route("/income", get(http::list_handler::<Income>).post(create))
-        .route(
-            "/income/{id}",
-            get(http::get_handler::<Income>).put(upsert).delete(delete),
-        )
+http::crud_list_route!(
+    list,
+    Income,
+    IncomeListQuery,
+    "/income",
+    "List every income (distribution) row, optionally narrowed by ?listing_id=, ?holding_account_id= and an inclusive ?from=/?to= over date_paid."
+);
+http::crud_get_route!(
+    get_one,
+    Income,
+    i64,
+    "/income/{id}",
+    "Fetch one income row, or 404."
+);
+
+pub fn router() -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new()
+        .routes(routes!(list, create))
+        .routes(routes!(get_one, upsert, delete))
 }
 
 /// Every income row assessable as cash income — each row except those of a
@@ -1170,6 +1179,11 @@ fn income_from_body(id: i64, body: IncomeBody) -> Income {
     }
 }
 
+#[utoipa::path(
+    put,
+    path = "/income/{id}",
+    summary = "Create or replace the income row at this id."
+)]
 async fn upsert(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
@@ -1183,12 +1197,17 @@ async fn upsert(
 /// one (see [`write`]), and the created row is returned so the caller can use
 /// its id immediately — attaching the registry advice that documents it, for
 /// one — with no `max(id) + 1` guess between the two calls.
+#[utoipa::path(
+    post,
+    path = "/income",
+    summary = "Create an income row; the created row is returned."
+)]
 async fn create(
     State(pool): State<SqlitePool>,
     Json(body): Json<IncomeBody>,
-) -> Result<(StatusCode, Json<Income>), ApiError> {
+) -> Result<Created<Income>, ApiError> {
     let created = db_create(&pool, &income_from_body(0, body)).await?;
-    Ok((StatusCode::CREATED, Json(created)))
+    Ok(Created(created))
 }
 
 impl From<UpsertError> for ApiError {
@@ -1289,12 +1308,13 @@ impl From<UpsertError> for ApiError {
     }
 }
 
+#[utoipa::path(delete, path = "/income/{id}", summary = "Delete the income row.")]
 async fn delete(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<NoContent, ApiError> {
     match db_delete(&pool, id).await? {
-        DeleteOutcome::Deleted => Ok(StatusCode::NO_CONTENT),
+        DeleteOutcome::Deleted => Ok(NoContent),
         DeleteOutcome::NotFound => Err(ApiError::not_found("no income with that id")),
         // Managed by the buy-back participation → 422.
         DeleteOutcome::BuyBackIncome => Err(ApiError::unprocessable(
@@ -1313,6 +1333,7 @@ async fn delete(
 mod tests {
     use super::*;
     use crate::test_support::{self, ApiClient, test_pool, ymd};
+    use axum::http::StatusCode;
     use rust_decimal::Decimal;
 
     /// Client over this module's own routes.

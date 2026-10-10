@@ -41,12 +41,13 @@ use crate::infra::http::ApiError;
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use crate::infra::id::TradeId;
-use axum::{Router, extract::State, routing::get};
+use axum::extract::State;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 use std::collections::HashMap;
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 /// One AMMA statement whose per-parcel adjustment set does not reconcile,
 /// with every problem found on it. A statement that reconciles is not
@@ -81,8 +82,8 @@ pub struct AmitAdjustmentAlert {
     pub problems: Vec<String>,
 }
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new().route("/reports/amit_adjustment_cross_check", get(report))
+pub fn router() -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new().routes(routes!(report))
 }
 
 /// One AMMA statement's adjustment rows, joined to the adjusted parcel.
@@ -501,6 +502,11 @@ fn units_held_problem(facts: &StatementFacts, has_adjustments: bool) -> Option<S
     ))
 }
 
+#[utoipa::path(
+    get,
+    path = "/reports/amit_adjustment_cross_check",
+    summary = "Flag AMMA statements whose adjustments do not reconcile with the adjusted parcels."
+)]
 async fn report(
     State(pool): State<SqlitePool>,
 ) -> Result<Json<Vec<AmitAdjustmentAlert>>, ApiError> {

@@ -95,12 +95,12 @@ use crate::infra::currency::CurrencyCode;
 use crate::infra::decimal::Money;
 use crate::infra::http::{self, ApiError, CrudEntity};
 use crate::infra::id::ListingId;
-use axum::{Router, routing::get};
 use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::{future::Future, pin::Pin, sync::Arc};
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 mod yahoo;
 pub use yahoo::YahooDistributionFetcher;
@@ -703,16 +703,25 @@ pub async fn run_refresh(
 // Routes
 // ---------------------------------------------------------------------------
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new()
-        .route(
-            "/distribution_events",
-            get(http::list_handler::<DistributionEvent>),
-        )
-        .route(
-            "/distribution_events/{id}",
-            get(http::get_handler::<DistributionEvent>),
-        )
+http::crud_list_route!(
+    list,
+    DistributionEvent,
+    DistributionEventListQuery,
+    "/distribution_events",
+    "List cached distribution events, optionally narrowed by ?listing_id= and an inclusive ?from=/?to= over ex_date."
+);
+http::crud_get_route!(
+    get_one,
+    DistributionEvent,
+    i64,
+    "/distribution_events/{id}",
+    "Fetch one cached distribution event, or 404."
+);
+
+pub fn router() -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new()
+        .routes(routes!(list))
+        .routes(routes!(get_one))
 }
 
 #[cfg(test)]

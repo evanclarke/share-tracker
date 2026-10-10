@@ -1,18 +1,16 @@
 use crate::infra::currency::CurrencyCode;
 use crate::infra::extract::Json;
 use crate::infra::fetch::{FeedFetcher, LiveFeedFetcher, SharedFeedFetcher, fetch_feed};
+use crate::infra::http::NoFilter;
 use crate::infra::http::{self, ApiError, CrudEntity};
-use axum::{
-    Router,
-    extract::{Extension, Path, State},
-    http::StatusCode,
-    routing::{get, post},
-};
+use crate::infra::respond::NoContent;
+use axum::extract::{Extension, Path, State};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::sync::Arc;
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 use crate::infra::decimal::Money;
 
@@ -153,22 +151,34 @@ impl From<CorrectionError> for ApiError {
     }
 }
 
-pub fn router() -> Router<SqlitePool> {
+http::crud_list_route!(
+    list,
+    RbaFxRate,
+    NoFilter,
+    "/rba_fx_rates",
+    "List every stored ATO/RBA FX rate."
+);
+http::crud_get_route!(
+    get_one,
+    RbaFxRate,
+    i64,
+    "/rba_fx_rates/{id}",
+    "Fetch one FX rate by id, or 404."
+);
+
+pub fn router() -> OpenApiRouter<SqlitePool> {
     router_with(Arc::new(LiveFeedFetcher))
 }
 
 /// [`router`] over a caller-supplied transport. The production `router` is the
 /// live one; the tests inject a stalled stub so the timeout path is exercised
 /// with no socket in play.
-fn router_with(fetcher: SharedFeedFetcher) -> Router<SqlitePool> {
-    Router::new()
-        .route("/rba_fx_rates", get(http::list_handler::<RbaFxRate>))
-        .route(
-            "/rba_fx_rates/{id}",
-            get(http::get_handler::<RbaFxRate>).put(correct),
-        )
+fn router_with(fetcher: SharedFeedFetcher) -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new()
+        .routes(routes!(list))
+        .routes(routes!(get_one, correct))
         // Manual trigger for retries / missed runs. Read-only for clients otherwise.
-        .route("/rba_fx_rates/import", post(import))
+        .routes(routes!(import))
         .layer(Extension(fetcher))
 }
 
@@ -179,11 +189,16 @@ fn router_with(fetcher: SharedFeedFetcher) -> Router<SqlitePool> {
 /// response names those rows and their ids). Deliberate by construction: it
 /// addresses one row by id and carries only the new rate. The write is audited
 /// and stales every snapshot from that month on (migration 0031).
+#[utoipa::path(
+    put,
+    path = "/rba_fx_rates/{id}",
+    summary = "Correct the stored rate at this id (the only field a correction may change). Always 204 when the id exists — this route can never create a row, so it never answers 201 (new rates arrive through POST /rba_fx_rates/import) — and 404 when it does not."
+)]
 async fn correct(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
     Json(body): Json<CorrectionBody>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<NoContent, ApiError> {
     if body.rate <= Decimal::ZERO {
         return Err(CorrectionError::NotPositive(body.rate).into());
     }
@@ -194,7 +209,7 @@ async fn correct(
         return Err(ApiError::not_found("no FX rate with that id"));
     }
     tracing::info!(%id, rate = %body.rate, "ATO/RBA FX rate corrected");
-    Ok(StatusCode::NO_CONTENT)
+    Ok(NoContent)
 }
 
 #[cfg(test)]
@@ -407,6 +422,12 @@ async fn fetch(fetcher: &dyn FeedFetcher, url: &str) -> Result<String, ImportErr
 /// unreachable); with an empty body, fetches from the RBA. Both share
 /// `import_from_content`, and both true up provisional snapshots when new
 /// rates landed.
+#[utoipa::path(
+    post,
+    path = "/rba_fx_rates/import",
+    summary = "Import the RBA F11 rates; the body is a bare (text) CSV document, and an empty body fetches the live source.",
+    request_body(content = String, content_type = "text/plain")
+)]
 async fn import(
     State(pool): State<SqlitePool>,
     Extension(fetcher): Extension<SharedFeedFetcher>,

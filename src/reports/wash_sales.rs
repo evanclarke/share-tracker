@@ -25,12 +25,13 @@ use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use crate::infra::id::TradeId;
 use crate::reports::realised_gains::{self, DisposalSource};
-use axum::{Router, extract::State, routing::get};
+use axum::extract::State;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 use std::collections::HashSet;
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 /// Review window when none is requested: a Buy within 30 days either side of
 /// the loss Sell is flagged. A convention for review, not an ATO bright line
@@ -68,8 +69,8 @@ pub struct WashSalesRequest {
     pub window_days: Option<i64>,
 }
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new().route("/reports/wash_sales", get(report))
+pub fn router() -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new().routes(routes!(report))
 }
 
 /// Flag every loss-realising Sell (any allocation realised a capital loss,
@@ -161,6 +162,12 @@ pub async fn db_wash_sales(
     Ok(alerts)
 }
 
+#[utoipa::path(
+    get,
+    path = "/reports/wash_sales",
+    summary = "Flag loss-realising sales with a re-purchase inside the wash-sale window; ?window_days= sets the window.",
+    params(WashSalesRequest)
+)]
 async fn report(
     State(pool): State<SqlitePool>,
     Query(req): Query<WashSalesRequest>,

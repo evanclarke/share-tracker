@@ -40,16 +40,13 @@ use crate::infra::http::{self, ApiError, DryRunQuery};
 use crate::infra::id::HoldingAccountId;
 #[cfg(test)]
 use crate::infra::id::TradeId;
-use axum::{
-    Router,
-    extract::{Path, State},
-    http::StatusCode,
-    routing::post,
-};
+use crate::infra::respond::Written;
+use axum::extract::{Path, State};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 #[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -170,8 +167,8 @@ impl From<ParticipationError> for ApiError {
     }
 }
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new().route("/corporate_actions/{id}/participate", post(participate))
+pub fn router() -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new().routes(routes!(participate))
 }
 
 /// Create the Sell trade (with its allocations) and the dividend-component
@@ -332,19 +329,20 @@ async fn execute(
     Ok(Participation { trade, income })
 }
 
+#[utoipa::path(
+    post,
+    path = "/corporate_actions/{id}/participate",
+    summary = "Participate in a buy-back: the closing Sell and its dividend-component income row are written together and returned (?dry_run=true previews it: 200 with the same body, nothing stored).",
+    params(DryRunQuery)
+)]
 async fn participate(
     State(pool): State<SqlitePool>,
     Path(action_id): Path<i64>,
     Query(query): Query<DryRunQuery>,
     Json(body): Json<ParticipationBody>,
-) -> Result<(StatusCode, Json<Participation>), ApiError> {
+) -> Result<Written<Participation>, ApiError> {
     let participation = execute(&pool, action_id, &body, query.mode()).await?;
-    let status = if query.dry_run {
-        StatusCode::OK
-    } else {
-        StatusCode::CREATED
-    };
-    Ok((status, Json(participation)))
+    Ok(Written::new(query.dry_run, participation))
 }
 
 #[cfg(test)]
@@ -354,6 +352,7 @@ mod tests {
     use crate::entities::{corporate_action::CorporateAction, income, listing};
     use crate::infra::id::ListingId;
     use crate::test_support::{self, ApiClient, dec, test_pool};
+    use axum::http::StatusCode;
 
     /// Client over this module's own routes.
     fn client(pool: &SqlitePool) -> ApiClient {

@@ -60,17 +60,14 @@ use crate::infra::http::{self, ApiError, DryRunQuery};
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use crate::infra::id::TradeId;
-use axum::{
-    Router,
-    extract::{Path, State},
-    http::StatusCode,
-    routing::{get, post},
-};
+use crate::infra::respond::{NoContent, Written};
+use axum::extract::{Path, State};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{QueryBuilder, Row, SqliteConnection, SqlitePool, sqlite::SqliteRow};
 use std::collections::HashMap;
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 #[derive(utoipa::ToSchema, Debug, Clone, Serialize)]
 pub struct RightsSale {
@@ -313,11 +310,11 @@ impl From<SellRightsError> for ApiError {
     }
 }
 
-pub fn router() -> Router<SqlitePool> {
-    Router::new()
-        .route("/corporate_actions/{id}/sell_rights", post(sell_rights))
-        .route("/rights_sales", get(list))
-        .route("/rights_sales/{id}", get(get_one).delete(delete_one))
+pub fn router() -> OpenApiRouter<SqlitePool> {
+    OpenApiRouter::new()
+        .routes(routes!(sell_rights))
+        .routes(routes!(list))
+        .routes(routes!(get_one, delete_one))
 }
 
 /// The amounts a sale carries once the body-only checks have passed, each
@@ -756,21 +753,28 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<bool, sqlx::Error> 
     Ok(result.rows_affected() > 0)
 }
 
+#[utoipa::path(
+    post,
+    path = "/corporate_actions/{id}/sell_rights",
+    summary = "Sell the rights of a renounceable issue and return the created rights sale (?dry_run=true previews it: 200 with the same body, nothing stored).",
+    params(DryRunQuery)
+)]
 async fn sell_rights(
     State(pool): State<SqlitePool>,
     Path(action_id): Path<i64>,
     Query(query): Query<DryRunQuery>,
     Json(body): Json<SellRightsBody>,
-) -> Result<(StatusCode, Json<RightsSale>), ApiError> {
+) -> Result<Written<RightsSale>, ApiError> {
     let sale = execute(&pool, action_id, &body, query.mode()).await?;
-    let status = if query.dry_run {
-        StatusCode::OK
-    } else {
-        StatusCode::CREATED
-    };
-    Ok((status, Json(sale)))
+    Ok(Written::new(query.dry_run, sale))
 }
 
+#[utoipa::path(
+    get,
+    path = "/rights_sales",
+    summary = "List rights sales, optionally narrowed by ?listing_id= (the rights issue's listing) / ?holding_account_id= / ?rights_action_id= / ?from= / ?to= (inclusive, over the sale date).",
+    params(ListParams)
+)]
 async fn list(
     State(pool): State<SqlitePool>,
     Query(params): Query<ListParams>,
@@ -778,6 +782,11 @@ async fn list(
     Ok(Json(db_list(&pool, &params).await?))
 }
 
+#[utoipa::path(
+    get,
+    path = "/rights_sales/{id}",
+    summary = "Fetch one rights sale, or 404."
+)]
 async fn get_one(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
@@ -788,10 +797,15 @@ async fn get_one(
         .ok_or_else(|| ApiError::not_found("no rights sale with that id"))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/rights_sales/{id}",
+    summary = "Delete the rights sale."
+)]
 async fn delete_one(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<NoContent, ApiError> {
     http::deleted(db_delete(&pool, id).await?, "rights sale")
 }
 
@@ -801,6 +815,7 @@ mod tests {
     use crate::entities::corporate_action::CorporateAction;
     use crate::entities::{listing, rights_exercise, trade};
     use crate::test_support::{self, ApiClient, dec, test_pool};
+    use axum::http::StatusCode;
 
     fn d(y: i32, m: u32, day: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(y, m, day).unwrap()
