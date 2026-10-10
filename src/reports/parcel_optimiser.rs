@@ -155,7 +155,7 @@ pub async fn db_candidate_parcels(
     holding_account_id: Option<i64>,
     sale_date: NaiveDate,
 ) -> Result<Candidates, sqlx::Error> {
-    let mut tx = pool.begin().await?;
+    let mut tx = crate::infra::db::read_tx(pool).await?;
     let candidates =
         db_candidate_parcels_on(&mut tx, listing_id, holding_account_id, sale_date).await?;
     tx.commit().await?;

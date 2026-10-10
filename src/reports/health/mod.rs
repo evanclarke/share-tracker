@@ -265,7 +265,7 @@ pub async fn db_health(
     today: NaiveDate,
     now: DateTime<Utc>,
 ) -> Result<HealthReport, sqlx::Error> {
-    let mut tx = pool.begin().await?;
+    let mut tx = crate::infra::db::read_tx(pool).await?;
     let latest_price_date: Option<NaiveDate> =
         sqlx::query_scalar("SELECT MAX(price_date) FROM closing_prices WHERE status = 'ok'")
             .fetch_one(&mut *tx)

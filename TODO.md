@@ -194,7 +194,12 @@ Scored 6/10 — the weakest dimension. The operation modules are well factored, 
     name `Currency`): all 79 currency fields, the local currency reads and the currency-carrying
     error payloads; `is_aud()` is the one AUD test, and production code cannot compile a `== "AUD"`
     (test-only `PartialEq<&str>`); pinned by `infra::currency`'s tests and the type itself
-  - [ ] `ReadPool`/`WritePool` split, retiring the deferred-`BEGIN` text scan
+  - [x] `ReadPool`/`WritePool` split, retiring the deferred-`BEGIN` text scan
+    — done 2026-10-10, at the transaction rather than the pool (two pool types would have rethreaded
+    ~940 `SqlitePool` mentions for the same guarantee): reads begin with `infra::db::read_tx`, a
+    `ReadTx` under `PRAGMA query_only` that SQLite refuses to write through; `sqlx::Pool::begin` is
+    in `clippy.toml`'s `disallowed-methods`; the pool's release hook resets `query_only`. The
+    `DEFERRED_BEGIN_ALLOWED` scan is gone; pinned by `a_read_transaction_refuses_every_write`
   - [ ] Id newtypes (`ListingId`, `TradeId`, …) in place of bare `i64`
   - [ ] `utoipa-axum` (`#[utoipa::path]`/`OpenApiRouter`) in place of the `ROUTES` table and its
     Rust-parsing tests

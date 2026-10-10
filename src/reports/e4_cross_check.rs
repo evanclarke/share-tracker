@@ -44,7 +44,7 @@ pub async fn db_e4_alerts(pool: &SqlitePool) -> Result<Vec<E4CrossCheckAlert>, s
     // Both inputs on one read transaction: a single consistent snapshot, so
     // an interleaved write can't pair an income row with a half-entered
     // action set.
-    let mut tx = pool.begin().await?;
+    let mut tx = crate::infra::db::read_tx(pool).await?;
     let income_rows = sqlx::query(
         "SELECT i.*, l.ticker \
          FROM income i \

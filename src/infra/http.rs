@@ -439,10 +439,9 @@ pub trait CrudListFilter: Default + serde::de::DeserializeOwned + Send + 'static
 /// While `apply_filter` took the builder itself, `qb.push(format!(" AND ticker
 /// = '{v}'"))` compiled and passed every test, and all ~14 filters went through
 /// the two helpers by convention alone — the one rule in this area with nothing
-/// structural behind it (compare
-/// `infra::db::tests::write_side_modules_never_begin_a_deferred_transaction`,
-/// which has to be a scan because a deferred `BEGIN` is a legitimate call for a
-/// reader). Here the narrowing needs no scan and no allowlist: a filter that
+/// structural behind it (as the deferred-`BEGIN` rule now has too: a reader
+/// gets a read-only `infra::db::ReadTx`, and `sqlx::Pool::begin` is refused
+/// by clippy). Here the narrowing needs no scan and no allowlist: a filter that
 /// wants to interpolate has no method to do it with, and a new clause shape is
 /// added here, once, with its binding written once.
 pub struct FilterClauses<'a> {

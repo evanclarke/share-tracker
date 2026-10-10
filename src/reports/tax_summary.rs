@@ -581,7 +581,7 @@ pub(crate) fn aud_label(
 pub async fn db_tax_summary(pool: &SqlitePool) -> Result<Vec<TaxYearSummary>, sqlx::Error> {
     // One read transaction for the income-side inputs (and the FX rates that
     // convert them), so they come from a single consistent snapshot.
-    let mut tx = pool.begin().await?;
+    let mut tx = crate::infra::db::read_tx(pool).await?;
     let result = db_tax_summary_on(&mut tx).await?;
     tx.commit().await?;
     Ok(result)

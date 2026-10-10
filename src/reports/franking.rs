@@ -446,7 +446,7 @@ mod tests {
             .insert(&pool)
             .await;
 
-        let mut tx = pool.begin().await.unwrap();
+        let mut tx = crate::infra::db::read_tx(&pool).await.unwrap();
         let fx = FxRates::load(&mut *tx).await.unwrap();
         let (dividends, attached_by_year) = db_franked_dividends(&mut tx, &fx).await.unwrap();
         tx.commit().await.unwrap();
@@ -477,7 +477,7 @@ mod tests {
             .build();
         test_support::insert_amma_bypassing_checks(&pool, &a).await;
 
-        let mut tx = pool.begin().await.unwrap();
+        let mut tx = crate::infra::db::read_tx(&pool).await.unwrap();
         let fx = FxRates::load(&mut *tx).await.unwrap();
         let (_, attached_by_year) = db_franked_dividends(&mut tx, &fx).await.unwrap();
         tx.commit().await.unwrap();

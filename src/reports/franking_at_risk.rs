@@ -138,7 +138,7 @@ pub fn router() -> Router<SqlitePool> {
 pub async fn db_franking_at_risk(
     pool: &SqlitePool,
 ) -> Result<Vec<FrankingAtRiskAlert>, sqlx::Error> {
-    let mut tx = pool.begin().await?;
+    let mut tx = crate::infra::db::read_tx(pool).await?;
     let fx = FxRates::load(&mut *tx).await?;
     let (dividends, attached_by_year) = franking::db_franked_dividends(&mut tx, &fx).await?;
     let tickers = crate::entities::listing::db_tickers(&mut *tx).await?;
@@ -198,7 +198,7 @@ pub async fn db_franking_what_if(
     pool: &SqlitePool,
     req: &WhatIfRequest,
 ) -> Result<Vec<FrankingWhatIfAlert>, sqlx::Error> {
-    let mut tx = pool.begin().await?;
+    let mut tx = crate::infra::db::read_tx(pool).await?;
     let fx = FxRates::load(&mut *tx).await?;
     let (dividends, attached_by_year) = franking::db_franked_dividends(&mut tx, &fx).await?;
     let tickers = crate::entities::listing::db_tickers(&mut *tx).await?;

@@ -90,7 +90,7 @@ pub async fn db_unrealised_gains(
     // One read transaction: every input below comes from the same snapshot,
     // so an interleaved write can't yield e.g. an allocation whose parcel is
     // missing from the same read.
-    let mut tx = pool.begin().await?;
+    let mut tx = crate::infra::db::read_tx(pool).await?;
     let gains = db_unrealised_gains_on(&mut tx, as_of_date).await?;
     tx.commit().await?;
     Ok(gains)

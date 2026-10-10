@@ -391,7 +391,7 @@ async fn load_report_data(conn: &mut sqlx::SqliteConnection) -> Result<ReportDat
 }
 
 pub async fn db_realised_gains(pool: &SqlitePool) -> Result<Vec<RealisedGainLoss>, sqlx::Error> {
-    let mut tx = pool.begin().await?;
+    let mut tx = crate::infra::db::read_tx(pool).await?;
     let data = load_report_data(&mut tx).await?;
     tx.commit().await?;
     compute_realised_gains(&data)

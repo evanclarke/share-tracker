@@ -804,9 +804,8 @@ mod tests {
         ),
     ];
 
-    /// The valuation-only restriction on the fallback resolver, as a scan
-    /// (mirroring `infra::db::tests::
-    /// write_side_modules_never_begin_a_deferred_transaction`): only the
+    /// The valuation-only restriction on the fallback resolver, as a scan:
+    /// only the
     /// files in [`VALUATION_RATE_CALLERS_ALLOWED`] may call
     /// `resolve_valuation_rate` — either form. Doc mentions (`` `…` `` in
     /// comments) don't count; call sites do.

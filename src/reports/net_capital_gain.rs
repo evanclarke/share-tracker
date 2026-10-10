@@ -729,7 +729,7 @@ pub async fn db_net_capital_gain(
     // AMMA/E10/G1 walks, the FX table, and the opening loss — so the whole
     // report sees a single consistent snapshot (an interleaved write can't
     // e.g. land an AMMA row between the realised read and the E10 walk).
-    let mut tx = pool.begin().await?;
+    let mut tx = crate::infra::db::read_tx(pool).await?;
     let realised = super::realised_gains::db_realised_gains_on(&mut tx).await?;
     let fx = FxRates::load(&mut *tx).await?;
     let buckets = gross_buckets(&mut tx, &realised, &fx).await?;
@@ -1283,7 +1283,9 @@ async fn what_if_handler(
     // realised rows, the AMMA/E10/G1 walks, and the opening loss — so the
     // dry-run works from a single consistent snapshot, exactly like the
     // report proper. Everything after the commit is pure computation.
-    let mut tx = pool.begin().await.map_err(ApiError::from)?;
+    let mut tx = crate::infra::db::read_tx(&pool)
+        .await
+        .map_err(ApiError::from)?;
     // Candidates as at the hypothetical disposal's own date, not today: a
     // parcel acquired after it can't be sold on it (the Sell path refuses
     // exactly that allocation), and one sold since was still there to sell.

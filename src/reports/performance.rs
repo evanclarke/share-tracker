@@ -559,7 +559,7 @@ pub async fn db_performance(
     as_of: NaiveDate,
 ) -> Result<Vec<HoldingPerformance>, sqlx::Error> {
     // One read transaction: every input comes from the same snapshot.
-    let mut tx = pool.begin().await?;
+    let mut tx = crate::infra::db::read_tx(pool).await?;
     let rows = db_performance_on(&mut tx, prices, as_of).await?;
     tx.commit().await?;
     Ok(rows)

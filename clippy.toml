@@ -1,0 +1,9 @@
+# `sqlx::Pool::begin` issues a deferred BEGIN, which a write transaction must
+# never use (it fails at once with SQLITE_BUSY_SNAPSHOT instead of waiting its
+# turn). Writes begin with `infra::db::write_tx` (BEGIN IMMEDIATE), reads with
+# `infra::db::read_tx` (deferred, made read-only by PRAGMA query_only) — the one
+# place allowed to call it. A nested `.begin()` on an existing transaction
+# (a SAVEPOINT) is a different method and stays allowed.
+disallowed-methods = [
+    { path = "sqlx::Pool::begin", reason = "begin a write with infra::db::write_tx and a read with infra::db::read_tx" },
+]

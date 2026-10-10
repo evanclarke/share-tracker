@@ -108,7 +108,7 @@ pub async fn db_holdings(
     // One read transaction: every input comes from the same snapshot, so an
     // interleaved write can't yield e.g. an allocation whose parcel is
     // missing from the same read.
-    let mut tx = pool.begin().await?;
+    let mut tx = crate::infra::db::read_tx(pool).await?;
     let holdings = db_holdings_on(&mut tx, as_of).await?;
     tx.commit().await?;
     Ok(holdings)

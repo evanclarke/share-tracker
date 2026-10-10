@@ -204,11 +204,11 @@ async fn load_convertibles(
 
 /// Every alert, newest record first within each kind.
 ///
-/// Reads its inputs on one `pool.begin()` read transaction — a consistent
+/// Reads its inputs on one `read_tx` read transaction — a consistent
 /// snapshot, so a rate imported part-way through cannot make one query think a
 /// month is covered while another thinks it is not.
 pub async fn db_fx_coverage(pool: &SqlitePool) -> Result<Vec<FxCoverageAlert>, sqlx::Error> {
-    let mut tx = pool.begin().await?;
+    let mut tx = crate::infra::db::read_tx(pool).await?;
     let fx = FxRates::load(&mut *tx).await?;
     let mut alerts = Vec::new();
 

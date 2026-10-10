@@ -93,7 +93,7 @@ pub async fn db_wash_sales(
     // the Buy candidates all come from the same snapshot — a Sell or transfer
     // committed between the reads must not pair a loss with Buys (or an
     // exclusion list) from a different state.
-    let mut tx = pool.begin().await?;
+    let mut tx = crate::infra::db::read_tx(pool).await?;
     let mut losses: Vec<_> = realised_gains::db_realised_gains_on(&mut tx)
         .await?
         .into_iter()

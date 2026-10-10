@@ -88,13 +88,13 @@ pub fn router() -> Router<SqlitePool> {
 /// no holiday calendar at all, so their trades are skipped — there is no
 /// coverage to be outside of, and every day is a trading day.
 ///
-/// Reads its inputs on one `pool.begin()` read transaction — a consistent
+/// Reads its inputs on one `read_tx` read transaction — a consistent
 /// snapshot, so a holiday entered part-way through cannot make the coverage
 /// span and the trading-day test disagree about the same calendar.
 pub async fn db_coverage_alerts(
     pool: &SqlitePool,
 ) -> Result<Vec<SettlementCoverageAlert>, sqlx::Error> {
-    let mut tx = pool.begin().await?;
+    let mut tx = crate::infra::db::read_tx(pool).await?;
     let candidates: Vec<CoverageCandidate> = sqlx::query_as(
         "SELECT t.id AS trade_id, t.listing_id, l.ticker, l.exchange_mic AS mic, \
                 t.trade_type, t.date, t.settlement_date, h.earliest, h.latest \

@@ -56,7 +56,7 @@ pub async fn db_amit_cash_alerts(pool: &SqlitePool) -> Result<Vec<AmitCashAlert>
     // Both inputs (and the FX rates converting the cash) on one read
     // transaction: a single consistent snapshot, so an interleaved write
     // can't pair a cash row with a half-entered statement set.
-    let mut tx = pool.begin().await?;
+    let mut tx = crate::infra::db::read_tx(pool).await?;
     let cash_rows = sqlx::query(
         "SELECT i.*, l.ticker, l.amit_from \
          FROM income i \

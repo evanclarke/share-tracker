@@ -21,7 +21,7 @@
 //! got is invisible and is the whole reason the job exists.
 //!
 //! The scan itself is one multi-query read and holds all of its inputs on one
-//! `pool.begin()` read transaction, exactly as the reports do: the held set,
+//! `read_tx` read transaction, exactly as the reports do: the held set,
 //! each listing's two closes, its identity, its price-basis events and its
 //! send-log check all come from one snapshot, so a price import or a corporate
 //! action landing mid-walk can never leave the recorded pair differing from the
@@ -223,7 +223,7 @@ pub async fn db_record(
 /// a pair straddling a price-basis event: there the reader would have expected
 /// an alert and must be told why there is none.
 ///
-/// Every read runs on one `pool.begin()` read transaction — the reports'
+/// Every read runs on one `read_tx` read transaction — the reports'
 /// single-snapshot pattern. It is a deferred `BEGIN` and not
 /// `infra::db::write_tx` because the walk only ever reads: a read-only
 /// transaction that never upgrades can never hit the failed-upgrade
@@ -237,7 +237,7 @@ pub async fn scan(
     as_of: NaiveDate,
 ) -> Result<Scan, sqlx::Error> {
     let mut scan = Scan::default();
-    let mut tx = pool.begin().await?;
+    let mut tx = crate::infra::db::read_tx(pool).await?;
     let listing_ids = db_held_listing_ids_on(&mut tx, Some(as_of)).await?;
 
     for listing_id in listing_ids {

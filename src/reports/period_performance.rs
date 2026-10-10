@@ -242,7 +242,7 @@ pub async fn compute(
     // committing between the `from` and `to` reads (a backdated Buy, a
     // scheduled price/FX import) makes the endpoints describe different
     // states, and `purchases`/`total_return` misbook the difference.
-    let mut tx = pool.begin().await?;
+    let mut tx = crate::infra::db::read_tx(pool).await?;
 
     let resolved_from = valuations_or_empty(&mut tx, from, now).await?;
     let resolved_to = valuations_or_empty(&mut tx, to, now).await?;

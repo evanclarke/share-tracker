@@ -715,7 +715,7 @@ pub async fn db_activity(
     pool: &SqlitePool,
     listing_id: i64,
 ) -> Result<Option<(Vec<ActivityEvent>, Vec<HoldingOverview>)>, sqlx::Error> {
-    let mut tx = pool.begin().await?;
+    let mut tx = crate::infra::db::read_tx(pool).await?;
     let Some(sources) = Sources::load(&mut tx, listing_id).await? else {
         return Ok(None);
     };

@@ -27,7 +27,7 @@
 //!
 //! The core financial sections (the disposal schedule, the CGT summary, the
 //! year's [`super::tax_summary::TaxYearSummary`] line) read on one
-//! `pool.begin()` transaction, per the house rule for multi-query reports.
+//! `read_tx` transaction, per the house rule for multi-query reports.
 //! The completeness section's three existing cross-checks
 //! ([`super::amit_cash_cross_check`], [`super::e4_cross_check`],
 //! [`super::amit_adjustment_cross_check`]) and the
@@ -1904,7 +1904,7 @@ pub async fn db_tax_report(pool: &SqlitePool, tax_year: i32) -> Result<TaxReport
             .map(|a| (a.income_id, a))
             .collect();
 
-    let mut tx = pool.begin().await?;
+    let mut tx = crate::infra::db::read_tx(pool).await?;
     let amma_coverage_result = amma_coverage(&mut tx, year).await?;
     // The realised-gains pipeline and the FX rate table each run/load once
     // for the whole document: the disposals schedule, the CGT summary and
@@ -2054,7 +2054,7 @@ async fn db_tax_report_years(pool: &SqlitePool) -> Result<Vec<i32>, sqlx::Error>
     // One read transaction over every input, per the house rule for
     // multi-query reports: an interleaved write can't land a fact between the
     // CGT walk and the date reads and leave the list internally inconsistent.
-    let mut tx = pool.begin().await?;
+    let mut tx = crate::infra::db::read_tx(pool).await?;
     let dates: Vec<NaiveDate> = sqlx::query_scalar(
         "SELECT date FROM trades \
          UNION SELECT date_paid FROM interest_income \

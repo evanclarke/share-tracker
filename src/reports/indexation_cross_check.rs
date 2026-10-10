@@ -200,7 +200,7 @@ pub fn router() -> Router<SqlitePool> {
 pub async fn db_indexation_cross_check(
     pool: &SqlitePool,
 ) -> Result<IndexationCrossCheck, sqlx::Error> {
-    let mut tx = pool.begin().await?;
+    let mut tx = crate::infra::db::read_tx(pool).await?;
     let disposals = super::realised_gains::db_realised_gains_on(&mut tx).await?;
     // The parcels' own trade dates: `ParcelDetail` carries the CGT
     // acquisition date (possibly deemed), and indexation turns on the date

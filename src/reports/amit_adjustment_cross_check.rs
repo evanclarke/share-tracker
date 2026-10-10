@@ -125,7 +125,7 @@ pub async fn db_amit_adjustment_alerts(
     // Every input on one read transaction: a single consistent snapshot, so
     // an interleaved write can't pair a statement with a half-entered
     // adjustment set (which is exactly what this report would then flag).
-    let mut tx = pool.begin().await?;
+    let mut tx = crate::infra::db::read_tx(pool).await?;
     let statement_rows = sqlx::query(
         "SELECT a.id, a.listing_id, l.ticker, a.tax_year_end_date, a.units_held, \
                 a.cost_base_adjustment, a.holding_account_id \

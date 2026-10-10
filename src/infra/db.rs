@@ -1,7 +1,7 @@
 use chrono::{DateTime, Local, NaiveDateTime};
 use sqlx::{
     Connection, Sqlite, SqlitePool, Transaction,
-    sqlite::{SqliteConnectOptions, SqliteConnection, SqliteJournalMode},
+    sqlite::{SqliteConnectOptions, SqliteConnection, SqliteJournalMode, SqlitePoolOptions},
 };
 use std::{
     collections::HashSet,
@@ -112,7 +112,26 @@ fn connect_options(db_path: &str) -> Result<SqliteConnectOptions, sqlx::Error> {
 /// is opened, and it always migrates.
 #[cfg(test)]
 pub async fn unmigrated_pool(db_path: &str) -> Result<SqlitePool, sqlx::Error> {
-    SqlitePool::connect_with(connect_options(db_path)?).await
+    connect(db_path).await
+}
+
+/// Opens a pool on [`connect_options`], with the one pool-level duty a
+/// [`ReadTx`] needs: every connection handed back to the pool leaves
+/// `query_only` switched off. [`ReadTx::commit`] switches it off itself; this
+/// covers a read transaction dropped on an error path instead, which would
+/// otherwise return a connection that refuses the next caller's writes.
+async fn connect(db_path: &str) -> Result<SqlitePool, sqlx::Error> {
+    SqlitePoolOptions::new()
+        .after_release(|conn, _| {
+            Box::pin(async move {
+                sqlx::query("PRAGMA query_only = OFF")
+                    .execute(&mut *conn)
+                    .await?;
+                Ok(true)
+            })
+        })
+        .connect_with(connect_options(db_path)?)
+        .await
 }
 
 /// Begin a transaction that is going to **write**: `BEGIN IMMEDIATE`, which
@@ -142,10 +161,13 @@ pub async fn unmigrated_pool(db_path: &str) -> Result<SqlitePool, sqlx::Error> {
 /// waiter fails after all (SCENARIOS X-b), now as a `503` naming the reason
 /// rather than an empty `500`.
 ///
-/// Read-only transactions stay on `pool.begin()` deliberately: they never
-/// upgrade, so they cannot hit either error, and making them immediate would
-/// serialise every report against every other for no reason. The split is
-/// pinned by [`tests::write_side_modules_never_begin_a_deferred_transaction`],
+/// Read-only transactions stay deferred deliberately: they never upgrade, so
+/// they cannot hit either error, and making them immediate would serialise
+/// every report against every other for no reason. They are begun with
+/// [`read_tx`], which is the only deferred `BEGIN` in the tree and makes the
+/// transaction **read-only** in SQLite's own terms, so a write cannot hide in
+/// one; `sqlx::Pool::begin` itself is refused by clippy (`clippy.toml`'s
+/// `disallowed-methods`, enforced at `-D warnings` by CI and the pre-push hook),
 /// whose allowlist names the read-only report files one by one.
 ///
 /// Top level only. sqlx issues a `SAVEPOINT` for a nested transaction and
@@ -153,6 +175,57 @@ pub async fn unmigrated_pool(db_path: &str) -> Result<SqlitePool, sqlx::Error> {
 /// so a transaction opened on an existing `&mut *tx` keeps using `.begin()`.
 pub async fn write_tx(pool: &SqlitePool) -> Result<Transaction<'static, Sqlite>, sqlx::Error> {
     pool.begin_with("BEGIN IMMEDIATE").await
+}
+
+/// Begin a **read-only** transaction: the one consistent snapshot a
+/// multi-query report reads all its inputs on (CLAUDE.md, "reports").
+///
+/// A deferred `BEGIN`, as a reader should be (see [`write_tx`] for why a
+/// writer must not be), with `PRAGMA query_only` switched on for its
+/// duration: any write attempted on it — an `INSERT`, `UPDATE` or `DELETE`, a
+/// trigger's write, DDL — fails with `SQLITE_READONLY` at once, rather than as
+/// the busy-snapshot upgrade failure a write in a deferred transaction meets
+/// only when another connection happens to have written first. So the
+/// read/write split is a property of the transaction's type, not of which
+/// files a scan allows.
+pub async fn read_tx(pool: &SqlitePool) -> Result<ReadTx, sqlx::Error> {
+    // The one sanctioned deferred BEGIN — made read-only on the next line.
+    #[allow(clippy::disallowed_methods)]
+    let mut tx = pool.begin().await?;
+    sqlx::query("PRAGMA query_only = ON")
+        .execute(&mut *tx)
+        .await?;
+    Ok(ReadTx(tx))
+}
+
+/// A transaction begun by [`read_tx`]: it reads like a connection (it derefs
+/// to one) and can only be ended, never written through.
+pub struct ReadTx(Transaction<'static, Sqlite>);
+
+impl ReadTx {
+    /// End the transaction, leaving the connection writable again for the
+    /// pool's next caller. (A read transaction has nothing to commit; the name
+    /// matches the write side's so a report reads the same either way.)
+    pub async fn commit(mut self) -> Result<(), sqlx::Error> {
+        sqlx::query("PRAGMA query_only = OFF")
+            .execute(&mut *self.0)
+            .await?;
+        self.0.commit().await
+    }
+}
+
+impl std::ops::Deref for ReadTx {
+    type Target = SqliteConnection;
+
+    fn deref(&self) -> &SqliteConnection {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for ReadTx {
+    fn deref_mut(&mut self) -> &mut SqliteConnection {
+        &mut self.0
+    }
 }
 
 /// How a computed write ends: committed, or — for a `?dry_run=true` preview —
@@ -208,7 +281,7 @@ pub fn insert_with_optional_id(
 }
 
 pub async fn init(db_path: &str) -> Result<SqlitePool, sqlx::Error> {
-    let pool = SqlitePool::connect_with(connect_options(db_path)?).await?;
+    let pool = connect(db_path).await?;
 
     let applied_before: Vec<i64> =
         sqlx::query_scalar("SELECT version FROM _sqlx_migrations WHERE success = TRUE")
@@ -799,58 +872,9 @@ fn prune_backups(db_path: &str, backup_dir: Option<&str>) -> Result<Vec<PathBuf>
 mod tests {
     use super::*;
 
-    /// Files that may begin a **deferred** transaction (`pool.begin()`).
-    /// Everything else under `src` must go through [`write_tx`], which begins
-    /// `IMMEDIATE` — see its docs for why a deferred write transaction can fail
-    /// outright with "database is locked".
-    ///
-    /// The read-only reports are the bulk of the list: a report reads all its
-    /// inputs on one transaction for a consistent snapshot and never writes, so
-    /// it can never hit the failed upgrade `write_tx` exists to avoid, and
-    /// taking the write lock up front would serialise every report against
-    /// every other for nothing. They are listed one file at a time, not as
-    /// `src/reports/`, so that a *new* report is an offender until someone
-    /// decides which side of the split it is on: `reports/snapshot.rs` is the
-    /// one report that **writes** (it persists the price-dependent reports to
-    /// `report_snapshots`) and is deliberately not here.
-    const DEFERRED_BEGIN_ALLOWED: &[&str] = &[
-        // This module's own tests drive a deferred BEGIN deliberately, to pin
-        // the failure `write_tx` exists to avoid.
-        "infra/db.rs",
-        // The price-alert scan: one multi-query read over the held listings,
-        // their closes, identities, price-basis events and the send log, held
-        // on one snapshot exactly as a report holds its inputs. Read-only — the
-        // send log write is a separate `write_tx` after the send.
-        "entities/price_alert.rs",
-        // Read-only reports, one transaction each, no writes.
-        "reports/activity.rs",
-        "reports/amit_adjustment_cross_check.rs",
-        "reports/amit_cash_cross_check.rs",
-        "reports/e4_cross_check.rs",
-        "reports/franking.rs",
-        "reports/franking_at_risk.rs",
-        "reports/fx_coverage.rs",
-        "reports/health/mod.rs",
-        "reports/indexation_cross_check.rs",
-        "reports/net_capital_gain.rs",
-        "reports/open_parcels.rs",
-        "reports/parcel_optimiser.rs",
-        "reports/performance.rs",
-        "reports/period_performance.rs",
-        "reports/portfolio.rs",
-        "reports/realised_gains.rs",
-        "reports/rollover_consistency.rs",
-        "reports/row_history.rs",
-        "reports/settlement_coverage.rs",
-        "reports/tax_report.rs",
-        "reports/tax_summary.rs",
-        "reports/unrealised_gains.rs",
-        "reports/wash_sales.rs",
-    ];
-
     /// Report files that begin **no** transaction of their own, each with the
-    /// reason it needs none. Everything under `src/reports/` must be either
-    /// here or in [`DEFERRED_BEGIN_ALLOWED`] —
+    /// reason it needs none. Everything under `src/reports/` must either be
+    /// here or open a [`read_tx`] —
     /// [`every_report_file_is_classified_for_transaction_discipline`] fails an
     /// unclassified file, so a new report is an offender until someone decides
     /// which side it is on.
@@ -917,74 +941,22 @@ mod tests {
         ),
     ];
 
-    /// The convention `write_tx` exists to hold: no write path may begin a
-    /// deferred transaction, because a deferred `BEGIN` that upgrades to a
-    /// write after another connection has written fails immediately with
-    /// "database is locked" — a 500 the busy timeout cannot prevent. Nothing in
-    /// the type system stops a new entity from typing `pool.begin()`, so this
-    /// scans for it, exactly as `decimal`'s scan pins `.bind(x.to_string())`
-    /// out of the tree.
-    #[test]
-    fn write_side_modules_never_begin_a_deferred_transaction() {
-        // Assembled so this test's own scan line is not itself a match.
-        let deferred = format!(".{}()", "begin");
-        let mut offenders = Vec::new();
-        let mut seen_in_allowed: Vec<&str> = Vec::new();
-        for (rel, body) in crate::test_support::rust_sources() {
-            let allowed = DEFERRED_BEGIN_ALLOWED.contains(&rel.as_str());
-            for (n, line) in body.lines().enumerate() {
-                let code = line.trim_start();
-                if code.starts_with("//") || !code.contains(&deferred) {
-                    continue;
-                }
-                if allowed {
-                    seen_in_allowed.push(
-                        DEFERRED_BEGIN_ALLOWED
-                            .iter()
-                            .find(|a| **a == rel)
-                            .expect("just matched"),
-                    );
-                } else {
-                    offenders.push(format!("{rel}:{}: {code}", n + 1));
-                }
-            }
-        }
-        assert!(
-            offenders.is_empty(),
-            "a write transaction must be begun with infra::db::write_tx(pool) — a deferred \
-             BEGIN fails with \"database is locked\" when another connection writes first. \
-             If this is a read-only report, add it to DEFERRED_BEGIN_ALLOWED:\n{}",
-            offenders.join("\n")
-        );
-        // …and the allowlist may not rot: an entry that no longer begins a
-        // deferred transaction (or no longer exists) has to go, or the list
-        // stops meaning anything.
-        let stale: Vec<&&str> = DEFERRED_BEGIN_ALLOWED
-            .iter()
-            .filter(|a| !seen_in_allowed.contains(*a))
-            .collect();
-        assert!(
-            stale.is_empty(),
-            "DEFERRED_BEGIN_ALLOWED names files that no longer begin a deferred \
-             transaction — drop them: {stale:?}"
-        );
-    }
-
-    /// The companion the scan above needs to be airtight for reports: that
-    /// scan only sees a file once it *types* `.begin()`, so a report reading
-    /// straight off the pool — each query its own implicit transaction, no
-    /// consistent snapshot — used to pass unclassified. That is exactly how
-    /// `period_performance`'s multi-snapshot read hid (code review
-    /// 2026-08-25). So the whole of `src/reports/` is classified, the way
-    /// every table is classified for snapshot staleness: a report file is
-    /// either in [`DEFERRED_BEGIN_ALLOWED`] — and the scan above holds it to
-    /// actually beginning its read transaction — or in
-    /// [`REPORTS_WITHOUT_A_READ_TRANSACTION`] with the reason it needs none.
-    /// A new report in neither list fails here until someone decides.
+    /// Report transaction discipline: a multi-query report reads all its
+    /// inputs on one [`read_tx`], for one consistent snapshot. A report reading
+    /// straight off the pool — each query its own implicit transaction — is
+    /// exactly how `period_performance`'s multi-snapshot read once hid (code
+    /// review 2026-08-25). So every file under `src/reports/` either opens a
+    /// `read_tx` (found in its code) or is in
+    /// [`REPORTS_WITHOUT_A_READ_TRANSACTION`] with the reason it needs none; a
+    /// new report in neither fails here until someone decides.
+    ///
+    /// (Which *kind* of transaction a file may begin is not a scan any more:
+    /// `sqlx::Pool::begin` is refused by clippy, and a [`ReadTx`] is read-only
+    /// in SQLite's own terms — see [`a_read_transaction_refuses_every_write`].)
     #[test]
     fn every_report_file_is_classified_for_transaction_discipline() {
         // Assembled so this test's own lines are not themselves matches.
-        let deferred = format!(".{}()", "begin");
+        let opens = format!("{}(", "read_tx");
         let mut report_files: Vec<String> = Vec::new();
         let mut unclassified: Vec<String> = Vec::new();
         for (rel, body) in crate::test_support::rust_sources() {
@@ -992,45 +964,26 @@ mod tests {
                 continue;
             }
             report_files.push(rel.clone());
-            let allowed = DEFERRED_BEGIN_ALLOWED.contains(&rel.as_str());
+            let code = crate::test_support::code_only(&body);
+            let reads_on_one_snapshot = code.contains(&opens);
             let exempt = REPORTS_WITHOUT_A_READ_TRANSACTION
                 .iter()
                 .any(|(f, _)| *f == rel);
+            // An exempt entry's reason is "begins no read transaction": the
+            // moment the file grows one, the entry is wrong.
             assert!(
-                !(allowed && exempt),
-                "{rel} is in both DEFERRED_BEGIN_ALLOWED and \
-                 REPORTS_WITHOUT_A_READ_TRANSACTION — pick the one that is true"
+                !(reads_on_one_snapshot && exempt),
+                "{rel} opens a read_tx but is listed in REPORTS_WITHOUT_A_READ_TRANSACTION \
+                 — drop the entry"
             );
-            if !allowed && !exempt {
+            if !reads_on_one_snapshot && !exempt {
                 unclassified.push(rel.clone());
-                continue;
-            }
-            // An exempt entry's reason is "begins no transaction": the moment
-            // the file grows one it belongs on the other list, where the scan
-            // above polices it.
-            if exempt {
-                let begins: Vec<String> = body
-                    .lines()
-                    .enumerate()
-                    .filter(|(_, line)| {
-                        let code = line.trim_start();
-                        !code.starts_with("//") && code.contains(&deferred)
-                    })
-                    .map(|(n, line)| format!("{rel}:{}: {}", n + 1, line.trim()))
-                    .collect();
-                assert!(
-                    begins.is_empty(),
-                    "listed in REPORTS_WITHOUT_A_READ_TRANSACTION but begins a \
-                     transaction — move it to DEFERRED_BEGIN_ALLOWED:\n{}",
-                    begins.join("\n")
-                );
             }
         }
         assert!(
             unclassified.is_empty(),
             "every report file must hold its reads together: either it opens one \
-             pool.begin() read transaction for all of them (add it to \
-             DEFERRED_BEGIN_ALLOWED) or it genuinely needs none (add it to \
+             infra::db::read_tx for all of them or it genuinely needs none (add it to \
              REPORTS_WITHOUT_A_READ_TRANSACTION with the reason). Unclassified:\n{}",
             unclassified.join("\n")
         );
@@ -1046,6 +999,41 @@ mod tests {
             "REPORTS_WITHOUT_A_READ_TRANSACTION names files that no longer exist — \
              drop them: {gone:?}"
         );
+    }
+
+    /// A [`ReadTx`] is read-only in SQLite's own terms: a write through it
+    /// fails at once, whatever it is, and ending it — committed, or dropped on
+    /// an error path — hands the pool back a connection that writes again.
+    #[tokio::test]
+    async fn a_read_transaction_refuses_every_write() {
+        let pool = crate::test_support::test_pool().await;
+        let mut tx = read_tx(&pool).await.unwrap();
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM holding_accounts")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+        assert!(count > 0, "a read transaction reads");
+        let refused = sqlx::query("INSERT INTO holding_accounts (id, name) VALUES (90, 'x')")
+            .execute(&mut *tx)
+            .await
+            .expect_err("a write inside a read transaction is refused");
+        assert!(
+            refused.to_string().contains("readonly"),
+            "refused as read-only, not as a lock: {refused}"
+        );
+        tx.commit().await.unwrap();
+
+        // Dropped without commit — the pool's release hook switches
+        // `query_only` back off, so the next caller can write.
+        let tx = read_tx(&pool).await.unwrap();
+        drop(tx);
+        for id in 91..101 {
+            sqlx::query("INSERT INTO holding_accounts (id, name) VALUES (?1, 'y' || ?1)")
+                .bind(id)
+                .execute(&pool)
+                .await
+                .expect("every pooled connection is writable again");
+        }
     }
 
     /// The premise `write_tx` rests on, as an executable fact rather than a
@@ -1067,6 +1055,7 @@ mod tests {
         let pool = init(&path).await.unwrap();
 
         // Deferred: this begins as a reader, and the read fixes its snapshot.
+        #[allow(clippy::disallowed_methods)] // deliberately deferred: the failure write_tx avoids
         let mut deferred = pool.begin().await.unwrap();
         let _: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM holding_accounts")
             .fetch_one(&mut *deferred)

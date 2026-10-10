@@ -164,7 +164,7 @@ pub async fn db_rollover_alerts(pool: &SqlitePool) -> Result<Vec<RolloverAlert>,
     // One read transaction: a consistent snapshot, so a write landing mid-read
     // cannot pair an operation with a half-updated source parcel — which is
     // exactly what this report would then flag.
-    let mut tx = pool.begin().await?;
+    let mut tx = crate::infra::db::read_tx(pool).await?;
     let groups = db_groups(&mut tx).await?;
     let mut alerts = Vec::new();
     for group in &groups {

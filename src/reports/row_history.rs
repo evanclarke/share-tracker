@@ -282,7 +282,7 @@ pub async fn db_row_history(
     // separates a re-used id from a plainly deleted one, so it has to come
     // from the same snapshot as the trail — a delete landing between the two
     // would label the boundary against a row that had just gone.
-    let mut tx = pool.begin().await?;
+    let mut tx = crate::infra::db::read_tx(pool).await?;
     let occupied = match audited {
         Some(t) => {
             sqlx::query_scalar::<_, bool>(sqlx::AssertSqlSafe(format!(
