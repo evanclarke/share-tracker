@@ -11,6 +11,7 @@ use super::model::SettlementDateSource;
 use crate::infra::db::write_tx;
 use crate::infra::http::ApiError;
 use crate::infra::id::ListingId;
+use crate::infra::id::TradeId;
 use chrono::{Datelike, Days, NaiveDate};
 use sqlx::SqlitePool;
 use std::collections::HashSet;
@@ -106,7 +107,7 @@ pub(crate) fn add_business_days(
 /// id the row will hold until the INSERT runs — an honest "no id yet" beats a
 /// made-up one in the log field.
 pub(crate) fn warn_if_outside_holiday_coverage(
-    trade_id: Option<i64>,
+    trade_id: Option<TradeId>,
     date: NaiveDate,
     settlement_date: NaiveDate,
     holidays: &HashSet<NaiveDate>,
@@ -198,7 +199,7 @@ impl Settlement {
     /// and a supplied date is simply stated.
     pub(crate) async fn resolve_on(
         conn: &mut sqlx::SqliteConnection,
-        trade_id: Option<i64>,
+        trade_id: Option<TradeId>,
         listing_id: ListingId,
         date: NaiveDate,
         supplied: Option<NaiveDate>,
@@ -239,7 +240,7 @@ impl Settlement {
 #[cfg(test)]
 pub(crate) async fn auto_settlement_date(
     pool: &SqlitePool,
-    trade_id: i64,
+    trade_id: TradeId,
     listing_id: ListingId,
     date: NaiveDate,
 ) -> Result<NaiveDate, SettlementError> {
@@ -254,7 +255,7 @@ pub(crate) async fn auto_settlement_date(
 /// create, before the database has assigned one.
 pub(crate) async fn auto_settlement_date_on(
     conn: &mut sqlx::SqliteConnection,
-    trade_id: Option<i64>,
+    trade_id: Option<TradeId>,
     listing_id: ListingId,
     date: NaiveDate,
 ) -> Result<NaiveDate, SettlementError> {
@@ -273,7 +274,7 @@ pub(crate) async fn auto_settlement_date_on(
 /// where that date came from.
 #[derive(sqlx::FromRow)]
 struct StoredSettlement {
-    id: i64,
+    id: TradeId,
     listing_id: ListingId,
     date: NaiveDate,
     settlement_date: NaiveDate,
@@ -353,7 +354,7 @@ pub async fn run_recompute(pool: &SqlitePool) -> Result<(), String> {
             .await
             .map_err(|e| e.to_string())?;
         tracing::info!(
-            trade_id = trade.id,
+            trade_id = trade.id.0,
             from = %trade.settlement_date,
             to = %wanted,
             "settlement date recomputed against the current calendar"

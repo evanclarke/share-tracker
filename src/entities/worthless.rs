@@ -46,6 +46,7 @@ use crate::infra::extract::{Json, Query};
 use crate::infra::http::{ApiError, DryRunQuery};
 #[cfg(test)]
 use crate::infra::id::HoldingAccountId;
+use crate::infra::id::TradeId;
 use axum::{
     Router,
     extract::{Path, State},
@@ -177,7 +178,7 @@ async fn execute(
     // Per open parcel, the units still held at the event date (split-adjusted).
     let mut allocations: Vec<AllocationInput> = Vec::new();
     for row in &parcel_rows {
-        let parcel_id: i64 = row.try_get("id")?;
+        let parcel_id: TradeId = row.try_get("id")?;
         let date: NaiveDate = row.try_get("date")?;
         let qty = parse_dec("quantity", row.try_get("quantity")?)?;
 
@@ -432,7 +433,7 @@ mod tests {
             .unwrap();
         assert_eq!(gains.len(), 1);
         let g = &gains[0];
-        assert_eq!(g.sale_trade_id, r.sell.id);
+        assert_eq!(g.sale_trade_id, r.sell.id.0);
         assert_eq!(g.proceeds, Decimal::ZERO);
         assert_eq!(g.cost_base, dec("2500"));
         assert_eq!(g.capital_gain_loss, dec("-2500"));
@@ -452,7 +453,7 @@ mod tests {
         // Sell 400 before the failure → 600 remain at 60% = $900 reduced cost base.
         sell::db_upsert_sell(
             &pool,
-            2,
+            TradeId(2),
             &SellBody {
                 brokerage_includes_gst: false,
                 statement_total: None,
@@ -470,7 +471,7 @@ mod tests {
                 spot_fx_rate: None,
                 contract_note_ref: None,
                 allocations: vec![AllocationInput {
-                    purchase_trade_id: 1,
+                    purchase_trade_id: TradeId(1),
                     quantity_allocated: dec("400"),
                 }],
             },
@@ -494,7 +495,10 @@ mod tests {
         let gains = crate::reports::realised_gains::db_realised_gains(&pool)
             .await
             .unwrap();
-        let closing = gains.iter().find(|g| g.sale_trade_id == r.sell.id).unwrap();
+        let closing = gains
+            .iter()
+            .find(|g| g.sale_trade_id == r.sell.id.0)
+            .unwrap();
         assert_eq!(closing.cost_base, dec("900"));
         assert_eq!(closing.capital_loss, dec("900"));
     }
@@ -766,7 +770,7 @@ mod tests {
                 spot_fx_rate: None,
                 contract_note_ref: None,
                 allocations: vec![AllocationInput {
-                    purchase_trade_id: 1,
+                    purchase_trade_id: TradeId(1),
                     quantity_allocated: dec("1000"),
                 }],
             },

@@ -20,6 +20,7 @@ use crate::infra::extract::{Json, Query};
 use crate::infra::http::{self, ApiError, DryRunQuery, Upsert, UpsertResponse};
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
+use crate::infra::id::TradeId;
 use axum::{
     Router,
     extract::{Path, State},
@@ -36,7 +37,7 @@ use sqlx::{Row, SqlitePool};
 #[schema(as = SellAllocationInput)]
 pub struct AllocationInput {
     /// The Buy or DRP trade (parcel) the units are taken from.
-    pub purchase_trade_id: i64,
+    pub purchase_trade_id: TradeId,
     /// Units taken from that parcel (decimal string, positive, at most its remaining units).
     #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub quantity_allocated: Decimal,
@@ -208,7 +209,7 @@ pub enum SellError {
     /// a transfer-in Buy, a scrip replacement Buy — is refused for what it
     /// actually is rather than being called a Sell.
     #[error("trade {id} is a {existing:?}, not a Sell")]
-    NotASell { id: i64, existing: TradeType },
+    NotASell { id: TradeId, existing: TradeType },
     /// A supplied statement total failed the cross-check (see
     /// `trade::check_statement_total`): for a Sell it must equal the net
     /// proceeds, quantity × price − brokerage − GST.
@@ -407,7 +408,7 @@ struct SellProvenanceRow {
 /// edited or deleted on its own here.
 async fn is_transfer_fee_sale(
     tx: &mut sqlx::SqliteConnection,
-    id: i64,
+    id: TradeId,
 ) -> Result<bool, sqlx::Error> {
     sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM transfers WHERE fee_sale_trade_id = ?)")
         .bind(id)
@@ -425,7 +426,7 @@ async fn is_transfer_fee_sale(
 /// with it — the group substitutes the same parcels, so it only ever exists
 /// as a whole — unless a replacement Buy is itself consumed by later
 /// allocations or AMIT adjustments (refused; remove those dependants first).
-pub async fn db_delete_sell(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome, sqlx::Error> {
+pub async fn db_delete_sell(pool: &SqlitePool, id: TradeId) -> Result<DeleteOutcome, sqlx::Error> {
     let mut tx = write_tx(pool).await?;
 
     let row: Option<SellDeleteRow> = sqlx::query_as(
@@ -510,10 +511,10 @@ pub async fn db_delete_sell(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome,
 /// against the id the database assigned rather than a guessed one.
 async fn write(
     pool: &SqlitePool,
-    id: Option<i64>,
+    id: Option<TradeId>,
     body: &SellBody,
     mode: WriteMode,
-) -> Result<(i64, Upsert, Option<Trade>), SellError> {
+) -> Result<(TradeId, Upsert, Option<Trade>), SellError> {
     let mut tx = write_tx(pool).await?;
 
     // The create-vs-replace decision is made inside the write's own
@@ -634,7 +635,7 @@ async fn write(
 /// `DELETE /sells/:id` and re-participate instead.
 pub async fn db_upsert_sell(
     pool: &SqlitePool,
-    id: i64,
+    id: TradeId,
     body: &SellBody,
 ) -> Result<http::Upserted<Trade>, SellError> {
     let (_, outcome, row) = write(pool, Some(id), body, WriteMode::Commit).await?;
@@ -726,7 +727,7 @@ pub(crate) struct SellWrite<'a> {
     /// `Some` only on the client-supplied-id path (`PUT /sells/{id}`,
     /// deliberately still an upsert); every server-created Sell passes `None`
     /// so the database assigns the id — see [`upsert_sell_in_tx`].
-    pub id: Option<i64>,
+    pub id: Option<TradeId>,
     pub body: &'a SellBody,
     pub settlement: trade::Settlement,
     /// `None` for a client-entered Sell and for the transfer's network-fee
@@ -758,7 +759,7 @@ pub(crate) struct SellWrite<'a> {
 pub(crate) async fn upsert_sell_in_tx(
     tx: &mut sqlx::SqliteConnection,
     write: SellWrite<'_>,
-) -> Result<i64, SellError> {
+) -> Result<TradeId, SellError> {
     let SellWrite {
         id,
         body,
@@ -858,7 +859,7 @@ pub(crate) async fn upsert_sell_in_tx(
              holding_account_id     = excluded.holding_account_id, \
              transfer_id            = excluded.transfer_id, \
              worthless_action_id    = excluded.worthless_action_id",
-        id,
+        id.map(|id| id.0),
     )
     .bind(body.date)
     .bind(settlement.date)
@@ -886,7 +887,7 @@ pub(crate) async fn upsert_sell_in_tx(
     // Read straight off the statement that wrote the row, on this very
     // connection — every child row below (and the caller's response) must use
     // the id the database just assigned, not a stale one.
-    let id = id.unwrap_or_else(|| result.last_insert_rowid());
+    let id = id.unwrap_or_else(|| TradeId(result.last_insert_rowid()));
 
     // The Sell's currency must be the listing's, exactly as a parcel's must:
     // its `average_price` is the price of that listed security, so the
@@ -987,7 +988,7 @@ pub(crate) async fn upsert_sell_in_tx(
 
 async fn upsert(
     State(pool): State<SqlitePool>,
-    Path(id): Path<i64>,
+    Path(id): Path<TradeId>,
     Json(body): Json<SellBody>,
 ) -> Result<UpsertResponse<Trade>, ApiError> {
     let (outcome, row) = db_upsert_sell(&pool, id, &body).await?;
@@ -1016,7 +1017,7 @@ async fn create(
 
 async fn delete(
     State(pool): State<SqlitePool>,
-    Path(id): Path<i64>,
+    Path(id): Path<TradeId>,
 ) -> Result<StatusCode, ApiError> {
     match db_delete_sell(&pool, id).await? {
         DeleteOutcome::Deleted => Ok(StatusCode::NO_CONTENT),
@@ -1102,11 +1103,11 @@ mod tests {
         let body = sell_body(
             Decimal::from(100),
             vec![AllocationInput {
-                purchase_trade_id: 1,
+                purchase_trade_id: TradeId(1),
                 quantity_allocated: Decimal::from(100),
             }],
         );
-        db_upsert_sell(&pool, 2, &body).await.unwrap();
+        db_upsert_sell(&pool, TradeId(2), &body).await.unwrap();
 
         assert!(trade_exists(&pool, 2).await);
         assert_eq!(count_allocations(&pool, 2).await, 1);
@@ -1136,16 +1137,20 @@ mod tests {
         insert_buy(&pool, 1, ListingId(1), Decimal::from(100)).await;
 
         let allocation = || AllocationInput {
-            purchase_trade_id: 1,
+            purchase_trade_id: TradeId(1),
             quantity_allocated: Decimal::from(100),
         };
         // The Sell as written with no date supplied: 2024-06-03 (Monday) + T+2
         // = 2024-06-05, recorded computed.
-        db_upsert_sell(&pool, 2, &sell_body(Decimal::from(100), vec![allocation()]))
-            .await
-            .unwrap();
+        db_upsert_sell(
+            &pool,
+            TradeId(2),
+            &sell_body(Decimal::from(100), vec![allocation()]),
+        )
+        .await
+        .unwrap();
         let stated = NaiveDate::from_ymd_opt(2024, 6, 5).unwrap();
-        let stored = trade::db_get(&pool, 2).await.unwrap().unwrap();
+        let stored = trade::db_get(&pool, TradeId(2)).await.unwrap().unwrap();
         assert_eq!(stored.settlement_date, stated);
         assert_eq!(
             stored.settlement_date_source,
@@ -1168,7 +1173,7 @@ mod tests {
             let running = running.clone();
             tokio::spawn(async move {
                 running.store(true, Ordering::SeqCst);
-                db_upsert_sell(&pool, 2, &replay).await
+                db_upsert_sell(&pool, TradeId(2), &replay).await
             })
         };
         // A condition, then a grace period in which the write can do nothing
@@ -1194,7 +1199,7 @@ mod tests {
             .expect("the Sell write task does not panic")
             .expect("the replay is a valid Sell");
 
-        let stored = trade::db_get(&pool, 2).await.unwrap().unwrap();
+        let stored = trade::db_get(&pool, TradeId(2)).await.unwrap().unwrap();
         assert_eq!(stored.settlement_date, stated);
         assert_eq!(
             stored.settlement_date_source,
@@ -1215,11 +1220,11 @@ mod tests {
         let body = sell_body(
             Decimal::from(100),
             vec![AllocationInput {
-                purchase_trade_id: 1,
+                purchase_trade_id: TradeId(1),
                 quantity_allocated: Decimal::from(60),
             }],
         );
-        let err = db_upsert_sell(&pool, 2, &body).await.unwrap_err();
+        let err = db_upsert_sell(&pool, TradeId(2), &body).await.unwrap_err();
         assert!(matches!(err, SellError::AllocationMismatch { .. }));
         // nothing persisted
         assert!(!trade_exists(&pool, 2).await);
@@ -1248,22 +1253,22 @@ mod tests {
         let body = sell_body(
             wei,
             vec![AllocationInput {
-                purchase_trade_id: 1,
+                purchase_trade_id: TradeId(1),
                 quantity_allocated: wei,
             }],
         );
-        db_upsert_sell(&pool, 2, &body).await.unwrap();
+        db_upsert_sell(&pool, TradeId(2), &body).await.unwrap();
         assert_eq!(count_allocations(&pool, 2).await, 1);
 
         // Two wei sold, one wei allocated: one digit out is still out.
         let body = sell_body(
             wei + wei,
             vec![AllocationInput {
-                purchase_trade_id: 1,
+                purchase_trade_id: TradeId(1),
                 quantity_allocated: wei,
             }],
         );
-        let err = db_upsert_sell(&pool, 3, &body).await.unwrap_err();
+        let err = db_upsert_sell(&pool, TradeId(3), &body).await.unwrap_err();
         assert!(matches!(err, SellError::AllocationMismatch { .. }));
         assert!(!trade_exists(&pool, 3).await);
     }
@@ -1278,11 +1283,11 @@ mod tests {
         let body = sell_body(
             Decimal::from(100),
             vec![AllocationInput {
-                purchase_trade_id: 1,
+                purchase_trade_id: TradeId(1),
                 quantity_allocated: Decimal::from(120),
             }],
         );
-        let err = db_upsert_sell(&pool, 2, &body).await.unwrap_err();
+        let err = db_upsert_sell(&pool, TradeId(2), &body).await.unwrap_err();
         assert!(matches!(err, SellError::AllocationMismatch { .. }));
     }
 
@@ -1296,11 +1301,11 @@ mod tests {
         let body = sell_body(
             Decimal::from(100),
             vec![AllocationInput {
-                purchase_trade_id: 1,
+                purchase_trade_id: TradeId(1),
                 quantity_allocated: Decimal::from(100),
             }],
         );
-        let err = db_upsert_sell(&pool, 2, &body).await.unwrap_err();
+        let err = db_upsert_sell(&pool, TradeId(2), &body).await.unwrap_err();
         assert!(matches!(err, SellError::PurchaseQuantityExceeded));
         assert!(!trade_exists(&pool, 2).await);
     }
@@ -1314,21 +1319,21 @@ mod tests {
         let prior = sell_body(
             Decimal::from(100),
             vec![AllocationInput {
-                purchase_trade_id: 1,
+                purchase_trade_id: TradeId(1),
                 quantity_allocated: Decimal::from(100),
             }],
         );
-        db_upsert_sell(&pool, 3, &prior).await.unwrap();
+        db_upsert_sell(&pool, TradeId(3), &prior).await.unwrap();
 
         // now try to allocate a new sell against the Sell trade 3
         let body = sell_body(
             Decimal::from(10),
             vec![AllocationInput {
-                purchase_trade_id: 3,
+                purchase_trade_id: TradeId(3),
                 quantity_allocated: Decimal::from(10),
             }],
         );
-        let err = db_upsert_sell(&pool, 4, &body).await.unwrap_err();
+        let err = db_upsert_sell(&pool, TradeId(4), &body).await.unwrap_err();
         assert!(matches!(err, SellError::PurchaseTradeNotBuyOrDrp));
     }
 
@@ -1346,11 +1351,11 @@ mod tests {
         let body = sell_body(
             Decimal::from(100),
             vec![AllocationInput {
-                purchase_trade_id: 1,
+                purchase_trade_id: TradeId(1),
                 quantity_allocated: Decimal::from(100),
             }],
         );
-        let err = db_upsert_sell(&pool, 2, &body).await.unwrap_err();
+        let err = db_upsert_sell(&pool, TradeId(2), &body).await.unwrap_err();
         assert!(matches!(err, SellError::PurchaseListingMismatch));
         assert!(!trade_exists(&pool, 2).await);
     }
@@ -1372,11 +1377,11 @@ mod tests {
         let body = sell_body(
             Decimal::from(100),
             vec![AllocationInput {
-                purchase_trade_id: 1,
+                purchase_trade_id: TradeId(1),
                 quantity_allocated: Decimal::from(100),
             }],
         );
-        let err = db_upsert_sell(&pool, 2, &body).await.unwrap_err();
+        let err = db_upsert_sell(&pool, TradeId(2), &body).await.unwrap_err();
         assert!(matches!(err, SellError::PurchaseAfterSale));
         assert!(!trade_exists(&pool, 2).await);
 
@@ -1388,11 +1393,11 @@ mod tests {
         let body = sell_body(
             Decimal::from(100),
             vec![AllocationInput {
-                purchase_trade_id: 1,
+                purchase_trade_id: TradeId(1),
                 quantity_allocated: Decimal::from(100),
             }],
         );
-        db_upsert_sell(&pool, 2, &body).await.unwrap();
+        db_upsert_sell(&pool, TradeId(2), &body).await.unwrap();
         assert!(trade_exists(&pool, 2).await);
     }
 
@@ -1424,11 +1429,11 @@ mod tests {
         let body = sell_body(
             Decimal::from(100),
             vec![AllocationInput {
-                purchase_trade_id: 1,
+                purchase_trade_id: TradeId(1),
                 quantity_allocated: Decimal::from(100),
             }],
         );
-        let err = db_upsert_sell(&pool, 2, &body).await.unwrap_err();
+        let err = db_upsert_sell(&pool, TradeId(2), &body).await.unwrap_err();
         assert!(matches!(err, SellError::PurchaseInDifferentAccount));
         assert!(!trade_exists(&pool, 2).await);
 
@@ -1436,12 +1441,12 @@ mod tests {
         let mut body = sell_body(
             Decimal::from(100),
             vec![AllocationInput {
-                purchase_trade_id: 1,
+                purchase_trade_id: TradeId(1),
                 quantity_allocated: Decimal::from(100),
             }],
         );
         body.holding_account_id = HoldingAccountId(2);
-        db_upsert_sell(&pool, 2, &body).await.unwrap();
+        db_upsert_sell(&pool, TradeId(2), &body).await.unwrap();
         assert!(trade_exists(&pool, 2).await);
     }
 
@@ -1591,11 +1596,11 @@ mod tests {
         let body = sell_body(
             Decimal::from(201),
             vec![AllocationInput {
-                purchase_trade_id: 1,
+                purchase_trade_id: TradeId(1),
                 quantity_allocated: Decimal::from(201),
             }],
         );
-        let err = db_upsert_sell(&pool, 2, &body).await.unwrap_err();
+        let err = db_upsert_sell(&pool, TradeId(2), &body).await.unwrap_err();
         assert!(matches!(err, SellError::PurchaseQuantityExceeded));
         assert!(!trade_exists(&pool, 2).await);
 
@@ -1603,11 +1608,11 @@ mod tests {
         let body = sell_body(
             Decimal::from(200),
             vec![AllocationInput {
-                purchase_trade_id: 1,
+                purchase_trade_id: TradeId(1),
                 quantity_allocated: Decimal::from(200),
             }],
         );
-        db_upsert_sell(&pool, 2, &body).await.unwrap();
+        db_upsert_sell(&pool, TradeId(2), &body).await.unwrap();
         assert!(trade_exists(&pool, 2).await);
     }
 
@@ -1635,37 +1640,43 @@ mod tests {
             Decimal::from(120),
             vec![
                 AllocationInput {
-                    purchase_trade_id: 1,
+                    purchase_trade_id: TradeId(1),
                     quantity_allocated: Decimal::from(80),
                 },
                 AllocationInput {
-                    purchase_trade_id: 2,
+                    purchase_trade_id: TradeId(2),
                     quantity_allocated: Decimal::from(40),
                 },
             ],
         );
-        db_upsert_sell(&pool, 3, &body).await.unwrap();
+        db_upsert_sell(&pool, TradeId(3), &body).await.unwrap();
         assert_eq!(
             remaining_quantities(&pool).await,
-            vec![(1, Decimal::from(120)), (2, Decimal::from(60)),],
+            vec![
+                (TradeId(1), Decimal::from(120)),
+                (TradeId(2), Decimal::from(60)),
+            ],
             "consumed units are out of the open pool, in post-split units"
         );
 
         assert_eq!(
-            db_delete_sell(&pool, 3).await.unwrap(),
+            db_delete_sell(&pool, TradeId(3)).await.unwrap(),
             DeleteOutcome::Deleted
         );
         assert_eq!(count_allocations(&pool, 3).await, 0);
         assert_eq!(
             remaining_quantities(&pool).await,
-            vec![(1, Decimal::from(200)), (2, Decimal::from(100)),],
+            vec![
+                (TradeId(1), Decimal::from(200)),
+                (TradeId(2), Decimal::from(100)),
+            ],
             "both parcels are whole again at their full post-split quantity"
         );
     }
 
     /// Each open parcel's `(trade_id, remaining_quantity)` from the open-parcels
     /// report — the same read every open-holdings view is built on.
-    async fn remaining_quantities(pool: &SqlitePool) -> Vec<(i64, Decimal)> {
+    async fn remaining_quantities(pool: &SqlitePool) -> Vec<(TradeId, Decimal)> {
         let mut conn = pool.acquire().await.unwrap();
         crate::domain::open_parcels::load(&mut conn, None)
             .await
@@ -1686,11 +1697,11 @@ mod tests {
         let v1 = sell_body(
             Decimal::from(100),
             vec![AllocationInput {
-                purchase_trade_id: 1,
+                purchase_trade_id: TradeId(1),
                 quantity_allocated: Decimal::from(100),
             }],
         );
-        db_upsert_sell(&pool, 3, &v1).await.unwrap();
+        db_upsert_sell(&pool, TradeId(3), &v1).await.unwrap();
         assert_eq!(count_allocations(&pool, 3).await, 1);
 
         // revised: split across two parcels — old allocation should be gone
@@ -1698,16 +1709,16 @@ mod tests {
             Decimal::from(100),
             vec![
                 AllocationInput {
-                    purchase_trade_id: 1,
+                    purchase_trade_id: TradeId(1),
                     quantity_allocated: Decimal::from(40),
                 },
                 AllocationInput {
-                    purchase_trade_id: 2,
+                    purchase_trade_id: TradeId(2),
                     quantity_allocated: Decimal::from(60),
                 },
             ],
         );
-        db_upsert_sell(&pool, 3, &v2).await.unwrap();
+        db_upsert_sell(&pool, TradeId(3), &v2).await.unwrap();
         assert_eq!(count_allocations(&pool, 3).await, 2);
     }
 
@@ -1741,14 +1752,14 @@ mod tests {
         let body = sell_body(
             Decimal::from(100),
             vec![AllocationInput {
-                purchase_trade_id: 1,
+                purchase_trade_id: TradeId(1),
                 quantity_allocated: Decimal::from(100),
             }],
         );
-        db_upsert_sell(&pool, 2, &body).await.unwrap();
+        db_upsert_sell(&pool, TradeId(2), &body).await.unwrap();
         assert_eq!(count_allocations(&pool, 2).await, 1);
 
-        let outcome = db_delete_sell(&pool, 2).await.unwrap();
+        let outcome = db_delete_sell(&pool, TradeId(2)).await.unwrap();
         assert_eq!(outcome, DeleteOutcome::Deleted);
         assert!(!trade_exists(&pool, 2).await);
         assert_eq!(count_allocations(&pool, 2).await, 0);
@@ -1760,7 +1771,7 @@ mod tests {
     async fn db_delete_missing_sell_is_not_found() {
         let pool = test_pool().await;
         assert_eq!(
-            db_delete_sell(&pool, 99).await.unwrap(),
+            db_delete_sell(&pool, TradeId(99)).await.unwrap(),
             DeleteOutcome::NotFound
         );
     }
@@ -1772,7 +1783,7 @@ mod tests {
         insert_buy(&pool, 1, ListingId(1), Decimal::from(100)).await;
         // trade 1 is a Buy — deleting it via the sells endpoint is refused
         assert_eq!(
-            db_delete_sell(&pool, 1).await.unwrap(),
+            db_delete_sell(&pool, TradeId(1)).await.unwrap(),
             DeleteOutcome::NotASell
         );
         assert!(trade_exists(&pool, 1).await);
@@ -1786,11 +1797,11 @@ mod tests {
         let body = sell_body(
             Decimal::from(100),
             vec![AllocationInput {
-                purchase_trade_id: 1,
+                purchase_trade_id: TradeId(1),
                 quantity_allocated: Decimal::from(100),
             }],
         );
-        db_upsert_sell(&pool, 2, &body).await.unwrap();
+        db_upsert_sell(&pool, TradeId(2), &body).await.unwrap();
 
         let app = client(&pool);
         let resp = app.delete("/sells/2").await;
@@ -1814,16 +1825,16 @@ mod tests {
         let mut body = sell_body(
             Decimal::from(100),
             vec![AllocationInput {
-                purchase_trade_id: 1,
+                purchase_trade_id: TradeId(1),
                 quantity_allocated: Decimal::from(100),
             }],
         );
         body.brokerage = "9.95".parse().unwrap();
         body.brokerage_includes_gst = true;
         body.statement_total = Some("1490.05".parse().unwrap());
-        db_upsert_sell(&pool, 2, &body).await.unwrap();
+        db_upsert_sell(&pool, TradeId(2), &body).await.unwrap();
 
-        let t = trade::db_get(&pool, 2).await.unwrap().unwrap();
+        let t = trade::db_get(&pool, TradeId(2)).await.unwrap().unwrap();
         assert_eq!(t.brokerage, "9.05".parse::<Decimal>().unwrap());
         assert_eq!(t.gst_on_brokerage, "0.90".parse::<Decimal>().unwrap());
         assert!(t.brokerage_includes_gst);
@@ -1831,7 +1842,7 @@ mod tests {
 
         // The Buy-direction figure (proceeds *plus* costs) must not pass.
         body.statement_total = Some("1509.95".parse().unwrap());
-        let err = db_upsert_sell(&pool, 3, &body).await.unwrap_err();
+        let err = db_upsert_sell(&pool, TradeId(3), &body).await.unwrap_err();
         assert!(matches!(
             err,
             SellError::StatementTotal(trade::StatementTotalError::TotalMismatch { .. })
@@ -1852,7 +1863,7 @@ mod tests {
         let mut body = sell_body(
             "33".parse().unwrap(),
             vec![AllocationInput {
-                purchase_trade_id: 1,
+                purchase_trade_id: TradeId(1),
                 quantity_allocated: "33".parse().unwrap(),
             }],
         );
@@ -1860,9 +1871,9 @@ mod tests {
         body.brokerage = "9.05".parse().unwrap();
         body.gst_on_brokerage = "0.90".parse().unwrap();
         body.statement_total = Some("481.96".parse().unwrap());
-        db_upsert_sell(&pool, 2, &body).await.unwrap();
+        db_upsert_sell(&pool, TradeId(2), &body).await.unwrap();
         assert_eq!(
-            trade::db_get(&pool, 2)
+            trade::db_get(&pool, TradeId(2))
                 .await
                 .unwrap()
                 .unwrap()
@@ -1871,7 +1882,7 @@ mod tests {
         );
 
         body.statement_total = Some("481.95".parse().unwrap());
-        let err = db_upsert_sell(&pool, 3, &body).await.unwrap_err();
+        let err = db_upsert_sell(&pool, TradeId(3), &body).await.unwrap_err();
         assert!(matches!(
             err,
             SellError::StatementTotal(trade::StatementTotalError::TotalMismatch { .. })
@@ -1938,7 +1949,7 @@ mod tests {
             "detail must explain the rejection: {detail}"
         );
         assert!(
-            trade::db_get(&pool, 2).await.unwrap().is_none(),
+            trade::db_get(&pool, TradeId(2)).await.unwrap().is_none(),
             "nothing persisted"
         );
     }
@@ -2002,7 +2013,7 @@ mod tests {
                 serde_json::json!([{ "purchase_trade_id": 1, "quantity_allocated": "100" }]);
             let (status, detail) = put_sell_json(&pool, 2, body).await;
             assert_eq!(status, StatusCode::NO_CONTENT, "pass {pass}: {detail}");
-            let t = trade::db_get(&pool, 2).await.unwrap().unwrap();
+            let t = trade::db_get(&pool, TradeId(2)).await.unwrap().unwrap();
             assert_eq!(t.brokerage, "0.90".parse::<Decimal>().unwrap());
             assert_eq!(t.gst_on_brokerage, "0.09".parse::<Decimal>().unwrap());
             assert!(t.brokerage_includes_gst);
@@ -2053,16 +2064,18 @@ mod tests {
             Decimal::from(100),
             vec![
                 AllocationInput {
-                    purchase_trade_id: 1,
+                    purchase_trade_id: TradeId(1),
                     quantity_allocated: Decimal::from(-5),
                 },
                 AllocationInput {
-                    purchase_trade_id: 2,
+                    purchase_trade_id: TradeId(2),
                     quantity_allocated: Decimal::from(105),
                 },
             ],
         );
-        let err = db_upsert_sell(&pool, 3, &negative).await.unwrap_err();
+        let err = db_upsert_sell(&pool, TradeId(3), &negative)
+            .await
+            .unwrap_err();
         assert!(
             matches!(err, SellError::AllocationNotPositive),
             "expected AllocationNotPositive, got: {err:?}"
@@ -2075,16 +2088,16 @@ mod tests {
             Decimal::from(100),
             vec![
                 AllocationInput {
-                    purchase_trade_id: 1,
+                    purchase_trade_id: TradeId(1),
                     quantity_allocated: Decimal::ZERO,
                 },
                 AllocationInput {
-                    purchase_trade_id: 2,
+                    purchase_trade_id: TradeId(2),
                     quantity_allocated: Decimal::from(100),
                 },
             ],
         );
-        let err = db_upsert_sell(&pool, 3, &zero).await.unwrap_err();
+        let err = db_upsert_sell(&pool, TradeId(3), &zero).await.unwrap_err();
         assert!(matches!(err, SellError::AllocationNotPositive));
         assert!(!trade_exists(&pool, 3).await);
     }
@@ -2249,7 +2262,7 @@ mod tests {
             serde_json::json!([ { "purchase_trade_id": 3, "quantity_allocated": "100" } ]);
         let (status, detail) = put_sell_json(&pool, 2, boundary).await;
         assert_eq!(status, StatusCode::CREATED, "detail: {detail}");
-        let sell = trade::db_get(&pool, 2).await.unwrap().unwrap();
+        let sell = trade::db_get(&pool, TradeId(2)).await.unwrap().unwrap();
         assert_eq!(sell.date, today);
         assert!(sell.settlement_date >= today);
     }
@@ -2335,7 +2348,7 @@ mod tests {
         });
         let (status, detail) = put_sell_json(&pool, 2, body).await;
         assert_eq!(status, StatusCode::CREATED, "detail: {detail}");
-        let sell = trade::db_get(&pool, 2).await.unwrap().unwrap();
+        let sell = trade::db_get(&pool, TradeId(2)).await.unwrap().unwrap();
         assert_eq!(sell.date, NaiveDate::from_ymd_opt(2024, 6, 1).unwrap());
     }
 
@@ -2379,7 +2392,7 @@ mod tests {
         // …and a USD Sell persists it.
         let resp = put(pool.clone(), "USD").await;
         assert_eq!(resp.status, StatusCode::CREATED);
-        let got = trade::db_get(&pool, 2).await.unwrap().unwrap();
+        let got = trade::db_get(&pool, TradeId(2)).await.unwrap().unwrap();
         assert_eq!(got.spot_fx_rate, Some("0.6543".parse().unwrap()));
     }
 
@@ -2399,11 +2412,11 @@ mod tests {
             let body = sell_body(
                 Decimal::from(100),
                 vec![AllocationInput {
-                    purchase_trade_id: 1,
+                    purchase_trade_id: TradeId(1),
                     quantity_allocated: allocated.parse().unwrap(),
                 }],
             );
-            let err = db_upsert_sell(&pool, 2, &body).await.unwrap_err();
+            let err = db_upsert_sell(&pool, TradeId(2), &body).await.unwrap_err();
             assert!(
                 matches!(err, SellError::AllocationMismatch { .. }),
                 "{allocated}: {err}"
@@ -2426,22 +2439,24 @@ mod tests {
                 Decimal::from(first + second),
                 vec![
                     AllocationInput {
-                        purchase_trade_id: 1,
+                        purchase_trade_id: TradeId(1),
                         quantity_allocated: Decimal::from(first),
                     },
                     AllocationInput {
-                        purchase_trade_id: 1,
+                        purchase_trade_id: TradeId(1),
                         quantity_allocated: Decimal::from(second),
                     },
                 ],
             )
         };
-        db_upsert_sell(&pool, 2, &two_rows(40, 20)).await.unwrap();
+        db_upsert_sell(&pool, TradeId(2), &two_rows(40, 20))
+            .await
+            .unwrap();
         assert_eq!(count_allocations(&pool, 2).await, 2);
 
         // 40 + 40 against the 40 the first Sell left: refused on the sum, not
         // on either row alone.
-        let err = db_upsert_sell(&pool, 3, &two_rows(40, 40))
+        let err = db_upsert_sell(&pool, TradeId(3), &two_rows(40, 40))
             .await
             .unwrap_err();
         assert!(matches!(err, SellError::PurchaseQuantityExceeded), "{err}");
@@ -2472,13 +2487,13 @@ mod tests {
                 .insert(&pool)
                 .await;
             allocations.push(AllocationInput {
-                purchase_trade_id: id,
+                purchase_trade_id: TradeId(id),
                 quantity_allocated: Decimal::ONE,
             });
         }
 
         let body = sell_body(Decimal::from(200), allocations);
-        db_upsert_sell(&pool, 500, &body).await.unwrap();
+        db_upsert_sell(&pool, TradeId(500), &body).await.unwrap();
         assert_eq!(count_allocations(&pool, 500).await, 200);
     }
 
@@ -2513,14 +2528,18 @@ mod tests {
         let all_three = || {
             (1..=3i64)
                 .map(|id| AllocationInput {
-                    purchase_trade_id: id,
+                    purchase_trade_id: TradeId(id),
                     quantity_allocated: Decimal::from(100),
                 })
                 .collect::<Vec<_>>()
         };
-        let err = db_upsert_sell(&pool, 10, &sell_body(Decimal::from(300), all_three()))
-            .await
-            .unwrap_err();
+        let err = db_upsert_sell(
+            &pool,
+            TradeId(10),
+            &sell_body(Decimal::from(300), all_three()),
+        )
+        .await
+        .unwrap_err();
         assert!(
             matches!(err, SellError::PurchaseInDifferentAccount),
             "{err}"
@@ -2532,12 +2551,14 @@ mod tests {
             let mut body = sell_body(
                 Decimal::from(100),
                 vec![AllocationInput {
-                    purchase_trade_id: account,
+                    purchase_trade_id: TradeId(account),
                     quantity_allocated: Decimal::from(100),
                 }],
             );
             body.holding_account_id = HoldingAccountId(account);
-            db_upsert_sell(&pool, 20 + account, &body).await.unwrap();
+            db_upsert_sell(&pool, TradeId(20 + account), &body)
+                .await
+                .unwrap();
         }
         assert!(remaining_quantities(&pool).await.is_empty());
     }
@@ -2555,20 +2576,22 @@ mod tests {
             sell_body(
                 Decimal::from(60),
                 vec![AllocationInput {
-                    purchase_trade_id: 1,
+                    purchase_trade_id: TradeId(1),
                     quantity_allocated: Decimal::from(60),
                 }],
             )
         };
-        db_upsert_sell(&pool, 2, &sixty()).await.unwrap();
+        db_upsert_sell(&pool, TradeId(2), &sixty()).await.unwrap();
 
         // Same day…
-        let err = db_upsert_sell(&pool, 3, &sixty()).await.unwrap_err();
+        let err = db_upsert_sell(&pool, TradeId(3), &sixty())
+            .await
+            .unwrap_err();
         assert!(matches!(err, SellError::PurchaseQuantityExceeded), "{err}");
         // …and a year later, where the parcel *once* held 60 spare units.
         let mut later = sixty();
         later.date = NaiveDate::from_ymd_opt(2025, 6, 3).unwrap();
-        let err = db_upsert_sell(&pool, 3, &later).await.unwrap_err();
+        let err = db_upsert_sell(&pool, TradeId(3), &later).await.unwrap_err();
         assert!(matches!(err, SellError::PurchaseQuantityExceeded), "{err}");
         assert!(!trade_exists(&pool, 3).await);
 
@@ -2576,7 +2599,7 @@ mod tests {
         let mut rest = sixty();
         rest.quantity = Decimal::from(40);
         rest.allocations[0].quantity_allocated = Decimal::from(40);
-        db_upsert_sell(&pool, 4, &rest).await.unwrap();
+        db_upsert_sell(&pool, TradeId(4), &rest).await.unwrap();
     }
 
     /// SCENARIOS D-11. A Sell entered before the Buy it draws on exists is
@@ -2590,11 +2613,11 @@ mod tests {
         let body = sell_body(
             Decimal::from(100),
             vec![AllocationInput {
-                purchase_trade_id: 7,
+                purchase_trade_id: TradeId(7),
                 quantity_allocated: Decimal::from(100),
             }],
         );
-        let err = db_upsert_sell(&pool, 2, &body).await.unwrap_err();
+        let err = db_upsert_sell(&pool, TradeId(2), &body).await.unwrap_err();
         assert!(matches!(err, SellError::PurchaseParcelMissing), "{err}");
         let trades: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM trades")
             .fetch_one(&pool)
@@ -2620,7 +2643,7 @@ mod tests {
             let mut body = sell_body(
                 Decimal::from(qty),
                 vec![AllocationInput {
-                    purchase_trade_id: 1,
+                    purchase_trade_id: TradeId(1),
                     quantity_allocated: Decimal::from(qty),
                 }],
             );
@@ -2628,16 +2651,18 @@ mod tests {
             body
         };
         let first = NaiveDate::from_ymd_opt(2023, 3, 1).unwrap();
-        db_upsert_sell(&pool, 2, &sale(first, 40)).await.unwrap();
+        db_upsert_sell(&pool, TradeId(2), &sale(first, 40))
+            .await
+            .unwrap();
         db_upsert_sell(
             &pool,
-            3,
+            TradeId(3),
             &sale(NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(), 60),
         )
         .await
         .unwrap();
 
-        let err = db_upsert_sell(&pool, 2, &sale(first, 50))
+        let err = db_upsert_sell(&pool, TradeId(2), &sale(first, 50))
             .await
             .unwrap_err();
         assert!(matches!(err, SellError::PurchaseQuantityExceeded), "{err}");
@@ -2654,10 +2679,12 @@ mod tests {
         );
 
         // Amending it *down* frees units and goes through.
-        db_upsert_sell(&pool, 2, &sale(first, 30)).await.unwrap();
+        db_upsert_sell(&pool, TradeId(2), &sale(first, 30))
+            .await
+            .unwrap();
         assert_eq!(
             remaining_quantities(&pool).await,
-            vec![(1, Decimal::from(10))]
+            vec![(TradeId(1), Decimal::from(10))]
         );
     }
 
@@ -2746,11 +2773,11 @@ mod tests {
                         let body = sell_body(
                             Decimal::from(100),
                             vec![AllocationInput {
-                                purchase_trade_id: 1,
+                                purchase_trade_id: TradeId(1),
                                 quantity_allocated: Decimal::from(100),
                             }],
                         );
-                        (10 + n, db_upsert_sell(&pool, 10 + n, &body).await)
+                        (10 + n, db_upsert_sell(&pool, TradeId(10 + n), &body).await)
                     })
                 })
                 .collect();
@@ -2796,7 +2823,7 @@ mod tests {
             );
 
             // Free the parcel for the next round.
-            db_delete_sell(&pool, winner).await.unwrap();
+            db_delete_sell(&pool, TradeId(winner)).await.unwrap();
         }
     }
 
@@ -2881,20 +2908,20 @@ mod tests {
         .await
         .unwrap();
 
-        let (status, detail) = put_sell_json(&pool, drp.id, sell_over_parcel_json()).await;
+        let (status, detail) = put_sell_json(&pool, drp.id.0, sell_over_parcel_json()).await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert!(
             detail.contains("is a DRP, not a Sell"),
             "the refusal must name what the id holds: {detail}"
         );
-        assert_eq!(stored_trade_type(&pool, drp.id).await, TradeType::DRP);
+        assert_eq!(stored_trade_type(&pool, drp.id.0).await, TradeType::DRP);
         // The distribution still points at a DRP trade, not at a disposal.
         let linked: Option<i64> =
             sqlx::query_scalar("SELECT reinvestment_trade_id FROM income WHERE id = 2")
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        assert_eq!(linked, Some(drp.id));
+        assert_eq!(linked, Some(drp.id.0));
     }
 
     /// SCENARIOS Z-b: the rights-exercise Buy (`rights_action_id`), whose
@@ -2938,13 +2965,13 @@ mod tests {
         .await
         .unwrap();
 
-        let (status, detail) = put_sell_json(&pool, buy.id, sell_over_parcel_json()).await;
+        let (status, detail) = put_sell_json(&pool, buy.id.0, sell_over_parcel_json()).await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert!(
             detail.contains("is a Buy, not a Sell"),
             "the refusal must name what the id holds: {detail}"
         );
-        assert_eq!(stored_trade_type(&pool, buy.id).await, TradeType::Buy);
+        assert_eq!(stored_trade_type(&pool, buy.id.0).await, TradeType::Buy);
     }
 
     /// SCENARIOS Z-b: the ESS vest Buy (`ess_statement_id`), whose cost base
@@ -2965,13 +2992,13 @@ mod tests {
             .await;
         let buy = ess_vest::db_vest(&pool, 1).await.unwrap();
 
-        let (status, detail) = put_sell_json(&pool, buy.id, sell_over_parcel_json()).await;
+        let (status, detail) = put_sell_json(&pool, buy.id.0, sell_over_parcel_json()).await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert!(
             detail.contains("is a Buy, not a Sell"),
             "the refusal must name what the id holds: {detail}"
         );
-        assert_eq!(stored_trade_type(&pool, buy.id).await, TradeType::Buy);
+        assert_eq!(stored_trade_type(&pool, buy.id.0).await, TradeType::Buy);
     }
 
     /// SCENARIOS Z-b: the inherited-parcel Buy (`inheritance_id`), which
@@ -3002,18 +3029,18 @@ mod tests {
         )
         .await
         .unwrap();
-        let buy_id: i64 = sqlx::query_scalar("SELECT id FROM trades WHERE inheritance_id = 1")
+        let buy_id: TradeId = sqlx::query_scalar("SELECT id FROM trades WHERE inheritance_id = 1")
             .fetch_one(&pool)
             .await
             .unwrap();
 
-        let (status, detail) = put_sell_json(&pool, buy_id, sell_over_parcel_json()).await;
+        let (status, detail) = put_sell_json(&pool, buy_id.0, sell_over_parcel_json()).await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert!(
             detail.contains("is a Buy, not a Sell"),
             "the refusal must name what the id holds: {detail}"
         );
-        assert_eq!(stored_trade_type(&pool, buy_id).await, TradeType::Buy);
+        assert_eq!(stored_trade_type(&pool, buy_id.0).await, TradeType::Buy);
     }
 
     /// SCENARIOS Z-b: an ordinary Buy carries no provenance at all, so the
@@ -3077,7 +3104,7 @@ mod tests {
                 from_account_id: HoldingAccountId(1),
                 to_account_id: HoldingAccountId(2),
                 allocations: vec![AllocationInput {
-                    purchase_trade_id: 1,
+                    purchase_trade_id: TradeId(1),
                     quantity_allocated: Decimal::from(100),
                 }],
                 fee_allocations: vec![],
@@ -3089,7 +3116,7 @@ mod tests {
         .unwrap();
         let transfer_in = group.transfer_ins.first().expect("a transfer-in Buy").id;
 
-        let (status, detail) = put_sell_json(&pool, transfer_in, sell_over_parcel_json()).await;
+        let (status, detail) = put_sell_json(&pool, transfer_in.0, sell_over_parcel_json()).await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert!(
             detail.contains("is a Buy, not a Sell"),
@@ -3187,7 +3214,7 @@ mod tests {
 
         // The allocations landed against the assigned id, and the returned row
         // is the stored one.
-        assert_eq!(count_allocations(&pool, created.id).await, 1);
+        assert_eq!(count_allocations(&pool, created.id.0).await, 1);
         let stored = trade::db_get(&pool, created.id).await.unwrap().unwrap();
         assert_eq!(stored.id, created.id);
         assert_eq!(stored.listing_id, 1);
@@ -3227,8 +3254,8 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(sell_count, 2, "both creates are stored");
-        assert_eq!(count_allocations(&pool, first.id).await, 1);
-        assert_eq!(count_allocations(&pool, second.id).await, 1);
+        assert_eq!(count_allocations(&pool, first.id.0).await, 1);
+        assert_eq!(count_allocations(&pool, second.id.0).await, 1);
     }
 
     /// The property the whole `row_history` occupant marking rests on: an id

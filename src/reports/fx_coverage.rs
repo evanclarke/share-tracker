@@ -42,6 +42,8 @@ use crate::infra::http::ApiError;
 #[cfg(test)]
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
+#[cfg(test)]
+use crate::infra::id::TradeId;
 use axum::{Router, extract::State, routing::get};
 use chrono::{Datelike, NaiveDate};
 use rust_decimal::Decimal;
@@ -691,7 +693,7 @@ mod tests {
                 fx_rate: Some(dec("0.99")),
                 holding_account_id: HoldingAccountId(1),
                 allocations: vec![crate::entities::rights_sale::AllocationInput {
-                    purchase_trade_id: 1,
+                    purchase_trade_id: TradeId(1),
                     units: dec("50"),
                 }],
             },

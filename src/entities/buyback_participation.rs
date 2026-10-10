@@ -38,6 +38,8 @@ use crate::infra::decimal::Money;
 use crate::infra::extract::{Json, Query};
 use crate::infra::http::{self, ApiError, DryRunQuery};
 use crate::infra::id::HoldingAccountId;
+#[cfg(test)]
+use crate::infra::id::TradeId;
 use axum::{
     Router,
     extract::{Path, State},
@@ -422,7 +424,7 @@ mod tests {
             date,
             units: units.parse().unwrap(),
             allocations: vec![AllocationInput {
-                purchase_trade_id: parcel,
+                purchase_trade_id: TradeId(parcel),
                 quantity_allocated: units.parse().unwrap(),
             }],
             fx_rate: None,
@@ -598,7 +600,7 @@ mod tests {
             .unwrap();
         let sale = gains
             .iter()
-            .find(|g| g.sale_trade_id == p.trade.id)
+            .find(|g| g.sale_trade_id == p.trade.id.0)
             .unwrap();
         assert_eq!(sale.proceeds, dec("8800.00"));
         assert_eq!(sale.cost_base, dec("6000.00"));
@@ -776,7 +778,7 @@ mod tests {
             spot_fx_rate: None,
             contract_note_ref: None,
             allocations: vec![AllocationInput {
-                purchase_trade_id: 1,
+                purchase_trade_id: TradeId(1),
                 quantity_allocated: dec("1000"),
             }],
         };
@@ -1038,7 +1040,7 @@ mod tests {
         // After a valid participation: PUT /sells on the trade → 422; PUT and
         // DELETE /income on the dividend row → 422.
         api_participate_expecting(&pool, 10, ok, StatusCode::CREATED).await;
-        let trade_id: i64 =
+        let trade_id: TradeId =
             sqlx::query_scalar("SELECT id FROM trades WHERE buyback_action_id = 10")
                 .fetch_one(&pool)
                 .await

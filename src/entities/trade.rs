@@ -80,6 +80,8 @@ use crate::infra::id::HoldingAccountId;
 #[cfg(test)]
 use crate::infra::id::ListingId;
 #[cfg(test)]
+use crate::infra::id::TradeId;
+#[cfg(test)]
 use axum::http::StatusCode;
 #[cfg(test)]
 use checks::split_gst_inclusive;
@@ -135,7 +137,12 @@ mod tests {
 
     /// Sell `qty` units out of the Buy parcel `buy_id` (listing 1), via the
     /// atomic Sell + allocation path.
-    async fn insert_sell_consuming(pool: &SqlitePool, sell_id: i64, buy_id: i64, qty: Decimal) {
+    async fn insert_sell_consuming(
+        pool: &SqlitePool,
+        sell_id: TradeId,
+        buy_id: TradeId,
+        qty: Decimal,
+    ) {
         use crate::entities::sell;
         sell::db_upsert_sell(
             pool,
@@ -182,13 +189,13 @@ mod tests {
 
     /// Link an AMIT adjustment covering `qty` units of trade `trade_id`
     /// (listing 1), creating the AMMA statement it hangs off.
-    async fn insert_amit_adjustment_covering(pool: &SqlitePool, trade_id: i64, qty: Decimal) {
+    async fn insert_amit_adjustment_covering(pool: &SqlitePool, trade_id: TradeId, qty: Decimal) {
         test_support::amma(1, 1)
             .units(qty)
             .cost_base_adjustment(dec("0.05"))
             .insert(pool)
             .await;
-        test_support::amit_adjustment(pool, 1, 1, trade_id, qty).await;
+        test_support::amit_adjustment(pool, 1, 1, trade_id.0, qty).await;
     }
 
     // DB-level tests
@@ -198,7 +205,7 @@ mod tests {
         let pool = test_pool().await;
         insert_test_listing(&pool).await;
         db_upsert(&pool, &buy_trade()).await.unwrap();
-        let got = db_get(&pool, 1).await.unwrap().unwrap();
+        let got = db_get(&pool, TradeId(1)).await.unwrap().unwrap();
         assert_eq!(got.trade_type, TradeType::Buy);
         assert_eq!(got.quantity, Decimal::from(10));
         assert_eq!(got.average_price, Decimal::from(100));
@@ -257,7 +264,7 @@ mod tests {
             .insert(&pool)
             .await;
         let mut btc = buy_trade();
-        btc.id = 2;
+        btc.id = TradeId(2);
         btc.listing_id = ListingId(2);
         btc.currency = "BTC".into();
         btc.brokerage_currency = "BTC".into();
@@ -276,7 +283,7 @@ mod tests {
             .gst_on_brokerage(dec("0.995"))
             .build();
         db_upsert(&pool, &trade).await.unwrap();
-        let got = db_get(&pool, 2).await.unwrap().unwrap();
+        let got = db_get(&pool, TradeId(2)).await.unwrap().unwrap();
         assert_eq!(got.trade_type, TradeType::Sell);
         assert_eq!(got.quantity, Decimal::from(5));
     }
@@ -292,7 +299,7 @@ mod tests {
             .price(Decimal::from(95))
             .build();
         db_upsert(&pool, &trade).await.unwrap();
-        let got = db_get(&pool, 3).await.unwrap().unwrap();
+        let got = db_get(&pool, TradeId(3)).await.unwrap().unwrap();
         assert_eq!(got.trade_type, TradeType::DRP);
         assert_eq!(got.quantity, Decimal::from(2));
     }
@@ -302,13 +309,13 @@ mod tests {
         let pool = test_pool().await;
         insert_test_listing(&pool).await;
         let mut trade = buy_trade();
-        trade.id = 7;
+        trade.id = TradeId(7);
         trade.trade_type = TradeType::DRP;
         trade.residual_brought_forward = "1.234567890".parse().unwrap();
         trade.residual_carried_forward = "0.987654321".parse().unwrap();
         trade.residual_paid_out = "2.500000001".parse().unwrap();
         db_upsert(&pool, &trade).await.unwrap();
-        let got = db_get(&pool, 7).await.unwrap().unwrap();
+        let got = db_get(&pool, TradeId(7)).await.unwrap().unwrap();
         assert_eq!(
             got.residual_brought_forward,
             "1.234567890".parse::<Decimal>().unwrap()
@@ -329,7 +336,7 @@ mod tests {
         let pool = test_pool().await;
         insert_test_listing(&pool).await;
         db_upsert(&pool, &buy_trade()).await.unwrap();
-        let got = db_get(&pool, 1).await.unwrap().unwrap();
+        let got = db_get(&pool, TradeId(1)).await.unwrap().unwrap();
         assert_eq!(got.residual_brought_forward, Decimal::ZERO);
         assert_eq!(got.residual_carried_forward, Decimal::ZERO);
         assert_eq!(got.residual_paid_out, Decimal::ZERO);
@@ -338,7 +345,7 @@ mod tests {
     #[tokio::test]
     async fn db_get_missing_returns_none() {
         let pool = test_pool().await;
-        assert!(db_get(&pool, 999).await.unwrap().is_none());
+        assert!(db_get(&pool, TradeId(999)).await.unwrap().is_none());
     }
 
     // Buy-trade edit/delete integrity (symmetric with the Sell-side invariants)
@@ -348,14 +355,14 @@ mod tests {
         let pool = test_pool().await;
         insert_test_listing(&pool).await;
         db_upsert(&pool, &buy_trade()).await.unwrap();
-        insert_sell_consuming(&pool, 2, 1, Decimal::from(5)).await;
+        insert_sell_consuming(&pool, TradeId(2), TradeId(1), Decimal::from(5)).await;
 
         assert_eq!(
-            db_delete(&pool, 1).await.unwrap(),
+            db_delete(&pool, TradeId(1)).await.unwrap(),
             DeleteOutcome::Referenced
         );
         assert!(
-            db_get(&pool, 1).await.unwrap().is_some(),
+            db_get(&pool, TradeId(1)).await.unwrap().is_some(),
             "consumed buy must remain"
         );
     }
@@ -365,14 +372,14 @@ mod tests {
         let pool = test_pool().await;
         insert_test_listing(&pool).await;
         db_upsert(&pool, &buy_trade()).await.unwrap();
-        insert_amit_adjustment_covering(&pool, 1, Decimal::from(10)).await;
+        insert_amit_adjustment_covering(&pool, TradeId(1), Decimal::from(10)).await;
 
         assert_eq!(
-            db_delete(&pool, 1).await.unwrap(),
+            db_delete(&pool, TradeId(1)).await.unwrap(),
             DeleteOutcome::Referenced
         );
         assert!(
-            db_get(&pool, 1).await.unwrap().is_some(),
+            db_get(&pool, TradeId(1)).await.unwrap().is_some(),
             "covered buy must remain"
         );
     }
@@ -395,11 +402,11 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            db_delete(&pool, 1).await.unwrap(),
+            db_delete(&pool, TradeId(1)).await.unwrap(),
             DeleteOutcome::Referenced
         );
         assert!(
-            db_get(&pool, 1).await.unwrap().is_some(),
+            db_get(&pool, TradeId(1)).await.unwrap().is_some(),
             "reinvestment trade must remain"
         );
     }
@@ -429,7 +436,7 @@ mod tests {
             matches!(err, UpsertError::ReinvestmentTrade),
             "expected ReinvestmentTrade, got: {err:?}"
         );
-        let kept = db_get(&pool, 1).await.unwrap().unwrap();
+        let kept = db_get(&pool, TradeId(1)).await.unwrap().unwrap();
         assert_eq!(kept.trade_type, TradeType::DRP, "trade must stay a DRP");
         assert_eq!(
             kept.residual_carried_forward,
@@ -479,7 +486,7 @@ mod tests {
         let pool = test_pool().await;
         insert_test_listing(&pool).await;
         db_upsert(&pool, &buy_trade()).await.unwrap(); // qty 10
-        insert_sell_consuming(&pool, 2, 1, Decimal::from(5)).await;
+        insert_sell_consuming(&pool, TradeId(2), TradeId(1), Decimal::from(5)).await;
 
         // Shrinking below the 5 already allocated out is refused…
         let mut shrunk = buy_trade();
@@ -490,7 +497,7 @@ mod tests {
             "expected QuantityBelowAllocated, got: {err:?}"
         );
         assert_eq!(
-            db_get(&pool, 1).await.unwrap().unwrap().quantity,
+            db_get(&pool, TradeId(1)).await.unwrap().unwrap().quantity,
             Decimal::from(10)
         );
 
@@ -499,7 +506,7 @@ mod tests {
         exact.quantity = Decimal::from(5);
         db_upsert(&pool, &exact).await.unwrap();
         assert_eq!(
-            db_get(&pool, 1).await.unwrap().unwrap().quantity,
+            db_get(&pool, TradeId(1)).await.unwrap().unwrap().quantity,
             Decimal::from(5)
         );
     }
@@ -528,7 +535,7 @@ mod tests {
         .await
         .unwrap();
         // Sell 10 post-split units (= 5 as-acquired) on 2024-06-01.
-        insert_sell_consuming(&pool, 2, 1, Decimal::from(10)).await;
+        insert_sell_consuming(&pool, TradeId(2), TradeId(1), Decimal::from(10)).await;
 
         // 4 < the 5 as-acquired units allocated out → refused…
         let mut shrunk = buy_trade();
@@ -544,7 +551,7 @@ mod tests {
         exact.quantity = Decimal::from(5);
         db_upsert(&pool, &exact).await.unwrap();
         assert_eq!(
-            db_get(&pool, 1).await.unwrap().unwrap().quantity,
+            db_get(&pool, TradeId(1)).await.unwrap().unwrap().quantity,
             Decimal::from(5)
         );
     }
@@ -554,7 +561,7 @@ mod tests {
         let pool = test_pool().await;
         insert_test_listing(&pool).await;
         db_upsert(&pool, &buy_trade()).await.unwrap(); // qty 10
-        insert_amit_adjustment_covering(&pool, 1, Decimal::from(8)).await;
+        insert_amit_adjustment_covering(&pool, TradeId(1), Decimal::from(8)).await;
 
         // Shrinking below the adjustment's 8 covered units is refused…
         let mut shrunk = buy_trade();
@@ -565,7 +572,7 @@ mod tests {
             "expected QuantityBelowAmitAdjustment, got: {err:?}"
         );
         assert_eq!(
-            db_get(&pool, 1).await.unwrap().unwrap().quantity,
+            db_get(&pool, TradeId(1)).await.unwrap().unwrap().quantity,
             Decimal::from(10)
         );
 
@@ -574,7 +581,7 @@ mod tests {
         exact.quantity = Decimal::from(8);
         db_upsert(&pool, &exact).await.unwrap();
         assert_eq!(
-            db_get(&pool, 1).await.unwrap().unwrap().quantity,
+            db_get(&pool, TradeId(1)).await.unwrap().unwrap().quantity,
             Decimal::from(8)
         );
     }
@@ -588,7 +595,7 @@ mod tests {
         insert_test_listing(&pool).await;
         test_support::listing(2).ticker("VGS").insert(&pool).await;
         db_upsert(&pool, &buy_trade()).await.unwrap(); // listing 1
-        insert_sell_consuming(&pool, 2, 1, Decimal::from(5)).await;
+        insert_sell_consuming(&pool, TradeId(2), TradeId(1), Decimal::from(5)).await;
 
         let mut moved = buy_trade();
         moved.listing_id = ListingId(2);
@@ -597,7 +604,10 @@ mod tests {
             matches!(err, UpsertError::ListingChangeReferenced),
             "expected ListingChangeReferenced, got: {err:?}"
         );
-        assert_eq!(db_get(&pool, 1).await.unwrap().unwrap().listing_id, 1);
+        assert_eq!(
+            db_get(&pool, TradeId(1)).await.unwrap().unwrap().listing_id,
+            1
+        );
     }
 
     /// The same freeze applies while an AMIT adjustment covers the parcel —
@@ -608,7 +618,7 @@ mod tests {
         insert_test_listing(&pool).await;
         test_support::listing(2).ticker("VGS").insert(&pool).await;
         db_upsert(&pool, &buy_trade()).await.unwrap(); // listing 1
-        insert_amit_adjustment_covering(&pool, 1, Decimal::from(8)).await;
+        insert_amit_adjustment_covering(&pool, TradeId(1), Decimal::from(8)).await;
 
         let mut moved = buy_trade();
         moved.listing_id = ListingId(2);
@@ -617,7 +627,10 @@ mod tests {
             matches!(err, UpsertError::ListingChangeReferenced),
             "expected ListingChangeReferenced, got: {err:?}"
         );
-        assert_eq!(db_get(&pool, 1).await.unwrap().unwrap().listing_id, 1);
+        assert_eq!(
+            db_get(&pool, TradeId(1)).await.unwrap().unwrap().listing_id,
+            1
+        );
 
         // With the adjustment removed the listing edits freely again.
         sqlx::query("DELETE FROM amit_adjustments WHERE trade_id = 1")
@@ -625,7 +638,10 @@ mod tests {
             .await
             .unwrap();
         db_upsert(&pool, &moved).await.unwrap();
-        assert_eq!(db_get(&pool, 1).await.unwrap().unwrap().listing_id, 2);
+        assert_eq!(
+            db_get(&pool, TradeId(1)).await.unwrap().unwrap().listing_id,
+            2
+        );
     }
 
     /// A Buy's date may not move past a Sell that allocates from it: the
@@ -638,7 +654,7 @@ mod tests {
         let pool = test_pool().await;
         insert_test_listing(&pool).await;
         db_upsert(&pool, &buy_trade()).await.unwrap(); // 2024-01-15
-        insert_sell_consuming(&pool, 2, 1, Decimal::from(5)).await; // sale 2024-06-01
+        insert_sell_consuming(&pool, TradeId(2), TradeId(1), Decimal::from(5)).await; // sale 2024-06-01
 
         let mut moved = buy_trade();
         moved.date = ymd(2024, 7, 1);
@@ -649,7 +665,7 @@ mod tests {
             "expected DateAfterAllocatedSale, got: {err:?}"
         );
         assert_eq!(
-            db_get(&pool, 1).await.unwrap().unwrap().date,
+            db_get(&pool, TradeId(1)).await.unwrap().unwrap().date,
             ymd(2024, 1, 15)
         );
 
@@ -660,7 +676,7 @@ mod tests {
         same_day.settlement_date = ymd(2024, 6, 3);
         db_upsert(&pool, &same_day).await.unwrap();
         assert_eq!(
-            db_get(&pool, 1).await.unwrap().unwrap().date,
+            db_get(&pool, TradeId(1)).await.unwrap().unwrap().date,
             ymd(2024, 6, 3)
         );
     }
@@ -677,7 +693,7 @@ mod tests {
         moved.settlement_date = ymd(2024, 7, 3);
         db_upsert(&pool, &moved).await.unwrap();
         assert_eq!(
-            db_get(&pool, 1).await.unwrap().unwrap().date,
+            db_get(&pool, TradeId(1)).await.unwrap().unwrap().date,
             ymd(2024, 7, 1)
         );
     }
@@ -692,7 +708,7 @@ mod tests {
         insert_test_listing(&pool).await;
         insert_second_account(&pool).await;
         db_upsert(&pool, &buy_trade()).await.unwrap(); // account 1
-        insert_sell_consuming(&pool, 2, 1, Decimal::from(5)).await;
+        insert_sell_consuming(&pool, TradeId(2), TradeId(1), Decimal::from(5)).await;
 
         let mut moved = buy_trade();
         moved.holding_account_id = HoldingAccountId(2);
@@ -702,7 +718,11 @@ mod tests {
             "expected AccountChangeReferenced, got: {err:?}"
         );
         assert_eq!(
-            db_get(&pool, 1).await.unwrap().unwrap().holding_account_id,
+            db_get(&pool, TradeId(1))
+                .await
+                .unwrap()
+                .unwrap()
+                .holding_account_id,
             1
         );
     }
@@ -716,7 +736,7 @@ mod tests {
         insert_test_listing(&pool).await;
         insert_second_account(&pool).await;
         db_upsert(&pool, &buy_trade()).await.unwrap();
-        insert_amit_adjustment_covering(&pool, 1, Decimal::from(8)).await;
+        insert_amit_adjustment_covering(&pool, TradeId(1), Decimal::from(8)).await;
 
         let mut moved = buy_trade();
         moved.holding_account_id = HoldingAccountId(2);
@@ -726,7 +746,11 @@ mod tests {
             "expected AccountChangeReferenced, got: {err:?}"
         );
         assert_eq!(
-            db_get(&pool, 1).await.unwrap().unwrap().holding_account_id,
+            db_get(&pool, TradeId(1))
+                .await
+                .unwrap()
+                .unwrap()
+                .holding_account_id,
             1
         );
 
@@ -737,7 +761,11 @@ mod tests {
             .unwrap();
         db_upsert(&pool, &moved).await.unwrap();
         assert_eq!(
-            db_get(&pool, 1).await.unwrap().unwrap().holding_account_id,
+            db_get(&pool, TradeId(1))
+                .await
+                .unwrap()
+                .unwrap()
+                .holding_account_id,
             2
         );
     }
@@ -750,7 +778,7 @@ mod tests {
         insert_test_listing(&pool).await;
         insert_second_account(&pool).await;
         db_upsert(&pool, &buy_trade()).await.unwrap();
-        insert_sell_consuming(&pool, 2, 1, Decimal::from(5)).await;
+        insert_sell_consuming(&pool, TradeId(2), TradeId(1), Decimal::from(5)).await;
 
         let body = |date: &str, account: i64| {
             serde_json::json!({
@@ -784,7 +812,7 @@ mod tests {
             "expected the holding-account rule, got: {detail}"
         );
 
-        let unchanged = db_get(&pool, 1).await.unwrap().unwrap();
+        let unchanged = db_get(&pool, TradeId(1)).await.unwrap().unwrap();
         assert_eq!(unchanged.date, ymd(2024, 1, 15));
         assert_eq!(unchanged.holding_account_id, 1);
     }
@@ -799,12 +827,15 @@ mod tests {
         shrunk.quantity = Decimal::ONE;
         db_upsert(&pool, &shrunk).await.unwrap();
         assert_eq!(
-            db_get(&pool, 1).await.unwrap().unwrap().quantity,
+            db_get(&pool, TradeId(1)).await.unwrap().unwrap().quantity,
             Decimal::ONE
         );
 
-        assert_eq!(db_delete(&pool, 1).await.unwrap(), DeleteOutcome::Deleted);
-        assert!(db_get(&pool, 1).await.unwrap().is_none());
+        assert_eq!(
+            db_delete(&pool, TradeId(1)).await.unwrap(),
+            DeleteOutcome::Deleted
+        );
+        assert!(db_get(&pool, TradeId(1)).await.unwrap().is_none());
     }
 
     // API-level tests
@@ -828,7 +859,7 @@ mod tests {
         });
         let resp = client(&pool).put("/trades/1", &body).await;
         assert_eq!(resp.status, StatusCode::CREATED);
-        let trade = db_get(&pool, 1).await.unwrap().unwrap();
+        let trade = db_get(&pool, TradeId(1)).await.unwrap().unwrap();
         assert_eq!(
             trade.settlement_date,
             NaiveDate::from_ymd_opt(2024, 1, 17).unwrap()
@@ -867,7 +898,7 @@ mod tests {
         });
         let resp = client(&pool).put("/trades/1", &body).await;
         assert_eq!(resp.status, StatusCode::CREATED);
-        let trade = db_get(&pool, 1).await.unwrap().unwrap();
+        let trade = db_get(&pool, TradeId(1)).await.unwrap().unwrap();
         assert_eq!(
             trade.settlement_date,
             NaiveDate::from_ymd_opt(2024, 6, 7).unwrap()
@@ -1019,7 +1050,7 @@ mod tests {
         });
         let resp = client(&pool).put("/trades/1", &body).await;
         assert_eq!(resp.status, StatusCode::CREATED);
-        let trade = db_get(&pool, 1).await.unwrap().unwrap();
+        let trade = db_get(&pool, TradeId(1)).await.unwrap().unwrap();
         assert_eq!(
             trade.settlement_date,
             NaiveDate::from_ymd_opt(2024, 12, 30).unwrap()
@@ -1045,7 +1076,7 @@ mod tests {
         });
         let resp = client(&pool).put("/trades/1", &body).await;
         assert_eq!(resp.status, StatusCode::CREATED);
-        let trade = db_get(&pool, 1).await.unwrap().unwrap();
+        let trade = db_get(&pool, TradeId(1)).await.unwrap().unwrap();
         assert_eq!(
             trade.settlement_date,
             NaiveDate::from_ymd_opt(2024, 1, 23).unwrap()
@@ -1088,9 +1119,10 @@ mod tests {
             let mut date = ymd(2019, 1, 1);
             while date <= coverage_end {
                 if closing_price::non_trading_day(&market, date).is_none() {
-                    let settled = auto_settlement_date(&pool, 1, ListingId(listing_id), date)
-                        .await
-                        .unwrap();
+                    let settled =
+                        auto_settlement_date(&pool, TradeId(1), ListingId(listing_id), date)
+                            .await
+                            .unwrap();
                     if settled <= coverage_end {
                         assert!(
                             closing_price::non_trading_day(&market, settled).is_none(),
@@ -1390,7 +1422,7 @@ mod tests {
 
         let resolved = Settlement::resolve_on(
             &mut tx,
-            Some(1),
+            Some(TradeId(1)),
             ListingId(1),
             ymd(2024, 1, 15),
             Some(ymd(2024, 1, 17)),
@@ -1406,7 +1438,7 @@ mod tests {
 
         // The probe was the transaction's own view, not the pool's.
         tx.rollback().await.unwrap();
-        let stored = db_get(&pool, 1).await.unwrap().unwrap();
+        let stored = db_get(&pool, TradeId(1)).await.unwrap().unwrap();
         assert_eq!(stored.settlement_date, ymd(2024, 1, 17));
         assert_eq!(
             stored.settlement_date_source,
@@ -1500,7 +1532,7 @@ mod tests {
         let resp = putting.await.expect("the PUT task does not panic");
         assert_eq!(resp.status, StatusCode::NO_CONTENT);
 
-        let stored = db_get(&pool, 1).await.unwrap().unwrap();
+        let stored = db_get(&pool, TradeId(1)).await.unwrap().unwrap();
         assert_eq!(
             stored.settlement_date,
             ymd(2024, 1, 17),
@@ -1587,8 +1619,8 @@ mod tests {
         let pool = test_pool().await;
         insert_test_listing(&pool).await;
         db_upsert(&pool, &buy_trade()).await.unwrap();
-        insert_sell_consuming(&pool, 2, 1, Decimal::from(4)).await;
-        let before = db_get(&pool, 2).await.unwrap().unwrap();
+        insert_sell_consuming(&pool, TradeId(2), TradeId(1), Decimal::from(4)).await;
+        let before = db_get(&pool, TradeId(2)).await.unwrap().unwrap();
         let allocations_before = allocation_rows(&pool).await;
 
         let body = serde_json::json!({
@@ -1611,7 +1643,7 @@ mod tests {
         assert!(detail.contains("PUT /sells/2"), "{detail}");
 
         // The stored row is untouched — still the disposal it was.
-        let after = db_get(&pool, 2).await.unwrap().unwrap();
+        let after = db_get(&pool, TradeId(2)).await.unwrap().unwrap();
         assert_eq!(after.trade_type, TradeType::Sell);
         assert_eq!(after.quantity, before.quantity);
         assert_eq!(after.average_price, before.average_price);
@@ -1633,7 +1665,7 @@ mod tests {
         let pool = test_pool().await;
         insert_test_listing(&pool).await;
         db_upsert(&pool, &buy_trade()).await.unwrap();
-        insert_sell_consuming(&pool, 2, 1, Decimal::from(4)).await;
+        insert_sell_consuming(&pool, TradeId(2), TradeId(1), Decimal::from(4)).await;
         let allocations_before = allocation_rows(&pool).await;
 
         let body = serde_json::json!({
@@ -1651,7 +1683,7 @@ mod tests {
         let resp = client(&pool).put("/trades/2", &body).await;
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(
-            db_get(&pool, 2).await.unwrap().unwrap().trade_type,
+            db_get(&pool, TradeId(2)).await.unwrap().unwrap().trade_type,
             TradeType::Sell
         );
         assert_eq!(allocation_rows(&pool).await, allocations_before);
@@ -1665,10 +1697,10 @@ mod tests {
         let pool = test_pool().await;
         insert_test_listing(&pool).await;
         db_upsert(&pool, &buy_trade()).await.unwrap();
-        insert_sell_consuming(&pool, 2, 1, Decimal::from(4)).await;
+        insert_sell_consuming(&pool, TradeId(2), TradeId(1), Decimal::from(4)).await;
 
         // Sell → Buy, and Sell → DRP.
-        let stored_sell = db_get(&pool, 2).await.unwrap().unwrap();
+        let stored_sell = db_get(&pool, TradeId(2)).await.unwrap().unwrap();
         for requested in [TradeType::Buy, TradeType::DRP] {
             let mut retyped = stored_sell.clone();
             retyped.trade_type = requested;
@@ -1676,7 +1708,7 @@ mod tests {
                 matches!(
                     db_upsert(&pool, &retyped).await,
                     Err(UpsertError::TradeTypeChange {
-                        id: 2,
+                        id: TradeId(2),
                         existing: TradeType::Sell,
                         requested: got,
                     }) if got == requested
@@ -1687,12 +1719,12 @@ mod tests {
 
         // Buy → Sell, the direction `PUT /sells/:id` refuses from its own side
         // (`sell::SellError::NotASell`, SCENARIOS Z-b).
-        let mut retyped = db_get(&pool, 1).await.unwrap().unwrap();
+        let mut retyped = db_get(&pool, TradeId(1)).await.unwrap().unwrap();
         retyped.trade_type = TradeType::Sell;
         assert!(matches!(
             db_upsert(&pool, &retyped).await,
             Err(UpsertError::TradeTypeChange {
-                id: 1,
+                id: TradeId(1),
                 existing: TradeType::Buy,
                 requested: TradeType::Sell,
             })
@@ -1700,11 +1732,11 @@ mod tests {
 
         // Nothing moved.
         assert_eq!(
-            db_get(&pool, 1).await.unwrap().unwrap().trade_type,
+            db_get(&pool, TradeId(1)).await.unwrap().unwrap().trade_type,
             TradeType::Buy
         );
         assert_eq!(
-            db_get(&pool, 2).await.unwrap().unwrap().trade_type,
+            db_get(&pool, TradeId(2)).await.unwrap().unwrap().trade_type,
             TradeType::Sell
         );
     }
@@ -1737,14 +1769,14 @@ mod tests {
         let resp = client(&pool).put("/trades/1", &body("25")).await;
         assert_eq!(resp.status, StatusCode::NO_CONTENT);
         assert_eq!(
-            db_get(&pool, 1).await.unwrap().unwrap().quantity,
+            db_get(&pool, TradeId(1)).await.unwrap().unwrap().quantity,
             Decimal::from(25)
         );
 
         // A new, free id.
         let resp = client(&pool).put("/trades/7", &body("5")).await;
         assert_eq!(resp.status, StatusCode::CREATED);
-        let created = db_get(&pool, 7).await.unwrap().unwrap();
+        let created = db_get(&pool, TradeId(7)).await.unwrap().unwrap();
         assert_eq!(created.trade_type, TradeType::Buy);
         assert_eq!(created.quantity, Decimal::from(5));
     }
@@ -1768,7 +1800,7 @@ mod tests {
         });
         let resp = client(&pool).put("/trades/1", &body).await;
         assert_eq!(resp.status, StatusCode::CREATED);
-        let trade = db_get(&pool, 1).await.unwrap().unwrap();
+        let trade = db_get(&pool, TradeId(1)).await.unwrap().unwrap();
         assert_eq!(
             trade.settlement_date,
             NaiveDate::from_ymd_opt(2024, 1, 20).unwrap()
@@ -1827,12 +1859,12 @@ mod tests {
         let pool = test_pool().await;
         insert_test_listing(&pool).await;
         db_upsert(&pool, &buy_trade()).await.unwrap();
-        insert_sell_consuming(&pool, 2, 1, Decimal::from(5)).await;
+        insert_sell_consuming(&pool, TradeId(2), TradeId(1), Decimal::from(5)).await;
 
         let resp = client(&pool).delete("/trades/1").await;
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
         assert!(
-            db_get(&pool, 1).await.unwrap().is_some(),
+            db_get(&pool, TradeId(1)).await.unwrap().is_some(),
             "consumed buy must remain"
         );
     }
@@ -1842,7 +1874,7 @@ mod tests {
         let pool = test_pool().await;
         insert_test_listing(&pool).await;
         db_upsert(&pool, &buy_trade()).await.unwrap(); // qty 10
-        insert_sell_consuming(&pool, 2, 1, Decimal::from(5)).await;
+        insert_sell_consuming(&pool, TradeId(2), TradeId(1), Decimal::from(5)).await;
 
         // Editing the Buy down to 4 would leave the Sell's 5-unit allocation
         // drawing on units the parcel no longer has.
@@ -1862,7 +1894,7 @@ mod tests {
         let resp = client(&pool).put("/trades/1", &body).await;
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(
-            db_get(&pool, 1).await.unwrap().unwrap().quantity,
+            db_get(&pool, TradeId(1)).await.unwrap().unwrap().quantity,
             Decimal::from(10)
         );
     }
@@ -1873,7 +1905,7 @@ mod tests {
         insert_test_listing(&pool).await;
         test_support::listing(2).ticker("VGS").insert(&pool).await;
         db_upsert(&pool, &buy_trade()).await.unwrap(); // listing 1
-        insert_sell_consuming(&pool, 2, 1, Decimal::from(5)).await;
+        insert_sell_consuming(&pool, TradeId(2), TradeId(1), Decimal::from(5)).await;
 
         let body = serde_json::json!({
             "trade_type": "Buy",
@@ -1894,7 +1926,10 @@ mod tests {
             detail.contains("listing cannot be changed"),
             "detail: {detail}"
         );
-        assert_eq!(db_get(&pool, 1).await.unwrap().unwrap().listing_id, 1);
+        assert_eq!(
+            db_get(&pool, TradeId(1)).await.unwrap().unwrap().listing_id,
+            1
+        );
     }
 
     #[tokio::test]
@@ -1990,7 +2025,7 @@ mod tests {
                 "{field}={value}: detail must explain the rule, got: {detail}"
             );
             assert!(
-                db_get(&pool, 1).await.unwrap().is_none(),
+                db_get(&pool, TradeId(1)).await.unwrap().is_none(),
                 "{field}={value}: nothing persisted"
             );
         }
@@ -2036,7 +2071,7 @@ mod tests {
                 && detail.contains("pre-CGT holding is outside CGT"),
             "detail must explain the pre-CGT rule, got: {detail}"
         );
-        assert!(db_get(&pool, 1).await.unwrap().is_none());
+        assert!(db_get(&pool, TradeId(1)).await.unwrap().is_none());
 
         // 20 September 1985 — the first day inside CGT — is accepted.
         let mut first_cgt_day = base;
@@ -2091,7 +2126,7 @@ mod tests {
             detail.contains("dated after today"),
             "detail must explain the rule, got: {detail}"
         );
-        assert!(db_get(&pool, 1).await.unwrap().is_none());
+        assert!(db_get(&pool, TradeId(1)).await.unwrap().is_none());
 
         // Today — the last day inside the window — is accepted.
         let mut boundary = base.clone();
@@ -2099,7 +2134,7 @@ mod tests {
         boundary["listing_id"] = 2.into();
         let (status, detail) = put_trade_json(&pool, 1, boundary).await;
         assert_eq!(status, StatusCode::CREATED, "detail: {detail}");
-        let stored = db_get(&pool, 1).await.unwrap().unwrap();
+        let stored = db_get(&pool, TradeId(1)).await.unwrap().unwrap();
         assert_eq!(stored.date, today);
 
         // And the settlement date is allowed past it: a T+2 settlement of a
@@ -2116,7 +2151,7 @@ mod tests {
         settled["date"] = last_open.to_string().into();
         let (status, detail) = put_trade_json(&pool, 2, settled).await;
         assert_eq!(status, StatusCode::CREATED, "detail: {detail}");
-        let stored = db_get(&pool, 2).await.unwrap().unwrap();
+        let stored = db_get(&pool, TradeId(2)).await.unwrap().unwrap();
         assert!(
             stored.settlement_date > today,
             "T+2 settlement of a trade dated {last_open} is legitimately in the future, got {}",
@@ -2161,7 +2196,7 @@ mod tests {
             detail.contains("XASX"),
             "the refusal must name the exchange, got: {detail}"
         );
-        assert!(db_get(&pool, 1).await.unwrap().is_none());
+        assert!(db_get(&pool, TradeId(1)).await.unwrap().is_none());
 
         // Australia Day 2024-01-26 — a Friday, and a seeded XASX holiday.
         let mut holiday = base.clone();
@@ -2172,7 +2207,7 @@ mod tests {
             detail.contains("public holiday") && detail.contains("XASX"),
             "the refusal must name the holiday and the exchange, got: {detail}"
         );
-        assert!(db_get(&pool, 1).await.unwrap().is_none());
+        assert!(db_get(&pool, TradeId(1)).await.unwrap().is_none());
 
         // The Monday between them is an ordinary trading day.
         let (status, _) = put_trade_json(&pool, 1, base).await;
@@ -2206,7 +2241,7 @@ mod tests {
         });
         let (status, detail) = put_trade_json(&pool, 1, body).await;
         assert_eq!(status, StatusCode::CREATED, "{detail}");
-        let stored = db_get(&pool, 1).await.unwrap().unwrap();
+        let stored = db_get(&pool, TradeId(1)).await.unwrap().unwrap();
         assert_eq!(stored.date, ymd(2024, 1, 13));
         // Same-day settlement, unchanged by this rule.
         assert_eq!(stored.settlement_date, ymd(2024, 1, 13));
@@ -2282,7 +2317,7 @@ mod tests {
         });
         let (status, _) = put_trade_json(&pool, 1, body).await;
         assert_eq!(status, StatusCode::CREATED);
-        let t = db_get(&pool, 1).await.unwrap().unwrap();
+        let t = db_get(&pool, TradeId(1)).await.unwrap().unwrap();
         assert_eq!(t.brokerage, d("9.05"));
         assert_eq!(t.gst_on_brokerage, d("0.90"));
         assert!(
@@ -2305,7 +2340,7 @@ mod tests {
         });
         let (status, _) = put_trade_json(&pool, 1, body).await;
         assert_eq!(status, StatusCode::NO_CONTENT);
-        let t = db_get(&pool, 1).await.unwrap().unwrap();
+        let t = db_get(&pool, TradeId(1)).await.unwrap().unwrap();
         assert_eq!(t.brokerage, d("10"));
         assert_eq!(t.gst_on_brokerage, d("1"));
 
@@ -2324,7 +2359,7 @@ mod tests {
         });
         let (status, _) = put_trade_json(&pool, 2, body).await;
         assert_eq!(status, StatusCode::CREATED);
-        let t = db_get(&pool, 2).await.unwrap().unwrap();
+        let t = db_get(&pool, TradeId(2)).await.unwrap().unwrap();
         assert_eq!(t.brokerage, d("9.95"));
         assert_eq!(t.gst_on_brokerage, d("0.995"));
         assert!(!t.brokerage_includes_gst);
@@ -2385,7 +2420,7 @@ mod tests {
             let body = crate::test_support::writable_body(&read, &[]);
             let (status, detail) = put_trade_json(&pool, 1, body).await;
             assert_eq!(status, StatusCode::NO_CONTENT, "pass {pass}: {detail}");
-            let t = db_get(&pool, 1).await.unwrap().unwrap();
+            let t = db_get(&pool, TradeId(1)).await.unwrap().unwrap();
             assert_eq!(t.brokerage, d("0.90"), "stored ex-GST (pass {pass})");
             assert_eq!(t.gst_on_brokerage, d("0.09"), "stored GST (pass {pass})");
             assert_eq!(t.statement_total, Some(d("1000.99")));
@@ -2436,7 +2471,11 @@ mod tests {
         let (status, _) = put_trade_json(&pool, 1, body.clone()).await;
         assert_eq!(status, StatusCode::CREATED);
         assert_eq!(
-            db_get(&pool, 1).await.unwrap().unwrap().statement_total,
+            db_get(&pool, TradeId(1))
+                .await
+                .unwrap()
+                .unwrap()
+                .statement_total,
             Some(d("1009.95"))
         );
 
@@ -2457,7 +2496,7 @@ mod tests {
             "detail must carry the computed figure: {detail}"
         );
         assert!(
-            db_get(&pool, 2).await.unwrap().is_none(),
+            db_get(&pool, TradeId(2)).await.unwrap().is_none(),
             "nothing persisted"
         );
     }
@@ -2523,7 +2562,7 @@ mod tests {
             "detail must carry the computed figure: {detail}"
         );
         assert!(
-            db_get(&pool, 6).await.unwrap().is_none(),
+            db_get(&pool, TradeId(6)).await.unwrap().is_none(),
             "nothing persisted"
         );
     }
@@ -2562,7 +2601,7 @@ mod tests {
                 "detail must explain the rejection: {detail}"
             );
             assert!(
-                db_get(&pool, id).await.unwrap().is_none(),
+                db_get(&pool, TradeId(id)).await.unwrap().is_none(),
                 "nothing persisted"
             );
         }
@@ -2647,7 +2686,7 @@ mod tests {
             "detail must name the payment and both currencies: {detail}"
         );
         assert!(
-            db_get(&pool, 1).await.unwrap().is_none(),
+            db_get(&pool, TradeId(1)).await.unwrap().is_none(),
             "nothing persisted"
         );
         // A parcel acquired *after* the payment is fine: it was never entitled
@@ -2682,7 +2721,10 @@ mod tests {
             detail.contains("recorded in AUD") && detail.contains("quoted in USD"),
             "the refusal names both currencies: {detail}"
         );
-        assert!(db_get(&pool, 1).await.unwrap().is_none(), "nothing written");
+        assert!(
+            db_get(&pool, TradeId(1)).await.unwrap().is_none(),
+            "nothing written"
+        );
 
         // In the listing's own currency it goes through.
         let (status, _) = put_trade_json(&pool, 1, buy("USD")).await;
@@ -2706,7 +2748,10 @@ mod tests {
             detail.contains("recorded in AUD") && detail.contains("quoted in USD"),
             "the Sell refusal names both currencies: {detail}"
         );
-        assert!(db_get(&pool, 2).await.unwrap().is_none(), "nothing written");
+        assert!(
+            db_get(&pool, TradeId(2)).await.unwrap().is_none(),
+            "nothing written"
+        );
         full.put("/sells/2", &sell("USD"))
             .await
             .expect_status(StatusCode::CREATED);
@@ -2736,14 +2781,21 @@ mod tests {
             .spot_fx_rate("0.643215987".parse().unwrap())
             .insert(&pool)
             .await;
-        let got = db_get(&pool, 1).await.unwrap().unwrap();
+        let got = db_get(&pool, TradeId(1)).await.unwrap().unwrap();
         assert_eq!(
             got.spot_fx_rate,
             Some("0.643215987".parse::<Decimal>().unwrap())
         );
         // Absent an override the column stays NULL — the unchanged default.
         test_support::buy(2, 1).currency("USD").insert(&pool).await;
-        assert_eq!(db_get(&pool, 2).await.unwrap().unwrap().spot_fx_rate, None);
+        assert_eq!(
+            db_get(&pool, TradeId(2))
+                .await
+                .unwrap()
+                .unwrap()
+                .spot_fx_rate,
+            None
+        );
     }
 
     #[tokio::test]
@@ -2760,7 +2812,7 @@ mod tests {
             matches!(err, UpsertError::SpotFxRate(SpotFxRateError::AudTrade)),
             "expected SpotFxRate(AudTrade), got: {err:?}"
         );
-        assert!(db_get(&pool, 1).await.unwrap().is_none());
+        assert!(db_get(&pool, TradeId(1)).await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -2808,7 +2860,7 @@ mod tests {
         )
         .await;
         assert_eq!(resp.status, StatusCode::CREATED);
-        let got = db_get(&pool, 1).await.unwrap().unwrap();
+        let got = db_get(&pool, TradeId(1)).await.unwrap().unwrap();
         assert_eq!(got.spot_fx_rate, Some("0.6543".parse().unwrap()));
 
         // The same entry on an AUD trade is rejected with the reason.
@@ -3017,11 +3069,15 @@ mod tests {
     async fn db_editing_a_consumed_source_parcel_is_still_allowed() {
         let pool = test_pool().await;
         exchanged_listing(&pool).await;
-        let mut parcel = db_get(&pool, 1).await.unwrap().unwrap();
+        let mut parcel = db_get(&pool, TradeId(1)).await.unwrap().unwrap();
         parcel.average_price = dec("12");
         db_upsert(&pool, &parcel).await.unwrap();
         assert_eq!(
-            db_get(&pool, 1).await.unwrap().unwrap().average_price,
+            db_get(&pool, TradeId(1))
+                .await
+                .unwrap()
+                .unwrap()
+                .average_price,
             dec("12")
         );
     }
@@ -3078,7 +3134,7 @@ mod tests {
         assert!(body.contains("average_price"), "{body}");
 
         // Nothing was written by any of the refusals.
-        assert!(db_get(&pool, 1).await.unwrap().is_none());
+        assert!(db_get(&pool, TradeId(1)).await.unwrap().is_none());
     }
 
     /// The control the finding was bounded with: the very same figures sent as
@@ -3156,7 +3212,7 @@ mod tests {
             "the limit is not named: {body}"
         );
         // Nothing was written, so the reports stay readable.
-        assert!(db_get(&pool, 9600).await.unwrap().is_none());
+        assert!(db_get(&pool, TradeId(9600)).await.unwrap().is_none());
     }
 
     /// The control, measured before the refusal existed and unchanged by it: a
@@ -3260,7 +3316,11 @@ mod tests {
         );
         // …and the accepted correction is what is still stored.
         assert_eq!(
-            db_get(&pool, 9600).await.unwrap().unwrap().average_price,
+            db_get(&pool, TradeId(9600))
+                .await
+                .unwrap()
+                .unwrap()
+                .average_price,
             Decimal::from(10)
         );
     }
@@ -3663,7 +3723,7 @@ mod tests {
         assert_list_filters(
             &client(&pool),
             "/trades",
-            |t: &Trade| t.id,
+            |t: &Trade| t.id.0,
             &[
                 ("", &[1, 2, 3, 4]),
                 ("?listing_id=1", &[1, 2]),

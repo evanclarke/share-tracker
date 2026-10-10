@@ -27,6 +27,8 @@
 
 use crate::infra::extract::{Json, Query};
 use crate::infra::http::ApiError;
+#[cfg(test)]
+use crate::infra::id::TradeId;
 use axum::{Router, extract::State, routing::get};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -465,7 +467,7 @@ mod tests {
 
         // Edit the quantity through the entity's own upsert (the real write
         // path: INSERT .. ON CONFLICT DO UPDATE fires the UPDATE trigger).
-        let mut edited = trade::db_get(&pool, 1).await.unwrap().unwrap();
+        let mut edited = trade::db_get(&pool, TradeId(1)).await.unwrap().unwrap();
         edited.quantity = Decimal::from(150);
         trade::db_upsert(&pool, &edited).await.unwrap();
 
@@ -489,7 +491,7 @@ mod tests {
             .qty(Decimal::from(100))
             .insert(&pool)
             .await;
-        trade::db_delete(&pool, 1).await.unwrap();
+        trade::db_delete(&pool, TradeId(1)).await.unwrap();
 
         let entries = db_row_history(&pool, "trades", 1).await.unwrap();
         assert_eq!(entries.len(), 1);
@@ -507,7 +509,7 @@ mod tests {
             .insert(&pool)
             .await;
         for qty in [150i64, 200] {
-            let mut edited = trade::db_get(&pool, 1).await.unwrap().unwrap();
+            let mut edited = trade::db_get(&pool, TradeId(1)).await.unwrap().unwrap();
             edited.quantity = Decimal::from(qty);
             trade::db_upsert(&pool, &edited).await.unwrap();
         }
@@ -537,7 +539,7 @@ mod tests {
         allocate(&pool, 1, 2, 1, Decimal::from(50)).await;
 
         // One legitimate edit so pre-existing history is at stake too.
-        let mut edited = trade::db_get(&pool, 2).await.unwrap().unwrap();
+        let mut edited = trade::db_get(&pool, TradeId(2)).await.unwrap().unwrap();
         edited.average_price = Decimal::from(11);
         trade::db_upsert(&pool, &edited).await.unwrap();
         let before = db_row_history(&pool, "trades", 2).await.unwrap();
@@ -567,7 +569,7 @@ mod tests {
         let pool = test_pool().await;
         test_support::listing(1).insert(&pool).await;
         test_support::buy(1, 1).insert(&pool).await;
-        trade::db_delete(&pool, 1).await.unwrap();
+        trade::db_delete(&pool, TradeId(1)).await.unwrap();
 
         for sql in [
             "UPDATE row_history SET operation = 'UPDATE'",
@@ -599,7 +601,7 @@ mod tests {
         .await
         .unwrap();
 
-        trade::db_delete(&pool, 1).await.unwrap();
+        trade::db_delete(&pool, TradeId(1)).await.unwrap();
 
         let entries = db_row_history(&pool, "attachments", 7).await.unwrap();
         assert_eq!(entries.len(), 1);
@@ -621,7 +623,7 @@ mod tests {
             .qty(Decimal::from(100))
             .insert(&pool)
             .await;
-        let mut edited = trade::db_get(&pool, 1).await.unwrap().unwrap();
+        let mut edited = trade::db_get(&pool, TradeId(1)).await.unwrap().unwrap();
         edited.quantity = Decimal::from(150);
         trade::db_upsert(&pool, &edited).await.unwrap();
 
@@ -679,7 +681,7 @@ mod tests {
     }
 
     async fn edit_trade_qty(pool: &SqlitePool, id: i64, qty: i64) {
-        let mut edited = trade::db_get(pool, id).await.unwrap().unwrap();
+        let mut edited = trade::db_get(pool, TradeId(id)).await.unwrap().unwrap();
         edited.quantity = Decimal::from(qty);
         trade::db_upsert(pool, &edited).await.unwrap();
     }
@@ -714,7 +716,7 @@ mod tests {
             .insert(&pool)
             .await;
         edit_trade_qty(&pool, 1, 150).await;
-        trade::db_delete(&pool, 1).await.unwrap();
+        trade::db_delete(&pool, TradeId(1)).await.unwrap();
 
         let entries = db_row_history(&pool, "trades", 1).await.unwrap();
         assert_eq!(entries[0]["operation"], "DELETE");
@@ -737,7 +739,7 @@ mod tests {
             .insert(&pool)
             .await;
         edit_trade_qty(&pool, 1, 150).await;
-        trade::db_delete(&pool, 1).await.unwrap();
+        trade::db_delete(&pool, TradeId(1)).await.unwrap();
 
         // A different trade takes the freed id (the hand-entered flavour:
         // `PUT /trades/1` after deleting trade 1).
@@ -775,7 +777,7 @@ mod tests {
             .qty(Decimal::from(100))
             .insert(&pool)
             .await;
-        trade::db_delete(&pool, 1).await.unwrap();
+        trade::db_delete(&pool, TradeId(1)).await.unwrap();
         test_support::buy(1, 1)
             .qty(Decimal::from(7))
             .insert(&pool)
@@ -801,7 +803,7 @@ mod tests {
                 .insert(&pool)
                 .await;
             edit_trade_qty(&pool, 1, qty + 1).await;
-            trade::db_delete(&pool, 1).await.unwrap();
+            trade::db_delete(&pool, TradeId(1)).await.unwrap();
         }
         test_support::buy(1, 1)
             .qty(Decimal::from(300))
@@ -967,7 +969,7 @@ mod tests {
             .qty(Decimal::from(100))
             .insert(&pool)
             .await;
-        trade::db_delete(&pool, 1).await.unwrap();
+        trade::db_delete(&pool, TradeId(1)).await.unwrap();
         test_support::buy(1, 1)
             .qty(Decimal::from(7))
             .insert(&pool)
@@ -990,7 +992,7 @@ mod tests {
         let pool = test_pool().await;
         test_support::listing(1).insert(&pool).await;
         test_support::buy(1, 1).insert(&pool).await;
-        trade::db_delete(&pool, 1).await.unwrap();
+        trade::db_delete(&pool, TradeId(1)).await.unwrap();
         test_support::buy(1, 1).insert(&pool).await;
 
         let page: Value = ApiClient::over(router().with_state(pool.clone()))
@@ -1025,7 +1027,7 @@ mod tests {
             .await;
         allocate(pool, 1, 2, 1, Decimal::from(40)).await;
 
-        let mut edited = trade::db_get(pool, 1).await.unwrap().unwrap();
+        let mut edited = trade::db_get(pool, TradeId(1)).await.unwrap().unwrap();
         edited.quantity = Decimal::from(150);
         trade::db_upsert(pool, &edited).await.unwrap();
 
@@ -1033,7 +1035,7 @@ mod tests {
         listing.name = "Renamed".into();
         listing::db_upsert(pool, &listing).await.unwrap();
 
-        sell::db_delete_sell(pool, 2).await.unwrap();
+        sell::db_delete_sell(pool, TradeId(2)).await.unwrap();
     }
 
     fn page(resp: &crate::test_support::ApiResponse) -> Value {

@@ -5,6 +5,7 @@ use crate::infra::currency::CurrencyCode;
 use crate::infra::decimal::{Money, OptMoney};
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
+use crate::infra::id::TradeId;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -78,7 +79,7 @@ impl SettlementDateSource {
 
 #[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Trade {
-    pub id: i64,
+    pub id: TradeId,
     pub trade_type: TradeType,
     pub date: NaiveDate,
     pub settlement_date: NaiveDate,

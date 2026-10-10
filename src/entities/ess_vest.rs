@@ -88,6 +88,8 @@ use crate::infra::extract::{Json, Query};
 use crate::infra::http::{ApiError, DryRunQuery};
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
+#[cfg(test)]
+use crate::infra::id::TradeId;
 use axum::{
     Router,
     extract::{Path, State},
@@ -378,7 +380,7 @@ mod tests {
         // Sold 2025-03-01 — six months after the taxing point.
         crate::entities::sell::db_upsert_sell(
             &pool,
-            50,
+            TradeId(50),
             &crate::entities::sell::SellBody {
                 brokerage_includes_gst: false,
                 statement_total: None,
@@ -550,7 +552,7 @@ mod tests {
     ) {
         crate::entities::sell::db_upsert_sell(
             pool,
-            id,
+            TradeId(id),
             &crate::entities::sell::SellBody {
                 brokerage_includes_gst: false,
                 statement_total: None,
@@ -795,7 +797,7 @@ mod tests {
 
         sell::db_upsert_sell(
             &pool,
-            50,
+            TradeId(50),
             &SellBody {
                 brokerage_includes_gst: false,
                 statement_total: None,
@@ -827,7 +829,7 @@ mod tests {
         );
         // Removing the sale frees the statement to delete.
         assert_eq!(
-            sell::db_delete_sell(&pool, 50).await.unwrap(),
+            sell::db_delete_sell(&pool, TradeId(50)).await.unwrap(),
             sell::DeleteOutcome::Deleted
         );
         assert_eq!(

@@ -52,6 +52,7 @@ use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
+use crate::infra::id::TradeId;
 use crate::reports::export::{self, Cents};
 use crate::reports::parcel_optimiser::{self, DisposalTotals, HypotheticalAllocation, Strategy};
 use crate::reports::tax_summary::aud_field;
@@ -444,9 +445,9 @@ async fn non_disposal_gains(
     // while split/payment applicability stays on the actual trade date — the
     // two the row distinguishes as `acquired()` and `date`. `order` keeps the
     // walk deterministic despite the map.
-    let mut parcels: HashMap<i64, ParcelRow> = HashMap::new();
-    let mut order: Vec<i64> = Vec::new();
-    let mut reductions: HashMap<i64, Vec<Reduction>> = HashMap::new();
+    let mut parcels: HashMap<TradeId, ParcelRow> = HashMap::new();
+    let mut order: Vec<TradeId> = Vec::new();
+    let mut reductions: HashMap<TradeId, Vec<Reduction>> = HashMap::new();
 
     // The AMIT reductions themselves come from the shared loader, so the
     // per-unit figure, the covered units and the split re-basing behind them
@@ -713,10 +714,10 @@ fn splits_of(
 /// so the walk over the map stays deterministic).
 fn parcel_entry<'a>(
     row: &sqlx::sqlite::SqliteRow,
-    parcels: &'a mut HashMap<i64, ParcelRow>,
-    order: &mut Vec<i64>,
+    parcels: &'a mut HashMap<TradeId, ParcelRow>,
+    order: &mut Vec<TradeId>,
 ) -> Result<&'a ParcelRow, sqlx::Error> {
-    let id: i64 = row.try_get("id")?;
+    let id: TradeId = row.try_get("id")?;
     if let std::collections::hash_map::Entry::Vacant(slot) = parcels.entry(id) {
         slot.insert(ParcelRow::from_row(row)?);
         order.push(id);
@@ -1230,7 +1231,7 @@ pub struct WhatIfRequest {
 #[serde(deny_unknown_fields)]
 pub struct WhatIfAllocation {
     /// An open Buy or DRP parcel of the listing.
-    pub purchase_trade_id: i64,
+    pub purchase_trade_id: TradeId,
     /// Units drawn from that parcel (decimal string, positive).
     #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub units: Decimal,
@@ -1314,14 +1315,14 @@ async fn what_if_handler(
     tx.commit().await.map_err(ApiError::from)?;
 
     // Exactly one of explicit allocations / a named strategy.
-    let picks: Vec<(i64, Decimal)> = match (&req.allocations, req.strategy) {
+    let picks: Vec<(TradeId, Decimal)> = match (&req.allocations, req.strategy) {
         (Some(_), Some(_)) | (None, None) => {
             return Err(ApiError::Unprocessable(
                 "supply either allocations or a strategy (exactly one)".to_string(),
             ));
         }
         (Some(allocs), None) => {
-            let mut remaining: HashMap<i64, Decimal> = candidates
+            let mut remaining: HashMap<TradeId, Decimal> = candidates
                 .parcels()
                 .iter()
                 .map(|p| (p.trade_id, p.remaining_quantity))
@@ -1493,10 +1494,10 @@ mod tests {
         pool: &SqlitePool,
         id: i64,
         amma_id: i64,
-        trade_id: i64,
+        trade_id: TradeId,
         qty: Decimal,
     ) {
-        test_support::amit_adjustment(pool, id, amma_id, trade_id, qty).await;
+        test_support::amit_adjustment(pool, id, amma_id, trade_id.0, qty).await;
     }
 
     /// The tax years the report emitted, in order — the series a test asserts
@@ -2196,7 +2197,7 @@ mod tests {
         let mut a = make_amma(1, ListingId(1), year_end);
         a.cost_base_adjustment = "1.50".parse().unwrap();
         test_support::insert_amma_bypassing_checks(&pool, &a).await;
-        link_adjustment(&pool, 1, 1, 1, Decimal::from(100)).await;
+        link_adjustment(&pool, 1, 1, TradeId(1), Decimal::from(100)).await;
 
         let r = db_net_capital_gain(&pool).await.unwrap();
         assert_eq!(tax_years(&r), vec![2025]);
@@ -2455,7 +2456,7 @@ mod tests {
                 fx_rate: None,
                 holding_account_id: HoldingAccountId(1),
                 allocations: vec![rights_sale::AllocationInput {
-                    purchase_trade_id: 1,
+                    purchase_trade_id: TradeId(1),
                     units: Decimal::from(250),
                 }],
             },
@@ -2599,7 +2600,7 @@ mod tests {
         );
         a.cost_base_adjustment = "1.50".parse().unwrap();
         amma::db_upsert(&pool, &a).await.unwrap();
-        link_adjustment(&pool, 1, 1, 1, Decimal::from(100)).await;
+        link_adjustment(&pool, 1, 1, TradeId(1), Decimal::from(100)).await;
 
         let r = db_net_capital_gain(&pool).await.unwrap();
         assert_eq!(r.len(), 1);
@@ -2654,7 +2655,7 @@ mod tests {
         a.cost_base_adjustment = Decimal::from(12);
         a.units_held = Decimal::from(60);
         amma::db_upsert(&pool, &a).await.unwrap();
-        link_adjustment(&pool, 1, 1, 1, Decimal::from(60)).await;
+        link_adjustment(&pool, 1, 1, TradeId(1), Decimal::from(60)).await;
 
         let r = db_net_capital_gain(&pool).await.unwrap();
         assert_eq!(r.len(), 1);
@@ -2695,7 +2696,7 @@ mod tests {
         );
         a.cost_base_adjustment = "1.50".parse().unwrap();
         amma::db_upsert(&pool, &a).await.unwrap();
-        link_adjustment(&pool, 1, 1, 1, Decimal::from(100)).await;
+        link_adjustment(&pool, 1, 1, TradeId(1), Decimal::from(100)).await;
 
         let r = db_net_capital_gain(&pool).await.unwrap();
         assert_eq!(r.len(), 1);
@@ -2730,7 +2731,7 @@ mod tests {
         );
         a1.cost_base_adjustment = "0.60".parse().unwrap();
         amma::db_upsert(&pool, &a1).await.unwrap();
-        link_adjustment(&pool, 1, 1, 1, Decimal::from(100)).await;
+        link_adjustment(&pool, 1, 1, TradeId(1), Decimal::from(100)).await;
         // FY2025: reduce $0.70/unit × 100 = $70 > $40 remaining → $30 excess (E10) in FY2025.
         let mut a2 = make_amma(
             2,
@@ -2739,7 +2740,7 @@ mod tests {
         );
         a2.cost_base_adjustment = "0.70".parse().unwrap();
         amma::db_upsert(&pool, &a2).await.unwrap();
-        link_adjustment(&pool, 2, 2, 1, Decimal::from(100)).await;
+        link_adjustment(&pool, 2, 2, TradeId(1), Decimal::from(100)).await;
 
         let r = db_net_capital_gain(&pool).await.unwrap();
         // Both AMMA statements create a year bucket; only FY2025 carries the E10 gain.
@@ -2789,7 +2790,7 @@ mod tests {
         );
         a1.cost_base_adjustment = Decimal::from(2);
         amma::db_upsert(&pool, &a1).await.unwrap();
-        link_adjustment(&pool, 1, 1, 1, Decimal::from(100)).await;
+        link_adjustment(&pool, 1, 1, TradeId(1), Decimal::from(100)).await;
         // FY2025: increase $1.50/unit × 100 = $150 → the base comes back to
         // $150, and no further E10 gain arises.
         let mut a2 = make_amma(
@@ -2799,7 +2800,7 @@ mod tests {
         );
         a2.cost_base_adjustment = "-1.50".parse().unwrap();
         amma::db_upsert(&pool, &a2).await.unwrap();
-        link_adjustment(&pool, 2, 2, 1, Decimal::from(100)).await;
+        link_adjustment(&pool, 2, 2, TradeId(1), Decimal::from(100)).await;
 
         // All 100 units sold for $200, after both statement year ends.
         insert_trade(
@@ -2880,7 +2881,7 @@ mod tests {
         );
         a.cost_base_adjustment = "6.00".parse().unwrap();
         amma::db_upsert(&pool, &a).await.unwrap();
-        link_adjustment(&pool, 1, 1, 1, Decimal::from(100)).await;
+        link_adjustment(&pool, 1, 1, TradeId(1), Decimal::from(100)).await;
 
         let r = db_net_capital_gain(&pool).await.unwrap();
         assert_eq!(r.len(), 1);
@@ -3341,7 +3342,7 @@ mod tests {
                 from_account_id: HoldingAccountId(1),
                 to_account_id: HoldingAccountId(2),
                 allocations: vec![crate::entities::sell::AllocationInput {
-                    purchase_trade_id: 1,
+                    purchase_trade_id: TradeId(1),
                     quantity_allocated: Decimal::from(100),
                 }],
                 fee_allocations: vec![],
@@ -3429,7 +3430,7 @@ mod tests {
                 from_account_id: HoldingAccountId(1),
                 to_account_id: HoldingAccountId(2),
                 allocations: vec![crate::entities::sell::AllocationInput {
-                    purchase_trade_id: 1,
+                    purchase_trade_id: TradeId(1),
                     quantity_allocated: Decimal::from(40),
                 }],
                 fee_allocations: vec![],
@@ -3882,7 +3883,7 @@ mod tests {
         );
         a.cost_base_adjustment = "6.00".parse().unwrap();
         amma::db_upsert(&pool, &a).await.unwrap();
-        link_adjustment(&pool, 1, 1, 1, Decimal::from(100)).await;
+        link_adjustment(&pool, 1, 1, TradeId(1), Decimal::from(100)).await;
 
         let r = db_net_capital_gain(&pool).await.unwrap();
         assert_eq!(r.len(), 1);
@@ -3933,7 +3934,7 @@ mod tests {
         );
         a.cost_base_adjustment = "6.00".parse().unwrap();
         amma::db_upsert(&pool, &a).await.unwrap();
-        link_adjustment(&pool, 1, 1, 1, Decimal::from(100)).await;
+        link_adjustment(&pool, 1, 1, TradeId(1), Decimal::from(100)).await;
         apply_roc(
             &pool,
             1,
@@ -3984,7 +3985,7 @@ mod tests {
         );
         a.cost_base_adjustment = "6.00".parse().unwrap();
         amma::db_upsert(&pool, &a).await.unwrap();
-        link_adjustment(&pool, 1, 1, 1, Decimal::from(100)).await;
+        link_adjustment(&pool, 1, 1, TradeId(1), Decimal::from(100)).await;
         // Sold in FY2026 at $15 against the nil cost base.
         insert_trade(
             &pool,
@@ -4040,7 +4041,7 @@ mod tests {
         );
         a.cost_base_adjustment = "7.00".parse().unwrap();
         amma::db_upsert(&pool, &a).await.unwrap();
-        link_adjustment(&pool, 1, 1, 1, Decimal::from(100)).await;
+        link_adjustment(&pool, 1, 1, TradeId(1), Decimal::from(100)).await;
         // Then $5/unit × 100 = $500 against that $300 → $200 excess (G1, FY2024).
         apply_roc(
             &pool,
@@ -4789,7 +4790,7 @@ mod tests {
             Decimal::ONE,
         )
         .await;
-        allocate(&pool, 1, 50, ex.replacements[0].id, Decimal::from(2000)).await;
+        allocate(&pool, 1, 50, ex.replacements[0].id.0, Decimal::from(2000)).await;
 
         let years = db_net_capital_gain(&pool).await.unwrap();
         assert_eq!(years.len(), 1);
@@ -4866,7 +4867,7 @@ mod tests {
             &pool,
             1,
             50,
-            dm.head_replacements[0].id,
+            dm.head_replacements[0].id.0,
             Decimal::from(1000),
         )
         .await;
@@ -4884,7 +4885,7 @@ mod tests {
             &pool,
             2,
             51,
-            dm.demerged_replacements[0].id,
+            dm.demerged_replacements[0].id.0,
             Decimal::from(200),
         )
         .await;

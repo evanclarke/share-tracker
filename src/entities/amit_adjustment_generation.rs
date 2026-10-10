@@ -34,6 +34,7 @@ use crate::infra::extract::Json;
 use crate::infra::http::ApiError;
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
+use crate::infra::id::TradeId;
 use axum::{
     Router,
     extract::{Path, State},
@@ -124,11 +125,11 @@ pub struct GeneratedAdjustment {
 #[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnattributedUnits {
     /// The parcel the statement's account held at year end.
-    pub source_trade_id: i64,
+    pub source_trade_id: TradeId,
     /// Units of it the operation carried away, in the operation date's basis.
     pub units: Decimal,
     /// The replacement parcels of that operation, one of which now holds them.
-    pub replacements: Vec<i64>,
+    pub replacements: Vec<TradeId>,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -181,11 +182,11 @@ struct Movement {
     /// Z-g those are adjustable by this statement too (the write path traces
     /// their units back to it), so naming only the same-listing ones would hand
     /// the user an empty list for exactly the case the list exists for.
-    replacements: Vec<i64>,
+    replacements: Vec<TradeId>,
     /// The same parcels as `(id, listing_id, quantity, deemed acquisition
     /// date)` — what [`Movement::matching_replacement`] identifies a transfer's
     /// replacement by.
-    replacement_facts: Vec<(i64, ListingId, Decimal, Option<NaiveDate>)>,
+    replacement_facts: Vec<(TradeId, ListingId, Decimal, Option<NaiveDate>)>,
 }
 
 impl Movement {
@@ -194,7 +195,7 @@ impl Movement {
     /// replacement carries exactly those units under that acquisition date. A
     /// scrip exchange or demerger scales the quantity by its own ratio, so
     /// there is no such match and the caller reports the units instead.
-    fn matching_replacement(&self, acquired: NaiveDate, units: Decimal) -> Option<i64> {
+    fn matching_replacement(&self, acquired: NaiveDate, units: Decimal) -> Option<TradeId> {
         if !self.is_transfer {
             return None;
         }
@@ -210,7 +211,7 @@ impl Movement {
 /// Every rollover that consumed part of `parcel_id`, oldest first.
 async fn db_rollovers_of(
     conn: &mut sqlx::SqliteConnection,
-    parcel_id: i64,
+    parcel_id: TradeId,
 ) -> Result<Vec<Movement>, sqlx::Error> {
     let rows = sqlx::query(
         "SELECT s.date, pa.quantity_allocated, s.listing_id, \
@@ -253,7 +254,7 @@ async fn db_rollovers_of(
         let mut replacement_facts = Vec::with_capacity(replacement_rows.len());
         for r in &replacement_rows {
             replacement_facts.push((
-                r.try_get("id")?,
+                r.try_get::<TradeId, _>("id")?,
                 r.try_get("listing_id")?,
                 row_dec(r, "quantity")?,
                 r.try_get("deemed_acquisition_date")?,
@@ -596,7 +597,7 @@ mod tests {
                 .iter()
                 .map(|a| (a.adjustment.trade_id, a.adjustment.quantity))
                 .collect::<Vec<_>>(),
-            vec![(18, dec("509")), (19, dec("1302"))]
+            vec![(TradeId(18), dec("509")), (TradeId(19), dec("1302"))]
         );
         assert_eq!(fy24.units_adjusted, dec("1811"));
         assert_eq!(fy24.units_held, dec("1811"));
@@ -612,11 +613,11 @@ mod tests {
                 .map(|a| (a.adjustment.trade_id, a.adjustment.quantity))
                 .collect::<Vec<_>>(),
             vec![
-                (18, dec("509")),
-                (19, dec("1302")),
-                (20, dec("776")),
-                (61, dec("32")),
-                (64, dec("1")),
+                (TradeId(18), dec("509")),
+                (TradeId(19), dec("1302")),
+                (TradeId(20), dec("776")),
+                (TradeId(61), dec("32")),
+                (TradeId(64), dec("1")),
             ]
         );
         assert_eq!(fy25.units_adjusted, dec("2620"));
@@ -881,7 +882,7 @@ mod tests {
                     from_account_id: HoldingAccountId(from),
                     to_account_id: HoldingAccountId(to),
                     allocations: vec![AllocationInput {
-                        purchase_trade_id: moved_from,
+                        purchase_trade_id: TradeId(moved_from),
                         quantity_allocated: dec("100"),
                     }],
                     fee_allocations: Vec::new(),
@@ -1041,7 +1042,7 @@ mod tests {
                 .iter()
                 .map(|a| (a.adjustment.trade_id, a.adjustment.quantity))
                 .collect::<Vec<_>>(),
-            vec![(1, dec("100"))]
+            vec![(TradeId(1), dec("100"))]
         );
         // With no split before the year end the two bases coincide, which is
         // the common case the confirm dialog must not get noisier for.
@@ -1054,7 +1055,7 @@ mod tests {
         let events = crate::domain::cost_base::db_cost_base_reduction_events(&mut conn, None)
             .await
             .unwrap();
-        let stated: Decimal = events[&1].iter().map(|e| e.amount()).sum();
+        let stated: Decimal = events[&TradeId(1)].iter().map(|e| e.amount()).sum();
         assert_eq!(stated, dec("50"));
     }
 
@@ -1118,7 +1119,7 @@ mod tests {
                 .map(|a| (a.adjustment.trade_id, a.adjustment.quantity))
                 .collect::<Vec<_>>(),
             // Stored as-acquired, reported (and reconciled) in the year's basis.
-            vec![(1, dec("100")), (2, dec("50"))]
+            vec![(TradeId(1), dec("100")), (TradeId(2), dec("50"))]
         );
         // Each row carries *both* bases, so a caller listing the rows under
         // the total is not showing two different units unlabelled: parcel 1's
@@ -1156,9 +1157,9 @@ mod tests {
             .await
             .unwrap();
         let stated =
-            |trade_id: i64| -> Decimal { events[&trade_id].iter().map(|e| e.amount()).sum() };
-        assert_eq!(stated(1), dec("100"));
-        assert_eq!(stated(2), dec("25"));
+            |trade_id: TradeId| -> Decimal { events[&trade_id].iter().map(|e| e.amount()).sum() };
+        assert_eq!(stated(TradeId(1)), dec("100"));
+        assert_eq!(stated(TradeId(2)), dec("25"));
     }
 
     // API-level tests
@@ -1335,7 +1336,7 @@ mod tests {
                 from_account_id: HoldingAccountId(1),
                 to_account_id: HoldingAccountId(2),
                 allocations: vec![AllocationInput {
-                    purchase_trade_id: 1,
+                    purchase_trade_id: TradeId(1),
                     quantity_allocated: dec("100"),
                 }],
                 fee_allocations: Vec::new(),
@@ -1449,7 +1450,7 @@ mod tests {
         assert_eq!(
             unattributed,
             vec![UnattributedUnits {
-                source_trade_id: 1,
+                source_trade_id: TradeId(1),
                 units: dec("1000"),
                 replacements: vec![replacement],
             }]
@@ -1504,7 +1505,7 @@ mod tests {
                 .iter()
                 .map(|a| (a.adjustment.trade_id, a.adjustment.quantity))
                 .collect::<Vec<_>>(),
-            vec![(1, dec("100"))]
+            vec![(TradeId(1), dec("100"))]
         );
         assert_eq!(result.difference, Decimal::ZERO);
     }
@@ -1546,7 +1547,7 @@ mod tests {
                 .iter()
                 .map(|a| (a.adjustment.trade_id, a.adjustment.quantity))
                 .collect::<Vec<_>>(),
-            vec![(1, dec("1000")), (2, dec("200"))]
+            vec![(TradeId(1), dec("1000")), (TradeId(2), dec("200"))]
         );
         assert_eq!(result.units_adjusted, dec("1200"));
         assert_eq!(result.difference, Decimal::ZERO);
@@ -1595,7 +1596,7 @@ mod tests {
                 from_account_id: HoldingAccountId(1),
                 to_account_id: HoldingAccountId(2),
                 allocations: vec![AllocationInput {
-                    purchase_trade_id: 1,
+                    purchase_trade_id: TradeId(1),
                     quantity_allocated: dec("100"),
                 }],
                 fee_allocations: Vec::new(),
@@ -1645,7 +1646,7 @@ mod tests {
     /// bought, an FY2024 statement at \$1 per unit, and 40 of the units moved
     /// to another account in August 2024 — after the year end, before the
     /// statement was entered. Returns the transfer's replacement parcel id.
-    async fn partial_transfer_after_the_year_end(pool: &SqlitePool) -> i64 {
+    async fn partial_transfer_after_the_year_end(pool: &SqlitePool) -> TradeId {
         use crate::entities::holding_account::{self, HoldingAccount};
         use crate::entities::sell::AllocationInput;
         use crate::entities::transfer::{self, TransferBody};
@@ -1684,7 +1685,7 @@ mod tests {
                 from_account_id: HoldingAccountId(1),
                 to_account_id: HoldingAccountId(2),
                 allocations: vec![AllocationInput {
-                    purchase_trade_id: 1,
+                    purchase_trade_id: TradeId(1),
                     quantity_allocated: dec("40"),
                 }],
                 fee_allocations: Vec::new(),
@@ -1741,11 +1742,11 @@ mod tests {
         assert_eq!(dec_field(&parcel(1), "amit_cost_base_reduction"), dec("60"));
         assert_eq!(dec_field(&parcel(1), "remaining_cost_base"), dec("540"));
         assert_eq!(
-            dec_field(&parcel(replacement), "amit_cost_base_reduction"),
+            dec_field(&parcel(replacement.0), "amit_cost_base_reduction"),
             dec("40")
         );
         assert_eq!(
-            dec_field(&parcel(replacement), "remaining_cost_base"),
+            dec_field(&parcel(replacement.0), "remaining_cost_base"),
             dec("360")
         );
 

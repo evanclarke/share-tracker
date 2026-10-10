@@ -8,6 +8,7 @@
 use crate::infra::decimal::parse_dec;
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
+use crate::infra::id::TradeId;
 use chrono::{Duration, NaiveDate};
 use rust_decimal::Decimal;
 use sqlx::{Row, SqlitePool};
@@ -101,7 +102,7 @@ impl HeldTimeline {
 
         let mut parcels: HashMap<ListingId, Vec<ParcelHolding>> = HashMap::new();
         for row in &buys {
-            let trade_id: i64 = row.try_get("id")?;
+            let trade_id: TradeId = row.try_get("id")?;
             let listing_id: ListingId = row.try_get("listing_id")?;
             let acquired: NaiveDate = row.try_get("date")?;
             let qty = parse_dec("quantity", row.try_get("quantity")?)?;

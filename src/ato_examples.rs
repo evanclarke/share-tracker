@@ -154,6 +154,7 @@
 
 use crate::entities::trade::{Trade, TradeType};
 use crate::infra::id::ListingId;
+use crate::infra::id::TradeId;
 use crate::reports::net_capital_gain::NetCapitalGainYear;
 use crate::reports::portfolio::HoldingOverview;
 use crate::reports::realised_gains::{DisposalSource, RealisedGainLoss};
@@ -267,7 +268,7 @@ async fn put_sell(
     qty: &str,
     price: &str,
     brokerage: &str,
-    purchase_trade_id: i64,
+    purchase_trade_id: TradeId,
 ) {
     api_put(
         pool,
@@ -309,7 +310,17 @@ async fn cgt_how_to_calculate_example_cgt_with_discount() {
     let pool = test_pool().await;
     put_listing(&pool, 1, "LAND").await;
     put_buy(&pool, 1, ListingId(1), "2023-01-10", "1", "100000", "0").await;
-    put_sell(&pool, 2, ListingId(1), "2024-07-10", "1", "110000", "0", 1).await; // 18 months later
+    put_sell(
+        &pool,
+        2,
+        ListingId(1),
+        "2024-07-10",
+        "1",
+        "110000",
+        "0",
+        TradeId(1),
+    )
+    .await; // 18 months later
 
     let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net_capital_gain").await;
     assert_eq!(years.len(), 1);
@@ -358,7 +369,7 @@ async fn cgt_how_to_calculate_example_single_asset() {
         "1",
         "600000",
         "13800",
-        1,
+        TradeId(1),
     )
     .await; // 5 years later
 
@@ -428,13 +439,23 @@ async fn cgt_how_to_calculate_example_multiple_assets() {
         "1",
         "600000",
         "13800",
-        1,
+        TradeId(1),
     )
     .await;
     // Plus the shares sold at a loss in the same financial year.
     put_listing(&pool, 2, "SHRS").await;
     put_buy(&pool, 3, ListingId(2), "2024-09-02", "1000", "10", "0").await; // $10,000 all-in
-    put_sell(&pool, 4, ListingId(2), "2025-06-10", "1000", "5.50", "0", 3).await; // $5,500, no sale costs
+    put_sell(
+        &pool,
+        4,
+        ListingId(2),
+        "2025-06-10",
+        "1000",
+        "5.50",
+        "0",
+        TradeId(3),
+    )
+    .await; // $5,500, no sale costs
 
     let sales: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised_gains").await;
     let shares = sales.iter().find(|s| s.sale_trade_id == 4).unwrap();
@@ -562,7 +583,17 @@ async fn keeping_records_example_boris_identifying_shares_sold() {
     put_buy(&pool, 1, ListingId(1), "2024-05-15", "1000", "5", "0").await;
     put_buy(&pool, 2, ListingId(1), "2025-05-15", "3000", "10", "0").await;
     // Sell 1,500 in 2026 for $8, nominating the 2025 parcel (trade 2).
-    put_sell(&pool, 3, ListingId(1), "2026-05-15", "1500", "8", "0", 2).await;
+    put_sell(
+        &pool,
+        3,
+        ListingId(1),
+        "2026-05-15",
+        "1500",
+        "8",
+        "0",
+        TradeId(2),
+    )
+    .await;
 
     // The nominated parcel makes it a $3,000 capital loss in the 2026 income year.
     let sales: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised_gains").await;
@@ -755,7 +786,17 @@ async fn you_and_your_shares_example_6_matthew_holding_period_rule() {
         }),
     )
     .await;
-    put_sell(&pool, 2, ListingId(1), "2025-04-10", "1000", "50", "0", 1).await;
+    put_sell(
+        &pool,
+        2,
+        ListingId(1),
+        "2025-04-10",
+        "1000",
+        "50",
+        "0",
+        TradeId(1),
+    )
+    .await;
 
     let years: Vec<TaxYearSummary> = api_get(&pool, "/portfolio/tax_summary").await;
     assert_eq!(years.len(), 1);
@@ -819,7 +860,17 @@ async fn you_and_your_shares_example_7_jessica_lifo_identification() {
     )
     .await;
     // 4,000 sold 20 days after the ex-date, CGT-allocated from the old parcel.
-    put_sell(&pool, 3, ListingId(1), "2025-04-03", "4000", "8", "0", 1).await;
+    put_sell(
+        &pool,
+        3,
+        ListingId(1),
+        "2025-04-03",
+        "4000",
+        "8",
+        "0",
+        TradeId(1),
+    )
+    .await;
 
     let years: Vec<TaxYearSummary> = api_get(&pool, "/portfolio/tax_summary").await;
     assert_eq!(years.len(), 1);
@@ -1478,7 +1529,7 @@ async fn demergers_examples_30_32_anita_bhp_billiton_demerger() {
         "56",
         "5",
         "0",
-        demerged_buy_id,
+        TradeId(demerged_buy_id),
     )
     .await;
     let gains: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised_gains").await;
@@ -1612,7 +1663,17 @@ async fn crypto_cgt_example_katrina_coin_swap() {
     put_buy(&pool, 1, ListingId(1), "2025-07-05", "100", "150", "0").await; // 100 Coin A for $15,000
     // The swap on 15 Nov 2025: dispose of 20 Coin A for $6,000 (100 Coin B's
     // market value) and acquire 100 Coin B for the same $6,000.
-    put_sell(&pool, 2, ListingId(1), "2025-11-15", "20", "300", "0", 1).await;
+    put_sell(
+        &pool,
+        2,
+        ListingId(1),
+        "2025-11-15",
+        "20",
+        "300",
+        "0",
+        TradeId(1),
+    )
+    .await;
     put_buy(&pool, 3, ListingId(2), "2025-11-15", "100", "60", "0").await;
 
     // Crypto settles same-day: the auto-populated settlement date is the
@@ -1689,10 +1750,30 @@ async fn crypto_wrapping_examples_5_6_kal_wrap_and_unwrap() {
     put_crypto_listing(&pool, 2, "BTC").await; // stands in for WETH
     put_buy(&pool, 1, ListingId(1), "2021-03-05", "5", "2000", "0").await; // 5 ETH for $10,000
     // The wrap: 5 ETH out at the $30,000 the 5 WETH received are worth.
-    put_sell(&pool, 2, ListingId(1), "2025-03-10", "5", "6000", "0", 1).await;
+    put_sell(
+        &pool,
+        2,
+        ListingId(1),
+        "2025-03-10",
+        "5",
+        "6000",
+        "0",
+        TradeId(1),
+    )
+    .await;
     put_buy(&pool, 3, ListingId(2), "2025-03-10", "5", "6000", "0").await;
     // The unwrap: 5 WETH burnt for 5 ETH worth $28,000.
-    put_sell(&pool, 4, ListingId(2), "2025-07-10", "5", "5600", "0", 3).await;
+    put_sell(
+        &pool,
+        4,
+        ListingId(2),
+        "2025-07-10",
+        "5",
+        "5600",
+        "0",
+        TradeId(3),
+    )
+    .await;
     put_buy(&pool, 5, ListingId(1), "2025-07-10", "5", "5600", "0").await;
 
     let mut sales: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised_gains").await;
@@ -1830,7 +1911,17 @@ async fn crypto_chain_split_example_alex_bitcoin_cash() {
     );
 
     // 2 March 2026: 2 units sold for $1,260 against a nil cost base.
-    put_sell(&pool, 3, ListingId(2), "2026-03-02", "2", "630", "0", 2).await;
+    put_sell(
+        &pool,
+        3,
+        ListingId(2),
+        "2026-03-02",
+        "2",
+        "630",
+        "0",
+        TradeId(2),
+    )
+    .await;
 
     let sales: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised_gains").await;
     assert_eq!(sales.len(), 1);
@@ -1954,7 +2045,17 @@ async fn crypto_initial_airdrop_example_josh_cx_tokens() {
     assert!(years.is_empty(), "no capital gain on receipt");
 
     // Sold 25 May 2026 for $4,000, held more than 12 months.
-    put_sell(&pool, 2, ListingId(1), "2026-05-25", "800", "5", "0", 1).await;
+    put_sell(
+        &pool,
+        2,
+        ListingId(1),
+        "2026-05-25",
+        "800",
+        "5",
+        "0",
+        TradeId(1),
+    )
+    .await;
 
     let sales: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised_gains").await;
     assert_eq!(sales.len(), 1);
@@ -2013,7 +2114,7 @@ async fn crypto_airdrop_draft_tr_2026_d1_example_6_francisco() {
         "10000",
         "1.50",
         "0",
-        1,
+        TradeId(1),
     )
     .await;
     let sales: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised_gains").await;
@@ -2825,7 +2926,17 @@ async fn pig_managed_funds_example_27_ilena_own_loss_against_fund_gains() {
     .await;
     // Ilena's own $100 capital loss on some shares sold during the year.
     put_buy(&pool, 1, ListingId(2), "2024-08-01", "100", "6", "0").await;
-    put_sell(&pool, 2, ListingId(2), "2025-03-03", "100", "5", "0", 1).await;
+    put_sell(
+        &pool,
+        2,
+        ListingId(2),
+        "2025-03-03",
+        "100",
+        "5",
+        "0",
+        TradeId(1),
+    )
+    .await;
 
     let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net_capital_gain").await;
     assert_eq!(years.len(), 1);
@@ -2978,17 +3089,47 @@ async fn tax_return_18_kathleen_loss_order_then_discount() {
     // Discount-method gain: bought 17 Nov 2000 at $3, sold 17 Dec 2025 at $6.
     put_listing(&pool, 1, "KTHA").await;
     put_buy(&pool, 1, ListingId(1), "2000-11-17", "1000", "3", "0").await;
-    put_sell(&pool, 10, ListingId(1), "2025-12-17", "1000", "6", "0", 1).await;
+    put_sell(
+        &pool,
+        10,
+        ListingId(1),
+        "2025-12-17",
+        "1000",
+        "6",
+        "0",
+        TradeId(1),
+    )
+    .await;
 
     // 'Other'-method gain: bought and sold inside 12 months.
     put_listing(&pool, 2, "KTHB").await;
     put_buy(&pool, 2, ListingId(2), "2025-10-10", "130", "4", "0").await;
-    put_sell(&pool, 11, ListingId(2), "2026-02-27", "130", "8", "0", 2).await;
+    put_sell(
+        &pool,
+        11,
+        ListingId(2),
+        "2026-02-27",
+        "130",
+        "8",
+        "0",
+        TradeId(2),
+    )
+    .await;
 
     // The current-year capital loss.
     put_listing(&pool, 3, "KTHC").await;
     put_buy(&pool, 3, ListingId(3), "2025-10-10", "600", "4", "0").await;
-    put_sell(&pool, 12, ListingId(3), "2026-06-25", "600", "3", "0", 3).await;
+    put_sell(
+        &pool,
+        12,
+        ListingId(3),
+        "2026-06-25",
+        "600",
+        "3",
+        "0",
+        TradeId(3),
+    )
+    .await;
 
     let gains: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised_gains").await;
     let by_sale = |id: i64| gains.iter().find(|g| g.sale_trade_id == id).unwrap();
@@ -3094,7 +3235,17 @@ async fn pig_managed_funds_examples_21_25_tim_gross_up_loss_then_discount() {
     // Tim's own $200 capital loss on another CGT asset, same income year.
     put_listing(&pool, 2, "TIMX").await;
     put_buy(&pool, 2, ListingId(2), "2024-09-02", "100", "10", "0").await;
-    put_sell(&pool, 10, ListingId(2), "2025-05-20", "100", "8", "0", 2).await;
+    put_sell(
+        &pool,
+        10,
+        ListingId(2),
+        "2025-05-20",
+        "100",
+        "8",
+        "0",
+        TradeId(2),
+    )
+    .await;
 
     let years: Vec<NetCapitalGainYear> = api_get(&pool, "/portfolio/net_capital_gain").await;
     let y = years.iter().find(|y| y.tax_year == 2025).unwrap();
@@ -3152,7 +3303,17 @@ async fn takeovers_example_26_desiree_takeover_without_rollover() {
     // 500 DEF shares bought October 2000 with a $1.50 cost base each.
     put_buy(&pool, 1, ListingId(1), "2000-10-16", "500", "1.50", "0").await;
     // The takeover: disposal at $2 per share (a $1.25 XYZ share + 75c cash)…
-    put_sell(&pool, 10, ListingId(1), "2002-03-15", "500", "2", "0", 1).await;
+    put_sell(
+        &pool,
+        10,
+        ListingId(1),
+        "2002-03-15",
+        "500",
+        "2",
+        "0",
+        TradeId(1),
+    )
+    .await;
     // …and the new XYZ parcel at its $1.25 market value.
     put_buy(&pool, 2, ListingId(2), "2002-03-15", "500", "1.25", "0").await;
 

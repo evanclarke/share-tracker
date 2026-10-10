@@ -5,6 +5,7 @@ use crate::infra::extract::Json;
 use crate::infra::http::{self, ApiError, CrudEntity, Upsert, UpsertResponse};
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
+use crate::infra::id::TradeId;
 use axum::{
     Router,
     extract::{Path, State},
@@ -161,7 +162,7 @@ pub struct Income {
     /// While set, the linked trade is frozen (`trade::db_upsert`/`db_delete`
     /// reject it) and `DELETE /income/:id` is refused — undo the reinvestment
     /// first.
-    pub reinvestment_trade_id: Option<i64>,
+    pub reinvestment_trade_id: Option<TradeId>,
     /// ISO 4217 currency the amounts are denominated in. The tax summary converts
     /// non-AUD amounts to AUD via the ATO rate for this currency and the month of
     /// the assessment date — `date_paid`, or `entitlement_date` when that governs
@@ -173,7 +174,7 @@ pub struct Income {
     /// (`entities::buyback_participation`). A row carrying it is managed by
     /// the participation: `PUT`/`DELETE /income` reject it (`422`), and it is
     /// removed together with the Sell by `DELETE /sells/:id`.
-    pub buyback_trade_id: Option<i64>,
+    pub buyback_trade_id: Option<TradeId>,
     /// The holding account the distribution was paid to (see
     /// `entities::holding_account`): decides whose DRP enrolment applies and
     /// which account a reinvestment trade lands in. Defaults to the seeded
@@ -1465,7 +1466,7 @@ mod tests {
         // A buy-back's dividend component is fixed by the tender itself, so
         // its payment date is not a fallback (SCENARIOS E-31).
         let buyback = test_support::income(1, 1, paid)
-            .with(|i| i.buyback_trade_id = Some(7))
+            .with(|i| i.buyback_trade_id = Some(TradeId(7)))
             .build();
         assert_eq!(buyback.ex_or_pay_date(), paid);
         assert!(buyback.ex_date_recorded());
@@ -1781,7 +1782,7 @@ mod tests {
         insert_test_listing(&pool).await;
         let trade_id = insert_test_trade(&pool).await;
         let mut inc = test_support::income(3, 1, NaiveDate::from_ymd_opt(2024, 3, 15).unwrap())
-            .with(|i| i.reinvestment_trade_id = Some(trade_id))
+            .with(|i| i.reinvestment_trade_id = Some(TradeId(trade_id)))
             .build();
         db_upsert(&pool, &inc).await.unwrap();
         let got = db_get(&pool, 3).await.unwrap().unwrap();
@@ -1806,7 +1807,7 @@ mod tests {
         let got = db_get(&pool, 3).await.unwrap().unwrap();
         assert_eq!(
             got.reinvestment_trade_id,
-            Some(trade_id),
+            Some(TradeId(trade_id)),
             "an edit must preserve the existing link"
         );
         assert_eq!(got.lic_capital_gain_amount, Decimal::from(40));
@@ -2108,7 +2109,7 @@ mod tests {
             .await;
         assert_eq!(resp.status, StatusCode::NO_CONTENT);
         let got = db_get(&pool, 1).await.unwrap().unwrap();
-        assert_eq!(got.reinvestment_trade_id, Some(trade_id));
+        assert_eq!(got.reinvestment_trade_id, Some(TradeId(trade_id)));
         assert_eq!(got.lic_capital_gain_amount, Decimal::from(12));
     }
 

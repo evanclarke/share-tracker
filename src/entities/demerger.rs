@@ -63,6 +63,7 @@ use crate::infra::extract::{Json, Query};
 use crate::infra::http::{ApiError, DryRunQuery};
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
+use crate::infra::id::TradeId;
 use axum::{
     Router,
     extract::{Path, State},
@@ -389,7 +390,7 @@ async fn execute(
 /// base; the entitlement units go to the demerged listing with the rest. Both
 /// carry the parcel's acquisition date.
 struct Replacement {
-    parcel_id: i64,
+    parcel_id: TradeId,
     at_date_units: Decimal,
     demerged_quantity: Decimal,
     head_cost_base: Decimal,
@@ -609,9 +610,9 @@ mod tests {
     #[allow(clippy::too_many_arguments)]
     async fn sell_listing(
         pool: &SqlitePool,
-        sell_id: i64,
+        sell_id: TradeId,
         listing_id: ListingId,
-        parcel_id: i64,
+        parcel_id: TradeId,
         date: NaiveDate,
         qty: &str,
         price: &str,
@@ -647,8 +648,8 @@ mod tests {
 
     async fn sell_units(
         pool: &SqlitePool,
-        sell_id: i64,
-        parcel_id: i64,
+        sell_id: TradeId,
+        parcel_id: TradeId,
         date: NaiveDate,
         qty: &str,
     ) {
@@ -931,7 +932,7 @@ mod tests {
             .brokerage(dec("50"))
             .insert(&pool)
             .await;
-        sell_units(&pool, 2, 1, d(2022, 5, 2), "400").await;
+        sell_units(&pool, TradeId(2), TradeId(1), d(2022, 5, 2), "400").await;
         insert_demerger(&pool, 10, d(2024, 7, 1)).await;
 
         let dm = db_demerge(&pool, 10).await.unwrap();
@@ -1126,7 +1127,7 @@ mod tests {
 
         sell_listing(
             &pool,
-            20,
+            TradeId(20),
             ListingId(2),
             demerged.id,
             d(2025, 1, 6),
@@ -1204,7 +1205,7 @@ mod tests {
         .unwrap();
         sell_listing(
             &pool,
-            20,
+            TradeId(20),
             ListingId(2),
             demerged.id,
             d(2025, 1, 6),
@@ -1331,7 +1332,7 @@ mod tests {
                 spot_fx_rate: None,
                 contract_note_ref: None,
                 allocations: vec![AllocationInput {
-                    purchase_trade_id: 1,
+                    purchase_trade_id: TradeId(1),
                     quantity_allocated: dec("1000"),
                 }],
             },
@@ -1377,7 +1378,7 @@ mod tests {
         // A later sale out of the demerged parcel blocks the group delete.
         sell::db_upsert_sell(
             &pool,
-            50,
+            TradeId(50),
             &SellBody {
                 brokerage_includes_gst: false,
                 statement_total: None,
@@ -1410,7 +1411,7 @@ mod tests {
         // Remove the later sale; the group then deletes as a whole and the
         // action thaws (it can be deleted again).
         assert_eq!(
-            sell::db_delete_sell(&pool, 50).await.unwrap(),
+            sell::db_delete_sell(&pool, TradeId(50)).await.unwrap(),
             sell::DeleteOutcome::Deleted
         );
         assert_eq!(

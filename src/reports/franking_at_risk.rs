@@ -33,6 +33,8 @@ use crate::infra::http::ApiError;
 #[cfg(test)]
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
+#[cfg(test)]
+use crate::infra::id::TradeId;
 use crate::reports::franking;
 use axum::{Router, extract::State, routing::get};
 use chrono::{Duration, NaiveDate};
@@ -428,7 +430,7 @@ mod tests {
                     date: ymd(2025, 6, 15),
                     units: Decimal::from(20000),
                     allocations: vec![AllocationInput {
-                        purchase_trade_id: 1,
+                        purchase_trade_id: TradeId(1),
                         quantity_allocated: Decimal::from(20000),
                     }],
                     fx_rate: None,

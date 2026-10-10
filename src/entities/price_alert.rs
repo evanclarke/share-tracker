@@ -50,6 +50,8 @@ use crate::infra::db::write_tx;
 use crate::infra::decimal::{Money, row_dec};
 use crate::infra::email::{self, Document, Notifier, Section, Table};
 use crate::infra::id::ListingId;
+#[cfg(test)]
+use crate::infra::id::TradeId;
 use crate::infra::scheduler::JobOutcome;
 use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
@@ -616,8 +618,8 @@ mod tests {
             &pool,
             &crate::entities::parcel_allocation::ParcelAllocation {
                 id: 1,
-                sale_trade_id: 700,
-                purchase_trade_id: 100,
+                sale_trade_id: TradeId(700),
+                purchase_trade_id: TradeId(100),
                 quantity_allocated: dec("10"),
             },
         )

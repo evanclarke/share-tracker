@@ -39,6 +39,8 @@
 use crate::infra::email::{self, Document, Notifier, Section, Table};
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
+#[cfg(test)]
+use crate::infra::id::TradeId;
 use crate::infra::scheduler::JobOutcome;
 use crate::reports::{period_performance, snapshot};
 use chrono::{DateTime, Duration, NaiveDate, Utc};
@@ -578,8 +580,8 @@ mod tests {
             &pool,
             &crate::entities::parcel_allocation::ParcelAllocation {
                 id: 1,
-                sale_trade_id: 701,
-                purchase_trade_id: 200,
+                sale_trade_id: TradeId(701),
+                purchase_trade_id: TradeId(200),
                 quantity_allocated: dec("10"),
             },
         )

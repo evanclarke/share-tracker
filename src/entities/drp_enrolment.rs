@@ -40,6 +40,8 @@ use crate::infra::extract::Json;
 use crate::infra::http::{self, ApiError, CrudEntity, Upsert, UpsertResponse};
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
+#[cfg(test)]
+use crate::infra::id::TradeId;
 use axum::{
     Router,
     extract::{Path, State},
@@ -936,7 +938,7 @@ mod tests {
             paid_out: test_support::dec(paid),
             ..Default::default()
         })
-        .write(&mut conn, Some(id))
+        .write(&mut conn, Some(TradeId(id)))
         .await
         .unwrap();
         // …together with the distribution that funded it: a DRP trade only
@@ -944,7 +946,7 @@ mod tests {
         // belongs to is that distribution's entitlement-date question. The
         // fixture states the trade date as the pay date and no ex date, so
         // the two dates coincide unless a test says otherwise.
-        link_funding_distribution(pool, id, listing_id, date, date).await;
+        link_funding_distribution(pool, (TradeId(id)).0, listing_id, date, date).await;
     }
 
     /// Insert the income row a DRP trade was reinvested from, linked to it —
@@ -977,7 +979,7 @@ mod tests {
             .unwrap();
     }
 
-    async fn residuals(pool: &SqlitePool, trade_id: i64) -> (String, String) {
+    async fn residuals(pool: &SqlitePool, trade_id: TradeId) -> (String, String) {
         sqlx::query_as(
             "SELECT residual_carried_forward, residual_paid_out FROM trades WHERE id = ?",
         )
@@ -1021,7 +1023,7 @@ mod tests {
         .await
         .unwrap();
 
-        let (carried, paid) = residuals(&pool, 11).await;
+        let (carried, paid) = residuals(&pool, TradeId(11)).await;
         assert_eq!(carried, "0", "the refunded residual is no longer carried");
         assert_eq!(
             paid, "2.50",
@@ -1029,7 +1031,7 @@ mod tests {
         );
         // The earlier reinvestment's historical snapshot is untouched.
         assert_eq!(
-            residuals(&pool, 10).await,
+            residuals(&pool, TradeId(10)).await,
             ("1".to_string(), "0".to_string())
         );
 
@@ -1047,7 +1049,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(
-            residuals(&pool, 11).await,
+            residuals(&pool, TradeId(11)).await,
             ("0".to_string(), "2.50".to_string())
         );
     }
@@ -1071,7 +1073,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(
-            residuals(&pool, 10).await,
+            residuals(&pool, TradeId(10)).await,
             ("5".to_string(), "0".to_string())
         );
     }
@@ -1174,7 +1176,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(
-            residuals(&pool, 10).await,
+            residuals(&pool, TradeId(10)).await,
             ("5".to_string(), "0".to_string())
         );
     }
@@ -1210,14 +1212,14 @@ mod tests {
         );
         db_upsert(&pool, &closed).await.unwrap();
         assert_eq!(
-            residuals(&pool, 11).await,
+            residuals(&pool, TradeId(11)).await,
             ("0".to_string(), "2.50".to_string())
         );
 
         // … and correct it: the leftover is carried again, not lost.
         db_upsert(&pool, &open).await.unwrap();
         assert_eq!(
-            residuals(&pool, 11).await,
+            residuals(&pool, TradeId(11)).await,
             ("2.50".to_string(), "0".to_string()),
             "re-opening the period restores the carry it refunded"
         );
@@ -1238,11 +1240,11 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(
-            residuals(&pool, 10).await,
+            residuals(&pool, TradeId(10)).await,
             ("0".to_string(), "1".to_string())
         );
         assert_eq!(
-            residuals(&pool, 11).await,
+            residuals(&pool, TradeId(11)).await,
             ("2.50".to_string(), "0".to_string())
         );
     }
@@ -1293,7 +1295,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(
-            residuals(&pool, 10).await,
+            residuals(&pool, TradeId(10)).await,
             ("0".to_string(), "2".to_string())
         );
 
@@ -1319,7 +1321,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(
-            residuals(&pool, 10).await,
+            residuals(&pool, TradeId(10)).await,
             ("0".to_string(), "2".to_string()),
             "the trade belongs to the period its distribution went ex in"
         );
@@ -1356,7 +1358,7 @@ mod tests {
             "the refused delete leaves the period in place"
         );
         assert_eq!(
-            residuals(&pool, 10).await,
+            residuals(&pool, TradeId(10)).await,
             ("5.50".to_string(), "0".to_string()),
             "and leaves the reinvestment's residual chain untouched"
         );
@@ -1375,7 +1377,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(
-            residuals(&pool, 10).await,
+            residuals(&pool, TradeId(10)).await,
             ("0".to_string(), "5.50".to_string())
         );
         // Closed, but still covering the reinvestment — still refused.

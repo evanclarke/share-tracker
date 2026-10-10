@@ -9,6 +9,7 @@ use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
+use crate::infra::id::TradeId;
 use axum::{Router, extract::State, routing::get};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
@@ -81,7 +82,7 @@ pub struct RealisedGainLoss {
 pub struct ParcelDetail {
     /// The Buy/DRP trade (or, for a rights sale, the parcel that earned the
     /// rights) this allocation drew from.
-    pub purchase_trade_id: i64,
+    pub purchase_trade_id: TradeId,
     /// Original/deemed acquisition date — the discount-clock anchor
     /// (`ParcelRow::acquired()`).
     pub acquisition_date: NaiveDate,
@@ -134,7 +135,7 @@ pub fn router() -> Router<SqlitePool> {
 /// across mixed currencies.
 #[derive(sqlx::FromRow)]
 struct SellInfo {
-    id: i64,
+    id: TradeId,
     listing_id: ListingId,
     holding_account_id: HoldingAccountId,
     date: NaiveDate,
@@ -178,7 +179,7 @@ impl SellInfo {
     /// shares. `None` for ordinary Sells.
     fn scrip_cash_apportionment(&self) -> Result<Option<(Decimal, Decimal)>, sqlx::Error> {
         scrip_cash_apportionment(
-            self.id,
+            self.id.0,
             self.scrip_cash_per_unit,
             self.scrip_market_value,
             self.scrip_new_units,
@@ -236,8 +237,8 @@ pub(crate) fn scrip_cash_apportionment(
 /// sale date's unit basis) came from the purchase parcel.
 #[derive(sqlx::FromRow)]
 struct Allocation {
-    sale_trade_id: i64,
-    purchase_trade_id: i64,
+    sale_trade_id: TradeId,
+    purchase_trade_id: TradeId,
     #[sqlx(try_from = "Money")]
     quantity_allocated: Decimal,
 }
@@ -272,7 +273,7 @@ struct RightsSaleInfo {
 #[derive(sqlx::FromRow)]
 struct RightsAllocation {
     rights_sale_id: i64,
-    purchase_trade_id: i64,
+    purchase_trade_id: TradeId,
     #[sqlx(try_from = "Money")]
     units: Decimal,
 }
@@ -282,8 +283,8 @@ struct RightsAllocation {
 /// in-memory data.
 #[derive(Default)]
 struct ReportData {
-    sells: HashMap<i64, SellInfo>,
-    buys: HashMap<i64, ParcelRow>,
+    sells: HashMap<TradeId, SellInfo>,
+    buys: HashMap<TradeId, ParcelRow>,
     allocations: Vec<Allocation>,
     /// Rights sales/lapses (disposals of the rights themselves) and their
     /// parcel anchorings, surfaced as `source = RightsSale` rows.
@@ -291,7 +292,7 @@ struct ReportData {
     rights_allocations: Vec<RightsAllocation>,
     /// AMIT cost-base reductions (CGT event E10) per purchase parcel, one per
     /// AMMA statement adjusting it.
-    cba_reduction: HashMap<i64, Vec<cost_base::AmitReductionEvent>>,
+    cba_reduction: HashMap<TradeId, Vec<cost_base::AmitReductionEvent>>,
     /// Return-of-capital payments (CGT event G1) per listing.
     roc_events: HashMap<ListingId, Vec<RocEvent>>,
     /// Share splits/consolidations per listing (quantity re-basing).
@@ -445,19 +446,19 @@ fn cumulative_share(
 /// The gain/loss computation: a pure function over [`ReportData`], so the
 /// arithmetic is unit-testable without a database.
 fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sqlx::Error> {
-    let mut sale_proceeds: HashMap<i64, Decimal> = HashMap::new();
-    let mut sale_cost_base: HashMap<i64, Decimal> = HashMap::new();
-    let mut sale_discount_gain: HashMap<i64, Decimal> = HashMap::new();
-    let mut sale_non_discount_gain: HashMap<i64, Decimal> = HashMap::new();
-    let mut sale_loss: HashMap<i64, Decimal> = HashMap::new();
+    let mut sale_proceeds: HashMap<TradeId, Decimal> = HashMap::new();
+    let mut sale_cost_base: HashMap<TradeId, Decimal> = HashMap::new();
+    let mut sale_discount_gain: HashMap<TradeId, Decimal> = HashMap::new();
+    let mut sale_non_discount_gain: HashMap<TradeId, Decimal> = HashMap::new();
+    let mut sale_loss: HashMap<TradeId, Decimal> = HashMap::new();
     // Per-sale parcel breakdown: the same per-allocation figures computed
     // below, kept instead of only being summed into the totals above, so the
     // report can surface which parcel contributed what.
-    let mut sale_parcels: HashMap<i64, Vec<ParcelDetail>> = HashMap::new();
+    let mut sale_parcels: HashMap<TradeId, Vec<ParcelDetail>> = HashMap::new();
     // Running (quantity, proceeds share) already handed to earlier
     // allocations of each sale, for the cumulative-difference apportionment
     // below.
-    let mut sale_proceeds_assigned: HashMap<i64, (Decimal, Decimal)> = HashMap::new();
+    let mut sale_proceeds_assigned: HashMap<TradeId, (Decimal, Decimal)> = HashMap::new();
 
     for alloc in &data.allocations {
         let sale_id = alloc.sale_trade_id;
@@ -634,7 +635,7 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
             });
             Some(RealisedGainLoss {
                 source: DisposalSource::Sell,
-                sale_trade_id: sale_id,
+                sale_trade_id: sale_id.0,
                 listing_id: sale.listing_id,
                 holding_account_id: sale.holding_account_id,
                 sale_date: sale.date,
@@ -838,14 +839,14 @@ mod tests {
         let d = |y, m, day| NaiveDate::from_ymd_opt(y, m, day).unwrap();
         let mut sell = mem_sell(9, d(2026, 5, 15), 1551, price, "AUD");
         sell.brokerage = dec(brokerage);
-        let mut buys: HashMap<i64, ParcelRow> = HashMap::new();
+        let mut buys: HashMap<TradeId, ParcelRow> = HashMap::new();
         let mut allocations = Vec::new();
         for id in 1..=3 {
-            buys.insert(id, mem_buy(id, d(2015, 3, 4), 517, 1, "AUD"));
+            buys.insert(TradeId(id), mem_buy(id, d(2015, 3, 4), 517, 1, "AUD"));
             allocations.push(mem_alloc(9, id, 517));
         }
         compute_realised_gains(&ReportData {
-            sells: [(9, sell)].into(),
+            sells: [(TradeId(9), sell)].into(),
             buys,
             allocations,
             ..ReportData::default()
@@ -859,7 +860,7 @@ mod tests {
 
     fn mem_sell(id: i64, date: NaiveDate, qty: i64, price: i64, currency: &str) -> SellInfo {
         SellInfo {
-            id,
+            id: TradeId(id),
             listing_id: ListingId(1),
             holding_account_id: HoldingAccountId(1),
             date,
@@ -879,7 +880,7 @@ mod tests {
 
     fn mem_buy(id: i64, date: NaiveDate, qty: i64, price: i64, currency: &str) -> ParcelRow {
         ParcelRow {
-            id,
+            id: TradeId(id),
             listing_id: ListingId(1),
             holding_account_id: HoldingAccountId(1),
             date,
@@ -901,8 +902,8 @@ mod tests {
 
     fn mem_alloc(sale: i64, buy: i64, qty: i64) -> Allocation {
         Allocation {
-            sale_trade_id: sale,
-            purchase_trade_id: buy,
+            sale_trade_id: TradeId(sale),
+            purchase_trade_id: TradeId(buy),
             quantity_allocated: Decimal::from(qty),
         }
     }
@@ -913,10 +914,10 @@ mod tests {
         // Old parcel (>12mo, gain 500), new parcel (≤12mo, gain 250) — same
         // facts as `db_two_parcels_mixed_eligibility`, straight from memory.
         let data = ReportData {
-            sells: [(3, mem_sell(3, d(2025, 6, 2), 150, 15, "AUD"))].into(),
+            sells: [(TradeId(3), mem_sell(3, d(2025, 6, 2), 150, 15, "AUD"))].into(),
             buys: [
-                (1, mem_buy(1, d(2023, 1, 3), 100, 10, "AUD")),
-                (2, mem_buy(2, d(2025, 1, 1), 50, 10, "AUD")),
+                (TradeId(1), mem_buy(1, d(2023, 1, 3), 100, 10, "AUD")),
+                (TradeId(2), mem_buy(2, d(2025, 1, 1), 50, 10, "AUD")),
             ]
             .into(),
             allocations: vec![mem_alloc(3, 1, 100), mem_alloc(3, 2, 50)],
@@ -944,8 +945,8 @@ mod tests {
         // USD buy at 0.50 (cost 1000 USD → 2000 AUD), USD sell at 0.60
         // (proceeds 1500 USD → 2500 AUD): gain 500 AUD, from the map alone.
         let data = ReportData {
-            sells: [(2, mem_sell(2, d(2025, 6, 2), 100, 15, "USD"))].into(),
-            buys: [(1, mem_buy(1, d(2024, 1, 15), 100, 10, "USD"))].into(),
+            sells: [(TradeId(2), mem_sell(2, d(2025, 6, 2), 100, 15, "USD"))].into(),
+            buys: [(TradeId(1), mem_buy(1, d(2024, 1, 15), 100, 10, "USD"))].into(),
             allocations: vec![mem_alloc(2, 1, 100)],
             fx: crate::infra::fx::FxRates::from_rates([
                 ("USD", "2024-01", "0.50".parse().unwrap()),
@@ -973,8 +974,8 @@ mod tests {
         let mut buy = mem_buy(1, d(2024, 1, 15), 100, 10, "USD");
         buy.fx_rate = "0.50".parse().unwrap();
         let data = ReportData {
-            sells: [(2, sell)].into(),
-            buys: [(1, buy)].into(),
+            sells: [(TradeId(2), sell)].into(),
+            buys: [(TradeId(1), buy)].into(),
             allocations: vec![mem_alloc(2, 1, 100)],
             ..ReportData::default()
         };
@@ -995,8 +996,8 @@ mod tests {
         let mut buy = mem_buy(1, d(2024, 1, 15), 100, 10, "USD");
         buy.spot_fx_rate = Some("0.40".parse().unwrap());
         let data = ReportData {
-            sells: [(2, sell)].into(),
-            buys: [(1, buy)].into(),
+            sells: [(TradeId(2), sell)].into(),
+            buys: [(TradeId(1), buy)].into(),
             allocations: vec![mem_alloc(2, 1, 100)],
             fx: crate::infra::fx::FxRates::from_rates([
                 ("USD", "2024-01", "0.50".parse().unwrap()),
@@ -1029,11 +1030,11 @@ mod tests {
         let mut sell = mem_sell(4, d(2025, 6, 2), 3, 4, "AUD");
         sell.brokerage = Decimal::from(10);
         let data = ReportData {
-            sells: [(4, sell)].into(),
+            sells: [(TradeId(4), sell)].into(),
             buys: [
-                (1, mem_buy(1, d(2024, 1, 1), 1, 1, "AUD")),
-                (2, mem_buy(2, d(2024, 2, 1), 1, 1, "AUD")),
-                (3, mem_buy(3, d(2024, 3, 1), 1, 1, "AUD")),
+                (TradeId(1), mem_buy(1, d(2024, 1, 1), 1, 1, "AUD")),
+                (TradeId(2), mem_buy(2, d(2024, 2, 1), 1, 1, "AUD")),
+                (TradeId(3), mem_buy(3, d(2024, 3, 1), 1, 1, "AUD")),
             ]
             .into(),
             allocations: vec![mem_alloc(4, 1, 1), mem_alloc(4, 2, 1), mem_alloc(4, 3, 1)],
@@ -1095,8 +1096,8 @@ mod tests {
         let mut sell = mem_sell(9, d(2026, 5, 15), 1551, 45, "AUD");
         sell.brokerage = dec("9.95");
         let data = ReportData {
-            sells: [(9, sell)].into(),
-            buys: [(1, mem_buy(1, d(2015, 3, 4), 1551, 25, "AUD"))].into(),
+            sells: [(TradeId(9), sell)].into(),
+            buys: [(TradeId(1), mem_buy(1, d(2015, 3, 4), 1551, 25, "AUD"))].into(),
             allocations: vec![mem_alloc(9, 1, 1551)],
             ..ReportData::default()
         };
@@ -1130,23 +1131,23 @@ mod tests {
         // plus $15.00 brokerage ($4,227.00) bought inside 12 months of the
         // sale — so its gain is the non-discountable one — and one of 155 at
         // $25.245 ($3,912.975), which is where the half cent comes from.
-        let mut buys: HashMap<i64, ParcelRow> = HashMap::new();
+        let mut buys: HashMap<TradeId, ParcelRow> = HashMap::new();
         let mut allocations = Vec::new();
         for id in 1..=8 {
-            buys.insert(id, mem_buy(id, d(2015, 3, 4), 155, 25, "AUD"));
+            buys.insert(TradeId(id), mem_buy(id, d(2015, 3, 4), 155, 25, "AUD"));
             allocations.push(mem_alloc(99, id, 155));
         }
         let mut recent = mem_buy(9, d(2025, 11, 3), 156, 27, "AUD");
         recent.brokerage = Decimal::from(15);
-        buys.insert(9, recent);
+        buys.insert(TradeId(9), recent);
         allocations.push(mem_alloc(99, 9, 156));
         let mut half_cent = mem_buy(10, d(2016, 8, 9), 155, 25, "AUD");
         half_cent.average_price = dec("25.245");
-        buys.insert(10, half_cent);
+        buys.insert(TradeId(10), half_cent);
         allocations.push(mem_alloc(99, 10, 155));
 
         let data = ReportData {
-            sells: [(99, sell)].into(),
+            sells: [(TradeId(99), sell)].into(),
             buys,
             allocations,
             ..ReportData::default()
@@ -1189,17 +1190,17 @@ mod tests {
         let d = |y, m, day| NaiveDate::from_ymd_opt(y, m, day).unwrap();
         let mut sell = mem_sell(5, d(2026, 5, 15), 1551, 45, "USD");
         sell.brokerage = dec("9.95");
-        let mut buys: HashMap<i64, ParcelRow> = HashMap::new();
+        let mut buys: HashMap<TradeId, ParcelRow> = HashMap::new();
         let mut allocations = Vec::new();
         for (i, qty) in [517i64, 517, 517].into_iter().enumerate() {
             let id = i as i64 + 1;
             let mut buy = mem_buy(id, d(2015, 3, 4), qty, 20, "USD");
             buy.currency = "USD".into();
-            buys.insert(id, buy);
+            buys.insert(TradeId(id), buy);
             allocations.push(mem_alloc(5, id, qty));
         }
         let data = ReportData {
-            sells: [(5, sell)].into(),
+            sells: [(TradeId(5), sell)].into(),
             buys,
             allocations,
             fx: crate::infra::fx::FxRates::from_rates([
@@ -1999,7 +2000,7 @@ mod tests {
                 from_account_id: HoldingAccountId(1),
                 to_account_id: HoldingAccountId(2),
                 allocations: vec![crate::entities::sell::AllocationInput {
-                    purchase_trade_id: 1,
+                    purchase_trade_id: TradeId(1),
                     quantity_allocated: dec("600"),
                 }],
                 fee_allocations: Vec::new(),
@@ -2916,8 +2917,8 @@ mod tests {
             Some((Decimal::from(10), Decimal::from(30)))
         );
         let data = ReportData {
-            sells: [(2, sell)].into(),
-            buys: [(1, mem_buy(1, d(2023, 1, 15), 100, 9, "AUD"))].into(),
+            sells: [(TradeId(2), sell)].into(),
+            buys: [(TradeId(1), mem_buy(1, d(2023, 1, 15), 100, 9, "AUD"))].into(),
             allocations: vec![mem_alloc(2, 1, 100)],
             ..ReportData::default()
         };
@@ -2968,7 +2969,7 @@ mod tests {
             Decimal::ONE,
         )
         .await;
-        allocate(&pool, 1, 50, ex.replacements[0].id, Decimal::from(2000)).await;
+        allocate(&pool, 1, 50, ex.replacements[0].id.0, Decimal::from(2000)).await;
 
         let result = db_realised_gains(&pool).await.unwrap();
         assert_eq!(result.len(), 1);
@@ -3018,7 +3019,7 @@ mod tests {
             Decimal::ONE,
         )
         .await;
-        allocate(&pool, 1, 50, ex.replacements[0].id, Decimal::from(2000)).await;
+        allocate(&pool, 1, 50, ex.replacements[0].id.0, Decimal::from(2000)).await;
 
         let result = db_realised_gains(&pool).await.unwrap();
         assert_eq!(result.len(), 1);
@@ -3074,7 +3075,7 @@ mod tests {
             .fx_rate("0.99".parse().unwrap())
             .insert(&pool)
             .await;
-        allocate(&pool, 1, 50, ex.replacements[0].id, Decimal::from(200)).await;
+        allocate(&pool, 1, 50, ex.replacements[0].id.0, Decimal::from(200)).await;
 
         let result = db_realised_gains(&pool).await.unwrap();
         assert_eq!(result.len(), 1);
@@ -3198,7 +3199,7 @@ mod tests {
             &pool,
             1,
             50,
-            dm.head_replacements[0].id,
+            dm.head_replacements[0].id.0,
             Decimal::from(1000),
         )
         .await;
@@ -3215,7 +3216,7 @@ mod tests {
             &pool,
             2,
             51,
-            dm.demerged_replacements[0].id,
+            dm.demerged_replacements[0].id.0,
             Decimal::from(200),
         )
         .await;
@@ -3263,7 +3264,7 @@ mod tests {
     fn mem_rights_alloc(sale: i64, buy: i64, units: i64) -> RightsAllocation {
         RightsAllocation {
             rights_sale_id: sale,
-            purchase_trade_id: buy,
+            purchase_trade_id: TradeId(buy),
             units: Decimal::from(units),
         }
     }
@@ -3277,8 +3278,8 @@ mod tests {
         let d = |y, m, day| NaiveDate::from_ymd_opt(y, m, day).unwrap();
         let data = ReportData {
             buys: [
-                (1, mem_buy(1, d(2023, 1, 3), 1000, 2, "AUD")), // > 12 months
-                (2, mem_buy(2, d(2025, 3, 1), 200, 2, "AUD")),  // ≤ 12 months
+                (TradeId(1), mem_buy(1, d(2023, 1, 3), 1000, 2, "AUD")), // > 12 months
+                (TradeId(2), mem_buy(2, d(2025, 3, 1), 200, 2, "AUD")),  // ≤ 12 months
             ]
             .into(),
             rights_sales: vec![mem_rights_sale(7, d(2025, 5, 1), 300, "0.20", "0")],
@@ -3325,9 +3326,9 @@ mod tests {
         sale.currency = "USD".into();
         let data = ReportData {
             buys: [
-                (1, mem_buy(1, d(2024, 1, 1), 100, 2, "AUD")),
-                (2, mem_buy(2, d(2024, 2, 1), 100, 2, "AUD")),
-                (3, mem_buy(3, d(2024, 3, 1), 100, 2, "AUD")),
+                (TradeId(1), mem_buy(1, d(2024, 1, 1), 100, 2, "AUD")),
+                (TradeId(2), mem_buy(2, d(2024, 2, 1), 100, 2, "AUD")),
+                (TradeId(3), mem_buy(3, d(2024, 3, 1), 100, 2, "AUD")),
             ]
             .into(),
             rights_sales: vec![sale],
@@ -3359,9 +3360,9 @@ mod tests {
         let d = |y, m, day| NaiveDate::from_ymd_opt(y, m, day).unwrap();
         let data = ReportData {
             buys: [
-                (1, mem_buy(1, d(2024, 1, 1), 100, 2, "AUD")),
-                (2, mem_buy(2, d(2024, 2, 1), 100, 2, "AUD")),
-                (3, mem_buy(3, d(2024, 3, 1), 100, 2, "AUD")),
+                (TradeId(1), mem_buy(1, d(2024, 1, 1), 100, 2, "AUD")),
+                (TradeId(2), mem_buy(2, d(2024, 2, 1), 100, 2, "AUD")),
+                (TradeId(3), mem_buy(3, d(2024, 3, 1), 100, 2, "AUD")),
             ]
             .into(),
             rights_sales: vec![mem_rights_sale(7, d(2024, 8, 1), 3, "0", "10")],
@@ -3428,7 +3429,7 @@ mod tests {
                 fx_rate: None,
                 holding_account_id: HoldingAccountId(1),
                 allocations: vec![rights_sale::AllocationInput {
-                    purchase_trade_id: 1,
+                    purchase_trade_id: TradeId(1),
                     units: Decimal::from(250),
                 }],
             },
@@ -3910,7 +3911,7 @@ mod tests {
                 fx_rate: None,
                 holding_account_id: HoldingAccountId(1),
                 allocations: vec![rights_sale::AllocationInput {
-                    purchase_trade_id: 1,
+                    purchase_trade_id: TradeId(1),
                     units: "10000000000000000000".parse().unwrap(),
                 }],
             },

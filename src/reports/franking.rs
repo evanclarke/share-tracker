@@ -24,6 +24,8 @@ use crate::infra::fx::{FxOverride, FxRates};
 #[cfg(test)]
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
+#[cfg(test)]
+use crate::infra::id::TradeId;
 use chrono::{Duration, NaiveDate};
 use rust_decimal::Decimal;
 use sqlx::{Row, SqliteConnection};
@@ -1070,7 +1072,7 @@ mod tests {
                 from_account_id: HoldingAccountId(1),
                 to_account_id: HoldingAccountId(2),
                 allocations: vec![crate::entities::sell::AllocationInput {
-                    purchase_trade_id: 1,
+                    purchase_trade_id: TradeId(1),
                     quantity_allocated: Decimal::from(1000),
                 }],
                 fee_allocations: Vec::new(),

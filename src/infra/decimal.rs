@@ -13,6 +13,8 @@
 
 #[cfg(test)]
 use crate::infra::id::HoldingAccountId;
+#[cfg(test)]
+use crate::infra::id::TradeId;
 use rust_decimal::Decimal;
 use serde::Deserialize as _;
 use serde::de::{self, Deserializer, Visitor};
@@ -919,7 +921,7 @@ mod tests {
     #[test]
     fn every_money_field_of_a_serialized_row_is_a_json_string() {
         let row = OpenParcel {
-            trade_id: 7,
+            trade_id: TradeId(7),
             listing_id: ListingId(3),
             holding_account_id: HoldingAccountId(1),
             ticker: "VDHG".to_string(),

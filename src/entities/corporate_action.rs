@@ -175,6 +175,8 @@ use crate::infra::id::HoldingAccountId;
 #[cfg(test)]
 use crate::infra::id::ListingId;
 #[cfg(test)]
+use crate::infra::id::TradeId;
+#[cfg(test)]
 use axum::http::StatusCode;
 #[cfg(test)]
 use chrono::NaiveDate;
@@ -2846,7 +2848,7 @@ mod tests {
     /// pair (SCENARIOS M-08) — and it is exactly the state this check exists
     /// for, so the tests reproduce it directly rather than driving a whole
     /// exchange.
-    async fn carried_over_from_a_rollover(pool: &SqlitePool, trade_id: i64, currency: &str) {
+    async fn carried_over_from_a_rollover(pool: &SqlitePool, trade_id: TradeId, currency: &str) {
         sqlx::query("UPDATE trades SET currency = ?, brokerage_currency = ? WHERE id = ?")
             .bind(currency)
             .bind(currency)
@@ -2877,7 +2879,7 @@ mod tests {
             .date(d(2023, 1, 10))
             .insert(&pool)
             .await;
-        carried_over_from_a_rollover(&pool, 1, "AUD").await;
+        carried_over_from_a_rollover(&pool, TradeId(1), "AUD").await;
 
         let resp = client(&pool)
             .put(
@@ -2914,7 +2916,7 @@ mod tests {
             .date(d(2025, 1, 6))
             .insert(&pool)
             .await;
-        carried_over_from_a_rollover(&pool, 2, "USD").await;
+        carried_over_from_a_rollover(&pool, TradeId(2), "USD").await;
 
         // Dated before the USD parcel was acquired: it was never entitled.
         api_put_expecting(
@@ -3176,7 +3178,7 @@ mod tests {
     ) -> Result<Upsert, SellError> {
         sell::db_upsert_sell(
             pool,
-            2,
+            TradeId(2),
             &SellBody {
                 brokerage_includes_gst: false,
                 statement_total: None,
@@ -3194,7 +3196,7 @@ mod tests {
                 spot_fx_rate: None,
                 contract_note_ref: None,
                 allocations: vec![AllocationInput {
-                    purchase_trade_id: 1,
+                    purchase_trade_id: TradeId(1),
                     quantity_allocated: qty.parse().unwrap(),
                 }],
             },
@@ -3313,7 +3315,7 @@ mod tests {
         // is then refused, which is exactly the state the guard keeps the
         // delete from leaving behind.
         assert!(matches!(
-            sell::db_delete_sell(&pool, 2).await.unwrap(),
+            sell::db_delete_sell(&pool, TradeId(2)).await.unwrap(),
             sell::DeleteOutcome::Deleted
         ));
         assert!(db_delete(&pool, 10).await.unwrap());
@@ -3663,7 +3665,7 @@ mod tests {
                 from_account_id: HoldingAccountId(1),
                 to_account_id: HoldingAccountId(2),
                 allocations: vec![AllocationInput {
-                    purchase_trade_id: 1,
+                    purchase_trade_id: TradeId(1),
                     quantity_allocated: Decimal::from(100),
                 }],
                 fee_allocations: Vec::new(),
@@ -3834,7 +3836,7 @@ mod tests {
         // The whole holding sold at nil, allocated 1:1 while no split exists.
         sell::db_upsert_sell(
             &pool,
-            2,
+            TradeId(2),
             &SellBody {
                 brokerage_includes_gst: false,
                 statement_total: None,
@@ -3852,7 +3854,7 @@ mod tests {
                 spot_fx_rate: None,
                 contract_note_ref: None,
                 allocations: vec![AllocationInput {
-                    purchase_trade_id: 1,
+                    purchase_trade_id: TradeId(1),
                     quantity_allocated: "1000000000000000000000000000".parse().unwrap(),
                 }],
             },
@@ -4000,7 +4002,7 @@ mod tests {
         // The whole holding, in post-consolidation units, sold at nil.
         sell::db_upsert_sell(
             &pool,
-            2,
+            TradeId(2),
             &SellBody {
                 brokerage_includes_gst: false,
                 statement_total: None,
@@ -4018,7 +4020,7 @@ mod tests {
                 spot_fx_rate: None,
                 contract_note_ref: None,
                 allocations: vec![AllocationInput {
-                    purchase_trade_id: 1,
+                    purchase_trade_id: TradeId(1),
                     quantity_allocated: "1000000000000000000000000".parse().unwrap(),
                 }],
             },

@@ -23,6 +23,7 @@ use crate::infra::extract::{Json, Query};
 use crate::infra::http::ApiError;
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
+use crate::infra::id::TradeId;
 use crate::reports::realised_gains::{self, DisposalSource};
 use axum::{Router, extract::State, routing::get};
 use chrono::NaiveDate;
@@ -40,7 +41,7 @@ pub const DEFAULT_WINDOW_DAYS: i64 = 30;
 /// nearby Buys yields one row per Buy.
 #[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WashSaleAlert {
-    pub sale_trade_id: i64,
+    pub sale_trade_id: TradeId,
     pub listing_id: ListingId,
     pub ticker: String,
     pub sale_holding_account_id: HoldingAccountId,
@@ -48,7 +49,7 @@ pub struct WashSaleAlert {
     /// The sale's realised capital loss across its loss-making allocations
     /// (AUD, positive) — the figure Part IVA would cancel.
     pub capital_loss: Decimal,
-    pub buy_trade_id: i64,
+    pub buy_trade_id: TradeId,
     /// May differ from the sale's account: a repurchase in another holding
     /// account of the same beneficial owner changes nothing economically.
     pub buy_holding_account_id: i64,
@@ -104,14 +105,14 @@ pub async fn db_wash_sales(
 
     // A transfer's network-fee disposal is compelled by the transfer, not
     // entered into for its loss — never a candidate (see the module docs).
-    let fee_sale_ids: HashSet<i64> = sqlx::query_scalar(
+    let fee_sale_ids: HashSet<TradeId> = sqlx::query_scalar(
         "SELECT fee_sale_trade_id FROM transfers WHERE fee_sale_trade_id IS NOT NULL",
     )
     .fetch_all(&mut *tx)
     .await?
     .into_iter()
     .collect();
-    losses.retain(|r| !fee_sale_ids.contains(&r.sale_trade_id));
+    losses.retain(|r| !fee_sale_ids.contains(&TradeId(r.sale_trade_id)));
     if losses.is_empty() {
         return Ok(Vec::new());
     }
@@ -141,7 +142,7 @@ pub async fn db_wash_sales(
                 continue;
             }
             alerts.push(WashSaleAlert {
-                sale_trade_id: sale.sale_trade_id,
+                sale_trade_id: TradeId(sale.sale_trade_id),
                 listing_id: sale.listing_id,
                 ticker: row.try_get("ticker")?,
                 sale_holding_account_id: sale.holding_account_id,
@@ -445,7 +446,7 @@ mod tests {
                 from_account_id: HoldingAccountId(1),
                 to_account_id: HoldingAccountId(2),
                 allocations: vec![crate::entities::sell::AllocationInput {
-                    purchase_trade_id: 3,
+                    purchase_trade_id: TradeId(3),
                     quantity_allocated: Decimal::from(50),
                 }],
                 fee_allocations: vec![],
@@ -500,11 +501,11 @@ mod tests {
                 from_account_id: HoldingAccountId(1),
                 to_account_id: HoldingAccountId(2),
                 allocations: vec![crate::entities::sell::AllocationInput {
-                    purchase_trade_id: 3,
+                    purchase_trade_id: TradeId(3),
                     quantity_allocated: Decimal::from(50),
                 }],
                 fee_allocations: vec![crate::entities::sell::AllocationInput {
-                    purchase_trade_id: 3,
+                    purchase_trade_id: TradeId(3),
                     quantity_allocated: Decimal::from(10),
                 }],
                 fee_market_price: Some(Decimal::from(10)),
@@ -528,7 +529,7 @@ mod tests {
             .await
             .unwrap()
             .into_iter()
-            .find(|r| r.sale_trade_id == fee_sale_id)
+            .find(|r| r.sale_trade_id == fee_sale_id.0)
             .expect("the fee disposal reaches the realised-gains report");
         assert_eq!(fee_row.capital_loss, Decimal::from(50));
 

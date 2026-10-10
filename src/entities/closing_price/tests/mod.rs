@@ -22,6 +22,7 @@ mod yahoo;
 
 use super::*;
 use crate::infra::id::ListingId;
+use crate::infra::id::TradeId;
 
 use crate::entities::exchange_holiday;
 
@@ -85,18 +86,18 @@ async fn insert_buy(pool: &SqlitePool, id: i64, listing_id: ListingId, qty: &str
 
 async fn sell_everything(
     pool: &SqlitePool,
-    sell_id: i64,
-    buy_id: i64,
+    sell_id: TradeId,
+    buy_id: TradeId,
     listing_id: ListingId,
     qty: &str,
 ) {
-    crate::test_support::sell(sell_id, listing_id.0)
+    crate::test_support::sell(sell_id.0, listing_id.0)
         .date(ymd(2024, 6, 3))
         .qty(qty.parse().unwrap())
         .price(Decimal::from(12))
         .insert(pool)
         .await;
-    crate::test_support::allocate(pool, sell_id, sell_id, buy_id, qty.parse().unwrap()).await;
+    crate::test_support::allocate(pool, sell_id.0, sell_id.0, buy_id.0, qty.parse().unwrap()).await;
 }
 
 /// Stub provider: per-listing canned closes and latest quotes (keyed by

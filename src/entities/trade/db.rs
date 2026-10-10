@@ -16,6 +16,7 @@ use crate::infra::decimal::{Money, OptMoney, parse_dec};
 use crate::infra::http::{self, ApiError, CrudEntity, Upsert};
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
+use crate::infra::id::TradeId;
 use chrono::NaiveDate;
 use sqlx::SqlitePool;
 
@@ -47,7 +48,7 @@ impl crate::infra::http::CrudListFilter for TradeListQuery {
 /// trade is presented through [`Trade::present`] and its delete has its own
 /// [`DeleteOutcome`] guards.
 impl CrudEntity for Trade {
-    type Key = i64;
+    type Key = TradeId;
     type Filter = TradeListQuery;
     const TABLE: &'static str = "trades";
     const COLUMNS: &'static str = "id, trade_type, date, settlement_date, settlement_date_source, \
@@ -85,7 +86,7 @@ pub async fn db_list_filtered(
     http::crud_list_filtered::<Trade>(pool, filter).await
 }
 
-pub async fn db_get<'e, X>(executor: X, id: i64) -> Result<Option<Trade>, sqlx::Error>
+pub async fn db_get<'e, X>(executor: X, id: TradeId) -> Result<Option<Trade>, sqlx::Error>
 where
     X: sqlx::Executor<'e, Database = sqlx::Sqlite>,
 {
@@ -223,7 +224,7 @@ pub enum UpsertError {
         "trade {id} is a {existing:?}: an existing trade's type cannot change to {requested:?}"
     )]
     TradeTypeChange {
-        id: i64,
+        id: TradeId,
         existing: super::model::TradeType,
         requested: super::model::TradeType,
     },
@@ -350,7 +351,10 @@ struct ExistingTrade {
 
 /// Does a Sell allocation or an AMIT adjustment reference parcel `id`? The
 /// dependants that freeze a parcel's listing and holding account alike.
-async fn drawn_on(conn: &mut sqlx::SqliteConnection, id: Option<i64>) -> Result<bool, sqlx::Error> {
+async fn drawn_on(
+    conn: &mut sqlx::SqliteConnection,
+    id: Option<TradeId>,
+) -> Result<bool, sqlx::Error> {
     sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM parcel_allocations WHERE purchase_trade_id = ?1) \
              OR EXISTS(SELECT 1 FROM amit_adjustments WHERE trade_id = ?1)",
@@ -472,10 +476,10 @@ pub async fn db_create(
 /// create, which leaves the id to the database.
 async fn write(
     pool: &SqlitePool,
-    id: Option<i64>,
+    id: Option<TradeId>,
     trade: &Trade,
     settlement_write: SettlementWrite,
-) -> Result<(i64, Upsert, Option<Trade>), UpsertError> {
+) -> Result<(TradeId, Upsert, Option<Trade>), UpsertError> {
     // Degenerate figures (zero/negative quantity, negative costs, …) corrupt
     // every downstream report without failing anything — rejected before
     // anything else runs.
@@ -728,7 +732,7 @@ async fn write(
              residual_carried_forward = excluded.residual_carried_forward, \
              residual_paid_out        = excluded.residual_paid_out, \
              holding_account_id       = excluded.holding_account_id",
-        id,
+        id.map(|id| id.0),
     );
     let result = query
         .bind(trade.trade_type)
@@ -756,7 +760,7 @@ async fn write(
     // An id-less INSERT was given one by the database; an upsert wrote the
     // explicit one it was handed. Either way the caller gets the id the row
     // actually holds.
-    let assigned_id = id.unwrap_or_else(|| result.last_insert_rowid());
+    let assigned_id = id.unwrap_or_else(|| TradeId(result.last_insert_rowid()));
 
     // The trade's currency must be the listing's: `average_price` is the price
     // of that listed security, so the two are one money (SCENARIOS M-08).
@@ -872,7 +876,7 @@ pub enum DeleteOutcome {
     Referenced,
 }
 
-pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome, sqlx::Error> {
+pub async fn db_delete(pool: &SqlitePool, id: TradeId) -> Result<DeleteOutcome, sqlx::Error> {
     let mut tx = write_tx(pool).await?;
 
     // The outer `Option` is the row, the inner its provenance column.
@@ -928,7 +932,7 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome, sqlx
 /// [`UpsertError::TradeTypeChange`] refusal: a Sell carries its parcel
 /// allocations, so it is only ever written through `PUT /sells/:id`, and a
 /// DRP is only ever created by reinvesting its distribution.
-fn edit_it_with(id: i64, existing: super::model::TradeType) -> String {
+fn edit_it_with(id: TradeId, existing: super::model::TradeType) -> String {
     match existing {
         super::model::TradeType::Sell => format!("Edit that Sell with PUT /sells/{id}"),
         super::model::TradeType::Buy => format!("Edit that Buy with PUT /trades/{id}"),

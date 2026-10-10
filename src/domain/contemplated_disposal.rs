@@ -42,6 +42,7 @@
 //! recorded Sell does.
 
 use crate::infra::id::ListingId;
+use crate::infra::id::TradeId;
 use std::collections::HashMap;
 
 use chrono::NaiveDate;
@@ -60,7 +61,7 @@ pub struct Costing {
     /// Every parcel's AMMA statements, **unbounded** by date (see the module
     /// doc): a statement for the year the contemplated sale falls inside
     /// still reaches the units it disposes of.
-    amit: HashMap<i64, Vec<AmitReductionEvent>>,
+    amit: HashMap<TradeId, Vec<AmitReductionEvent>>,
     /// Return-of-capital payments (CGT event G1) per listing.
     roc: HashMap<ListingId, Vec<RocEvent>>,
     /// Share splits/consolidations per listing (quantity re-basing).

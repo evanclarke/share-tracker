@@ -4,6 +4,8 @@ use crate::infra::extract::Json;
 use crate::infra::http::ApiError;
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
+#[cfg(test)]
+use crate::infra::id::TradeId;
 use axum::{Extension, Router, extract::State, routing::post};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
@@ -463,7 +465,7 @@ mod tests {
             &amit_adjustment::AmitAdjustment {
                 id: 1,
                 amma_statement_id: 1,
-                trade_id: 1,
+                trade_id: TradeId(1),
                 quantity: Decimal::from(100),
             },
         )
@@ -499,7 +501,7 @@ mod tests {
             &amit_adjustment::AmitAdjustment {
                 id: 1,
                 amma_statement_id: 1,
-                trade_id: 1,
+                trade_id: TradeId(1),
                 quantity: Decimal::from(100),
             },
         )

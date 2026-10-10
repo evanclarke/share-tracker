@@ -68,6 +68,7 @@ use crate::infra::http::ApiError;
 #[cfg(test)]
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
+use crate::infra::id::TradeId;
 use axum::{Router, extract::State, routing::get};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
@@ -125,9 +126,9 @@ pub struct RolloverAlert {
     pub listing_id: ListingId,
     pub ticker: String,
     /// The closing Sell, so the group is openable without a search.
-    pub sell_trade_id: i64,
+    pub sell_trade_id: TradeId,
     /// The replacement parcels' trade ids, ascending.
-    pub replacement_trade_ids: Vec<i64>,
+    pub replacement_trade_ids: Vec<TradeId>,
     /// Every problem found, each a self-contained sentence naming what moved.
     pub problems: Vec<String>,
 }
@@ -145,7 +146,7 @@ struct Group {
     /// `domain::whole_holding`, the one place that set is spelled out.
     whole_holding: Option<whole_holding::Kind>,
     group_id: i64,
-    sell_trade_id: i64,
+    sell_trade_id: TradeId,
     date: NaiveDate,
     listing_id: ListingId,
     ticker: String,
@@ -155,7 +156,7 @@ struct Group {
 
 /// A replacement parcel's stored figures.
 struct Replacement {
-    id: i64,
+    id: TradeId,
     currency: CurrencyCode,
     quantity: Decimal,
     cost_base: Decimal,
@@ -243,7 +244,7 @@ async fn db_groups(conn: &mut sqlx::SqliteConnection) -> Result<Vec<Group>, sqlx
 
 /// What [`problems_for`] found, with the replacement parcels it compared.
 struct GroupProblems {
-    replacement_trade_ids: Vec<i64>,
+    replacement_trade_ids: Vec<TradeId>,
     problems: Vec<String>,
 }
 
@@ -279,7 +280,7 @@ async fn problems_for(
                 + row_dec(row, "gst_on_brokerage")?,
         });
     }
-    let replacement_trade_ids: Vec<i64> = replacements.iter().map(|r| r.id).collect();
+    let replacement_trade_ids: Vec<TradeId> = replacements.iter().map(|r| r.id).collect();
 
     // Did the operation consume the whole holding it was supposed to? Asked
     // first, and asked of a partial-rollover exchange and a worthless-shares
@@ -403,7 +404,7 @@ async fn problems_for(
 async fn unconsumed_problems(
     conn: &mut sqlx::SqliteConnection,
     group: &Group,
-    replacement_trade_ids: &[i64],
+    replacement_trade_ids: &[TradeId],
 ) -> Result<Vec<String>, sqlx::Error> {
     let Some(kind) = group.whole_holding else {
         return Ok(Vec::new());
@@ -472,7 +473,7 @@ mod tests {
                 from_account_id: HoldingAccountId(1),
                 to_account_id: HoldingAccountId(2),
                 allocations: vec![AllocationInput {
-                    purchase_trade_id: 1,
+                    purchase_trade_id: TradeId(1),
                     quantity_allocated: dec("100"),
                 }],
                 fee_allocations: Vec::new(),
@@ -483,7 +484,7 @@ mod tests {
         .await
         .unwrap();
         let replacement = group.transfer_ins[0].id;
-        (pool, replacement)
+        (pool, replacement.0)
     }
 
     /// A rollover nothing has disturbed reconciles, so the report is empty —
@@ -503,7 +504,7 @@ mod tests {
         let (pool, replacement) = pool_with_transfer().await;
         // $5.00 → $6.00 a unit: the parcel is now worth $600, but the
         // transfer-in still carries $500.
-        let mut parcel = trade::db_get(&pool, 1).await.unwrap().unwrap();
+        let mut parcel = trade::db_get(&pool, TradeId(1)).await.unwrap().unwrap();
         parcel.average_price = dec("6");
         trade::db_upsert(&pool, &parcel).await.unwrap();
 
@@ -607,7 +608,7 @@ mod tests {
 
         // Move the source parcel's brokerage and the split of $1,000 no longer
         // adds up.
-        let mut parcel = trade::db_get(&pool, 1).await.unwrap().unwrap();
+        let mut parcel = trade::db_get(&pool, TradeId(1)).await.unwrap().unwrap();
         parcel.brokerage = dec("50");
         trade::db_upsert(&pool, &parcel).await.unwrap();
         let alerts = db_rollover_alerts(&pool).await.unwrap();
@@ -624,7 +625,7 @@ mod tests {
         let alerts: Vec<RolloverAlert> = client.get_json("/reports/rollover_consistency").await;
         assert!(alerts.is_empty());
 
-        let mut parcel = trade::db_get(&pool, 1).await.unwrap().unwrap();
+        let mut parcel = trade::db_get(&pool, TradeId(1)).await.unwrap().unwrap();
         parcel.brokerage = dec("25");
         trade::db_upsert(&pool, &parcel).await.unwrap();
         let alerts: Vec<RolloverAlert> = client.get_json("/reports/rollover_consistency").await;
@@ -813,7 +814,7 @@ mod tests {
                 from_account_id: HoldingAccountId(1),
                 to_account_id: HoldingAccountId(2),
                 allocations: vec![AllocationInput {
-                    purchase_trade_id: 1,
+                    purchase_trade_id: TradeId(1),
                     quantity_allocated: dec("40"),
                 }],
                 fee_allocations: Vec::new(),

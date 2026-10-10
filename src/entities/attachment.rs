@@ -31,6 +31,7 @@
 use crate::infra::http::{self, ApiError, CrudEntity};
 #[cfg(test)]
 use crate::infra::id::HoldingAccountId;
+use crate::infra::id::TradeId;
 use std::fmt::Write as _;
 
 use crate::infra::extract::{Json, Query};
@@ -99,7 +100,7 @@ impl ContentType {
 #[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Attachment {
     pub id: i64,
-    pub trade_id: Option<i64>,
+    pub trade_id: Option<TradeId>,
     pub income_id: Option<i64>,
     pub amma_statement_id: Option<i64>,
     pub ess_statement_id: Option<i64>,
@@ -114,7 +115,7 @@ pub struct Attachment {
 
 /// The owner + payload for a new attachment (the row to insert).
 pub struct NewAttachment<'a> {
-    pub trade_id: Option<i64>,
+    pub trade_id: Option<TradeId>,
     pub income_id: Option<i64>,
     pub amma_statement_id: Option<i64>,
     pub ess_statement_id: Option<i64>,
@@ -135,7 +136,7 @@ pub struct NewAttachment<'a> {
 #[derive(Debug, Default, Deserialize, utoipa::IntoParams)]
 #[serde(deny_unknown_fields)]
 pub struct ListQuery {
-    pub trade_id: Option<i64>,
+    pub trade_id: Option<TradeId>,
     pub income_id: Option<i64>,
     pub amma_statement_id: Option<i64>,
     pub ess_statement_id: Option<i64>,
@@ -152,7 +153,7 @@ impl ListQuery {
     /// end up written against five of the six.
     fn owner_filters(&self) -> [(&'static str, Option<i64>); 6] {
         [
-            ("trade_id", self.trade_id),
+            ("trade_id", self.trade_id.map(|t| t.0)),
             ("income_id", self.income_id),
             ("amma_statement_id", self.amma_statement_id),
             ("ess_statement_id", self.ess_statement_id),
@@ -246,7 +247,7 @@ pub async fn db_list(pool: &SqlitePool, q: &ListQuery) -> Result<Vec<Attachment>
 /// via the Corporate Actions screen instead.
 pub async fn db_list_with_linked(
     pool: &SqlitePool,
-    trade_id: i64,
+    trade_id: TradeId,
 ) -> Result<Vec<Attachment>, sqlx::Error> {
     sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {METADATA_COLS} FROM attachments \
@@ -331,7 +332,7 @@ async fn upload(
     mut multipart: Multipart,
 ) -> Result<Response, ApiError> {
     let bad_request = |msg: &str| ApiError::bad_request(msg);
-    let mut trade_id: Option<i64> = None;
+    let mut trade_id: Option<TradeId> = None;
     let mut income_id: Option<i64> = None;
     let mut amma_statement_id: Option<i64> = None;
     let mut ess_statement_id: Option<i64> = None;
@@ -347,7 +348,7 @@ async fn upload(
         // Take an owned name so the field can be consumed in the arm below.
         let name = field.name().map(str::to_string);
         match name.as_deref() {
-            Some("trade_id") => trade_id = read_owner_field(field).await?,
+            Some("trade_id") => trade_id = read_owner_field(field).await?.map(TradeId),
             Some("income_id") => income_id = read_owner_field(field).await?,
             Some("amma_statement_id") => amma_statement_id = read_owner_field(field).await?,
             Some("ess_statement_id") => ess_statement_id = read_owner_field(field).await?,
@@ -380,7 +381,7 @@ async fn upload(
     // Exactly one owner must be set (mirroring the table's CHECK, so a bad
     // upload is a readable 422 rather than a constraint violation).
     let owners = [
-        trade_id,
+        trade_id.map(|t| t.0),
         income_id,
         amma_statement_id,
         ess_statement_id,
@@ -525,7 +526,7 @@ mod tests {
 
     /// A parcel an operation wrote, carrying `origin`'s provenance link —
     /// the shape the linked-attachment traversal follows.
-    async fn insert_parcel(pool: &SqlitePool, origin: trade::ParcelOrigin) -> i64 {
+    async fn insert_parcel(pool: &SqlitePool, origin: trade::ParcelOrigin) -> TradeId {
         insert_listing(pool).await;
         let mut conn = pool.acquire().await.unwrap();
         trade::NewParcel::new(
@@ -590,7 +591,7 @@ mod tests {
     /// ESS statement (the owners the linked-traversal tests exercise).
     async fn insert_owned(
         pool: &SqlitePool,
-        trade_id: Option<i64>,
+        trade_id: Option<TradeId>,
         income_id: Option<i64>,
         ess_statement_id: Option<i64>,
         name: &str,
@@ -668,7 +669,7 @@ mod tests {
         let id = db_insert(
             &pool,
             &NewAttachment {
-                trade_id: Some(trade_id),
+                trade_id: Some(TradeId(trade_id)),
                 income_id: None,
                 amma_statement_id: None,
                 ess_statement_id: None,
@@ -685,7 +686,7 @@ mod tests {
         .unwrap();
 
         let meta = db_get(&pool, id).await.unwrap().unwrap();
-        assert_eq!(meta.trade_id, Some(trade_id));
+        assert_eq!(meta.trade_id, Some(TradeId(trade_id)));
         assert_eq!(meta.byte_size, content.len() as i64);
         assert_eq!(meta.content_type, ContentType::Pdf);
 
@@ -709,7 +710,7 @@ mod tests {
         let resp = post_multipart(pool.clone(), body).await;
         assert_eq!(resp.status, StatusCode::CREATED);
         let meta: Attachment = resp.json();
-        assert_eq!(meta.trade_id, Some(trade_id));
+        assert_eq!(meta.trade_id, Some(TradeId(trade_id)));
         assert_eq!(meta.filename, "conf.pdf");
         assert_eq!(meta.content_type, ContentType::Pdf);
         assert_eq!(meta.byte_size, content.len() as i64);
@@ -945,7 +946,7 @@ mod tests {
         // The DRP advice is attached to the income row; the trade has one
         // document of its own too.
         insert_owned(&pool, None, Some(income_id), None, "drp-advice.pdf").await;
-        insert_owned(&pool, Some(drp_id), None, None, "own.pdf").await;
+        insert_owned(&pool, Some(TradeId(drp_id.0)), None, None, "own.pdf").await;
 
         // Without the flag: only the trade's own attachment (unchanged).
         let own = list_filenames(pool.clone(), &format!("trade_id={drp_id}")).await;
@@ -1123,7 +1124,7 @@ mod tests {
             db_insert(
                 &pool,
                 &NewAttachment {
-                    trade_id: t,
+                    trade_id: t.map(TradeId),
                     income_id: i,
                     amma_statement_id: None,
                     ess_statement_id: None,
@@ -1153,7 +1154,7 @@ mod tests {
         );
         let items: Vec<Attachment> = serde_json::from_str(&text).unwrap();
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0].trade_id, Some(trade_id));
+        assert_eq!(items[0].trade_id, Some(TradeId(trade_id)));
     }
 
     #[tokio::test]
@@ -1163,7 +1164,7 @@ mod tests {
         let id = db_insert(
             &pool,
             &NewAttachment {
-                trade_id: Some(trade_id),
+                trade_id: Some(TradeId(trade_id)),
                 income_id: None,
                 amma_statement_id: None,
                 ess_statement_id: None,
@@ -1194,7 +1195,7 @@ mod tests {
         db_insert(
             &pool,
             &NewAttachment {
-                trade_id: Some(trade_id),
+                trade_id: Some(TradeId(trade_id)),
                 income_id: None,
                 amma_statement_id: None,
                 ess_statement_id: None,
@@ -1219,7 +1220,7 @@ mod tests {
         let remaining = db_list(
             &pool,
             &ListQuery {
-                trade_id: Some(trade_id),
+                trade_id: Some(TradeId(trade_id)),
                 ..Default::default()
             },
         )

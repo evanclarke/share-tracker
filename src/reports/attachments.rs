@@ -1,6 +1,8 @@
 use crate::infra::extract::Json;
 use crate::infra::http::ApiError;
 use crate::infra::id::ListingId;
+#[cfg(test)]
+use crate::infra::id::TradeId;
 use axum::{Router, extract::State, routing::get};
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
@@ -227,7 +229,7 @@ mod tests {
             "conf.pdf",
             "2024-05-02T00:00:00Z",
             attachment::NewAttachment {
-                trade_id: Some(1),
+                trade_id: Some(TradeId(1)),
                 ..base_owner(b"x")
             },
         )
@@ -409,7 +411,7 @@ mod tests {
             "first.pdf",
             "2024-01-01T00:00:00Z",
             attachment::NewAttachment {
-                trade_id: Some(1),
+                trade_id: Some(TradeId(1)),
                 ..base_owner(b"x")
             },
         )
@@ -419,7 +421,7 @@ mod tests {
             "second.pdf",
             "2024-06-01T00:00:00Z",
             attachment::NewAttachment {
-                trade_id: Some(1),
+                trade_id: Some(TradeId(1)),
                 ..base_owner(b"y")
             },
         )
@@ -451,7 +453,7 @@ mod tests {
             "conf.pdf",
             "2024-05-02T00:00:00Z",
             attachment::NewAttachment {
-                trade_id: Some(1),
+                trade_id: Some(TradeId(1)),
                 ..base_owner(b"x")
             },
         )

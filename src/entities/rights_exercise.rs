@@ -43,6 +43,8 @@ use crate::infra::extract::{Json, Query};
 use crate::infra::http::{ApiError, DryRunQuery};
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
+#[cfg(test)]
+use crate::infra::id::TradeId;
 use axum::{
     Router,
     extract::{Path, State},
@@ -529,11 +531,11 @@ mod tests {
         id: i64,
         date: NaiveDate,
         qty: &str,
-        parcel_trade_id: i64,
+        parcel_trade_id: TradeId,
     ) {
         sell::db_upsert_sell(
             pool,
-            id,
+            TradeId(id),
             &sell::SellBody {
                 brokerage_includes_gst: false,
                 statement_total: None,
@@ -773,7 +775,7 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
         insert_buy(&pool, 1, d(2024, 1, 15), "1000", "2.00").await;
-        insert_sell(&pool, 2, d(2024, 5, 1), "600", 1).await;
+        insert_sell(&pool, 2, d(2024, 5, 1), "600", TradeId(1)).await;
         insert_buy(&pool, 3, d(2024, 7, 1), "400", "2.00").await; // ex-rights
         insert_rights_issue(&pool, 10, d(2024, 7, 1)).await;
 
@@ -1197,10 +1199,11 @@ mod tests {
         // PUT /trades on the exercise trade → 422 (immutable); the frozen
         // action → 422 on PUT and DELETE.
         api_exercise_expecting(&pool, 10, ok, StatusCode::CREATED).await;
-        let trade_id: i64 = sqlx::query_scalar("SELECT id FROM trades WHERE rights_action_id = 10")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+        let trade_id: TradeId =
+            sqlx::query_scalar("SELECT id FROM trades WHERE rights_action_id = 10")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         let app = ApiClient::over(crate::entities::router().with_state(pool.clone()));
         let resp = app
             .put(

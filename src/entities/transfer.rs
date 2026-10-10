@@ -44,6 +44,7 @@ use crate::infra::extract::{Json, Query};
 use crate::infra::http::{self, ApiError, CrudEntity, DryRunQuery};
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
+use crate::infra::id::TradeId;
 use axum::{
     Router,
     extract::{Path, State},
@@ -69,7 +70,7 @@ pub struct Transfer {
     /// this Sell is a real disposal and IS counted by the gains reports — it is
     /// linked here (not via `trades.transfer_id`) so it round-trips with the
     /// transfer yet stays visible to those reports.
-    pub fee_sale_trade_id: Option<i64>,
+    pub fee_sale_trade_id: Option<TradeId>,
 }
 
 #[derive(utoipa::ToSchema, Debug, Deserialize)]
@@ -657,7 +658,7 @@ async fn write_fee_sale(
     transfer_id: i64,
     body: &TransferBody,
     listing_currency: CurrencyCode,
-) -> Result<Option<i64>, TransferError> {
+) -> Result<Option<TradeId>, TransferError> {
     if body.fee_allocations.is_empty() {
         return Ok(None);
     }
@@ -937,7 +938,7 @@ mod tests {
             allocations: allocations
                 .into_iter()
                 .map(|(id, q)| AllocationInput {
-                    purchase_trade_id: id,
+                    purchase_trade_id: TradeId(id),
                     quantity_allocated: q.parse().unwrap(),
                 })
                 .collect(),
@@ -1063,7 +1064,7 @@ mod tests {
 
         crate::entities::sell::db_upsert_sell(
             &pool,
-            30,
+            TradeId(30),
             &SellBody {
                 brokerage_includes_gst: false,
                 statement_total: None,
@@ -1137,7 +1138,7 @@ mod tests {
         let map = |v: Vec<(i64, &str)>| {
             v.into_iter()
                 .map(|(id, q)| AllocationInput {
-                    purchase_trade_id: id,
+                    purchase_trade_id: TradeId(id),
                     quantity_allocated: q.parse().unwrap(),
                 })
                 .collect()
@@ -1207,7 +1208,7 @@ mod tests {
             .unwrap();
         assert_eq!(realised.len(), 1, "only the fee is a disposal");
         let g = &realised[0];
-        assert_eq!(g.sale_trade_id, fee.id);
+        assert_eq!(g.sale_trade_id, fee.id.0);
         assert_eq!(g.proceeds, dec("80"));
         assert_eq!(g.cost_base, dec("60"));
         assert_eq!(g.capital_gain_loss, dec("20"));
@@ -1333,7 +1334,7 @@ mod tests {
             .unwrap();
         assert!(realised.is_empty());
         // The whole 1.0 BTC parcel is open again in account 2.
-        let parcel = trade::db_get(&pool, 1).await.unwrap().unwrap();
+        let parcel = trade::db_get(&pool, TradeId(1)).await.unwrap().unwrap();
         assert_eq!(parcel.quantity, dec("1.0"));
         assert_eq!(parcel.holding_account_id, 2);
     }
@@ -1382,7 +1383,7 @@ mod tests {
                 contract_note_ref: None,
                 holding_account_id: HoldingAccountId(2),
                 allocations: vec![AllocationInput {
-                    purchase_trade_id: 1,
+                    purchase_trade_id: TradeId(1),
                     quantity_allocated: dec("0.001"),
                 }],
             },
@@ -1427,7 +1428,7 @@ mod tests {
         // plan-account Sell of 60 against the original parcel still fits.
         sell::db_upsert_sell(
             &pool,
-            50,
+            TradeId(50),
             &SellBody {
                 brokerage_includes_gst: false,
                 statement_total: None,
@@ -1445,7 +1446,7 @@ mod tests {
                 contract_note_ref: None,
                 holding_account_id: HoldingAccountId(2),
                 allocations: vec![AllocationInput {
-                    purchase_trade_id: 1,
+                    purchase_trade_id: TradeId(1),
                     quantity_allocated: dec("60"),
                 }],
             },
@@ -1502,7 +1503,7 @@ mod tests {
         assert_eq!(allocs, 0);
         assert!(db_get(&pool, 1).await.unwrap().is_none());
         // The original vest parcel is open in the plan account again.
-        let vest = trade::db_get(&pool, 1).await.unwrap().unwrap();
+        let vest = trade::db_get(&pool, TradeId(1)).await.unwrap().unwrap();
         assert_eq!(vest.holding_account_id, 2);
 
         assert_eq!(db_delete(&pool, 1).await.unwrap(), DeleteOutcome::NotFound);
@@ -1521,7 +1522,7 @@ mod tests {
 
         sell::db_upsert_sell(
             &pool,
-            50,
+            TradeId(50),
             &SellBody {
                 brokerage_includes_gst: false,
                 statement_total: None,
@@ -1554,7 +1555,7 @@ mod tests {
 
         // Removing the later sale unblocks the delete.
         assert_eq!(
-            sell::db_delete_sell(&pool, 50).await.unwrap(),
+            sell::db_delete_sell(&pool, TradeId(50)).await.unwrap(),
             sell::DeleteOutcome::Deleted
         );
         assert_eq!(db_delete(&pool, 1).await.unwrap(), DeleteOutcome::Deleted);
@@ -1592,7 +1593,7 @@ mod tests {
                 contract_note_ref: None,
                 holding_account_id: HoldingAccountId(2),
                 allocations: vec![AllocationInput {
-                    purchase_trade_id: 1,
+                    purchase_trade_id: TradeId(1),
                     quantity_allocated: dec("100"),
                 }],
             },
@@ -1998,7 +1999,7 @@ mod tests {
                 from_account_id: HoldingAccountId(1),
                 to_account_id: HoldingAccountId(2),
                 allocations: vec![AllocationInput {
-                    purchase_trade_id: 500,
+                    purchase_trade_id: TradeId(500),
                     quantity_allocated: dec("40"),
                 }],
                 fee_allocations: Vec::new(),

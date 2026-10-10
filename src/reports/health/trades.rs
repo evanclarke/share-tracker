@@ -10,6 +10,7 @@ use crate::entities::trade;
 use crate::infra::currency::CurrencyCode;
 use crate::infra::decimal::Money;
 use crate::infra::id::ListingId;
+use crate::infra::id::TradeId;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -83,7 +84,7 @@ pub struct ExchangeCurrencyMismatch {
 /// surface here too.
 #[derive(utoipa::ToSchema, Debug, Serialize, Deserialize)]
 pub struct NonTradingDayTrade {
-    pub trade_id: i64,
+    pub trade_id: TradeId,
     /// `Buy`, `Sell` or `DRP`.
     pub trade_type: String,
     pub listing_id: ListingId,
@@ -102,7 +103,7 @@ pub struct NonTradingDayTrade {
 /// listing's calendar. Mapped by column name via `FromRow`.
 #[derive(sqlx::FromRow)]
 pub(super) struct NonTradingDayCandidate {
-    trade_id: i64,
+    trade_id: TradeId,
     trade_type: String,
     listing_id: ListingId,
     ticker: String,
@@ -161,7 +162,7 @@ pub(super) struct NonTradingDayCandidate {
 #[derive(utoipa::ToSchema, Debug, Serialize, Deserialize)]
 pub struct EssThirtyDaySale {
     /// The Sell whose allocation draws on the vest parcel.
-    pub sale_trade_id: i64,
+    pub sale_trade_id: TradeId,
     pub listing_id: ListingId,
     pub ticker: String,
     pub sale_date: NaiveDate,
@@ -170,7 +171,7 @@ pub struct EssThirtyDaySale {
     pub units_sold: Decimal,
     pub ess_statement_id: i64,
     /// The statement's vest Buy, i.e. the parcel allocated from.
-    pub vest_trade_id: i64,
+    pub vest_trade_id: TradeId,
     pub taxing_point_date: NaiveDate,
     /// `sale_date − taxing_point_date` in days: always 1..=30
     /// ([`ESS_THIRTY_DAY_WINDOW`]).
@@ -213,7 +214,7 @@ pub enum EssDisposalKind {
 /// `ess_statement::discount_labels` rather than re-added here.
 #[derive(sqlx::FromRow)]
 pub(super) struct EssThirtyDaySaleRow {
-    sale_trade_id: i64,
+    sale_trade_id: TradeId,
     listing_id: ListingId,
     ticker: String,
     sale_date: NaiveDate,
@@ -222,7 +223,7 @@ pub(super) struct EssThirtyDaySaleRow {
     /// The parcel the allocation consumed — a vest parcel, or a replacement one
     /// down its rollover chain; the statement and vest parcel are looked up
     /// from it.
-    parcel_id: i64,
+    parcel_id: TradeId,
     /// Set when the Sell is a scrip-for-scrip exchange or demerger closing
     /// Sell (the transfer case never reaches here — it is filtered in SQL).
     rollover_action_id: Option<i64>,
@@ -376,7 +377,7 @@ pub(super) async fn db_ess_30_day_rule(
     conn: &mut sqlx::SqliteConnection,
 ) -> Result<Vec<EssThirtyDaySale>, sqlx::Error> {
     // Every vest parcel, and the statement behind it.
-    let vests: Vec<(i64, i64)> = sqlx::query_as(
+    let vests: Vec<(TradeId, i64)> = sqlx::query_as(
         "SELECT id, ess_statement_id FROM trades \
          WHERE ess_statement_id IS NOT NULL AND trade_type IN ('Buy', 'DRP') ORDER BY id",
     )
@@ -387,7 +388,7 @@ pub(super) async fn db_ess_30_day_rule(
     }
     // Which (vest parcel, statement) each parcel now holding ESS units answers
     // for — the vest parcel itself, and every replacement down the chain.
-    let mut ess_parcels: HashMap<i64, Vec<(i64, i64)>> = HashMap::new();
+    let mut ess_parcels: HashMap<TradeId, Vec<(TradeId, i64)>> = HashMap::new();
     for (vest_trade_id, ess_statement_id) in vests {
         ess_parcels
             .entry(vest_trade_id)
@@ -418,7 +419,7 @@ pub(super) async fn db_ess_30_day_rule(
          WHERE pa.purchase_trade_id IN ({placeholders}) AND s.transfer_id IS NULL \
          ORDER BY s.date DESC, s.id"
     )));
-    let mut parcel_ids: Vec<i64> = ess_parcels.keys().copied().collect();
+    let mut parcel_ids: Vec<TradeId> = ess_parcels.keys().copied().collect();
     parcel_ids.sort_unstable();
     for id in &parcel_ids {
         query = query.bind(id);

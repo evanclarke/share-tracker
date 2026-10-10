@@ -16,6 +16,7 @@ use crate::infra::db;
 use crate::infra::decimal::Money;
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
+use crate::infra::id::TradeId;
 use axum::body::{Body, Bytes};
 use axum::http::{HeaderMap, Request, StatusCode};
 use chrono::NaiveDate;
@@ -1018,7 +1019,7 @@ impl TradeBuilder {
         let date = ymd(2024, 1, 2);
         TradeBuilder {
             t: trade::Trade {
-                id,
+                id: TradeId(id),
                 trade_type,
                 date,
                 settlement_date: date + chrono::Duration::days(2),
@@ -1378,7 +1379,7 @@ pub async fn amit_adjustment(
         &amit_adjustment::AmitAdjustment {
             id,
             amma_statement_id: amma_id,
-            trade_id,
+            trade_id: TradeId(trade_id),
             quantity: qty,
         },
     )
@@ -1392,8 +1393,8 @@ pub async fn allocate(pool: &SqlitePool, id: i64, sale_id: i64, buy_id: i64, qty
         pool,
         &parcel_allocation::ParcelAllocation {
             id,
-            sale_trade_id: sale_id,
-            purchase_trade_id: buy_id,
+            sale_trade_id: TradeId(sale_id),
+            purchase_trade_id: TradeId(buy_id),
             quantity_allocated: qty,
         },
     )

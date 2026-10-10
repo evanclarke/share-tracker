@@ -27,6 +27,7 @@
 #[cfg(test)]
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
+use crate::infra::id::TradeId;
 use std::collections::HashMap;
 
 use chrono::NaiveDate;
@@ -44,7 +45,7 @@ use crate::domain::cost_base::{self, ParcelRow};
 pub struct CostBaseInputs {
     pub splits: Vec<SplitEvent>,
     roc_events: Vec<RocEvent>,
-    amit_events: HashMap<i64, Vec<cost_base::AmitReductionEvent>>,
+    amit_events: HashMap<TradeId, Vec<cost_base::AmitReductionEvent>>,
     /// The operation's own date — the one bound every read here observes: an
     /// AMMA statement whose year end postdates it is not loaded at all (its
     /// adjustment arises at that year end, which has not happened yet as at
@@ -203,7 +204,7 @@ pub fn no_provenance_sql(alias: &str) -> String {
 /// (column, id) pair whose closing Sell consumed part of `parcel_id`.
 async fn groups_consuming(
     conn: &mut sqlx::SqliteConnection,
-    parcel_id: i64,
+    parcel_id: TradeId,
 ) -> Result<Vec<(&'static str, i64)>, sqlx::Error> {
     let mut out = Vec::new();
     for column in PROVENANCE_COLUMNS {
@@ -225,7 +226,7 @@ async fn group_replacements(
     conn: &mut sqlx::SqliteConnection,
     column: &'static str,
     group_id: i64,
-) -> Result<Vec<i64>, sqlx::Error> {
+) -> Result<Vec<TradeId>, sqlx::Error> {
     // The column name comes from `PROVENANCE_COLUMNS`, never from user input.
     sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
         "SELECT id FROM trades WHERE {column} = ? AND trade_type IN ('Buy', 'DRP') ORDER BY id"
@@ -240,7 +241,7 @@ async fn group_sources(
     conn: &mut sqlx::SqliteConnection,
     column: &'static str,
     group_id: i64,
-) -> Result<Vec<i64>, sqlx::Error> {
+) -> Result<Vec<TradeId>, sqlx::Error> {
     sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
         "SELECT DISTINCT pa.purchase_trade_id FROM parcel_allocations pa \
          JOIN trades s ON s.id = pa.sale_trade_id \
@@ -255,7 +256,7 @@ async fn group_sources(
 /// At most one — a trade carries at most one provenance column.
 async fn group_creating(
     conn: &mut sqlx::SqliteConnection,
-    parcel_id: i64,
+    parcel_id: TradeId,
 ) -> Result<Option<(&'static str, i64)>, sqlx::Error> {
     let row = sqlx::query(
         "SELECT scrip_action_id, demerger_action_id, transfer_id FROM trades WHERE id = ?",
@@ -286,8 +287,8 @@ async fn group_creating(
 /// question, not a claim about which source parcel became which replacement.
 pub async fn source_ancestors(
     conn: &mut sqlx::SqliteConnection,
-    parcel_id: i64,
-) -> Result<Vec<i64>, sqlx::Error> {
+    parcel_id: TradeId,
+) -> Result<Vec<TradeId>, sqlx::Error> {
     let mut seen = std::collections::HashSet::from([parcel_id]);
     let mut frontier = vec![parcel_id];
     let mut found = Vec::new();
@@ -332,8 +333,8 @@ pub async fn source_ancestors(
 /// twice.
 pub async fn replacement_descendants(
     conn: &mut sqlx::SqliteConnection,
-    parcel_id: i64,
-) -> Result<Vec<i64>, sqlx::Error> {
+    parcel_id: TradeId,
+) -> Result<Vec<TradeId>, sqlx::Error> {
     let mut seen = std::collections::HashSet::from([parcel_id]);
     let mut frontier = vec![parcel_id];
     let mut found = Vec::new();
@@ -421,7 +422,7 @@ mod tests {
                 from_account_id: HoldingAccountId(1),
                 to_account_id: HoldingAccountId(2),
                 allocations: vec![AllocationInput {
-                    purchase_trade_id: 1,
+                    purchase_trade_id: TradeId(1),
                     quantity_allocated: dec("1000"),
                 }],
                 fee_allocations: Vec::new(),
@@ -455,7 +456,7 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        test_support::amit_adjustment(&pool, 50, 6, replacement.id, dec("1000")).await;
+        test_support::amit_adjustment(&pool, 50, 6, replacement.id.0, dec("1000")).await;
 
         // The reduction is applied exactly once: $10,000 − 1,000 × $1.
         let open = open_parcels::load(&mut conn, None).await.unwrap();
@@ -501,7 +502,7 @@ mod tests {
                     from_account_id: HoldingAccountId(from),
                     to_account_id: HoldingAccountId(to),
                     allocations: vec![AllocationInput {
-                        purchase_trade_id: parcel,
+                        purchase_trade_id: TradeId(parcel),
                         quantity_allocated: dec("100"),
                     }],
                     fee_allocations: Vec::new(),
@@ -515,11 +516,13 @@ mod tests {
                 .id
         };
         let first = move_to(1, 1, 1, 2, ymd(2023, 3, 1)).await;
-        let second = move_to(2, first, 2, 3, ymd(2023, 5, 1)).await;
+        let second = move_to(2, first.0, 2, 3, ymd(2023, 5, 1)).await;
 
         let mut conn = pool.acquire().await.unwrap();
         assert_eq!(
-            replacement_descendants(&mut conn, 1).await.unwrap(),
+            replacement_descendants(&mut conn, TradeId(1))
+                .await
+                .unwrap(),
             vec![first, second]
         );
         assert_eq!(
@@ -539,7 +542,7 @@ mod tests {
             .insert(&pool)
             .await;
         assert!(
-            replacement_descendants(&mut conn, 50)
+            replacement_descendants(&mut conn, TradeId(50))
                 .await
                 .unwrap()
                 .is_empty()
@@ -566,7 +569,7 @@ mod tests {
     /// costing $2,000, a $0.05/unit payment (record date 2022-06-25, paid
     /// 2026-08-01 — $100 over the parcel) and the 2023 exchange already run,
     /// leaving one open parcel on listing 2. Answers its id.
-    async fn exchanged_across_a_return_of_capital_record_date(pool: &sqlx::SqlitePool) -> i64 {
+    async fn exchanged_across_a_return_of_capital_record_date(pool: &sqlx::SqlitePool) -> TradeId {
         test_support::listing(1).ticker("OLD").insert(pool).await;
         test_support::listing(2).ticker("NEW").insert(pool).await;
         test_support::buy(1, 1)
@@ -659,7 +662,7 @@ mod tests {
                 from_account_id: HoldingAccountId(1),
                 to_account_id: HoldingAccountId(2),
                 allocations: vec![AllocationInput {
-                    purchase_trade_id: exchanged,
+                    purchase_trade_id: TradeId(exchanged.0),
                     quantity_allocated: dec("2000"),
                 }],
                 fee_allocations: Vec::new(),

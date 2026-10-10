@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::infra::id::ListingId;
+use crate::infra::id::TradeId;
 
 #[tokio::test]
 async fn db_held_listings_excludes_fully_sold() {
@@ -12,7 +13,7 @@ async fn db_held_listings_excludes_fully_sold() {
     insert_listing(&pool, 3, "NEVER", "XASX", "AUD").await;
     insert_buy(&pool, 1, ListingId(1), "100").await;
     insert_buy(&pool, 2, ListingId(2), "50").await;
-    sell_everything(&pool, 3, 2, ListingId(2), "50").await;
+    sell_everything(&pool, TradeId(3), TradeId(2), ListingId(2), "50").await;
 
     assert_eq!(db_held_listing_ids(&pool, None).await.unwrap(), vec![1]);
     // As at a date before the sale, the sold listing still counts; before
@@ -45,7 +46,7 @@ async fn collection_covers_a_listing_sold_inside_the_lookback_window() {
         .price(Decimal::from(10))
         .insert(&pool)
         .await;
-    sell_everything(&pool, 2, 1, ListingId(1), "100").await;
+    sell_everything(&pool, TradeId(2), TradeId(1), ListingId(1), "100").await;
     sqlx::query("UPDATE trades SET date = '2026-06-03' WHERE id = 2")
         .execute(&pool)
         .await

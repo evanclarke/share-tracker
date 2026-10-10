@@ -7,6 +7,7 @@ use crate::infra::extract::Json;
 use crate::infra::http::{self, ApiError, CrudEntity, Upsert, UpsertResponse};
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
+use crate::infra::id::TradeId;
 use axum::{
     Router,
     extract::{Path, State},
@@ -21,7 +22,7 @@ use sqlx::{Row, SqlitePool};
 pub struct AmitAdjustment {
     pub id: i64,
     pub amma_statement_id: i64,
-    pub trade_id: i64,
+    pub trade_id: TradeId,
     /// Units of the parcel covered by the statement's per-unit adjustment,
     /// expressed in the parcel's *as-acquired* units (the same basis as
     /// `trade.quantity`, which caps it). A share split/consolidation between
@@ -46,7 +47,7 @@ pub struct AmitAdjustmentBody {
     pub amma_statement_id: i64,
     /// The purchase parcel the adjustment reduces: a Buy or DRP trade of the
     /// statement's listing.
-    pub trade_id: i64,
+    pub trade_id: TradeId,
     /// Units of the parcel the adjustment covers, in the parcel's as-acquired
     /// units (decimal string, at most the parcel's quantity). A split or bonus
     /// issue before the statement's year end is re-based automatically.
@@ -63,7 +64,7 @@ pub struct AmitAdjustmentBody {
 #[serde(deny_unknown_fields)]
 pub struct AmitAdjustmentListQuery {
     pub amma_statement_id: Option<i64>,
-    pub trade_id: Option<i64>,
+    pub trade_id: Option<TradeId>,
 }
 
 impl crate::infra::http::CrudListFilter for AmitAdjustmentListQuery {
@@ -243,7 +244,7 @@ fn adjustment_body(adj: &AmitAdjustment) -> AmitAdjustmentBody {
 /// *both*.
 async fn traces_back_to(
     conn: &mut sqlx::SqliteConnection,
-    parcel_id: i64,
+    parcel_id: TradeId,
     listing_id: ListingId,
     account_id: HoldingAccountId,
 ) -> Result<bool, sqlx::Error> {
@@ -264,7 +265,7 @@ async fn traces_back_to(
 /// allocation (in its sale date's units) back to the parcel's as-acquired ones.
 async fn trade_date_and_splits(
     conn: &mut sqlx::SqliteConnection,
-    trade_id: i64,
+    trade_id: TradeId,
     listing_id: ListingId,
 ) -> Result<(chrono::NaiveDate, Vec<corporate_action::SplitEvent>), sqlx::Error> {
     let trade_date: chrono::NaiveDate = sqlx::query_scalar("SELECT date FROM trades WHERE id = ?")
@@ -656,14 +657,17 @@ mod tests {
             .await
             .into_iter()
             .map(|(trade_id, events)| {
-                (trade_id, events.iter().map(|e| e.amount()).sum::<Decimal>())
+                (
+                    trade_id.0,
+                    events.iter().map(|e| e.amount()).sum::<Decimal>(),
+                )
             })
             .collect()
     }
 
     /// [`db_cost_base_reduction_events`](crate::domain::cost_base::db_cost_base_reduction_events) over a pool-acquired connection
     /// (reports call it on their own read transaction).
-    async fn events(pool: &SqlitePool) -> HashMap<i64, Vec<AmitReductionEvent>> {
+    async fn events(pool: &SqlitePool) -> HashMap<TradeId, Vec<AmitReductionEvent>> {
         let mut conn = pool.acquire().await.unwrap();
         db_cost_base_reduction_events(&mut conn, None)
             .await
@@ -719,7 +723,7 @@ mod tests {
                 from_account_id: HoldingAccountId(1),
                 to_account_id: HoldingAccountId(2),
                 allocations: vec![AllocationInput {
-                    purchase_trade_id: 1,
+                    purchase_trade_id: TradeId(1),
                     quantity_allocated: dec("600"),
                 }],
                 fee_allocations: Vec::new(),
@@ -734,9 +738,9 @@ mod tests {
         // The March Sell counts as disposed by the year end; the transfer's
         // closing Sell does not — the row's 600 covered units stay on the
         // held side of the split.
-        assert_eq!(events[&1][0].disposed_by_year_end, dec("400"));
+        assert_eq!(events[&TradeId(1)][0].disposed_by_year_end, dec("400"));
         // The moved units are carried out instead — neither held nor sold.
-        assert_eq!(events[&1][0].carried_out, dec("600"));
+        assert_eq!(events[&TradeId(1)][0].carried_out, dec("600"));
     }
 
     /// 2026-10-10 review: a row's coverage is capped at the units of the
@@ -793,7 +797,7 @@ mod tests {
         let events = db_cost_base_reduction_events(&mut conn, None)
             .await
             .unwrap();
-        let e = events[&1][0];
+        let e = events[&TradeId(1)][0];
         assert_eq!(e.disposed_before_year_start, dec("60"));
         let sold = crate::domain::cost_base::Whereabouts::DisposedOn(ymd(2022, 3, 3));
         assert_eq!(
@@ -848,7 +852,7 @@ mod tests {
                 from_account_id: HoldingAccountId(1),
                 to_account_id: HoldingAccountId(2),
                 allocations: vec![AllocationInput {
-                    purchase_trade_id: 1,
+                    purchase_trade_id: TradeId(1),
                     quantity_allocated: dec("100"),
                 }],
                 fee_allocations: Vec::new(),
@@ -939,7 +943,7 @@ mod tests {
         let adj = AmitAdjustment {
             id: 1,
             amma_statement_id: 1,
-            trade_id: 1,
+            trade_id: TradeId(1),
             quantity: Decimal::from(100),
         };
         db_upsert(&pool, &adj).await.unwrap();
@@ -962,7 +966,7 @@ mod tests {
             &AmitAdjustment {
                 id: 1,
                 amma_statement_id: 1,
-                trade_id: 1,
+                trade_id: TradeId(1),
                 quantity: Decimal::from(50),
             },
         )
@@ -984,7 +988,7 @@ mod tests {
             &AmitAdjustment {
                 id: 1,
                 amma_statement_id: 1,
-                trade_id: 1,
+                trade_id: TradeId(1),
                 quantity: Decimal::from(50),
             },
         )
@@ -1022,7 +1026,7 @@ mod tests {
             &AmitAdjustment {
                 id: 1,
                 amma_statement_id: 1,
-                trade_id: 1,
+                trade_id: TradeId(1),
                 quantity: Decimal::from(50),
             },
         )
@@ -1040,7 +1044,7 @@ mod tests {
             &AmitAdjustment {
                 id: 1,
                 amma_statement_id: 1,
-                trade_id: 1,
+                trade_id: TradeId(1),
                 quantity: Decimal::from(50),
             },
         )
@@ -1060,7 +1064,7 @@ mod tests {
             &AmitAdjustment {
                 id: 1,
                 amma_statement_id: 1,
-                trade_id: 1,
+                trade_id: TradeId(1),
                 quantity: Decimal::from(101),
             },
         )
@@ -1084,7 +1088,7 @@ mod tests {
         let first = AmitAdjustment {
             id: 1,
             amma_statement_id: 1,
-            trade_id: 1,
+            trade_id: TradeId(1),
             quantity: Decimal::from(100),
         };
         db_upsert(&pool, &first).await.unwrap();
@@ -1138,7 +1142,7 @@ mod tests {
             &AmitAdjustment {
                 id: 1,
                 amma_statement_id: 1,
-                trade_id: 1,
+                trade_id: TradeId(1),
                 quantity: Decimal::from(100),
             },
         )
@@ -1149,7 +1153,7 @@ mod tests {
             &AmitAdjustment {
                 id: 2,
                 amma_statement_id: 2,
-                trade_id: 1,
+                trade_id: TradeId(1),
                 quantity: Decimal::from(80),
             },
         )
@@ -1205,10 +1209,10 @@ mod tests {
         // The itemised detail the E10 walk reads agrees, figure for figure —
         // and states it per as-acquired unit: $1 for each of the 100.
         let detail = events(&pool).await;
-        assert_eq!(detail[&1].len(), 1);
-        assert_eq!(detail[&1][0].per_unit, dec("1"));
-        assert_eq!(detail[&1][0].covered, dec("100"));
-        assert_eq!(detail[&1][0].amount(), dec("100"));
+        assert_eq!(detail[&TradeId(1)].len(), 1);
+        assert_eq!(detail[&TradeId(1)][0].per_unit, dec("1"));
+        assert_eq!(detail[&TradeId(1)][0].covered, dec("100"));
+        assert_eq!(detail[&TradeId(1)][0].amount(), dec("100"));
 
         // A parcel bought *after* the split is already on the year end's
         // basis, so nothing is re-based: 50 × $0.50 = $25.
@@ -1247,7 +1251,7 @@ mod tests {
             &AmitAdjustment {
                 id: 1,
                 amma_statement_id: 1,
-                trade_id: 1,
+                trade_id: TradeId(1),
                 quantity: Decimal::from(100),
             },
         )
@@ -1507,7 +1511,7 @@ mod tests {
 
     /// Move `quantity` units of parcel `trade_id` to holding account 2,
     /// returning the replacement parcel's id.
-    async fn transfer_out(pool: &SqlitePool, trade_id: i64, quantity: Decimal) -> i64 {
+    async fn transfer_out(pool: &SqlitePool, trade_id: TradeId, quantity: Decimal) -> i64 {
         use crate::entities::holding_account::{self, HoldingAccount};
         use crate::entities::sell::AllocationInput;
         use crate::entities::transfer::{self, TransferBody};
@@ -1546,7 +1550,7 @@ mod tests {
         )
         .await
         .unwrap();
-        group.transfer_ins[0].id
+        group.transfer_ins[0].id.0
     }
 
     /// SCENARIOS F-17: a transfer carries the parcel's units — and their cost
@@ -1560,14 +1564,14 @@ mod tests {
         insert_test_listing(&pool, 1, "XASX", "VDHG").await;
         insert_buy_trade(&pool, 1, ListingId(1), Decimal::from(100)).await;
         insert_amma(&pool, 1, ListingId(1), "0.05".parse().unwrap()).await;
-        let replacement = transfer_out(&pool, 1, Decimal::from(100)).await;
+        let replacement = transfer_out(&pool, TradeId(1), Decimal::from(100)).await;
 
         let err = db_upsert(
             &pool,
             &AmitAdjustment {
                 id: 1,
                 amma_statement_id: 1,
-                trade_id: 1,
+                trade_id: TradeId(1),
                 quantity: Decimal::from(100),
             },
         )
@@ -1594,12 +1598,12 @@ mod tests {
         insert_test_listing(&pool, 1, "XASX", "VDHG").await;
         insert_buy_trade(&pool, 1, ListingId(1), Decimal::from(100)).await;
         insert_amma(&pool, 1, ListingId(1), "0.05".parse().unwrap()).await;
-        transfer_out(&pool, 1, Decimal::from(40)).await;
+        transfer_out(&pool, TradeId(1), Decimal::from(40)).await;
 
         let row = AmitAdjustment {
             id: 1,
             amma_statement_id: 1,
-            trade_id: 1,
+            trade_id: TradeId(1),
             quantity: Decimal::from(60),
         };
         db_upsert(&pool, &row).await.unwrap();
@@ -1638,13 +1642,13 @@ mod tests {
             &AmitAdjustment {
                 id: 1,
                 amma_statement_id: 1,
-                trade_id: 1,
+                trade_id: TradeId(1),
                 quantity: Decimal::from(100),
             },
         )
         .await
         .unwrap();
-        let replacement = transfer_out(&pool, 1, Decimal::from(100)).await;
+        let replacement = transfer_out(&pool, TradeId(1), Decimal::from(100)).await;
 
         // 100 × $100 + 9.95 + 0.995 = 10,010.945, less 100 × 5c.
         let parcels = crate::reports::open_parcels::db_open_parcels(&pool, None)
@@ -1675,7 +1679,7 @@ mod tests {
             &AmitAdjustment {
                 id: 1,
                 amma_statement_id: 1,
-                trade_id: 1,
+                trade_id: TradeId(1),
                 quantity: Decimal::from(100),
             },
         )
@@ -1698,14 +1702,14 @@ mod tests {
         insert_buy_trade(&pool, 1, ListingId(1), Decimal::from(100)).await;
         insert_amma(&pool, 1, ListingId(1), "0.05".parse().unwrap()).await;
         // The statement is account 1's; the transfer moves the units to 2.
-        let replacement = transfer_out(&pool, 1, Decimal::from(100)).await;
+        let replacement = transfer_out(&pool, TradeId(1), Decimal::from(100)).await;
 
         db_upsert(
             &pool,
             &AmitAdjustment {
                 id: 1,
                 amma_statement_id: 1,
-                trade_id: replacement,
+                trade_id: TradeId(replacement),
                 quantity: Decimal::from(100),
             },
         )
@@ -1735,7 +1739,7 @@ mod tests {
             &AmitAdjustment {
                 id: 2,
                 amma_statement_id: 1,
-                trade_id: 50,
+                trade_id: TradeId(50),
                 quantity: Decimal::from(10),
             },
         )
@@ -1774,12 +1778,12 @@ mod tests {
         let exchange = crate::entities::scrip_exchange::db_exchange(pool, action_id)
             .await
             .unwrap();
-        exchange.replacements[0].id
+        exchange.replacements[0].id.0
     }
 
     /// The AMIT cost-base reduction the shared pipeline reports against one
     /// open parcel — what the open-parcels and unrealised-gains screens show.
-    async fn open_parcel_amit_reduction(pool: &SqlitePool, trade_id: i64) -> Decimal {
+    async fn open_parcel_amit_reduction(pool: &SqlitePool, trade_id: TradeId) -> Decimal {
         crate::domain::open_parcels::load(&mut pool.acquire().await.unwrap(), None)
             .await
             .unwrap()
@@ -1825,7 +1829,7 @@ mod tests {
             &AmitAdjustment {
                 id: 1,
                 amma_statement_id: 1,
-                trade_id: replacement,
+                trade_id: TradeId(replacement),
                 quantity: Decimal::from(10_000),
             },
         )
@@ -1835,7 +1839,7 @@ mod tests {
         // A$2,000 of the A$20,000 carried cost base, reaching the parcel the
         // units are now in — the figure that was recordable nowhere.
         assert_eq!(
-            open_parcel_amit_reduction(&pool, replacement).await,
+            open_parcel_amit_reduction(&pool, TradeId(replacement)).await,
             Decimal::from(2000)
         );
     }
@@ -1965,14 +1969,14 @@ mod tests {
             &AmitAdjustment {
                 id: 1,
                 amma_statement_id: 1,
-                trade_id: demerged,
+                trade_id: TradeId(demerged),
                 quantity: Decimal::from(1000),
             },
         )
         .await
         .expect("the demerged parcel holds this statement's units");
         assert_eq!(
-            open_parcel_amit_reduction(&pool, demerged).await,
+            open_parcel_amit_reduction(&pool, TradeId(demerged)).await,
             Decimal::from(100)
         );
     }
@@ -2015,7 +2019,7 @@ mod tests {
                 from_account_id: HoldingAccountId(1),
                 to_account_id: HoldingAccountId(2),
                 allocations: vec![AllocationInput {
-                    purchase_trade_id: exchanged,
+                    purchase_trade_id: TradeId(exchanged),
                     quantity_allocated: Decimal::from(10_000),
                 }],
                 fee_allocations: Vec::new(),
@@ -2079,7 +2083,7 @@ mod tests {
             &AmitAdjustment {
                 id: 1,
                 amma_statement_id: 1,
-                trade_id: 90,
+                trade_id: TradeId(90),
                 quantity: Decimal::from(10),
             },
         )
@@ -2094,7 +2098,7 @@ mod tests {
         insert_test_listing(&pool, 1, "XASX", "VDHG").await;
         insert_buy_trade(&pool, 1, ListingId(1), Decimal::from(100)).await;
         insert_amma(&pool, 1, ListingId(1), "0.05".parse().unwrap()).await;
-        let replacement = transfer_out(&pool, 1, Decimal::from(100)).await;
+        let replacement = transfer_out(&pool, TradeId(1), Decimal::from(100)).await;
 
         let resp = client(&pool)
             .put(
@@ -2136,7 +2140,7 @@ mod tests {
             &AmitAdjustment {
                 id: 1,
                 amma_statement_id: 1,
-                trade_id: 1,
+                trade_id: TradeId(1),
                 quantity: Decimal::from(100),
             },
         )
@@ -2167,7 +2171,7 @@ mod tests {
             &AmitAdjustment {
                 id: 1,
                 amma_statement_id: 1,
-                trade_id: 1,
+                trade_id: TradeId(1),
                 quantity: Decimal::from(100),
             },
         )

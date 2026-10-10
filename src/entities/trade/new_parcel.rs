@@ -17,6 +17,7 @@
 use crate::infra::decimal::{Money, OptMoney};
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
+use crate::infra::id::TradeId;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 
@@ -178,7 +179,7 @@ impl<'a> NewParcel<'a> {
     /// Write the parcel as a new row and answer the id the database gave it —
     /// one its `AUTOINCREMENT` sequence has never issued, so a caller writing
     /// several takes each id from its own call, never by adding to the last.
-    pub async fn insert(&self, conn: &mut sqlx::SqliteConnection) -> Result<i64, sqlx::Error> {
+    pub async fn insert(&self, conn: &mut sqlx::SqliteConnection) -> Result<TradeId, sqlx::Error> {
         self.write(conn, None).await
     }
 
@@ -190,10 +191,10 @@ impl<'a> NewParcel<'a> {
     pub async fn write(
         &self,
         conn: &mut sqlx::SqliteConnection,
-        id: Option<i64>,
-    ) -> Result<i64, sqlx::Error> {
+        id: Option<TradeId>,
+    ) -> Result<TradeId, sqlx::Error> {
         let link = self.origin.link();
-        let mut query = crate::infra::db::insert_with_optional_id(INSERT_SQL, id)
+        let mut query = crate::infra::db::insert_with_optional_id(INSERT_SQL, id.map(|id| id.0))
             .bind(self.origin.trade_type())
             .bind(self.date)
             .bind(self.date)
@@ -214,7 +215,7 @@ impl<'a> NewParcel<'a> {
             query = query.bind(link.filter(|(c, _)| *c == column).map(|(_, id)| id));
         }
         let result = query.execute(&mut *conn).await?;
-        Ok(id.unwrap_or_else(|| result.last_insert_rowid()))
+        Ok(id.unwrap_or_else(|| TradeId(result.last_insert_rowid())))
     }
 }
 

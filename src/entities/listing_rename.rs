@@ -67,6 +67,8 @@ use crate::infra::db::write_tx;
 use crate::infra::extract::{Json, Query};
 use crate::infra::http::{ApiError, CrudEntity};
 use crate::infra::id::ListingId;
+#[cfg(test)]
+use crate::infra::id::TradeId;
 use axum::{
     Router,
     extract::{Path, State},
@@ -1884,7 +1886,7 @@ mod tests {
             .await
             .unwrap();
 
-        let trade = crate::entities::trade::db_get(&pool, 1)
+        let trade = crate::entities::trade::db_get(&pool, TradeId(1))
             .await
             .unwrap()
             .unwrap();

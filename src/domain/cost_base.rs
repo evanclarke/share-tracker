@@ -51,6 +51,7 @@
 use crate::infra::currency::CurrencyCode;
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
+use crate::infra::id::TradeId;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::Serialize;
@@ -291,7 +292,7 @@ pub fn checked_cost_base(terms: &[Term<'_>]) -> Result<Decimal, UnrepresentableC
 /// from `trades`.
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct ParcelRow {
-    pub id: i64,
+    pub id: TradeId,
     pub listing_id: ListingId,
     pub holding_account_id: HoldingAccountId,
     /// The actual trade date — drives split and return-of-capital
@@ -1210,7 +1211,7 @@ pub fn reduction_for(
 pub async fn db_cost_base_reduction_events(
     conn: &mut sqlx::SqliteConnection,
     up_to: Option<chrono::NaiveDate>,
-) -> Result<HashMap<i64, Vec<AmitReductionEvent>>, sqlx::Error> {
+) -> Result<HashMap<TradeId, Vec<AmitReductionEvent>>, sqlx::Error> {
     let cutoff = crate::infra::date::as_of_or_open(up_to);
     let splits = adjustments::db_share_split_events(&mut *conn).await?;
     let rows = sqlx::query(
@@ -1239,9 +1240,9 @@ pub async fn db_cost_base_reduction_events(
     // as held diluted the units left behind by the ones that moved.
     let consumed = crate::domain::open_parcels::db_units_sold(&mut *conn, up_to).await?;
 
-    let mut map: HashMap<i64, Vec<AmitReductionEvent>> = HashMap::new();
+    let mut map: HashMap<TradeId, Vec<AmitReductionEvent>> = HashMap::new();
     for row in &rows {
-        let trade_id: i64 = row.try_get("trade_id")?;
+        let trade_id: TradeId = row.try_get("trade_id")?;
         let listing_id: ListingId = row.try_get("listing_id")?;
         let amma_statement_id: i64 = row.try_get("amma_statement_id")?;
         let tax_year_end_date: chrono::NaiveDate = row.try_get("tax_year_end_date")?;
@@ -1343,7 +1344,7 @@ mod tests {
         provenance: impl Fn(&mut ParcelRow),
     ) -> ParcelRow {
         let mut row = ParcelRow {
-            id: 1,
+            id: TradeId(1),
             listing_id,
             holding_account_id: HoldingAccountId(1),
             date: operated,

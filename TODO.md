@@ -200,9 +200,12 @@ Scored 6/10 — the weakest dimension. The operation modules are well factored, 
     `ReadTx` under `PRAGMA query_only` that SQLite refuses to write through; `sqlx::Pool::begin` is
     in `clippy.toml`'s `disallowed-methods`; the pool's release hook resets `query_only`. The
     `DEFERRED_BEGIN_ALLOWED` scan is gone; pinned by `a_read_transaction_refuses_every_write`
-  - [ ] Id newtypes (`ListingId`, `TradeId`, …) in place of bare `i64` — `ListingId` and
-    `HoldingAccountId` done 2026-10-10 (`infra::id`, every such field, param, route path and keyed
-    map); `TradeId` remains, the same way (`id_type!` + the compiler-driven pass)
+  - [x] Id newtypes (`ListingId`, `TradeId`, …) in place of bare `i64` — done 2026-10-10 for the
+    three ids that get crossed: `ListingId`, `HoldingAccountId`, `TradeId` (`infra::id`'s `id_type!`;
+    every such field, param, route path and keyed map). The less-shared ids (statement, income,
+    action) stay `i64`; adding one is a line in `infra::id` plus the same compiler-driven pass.
+    `RealisedGainLoss::sale_trade_id` stays bare — it is a trade id *or* a rights-sale id by
+    `source`, and its consumers all check `source` first
   - [ ] `utoipa-axum` (`#[utoipa::path]`/`OpenApiRouter`) in place of the `ROUTES` table and its
     Rust-parsing tests
 - [x] DECIDED 2026-10-10 (owner): keep them — N/A. prune `doc_checks.rs` phrase pins (~150 tests asserting exact prose,

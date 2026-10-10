@@ -7,6 +7,7 @@ use crate::entities::inheritance::Inheritance;
 use crate::entities::investment_expense::{ExpenseType, InvestmentExpense};
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
+use crate::infra::id::TradeId;
 use crate::test_support::{self, ApiClient, dec, test_pool, ymd};
 use axum::http::StatusCode;
 use chrono::Duration;
@@ -2594,7 +2595,7 @@ async fn ess_vest(
     statement_id: i64,
     listing_id: ListingId,
     taxing_point: NaiveDate,
-) -> i64 {
+) -> TradeId {
     test_support::ess_statement(statement_id, listing_id.0, taxing_point)
         .with(|s| {
             s.quantity = dec("400");
@@ -2614,7 +2615,7 @@ async fn sell_vest_parcel(
     pool: &SqlitePool,
     sale_id: i64,
     listing_id: ListingId,
-    vest_trade_id: i64,
+    vest_trade_id: TradeId,
     sale_date: NaiveDate,
     units: Decimal,
 ) {
@@ -2636,7 +2637,7 @@ async fn sell_vest_parcel_in_account(
     pool: &SqlitePool,
     sale_id: i64,
     listing_id: ListingId,
-    vest_trade_id: i64,
+    vest_trade_id: TradeId,
     sale_date: NaiveDate,
     units: Decimal,
     account: i64,
@@ -2648,7 +2649,7 @@ async fn sell_vest_parcel_in_account(
         .account(account)
         .insert(pool)
         .await;
-    test_support::allocate(pool, sale_id, sale_id, vest_trade_id, units).await;
+    test_support::allocate(pool, sale_id, sale_id, vest_trade_id.0, units).await;
 }
 
 /// Example 11 itself, entered the way a user naturally would — the
@@ -2662,7 +2663,15 @@ async fn a_sale_inside_the_thirty_day_window_is_flagged_with_both_years() {
     let pool = test_pool().await;
     test_support::listing(1).ticker("PEPP").insert(&pool).await;
     let vest = ess_vest(&pool, 1, ListingId(1), ymd(2019, 6, 23)).await;
-    sell_vest_parcel(&pool, 101, ListingId(1), vest, ymd(2019, 7, 22), dec("400")).await;
+    sell_vest_parcel(
+        &pool,
+        101,
+        ListingId(1),
+        TradeId(vest.0),
+        ymd(2019, 7, 22),
+        dec("400"),
+    )
+    .await;
 
     let h = health(&pool, ymd(2019, 8, 1)).await;
     assert_eq!(h.ess_30_day_rule.len(), 1);
@@ -2693,12 +2702,20 @@ async fn the_window_includes_day_thirty_and_excludes_day_thirty_one() {
     let taxing_point = ymd(2026, 3, 10);
     let day30 = ess_vest(&pool, 1, ListingId(1), taxing_point).await;
     let day31 = ess_vest(&pool, 2, ListingId(2), taxing_point).await;
-    sell_vest_parcel(&pool, 101, ListingId(1), day30, ymd(2026, 4, 9), dec("400")).await;
+    sell_vest_parcel(
+        &pool,
+        101,
+        ListingId(1),
+        TradeId(day30.0),
+        ymd(2026, 4, 9),
+        dec("400"),
+    )
+    .await;
     sell_vest_parcel(
         &pool,
         102,
         ListingId(2),
-        day31,
+        TradeId(day31.0),
         ymd(2026, 4, 10),
         dec("400"),
     )
@@ -2726,7 +2743,15 @@ async fn a_same_day_sale_and_a_non_ess_parcel_are_not_flagged() {
     test_support::listing(2).ticker("ORD").insert(&pool).await;
     // The amended statement: taxing point *is* the disposal date.
     let vest = ess_vest(&pool, 1, ListingId(1), ymd(2019, 7, 22)).await;
-    sell_vest_parcel(&pool, 101, ListingId(1), vest, ymd(2019, 7, 22), dec("400")).await;
+    sell_vest_parcel(
+        &pool,
+        101,
+        ListingId(1),
+        TradeId(vest.0),
+        ymd(2019, 7, 22),
+        dec("400"),
+    )
+    .await;
     // An ordinary Buy sold the next day — no ESS statement behind it.
     test_support::buy(50, 2)
         .date(ymd(2019, 7, 22))
@@ -2758,8 +2783,8 @@ async fn each_vest_parcel_a_sale_draws_on_is_named_separately() {
         .qty(dec("500"))
         .insert(&pool)
         .await;
-    test_support::allocate(&pool, 1, 101, march2, dec("400")).await;
-    test_support::allocate(&pool, 2, 101, march10, dec("100")).await;
+    test_support::allocate(&pool, 1, 101, march2.0, dec("400")).await;
+    test_support::allocate(&pool, 2, 101, march10.0, dec("100")).await;
 
     let h = health(&pool, ymd(2026, 5, 1)).await;
     assert_eq!(h.ess_30_day_rule.len(), 2);
@@ -2804,7 +2829,7 @@ async fn a_holding_account_transfer_inside_the_window_is_not_a_disposal() {
             from_account_id: HoldingAccountId(1),
             to_account_id: HoldingAccountId(2),
             allocations: vec![crate::entities::sell::AllocationInput {
-                purchase_trade_id: vest,
+                purchase_trade_id: TradeId(vest.0),
                 quantity_allocated: dec("400"),
             }],
             fee_allocations: Vec::new(),
@@ -3400,7 +3425,7 @@ async fn only_a_paid_for_right_disposed_of_at_nil_is_flagged() {
             fx_rate: None,
             holding_account_id: HoldingAccountId(1),
             allocations: vec![crate::entities::rights_sale::AllocationInput {
-                purchase_trade_id: 1,
+                purchase_trade_id: TradeId(1),
                 units: units.parse().unwrap(),
             }],
         }
@@ -3854,8 +3879,8 @@ async fn a_drp_surplus_arriving_intact_disproves_a_distribution_in_the_gap() {
     holding_before_the_ex_date(&pool).await;
     // Two reinvested distributions either side of the disputed event, the
     // second bringing forward exactly what the first carried on.
-    reinvested(&pool, 2, 1, ymd(2020, 10, 16), "0", "50.4362").await;
-    reinvested(&pool, 3, 2, ymd(2021, 1, 19), "50.4362", "38.7177").await;
+    reinvested(&pool, TradeId(2), 1, ymd(2020, 10, 16), "0", "50.4362").await;
+    reinvested(&pool, TradeId(3), 2, ymd(2021, 1, 19), "50.4362", "38.7177").await;
     insert_event(
         &pool,
         ListingId(1),
@@ -3901,8 +3926,8 @@ async fn a_missing_reinvested_distribution_is_still_reported() {
     holding_before_the_ex_date(&pool).await;
     // VDHG's real chain: September reinvested on 16 October carrying
     // $50.4362 on, December reinvested on 19 January bringing it back.
-    reinvested(&pool, 2, 1, ymd(2020, 10, 16), "0", "50.4362").await;
-    reinvested(&pool, 3, 2, ymd(2021, 1, 19), "50.4362", "38.7177").await;
+    reinvested(&pool, TradeId(2), 1, ymd(2020, 10, 16), "0", "50.4362").await;
+    reinvested(&pool, TradeId(3), 2, ymd(2021, 1, 19), "50.4362", "38.7177").await;
     // The December distribution itself: ex 4 January, paid 19 January —
     // and its income row is the one that was never entered.
     sqlx::query("DELETE FROM income WHERE id = 2")
@@ -3937,8 +3962,8 @@ async fn a_missing_reinvested_distribution_is_still_reported() {
 async fn a_nil_drp_surplus_is_not_evidence_and_suppresses_nothing() {
     let pool = test_pool().await;
     holding_before_the_ex_date(&pool).await;
-    reinvested(&pool, 2, 1, ymd(2020, 10, 16), "0", "0").await;
-    reinvested(&pool, 3, 2, ymd(2021, 1, 19), "0", "0").await;
+    reinvested(&pool, TradeId(2), 1, ymd(2020, 10, 16), "0", "0").await;
+    reinvested(&pool, TradeId(3), 2, ymd(2021, 1, 19), "0", "0").await;
     insert_event(
         &pool,
         ListingId(1),
@@ -3956,13 +3981,13 @@ async fn a_nil_drp_surplus_is_not_evidence_and_suppresses_nothing() {
 /// registry's brought/carried surplus as the advice states them.
 async fn reinvested(
     pool: &SqlitePool,
-    trade_id: i64,
+    trade_id: TradeId,
     income_id: i64,
     date: NaiveDate,
     brought: &str,
     carried: &str,
 ) {
-    test_support::drp(trade_id, 1)
+    test_support::drp(trade_id.0, 1)
         .date(date)
         .qty(dec("10"))
         .with(|t| {

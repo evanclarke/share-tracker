@@ -15,6 +15,7 @@
 use crate::infra::currency::CurrencyCode;
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
+use crate::infra::id::TradeId;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 
@@ -108,7 +109,7 @@ pub async fn insert_replacement_buy(
     conn: &mut sqlx::SqliteConnection,
     buy: &ReplacementBuy<'_>,
     provenance: Provenance,
-) -> Result<i64, sqlx::Error> {
+) -> Result<TradeId, sqlx::Error> {
     trade::NewParcel::new(
         provenance.origin(),
         buy.date,
@@ -130,7 +131,7 @@ pub async fn insert_replacement_buy(
 /// not-found: the ids were just inserted in the committed transaction.
 pub async fn created_trades(
     conn: &mut sqlx::SqliteConnection,
-    ids: impl IntoIterator<Item = i64>,
+    ids: impl IntoIterator<Item = TradeId>,
 ) -> Result<Vec<Trade>, sqlx::Error> {
     let mut out = Vec::new();
     for id in ids {

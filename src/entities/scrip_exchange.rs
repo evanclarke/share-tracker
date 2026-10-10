@@ -62,6 +62,7 @@ use crate::infra::extract::{Json, Query};
 use crate::infra::http::{ApiError, DryRunQuery};
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
+use crate::infra::id::TradeId;
 use axum::{
     Router,
     extract::{Path, State},
@@ -441,7 +442,7 @@ impl Terms {
 /// scaled by the ratio, its remaining reduced cost base, and its carried
 /// acquisition date.
 struct Replacement {
-    parcel_id: i64,
+    parcel_id: TradeId,
     at_date_units: Decimal,
     new_quantity: Decimal,
     carried_cost_base: Decimal,
@@ -675,8 +676,8 @@ mod tests {
 
     async fn sell_units(
         pool: &SqlitePool,
-        sell_id: i64,
-        parcel_id: i64,
+        sell_id: TradeId,
+        parcel_id: TradeId,
         date: NaiveDate,
         qty: &str,
     ) {
@@ -823,7 +824,7 @@ mod tests {
             .brokerage(dec("50"))
             .insert(&pool)
             .await;
-        sell_units(&pool, 2, 1, d(2022, 5, 2), "400").await;
+        sell_units(&pool, TradeId(2), TradeId(1), d(2022, 5, 2), "400").await;
         insert_scrip(&pool, 10, d(2024, 7, 1)).await;
 
         let ex = db_exchange(&pool, 10).await.unwrap();
@@ -1175,7 +1176,7 @@ mod tests {
                 spot_fx_rate: None,
                 contract_note_ref: None,
                 allocations: vec![AllocationInput {
-                    purchase_trade_id: 1,
+                    purchase_trade_id: TradeId(1),
                     quantity_allocated: dec("1000"),
                 }],
             },
@@ -1219,7 +1220,7 @@ mod tests {
         // A later sale out of the replacement parcel blocks the group delete.
         sell::db_upsert_sell(
             &pool,
-            50,
+            TradeId(50),
             &SellBody {
                 brokerage_includes_gst: false,
                 statement_total: None,
@@ -1252,7 +1253,7 @@ mod tests {
         // Remove the later sale; the group then deletes as a whole and the
         // action thaws (it can be deleted again).
         assert_eq!(
-            sell::db_delete_sell(&pool, 50).await.unwrap(),
+            sell::db_delete_sell(&pool, TradeId(50)).await.unwrap(),
             sell::DeleteOutcome::Deleted
         );
         assert_eq!(
@@ -1411,7 +1412,7 @@ mod tests {
 
         let err = sell::db_upsert_sell(
             &pool,
-            60,
+            TradeId(60),
             &SellBody {
                 brokerage_includes_gst: false,
                 statement_total: None,
@@ -1429,7 +1430,7 @@ mod tests {
                 spot_fx_rate: None,
                 contract_note_ref: None,
                 allocations: vec![AllocationInput {
-                    purchase_trade_id: 1,
+                    purchase_trade_id: TradeId(1),
                     quantity_allocated: dec("100"),
                 }],
             },

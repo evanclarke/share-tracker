@@ -13,6 +13,7 @@ use crate::infra::db::write_tx;
 use crate::infra::decimal::{OptMoney, parse_dec};
 use crate::infra::http::{self, ApiError, CrudEntity, Upsert};
 use crate::infra::id::ListingId;
+use crate::infra::id::TradeId;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use sqlx::{Row, SqlitePool};
@@ -279,9 +280,9 @@ async fn allocations_fit_parcels(
 
     // Each parcel's (quantity, allocations consumed so far), in as-acquired
     // units.
-    let mut consumed: HashMap<i64, (Decimal, Decimal)> = HashMap::new();
+    let mut consumed: HashMap<TradeId, (Decimal, Decimal)> = HashMap::new();
     for row in &rows {
-        let parcel_id: i64 = row.try_get("purchase_trade_id")?;
+        let parcel_id: TradeId = row.try_get("purchase_trade_id")?;
         let acquired: NaiveDate = row.try_get("acquired")?;
         let parcel_quantity = parse_dec("parcel_quantity", row.try_get("parcel_quantity")?)?;
         let sale_date: NaiveDate = row.try_get("sale_date")?;

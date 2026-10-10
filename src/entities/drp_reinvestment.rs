@@ -106,6 +106,8 @@ use crate::infra::extract::{Json, Query};
 use crate::infra::http::{ApiError, DryRunQuery};
 #[cfg(test)]
 use crate::infra::id::HoldingAccountId;
+#[cfg(test)]
+use crate::infra::id::TradeId;
 use axum::{
     Router,
     extract::{Path, State},
@@ -1011,7 +1013,7 @@ mod tests {
         // Both parcels sold on 2025-06-25 at $15.
         crate::entities::sell::db_upsert_sell(
             &pool,
-            50,
+            TradeId(50),
             &crate::entities::sell::SellBody {
                 brokerage_includes_gst: false,
                 statement_total: None,
@@ -2315,7 +2317,7 @@ mod tests {
         let trade = db_reinvest(&pool, 1, &body("9")).await.unwrap();
         crate::entities::sell::db_upsert_sell(
             &pool,
-            50,
+            TradeId(50),
             &crate::entities::sell::SellBody {
                 date: "2024-06-03".parse().unwrap(),
                 settlement_date: Some("2024-06-05".parse().unwrap()),
@@ -2707,7 +2709,7 @@ mod tests {
 
     /// One trade's `(residual_carried_forward, residual_paid_out)` as stored,
     /// for reading a trade back after a later write re-derived the chain.
-    async fn residuals(pool: &SqlitePool, trade_id: i64) -> (Decimal, Decimal) {
+    async fn residuals(pool: &SqlitePool, trade_id: TradeId) -> (Decimal, Decimal) {
         let t = crate::entities::trade::db_get(pool, trade_id)
             .await
             .unwrap()

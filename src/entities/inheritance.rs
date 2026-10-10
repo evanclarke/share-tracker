@@ -110,6 +110,7 @@ use crate::infra::extract::Json;
 use crate::infra::http::{self, ApiError, CrudEntity, Upsert, UpsertResponse};
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
+use crate::infra::id::TradeId;
 use axum::{
     Router,
     extract::{Path, State},
@@ -522,7 +523,7 @@ pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<Inheritance>, s
 async fn linked_buy_id(
     tx: &mut sqlx::SqliteConnection,
     inheritance_id: i64,
-) -> Result<Option<i64>, sqlx::Error> {
+) -> Result<Option<TradeId>, sqlx::Error> {
     sqlx::query_scalar("SELECT id FROM trades WHERE inheritance_id = ?")
         .bind(inheritance_id)
         .fetch_optional(tx)
@@ -532,7 +533,10 @@ async fn linked_buy_id(
 /// Whether anything draws on the linked Buy: a Sell allocation consuming its
 /// units or an AMIT adjustment covering them. While true, the inheritance is
 /// frozen — an edit or delete could invalidate those dependants.
-async fn buy_drawn_on(tx: &mut sqlx::SqliteConnection, buy_id: i64) -> Result<bool, sqlx::Error> {
+async fn buy_drawn_on(
+    tx: &mut sqlx::SqliteConnection,
+    buy_id: TradeId,
+) -> Result<bool, sqlx::Error> {
     sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM parcel_allocations WHERE purchase_trade_id = ?1) \
              OR EXISTS(SELECT 1 FROM amit_adjustments WHERE trade_id = ?1)",
@@ -1034,12 +1038,12 @@ mod tests {
             .fetch_one(pool)
             .await
             .unwrap();
-        trade::db_get(pool, id).await.unwrap().unwrap()
+        trade::db_get(pool, TradeId(id)).await.unwrap().unwrap()
     }
 
     /// An AUD Sell of `qty` units of listing 1 at `price`, fully allocated to
     /// the `buy_id` parcel.
-    fn sell_body(buy_id: i64, date: NaiveDate, qty: &str, price: &str) -> SellBody {
+    fn sell_body(buy_id: TradeId, date: NaiveDate, qty: &str, price: &str) -> SellBody {
         SellBody {
             brokerage_includes_gst: false,
             statement_total: None,
@@ -1284,9 +1288,13 @@ mod tests {
         db_upsert(&pool, &post_cgt(1)).await.unwrap();
         let buy = linked_buy(&pool, 1).await;
 
-        sell::db_upsert_sell(&pool, 50, &sell_body(buy.id, ymd(2025, 6, 2), "30", "40"))
-            .await
-            .unwrap();
+        sell::db_upsert_sell(
+            &pool,
+            TradeId(50),
+            &sell_body(buy.id, ymd(2025, 6, 2), "30", "40"),
+        )
+        .await
+        .unwrap();
 
         assert!(matches!(
             db_upsert(&pool, &post_cgt(1)).await,
@@ -1299,7 +1307,7 @@ mod tests {
 
         // Removing the sale unfreezes both.
         assert_eq!(
-            sell::db_delete_sell(&pool, 50).await.unwrap(),
+            sell::db_delete_sell(&pool, TradeId(50)).await.unwrap(),
             sell::DeleteOutcome::Deleted
         );
         db_upsert(&pool, &post_cgt(1)).await.unwrap();
@@ -1341,8 +1349,12 @@ mod tests {
         db_upsert(&pool, &post_cgt(1)).await.unwrap();
         let buy = linked_buy(&pool, 1).await;
 
-        let result =
-            sell::db_upsert_sell(&pool, 50, &sell_body(buy.id, ymd(2025, 6, 1), "101", "40")).await;
+        let result = sell::db_upsert_sell(
+            &pool,
+            TradeId(50),
+            &sell_body(buy.id, ymd(2025, 6, 1), "101", "40"),
+        )
+        .await;
         assert!(matches!(
             result,
             Err(sell::SellError::PurchaseQuantityExceeded)
@@ -1388,9 +1400,13 @@ mod tests {
         // 2025-06-01: under 5 months after the 2025-01-10 death, over 5 years
         // after the deceased's 2020-02-01 acquisition. 100 × $40 = $4,000
         // proceeds against the $3,200 inherited cost base.
-        sell::db_upsert_sell(&pool, 50, &sell_body(buy.id, ymd(2025, 6, 2), "100", "40"))
-            .await
-            .unwrap();
+        sell::db_upsert_sell(
+            &pool,
+            TradeId(50),
+            &sell_body(buy.id, ymd(2025, 6, 2), "100", "40"),
+        )
+        .await
+        .unwrap();
 
         let realised = crate::reports::realised_gains::db_realised_gains(&pool)
             .await
@@ -1416,13 +1432,21 @@ mod tests {
         // $5,000 market value at death over 100 units = $50/unit cost base.
         // 30 units at $60 on 2025-06-01 (< 12 months after the 2025-01-10
         // death): $300 gain, non-discountable.
-        sell::db_upsert_sell(&pool, 50, &sell_body(buy.id, ymd(2025, 6, 2), "30", "60"))
-            .await
-            .unwrap();
+        sell::db_upsert_sell(
+            &pool,
+            TradeId(50),
+            &sell_body(buy.id, ymd(2025, 6, 2), "30", "60"),
+        )
+        .await
+        .unwrap();
         // 30 more on 2026-02-01 (> 12 months after the death): discountable.
-        sell::db_upsert_sell(&pool, 51, &sell_body(buy.id, ymd(2026, 2, 2), "30", "60"))
-            .await
-            .unwrap();
+        sell::db_upsert_sell(
+            &pool,
+            TradeId(51),
+            &sell_body(buy.id, ymd(2026, 2, 2), "30", "60"),
+        )
+        .await
+        .unwrap();
 
         let realised = crate::reports::realised_gains::db_realised_gains(&pool)
             .await

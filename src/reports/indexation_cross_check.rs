@@ -98,6 +98,7 @@ use crate::infra::decimal::to_cents;
 use crate::infra::extract::Json;
 use crate::infra::http::ApiError;
 use crate::infra::id::ListingId;
+use crate::infra::id::TradeId;
 use axum::{Router, extract::State, routing::get};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
@@ -113,12 +114,12 @@ pub struct IndexationComparison {
     /// end) — the key of the matching `years` row.
     pub tax_year: i32,
     /// The Sell trade this allocation belongs to.
-    pub sale_trade_id: i64,
+    pub sale_trade_id: TradeId,
     pub listing_id: ListingId,
     pub ticker: String,
     pub sale_date: NaiveDate,
     /// The Buy/DRP parcel the units came from.
-    pub purchase_trade_id: i64,
+    pub purchase_trade_id: TradeId,
     /// The parcel's own trade date — when the indexable cost was incurred.
     pub cost_incurred_date: NaiveDate,
     /// End date of the CPI quarter that date falls in — the row of the ATO's
@@ -213,7 +214,7 @@ pub async fn db_indexation_cross_check(
     let cpi = CpiQuarters::load(&mut tx).await?;
     tx.commit().await?;
 
-    let mut incurred: HashMap<i64, NaiveDate> = HashMap::with_capacity(parcel_rows.len());
+    let mut incurred: HashMap<TradeId, NaiveDate> = HashMap::with_capacity(parcel_rows.len());
     for row in &parcel_rows {
         incurred.insert(row.try_get("id")?, row.try_get("date")?);
     }
@@ -262,7 +263,7 @@ pub async fn db_indexation_cross_check(
             };
             comparisons.push(IndexationComparison {
                 tax_year,
-                sale_trade_id: disposal.sale_trade_id,
+                sale_trade_id: TradeId(disposal.sale_trade_id),
                 listing_id: disposal.listing_id,
                 ticker,
                 sale_date: disposal.sale_date,

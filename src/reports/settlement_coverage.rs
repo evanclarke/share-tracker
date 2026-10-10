@@ -3,6 +3,7 @@ use crate::entities::exchange_holiday::{coverage_span_for, window_outside_covera
 use crate::infra::extract::Json;
 use crate::infra::http::ApiError;
 use crate::infra::id::ListingId;
+use crate::infra::id::TradeId;
 use axum::{Router, extract::State, routing::get};
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
@@ -32,7 +33,7 @@ use std::collections::{HashMap, HashSet};
 /// [`coverage_status`]: SettlementCoverageAlert::coverage_status
 #[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SettlementCoverageAlert {
-    pub trade_id: i64,
+    pub trade_id: TradeId,
     pub listing_id: ListingId,
     pub ticker: String,
     pub mic: String,
@@ -63,7 +64,7 @@ pub struct SettlementCoverageAlert {
 /// listing's calendar. Mapped by column name via `FromRow`.
 #[derive(sqlx::FromRow)]
 struct CoverageCandidate {
-    trade_id: i64,
+    trade_id: TradeId,
     listing_id: ListingId,
     ticker: String,
     mic: String,

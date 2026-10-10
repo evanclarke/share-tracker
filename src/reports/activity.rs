@@ -42,6 +42,7 @@ use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
+use crate::infra::id::TradeId;
 use crate::reports::portfolio::{self, HoldingOverview};
 use axum::{Extension, Router, extract::State, routing::get};
 use chrono::NaiveDate;
@@ -637,7 +638,7 @@ impl Sources {
     }
 
     fn trade_rows(&self) -> Result<Vec<Proto>, sqlx::Error> {
-        let fee_sale_ids: HashSet<i64> = self
+        let fee_sale_ids: HashSet<TradeId> = self
             .transfers
             .iter()
             .filter_map(|t| t.fee_sale_trade_id)
@@ -668,7 +669,7 @@ impl Sources {
                     date: t.date,
                     rank: 2,
                     record: RecordTable::Trades,
-                    id: t.id,
+                    id: t.id.0,
                     event: trade_event(t, &fee_sale_ids),
                     detail: format!("{} @ {} {}", t.quantity, t.average_price, t.currency),
                     holding_account_id: Some(t.holding_account_id),
@@ -731,7 +732,7 @@ pub async fn db_activity(
 /// it (the provenance columns / the transfer's network-fee link). `pub(crate)`
 /// so the annual tax report's disposal schedule can label each parcel's
 /// acquisition the same way this ledger does, instead of a second labeller.
-pub(crate) fn trade_event(t: &Trade, fee_sale_ids: &HashSet<i64>) -> String {
+pub(crate) fn trade_event(t: &Trade, fee_sale_ids: &HashSet<TradeId>) -> String {
     let base = match t.trade_type {
         TradeType::Buy => "Buy",
         TradeType::Sell => "Sell",
@@ -1068,7 +1069,7 @@ mod tests {
                 from_account_id: HoldingAccountId(1),
                 to_account_id: HoldingAccountId(2),
                 allocations: vec![crate::entities::sell::AllocationInput {
-                    purchase_trade_id: 1,
+                    purchase_trade_id: TradeId(1),
                     quantity_allocated: dec("40"),
                 }],
                 fee_allocations: vec![],

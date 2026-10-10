@@ -42,6 +42,7 @@ use crate::infra::extract::{Json, Query};
 use crate::infra::http::ApiError;
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
+use crate::infra::id::TradeId;
 use axum::{Extension, Router, extract::State, routing::get};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
@@ -82,7 +83,7 @@ pub const ALL_STRATEGIES: [Strategy; 4] = [
 /// acquisition date driving FIFO order and the 12-month discount clock.
 #[derive(Debug, Clone)]
 pub struct CandidateParcel {
-    pub trade_id: i64,
+    pub trade_id: TradeId,
     pub holding_account_id: HoldingAccountId,
     pub acquisition_date: NaiveDate,
     pub remaining_quantity: Decimal,
@@ -111,7 +112,7 @@ pub struct Candidates {
     /// The candidates' trade rows, keyed by trade id — [`CandidateParcel`]
     /// carries only what the strategies rank on, while costing a pick needs
     /// the whole parcel row.
-    rows: HashMap<i64, ParcelRow>,
+    rows: HashMap<TradeId, ParcelRow>,
     costing: contemplated_disposal::Costing,
     sale_date: NaiveDate,
 }
@@ -130,7 +131,7 @@ impl Candidates {
 
     /// The AUD adjusted cost base of `units` (sale-date basis) out of the
     /// candidate parcel created by `trade_id`.
-    fn cost_base(&self, trade_id: i64, units: Decimal) -> Result<Decimal, sqlx::Error> {
+    fn cost_base(&self, trade_id: TradeId, units: Decimal) -> Result<Decimal, sqlx::Error> {
         let row = self
             .rows
             .get(&trade_id)
@@ -224,7 +225,7 @@ pub fn allocate_strategy(
     price: Decimal,
     sale_date: NaiveDate,
     strategy: Strategy,
-) -> Vec<(i64, Decimal)> {
+) -> Vec<(TradeId, Decimal)> {
     let gain_pu = |p: &CandidateParcel| price - p.remaining_cost_base / p.remaining_quantity;
     // Assessable contribution per unit: a loss offsets gains in full; a
     // discount-eligible gain counts at half after the 50% discount.
@@ -292,7 +293,7 @@ pub fn allocate_strategy(
 /// One parcel's share of a hypothetical disposal.
 #[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize)]
 pub struct HypotheticalAllocation {
-    pub purchase_trade_id: i64,
+    pub purchase_trade_id: TradeId,
     pub holding_account_id: HoldingAccountId,
     pub acquisition_date: NaiveDate,
     pub units: Decimal,
@@ -335,12 +336,12 @@ pub struct DisposalTotals {
 /// depends on how many units are sold (`domain::contemplated_disposal`).
 pub fn disposal_figures(
     candidates: &Candidates,
-    picks: &[(i64, Decimal)],
+    picks: &[(TradeId, Decimal)],
     total_proceeds: Decimal,
     total_units: Decimal,
 ) -> Result<(Vec<HypotheticalAllocation>, DisposalTotals), sqlx::Error> {
     let sale_date = candidates.sale_date();
-    let by_id: HashMap<i64, &CandidateParcel> = candidates
+    let by_id: HashMap<TradeId, &CandidateParcel> = candidates
         .parcels()
         .iter()
         .map(|p| (p.trade_id, p))
@@ -616,7 +617,7 @@ mod tests {
             .unwrap()
     }
 
-    async fn fixture_picks(pool: &SqlitePool, strategy: Strategy) -> Vec<(i64, Decimal)> {
+    async fn fixture_picks(pool: &SqlitePool, strategy: Strategy) -> Vec<(TradeId, Decimal)> {
         let candidates = fixture_candidates(pool).await;
         let (units, price, sale_date) = fixture_sale();
         allocate_strategy(candidates.parcels(), units, price, sale_date, strategy)
@@ -629,7 +630,13 @@ mod tests {
         let pool = test_pool().await;
         strategy_fixture(&pool).await;
         let picks = fixture_picks(&pool, Strategy::Fifo).await;
-        assert_eq!(picks, vec![(1, Decimal::from(100)), (2, Decimal::from(50))]);
+        assert_eq!(
+            picks,
+            vec![
+                (TradeId(1), Decimal::from(100)),
+                (TradeId(2), Decimal::from(50))
+            ]
+        );
     }
 
     #[tokio::test]
@@ -638,7 +645,13 @@ mod tests {
         strategy_fixture(&pool).await;
         // Parcel 2 is the only loss; the remainder follows FIFO (parcel 1).
         let picks = fixture_picks(&pool, Strategy::HarvestLosses).await;
-        assert_eq!(picks, vec![(2, Decimal::from(100)), (1, Decimal::from(50))]);
+        assert_eq!(
+            picks,
+            vec![
+                (TradeId(2), Decimal::from(100)),
+                (TradeId(1), Decimal::from(50))
+            ]
+        );
     }
 
     #[tokio::test]
@@ -648,7 +661,13 @@ mod tests {
         // Assessable per unit: parcel 2 (−2) < parcel 3 (+2 eligible → 1)
         // < parcel 1 (+5 eligible → 2.5) < parcel 4 (+6 not eligible → 6).
         let picks = fixture_picks(&pool, Strategy::MinGain).await;
-        assert_eq!(picks, vec![(2, Decimal::from(100)), (3, Decimal::from(50))]);
+        assert_eq!(
+            picks,
+            vec![
+                (TradeId(2), Decimal::from(100)),
+                (TradeId(3), Decimal::from(50))
+            ]
+        );
     }
 
     #[tokio::test]
@@ -658,7 +677,13 @@ mod tests {
         // Eligible gain parcels in FIFO order: parcel 1 then parcel 3 —
         // unlike FIFO, the loss parcel 2 is passed over.
         let picks = fixture_picks(&pool, Strategy::MaxDiscount).await;
-        assert_eq!(picks, vec![(1, Decimal::from(100)), (3, Decimal::from(50))]);
+        assert_eq!(
+            picks,
+            vec![
+                (TradeId(1), Decimal::from(100)),
+                (TradeId(3), Decimal::from(50))
+            ]
+        );
     }
 
     /// The optimiser classifies on the shared ownership rule, so the boundary
@@ -678,7 +703,10 @@ mod tests {
         // Both parcels stand at a gain (price 20 vs cost 10/unit); only the
         // older one has cleared 12 months as at the sale date.
         let sale_date = ymd(2026, 6, 15);
-        let parcels = vec![parcel(1, ymd(2025, 6, 15)), parcel(2, ymd(2025, 6, 14))];
+        let parcels = vec![
+            parcel(TradeId(1), ymd(2025, 6, 15)),
+            parcel(TradeId(2), ymd(2025, 6, 14)),
+        ];
         let picks = allocate_strategy(
             &parcels,
             Decimal::from(20),
@@ -686,7 +714,13 @@ mod tests {
             sale_date,
             Strategy::MaxDiscount,
         );
-        assert_eq!(picks, vec![(2, Decimal::from(10)), (1, Decimal::from(10))]);
+        assert_eq!(
+            picks,
+            vec![
+                (TradeId(2), Decimal::from(10)),
+                (TradeId(1), Decimal::from(10))
+            ]
+        );
     }
 
     // ---- disposal figures ------------------------------------------------
@@ -755,7 +789,10 @@ mod tests {
         let candidates = db_candidate_parcels(&pool, ListingId(1), None, sale_date)
             .await
             .unwrap();
-        let picks = vec![(1, Decimal::from(30)), (2, Decimal::from(20))];
+        let picks = vec![
+            (TradeId(1), Decimal::from(30)),
+            (TradeId(2), Decimal::from(20)),
+        ];
         let (allocs, totals) = disposal_figures(
             &candidates,
             &picks,
@@ -796,7 +833,8 @@ mod tests {
         let candidates = db_candidate_parcels(&pool, ListingId(1), None, ymd(2026, 1, 1))
             .await
             .unwrap();
-        let picks: Vec<(i64, Decimal)> = (1..=3).map(|id| (id, Decimal::ONE)).collect();
+        let picks: Vec<(TradeId, Decimal)> =
+            (1..=3).map(|id| (TradeId(id), Decimal::ONE)).collect();
         let total = Decimal::from(1000);
         let (allocs, totals) =
             disposal_figures(&candidates, &picks, total, Decimal::from(3)).unwrap();
@@ -908,7 +946,7 @@ mod tests {
             "a parcel acquired after the sale date was offered"
         );
 
-        let picks = |strategy: Strategy| -> Vec<(i64, Decimal)> {
+        let picks = |strategy: Strategy| -> Vec<(TradeId, Decimal)> {
             r.allocations
                 .iter()
                 .filter(|a| a.strategy == strategy)
@@ -920,11 +958,17 @@ mod tests {
         // where reading today's parcels made every strategy identical.
         assert_eq!(
             picks(Strategy::Fifo),
-            vec![(1, Decimal::from(100)), (2, Decimal::from(50))]
+            vec![
+                (TradeId(1), Decimal::from(100)),
+                (TradeId(2), Decimal::from(50))
+            ]
         );
         assert_eq!(
             picks(Strategy::MaxDiscount),
-            vec![(2, Decimal::from(100)), (1, Decimal::from(50))]
+            vec![
+                (TradeId(2), Decimal::from(100)),
+                (TradeId(1), Decimal::from(50))
+            ]
         );
 
         // Held from 2021-01-01 to 2023-06-15 — over 12 months, so the gain is
@@ -971,7 +1015,7 @@ mod tests {
             .filter(|a| a.strategy == Strategy::Fifo)
             .map(|a| {
                 (
-                    a.allocation.purchase_trade_id,
+                    a.allocation.purchase_trade_id.0,
                     a.allocation.discount_eligible,
                 )
             })
@@ -1145,7 +1189,7 @@ mod tests {
                 .allocations
                 .iter()
                 .filter(|a| a.strategy == Strategy::Fifo)
-                .map(|a| a.allocation.purchase_trade_id)
+                .map(|a| a.allocation.purchase_trade_id.0)
                 .collect();
             assert_eq!(ids, (1..=4).collect::<std::collections::BTreeSet<i64>>());
         }
@@ -1562,7 +1606,7 @@ mod tests {
                 &pool,
                 SELL_ID + i as i64,
                 SELL_ID,
-                p.purchase_trade_id,
+                p.purchase_trade_id.0,
                 p.units,
             )
             .await;
@@ -2007,7 +2051,7 @@ mod tests {
             .allocations
             .iter()
             .filter(|a| a.strategy == Strategy::MinGain)
-            .map(|a| a.allocation.purchase_trade_id)
+            .map(|a| a.allocation.purchase_trade_id.0)
             .collect();
         // Once the statement reaches the estimate, parcel 1 is costed at
         // $58.70/unit against parcel 2's $59.90 — so parcel 2 is now the

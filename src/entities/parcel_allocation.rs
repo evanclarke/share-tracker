@@ -4,6 +4,7 @@ use crate::infra::decimal::parse_dec;
 use crate::infra::http::{self, CrudEntity};
 #[cfg(test)]
 use crate::infra::id::ListingId;
+use crate::infra::id::TradeId;
 use axum::{Router, routing::get};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -14,8 +15,8 @@ use sqlx::SqlitePool;
 #[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct ParcelAllocation {
     pub id: i64,
-    pub sale_trade_id: i64,
-    pub purchase_trade_id: i64,
+    pub sale_trade_id: TradeId,
+    pub purchase_trade_id: TradeId,
     #[sqlx(try_from = "Money")]
     pub quantity_allocated: Decimal,
 }
@@ -28,8 +29,8 @@ pub struct ParcelAllocation {
 #[derive(Debug, Default, serde::Deserialize, utoipa::IntoParams)]
 #[serde(deny_unknown_fields)]
 pub struct ParcelAllocationListQuery {
-    pub sale_trade_id: Option<i64>,
-    pub purchase_trade_id: Option<i64>,
+    pub sale_trade_id: Option<TradeId>,
+    pub purchase_trade_id: Option<TradeId>,
 }
 
 impl crate::infra::http::CrudListFilter for ParcelAllocationListQuery {
@@ -91,7 +92,7 @@ pub enum UpsertError {
 async fn sum_allocated(
     pool: &SqlitePool,
     column: &str,
-    trade_id: i64,
+    trade_id: TradeId,
     exclude_id: i64,
 ) -> Result<Decimal, sqlx::Error> {
     let rows: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
@@ -269,8 +270,8 @@ mod tests {
 
         let alloc = ParcelAllocation {
             id: 1,
-            sale_trade_id: 2,
-            purchase_trade_id: 1,
+            sale_trade_id: TradeId(2),
+            purchase_trade_id: TradeId(1),
             quantity_allocated: Decimal::from(5),
         };
         db_upsert(&pool, &alloc).await.unwrap();
@@ -290,8 +291,8 @@ mod tests {
 
         let alloc = ParcelAllocation {
             id: 1,
-            sale_trade_id: 2,
-            purchase_trade_id: 1,
+            sale_trade_id: TradeId(2),
+            purchase_trade_id: TradeId(1),
             quantity_allocated: Decimal::from(11),
         };
         let err = db_upsert(&pool, &alloc).await.unwrap_err();
@@ -307,8 +308,8 @@ mod tests {
 
         let alloc = ParcelAllocation {
             id: 1,
-            sale_trade_id: 2,
-            purchase_trade_id: 1,
+            sale_trade_id: TradeId(2),
+            purchase_trade_id: TradeId(1),
             quantity_allocated: Decimal::from(5),
         };
         let err = db_upsert(&pool, &alloc).await.unwrap_err();
@@ -328,8 +329,8 @@ mod tests {
             &pool,
             &ParcelAllocation {
                 id: 1,
-                sale_trade_id: 2,
-                purchase_trade_id: 1,
+                sale_trade_id: TradeId(2),
+                purchase_trade_id: TradeId(1),
                 quantity_allocated: Decimal::from(8),
             },
         )
@@ -341,8 +342,8 @@ mod tests {
             &pool,
             &ParcelAllocation {
                 id: 2,
-                sale_trade_id: 3,
-                purchase_trade_id: 1,
+                sale_trade_id: TradeId(3),
+                purchase_trade_id: TradeId(1),
                 quantity_allocated: Decimal::from(3),
             },
         )
@@ -363,8 +364,8 @@ mod tests {
             &pool,
             &ParcelAllocation {
                 id: 1,
-                sale_trade_id: 3,
-                purchase_trade_id: 1,
+                sale_trade_id: TradeId(3),
+                purchase_trade_id: TradeId(1),
                 quantity_allocated: Decimal::from(4),
             },
         )
@@ -375,8 +376,8 @@ mod tests {
             &pool,
             &ParcelAllocation {
                 id: 2,
-                sale_trade_id: 3,
-                purchase_trade_id: 2,
+                sale_trade_id: TradeId(3),
+                purchase_trade_id: TradeId(2),
                 quantity_allocated: Decimal::from(3),
             },
         )
@@ -396,8 +397,8 @@ mod tests {
             &pool,
             &ParcelAllocation {
                 id: 1,
-                sale_trade_id: 1, // Buy, not Sell
-                purchase_trade_id: 2,
+                sale_trade_id: TradeId(1), // Buy, not Sell
+                purchase_trade_id: TradeId(2),
                 quantity_allocated: Decimal::from(5),
             },
         )
@@ -417,8 +418,8 @@ mod tests {
             &pool,
             &ParcelAllocation {
                 id: 1,
-                sale_trade_id: 1,
-                purchase_trade_id: 2, // Sell, not Buy/DRP
+                sale_trade_id: TradeId(1),
+                purchase_trade_id: TradeId(2), // Sell, not Buy/DRP
                 quantity_allocated: Decimal::from(5),
             },
         )
@@ -438,8 +439,8 @@ mod tests {
             &pool,
             &ParcelAllocation {
                 id: 1,
-                sale_trade_id: 2,
-                purchase_trade_id: 1,
+                sale_trade_id: TradeId(2),
+                purchase_trade_id: TradeId(1),
                 quantity_allocated: Decimal::from(5),
             },
         )
@@ -479,8 +480,8 @@ mod tests {
             &pool,
             &ParcelAllocation {
                 id: 1,
-                sale_trade_id: 2,
-                purchase_trade_id: 1,
+                sale_trade_id: TradeId(2),
+                purchase_trade_id: TradeId(1),
                 quantity_allocated: Decimal::from(5),
             },
         )
@@ -511,8 +512,8 @@ mod tests {
             &pool,
             &ParcelAllocation {
                 id: 1,
-                sale_trade_id: 2,
-                purchase_trade_id: 1,
+                sale_trade_id: TradeId(2),
+                purchase_trade_id: TradeId(1),
                 quantity_allocated: "10.5".parse().unwrap(),
             },
         )

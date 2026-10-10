@@ -3,6 +3,7 @@ use crate::infra::extract::{Json, Query};
 use crate::infra::http::ApiError;
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
+use crate::infra::id::TradeId;
 use axum::{Router, extract::State, routing::get};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
@@ -15,7 +16,7 @@ use sqlx::SqlitePool;
 #[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize)]
 pub struct OpenParcel {
     /// The Buy/DRP trade that created the parcel.
-    pub trade_id: i64,
+    pub trade_id: TradeId,
     pub listing_id: ListingId,
     /// The holding account the parcel sits in.
     pub holding_account_id: HoldingAccountId,
@@ -261,7 +262,7 @@ mod tests {
         pool: &SqlitePool,
         amma_id: i64,
         listing_id: ListingId,
-        trade_id: i64,
+        trade_id: TradeId,
         qty: Decimal,
         per_unit: Decimal,
     ) {
@@ -270,7 +271,7 @@ mod tests {
             .cost_base_adjustment(per_unit)
             .insert(pool)
             .await;
-        test_support::amit_adjustment(pool, amma_id, amma_id, trade_id, qty).await;
+        test_support::amit_adjustment(pool, amma_id, amma_id, trade_id.0, qty).await;
     }
 
     // DB-level tests
@@ -446,7 +447,7 @@ mod tests {
             &pool,
             1,
             ListingId(1),
-            1,
+            TradeId(1),
             Decimal::from(100),
             "0.05".parse().unwrap(),
         )
@@ -487,7 +488,7 @@ mod tests {
             &pool,
             1,
             ListingId(1),
-            1,
+            TradeId(1),
             Decimal::from(100),
             Decimal::from(11),
         )
@@ -526,7 +527,7 @@ mod tests {
             &pool,
             1,
             ListingId(1),
-            1,
+            TradeId(1),
             Decimal::from(100),
             "-0.30".parse().unwrap(),
         )
@@ -1515,11 +1516,11 @@ mod tests {
                 holding_account_id: HoldingAccountId(1),
                 allocations: vec![
                     AllocationInput {
-                        purchase_trade_id: 1,
+                        purchase_trade_id: TradeId(1),
                         quantity_allocated: dec("50"),
                     },
                     AllocationInput {
-                        purchase_trade_id: 2,
+                        purchase_trade_id: TradeId(2),
                         quantity_allocated: dec("50"),
                     },
                 ],
@@ -1532,10 +1533,10 @@ mod tests {
             let done = done.clone();
             tokio::spawn(async move {
                 for _ in 0..30 {
-                    sell::db_upsert_sell(&pool, 3, &half_of_each())
+                    sell::db_upsert_sell(&pool, TradeId(3), &half_of_each())
                         .await
                         .expect("the Sell writes");
-                    sell::db_delete_sell(&pool, 3)
+                    sell::db_delete_sell(&pool, TradeId(3))
                         .await
                         .expect("and deletes again");
                 }
@@ -1556,7 +1557,7 @@ mod tests {
                     let parcels = db_open_parcels(&pool, None)
                         .await
                         .expect("the report reads");
-                    let remaining = |trade_id: i64| {
+                    let remaining = |trade_id: TradeId| {
                         parcels
                             .iter()
                             .find(|p| p.trade_id == trade_id)
@@ -1566,15 +1567,15 @@ mod tests {
                     // both the same way: one at 50 while the other is at 100
                     // is exactly half a Sell.
                     assert_eq!(
-                        (remaining(1), remaining(2)),
-                        (remaining(1), remaining(1)),
+                        (remaining(TradeId(1)), remaining(TradeId(2))),
+                        (remaining(TradeId(1)), remaining(TradeId(1))),
                         "a read saw one parcel of a two-parcel Sell consumed \
                          without the other (SCENARIOS X-05)"
                     );
                     assert!(
-                        matches!(remaining(1), Some(q) if q == dec("100") || q == dec("50")),
+                        matches!(remaining(TradeId(1)), Some(q) if q == dec("100") || q == dec("50")),
                         "unexpected remaining quantity {:?}",
-                        remaining(1)
+                        remaining(TradeId(1))
                     );
                     reads += 1;
                 }

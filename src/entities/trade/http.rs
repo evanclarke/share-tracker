@@ -10,6 +10,7 @@ use super::{
 };
 use crate::infra::extract::{Json, Query};
 use crate::infra::http::{self, ApiError, UpsertResponse};
+use crate::infra::id::TradeId;
 use axum::{
     Router,
     extract::{Path, State},
@@ -38,7 +39,7 @@ async fn list(
 
 async fn get_one(
     State(pool): State<SqlitePool>,
-    Path(id): Path<i64>,
+    Path(id): Path<TradeId>,
 ) -> Result<Json<Trade>, ApiError> {
     db_get(&pool, id)
         .await
@@ -61,7 +62,7 @@ async fn get_one(
 /// residuals) that could shadow that chain — and editing a reinvest-created DRP
 /// through this endpoint would silently zero its residual columns (the form
 /// doesn't carry them). Reject both.
-fn trade_from_body(id: i64, body: TradeBody) -> Result<Trade, ApiError> {
+fn trade_from_body(id: TradeId, body: TradeBody) -> Result<Trade, ApiError> {
     if body.trade_type == TradeType::Sell {
         return Err(ApiError::unprocessable(
             "a Sell must be created via PUT /sells/:id so it carries its parcel allocations",
@@ -127,7 +128,7 @@ fn trade_from_body(id: i64, body: TradeBody) -> Result<Trade, ApiError> {
 
 async fn upsert(
     State(pool): State<SqlitePool>,
-    Path(id): Path<i64>,
+    Path(id): Path<TradeId>,
     Json(body): Json<TradeBody>,
 ) -> Result<UpsertResponse<Trade>, ApiError> {
     let supplied = body.settlement_date;
@@ -147,14 +148,14 @@ async fn create(
     Json(body): Json<TradeBody>,
 ) -> Result<(StatusCode, Json<Trade>), ApiError> {
     let supplied = body.settlement_date;
-    let trade = trade_from_body(0, body)?;
+    let trade = trade_from_body(TradeId(0), body)?;
     let created = db_create(&pool, &trade, supplied).await?;
     Ok((StatusCode::CREATED, Json(created.present())))
 }
 
 async fn delete(
     State(pool): State<SqlitePool>,
-    Path(id): Path<i64>,
+    Path(id): Path<TradeId>,
 ) -> Result<StatusCode, ApiError> {
     match db_delete(&pool, id).await? {
         DeleteOutcome::Deleted => Ok(StatusCode::NO_CONTENT),

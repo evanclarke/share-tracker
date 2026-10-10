@@ -38,6 +38,7 @@ use crate::infra::extract::Json;
 use crate::infra::http::{self, ApiError, CrudEntity, Upsert, UpsertResponse};
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
+use crate::infra::id::TradeId;
 use axum::{
     Router,
     extract::{Path, State},
@@ -125,7 +126,7 @@ pub struct EssStatement {
     /// read — not a stored column, ignored on write — so the web UI can offer
     /// the Vest action only on unvested rows.
     #[serde(default)]
-    pub vest_trade_id: Option<i64>,
+    pub vest_trade_id: Option<TradeId>,
 }
 
 #[derive(utoipa::ToSchema, Debug, Deserialize)]

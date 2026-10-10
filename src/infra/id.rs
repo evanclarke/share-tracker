@@ -66,6 +66,11 @@ id_type!(
     HoldingAccountId
 );
 
+id_type!(
+    /// The id of a `trades` row: a Buy or DRP parcel, or a Sell.
+    TradeId
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;

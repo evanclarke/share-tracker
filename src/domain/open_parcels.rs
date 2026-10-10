@@ -32,6 +32,7 @@
 //! read.
 
 use crate::infra::id::ListingId;
+use crate::infra::id::TradeId;
 use std::collections::HashMap;
 
 use chrono::NaiveDate;
@@ -113,7 +114,7 @@ impl UnitsConsumed {
 pub async fn db_units_sold(
     conn: &mut sqlx::SqliteConnection,
     as_of: Option<NaiveDate>,
-) -> Result<HashMap<i64, Vec<UnitsConsumed>>, sqlx::Error> {
+) -> Result<HashMap<TradeId, Vec<UnitsConsumed>>, sqlx::Error> {
     let no_provenance = crate::domain::rollover::no_provenance_sql("s");
     let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
         "SELECT pa.purchase_trade_id, pa.quantity_allocated, s.date AS sale_date, \
@@ -125,9 +126,9 @@ pub async fn db_units_sold(
     .fetch_all(&mut *conn)
     .await?;
 
-    let mut sold: HashMap<i64, Vec<UnitsConsumed>> = HashMap::new();
+    let mut sold: HashMap<TradeId, Vec<UnitsConsumed>> = HashMap::new();
     for row in &rows {
-        let purchase_trade_id: i64 = row.try_get("purchase_trade_id")?;
+        let purchase_trade_id: TradeId = row.try_get("purchase_trade_id")?;
         sold.entry(purchase_trade_id)
             .or_default()
             .push(UnitsConsumed {
@@ -251,7 +252,7 @@ pub async fn load(
 /// (TD 2000/10) before comparing it with the parcel's quantity.
 pub async fn db_parcel_sales(
     conn: &mut sqlx::SqliteConnection,
-    parcel_id: i64,
+    parcel_id: TradeId,
 ) -> Result<Vec<(NaiveDate, Decimal)>, sqlx::Error> {
     let rows = sqlx::query(
         "SELECT s.date AS sale_date, pa.quantity_allocated \
@@ -269,7 +270,7 @@ pub async fn db_parcel_sales(
 pub async fn db_sales_by_parcel(
     conn: &mut sqlx::SqliteConnection,
     listing_id: Option<ListingId>,
-) -> Result<HashMap<i64, Vec<(NaiveDate, Decimal)>>, sqlx::Error> {
+) -> Result<HashMap<TradeId, Vec<(NaiveDate, Decimal)>>, sqlx::Error> {
     let rows = sqlx::query(
         "SELECT pa.purchase_trade_id, s.date AS sale_date, pa.quantity_allocated \
          FROM parcel_allocations pa \
@@ -280,7 +281,7 @@ pub async fn db_sales_by_parcel(
     .bind(listing_id)
     .fetch_all(&mut *conn)
     .await?;
-    let mut sales: HashMap<i64, Vec<(NaiveDate, Decimal)>> = HashMap::new();
+    let mut sales: HashMap<TradeId, Vec<(NaiveDate, Decimal)>> = HashMap::new();
     for row in &rows {
         sales
             .entry(row.try_get("purchase_trade_id")?)
@@ -835,8 +836,8 @@ mod tests {
 
         let mut conn = pool.acquire().await.unwrap();
         let sold = db_units_sold(&mut conn, None).await.unwrap();
-        let dated = |sold: &HashMap<i64, Vec<UnitsConsumed>>, id: i64| {
-            sold.get(&id)
+        let dated = |sold: &HashMap<TradeId, Vec<UnitsConsumed>>, id: i64| {
+            sold.get(&TradeId(id))
                 .map(|v| v.iter().map(UnitsConsumed::dated).collect::<Vec<_>>())
         };
         assert_eq!(
@@ -847,7 +848,7 @@ mod tests {
             ])
         );
         // Both are ordinary Sells, so both are disposals.
-        assert!(sold[&1].iter().all(|c| c.disposal));
+        assert!(sold[&TradeId(1)].iter().all(|c| c.disposal));
 
         // Bounded at a date between the two sales, only the first counts.
         let sold = db_units_sold(&mut conn, Some(ymd(2024, 6, 30)))

@@ -49,6 +49,8 @@ use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
+#[cfg(test)]
+use crate::infra::id::TradeId;
 use axum::{Extension, Router, extract::State, routing::post};
 use chrono::{Months, NaiveDate};
 use rust_decimal::{Decimal, MathematicalOps};
@@ -778,8 +780,8 @@ mod tests {
         .await;
     }
 
-    async fn allocate(pool: &SqlitePool, id: i64, sale_id: i64, buy_id: i64, qty: i64) {
-        test_support::allocate(pool, id, sale_id, buy_id, Decimal::from(qty)).await;
+    async fn allocate(pool: &SqlitePool, id: i64, sale_id: i64, buy_id: TradeId, qty: i64) {
+        test_support::allocate(pool, id, sale_id, buy_id.0, Decimal::from(qty)).await;
     }
 
     /// An unfranked cash distribution (everything else zero).
@@ -942,7 +944,7 @@ mod tests {
         insert_listing(&pool, 1, "VAS", "XASX", "AUD").await;
         buy(&pool, 1, 1, d(2023, 1, 3), 100, 10).await;
         sell(&pool, 2, 1, d(2024, 1, 3), 100, 11).await;
-        allocate(&pool, 1, 2, 1, 100).await;
+        allocate(&pool, 1, 2, TradeId(1), 100).await;
 
         let rows = db_performance(&pool, &HashMap::new(), d(2024, 6, 30))
             .await
@@ -1027,7 +1029,7 @@ mod tests {
                 from_account_id: HoldingAccountId(1),
                 to_account_id: HoldingAccountId(2),
                 allocations: vec![sell_mod::AllocationInput {
-                    purchase_trade_id: 1,
+                    purchase_trade_id: TradeId(1),
                     quantity_allocated: Decimal::from(100),
                 }],
                 fee_allocations: Vec::new(),
@@ -1193,7 +1195,7 @@ mod tests {
         insert_listing(&pool, 1, "VAS", "XASX", "AUD").await;
         buy(&pool, 1, 1, d(2024, 1, 2), 100, 10).await;
         sell(&pool, 2, 1, d(2024, 6, 3), 100, 15).await;
-        allocate(&pool, 1, 2, 1, 100).await;
+        allocate(&pool, 1, 2, TradeId(1), 100).await;
         insert_income(&pool, 1, ListingId(1), d(2024, 5, 1), 50).await;
 
         // As at 31 Mar the sale and the May distribution haven't happened.

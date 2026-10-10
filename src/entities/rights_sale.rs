@@ -59,6 +59,7 @@ use crate::infra::extract::{Json, Query};
 use crate::infra::http::{self, ApiError, DryRunQuery};
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
+use crate::infra::id::TradeId;
 use axum::{
     Router,
     extract::{Path, State},
@@ -90,7 +91,7 @@ pub struct RightsSale {
 
 #[derive(utoipa::ToSchema, Debug, Clone, Serialize)]
 pub struct RightsSaleAllocation {
-    pub purchase_trade_id: i64,
+    pub purchase_trade_id: TradeId,
     pub units: Decimal,
 }
 
@@ -115,7 +116,7 @@ pub struct AllocationInput {
     /// An original Buy or DRP parcel of the issue's listing, acquired before the record
     /// date, that the sold rights are anchored to (their discount clock runs from its
     /// acquisition).
-    pub purchase_trade_id: i64,
+    pub purchase_trade_id: TradeId,
     /// Rights units anchored to that parcel (decimal string, positive, at most the
     /// entitlement its record-date units earned).
     #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]
@@ -394,7 +395,7 @@ struct Anchoring<'a> {
 async fn parcel_units_at_record_date(
     conn: &mut sqlx::SqliteConnection,
     anchoring: &Anchoring<'_>,
-    purchase_trade_id: i64,
+    purchase_trade_id: TradeId,
 ) -> Result<Decimal, SellRightsError> {
     let parcel =
         sqlx::query("SELECT trade_type, listing_id, date, quantity FROM trades WHERE id = ?")
@@ -436,7 +437,7 @@ async fn parcel_units_at_record_date(
 async fn prior_anchored_units(
     conn: &mut sqlx::SqliteConnection,
     action_id: i64,
-    purchase_trade_id: i64,
+    purchase_trade_id: TradeId,
 ) -> Result<Decimal, SellRightsError> {
     let prior: Vec<String> = sqlx::query_scalar(
         "SELECT rsa.units FROM rights_sale_allocations rsa \
@@ -467,7 +468,7 @@ async fn check_parcel_anchoring(
     anchoring: &Anchoring<'_>,
     allocations: &[AllocationInput],
 ) -> Result<(), SellRightsError> {
-    let mut in_request: HashMap<i64, Decimal> = HashMap::new();
+    let mut in_request: HashMap<TradeId, Decimal> = HashMap::new();
     for alloc in allocations {
         let at_record =
             parcel_units_at_record_date(conn, anchoring, alloc.purchase_trade_id).await?;
@@ -885,7 +886,7 @@ mod tests {
             fx_rate: None,
             holding_account_id: HoldingAccountId(1),
             allocations: vec![AllocationInput {
-                purchase_trade_id: parcel,
+                purchase_trade_id: TradeId(parcel),
                 units: units.parse().unwrap(),
             }],
         }
@@ -1063,11 +1064,11 @@ mod tests {
         let mut split = body(d(2024, 7, 20), "201", 1);
         split.allocations = vec![
             AllocationInput {
-                purchase_trade_id: 1,
+                purchase_trade_id: TradeId(1),
                 units: "200".parse().unwrap(),
             },
             AllocationInput {
-                purchase_trade_id: 1,
+                purchase_trade_id: TradeId(1),
                 units: Decimal::ONE,
             },
         ];
@@ -1081,11 +1082,11 @@ mod tests {
         let mut ok = body(d(2024, 7, 20), "250", 1);
         ok.allocations = vec![
             AllocationInput {
-                purchase_trade_id: 1,
+                purchase_trade_id: TradeId(1),
                 units: "200".parse().unwrap(),
             },
             AllocationInput {
-                purchase_trade_id: 2,
+                purchase_trade_id: TradeId(2),
                 units: "50".parse().unwrap(),
             },
         ];
@@ -1122,11 +1123,11 @@ mod tests {
         let mut split = body(d(2024, 7, 21), "100", 1);
         split.allocations = vec![
             AllocationInput {
-                purchase_trade_id: 1,
+                purchase_trade_id: TradeId(1),
                 units: "50".parse().unwrap(),
             },
             AllocationInput {
-                purchase_trade_id: 1,
+                purchase_trade_id: TradeId(1),
                 units: "50".parse().unwrap(),
             },
         ];
@@ -1291,11 +1292,11 @@ mod tests {
             .await
             .unwrap();
 
-        let parcel = trade::db_get(&pool, 1).await.unwrap().unwrap();
+        let parcel = trade::db_get(&pool, TradeId(1)).await.unwrap().unwrap();
         let err = trade::db_upsert(&pool, &parcel).await;
         assert!(matches!(err, Err(trade::UpsertError::RightsAnchorParcel)));
         assert_eq!(
-            trade::db_delete(&pool, 1).await.unwrap(),
+            trade::db_delete(&pool, TradeId(1)).await.unwrap(),
             trade::DeleteOutcome::Referenced
         );
 
@@ -1750,7 +1751,7 @@ mod tests {
                 fx_rate: None,
                 holding_account_id: HoldingAccountId(1),
                 allocations: vec![AllocationInput {
-                    purchase_trade_id: 1,
+                    purchase_trade_id: TradeId(1),
                     units: dec("250"),
                 }],
             },
@@ -1780,7 +1781,7 @@ mod tests {
                 fx_rate: Some(dec("0.62")),
                 holding_account_id: HoldingAccountId(1),
                 allocations: vec![AllocationInput {
-                    purchase_trade_id: 1,
+                    purchase_trade_id: TradeId(1),
                     units: dec("250"),
                 }],
             },
@@ -1810,7 +1811,7 @@ mod tests {
                 fx_rate: None,
                 holding_account_id: HoldingAccountId(1),
                 allocations: vec![AllocationInput {
-                    purchase_trade_id: 1,
+                    purchase_trade_id: TradeId(1),
                     units: dec("250"),
                 }],
             },

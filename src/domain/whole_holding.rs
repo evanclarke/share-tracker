@@ -39,6 +39,7 @@
 //! stranded there as any other.
 
 use crate::infra::id::ListingId;
+use crate::infra::id::TradeId;
 use chrono::NaiveDate;
 use sqlx::Row;
 
@@ -89,7 +90,7 @@ pub struct Executed {
     /// The operation date — the closing Sell's date.
     pub date: NaiveDate,
     /// The closing Sell, so the group is openable without a search.
-    pub sell_trade_id: i64,
+    pub sell_trade_id: TradeId,
 }
 
 impl Executed {

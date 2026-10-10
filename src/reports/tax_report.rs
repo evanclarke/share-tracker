@@ -54,6 +54,7 @@ use crate::infra::fx::FxRates;
 use crate::infra::http::ApiError;
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
+use crate::infra::id::TradeId;
 use crate::reports::realised_gains::DisposalSource;
 use crate::reports::{
     activity, amit_adjustment_cross_check, amit_cash_cross_check, e4_cross_check, franking_at_risk,
@@ -451,7 +452,7 @@ impl DisposalTotals {
 pub struct DisposalParcelRow {
     pub source: DisposalSource,
     pub sale_trade_id: i64,
-    pub purchase_trade_id: i64,
+    pub purchase_trade_id: TradeId,
     pub holding_account_id: HoldingAccountId,
 
     // Acquisition / traceability
@@ -623,14 +624,14 @@ pub struct DisposalsSection {
 /// Everything [`disposal_parcel_rows`] needs, read once on the caller's
 /// transaction.
 struct DisposalInputs {
-    buys: HashMap<i64, ParcelRow>,
-    trades: HashMap<i64, Trade>,
+    buys: HashMap<TradeId, ParcelRow>,
+    trades: HashMap<TradeId, Trade>,
     /// Each rights sale's `(currency, fx_rate)` — the issue's currency and the
     /// row's manual fallback rate, which is what `realised_gains` converted
     /// its proceeds at. A rights sale is not a trade, so it is not in
     /// `trades`, and the printed sell-side rate has to come from here.
     rights_sales: HashMap<i64, (String, Decimal)>,
-    amit_events: HashMap<i64, Vec<cost_base::AmitReductionEvent>>,
+    amit_events: HashMap<TradeId, Vec<cost_base::AmitReductionEvent>>,
     roc_events: HashMap<ListingId, Vec<RocEvent>>,
     split_events: HashMap<ListingId, Vec<SplitEvent>>,
     /// Each partial-rollover scrip closing Sell's cash-side apportionment
@@ -645,7 +646,7 @@ struct DisposalInputs {
     /// [`realised_gains::scrip_cash_apportionment`] helper, so the two can
     /// never disagree.
     scrip_cash: HashMap<i64, (Decimal, Decimal)>,
-    fee_sale_ids: HashSet<i64>,
+    fee_sale_ids: HashSet<TradeId>,
     fx: FxRates,
 }
 
@@ -688,7 +689,7 @@ async fn load_disposal_inputs(
     // Transfer-out Sells that fund a crypto network fee (activity's "transfer
     // network fee" qualifier) — reused here so a disposed parcel's
     // acquisition label matches the Listing Activity ledger exactly.
-    let fee_sale_ids: HashSet<i64> = sqlx::query_scalar(
+    let fee_sale_ids: HashSet<TradeId> = sqlx::query_scalar(
         "SELECT fee_sale_trade_id FROM transfers WHERE fee_sale_trade_id IS NOT NULL",
     )
     .fetch_all(&mut *conn)
@@ -778,7 +779,7 @@ fn disposal_parcel_rows(
             let buy = inputs.buys.get(&p.purchase_trade_id);
             let buy_trade = inputs.trades.get(&p.purchase_trade_id);
             let sale_trade = if disposal.source == DisposalSource::Sell {
-                inputs.trades.get(&disposal.sale_trade_id)
+                inputs.trades.get(&TradeId(disposal.sale_trade_id))
             } else {
                 None
             };
@@ -3979,7 +3980,7 @@ mod tests {
         // The September parcel sold in May 2025 at $15: $1,500 − $1,000.
         crate::entities::sell::db_upsert_sell(
             &pool,
-            50,
+            TradeId(50),
             &crate::entities::sell::SellBody {
                 brokerage_includes_gst: false,
                 statement_total: None,
@@ -4260,7 +4261,7 @@ mod tests {
                 fx_rate: None,
                 holding_account_id: HoldingAccountId(1),
                 allocations: vec![rights_sale::AllocationInput {
-                    purchase_trade_id: 1,
+                    purchase_trade_id: TradeId(1),
                     units: dec("250"),
                 }],
             },
@@ -5594,7 +5595,7 @@ mod tests {
     #[test]
     fn a_failed_disposal_conversion_propagates_instead_of_a_parity_row() {
         let parcel = ParcelRow {
-            id: 1,
+            id: TradeId(1),
             listing_id: ListingId(1),
             holding_account_id: HoldingAccountId(1),
             date: ymd(2026, 1, 5),
@@ -5613,7 +5614,7 @@ mod tests {
             registered_from: None,
         };
         let inputs = DisposalInputs {
-            buys: HashMap::from([(1, parcel)]),
+            buys: HashMap::from([(TradeId(1), parcel)]),
             trades: HashMap::new(),
             rights_sales: HashMap::new(),
             amit_events: HashMap::new(),
@@ -5644,7 +5645,7 @@ mod tests {
             non_discountable_gain: dec("1000"),
             capital_loss: Decimal::ZERO,
             parcels: vec![realised_gains::ParcelDetail {
-                purchase_trade_id: 1,
+                purchase_trade_id: TradeId(1),
                 acquisition_date: ymd(2026, 1, 5),
                 units: dec("100"),
                 cost_base: dec("1000"),

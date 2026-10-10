@@ -40,6 +40,7 @@ use crate::infra::extract::Json;
 use crate::infra::http::ApiError;
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
+use crate::infra::id::TradeId;
 use axum::{Router, extract::State, routing::get};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
@@ -86,7 +87,7 @@ pub fn router() -> Router<SqlitePool> {
 
 /// One AMMA statement's adjustment rows, joined to the adjusted parcel.
 struct AdjustmentRow {
-    trade_id: i64,
+    trade_id: TradeId,
     quantity: Decimal,
     trade_date: NaiveDate,
     trade_quantity: Decimal,
@@ -107,7 +108,7 @@ struct AdjustmentRow {
     /// the operation's closing Sell, which is recorded against the *source*
     /// parcel, so a replacement looked at on its own shows no disposal at all
     /// (SCENARIOS Z-g).
-    rollover_sources: Vec<i64>,
+    rollover_sources: Vec<TradeId>,
 }
 
 /// The statement's own figures the checks compare against.
@@ -148,9 +149,9 @@ pub async fn db_amit_adjustment_alerts(
     .await?;
     // The rollover chain behind each adjusted replacement parcel, on the same
     // read transaction as everything else.
-    let mut rollover_sources: HashMap<i64, Vec<i64>> = HashMap::new();
+    let mut rollover_sources: HashMap<TradeId, Vec<TradeId>> = HashMap::new();
     for row in &adjustment_rows {
-        let trade_id: i64 = row.try_get("trade_id")?;
+        let trade_id: TradeId = row.try_get("trade_id")?;
         if row.try_get("rollover_replacement")?
             && let std::collections::hash_map::Entry::Vacant(slot) =
                 rollover_sources.entry(trade_id)
@@ -203,7 +204,7 @@ pub async fn db_amit_adjustment_alerts(
                 trade_quantity: row_dec(row, "trade_quantity")?,
                 rollover_replacement: row.try_get("rollover_replacement")?,
                 rollover_sources: rollover_sources
-                    .get(&row.try_get::<i64, _>("trade_id")?)
+                    .get(&row.try_get::<TradeId, _>("trade_id")?)
                     .cloned()
                     .unwrap_or_default(),
             });
@@ -287,14 +288,14 @@ pub async fn db_amit_adjustment_alerts(
 fn disposed_between(
     adjustments: &[AdjustmentRow],
     splits: &[SplitEvent],
-    sold: &HashMap<i64, Vec<open_parcels::UnitsConsumed>>,
+    sold: &HashMap<TradeId, Vec<open_parcels::UnitsConsumed>>,
     from: NaiveDate,
     to: NaiveDate,
 ) -> Decimal {
     // By parcel, not by row: a parcel adjusted twice (pre-0022 data, flagged
     // separately below) must not have its disposals counted twice into the
     // allowance, which would mask the very over-coverage it is.
-    let parcels: std::collections::BTreeSet<i64> = adjustments
+    let parcels: std::collections::BTreeSet<TradeId> = adjustments
         .iter()
         .flat_map(|a| std::iter::once(a.trade_id).chain(a.rollover_sources.iter().copied()))
         .collect();
@@ -310,7 +311,7 @@ fn disposed_between(
 fn problems_for(
     adjustments: &[AdjustmentRow],
     splits: &[SplitEvent],
-    sold: &HashMap<i64, Vec<open_parcels::UnitsConsumed>>,
+    sold: &HashMap<TradeId, Vec<open_parcels::UnitsConsumed>>,
     facts: &StatementFacts,
 ) -> Vec<String> {
     let &StatementFacts {
@@ -379,11 +380,11 @@ fn problems_for(
     // only ever fires on rows entered before it — kept because the report's
     // job is to describe the data as it is, not as the current writer would
     // allow it.
-    let mut seen: HashMap<i64, i64> = HashMap::new();
+    let mut seen: HashMap<TradeId, i64> = HashMap::new();
     for a in adjustments {
         *seen.entry(a.trade_id).or_insert(0) += 1;
     }
-    let mut duplicates: Vec<(i64, i64)> = seen.into_iter().filter(|&(_, n)| n > 1).collect();
+    let mut duplicates: Vec<(TradeId, i64)> = seen.into_iter().filter(|&(_, n)| n > 1).collect();
     duplicates.sort_unstable();
     for (trade_id, count) in duplicates {
         problems.push(format!(
@@ -552,7 +553,7 @@ mod tests {
     /// account 2 on `date`, as transfer #1.
     async fn transfer_all(
         pool: &SqlitePool,
-        purchase_trade_id: i64,
+        purchase_trade_id: TradeId,
         date: NaiveDate,
         qty: Decimal,
     ) {
@@ -1166,7 +1167,7 @@ mod tests {
             .await;
         amma(&pool, 1, ListingId(1), ymd(2024, 6, 30), "1000").await;
         second_account(&pool).await;
-        transfer_all(&pool, 1, ymd(2024, 8, 15), dec("1000")).await;
+        transfer_all(&pool, TradeId(1), ymd(2024, 8, 15), dec("1000")).await;
 
         crate::entities::amit_adjustment_generation::db_generate(
             &pool,
@@ -1198,7 +1199,7 @@ mod tests {
             .await;
         amma(&pool, 1, ListingId(1), ymd(2024, 6, 30), "0").await;
         second_account(&pool).await;
-        transfer_all(&pool, 1, ymd(2024, 3, 15), dec("1000")).await;
+        transfer_all(&pool, TradeId(1), ymd(2024, 3, 15), dec("1000")).await;
 
         let replacement: i64 = sqlx::query_scalar(
             "SELECT id FROM trades WHERE transfer_id = 1 AND trade_type = 'Buy'",
@@ -1305,7 +1306,7 @@ mod tests {
             .id;
         // The final statement: nil units held at 30 June, arriving in spring.
         amma(&pool, 1, ListingId(1), ymd(2024, 6, 30), "0").await;
-        test_support::amit_adjustment(&pool, 1, 1, replacement, dec("1000")).await;
+        test_support::amit_adjustment(&pool, 1, 1, replacement.0, dec("1000")).await;
 
         assert!(
             db_amit_adjustment_alerts(&pool).await.unwrap().is_empty(),
