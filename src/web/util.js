@@ -889,6 +889,14 @@ const TABLE_LABEL_SOURCES = {
     api: '/amma_statements', needs: ['listings'],
     label: function (a, maps) { return listingNameFromMap(maps.listings)(a.listing_id) + ' FY' + a.tax_year_end_date; },
   },
+  income: {
+    api: '/income', needs: ['listings'],
+    label: function (i, maps) { return listingNameFromMap(maps.listings)(i.listing_id) + ' paid ' + i.date_paid; },
+  },
+  ess: {
+    api: '/ess_statements', needs: ['listings'],
+    label: function (e, maps) { return listingNameFromMap(maps.listings)(e.listing_id) + ' taxing point ' + e.taxing_point_date; },
+  },
 };
 
 // Which source names each foreign-key id column. Drives table-cell naming
@@ -902,7 +910,8 @@ const FK_COLUMN_SOURCES = {
   from_account_id: 'holdingAccounts', to_account_id: 'holdingAccounts',
   trade_id: 'trades', sale_trade_id: 'trades', purchase_trade_id: 'trades',
   reinvestment_trade_id: 'trades', vest_trade_id: 'trades',
-  amma_statement_id: 'amma',
+  buy_trade_id: 'trades', sell_trade_id: 'trades',
+  amma_statement_id: 'amma', income_id: 'income', ess_statement_id: 'ess',
 };
 
 // id → "MIC:TICKER" resolver over a prebuilt listings map; unknown/null id
@@ -938,12 +947,25 @@ export async function fkLabelMaps(specs) {
 // — so the same map that gives a cell its label (FK_COLUMN_SOURCES above)
 // also gives it its link, and a column naming a listing links into that
 // listing's own activity ledger wherever it appears, `listing_id` and
-// `scrip_listing_id`/`demerger_listing_id` alike. A source with no screen
-// worth landing on (an account, a trade, a statement) is deliberately absent
-// and its cells stay plain text.
+// `scrip_listing_id`/`demerger_listing_id` alike, and a trade, statement or
+// distribution opens that record's own edit form — a trade through
+// `#/record/`, which sends a Sell to the Sells screen with its allocations
+// rather than the Buy-only trades form. An account has no screen worth
+// landing on, so it is deliberately absent and its cells stay plain text.
 const FK_LINK_ROUTES = {
   listings: function (id) { return '#/r/activity/' + id; },
+  trades: function (id) { return '#/record/trade_id/' + id; },
+  amma: function (id) { return '#/e/amma_statements/edit/' + id; },
+  income: function (id) { return '#/e/income/edit/' + id; },
+  ess: function (id) { return '#/e/ess_statements/edit/' + id; },
 };
+
+// The record route for a source FK_LINK_ROUTES knows, for a screen that names
+// its record some other way than an FK column (config.js's per-report maps).
+export function recordHref(source, id) {
+  const route = FK_LINK_ROUTES[source];
+  return route && id != null && id !== '' ? route(id) : null;
+}
 
 // The same drill-down for a table that shows a *composed* listing name
 // instead of a raw foreign-key cell — the Closing Prices screen's "listing"

@@ -16,7 +16,7 @@ import assert from 'node:assert/strict';
 import {
   roundDecimalStr, groupThousands, padMinDp, decStrEq, numericDisplay,
   addDecimalStrings, decParts, decCompare, mulToCents, frankingCreditFor, decEq,
-  looksNumeric, columnKinds, columnLabel, columnLinks, listingLinkFrom, defaultSortColumn,
+  looksNumeric, columnKinds, columnLabel, columnLinks, recordHref, listingLinkFrom, defaultSortColumn,
   tableViewCache, debounce,
   tradeOrigin,
   periodReturnPct,
@@ -277,11 +277,32 @@ test('columnLinks: every column naming a listing drills into its activity ledger
 });
 
 test('columnLinks: a column naming no linkable source gets no link at all', () => {
-  // An account or a trade has no screen worth landing on, and a plain data
-  // column is not a foreign key — absent, not a function returning null, so
+  // An account has no screen worth landing on, and a plain data column is
+  // not a foreign key — absent, not a function returning null, so
   // filterableTable renders the cell exactly as it did before.
-  const links = columnLinks(['holding_account_id', 'sale_trade_id', 'quantity', 'ticker']);
+  const links = columnLinks(['holding_account_id', 'quantity', 'ticker']);
   assert.deepEqual(links, {});
+});
+
+test('columnLinks: a trade, statement or distribution opens its own record', () => {
+  // Every trade column — the realised-gains sale and parcel, the wash-sale
+  // pair, a rollover's closing Sell — goes through #/record/, which sends a
+  // Sell to the Sells screen rather than the Buy-only trades form.
+  const tradeCols = ['trade_id', 'sale_trade_id', 'purchase_trade_id', 'reinvestment_trade_id',
+    'vest_trade_id', 'buy_trade_id', 'sell_trade_id'];
+  const links = columnLinks(tradeCols.concat(['amma_statement_id', 'income_id', 'ess_statement_id']));
+  for (const c of tradeCols) assert.equal(links[c]({ [c]: 4 }), '#/record/trade_id/4', c);
+  assert.equal(links.amma_statement_id({ amma_statement_id: 2 }), '#/e/amma_statements/edit/2');
+  assert.equal(links.income_id({ income_id: 9 }), '#/e/income/edit/9');
+  assert.equal(links.ess_statement_id({ ess_statement_id: 3 }), '#/e/ess_statements/edit/3');
+  assert.equal(links.sale_trade_id({ sale_trade_id: null }), null);
+});
+
+test('recordHref: the same routes, for a screen naming its record another way', () => {
+  assert.equal(recordHref('trades', 5), '#/record/trade_id/5');
+  assert.equal(recordHref('income', 1), '#/e/income/edit/1');
+  assert.equal(recordHref('trades', null), null);
+  assert.equal(recordHref('holdingAccounts', 1), null);
 });
 
 test('columnLinks: a null or blank id links nowhere', () => {

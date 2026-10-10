@@ -3235,12 +3235,43 @@ mod tests {
             );
         }
         assert!(config.contains("links: { event: activityRecordHref }"));
-        // A Sell opens on the Sells screen, via the owner-record resolver.
-        assert!(map.contains("'#/record/trade_id/' + id"));
+        // A Sell opens on the Sells screen, via the shared trade route (the
+        // owner-record resolver, pinned in the FX Coverage test below).
+        assert!(map.contains("trades: function (id) { return recordHref('trades', id); },"));
         // The link is handed the response so a rename can name its listing.
         let js = app_js_body().await;
         assert!(js.contains("links: t.links || report.links"));
         assert!(js.contains("return cfg.links[c](row, cfg.context);"));
+    }
+
+    /// The two cross-checks that name their record in something other than an
+    /// FK column link it all the same. FX Coverage's `record` is the report's
+    /// own label, so every label `reports::fx_coverage` can answer (its
+    /// `SOURCES`) has a route in config.js's map; Rollover Consistency's Kind
+    /// cell opens the operation its `group_id` names.
+    #[tokio::test]
+    async fn fx_coverage_and_rollover_rows_link_to_their_records() {
+        let config = body_string(get("/static/config.js").await).await;
+        let start = config
+            .find("const FX_COVERAGE_RECORD_ROUTES = {")
+            .expect("the FX Coverage record route map");
+        let map = &config[start..start + config[start..].find("\n};").unwrap()];
+        for (record, _) in crate::reports::fx_coverage::SOURCES {
+            assert!(
+                map.contains(&format!("\n  '{record}': function")),
+                "no FX Coverage route for record {record}"
+            );
+        }
+        assert!(config.contains("links: { record: fxCoverageRecordHref }"));
+        assert!(config.contains("links: { kind: rolloverOperationHref }"));
+        assert!(config.contains(
+            "row.kind === 'Transfer' ? '#/transfers' : '#/e/corporate_actions/edit/' + row.group_id"
+        ));
+        // The rollover's own closing Sell links by its column name, like
+        // every other trade cell.
+        let js = app_js_body().await;
+        assert!(js.contains("buy_trade_id: 'trades', sell_trade_id: 'trades',"));
+        assert!(js.contains("trades: function (id) { return '#/record/trade_id/' + id; },"));
     }
 
     #[tokio::test]

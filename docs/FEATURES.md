@@ -363,6 +363,7 @@ What it puts on screen:
 - a closing-price history screen with re-fetch and backfill actions
 - a snapshots maintenance screen with generate/regenerate and bulk regenerate-all (date-ranged, defaulting to the whole history) / regenerate-provisional actions
 - a listing name in any table — report, entity list, or nested breakdown row — linking straight into that listing's activity ledger
+- a trade, statement or distribution named in any table (and each Listing Activity, FX Coverage and Rollover Consistency row) linking straight to that record's own edit screen — a Sell on the Sells screen
 - every table opening newest-first on its own date column (the activity ledger included: ties reverse with the sort, so its running units-held balance still steps down the page)
 - an inline-SVG time-series graph on the Portfolio Overview screen with date-range presets (stale points hollow, provisional points dash-ringed, carried-forward-price points amber-ringed) and a period-performance summary
 - a view for each report, and a printable Annual Tax Report view (plain semantic tables, not the shared filterable/paginated table — a print document has no business with a filter row or a pager) with a Print / Save as PDF button

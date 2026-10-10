@@ -6,7 +6,7 @@
 // list/form/report/action code does the rest. Adding or changing an entity,
 // report, or action means editing the matching entry here, not adding views.
 //
-import { describeTrade, tradeOrigin, apiUrl, confirmGeneratedAdjustments, fmtLocalTimestamp } from './util.js';
+import { describeTrade, tradeOrigin, apiUrl, confirmGeneratedAdjustments, fmtLocalTimestamp, recordHref } from './util.js';
 import { txt, dec, int, dt, bool, sel, fk, wireGstBrokerage, wireIncomeEntry, wireAmmaEntry } from './forms.js';
 
 // Top menu bar order (nav.js's navModel groups ENTITIES/REPORTS by their
@@ -486,17 +486,17 @@ function ownerRecordHref(row) {
 
 // The Listing Activity ledger's Event cell opens the record the row was read
 // from (`record_table`/`record_id`), on the screen that edits it. A trade goes
-// through `#/record/` so a Sell lands on the Sells screen with its
-// allocations; a transfer and a rights sale have no edit form (both are
-// deleted and re-run), so they open their list; a rename opens the listing's
-// rename chain, named by the response's own `listing_id`.
+// through util.js's `recordHref` (`#/record/`) so a Sell lands on the Sells
+// screen with its allocations; a transfer and a rights sale have no edit form
+// (both are deleted and re-run), so they open their list; a rename opens the
+// listing's rename chain, named by the response's own `listing_id`.
 const ACTIVITY_RECORD_ROUTES = {
-  trades: function (id) { return '#/record/trade_id/' + id; },
+  trades: function (id) { return recordHref('trades', id); },
   transfers: function () { return '#/transfers'; },
-  income: function (id) { return '#/e/income/edit/' + id; },
+  income: function (id) { return recordHref('income', id); },
   corporate_actions: function (id) { return '#/e/corporate_actions/edit/' + id; },
-  amma_statements: function (id) { return '#/e/amma_statements/edit/' + id; },
-  ess_statements: function (id) { return '#/e/ess_statements/edit/' + id; },
+  amma_statements: function (id) { return recordHref('amma', id); },
+  ess_statements: function (id) { return recordHref('ess', id); },
   rights_sales: function () { return '#/e/rights_sales'; },
   drp_enrolments: function (id) { return '#/e/drp_enrolments/edit/' + id; },
   investment_expenses: function (id) { return '#/e/investment_expenses/edit/' + id; },
@@ -506,6 +506,33 @@ const ACTIVITY_RECORD_ROUTES = {
 function activityRecordHref(row, response) {
   const route = ACTIVITY_RECORD_ROUTES[row.record_table];
   return route ? route(row.record_id, response) : null;
+}
+
+// FX Coverage names each flagged amount's record in prose (`record`, the
+// report's own wording) beside its `record_id`; the Record cell opens it.
+// A return of capital is a corporate action; a rights sale has no edit form.
+const FX_COVERAGE_RECORD_ROUTES = {
+  'trade': function (id) { return recordHref('trades', id); },
+  'income': function (id) { return recordHref('income', id); },
+  'AMMA statement': function (id) { return recordHref('amma', id); },
+  'ESS statement': function (id) { return recordHref('ess', id); },
+  'interest income': function (id) { return '#/e/interest_income/edit/' + id; },
+  'investment expense': function (id) { return '#/e/investment_expenses/edit/' + id; },
+  'return of capital': function (id) { return '#/e/corporate_actions/edit/' + id; },
+  'rights sale': function () { return '#/e/rights_sales'; },
+};
+
+function fxCoverageRecordHref(row) {
+  const route = FX_COVERAGE_RECORD_ROUTES[row.record];
+  return route ? route(row.record_id) : null;
+}
+
+// Rollover Consistency's Kind cell opens the operation a flagged group hangs
+// off (`group_id`): a transfer has no edit form, so the transfers list; the
+// other three are corporate actions. The fix the report prescribes — delete
+// the operation and run it again — starts from there.
+function rolloverOperationHref(row) {
+  return row.kind === 'Transfer' ? '#/transfers' : '#/e/corporate_actions/edit/' + row.group_id;
 }
 
 export const REPORTS = [
@@ -679,7 +706,7 @@ export const REPORTS = [
     desc: 'A printable, archivable tax document for one financial year — trading gains/losses with a full cost-base breakdown, the ATO gain/loss worksheet, income by category, and a data-completeness check. Print or Save as PDF to archive it.',
   },
   { slug: 'exchange-mic-validation', title: 'Exchange MIC Validation', api: '/reports/exchange_mic_validation', method: 'GET', statusField: 'registry_status', menu: 'Reports', section: 'Cross-checks & alerts', desc: 'Curated exchanges checked against the ISO MIC registry.' },
-  { slug: 'fx-coverage', title: 'FX Coverage', api: '/reports/fx_coverage', method: 'GET', statusField: 'kind', menu: 'Reports', section: 'Cross-checks & alerts', desc: 'Amounts whose ATO monthly rate has not been imported (and what each currently converts at), plus the two documented FX simplifications where they actually bite: a settlement window crossing a rate month (CGT event K10/K11) and a cost-base reduction converted at the parcel acquisition month.' },
+  { slug: 'fx-coverage', title: 'FX Coverage', api: '/reports/fx_coverage', method: 'GET', statusField: 'kind', menu: 'Reports', section: 'Cross-checks & alerts', desc: 'Amounts whose ATO monthly rate has not been imported (and what each currently converts at), plus the two documented FX simplifications where they actually bite: a settlement window crossing a rate month (CGT event K10/K11) and a cost-base reduction converted at the parcel acquisition month. Click a Record to open it.', links: { record: fxCoverageRecordHref } },
   { slug: 'settlement-holiday-coverage', title: 'Settlement Holiday Coverage', api: '/reports/settlement_holiday_coverage', method: 'GET', statusField: 'coverage_status', menu: 'Reports', section: 'Cross-checks & alerts', desc: 'Settlement dates worth a second look, on two independent questions: the trade\u2019s settlement window falls outside the seeded exchange-holiday calendars (so the date was computed skipping weekends only), or the stored settlement date is not a trading day on the listing\u2019s own calendar \u2014 a hand-entered weekend or public holiday. A row can carry both; neither is refused at write time, so a flagged trade stays editable.' },
   { slug: 'e4-cross-check', title: 'Tax-Deferred E4 Cross-Check', api: '/reports/e4_cross_check', method: 'GET', menu: 'Reports', section: 'Cross-checks & alerts', desc: 'Trust income rows whose statement reported a tax-deferred amount (a CGT event E4 cost-base reduction) with no Return of capital corporate action on the listing in the same financial year — enter the action to clear a row.' },
   {
@@ -692,7 +719,7 @@ export const REPORTS = [
     ],
   },
   { slug: 'amit-adjustment-cross-check', title: 'AMIT Adjustment Cross-Check', api: '/reports/amit_adjustment_cross_check', method: 'GET', menu: 'Reports', section: 'Cross-checks & alerts', desc: 'AMMA statements whose per-parcel AMIT adjustments don’t reconcile to the statement: none entered at all, adjusted units outside the band the year allows — the units held at its end, plus the units disposed of during it, so a statement for the year a holding was sold reconciles rather than reading as excess coverage (split-aware) — the same parcel adjusted twice, a parcel that cannot have been held in the statement’s year, or the statement’s own units held disagreeing with the units actually open on its holding account at the year end — the one a set that reconciled when it was generated cannot notice, since entering a Buy dated before the year end moves the parcels while the statement and its set stand still. A missed parcel overstates its cost base; a duplicated one over-reduces it, and CGT event E10’s nil floor can turn that into a capital gain that was never made. Generate adjustments from the statement’s row to clear a row.' },
-  { slug: 'rollover-consistency', title: 'Rollover Consistency', api: '/reports/rollover_consistency', method: 'GET', menu: 'Reports', section: 'Cross-checks & alerts', desc: 'Parcel-substituting operations whose recorded picture no longer holds, in two ways. A transfer, scrip-for-scrip exchange or demerger writes the cost base (and units) its replacement parcels carry as a stored value, computed when it ran — so editing a source parcel, or correcting an AMMA statement behind it, moves the parcels the reports still walk while the frozen replacement figures stay put, and the same holding reports a different cost base depending on the order things were entered. Separately, a scrip-for-scrip exchange, demerger or worthless-shares recognise consumes every open parcel of its listing as a matter of law, so a parcel still open at the operation’s date is units it could never reach — entered after the operation ran and dated on or before it. Each row names what the operation carried, what the units it consumed are worth now and the difference, or the parcel left behind and what it still holds; the fix either way is to delete that operation and run it again. A partial-rollover scrip exchange (one with a cash component) has its stored figures listed as not checked, because how much of each cost base went to the cash side is the exchange’s own apportionment. An empty report means every rollover still reconciles and every whole-holding operation took the whole holding.' },
+  { slug: 'rollover-consistency', title: 'Rollover Consistency', api: '/reports/rollover_consistency', method: 'GET', menu: 'Reports', section: 'Cross-checks & alerts', desc: 'Parcel-substituting operations whose recorded picture no longer holds, in two ways. A transfer, scrip-for-scrip exchange or demerger writes the cost base (and units) its replacement parcels carry as a stored value, computed when it ran — so editing a source parcel, or correcting an AMMA statement behind it, moves the parcels the reports still walk while the frozen replacement figures stay put, and the same holding reports a different cost base depending on the order things were entered. Separately, a scrip-for-scrip exchange, demerger or worthless-shares recognise consumes every open parcel of its listing as a matter of law, so a parcel still open at the operation’s date is units it could never reach — entered after the operation ran and dated on or before it. Each row names what the operation carried, what the units it consumed are worth now and the difference, or the parcel left behind and what it still holds; the fix either way is to delete that operation and run it again — click a row’s Kind to open it. A partial-rollover scrip exchange (one with a cash component) has its stored figures listed as not checked, because how much of each cost base went to the cash side is the exchange’s own apportionment. An empty report means every rollover still reconciles and every whole-holding operation took the whole holding.', links: { kind: rolloverOperationHref } },
   { slug: 'amit-cash-cross-check', title: 'AMIT Cash Cross-Check', api: '/reports/amit_cash_cross_check', method: 'GET', menu: 'Reports', section: 'Cross-checks & alerts', desc: 'Financial years with AMIT cash distribution rows but no AMMA statement covering the year, per holding account — a registry issues one statement per holder account, so a fund held in two accounts needs two. AMIT cash rows fund DRP reinvestment only — the AMMA attribution is the assessable record the Tax Summary reports — so a missing AMMA would silently drop the year’s income from the return. Enter that account’s AMMA statement to clear a row; an AMMA year with no cash rows is fine.' },
   {
     slug: 'wash-sales', title: 'Wash Sales', api: '/reports/wash_sales', method: 'GET',

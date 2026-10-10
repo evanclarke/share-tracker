@@ -96,6 +96,73 @@ fn month_of(date: NaiveDate) -> String {
     format!("{:04}-{:02}", date.year(), date.month())
 }
 
+/// `(label, SQL)` — each yields id, listing_id, ticker, date, currency, and
+/// the record's fallback columns (NULL where the record has none). The label
+/// is the alert's `record`, which the web UI's FX Coverage screen also keys
+/// its link to the record on (config.js's `FX_COVERAGE_RECORD_ROUTES`).
+pub(crate) const SOURCES: [(&str, &str); 8] = [
+    (
+        "trade",
+        "SELECT t.id, t.listing_id, l.ticker, t.date, t.currency, t.fx_rate AS fallback, \
+                t.spot_fx_rate AS spot \
+         FROM trades t JOIN listings l ON l.id = t.listing_id WHERE t.currency <> 'AUD'",
+    ),
+    (
+        "income",
+        "SELECT i.id, i.listing_id, l.ticker, i.date_paid AS date, i.currency, \
+                NULL AS fallback, NULL AS spot \
+         FROM income i JOIN listings l ON l.id = i.listing_id WHERE i.currency <> 'AUD'",
+    ),
+    (
+        "AMMA statement",
+        "SELECT a.id, a.listing_id, l.ticker, a.tax_year_end_date AS date, a.currency, \
+                NULL AS fallback, NULL AS spot \
+         FROM amma_statements a JOIN listings l ON l.id = a.listing_id \
+         WHERE a.currency <> 'AUD'",
+    ),
+    (
+        "ESS statement",
+        "SELECT e.id, e.listing_id, l.ticker, e.taxing_point_date AS date, e.currency, \
+                e.fx_rate AS fallback, NULL AS spot \
+         FROM ess_statements e JOIN listings l ON l.id = e.listing_id \
+         WHERE e.currency <> 'AUD'",
+    ),
+    (
+        "interest income",
+        "SELECT id, NULL AS listing_id, NULL AS ticker, date_paid AS date, currency, \
+                NULL AS fallback, NULL AS spot \
+         FROM interest_income WHERE currency <> 'AUD'",
+    ),
+    (
+        "investment expense",
+        "SELECT e.id, e.listing_id, l.ticker, e.date_incurred AS date, e.currency, \
+                NULL AS fallback, NULL AS spot \
+         FROM investment_expenses e LEFT JOIN listings l ON l.id = e.listing_id \
+         WHERE e.currency <> 'AUD'",
+    ),
+    (
+        "return of capital",
+        "SELECT c.id, c.listing_id, l.ticker, c.date, c.currency, \
+                NULL AS fallback, NULL AS spot \
+         FROM corporate_actions c JOIN listings l ON l.id = c.listing_id \
+         WHERE c.action_type = 'ReturnOfCapital' AND c.currency IS NOT NULL \
+           AND c.currency <> 'AUD'",
+    ),
+    // Both legs of a rights sale — proceeds and rights cost — convert at
+    // the *sale* month in the issue's currency, with the row's own
+    // `fx_rate` as the manual fallback (`reports::realised_gains`), so a
+    // missing month rests on that stored rate like a trade's does.
+    (
+        "rights sale",
+        "SELECT rs.id, ca.listing_id, l.ticker, rs.date, ca.currency, \
+                rs.fx_rate AS fallback, NULL AS spot \
+         FROM rights_sales rs \
+         JOIN corporate_actions ca ON ca.id = rs.rights_action_id \
+         JOIN listings l ON l.id = ca.listing_id \
+         WHERE ca.currency <> 'AUD'",
+    ),
+];
+
 /// Every non-AUD amount that converts, with the date whose month anchors it
 /// and whatever fallback its own row carries.
 ///
@@ -109,71 +176,7 @@ async fn load_convertibles(
     conn: &mut sqlx::SqliteConnection,
 ) -> Result<Vec<Convertible>, sqlx::Error> {
     let mut out = Vec::new();
-    // (label, SQL) — each yields id, listing_id, ticker, date, currency, and
-    // the record's fallback columns (NULL where the record has none).
-    let sources: [(&'static str, &'static str); 8] = [
-        (
-            "trade",
-            "SELECT t.id, t.listing_id, l.ticker, t.date, t.currency, t.fx_rate AS fallback, \
-                    t.spot_fx_rate AS spot \
-             FROM trades t JOIN listings l ON l.id = t.listing_id WHERE t.currency <> 'AUD'",
-        ),
-        (
-            "income",
-            "SELECT i.id, i.listing_id, l.ticker, i.date_paid AS date, i.currency, \
-                    NULL AS fallback, NULL AS spot \
-             FROM income i JOIN listings l ON l.id = i.listing_id WHERE i.currency <> 'AUD'",
-        ),
-        (
-            "AMMA statement",
-            "SELECT a.id, a.listing_id, l.ticker, a.tax_year_end_date AS date, a.currency, \
-                    NULL AS fallback, NULL AS spot \
-             FROM amma_statements a JOIN listings l ON l.id = a.listing_id \
-             WHERE a.currency <> 'AUD'",
-        ),
-        (
-            "ESS statement",
-            "SELECT e.id, e.listing_id, l.ticker, e.taxing_point_date AS date, e.currency, \
-                    e.fx_rate AS fallback, NULL AS spot \
-             FROM ess_statements e JOIN listings l ON l.id = e.listing_id \
-             WHERE e.currency <> 'AUD'",
-        ),
-        (
-            "interest income",
-            "SELECT id, NULL AS listing_id, NULL AS ticker, date_paid AS date, currency, \
-                    NULL AS fallback, NULL AS spot \
-             FROM interest_income WHERE currency <> 'AUD'",
-        ),
-        (
-            "investment expense",
-            "SELECT e.id, e.listing_id, l.ticker, e.date_incurred AS date, e.currency, \
-                    NULL AS fallback, NULL AS spot \
-             FROM investment_expenses e LEFT JOIN listings l ON l.id = e.listing_id \
-             WHERE e.currency <> 'AUD'",
-        ),
-        (
-            "return of capital",
-            "SELECT c.id, c.listing_id, l.ticker, c.date, c.currency, \
-                    NULL AS fallback, NULL AS spot \
-             FROM corporate_actions c JOIN listings l ON l.id = c.listing_id \
-             WHERE c.action_type = 'ReturnOfCapital' AND c.currency IS NOT NULL \
-               AND c.currency <> 'AUD'",
-        ),
-        // Both legs of a rights sale — proceeds and rights cost — convert at
-        // the *sale* month in the issue's currency, with the row's own
-        // `fx_rate` as the manual fallback (`reports::realised_gains`), so a
-        // missing month rests on that stored rate like a trade's does.
-        (
-            "rights sale",
-            "SELECT rs.id, ca.listing_id, l.ticker, rs.date, ca.currency, \
-                    rs.fx_rate AS fallback, NULL AS spot \
-             FROM rights_sales rs \
-             JOIN corporate_actions ca ON ca.id = rs.rights_action_id \
-             JOIN listings l ON l.id = ca.listing_id \
-             WHERE ca.currency <> 'AUD'",
-        ),
-    ];
-    for (record, sql) in sources {
+    for (record, sql) in SOURCES {
         let rows = sqlx::query(sql).fetch_all(&mut *conn).await?;
         for row in &rows {
             let fallback: Option<String> = row.try_get("fallback")?;
