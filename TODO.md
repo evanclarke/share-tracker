@@ -183,15 +183,22 @@ Scored 6/10 — the weakest dimension. The operation modules are well factored, 
   policy, the upsert and delete guards read the row's one column via `provenance_column_sql`
   (so `every_trades_foreign_key_is_classified` makes a new link choose both), and the listing- and
   account-change freezes share `drawn_on`; the existing refusal tests pass unchanged
-- [ ] NEEDS DECISION (owner): replace source-scanning conventions with compile-time ones where the
+- [x] DECIDED 2026-10-10 (owner: all four): replace source-scanning conventions with compile-time ones where the
   type system can carry them — `utoipa-axum` (`#[utoipa::path]`/`OpenApiRouter`) instead of the
   hand-kept `ROUTES` table and its ~3,700 lines of Rust-parsing tests; a `ReadPool`/`WritePool` split
   instead of the deferred-`BEGIN` text scan; a `Currency` type instead of `String` + `== "AUD"`;
   id newtypes (`ListingId`, `TradeId`, …) instead of bare `i64`. Each is a large mechanical change —
   decide which (if any) are worth it
-- [ ] NEEDS DECISION (owner): prune `doc_checks.rs` phrase pins (~150 tests asserting exact prose,
+  - [ ] `Currency` type in place of `String` + `== "AUD"` (do first: financial-correctness value)
+  - [ ] `ReadPool`/`WritePool` split, retiring the deferred-`BEGIN` text scan
+  - [ ] Id newtypes (`ListingId`, `TradeId`, …) in place of bare `i64`
+  - [ ] `utoipa-axum` (`#[utoipa::path]`/`OpenApiRouter`) in place of the `ROUTES` table and its
+    Rust-parsing tests
+- [x] DECIDED 2026-10-10 (owner): keep them — N/A. prune `doc_checks.rs` phrase pins (~150 tests asserting exact prose,
   which break on rewording without protecting behaviour) down to the structural checks (link
   resolution, advisory-ignore expiry, QC headers)
+  The pins are the passing test CLAUDE.md requires before a doc-only TODO item can be checked off;
+  rewording costs a test edit, which is the intended friction
 
 ## Test-suite gaps (2026-10-10 review, tests)
 - [ ] Add `proptest` for the invariants the suite currently pins with hand-picked cases: cost-base
