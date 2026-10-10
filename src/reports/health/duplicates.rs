@@ -8,6 +8,7 @@ use crate::entities::inheritance::{self, Inheritance};
 use crate::entities::interest_income::InterestIncome;
 use crate::entities::investment_expense::{ExpenseType, InvestmentExpense};
 use crate::infra::currency::CurrencyCode;
+use crate::infra::id::ListingId;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -60,7 +61,7 @@ use std::collections::HashMap;
 /// corrected to the one the second note actually carries.
 #[derive(utoipa::ToSchema, Debug, Serialize, Deserialize)]
 pub struct DuplicateTrade {
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     pub ticker: String,
     /// The shared reference, trimmed — the second half of the key, and what
     /// the note itself is found by in the broker's records.
@@ -89,7 +90,7 @@ pub struct DuplicateTrade {
 /// enterable and this names it for the user to judge.
 #[derive(utoipa::ToSchema, Debug, Serialize, Deserialize)]
 pub struct DuplicateAction {
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     pub ticker: String,
     pub action_type: String,
     pub date: NaiveDate,
@@ -118,7 +119,7 @@ pub struct DuplicateAction {
 /// legitimately has two statements for one year (SCENARIOS F-03).
 #[derive(utoipa::ToSchema, Debug, Serialize, Deserialize)]
 pub struct DuplicateAmmaStatement {
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     pub ticker: String,
     /// The financial year the statements attribute, identified by the
     /// calendar year of their shared 30 June end (`domain::tax_year`).
@@ -152,7 +153,7 @@ pub struct DuplicateAmmaStatement {
 /// original, not evidence of a second payment.
 #[derive(utoipa::ToSchema, Debug, Serialize, Deserialize)]
 pub struct DuplicateIncome {
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     pub ticker: String,
     pub holding_account_id: i64,
     pub date_paid: NaiveDate,
@@ -229,7 +230,7 @@ pub struct DuplicateExpense {
     pub description: Option<String>,
     /// The listing the rows are attributed to (part of the key); `None` for a
     /// portfolio-wide expense.
-    pub listing_id: Option<i64>,
+    pub listing_id: Option<ListingId>,
     /// That listing's ticker, so the warning names the holding rather than only
     /// its id; `None` for a portfolio-wide expense.
     pub ticker: Option<String>,
@@ -262,7 +263,7 @@ pub struct DuplicateExpense {
 /// value or any discount label are two grants, not one entered twice.
 #[derive(utoipa::ToSchema, Debug, Serialize, Deserialize)]
 pub struct DuplicateEssStatement {
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     pub ticker: String,
     pub holding_account_id: i64,
     pub taxing_point_date: NaiveDate,
@@ -299,7 +300,7 @@ pub struct DuplicateEssStatement {
 /// entered twice.
 #[derive(utoipa::ToSchema, Debug, Serialize, Deserialize)]
 pub struct DuplicateInheritance {
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     pub ticker: String,
     pub holding_account_id: i64,
     pub date_of_death: NaiveDate,
@@ -349,7 +350,7 @@ trait DuplicateCheck: for<'r> sqlx::FromRow<'r, SqliteRow> + Send + Unpin + Size
     /// The entry for one group of ≥ 2 rows, ids ascending. `tickers` names a
     /// listing by id; the FK guarantees a set listing exists, so a miss is
     /// only a row read between the two queries, and the ids are named anyway.
-    fn report(group: &[Self], ids: Vec<i64>, tickers: &HashMap<i64, String>) -> Self::Report;
+    fn report(group: &[Self], ids: Vec<i64>, tickers: &HashMap<ListingId, String>) -> Self::Report;
 
     /// The list's order: newest first, then the tie-breaks that make it total.
     fn newest_first(a: &Self::Report, b: &Self::Report) -> Ordering;
@@ -416,7 +417,7 @@ pub(super) async fn db_duplicates(
     })
 }
 
-fn ticker(tickers: &HashMap<i64, String>, listing_id: i64) -> String {
+fn ticker(tickers: &HashMap<ListingId, String>, listing_id: ListingId) -> String {
     tickers.get(&listing_id).cloned().unwrap_or_default()
 }
 
@@ -431,7 +432,7 @@ fn ticker(tickers: &HashMap<i64, String>, listing_id: i64) -> String {
 #[derive(sqlx::FromRow)]
 struct ContractNoteTrade {
     id: i64,
-    listing_id: i64,
+    listing_id: ListingId,
     /// Trimmed.
     contract_note_ref: String,
     date: NaiveDate,
@@ -459,7 +460,11 @@ impl DuplicateCheck for ContractNoteTrade {
         self.id
     }
 
-    fn report(group: &[Self], ids: Vec<i64>, tickers: &HashMap<i64, String>) -> DuplicateTrade {
+    fn report(
+        group: &[Self],
+        ids: Vec<i64>,
+        tickers: &HashMap<ListingId, String>,
+    ) -> DuplicateTrade {
         let first = &group[0];
         DuplicateTrade {
             listing_id: first.listing_id,
@@ -488,7 +493,7 @@ impl DuplicateCheck for ContractNoteTrade {
 #[derive(sqlx::FromRow)]
 struct ActionEntry {
     id: i64,
-    listing_id: i64,
+    listing_id: ListingId,
     action_type: String,
     date: NaiveDate,
 }
@@ -515,7 +520,11 @@ impl DuplicateCheck for ActionEntry {
         self.id
     }
 
-    fn report(group: &[Self], ids: Vec<i64>, tickers: &HashMap<i64, String>) -> DuplicateAction {
+    fn report(
+        group: &[Self],
+        ids: Vec<i64>,
+        tickers: &HashMap<ListingId, String>,
+    ) -> DuplicateAction {
         let first = &group[0];
         DuplicateAction {
             listing_id: first.listing_id,
@@ -543,7 +552,7 @@ impl DuplicateCheck for ActionEntry {
 #[derive(sqlx::FromRow)]
 struct AmmaEntry {
     id: i64,
-    listing_id: i64,
+    listing_id: ListingId,
     tax_year_end_date: NaiveDate,
     holding_account_id: i64,
 }
@@ -574,7 +583,7 @@ impl DuplicateCheck for AmmaEntry {
     fn report(
         group: &[Self],
         ids: Vec<i64>,
-        tickers: &HashMap<i64, String>,
+        tickers: &HashMap<ListingId, String>,
     ) -> DuplicateAmmaStatement {
         let first = &group[0];
         DuplicateAmmaStatement {
@@ -642,7 +651,11 @@ impl DuplicateCheck for Income {
         self.id
     }
 
-    fn report(group: &[Self], ids: Vec<i64>, tickers: &HashMap<i64, String>) -> DuplicateIncome {
+    fn report(
+        group: &[Self],
+        ids: Vec<i64>,
+        tickers: &HashMap<ListingId, String>,
+    ) -> DuplicateIncome {
         let first = &group[0];
         DuplicateIncome {
             listing_id: first.listing_id,
@@ -700,7 +713,7 @@ impl DuplicateCheck for InterestIncome {
         self.id
     }
 
-    fn report(group: &[Self], ids: Vec<i64>, _: &HashMap<i64, String>) -> DuplicateInterest {
+    fn report(group: &[Self], ids: Vec<i64>, _: &HashMap<ListingId, String>) -> DuplicateInterest {
         let first = &group[0];
         DuplicateInterest {
             date_paid: first.date_paid,
@@ -755,7 +768,11 @@ impl DuplicateCheck for InvestmentExpense {
         self.id
     }
 
-    fn report(group: &[Self], ids: Vec<i64>, tickers: &HashMap<i64, String>) -> DuplicateExpense {
+    fn report(
+        group: &[Self],
+        ids: Vec<i64>,
+        tickers: &HashMap<ListingId, String>,
+    ) -> DuplicateExpense {
         let first = &group[0];
         DuplicateExpense {
             date_incurred: first.date_incurred,
@@ -834,7 +851,7 @@ impl DuplicateCheck for EssStatement {
     fn report(
         group: &[Self],
         ids: Vec<i64>,
-        tickers: &HashMap<i64, String>,
+        tickers: &HashMap<ListingId, String>,
     ) -> DuplicateEssStatement {
         let first = &group[0];
         DuplicateEssStatement {
@@ -905,7 +922,7 @@ impl DuplicateCheck for Inheritance {
     fn report(
         group: &[Self],
         ids: Vec<i64>,
-        tickers: &HashMap<i64, String>,
+        tickers: &HashMap<ListingId, String>,
     ) -> DuplicateInheritance {
         let first = &group[0];
         DuplicateInheritance {

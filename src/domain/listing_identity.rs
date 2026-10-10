@@ -23,6 +23,7 @@
 //! security, which is the ATO-correct view — with the full chain discoverable
 //! via `GET /listings/:id/renames` and the Row History screen.
 
+use crate::infra::id::ListingId;
 use chrono::NaiveDate;
 use std::collections::HashMap;
 
@@ -57,13 +58,13 @@ impl Identity {
 /// `infra::fx::FxRates::load`, so per-row resolution costs no further DB
 /// round-trip. Chains are stored ascending by `effective_date`.
 pub struct RenameHistory {
-    by_listing: HashMap<i64, Vec<Rename>>,
+    by_listing: HashMap<ListingId, Vec<Rename>>,
 }
 
 /// One `listing_renames` row as selected by [`RenameHistory::load`]:
 /// (listing_id, effective_date, old_ticker, new_ticker, old_mic, new_mic).
 type RenameRow = (
-    i64,
+    ListingId,
     NaiveDate,
     String,
     String,
@@ -80,7 +81,7 @@ impl RenameHistory {
         )
         .fetch_all(&mut *conn)
         .await?;
-        let mut by_listing: HashMap<i64, Vec<Rename>> = HashMap::new();
+        let mut by_listing: HashMap<ListingId, Vec<Rename>> = HashMap::new();
         for (
             listing_id,
             effective_date,
@@ -108,7 +109,7 @@ impl RenameHistory {
     /// is the source of truth for the identity in effect now, and a rename
     /// deliberately doesn't re-derive it. With no rename at all the result is
     /// the single open-ended `current` span.
-    pub fn identities(&self, listing_id: i64, current: Identity) -> Vec<Identity> {
+    pub fn identities(&self, listing_id: ListingId, current: Identity) -> Vec<Identity> {
         let Some(chain) = self.by_listing.get(&listing_id) else {
             return vec![Identity {
                 from: None,
@@ -136,7 +137,12 @@ impl RenameHistory {
 
     /// The identity in effect for `listing_id` on `date` — the latest span
     /// from [`identities`](Self::identities) that had started by then.
-    pub fn identity_as_at(&self, listing_id: i64, date: NaiveDate, current: Identity) -> Identity {
+    pub fn identity_as_at(
+        &self,
+        listing_id: ListingId,
+        date: NaiveDate,
+        current: Identity,
+    ) -> Identity {
         let spans = self.identities(listing_id, current);
         spans
             .into_iter()
@@ -149,7 +155,12 @@ impl RenameHistory {
     /// the caller's own `listings.ticker` read — this resolver holds only the
     /// rename chain, not a listings snapshot. Exchange changes don't affect
     /// the answer, so the current MIC is immaterial here.
-    pub fn ticker_as_at(&self, listing_id: i64, date: NaiveDate, current_ticker: &str) -> String {
+    pub fn ticker_as_at(
+        &self,
+        listing_id: ListingId,
+        date: NaiveDate,
+        current_ticker: &str,
+    ) -> String {
         self.identity_as_at(
             listing_id,
             date,
@@ -170,7 +181,7 @@ mod tests {
 
     async fn insert_rename(
         pool: &sqlx::SqlitePool,
-        listing_id: i64,
+        listing_id: ListingId,
         effective_date: NaiveDate,
         old_ticker: &str,
         new_ticker: &str,
@@ -190,7 +201,7 @@ mod tests {
 
     async fn insert_exchange_rename(
         pool: &sqlx::SqlitePool,
-        listing_id: i64,
+        listing_id: ListingId,
         effective_date: NaiveDate,
         old: (&str, &str),
         new: (&str, &str),
@@ -227,7 +238,7 @@ mod tests {
         let mut conn = pool.acquire().await.unwrap();
         let history = RenameHistory::load(&mut conn).await.unwrap();
         assert_eq!(
-            history.ticker_as_at(1, ymd(2024, 1, 1), "VAS"),
+            history.ticker_as_at(ListingId(1), ymd(2024, 1, 1), "VAS"),
             "VAS".to_string()
         );
     }
@@ -236,30 +247,48 @@ mod tests {
     async fn resolves_before_at_and_after_a_single_rename() {
         let pool = test_pool().await;
         listing(1).ticker("LAR").insert(&pool).await;
-        insert_rename(&pool, 1, ymd(2024, 6, 1), "LAAC", "LAR").await;
+        insert_rename(&pool, ListingId(1), ymd(2024, 6, 1), "LAAC", "LAR").await;
         let mut conn = pool.acquire().await.unwrap();
         let history = RenameHistory::load(&mut conn).await.unwrap();
 
         // Strictly before the rename: the old ticker.
-        assert_eq!(history.ticker_as_at(1, ymd(2024, 1, 1), "LAR"), "LAAC");
+        assert_eq!(
+            history.ticker_as_at(ListingId(1), ymd(2024, 1, 1), "LAR"),
+            "LAAC"
+        );
         // On the effective date itself: the new ticker (in effect from then).
-        assert_eq!(history.ticker_as_at(1, ymd(2024, 6, 1), "LAR"), "LAR");
+        assert_eq!(
+            history.ticker_as_at(ListingId(1), ymd(2024, 6, 1), "LAR"),
+            "LAR"
+        );
         // After: still the new ticker.
-        assert_eq!(history.ticker_as_at(1, ymd(2025, 1, 1), "LAR"), "LAR");
+        assert_eq!(
+            history.ticker_as_at(ListingId(1), ymd(2025, 1, 1), "LAR"),
+            "LAR"
+        );
     }
 
     #[tokio::test]
     async fn resolves_across_a_chain_of_multiple_renames() {
         let pool = test_pool().await;
         listing(1).ticker("C").insert(&pool).await;
-        insert_rename(&pool, 1, ymd(2023, 1, 1), "A", "B").await;
-        insert_rename(&pool, 1, ymd(2024, 1, 1), "B", "C").await;
+        insert_rename(&pool, ListingId(1), ymd(2023, 1, 1), "A", "B").await;
+        insert_rename(&pool, ListingId(1), ymd(2024, 1, 1), "B", "C").await;
         let mut conn = pool.acquire().await.unwrap();
         let history = RenameHistory::load(&mut conn).await.unwrap();
 
-        assert_eq!(history.ticker_as_at(1, ymd(2022, 6, 1), "C"), "A");
-        assert_eq!(history.ticker_as_at(1, ymd(2023, 6, 1), "C"), "B");
-        assert_eq!(history.ticker_as_at(1, ymd(2024, 6, 1), "C"), "C");
+        assert_eq!(
+            history.ticker_as_at(ListingId(1), ymd(2022, 6, 1), "C"),
+            "A"
+        );
+        assert_eq!(
+            history.ticker_as_at(ListingId(1), ymd(2023, 6, 1), "C"),
+            "B"
+        );
+        assert_eq!(
+            history.ticker_as_at(ListingId(1), ymd(2024, 6, 1), "C"),
+            "C"
+        );
     }
 
     #[tokio::test]
@@ -267,10 +296,13 @@ mod tests {
         let pool = test_pool().await;
         listing(1).ticker("X").insert(&pool).await;
         listing(2).ticker("Z").insert(&pool).await;
-        insert_rename(&pool, 2, ymd(2024, 1, 1), "Y", "Z").await;
+        insert_rename(&pool, ListingId(2), ymd(2024, 1, 1), "Y", "Z").await;
         let mut conn = pool.acquire().await.unwrap();
         let history = RenameHistory::load(&mut conn).await.unwrap();
-        assert_eq!(history.ticker_as_at(1, ymd(2025, 1, 1), "X"), "X");
+        assert_eq!(
+            history.ticker_as_at(ListingId(1), ymd(2025, 1, 1), "X"),
+            "X"
+        );
     }
 
     #[tokio::test]
@@ -280,7 +312,7 @@ mod tests {
         let mut conn = pool.acquire().await.unwrap();
         let history = RenameHistory::load(&mut conn).await.unwrap();
         assert_eq!(
-            history.identities(1, ident("VAS", Some("XASX"))),
+            history.identities(ListingId(1), ident("VAS", Some("XASX"))),
             vec![ident("VAS", Some("XASX"))]
         );
     }
@@ -289,12 +321,12 @@ mod tests {
     async fn identities_span_a_chain_contiguously_and_end_on_the_current_row() {
         let pool = test_pool().await;
         listing(1).ticker("C").insert(&pool).await;
-        insert_rename(&pool, 1, ymd(2023, 1, 1), "A", "B").await;
-        insert_rename(&pool, 1, ymd(2024, 1, 1), "B", "C").await;
+        insert_rename(&pool, ListingId(1), ymd(2023, 1, 1), "A", "B").await;
+        insert_rename(&pool, ListingId(1), ymd(2024, 1, 1), "B", "C").await;
         let mut conn = pool.acquire().await.unwrap();
         let history = RenameHistory::load(&mut conn).await.unwrap();
 
-        let spans = history.identities(1, ident("C", Some("XASX")));
+        let spans = history.identities(ListingId(1), ident("C", Some("XASX")));
         assert_eq!(spans.len(), 3);
         assert_eq!(spans[0].from, None);
         assert_eq!(spans[0].ticker, "A");
@@ -311,19 +343,26 @@ mod tests {
     async fn identity_resolves_the_exchange_before_at_and_after_a_move() {
         let pool = test_pool().await;
         listing(1).ticker("LAR").insert(&pool).await;
-        insert_exchange_rename(&pool, 1, ymd(2024, 6, 1), ("LAAC", "XASX"), ("LAR", "XNYS")).await;
+        insert_exchange_rename(
+            &pool,
+            ListingId(1),
+            ymd(2024, 6, 1),
+            ("LAAC", "XASX"),
+            ("LAR", "XNYS"),
+        )
+        .await;
         let mut conn = pool.acquire().await.unwrap();
         let history = RenameHistory::load(&mut conn).await.unwrap();
         let current = ident("LAR", Some("XNYS"));
 
-        let before = history.identity_as_at(1, ymd(2024, 5, 31), current.clone());
+        let before = history.identity_as_at(ListingId(1), ymd(2024, 5, 31), current.clone());
         assert_eq!(before.ticker, "LAAC");
         assert_eq!(before.exchange_mic.as_deref(), Some("XASX"));
         // On the effective date itself the new identity is already in force.
-        let on = history.identity_as_at(1, ymd(2024, 6, 1), current.clone());
+        let on = history.identity_as_at(ListingId(1), ymd(2024, 6, 1), current.clone());
         assert_eq!(on.ticker, "LAR");
         assert_eq!(on.exchange_mic.as_deref(), Some("XNYS"));
-        let after = history.identity_as_at(1, ymd(2025, 1, 1), current);
+        let after = history.identity_as_at(ListingId(1), ymd(2025, 1, 1), current);
         assert_eq!(after.ticker, "LAR");
         assert_eq!(after.exchange_mic.as_deref(), Some("XNYS"));
     }
@@ -334,7 +373,7 @@ mod tests {
         listing(1).ticker("BTC").insert(&pool).await;
         let mut conn = pool.acquire().await.unwrap();
         let history = RenameHistory::load(&mut conn).await.unwrap();
-        let resolved = history.identity_as_at(1, ymd(2019, 1, 1), ident("BTC", None));
+        let resolved = history.identity_as_at(ListingId(1), ymd(2019, 1, 1), ident("BTC", None));
         assert_eq!(resolved.ticker, "BTC");
         assert_eq!(resolved.exchange_mic, None);
     }

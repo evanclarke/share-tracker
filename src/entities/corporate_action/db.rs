@@ -12,6 +12,7 @@ use crate::infra::currency::CurrencyCode;
 use crate::infra::db::write_tx;
 use crate::infra::decimal::{OptMoney, parse_dec};
 use crate::infra::http::{self, ApiError, CrudEntity, Upsert};
+use crate::infra::id::ListingId;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use sqlx::{Row, SqlitePool};
@@ -37,7 +38,7 @@ const COLUMNS: &str = "id, action_type, listing_id, date, amount_per_unit, curre
 #[derive(Debug, Default, serde::Deserialize, utoipa::IntoParams)]
 #[serde(deny_unknown_fields)]
 pub struct CorporateActionListQuery {
-    pub listing_id: Option<i64>,
+    pub listing_id: Option<ListingId>,
     pub from: Option<NaiveDate>,
     pub to: Option<NaiveDate>,
 }
@@ -261,7 +262,7 @@ impl From<WriteError> for ApiError {
 /// the split stream itself rather than either side of the sum.
 async fn allocations_fit_parcels(
     conn: &mut sqlx::SqliteConnection,
-    listing_id: i64,
+    listing_id: ListingId,
 ) -> Result<bool, sqlx::Error> {
     let splits = db_splits_for_listing(&mut *conn, listing_id).await?;
     let rows = sqlx::query(
@@ -338,7 +339,7 @@ async fn allocations_fit_parcels(
 /// be refused if the walk ran first.
 pub async fn rebased_quantity_beyond_range(
     conn: &mut sqlx::SqliteConnection,
-    listing_id: i64,
+    listing_id: ListingId,
 ) -> Result<Option<crate::domain::cost_base::UnrepresentableQuantity>, sqlx::Error> {
     let splits = db_splits_for_listing(&mut *conn, listing_id).await?;
     // Nothing re-bases quantities on this listing, so nothing can overflow.
@@ -403,7 +404,7 @@ pub async fn rebased_quantity_beyond_range(
 /// Read on the caller's transaction, so the check and the write see one state.
 async fn rollovers_after(
     conn: &mut sqlx::SqliteConnection,
-    listing_id: i64,
+    listing_id: ListingId,
     date: NaiveDate,
     exclude_action_id: i64,
 ) -> Result<Vec<(NaiveDate, String)>, sqlx::Error> {
@@ -511,13 +512,13 @@ async fn write(
         buyback_dividend: OptMoney,
         buyback_franking_credit: OptMoney,
         buyback_market_value: OptMoney,
-        scrip_listing_id: Option<i64>,
+        scrip_listing_id: Option<ListingId>,
         scrip_new_units: OptMoney,
         scrip_old_units: OptMoney,
         scrip_cash_per_unit: OptMoney,
         scrip_market_value: OptMoney,
         scrip_cash_currency: Option<CurrencyCode>,
-        demerger_listing_id: Option<i64>,
+        demerger_listing_id: Option<ListingId>,
         demerger_new_units: OptMoney,
         demerger_held_units: OptMoney,
         demerger_cost_base_pct: OptMoney,
@@ -729,7 +730,7 @@ async fn write(
 
     // Which listing the row is leaving, when an edit moves it (the split
     // stream it is removed from has to hold up too). `None` for an insert.
-    let previous_listing_id: Option<i64> = stored.as_ref().map(|stored| stored.listing_id);
+    let previous_listing_id: Option<ListingId> = stored.as_ref().map(|stored| stored.listing_id);
 
     // A create (`id` is `None`) binds a NULL id, so the database picks one
     // it has never issued (`infra::db::insert_with_optional_id`, SCENARIOS U-a).

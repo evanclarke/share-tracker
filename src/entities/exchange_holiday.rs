@@ -10,6 +10,7 @@
 use crate::infra::db::write_tx;
 use crate::infra::extract::{Json, Query};
 use crate::infra::http::{self, ApiError, Upsert, UpsertResponse};
+use crate::infra::id::ListingId;
 use axum::{
     Router,
     extract::{Path, State},
@@ -217,7 +218,7 @@ pub(crate) fn window_outside_coverage(
 /// load a calendar on the transaction it rewrites settlement dates in.
 pub(crate) async fn exchange_holidays_for_listing(
     conn: &mut sqlx::SqliteConnection,
-    listing_id: i64,
+    listing_id: ListingId,
 ) -> Result<HashSet<NaiveDate>, sqlx::Error> {
     let dates: Vec<NaiveDate> = sqlx::query_scalar(
         "SELECT eh.holiday_date FROM listings l \
@@ -468,11 +469,15 @@ mod tests {
         insert_listing(&pool, 1, "XASX").await;
         insert_listing(&pool, 2, "XNYS").await;
         let mut conn = pool.acquire().await.unwrap();
-        let asx = exchange_holidays_for_listing(&mut conn, 1).await.unwrap();
+        let asx = exchange_holidays_for_listing(&mut conn, ListingId(1))
+            .await
+            .unwrap();
         assert!(asx.contains(&ymd(2024, 4, 25))); // Anzac Day (ASX)
         assert!(!asx.contains(&ymd(2024, 11, 28))); // Thanksgiving (NYSE only)
 
-        let nyse = exchange_holidays_for_listing(&mut conn, 2).await.unwrap();
+        let nyse = exchange_holidays_for_listing(&mut conn, ListingId(2))
+            .await
+            .unwrap();
         assert!(nyse.contains(&ymd(2024, 11, 28)));
         assert!(!nyse.contains(&ymd(2024, 4, 25)));
     }

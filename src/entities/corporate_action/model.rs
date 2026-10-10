@@ -4,6 +4,7 @@
 
 use crate::infra::currency::CurrencyCode;
 use crate::infra::decimal::{row_dec, row_opt_dec};
+use crate::infra::id::ListingId;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -120,7 +121,7 @@ pub enum ActionKind {
     ScripForScrip {
         /// The replacement listing the original holding converts into (must
         /// differ from the action's own `listing_id`).
-        scrip_listing_id: i64,
+        scrip_listing_id: ListingId,
         /// Every `scrip_old_units` units of the original listing held at the
         /// exchange date become `scrip_new_units` units of the replacement
         /// listing (both positive).
@@ -150,7 +151,7 @@ pub enum ActionKind {
     Demerger {
         /// The demerged entity's listing (must differ from the action's own
         /// `listing_id`, the head entity).
-        demerger_listing_id: i64,
+        demerger_listing_id: ListingId,
         /// Every `demerger_held_units` units of the head entity held at the
         /// demerger date receive `demerger_new_units` units of the demerged
         /// entity (both positive; BHP Billiton's 1-for-5 demerger of BHP
@@ -232,7 +233,7 @@ impl ActionKind {
 #[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
 pub struct CorporateAction {
     pub id: i64,
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     /// ReturnOfCapital: payment date — parcels acquired on/before it are
     /// affected, unless the action carries a `record_date`, which then decides
     /// entitlement instead. ShareSplit: conversion date — parcels acquired before it are
@@ -346,7 +347,7 @@ pub struct CorporateActionBody {
     action_type: ActionType,
     /// The listing the action applies to (the original holding for ScripForScrip, the head
     /// entity for Demerger).
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     /// `YYYY-MM-DD`. ReturnOfCapital: payment date. ShareSplit: conversion date (parcels
     /// acquired before it are converted). BonusIssue: issue date. RightsIssue: record date
     /// (units held before it earn the entitlement). BuyBack: buy-back date. ScripForScrip /
@@ -456,7 +457,7 @@ pub struct CorporateActionBody {
     /// ScripForScrip only (required): the replacement listing the holding converts into;
     /// must differ from `listing_id`.
     #[serde(default)]
-    scrip_listing_id: Option<i64>,
+    scrip_listing_id: Option<ListingId>,
     /// ScripForScrip only (required): every `scrip_old_units` units held at the exchange
     /// date become `scrip_new_units` units of `scrip_listing_id` (decimal string,
     /// positive).
@@ -492,7 +493,7 @@ pub struct CorporateActionBody {
     scrip_cash_currency: Option<CurrencyCode>,
     /// Demerger only (required): the demerged entity's listing; must differ from `listing_id`.
     #[serde(default)]
-    demerger_listing_id: Option<i64>,
+    demerger_listing_id: Option<ListingId>,
     /// Demerger only (required): every `demerger_held_units` units of the head entity held
     /// at the demerger date receive `demerger_new_units` units of `demerger_listing_id`
     /// (decimal string, positive).

@@ -14,6 +14,7 @@ use crate::infra::currency::CurrencyCode;
 use crate::infra::db::write_tx;
 use crate::infra::decimal::{Money, OptMoney, parse_dec};
 use crate::infra::http::{self, ApiError, CrudEntity, Upsert};
+use crate::infra::id::ListingId;
 use chrono::NaiveDate;
 use sqlx::SqlitePool;
 
@@ -26,7 +27,7 @@ use sqlx::SqlitePool;
 #[derive(Debug, Default, serde::Deserialize, utoipa::IntoParams)]
 #[serde(deny_unknown_fields)]
 pub struct TradeListQuery {
-    pub listing_id: Option<i64>,
+    pub listing_id: Option<ListingId>,
     pub holding_account_id: Option<i64>,
     pub from: Option<NaiveDate>,
     pub to: Option<NaiveDate>,
@@ -338,7 +339,7 @@ pub enum UpsertError {
 #[derive(sqlx::FromRow)]
 struct ExistingTrade {
     trade_type: super::model::TradeType,
-    listing_id: i64,
+    listing_id: ListingId,
     date: chrono::NaiveDate,
     holding_account_id: i64,
     /// The provenance column the row carries, if any
@@ -381,7 +382,7 @@ async fn drawn_on(conn: &mut sqlx::SqliteConnection, id: Option<i64>) -> Result<
 /// [drp]: crate::entities::drp_reinvestment
 pub(crate) async fn listing_currency_mismatch(
     conn: &mut sqlx::SqliteConnection,
-    listing_id: i64,
+    listing_id: ListingId,
     currency: &str,
 ) -> Result<Option<CurrencyCode>, sqlx::Error> {
     let listing: Option<CurrencyCode> =

@@ -1,6 +1,7 @@
 //! Schema invariants: the CHECK constraints the table is held to.
 
 use super::*;
+use crate::infra::id::ListingId;
 
 /// The schema pairs a manual row's provenance with its origin, so no
 /// write path — not even raw SQL — can store a hand-entered price without
@@ -178,8 +179,8 @@ async fn db_check_constraints_tie_price_and_error_to_status() {
     .await;
     assert!(bad.is_err());
     // duplicate (listing, date) is rejected by the primary key.
-    let market = load_market(&pool, 1).await.unwrap().unwrap();
-    let ok = StubFetcher::default().with_close(1, ymd(2026, 6, 5), "62.48", "AUD");
+    let market = load_market(&pool, ListingId(1)).await.unwrap().unwrap();
+    let ok = StubFetcher::default().with_close(ListingId(1), ymd(2026, 6, 5), "62.48", "AUD");
     fetch_and_store(&pool, &ok, &market, &[ymd(2026, 6, 5)])
         .await
         .unwrap();

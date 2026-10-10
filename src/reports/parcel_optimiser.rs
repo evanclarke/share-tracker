@@ -40,6 +40,7 @@ use crate::entities::closing_price::{self, SharedFetcher};
 use crate::infra::decimal::mul_div;
 use crate::infra::extract::{Json, Query};
 use crate::infra::http::ApiError;
+use crate::infra::id::ListingId;
 use axum::{Extension, Router, extract::State, routing::get};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
@@ -151,7 +152,7 @@ impl Candidates {
 /// too.
 pub async fn db_candidate_parcels(
     pool: &SqlitePool,
-    listing_id: i64,
+    listing_id: ListingId,
     holding_account_id: Option<i64>,
     sale_date: NaiveDate,
 ) -> Result<Candidates, sqlx::Error> {
@@ -166,7 +167,7 @@ pub async fn db_candidate_parcels(
 /// which folds them into its wider single-snapshot read transaction.
 pub async fn db_candidate_parcels_on(
     conn: &mut sqlx::SqliteConnection,
-    listing_id: i64,
+    listing_id: ListingId,
     holding_account_id: Option<i64>,
     sale_date: NaiveDate,
 ) -> Result<Candidates, sqlx::Error> {
@@ -388,7 +389,7 @@ pub fn disposal_figures(
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
 #[serde(deny_unknown_fields)]
 pub struct OptimiserRequest {
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     /// The account the contemplated Sell would happen in — a real Sell's
     /// allocations may only consume its own account's parcels.
     pub holding_account_id: i64,
@@ -424,7 +425,7 @@ pub struct StrategyAllocation {
 
 #[derive(utoipa::ToSchema, Debug, Serialize, Deserialize)]
 pub struct OptimiserResponse {
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     pub holding_account_id: i64,
     pub units: Decimal,
     pub sale_date: NaiveDate,
@@ -571,12 +572,12 @@ mod tests {
     async fn insert_buy(
         pool: &SqlitePool,
         id: i64,
-        listing_id: i64,
+        listing_id: ListingId,
         date: NaiveDate,
         qty: Decimal,
         price: Decimal,
     ) {
-        test_support::buy(id, listing_id)
+        test_support::buy(id, listing_id.0)
             .date(date)
             .qty(qty)
             .price(price)
@@ -597,7 +598,7 @@ mod tests {
             (3, ymd(2025, 1, 2), "8"),
             (4, ymd(2026, 3, 2), "4"),
         ] {
-            insert_buy(pool, id, 1, date, Decimal::from(100), dec(price)).await;
+            insert_buy(pool, id, ListingId(1), date, Decimal::from(100), dec(price)).await;
         }
     }
 
@@ -609,7 +610,7 @@ mod tests {
     /// every figure derived from them is costed on.
     async fn fixture_candidates(pool: &SqlitePool) -> Candidates {
         let (_, _, sale_date) = fixture_sale();
-        db_candidate_parcels(pool, 1, None, sale_date)
+        db_candidate_parcels(pool, ListingId(1), None, sale_date)
             .await
             .unwrap()
     }
@@ -735,7 +736,7 @@ mod tests {
         insert_buy(
             &pool,
             1,
-            1,
+            ListingId(1),
             ymd(2023, 1, 3),
             Decimal::from(100),
             Decimal::ONE,
@@ -744,13 +745,13 @@ mod tests {
         insert_buy(
             &pool,
             2,
-            1,
+            ListingId(1),
             ymd(2026, 3, 2),
             Decimal::from(100),
             Decimal::ONE,
         )
         .await;
-        let candidates = db_candidate_parcels(&pool, 1, None, sale_date)
+        let candidates = db_candidate_parcels(&pool, ListingId(1), None, sale_date)
             .await
             .unwrap();
         let picks = vec![(1, Decimal::from(30)), (2, Decimal::from(20))];
@@ -784,14 +785,14 @@ mod tests {
             insert_buy(
                 &pool,
                 id,
-                1,
+                ListingId(1),
                 ymd(2023, 1, 3),
                 Decimal::ONE,
                 Decimal::from(100),
             )
             .await;
         }
-        let candidates = db_candidate_parcels(&pool, 1, None, ymd(2026, 1, 1))
+        let candidates = db_candidate_parcels(&pool, ListingId(1), None, ymd(2026, 1, 1))
             .await
             .unwrap();
         let picks: Vec<(i64, Decimal)> = (1..=3).map(|id| (id, Decimal::ONE)).collect();
@@ -810,10 +811,34 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "AAA").await;
         insert_listing(&pool, 2, "BBB").await;
-        insert_buy(&pool, 1, 1, ymd(2024, 1, 2), Decimal::from(100), dec("5")).await;
-        insert_buy(&pool, 2, 2, ymd(2024, 1, 2), Decimal::from(100), dec("5")).await;
+        insert_buy(
+            &pool,
+            1,
+            ListingId(1),
+            ymd(2024, 1, 2),
+            Decimal::from(100),
+            dec("5"),
+        )
+        .await;
+        insert_buy(
+            &pool,
+            2,
+            ListingId(2),
+            ymd(2024, 1, 2),
+            Decimal::from(100),
+            dec("5"),
+        )
+        .await;
         // Fully sell parcel 1's sibling parcel 3 so it drops out.
-        insert_buy(&pool, 3, 1, ymd(2024, 2, 1), Decimal::from(40), dec("5")).await;
+        insert_buy(
+            &pool,
+            3,
+            ListingId(1),
+            ymd(2024, 2, 1),
+            Decimal::from(40),
+            dec("5"),
+        )
+        .await;
         test_support::sell(4, 1)
             .date(ymd(2025, 6, 2))
             .qty(Decimal::from(40))
@@ -823,13 +848,13 @@ mod tests {
         allocate(&pool, 1, 4, 3, Decimal::from(40)).await;
 
         let today = crate::infra::date::today();
-        let parcels = db_candidate_parcels(&pool, 1, Some(1), today)
+        let parcels = db_candidate_parcels(&pool, ListingId(1), Some(1), today)
             .await
             .unwrap();
         assert_eq!(parcels.parcels().len(), 1);
         assert_eq!(parcels.parcels()[0].trade_id, 1);
         // Wrong account: nothing.
-        let parcels = db_candidate_parcels(&pool, 1, Some(99), today)
+        let parcels = db_candidate_parcels(&pool, ListingId(1), Some(99), today)
             .await
             .unwrap();
         assert!(parcels.parcels().is_empty());
@@ -849,7 +874,7 @@ mod tests {
             (3, ymd(2023, 1, 3), "4"),
             (4, ymd(2025, 1, 2), "8"),
         ] {
-            insert_buy(pool, id, 1, date, Decimal::from(100), dec(price)).await;
+            insert_buy(pool, id, ListingId(1), date, Decimal::from(100), dec(price)).await;
         }
     }
 
@@ -1017,7 +1042,7 @@ mod tests {
         allocate(&pool, 1, 5, 2, Decimal::from(100)).await;
 
         // Today it is gone…
-        let live = db_candidate_parcels(&pool, 1, None, crate::infra::date::today())
+        let live = db_candidate_parcels(&pool, ListingId(1), None, crate::infra::date::today())
             .await
             .unwrap();
         assert!(live.parcels().iter().all(|p| p.trade_id != 2));
@@ -1050,12 +1075,20 @@ mod tests {
     async fn api_past_dated_candidates_are_in_that_dates_unit_basis() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "SPL").await;
-        insert_buy(&pool, 1, 1, ymd(2020, 1, 2), Decimal::from(100), dec("5")).await;
+        insert_buy(
+            &pool,
+            1,
+            ListingId(1),
+            ymd(2020, 1, 2),
+            Decimal::from(100),
+            dec("5"),
+        )
+        .await;
         crate::entities::corporate_action::db_upsert(
             &pool,
             &crate::entities::corporate_action::CorporateAction {
                 id: 1,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: ymd(2025, 1, 2),
                 kind: crate::entities::corporate_action::ActionKind::ShareSplit {
                     split_new_units: Decimal::from(2),
@@ -1066,11 +1099,11 @@ mod tests {
         .await
         .unwrap();
 
-        let before = db_candidate_parcels(&pool, 1, None, ymd(2024, 6, 30))
+        let before = db_candidate_parcels(&pool, ListingId(1), None, ymd(2024, 6, 30))
             .await
             .unwrap();
         assert_eq!(before.parcels()[0].remaining_quantity, Decimal::from(100));
-        let after = db_candidate_parcels(&pool, 1, None, crate::infra::date::today())
+        let after = db_candidate_parcels(&pool, ListingId(1), None, crate::infra::date::today())
             .await
             .unwrap();
         assert_eq!(after.parcels()[0].remaining_quantity, Decimal::from(200));
@@ -1372,7 +1405,7 @@ mod tests {
         insert_buy(
             &pool,
             1,
-            1,
+            ListingId(1),
             ymd(2023, 1, 3),
             dec("100000000000000"),
             Decimal::ZERO,
@@ -1408,7 +1441,7 @@ mod tests {
         insert_buy(
             &pool,
             1,
-            1,
+            ListingId(1),
             ymd(2023, 1, 3),
             dec("100000000000000"),
             dec("10000000000"),
@@ -1584,7 +1617,15 @@ mod tests {
     async fn agreement_on_a_plain_partial_sale() {
         let cost = optimiser_agrees_with_the_recorded_sell(async |pool, _client| {
             insert_listing(pool, 1, "VAS").await;
-            insert_buy(pool, 1, 1, ymd(2024, 1, 2), dec("100"), dec("10")).await;
+            insert_buy(
+                pool,
+                1,
+                ListingId(1),
+                ymd(2024, 1, 2),
+                dec("100"),
+                dec("10"),
+            )
+            .await;
             Rehearsal {
                 units: dec("40"),
                 sale_date: ymd(2026, 6, 15),
@@ -1601,7 +1642,15 @@ mod tests {
     async fn agreement_on_a_whole_parcel_pick() {
         optimiser_agrees_with_the_recorded_sell(async |pool, client| {
             insert_listing(pool, 1, "VDHG").await;
-            insert_buy(pool, 1, 1, ymd(2024, 1, 15), dec("100"), dec("60")).await;
+            insert_buy(
+                pool,
+                1,
+                ListingId(1),
+                ymd(2024, 1, 15),
+                dec("100"),
+                dec("60"),
+            )
+            .await;
             amma_with_generated_adjustments(client, pool, 1, ymd(2026, 6, 30), dec("100"), "1.30")
                 .await;
             Rehearsal {
@@ -1622,7 +1671,15 @@ mod tests {
     async fn agreement_when_the_amma_year_end_falls_after_the_sale() {
         optimiser_agrees_with_the_recorded_sell(async |pool, client| {
             insert_listing(pool, 1, "VDHG").await;
-            insert_buy(pool, 1, 1, ymd(2024, 1, 15), dec("100"), dec("60")).await;
+            insert_buy(
+                pool,
+                1,
+                ListingId(1),
+                ymd(2024, 1, 15),
+                dec("100"),
+                dec("60"),
+            )
+            .await;
             amma_with_generated_adjustments(client, pool, 1, ymd(2026, 6, 30), dec("100"), "1.30")
                 .await;
             Rehearsal {
@@ -1641,7 +1698,15 @@ mod tests {
     async fn agreement_when_the_amma_year_end_falls_before_the_sale() {
         optimiser_agrees_with_the_recorded_sell(async |pool, client| {
             insert_listing(pool, 1, "VDHG").await;
-            insert_buy(pool, 1, 1, ymd(2024, 1, 15), dec("100"), dec("60")).await;
+            insert_buy(
+                pool,
+                1,
+                ListingId(1),
+                ymd(2024, 1, 15),
+                dec("100"),
+                dec("60"),
+            )
+            .await;
             amma_with_generated_adjustments(client, pool, 1, ymd(2025, 6, 30), dec("100"), "1.30")
                 .await;
             Rehearsal {
@@ -1663,7 +1728,15 @@ mod tests {
     async fn agreement_when_the_amit_row_covers_less_than_the_parcel() {
         optimiser_agrees_with_the_recorded_sell(async |pool, client| {
             insert_listing(pool, 1, "VDHG").await;
-            insert_buy(pool, 1, 1, ymd(2024, 1, 15), dec("100"), dec("60")).await;
+            insert_buy(
+                pool,
+                1,
+                ListingId(1),
+                ymd(2024, 1, 15),
+                dec("100"),
+                dec("60"),
+            )
+            .await;
             test_support::sell(2, 1)
                 .date(ymd(2025, 5, 1))
                 .qty(dec("30"))
@@ -1690,7 +1763,15 @@ mod tests {
     async fn agreement_when_a_partly_covering_amit_row_is_taken_in_full() {
         optimiser_agrees_with_the_recorded_sell(async |pool, client| {
             insert_listing(pool, 1, "VDHG").await;
-            insert_buy(pool, 1, 1, ymd(2024, 1, 15), dec("100"), dec("60")).await;
+            insert_buy(
+                pool,
+                1,
+                ListingId(1),
+                ymd(2024, 1, 15),
+                dec("100"),
+                dec("60"),
+            )
+            .await;
             test_support::sell(2, 1)
                 .date(ymd(2025, 5, 1))
                 .qty(dec("30"))
@@ -1714,12 +1795,20 @@ mod tests {
     async fn agreement_on_a_return_of_capital() {
         optimiser_agrees_with_the_recorded_sell(async |pool, _client| {
             insert_listing(pool, 1, "TLS").await;
-            insert_buy(pool, 1, 1, ymd(2024, 1, 2), dec("100"), dec("10")).await;
+            insert_buy(
+                pool,
+                1,
+                ListingId(1),
+                ymd(2024, 1, 2),
+                dec("100"),
+                dec("10"),
+            )
+            .await;
             crate::entities::corporate_action::db_upsert(
                 pool,
                 &crate::entities::corporate_action::CorporateAction {
                     id: 1,
-                    listing_id: 1,
+                    listing_id: ListingId(1),
                     date: ymd(2025, 3, 3),
                     kind: crate::entities::corporate_action::ActionKind::ReturnOfCapital {
                         amount_per_unit: dec("0.15"),
@@ -1747,12 +1836,20 @@ mod tests {
     async fn agreement_across_a_split_between_acquisition_and_the_sale() {
         optimiser_agrees_with_the_recorded_sell(async |pool, _client| {
             insert_listing(pool, 1, "SPL").await;
-            insert_buy(pool, 1, 1, ymd(2024, 1, 2), dec("100"), dec("10")).await;
+            insert_buy(
+                pool,
+                1,
+                ListingId(1),
+                ymd(2024, 1, 2),
+                dec("100"),
+                dec("10"),
+            )
+            .await;
             crate::entities::corporate_action::db_upsert(
                 pool,
                 &crate::entities::corporate_action::CorporateAction {
                     id: 1,
-                    listing_id: 1,
+                    listing_id: ListingId(1),
                     date: ymd(2025, 1, 2),
                     kind: crate::entities::corporate_action::ActionKind::ShareSplit {
                         split_new_units: dec("3"),
@@ -1779,13 +1876,29 @@ mod tests {
     async fn agreement_across_two_parcels_with_every_cost_base_event() {
         optimiser_agrees_with_the_recorded_sell(async |pool, client| {
             insert_listing(pool, 1, "VDHG").await;
-            insert_buy(pool, 1, 1, ymd(2023, 2, 1), dec("100"), dec("40")).await;
-            insert_buy(pool, 2, 1, ymd(2024, 1, 15), dec("100"), dec("60")).await;
+            insert_buy(
+                pool,
+                1,
+                ListingId(1),
+                ymd(2023, 2, 1),
+                dec("100"),
+                dec("40"),
+            )
+            .await;
+            insert_buy(
+                pool,
+                2,
+                ListingId(1),
+                ymd(2024, 1, 15),
+                dec("100"),
+                dec("60"),
+            )
+            .await;
             crate::entities::corporate_action::db_upsert(
                 pool,
                 &crate::entities::corporate_action::CorporateAction {
                     id: 1,
-                    listing_id: 1,
+                    listing_id: ListingId(1),
                     date: ymd(2025, 3, 3),
                     kind: crate::entities::corporate_action::ActionKind::ReturnOfCapital {
                         amount_per_unit: dec("0.25"),
@@ -1819,7 +1932,15 @@ mod tests {
     async fn the_amma_reduction_reaches_the_estimate_of_a_sale_inside_its_year() {
         let cost = optimiser_agrees_with_the_recorded_sell(async |pool, client| {
             insert_listing(pool, 1, "VDHG").await;
-            insert_buy(pool, 1, 1, ymd(2024, 1, 15), dec("100"), dec("60")).await;
+            insert_buy(
+                pool,
+                1,
+                ListingId(1),
+                ymd(2024, 1, 15),
+                dec("100"),
+                dec("60"),
+            )
+            .await;
             amma_with_generated_adjustments(client, pool, 1, ymd(2026, 6, 30), dec("100"), "1.30")
                 .await;
             Rehearsal {
@@ -1845,8 +1966,24 @@ mod tests {
         insert_listing(&pool, 1, "VDHG").await;
         // Two parcels ten cents apart per unit before the statement — parcel
         // 1 is the dearer, so on its own it is the smaller gain…
-        insert_buy(&pool, 1, 1, ymd(2023, 2, 1), dec("100"), dec("60.00")).await;
-        insert_buy(&pool, 2, 1, ymd(2023, 2, 2), dec("100"), dec("59.90")).await;
+        insert_buy(
+            &pool,
+            1,
+            ListingId(1),
+            ymd(2023, 2, 1),
+            dec("100"),
+            dec("60.00"),
+        )
+        .await;
+        insert_buy(
+            &pool,
+            2,
+            ListingId(1),
+            ymd(2023, 2, 2),
+            dec("100"),
+            dec("59.90"),
+        )
+        .await;
         // …and a statement that reduces only the first, by $1.30/unit, which
         // takes its cost base under the other's and so reverses the order.
         test_support::amma(1, 1)
@@ -1887,7 +2024,15 @@ mod tests {
         let pool = test_pool().await;
         let client = ApiClient::full(&pool);
         insert_listing(&pool, 1, "VDHG").await;
-        insert_buy(&pool, 1, 1, ymd(2024, 1, 15), dec("100"), dec("60")).await;
+        insert_buy(
+            &pool,
+            1,
+            ListingId(1),
+            ymd(2024, 1, 15),
+            dec("100"),
+            dec("60"),
+        )
+        .await;
         amma_with_generated_adjustments(&client, &pool, 1, ymd(2026, 6, 30), dec("100"), "1.30")
             .await;
 

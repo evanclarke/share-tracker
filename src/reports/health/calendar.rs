@@ -4,6 +4,7 @@
 use crate::entities::closing_price::HeldTimeline;
 use crate::infra::currency::CurrencyCode;
 use crate::infra::decimal::Money;
+use crate::infra::id::ListingId;
 use chrono::{DateTime, Duration, NaiveDate};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -63,7 +64,7 @@ pub(super) const DIVIDEND_AMOUNT_TOLERANCE_FLOOR: i64 = 1;
 /// (see [`db_distribution_calendar`]).
 #[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MissingDividendEntry {
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     pub ticker: String,
     pub holding_account_id: i64,
     pub holding_account: String,
@@ -104,7 +105,10 @@ pub struct MissingDividendEntry {
 /// alarm on the banner, which is what teaches a reader to ignore it. Each gap
 /// is clamped to the matching window, so one mistyped `date_paid` cannot push
 /// every later alert out by a year.
-pub(super) fn expected_payment_lag_days(lags: &HashMap<i64, i64>, listing_id: i64) -> i64 {
+pub(super) fn expected_payment_lag_days(
+    lags: &HashMap<ListingId, i64>,
+    listing_id: ListingId,
+) -> i64 {
     lags.get(&listing_id)
         .copied()
         .unwrap_or(DIVIDEND_MATCH_AFTER_DAYS)
@@ -116,7 +120,7 @@ pub(super) fn expected_payment_lag_days(lags: &HashMap<i64, i64>, listing_id: i6
 pub struct DividendAmountMismatch {
     /// The `income` row the alert is about.
     pub income_id: i64,
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     pub ticker: String,
     pub holding_account_id: i64,
     pub holding_account: String,
@@ -144,7 +148,7 @@ pub struct DividendAmountMismatch {
 /// A stored calendar event with its listing's ticker.
 #[derive(sqlx::FromRow)]
 pub(super) struct CalendarEventRow {
-    listing_id: i64,
+    listing_id: ListingId,
     ticker: String,
     ex_date: NaiveDate,
     #[sqlx(try_from = "Money")]
@@ -158,7 +162,7 @@ pub(super) struct CalendarEventRow {
 #[derive(sqlx::FromRow)]
 pub(super) struct CalendarIncomeRow {
     id: i64,
-    listing_id: i64,
+    listing_id: ListingId,
     holding_account_id: i64,
     date_paid: NaiveDate,
     ex_date: Option<NaiveDate>,
@@ -182,7 +186,7 @@ pub(super) struct CalendarIncomeRow {
 /// on (see [`DrpChain`]).
 #[derive(sqlx::FromRow)]
 pub(super) struct DrpReinvestmentRow {
-    listing_id: i64,
+    listing_id: ListingId,
     holding_account_id: i64,
     /// The reinvestment trade's date — the distribution's **payment** date,
     /// which is a couple of weeks after its own ex-date.
@@ -211,7 +215,7 @@ pub(super) struct DrpReinvestmentRow {
 /// there was never a row to enter.
 pub(super) struct DrpChain {
     /// Ascending by date.
-    payments: HashMap<(i64, i64), Vec<DrpReinvestmentRow>>,
+    payments: HashMap<(ListingId, i64), Vec<DrpReinvestmentRow>>,
 }
 
 impl DrpChain {
@@ -231,7 +235,7 @@ impl DrpChain {
     /// reader to ignore the banner, the failure this project guards against
     /// everywhere else — for a false negative that needs the registry to have
     /// distributed while leaving an enrolled holder's DRP surplus untouched.
-    fn closes_across(&self, listing_id: i64, account_id: i64, ex_date: NaiveDate) -> bool {
+    fn closes_across(&self, listing_id: ListingId, account_id: i64, ex_date: NaiveDate) -> bool {
         let Some(payments) = self.payments.get(&(listing_id, account_id)) else {
             return false;
         };
@@ -423,7 +427,7 @@ pub(super) async fn db_distribution_calendar(
     // Income rows by (listing, account), so the match is run one registered
     // holder at a time — the same listing in two accounts pays two
     // distributions and is entered as two rows.
-    let mut by_holder: HashMap<(i64, i64), Vec<&CalendarIncomeRow>> = HashMap::new();
+    let mut by_holder: HashMap<(ListingId, i64), Vec<&CalendarIncomeRow>> = HashMap::new();
     for row in &income {
         by_holder
             .entry((row.listing_id, row.holding_account_id))
@@ -439,7 +443,7 @@ pub(super) async fn db_distribution_calendar(
     // The longest ex-date-to-payment gap per listing among the matched
     // distributions — what each missing entry's due date is read from once the
     // walk has seen every match (see [`expected_payment_lag_days`]).
-    let mut payment_lags: HashMap<i64, i64> = HashMap::new();
+    let mut payment_lags: HashMap<ListingId, i64> = HashMap::new();
     for event in &events {
         let basis_at = DateTime::parse_from_rfc3339(&event.fetched_at)
             .map_err(|e| {

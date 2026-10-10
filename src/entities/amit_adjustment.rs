@@ -5,6 +5,7 @@ use crate::infra::db::write_tx;
 use crate::infra::decimal::{Money, parse_dec};
 use crate::infra::extract::Json;
 use crate::infra::http::{self, ApiError, CrudEntity, Upsert, UpsertResponse};
+use crate::infra::id::ListingId;
 use axum::{
     Router,
     extract::{Path, State},
@@ -242,11 +243,11 @@ fn adjustment_body(adj: &AmitAdjustment) -> AmitAdjustmentBody {
 async fn traces_back_to(
     conn: &mut sqlx::SqliteConnection,
     parcel_id: i64,
-    listing_id: i64,
+    listing_id: ListingId,
     account_id: i64,
 ) -> Result<bool, sqlx::Error> {
     for ancestor in rollover::source_ancestors(&mut *conn, parcel_id).await? {
-        let holding: Option<(i64, i64)> =
+        let holding: Option<(ListingId, i64)> =
             sqlx::query_as("SELECT listing_id, holding_account_id FROM trades WHERE id = ?")
                 .bind(ancestor)
                 .fetch_optional(&mut *conn)
@@ -263,7 +264,7 @@ async fn traces_back_to(
 async fn trade_date_and_splits(
     conn: &mut sqlx::SqliteConnection,
     trade_id: i64,
-    listing_id: i64,
+    listing_id: ListingId,
 ) -> Result<(chrono::NaiveDate, Vec<corporate_action::SplitEvent>), sqlx::Error> {
     let trade_date: chrono::NaiveDate = sqlx::query_scalar("SELECT date FROM trades WHERE id = ?")
         .bind(trade_id)
@@ -291,12 +292,12 @@ async fn db_write_on(
         return Err(UpsertError::TradeNotBuyOrDrp);
     }
 
-    let (trade_listing_id, trade_account_id): (i64, i64) =
+    let (trade_listing_id, trade_account_id): (ListingId, i64) =
         sqlx::query_as("SELECT listing_id, holding_account_id FROM trades WHERE id = ?")
             .bind(adj.trade_id)
             .fetch_one(&mut *conn)
             .await?;
-    let (amma_listing_id, amma_account_id): (i64, i64) =
+    let (amma_listing_id, amma_account_id): (ListingId, i64) =
         sqlx::query_as("SELECT listing_id, holding_account_id FROM amma_statements WHERE id = ?")
             .bind(adj.amma_statement_id)
             .fetch_one(&mut *conn)
@@ -712,7 +713,7 @@ mod tests {
             &pool,
             1,
             &TransferBody {
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: ymd(2025, 5, 1),
                 from_account_id: 1,
                 to_account_id: 2,
@@ -841,7 +842,7 @@ mod tests {
             &pool,
             1,
             &TransferBody {
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: ymd(2024, 8, 15),
                 from_account_id: 1,
                 to_account_id: 2,
@@ -881,8 +882,13 @@ mod tests {
             .await;
     }
 
-    async fn insert_buy_trade(pool: &SqlitePool, id: i64, listing_id: i64, quantity: Decimal) {
-        test_support::buy(id, listing_id)
+    async fn insert_buy_trade(
+        pool: &SqlitePool,
+        id: i64,
+        listing_id: ListingId,
+        quantity: Decimal,
+    ) {
+        test_support::buy(id, listing_id.0)
             .date(ymd(2024, 1, 16))
             .qty(quantity)
             .price(Decimal::from(100))
@@ -892,8 +898,13 @@ mod tests {
             .await;
     }
 
-    async fn insert_sell_trade(pool: &SqlitePool, id: i64, listing_id: i64, quantity: Decimal) {
-        test_support::sell(id, listing_id)
+    async fn insert_sell_trade(
+        pool: &SqlitePool,
+        id: i64,
+        listing_id: ListingId,
+        quantity: Decimal,
+    ) {
+        test_support::sell(id, listing_id.0)
             .date(ymd(2024, 6, 3))
             .qty(quantity)
             .price(Decimal::from(120))
@@ -903,8 +914,13 @@ mod tests {
             .await;
     }
 
-    async fn insert_amma(pool: &SqlitePool, id: i64, listing_id: i64, cost_base_adj: Decimal) {
-        test_support::amma(id, listing_id)
+    async fn insert_amma(
+        pool: &SqlitePool,
+        id: i64,
+        listing_id: ListingId,
+        cost_base_adj: Decimal,
+    ) {
+        test_support::amma(id, listing_id.0)
             .cost_base_adjustment(cost_base_adj)
             .insert(pool)
             .await;
@@ -916,8 +932,8 @@ mod tests {
     async fn db_insert_and_retrieve() {
         let pool = test_pool().await;
         insert_test_listing(&pool, 1, "XASX", "VAF").await;
-        insert_buy_trade(&pool, 1, 1, Decimal::from(100)).await;
-        insert_amma(&pool, 1, 1, "0.05".parse().unwrap()).await;
+        insert_buy_trade(&pool, 1, ListingId(1), Decimal::from(100)).await;
+        insert_amma(&pool, 1, ListingId(1), "0.05".parse().unwrap()).await;
 
         let adj = AmitAdjustment {
             id: 1,
@@ -937,8 +953,8 @@ mod tests {
     async fn db_sell_trade_rejected() {
         let pool = test_pool().await;
         insert_test_listing(&pool, 1, "XASX", "VAF").await;
-        insert_sell_trade(&pool, 1, 1, Decimal::from(50)).await;
-        insert_amma(&pool, 1, 1, "0.05".parse().unwrap()).await;
+        insert_sell_trade(&pool, 1, ListingId(1), Decimal::from(50)).await;
+        insert_amma(&pool, 1, ListingId(1), "0.05".parse().unwrap()).await;
 
         let err = db_upsert(
             &pool,
@@ -959,8 +975,8 @@ mod tests {
         let pool = test_pool().await;
         insert_test_listing(&pool, 1, "XASX", "VAF").await;
         insert_test_listing(&pool, 2, "XASX", "VAS").await;
-        insert_buy_trade(&pool, 1, 1, Decimal::from(100)).await;
-        insert_amma(&pool, 1, 2, "0.05".parse().unwrap()).await; // different listing
+        insert_buy_trade(&pool, 1, ListingId(1), Decimal::from(100)).await;
+        insert_amma(&pool, 1, ListingId(2), "0.05".parse().unwrap()).await; // different listing
 
         let err = db_upsert(
             &pool,
@@ -993,12 +1009,12 @@ mod tests {
         )
         .await
         .unwrap();
-        insert_buy_trade(&pool, 1, 1, Decimal::from(100)).await;
+        insert_buy_trade(&pool, 1, ListingId(1), Decimal::from(100)).await;
         sqlx::query("UPDATE trades SET holding_account_id = 2 WHERE id = 1")
             .execute(&pool)
             .await
             .unwrap();
-        insert_amma(&pool, 1, 1, "0.05".parse().unwrap()).await; // default account
+        insert_amma(&pool, 1, ListingId(1), "0.05".parse().unwrap()).await; // default account
 
         let err = db_upsert(
             &pool,
@@ -1035,8 +1051,8 @@ mod tests {
     async fn db_quantity_exceeds_trade_rejected() {
         let pool = test_pool().await;
         insert_test_listing(&pool, 1, "XASX", "VAF").await;
-        insert_buy_trade(&pool, 1, 1, Decimal::from(100)).await;
-        insert_amma(&pool, 1, 1, "0.05".parse().unwrap()).await;
+        insert_buy_trade(&pool, 1, ListingId(1), Decimal::from(100)).await;
+        insert_amma(&pool, 1, ListingId(1), "0.05".parse().unwrap()).await;
 
         let err = db_upsert(
             &pool,
@@ -1060,9 +1076,9 @@ mod tests {
     async fn db_duplicate_parcel_on_one_statement_rejected() {
         let pool = test_pool().await;
         insert_test_listing(&pool, 1, "XASX", "VAF").await;
-        insert_buy_trade(&pool, 1, 1, Decimal::from(100)).await;
-        insert_amma(&pool, 1, 1, "0.05".parse().unwrap()).await;
-        insert_amma(&pool, 2, 1, "0.03".parse().unwrap()).await;
+        insert_buy_trade(&pool, 1, ListingId(1), Decimal::from(100)).await;
+        insert_amma(&pool, 1, ListingId(1), "0.05".parse().unwrap()).await;
+        insert_amma(&pool, 2, ListingId(1), "0.03".parse().unwrap()).await;
 
         let first = AmitAdjustment {
             id: 1,
@@ -1111,10 +1127,10 @@ mod tests {
     async fn db_cost_base_reduction_calculation() {
         let pool = test_pool().await;
         insert_test_listing(&pool, 1, "XASX", "VAF").await;
-        insert_buy_trade(&pool, 1, 1, Decimal::from(100)).await;
+        insert_buy_trade(&pool, 1, ListingId(1), Decimal::from(100)).await;
         // Two AMMA statements: $0.05/unit and $0.03/unit
-        insert_amma(&pool, 1, 1, "0.05".parse().unwrap()).await;
-        insert_amma(&pool, 2, 1, "0.03".parse().unwrap()).await;
+        insert_amma(&pool, 1, ListingId(1), "0.05".parse().unwrap()).await;
+        insert_amma(&pool, 2, ListingId(1), "0.03".parse().unwrap()).await;
 
         db_upsert(
             &pool,
@@ -1169,7 +1185,7 @@ mod tests {
             &pool,
             &CorporateAction {
                 id: 1,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: ymd(2024, 1, 15),
                 kind: ActionKind::ShareSplit {
                     split_new_units: Decimal::from(2),
@@ -1180,7 +1196,7 @@ mod tests {
         .await
         .unwrap();
         // FY2024 statement (year ended 30 June 2024, after the split).
-        insert_amma(&pool, 1, 1, dec("0.50")).await;
+        insert_amma(&pool, 1, ListingId(1), dec("0.50")).await;
         test_support::amit_adjustment(&pool, 1, 1, 1, Decimal::from(100)).await;
 
         assert_eq!(reductions(&pool).await.get(&1).copied(), Some(dec("100")));
@@ -1213,7 +1229,7 @@ mod tests {
     async fn db_cost_base_reduction_ignores_tax_deferred_and_tax_free() {
         let pool = test_pool().await;
         insert_test_listing(&pool, 1, "XASX", "VAF").await;
-        insert_buy_trade(&pool, 1, 1, Decimal::from(100)).await;
+        insert_buy_trade(&pool, 1, ListingId(1), Decimal::from(100)).await;
 
         // AMMA with cost_base_adjustment 0.05/unit but huge tax-deferred / tax-free lines.
         test_support::amma(1, 1)
@@ -1253,8 +1269,8 @@ mod tests {
     async fn post_amit_adjustment_creates_a_row_with_a_database_assigned_id() {
         let pool = test_pool().await;
         insert_test_listing(&pool, 1, "XASX", "VAF").await;
-        insert_buy_trade(&pool, 1, 1, Decimal::from(100)).await;
-        insert_amma(&pool, 1, 1, dec("0.05")).await;
+        insert_buy_trade(&pool, 1, ListingId(1), Decimal::from(100)).await;
+        insert_amma(&pool, 1, ListingId(1), dec("0.05")).await;
         let client = client(&pool);
 
         let body = serde_json::json!({
@@ -1285,9 +1301,9 @@ mod tests {
     async fn post_amit_adjustment_twice_stores_two_distinct_rows() {
         let pool = test_pool().await;
         insert_test_listing(&pool, 1, "XASX", "VAF").await;
-        insert_buy_trade(&pool, 1, 1, Decimal::from(100)).await;
-        insert_amma(&pool, 1, 1, dec("0.05")).await;
-        insert_amma(&pool, 2, 1, dec("0.03")).await;
+        insert_buy_trade(&pool, 1, ListingId(1), Decimal::from(100)).await;
+        insert_amma(&pool, 1, ListingId(1), dec("0.05")).await;
+        insert_amma(&pool, 2, ListingId(1), dec("0.03")).await;
         let client = client(&pool);
 
         let first: AmitAdjustment = client
@@ -1332,8 +1348,8 @@ mod tests {
     async fn post_amit_adjustment_never_reuses_a_deleted_rows_id() {
         let pool = test_pool().await;
         insert_test_listing(&pool, 1, "XASX", "VAF").await;
-        insert_buy_trade(&pool, 1, 1, Decimal::from(100)).await;
-        insert_amma(&pool, 1, 1, dec("0.05")).await;
+        insert_buy_trade(&pool, 1, ListingId(1), Decimal::from(100)).await;
+        insert_amma(&pool, 1, ListingId(1), dec("0.05")).await;
         let client = client(&pool);
 
         let body = serde_json::json!({
@@ -1383,8 +1399,8 @@ mod tests {
     async fn post_amit_adjustment_rejects_like_the_upsert_and_stores_nothing() {
         let pool = test_pool().await;
         insert_test_listing(&pool, 1, "XASX", "VAF").await;
-        insert_buy_trade(&pool, 1, 1, Decimal::from(100)).await;
-        insert_amma(&pool, 1, 1, dec("0.05")).await;
+        insert_buy_trade(&pool, 1, ListingId(1), Decimal::from(100)).await;
+        insert_amma(&pool, 1, ListingId(1), dec("0.05")).await;
         let client = client(&pool);
 
         let response = client
@@ -1412,8 +1428,8 @@ mod tests {
     async fn api_upsert_and_get() {
         let pool = test_pool().await;
         insert_test_listing(&pool, 1, "XASX", "VAF").await;
-        insert_buy_trade(&pool, 1, 1, Decimal::from(100)).await;
-        insert_amma(&pool, 1, 1, "0.05".parse().unwrap()).await;
+        insert_buy_trade(&pool, 1, ListingId(1), Decimal::from(100)).await;
+        insert_amma(&pool, 1, ListingId(1), "0.05".parse().unwrap()).await;
 
         let body = serde_json::json!({
             "amma_statement_id": 1,
@@ -1433,8 +1449,8 @@ mod tests {
     async fn api_sell_trade_returns_422() {
         let pool = test_pool().await;
         insert_test_listing(&pool, 1, "XASX", "VAF").await;
-        insert_sell_trade(&pool, 1, 1, Decimal::from(50)).await;
-        insert_amma(&pool, 1, 1, "0.05".parse().unwrap()).await;
+        insert_sell_trade(&pool, 1, ListingId(1), Decimal::from(50)).await;
+        insert_amma(&pool, 1, ListingId(1), "0.05".parse().unwrap()).await;
 
         let body = serde_json::json!({
             "amma_statement_id": 1,
@@ -1452,8 +1468,8 @@ mod tests {
         let pool = test_pool().await;
         insert_test_listing(&pool, 1, "XASX", "VAF").await;
         insert_test_listing(&pool, 2, "XASX", "VAS").await;
-        insert_buy_trade(&pool, 1, 1, Decimal::from(100)).await;
-        insert_amma(&pool, 1, 2, "0.05".parse().unwrap()).await;
+        insert_buy_trade(&pool, 1, ListingId(1), Decimal::from(100)).await;
+        insert_amma(&pool, 1, ListingId(2), "0.05".parse().unwrap()).await;
 
         let body = serde_json::json!({
             "amma_statement_id": 1,
@@ -1468,8 +1484,8 @@ mod tests {
     async fn api_duplicate_parcel_returns_422() {
         let pool = test_pool().await;
         insert_test_listing(&pool, 1, "XASX", "VAF").await;
-        insert_buy_trade(&pool, 1, 1, Decimal::from(100)).await;
-        insert_amma(&pool, 1, 1, "0.05".parse().unwrap()).await;
+        insert_buy_trade(&pool, 1, ListingId(1), Decimal::from(100)).await;
+        insert_amma(&pool, 1, ListingId(1), "0.05".parse().unwrap()).await;
 
         let body = serde_json::json!({
             "amma_statement_id": 1,
@@ -1514,7 +1530,7 @@ mod tests {
             pool,
             1,
             &TransferBody {
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: ymd(2024, 8, 1),
                 from_account_id: 1,
                 to_account_id: 2,
@@ -1541,8 +1557,8 @@ mod tests {
     async fn db_an_adjustment_on_a_parcel_a_rollover_closed_is_refused() {
         let pool = test_pool().await;
         insert_test_listing(&pool, 1, "XASX", "VDHG").await;
-        insert_buy_trade(&pool, 1, 1, Decimal::from(100)).await;
-        insert_amma(&pool, 1, 1, "0.05".parse().unwrap()).await;
+        insert_buy_trade(&pool, 1, ListingId(1), Decimal::from(100)).await;
+        insert_amma(&pool, 1, ListingId(1), "0.05".parse().unwrap()).await;
         let replacement = transfer_out(&pool, 1, Decimal::from(100)).await;
 
         let err = db_upsert(
@@ -1575,8 +1591,8 @@ mod tests {
     async fn db_a_partial_rollover_leaves_the_units_it_did_not_take_adjustable() {
         let pool = test_pool().await;
         insert_test_listing(&pool, 1, "XASX", "VDHG").await;
-        insert_buy_trade(&pool, 1, 1, Decimal::from(100)).await;
-        insert_amma(&pool, 1, 1, "0.05".parse().unwrap()).await;
+        insert_buy_trade(&pool, 1, ListingId(1), Decimal::from(100)).await;
+        insert_amma(&pool, 1, ListingId(1), "0.05".parse().unwrap()).await;
         transfer_out(&pool, 1, Decimal::from(40)).await;
 
         let row = AmitAdjustment {
@@ -1614,8 +1630,8 @@ mod tests {
     async fn db_an_adjustment_entered_before_a_rollover_carries_into_the_replacement() {
         let pool = test_pool().await;
         insert_test_listing(&pool, 1, "XASX", "VDHG").await;
-        insert_buy_trade(&pool, 1, 1, Decimal::from(100)).await;
-        insert_amma(&pool, 1, 1, "0.05".parse().unwrap()).await;
+        insert_buy_trade(&pool, 1, ListingId(1), Decimal::from(100)).await;
+        insert_amma(&pool, 1, ListingId(1), "0.05".parse().unwrap()).await;
         db_upsert(
             &pool,
             &AmitAdjustment {
@@ -1648,10 +1664,10 @@ mod tests {
     async fn db_a_parcel_closed_by_an_ordinary_sell_stays_adjustable() {
         let pool = test_pool().await;
         insert_test_listing(&pool, 1, "XASX", "VDHG").await;
-        insert_buy_trade(&pool, 1, 1, Decimal::from(100)).await;
-        insert_sell_trade(&pool, 2, 1, Decimal::from(100)).await;
+        insert_buy_trade(&pool, 1, ListingId(1), Decimal::from(100)).await;
+        insert_sell_trade(&pool, 2, ListingId(1), Decimal::from(100)).await;
         crate::test_support::allocate(&pool, 1, 2, 1, Decimal::from(100)).await;
-        insert_amma(&pool, 1, 1, "0.05".parse().unwrap()).await;
+        insert_amma(&pool, 1, ListingId(1), "0.05".parse().unwrap()).await;
 
         db_upsert(
             &pool,
@@ -1678,8 +1694,8 @@ mod tests {
     async fn db_a_replacement_parcel_in_another_account_is_adjustable() {
         let pool = test_pool().await;
         insert_test_listing(&pool, 1, "XASX", "VDHG").await;
-        insert_buy_trade(&pool, 1, 1, Decimal::from(100)).await;
-        insert_amma(&pool, 1, 1, "0.05".parse().unwrap()).await;
+        insert_buy_trade(&pool, 1, ListingId(1), Decimal::from(100)).await;
+        insert_amma(&pool, 1, ListingId(1), "0.05".parse().unwrap()).await;
         // The statement is account 1's; the transfer moves the units to 2.
         let replacement = transfer_out(&pool, 1, Decimal::from(100)).await;
 
@@ -1740,10 +1756,10 @@ mod tests {
             pool,
             &CorporateAction {
                 id: action_id,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date,
                 kind: ActionKind::ScripForScrip {
-                    scrip_listing_id: 2,
+                    scrip_listing_id: ListingId(2),
                     scrip_new_units: Decimal::ONE,
                     scrip_old_units: Decimal::ONE,
                     scrip_cash_per_unit: None,
@@ -1907,10 +1923,10 @@ mod tests {
             &pool,
             &CorporateAction {
                 id: 10,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: ymd(2025, 3, 15),
                 kind: ActionKind::Demerger {
-                    demerger_listing_id: 2,
+                    demerger_listing_id: ListingId(2),
                     demerger_new_units: Decimal::ONE,
                     demerger_held_units: Decimal::ONE,
                     demerger_cost_base_pct: dec("30"),
@@ -1993,7 +2009,7 @@ mod tests {
             &pool,
             1,
             &TransferBody {
-                listing_id: 2,
+                listing_id: ListingId(2),
                 date: ymd(2025, 8, 1),
                 from_account_id: 1,
                 to_account_id: 2,
@@ -2045,9 +2061,9 @@ mod tests {
     async fn db_a_parcel_that_never_held_the_statements_units_is_still_refused() {
         let pool = test_pool().await;
         insert_test_listing(&pool, 1, "XASX", "VDHG").await;
-        insert_buy_trade(&pool, 1, 1, Decimal::from(100)).await;
+        insert_buy_trade(&pool, 1, ListingId(1), Decimal::from(100)).await;
         exchange_out(&pool, 10, ymd(2024, 5, 1)).await;
-        insert_amma(&pool, 1, 1, dec("0.05")).await;
+        insert_amma(&pool, 1, ListingId(1), dec("0.05")).await;
 
         // Bought on market on the acquirer's own listing, in the statement's
         // account: nothing connects it to the statement.
@@ -2075,8 +2091,8 @@ mod tests {
     async fn api_rollover_replaced_parcel_returns_422_naming_the_replacement() {
         let pool = test_pool().await;
         insert_test_listing(&pool, 1, "XASX", "VDHG").await;
-        insert_buy_trade(&pool, 1, 1, Decimal::from(100)).await;
-        insert_amma(&pool, 1, 1, "0.05".parse().unwrap()).await;
+        insert_buy_trade(&pool, 1, ListingId(1), Decimal::from(100)).await;
+        insert_amma(&pool, 1, ListingId(1), "0.05".parse().unwrap()).await;
         let replacement = transfer_out(&pool, 1, Decimal::from(100)).await;
 
         let resp = client(&pool)
@@ -2112,8 +2128,8 @@ mod tests {
     async fn api_list_returns_ok() {
         let pool = test_pool().await;
         insert_test_listing(&pool, 1, "XASX", "VAF").await;
-        insert_buy_trade(&pool, 1, 1, Decimal::from(100)).await;
-        insert_amma(&pool, 1, 1, "0.05".parse().unwrap()).await;
+        insert_buy_trade(&pool, 1, ListingId(1), Decimal::from(100)).await;
+        insert_amma(&pool, 1, ListingId(1), "0.05".parse().unwrap()).await;
         db_upsert(
             &pool,
             &AmitAdjustment {
@@ -2143,8 +2159,8 @@ mod tests {
     async fn api_delete_existing_returns_no_content() {
         let pool = test_pool().await;
         insert_test_listing(&pool, 1, "XASX", "VAF").await;
-        insert_buy_trade(&pool, 1, 1, Decimal::from(100)).await;
-        insert_amma(&pool, 1, 1, "0.05".parse().unwrap()).await;
+        insert_buy_trade(&pool, 1, ListingId(1), Decimal::from(100)).await;
+        insert_amma(&pool, 1, ListingId(1), "0.05".parse().unwrap()).await;
         db_upsert(
             &pool,
             &AmitAdjustment {
@@ -2175,10 +2191,10 @@ mod tests {
         use crate::test_support::assert_list_filters;
         let pool = test_pool().await;
         insert_test_listing(&pool, 1, "XASX", "VAF").await;
-        insert_buy_trade(&pool, 1, 1, Decimal::from(100)).await;
-        insert_buy_trade(&pool, 2, 1, Decimal::from(100)).await;
-        insert_amma(&pool, 1, 1, dec("0.05")).await;
-        insert_amma(&pool, 2, 1, dec("0.05")).await;
+        insert_buy_trade(&pool, 1, ListingId(1), Decimal::from(100)).await;
+        insert_buy_trade(&pool, 2, ListingId(1), Decimal::from(100)).await;
+        insert_amma(&pool, 1, ListingId(1), dec("0.05")).await;
+        insert_amma(&pool, 2, ListingId(1), dec("0.05")).await;
         for (id, amma_id, trade_id) in [(1, 1, 1), (2, 1, 2), (3, 2, 1), (4, 2, 2)] {
             test_support::amit_adjustment(&pool, id, amma_id, trade_id, Decimal::from(10)).await;
         }

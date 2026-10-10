@@ -40,6 +40,7 @@ use crate::infra::decimal::{mul_div, parse_dec};
 use crate::infra::extract::{Json, Query};
 use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
+use crate::infra::id::ListingId;
 use crate::reports::portfolio::{self, HoldingOverview};
 use axum::{Extension, Router, extract::State, routing::get};
 use chrono::NaiveDate;
@@ -117,7 +118,7 @@ impl RecordTable {
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
 #[serde(deny_unknown_fields)]
 pub struct ActivityRequest {
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     /// Current price per unit in AUD for the holding summary. Absent → the
     /// live-valuation rules; an explicit price wins.
     #[serde(
@@ -129,7 +130,7 @@ pub struct ActivityRequest {
 
 #[derive(utoipa::ToSchema, Debug, Serialize, Deserialize)]
 pub struct ActivityResponse {
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     /// The full ledger, chronological.
     pub events: Vec<ActivityEvent>,
     /// Final holding summary per holding account: the portfolio overview's
@@ -198,7 +199,7 @@ struct Sources {
     account_names: HashMap<i64, String>,
     /// Every listing's *current* ticker — the fallback
     /// [`RenameHistory::ticker_as_at`] resolves back from.
-    tickers: HashMap<i64, String>,
+    tickers: HashMap<ListingId, String>,
     /// The rename chains, so a counterpart listing named in an action's
     /// detail reads as it stood on the action's own date, not today
     /// (`docs/API.md`, "Ticker or name changes").
@@ -213,7 +214,7 @@ impl Sources {
     /// snapshot. `None` when the listing does not exist.
     async fn load(
         conn: &mut sqlx::SqliteConnection,
-        listing_id: i64,
+        listing_id: ListingId,
     ) -> Result<Option<Self>, sqlx::Error> {
         let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM listings WHERE id = ?)")
             .bind(listing_id)
@@ -356,7 +357,7 @@ impl Sources {
     /// ticker unless renamed since, in which case the one in force then, so a
     /// dated ledger row never prints a ticker that did not yet exist. Falls
     /// back to the raw id only when the listing has since gone.
-    fn ticker_as_at(&self, listing_id: i64, date: NaiveDate) -> String {
+    fn ticker_as_at(&self, listing_id: ListingId, date: NaiveDate) -> String {
         let Some(current) = self.tickers.get(&listing_id) else {
             return format!("listing {listing_id}");
         };
@@ -713,7 +714,7 @@ fn ledger(mut rows: Vec<Proto>) -> Vec<ActivityEvent> {
 /// `None` when the listing does not exist.
 pub async fn db_activity(
     pool: &SqlitePool,
-    listing_id: i64,
+    listing_id: ListingId,
 ) -> Result<Option<(Vec<ActivityEvent>, Vec<HoldingOverview>)>, sqlx::Error> {
     let mut tx = crate::infra::db::read_tx(pool).await?;
     let Some(sources) = Sources::load(&mut tx, listing_id).await? else {
@@ -767,7 +768,7 @@ pub(crate) fn trade_event(t: &Trade, fee_sale_ids: &HashSet<i64>) -> String {
 /// still reads the way it did when the action happened.
 fn describe_action(
     a: &CorporateAction,
-    ticker: impl Fn(i64) -> String,
+    ticker: impl Fn(ListingId) -> String,
 ) -> (String, String, Option<(Decimal, Decimal)>) {
     match &a.kind {
         ActionKind::ReturnOfCapital {
@@ -907,7 +908,7 @@ async fn activity_handler(
 
     // Value the summary like the overview does: an explicit price wins and is
     // never fetched; otherwise the live-valuation rules, degrading per-holding.
-    let prices: HashMap<i64, Decimal> = req
+    let prices: HashMap<ListingId, Decimal> = req
         .price
         .map(|p| HashMap::from([(req.listing_id, p)]))
         .unwrap_or_default();
@@ -947,21 +948,21 @@ mod tests {
             .await;
     }
 
-    async fn events(pool: &SqlitePool, listing_id: i64) -> Vec<ActivityEvent> {
+    async fn events(pool: &SqlitePool, listing_id: ListingId) -> Vec<ActivityEvent> {
         db_activity(pool, listing_id).await.unwrap().unwrap().0
     }
 
     #[tokio::test]
     async fn db_unknown_listing_is_none() {
         let pool = test_pool().await;
-        assert!(db_activity(&pool, 99).await.unwrap().is_none());
+        assert!(db_activity(&pool, ListingId(99)).await.unwrap().is_none());
     }
 
     #[tokio::test]
     async fn db_no_activity_is_empty_ledger() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "VAS").await;
-        let (events, holdings) = db_activity(&pool, 1).await.unwrap().unwrap();
+        let (events, holdings) = db_activity(&pool, ListingId(1)).await.unwrap().unwrap();
         assert!(events.is_empty());
         assert!(holdings.is_empty());
     }
@@ -983,7 +984,7 @@ mod tests {
             &pool,
             &corporate_action::CorporateAction {
                 id: 1,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: ymd(2024, 3, 1),
                 kind: ActionKind::ShareSplit {
                     split_new_units: dec("2"),
@@ -1008,7 +1009,7 @@ mod tests {
             .await;
         allocate(&pool, 1, 2, 1, dec("80")).await;
 
-        let (events, holdings) = db_activity(&pool, 1).await.unwrap().unwrap();
+        let (events, holdings) = db_activity(&pool, ListingId(1)).await.unwrap().unwrap();
         let order: Vec<&str> = events.iter().map(|e| e.event.as_str()).collect();
         assert_eq!(order, vec!["Buy", "Share split", "Dividend", "Sell"]);
         assert_eq!(events[0].date, ymd(2024, 1, 2));
@@ -1061,7 +1062,7 @@ mod tests {
             &pool,
             1,
             &transfer::TransferBody {
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: ymd(2024, 5, 1),
                 from_account_id: 1,
                 to_account_id: 2,
@@ -1077,7 +1078,7 @@ mod tests {
         .await
         .unwrap();
 
-        let (events, holdings) = db_activity(&pool, 1).await.unwrap().unwrap();
+        let (events, holdings) = db_activity(&pool, ListingId(1)).await.unwrap().unwrap();
         assert_eq!(events.len(), 2, "buy + one transfer row, no group trades");
         assert_eq!(events[1].event, "Transfer between accounts");
         // Accounts are named, never raw foreign-key ids.
@@ -1116,7 +1117,7 @@ mod tests {
             .insert(&pool)
             .await;
 
-        let events = events(&pool, 1).await;
+        let events = events(&pool, ListingId(1)).await;
         // 150 × 10 = 1500 USD at 2 USD/AUD → 750 AUD.
         assert_eq!(events[0].amount_aud, Some(dec("750")));
         assert_eq!(events[0].detail, "10 @ 150 USD");
@@ -1155,7 +1156,7 @@ mod tests {
             .await;
         allocate(&pool, 1, 2, 1, dec("40")).await;
 
-        let events = events(&pool, 1).await;
+        let events = events(&pool, ListingId(1)).await;
         let amount = |event: &str| {
             events
                 .iter()
@@ -1193,7 +1194,7 @@ mod tests {
             .insert(&pool)
             .await;
 
-        let events = events(&pool, 1).await;
+        let events = events(&pool, ListingId(1)).await;
         let row = events
             .iter()
             .find(|e| e.event == "Trust distribution")
@@ -1216,7 +1217,7 @@ mod tests {
             &pool,
             &corporate_action::CorporateAction {
                 id: 1,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: ymd(2024, 2, 1),
                 kind: ActionKind::ReturnOfCapital {
                     amount_per_unit: dec("0.50"),
@@ -1231,7 +1232,7 @@ mod tests {
             &pool,
             &corporate_action::CorporateAction {
                 id: 2,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: ymd(2024, 3, 1),
                 kind: ActionKind::RightsIssue {
                     rights_units: dec("1"),
@@ -1248,10 +1249,10 @@ mod tests {
             &pool,
             &corporate_action::CorporateAction {
                 id: 3,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: ymd(2024, 12, 1),
                 kind: ActionKind::ScripForScrip {
-                    scrip_listing_id: 2,
+                    scrip_listing_id: ListingId(2),
                     scrip_new_units: dec("2"),
                     scrip_old_units: dec("1"),
                     scrip_cash_per_unit: None,
@@ -1273,7 +1274,7 @@ mod tests {
             &pool,
             &DrpEnrolment {
                 id: 1,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 holding_account_id: 1,
                 enrolment_date: ymd(2024, 1, 10),
                 unenrolment_date: Some(ymd(2024, 10, 1)),
@@ -1293,14 +1294,14 @@ mod tests {
                 deductible_percentage: None,
                 currency: "AUD".into(),
                 description: Some("adviser".to_string()),
-                listing_id: Some(1),
+                listing_id: Some(ListingId(1)),
                 holding_account_id: None,
             },
         )
         .await
         .unwrap();
 
-        let events = events(&pool, 1).await;
+        let events = events(&pool, ListingId(1)).await;
         let by_event = |name: &str| {
             events
                 .iter()
@@ -1386,7 +1387,7 @@ mod tests {
             .build();
         test_support::insert_amma_bypassing_checks(&pool, &a).await;
 
-        let events = events(&pool, 1).await;
+        let events = events(&pool, ListingId(1)).await;
         let amma = events
             .iter()
             .find(|e| e.event == "AMMA statement")
@@ -1407,7 +1408,7 @@ mod tests {
             &pool,
             &corporate_action::CorporateAction {
                 id: 1,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: ymd(2024, 3, 1),
                 kind: ActionKind::ShareSplit {
                     split_new_units: dec("2"),
@@ -1424,11 +1425,11 @@ mod tests {
             .insert(&pool)
             .await;
 
-        let events = events(&pool, 1).await;
+        let events = events(&pool, ListingId(1)).await;
         assert_eq!(events[1].event, "Share split");
         assert_eq!(events[1].units_after, dec("200"));
         assert_eq!(events[2].units_after, dec("250"));
-        let (_, holdings) = db_activity(&pool, 1).await.unwrap().unwrap();
+        let (_, holdings) = db_activity(&pool, ListingId(1)).await.unwrap().unwrap();
         let held: Decimal = holdings.iter().map(|h| h.quantity).sum();
         assert_eq!(events.last().unwrap().units_after, held);
     }
@@ -1531,7 +1532,7 @@ mod tests {
             .await;
         crate::entities::listing_rename::db_rename(
             &pool,
-            1,
+            ListingId(1),
             &crate::entities::listing_rename::RenameBody {
                 effective_date: ymd(2024, 6, 1),
                 ticker: "LAR".to_string(),
@@ -1550,7 +1551,7 @@ mod tests {
             .await;
         allocate(&pool, 1, 2, 1, dec("10")).await;
 
-        let rows = events(&pool, 1).await;
+        let rows = events(&pool, ListingId(1)).await;
         let rename_row = rows
             .iter()
             .find(|r| r.event == "Ticker/exchange change")
@@ -1582,7 +1583,12 @@ mod tests {
         assert!(buy_pos < rename_pos && rename_pos < sell_pos);
     }
 
-    async fn rename(pool: &SqlitePool, listing_id: i64, effective_date: NaiveDate, ticker: &str) {
+    async fn rename(
+        pool: &SqlitePool,
+        listing_id: ListingId,
+        effective_date: NaiveDate,
+        ticker: &str,
+    ) {
         crate::entities::listing_rename::db_rename(
             pool,
             listing_id,
@@ -1615,10 +1621,10 @@ mod tests {
             &pool,
             &corporate_action::CorporateAction {
                 id: 1,
-                listing_id: 8,
+                listing_id: ListingId(8),
                 date: ymd(2023, 10, 3),
                 kind: ActionKind::Demerger {
-                    demerger_listing_id: 9,
+                    demerger_listing_id: ListingId(9),
                     demerger_new_units: dec("1"),
                     demerger_held_units: dec("1"),
                     demerger_cost_base_pct: dec("30"),
@@ -1631,9 +1637,9 @@ mod tests {
         )
         .await
         .unwrap();
-        rename(&pool, 9, ymd(2025, 6, 1), "SPUN").await;
+        rename(&pool, ListingId(9), ymd(2025, 6, 1), "SPUN").await;
 
-        let rows = events(&pool, 8).await;
+        let rows = events(&pool, ListingId(8)).await;
         let demerger = rows
             .iter()
             .find(|r| r.event == "Demerger")
@@ -1658,10 +1664,10 @@ mod tests {
             &pool,
             &corporate_action::CorporateAction {
                 id: 1,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: ymd(2023, 10, 3),
                 kind: ActionKind::ScripForScrip {
-                    scrip_listing_id: 2,
+                    scrip_listing_id: ListingId(2),
                     scrip_new_units: dec("2"),
                     scrip_old_units: dec("1"),
                     scrip_cash_per_unit: None,
@@ -1672,9 +1678,9 @@ mod tests {
         )
         .await
         .unwrap();
-        rename(&pool, 2, ymd(2025, 6, 1), "ACQR").await;
+        rename(&pool, ListingId(2), ymd(2025, 6, 1), "ACQR").await;
 
-        let rows = events(&pool, 1).await;
+        let rows = events(&pool, ListingId(1)).await;
         let scrip = rows
             .iter()
             .find(|r| r.event == "Scrip-for-scrip takeover")
@@ -1699,10 +1705,10 @@ mod tests {
             &pool,
             &corporate_action::CorporateAction {
                 id: 1,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: ymd(2023, 10, 3),
                 kind: ActionKind::ScripForScrip {
-                    scrip_listing_id: 2,
+                    scrip_listing_id: ListingId(2),
                     scrip_new_units: dec("2"),
                     scrip_old_units: dec("1"),
                     scrip_cash_per_unit: None,
@@ -1714,15 +1720,15 @@ mod tests {
         .await
         .unwrap();
         // Renamed *before* this demerger, so its row reads the new ticker.
-        rename(&pool, 3, ymd(2023, 6, 1), "SPUN").await;
+        rename(&pool, ListingId(3), ymd(2023, 6, 1), "SPUN").await;
         corporate_action::db_upsert(
             &pool,
             &corporate_action::CorporateAction {
                 id: 2,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: ymd(2023, 10, 3),
                 kind: ActionKind::Demerger {
-                    demerger_listing_id: 3,
+                    demerger_listing_id: ListingId(3),
                     demerger_new_units: dec("1"),
                     demerger_held_units: dec("1"),
                     demerger_cost_base_pct: dec("30"),
@@ -1736,7 +1742,7 @@ mod tests {
         .await
         .unwrap();
 
-        let rows = events(&pool, 1).await;
+        let rows = events(&pool, ListingId(1)).await;
         assert_eq!(
             rows.iter()
                 .find(|r| r.event == "Scrip-for-scrip takeover")
@@ -1772,7 +1778,7 @@ mod tests {
             &pool,
             &corporate_action::CorporateAction {
                 id: 1,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: ymd(2024, 3, 1),
                 kind: ActionKind::ShareSplit {
                     split_new_units: dec("1000"),

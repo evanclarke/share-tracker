@@ -489,6 +489,7 @@ async fn download(
 mod tests {
     use super::*;
     use crate::entities::trade;
+    use crate::infra::id::ListingId;
     use crate::test_support::{self, ApiClient, ApiResponse, dec, test_pool, ymd};
 
     /// Client over this module's own routes.
@@ -525,7 +526,7 @@ mod tests {
     async fn insert_parcel(pool: &SqlitePool, origin: trade::ParcelOrigin) -> i64 {
         insert_listing(pool).await;
         let mut conn = pool.acquire().await.unwrap();
-        trade::NewParcel::new(origin, ymd(2024, 1, 2), 1, 1, dec("1"), "AUD")
+        trade::NewParcel::new(origin, ymd(2024, 1, 2), ListingId(1), 1, dec("1"), "AUD")
             .price(dec("1"))
             .insert(&mut conn)
             .await

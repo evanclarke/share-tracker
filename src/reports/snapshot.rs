@@ -76,6 +76,7 @@
 use crate::infra::db::write_tx;
 use crate::infra::extract::{Json, Query};
 use crate::infra::http::ApiError;
+use crate::infra::id::ListingId;
 use axum::{
     Router,
     extract::{Path, State},
@@ -228,7 +229,7 @@ pub struct HoldingSeriesPoint {
 /// and the line is there for the *shape* of the window.
 #[derive(utoipa::ToSchema, Debug, Serialize, Deserialize)]
 pub struct HoldingSeries {
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     pub holding_account_id: i64,
     pub points: Vec<HoldingSeriesPoint>,
 }
@@ -347,7 +348,7 @@ pub async fn db_get(
 ///   whole stored result, this listing's rows included.
 pub async fn db_series(
     pool: &SqlitePool,
-    listing: Option<i64>,
+    listing: Option<ListingId>,
 ) -> Result<Vec<SeriesPoint>, sqlx::Error> {
     let rows = sqlx::query(
         "SELECT snapshot_date, stale, provisional, price_carried_forward, holding_excluded, \
@@ -458,7 +459,7 @@ pub async fn db_holding_series(
 
     // Keyed order, so the response is stable run to run (listing, then
     // account) rather than however the first snapshot happened to list them.
-    let mut by_holding: BTreeMap<(i64, i64), Vec<HoldingSeriesPoint>> = BTreeMap::new();
+    let mut by_holding: BTreeMap<(ListingId, i64), Vec<HoldingSeriesPoint>> = BTreeMap::new();
     for row in &rows {
         let snapshot_date: NaiveDate = row.try_get("snapshot_date")?;
         let rows_json: String = row.try_get("rows_json")?;
@@ -565,15 +566,15 @@ pub async fn default_regenerate_range(
 /// held as at it (from `valuation::stored_valuations`), plus the two
 /// per-listing caveats the stored snapshot and its rows must carry.
 struct PricedListings {
-    prices: HashMap<i64, Decimal>,
+    prices: HashMap<ListingId, Decimal>,
     /// Listings whose AUD conversion used a fallback-month rate — non-empty
     /// makes the snapshot `provisional`.
-    fx_provisional: HashSet<i64>,
+    fx_provisional: HashSet<ListingId>,
     /// Listings valued at a carried-forward close because the provider has
     /// stopped quoting them — non-empty makes the snapshot
     /// `price_carried_forward` (SCENARIOS Q-02). Kept apart from
     /// `fx_provisional` because only that one is ever trued up.
-    carried_forward: HashSet<i64>,
+    carried_forward: HashSet<ListingId>,
     /// Held listings left out of the valuation entirely because no price is
     /// obtainable for them at this date (`listings.unpriced_before`) —
     /// non-empty makes the snapshot `holding_excluded` and is stored verbatim
@@ -649,7 +650,7 @@ pub async fn generate(
     // reason, exactly as a failed live quote does — the row-level counterpart
     // of the snapshot-level list, so a reader of the rows alone still sees
     // which holding is absent and why.
-    let excluded_reason: HashMap<i64, &str> = excluded_holdings
+    let excluded_reason: HashMap<ListingId, &str> = excluded_holdings
         .0
         .iter()
         .map(|x| (x.listing_id, x.reason.as_str()))
@@ -1004,7 +1005,7 @@ pub(crate) struct ListParams {
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SeriesParams {
-    listing_id: Option<i64>,
+    listing_id: Option<ListingId>,
 }
 
 /// `GET /report_snapshots/holding_series` query: the snapshot dates to read,
@@ -1534,13 +1535,13 @@ mod tests {
     async fn insert_buy(
         pool: &SqlitePool,
         id: i64,
-        listing_id: i64,
+        listing_id: ListingId,
         date: NaiveDate,
         qty: &str,
         price: &str,
         ccy: &str,
     ) {
-        test_support::buy(id, listing_id)
+        test_support::buy(id, listing_id.0)
             .date(date)
             .settlement(date)
             .qty(qty.parse().unwrap())
@@ -1550,15 +1551,20 @@ mod tests {
             .await;
     }
 
-    async fn store_price(pool: &SqlitePool, listing_id: i64, date: NaiveDate, price: &str) {
-        test_support::closing_price(listing_id, date)
+    async fn store_price(pool: &SqlitePool, listing_id: ListingId, date: NaiveDate, price: &str) {
+        test_support::closing_price(listing_id.0, date)
             .price(price)
             .insert(pool)
             .await;
     }
 
-    async fn store_errored_price(pool: &SqlitePool, listing_id: i64, date: NaiveDate, msg: &str) {
-        test_support::closing_price(listing_id, date)
+    async fn store_errored_price(
+        pool: &SqlitePool,
+        listing_id: ListingId,
+        date: NaiveDate,
+        msg: &str,
+    ) {
+        test_support::closing_price(listing_id.0, date)
             .errored(msg)
             .insert(pool)
             .await;
@@ -1580,8 +1586,8 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "BHP", Some("XASX"), "AUD").await;
         insert_listing(&pool, 2, "ICE", Some("XNYS"), "USD").await;
-        insert_buy(&pool, 1, 1, ymd(2024, 1, 16), "100", "10", "AUD").await;
-        insert_buy(&pool, 2, 2, ymd(2024, 1, 16), "10", "100", "USD").await;
+        insert_buy(&pool, 1, ListingId(1), ymd(2024, 1, 16), "100", "10", "AUD").await;
+        insert_buy(&pool, 2, ListingId(2), ymd(2024, 1, 16), "10", "100", "USD").await;
         // RBA rates: 2 USD per AUD in both the acquisition and valuation months.
         for month in ["2024-01", "2026-06"] {
             sqlx::query("INSERT INTO rba_fx_rates (currency, month, rate) VALUES ('USD', ?, '2')")
@@ -1597,8 +1603,8 @@ mod tests {
             latest_snapshot_date(&pool, now).await.unwrap(),
             Some(ymd(2026, 6, 4))
         );
-        store_price(&pool, 1, ymd(2026, 6, 4), "62.48").await;
-        store_price(&pool, 2, ymd(2026, 6, 4), "141.50").await;
+        store_price(&pool, ListingId(1), ymd(2026, 6, 4), "62.48").await;
+        store_price(&pool, ListingId(2), ymd(2026, 6, 4), "141.50").await;
 
         run_snapshot_job(&pool, now).await.unwrap();
 
@@ -1658,10 +1664,19 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "BHP", Some("XASX"), "AUD").await;
         insert_listing(&pool, 2, "BTC", None, "AUD").await;
-        insert_buy(&pool, 1, 1, ymd(2024, 1, 16), "100", "10", "AUD").await;
-        insert_buy(&pool, 2, 2, ymd(2024, 1, 16), "0.5", "60000", "AUD").await;
-        store_price(&pool, 1, ymd(2026, 6, 5), "62.48").await; // Friday
-        store_price(&pool, 2, ymd(2026, 6, 6), "99545.35").await; // Saturday (UTC day)
+        insert_buy(&pool, 1, ListingId(1), ymd(2024, 1, 16), "100", "10", "AUD").await;
+        insert_buy(
+            &pool,
+            2,
+            ListingId(2),
+            ymd(2024, 1, 16),
+            "0.5",
+            "60000",
+            "AUD",
+        )
+        .await;
+        store_price(&pool, ListingId(1), ymd(2026, 6, 5), "62.48").await; // Friday
+        store_price(&pool, ListingId(2), ymd(2026, 6, 6), "99545.35").await; // Saturday (UTC day)
 
         // Sunday 01:30 UTC: Saturday's crypto candle is complete, Friday's ASX
         // close long final → the portfolio is valuable as at Saturday.
@@ -1690,9 +1705,9 @@ mod tests {
     async fn db_manual_price_over_a_stored_price_stales_on_or_after_snapshots() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "BHP", Some("XASX"), "AUD").await;
-        insert_buy(&pool, 1, 1, ymd(2024, 1, 16), "100", "10", "AUD").await;
-        store_price(&pool, 1, ymd(2026, 6, 3), "64.91").await; // Wednesday
-        store_price(&pool, 1, ymd(2026, 6, 5), "62.48").await; // Friday
+        insert_buy(&pool, 1, ListingId(1), ymd(2024, 1, 16), "100", "10", "AUD").await;
+        store_price(&pool, ListingId(1), ymd(2026, 6, 3), "64.91").await; // Wednesday
+        store_price(&pool, ListingId(1), ymd(2026, 6, 5), "62.48").await; // Friday
         let now = friday_evening_sydney();
         generate(&pool, ymd(2026, 6, 3), now).await.unwrap();
         generate(&pool, ymd(2026, 6, 5), now).await.unwrap();
@@ -1737,16 +1752,16 @@ mod tests {
     async fn db_deleting_a_stored_price_stales_on_or_after_snapshots() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "BHP", Some("XASX"), "AUD").await;
-        insert_buy(&pool, 1, 1, ymd(2024, 1, 16), "100", "10", "AUD").await;
-        store_price(&pool, 1, ymd(2026, 6, 3), "64.91").await; // Wednesday
-        store_price(&pool, 1, ymd(2026, 6, 5), "62.48").await; // Friday
+        insert_buy(&pool, 1, ListingId(1), ymd(2024, 1, 16), "100", "10", "AUD").await;
+        store_price(&pool, ListingId(1), ymd(2026, 6, 3), "64.91").await; // Wednesday
+        store_price(&pool, ListingId(1), ymd(2026, 6, 5), "62.48").await; // Friday
         let now = friday_evening_sydney();
         generate(&pool, ymd(2026, 6, 3), now).await.unwrap();
         generate(&pool, ymd(2026, 6, 5), now).await.unwrap();
         assert_eq!(stale_flags(&pool, ymd(2026, 6, 5)).await, vec![false; 3]);
 
         assert!(
-            closing_price::db_delete(&pool, 1, ymd(2026, 6, 5))
+            closing_price::db_delete(&pool, ListingId(1), ymd(2026, 6, 5))
                 .await
                 .unwrap(),
             "the ok row is there to delete"
@@ -1772,15 +1787,15 @@ mod tests {
     async fn db_back_dated_fact_stales_on_or_after_snapshots_and_regeneration_clears() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "BHP", Some("XASX"), "AUD").await;
-        insert_buy(&pool, 1, 1, ymd(2024, 1, 16), "100", "10", "AUD").await;
-        store_price(&pool, 1, ymd(2026, 6, 3), "64.91").await; // Wednesday
-        store_price(&pool, 1, ymd(2026, 6, 5), "62.48").await; // Friday
+        insert_buy(&pool, 1, ListingId(1), ymd(2024, 1, 16), "100", "10", "AUD").await;
+        store_price(&pool, ListingId(1), ymd(2026, 6, 3), "64.91").await; // Wednesday
+        store_price(&pool, ListingId(1), ymd(2026, 6, 5), "62.48").await; // Friday
         let now = friday_evening_sydney();
         generate(&pool, ymd(2026, 6, 3), now).await.unwrap();
         generate(&pool, ymd(2026, 6, 5), now).await.unwrap();
 
         // A Buy back-dated to Thursday: Friday's snapshots stale, Wednesday's untouched.
-        insert_buy(&pool, 2, 1, ymd(2026, 6, 4), "50", "63", "AUD").await;
+        insert_buy(&pool, 2, ListingId(1), ymd(2026, 6, 4), "50", "63", "AUD").await;
         assert_eq!(stale_flags(&pool, ymd(2026, 6, 3)).await, vec![false; 3]);
         assert_eq!(stale_flags(&pool, ymd(2026, 6, 5)).await, vec![true; 3]);
 
@@ -1830,7 +1845,7 @@ mod tests {
             &pool,
             &corporate_action::CorporateAction {
                 id: 1,
-                listing_id: 2,
+                listing_id: ListingId(2),
                 date: ymd(2026, 6, 4),
                 kind: corporate_action::ActionKind::ReturnOfCapital {
                     amount_per_unit: "0.50".parse().unwrap(),
@@ -1862,9 +1877,9 @@ mod tests {
     async fn db_an_exchange_holiday_write_stales_the_snapshots_it_re_values() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "BHP", Some("XASX"), "AUD").await;
-        insert_buy(&pool, 1, 1, ymd(2024, 1, 16), "100", "10", "AUD").await;
-        store_price(&pool, 1, ymd(2026, 6, 4), "44.4308").await; // Thursday
-        store_price(&pool, 1, ymd(2026, 6, 5), "50.7308").await; // Friday
+        insert_buy(&pool, 1, ListingId(1), ymd(2024, 1, 16), "100", "10", "AUD").await;
+        store_price(&pool, ListingId(1), ymd(2026, 6, 4), "44.4308").await; // Thursday
+        store_price(&pool, ListingId(1), ymd(2026, 6, 5), "50.7308").await; // Friday
         let now = friday_evening_sydney();
         generate(&pool, ymd(2026, 6, 4), now).await.unwrap();
         generate(&pool, ymd(2026, 6, 5), now).await.unwrap();
@@ -1931,8 +1946,8 @@ mod tests {
     async fn db_failed_price_day_yields_no_snapshot_until_the_price_rerun_succeeds() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "BHP", Some("XASX"), "AUD").await;
-        insert_buy(&pool, 1, 1, ymd(2024, 1, 16), "100", "10", "AUD").await;
-        store_errored_price(&pool, 1, ymd(2026, 6, 5), "provider down").await;
+        insert_buy(&pool, 1, ListingId(1), ymd(2024, 1, 16), "100", "10", "AUD").await;
+        store_errored_price(&pool, ListingId(1), ymd(2026, 6, 5), "provider down").await;
 
         let err = run_snapshot_job(&pool, friday_evening_sydney())
             .await
@@ -1954,7 +1969,7 @@ mod tests {
         assert!(matches!(err, GenerateError::Unprocessable(ref msg) if msg.contains("backfill")));
 
         // Once the re-fetch succeeds, the job stores the snapshot.
-        store_price(&pool, 1, ymd(2026, 6, 5), "62.48").await;
+        store_price(&pool, ListingId(1), ymd(2026, 6, 5), "62.48").await;
         run_snapshot_job(&pool, friday_evening_sydney())
             .await
             .unwrap();
@@ -1981,22 +1996,22 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "BHP", Some("XASX"), "AUD").await;
         insert_listing(&pool, 2, "ATVI", Some("XASX"), "AUD").await;
-        insert_buy(&pool, 1, 1, ymd(2024, 1, 16), "100", "10", "AUD").await;
-        insert_buy(&pool, 2, 2, ymd(2024, 1, 16), "50", "20", "AUD").await;
-        store_price(&pool, 1, ymd(2026, 6, 4), "62.48").await;
+        insert_buy(&pool, 1, ListingId(1), ymd(2024, 1, 16), "100", "10", "AUD").await;
+        insert_buy(&pool, 2, ListingId(2), ymd(2024, 1, 16), "50", "20", "AUD").await;
+        store_price(&pool, ListingId(1), ymd(2026, 6, 4), "62.48").await;
         // ATVI's last quote was two days earlier; the provider has served
         // nothing since.
-        store_price(&pool, 2, ymd(2026, 6, 2), "94.42").await;
+        store_price(&pool, ListingId(2), ymd(2026, 6, 2), "94.42").await;
         store_errored_price(
             &pool,
-            2,
+            ListingId(2),
             ymd(2026, 6, 3),
             "yahoo fetch for ATVI failed: Not found",
         )
         .await;
         store_errored_price(
             &pool,
-            2,
+            ListingId(2),
             ymd(2026, 6, 4),
             "yahoo fetch for ATVI failed: Not found",
         )
@@ -2059,8 +2074,8 @@ mod tests {
     async fn db_clearing_unpriced_from_stales_the_carried_forward_snapshots() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "ATVI", Some("XASX"), "AUD").await;
-        insert_buy(&pool, 1, 1, ymd(2024, 1, 16), "50", "20", "AUD").await;
-        store_price(&pool, 1, ymd(2026, 6, 2), "94.42").await;
+        insert_buy(&pool, 1, ListingId(1), ymd(2024, 1, 16), "50", "20", "AUD").await;
+        store_price(&pool, ListingId(1), ymd(2026, 6, 2), "94.42").await;
         let marked = test_support::listing(1)
             .ticker("ATVI")
             .name("ATVI")
@@ -2081,7 +2096,7 @@ mod tests {
             vec![true; 3],
             "clearing the marker stales every snapshot from its date on"
         );
-        store_price(&pool, 1, ymd(2026, 6, 4), "60.00").await;
+        store_price(&pool, ListingId(1), ymd(2026, 6, 4), "60.00").await;
 
         generate(&pool, ymd(2026, 6, 4), now).await.unwrap();
         assert_eq!(carried_flags(&pool, ymd(2026, 6, 4)).await, vec![false; 3]);
@@ -2103,8 +2118,8 @@ mod tests {
     async fn db_a_manual_price_inside_the_unpriced_run_beats_the_carried_close() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "ATVI", Some("XASX"), "AUD").await;
-        insert_buy(&pool, 1, 1, ymd(2024, 1, 16), "50", "20", "AUD").await;
-        store_price(&pool, 1, ymd(2026, 6, 2), "94.42").await;
+        insert_buy(&pool, 1, ListingId(1), ymd(2024, 1, 16), "50", "20", "AUD").await;
+        store_price(&pool, ListingId(1), ymd(2026, 6, 2), "94.42").await;
         test_support::closing_price(1, ymd(2026, 6, 4))
             .price("80.00")
             .manual("administrator valuation", "suspended, no provider candle")
@@ -2151,16 +2166,16 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "BHP", Some("XASX"), "AUD").await;
         insert_listing(&pool, 2, "LAC", Some("XASX"), "AUD").await;
-        insert_buy(&pool, 1, 1, ymd(2024, 1, 16), "100", "10", "AUD").await;
-        insert_buy(&pool, 2, 2, ymd(2024, 1, 16), "50", "20", "AUD").await;
+        insert_buy(&pool, 1, ListingId(1), ymd(2024, 1, 16), "100", "10", "AUD").await;
+        insert_buy(&pool, 2, ListingId(2), ymd(2024, 1, 16), "50", "20", "AUD").await;
         for d in [ymd(2026, 6, 3), ymd(2026, 6, 4)] {
-            store_price(&pool, 1, d, "62.48").await;
+            store_price(&pool, ListingId(1), d, "62.48").await;
         }
         // LAC's own series begins on the 4th. The 3rd carries a stored close
         // all the same — in the live case another listing's series, copied in
         // to unblock the date.
-        store_price(&pool, 2, ymd(2026, 6, 3), "10.13").await;
-        store_price(&pool, 2, ymd(2026, 6, 4), "24.90").await;
+        store_price(&pool, ListingId(2), ymd(2026, 6, 3), "10.13").await;
+        store_price(&pool, ListingId(2), ymd(2026, 6, 4), "24.90").await;
 
         let now = friday_evening_sydney();
         let marked = test_support::listing(2)
@@ -2242,12 +2257,12 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "BHP", Some("XASX"), "AUD").await;
         insert_listing(&pool, 2, "LAC", Some("XASX"), "AUD").await;
-        insert_buy(&pool, 1, 1, ymd(2024, 1, 16), "100", "10", "AUD").await;
-        insert_buy(&pool, 2, 2, ymd(2024, 1, 16), "50", "20", "AUD").await;
-        store_price(&pool, 1, ymd(2026, 6, 3), "62.48").await;
-        store_price(&pool, 1, ymd(2026, 6, 4), "63.00").await;
+        insert_buy(&pool, 1, ListingId(1), ymd(2024, 1, 16), "100", "10", "AUD").await;
+        insert_buy(&pool, 2, ListingId(2), ymd(2024, 1, 16), "50", "20", "AUD").await;
+        store_price(&pool, ListingId(1), ymd(2026, 6, 3), "62.48").await;
+        store_price(&pool, ListingId(1), ymd(2026, 6, 4), "63.00").await;
         // LAC's provider series begins on the 4th, so the 3rd excludes it.
-        store_price(&pool, 2, ymd(2026, 6, 4), "24.90").await;
+        store_price(&pool, ListingId(2), ymd(2026, 6, 4), "24.90").await;
         let marked = test_support::listing(2)
             .ticker("LAC")
             .name("LAC")
@@ -2289,7 +2304,7 @@ mod tests {
 
         // LAC's own line: one point, on the day it was valued — the excluded
         // day is a gap, not a zero point carrying its cost base alone.
-        let lac = db_series(&pool, Some(2)).await.unwrap();
+        let lac = db_series(&pool, Some(ListingId(2))).await.unwrap();
         assert_eq!(
             lac.len(),
             1,
@@ -2303,7 +2318,7 @@ mod tests {
         assert!(lac[0].excluded_holdings.0.is_empty());
 
         // BHP was never excluded: both dates are still points on its line.
-        let bhp = db_series(&pool, Some(1)).await.unwrap();
+        let bhp = db_series(&pool, Some(ListingId(1))).await.unwrap();
         assert_eq!(bhp.len(), 2);
         assert_eq!(bhp[0].market_value, "6248.00".parse().unwrap());
         assert_eq!(bhp[1].market_value, "6300.00".parse().unwrap());
@@ -2320,9 +2335,9 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "BHP", Some("XASX"), "AUD").await;
         insert_listing(&pool, 2, "LAC", Some("XASX"), "AUD").await;
-        insert_buy(&pool, 1, 1, ymd(2024, 1, 16), "100", "10", "AUD").await;
-        insert_buy(&pool, 2, 2, ymd(2024, 1, 16), "50", "20", "AUD").await;
-        store_price(&pool, 1, ymd(2026, 6, 3), "62.48").await;
+        insert_buy(&pool, 1, ListingId(1), ymd(2024, 1, 16), "100", "10", "AUD").await;
+        insert_buy(&pool, 2, ListingId(2), ymd(2024, 1, 16), "50", "20", "AUD").await;
+        store_price(&pool, ListingId(1), ymd(2026, 6, 3), "62.48").await;
         let marked = test_support::listing(2)
             .ticker("LAC")
             .name("LAC")
@@ -2357,9 +2372,9 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "LAC", Some("XASX"), "AUD").await;
         insert_listing(&pool, 2, "BHP", Some("XASX"), "AUD").await;
-        insert_buy(&pool, 1, 1, ymd(2024, 1, 16), "50", "20", "AUD").await;
-        insert_buy(&pool, 2, 2, ymd(2024, 1, 16), "100", "10", "AUD").await;
-        store_price(&pool, 2, ymd(2026, 6, 3), "62.48").await;
+        insert_buy(&pool, 1, ListingId(1), ymd(2024, 1, 16), "50", "20", "AUD").await;
+        insert_buy(&pool, 2, ListingId(2), ymd(2024, 1, 16), "100", "10", "AUD").await;
+        store_price(&pool, ListingId(2), ymd(2026, 6, 3), "62.48").await;
         let marked = test_support::listing(1)
             .ticker("LAC")
             .name("LAC")
@@ -2412,11 +2427,11 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "LAC", Some("XASX"), "AUD").await;
         insert_listing(&pool, 2, "BHP", Some("XASX"), "AUD").await;
-        insert_buy(&pool, 1, 1, ymd(2024, 1, 16), "50", "20", "AUD").await;
-        insert_buy(&pool, 2, 2, ymd(2024, 1, 16), "100", "10", "AUD").await;
+        insert_buy(&pool, 1, ListingId(1), ymd(2024, 1, 16), "50", "20", "AUD").await;
+        insert_buy(&pool, 2, ListingId(2), ymd(2024, 1, 16), "100", "10", "AUD").await;
         // LAC's row for the day is another security's price — the live shape.
-        store_price(&pool, 1, ymd(2026, 6, 3), "10.13").await;
-        store_price(&pool, 2, ymd(2026, 6, 3), "62.48").await;
+        store_price(&pool, ListingId(1), ymd(2026, 6, 3), "10.13").await;
+        store_price(&pool, ListingId(2), ymd(2026, 6, 3), "62.48").await;
         let marked = test_support::listing(1)
             .ticker("LAC")
             .name("LAC")
@@ -2430,7 +2445,7 @@ mod tests {
         let before = db_series(&pool, None).await.unwrap()[0].market_value;
         assert_eq!(before, "6248.00".parse().unwrap());
 
-        let cleared = crate::entities::closing_price::db_clear_unpriced_before(&pool, 1)
+        let cleared = crate::entities::closing_price::db_clear_unpriced_before(&pool, ListingId(1))
             .await
             .unwrap();
         assert!(matches!(
@@ -2470,7 +2485,7 @@ mod tests {
     async fn db_a_date_where_every_holding_is_excluded_is_blocked() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "LAC", Some("XASX"), "AUD").await;
-        insert_buy(&pool, 1, 1, ymd(2024, 1, 16), "50", "20", "AUD").await;
+        insert_buy(&pool, 1, ListingId(1), ymd(2024, 1, 16), "50", "20", "AUD").await;
         let marked = test_support::listing(1)
             .ticker("LAC")
             .name("LAC")
@@ -2517,11 +2532,11 @@ mod tests {
     async fn db_missing_month_rate_makes_snapshot_provisional_until_regenerated() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "ICE", Some("XNYS"), "USD").await;
-        insert_buy(&pool, 1, 1, ymd(2024, 1, 16), "10", "100", "USD").await;
+        insert_buy(&pool, 1, ListingId(1), ymd(2024, 1, 16), "10", "100", "USD").await;
         import_rate(&pool, "USD", "2024-01", "2").await;
         // May's rate exists, June's is not published yet.
         import_rate(&pool, "USD", "2026-05", "2").await;
-        store_price(&pool, 1, ymd(2026, 6, 4), "141.50").await;
+        store_price(&pool, ListingId(1), ymd(2026, 6, 4), "141.50").await;
 
         let now = friday_evening_sydney();
         let metas = generate(&pool, ymd(2026, 6, 4), now).await.unwrap();
@@ -2572,9 +2587,9 @@ mod tests {
     async fn db_rate_gap_beyond_fallback_bound_still_blocks() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "ICE", Some("XNYS"), "USD").await;
-        insert_buy(&pool, 1, 1, ymd(2024, 1, 16), "10", "100", "USD").await;
+        insert_buy(&pool, 1, ListingId(1), ymd(2024, 1, 16), "10", "100", "USD").await;
         import_rate(&pool, "USD", "2026-03", "2").await; // 3 months before June
-        store_price(&pool, 1, ymd(2026, 6, 4), "141.50").await;
+        store_price(&pool, ListingId(1), ymd(2026, 6, 4), "141.50").await;
 
         let err = generate(&pool, ymd(2026, 6, 4), friday_evening_sydney())
             .await
@@ -2594,15 +2609,24 @@ mod tests {
     async fn db_job_catches_up_missing_dates_and_retries_blocked_ones() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "BTC", None, "AUD").await;
-        insert_buy(&pool, 1, 1, ymd(2024, 1, 16), "0.5", "60000", "AUD").await;
-        store_price(&pool, 1, ymd(2026, 6, 3), "99000").await;
+        insert_buy(
+            &pool,
+            1,
+            ListingId(1),
+            ymd(2024, 1, 16),
+            "0.5",
+            "60000",
+            "AUD",
+        )
+        .await;
+        store_price(&pool, ListingId(1), ymd(2026, 6, 3), "99000").await;
         let now = utc(2026, 6, 7, 1, 30); // latest complete crypto day: 6/6
         generate(&pool, ymd(2026, 6, 3), now).await.unwrap();
 
         // Prices exist for 6/4 and 6/6 but 6/5 is missing: the run stores the
         // two generable dates and fails naming the blocked one.
-        store_price(&pool, 1, ymd(2026, 6, 4), "99100").await;
-        store_price(&pool, 1, ymd(2026, 6, 6), "99545.35").await;
+        store_price(&pool, ListingId(1), ymd(2026, 6, 4), "99100").await;
+        store_price(&pool, ListingId(1), ymd(2026, 6, 6), "99545.35").await;
         let err = run_snapshot_job(&pool, now).await.unwrap_err();
         assert!(err.contains("2026-06-05"), "{err}");
         assert!(err.contains("backfill"), "{err}");
@@ -2619,7 +2643,7 @@ mod tests {
         );
 
         // The late price lands: the next run fills the hole and succeeds.
-        store_price(&pool, 1, ymd(2026, 6, 5), "99200").await;
+        store_price(&pool, ListingId(1), ymd(2026, 6, 5), "99200").await;
         run_snapshot_job(&pool, now).await.unwrap();
         assert_eq!(
             db_list(&pool, Some(ReportKind::UnrealisedGains), None, None)
@@ -2637,16 +2661,25 @@ mod tests {
     async fn db_job_lookback_window_is_capped_and_regenerates_stale_in_window() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "BTC", None, "AUD").await;
-        insert_buy(&pool, 1, 1, ymd(2024, 1, 16), "0.5", "60000", "AUD").await;
+        insert_buy(
+            &pool,
+            1,
+            ListingId(1),
+            ymd(2024, 1, 16),
+            "0.5",
+            "60000",
+            "AUD",
+        )
+        .await;
         let now = utc(2026, 6, 7, 1, 30); // latest complete crypto day: 6/6
         let latest = ymd(2026, 6, 6);
         let window_start = latest - Duration::days(CATCHUP_LOOKBACK_DAYS - 1); // 5/24
 
         // Last stored snapshot is a month old; prices exist for every day.
-        store_price(&pool, 1, ymd(2026, 5, 6), "90000").await;
+        store_price(&pool, ListingId(1), ymd(2026, 5, 6), "90000").await;
         let mut d = window_start - Duration::days(3);
         while d <= latest {
-            store_price(&pool, 1, d, "99000").await;
+            store_price(&pool, ListingId(1), d, "99000").await;
             d += Duration::days(1);
         }
         generate(&pool, ymd(2026, 5, 6), now).await.unwrap();
@@ -2668,7 +2701,16 @@ mod tests {
 
         // A back-dated fact stales snapshots inside the window; the next run
         // regenerates them without being asked.
-        insert_buy(&pool, 2, 1, ymd(2026, 6, 1), "0.1", "95000", "AUD").await;
+        insert_buy(
+            &pool,
+            2,
+            ListingId(1),
+            ymd(2026, 6, 1),
+            "0.1",
+            "95000",
+            "AUD",
+        )
+        .await;
         assert_eq!(stale_flags(&pool, ymd(2026, 6, 6)).await, vec![true; 3]);
         run_snapshot_job(&pool, now).await.unwrap();
         assert_eq!(stale_flags(&pool, ymd(2026, 6, 6)).await, vec![false; 3]);
@@ -2697,7 +2739,7 @@ mod tests {
         insert_listing(&pool, 2, "CBA", Some("XASX"), "AUD").await;
         // BHP is held throughout, in two accounts; CBA is only bought on the
         // second day, so the first snapshot has no row for it at all.
-        insert_buy(&pool, 1, 1, ymd(2024, 1, 16), "100", "10", "AUD").await;
+        insert_buy(&pool, 1, ListingId(1), ymd(2024, 1, 16), "100", "10", "AUD").await;
         test_support::buy(2, 1)
             .date(ymd(2024, 1, 16))
             .settlement(ymd(2024, 1, 16))
@@ -2706,21 +2748,21 @@ mod tests {
             .account(2)
             .insert(&pool)
             .await;
-        insert_buy(&pool, 3, 2, ymd(2026, 6, 5), "50", "100", "AUD").await;
+        insert_buy(&pool, 3, ListingId(2), ymd(2026, 6, 5), "50", "100", "AUD").await;
         for (date, bhp, cba) in [
             (ymd(2026, 6, 3), "60.00", "100.00"),
             (ymd(2026, 6, 4), "64.91", "100.00"),
             (ymd(2026, 6, 5), "62.48", "104.00"),
         ] {
-            store_price(&pool, 1, date, bhp).await;
-            store_price(&pool, 2, date, cba).await;
+            store_price(&pool, ListingId(1), date, bhp).await;
+            store_price(&pool, ListingId(2), date, cba).await;
             generate(&pool, date, utc(2026, 6, 8, 5, 0)).await.unwrap();
         }
 
         let series = db_holding_series(&pool, None, None).await.unwrap();
         let keys: Vec<(i64, i64)> = series
             .iter()
-            .map(|h| (h.listing_id, h.holding_account_id))
+            .map(|h| (h.listing_id.0, h.holding_account_id))
             .collect();
         assert_eq!(
             keys,
@@ -2764,7 +2806,7 @@ mod tests {
         assert_eq!(
             windowed
                 .iter()
-                .map(|h| (h.listing_id, h.points.len()))
+                .map(|h| (h.listing_id.0, h.points.len()))
                 .collect::<Vec<_>>(),
             vec![(1, 2), (1, 2)]
         );
@@ -2776,8 +2818,8 @@ mod tests {
     async fn holding_series_skips_an_unpriced_row_rather_than_plotting_a_zero() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "BHP", Some("XASX"), "AUD").await;
-        insert_buy(&pool, 1, 1, ymd(2024, 1, 16), "100", "10", "AUD").await;
-        store_price(&pool, 1, ymd(2026, 6, 4), "64.91").await;
+        insert_buy(&pool, 1, ListingId(1), ymd(2024, 1, 16), "100", "10", "AUD").await;
+        store_price(&pool, ListingId(1), ymd(2026, 6, 4), "64.91").await;
         generate(&pool, ymd(2026, 6, 4), utc(2026, 6, 8, 5, 0))
             .await
             .unwrap();
@@ -2810,7 +2852,7 @@ mod tests {
         assert!(db_list(&pool, None, None, None).await.unwrap().is_empty());
 
         insert_listing(&pool, 1, "BHP", Some("XASX"), "AUD").await;
-        insert_buy(&pool, 1, 1, ymd(2024, 1, 16), "100", "10", "AUD").await;
+        insert_buy(&pool, 1, ListingId(1), ymd(2024, 1, 16), "100", "10", "AUD").await;
         // Friday 15:00 Sydney: Friday's close is not final yet.
         let err = generate(&pool, ymd(2026, 6, 5), utc(2026, 6, 5, 5, 0))
             .await
@@ -2832,9 +2874,9 @@ mod tests {
     async fn api_generate_list_get_and_series() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "BHP", Some("XASX"), "AUD").await;
-        insert_buy(&pool, 1, 1, ymd(2024, 1, 16), "100", "10", "AUD").await;
-        store_price(&pool, 1, ymd(2026, 6, 4), "64.91").await;
-        store_price(&pool, 1, ymd(2026, 6, 5), "62.48").await;
+        insert_buy(&pool, 1, ListingId(1), ymd(2024, 1, 16), "100", "10", "AUD").await;
+        store_price(&pool, ListingId(1), ymd(2026, 6, 4), "64.91").await;
+        store_price(&pool, ListingId(1), ymd(2026, 6, 5), "62.48").await;
         let app = app(pool.clone());
 
         // Generate two days on demand (a backfilled past date + the latest).
@@ -2934,17 +2976,17 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "BHP", Some("XASX"), "AUD").await;
         insert_listing(&pool, 2, "CBA", Some("XASX"), "AUD").await;
-        insert_buy(&pool, 1, 1, ymd(2024, 1, 16), "100", "10", "AUD").await;
+        insert_buy(&pool, 1, ListingId(1), ymd(2024, 1, 16), "100", "10", "AUD").await;
         // CBA is bought between the two snapshot dates, so it is held on the
         // Friday and not on the Thursday.
-        insert_buy(&pool, 2, 2, ymd(2026, 6, 5), "50", "20", "AUD").await;
+        insert_buy(&pool, 2, ListingId(2), ymd(2026, 6, 5), "50", "20", "AUD").await;
         for (listing, date, price) in [
             (1, ymd(2026, 6, 4), "44.4308"),
             (1, ymd(2026, 6, 5), "50.7308"),
             (2, ymd(2026, 6, 4), "100"),
             (2, ymd(2026, 6, 5), "110"),
         ] {
-            store_price(&pool, listing, date, price).await;
+            store_price(&pool, ListingId(listing), date, price).await;
         }
         let now = friday_evening_sydney();
         generate(&pool, ymd(2026, 6, 4), now).await.unwrap();
@@ -2996,13 +3038,13 @@ mod tests {
     async fn api_regenerate_all_and_provisional() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "ICE", Some("XNYS"), "USD").await;
-        insert_buy(&pool, 1, 1, ymd(2024, 1, 16), "10", "100", "USD").await;
+        insert_buy(&pool, 1, ListingId(1), ymd(2024, 1, 16), "10", "100", "USD").await;
         import_rate(&pool, "USD", "2024-01", "2").await;
         import_rate(&pool, "USD", "2026-05", "2").await;
         let now = friday_evening_sydney();
         // 6/3 finalised with May's real rate; 6/4 provisional (June missing).
-        store_price(&pool, 1, ymd(2026, 5, 29), "140").await;
-        store_price(&pool, 1, ymd(2026, 6, 4), "141.50").await;
+        store_price(&pool, ListingId(1), ymd(2026, 5, 29), "140").await;
+        store_price(&pool, ListingId(1), ymd(2026, 6, 4), "141.50").await;
         generate(&pool, ymd(2026, 5, 29), now).await.unwrap();
         generate(&pool, ymd(2026, 6, 4), now).await.unwrap();
         assert_eq!(
@@ -3089,13 +3131,13 @@ mod tests {
     async fn db_regenerate_all_over_a_range_backfills_missing_dates() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "BHP", Some("XASX"), "AUD").await;
-        insert_buy(&pool, 1, 1, ymd(2026, 6, 2), "100", "10", "AUD").await;
+        insert_buy(&pool, 1, ListingId(1), ymd(2026, 6, 2), "100", "10", "AUD").await;
         for (date, price) in [
             (ymd(2026, 6, 2), "60.00"),
             (ymd(2026, 6, 3), "61.00"),
             (ymd(2026, 6, 4), "62.48"),
         ] {
-            store_price(&pool, 1, date, price).await;
+            store_price(&pool, ListingId(1), date, price).await;
         }
         let now = friday_evening_sydney();
         assert!(
@@ -3127,9 +3169,9 @@ mod tests {
     async fn db_regenerate_all_logs_progress_per_date() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "BHP", Some("XASX"), "AUD").await;
-        insert_buy(&pool, 1, 1, ymd(2026, 6, 2), "100", "10", "AUD").await;
-        store_price(&pool, 1, ymd(2026, 6, 2), "60.00").await;
-        store_price(&pool, 1, ymd(2026, 6, 3), "61.00").await;
+        insert_buy(&pool, 1, ListingId(1), ymd(2026, 6, 2), "100", "10", "AUD").await;
+        store_price(&pool, ListingId(1), ymd(2026, 6, 2), "60.00").await;
+        store_price(&pool, ListingId(1), ymd(2026, 6, 3), "61.00").await;
         // 6/4 has no stored price, so it stays blocked — exercising both the
         // success and blocked log lines in one range.
         let now = friday_evening_sydney();
@@ -3163,10 +3205,10 @@ mod tests {
         assert_eq!(range["to"], serde_json::Value::Null);
 
         insert_listing(&pool, 1, "BHP", Some("XASX"), "AUD").await;
-        insert_buy(&pool, 1, 1, ymd(2026, 6, 1), "100", "10", "AUD").await;
-        store_price(&pool, 1, ymd(2026, 6, 2), "60.00").await;
-        store_price(&pool, 1, ymd(2026, 6, 3), "61.00").await;
-        store_price(&pool, 1, ymd(2026, 6, 4), "62.48").await;
+        insert_buy(&pool, 1, ListingId(1), ymd(2026, 6, 1), "100", "10", "AUD").await;
+        store_price(&pool, ListingId(1), ymd(2026, 6, 2), "60.00").await;
+        store_price(&pool, ListingId(1), ymd(2026, 6, 3), "61.00").await;
+        store_price(&pool, ListingId(1), ymd(2026, 6, 4), "62.48").await;
         let app = app(pool.clone());
 
         let resp = app.get("/report_snapshots/regenerate_range").await;
@@ -3201,7 +3243,7 @@ mod tests {
     async fn api_generate_blocked_day_returns_422_with_detail() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "BHP", Some("XASX"), "AUD").await;
-        insert_buy(&pool, 1, 1, ymd(2024, 1, 16), "100", "10", "AUD").await;
+        insert_buy(&pool, 1, ListingId(1), ymd(2024, 1, 16), "100", "10", "AUD").await;
         let app = app(pool);
 
         let resp = app
@@ -3225,12 +3267,12 @@ mod tests {
     async fn db_a_pre_rename_date_is_valued_from_prices_the_collection_run_filled() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "LAAC", Some("XNYS"), "USD").await;
-        insert_buy(&pool, 1, 1, ymd(2024, 1, 16), "100", "10", "USD").await;
+        insert_buy(&pool, 1, ListingId(1), ymd(2024, 1, 16), "100", "10", "USD").await;
         import_rate(&pool, "USD", "2024-01", "0.65").await;
         import_rate(&pool, "USD", "2026-06", "0.65").await;
         crate::entities::listing_rename::db_rename(
             &pool,
-            1,
+            ListingId(1),
             &crate::entities::listing_rename::RenameBody {
                 effective_date: ymd(2026, 6, 3),
                 ticker: "LAR".to_string(),
@@ -3290,12 +3332,12 @@ mod tests {
     async fn db_a_split_holding_is_never_stored_unvalued() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "SPL", Some("XASX"), "AUD").await;
-        insert_buy(&pool, 1, 1, ymd(2024, 1, 16), "100", "10", "AUD").await;
+        insert_buy(&pool, 1, ListingId(1), ymd(2024, 1, 16), "100", "10", "AUD").await;
         corporate_action::db_upsert(
             &pool,
             &corporate_action::CorporateAction {
                 id: 1,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: ymd(2024, 3, 1),
                 kind: corporate_action::ActionKind::ShareSplit {
                     split_new_units: "2".parse().unwrap(),
@@ -3314,7 +3356,7 @@ mod tests {
             .insert(&pool)
             .await;
         test_support::allocate(&pool, 2, 2, 1, "150".parse().unwrap()).await;
-        store_price(&pool, 1, ymd(2026, 6, 5), "62.48").await;
+        store_price(&pool, ListingId(1), ymd(2026, 6, 5), "62.48").await;
 
         generate(&pool, ymd(2026, 6, 5), friday_evening_sydney())
             .await
@@ -3342,12 +3384,12 @@ mod tests {
     async fn db_the_valuation_series_does_not_step_at_a_split() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "NVD", Some("XASX"), "AUD").await;
-        insert_buy(&pool, 1, 1, ymd(2026, 6, 1), "100", "115", "AUD").await;
+        insert_buy(&pool, 1, ListingId(1), ymd(2026, 6, 1), "100", "115", "AUD").await;
         corporate_action::db_upsert(
             &pool,
             &corporate_action::CorporateAction {
                 id: 1,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: ymd(2026, 6, 10),
                 kind: corporate_action::ActionKind::ShareSplit {
                     split_new_units: "10".parse().unwrap(),
@@ -3447,10 +3489,19 @@ mod tests {
         // Enough parcels that a run does real work: the point is that the write
         // has a window to land in, not that it lands at a chosen instant.
         for id in 1..=200 {
-            insert_buy(&pool, id, 1, ymd(2024, 1, 16), "100", "10", "AUD").await;
+            insert_buy(
+                &pool,
+                id,
+                ListingId(1),
+                ymd(2024, 1, 16),
+                "100",
+                "10",
+                "AUD",
+            )
+            .await;
         }
         let date = ymd(2026, 6, 5); // Friday
-        store_price(&pool, 1, date, "62.48").await;
+        store_price(&pool, ListingId(1), date, "62.48").await;
         let now = friday_evening_sydney();
 
         for round in 0..6 {
@@ -3513,9 +3564,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let pool = test_support::race_pool(&dir).await;
         insert_listing(&pool, 1, "BHP", Some("XASX"), "AUD").await;
-        insert_buy(&pool, 1, 1, ymd(2024, 1, 16), "100", "10", "AUD").await;
+        insert_buy(&pool, 1, ListingId(1), ymd(2024, 1, 16), "100", "10", "AUD").await;
         let date = ymd(2026, 6, 5);
-        store_price(&pool, 1, date, "62.48").await;
+        store_price(&pool, ListingId(1), date, "62.48").await;
         let now = friday_evening_sydney();
 
         // A fact write in flight on another connection: `BEGIN IMMEDIATE` has

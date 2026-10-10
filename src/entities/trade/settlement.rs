@@ -10,6 +10,7 @@
 use super::model::SettlementDateSource;
 use crate::infra::db::write_tx;
 use crate::infra::http::ApiError;
+use crate::infra::id::ListingId;
 use chrono::{Datelike, Days, NaiveDate};
 use sqlx::SqlitePool;
 use std::collections::HashSet;
@@ -125,7 +126,7 @@ pub(crate) fn warn_if_outside_holiday_coverage(
 /// exchange-less (Crypto) listing — those settle same-day.
 pub(crate) async fn settlement_days_for_listing(
     conn: &mut sqlx::SqliteConnection,
-    listing_id: i64,
+    listing_id: ListingId,
 ) -> Result<Option<i64>, sqlx::Error> {
     sqlx::query_scalar(
         "SELECT e.settlement_days FROM listings l \
@@ -198,7 +199,7 @@ impl Settlement {
     pub(crate) async fn resolve_on(
         conn: &mut sqlx::SqliteConnection,
         trade_id: Option<i64>,
-        listing_id: i64,
+        listing_id: ListingId,
         date: NaiveDate,
         supplied: Option<NaiveDate>,
     ) -> Result<Self, SettlementError> {
@@ -239,7 +240,7 @@ impl Settlement {
 pub(crate) async fn auto_settlement_date(
     pool: &SqlitePool,
     trade_id: i64,
-    listing_id: i64,
+    listing_id: ListingId,
     date: NaiveDate,
 ) -> Result<NaiveDate, SettlementError> {
     let mut conn = pool.acquire().await?;
@@ -254,7 +255,7 @@ pub(crate) async fn auto_settlement_date(
 pub(crate) async fn auto_settlement_date_on(
     conn: &mut sqlx::SqliteConnection,
     trade_id: Option<i64>,
-    listing_id: i64,
+    listing_id: ListingId,
     date: NaiveDate,
 ) -> Result<NaiveDate, SettlementError> {
     let Some(days) = settlement_days_for_listing(&mut *conn, listing_id).await? else {
@@ -273,7 +274,7 @@ pub(crate) async fn auto_settlement_date_on(
 #[derive(sqlx::FromRow)]
 struct StoredSettlement {
     id: i64,
-    listing_id: i64,
+    listing_id: ListingId,
     date: NaiveDate,
     settlement_date: NaiveDate,
     settlement_date_source: SettlementDateSource,

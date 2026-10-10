@@ -2,6 +2,7 @@ use crate::entities::closing_price::{self, NonTradingReason};
 use crate::entities::exchange_holiday::{coverage_span_for, window_outside_coverage};
 use crate::infra::extract::Json;
 use crate::infra::http::ApiError;
+use crate::infra::id::ListingId;
 use axum::{Router, extract::State, routing::get};
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
@@ -32,7 +33,7 @@ use std::collections::{HashMap, HashSet};
 #[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SettlementCoverageAlert {
     pub trade_id: i64,
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     pub ticker: String,
     pub mic: String,
     pub trade_type: String,
@@ -63,7 +64,7 @@ pub struct SettlementCoverageAlert {
 #[derive(sqlx::FromRow)]
 struct CoverageCandidate {
     trade_id: i64,
-    listing_id: i64,
+    listing_id: ListingId,
     ticker: String,
     mic: String,
     trade_type: String,
@@ -111,8 +112,8 @@ pub async fn db_coverage_alerts(
     // Every calendar first, one load per listing that has trades — not one per
     // trade: the `Market` behind it is four queries (the shape
     // `reports::health`'s non-trading-day alert uses).
-    let listing_ids: HashSet<i64> = candidates.iter().map(|c| c.listing_id).collect();
-    let mut markets: HashMap<i64, closing_price::Market> = HashMap::new();
+    let listing_ids: HashSet<ListingId> = candidates.iter().map(|c| c.listing_id).collect();
+    let mut markets: HashMap<ListingId, closing_price::Market> = HashMap::new();
     for listing_id in listing_ids {
         if let Some(market) = closing_price::load_market_on(&mut tx, listing_id).await? {
             markets.insert(listing_id, market);
@@ -192,11 +193,11 @@ mod tests {
     async fn insert_buy(
         pool: &SqlitePool,
         id: i64,
-        listing_id: i64,
+        listing_id: ListingId,
         date: NaiveDate,
         settlement: NaiveDate,
     ) {
-        test_support::buy(id, listing_id)
+        test_support::buy(id, listing_id.0)
             .date(date)
             .settlement(settlement)
             .qty(Decimal::from(10))
@@ -211,7 +212,7 @@ mod tests {
     async fn db_trade_inside_coverage_is_not_flagged() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "XASX").await;
-        insert_buy(&pool, 1, 1, ymd(2024, 1, 15), ymd(2024, 1, 17)).await;
+        insert_buy(&pool, 1, ListingId(1), ymd(2024, 1, 15), ymd(2024, 1, 17)).await;
         assert!(db_coverage_alerts(&pool).await.unwrap().is_empty());
     }
 
@@ -225,7 +226,7 @@ mod tests {
     async fn db_trade_beyond_seeded_holiday_range_is_flagged() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "XASX").await;
-        insert_buy(&pool, 1, 1, ymd(2026, 8, 3), ymd(2028, 1, 4)).await;
+        insert_buy(&pool, 1, ListingId(1), ymd(2026, 8, 3), ymd(2028, 1, 4)).await;
         let alerts = db_coverage_alerts(&pool).await.unwrap();
         assert_eq!(alerts.len(), 1);
         let a = &alerts[0];
@@ -242,7 +243,7 @@ mod tests {
     async fn db_trade_before_seeded_holiday_range_is_flagged() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "XASX").await;
-        insert_buy(&pool, 1, 1, ymd(2018, 3, 6), ymd(2018, 3, 8)).await;
+        insert_buy(&pool, 1, ListingId(1), ymd(2018, 3, 6), ymd(2018, 3, 8)).await;
         let alerts = db_coverage_alerts(&pool).await.unwrap();
         assert_eq!(alerts.len(), 1);
         assert_eq!(alerts[0].coverage_status, "outside_holiday_coverage");
@@ -258,7 +259,7 @@ mod tests {
     async fn db_window_straddling_coverage_start_is_flagged() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "XASX").await;
-        insert_buy(&pool, 1, 1, ymd(2018, 12, 28), ymd(2019, 1, 3)).await;
+        insert_buy(&pool, 1, ListingId(1), ymd(2018, 12, 28), ymd(2019, 1, 3)).await;
         let alerts = db_coverage_alerts(&pool).await.unwrap();
         assert_eq!(alerts.len(), 1);
         assert_eq!(alerts[0].coverage_status, "outside_holiday_coverage");
@@ -284,7 +285,7 @@ mod tests {
         .await
         .unwrap();
         insert_listing(&pool, 1, "XLON").await;
-        insert_buy(&pool, 1, 1, ymd(2024, 1, 15), ymd(2024, 1, 17)).await;
+        insert_buy(&pool, 1, ListingId(1), ymd(2024, 1, 15), ymd(2024, 1, 17)).await;
         let alerts = db_coverage_alerts(&pool).await.unwrap();
         assert_eq!(alerts.len(), 1);
         let a = &alerts[0];
@@ -305,7 +306,7 @@ mod tests {
             .name("Bitcoin")
             .insert(&pool)
             .await;
-        insert_buy(&pool, 1, 1, ymd(2018, 6, 4), ymd(2018, 6, 4)).await;
+        insert_buy(&pool, 1, ListingId(1), ymd(2018, 6, 4), ymd(2018, 6, 4)).await;
         assert!(db_coverage_alerts(&pool).await.unwrap().is_empty());
     }
 
@@ -323,7 +324,7 @@ mod tests {
     async fn db_supplied_weekend_settlement_is_flagged_inside_coverage() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "XNYS").await;
-        insert_buy(&pool, 1, 1, ymd(2021, 3, 25), ymd(2021, 5, 29)).await;
+        insert_buy(&pool, 1, ListingId(1), ymd(2021, 3, 25), ymd(2021, 5, 29)).await;
         let alerts = db_coverage_alerts(&pool).await.unwrap();
         assert_eq!(alerts.len(), 1);
         let a = &alerts[0];
@@ -347,7 +348,7 @@ mod tests {
     async fn db_supplied_holiday_settlement_is_flagged() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "XASX").await;
-        insert_buy(&pool, 1, 1, ymd(2026, 4, 2), ymd(2026, 4, 3)).await;
+        insert_buy(&pool, 1, ListingId(1), ymd(2026, 4, 2), ymd(2026, 4, 3)).await;
         let alerts = db_coverage_alerts(&pool).await.unwrap();
         assert_eq!(alerts.len(), 1);
         assert_eq!(alerts[0].coverage_status, "inside_holiday_coverage");
@@ -370,7 +371,7 @@ mod tests {
             .insert(&pool)
             .await;
         // Saturday 2026-03-14, traded and settled the same day.
-        insert_buy(&pool, 1, 1, ymd(2026, 3, 14), ymd(2026, 3, 14)).await;
+        insert_buy(&pool, 1, ListingId(1), ymd(2026, 3, 14), ymd(2026, 3, 14)).await;
         assert!(db_coverage_alerts(&pool).await.unwrap().is_empty());
     }
 
@@ -385,7 +386,7 @@ mod tests {
         insert_listing(&pool, 1, "XASX").await;
         // Monday 2026-08-03, settling Saturday 2028-01-08 — beyond the seeded
         // span and on a weekend.
-        insert_buy(&pool, 1, 1, ymd(2026, 8, 3), ymd(2028, 1, 8)).await;
+        insert_buy(&pool, 1, ListingId(1), ymd(2026, 8, 3), ymd(2028, 1, 8)).await;
         let alerts = db_coverage_alerts(&pool).await.unwrap();
         assert_eq!(alerts.len(), 1);
         let a = &alerts[0];
@@ -401,7 +402,7 @@ mod tests {
     async fn api_get_settlement_holiday_coverage() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "XASX").await;
-        insert_buy(&pool, 1, 1, ymd(2018, 3, 6), ymd(2018, 3, 8)).await;
+        insert_buy(&pool, 1, ListingId(1), ymd(2018, 3, 6), ymd(2018, 3, 8)).await;
         let resp = ApiClient::over(router().with_state(pool))
             .get("/reports/settlement_holiday_coverage")
             .await;

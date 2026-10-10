@@ -39,6 +39,7 @@ use crate::infra::currency::CurrencyCode;
 use crate::infra::extract::Json;
 use crate::infra::fx::FxRates;
 use crate::infra::http::ApiError;
+use crate::infra::id::ListingId;
 use axum::{Router, extract::State, routing::get};
 use chrono::{Datelike, NaiveDate};
 use rust_decimal::Decimal;
@@ -55,7 +56,7 @@ pub struct FxCoverageAlert {
     /// `income`, `AMMA statement`, …).
     pub record: String,
     pub record_id: i64,
-    pub listing_id: Option<i64>,
+    pub listing_id: Option<ListingId>,
     pub ticker: Option<String>,
     /// The record's own date — the one whose month anchors its conversion.
     pub date: NaiveDate,
@@ -81,7 +82,7 @@ pub fn router() -> Router<SqlitePool> {
 struct Convertible {
     record: &'static str,
     id: i64,
-    listing_id: Option<i64>,
+    listing_id: Option<ListingId>,
     ticker: Option<String>,
     date: NaiveDate,
     currency: CurrencyCode,
@@ -621,7 +622,7 @@ mod tests {
             &pool,
             &corporate_action::CorporateAction {
                 id: 1,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: ymd(2024, 5, 1),
                 kind: corporate_action::ActionKind::ReturnOfCapital {
                     amount_per_unit: dec("0.50"),
@@ -664,7 +665,7 @@ mod tests {
             &pool,
             &crate::entities::corporate_action::CorporateAction {
                 id: 10,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: ymd(2024, 7, 1),
                 kind: crate::entities::corporate_action::ActionKind::RightsIssue {
                     rights_units: Decimal::ONE,

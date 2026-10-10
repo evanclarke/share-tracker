@@ -4646,7 +4646,15 @@ mod tests {
         assert_eq!(tax_year["schema"]["type"], serde_json::json!("integer"));
         let listing_id = param("/portfolio/activity", "listing_id");
         assert_eq!(listing_id["required"], serde_json::json!(true));
-        assert_eq!(listing_id["schema"]["type"], serde_json::json!("integer"));
+        // A typed id is a `$ref` to its integer component (`infra::id`).
+        let reference = listing_id["schema"]["$ref"]
+            .as_str()
+            .expect("a typed id parameter refers to its component");
+        let component = reference.trim_start_matches("#/components/schemas/");
+        assert_eq!(
+            doc["components"]["schemas"][component]["type"],
+            serde_json::json!("integer")
+        );
         // …and an `Option` field is optional, so the two are really being told
         // apart rather than everything being stamped the same way.
         let as_of = param("/portfolio/open_parcels", "as_of_date");

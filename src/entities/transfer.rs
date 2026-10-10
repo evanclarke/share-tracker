@@ -42,6 +42,7 @@ use crate::infra::currency::CurrencyCode;
 use crate::infra::db::{WriteMode, write_tx};
 use crate::infra::extract::{Json, Query};
 use crate::infra::http::{self, ApiError, CrudEntity, DryRunQuery};
+use crate::infra::id::ListingId;
 use axum::{
     Router,
     extract::{Path, State},
@@ -56,7 +57,7 @@ use sqlx::SqlitePool;
 #[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Transfer {
     pub id: i64,
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     /// The date the holding moves: the transfer-out Sell and transfer-in
     /// Buys are dated on it.
     pub date: NaiveDate,
@@ -74,7 +75,7 @@ pub struct Transfer {
 #[serde(deny_unknown_fields)]
 pub struct TransferBody {
     /// The listing whose parcels move between accounts.
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     /// Transfer date (`YYYY-MM-DD`); the transfer-out Sell and transfer-in Buys are dated
     /// on it. Not a CGT event.
     pub date: NaiveDate,
@@ -332,7 +333,7 @@ impl From<TransferError> for ApiError {
 #[derive(Debug, Default, serde::Deserialize, utoipa::IntoParams)]
 #[serde(deny_unknown_fields)]
 pub struct TransferListQuery {
-    pub listing_id: Option<i64>,
+    pub listing_id: Option<ListingId>,
     pub from: Option<NaiveDate>,
     pub to: Option<NaiveDate>,
 }
@@ -666,7 +667,7 @@ async fn write_fee_sale(
     // Fee parcels must be of the transfer's listing (the Sell core checks the
     // source-account and capacity invariants, but not the listing).
     for alloc in &body.fee_allocations {
-        let parcel_listing: Option<i64> =
+        let parcel_listing: Option<ListingId> =
             sqlx::query_scalar("SELECT listing_id FROM trades WHERE id = ?")
                 .bind(alloc.purchase_trade_id)
                 .fetch_optional(&mut *conn)
@@ -928,7 +929,7 @@ mod tests {
 
     fn body(date: NaiveDate, from: i64, to: i64, allocations: Vec<(i64, &str)>) -> TransferBody {
         TransferBody {
-            listing_id: 1,
+            listing_id: ListingId(1),
             date,
             from_account_id: from,
             to_account_id: to,
@@ -1068,7 +1069,7 @@ mod tests {
                 holding_account_id: 1,
                 date: d(2024, 9, 3),
                 settlement_date: Some(d(2024, 9, 3)),
-                listing_id: 1,
+                listing_id: ListingId(1),
                 average_price: dec("15"),
                 quantity: dec("100"),
                 currency: "AUD".into(),
@@ -1141,7 +1142,7 @@ mod tests {
                 .collect()
         };
         TransferBody {
-            listing_id: 1,
+            listing_id: ListingId(1),
             date,
             from_account_id: from,
             to_account_id: to,
@@ -1368,7 +1369,7 @@ mod tests {
                 statement_total: None,
                 date: d(2024, 6, 1),
                 settlement_date: Some(d(2024, 6, 1)),
-                listing_id: 1,
+                listing_id: ListingId(1),
                 average_price: dec("99"),
                 quantity: dec("0.001"),
                 currency: "AUD".into(),
@@ -1431,7 +1432,7 @@ mod tests {
                 statement_total: None,
                 date: d(2024, 7, 1),
                 settlement_date: Some(d(2024, 7, 1)),
-                listing_id: 1,
+                listing_id: ListingId(1),
                 average_price: dec("130"),
                 quantity: dec("60"),
                 currency: "USD".into(),
@@ -1525,7 +1526,7 @@ mod tests {
                 statement_total: None,
                 date: d(2024, 8, 1),
                 settlement_date: Some(d(2024, 8, 1)),
-                listing_id: 1,
+                listing_id: ListingId(1),
                 average_price: dec("130"),
                 quantity: dec("50"),
                 currency: "USD".into(),
@@ -1578,7 +1579,7 @@ mod tests {
                 statement_total: None,
                 date: d(2024, 6, 1),
                 settlement_date: Some(d(2024, 6, 1)),
-                listing_id: 1,
+                listing_id: ListingId(1),
                 average_price: dec("9.99"),
                 quantity: dec("100"),
                 currency: "USD".into(),
@@ -1658,7 +1659,7 @@ mod tests {
         // A parcel of a different listing.
         insert_listing(&pool, 2, "OTHER").await;
         let mut wrong_listing = body(d(2024, 6, 1), 2, 1, vec![(1, "100")]);
-        wrong_listing.listing_id = 2;
+        wrong_listing.listing_id = ListingId(2);
         assert!(matches!(
             db_transfer(&pool, 1, &wrong_listing).await,
             Err(TransferError::ListingMismatch)
@@ -1716,7 +1717,7 @@ mod tests {
             &pool,
             &corporate_action::CorporateAction {
                 id: 5,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: d(2024, 3, 1),
                 kind: corporate_action::ActionKind::ReturnOfCapital {
                     amount_per_unit: dec("2"),
@@ -1760,7 +1761,7 @@ mod tests {
                 &pool,
                 &corporate_action::CorporateAction {
                     id: 5,
-                    listing_id: 1,
+                    listing_id: ListingId(1),
                     date: payment_date,
                     kind: corporate_action::ActionKind::ReturnOfCapital {
                         amount_per_unit: dec("2"),
@@ -1991,7 +1992,7 @@ mod tests {
             &pool,
             1,
             &TransferBody {
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: d(2024, 4, 2),
                 from_account_id: 1,
                 to_account_id: 2,
@@ -2099,7 +2100,7 @@ mod tests {
             &pool,
             &crate::entities::corporate_action::CorporateAction {
                 id: 10,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: d(2023, 6, 1),
                 kind: crate::entities::corporate_action::ActionKind::ShareSplit {
                     split_new_units: Decimal::ONE,
@@ -2177,7 +2178,7 @@ mod tests {
             pool,
             &corporate_action::CorporateAction {
                 id,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date,
                 kind: corporate_action::ActionKind::ShareSplit {
                     split_new_units: dec(new),
@@ -2225,7 +2226,7 @@ mod tests {
             &pool,
             &corporate_action::CorporateAction {
                 id: 11,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: d(2024, 7, 1),
                 kind: corporate_action::ActionKind::ShareSplit {
                     split_new_units: dec("1000000"),
@@ -2553,7 +2554,7 @@ mod tests {
             // `body` builds a listing-1 transfer; the listing is the filter
             // under test, so it is set here rather than assumed.
             let mut request = body(date, 2, 1, vec![(parcel, "100")]);
-            request.listing_id = listing_id;
+            request.listing_id = ListingId(listing_id);
             db_transfer(&pool, id, &request).await.unwrap();
         }
 

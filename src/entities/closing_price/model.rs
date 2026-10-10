@@ -4,6 +4,7 @@
 //! hand for a day the provider cannot serve).
 
 use crate::infra::decimal::OptMoney;
+use crate::infra::id::ListingId;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -60,7 +61,7 @@ pub struct ClosingPrice {
     /// handed and lets the database assign or preserve it.
     #[serde(default)]
     pub id: i64,
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     pub price_date: NaiveDate,
     /// Closing price in the listing's quote currency, in the unit basis in
     /// force on [`Self::price_date`]; None exactly when the fetch failed.

@@ -15,6 +15,7 @@
 //! type rather than a column name typed at each call site.
 
 use crate::infra::decimal::{Money, OptMoney};
+use crate::infra::id::ListingId;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 
@@ -93,7 +94,7 @@ pub(crate) struct Residuals {
 pub(crate) struct NewParcel<'a> {
     origin: ParcelOrigin,
     date: NaiveDate,
-    listing_id: i64,
+    listing_id: ListingId,
     holding_account_id: i64,
     quantity: Decimal,
     currency: &'a str,
@@ -112,7 +113,7 @@ impl<'a> NewParcel<'a> {
     pub fn new(
         origin: ParcelOrigin,
         date: NaiveDate,
-        listing_id: i64,
+        listing_id: ListingId,
         holding_account_id: i64,
         quantity: Decimal,
         currency: &'a str,
@@ -305,7 +306,7 @@ mod tests {
             .await
             .unwrap();
         for origin in ALL_ORIGINS {
-            let id = NewParcel::new(origin, ymd(2024, 1, 2), 1, 1, dec("10"), "AUD")
+            let id = NewParcel::new(origin, ymd(2024, 1, 2), ListingId(1), 1, dec("10"), "AUD")
                 .price(dec("1.5"))
                 .insert(&mut conn)
                 .await

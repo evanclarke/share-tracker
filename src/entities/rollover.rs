@@ -13,6 +13,7 @@
 //! in `entities`, while writing a Sell or a Buy is an entity's business.
 
 use crate::infra::currency::CurrencyCode;
+use crate::infra::id::ListingId;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 
@@ -29,7 +30,7 @@ use crate::entities::trade::{self, Trade};
 /// what keeps the Sell out of the gains reports.
 pub fn closing_sell_body(
     date: NaiveDate,
-    listing_id: i64,
+    listing_id: ListingId,
     holding_account_id: i64,
     average_price: Decimal,
     currency: CurrencyCode,
@@ -81,7 +82,7 @@ impl Provenance {
 /// [`insert_replacement_buy`]).
 pub struct ReplacementBuy<'a> {
     pub date: NaiveDate,
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     pub quantity: Decimal,
     /// The carried cost base, in the original parcel's currency.
     pub cost_base: Decimal,

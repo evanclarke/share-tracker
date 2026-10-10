@@ -31,6 +31,7 @@
 //! reference data. What they do share is [`db_units_sold`], the allocations
 //! read.
 
+use crate::infra::id::ListingId;
 use std::collections::HashMap;
 
 use chrono::NaiveDate;
@@ -267,7 +268,7 @@ pub async fn db_parcel_sales(
 /// — narrowed to the parcels of one listing, or `None` for every listing.
 pub async fn db_sales_by_parcel(
     conn: &mut sqlx::SqliteConnection,
-    listing_id: Option<i64>,
+    listing_id: Option<ListingId>,
 ) -> Result<HashMap<i64, Vec<(NaiveDate, Decimal)>>, sqlx::Error> {
     let rows = sqlx::query(
         "SELECT pa.purchase_trade_id, s.date AS sale_date, pa.quantity_allocated \
@@ -308,7 +309,13 @@ mod tests {
         load(&mut conn, as_of).await.unwrap()
     }
 
-    async fn split(pool: &SqlitePool, id: i64, listing_id: i64, date: NaiveDate, ratio: &str) {
+    async fn split(
+        pool: &SqlitePool,
+        id: i64,
+        listing_id: ListingId,
+        date: NaiveDate,
+        ratio: &str,
+    ) {
         corporate_action::db_upsert(
             pool,
             &CorporateAction {
@@ -328,7 +335,7 @@ mod tests {
     async fn return_of_capital(
         pool: &SqlitePool,
         id: i64,
-        listing_id: i64,
+        listing_id: ListingId,
         date: NaiveDate,
         per_unit: &str,
     ) {
@@ -461,8 +468,8 @@ mod tests {
             .price(dec("10"))
             .insert(&pool)
             .await;
-        split(&pool, 1, 1, future, "2").await;
-        return_of_capital(&pool, 2, 1, future, "1.00").await;
+        split(&pool, 1, ListingId(1), future, "2").await;
+        return_of_capital(&pool, 2, ListingId(1), future, "1.00").await;
 
         let open = load_all(&pool, None).await;
         assert_eq!(open.len(), 1);
@@ -564,7 +571,7 @@ mod tests {
             .price(dec("10"))
             .insert(&pool)
             .await;
-        split(&pool, 1, 1, ymd(2024, 3, 1), "2").await;
+        split(&pool, 1, ListingId(1), ymd(2024, 3, 1), "2").await;
         test_support::sell(2, 1)
             .date(ymd(2024, 4, 2))
             .qty(dec("60"))
@@ -606,7 +613,7 @@ mod tests {
             .await;
         // 50c/unit return of capital in September 2024, while the trust was
         // not yet an AMIT…
-        return_of_capital(&pool, 1, 1, ymd(2024, 9, 15), "0.50").await;
+        return_of_capital(&pool, 1, ListingId(1), ymd(2024, 9, 15), "0.50").await;
         // …and the conversion, after which its cost-base movement comes from
         // its AMMA statement instead.
         test_support::listing(1).amit(true).insert(&pool).await;
@@ -690,7 +697,7 @@ mod tests {
             .price(dec("3"))
             .insert(&pool)
             .await;
-        split(&pool, 1, 2, ymd(2024, 1, 15), "2").await;
+        split(&pool, 1, ListingId(2), ymd(2024, 1, 15), "2").await;
         test_support::sell(3, 2)
             .date(ymd(2024, 2, 1))
             .qty(dec("100"))
@@ -704,7 +711,7 @@ mod tests {
             .insert(&pool)
             .await;
         test_support::amit_adjustment(&pool, 1, 1, 1, dec("100")).await;
-        return_of_capital(&pool, 2, 2, ymd(2024, 3, 1), "0.10").await;
+        return_of_capital(&pool, 2, ListingId(2), ymd(2024, 3, 1), "0.10").await;
 
         // The live view: the portfolio overview and the open-parcels
         // schedule are both `as_of: None`.
@@ -733,12 +740,12 @@ mod tests {
         let mut by_key: HashMap<(i64, i64), Decimal> = HashMap::new();
         for p in &parcels {
             *by_key
-                .entry((p.listing_id, p.holding_account_id))
+                .entry((p.listing_id.0, p.holding_account_id))
                 .or_insert(Decimal::ZERO) += p.remaining_quantity;
         }
         for h in &holdings {
             assert_eq!(
-                by_key.get(&(h.listing_id, h.holding_account_id)).copied(),
+                by_key.get(&(h.listing_id.0, h.holding_account_id)).copied(),
                 Some(h.quantity)
             );
         }
@@ -765,8 +772,8 @@ mod tests {
             .price(dec("10"))
             .insert(&pool)
             .await;
-        split(&pool, 1, 1, future, "2").await;
-        return_of_capital(&pool, 2, 1, future, "1.00").await;
+        split(&pool, 1, ListingId(1), future, "2").await;
+        return_of_capital(&pool, 2, ListingId(1), future, "1.00").await;
 
         let holdings = portfolio::db_holdings(&pool, None).await.unwrap();
         assert_eq!(holdings.len(), 1);
@@ -782,7 +789,7 @@ mod tests {
         // The optimiser prices a contemplated sale off those parcels, so the
         // reduced $9.00/unit basis would have overstated every strategy's
         // gain.
-        let candidates = parcel_optimiser::db_candidate_parcels(&pool, 1, None, today)
+        let candidates = parcel_optimiser::db_candidate_parcels(&pool, ListingId(1), None, today)
             .await
             .unwrap();
         assert_eq!(candidates.parcels().len(), 1);

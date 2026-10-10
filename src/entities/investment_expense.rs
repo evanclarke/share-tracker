@@ -21,6 +21,7 @@ use crate::infra::db::write_tx;
 use crate::infra::decimal::{Money, OptMoney, mul_div};
 use crate::infra::extract::Json;
 use crate::infra::http::{self, ApiError, CrudEntity, Upsert, UpsertResponse};
+use crate::infra::id::ListingId;
 use axum::{
     Router,
     extract::{Path, State},
@@ -90,7 +91,7 @@ pub struct InvestmentExpense {
     /// Free-text note.
     pub description: Option<String>,
     /// Optional link to the listing the expense relates to (NULL = portfolio-wide).
-    pub listing_id: Option<i64>,
+    pub listing_id: Option<ListingId>,
     /// Optional link to the holding account the expense relates to
     /// (NULL = portfolio-wide).
     pub holding_account_id: Option<i64>,
@@ -133,7 +134,7 @@ pub struct InvestmentExpenseBody {
     pub description: Option<String>,
     /// The listing the expense relates to; omit for a portfolio-wide expense.
     #[serde(default)]
-    pub listing_id: Option<i64>,
+    pub listing_id: Option<ListingId>,
     /// The holding account the expense relates to; omit for a portfolio-wide expense.
     #[serde(default)]
     pub holding_account_id: Option<i64>,
@@ -147,7 +148,7 @@ pub struct InvestmentExpenseBody {
 #[derive(Debug, Default, serde::Deserialize, utoipa::IntoParams)]
 #[serde(deny_unknown_fields)]
 pub struct InvestmentExpenseListQuery {
-    pub listing_id: Option<i64>,
+    pub listing_id: Option<ListingId>,
     pub holding_account_id: Option<i64>,
     pub from: Option<NaiveDate>,
     pub to: Option<NaiveDate>,
@@ -472,11 +473,11 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
         let mut e = sample(1);
-        e.listing_id = Some(1);
+        e.listing_id = Some(ListingId(1));
         e.holding_account_id = Some(1);
         db_upsert(&pool, &e).await.unwrap();
         let got = db_get(&pool, 1).await.unwrap().unwrap();
-        assert_eq!(got.listing_id, Some(1));
+        assert_eq!(got.listing_id, Some(ListingId(1)));
         assert_eq!(got.holding_account_id, Some(1));
     }
 
@@ -880,7 +881,11 @@ mod tests {
             .expect_status(StatusCode::CREATED);
 
         let got = db_get(&pool, 1).await.unwrap().unwrap();
-        assert_eq!(got.listing_id, Some(1), "the rename keeps the same listing");
+        assert_eq!(
+            got.listing_id,
+            Some(ListingId(1)),
+            "the rename keeps the same listing"
+        );
         assert_eq!(
             got.date_incurred,
             NaiveDate::from_ymd_opt(2026, 3, 15).unwrap()
@@ -1074,7 +1079,7 @@ mod tests {
             (4, Some(2), None, crate::test_support::ymd(2025, 2, 10)),
         ] {
             let mut row = sample(id);
-            row.listing_id = listing;
+            row.listing_id = listing.map(ListingId);
             row.holding_account_id = account;
             row.date_incurred = date;
             db_upsert(&pool, &row).await.unwrap();

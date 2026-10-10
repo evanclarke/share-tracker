@@ -383,6 +383,7 @@ pub fn row_opt_dec(row: &SqliteRow, column: &str) -> Result<Option<Decimal>, sql
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::infra::id::ListingId;
     use crate::reports::open_parcels::OpenParcel;
     use crate::test_support::{buy, test_pool};
     use chrono::NaiveDate;
@@ -917,7 +918,7 @@ mod tests {
     fn every_money_field_of_a_serialized_row_is_a_json_string() {
         let row = OpenParcel {
             trade_id: 7,
-            listing_id: 3,
+            listing_id: ListingId(3),
             holding_account_id: 1,
             ticker: "VDHG".to_string(),
             acquisition_date: NaiveDate::from_ymd_opt(2024, 1, 2).expect("a valid date"),

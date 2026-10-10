@@ -13,6 +13,7 @@ use super::fetcher::{FetchError, FetchedClose, PriceFetcher};
 use super::held::db_held_listing_ids;
 use super::market::{Market, load_market};
 use super::model::{ClosingPrice, PriceOrigin, PriceStatus, UNASSIGNED_ID};
+use crate::infra::id::ListingId;
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use sqlx::SqlitePool;
@@ -271,8 +272,8 @@ async fn db_listing_ids_held_between(
     pool: &SqlitePool,
     from: NaiveDate,
     to: NaiveDate,
-) -> Result<Vec<i64>, sqlx::Error> {
-    let mut ids: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
+) -> Result<Vec<ListingId>, sqlx::Error> {
+    let mut ids: std::collections::BTreeSet<ListingId> = std::collections::BTreeSet::new();
     let mut date = from;
     while date <= to {
         ids.extend(db_held_listing_ids(pool, Some(date)).await?);

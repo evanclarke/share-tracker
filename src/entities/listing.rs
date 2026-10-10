@@ -2,6 +2,7 @@ use crate::infra::currency::CurrencyCode;
 use crate::infra::db::write_tx;
 use crate::infra::extract::Json;
 use crate::infra::http::{self, ApiError, CrudEntity, Upsert, UpsertResponse};
+use crate::infra::id::ListingId;
 use axum::{
     Router,
     extract::{Path, State},
@@ -31,7 +32,7 @@ pub enum SecurityType {
 
 #[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Listing {
-    pub id: i64,
+    pub id: ListingId,
     /// NULL exactly for Crypto listings (CHECK-enforced): a crypto asset
     /// trades on no MIC-coded venue. Exchange-less listings are unique by
     /// ticker (partial unique index); the rest by (exchange_mic, ticker).
@@ -386,7 +387,7 @@ impl crate::infra::http::CrudListFilter for ListingListQuery {
 }
 
 impl CrudEntity for Listing {
-    type Key = i64;
+    type Key = ListingId;
     type Filter = ListingListQuery;
     const TABLE: &'static str = "listings";
     const COLUMNS: &'static str = "id, exchange_mic, ticker, name, isin, security_type, currency, amit, \
@@ -398,11 +399,11 @@ impl CrudEntity for Listing {
 /// Every listing's ticker by id — the label the reports put beside a listing.
 pub async fn db_tickers<'e, X>(
     executor: X,
-) -> Result<std::collections::HashMap<i64, String>, sqlx::Error>
+) -> Result<std::collections::HashMap<ListingId, String>, sqlx::Error>
 where
     X: sqlx::Executor<'e, Database = sqlx::Sqlite>,
 {
-    let rows: Vec<(i64, String)> = sqlx::query_as("SELECT id, ticker FROM listings")
+    let rows: Vec<(ListingId, String)> = sqlx::query_as("SELECT id, ticker FROM listings")
         .fetch_all(executor)
         .await?;
     Ok(rows.into_iter().collect())
@@ -423,7 +424,7 @@ pub fn router() -> Router<SqlitePool> {
 /// Executor-generic so the row can be read on a caller's transaction as well
 /// as from the pool — `closing_price::load_market_on` needs it inside the
 /// trade write path's own transaction.
-pub async fn db_get<'e, X>(executor: X, id: i64) -> Result<Option<Listing>, sqlx::Error>
+pub async fn db_get<'e, X>(executor: X, id: ListingId) -> Result<Option<Listing>, sqlx::Error>
 where
     X: sqlx::Executor<'e, Database = sqlx::Sqlite>,
 {
@@ -438,9 +439,9 @@ where
 /// to the database.
 async fn write(
     pool: &SqlitePool,
-    id: Option<i64>,
+    id: Option<ListingId>,
     listing: &Listing,
-) -> Result<(i64, Upsert, Option<Listing>), UpsertError> {
+) -> Result<(ListingId, Upsert, Option<Listing>), UpsertError> {
     // A blank ticker or name is refused before the transaction is even opened:
     // it is a pure check on the request, and neither value is inert. The
     // ticker (with the exchange) resolves the provider symbol — a stored blank
@@ -625,7 +626,7 @@ async fn write(
              unpriced_before = excluded.unpriced_before, \
              preference    = excluded.preference, \
              price_symbol  = excluded.price_symbol",
-        id,
+        id.map(|id| id.0),
     );
     let result = query
         .bind(&listing.exchange_mic)
@@ -645,7 +646,7 @@ async fn write(
     // An id-less INSERT was given one by the database; an upsert wrote the
     // explicit one it was handed. Either way the caller gets the id the row
     // actually holds.
-    let assigned_id = id.unwrap_or_else(|| result.last_insert_rowid());
+    let assigned_id = id.unwrap_or_else(|| ListingId(result.last_insert_rowid()));
     let (outcome, stored) =
         http::crud_upserted::<Listing, _>(&mut *tx, existed, assigned_id).await?;
     tx.commit().await?;
@@ -669,14 +670,14 @@ pub async fn db_create(pool: &SqlitePool, listing: &Listing) -> Result<Listing, 
 }
 
 #[cfg(test)]
-pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<bool, sqlx::Error> {
+pub async fn db_delete(pool: &SqlitePool, id: ListingId) -> Result<bool, sqlx::Error> {
     http::crud_delete::<Listing>(pool, id).await
 }
 
 /// The row a request body describes. `id` is the path's on an upsert and
 /// ignored on a create (the database assigns one), so both entry points build
 /// their `Listing` through this one mapping and cannot drift.
-fn listing_from_body(id: i64, body: ListingBody) -> Listing {
+fn listing_from_body(id: ListingId, body: ListingBody) -> Listing {
     Listing {
         id,
         exchange_mic: body.exchange_mic,
@@ -696,7 +697,7 @@ fn listing_from_body(id: i64, body: ListingBody) -> Listing {
 
 async fn upsert(
     State(pool): State<SqlitePool>,
-    Path(id): Path<i64>,
+    Path(id): Path<ListingId>,
     Json(body): Json<ListingBody>,
 ) -> Result<UpsertResponse<Listing>, ApiError> {
     let (outcome, row) = db_upsert(&pool, &listing_from_body(id, body)).await?;
@@ -713,7 +714,7 @@ async fn create(
     State(pool): State<SqlitePool>,
     Json(body): Json<ListingBody>,
 ) -> Result<(StatusCode, Json<Listing>), ApiError> {
-    let created = db_create(&pool, &listing_from_body(0, body)).await?;
+    let created = db_create(&pool, &listing_from_body(ListingId(0), body)).await?;
     Ok((StatusCode::CREATED, Json(created)))
 }
 
@@ -751,7 +752,7 @@ mod tests {
     async fn db_insert_and_retrieve() {
         let pool = test_pool().await;
         db_upsert(&pool, &xtest()).await.unwrap();
-        let got = db_get(&pool, 1).await.unwrap().unwrap();
+        let got = db_get(&pool, ListingId(1)).await.unwrap().unwrap();
         assert_eq!(got.ticker, "VAS");
         assert_eq!(got.exchange_mic.as_deref(), Some("XASX"));
         assert_eq!(got.isin, Some("AU0000VASAU4".to_string()));
@@ -761,7 +762,7 @@ mod tests {
     #[tokio::test]
     async fn db_get_missing_returns_none() {
         let pool = test_pool().await;
-        assert!(db_get(&pool, 999).await.unwrap().is_none());
+        assert!(db_get(&pool, ListingId(999)).await.unwrap().is_none());
     }
 
     /// 2026-09-17 review: `ticker TEXT NOT NULL` is satisfied by the empty
@@ -786,10 +787,10 @@ mod tests {
             db_upsert(&pool, &blank_name).await.unwrap_err(),
             UpsertError::BlankName
         ));
-        assert!(db_get(&pool, 1).await.unwrap().is_none());
+        assert!(db_get(&pool, ListingId(1)).await.unwrap().is_none());
 
         db_upsert(&pool, &xtest()).await.unwrap();
-        let got = db_get(&pool, 1).await.unwrap().unwrap();
+        let got = db_get(&pool, ListingId(1)).await.unwrap().unwrap();
         assert_eq!(got.ticker, "VAS");
         assert_eq!(got.name, "Vanguard Australian Shares ETF");
     }
@@ -813,7 +814,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            db_get(&pool, 1).await.unwrap().unwrap().amit_from,
+            db_get(&pool, ListingId(1))
+                .await
+                .unwrap()
+                .unwrap()
+                .amit_from,
             Some(ymd(2023, 7, 1))
         );
 
@@ -865,7 +870,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            db_get(&pool, 1).await.unwrap().unwrap().unpriced_from,
+            db_get(&pool, ListingId(1))
+                .await
+                .unwrap()
+                .unwrap()
+                .unpriced_from,
             Some(ymd(2023, 10, 13))
         );
 
@@ -913,7 +922,11 @@ mod tests {
             .build();
         db_upsert(&pool, &listing).await.unwrap();
         assert_eq!(
-            db_get(&pool, 1).await.unwrap().unwrap().unpriced_from,
+            db_get(&pool, ListingId(1))
+                .await
+                .unwrap()
+                .unwrap()
+                .unpriced_from,
             Some(ymd(2023, 10, 13))
         );
     }
@@ -995,7 +1008,11 @@ mod tests {
             .build();
         db_upsert(&pool, &marked).await.unwrap();
         assert_eq!(
-            db_get(&pool, 1).await.unwrap().unwrap().unpriced_before,
+            db_get(&pool, ListingId(1))
+                .await
+                .unwrap()
+                .unwrap()
+                .unpriced_before,
             Some(ymd(2023, 10, 2))
         );
 
@@ -1099,7 +1116,7 @@ mod tests {
         updated.name = "Updated ETF".to_string();
         updated.amit = false;
         db_upsert(&pool, &updated).await.unwrap();
-        let got = db_get(&pool, 1).await.unwrap().unwrap();
+        let got = db_get(&pool, ListingId(1)).await.unwrap().unwrap();
         assert_eq!(got.name, "Updated ETF");
         assert!(!got.amit);
     }
@@ -1114,7 +1131,10 @@ mod tests {
         let mut renamed = xtest();
         renamed.ticker = "VASX".to_string();
         db_upsert(&pool, &renamed).await.unwrap();
-        assert_eq!(db_get(&pool, 1).await.unwrap().unwrap().ticker, "VASX");
+        assert_eq!(
+            db_get(&pool, ListingId(1)).await.unwrap().unwrap().ticker,
+            "VASX"
+        );
     }
 
     /// Once a listing has a trade, a bare `PUT` changing its ticker or
@@ -1145,9 +1165,15 @@ mod tests {
         let mut renamed_only = xtest();
         renamed_only.name = "Renamed ETF".to_string();
         db_upsert(&pool, &renamed_only).await.unwrap();
-        assert_eq!(db_get(&pool, 1).await.unwrap().unwrap().name, "Renamed ETF");
+        assert_eq!(
+            db_get(&pool, ListingId(1)).await.unwrap().unwrap().name,
+            "Renamed ETF"
+        );
         // The ticker is still untouched by the refused attempts.
-        assert_eq!(db_get(&pool, 1).await.unwrap().unwrap().ticker, "VAS");
+        assert_eq!(
+            db_get(&pool, ListingId(1)).await.unwrap().unwrap().ticker,
+            "VAS"
+        );
     }
 
     /// The quote currency is part of the identity for the same reason the
@@ -1165,7 +1191,10 @@ mod tests {
         let mut to_usd = xtest();
         to_usd.currency = "USD".into();
         db_upsert(&pool, &to_usd).await.unwrap();
-        assert_eq!(db_get(&pool, 1).await.unwrap().unwrap().currency, "USD");
+        assert_eq!(
+            db_get(&pool, ListingId(1)).await.unwrap().unwrap().currency,
+            "USD"
+        );
 
         crate::test_support::buy(1, 1)
             .currency("USD")
@@ -1189,7 +1218,10 @@ mod tests {
         assert!(body.contains("transfer"), "{body}");
 
         // Nothing was written, and a same-currency edit still goes through.
-        assert_eq!(db_get(&pool, 1).await.unwrap().unwrap().currency, "USD");
+        assert_eq!(
+            db_get(&pool, ListingId(1)).await.unwrap().unwrap().currency,
+            "USD"
+        );
         let mut renamed_only = to_usd;
         renamed_only.name = "Renamed".to_string();
         db_upsert(&pool, &renamed_only).await.unwrap();
@@ -1255,24 +1287,47 @@ mod tests {
         let pool = test_pool().await;
         // Default: an ordinary listing is not a preference share.
         db_upsert(&pool, &xtest()).await.unwrap();
-        assert!(!db_get(&pool, 1).await.unwrap().unwrap().preference);
+        assert!(
+            !db_get(&pool, ListingId(1))
+                .await
+                .unwrap()
+                .unwrap()
+                .preference
+        );
         // The flag persists when set.
         let mut pref = xtest();
         pref.preference = true;
         db_upsert(&pool, &pref).await.unwrap();
-        assert!(db_get(&pool, 1).await.unwrap().unwrap().preference);
+        assert!(
+            db_get(&pool, ListingId(1))
+                .await
+                .unwrap()
+                .unwrap()
+                .preference
+        );
     }
 
     #[tokio::test]
     async fn db_price_symbol_round_trips_and_defaults_none() {
         let pool = test_pool().await;
         db_upsert(&pool, &xtest()).await.unwrap();
-        assert_eq!(db_get(&pool, 1).await.unwrap().unwrap().price_symbol, None);
+        assert_eq!(
+            db_get(&pool, ListingId(1))
+                .await
+                .unwrap()
+                .unwrap()
+                .price_symbol,
+            None
+        );
         let mut with_symbol = xtest();
         with_symbol.price_symbol = Some("VAS.AX".to_string());
         db_upsert(&pool, &with_symbol).await.unwrap();
         assert_eq!(
-            db_get(&pool, 1).await.unwrap().unwrap().price_symbol,
+            db_get(&pool, ListingId(1))
+                .await
+                .unwrap()
+                .unwrap()
+                .price_symbol,
             Some("VAS.AX".to_string())
         );
     }
@@ -1281,14 +1336,14 @@ mod tests {
     async fn db_delete_removes_listing() {
         let pool = test_pool().await;
         db_upsert(&pool, &xtest()).await.unwrap();
-        assert!(db_delete(&pool, 1).await.unwrap());
-        assert!(db_get(&pool, 1).await.unwrap().is_none());
+        assert!(db_delete(&pool, ListingId(1)).await.unwrap());
+        assert!(db_get(&pool, ListingId(1)).await.unwrap().is_none());
     }
 
     #[tokio::test]
     async fn db_delete_missing_returns_false() {
         let pool = test_pool().await;
-        assert!(!db_delete(&pool, 999).await.unwrap());
+        assert!(!db_delete(&pool, ListingId(999)).await.unwrap());
     }
 
     #[tokio::test]
@@ -1328,7 +1383,7 @@ mod tests {
     async fn db_crypto_listing_round_trips_without_exchange() {
         let pool = test_pool().await;
         db_upsert(&pool, &crypto()).await.unwrap();
-        let got = db_get(&pool, 2).await.unwrap().unwrap();
+        let got = db_get(&pool, ListingId(2)).await.unwrap().unwrap();
         assert_eq!(got.exchange_mic, None);
         assert_eq!(got.ticker, "BTC");
         assert_eq!(got.security_type, SecurityType::Crypto);
@@ -1345,7 +1400,7 @@ mod tests {
             db_upsert(&pool, &bad).await.unwrap_err(),
             UpsertError::UnrecognisedDigitalToken
         ));
-        assert!(db_get(&pool, 2).await.unwrap().is_none());
+        assert!(db_get(&pool, ListingId(2)).await.unwrap().is_none());
         // A fiat code is no better: BTC must be a *DigitalToken* row.
         bad.ticker = "USD".to_string();
         assert!(matches!(
@@ -1376,7 +1431,7 @@ mod tests {
             db_upsert(&pool, &bare).await.unwrap_err(),
             UpsertError::ExchangeRequired
         ));
-        assert!(db_get(&pool, 2).await.unwrap().is_none());
+        assert!(db_get(&pool, ListingId(2)).await.unwrap().is_none());
 
         // The CHECK still holds against a write that bypasses `db_upsert`.
         let err = sqlx::query(
@@ -1414,7 +1469,7 @@ mod tests {
             db_upsert(&pool, &fund).await.unwrap_err(),
             UpsertError::CryptoCannotBeAmit
         ));
-        assert!(db_get(&pool, 2).await.unwrap().is_none());
+        assert!(db_get(&pool, ListingId(2)).await.unwrap().is_none());
         // An ordinary trust listing is untouched.
         let mut trust = xtest();
         trust.security_type = SecurityType::Trust;
@@ -1429,7 +1484,7 @@ mod tests {
         // partial unique index must catch a second exchange-less BTC listing.
         db_upsert(&pool, &crypto()).await.unwrap();
         let mut dup = crypto();
-        dup.id = 3;
+        dup.id = ListingId(3);
         let UpsertError::Db(err) = db_upsert(&pool, &dup).await.unwrap_err() else {
             panic!("expected a DB error");
         };
@@ -1483,7 +1538,7 @@ mod tests {
         });
         let resp = client(&pool).put("/listings/1", &body).await;
         assert_eq!(resp.status, StatusCode::CREATED);
-        assert!(db_get(&pool, 1).await.unwrap().is_some());
+        assert!(db_get(&pool, ListingId(1)).await.unwrap().is_some());
     }
 
     /// The blank-ticker/name refusal as the web UI sees it: `422` naming the
@@ -1519,13 +1574,13 @@ mod tests {
                 "the 422 must name {field}, got: {detail}"
             );
             assert!(
-                db_get(&pool, 1).await.unwrap().is_none(),
+                db_get(&pool, ListingId(1)).await.unwrap().is_none(),
                 "ticker {ticker:?} / name {name:?} must not be stored"
             );
         }
 
         client.put_ok("/listings/1", &body("VAS", "Vanguard")).await;
-        let got = db_get(&pool, 1).await.unwrap().unwrap();
+        let got = db_get(&pool, ListingId(1)).await.unwrap().unwrap();
         assert_eq!(got.ticker, "VAS");
         assert_eq!(got.name, "Vanguard");
     }
@@ -1563,7 +1618,7 @@ mod tests {
         });
         let resp = client(&pool).put("/listings/2", &body).await;
         assert_eq!(resp.status, StatusCode::CREATED);
-        let got = db_get(&pool, 2).await.unwrap().unwrap();
+        let got = db_get(&pool, ListingId(2)).await.unwrap().unwrap();
         assert_eq!(got.exchange_mic, None);
         assert_eq!(got.security_type, SecurityType::Crypto);
     }
@@ -1658,7 +1713,7 @@ mod tests {
         });
         let resp = client(&pool).put("/listings/1", &body).await;
         assert_eq!(resp.status, StatusCode::NO_CONTENT);
-        let got = db_get(&pool, 1).await.unwrap().unwrap();
+        let got = db_get(&pool, ListingId(1)).await.unwrap().unwrap();
         assert_eq!(got.name, "Renamed ETF");
         assert!(!got.amit);
     }
@@ -1853,7 +1908,7 @@ mod tests {
         assert_list_filters(
             &client(&pool),
             "/listings",
-            |l: &Listing| l.id,
+            |l: &Listing| l.id.0,
             &[
                 ("", &[1, 2, 3, 4]),
                 ("?exchange_mic=XASX", &[1, 2]),

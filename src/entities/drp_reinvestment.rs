@@ -772,6 +772,7 @@ async fn unreinvest(
 mod tests {
     use super::*;
     use crate::entities::{drp_enrolment, income, listing, trade::TradeType};
+    use crate::infra::id::ListingId;
     use crate::test_support::{self, ApiClient, test_pool};
 
     /// Client over this module's own routes.
@@ -791,7 +792,7 @@ mod tests {
     async fn enrol_period(
         pool: &SqlitePool,
         id: i64,
-        listing_id: i64,
+        listing_id: ListingId,
         from: &str,
         to: Option<&str>,
         handling: ResidualHandling,
@@ -812,8 +813,8 @@ mod tests {
     }
 
     /// Enrol open-ended from 2024-01-01, covering the default distribution date.
-    async fn enrol(pool: &SqlitePool, listing_id: i64, handling: ResidualHandling) {
-        enrol_period(pool, listing_id, listing_id, "2024-01-01", None, handling).await;
+    async fn enrol(pool: &SqlitePool, listing_id: ListingId, handling: ResidualHandling) {
+        enrol_period(pool, listing_id.0, listing_id, "2024-01-01", None, handling).await;
     }
 
     /// Insert a distribution paying `cash` as unfranked cash (the simplest cash
@@ -821,7 +822,7 @@ mod tests {
     async fn insert_distribution(
         pool: &SqlitePool,
         id: i64,
-        listing_id: i64,
+        listing_id: ListingId,
         cash: Decimal,
         franking: Decimal,
     ) {
@@ -831,7 +832,7 @@ mod tests {
     async fn insert_distribution_dated(
         pool: &SqlitePool,
         id: i64,
-        listing_id: i64,
+        listing_id: ListingId,
         date_paid: &str,
         ex_date: Option<&str>,
         cash: Decimal,
@@ -846,7 +847,7 @@ mod tests {
                 .fetch_one(pool)
                 .await
                 .unwrap();
-        test_support::income(id, listing_id, date_paid.parse().unwrap())
+        test_support::income(id, listing_id.0, date_paid.parse().unwrap())
             .with(|i| {
                 i.ex_date = ex_date.map(|d| d.parse().unwrap());
                 i.unfranked_amount = cash;
@@ -893,7 +894,7 @@ mod tests {
     async fn enrol_in_account(
         pool: &SqlitePool,
         id: i64,
-        listing_id: i64,
+        listing_id: ListingId,
         account_id: i64,
         handling: ResidualHandling,
     ) {
@@ -916,11 +917,11 @@ mod tests {
     async fn insert_distribution_in_account(
         pool: &SqlitePool,
         id: i64,
-        listing_id: i64,
+        listing_id: ListingId,
         account_id: i64,
         cash: Decimal,
     ) {
-        test_support::income(id, listing_id, "2024-03-31".parse().unwrap())
+        test_support::income(id, listing_id.0, "2024-03-31".parse().unwrap())
             .with(|i| {
                 i.holding_account_id = account_id;
                 i.unfranked_amount = cash;
@@ -934,9 +935,16 @@ mod tests {
     async fn carry_forward_buys_whole_shares_and_carries_leftover() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "AUD").await;
-        enrol(&pool, 1, ResidualHandling::CarryForward).await;
+        enrol(&pool, ListingId(1), ResidualHandling::CarryForward).await;
         // $100 cash + $30 notional franking credits (must be ignored), price $9.
-        insert_distribution(&pool, 1, 1, Decimal::from(100), Decimal::from(30)).await;
+        insert_distribution(
+            &pool,
+            1,
+            ListingId(1),
+            Decimal::from(100),
+            Decimal::from(30),
+        )
+        .await;
 
         let trade = db_reinvest(&pool, 1, &body("9")).await.unwrap();
 
@@ -963,12 +971,12 @@ mod tests {
     async fn each_reinvestment_parcel_runs_its_own_discount_clock() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "AUD").await;
-        enrol(&pool, 1, ResidualHandling::CarryForward).await;
+        enrol(&pool, ListingId(1), ResidualHandling::CarryForward).await;
         // $1,000 reinvested at $10 in each of two quarters → 100 units each.
         insert_distribution_dated(
             &pool,
             1,
-            1,
+            ListingId(1),
             "2024-03-31",
             None,
             Decimal::from(1000),
@@ -978,7 +986,7 @@ mod tests {
         insert_distribution_dated(
             &pool,
             2,
-            1,
+            ListingId(1),
             "2024-06-30",
             None,
             Decimal::from(1000),
@@ -1008,7 +1016,7 @@ mod tests {
                 holding_account_id: 1,
                 date: "2025-06-25".parse().unwrap(),
                 settlement_date: Some("2025-06-27".parse().unwrap()),
-                listing_id: 1,
+                listing_id: ListingId(1),
                 average_price: Decimal::from(15),
                 quantity: Decimal::from(200),
                 currency: "AUD".into(),
@@ -1059,8 +1067,8 @@ mod tests {
     async fn reinvestment_trade_is_not_gst_flagged_and_has_no_statement_total() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "AUD").await;
-        enrol(&pool, 1, ResidualHandling::CarryForward).await;
-        insert_distribution(&pool, 1, 1, Decimal::from(100), Decimal::ZERO).await;
+        enrol(&pool, ListingId(1), ResidualHandling::CarryForward).await;
+        insert_distribution(&pool, 1, ListingId(1), Decimal::from(100), Decimal::ZERO).await;
 
         let trade = db_reinvest(&pool, 1, &body("9")).await.unwrap();
         let stored = crate::entities::trade::db_get(&pool, trade.id)
@@ -1075,15 +1083,15 @@ mod tests {
     async fn carried_residual_is_picked_up_by_the_next_reinvestment() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "AUD").await;
-        enrol(&pool, 1, ResidualHandling::CarryForward).await;
+        enrol(&pool, ListingId(1), ResidualHandling::CarryForward).await;
 
         // First: $100 at $9 → 11 shares, $1 carried.
-        insert_distribution(&pool, 1, 1, Decimal::from(100), Decimal::ZERO).await;
+        insert_distribution(&pool, 1, ListingId(1), Decimal::from(100), Decimal::ZERO).await;
         let first = db_reinvest(&pool, 1, &body("9")).await.unwrap();
         assert_eq!(first.residual_carried_forward, Decimal::ONE);
 
         // Second: $8 cash + $1 brought forward = $9 available at $9 → exactly 1 share, $0 leftover.
-        insert_distribution(&pool, 2, 1, Decimal::from(8), Decimal::ZERO).await;
+        insert_distribution(&pool, 2, ListingId(1), Decimal::from(8), Decimal::ZERO).await;
         let second = db_reinvest(&pool, 2, &body("9")).await.unwrap();
         assert_eq!(second.residual_brought_forward, Decimal::ONE);
         assert_eq!(second.quantity, Decimal::from(1));
@@ -1094,8 +1102,8 @@ mod tests {
     async fn pay_out_records_leftover_as_paid_not_carried() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "AUD").await;
-        enrol(&pool, 1, ResidualHandling::PayOut).await;
-        insert_distribution(&pool, 1, 1, Decimal::from(100), Decimal::ZERO).await;
+        enrol(&pool, ListingId(1), ResidualHandling::PayOut).await;
+        insert_distribution(&pool, 1, ListingId(1), Decimal::from(100), Decimal::ZERO).await;
 
         let trade = db_reinvest(&pool, 1, &body("9")).await.unwrap();
         // 11 shares, $1 leftover paid out (not carried).
@@ -1104,7 +1112,7 @@ mod tests {
         assert_eq!(trade.residual_carried_forward, Decimal::ZERO);
 
         // A pay-out leaves no carried balance for the next reinvestment.
-        insert_distribution(&pool, 2, 1, Decimal::from(8), Decimal::ZERO).await;
+        insert_distribution(&pool, 2, ListingId(1), Decimal::from(8), Decimal::ZERO).await;
         let next = db_reinvest(&pool, 2, &body("9")).await.unwrap();
         assert_eq!(next.residual_brought_forward, Decimal::ZERO);
         assert_eq!(next.quantity, Decimal::ZERO); // 8 < 9, no whole share
@@ -1121,9 +1129,9 @@ mod tests {
     async fn a_discounted_allotment_costs_the_parcel_at_the_dividend_applied() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "AUD").await;
-        enrol(&pool, 1, ResidualHandling::CarryForward).await;
+        enrol(&pool, ListingId(1), ResidualHandling::CarryForward).await;
         // $100 distribution; market $10.00, allotted at a 5% discount.
-        insert_distribution(&pool, 1, 1, Decimal::from(100), Decimal::ZERO).await;
+        insert_distribution(&pool, 1, ListingId(1), Decimal::from(100), Decimal::ZERO).await;
 
         let trade = db_reinvest(&pool, 1, &body("9.50")).await.unwrap();
         assert_eq!(trade.quantity, Decimal::from(10));
@@ -1147,8 +1155,8 @@ mod tests {
     async fn a_four_decimal_price_floors_whole_units_and_carries_the_exact_residual() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "AUD").await;
-        enrol(&pool, 1, ResidualHandling::CarryForward).await;
-        insert_distribution(&pool, 1, 1, Decimal::from(1000), Decimal::ZERO).await;
+        enrol(&pool, ListingId(1), ResidualHandling::CarryForward).await;
+        insert_distribution(&pool, 1, ListingId(1), Decimal::from(1000), Decimal::ZERO).await;
 
         // $1,000 ÷ $12.3456 = 81.00 units and a $0.0064 remainder.
         let trade = db_reinvest(&pool, 1, &body("12.3456")).await.unwrap();
@@ -1176,19 +1184,27 @@ mod tests {
         enrol_period(
             &pool,
             1,
-            1,
+            ListingId(1),
             "2024-01-01",
             Some("2024-07-01"),
             ResidualHandling::CarryForward,
         )
         .await;
-        enrol_period(&pool, 2, 1, "2024-07-01", None, ResidualHandling::PayOut).await;
+        enrol_period(
+            &pool,
+            2,
+            ListingId(1),
+            "2024-07-01",
+            None,
+            ResidualHandling::PayOut,
+        )
+        .await;
 
         // Ex 20 June (period 1), paid 15 July (inside period 2's window).
         insert_distribution_dated(
             &pool,
             1,
-            1,
+            ListingId(1),
             "2024-07-15",
             Some("2024-06-20"),
             Decimal::from(100),
@@ -1209,7 +1225,7 @@ mod tests {
         insert_distribution_dated(
             &pool,
             2,
-            1,
+            ListingId(1),
             "2024-09-15",
             Some("2024-09-01"),
             Decimal::from(100),
@@ -1232,16 +1248,16 @@ mod tests {
     async fn stated_whole_units_carry_the_cash_they_left_over() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "AUD").await;
-        enrol(&pool, 1, ResidualHandling::CarryForward).await;
+        enrol(&pool, ListingId(1), ResidualHandling::CarryForward).await;
         // $100 at $7 buys 14 whole units for $98; the statement says "14".
-        insert_distribution(&pool, 1, 1, Decimal::from(100), Decimal::ZERO).await;
+        insert_distribution(&pool, 1, ListingId(1), Decimal::from(100), Decimal::ZERO).await;
         let trade = db_reinvest(&pool, 1, &body_units("7", "14")).await.unwrap();
         assert_eq!(trade.quantity, Decimal::from(14));
         assert_eq!(trade.residual_carried_forward, Decimal::TWO);
         assert_eq!(trade.residual_paid_out, Decimal::ZERO);
 
         // …and the next reinvestment brings it forward: $12 + $2 = 2 units.
-        insert_distribution(&pool, 2, 1, Decimal::from(12), Decimal::ZERO).await;
+        insert_distribution(&pool, 2, ListingId(1), Decimal::from(12), Decimal::ZERO).await;
         let next = db_reinvest(&pool, 2, &body("7")).await.unwrap();
         assert_eq!(next.residual_brought_forward, Decimal::TWO);
         assert_eq!(next.quantity, Decimal::TWO);
@@ -1253,8 +1269,8 @@ mod tests {
     async fn stated_whole_units_pay_out_the_leftover_where_the_period_says_so() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "AUD").await;
-        enrol(&pool, 1, ResidualHandling::PayOut).await;
-        insert_distribution(&pool, 1, 1, Decimal::from(100), Decimal::ZERO).await;
+        enrol(&pool, ListingId(1), ResidualHandling::PayOut).await;
+        insert_distribution(&pool, 1, ListingId(1), Decimal::from(100), Decimal::ZERO).await;
 
         let trade = db_reinvest(&pool, 1, &body_units("7", "14")).await.unwrap();
         assert_eq!(trade.residual_carried_forward, Decimal::ZERO);
@@ -1270,7 +1286,7 @@ mod tests {
     async fn a_distribution_in_another_currency_than_its_listing_is_refused() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "AUD").await;
-        enrol(&pool, 1, ResidualHandling::CarryForward).await;
+        enrol(&pool, ListingId(1), ResidualHandling::CarryForward).await;
         test_support::income(1, 1, "2024-03-31".parse().unwrap())
             .with(|i| {
                 i.foreign_source_income = Decimal::from(100);
@@ -1321,14 +1337,14 @@ mod tests {
     async fn the_partial_participation_workaround_costs_the_parcel_at_the_cash_reinvested() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "AUD").await;
-        enrol(&pool, 1, ResidualHandling::CarryForward).await;
+        enrol(&pool, ListingId(1), ResidualHandling::CarryForward).await;
         // A $100 distribution, half of it reinvested at $7: two rows.
-        insert_distribution(&pool, 1, 1, Decimal::from(50), Decimal::ZERO).await;
-        insert_distribution(&pool, 2, 1, Decimal::from(50), Decimal::ZERO).await;
+        insert_distribution(&pool, 1, ListingId(1), Decimal::from(50), Decimal::ZERO).await;
+        insert_distribution(&pool, 2, ListingId(1), Decimal::from(50), Decimal::ZERO).await;
 
         // Stating the partial allotment against the whole distribution is
         // refused — the rejection the limitation documents.
-        insert_distribution(&pool, 3, 1, Decimal::from(100), Decimal::ZERO).await;
+        insert_distribution(&pool, 3, ListingId(1), Decimal::from(100), Decimal::ZERO).await;
         let err = db_reinvest(&pool, 3, &body_units("7", "7"))
             .await
             .unwrap_err();
@@ -1372,9 +1388,9 @@ mod tests {
             .amit(true)
             .insert(&pool)
             .await;
-        enrol(&pool, 1, ResidualHandling::CarryForward).await;
+        enrol(&pool, ListingId(1), ResidualHandling::CarryForward).await;
         // $500 of cash distributed in the 2023-24 year, all reinvested at $50.
-        insert_distribution(&pool, 1, 1, Decimal::from(500), Decimal::ZERO).await;
+        insert_distribution(&pool, 1, ListingId(1), Decimal::from(500), Decimal::ZERO).await;
         let trade = db_reinvest(&pool, 1, &body("50")).await.unwrap();
         assert_eq!(trade.quantity, Decimal::from(10));
 
@@ -1428,8 +1444,8 @@ mod tests {
     async fn a_split_after_a_reinvestment_re_bases_it_and_undo_still_works() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "AUD").await;
-        enrol(&pool, 1, ResidualHandling::CarryForward).await;
-        insert_distribution(&pool, 1, 1, Decimal::from(100), Decimal::ZERO).await;
+        enrol(&pool, ListingId(1), ResidualHandling::CarryForward).await;
+        insert_distribution(&pool, 1, ListingId(1), Decimal::from(100), Decimal::ZERO).await;
         let trade = db_reinvest(&pool, 1, &body("10")).await.unwrap();
         assert_eq!(trade.quantity, Decimal::from(10));
 
@@ -1438,7 +1454,7 @@ mod tests {
             &pool,
             &crate::entities::corporate_action::CorporateAction {
                 id: 1,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: "2024-05-01".parse().unwrap(),
                 kind: crate::entities::corporate_action::ActionKind::ShareSplit {
                     split_new_units: Decimal::TWO,
@@ -1474,9 +1490,9 @@ mod tests {
     async fn franking_credits_are_excluded_from_reinvestable_cash() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "AUD").await;
-        enrol(&pool, 1, ResidualHandling::CarryForward).await;
+        enrol(&pool, ListingId(1), ResidualHandling::CarryForward).await;
         // $9 cash but $90 franking credits — only the $9 cash reinvests.
-        insert_distribution(&pool, 1, 1, Decimal::from(9), Decimal::from(90)).await;
+        insert_distribution(&pool, 1, ListingId(1), Decimal::from(9), Decimal::from(90)).await;
 
         let trade = db_reinvest(&pool, 1, &body("9")).await.unwrap();
         assert_eq!(trade.quantity, Decimal::from(1));
@@ -1490,9 +1506,16 @@ mod tests {
     async fn explicit_units_take_the_statements_fractional_allotment() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "USD").await;
-        enrol(&pool, 1, ResidualHandling::CarryForward).await;
+        enrol(&pool, ListingId(1), ResidualHandling::CarryForward).await;
         // $68.47 cash at $136.94 → the statement says 0.500 shares.
-        insert_distribution(&pool, 1, 1, "68.47".parse().unwrap(), Decimal::ZERO).await;
+        insert_distribution(
+            &pool,
+            1,
+            ListingId(1),
+            "68.47".parse().unwrap(),
+            Decimal::ZERO,
+        )
+        .await;
 
         let trade = db_reinvest(&pool, 1, &body_units("136.94", "0.500"))
             .await
@@ -1523,10 +1546,17 @@ mod tests {
     async fn explicit_units_tolerate_sub_step_statement_rounding() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "USD").await;
-        enrol(&pool, 1, ResidualHandling::CarryForward).await;
+        enrol(&pool, ListingId(1), ResidualHandling::CarryForward).await;
         // 0.501 × 137.05 = 68.66205 vs $68.66 cash — off by $0.00205,
         // well inside one 0.001 unit-step (0.001 × 137.05 = $0.13705).
-        insert_distribution(&pool, 1, 1, "68.66".parse().unwrap(), Decimal::ZERO).await;
+        insert_distribution(
+            &pool,
+            1,
+            ListingId(1),
+            "68.66".parse().unwrap(),
+            Decimal::ZERO,
+        )
+        .await;
 
         let trade = db_reinvest(&pool, 1, &body_units("137.05", "0.501"))
             .await
@@ -1543,8 +1573,15 @@ mod tests {
     async fn explicit_units_cash_mismatch_is_rejected() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "USD").await;
-        enrol(&pool, 1, ResidualHandling::CarryForward).await;
-        insert_distribution(&pool, 1, 1, "68.66".parse().unwrap(), Decimal::ZERO).await;
+        enrol(&pool, ListingId(1), ResidualHandling::CarryForward).await;
+        insert_distribution(
+            &pool,
+            1,
+            ListingId(1),
+            "68.66".parse().unwrap(),
+            Decimal::ZERO,
+        )
+        .await;
 
         // 0.600 × 137.05 = 82.23 — $13.57 off the $68.66 cash.
         let err = db_reinvest(&pool, 1, &body_units("137.05", "0.600"))
@@ -1559,13 +1596,20 @@ mod tests {
 
         // The boundary is exclusive: exactly one unit-step off still rejects
         // (a broker-computed figure is always strictly inside the step)...
-        insert_distribution(&pool, 2, 1, Decimal::from(60), Decimal::ZERO).await;
+        insert_distribution(&pool, 2, ListingId(1), Decimal::from(60), Decimal::ZERO).await;
         let err = db_reinvest(&pool, 2, &body_units("100", "0.5")) // step 0.1 → tolerance $10
             .await
             .unwrap_err();
         assert!(matches!(err, ReinvestError::UnitsCashMismatch { .. }));
         // ...while just inside it passes (coarser stated precision, looser check).
-        insert_distribution(&pool, 3, 1, "59.99".parse().unwrap(), Decimal::ZERO).await;
+        insert_distribution(
+            &pool,
+            3,
+            ListingId(1),
+            "59.99".parse().unwrap(),
+            Decimal::ZERO,
+        )
+        .await;
         let trade = db_reinvest(&pool, 3, &body_units("100", "0.5"))
             .await
             .unwrap();
@@ -1576,8 +1620,8 @@ mod tests {
     async fn non_positive_units_are_rejected() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "USD").await;
-        enrol(&pool, 1, ResidualHandling::CarryForward).await;
-        insert_distribution(&pool, 1, 1, Decimal::from(100), Decimal::ZERO).await;
+        enrol(&pool, ListingId(1), ResidualHandling::CarryForward).await;
+        insert_distribution(&pool, 1, ListingId(1), Decimal::from(100), Decimal::ZERO).await;
         for units in ["0", "-0.5"] {
             let err = db_reinvest(&pool, 1, &body_units("9", units))
                 .await
@@ -1594,7 +1638,14 @@ mod tests {
     async fn explicit_units_still_require_enrolment() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "USD").await;
-        insert_distribution(&pool, 1, 1, "68.47".parse().unwrap(), Decimal::ZERO).await;
+        insert_distribution(
+            &pool,
+            1,
+            ListingId(1),
+            "68.47".parse().unwrap(),
+            Decimal::ZERO,
+        )
+        .await;
         let err = db_reinvest(&pool, 1, &body_units("136.94", "0.500"))
             .await
             .unwrap_err();
@@ -1609,15 +1660,15 @@ mod tests {
     async fn explicit_units_spend_the_brought_forward_residual() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "AUD").await;
-        enrol(&pool, 1, ResidualHandling::CarryForward).await;
+        enrol(&pool, ListingId(1), ResidualHandling::CarryForward).await;
 
         // Whole-share first: $100 at $9 → 11 shares, $1 carried.
-        insert_distribution(&pool, 1, 1, Decimal::from(100), Decimal::ZERO).await;
+        insert_distribution(&pool, 1, ListingId(1), Decimal::from(100), Decimal::ZERO).await;
         let first = db_reinvest(&pool, 1, &body("9")).await.unwrap();
         assert_eq!(first.residual_carried_forward, Decimal::ONE);
 
         // Fractional next: $8 cash + $1 brought forward = $9 = 0.5 × $18.
-        insert_distribution(&pool, 2, 1, Decimal::from(8), Decimal::ZERO).await;
+        insert_distribution(&pool, 2, ListingId(1), Decimal::from(8), Decimal::ZERO).await;
         let second = db_reinvest(&pool, 2, &body_units("18", "0.5"))
             .await
             .unwrap();
@@ -1637,7 +1688,7 @@ mod tests {
     async fn morgan_stanley_ice_fractional_statements_reproduce() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "USD").await;
-        enrol(&pool, 1, ResidualHandling::CarryForward).await;
+        enrol(&pool, ListingId(1), ResidualHandling::CarryForward).await;
 
         // (pay date, gross, US tax withheld, stated units, price)
         let statements = [
@@ -1680,7 +1731,7 @@ mod tests {
     async fn not_enrolled_is_rejected_and_nothing_persisted() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "AUD").await;
-        insert_distribution(&pool, 1, 1, Decimal::from(100), Decimal::ZERO).await;
+        insert_distribution(&pool, 1, ListingId(1), Decimal::from(100), Decimal::ZERO).await;
 
         let err = db_reinvest(&pool, 1, &body("9")).await.unwrap_err();
         assert!(matches!(err, ReinvestError::NotEnrolled { .. }));
@@ -1704,8 +1755,8 @@ mod tests {
     async fn already_reinvested_is_rejected() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "AUD").await;
-        enrol(&pool, 1, ResidualHandling::CarryForward).await;
-        insert_distribution(&pool, 1, 1, Decimal::from(100), Decimal::ZERO).await;
+        enrol(&pool, ListingId(1), ResidualHandling::CarryForward).await;
+        insert_distribution(&pool, 1, ListingId(1), Decimal::from(100), Decimal::ZERO).await;
 
         db_reinvest(&pool, 1, &body("9")).await.unwrap();
         let err = db_reinvest(&pool, 1, &body("9")).await.unwrap_err();
@@ -1729,8 +1780,8 @@ mod tests {
     async fn non_positive_price_is_rejected() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "AUD").await;
-        enrol(&pool, 1, ResidualHandling::CarryForward).await;
-        insert_distribution(&pool, 1, 1, Decimal::from(100), Decimal::ZERO).await;
+        enrol(&pool, ListingId(1), ResidualHandling::CarryForward).await;
+        insert_distribution(&pool, 1, ListingId(1), Decimal::from(100), Decimal::ZERO).await;
         let err = db_reinvest(&pool, 1, &body("0")).await.unwrap_err();
         assert!(matches!(err, ReinvestError::NonPositivePrice));
     }
@@ -1743,13 +1794,13 @@ mod tests {
         enrol_period(
             &pool,
             1,
-            1,
+            ListingId(1),
             "2024-06-01",
             None,
             ResidualHandling::CarryForward,
         )
         .await;
-        insert_distribution(&pool, 1, 1, Decimal::from(100), Decimal::ZERO).await; // 2024-03-31
+        insert_distribution(&pool, 1, ListingId(1), Decimal::from(100), Decimal::ZERO).await; // 2024-03-31
         let err = db_reinvest(&pool, 1, &body("9")).await.unwrap_err();
         assert!(matches!(err, ReinvestError::NotEnrolled { .. }));
     }
@@ -1762,7 +1813,7 @@ mod tests {
         enrol_period(
             &pool,
             1,
-            1,
+            ListingId(1),
             "2023-01-01",
             Some("2024-01-01"),
             ResidualHandling::CarryForward,
@@ -1771,13 +1822,13 @@ mod tests {
         enrol_period(
             &pool,
             2,
-            1,
+            ListingId(1),
             "2025-01-01",
             None,
             ResidualHandling::CarryForward,
         )
         .await;
-        insert_distribution(&pool, 1, 1, Decimal::from(100), Decimal::ZERO).await; // 2024-03-31
+        insert_distribution(&pool, 1, ListingId(1), Decimal::from(100), Decimal::ZERO).await; // 2024-03-31
         let err = db_reinvest(&pool, 1, &body("9")).await.unwrap_err();
         assert!(matches!(err, ReinvestError::NotEnrolled { .. }));
     }
@@ -1789,19 +1840,27 @@ mod tests {
         enrol_period(
             &pool,
             1,
-            1,
+            ListingId(1),
             "2023-01-01",
             Some("2024-01-01"),
             ResidualHandling::CarryForward,
         )
         .await;
-        enrol_period(&pool, 2, 1, "2025-01-01", None, ResidualHandling::PayOut).await;
+        enrol_period(
+            &pool,
+            2,
+            ListingId(1),
+            "2025-01-01",
+            None,
+            ResidualHandling::PayOut,
+        )
+        .await;
         // A distribution inside the re-enrolment period reinvests, and its
         // leftover follows the *new* period's PayOut, not the old CarryForward.
         insert_distribution_dated(
             &pool,
             1,
-            1,
+            ListingId(1),
             "2025-03-31",
             None,
             Decimal::from(100),
@@ -1821,7 +1880,7 @@ mod tests {
         enrol_period(
             &pool,
             1,
-            1,
+            ListingId(1),
             "2024-01-01",
             Some("2024-04-01"),
             ResidualHandling::CarryForward,
@@ -1833,7 +1892,7 @@ mod tests {
         insert_distribution_dated(
             &pool,
             1,
-            1,
+            ListingId(1),
             "2024-04-10",
             Some("2024-03-15"),
             Decimal::from(100),
@@ -1847,7 +1906,7 @@ mod tests {
         insert_distribution_dated(
             &pool,
             2,
-            1,
+            ListingId(1),
             "2024-02-01",
             Some("2023-12-15"),
             Decimal::from(100),
@@ -1869,7 +1928,7 @@ mod tests {
         enrol_period(
             &pool,
             1,
-            1,
+            ListingId(1),
             "2024-01-01",
             Some("2024-07-05"),
             ResidualHandling::CarryForward,
@@ -1906,10 +1965,10 @@ mod tests {
     async fn carried_residual_does_not_cross_an_unenrolment() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "AUD").await;
-        enrol(&pool, 1, ResidualHandling::CarryForward).await; // open from 2024-01-01
+        enrol(&pool, ListingId(1), ResidualHandling::CarryForward).await; // open from 2024-01-01
 
         // First reinvestment carries $1 forward.
-        insert_distribution(&pool, 1, 1, Decimal::from(100), Decimal::ZERO).await;
+        insert_distribution(&pool, 1, ListingId(1), Decimal::from(100), Decimal::ZERO).await;
         let first = db_reinvest(&pool, 1, &body("9")).await.unwrap();
         assert_eq!(first.residual_carried_forward, Decimal::ONE);
 
@@ -1917,7 +1976,7 @@ mod tests {
         enrol_period(
             &pool,
             1,
-            1,
+            ListingId(1),
             "2024-01-01",
             Some("2024-06-01"),
             ResidualHandling::CarryForward,
@@ -1931,7 +1990,7 @@ mod tests {
         enrol_period(
             &pool,
             2,
-            1,
+            ListingId(1),
             "2025-01-01",
             None,
             ResidualHandling::CarryForward,
@@ -1940,7 +1999,7 @@ mod tests {
         insert_distribution_dated(
             &pool,
             2,
-            1,
+            ListingId(1),
             "2025-03-31",
             None,
             Decimal::from(8),
@@ -1964,16 +2023,16 @@ mod tests {
         insert_listing(&pool, 1, "AUD").await;
         insert_account(&pool, 2, "ICE Employee Plan").await;
         // Only the default (personal) account is enrolled.
-        enrol_in_account(&pool, 1, 1, 1, ResidualHandling::CarryForward).await;
+        enrol_in_account(&pool, 1, ListingId(1), 1, ResidualHandling::CarryForward).await;
 
         // Personal-account distribution reinvests, into the personal account.
-        insert_distribution_in_account(&pool, 1, 1, 1, Decimal::from(100)).await;
+        insert_distribution_in_account(&pool, 1, ListingId(1), 1, Decimal::from(100)).await;
         let trade = db_reinvest(&pool, 1, &body("9")).await.unwrap();
         assert_eq!(trade.quantity, Decimal::from(11));
         assert_eq!(trade.holding_account_id, 1);
 
         // The plan account's distribution on the same listing is rejected.
-        insert_distribution_in_account(&pool, 2, 1, 2, Decimal::from(100)).await;
+        insert_distribution_in_account(&pool, 2, ListingId(1), 2, Decimal::from(100)).await;
         let err = db_reinvest(&pool, 2, &body("9")).await.unwrap_err();
         assert!(matches!(err, ReinvestError::NotEnrolled { .. }));
     }
@@ -1985,8 +2044,8 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "AUD").await;
         insert_account(&pool, 2, "Personal CHESS").await;
-        enrol_in_account(&pool, 1, 1, 2, ResidualHandling::CarryForward).await;
-        insert_distribution_in_account(&pool, 1, 1, 2, Decimal::from(100)).await;
+        enrol_in_account(&pool, 1, ListingId(1), 2, ResidualHandling::CarryForward).await;
+        insert_distribution_in_account(&pool, 1, ListingId(1), 2, Decimal::from(100)).await;
 
         let trade = db_reinvest(&pool, 1, &body("9")).await.unwrap();
         assert_eq!(trade.holding_account_id, 2);
@@ -2000,22 +2059,22 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "AUD").await;
         insert_account(&pool, 2, "Personal CHESS").await;
-        enrol_in_account(&pool, 1, 1, 1, ResidualHandling::CarryForward).await;
-        enrol_in_account(&pool, 2, 1, 2, ResidualHandling::CarryForward).await;
+        enrol_in_account(&pool, 1, ListingId(1), 1, ResidualHandling::CarryForward).await;
+        enrol_in_account(&pool, 2, ListingId(1), 2, ResidualHandling::CarryForward).await;
 
         // Account 1: $100 at $9 → 11 shares, $1 carried forward.
-        insert_distribution_in_account(&pool, 1, 1, 1, Decimal::from(100)).await;
+        insert_distribution_in_account(&pool, 1, ListingId(1), 1, Decimal::from(100)).await;
         let first = db_reinvest(&pool, 1, &body("9")).await.unwrap();
         assert_eq!(first.residual_carried_forward, Decimal::ONE);
 
         // Account 2's next reinvestment brings nothing forward from account 1.
-        insert_distribution_in_account(&pool, 2, 1, 2, Decimal::from(8)).await;
+        insert_distribution_in_account(&pool, 2, ListingId(1), 2, Decimal::from(8)).await;
         let other = db_reinvest(&pool, 2, &body("9")).await.unwrap();
         assert_eq!(other.residual_brought_forward, Decimal::ZERO);
         assert_eq!(other.quantity, Decimal::ZERO); // 8 < 9, no whole share
 
         // Account 1's own chain still picks its $1 up.
-        insert_distribution_in_account(&pool, 3, 1, 1, Decimal::from(8)).await;
+        insert_distribution_in_account(&pool, 3, ListingId(1), 1, Decimal::from(8)).await;
         let next = db_reinvest(&pool, 3, &body("9")).await.unwrap();
         assert_eq!(next.residual_brought_forward, Decimal::ONE);
         assert_eq!(next.quantity, Decimal::from(1));
@@ -2025,8 +2084,8 @@ mod tests {
     async fn api_reinvest_returns_201_with_trade() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "AUD").await;
-        enrol(&pool, 1, ResidualHandling::CarryForward).await;
-        insert_distribution(&pool, 1, 1, Decimal::from(100), Decimal::ZERO).await;
+        enrol(&pool, ListingId(1), ResidualHandling::CarryForward).await;
+        insert_distribution(&pool, 1, ListingId(1), Decimal::from(100), Decimal::ZERO).await;
 
         let resp = client(&pool)
             .post_raw("/income/1/reinvest", r#"{"reinvestment_price":"9"}"#)
@@ -2041,8 +2100,15 @@ mod tests {
     async fn api_reinvest_with_units_returns_201_with_fractional_trade() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "USD").await;
-        enrol(&pool, 1, ResidualHandling::CarryForward).await;
-        insert_distribution(&pool, 1, 1, "68.47".parse().unwrap(), Decimal::ZERO).await;
+        enrol(&pool, ListingId(1), ResidualHandling::CarryForward).await;
+        insert_distribution(
+            &pool,
+            1,
+            ListingId(1),
+            "68.47".parse().unwrap(),
+            Decimal::ZERO,
+        )
+        .await;
 
         let resp = client(&pool)
             .post_raw(
@@ -2062,8 +2128,15 @@ mod tests {
     async fn api_reinvest_units_mismatch_returns_422_with_figures() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "USD").await;
-        enrol(&pool, 1, ResidualHandling::CarryForward).await;
-        insert_distribution(&pool, 1, 1, "68.66".parse().unwrap(), Decimal::ZERO).await;
+        enrol(&pool, ListingId(1), ResidualHandling::CarryForward).await;
+        insert_distribution(
+            &pool,
+            1,
+            ListingId(1),
+            "68.66".parse().unwrap(),
+            Decimal::ZERO,
+        )
+        .await;
         let resp = client(&pool)
             .post_raw(
                 "/income/1/reinvest",
@@ -2080,7 +2153,7 @@ mod tests {
     async fn api_reinvest_not_enrolled_returns_422() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "AUD").await;
-        insert_distribution(&pool, 1, 1, Decimal::from(100), Decimal::ZERO).await;
+        insert_distribution(&pool, 1, ListingId(1), Decimal::from(100), Decimal::ZERO).await;
         let resp = client(&pool)
             .post_raw("/income/1/reinvest", r#"{"reinvestment_price":"9"}"#)
             .await;
@@ -2107,8 +2180,8 @@ mod tests {
     async fn unreinvest_deletes_the_trade_clears_the_link_and_allows_redo() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "AUD").await;
-        enrol(&pool, 1, ResidualHandling::CarryForward).await;
-        insert_distribution(&pool, 1, 1, Decimal::from(100), Decimal::ZERO).await;
+        enrol(&pool, ListingId(1), ResidualHandling::CarryForward).await;
+        insert_distribution(&pool, 1, ListingId(1), Decimal::from(100), Decimal::ZERO).await;
         let trade = db_reinvest(&pool, 1, &body("9")).await.unwrap();
 
         db_unreinvest(&pool, 1).await.unwrap();
@@ -2141,7 +2214,7 @@ mod tests {
     async fn unreinvest_without_a_reinvestment_is_rejected() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "AUD").await;
-        insert_distribution(&pool, 1, 1, Decimal::from(100), Decimal::ZERO).await;
+        insert_distribution(&pool, 1, ListingId(1), Decimal::from(100), Decimal::ZERO).await;
         let err = db_unreinvest(&pool, 1).await.unwrap_err();
         assert!(
             matches!(err, ReinvestError::NotReinvested),
@@ -2165,8 +2238,8 @@ mod tests {
         // undo — refused, and nothing changes.
         let pool = test_pool().await;
         insert_listing(&pool, 1, "AUD").await;
-        enrol(&pool, 1, ResidualHandling::CarryForward).await;
-        insert_distribution(&pool, 1, 1, Decimal::from(100), Decimal::ZERO).await;
+        enrol(&pool, ListingId(1), ResidualHandling::CarryForward).await;
+        insert_distribution(&pool, 1, ListingId(1), Decimal::from(100), Decimal::ZERO).await;
         let trade = db_reinvest(&pool, 1, &body("9")).await.unwrap();
         crate::entities::sell::db_upsert_sell(
             &pool,
@@ -2174,7 +2247,7 @@ mod tests {
             &crate::entities::sell::SellBody {
                 date: "2024-06-03".parse().unwrap(),
                 settlement_date: Some("2024-06-05".parse().unwrap()),
-                listing_id: 1,
+                listing_id: ListingId(1),
                 average_price: Decimal::from(12),
                 quantity: Decimal::from(5),
                 currency: "AUD".into(),
@@ -2225,11 +2298,11 @@ mod tests {
         // residual forward, so the first can only be undone after the second.
         let pool = test_pool().await;
         insert_listing(&pool, 1, "AUD").await;
-        enrol(&pool, 1, ResidualHandling::CarryForward).await;
+        enrol(&pool, ListingId(1), ResidualHandling::CarryForward).await;
         insert_distribution_dated(
             &pool,
             1,
-            1,
+            ListingId(1),
             "2024-03-31",
             None,
             Decimal::from(100),
@@ -2239,7 +2312,7 @@ mod tests {
         insert_distribution_dated(
             &pool,
             2,
-            1,
+            ListingId(1),
             "2024-06-30",
             None,
             Decimal::from(100),
@@ -2278,12 +2351,12 @@ mod tests {
     async fn reinvesting_behind_an_existing_reinvestment_is_refused() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "AUD").await;
-        enrol(&pool, 1, ResidualHandling::CarryForward).await;
+        enrol(&pool, ListingId(1), ResidualHandling::CarryForward).await;
         // March pays $105, September $107 — the measured case.
         insert_distribution_dated(
             &pool,
             1,
-            1,
+            ListingId(1),
             "2024-03-28",
             None,
             Decimal::from(105),
@@ -2293,7 +2366,7 @@ mod tests {
         insert_distribution_dated(
             &pool,
             2,
-            1,
+            ListingId(1),
             "2024-09-30",
             None,
             Decimal::from(107),
@@ -2334,11 +2407,11 @@ mod tests {
     async fn in_payment_order_the_two_distributions_chain_correctly() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "AUD").await;
-        enrol(&pool, 1, ResidualHandling::CarryForward).await;
+        enrol(&pool, ListingId(1), ResidualHandling::CarryForward).await;
         insert_distribution_dated(
             &pool,
             1,
-            1,
+            ListingId(1),
             "2024-03-28",
             None,
             Decimal::from(105),
@@ -2348,7 +2421,7 @@ mod tests {
         insert_distribution_dated(
             &pool,
             2,
-            1,
+            ListingId(1),
             "2024-09-30",
             None,
             Decimal::from(107),
@@ -2380,7 +2453,7 @@ mod tests {
         enrol_period(
             &pool,
             1,
-            1,
+            ListingId(1),
             "2024-01-01",
             None,
             ResidualHandling::CarryForward,
@@ -2401,7 +2474,7 @@ mod tests {
         enrol_period(
             &pool,
             1,
-            1,
+            ListingId(1),
             "2024-01-01",
             Some("2024-12-01"),
             ResidualHandling::CarryForward,
@@ -2434,7 +2507,7 @@ mod tests {
         enrol_period(
             &pool,
             1,
-            1,
+            ListingId(1),
             "2024-01-01",
             Some("2024-12-01"),
             ResidualHandling::CarryForward,
@@ -2476,7 +2549,7 @@ mod tests {
         enrol_period(
             &pool,
             1,
-            1,
+            ListingId(1),
             "2024-01-01",
             Some("2024-12-01"),
             ResidualHandling::PayOut,
@@ -2512,7 +2585,7 @@ mod tests {
         enrol_period(
             &pool,
             1,
-            1,
+            ListingId(1),
             "2024-01-01",
             Some("2024-12-01"),
             ResidualHandling::CarryForward,
@@ -2541,7 +2614,7 @@ mod tests {
         insert_distribution_dated(
             pool,
             1,
-            1,
+            ListingId(1),
             "2024-03-28",
             Some("2024-03-01"),
             Decimal::from(105),
@@ -2551,7 +2624,7 @@ mod tests {
         insert_distribution_dated(
             pool,
             2,
-            1,
+            ListingId(1),
             "2024-06-28",
             Some("2024-06-01"),
             Decimal::from(107),
@@ -2580,11 +2653,11 @@ mod tests {
     async fn the_chain_order_is_the_trades_date_not_the_distributions() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "AUD").await;
-        enrol(&pool, 1, ResidualHandling::CarryForward).await;
+        enrol(&pool, ListingId(1), ResidualHandling::CarryForward).await;
         insert_distribution_dated(
             &pool,
             1,
-            1,
+            ListingId(1),
             "2024-03-28",
             None,
             Decimal::from(100),
@@ -2594,7 +2667,7 @@ mod tests {
         insert_distribution_dated(
             &pool,
             2,
-            1,
+            ListingId(1),
             "2024-09-30",
             None,
             Decimal::from(100),
@@ -2631,11 +2704,11 @@ mod tests {
     async fn a_same_dated_reinvestment_joins_the_chain_behind_it() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "AUD").await;
-        enrol(&pool, 1, ResidualHandling::CarryForward).await;
+        enrol(&pool, ListingId(1), ResidualHandling::CarryForward).await;
         insert_distribution_dated(
             &pool,
             1,
-            1,
+            ListingId(1),
             "2024-03-28",
             None,
             Decimal::from(100),
@@ -2645,7 +2718,7 @@ mod tests {
         insert_distribution_dated(
             &pool,
             2,
-            1,
+            ListingId(1),
             "2024-03-28",
             None,
             Decimal::from(8),
@@ -2673,7 +2746,7 @@ mod tests {
         enrol_period(
             &pool,
             1,
-            1,
+            ListingId(1),
             "2024-01-01",
             Some("2024-07-01"),
             ResidualHandling::CarryForward,
@@ -2682,7 +2755,7 @@ mod tests {
         enrol_period(
             &pool,
             2,
-            1,
+            ListingId(1),
             "2024-07-01",
             None,
             ResidualHandling::CarryForward,
@@ -2692,7 +2765,7 @@ mod tests {
         insert_distribution_dated(
             &pool,
             1,
-            1,
+            ListingId(1),
             "2024-03-31",
             None,
             Decimal::from(100),
@@ -2702,7 +2775,7 @@ mod tests {
         insert_distribution_dated(
             &pool,
             2,
-            1,
+            ListingId(1),
             "2024-09-30",
             None,
             Decimal::from(100),
@@ -2724,11 +2797,11 @@ mod tests {
     async fn api_out_of_order_reinvestment_is_422_naming_the_remedy() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "AUD").await;
-        enrol(&pool, 1, ResidualHandling::CarryForward).await;
+        enrol(&pool, ListingId(1), ResidualHandling::CarryForward).await;
         insert_distribution_dated(
             &pool,
             1,
-            1,
+            ListingId(1),
             "2024-03-28",
             None,
             Decimal::from(105),
@@ -2738,7 +2811,7 @@ mod tests {
         insert_distribution_dated(
             &pool,
             2,
-            1,
+            ListingId(1),
             "2024-09-30",
             None,
             Decimal::from(107),
@@ -2765,8 +2838,8 @@ mod tests {
     async fn api_unreinvest_round_trip_and_rejections() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "AUD").await;
-        enrol(&pool, 1, ResidualHandling::CarryForward).await;
-        insert_distribution(&pool, 1, 1, Decimal::from(100), Decimal::ZERO).await;
+        enrol(&pool, ListingId(1), ResidualHandling::CarryForward).await;
+        insert_distribution(&pool, 1, ListingId(1), Decimal::from(100), Decimal::ZERO).await;
         db_reinvest(&pool, 1, &body("9")).await.unwrap();
 
         let app = client(&pool);
@@ -2797,8 +2870,8 @@ mod tests {
             "2024-12-02".parse().unwrap(),
         )
         .await;
-        enrol(&pool, 1, ResidualHandling::CarryForward).await;
-        insert_distribution(&pool, 1, 1, Decimal::from(100), Decimal::ZERO).await;
+        enrol(&pool, ListingId(1), ResidualHandling::CarryForward).await;
+        insert_distribution(&pool, 1, ListingId(1), Decimal::from(100), Decimal::ZERO).await;
 
         // The default trade date — the distribution's own `date_paid`.
         let err = db_reinvest(&pool, 1, &body("2")).await.unwrap_err();
@@ -2849,8 +2922,15 @@ mod tests {
     async fn an_unrepresentable_reinvested_cost_base_is_refused_naming_it() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "USD").await;
-        enrol(&pool, 1, ResidualHandling::CarryForward).await;
-        insert_distribution(&pool, 1, 1, "68.66".parse().unwrap(), Decimal::ZERO).await;
+        enrol(&pool, ListingId(1), ResidualHandling::CarryForward).await;
+        insert_distribution(
+            &pool,
+            1,
+            ListingId(1),
+            "68.66".parse().unwrap(),
+            Decimal::ZERO,
+        )
+        .await;
 
         let response = client(&pool)
             .post(
@@ -2892,13 +2972,13 @@ mod tests {
     /// reinvestment price buys 7.9e25 units.
     async fn enrolled_listing_behind_a_split(pool: &SqlitePool, cash: &str) {
         insert_listing(pool, 1, "AUD").await;
-        enrol(pool, 1, ResidualHandling::CarryForward).await;
-        insert_distribution(pool, 1, 1, cash.parse().unwrap(), Decimal::ZERO).await;
+        enrol(pool, ListingId(1), ResidualHandling::CarryForward).await;
+        insert_distribution(pool, 1, ListingId(1), cash.parse().unwrap(), Decimal::ZERO).await;
         crate::entities::corporate_action::db_upsert(
             pool,
             &crate::entities::corporate_action::CorporateAction {
                 id: 10,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: "2024-06-01".parse().unwrap(),
                 kind: crate::entities::corporate_action::ActionKind::ShareSplit {
                     split_new_units: Decimal::from(1000),
@@ -3011,8 +3091,15 @@ mod tests {
     async fn api_reinvest_dry_run_previews_without_storing() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "USD").await;
-        enrol(&pool, 1, ResidualHandling::CarryForward).await;
-        insert_distribution(&pool, 1, 1, "68.66".parse().unwrap(), Decimal::ZERO).await;
+        enrol(&pool, ListingId(1), ResidualHandling::CarryForward).await;
+        insert_distribution(
+            &pool,
+            1,
+            ListingId(1),
+            "68.66".parse().unwrap(),
+            Decimal::ZERO,
+        )
+        .await;
         let client = client(&pool);
 
         client

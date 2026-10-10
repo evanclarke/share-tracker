@@ -21,6 +21,7 @@ mod unpriced;
 mod yahoo;
 
 use super::*;
+use crate::infra::id::ListingId;
 
 use crate::entities::exchange_holiday;
 
@@ -73,8 +74,8 @@ async fn insert_crypto_listing(pool: &SqlitePool, id: i64, ticker: &str) {
         .await;
 }
 
-async fn insert_buy(pool: &SqlitePool, id: i64, listing_id: i64, qty: &str) {
-    crate::test_support::buy(id, listing_id)
+async fn insert_buy(pool: &SqlitePool, id: i64, listing_id: ListingId, qty: &str) {
+    crate::test_support::buy(id, listing_id.0)
         .date(ymd(2024, 1, 16))
         .qty(qty.parse().unwrap())
         .price(Decimal::from(10))
@@ -82,8 +83,14 @@ async fn insert_buy(pool: &SqlitePool, id: i64, listing_id: i64, qty: &str) {
         .await;
 }
 
-async fn sell_everything(pool: &SqlitePool, sell_id: i64, buy_id: i64, listing_id: i64, qty: &str) {
-    crate::test_support::sell(sell_id, listing_id)
+async fn sell_everything(
+    pool: &SqlitePool,
+    sell_id: i64,
+    buy_id: i64,
+    listing_id: ListingId,
+    qty: &str,
+) {
+    crate::test_support::sell(sell_id, listing_id.0)
         .date(ymd(2024, 6, 3))
         .qty(qty.parse().unwrap())
         .price(Decimal::from(12))
@@ -97,8 +104,8 @@ async fn sell_everything(pool: &SqlitePool, sell_id: i64, buy_id: i64, listing_i
 /// call.
 #[derive(Default)]
 struct StubFetcher {
-    closes: HashMap<i64, Vec<FetchedClose>>,
-    quotes: HashMap<i64, LatestQuote>,
+    closes: HashMap<ListingId, Vec<FetchedClose>>,
+    quotes: HashMap<ListingId, LatestQuote>,
     fail: Option<FetchError>,
     calls: Mutex<Vec<(i64, NaiveDate, NaiveDate)>>,
     /// The resolved symbol (`yahoo_symbol`'s output) each `daily_closes`
@@ -112,7 +119,13 @@ struct StubFetcher {
 }
 
 impl StubFetcher {
-    fn with_close(mut self, listing_id: i64, date: NaiveDate, price: &str, ccy: &str) -> Self {
+    fn with_close(
+        mut self,
+        listing_id: ListingId,
+        date: NaiveDate,
+        price: &str,
+        ccy: &str,
+    ) -> Self {
         self.closes
             .entry(listing_id)
             .or_default()
@@ -124,7 +137,13 @@ impl StubFetcher {
         self
     }
 
-    fn with_quote(mut self, listing_id: i64, price: &str, ccy: &str, as_of: DateTime<Utc>) -> Self {
+    fn with_quote(
+        mut self,
+        listing_id: ListingId,
+        price: &str,
+        ccy: &str,
+        as_of: DateTime<Utc>,
+    ) -> Self {
         self.quotes.insert(
             listing_id,
             LatestQuote {
@@ -187,7 +206,7 @@ impl PriceFetcher for StubFetcher {
             self.calls
                 .lock()
                 .unwrap()
-                .push((market.listing.id, from, to));
+                .push((market.listing.id.0, from, to));
             self.symbols
                 .lock()
                 .unwrap()
@@ -229,7 +248,7 @@ impl PriceFetcher for StubFetcher {
             self.quote_batches
                 .lock()
                 .unwrap()
-                .push(markets.iter().map(|m| m.listing.id).collect());
+                .push(markets.iter().map(|m| m.listing.id.0).collect());
             let mut out = Vec::with_capacity(markets.len());
             for market in markets {
                 out.push(self.latest_quote(market).await);
@@ -247,7 +266,7 @@ fn friday_evening_sydney() -> DateTime<Utc> {
 
 async fn insert_share_split(
     pool: &SqlitePool,
-    listing_id: i64,
+    listing_id: ListingId,
     date: NaiveDate,
     new: &str,
     old: &str,
@@ -255,7 +274,7 @@ async fn insert_share_split(
     crate::entities::corporate_action::db_upsert(
         pool,
         &crate::entities::corporate_action::CorporateAction {
-            id: 900 + listing_id,
+            id: 900 + listing_id.0,
             listing_id,
             date,
             kind: crate::entities::corporate_action::ActionKind::ShareSplit {
@@ -272,7 +291,7 @@ async fn insert_share_split(
 /// listing row move together exactly as `POST /listings/:id/renames` does.
 async fn rename_listing(
     pool: &SqlitePool,
-    listing_id: i64,
+    listing_id: ListingId,
     effective_date: NaiveDate,
     new_ticker: &str,
     new_mic: Option<&str>,
@@ -314,8 +333,8 @@ fn asx_lookback_window() -> Vec<NaiveDate> {
 }
 
 /// Store an ok row directly (as an earlier successful run would have).
-async fn seed_ok_price(pool: &SqlitePool, listing_id: i64, date: NaiveDate) {
-    crate::test_support::closing_price(listing_id, date)
+async fn seed_ok_price(pool: &SqlitePool, listing_id: ListingId, date: NaiveDate) {
+    crate::test_support::closing_price(listing_id.0, date)
         .source(PriceSource::Yahoo)
         .fetched_at("2026-06-01T00:00:00Z")
         .insert(pool)
@@ -323,8 +342,8 @@ async fn seed_ok_price(pool: &SqlitePool, listing_id: i64, date: NaiveDate) {
 }
 
 /// Store a hand-entered price directly, as `PUT /closing_prices/…` does.
-async fn seed_manual_price(pool: &SqlitePool, listing_id: i64, date: NaiveDate, price: &str) {
-    crate::test_support::closing_price(listing_id, date)
+async fn seed_manual_price(pool: &SqlitePool, listing_id: ListingId, date: NaiveDate, price: &str) {
+    crate::test_support::closing_price(listing_id.0, date)
         .price(price)
         .manual("asx.com.au closing report", "provider serves no candle")
         .insert(pool)
@@ -357,7 +376,7 @@ async fn delete_req(app: &ApiClient, uri: &str) -> (StatusCode, axum::body::Byte
 /// Store one errored row for (listing 1, `date`) via the normal fetch
 /// path — a stub with no candle for the day.
 async fn store_errored(pool: &SqlitePool, date: NaiveDate) {
-    let market = load_market(pool, 1).await.unwrap().unwrap();
+    let market = load_market(pool, ListingId(1)).await.unwrap().unwrap();
     let (_, errored) = fetch_and_store(pool, &StubFetcher::default(), &market, &[date])
         .await
         .unwrap();

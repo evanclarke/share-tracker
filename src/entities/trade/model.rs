@@ -3,6 +3,7 @@
 
 use crate::infra::currency::CurrencyCode;
 use crate::infra::decimal::{Money, OptMoney};
+use crate::infra::id::ListingId;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -85,7 +86,7 @@ pub struct Trade {
     /// migration 0041. Read by the `settlement-recompute` job, which rewrites
     /// only the computed ones; informational on the wire.
     pub settlement_date_source: SettlementDateSource,
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     #[sqlx(try_from = "Money")]
     pub average_price: Decimal,
     #[sqlx(try_from = "Money")]
@@ -301,7 +302,7 @@ pub struct TradeBody {
     #[serde(default)]
     pub settlement_date: Option<NaiveDate>,
     /// The listing traded.
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     /// Price per unit, in `currency` (decimal string).
     #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub average_price: Decimal,

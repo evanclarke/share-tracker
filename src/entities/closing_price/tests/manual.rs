@@ -2,6 +2,7 @@
 //! with the provenance that makes the figure auditable later.
 
 use super::*;
+use crate::infra::id::ListingId;
 
 async fn put_json(
     app: &ApiClient,
@@ -29,7 +30,7 @@ fn manual_body(price: &str) -> serde_json::Value {
 async fn api_manual_price_stores_the_price_with_its_provenance() {
     let pool = test_pool().await;
     insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
-    insert_buy(&pool, 1, 1, "100").await;
+    insert_buy(&pool, 1, ListingId(1), "100").await;
     let app = full_router(pool.clone(), StubFetcher::default());
 
     let (status, bytes) =
@@ -47,7 +48,7 @@ async fn api_manual_price_stores_the_price_with_its_provenance() {
     assert_eq!(created["listing_id"], 1);
     assert_eq!(created["price"], "62.48");
 
-    let row = db_get_one(&pool, 1, ymd(2026, 6, 4))
+    let row = db_get_one(&pool, ListingId(1), ymd(2026, 6, 4))
         .await
         .unwrap()
         .unwrap();
@@ -72,7 +73,7 @@ async fn api_manual_price_stores_the_price_with_its_provenance() {
 async fn manual_price_unblocks_valuation_of_an_errored_day() {
     let pool = test_pool().await;
     insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
-    insert_buy(&pool, 1, 1, "100").await;
+    insert_buy(&pool, 1, ListingId(1), "100").await;
     store_errored(&pool, ymd(2026, 6, 4)).await;
     let now = utc(2026, 6, 8, 9, 0);
 
@@ -122,7 +123,7 @@ async fn api_manual_price_requires_both_provenance_fields() {
         assert!(msg.contains(expected), "names the missing field: {msg}");
     }
     assert!(
-        db_get_one(&pool, 1, ymd(2026, 6, 4))
+        db_get_one(&pool, ListingId(1), ymd(2026, 6, 4))
             .await
             .unwrap()
             .is_none(),
@@ -203,7 +204,7 @@ async fn api_manual_price_accepts_a_weekend_day_for_crypto_only() {
         "{}",
         String::from_utf8_lossy(&bytes)
     );
-    let stored = db_get_one(&pool, 1, ymd(2026, 6, 6))
+    let stored = db_get_one(&pool, ListingId(1), ymd(2026, 6, 6))
         .await
         .unwrap()
         .unwrap();
@@ -235,9 +236,9 @@ async fn api_manual_price_unknown_listing_is_404() {
 async fn api_fetch_refuses_to_replace_a_manual_price() {
     let pool = test_pool().await;
     insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
-    insert_buy(&pool, 1, 1, "100").await;
-    seed_manual_price(&pool, 1, ymd(2026, 6, 4), "62.48").await;
-    let stub = StubFetcher::default().with_close(1, ymd(2026, 6, 4), "99.99", "AUD");
+    insert_buy(&pool, 1, ListingId(1), "100").await;
+    seed_manual_price(&pool, ListingId(1), ymd(2026, 6, 4), "62.48").await;
+    let stub = StubFetcher::default().with_close(ListingId(1), ymd(2026, 6, 4), "99.99", "AUD");
     let app = full_router(pool.clone(), stub);
 
     let (status, bytes) = post_json(
@@ -254,7 +255,7 @@ async fn api_fetch_refuses_to_replace_a_manual_price() {
         "quotes why: {msg}"
     );
 
-    let row = db_get_one(&pool, 1, ymd(2026, 6, 4))
+    let row = db_get_one(&pool, ListingId(1), ymd(2026, 6, 4))
         .await
         .unwrap()
         .unwrap();
@@ -269,7 +270,7 @@ async fn api_fetch_refuses_to_replace_a_manual_price() {
 async fn api_delete_rejects_a_manual_price() {
     let pool = test_pool().await;
     insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
-    seed_manual_price(&pool, 1, ymd(2026, 6, 4), "62.48").await;
+    seed_manual_price(&pool, ListingId(1), ymd(2026, 6, 4), "62.48").await;
     let app = full_router(pool.clone(), StubFetcher::default());
 
     let (status, bytes) = delete_req(&app, "/closing_prices/1/2026-06-04").await;
@@ -277,7 +278,7 @@ async fn api_delete_rejects_a_manual_price() {
     let msg = String::from_utf8_lossy(&bytes);
     assert!(msg.contains("enter another manual price"), "{msg}");
     assert!(
-        db_get_one(&pool, 1, ymd(2026, 6, 4))
+        db_get_one(&pool, ListingId(1), ymd(2026, 6, 4))
             .await
             .unwrap()
             .is_some()
@@ -291,25 +292,25 @@ async fn api_delete_rejects_a_manual_price() {
 async fn collection_and_backfill_leave_a_manual_price_alone() {
     let pool = test_pool().await;
     insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
-    insert_buy(&pool, 1, 1, "100").await;
-    seed_manual_price(&pool, 1, ymd(2026, 6, 4), "62.48").await;
+    insert_buy(&pool, 1, ListingId(1), "100").await;
+    seed_manual_price(&pool, ListingId(1), ymd(2026, 6, 4), "62.48").await;
 
     let week = asx_lookback_window();
     let mut stub = StubFetcher::default();
     for &d in &week {
-        stub = stub.with_close(1, d, "99.99", "AUD");
+        stub = stub.with_close(ListingId(1), d, "99.99", "AUD");
     }
     run_collection(&pool, &stub, friday_evening_sydney())
         .await
         .unwrap();
-    let row = db_get_one(&pool, 1, ymd(2026, 6, 4))
+    let row = db_get_one(&pool, ListingId(1), ymd(2026, 6, 4))
         .await
         .unwrap()
         .unwrap();
     assert_eq!(row.price, Some("62.48".parse().unwrap()), "not re-fetched");
     assert_eq!(row.origin, PriceOrigin::Manual);
     // The other days of the window were collected normally.
-    let other = db_get_one(&pool, 1, ymd(2026, 6, 5))
+    let other = db_get_one(&pool, ListingId(1), ymd(2026, 6, 5))
         .await
         .unwrap()
         .unwrap();
@@ -323,7 +324,7 @@ async fn collection_and_backfill_leave_a_manual_price_alone() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{:?}", bytes);
-    let row = db_get_one(&pool, 1, ymd(2026, 6, 4))
+    let row = db_get_one(&pool, ListingId(1), ymd(2026, 6, 4))
         .await
         .unwrap()
         .unwrap();
@@ -349,7 +350,7 @@ async fn revising_a_manual_price_retains_the_superseded_provenance() {
     });
     let (status, _) = put_json(&app, "/closing_prices/1/2026-06-04", first).await;
     assert_eq!(status, StatusCode::CREATED);
-    let stored = db_get_one(&pool, 1, ymd(2026, 6, 4))
+    let stored = db_get_one(&pool, ListingId(1), ymd(2026, 6, 4))
         .await
         .unwrap()
         .unwrap();
@@ -364,7 +365,7 @@ async fn revising_a_manual_price_retains_the_superseded_provenance() {
 
     // The row keeps its identity across the correction — one audit trail,
     // not two rows.
-    let now = db_get_one(&pool, 1, ymd(2026, 6, 4))
+    let now = db_get_one(&pool, ListingId(1), ymd(2026, 6, 4))
         .await
         .unwrap()
         .unwrap();

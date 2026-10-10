@@ -21,6 +21,7 @@ use crate::entities::corporate_action::{self, SplitEvent};
 use crate::entities::trade::TradeType;
 use crate::infra::decimal::{mul_div, parse_dec};
 use crate::infra::fx::{FxOverride, FxRates};
+use crate::infra::id::ListingId;
 use chrono::{Duration, NaiveDate};
 use rust_decimal::Decimal;
 use sqlx::{Row, SqliteConnection};
@@ -76,7 +77,7 @@ struct ListingWalk {
 /// per dividend — and, because it loads on the caller's connection, reads
 /// them from the same snapshot as the rest of the report's inputs.
 pub struct HoldingWalks {
-    listings: HashMap<i64, ListingWalk>,
+    listings: HashMap<ListingId, ListingWalk>,
 }
 
 impl HoldingWalks {
@@ -98,7 +99,7 @@ impl HoldingWalks {
                     },
                 ))
             })
-            .collect::<Result<HashMap<i64, ListingWalk>, sqlx::Error>>()?;
+            .collect::<Result<HashMap<ListingId, ListingWalk>, sqlx::Error>>()?;
 
         // A demerger never disposes of the head shares — the closing Sell and
         // head replacement Buys (demerger-group trades on the action's own head
@@ -120,7 +121,7 @@ impl HoldingWalks {
         .fetch_all(&mut *conn)
         .await?;
         for row in &rows {
-            let listing_id: i64 = row.try_get("listing_id")?;
+            let listing_id: ListingId = row.try_get("listing_id")?;
             let trade_type: TradeType = row.try_get("trade_type")?;
             let event = Event {
                 sell: trade_type == TradeType::Sell,
@@ -143,7 +144,7 @@ impl HoldingWalks {
 
     /// At-risk days the listing's shares must accrue to keep the credits:
     /// 90 for preference shares, 45 otherwise.
-    pub fn required_days(&self, listing_id: i64) -> i64 {
+    pub fn required_days(&self, listing_id: ListingId) -> i64 {
         match self.listings.get(&listing_id) {
             Some(l) if l.preference => 90,
             _ => 45,
@@ -161,7 +162,7 @@ impl HoldingWalks {
     /// required at-risk days (both the acquisition and disposal day excluded) is
     /// disqualified. Anything still held at the end of the qualification period
     /// has necessarily accrued the required days, so later sales are irrelevant.
-    pub fn test(&self, listing_id: i64, ex_date: NaiveDate) -> HoldingPeriodTest {
+    pub fn test(&self, listing_id: ListingId, ex_date: NaiveDate) -> HoldingPeriodTest {
         self.test_with_sale(listing_id, ex_date, None)
     }
 
@@ -174,7 +175,7 @@ impl HoldingWalks {
     /// qualification window is ignored — it can no longer affect entitlement.
     pub fn test_with_sale(
         &self,
-        listing_id: i64,
+        listing_id: ListingId,
         ex_date: NaiveDate,
         contemplated_sale: Option<(NaiveDate, Decimal)>,
     ) -> HoldingPeriodTest {
@@ -295,7 +296,7 @@ pub struct FrankedDividend {
     /// The `income` row id.
     pub income_id: i64,
     pub tax_year: i32,
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     pub date_paid: NaiveDate,
     /// Ex-dividend date: the recorded one, else a trust row's entitlement
     /// date (the distribution period's end — when the units went ex), else
@@ -403,12 +404,12 @@ mod tests {
     async fn insert_trade(
         pool: &SqlitePool,
         id: i64,
-        listing_id: i64,
+        listing_id: ListingId,
         trade_type: trade::TradeType,
         date: NaiveDate,
         qty: i64,
     ) {
-        test_support::trade(id, listing_id, trade_type)
+        test_support::trade(id, listing_id.0, trade_type)
             .date(date)
             .qty(Decimal::from(qty))
             .price(Decimal::ONE)
@@ -492,8 +493,16 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, false).await;
         // Acquired the day before ex-date and never sold: entitled and qualified.
-        insert_trade(&pool, 1, 1, trade::TradeType::Buy, d("2025-03-13"), 100).await;
-        let t = walks(&pool).await.test(1, d("2025-03-14"));
+        insert_trade(
+            &pool,
+            1,
+            ListingId(1),
+            trade::TradeType::Buy,
+            d("2025-03-13"),
+            100,
+        )
+        .await;
+        let t = walks(&pool).await.test(ListingId(1), d("2025-03-14"));
         assert_eq!(t.entitled_units, Decimal::from(100));
         assert_eq!(t.disqualified_units, Decimal::ZERO);
     }
@@ -504,9 +513,25 @@ mod tests {
         insert_listing(&pool, 1, false).await;
         // Matthew (Example 6) shape: acquired 1 Mar, sold 10 Apr — 39 at-risk
         // days (both end days excluded), under 45.
-        insert_trade(&pool, 1, 1, trade::TradeType::Buy, d("2025-03-03"), 1000).await;
-        insert_trade(&pool, 2, 1, trade::TradeType::Sell, d("2025-04-10"), 1000).await;
-        let t = walks(&pool).await.test(1, d("2025-03-14"));
+        insert_trade(
+            &pool,
+            1,
+            ListingId(1),
+            trade::TradeType::Buy,
+            d("2025-03-03"),
+            1000,
+        )
+        .await;
+        insert_trade(
+            &pool,
+            2,
+            ListingId(1),
+            trade::TradeType::Sell,
+            d("2025-04-10"),
+            1000,
+        )
+        .await;
+        let t = walks(&pool).await.test(ListingId(1), d("2025-03-14"));
         assert_eq!(t.entitled_units, Decimal::from(1000));
         assert_eq!(t.disqualified_units, Decimal::from(1000));
         assert_eq!(t.denied(Decimal::from(5600)), Decimal::from(5600));
@@ -520,16 +545,48 @@ mod tests {
         // days → qualifies. (The buy is the Friday before the ex-date rather
         // than 1 March, which is a Saturday and so not a day the exchange
         // traded — SCENARIOS S-08.)
-        insert_trade(&pool, 1, 1, trade::TradeType::Buy, d("2025-02-28"), 100).await;
-        insert_trade(&pool, 2, 1, trade::TradeType::Sell, d("2025-04-15"), 100).await;
-        let t = walks(&pool).await.test(1, d("2025-03-02"));
+        insert_trade(
+            &pool,
+            1,
+            ListingId(1),
+            trade::TradeType::Buy,
+            d("2025-02-28"),
+            100,
+        )
+        .await;
+        insert_trade(
+            &pool,
+            2,
+            ListingId(1),
+            trade::TradeType::Sell,
+            d("2025-04-15"),
+            100,
+        )
+        .await;
+        let t = walks(&pool).await.test(ListingId(1), d("2025-03-02"));
         assert_eq!(t.disqualified_units, Decimal::ZERO);
 
         // Same shape sold one day earlier (44 at-risk days) → disqualified.
         insert_listing(&pool, 2, false).await;
-        insert_trade(&pool, 3, 2, trade::TradeType::Buy, d("2025-02-28"), 100).await;
-        insert_trade(&pool, 4, 2, trade::TradeType::Sell, d("2025-04-14"), 100).await;
-        let t = walks(&pool).await.test(2, d("2025-03-02"));
+        insert_trade(
+            &pool,
+            3,
+            ListingId(2),
+            trade::TradeType::Buy,
+            d("2025-02-28"),
+            100,
+        )
+        .await;
+        insert_trade(
+            &pool,
+            4,
+            ListingId(2),
+            trade::TradeType::Sell,
+            d("2025-04-14"),
+            100,
+        )
+        .await;
+        let t = walks(&pool).await.test(ListingId(2), d("2025-03-02"));
         assert_eq!(t.disqualified_units, Decimal::from(100));
     }
 
@@ -544,12 +601,20 @@ mod tests {
         // post-split units sold 20 days after the ex-date. The whole holding
         // is entitled (200 post-split) and fully qualified — the at-risk clock
         // runs from the 2024 acquisition, not the split.
-        insert_trade(&pool, 1, 1, trade::TradeType::Buy, d("2024-03-14"), 100).await;
+        insert_trade(
+            &pool,
+            1,
+            ListingId(1),
+            trade::TradeType::Buy,
+            d("2024-03-14"),
+            100,
+        )
+        .await;
         crate::entities::corporate_action::db_upsert(
             &pool,
             &crate::entities::corporate_action::CorporateAction {
                 id: 1,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: d("2025-01-10"),
                 kind: crate::entities::corporate_action::ActionKind::ShareSplit {
                     split_new_units: Decimal::from(2),
@@ -559,8 +624,16 @@ mod tests {
         )
         .await
         .unwrap();
-        insert_trade(&pool, 2, 1, trade::TradeType::Sell, d("2025-04-03"), 200).await;
-        let t = walks(&pool).await.test(1, d("2025-03-14"));
+        insert_trade(
+            &pool,
+            2,
+            ListingId(1),
+            trade::TradeType::Sell,
+            d("2025-04-03"),
+            200,
+        )
+        .await;
+        let t = walks(&pool).await.test(ListingId(1), d("2025-03-14"));
         assert_eq!(t.entitled_units, Decimal::from(200));
         // Held since 2024 → well over 45 at-risk days: nothing disqualified.
         assert_eq!(t.disqualified_units, Decimal::ZERO);
@@ -568,12 +641,20 @@ mod tests {
         // The same sale against a parcel bought 10 days before the ex-date
         // (post-split basis) is disqualified — proving the basis lines up.
         insert_listing(&pool, 2, false).await;
-        insert_trade(&pool, 3, 2, trade::TradeType::Buy, d("2025-03-04"), 100).await;
+        insert_trade(
+            &pool,
+            3,
+            ListingId(2),
+            trade::TradeType::Buy,
+            d("2025-03-04"),
+            100,
+        )
+        .await;
         crate::entities::corporate_action::db_upsert(
             &pool,
             &crate::entities::corporate_action::CorporateAction {
                 id: 2,
-                listing_id: 2,
+                listing_id: ListingId(2),
                 date: d("2025-03-10"),
                 kind: crate::entities::corporate_action::ActionKind::ShareSplit {
                     split_new_units: Decimal::from(2),
@@ -583,8 +664,16 @@ mod tests {
         )
         .await
         .unwrap();
-        insert_trade(&pool, 4, 2, trade::TradeType::Sell, d("2025-04-03"), 200).await;
-        let t = walks(&pool).await.test(2, d("2025-03-14"));
+        insert_trade(
+            &pool,
+            4,
+            ListingId(2),
+            trade::TradeType::Sell,
+            d("2025-04-03"),
+            200,
+        )
+        .await;
+        let t = walks(&pool).await.test(ListingId(2), d("2025-03-14"));
         assert_eq!(t.entitled_units, Decimal::from(200));
         assert_eq!(t.disqualified_units, Decimal::from(200));
     }
@@ -596,10 +685,34 @@ mod tests {
         // Jessica (Example 7) shape: 10,000 held 12 months, 4,000 bought 10
         // days before ex-date, 4,000 sold 20 days after. LIFO deems the recent
         // 4,000 sold (29 at-risk days < 45) — the long-held 10,000 qualify.
-        insert_trade(&pool, 1, 1, trade::TradeType::Buy, d("2024-03-14"), 10000).await;
-        insert_trade(&pool, 2, 1, trade::TradeType::Buy, d("2025-03-04"), 4000).await;
-        insert_trade(&pool, 3, 1, trade::TradeType::Sell, d("2025-04-03"), 4000).await;
-        let t = walks(&pool).await.test(1, d("2025-03-14"));
+        insert_trade(
+            &pool,
+            1,
+            ListingId(1),
+            trade::TradeType::Buy,
+            d("2024-03-14"),
+            10000,
+        )
+        .await;
+        insert_trade(
+            &pool,
+            2,
+            ListingId(1),
+            trade::TradeType::Buy,
+            d("2025-03-04"),
+            4000,
+        )
+        .await;
+        insert_trade(
+            &pool,
+            3,
+            ListingId(1),
+            trade::TradeType::Sell,
+            d("2025-04-03"),
+            4000,
+        )
+        .await;
+        let t = walks(&pool).await.test(ListingId(1), d("2025-03-14"));
         assert_eq!(t.entitled_units, Decimal::from(14000));
         assert_eq!(t.disqualified_units, Decimal::from(4000));
         // Denied proportionally, multiply-before-divide: 7000 × 4000 / 14000 = 2000 exact.
@@ -615,19 +728,43 @@ mod tests {
         insert_listing(&pool, 1, false).await;
         // Long-held 10,000; 4,000 bought 10 days before the March ex-date and
         // sold 20 days after it (29 at-risk days).
-        insert_trade(&pool, 1, 1, trade::TradeType::Buy, d("2024-03-14"), 10000).await;
-        insert_trade(&pool, 2, 1, trade::TradeType::Buy, d("2025-03-04"), 4000).await;
-        insert_trade(&pool, 3, 1, trade::TradeType::Sell, d("2025-04-03"), 4000).await;
+        insert_trade(
+            &pool,
+            1,
+            ListingId(1),
+            trade::TradeType::Buy,
+            d("2024-03-14"),
+            10000,
+        )
+        .await;
+        insert_trade(
+            &pool,
+            2,
+            ListingId(1),
+            trade::TradeType::Buy,
+            d("2025-03-04"),
+            4000,
+        )
+        .await;
+        insert_trade(
+            &pool,
+            3,
+            ListingId(1),
+            trade::TradeType::Sell,
+            d("2025-04-03"),
+            4000,
+        )
+        .await;
 
         let w = walks(&pool).await;
         // August 2024 ex-date: only the long-held parcel is entitled, and the
         // 2025 sale is far outside its qualification window — fully qualified.
-        let aug = w.test(1, d("2024-08-14"));
+        let aug = w.test(ListingId(1), d("2024-08-14"));
         assert_eq!(aug.entitled_units, Decimal::from(10000));
         assert_eq!(aug.disqualified_units, Decimal::ZERO);
         // March 2025 ex-date (Jessica's shape) from the same load: the recent
         // 4,000 are deemed sold under LIFO and disqualified.
-        let mar = w.test(1, d("2025-03-14"));
+        let mar = w.test(ListingId(1), d("2025-03-14"));
         assert_eq!(mar.entitled_units, Decimal::from(14000));
         assert_eq!(mar.disqualified_units, Decimal::from(4000));
     }
@@ -643,7 +780,7 @@ mod tests {
             insert_trade(
                 &pool,
                 base + 1,
-                listing_id,
+                ListingId(listing_id),
                 trade::TradeType::Buy,
                 d("2025-03-04"),
                 100,
@@ -652,16 +789,16 @@ mod tests {
             insert_trade(
                 &pool,
                 base + 2,
-                listing_id,
+                ListingId(listing_id),
                 trade::TradeType::Sell,
                 d("2025-05-13"),
                 100,
             )
             .await;
         }
-        let ordinary = walks(&pool).await.test(1, d("2025-03-14"));
+        let ordinary = walks(&pool).await.test(ListingId(1), d("2025-03-14"));
         assert_eq!(ordinary.disqualified_units, Decimal::ZERO);
-        let preference = walks(&pool).await.test(2, d("2025-03-14"));
+        let preference = walks(&pool).await.test(ListingId(2), d("2025-03-14"));
         assert_eq!(preference.disqualified_units, Decimal::from(100));
     }
 
@@ -671,10 +808,34 @@ mod tests {
         insert_listing(&pool, 1, false).await;
         // The 50 bought and re-sold before the ex-date never carry the
         // entitlement; the long-held 100 remain entitled and qualified.
-        insert_trade(&pool, 1, 1, trade::TradeType::Buy, d("2024-01-10"), 100).await;
-        insert_trade(&pool, 2, 1, trade::TradeType::Buy, d("2025-03-10"), 50).await;
-        insert_trade(&pool, 3, 1, trade::TradeType::Sell, d("2025-03-12"), 50).await;
-        let t = walks(&pool).await.test(1, d("2025-03-14"));
+        insert_trade(
+            &pool,
+            1,
+            ListingId(1),
+            trade::TradeType::Buy,
+            d("2024-01-10"),
+            100,
+        )
+        .await;
+        insert_trade(
+            &pool,
+            2,
+            ListingId(1),
+            trade::TradeType::Buy,
+            d("2025-03-10"),
+            50,
+        )
+        .await;
+        insert_trade(
+            &pool,
+            3,
+            ListingId(1),
+            trade::TradeType::Sell,
+            d("2025-03-12"),
+            50,
+        )
+        .await;
+        let t = walks(&pool).await.test(ListingId(1), d("2025-03-14"));
         assert_eq!(t.entitled_units, Decimal::from(100));
         assert_eq!(t.disqualified_units, Decimal::ZERO);
     }
@@ -685,10 +846,34 @@ mod tests {
         insert_listing(&pool, 1, false).await;
         // The sale matches the (unentitled) parcel bought after the ex-date
         // under LIFO, so the entitled long-held parcel is untouched.
-        insert_trade(&pool, 1, 1, trade::TradeType::Buy, d("2024-01-10"), 100).await;
-        insert_trade(&pool, 2, 1, trade::TradeType::Buy, d("2025-03-19"), 50).await;
-        insert_trade(&pool, 3, 1, trade::TradeType::Sell, d("2025-03-24"), 50).await;
-        let t = walks(&pool).await.test(1, d("2025-03-14"));
+        insert_trade(
+            &pool,
+            1,
+            ListingId(1),
+            trade::TradeType::Buy,
+            d("2024-01-10"),
+            100,
+        )
+        .await;
+        insert_trade(
+            &pool,
+            2,
+            ListingId(1),
+            trade::TradeType::Buy,
+            d("2025-03-19"),
+            50,
+        )
+        .await;
+        insert_trade(
+            &pool,
+            3,
+            ListingId(1),
+            trade::TradeType::Sell,
+            d("2025-03-24"),
+            50,
+        )
+        .await;
+        let t = walks(&pool).await.test(ListingId(1), d("2025-03-14"));
         assert_eq!(t.entitled_units, Decimal::from(100));
         assert_eq!(t.disqualified_units, Decimal::ZERO);
     }
@@ -699,10 +884,34 @@ mod tests {
         insert_listing(&pool, 1, false).await;
         // A DRP parcel acquired shortly before the ex-date and sold (LIFO)
         // 30 days later is disqualified like any other recent acquisition.
-        insert_trade(&pool, 1, 1, trade::TradeType::Buy, d("2024-01-10"), 100).await;
-        insert_trade(&pool, 2, 1, trade::TradeType::DRP, d("2025-03-04"), 10).await;
-        insert_trade(&pool, 3, 1, trade::TradeType::Sell, d("2025-04-03"), 10).await;
-        let t = walks(&pool).await.test(1, d("2025-03-14"));
+        insert_trade(
+            &pool,
+            1,
+            ListingId(1),
+            trade::TradeType::Buy,
+            d("2024-01-10"),
+            100,
+        )
+        .await;
+        insert_trade(
+            &pool,
+            2,
+            ListingId(1),
+            trade::TradeType::DRP,
+            d("2025-03-04"),
+            10,
+        )
+        .await;
+        insert_trade(
+            &pool,
+            3,
+            ListingId(1),
+            trade::TradeType::Sell,
+            d("2025-04-03"),
+            10,
+        )
+        .await;
+        let t = walks(&pool).await.test(ListingId(1), d("2025-03-14"));
         assert_eq!(t.entitled_units, Decimal::from(110));
         assert_eq!(t.disqualified_units, Decimal::from(10));
     }
@@ -720,15 +929,23 @@ mod tests {
         insert_listing(&pool, 2, false).await;
         // Bought 1 Mar, ex-dividend 14 Mar, demerger 1 Apr — inside the
         // qualification window with only 30 at-risk days at the demerge.
-        insert_trade(&pool, 1, 1, trade::TradeType::Buy, d("2025-03-03"), 1000).await;
+        insert_trade(
+            &pool,
+            1,
+            ListingId(1),
+            trade::TradeType::Buy,
+            d("2025-03-03"),
+            1000,
+        )
+        .await;
         crate::entities::corporate_action::db_upsert(
             &pool,
             &crate::entities::corporate_action::CorporateAction {
                 id: 10,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: d("2025-04-01"),
                 kind: crate::entities::corporate_action::ActionKind::Demerger {
-                    demerger_listing_id: 2,
+                    demerger_listing_id: ListingId(2),
                     demerger_new_units: Decimal::ONE,
                     demerger_held_units: Decimal::from(5),
                     demerger_cost_base_pct: "5.063".parse().unwrap(),
@@ -746,12 +963,12 @@ mod tests {
             .unwrap();
 
         // The head shares were never disposed of: nothing is disqualified.
-        let t = walks(&pool).await.test(1, d("2025-03-14"));
+        let t = walks(&pool).await.test(ListingId(1), d("2025-03-14"));
         assert_eq!(t.entitled_units, Decimal::from(1000));
         assert_eq!(t.disqualified_units, Decimal::ZERO);
 
         // The demerged listing's walk sees the demerged-entity parcel.
-        let t = walks(&pool).await.test(2, d("2025-05-10"));
+        let t = walks(&pool).await.test(ListingId(2), d("2025-05-10"));
         assert_eq!(t.entitled_units, Decimal::from(200));
         assert_eq!(t.disqualified_units, Decimal::ZERO);
     }
@@ -768,16 +985,48 @@ mod tests {
         insert_listing(&pool, 1, false).await;
         // Bought 1 Jan, ex-dividend 10 Feb (40 days later), sold 20 Feb (10
         // days after the ex-date) — inside the window, 49 at-risk days.
-        insert_trade(&pool, 1, 1, trade::TradeType::Buy, d("2025-01-02"), 1000).await;
-        insert_trade(&pool, 2, 1, trade::TradeType::Sell, d("2025-02-20"), 1000).await;
-        let t = walks(&pool).await.test(1, d("2025-02-10"));
+        insert_trade(
+            &pool,
+            1,
+            ListingId(1),
+            trade::TradeType::Buy,
+            d("2025-01-02"),
+            1000,
+        )
+        .await;
+        insert_trade(
+            &pool,
+            2,
+            ListingId(1),
+            trade::TradeType::Sell,
+            d("2025-02-20"),
+            1000,
+        )
+        .await;
+        let t = walks(&pool).await.test(ListingId(1), d("2025-02-10"));
         assert_eq!(t.entitled_units, Decimal::from(1000));
         assert_eq!(t.disqualified_units, Decimal::ZERO);
         // One day less at risk (44) and the same shape is disqualified.
         insert_listing(&pool, 2, false).await;
-        insert_trade(&pool, 3, 2, trade::TradeType::Buy, d("2025-01-06"), 1000).await;
-        insert_trade(&pool, 4, 2, trade::TradeType::Sell, d("2025-02-20"), 1000).await;
-        let t = walks(&pool).await.test(2, d("2025-02-10"));
+        insert_trade(
+            &pool,
+            3,
+            ListingId(2),
+            trade::TradeType::Buy,
+            d("2025-01-06"),
+            1000,
+        )
+        .await;
+        insert_trade(
+            &pool,
+            4,
+            ListingId(2),
+            trade::TradeType::Sell,
+            d("2025-02-20"),
+            1000,
+        )
+        .await;
+        let t = walks(&pool).await.test(ListingId(2), d("2025-02-10"));
         assert_eq!(t.disqualified_units, Decimal::from(1000));
     }
 
@@ -790,7 +1039,15 @@ mod tests {
     async fn db_holding_account_transfer_inside_the_window_keeps_the_clock_running() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, false).await;
-        insert_trade(&pool, 1, 1, trade::TradeType::Buy, d("2025-03-03"), 1000).await;
+        insert_trade(
+            &pool,
+            1,
+            ListingId(1),
+            trade::TradeType::Buy,
+            d("2025-03-03"),
+            1000,
+        )
+        .await;
         crate::entities::holding_account::db_upsert(
             &pool,
             &crate::entities::holding_account::HoldingAccount {
@@ -806,7 +1063,7 @@ mod tests {
             &pool,
             1,
             &crate::entities::transfer::TransferBody {
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: d("2025-04-01"),
                 from_account_id: 1,
                 to_account_id: 2,
@@ -822,7 +1079,7 @@ mod tests {
         .await
         .unwrap();
 
-        let t = walks(&pool).await.test(1, d("2025-03-14"));
+        let t = walks(&pool).await.test(ListingId(1), d("2025-03-14"));
         assert_eq!(t.entitled_units, Decimal::from(1000));
         assert_eq!(t.disqualified_units, Decimal::ZERO);
     }

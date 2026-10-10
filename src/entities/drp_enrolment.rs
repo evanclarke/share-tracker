@@ -38,6 +38,7 @@ use crate::infra::db::write_tx;
 use crate::infra::decimal::{Money, parse_dec};
 use crate::infra::extract::Json;
 use crate::infra::http::{self, ApiError, CrudEntity, Upsert, UpsertResponse};
+use crate::infra::id::ListingId;
 use axum::{
     Router,
     extract::{Path, State},
@@ -65,7 +66,7 @@ pub enum ResidualHandling {
 pub struct DrpEnrolment {
     pub id: i64,
     /// Listing this enrolment period applies to.
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     /// The holding account the enrolment applies to: enrolment is per
     /// (listing, holding account), so the same listing may be enrolled in one
     /// account and unenrolled in another (e.g. an employer share-plan account
@@ -85,7 +86,7 @@ pub struct DrpEnrolment {
 #[serde(deny_unknown_fields)]
 pub struct DrpEnrolmentBody {
     /// The listing enrolled in its dividend reinvestment plan.
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     /// Defaults to the seeded default holding account when omitted.
     #[serde(default = "crate::entities::holding_account::default_holding_account_id")]
     pub holding_account_id: i64,
@@ -159,7 +160,7 @@ pub(crate) static PERIOD_TRADES_FROM_WHERE: LazyLock<String> = LazyLock::new(|| 
 #[derive(Debug, Default, serde::Deserialize, utoipa::IntoParams)]
 #[serde(deny_unknown_fields)]
 pub struct DrpEnrolmentListQuery {
-    pub listing_id: Option<i64>,
+    pub listing_id: Option<ListingId>,
     pub holding_account_id: Option<i64>,
 }
 
@@ -605,7 +606,7 @@ mod tests {
 
     fn period(
         id: i64,
-        listing_id: i64,
+        listing_id: ListingId,
         from: &str,
         to: Option<&str>,
         handling: ResidualHandling,
@@ -626,7 +627,13 @@ mod tests {
         insert_listing(&pool, 1).await;
         db_upsert(
             &pool,
-            &period(1, 1, "2024-01-01", None, ResidualHandling::PayOut),
+            &period(
+                1,
+                ListingId(1),
+                "2024-01-01",
+                None,
+                ResidualHandling::PayOut,
+            ),
         )
         .await
         .unwrap();
@@ -650,7 +657,7 @@ mod tests {
             &pool,
             &period(
                 1,
-                1,
+                ListingId(1),
                 "2023-01-01",
                 Some("2024-01-01"),
                 ResidualHandling::CarryForward,
@@ -660,7 +667,13 @@ mod tests {
         .unwrap();
         db_upsert(
             &pool,
-            &period(2, 1, "2025-01-01", None, ResidualHandling::PayOut),
+            &period(
+                2,
+                ListingId(1),
+                "2025-01-01",
+                None,
+                ResidualHandling::PayOut,
+            ),
         )
         .await
         .unwrap();
@@ -679,7 +692,7 @@ mod tests {
             &pool,
             &period(
                 1,
-                1,
+                ListingId(1),
                 "2024-01-01",
                 Some("2024-06-01"),
                 ResidualHandling::CarryForward,
@@ -693,7 +706,7 @@ mod tests {
             &pool,
             &period(
                 2,
-                1,
+                ListingId(1),
                 "2024-03-01",
                 Some("2024-09-01"),
                 ResidualHandling::CarryForward,
@@ -706,7 +719,13 @@ mod tests {
         // Open period starting before the existing one ends.
         let err = db_upsert(
             &pool,
-            &period(2, 1, "2024-05-31", None, ResidualHandling::CarryForward),
+            &period(
+                2,
+                ListingId(1),
+                "2024-05-31",
+                None,
+                ResidualHandling::CarryForward,
+            ),
         )
         .await
         .unwrap_err();
@@ -716,7 +735,13 @@ mod tests {
         // previous one's unenrolment takes effect.
         db_upsert(
             &pool,
-            &period(2, 1, "2024-06-01", None, ResidualHandling::CarryForward),
+            &period(
+                2,
+                ListingId(1),
+                "2024-06-01",
+                None,
+                ResidualHandling::CarryForward,
+            ),
         )
         .await
         .unwrap();
@@ -725,7 +750,13 @@ mod tests {
         insert_listing(&pool, 2).await;
         db_upsert(
             &pool,
-            &period(3, 2, "2024-03-01", None, ResidualHandling::CarryForward),
+            &period(
+                3,
+                ListingId(2),
+                "2024-03-01",
+                None,
+                ResidualHandling::CarryForward,
+            ),
         )
         .await
         .unwrap();
@@ -737,14 +768,26 @@ mod tests {
         insert_listing(&pool, 1).await;
         db_upsert(
             &pool,
-            &period(1, 1, "2023-01-01", None, ResidualHandling::CarryForward),
+            &period(
+                1,
+                ListingId(1),
+                "2023-01-01",
+                None,
+                ResidualHandling::CarryForward,
+            ),
         )
         .await
         .unwrap();
         // A second open period — even starting later — always overlaps an open one.
         let err = db_upsert(
             &pool,
-            &period(2, 1, "2025-01-01", None, ResidualHandling::CarryForward),
+            &period(
+                2,
+                ListingId(1),
+                "2025-01-01",
+                None,
+                ResidualHandling::CarryForward,
+            ),
         )
         .await
         .unwrap_err();
@@ -754,7 +797,7 @@ mod tests {
             &pool,
             &period(
                 2,
-                1,
+                ListingId(1),
                 "2025-01-01",
                 Some("2026-01-01"),
                 ResidualHandling::CarryForward,
@@ -778,7 +821,7 @@ mod tests {
             &pool,
             &period(
                 1,
-                1,
+                ListingId(1),
                 "2023-01-01",
                 Some("2024-01-01"),
                 ResidualHandling::CarryForward,
@@ -788,7 +831,13 @@ mod tests {
         .unwrap();
         db_upsert(
             &pool,
-            &period(2, 1, "2024-01-01", None, ResidualHandling::PayOut),
+            &period(
+                2,
+                ListingId(1),
+                "2024-01-01",
+                None,
+                ResidualHandling::PayOut,
+            ),
         )
         .await
         .unwrap();
@@ -807,7 +856,7 @@ mod tests {
                 &pool,
                 &period(
                     1,
-                    1,
+                    ListingId(1),
                     "2024-01-01",
                     Some(end),
                     ResidualHandling::CarryForward,
@@ -828,7 +877,13 @@ mod tests {
         // No listing 99 exists → FK violation.
         let err = db_upsert(
             &pool,
-            &period(1, 99, "2024-01-01", None, ResidualHandling::CarryForward),
+            &period(
+                1,
+                ListingId(99),
+                "2024-01-01",
+                None,
+                ResidualHandling::CarryForward,
+            ),
         )
         .await
         .unwrap_err();
@@ -860,7 +915,7 @@ mod tests {
     async fn insert_drp_trade(
         pool: &SqlitePool,
         id: i64,
-        listing_id: i64,
+        listing_id: ListingId,
         date: &str,
         carried: &str,
         paid: &str,
@@ -896,7 +951,7 @@ mod tests {
     async fn link_funding_distribution(
         pool: &SqlitePool,
         trade_id: i64,
-        listing_id: i64,
+        listing_id: ListingId,
         ex_date: &str,
         date_paid: &str,
     ) {
@@ -905,7 +960,7 @@ mod tests {
             .fetch_one(pool)
             .await
             .unwrap();
-        test_support::income(1000 + trade_id, listing_id, date_paid.parse().unwrap())
+        test_support::income(1000 + trade_id, listing_id.0, date_paid.parse().unwrap())
             .with(|i| {
                 i.ex_date = Some(ex_date.parse().unwrap());
                 i.unfranked_amount = Decimal::from(100);
@@ -937,20 +992,26 @@ mod tests {
         insert_listing(&pool, 1).await;
         db_upsert(
             &pool,
-            &period(1, 1, "2024-01-01", None, ResidualHandling::CarryForward),
+            &period(
+                1,
+                ListingId(1),
+                "2024-01-01",
+                None,
+                ResidualHandling::CarryForward,
+            ),
         )
         .await
         .unwrap();
         // Two reinvestments in the period; only the latest carries the trailing residual.
-        insert_drp_trade(&pool, 10, 1, "2024-03-31", "1", "0").await;
-        insert_drp_trade(&pool, 11, 1, "2024-09-30", "2.50", "0").await;
+        insert_drp_trade(&pool, 10, ListingId(1), "2024-03-31", "1", "0").await;
+        insert_drp_trade(&pool, 11, ListingId(1), "2024-09-30", "2.50", "0").await;
 
         // Unenrol: the open period is closed and the trailing residual paid out.
         db_upsert(
             &pool,
             &period(
                 1,
-                1,
+                ListingId(1),
                 "2024-01-01",
                 Some("2025-01-01"),
                 ResidualHandling::CarryForward,
@@ -976,7 +1037,7 @@ mod tests {
             &pool,
             &period(
                 1,
-                1,
+                ListingId(1),
                 "2024-01-01",
                 Some("2025-01-01"),
                 ResidualHandling::CarryForward,
@@ -995,12 +1056,12 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
         // A DRP trade from before the period must not be touched by its closure.
-        insert_drp_trade(&pool, 10, 1, "2023-06-30", "5", "0").await;
+        insert_drp_trade(&pool, 10, ListingId(1), "2023-06-30", "5", "0").await;
         db_upsert(
             &pool,
             &period(
                 1,
-                1,
+                ListingId(1),
                 "2024-01-01",
                 Some("2025-01-01"),
                 ResidualHandling::CarryForward,
@@ -1033,18 +1094,36 @@ mod tests {
 
         db_upsert(
             &pool,
-            &period(1, 1, "2024-01-01", None, ResidualHandling::CarryForward),
+            &period(
+                1,
+                ListingId(1),
+                "2024-01-01",
+                None,
+                ResidualHandling::CarryForward,
+            ),
         )
         .await
         .unwrap();
 
         // Same listing, other account: a coexisting open period is fine.
-        let mut other_account = period(2, 1, "2024-01-01", None, ResidualHandling::PayOut);
+        let mut other_account = period(
+            2,
+            ListingId(1),
+            "2024-01-01",
+            None,
+            ResidualHandling::PayOut,
+        );
         other_account.holding_account_id = 2;
         db_upsert(&pool, &other_account).await.unwrap();
 
         // A second open period within account 2 still overlaps.
-        let mut doubly_open = period(3, 1, "2025-01-01", None, ResidualHandling::PayOut);
+        let mut doubly_open = period(
+            3,
+            ListingId(1),
+            "2025-01-01",
+            None,
+            ResidualHandling::PayOut,
+        );
         doubly_open.holding_account_id = 2;
         assert!(matches!(
             db_upsert(&pool, &doubly_open).await,
@@ -1070,7 +1149,7 @@ mod tests {
         .unwrap();
         // An in-period DRP trade, but in account 2 — as is the distribution
         // that funded it (a reinvestment lands in its distribution's account).
-        insert_drp_trade(&pool, 10, 1, "2024-06-30", "5", "0").await;
+        insert_drp_trade(&pool, 10, ListingId(1), "2024-06-30", "5", "0").await;
         sqlx::query("UPDATE trades SET holding_account_id = 2 WHERE id = 10")
             .execute(&pool)
             .await
@@ -1085,7 +1164,7 @@ mod tests {
             &pool,
             &period(
                 1,
-                1,
+                ListingId(1),
                 "2024-01-01",
                 Some("2025-01-01"),
                 ResidualHandling::CarryForward,
@@ -1109,15 +1188,21 @@ mod tests {
     async fn re_opening_or_moving_an_unenrolment_re_derives_the_settlement() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        let open = period(1, 1, "2024-01-01", None, ResidualHandling::CarryForward);
+        let open = period(
+            1,
+            ListingId(1),
+            "2024-01-01",
+            None,
+            ResidualHandling::CarryForward,
+        );
         db_upsert(&pool, &open).await.unwrap();
-        insert_drp_trade(&pool, 10, 1, "2024-03-31", "1", "0").await;
-        insert_drp_trade(&pool, 11, 1, "2024-09-30", "2.50", "0").await;
+        insert_drp_trade(&pool, 10, ListingId(1), "2024-03-31", "1", "0").await;
+        insert_drp_trade(&pool, 11, ListingId(1), "2024-09-30", "2.50", "0").await;
 
         // Unenrol by mistake …
         let closed = period(
             1,
-            1,
+            ListingId(1),
             "2024-01-01",
             Some("2024-10-01"),
             ResidualHandling::CarryForward,
@@ -1143,7 +1228,7 @@ mod tests {
             &pool,
             &period(
                 1,
-                1,
+                ListingId(1),
                 "2024-01-01",
                 Some("2024-06-30"),
                 ResidualHandling::CarryForward,
@@ -1176,7 +1261,7 @@ mod tests {
             &pool,
             &period(
                 1,
-                1,
+                ListingId(1),
                 "2024-01-01",
                 Some("2024-07-01"),
                 ResidualHandling::CarryForward,
@@ -1186,7 +1271,7 @@ mod tests {
         .unwrap();
         // Went ex 20 June (inside the period), paid — and so allotted — on
         // 15 July, after the unenrolment took effect.
-        insert_drp_trade(&pool, 10, 1, "2024-07-15", "2", "0").await;
+        insert_drp_trade(&pool, 10, ListingId(1), "2024-07-15", "2", "0").await;
         sqlx::query("UPDATE income SET ex_date = '2024-06-20' WHERE reinvestment_trade_id = 10")
             .execute(&pool)
             .await
@@ -1198,7 +1283,7 @@ mod tests {
             &pool,
             &period(
                 1,
-                1,
+                ListingId(1),
                 "2024-01-01",
                 Some("2024-07-01"),
                 ResidualHandling::CarryForward,
@@ -1222,7 +1307,13 @@ mod tests {
         // own settlement leaves the earlier period's reinvestment alone.
         db_upsert(
             &pool,
-            &period(2, 1, "2024-07-01", None, ResidualHandling::PayOut),
+            &period(
+                2,
+                ListingId(1),
+                "2024-07-01",
+                None,
+                ResidualHandling::PayOut,
+            ),
         )
         .await
         .unwrap();
@@ -1243,11 +1334,17 @@ mod tests {
         insert_listing(&pool, 1).await;
         db_upsert(
             &pool,
-            &period(1, 1, "2024-01-01", None, ResidualHandling::CarryForward),
+            &period(
+                1,
+                ListingId(1),
+                "2024-01-01",
+                None,
+                ResidualHandling::CarryForward,
+            ),
         )
         .await
         .unwrap();
-        insert_drp_trade(&pool, 10, 1, "2024-09-30", "5.50", "0").await;
+        insert_drp_trade(&pool, 10, ListingId(1), "2024-09-30", "5.50", "0").await;
 
         assert!(matches!(
             db_delete(&pool, 1).await,
@@ -1268,7 +1365,7 @@ mod tests {
             &pool,
             &period(
                 1,
-                1,
+                ListingId(1),
                 "2024-01-01",
                 Some("2025-01-01"),
                 ResidualHandling::CarryForward,
@@ -1306,7 +1403,7 @@ mod tests {
             &pool,
             &period(
                 1,
-                1,
+                ListingId(1),
                 "2024-01-01",
                 Some("2025-01-01"),
                 ResidualHandling::CarryForward,
@@ -1315,9 +1412,9 @@ mod tests {
         .await
         .unwrap();
         // Before the period, after it, and inside it but in another account.
-        insert_drp_trade(&pool, 10, 1, "2023-06-30", "1", "0").await;
-        insert_drp_trade(&pool, 11, 1, "2025-06-30", "1", "0").await;
-        insert_drp_trade(&pool, 12, 1, "2024-06-30", "1", "0").await;
+        insert_drp_trade(&pool, 10, ListingId(1), "2023-06-30", "1", "0").await;
+        insert_drp_trade(&pool, 11, ListingId(1), "2025-06-30", "1", "0").await;
+        insert_drp_trade(&pool, 12, ListingId(1), "2024-06-30", "1", "0").await;
         sqlx::query("UPDATE trades SET holding_account_id = 2 WHERE id = 12")
             .execute(&pool)
             .await
@@ -1493,11 +1590,17 @@ mod tests {
         insert_listing(&pool, 1).await;
         db_upsert(
             &pool,
-            &period(1, 1, "2024-01-01", None, ResidualHandling::CarryForward),
+            &period(
+                1,
+                ListingId(1),
+                "2024-01-01",
+                None,
+                ResidualHandling::CarryForward,
+            ),
         )
         .await
         .unwrap();
-        insert_drp_trade(&pool, 10, 1, "2024-09-30", "5.50", "0").await;
+        insert_drp_trade(&pool, 10, ListingId(1), "2024-09-30", "5.50", "0").await;
 
         let resp = client(&pool).delete("/drp_enrolments/1").await;
         let (status, body) = resp.status_and_body();
@@ -1536,7 +1639,13 @@ mod tests {
         insert_listing(&pool, 1).await;
         db_upsert(
             &pool,
-            &period(1, 1, "2024-01-01", None, ResidualHandling::CarryForward),
+            &period(
+                1,
+                ListingId(1),
+                "2024-01-01",
+                None,
+                ResidualHandling::CarryForward,
+            ),
         )
         .await
         .unwrap();
@@ -1603,7 +1712,7 @@ mod tests {
                 &pool,
                 &DrpEnrolment {
                     id,
-                    listing_id,
+                    listing_id: ListingId(listing_id),
                     holding_account_id: account,
                     enrolment_date: start,
                     unenrolment_date: None,

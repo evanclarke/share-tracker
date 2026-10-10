@@ -1,6 +1,7 @@
 //! On-demand live valuation: latest quote per listing, converted to AUD.
 
 use super::*;
+use crate::infra::id::ListingId;
 
 #[tokio::test]
 async fn live_aud_prices_converts_quote_currency_and_carries_as_of() {
@@ -14,16 +15,16 @@ async fn live_aud_prices_converts_quote_currency_and_carries_as_of() {
         .unwrap();
     let as_of = utc(2026, 6, 5, 6, 30);
     let fetcher = StubFetcher::default()
-        .with_quote(1, "62.48", "AUD", as_of)
-        .with_quote(2, "141.50", "USD", as_of);
+        .with_quote(ListingId(1), "62.48", "AUD", as_of)
+        .with_quote(ListingId(2), "141.50", "USD", as_of);
 
-    let prices = fetch_live_aud_prices(&pool, &fetcher, &[1, 2])
+    let prices = fetch_live_aud_prices(&pool, &fetcher, &[ListingId(1), ListingId(2)])
         .await
         .unwrap();
-    let bhp = prices[&1].as_ref().unwrap();
+    let bhp = prices[&ListingId(1)].as_ref().unwrap();
     assert_eq!(bhp.aud_price, "62.48".parse::<Decimal>().unwrap());
     assert_eq!(bhp.as_of, as_of.to_rfc3339());
-    let ice = prices[&2].as_ref().unwrap();
+    let ice = prices[&ListingId(2)].as_ref().unwrap();
     assert_eq!(ice.aud_price, "70.75".parse::<Decimal>().unwrap());
 }
 
@@ -35,23 +36,44 @@ async fn live_aud_prices_surface_failures_instead_of_zeroing() {
     insert_listing(&pool, 3, "VAS", "XASX", "USD").await; // no ATO rate for the quote month
 
     // Listing 1: blanket failure.
-    let down = fetch_live_aud_prices(&pool, &StubFetcher::failing("provider down"), &[1])
-        .await
-        .unwrap();
-    assert!(down[&1].as_ref().unwrap_err().contains("provider down"));
+    let down = fetch_live_aud_prices(
+        &pool,
+        &StubFetcher::failing("provider down"),
+        &[ListingId(1)],
+    )
+    .await
+    .unwrap();
+    assert!(
+        down[&ListingId(1)]
+            .as_ref()
+            .unwrap_err()
+            .contains("provider down")
+    );
 
     let as_of = utc(2026, 6, 5, 6, 30);
     // Listing 2: provider quotes AUD for a USD listing.
-    let mismatch = StubFetcher::default().with_quote(2, "141.50", "AUD", as_of);
-    let m = fetch_live_aud_prices(&pool, &mismatch, &[2]).await.unwrap();
-    assert!(m[&2].as_ref().unwrap_err().contains("currency mismatch"));
-
-    // Listing 3: USD quote but no ATO rate imported for the quote month.
-    let unconvertible = StubFetcher::default().with_quote(3, "10.00", "USD", as_of);
-    let u = fetch_live_aud_prices(&pool, &unconvertible, &[3])
+    let mismatch = StubFetcher::default().with_quote(ListingId(2), "141.50", "AUD", as_of);
+    let m = fetch_live_aud_prices(&pool, &mismatch, &[ListingId(2)])
         .await
         .unwrap();
-    assert!(u[&3].as_ref().unwrap_err().contains("no ATO FX rate"));
+    assert!(
+        m[&ListingId(2)]
+            .as_ref()
+            .unwrap_err()
+            .contains("currency mismatch")
+    );
+
+    // Listing 3: USD quote but no ATO rate imported for the quote month.
+    let unconvertible = StubFetcher::default().with_quote(ListingId(3), "10.00", "USD", as_of);
+    let u = fetch_live_aud_prices(&pool, &unconvertible, &[ListingId(3)])
+        .await
+        .unwrap();
+    assert!(
+        u[&ListingId(3)]
+            .as_ref()
+            .unwrap_err()
+            .contains("no ATO FX rate")
+    );
 }
 
 /// Live valuation is a whole-portfolio question, so the provider is asked
@@ -66,12 +88,16 @@ async fn live_valuation_asks_the_price_source_once_for_the_whole_portfolio() {
     let mut fetcher = StubFetcher::default();
     for id in 1..=4 {
         insert_listing(&pool, id, &format!("T{id}"), "XASX", "AUD").await;
-        fetcher = fetcher.with_quote(id, "10", "AUD", as_of);
+        fetcher = fetcher.with_quote(ListingId(id), "10", "AUD", as_of);
     }
 
-    let prices = fetch_live_aud_prices(&pool, &fetcher, &[1, 2, 3, 4])
-        .await
-        .unwrap();
+    let prices = fetch_live_aud_prices(
+        &pool,
+        &fetcher,
+        &[ListingId(1), ListingId(2), ListingId(3), ListingId(4)],
+    )
+    .await
+    .unwrap();
 
     assert_eq!(prices.len(), 4, "every listing is valued");
     assert_eq!(
@@ -95,25 +121,34 @@ async fn a_batched_answer_is_paired_back_to_each_listing() {
     let as_of = utc(2026, 6, 5, 6, 30);
     // Listing 2 is deliberately unquoted: its failure must stay its own.
     let fetcher = StubFetcher::default()
-        .with_quote(1, "62.48", "AUD", as_of)
-        .with_quote(3, "180.10", "AUD", as_of);
+        .with_quote(ListingId(1), "62.48", "AUD", as_of)
+        .with_quote(ListingId(3), "180.10", "AUD", as_of);
 
     // Listing 99 does not exist at all.
-    let prices = fetch_live_aud_prices(&pool, &fetcher, &[1, 2, 3, 99])
-        .await
-        .unwrap();
+    let prices = fetch_live_aud_prices(
+        &pool,
+        &fetcher,
+        &[ListingId(1), ListingId(2), ListingId(3), ListingId(99)],
+    )
+    .await
+    .unwrap();
 
     assert_eq!(
-        prices[&1].as_ref().unwrap().aud_price,
+        prices[&ListingId(1)].as_ref().unwrap().aud_price,
         "62.48".parse::<Decimal>().unwrap()
     );
-    assert!(prices[&2].as_ref().unwrap_err().contains("listing 2"));
+    assert!(
+        prices[&ListingId(2)]
+            .as_ref()
+            .unwrap_err()
+            .contains("listing 2")
+    );
     assert_eq!(
-        prices[&3].as_ref().unwrap().aud_price,
+        prices[&ListingId(3)].as_ref().unwrap().aud_price,
         "180.10".parse::<Decimal>().unwrap()
     );
     assert!(
-        prices[&99]
+        prices[&ListingId(99)]
             .as_ref()
             .unwrap_err()
             .contains("no longer exists")
@@ -138,8 +173,8 @@ async fn the_default_batch_is_the_per_market_loop_answered_positionally() {
     let as_of = utc(2026, 6, 5, 6, 30);
     let fetcher = test_support::QuoteStub::default().with_quote(2, "30", "AUD", as_of);
     let markets = [
-        load_market(&pool, 1).await.unwrap().unwrap(),
-        load_market(&pool, 2).await.unwrap().unwrap(),
+        load_market(&pool, ListingId(1)).await.unwrap().unwrap(),
+        load_market(&pool, ListingId(2)).await.unwrap().unwrap(),
     ];
     let borrowed: Vec<&Market> = markets.iter().collect();
 
@@ -194,26 +229,49 @@ async fn resolve_live_prices_skips_overridden_and_respects_the_flag() {
     insert_listing(&pool, 2, "WBC", "XASX", "AUD").await;
     let as_of = utc(2026, 6, 5, 6, 30);
     let fetcher = StubFetcher::default()
-        .with_quote(1, "62.48", "AUD", as_of)
-        .with_quote(2, "30", "AUD", as_of);
+        .with_quote(ListingId(1), "62.48", "AUD", as_of)
+        .with_quote(ListingId(2), "30", "AUD", as_of);
 
     // live = false → nothing fetched.
-    let off = resolve_live_prices(&pool, Some(&fetcher), false, &HashMap::new(), [1, 2])
-        .await
-        .unwrap();
+    let off = resolve_live_prices(
+        &pool,
+        Some(&fetcher),
+        false,
+        &HashMap::new(),
+        [ListingId(1), ListingId(2)],
+    )
+    .await
+    .unwrap();
     assert!(off.is_empty());
 
     // live = true, listing 1 overridden → only listing 2 is fetched.
-    let overrides = HashMap::from([(1i64, "99".parse::<Decimal>().unwrap())]);
-    let on = resolve_live_prices(&pool, Some(&fetcher), true, &overrides, [1, 2])
-        .await
-        .unwrap();
-    assert!(!on.contains_key(&1), "overridden listing is never fetched");
-    assert_eq!(on[&2].as_ref().unwrap().aud_price, Decimal::from(30));
+    let overrides = HashMap::from([(ListingId(1), "99".parse::<Decimal>().unwrap())]);
+    let on = resolve_live_prices(
+        &pool,
+        Some(&fetcher),
+        true,
+        &overrides,
+        [ListingId(1), ListingId(2)],
+    )
+    .await
+    .unwrap();
+    assert!(
+        !on.contains_key(&ListingId(1)),
+        "overridden listing is never fetched"
+    );
+    assert_eq!(
+        on[&ListingId(2)].as_ref().unwrap().aud_price,
+        Decimal::from(30)
+    );
 
     // live = true with no fetcher → each listing marked unavailable.
-    let none = resolve_live_prices(&pool, None, true, &HashMap::new(), [1])
+    let none = resolve_live_prices(&pool, None, true, &HashMap::new(), [ListingId(1)])
         .await
         .unwrap();
-    assert!(none[&1].as_ref().unwrap_err().contains("unavailable"));
+    assert!(
+        none[&ListingId(1)]
+            .as_ref()
+            .unwrap_err()
+            .contains("unavailable")
+    );
 }

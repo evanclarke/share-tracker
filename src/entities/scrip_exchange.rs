@@ -60,6 +60,7 @@ use crate::infra::db::{WriteMode, write_tx};
 use crate::infra::decimal::mul_div;
 use crate::infra::extract::{Json, Query};
 use crate::infra::http::{ApiError, DryRunQuery};
+use crate::infra::id::ListingId;
 use axum::{
     Router,
     extract::{Path, State},
@@ -343,7 +344,7 @@ async fn execute(
 /// The exchange's terms, read off the action: the replacement listing, the
 /// ratio, and the cash component of a partial rollover.
 struct Terms {
-    scrip_listing_id: i64,
+    scrip_listing_id: ListingId,
     new_units: Decimal,
     old_units: Decimal,
     /// `(cash per old unit, replacement market value, cash currency)` — all
@@ -458,7 +459,7 @@ struct Replacement {
 async fn check_exchangeable(
     conn: &mut sqlx::SqliteConnection,
     action_id: i64,
-    listing_id: i64,
+    listing_id: ListingId,
     date: NaiveDate,
 ) -> Result<(), ExchangeError> {
     let already: bool =
@@ -606,12 +607,12 @@ mod tests {
     async fn insert_buy(
         pool: &SqlitePool,
         id: i64,
-        listing_id: i64,
+        listing_id: ListingId,
         date: NaiveDate,
         qty: &str,
         price: &str,
     ) {
-        test_support::buy(id, listing_id)
+        test_support::buy(id, listing_id.0)
             .date(date)
             .settlement(date)
             .qty(qty.parse().unwrap())
@@ -623,14 +624,14 @@ mod tests {
     /// A 2-for-1 takeover of listing 1 by listing 2 on the given date: every
     /// 1 unit of listing 1 becomes 2 units of listing 2.
     async fn insert_scrip(pool: &SqlitePool, id: i64, date: NaiveDate) {
-        insert_scrip_terms(pool, id, 1, 2, date, "2", "1").await;
+        insert_scrip_terms(pool, id, ListingId(1), ListingId(2), date, "2", "1").await;
     }
 
     async fn insert_scrip_terms(
         pool: &SqlitePool,
         id: i64,
-        listing_id: i64,
-        scrip_listing_id: i64,
+        listing_id: ListingId,
+        scrip_listing_id: ListingId,
         date: NaiveDate,
         new: &str,
         old: &str,
@@ -644,8 +645,8 @@ mod tests {
     async fn insert_scrip_cash_terms(
         pool: &SqlitePool,
         id: i64,
-        listing_id: i64,
-        scrip_listing_id: i64,
+        listing_id: ListingId,
+        scrip_listing_id: ListingId,
         date: NaiveDate,
         new: &str,
         old: &str,
@@ -687,7 +688,7 @@ mod tests {
                 holding_account_id: 1,
                 date,
                 settlement_date: Some(date),
-                listing_id: 1,
+                listing_id: ListingId(1),
                 average_price: dec("10"),
                 quantity: dec(qty),
                 currency: "AUD".into(),
@@ -718,8 +719,8 @@ mod tests {
         insert_listing(&pool, 1, "OLD").await;
         insert_listing(&pool, 2, "NEW").await;
         // Two parcels: 1,000 @ $1.50 (2020) and 500 @ $2.00 (2023).
-        insert_buy(&pool, 1, 1, d(2020, 10, 1), "1000", "1.50").await;
-        insert_buy(&pool, 2, 1, d(2023, 3, 1), "500", "2.00").await;
+        insert_buy(&pool, 1, ListingId(1), d(2020, 10, 1), "1000", "1.50").await;
+        insert_buy(&pool, 2, ListingId(1), d(2023, 3, 1), "500", "2.00").await;
         insert_scrip(&pool, 10, d(2024, 7, 1)).await;
 
         let ex = db_exchange(&pool, 10).await.unwrap();
@@ -773,7 +774,7 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "OLD").await;
         insert_listing(&pool, 2, "NEW").await;
-        insert_buy(&pool, 1, 1, d(2020, 10, 1), "1000", "1.50").await;
+        insert_buy(&pool, 1, ListingId(1), d(2020, 10, 1), "1000", "1.50").await;
 
         // Record date 25 Jun, payment 1 Aug, exchange 1 Jul — inside the
         // window, and on the listing the units are exchanged *into*.
@@ -781,7 +782,7 @@ mod tests {
             &pool,
             &CorporateAction {
                 id: 5,
-                listing_id: 2,
+                listing_id: ListingId(2),
                 date: d(2024, 8, 1),
                 kind: ActionKind::ReturnOfCapital {
                     amount_per_unit: dec("0.05"),
@@ -840,7 +841,7 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "OLD").await;
         insert_listing(&pool, 2, "NEW").await;
-        insert_buy(&pool, 1, 1, d(2020, 10, 1), "1000", "1.50").await;
+        insert_buy(&pool, 1, ListingId(1), d(2020, 10, 1), "1000", "1.50").await;
 
         // An AMMA statement with a 10c/unit cost-base decrease over the
         // parcel's 1,000 units → −$100.
@@ -860,7 +861,7 @@ mod tests {
             &pool,
             &CorporateAction {
                 id: 5,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: d(2022, 3, 1),
                 kind: ActionKind::ReturnOfCapital {
                     amount_per_unit: dec("0.05"),
@@ -891,9 +892,19 @@ mod tests {
         insert_listing(&pool, 1, "WDR").await;
         insert_listing(&pool, 2, "RGL").await;
         // Gunther: 100 shares with a $9 cost base each = $900.
-        insert_buy(&pool, 1, 1, d(2020, 10, 1), "100", "9").await;
+        insert_buy(&pool, 1, ListingId(1), d(2020, 10, 1), "100", "9").await;
         // 1-for-1, $10 cash per old share, $20 market value per new share.
-        insert_scrip_cash_terms(&pool, 10, 1, 2, d(2024, 7, 1), "1", "1", Some(("10", "20"))).await;
+        insert_scrip_cash_terms(
+            &pool,
+            10,
+            ListingId(1),
+            ListingId(2),
+            d(2024, 7, 1),
+            "1",
+            "1",
+            Some(("10", "20")),
+        )
+        .await;
 
         let ex = db_exchange(&pool, 10).await.unwrap();
 
@@ -925,8 +936,18 @@ mod tests {
         // Cost base $1,100; 2-for-1 exchange, $3 cash per old unit, $4 market
         // value per new unit → per old unit 3 cash + 8 scrip; the cash share
         // is 3/11 of $1,100 = $300.
-        insert_buy(&pool, 1, 1, d(2020, 10, 1), "100", "11").await;
-        insert_scrip_cash_terms(&pool, 10, 1, 2, d(2024, 7, 1), "2", "1", Some(("3", "4"))).await;
+        insert_buy(&pool, 1, ListingId(1), d(2020, 10, 1), "100", "11").await;
+        insert_scrip_cash_terms(
+            &pool,
+            10,
+            ListingId(1),
+            ListingId(2),
+            d(2024, 7, 1),
+            "2",
+            "1",
+            Some(("3", "4")),
+        )
+        .await;
 
         let ex = db_exchange(&pool, 10).await.unwrap();
 
@@ -943,13 +964,13 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "OLD").await;
         insert_listing(&pool, 2, "NEW").await;
-        insert_buy(&pool, 1, 1, d(2020, 10, 1), "1000", "1.50").await;
+        insert_buy(&pool, 1, ListingId(1), d(2020, 10, 1), "1000", "1.50").await;
         // 3-for-1 split: the 1,000 as-acquired units are 3,000 at the exchange.
         corporate_action::db_upsert(
             &pool,
             &CorporateAction {
                 id: 5,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: d(2022, 1, 1),
                 kind: ActionKind::ShareSplit {
                     split_new_units: dec("3"),
@@ -983,8 +1004,17 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "OLD").await;
         insert_listing(&pool, 2, "NEW").await;
-        insert_buy(&pool, 1, 1, d(2022, 1, 10), "101", "10").await;
-        insert_scrip_terms(&pool, 10, 1, 2, d(2024, 3, 1), "1", "3").await;
+        insert_buy(&pool, 1, ListingId(1), d(2022, 1, 10), "101", "10").await;
+        insert_scrip_terms(
+            &pool,
+            10,
+            ListingId(1),
+            ListingId(2),
+            d(2024, 3, 1),
+            "1",
+            "3",
+        )
+        .await;
 
         let ex = db_exchange(&pool, 10).await.unwrap();
         assert_eq!(ex.replacements.len(), 1);
@@ -1013,12 +1043,21 @@ mod tests {
         insert_listing(&pool, 1, "OLD").await;
         insert_listing(&pool, 2, "MID").await;
         insert_listing(&pool, 3, "NEW").await;
-        insert_buy(&pool, 1, 1, d(2020, 10, 1), "1000", "1.50").await;
+        insert_buy(&pool, 1, ListingId(1), d(2020, 10, 1), "1000", "1.50").await;
         insert_scrip(&pool, 10, d(2024, 7, 1)).await;
         db_exchange(&pool, 10).await.unwrap();
 
         // Listing 2 is itself taken over by listing 3, 1-for-2.
-        insert_scrip_terms(&pool, 11, 2, 3, d(2025, 2, 1), "1", "2").await;
+        insert_scrip_terms(
+            &pool,
+            11,
+            ListingId(2),
+            ListingId(3),
+            d(2025, 2, 1),
+            "1",
+            "2",
+        )
+        .await;
         let ex = db_exchange(&pool, 11).await.unwrap();
 
         assert_eq!(ex.replacements.len(), 1);
@@ -1048,7 +1087,7 @@ mod tests {
             &pool,
             &CorporateAction {
                 id: 1,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: d(2024, 7, 1),
                 kind: ActionKind::ShareSplit {
                     split_new_units: dec("2"),
@@ -1072,7 +1111,7 @@ mod tests {
 
         // A target trade dated on/after the exchange date contradicts the
         // takeover.
-        insert_buy(&pool, 1, 1, d(2024, 7, 1), "100", "1.50").await;
+        insert_buy(&pool, 1, ListingId(1), d(2024, 7, 1), "100", "1.50").await;
         assert!(matches!(
             db_exchange(&pool, 10).await,
             Err(ExchangeError::TradedOnOrAfterExchangeDate)
@@ -1092,7 +1131,7 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "OLD").await;
         insert_listing(&pool, 2, "NEW").await;
-        insert_buy(&pool, 1, 1, d(2020, 10, 1), "1000", "1.50").await;
+        insert_buy(&pool, 1, ListingId(1), d(2020, 10, 1), "1000", "1.50").await;
         insert_scrip(&pool, 10, d(2024, 7, 1)).await;
         db_exchange(&pool, 10).await.unwrap();
 
@@ -1110,7 +1149,7 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "OLD").await;
         insert_listing(&pool, 2, "NEW").await;
-        insert_buy(&pool, 1, 1, d(2020, 10, 1), "1000", "1.50").await;
+        insert_buy(&pool, 1, ListingId(1), d(2020, 10, 1), "1000", "1.50").await;
         insert_scrip(&pool, 10, d(2024, 7, 1)).await;
         let ex = db_exchange(&pool, 10).await.unwrap();
 
@@ -1124,7 +1163,7 @@ mod tests {
                 holding_account_id: 1,
                 date: d(2024, 7, 1),
                 settlement_date: Some(d(2024, 7, 1)),
-                listing_id: 1,
+                listing_id: ListingId(1),
                 average_price: dec("9.99"),
                 quantity: dec("1000"),
                 currency: "AUD".into(),
@@ -1172,7 +1211,7 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "OLD").await;
         insert_listing(&pool, 2, "NEW").await;
-        insert_buy(&pool, 1, 1, d(2020, 10, 1), "1000", "1.50").await;
+        insert_buy(&pool, 1, ListingId(1), d(2020, 10, 1), "1000", "1.50").await;
         insert_scrip(&pool, 10, d(2024, 7, 1)).await;
         let ex = db_exchange(&pool, 10).await.unwrap();
 
@@ -1186,7 +1225,7 @@ mod tests {
                 holding_account_id: 1,
                 date: d(2025, 1, 10),
                 settlement_date: Some(d(2025, 1, 12)),
-                listing_id: 2,
+                listing_id: ListingId(2),
                 average_price: dec("3.00"),
                 quantity: dec("500"),
                 currency: "AUD".into(),
@@ -1240,7 +1279,7 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "OLD").await;
         insert_listing(&pool, 2, "NEW").await;
-        insert_buy(&pool, 1, 1, d(2020, 10, 1), "1000", "1.50").await;
+        insert_buy(&pool, 1, ListingId(1), d(2020, 10, 1), "1000", "1.50").await;
         insert_scrip(&pool, 10, d(2024, 7, 1)).await;
         db_exchange(&pool, 10).await.unwrap();
 
@@ -1271,8 +1310,8 @@ mod tests {
         .await
         .unwrap();
         // One parcel per account.
-        insert_buy(&pool, 1, 1, d(2020, 10, 1), "1000", "1.50").await;
-        insert_buy(&pool, 2, 1, d(2023, 3, 1), "500", "2.00").await;
+        insert_buy(&pool, 1, ListingId(1), d(2020, 10, 1), "1000", "1.50").await;
+        insert_buy(&pool, 2, ListingId(1), d(2023, 3, 1), "500", "2.00").await;
         sqlx::query("UPDATE trades SET holding_account_id = 2 WHERE id = 2")
             .execute(&pool)
             .await
@@ -1293,7 +1332,7 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "OLD").await;
         insert_listing(&pool, 2, "NEW").await;
-        insert_buy(&pool, 1, 1, d(2020, 10, 1), "1000", "1.50").await;
+        insert_buy(&pool, 1, ListingId(1), d(2020, 10, 1), "1000", "1.50").await;
         insert_scrip(&pool, 10, d(2024, 7, 1)).await;
 
         let resp = client(&pool)
@@ -1365,7 +1404,7 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "OLD").await;
         insert_listing(&pool, 2, "NEW").await;
-        insert_buy(&pool, 1, 1, d(2022, 1, 10), "100", "10").await;
+        insert_buy(&pool, 1, ListingId(1), d(2022, 1, 10), "100", "10").await;
         insert_scrip(&pool, 10, d(2024, 6, 2)).await;
         db_exchange(&pool, 10).await.unwrap();
 
@@ -1378,7 +1417,7 @@ mod tests {
                 holding_account_id: 1,
                 date: d(2024, 6, 3),
                 settlement_date: Some(d(2024, 6, 3)),
-                listing_id: 1,
+                listing_id: ListingId(1),
                 average_price: dec("15"),
                 quantity: dec("100"),
                 currency: "AUD".into(),
@@ -1437,10 +1476,10 @@ mod tests {
             &pool,
             &CorporateAction {
                 id: 10,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: d(2024, 6, 10),
                 kind: ActionKind::ScripForScrip {
-                    scrip_listing_id: 2,
+                    scrip_listing_id: ListingId(2),
                     scrip_new_units: Decimal::ONE,
                     scrip_old_units: Decimal::ONE,
                     scrip_cash_per_unit: None,
@@ -1487,7 +1526,7 @@ mod tests {
         insert_buy(
             &pool,
             1,
-            1,
+            ListingId(1),
             d(2020, 10, 1),
             "10000000000",
             "10000000000000000",
@@ -1500,8 +1539,8 @@ mod tests {
         insert_scrip_cash_terms(
             &pool,
             10,
-            1,
-            2,
+            ListingId(1),
+            ListingId(2),
             d(2024, 7, 1),
             "1",
             "100",
@@ -1539,13 +1578,22 @@ mod tests {
         insert_buy(
             &pool,
             1,
-            1,
+            ListingId(1),
             d(2020, 10, 1),
             "1000000000000000000000000000",
             "0",
         )
         .await;
-        insert_scrip_terms(&pool, 10, 1, 2, d(2024, 7, 1), "1000", "1").await;
+        insert_scrip_terms(
+            &pool,
+            10,
+            ListingId(1),
+            ListingId(2),
+            d(2024, 7, 1),
+            "1000",
+            "1",
+        )
+        .await;
 
         let err = db_exchange(&pool, 10).await.unwrap_err();
         assert!(
@@ -1589,13 +1637,22 @@ mod tests {
         insert_buy(
             &pool,
             1,
-            1,
+            ListingId(1),
             d(2020, 10, 1),
             "1000000000000000000000000000",
             "0",
         )
         .await;
-        insert_scrip_terms(&pool, 10, 1, 2, d(2024, 7, 1), "1000", "1000000").await;
+        insert_scrip_terms(
+            &pool,
+            10,
+            ListingId(1),
+            ListingId(2),
+            d(2024, 7, 1),
+            "1000",
+            "1000000",
+        )
+        .await;
 
         let resp = client(&pool)
             .post_empty("/corporate_actions/10/exchange")
@@ -1616,7 +1673,7 @@ mod tests {
             pool,
             &CorporateAction {
                 id: 11,
-                listing_id: 2,
+                listing_id: ListingId(2),
                 date: d(2024, 6, 1),
                 kind: ActionKind::ShareSplit {
                     split_new_units: Decimal::from(1000),
@@ -1645,13 +1702,22 @@ mod tests {
         insert_buy(
             &pool,
             1,
-            1,
+            ListingId(1),
             d(2024, 1, 15),
             "100000000000000000000000000",
             "0",
         )
         .await;
-        insert_scrip_terms(&pool, 10, 1, 2, d(2024, 3, 15), "1", "1").await;
+        insert_scrip_terms(
+            &pool,
+            10,
+            ListingId(1),
+            ListingId(2),
+            d(2024, 3, 15),
+            "1",
+            "1",
+        )
+        .await;
         split_the_replacement_listing(&pool).await;
 
         let response = client(&pool)
@@ -1688,13 +1754,22 @@ mod tests {
         insert_buy(
             &pool,
             1,
-            1,
+            ListingId(1),
             d(2024, 1, 15),
             "79000000000000000000000000",
             "0",
         )
         .await;
-        insert_scrip_terms(&pool, 10, 1, 2, d(2024, 3, 15), "1", "1").await;
+        insert_scrip_terms(
+            &pool,
+            10,
+            ListingId(1),
+            ListingId(2),
+            d(2024, 3, 15),
+            "1",
+            "1",
+        )
+        .await;
         split_the_replacement_listing(&pool).await;
 
         client(&pool)
@@ -1745,10 +1820,10 @@ mod tests {
             pool,
             &CorporateAction {
                 id,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date,
                 kind: ActionKind::ScripForScrip {
-                    scrip_listing_id: 2,
+                    scrip_listing_id: ListingId(2),
                     scrip_new_units: Decimal::ONE,
                     scrip_old_units: Decimal::ONE,
                     scrip_cash_per_unit: Some(cash.0.parse().unwrap()),
@@ -1843,7 +1918,7 @@ mod tests {
             .assert_dry_run_refuses_alike(&pool, "/corporate_actions/10/exchange", None)
             .await;
 
-        insert_buy(&pool, 1, 1, d(2020, 10, 1), "1000", "1.50").await;
+        insert_buy(&pool, 1, ListingId(1), d(2020, 10, 1), "1000", "1.50").await;
         let created = client(&pool)
             .assert_dry_run_previews(&pool, "/corporate_actions/10/exchange", None)
             .await;

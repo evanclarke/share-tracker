@@ -30,6 +30,7 @@
 use crate::infra::extract::{Json, Query};
 use crate::infra::fx::FxRates;
 use crate::infra::http::ApiError;
+use crate::infra::id::ListingId;
 use crate::reports::franking;
 use axum::{Router, extract::State, routing::get};
 use chrono::{Duration, NaiveDate};
@@ -46,7 +47,7 @@ use sqlx::SqlitePool;
 pub struct FrankingAtRiskAlert {
     /// The `income` row id.
     pub income_id: i64,
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     pub ticker: String,
     /// Financial year the credits count for (calendar year of its 30 June end).
     pub tax_year: i32,
@@ -91,7 +92,7 @@ pub struct FrankingAtRiskAlert {
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
 #[serde(deny_unknown_fields)]
 pub struct WhatIfRequest {
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     pub sale_date: NaiveDate,
     #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub units: Decimal,
@@ -101,7 +102,7 @@ pub struct WhatIfRequest {
 #[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FrankingWhatIfAlert {
     pub income_id: i64,
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     pub ticker: String,
     pub tax_year: i32,
     pub ex_date: NaiveDate,
@@ -283,8 +284,14 @@ mod tests {
             .await;
     }
 
-    async fn insert_buy(pool: &SqlitePool, id: i64, listing_id: i64, date: NaiveDate, qty: i64) {
-        test_support::buy(id, listing_id)
+    async fn insert_buy(
+        pool: &SqlitePool,
+        id: i64,
+        listing_id: ListingId,
+        date: NaiveDate,
+        qty: i64,
+    ) {
+        test_support::buy(id, listing_id.0)
             .date(date)
             .qty(Decimal::from(qty))
             .price(Decimal::ONE)
@@ -292,8 +299,14 @@ mod tests {
             .await;
     }
 
-    async fn insert_sell(pool: &SqlitePool, id: i64, listing_id: i64, date: NaiveDate, qty: i64) {
-        test_support::sell(id, listing_id)
+    async fn insert_sell(
+        pool: &SqlitePool,
+        id: i64,
+        listing_id: ListingId,
+        date: NaiveDate,
+        qty: i64,
+    ) {
+        test_support::sell(id, listing_id.0)
             .date(date)
             .qty(Decimal::from(qty))
             .price(Decimal::ONE)
@@ -304,12 +317,12 @@ mod tests {
     async fn insert_dividend(
         pool: &SqlitePool,
         id: i64,
-        listing_id: i64,
+        listing_id: ListingId,
         paid: NaiveDate,
         ex: NaiveDate,
         credits: i64,
     ) {
-        test_support::income(id, listing_id, paid)
+        test_support::income(id, listing_id.0, paid)
             .fully_franked_credits(Decimal::from(credits))
             .with(|i| i.ex_date = Some(ex))
             .insert(pool)
@@ -324,9 +337,17 @@ mod tests {
     async fn db_denied_dividend_lists_failing_window_and_amounts() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "TLS").await;
-        insert_buy(&pool, 1, 1, ymd(2025, 3, 3), 1000).await;
-        insert_sell(&pool, 2, 1, ymd(2025, 4, 10), 1000).await;
-        insert_dividend(&pool, 1, 1, ymd(2025, 3, 28), ymd(2025, 3, 14), 5600).await;
+        insert_buy(&pool, 1, ListingId(1), ymd(2025, 3, 3), 1000).await;
+        insert_sell(&pool, 2, ListingId(1), ymd(2025, 4, 10), 1000).await;
+        insert_dividend(
+            &pool,
+            1,
+            ListingId(1),
+            ymd(2025, 3, 28),
+            ymd(2025, 3, 14),
+            5600,
+        )
+        .await;
 
         let alerts = db_franking_at_risk(&pool).await.unwrap();
         assert_eq!(alerts.len(), 1);
@@ -351,8 +372,16 @@ mod tests {
     async fn db_qualified_dividend_is_not_listed() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "TLS").await;
-        insert_buy(&pool, 1, 1, ymd(2024, 3, 1), 1000).await;
-        insert_dividend(&pool, 1, 1, ymd(2025, 3, 28), ymd(2025, 3, 14), 5600).await;
+        insert_buy(&pool, 1, ListingId(1), ymd(2024, 3, 1), 1000).await;
+        insert_dividend(
+            &pool,
+            1,
+            ListingId(1),
+            ymd(2025, 3, 28),
+            ymd(2025, 3, 14),
+            5600,
+        )
+        .await;
         assert!(db_franking_at_risk(&pool).await.unwrap().is_empty());
     }
 
@@ -371,12 +400,12 @@ mod tests {
 
         async fn buy_back(pool: &SqlitePool, bought: NaiveDate) -> Vec<super::FrankingAtRiskAlert> {
             insert_listing(pool, 1, "BBK").await;
-            insert_buy(pool, 1, 1, bought, 20000).await;
+            insert_buy(pool, 1, ListingId(1), bought, 20000).await;
             corporate_action::db_upsert(
                 pool,
                 &CorporateAction {
                     id: 10,
-                    listing_id: 1,
+                    listing_id: ListingId(1),
                     date: ymd(2025, 6, 2),
                     kind: ActionKind::BuyBack {
                         buyback_price: Decimal::from(10),
@@ -435,9 +464,17 @@ mod tests {
     async fn db_small_shareholder_exemption_flagged_but_not_denied() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "TLS").await;
-        insert_buy(&pool, 1, 1, ymd(2025, 3, 3), 1000).await;
-        insert_sell(&pool, 2, 1, ymd(2025, 4, 10), 1000).await;
-        insert_dividend(&pool, 1, 1, ymd(2025, 3, 28), ymd(2025, 3, 14), 4990).await;
+        insert_buy(&pool, 1, ListingId(1), ymd(2025, 3, 3), 1000).await;
+        insert_sell(&pool, 2, ListingId(1), ymd(2025, 4, 10), 1000).await;
+        insert_dividend(
+            &pool,
+            1,
+            ListingId(1),
+            ymd(2025, 3, 28),
+            ymd(2025, 3, 14),
+            4990,
+        )
+        .await;
 
         let alerts = db_franking_at_risk(&pool).await.unwrap();
         assert_eq!(alerts.len(), 1);
@@ -472,8 +509,8 @@ mod tests {
 
         // FY2024, pre-conversion: a trust distribution with $4,000 of
         // credits, its entitled units sold inside the qualification window.
-        insert_buy(&pool, 1, 1, ymd(2024, 3, 1), 1000).await;
-        insert_sell(&pool, 2, 1, ymd(2024, 4, 10), 1000).await;
+        insert_buy(&pool, 1, ListingId(1), ymd(2024, 3, 1), 1000).await;
+        insert_sell(&pool, 2, ListingId(1), ymd(2024, 4, 10), 1000).await;
         test_support::income(1, 1, ymd(2024, 3, 28))
             .fully_franked_credits(Decimal::from(4000))
             .with(|i| {
@@ -485,9 +522,17 @@ mod tests {
 
         // An ordinary short-held dividend in the same year: $1,500 of credits,
         // under the threshold on its own.
-        insert_buy(&pool, 3, 2, ymd(2024, 3, 1), 1000).await;
-        insert_sell(&pool, 4, 2, ymd(2024, 4, 10), 1000).await;
-        insert_dividend(&pool, 2, 2, ymd(2024, 3, 28), ymd(2024, 3, 14), 1500).await;
+        insert_buy(&pool, 3, ListingId(2), ymd(2024, 3, 1), 1000).await;
+        insert_sell(&pool, 4, ListingId(2), ymd(2024, 4, 10), 1000).await;
+        insert_dividend(
+            &pool,
+            2,
+            ListingId(2),
+            ymd(2024, 3, 28),
+            ymd(2024, 3, 14),
+            1500,
+        )
+        .await;
 
         let resp = ApiClient::over(router().with_state(pool.clone()))
             .get("/reports/franking_at_risk")
@@ -529,10 +574,18 @@ mod tests {
     async fn db_denied_amounts_match_the_tax_summary() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "JES").await;
-        insert_buy(&pool, 1, 1, ymd(2024, 3, 14), 10000).await;
-        insert_buy(&pool, 2, 1, ymd(2025, 3, 4), 4000).await;
-        insert_sell(&pool, 3, 1, ymd(2025, 4, 3), 4000).await;
-        insert_dividend(&pool, 1, 1, ymd(2025, 3, 28), ymd(2025, 3, 14), 7000).await;
+        insert_buy(&pool, 1, ListingId(1), ymd(2024, 3, 14), 10000).await;
+        insert_buy(&pool, 2, ListingId(1), ymd(2025, 3, 4), 4000).await;
+        insert_sell(&pool, 3, ListingId(1), ymd(2025, 4, 3), 4000).await;
+        insert_dividend(
+            &pool,
+            1,
+            ListingId(1),
+            ymd(2025, 3, 28),
+            ymd(2025, 3, 14),
+            7000,
+        )
+        .await;
 
         let alerts = db_franking_at_risk(&pool).await.unwrap();
         assert_eq!(alerts.len(), 1);
@@ -554,12 +607,20 @@ mod tests {
     async fn db_what_if_shows_credits_a_contemplated_sale_would_cost() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "JES").await;
-        insert_buy(&pool, 1, 1, ymd(2024, 3, 14), 10000).await;
-        insert_buy(&pool, 2, 1, ymd(2025, 3, 4), 4000).await;
-        insert_dividend(&pool, 1, 1, ymd(2025, 3, 28), ymd(2025, 3, 14), 7000).await;
+        insert_buy(&pool, 1, ListingId(1), ymd(2024, 3, 14), 10000).await;
+        insert_buy(&pool, 2, ListingId(1), ymd(2025, 3, 4), 4000).await;
+        insert_dividend(
+            &pool,
+            1,
+            ListingId(1),
+            ymd(2025, 3, 28),
+            ymd(2025, 3, 14),
+            7000,
+        )
+        .await;
 
         let req = WhatIfRequest {
-            listing_id: 1,
+            listing_id: ListingId(1),
             sale_date: ymd(2025, 4, 3),
             units: Decimal::from(4000),
         };
@@ -583,12 +644,20 @@ mod tests {
     async fn db_what_if_sale_after_window_end_is_safe() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "JES").await;
-        insert_buy(&pool, 1, 1, ymd(2024, 3, 14), 10000).await;
-        insert_buy(&pool, 2, 1, ymd(2025, 3, 4), 4000).await;
-        insert_dividend(&pool, 1, 1, ymd(2025, 3, 28), ymd(2025, 3, 14), 7000).await;
+        insert_buy(&pool, 1, ListingId(1), ymd(2024, 3, 14), 10000).await;
+        insert_buy(&pool, 2, ListingId(1), ymd(2025, 3, 4), 4000).await;
+        insert_dividend(
+            &pool,
+            1,
+            ListingId(1),
+            ymd(2025, 3, 28),
+            ymd(2025, 3, 14),
+            7000,
+        )
+        .await;
 
         let req = WhatIfRequest {
-            listing_id: 1,
+            listing_id: ListingId(1),
             // The day after window_end (2025-04-28).
             sale_date: ymd(2025, 4, 29),
             units: Decimal::from(4000),
@@ -603,11 +672,18 @@ mod tests {
         for (listing_id, ticker) in [(1, "AAA"), (2, "BBB")] {
             insert_listing(&pool, listing_id, ticker).await;
             let base = (listing_id - 1) * 10;
-            insert_buy(&pool, base + 1, listing_id, ymd(2025, 3, 4), 4000).await;
+            insert_buy(
+                &pool,
+                base + 1,
+                ListingId(listing_id),
+                ymd(2025, 3, 4),
+                4000,
+            )
+            .await;
             insert_dividend(
                 &pool,
                 listing_id,
-                listing_id,
+                ListingId(listing_id),
                 ymd(2025, 3, 28),
                 ymd(2025, 3, 14),
                 7000,
@@ -615,7 +691,7 @@ mod tests {
             .await;
         }
         let req = WhatIfRequest {
-            listing_id: 1,
+            listing_id: ListingId(1),
             sale_date: ymd(2025, 4, 3),
             units: Decimal::from(4000),
         };
@@ -633,9 +709,17 @@ mod tests {
             .preference(true)
             .insert(&pool)
             .await;
-        insert_buy(&pool, 1, 1, ymd(2025, 3, 4), 100).await;
-        insert_sell(&pool, 2, 1, ymd(2025, 5, 13), 100).await; // 69 at-risk days
-        insert_dividend(&pool, 1, 1, ymd(2025, 3, 28), ymd(2025, 3, 14), 6000).await;
+        insert_buy(&pool, 1, ListingId(1), ymd(2025, 3, 4), 100).await;
+        insert_sell(&pool, 2, ListingId(1), ymd(2025, 5, 13), 100).await; // 69 at-risk days
+        insert_dividend(
+            &pool,
+            1,
+            ListingId(1),
+            ymd(2025, 3, 28),
+            ymd(2025, 3, 14),
+            6000,
+        )
+        .await;
 
         let alerts = db_franking_at_risk(&pool).await.unwrap();
         assert_eq!(alerts.len(), 1);
@@ -652,13 +736,21 @@ mod tests {
     async fn db_what_if_predicts_what_the_recorded_sale_actually_denies() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "AAA").await;
-        insert_buy(&pool, 1, 1, ymd(2025, 1, 2), 1000).await;
+        insert_buy(&pool, 1, ListingId(1), ymd(2025, 1, 2), 1000).await;
         // Ex 10 Jan, paid 10 Feb: 400 of the 1,000 entitled units sold on
         // 20 Jan, 19 at-risk days into a 45-day requirement.
-        insert_dividend(&pool, 1, 1, ymd(2025, 2, 10), ymd(2025, 1, 10), 6000).await;
+        insert_dividend(
+            &pool,
+            1,
+            ListingId(1),
+            ymd(2025, 2, 10),
+            ymd(2025, 1, 10),
+            6000,
+        )
+        .await;
 
         let req = WhatIfRequest {
-            listing_id: 1,
+            listing_id: ListingId(1),
             sale_date: ymd(2025, 1, 20),
             units: Decimal::from(400),
         };
@@ -666,7 +758,7 @@ mod tests {
         assert_eq!(what_if.len(), 1);
         assert_eq!(what_if[0].additional_credits_at_risk, Decimal::from(2400));
 
-        insert_sell(&pool, 2, 1, ymd(2025, 1, 20), 400).await;
+        insert_sell(&pool, 2, ListingId(1), ymd(2025, 1, 20), 400).await;
         let alerts = db_franking_at_risk(&pool).await.unwrap();
         assert_eq!(alerts.len(), 1);
         assert_eq!(alerts[0].entitled_units, Decimal::from(1000));
@@ -690,9 +782,9 @@ mod tests {
     async fn db_a_trust_rows_entitlement_date_anchors_the_holding_period_walk() {
         async fn credits_denied(pool: &SqlitePool, ex_date: Option<NaiveDate>) -> Decimal {
             insert_listing(pool, 1, "TRU").await;
-            insert_buy(pool, 1, 1, ymd(2025, 6, 2), 1000).await;
+            insert_buy(pool, 1, ListingId(1), ymd(2025, 6, 2), 1000).await;
             // Entitled at 30 June, sold 5 July (33 at-risk days), paid 20 July.
-            insert_sell(pool, 2, 1, ymd(2025, 7, 7), 1000).await;
+            insert_sell(pool, 2, ListingId(1), ymd(2025, 7, 7), 1000).await;
             test_support::income(1, 1, ymd(2025, 7, 20))
                 .with(|i| {
                     i.trust_income = true;
@@ -737,8 +829,8 @@ mod tests {
     async fn db_a_dividend_with_no_ex_date_is_reported_as_untested() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "AAA").await;
-        insert_buy(&pool, 1, 1, ymd(2025, 1, 2), 1000).await;
-        insert_sell(&pool, 2, 1, ymd(2025, 1, 20), 400).await; // 19 at-risk days
+        insert_buy(&pool, 1, ListingId(1), ymd(2025, 1, 2), 1000).await;
+        insert_sell(&pool, 2, ListingId(1), ymd(2025, 1, 20), 400).await; // 19 at-risk days
         test_support::income(1, 1, ymd(2025, 2, 10))
             .with(|i| {
                 i.franked_amount = Decimal::from(14000);
@@ -779,8 +871,8 @@ mod tests {
     async fn db_a_denial_found_on_the_fallback_date_is_still_a_denial() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "AAA").await;
-        insert_buy(&pool, 1, 1, ymd(2025, 4, 1), 1000).await;
-        insert_sell(&pool, 2, 1, ymd(2025, 4, 22), 1000).await;
+        insert_buy(&pool, 1, ListingId(1), ymd(2025, 4, 1), 1000).await;
+        insert_sell(&pool, 2, ListingId(1), ymd(2025, 4, 22), 1000).await;
         test_support::income(1, 1, ymd(2025, 4, 8))
             .fully_franked_credits(Decimal::from(6000))
             .insert(&pool)
@@ -800,9 +892,17 @@ mod tests {
     async fn db_rename_between_ex_date_and_payment_keeps_one_walk() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "OLD").await;
-        insert_buy(&pool, 1, 1, ymd(2025, 1, 2), 1000).await;
-        insert_sell(&pool, 2, 1, ymd(2025, 1, 20), 400).await;
-        insert_dividend(&pool, 1, 1, ymd(2025, 2, 10), ymd(2025, 1, 10), 6000).await;
+        insert_buy(&pool, 1, ListingId(1), ymd(2025, 1, 2), 1000).await;
+        insert_sell(&pool, 2, ListingId(1), ymd(2025, 1, 20), 400).await;
+        insert_dividend(
+            &pool,
+            1,
+            ListingId(1),
+            ymd(2025, 2, 10),
+            ymd(2025, 1, 10),
+            6000,
+        )
+        .await;
         ApiClient::full(&pool)
             .post(
                 "/listings/1/renames",
@@ -822,9 +922,17 @@ mod tests {
     async fn api_get_franking_at_risk() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "TLS").await;
-        insert_buy(&pool, 1, 1, ymd(2025, 3, 3), 1000).await;
-        insert_sell(&pool, 2, 1, ymd(2025, 4, 10), 1000).await;
-        insert_dividend(&pool, 1, 1, ymd(2025, 3, 28), ymd(2025, 3, 14), 5600).await;
+        insert_buy(&pool, 1, ListingId(1), ymd(2025, 3, 3), 1000).await;
+        insert_sell(&pool, 2, ListingId(1), ymd(2025, 4, 10), 1000).await;
+        insert_dividend(
+            &pool,
+            1,
+            ListingId(1),
+            ymd(2025, 3, 28),
+            ymd(2025, 3, 14),
+            5600,
+        )
+        .await;
 
         let resp = ApiClient::over(router().with_state(pool))
             .get("/reports/franking_at_risk")
@@ -839,8 +947,16 @@ mod tests {
     async fn api_get_what_if_and_validation() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "JES").await;
-        insert_buy(&pool, 1, 1, ymd(2025, 3, 4), 4000).await;
-        insert_dividend(&pool, 1, 1, ymd(2025, 3, 28), ymd(2025, 3, 14), 7000).await;
+        insert_buy(&pool, 1, ListingId(1), ymd(2025, 3, 4), 4000).await;
+        insert_dividend(
+            &pool,
+            1,
+            ListingId(1),
+            ymd(2025, 3, 28),
+            ymd(2025, 3, 14),
+            7000,
+        )
+        .await;
 
         let get = |query: &'static str| {
             let client = ApiClient::over(router().with_state(pool.clone()));

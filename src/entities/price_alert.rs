@@ -49,6 +49,7 @@ use crate::infra::currency::CurrencyCode;
 use crate::infra::db::write_tx;
 use crate::infra::decimal::{Money, row_dec};
 use crate::infra::email::{self, Document, Notifier, Section, Table};
+use crate::infra::id::ListingId;
 use crate::infra::scheduler::JobOutcome;
 use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
@@ -71,7 +72,7 @@ pub struct PriceAlert {
     /// the whole stored row rather than a chosen subset of it.
     #[expect(dead_code)]
     pub id: i64,
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     pub price_date: NaiveDate,
     pub previous_date: NaiveDate,
     #[sqlx(try_from = "Money")]
@@ -88,7 +89,7 @@ pub struct PriceAlert {
 /// One holding's move, with the identity the email needs to name it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Mover {
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     pub ticker: String,
     pub name: String,
     pub currency: CurrencyCode,
@@ -117,7 +118,7 @@ pub struct Scan {
 /// own connection — the scan's single read transaction.
 async fn db_latest_two_closes_on(
     conn: &mut sqlx::SqliteConnection,
-    listing_id: i64,
+    listing_id: ListingId,
 ) -> Result<Vec<(NaiveDate, Decimal)>, sqlx::Error> {
     let rows = sqlx::query(
         "SELECT price_date, price FROM closing_prices \
@@ -136,7 +137,7 @@ async fn db_latest_two_closes_on(
 /// connection.
 async fn db_listing_identity_on(
     conn: &mut sqlx::SqliteConnection,
-    listing_id: i64,
+    listing_id: ListingId,
 ) -> Result<Option<(String, String, CurrencyCode)>, sqlx::Error> {
     let row = sqlx::query("SELECT ticker, name, currency FROM listings WHERE id = ?")
         .bind(listing_id)
@@ -156,7 +157,7 @@ async fn db_listing_identity_on(
 /// own connection.
 async fn db_already_alerted_on(
     conn: &mut sqlx::SqliteConnection,
-    listing_id: i64,
+    listing_id: ListingId,
     price_date: NaiveDate,
 ) -> Result<bool, sqlx::Error> {
     let found: Option<i64> =
@@ -173,7 +174,7 @@ async fn db_already_alerted_on(
 #[cfg(test)]
 pub async fn db_already_alerted(
     pool: &SqlitePool,
-    listing_id: i64,
+    listing_id: ListingId,
     price_date: NaiveDate,
 ) -> Result<bool, sqlx::Error> {
     let mut conn = pool.acquire().await?;
@@ -439,8 +440,8 @@ mod tests {
             .await;
     }
 
-    async fn close(pool: &SqlitePool, listing_id: i64, date: NaiveDate, price: &str) {
-        crate::test_support::closing_price(listing_id, date)
+    async fn close(pool: &SqlitePool, listing_id: ListingId, date: NaiveDate, price: &str) {
+        crate::test_support::closing_price(listing_id.0, date)
             .price(price)
             .insert(pool)
             .await;
@@ -450,8 +451,8 @@ mod tests {
     async fn a_move_past_the_threshold_is_alerted_once_and_never_again() {
         let pool = test_pool().await;
         held_listing(&pool, 1, "AAA").await;
-        close(&pool, 1, ymd(2026, 3, 2), "100").await;
-        close(&pool, 1, ymd(2026, 3, 3), "108").await;
+        close(&pool, ListingId(1), ymd(2026, 3, 2), "100").await;
+        close(&pool, ListingId(1), ymd(2026, 3, 3), "108").await;
 
         let outbox = Outbox::new();
         let notifier = outbox.notifier(dec("5"));
@@ -478,8 +479,8 @@ mod tests {
     async fn a_fall_alerts_like_a_rise() {
         let pool = test_pool().await;
         held_listing(&pool, 1, "AAA").await;
-        close(&pool, 1, ymd(2026, 3, 2), "100").await;
-        close(&pool, 1, ymd(2026, 3, 3), "91").await;
+        close(&pool, ListingId(1), ymd(2026, 3, 2), "100").await;
+        close(&pool, ListingId(1), ymd(2026, 3, 3), "91").await;
 
         let outbox = Outbox::new();
         run_alert(
@@ -497,8 +498,8 @@ mod tests {
     async fn a_move_inside_the_threshold_sends_nothing() {
         let pool = test_pool().await;
         held_listing(&pool, 1, "AAA").await;
-        close(&pool, 1, ymd(2026, 3, 2), "100").await;
-        close(&pool, 1, ymd(2026, 3, 3), "104.99").await;
+        close(&pool, ListingId(1), ymd(2026, 3, 2), "100").await;
+        close(&pool, ListingId(1), ymd(2026, 3, 3), "104.99").await;
 
         let outbox = Outbox::new();
         let note = run_alert(
@@ -511,15 +512,19 @@ mod tests {
         assert_eq!(note, None);
         assert!(outbox.sent().is_empty(), "nothing to say, nothing sent");
         // …and nothing was recorded, so a later 5% move is still alertable.
-        assert!(!db_already_alerted(&pool, 1, ymd(2026, 3, 3)).await.unwrap());
+        assert!(
+            !db_already_alerted(&pool, ListingId(1), ymd(2026, 3, 3))
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]
     async fn the_threshold_is_configurable() {
         let pool = test_pool().await;
         held_listing(&pool, 1, "AAA").await;
-        close(&pool, 1, ymd(2026, 3, 2), "100").await;
-        close(&pool, 1, ymd(2026, 3, 3), "103").await;
+        close(&pool, ListingId(1), ymd(2026, 3, 2), "100").await;
+        close(&pool, ListingId(1), ymd(2026, 3, 3), "103").await;
 
         let quiet = Outbox::new();
         run_alert(
@@ -546,14 +551,14 @@ mod tests {
     async fn a_pair_straddling_a_split_is_skipped_and_reported() {
         let pool = test_pool().await;
         held_listing(&pool, 1, "AAA").await;
-        close(&pool, 1, ymd(2026, 3, 2), "100").await;
+        close(&pool, ListingId(1), ymd(2026, 3, 2), "100").await;
         // A 1-for-2 consolidation between the two closes: the stored prices are
         // in different units, so the apparent 50% fall is a change of unit.
         crate::entities::corporate_action::db_upsert(
             &pool,
             &crate::entities::corporate_action::CorporateAction {
                 id: 1,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: ymd(2026, 3, 3),
                 kind: crate::entities::corporate_action::ActionKind::ShareSplit {
                     split_new_units: dec("1"),
@@ -563,7 +568,7 @@ mod tests {
         )
         .await
         .expect("the consolidation records");
-        close(&pool, 1, ymd(2026, 3, 3), "50").await;
+        close(&pool, ListingId(1), ymd(2026, 3, 3), "50").await;
 
         let outbox = Outbox::new();
         let note = run_alert(
@@ -583,7 +588,7 @@ mod tests {
     async fn a_listing_with_one_close_is_passed_over() {
         let pool = test_pool().await;
         held_listing(&pool, 1, "AAA").await;
-        close(&pool, 1, ymd(2026, 3, 3), "100").await;
+        close(&pool, ListingId(1), ymd(2026, 3, 3), "100").await;
 
         let outbox = Outbox::new();
         run_alert(
@@ -618,8 +623,8 @@ mod tests {
         )
         .await
         .expect("the sale consumes the parcel");
-        close(&pool, 1, ymd(2026, 3, 2), "100").await;
-        close(&pool, 1, ymd(2026, 3, 3), "150").await;
+        close(&pool, ListingId(1), ymd(2026, 3, 2), "100").await;
+        close(&pool, ListingId(1), ymd(2026, 3, 3), "150").await;
 
         let outbox = Outbox::new();
         run_alert(
@@ -637,8 +642,8 @@ mod tests {
         let pool = test_pool().await;
         for (id, ticker, close_price) in [(1, "AAA", "106"), (2, "BBB", "88"), (3, "CCC", "120")] {
             held_listing(&pool, id, ticker).await;
-            close(&pool, id, ymd(2026, 3, 2), "100").await;
-            close(&pool, id, ymd(2026, 3, 3), close_price).await;
+            close(&pool, ListingId(id), ymd(2026, 3, 2), "100").await;
+            close(&pool, ListingId(id), ymd(2026, 3, 3), close_price).await;
         }
         let outbox = Outbox::new();
         run_alert(
@@ -681,12 +686,12 @@ mod tests {
         let pool = crate::test_support::race_pool(&dir).await;
         for id in 1..=LISTINGS {
             held_listing(&pool, id, &format!("L{id:02}")).await;
-            close(&pool, id, ymd(2026, 3, 2), "100").await;
+            close(&pool, ListingId(id), ymd(2026, 3, 2), "100").await;
             // Seeded in the moving state, which the writer's first round
             // reproduces: an untransitioned third state would let a scan before
             // the first commit read a pair inside the threshold, which is
             // neither of the two states this invariant is about.
-            close(&pool, id, ymd(2026, 3, 3), "106").await;
+            close(&pool, ListingId(id), ymd(2026, 3, 3), "106").await;
         }
 
         let done = Arc::new(AtomicBool::new(false));
@@ -782,8 +787,8 @@ mod tests {
     async fn a_failed_send_records_nothing_so_the_move_is_retried() {
         let pool = test_pool().await;
         held_listing(&pool, 1, "AAA").await;
-        close(&pool, 1, ymd(2026, 3, 2), "100").await;
-        close(&pool, 1, ymd(2026, 3, 3), "108").await;
+        close(&pool, ListingId(1), ymd(2026, 3, 2), "100").await;
+        close(&pool, ListingId(1), ymd(2026, 3, 3), "108").await;
 
         let broken = Outbox::failing("relay refused the connection");
         let err = run_alert(
@@ -795,7 +800,9 @@ mod tests {
         .expect_err("a failed send fails the run");
         assert!(err.contains("could not send"), "{err}");
         assert!(
-            !db_already_alerted(&pool, 1, ymd(2026, 3, 3)).await.unwrap(),
+            !db_already_alerted(&pool, ListingId(1), ymd(2026, 3, 3))
+                .await
+                .unwrap(),
             "a move that never went out must stay alertable"
         );
 
@@ -826,8 +833,8 @@ mod tests {
     async fn a_failed_record_after_a_successful_send_re_alerts_next_run() {
         let pool = test_pool().await;
         held_listing(&pool, 1, "AAA").await;
-        close(&pool, 1, ymd(2026, 3, 2), "100").await;
-        close(&pool, 1, ymd(2026, 3, 3), "108").await;
+        close(&pool, ListingId(1), ymd(2026, 3, 2), "100").await;
+        close(&pool, ListingId(1), ymd(2026, 3, 3), "108").await;
 
         sqlx::query(
             "CREATE TRIGGER refuse_price_alerts BEFORE INSERT ON price_alerts \
@@ -857,7 +864,9 @@ mod tests {
             .expect("the send log is readable");
         assert_eq!(rows, 0, "a failed record leaves no row");
         assert!(
-            !db_already_alerted(&pool, 1, ymd(2026, 3, 3)).await.unwrap(),
+            !db_already_alerted(&pool, ListingId(1), ymd(2026, 3, 3))
+                .await
+                .unwrap(),
             "an unrecorded move stays alertable"
         );
 
@@ -889,8 +898,8 @@ mod tests {
     async fn with_no_email_configured_the_run_notes_that_nothing_was_sent() {
         let pool = test_pool().await;
         held_listing(&pool, 1, "AAA").await;
-        close(&pool, 1, ymd(2026, 3, 2), "100").await;
-        close(&pool, 1, ymd(2026, 3, 3), "150").await;
+        close(&pool, ListingId(1), ymd(2026, 3, 2), "100").await;
+        close(&pool, ListingId(1), ymd(2026, 3, 3), "150").await;
 
         let note = run_alert(&pool, None, now_on(ymd(2026, 3, 3)))
             .await
@@ -903,8 +912,8 @@ mod tests {
     async fn the_recorded_alert_carries_both_prices_and_the_threshold() {
         let pool = test_pool().await;
         held_listing(&pool, 1, "AAA").await;
-        close(&pool, 1, ymd(2026, 3, 2), "100").await;
-        close(&pool, 1, ymd(2026, 3, 3), "108").await;
+        close(&pool, ListingId(1), ymd(2026, 3, 2), "100").await;
+        close(&pool, ListingId(1), ymd(2026, 3, 3), "108").await;
 
         let outbox = Outbox::new();
         run_alert(

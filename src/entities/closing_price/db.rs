@@ -6,6 +6,7 @@ use super::fetcher::clean_price;
 use super::model::{ClosingPrice, PriceStatus};
 use crate::infra::db::write_tx;
 use crate::infra::decimal::{Money, OptMoney};
+use crate::infra::id::ListingId;
 use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use sqlx::{QueryBuilder, SqlitePool};
@@ -16,7 +17,7 @@ use std::collections::HashSet;
 /// result) as well as on the pool.
 pub async fn db_get_one<'e, E>(
     executor: E,
-    listing_id: i64,
+    listing_id: ListingId,
     price_date: NaiveDate,
 ) -> Result<Option<ClosingPrice>, sqlx::Error>
 where
@@ -50,7 +51,7 @@ where
 /// Executor-generic for the same reason [`db_get_one`] is.
 pub async fn db_latest_ok_price_on_or_before<'e, E>(
     executor: E,
-    listing_id: i64,
+    listing_id: ListingId,
     on_or_before: NaiveDate,
     not_before: Option<NaiveDate>,
 ) -> Result<Option<(NaiveDate, Decimal)>, sqlx::Error>
@@ -80,7 +81,7 @@ where
 /// dropping them itself. `None` is every row — the stored default, unchanged.
 pub async fn db_list(
     pool: &SqlitePool,
-    listing_id: Option<i64>,
+    listing_id: Option<ListingId>,
     from: Option<NaiveDate>,
     to: Option<NaiveDate>,
     status: Option<PriceStatus>,
@@ -102,7 +103,7 @@ pub async fn db_list(
 /// (so collection/backfill never re-fetches a good price).
 pub(super) async fn db_ok_dates(
     pool: &SqlitePool,
-    listing_id: i64,
+    listing_id: ListingId,
     from: NaiveDate,
     to: NaiveDate,
 ) -> Result<HashSet<NaiveDate>, sqlx::Error> {
@@ -206,7 +207,7 @@ struct ObservedFigure {
 /// dividing by it would only ever answer 1.
 async fn db_observed_figure(
     conn: &mut sqlx::SqliteConnection,
-    listing_id: i64,
+    listing_id: ListingId,
     price_date: NaiveDate,
 ) -> Result<Option<ObservedFigure>, sqlx::Error> {
     let row: Option<(Money, String)> = sqlx::query_as(
@@ -271,7 +272,7 @@ fn observation_date(fetched_at: &str) -> Result<NaiveDate, sqlx::Error> {
 /// half-open window already leaves alone).
 pub async fn db_price_basis_events(
     conn: &mut sqlx::SqliteConnection,
-    listing_id: i64,
+    listing_id: ListingId,
 ) -> Result<Vec<crate::entities::corporate_action::PriceBasisEvent>, sqlx::Error> {
     use crate::entities::corporate_action::{self, PriceBasisEvent};
 
@@ -349,7 +350,7 @@ struct ObservedRow {
 /// declaration and is never rewritten (module docs).
 pub async fn db_rebase_listing_prices(
     conn: &mut sqlx::SqliteConnection,
-    listing_id: i64,
+    listing_id: ListingId,
 ) -> Result<usize, sqlx::Error> {
     let events = db_price_basis_events(&mut *conn, listing_id).await?;
     let rows: Vec<ObservedRow> = sqlx::query_as(
@@ -389,7 +390,7 @@ pub async fn db_rebase_listing_prices(
 /// close was folded into the same job rather than given one of its own.
 pub async fn run_rebase(pool: &SqlitePool) -> Result<(), String> {
     let mut tx = write_tx(pool).await.map_err(|e| e.to_string())?;
-    let listing_ids: Vec<i64> = sqlx::query_scalar(
+    let listing_ids: Vec<ListingId> = sqlx::query_scalar(
         "SELECT DISTINCT listing_id FROM corporate_actions \
          WHERE action_type IN ('ShareSplit', 'BonusIssue') \
             OR (action_type = 'Demerger' AND demerger_close_date IS NOT NULL) \
@@ -448,7 +449,7 @@ pub async fn run_rebase(pool: &SqlitePool) -> Result<(), String> {
 /// rows are gone.
 pub async fn db_delete<'e, E>(
     executor: E,
-    listing_id: i64,
+    listing_id: ListingId,
     price_date: NaiveDate,
 ) -> Result<bool, sqlx::Error>
 where
@@ -500,7 +501,7 @@ pub enum ClearOutcome {
 /// this leaves alone.
 pub async fn db_clear_unpriced_before(
     pool: &SqlitePool,
-    listing_id: i64,
+    listing_id: ListingId,
 ) -> Result<ClearOutcome, sqlx::Error> {
     let mut tx = write_tx(pool).await?;
     let found: Option<(Option<NaiveDate>,)> =

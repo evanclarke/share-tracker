@@ -21,6 +21,7 @@
 use crate::infra::decimal::row_dec;
 use crate::infra::extract::{Json, Query};
 use crate::infra::http::ApiError;
+use crate::infra::id::ListingId;
 use crate::reports::realised_gains::{self, DisposalSource};
 use axum::{Router, extract::State, routing::get};
 use chrono::NaiveDate;
@@ -39,7 +40,7 @@ pub const DEFAULT_WINDOW_DAYS: i64 = 30;
 #[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WashSaleAlert {
     pub sale_trade_id: i64,
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     pub ticker: String,
     pub sale_holding_account_id: i64,
     pub sale_date: NaiveDate,
@@ -129,7 +130,7 @@ pub async fn db_wash_sales(
     let mut alerts = Vec::new();
     for sale in &losses {
         for row in &buy_rows {
-            let buy_listing_id: i64 = row.try_get("listing_id")?;
+            let buy_listing_id: ListingId = row.try_get("listing_id")?;
             if buy_listing_id != sale.listing_id {
                 continue;
             }
@@ -438,7 +439,7 @@ mod tests {
             &pool,
             1,
             &crate::entities::transfer::TransferBody {
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: ymd(2025, 6, 16),
                 from_account_id: 1,
                 to_account_id: 2,
@@ -493,7 +494,7 @@ mod tests {
             &pool,
             1,
             &crate::entities::transfer::TransferBody {
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: ymd(2025, 6, 12),
                 from_account_id: 1,
                 to_account_id: 2,

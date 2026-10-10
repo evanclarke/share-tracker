@@ -2,6 +2,7 @@ use crate::domain::tax_year::tax_year_for;
 use crate::entities::income::Income;
 use crate::infra::extract::Json;
 use crate::infra::http::ApiError;
+use crate::infra::id::ListingId;
 use axum::{Router, extract::State, routing::get};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
@@ -19,7 +20,7 @@ use sqlx::{FromRow, Row, SqlitePool};
 #[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct E4CrossCheckAlert {
     pub income_id: i64,
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     pub ticker: String,
     pub date_paid: NaiveDate,
     /// The statement's tax-deferred amount, verbatim (record currency).
@@ -65,7 +66,7 @@ pub async fn db_e4_alerts(pool: &SqlitePool) -> Result<Vec<E4CrossCheckAlert>, s
     // (listing, FY) pairs that have a return-of-capital action.
     let mut covered = std::collections::HashSet::new();
     for row in &roc_rows {
-        let listing_id: i64 = row.try_get("listing_id")?;
+        let listing_id: ListingId = row.try_get("listing_id")?;
         let date: NaiveDate = row.try_get("date")?;
         covered.insert((listing_id, tax_year_for(date)));
     }
@@ -133,7 +134,7 @@ mod tests {
             pool,
             &corporate_action::CorporateAction {
                 id,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date,
                 kind: corporate_action::ActionKind::ReturnOfCapital {
                     amount_per_unit: "0.10".parse().unwrap(),
@@ -237,7 +238,7 @@ mod tests {
             &pool,
             &corporate_action::CorporateAction {
                 id: 1,
-                listing_id: 2,
+                listing_id: ListingId(2),
                 date: ymd(2025, 5, 1),
                 kind: corporate_action::ActionKind::ReturnOfCapital {
                     amount_per_unit: "0.10".parse().unwrap(),

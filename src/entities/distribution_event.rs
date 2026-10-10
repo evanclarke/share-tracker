@@ -94,6 +94,7 @@ use crate::entities::closing_price::{self, FetchError, Market};
 use crate::infra::currency::CurrencyCode;
 use crate::infra::decimal::Money;
 use crate::infra::http::{self, ApiError, CrudEntity};
+use crate::infra::id::ListingId;
 use axum::{Router, routing::get};
 use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
@@ -128,7 +129,7 @@ pub struct DistributionEvent {
     /// (`row_history.row_id`). Writes address a row by its
     /// `(listing_id, ex_date)` natural key, never by this.
     pub id: i64,
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     /// The ex-dividend date in the exchange's own timezone — the first day the
     /// security traded without entitlement to this distribution. See the
     /// module docs: this is the candle-joined date, not the provider's own.
@@ -180,7 +181,7 @@ pub struct DistributionEvent {
 #[derive(Debug, Default, serde::Deserialize, utoipa::IntoParams)]
 #[serde(deny_unknown_fields)]
 pub struct DistributionEventListQuery {
-    pub listing_id: Option<i64>,
+    pub listing_id: Option<ListingId>,
     pub from: Option<NaiveDate>,
     pub to: Option<NaiveDate>,
 }
@@ -302,7 +303,7 @@ pub enum StoreError {
         "distribution for listing {listing_id} on {ex_date} is not a positive amount: {amount}"
     )]
     NotPositive {
-        listing_id: i64,
+        listing_id: ListingId,
         ex_date: NaiveDate,
         amount: Decimal,
     },
@@ -315,7 +316,7 @@ pub enum StoreError {
          listing trades in {listing}"
     )]
     CurrencyMismatch {
-        listing_id: i64,
+        listing_id: ListingId,
         ex_date: NaiveDate,
         provider: CurrencyCode,
         listing: CurrencyCode,
@@ -367,7 +368,7 @@ impl From<StoreError> for ApiError {
 /// past an unchanged figure would be the reading that could be wrong.
 pub async fn db_store(
     conn: &mut sqlx::SqliteConnection,
-    listing_id: i64,
+    listing_id: ListingId,
     event: &FetchedDistribution,
     listing_currency: &str,
     source: DistributionSource,

@@ -3,6 +3,7 @@ use crate::infra::db::write_tx;
 use crate::infra::decimal::{Money, OptMoney};
 use crate::infra::extract::Json;
 use crate::infra::http::{self, ApiError, CrudEntity, Upsert, UpsertResponse};
+use crate::infra::id::ListingId;
 use axum::{
     Router,
     extract::{Path, State},
@@ -92,7 +93,7 @@ impl IncomeType {
 #[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Income {
     pub id: i64,
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     pub date_paid: NaiveDate,
     pub ex_date: Option<NaiveDate>,
     #[sqlx(try_from = "Money")]
@@ -379,7 +380,7 @@ impl Income {
 #[serde(deny_unknown_fields)]
 pub struct IncomeBody {
     /// The listing that paid the distribution.
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     /// Payment date (`YYYY-MM-DD`). Sets the financial year and FX conversion month unless
     /// `entitlement_date` governs.
     pub date_paid: NaiveDate,
@@ -479,7 +480,7 @@ pub struct IncomeBody {
 #[derive(Debug, Default, serde::Deserialize, utoipa::IntoParams)]
 #[serde(deny_unknown_fields)]
 pub struct IncomeListQuery {
-    pub listing_id: Option<i64>,
+    pub listing_id: Option<ListingId>,
     pub holding_account_id: Option<i64>,
     pub from: Option<NaiveDate>,
     pub to: Option<NaiveDate>,
@@ -1837,7 +1838,7 @@ mod tests {
             &pool,
             &crate::entities::drp_enrolment::DrpEnrolment {
                 id: 1,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 holding_account_id: 1,
                 enrolment_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
                 unenrolment_date: None,
@@ -1869,7 +1870,7 @@ mod tests {
         for (field, edit) in [
             (
                 "listing_id",
-                (|i: &mut Income| i.listing_id = 2) as fn(&mut Income),
+                (|i: &mut Income| i.listing_id = ListingId(2)) as fn(&mut Income),
             ),
             ("holding_account_id", |i: &mut Income| {
                 i.holding_account_id = 2

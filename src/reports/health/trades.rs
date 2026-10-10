@@ -9,6 +9,7 @@ use crate::entities::ess_statement::{self, EssStatement};
 use crate::entities::trade;
 use crate::infra::currency::CurrencyCode;
 use crate::infra::decimal::Money;
+use crate::infra::id::ListingId;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -48,7 +49,7 @@ pub const ESS_THIRTY_DAY_WINDOW: i64 = 30;
 /// `exchanges`, so they never appear).
 #[derive(utoipa::ToSchema, Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct ExchangeCurrencyMismatch {
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     pub ticker: String,
     /// The listing's own `currency` — what every stored closing price for it
     /// is denominated in.
@@ -85,7 +86,7 @@ pub struct NonTradingDayTrade {
     pub trade_id: i64,
     /// `Buy`, `Sell` or `DRP`.
     pub trade_type: String,
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     pub ticker: String,
     pub date: NaiveDate,
     /// The MIC whose calendar was in force on `date` — not necessarily the
@@ -103,7 +104,7 @@ pub struct NonTradingDayTrade {
 pub(super) struct NonTradingDayCandidate {
     trade_id: i64,
     trade_type: String,
-    listing_id: i64,
+    listing_id: ListingId,
     ticker: String,
     date: NaiveDate,
     source: String,
@@ -161,7 +162,7 @@ pub(super) struct NonTradingDayCandidate {
 pub struct EssThirtyDaySale {
     /// The Sell whose allocation draws on the vest parcel.
     pub sale_trade_id: i64,
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     pub ticker: String,
     pub sale_date: NaiveDate,
     /// Units of the vest parcel this sale allocated — the ESS interests
@@ -213,7 +214,7 @@ pub enum EssDisposalKind {
 #[derive(sqlx::FromRow)]
 pub(super) struct EssThirtyDaySaleRow {
     sale_trade_id: i64,
-    listing_id: i64,
+    listing_id: ListingId,
     ticker: String,
     sale_date: NaiveDate,
     #[sqlx(try_from = "Money")]
@@ -282,7 +283,7 @@ pub struct NilProceedsDisposal {
     pub kind: NilProceedsKind,
     /// The `trades` id (`Sell`) or the `rights_sales` id (`RightsSale`).
     pub record_id: i64,
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     pub ticker: String,
     /// The disposal date — the CGT event date the market value would be read
     /// at.
@@ -318,7 +319,7 @@ pub enum NilProceedsKind {
 #[derive(sqlx::FromRow)]
 pub(super) struct NilProceedsSellRow {
     record_id: i64,
-    listing_id: i64,
+    listing_id: ListingId,
     ticker: String,
     date: NaiveDate,
     #[sqlx(try_from = "Money")]
@@ -333,7 +334,7 @@ pub(super) struct NilProceedsSellRow {
 #[derive(sqlx::FromRow)]
 pub(super) struct NilProceedsRightsSaleRow {
     record_id: i64,
-    listing_id: i64,
+    listing_id: ListingId,
     ticker: String,
     date: NaiveDate,
     #[sqlx(try_from = "Money")]
@@ -534,8 +535,8 @@ pub(super) async fn db_non_trading_day_trades(
     // Every calendar first, one load per listing that has trades — not one per
     // trade: the `Market` behind it is four queries, and a listing with six
     // years of history has hundreds of rows.
-    let listing_ids: HashSet<i64> = candidates.iter().map(|c| c.listing_id).collect();
-    let mut markets: HashMap<i64, closing_price::Market> = HashMap::new();
+    let listing_ids: HashSet<ListingId> = candidates.iter().map(|c| c.listing_id).collect();
+    let mut markets: HashMap<ListingId, closing_price::Market> = HashMap::new();
     for listing_id in listing_ids {
         if let Some(market) = closing_price::load_market_on(&mut *conn, listing_id).await? {
             markets.insert(listing_id, market);

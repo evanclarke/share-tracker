@@ -86,6 +86,7 @@ use crate::entities::trade::{self, Trade};
 use crate::infra::db::{WriteMode, write_tx};
 use crate::infra::extract::{Json, Query};
 use crate::infra::http::{ApiError, DryRunQuery};
+use crate::infra::id::ListingId;
 use axum::{
     Router,
     extract::{Path, State},
@@ -175,7 +176,7 @@ async fn execute(
         return Err(VestError::AlreadyVested);
     }
 
-    let listing_id: i64 = row.try_get("listing_id")?;
+    let listing_id: ListingId = row.try_get("listing_id")?;
     let holding_account_id: i64 = row.try_get("holding_account_id")?;
     let taxing_point_date: chrono::NaiveDate = row.try_get("taxing_point_date")?;
     let quantity = crate::infra::decimal::parse_dec("quantity", row.try_get("quantity")?)?;
@@ -383,7 +384,7 @@ mod tests {
                 holding_account_id: parcel.holding_account_id,
                 date: ymd(2025, 3, 3),
                 settlement_date: Some(ymd(2025, 3, 3)),
-                listing_id: 1,
+                listing_id: ListingId(1),
                 average_price: Decimal::from(10),
                 quantity: Decimal::from(100),
                 currency: "AUD".into(),
@@ -481,7 +482,7 @@ mod tests {
             &pool,
             1,
             &crate::entities::transfer::TransferBody {
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: ymd(2024, 10, 1),
                 from_account_id: 1,
                 to_account_id: 2,
@@ -800,7 +801,7 @@ mod tests {
                 holding_account_id: 1,
                 date: NaiveDate::from_ymd_opt(2025, 1, 10).unwrap(),
                 settlement_date: Some(NaiveDate::from_ymd_opt(2025, 1, 12).unwrap()),
-                listing_id: 1,
+                listing_id: ListingId(1),
                 average_price: Decimal::from(9),
                 quantity: Decimal::from(40),
                 currency: "AUD".into(),
@@ -919,7 +920,7 @@ mod tests {
             pool,
             &crate::entities::corporate_action::CorporateAction {
                 id: 10,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: ymd(2025, 6, 1),
                 kind: crate::entities::corporate_action::ActionKind::ShareSplit {
                     split_new_units: Decimal::from(1000),

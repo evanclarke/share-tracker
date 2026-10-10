@@ -11,6 +11,7 @@ use crate::entities::listing;
 use crate::infra::db::write_tx;
 use crate::infra::extract::{Json, Query};
 use crate::infra::http::{self, ApiError, Upsert, UpsertResponse};
+use crate::infra::id::ListingId;
 use axum::{
     Extension, Router,
     extract::{Path, State},
@@ -25,7 +26,7 @@ use sqlx::SqlitePool;
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ListParams {
-    listing_id: Option<i64>,
+    listing_id: Option<ListingId>,
     from: Option<NaiveDate>,
     to: Option<NaiveDate>,
     /// The row's own `status`, as a typed enum: `?status=ok` is the clean
@@ -41,7 +42,7 @@ pub(crate) struct ListParams {
 #[serde(deny_unknown_fields)]
 pub struct FetchBody {
     /// The listing to re-fetch a closing price for.
-    listing_id: i64,
+    listing_id: ListingId,
     /// The trading day to fetch (`YYYY-MM-DD`); whatever is stored for that
     /// day is replaced.
     price_date: NaiveDate,
@@ -51,7 +52,7 @@ pub struct FetchBody {
 #[serde(deny_unknown_fields)]
 pub struct BackfillBody {
     /// The listing to backfill closing prices for.
-    listing_id: i64,
+    listing_id: ListingId,
     /// First day of the range (`YYYY-MM-DD`, inclusive).
     from: NaiveDate,
     /// Last day of the range (`YYYY-MM-DD`, inclusive).
@@ -87,13 +88,13 @@ pub struct ManualPriceBody {
 pub struct ClearBody {
     /// The listing whose stored rows before its `unpriced_before` date are
     /// cleared.
-    listing_id: i64,
+    listing_id: ListingId,
 }
 
 /// What a clear run did, returned to the caller.
 #[derive(utoipa::ToSchema, Debug, Serialize, Deserialize)]
 pub struct ClearSummary {
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     /// The marker that defined the cleared span, echoed back so the caller
     /// can see what it actually acted on.
     pub unpriced_before: NaiveDate,
@@ -135,7 +136,7 @@ async fn list(
 /// is missing, as every GET-one answers.
 async fn get_one(
     State(pool): State<SqlitePool>,
-    Path((listing_id, price_date)): Path<(i64, NaiveDate)>,
+    Path((listing_id, price_date)): Path<(ListingId, NaiveDate)>,
 ) -> Result<Json<ClosingPrice>, ApiError> {
     db_get_one(&pool, listing_id, price_date)
         .await?
@@ -157,7 +158,7 @@ async fn get_one(
 /// the snapshots that used the old figure.
 async fn put_manual(
     State(pool): State<SqlitePool>,
-    Path((listing_id, price_date)): Path<(i64, NaiveDate)>,
+    Path((listing_id, price_date)): Path<(ListingId, NaiveDate)>,
     Json(body): Json<ManualPriceBody>,
 ) -> Result<UpsertResponse<ClosingPrice>, ApiError> {
     let market = load_market(&pool, listing_id)
@@ -375,7 +376,7 @@ async fn backfill(
 /// could remove the very figure being carried.
 async fn delete_one(
     State(pool): State<SqlitePool>,
-    Path((listing_id, price_date)): Path<(i64, NaiveDate)>,
+    Path((listing_id, price_date)): Path<(ListingId, NaiveDate)>,
 ) -> Result<StatusCode, ApiError> {
     // The guard and the delete share one connection inside one write
     // transaction. Read on the pool and deleted in a separate statement, a
@@ -444,7 +445,7 @@ async fn clear_unpriced_before(
             deleted,
         } => {
             tracing::info!(
-                listing_id = body.listing_id,
+                listing_id = body.listing_id.0,
                 ticker = ?listing.ticker,
                 %unpriced_before,
                 deleted,

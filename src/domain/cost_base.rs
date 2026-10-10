@@ -49,6 +49,7 @@
 //!    holding receiving non-AUD reductions.
 
 use crate::infra::currency::CurrencyCode;
+use crate::infra::id::ListingId;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::Serialize;
@@ -290,7 +291,7 @@ pub fn checked_cost_base(terms: &[Term<'_>]) -> Result<Decimal, UnrepresentableC
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct ParcelRow {
     pub id: i64,
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     pub holding_account_id: i64,
     /// The actual trade date — drives split and return-of-capital
     /// applicability (see [`Parcel::trade_date`]).
@@ -329,7 +330,7 @@ pub struct ParcelRow {
     /// the demerged entity, and this is the only thing that tells them apart
     /// (see [`Self::rollover`]). [`Self::columns_qualified`] reads it back off
     /// `corporate_actions`, so every query built from that list has it.
-    pub demerger_head_listing_id: Option<i64>,
+    pub demerger_head_listing_id: Option<ListingId>,
     /// The date this parcel's units joined **this listing's** register, walked
     /// back up the rollover chain — set only where that walk is needed, i.e.
     /// on a replacement parcel the operation left registered
@@ -1240,7 +1241,7 @@ pub async fn db_cost_base_reduction_events(
     let mut map: HashMap<i64, Vec<AmitReductionEvent>> = HashMap::new();
     for row in &rows {
         let trade_id: i64 = row.try_get("trade_id")?;
-        let listing_id: i64 = row.try_get("listing_id")?;
+        let listing_id: ListingId = row.try_get("listing_id")?;
         let amma_statement_id: i64 = row.try_get("amma_statement_id")?;
         let tax_year_end_date: chrono::NaiveDate = row.try_get("tax_year_end_date")?;
         let trade_date: chrono::NaiveDate = row.try_get("trade_date")?;
@@ -1335,7 +1336,7 @@ mod tests {
     /// `operated` (its own trade date) out of units acquired on `acquired`.
     /// `provenance` sets the one column the operation writes.
     fn replacement(
-        listing_id: i64,
+        listing_id: ListingId,
         acquired: NaiveDate,
         operated: NaiveDate,
         provenance: impl Fn(&mut ParcelRow),
@@ -1382,16 +1383,20 @@ mod tests {
         let registered_from = |row: ParcelRow| row.rollover().map(|r| r.registered_from);
 
         // Head listing 1, demerged entity listing 2.
-        let head = replacement(1, acquired, operated, |row| {
+        let head = replacement(ListingId(1), acquired, operated, |row| {
             row.demerger_action_id = Some(10);
-            row.demerger_head_listing_id = Some(1);
+            row.demerger_head_listing_id = Some(ListingId(1));
         });
-        let demerged = replacement(2, acquired, operated, |row| {
+        let demerged = replacement(ListingId(2), acquired, operated, |row| {
             row.demerger_action_id = Some(10);
-            row.demerger_head_listing_id = Some(1);
+            row.demerger_head_listing_id = Some(ListingId(1));
         });
-        let transferred = replacement(1, acquired, operated, |row| row.transfer_id = Some(3));
-        let exchanged = replacement(2, acquired, operated, |row| row.scrip_action_id = Some(7));
+        let transferred = replacement(ListingId(1), acquired, operated, |row| {
+            row.transfer_id = Some(3)
+        });
+        let exchanged = replacement(ListingId(2), acquired, operated, |row| {
+            row.scrip_action_id = Some(7)
+        });
 
         assert_eq!(registered_from(head), Some(acquired));
         assert_eq!(registered_from(transferred), Some(acquired));
@@ -1401,14 +1406,14 @@ mod tests {
         // Both operations still date the *operation* itself at the parcel's
         // trade date — the guard against counting a payment already folded
         // into the carried cost base (SCENARIOS N-06).
-        let head = replacement(1, acquired, operated, |row| {
+        let head = replacement(ListingId(1), acquired, operated, |row| {
             row.demerger_action_id = Some(10);
-            row.demerger_head_listing_id = Some(1);
+            row.demerger_head_listing_id = Some(ListingId(1));
         });
         assert_eq!(head.rollover().map(|r| r.on), Some(operated));
 
         // An ordinary parcel has no rollover at all, however it was acquired.
-        let ordinary = replacement(1, acquired, operated, |_| {});
+        let ordinary = replacement(ListingId(1), acquired, operated, |_| {});
         assert!(ordinary.rollover().is_none());
     }
 
@@ -1428,13 +1433,13 @@ mod tests {
         let registered_from = |row: ParcelRow| row.rollover().map(|r| r.registered_from);
         let walked = |row: &mut ParcelRow| row.registered_from = Some(exchanged);
 
-        let transferred = replacement(1, acquired, operated, |row| {
+        let transferred = replacement(ListingId(1), acquired, operated, |row| {
             row.transfer_id = Some(3);
             walked(row);
         });
-        let head = replacement(1, acquired, operated, |row| {
+        let head = replacement(ListingId(1), acquired, operated, |row| {
             row.demerger_action_id = Some(10);
-            row.demerger_head_listing_id = Some(1);
+            row.demerger_head_listing_id = Some(ListingId(1));
             walked(row);
         });
         assert_eq!(registered_from(transferred), Some(exchanged));
@@ -1442,18 +1447,20 @@ mod tests {
 
         // Nothing to follow — a chain the walk could not read — falls back to
         // the parcel's own acquisition date, the behaviour before the walk.
-        let transferred = replacement(1, acquired, operated, |row| row.transfer_id = Some(3));
+        let transferred = replacement(ListingId(1), acquired, operated, |row| {
+            row.transfer_id = Some(3)
+        });
         assert_eq!(registered_from(transferred), Some(acquired));
 
         // The two that left the register answer with the operation date
         // whatever the column says.
-        let exchanged_parcel = replacement(2, acquired, operated, |row| {
+        let exchanged_parcel = replacement(ListingId(2), acquired, operated, |row| {
             row.scrip_action_id = Some(7);
             walked(row);
         });
-        let demerged = replacement(2, acquired, operated, |row| {
+        let demerged = replacement(ListingId(2), acquired, operated, |row| {
             row.demerger_action_id = Some(10);
-            row.demerger_head_listing_id = Some(1);
+            row.demerger_head_listing_id = Some(ListingId(1));
             walked(row);
         });
         assert_eq!(registered_from(exchanged_parcel), Some(operated));

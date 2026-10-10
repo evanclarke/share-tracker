@@ -2,6 +2,7 @@
 //! the holdings reports across a split or consolidation.
 
 use super::*;
+use crate::infra::id::ListingId;
 
 #[tokio::test]
 async fn db_held_listings_excludes_fully_sold() {
@@ -9,9 +10,9 @@ async fn db_held_listings_excludes_fully_sold() {
     insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
     insert_listing(&pool, 2, "SOLD", "XASX", "AUD").await;
     insert_listing(&pool, 3, "NEVER", "XASX", "AUD").await;
-    insert_buy(&pool, 1, 1, "100").await;
-    insert_buy(&pool, 2, 2, "50").await;
-    sell_everything(&pool, 3, 2, 2, "50").await;
+    insert_buy(&pool, 1, ListingId(1), "100").await;
+    insert_buy(&pool, 2, ListingId(2), "50").await;
+    sell_everything(&pool, 3, 2, ListingId(2), "50").await;
 
     assert_eq!(db_held_listing_ids(&pool, None).await.unwrap(), vec![1]);
     // As at a date before the sale, the sold listing still counts; before
@@ -44,7 +45,7 @@ async fn collection_covers_a_listing_sold_inside_the_lookback_window() {
         .price(Decimal::from(10))
         .insert(&pool)
         .await;
-    sell_everything(&pool, 2, 1, 1, "100").await;
+    sell_everything(&pool, 2, 1, ListingId(1), "100").await;
     sqlx::query("UPDATE trades SET date = '2026-06-03' WHERE id = 2")
         .execute(&pool)
         .await
@@ -55,13 +56,15 @@ async fn collection_covers_a_listing_sold_inside_the_lookback_window() {
 
     let mut stub = StubFetcher::default();
     for &d in &asx_lookback_window() {
-        stub = stub.with_close(1, d, "62.48", "AUD");
+        stub = stub.with_close(ListingId(1), d, "62.48", "AUD");
     }
     run_collection(&pool, &stub, friday_evening_sydney())
         .await
         .unwrap();
 
-    let stored = db_list(&pool, Some(1), None, None, None).await.unwrap();
+    let stored = db_list(&pool, Some(ListingId(1)), None, None, None)
+        .await
+        .unwrap();
     assert!(
         !stored.is_empty(),
         "the sold listing is still collected for the window"
@@ -100,7 +103,7 @@ async fn held_sets_agree(pool: &SqlitePool, as_of: NaiveDate) {
     let holdings = crate::reports::portfolio::db_holdings_on(&mut conn, Some(as_of))
         .await
         .unwrap();
-    let mut from_report: Vec<i64> = holdings.iter().map(|h| h.listing_id).collect();
+    let mut from_report: Vec<i64> = holdings.iter().map(|h| h.listing_id.0).collect();
     from_report.sort();
     from_report.dedup();
     assert_eq!(ids, from_report, "as at {as_of}");
@@ -117,7 +120,7 @@ async fn db_held_listings_match_the_holdings_report_across_a_split() {
         .price(Decimal::from(10))
         .insert(&pool)
         .await;
-    insert_share_split(&pool, 1, ymd(2024, 3, 1), "2", "1").await;
+    insert_share_split(&pool, ListingId(1), ymd(2024, 3, 1), "2", "1").await;
     crate::test_support::sell(2, 1)
         .date(ymd(2024, 6, 3))
         .qty(Decimal::from(150))
@@ -148,7 +151,7 @@ async fn db_held_listings_match_the_holdings_report_across_a_consolidation() {
         .price(Decimal::from(1))
         .insert(&pool)
         .await;
-    insert_share_split(&pool, 1, ymd(2024, 3, 1), "1", "10").await;
+    insert_share_split(&pool, ListingId(1), ymd(2024, 3, 1), "1", "10").await;
     crate::test_support::sell(2, 1)
         .date(ymd(2024, 6, 3))
         .qty(Decimal::from(100))

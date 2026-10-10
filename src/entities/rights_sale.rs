@@ -57,6 +57,7 @@ use crate::infra::db::{WriteMode, write_tx};
 use crate::infra::decimal::{Money, parse_dec, row_dec};
 use crate::infra::extract::{Json, Query};
 use crate::infra::http::{self, ApiError, DryRunQuery};
+use crate::infra::id::ListingId;
 use axum::{
     Router,
     extract::{Path, State},
@@ -373,7 +374,7 @@ fn check_body(body: &SellRightsBody) -> Result<SaleAmounts, SellRightsError> {
 /// the walk is compared in record-date units).
 struct Anchoring<'a> {
     action_id: i64,
-    listing_id: i64,
+    listing_id: ListingId,
     record_date: NaiveDate,
     rights_units: Decimal,
     rights_held_units: Decimal,
@@ -402,7 +403,7 @@ async fn parcel_units_at_record_date(
     let Some(parcel) = parcel else {
         return Err(SellRightsError::NotAnOriginalParcel);
     };
-    let parcel_listing: i64 = parcel.try_get("listing_id")?;
+    let parcel_listing: ListingId = parcel.try_get("listing_id")?;
     let parcel_date: NaiveDate = parcel.try_get("date")?;
     let parcel_type: TradeType = parcel.try_get("trade_type")?;
     if !parcel_type.is_acquisition()
@@ -696,7 +697,7 @@ async fn attach_allocations(
 #[derive(Debug, Default, Deserialize, utoipa::IntoParams)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ListParams {
-    pub listing_id: Option<i64>,
+    pub listing_id: Option<ListingId>,
     pub holding_account_id: Option<i64>,
     pub rights_action_id: Option<i64>,
     pub from: Option<NaiveDate>,
@@ -838,7 +839,7 @@ mod tests {
             pool,
             &CorporateAction {
                 id,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date,
                 kind: ActionKind::RightsIssue {
                     rights_units: Decimal::ONE,
@@ -859,7 +860,7 @@ mod tests {
             pool,
             &CorporateAction {
                 id,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date,
                 kind: ActionKind::RightsIssue {
                     rights_units: Decimal::ONE,
@@ -1181,7 +1182,7 @@ mod tests {
             &pool,
             &CorporateAction {
                 id: 11,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: d(2024, 7, 1),
                 kind: ActionKind::ShareSplit {
                     split_new_units: Decimal::from(2),
@@ -1676,7 +1677,7 @@ mod tests {
             pool,
             &CorporateAction {
                 id,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date,
                 kind: ActionKind::RightsIssue {
                     rights_units: Decimal::ONE,

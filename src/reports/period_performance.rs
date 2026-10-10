@@ -41,6 +41,7 @@ use crate::infra::currency::CurrencyCode;
 use crate::infra::extract::{Json, Query};
 use crate::infra::fx::{FxError, FxRates};
 use crate::infra::http::ApiError;
+use crate::infra::id::ListingId;
 use crate::reports::{performance, realised_gains, valuation};
 use axum::{Router, extract::State, routing::get};
 use chrono::{DateTime, NaiveDate, Utc};
@@ -58,7 +59,7 @@ pub struct PeriodRequest {
 
 #[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize)]
 pub struct HoldingPeriod {
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     pub holding_account_id: i64,
     pub opening_market_value: Decimal,
     pub closing_market_value: Decimal,
@@ -267,15 +268,15 @@ pub async fn compute(
     let holding_excluded = !excluded_holdings.is_empty();
     let valuations_from = resolved_from.valuations;
     let valuations_to = resolved_to.valuations;
-    let val_from_by_listing: HashMap<i64, &valuation::ListingValuation> =
+    let val_from_by_listing: HashMap<ListingId, &valuation::ListingValuation> =
         valuations_from.iter().map(|v| (v.listing_id, v)).collect();
-    let val_to_by_listing: HashMap<i64, &valuation::ListingValuation> =
+    let val_to_by_listing: HashMap<ListingId, &valuation::ListingValuation> =
         valuations_to.iter().map(|v| (v.listing_id, v)).collect();
-    let prices_from: HashMap<i64, Decimal> = valuations_from
+    let prices_from: HashMap<ListingId, Decimal> = valuations_from
         .iter()
         .map(|v| (v.listing_id, v.aud_price))
         .collect();
-    let prices_to: HashMap<i64, Decimal> = valuations_to
+    let prices_to: HashMap<ListingId, Decimal> = valuations_to
         .iter()
         .map(|v| (v.listing_id, v.aud_price))
         .collect();
@@ -298,7 +299,7 @@ pub async fn compute(
         Option<&'a performance::HoldingPerformance>,
         Option<&'a performance::HoldingPerformance>,
     );
-    let mut by_key: BTreeMap<(i64, i64), Endpoints> = BTreeMap::new();
+    let mut by_key: BTreeMap<(ListingId, i64), Endpoints> = BTreeMap::new();
     for r in &perf_from {
         if let (Some(l), Some(a)) = (r.listing_id, r.holding_account_id) {
             by_key.entry((l, a)).or_default().0 = Some(r);
@@ -519,8 +520,8 @@ mod tests {
             .await;
     }
 
-    async fn store_price(pool: &SqlitePool, listing_id: i64, date: NaiveDate, price: &str) {
-        test_support::closing_price(listing_id, date)
+    async fn store_price(pool: &SqlitePool, listing_id: ListingId, date: NaiveDate, price: &str) {
+        test_support::closing_price(listing_id.0, date)
             .price(price)
             .fetched_at("2026-01-01T00:00:00Z")
             .insert(pool)
@@ -552,8 +553,8 @@ mod tests {
             .await;
         let from = ymd(2026, 6, 1);
         let to = ymd(2026, 7, 1);
-        store_price(&pool, 1, from, "12").await;
-        store_price(&pool, 1, to, "15").await;
+        store_price(&pool, ListingId(1), from, "12").await;
+        store_price(&pool, ListingId(1), to, "15").await;
 
         let r = compute(&pool, from, to, now_after(to)).await.unwrap();
         assert_eq!(r.opening_market_value, dec("1200"));
@@ -593,7 +594,7 @@ mod tests {
             .await;
         let from = ymd(2026, 6, 1);
         let to = ymd(2026, 7, 1);
-        store_price(&pool, 1, from, "12").await;
+        store_price(&pool, ListingId(1), from, "12").await;
 
         // Nothing stored at `to`: the whole window fails, the no-partial-result
         // rule.
@@ -646,9 +647,9 @@ mod tests {
             .await;
         let from = ymd(2026, 6, 1);
         let to = ymd(2026, 7, 1);
-        store_price(&pool, 1, to, "12").await;
-        store_price(&pool, 2, from, "60").await;
-        store_price(&pool, 2, to, "70").await;
+        store_price(&pool, ListingId(1), to, "12").await;
+        store_price(&pool, ListingId(2), from, "60").await;
+        store_price(&pool, ListingId(2), to, "70").await;
 
         // Nothing stored at `from`: the whole window fails, the
         // no-partial-result rule.
@@ -709,7 +710,7 @@ mod tests {
             .await;
         let from = ymd(2025, 1, 1);
         let to = ymd(2026, 1, 1); // exactly 365 days later
-        store_price(&pool, 1, from, "12").await; // opening: 100 * 12 = 1,200
+        store_price(&pool, ListingId(1), from, "12").await; // opening: 100 * 12 = 1,200
         test_support::buy(2, 1)
             .date(ymd(2025, 7, 1)) // mid-window purchase: 50 * 20 = 1,000
             .qty(dec("50"))
@@ -717,7 +718,7 @@ mod tests {
             .currency("AUD")
             .insert(&pool)
             .await;
-        store_price(&pool, 1, to, "18").await; // closing: 150 * 18 = 2,700
+        store_price(&pool, ListingId(1), to, "18").await; // closing: 150 * 18 = 2,700
 
         let r = compute(&pool, from, to, now_after(to)).await.unwrap();
         assert_eq!(r.opening_market_value, dec("1200"));
@@ -752,8 +753,8 @@ mod tests {
         let to = ymd(2026, 7, 1);
         insert_fx_rate(&pool, "USD", "2026-06", "2").await;
         insert_fx_rate(&pool, "USD", "2026-07", "4").await;
-        store_price(&pool, 1, from, "100").await;
-        store_price(&pool, 1, to, "100").await;
+        store_price(&pool, ListingId(1), from, "100").await;
+        store_price(&pool, ListingId(1), to, "100").await;
 
         let r = compute(&pool, from, to, now_after(to)).await.unwrap();
         // V0 = 10*100/2 = 500, V1 = 10*100/4 = 250.
@@ -791,7 +792,7 @@ mod tests {
             .currency("AUD")
             .insert(&pool)
             .await;
-        store_price(&pool, 10, to, "25").await;
+        store_price(&pool, ListingId(10), to, "25").await;
 
         // Closed mid-window: bought before `from`, fully sold 2026-06-15.
         insert_listing(&pool, 11, "ETH", "AUD").await;
@@ -810,7 +811,7 @@ mod tests {
             .insert(&pool)
             .await;
         test_support::allocate(&pool, 1, 12, 11, dec("30")).await;
-        store_price(&pool, 11, from, "12").await;
+        store_price(&pool, ListingId(11), from, "12").await;
 
         let r = compute(&pool, from, to, now_after(to)).await.unwrap();
         assert_eq!(r.holdings.len(), 2);
@@ -868,7 +869,7 @@ mod tests {
             .currency("AUD")
             .insert(&pool)
             .await;
-        store_price(&pool, 1, to, "25").await;
+        store_price(&pool, ListingId(1), to, "25").await;
 
         let r = compute(&pool, from, to, now_after(to)).await.unwrap();
         assert_eq!(r.opening_market_value, Decimal::ZERO);
@@ -890,8 +891,8 @@ mod tests {
             .currency("AUD")
             .insert(&pool)
             .await;
-        store_price(&pool, 1, from, "12").await;
-        store_price(&pool, 1, to, "12").await;
+        store_price(&pool, ListingId(1), from, "12").await;
+        store_price(&pool, ListingId(1), to, "12").await;
         test_support::income(1, 1, ymd(2026, 6, 20))
             .with(|i| i.unfranked_amount = dec("50"))
             .insert(&pool)
@@ -921,8 +922,8 @@ mod tests {
         let to = ymd(2026, 7, 1);
         insert_fx_rate(&pool, "USD", "2026-05", "2").await;
         insert_fx_rate(&pool, "USD", "2026-06", "3").await; // no 2026-07 entry
-        store_price(&pool, 1, from, "100").await;
-        store_price(&pool, 1, to, "100").await;
+        store_price(&pool, ListingId(1), from, "100").await;
+        store_price(&pool, ListingId(1), to, "100").await;
 
         let r = compute(&pool, from, to, now_after(to)).await.unwrap();
         assert!(r.provisional);
@@ -969,7 +970,7 @@ mod tests {
             .await;
         let from = ymd(2026, 6, 1);
         let to = ymd(2026, 7, 1);
-        store_price(&pool, 1, from, "12").await;
+        store_price(&pool, ListingId(1), from, "12").await;
         // no price stored at `to`
 
         let err = compute(&pool, from, to, now_after(to)).await.unwrap_err();
@@ -991,8 +992,8 @@ mod tests {
             .await;
         let from = ymd(2026, 6, 1);
         let to = ymd(2026, 7, 1);
-        store_price(&pool, 1, from, "12").await;
-        store_price(&pool, 1, to, "15").await;
+        store_price(&pool, ListingId(1), from, "12").await;
+        store_price(&pool, ListingId(1), to, "15").await;
 
         let resp = ApiClient::over(router().with_state(pool))
             .get(format!("/portfolio/period_performance?from={from}&to={to}"))
@@ -1049,8 +1050,8 @@ mod tests {
             .await;
         let from = ymd(2026, 6, 1);
         let to = ymd(2026, 7, 1);
-        store_price(&pool, 1, from, "12").await;
-        store_price(&pool, 1, to, "15").await;
+        store_price(&pool, ListingId(1), from, "12").await;
+        store_price(&pool, ListingId(1), to, "15").await;
         // Only the valuation month resolves; the missing month is the
         // income's own.
         insert_fx_rate(&pool, "USD", "2026-06", "2").await;

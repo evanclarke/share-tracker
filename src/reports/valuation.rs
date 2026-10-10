@@ -23,6 +23,7 @@
 //! valuation — zero of zero is not a portfolio total.
 
 use crate::infra::currency::CurrencyCode;
+use crate::infra::id::ListingId;
 use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -61,7 +62,7 @@ pub enum ValuationError {
 /// close, the FX rate used to convert it, and the AUD result.
 #[derive(Debug, Clone)]
 pub struct ListingValuation {
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     pub currency: CurrencyCode,
     /// The stored closing price, in the listing's quote currency (not AUD).
     pub native_price: Decimal,
@@ -94,7 +95,7 @@ pub struct ListingValuation {
 /// stored with the snapshot.
 #[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExcludedHolding {
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     pub ticker: String,
     /// Why the holding is absent, in the wording every surface repeats.
     pub reason: String,
@@ -104,7 +105,7 @@ impl ExcludedHolding {
     /// The one place the exclusion is worded, so the snapshot banner, the
     /// report row's `price_unavailable`, and the blocker text cannot drift.
     fn new(
-        listing_id: i64,
+        listing_id: ListingId,
         ticker: &str,
         unpriced_before: NaiveDate,
         valuation_day: NaiveDate,

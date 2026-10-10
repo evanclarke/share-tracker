@@ -41,6 +41,7 @@ use crate::infra::db::{WriteMode, write_tx};
 use crate::infra::decimal::parse_dec;
 use crate::infra::extract::{Json, Query};
 use crate::infra::http::{ApiError, DryRunQuery};
+use crate::infra::id::ListingId;
 use axum::{
     Router,
     extract::{Path, State},
@@ -214,7 +215,7 @@ pub fn router() -> Router<SqlitePool> {
 /// compare in one basis.
 pub(crate) async fn db_held_at_record_date(
     conn: &mut sqlx::SqliteConnection,
-    listing_id: i64,
+    listing_id: ListingId,
     record_date: NaiveDate,
     splits: &[SplitEvent],
 ) -> Result<Decimal, sqlx::Error> {
@@ -538,7 +539,7 @@ mod tests {
                 holding_account_id: 1,
                 date,
                 settlement_date: Some(date),
-                listing_id: 1,
+                listing_id: ListingId(1),
                 average_price: "2.00".parse().unwrap(),
                 quantity: qty.parse().unwrap(),
                 currency: "AUD".into(),
@@ -567,7 +568,7 @@ mod tests {
             pool,
             &CorporateAction {
                 id,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date,
                 kind: ActionKind::RightsIssue {
                     rights_units: Decimal::ONE,
@@ -588,7 +589,7 @@ mod tests {
             pool,
             &CorporateAction {
                 id,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date,
                 kind: ActionKind::RightsIssue {
                     rights_units: Decimal::ONE,
@@ -794,7 +795,7 @@ mod tests {
             &pool,
             &CorporateAction {
                 id: 5,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: d(2024, 4, 1),
                 kind: ActionKind::ShareSplit {
                     split_new_units: Decimal::from(2),
@@ -829,7 +830,7 @@ mod tests {
             &pool,
             &CorporateAction {
                 id: 5,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: d(2024, 7, 15),
                 kind: ActionKind::ShareSplit {
                     split_new_units: Decimal::from(2),
@@ -863,7 +864,7 @@ mod tests {
             &pool,
             &CorporateAction {
                 id: 10,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: d(2024, 7, 1),
                 kind: ActionKind::RightsIssue {
                     rights_units: Decimal::from(3),
@@ -895,7 +896,7 @@ mod tests {
             &pool,
             &CorporateAction {
                 id: 11,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: d(2024, 7, 1),
                 kind: ActionKind::ShareSplit {
                     split_new_units: Decimal::from(2),
@@ -1251,7 +1252,7 @@ mod tests {
             &pool,
             &CorporateAction {
                 id: 91,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: d(2024, 2, 6),
                 kind: ActionKind::RightsIssue {
                     rights_units: Decimal::ONE,
@@ -1314,7 +1315,7 @@ mod tests {
             &pool,
             &CorporateAction {
                 id: 10,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: d(2024, 7, 1),
                 kind: ActionKind::RightsIssue {
                     rights_units: Decimal::ONE,
@@ -1397,7 +1398,7 @@ mod tests {
             &pool,
             &CorporateAction {
                 id: 10,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: d(2024, 7, 1),
                 kind: ActionKind::RightsIssue {
                     rights_units: Decimal::from(1000),
@@ -1440,7 +1441,7 @@ mod tests {
             &pool,
             &CorporateAction {
                 id: 11,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: d(2024, 7, 1),
                 kind: ActionKind::RightsIssue {
                     rights_units: Decimal::ONE,
@@ -1487,7 +1488,7 @@ mod tests {
             &pool,
             &CorporateAction {
                 id: 10,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: d(2024, 7, 1),
                 kind: ActionKind::RightsIssue {
                     rights_units: Decimal::from(1000),
@@ -1530,7 +1531,7 @@ mod tests {
             pool,
             &CorporateAction {
                 id: 10,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: d(2024, 2, 1),
                 kind: ActionKind::RightsIssue {
                     rights_units: "1e27".parse().unwrap(),
@@ -1547,7 +1548,7 @@ mod tests {
             pool,
             &CorporateAction {
                 id: 11,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: d(2024, 6, 1),
                 kind: ActionKind::ShareSplit {
                     split_new_units: Decimal::from(1000),
@@ -1667,7 +1668,7 @@ mod tests {
             pool,
             &CorporateAction {
                 id,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date,
                 kind: crate::entities::corporate_action::ActionKind::RightsIssue {
                     rights_units: Decimal::ONE,

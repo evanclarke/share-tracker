@@ -3,6 +3,7 @@
 //! validation (exchange MIC validation, settlement-holiday coverage). The one
 //! exception to "no writes" is `snapshot`, which persists the price-dependent
 //! reports' daily results to `report_snapshots`.
+use crate::infra::id::ListingId;
 use axum::Router;
 use sqlx::SqlitePool;
 
@@ -52,7 +53,7 @@ pub mod weekly_summary;
 /// id straight from the request).
 pub(crate) async fn listing_label(
     pool: &SqlitePool,
-    listing_id: i64,
+    listing_id: ListingId,
 ) -> Result<String, sqlx::Error> {
     let ticker: Option<String> = sqlx::query_scalar("SELECT ticker FROM listings WHERE id = ?")
         .bind(listing_id)

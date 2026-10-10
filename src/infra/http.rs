@@ -2039,7 +2039,7 @@ mod tests {
                 "Decimal" => Some("strict_decimal"),
                 "Option<Decimal>" => Some("strict_optional_decimal"),
                 // The three portfolio reports' price-override maps.
-                "HashMap<i64,Decimal>" => Some("strict_decimal_map"),
+                "HashMap<ListingId,Decimal>" => Some("strict_decimal_map"),
                 // Any other shape nesting a decimal would need its own
                 // `deserialize_with`, so fail rather than wave it through.
                 other if other.contains("Decimal") => Some("«a strict decimal deserialiser»"),

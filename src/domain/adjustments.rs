@@ -28,6 +28,7 @@
 
 use crate::infra::currency::CurrencyCode;
 use crate::infra::decimal::{mul_div, parse_dec};
+use crate::infra::id::ListingId;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use sqlx::Row;
@@ -177,7 +178,7 @@ impl RocEvent {
 /// read transaction.
 pub async fn db_return_of_capital_events<'e, E>(
     executor: E,
-) -> Result<HashMap<i64, Vec<RocEvent>>, sqlx::Error>
+) -> Result<HashMap<ListingId, Vec<RocEvent>>, sqlx::Error>
 where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
 {
@@ -188,9 +189,9 @@ where
     .fetch_all(executor)
     .await?;
 
-    let mut map: HashMap<i64, Vec<RocEvent>> = HashMap::new();
+    let mut map: HashMap<ListingId, Vec<RocEvent>> = HashMap::new();
     for row in &rows {
-        let listing_id: i64 = row.try_get("listing_id")?;
+        let listing_id: ListingId = row.try_get("listing_id")?;
         map.entry(listing_id).or_default().push(RocEvent {
             date: row.try_get("date")?,
             amount_per_unit: parse_dec("amount_per_unit", row.try_get("amount_per_unit")?)?,
@@ -235,7 +236,7 @@ pub struct CurrencyConflict {
 /// known at write time, so the check is the conservative one.
 pub async fn db_payment_currency_conflict<'e, E>(
     executor: E,
-    listing_id: i64,
+    listing_id: ListingId,
 ) -> Result<Option<CurrencyConflict>, sqlx::Error>
 where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
@@ -420,7 +421,7 @@ fn split_event_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<SplitEvent, sql
 /// transaction.
 pub async fn db_share_split_events<'e, E>(
     executor: E,
-) -> Result<HashMap<i64, Vec<SplitEvent>>, sqlx::Error>
+) -> Result<HashMap<ListingId, Vec<SplitEvent>>, sqlx::Error>
 where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
 {
@@ -432,9 +433,9 @@ where
     .fetch_all(executor)
     .await?;
 
-    let mut map: HashMap<i64, Vec<SplitEvent>> = HashMap::new();
+    let mut map: HashMap<ListingId, Vec<SplitEvent>> = HashMap::new();
     for row in &rows {
-        let listing_id: i64 = row.try_get("listing_id")?;
+        let listing_id: ListingId = row.try_get("listing_id")?;
         map.entry(listing_id)
             .or_default()
             .push(split_event_from_row(row)?);
@@ -447,7 +448,7 @@ where
 /// validators (sells/trades) can run it inside their transaction.
 pub async fn db_splits_for_listing<'e, E>(
     executor: E,
-    listing_id: i64,
+    listing_id: ListingId,
 ) -> Result<Vec<SplitEvent>, sqlx::Error>
 where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
@@ -654,7 +655,7 @@ pub struct DemergerPriceStatement {
 /// corporate-action write's own transaction.
 pub async fn db_demerger_price_statements<'e, E>(
     executor: E,
-    listing_id: i64,
+    listing_id: ListingId,
 ) -> Result<Vec<DemergerPriceStatement>, sqlx::Error>
 where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,

@@ -41,6 +41,7 @@
 //! allocation is costed at its own unit count here, which is also what the
 //! recorded Sell does.
 
+use crate::infra::id::ListingId;
 use std::collections::HashMap;
 
 use chrono::NaiveDate;
@@ -61,9 +62,9 @@ pub struct Costing {
     /// still reaches the units it disposes of.
     amit: HashMap<i64, Vec<AmitReductionEvent>>,
     /// Return-of-capital payments (CGT event G1) per listing.
-    roc: HashMap<i64, Vec<RocEvent>>,
+    roc: HashMap<ListingId, Vec<RocEvent>>,
     /// Share splits/consolidations per listing (quantity re-basing).
-    splits: HashMap<i64, Vec<SplitEvent>>,
+    splits: HashMap<ListingId, Vec<SplitEvent>>,
     /// Every imported ATO FX rate, so the per-parcel conversion is a map
     /// lookup rather than a round trip.
     fx: FxRates,

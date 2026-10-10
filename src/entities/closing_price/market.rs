@@ -10,6 +10,7 @@
 //! exactly for an exchange-less (Crypto) span.
 
 use crate::entities::{exchange, listing};
+use crate::infra::id::ListingId;
 use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveTime, Utc};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
@@ -267,7 +268,7 @@ impl Market {
 /// span's exchange and holiday calendar; None if the listing doesn't exist.
 pub async fn load_market(
     pool: &SqlitePool,
-    listing_id: i64,
+    listing_id: ListingId,
 ) -> Result<Option<Market>, sqlx::Error> {
     let mut conn = pool.acquire().await?;
     load_market_on(&mut conn, listing_id).await
@@ -279,7 +280,7 @@ pub async fn load_market(
 /// `trade::db::listing_currency_mismatch` reads the listing's currency there.
 pub(crate) async fn load_market_on(
     conn: &mut sqlx::SqliteConnection,
-    listing_id: i64,
+    listing_id: ListingId,
 ) -> Result<Option<Market>, sqlx::Error> {
     let Some(listing) = listing::db_get(&mut *conn, listing_id).await? else {
         return Ok(None);
@@ -408,7 +409,7 @@ pub(crate) fn non_trading_day(market: &Market, date: NaiveDate) -> Option<NonTra
 /// missing listing better than a calendar message could.
 pub(crate) async fn db_non_trading_day(
     conn: &mut sqlx::SqliteConnection,
-    listing_id: i64,
+    listing_id: ListingId,
     date: NaiveDate,
 ) -> Result<Option<NonTradingDay>, sqlx::Error> {
     let Some(market) = load_market_on(conn, listing_id).await? else {

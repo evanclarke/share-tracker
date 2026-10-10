@@ -4,6 +4,7 @@
 
 use crate::entities::closing_price::{self, HeldTimeline, PriceOrigin};
 use crate::infra::decimal::Money;
+use crate::infra::id::ListingId;
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -35,7 +36,7 @@ pub const DUPLICATE_PRICE_SERIES_RUN_DAYS: i64 = 30;
 /// (migration 0037).
 #[derive(utoipa::ToSchema, Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct ErroredPriceListing {
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     pub ticker: String,
     /// Count of errored rows for this listing (any date, not just recent).
     pub errored_days: i64,
@@ -64,7 +65,7 @@ pub struct ErroredPriceListing {
 /// for the same reason [`ErroredPriceListing`] excludes them.
 #[derive(utoipa::ToSchema, Debug, Serialize, Deserialize)]
 pub struct UnpricedListing {
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     pub ticker: String,
     /// Count of distinct valuation days with no stored row.
     pub unpriced_days: i64,
@@ -116,7 +117,7 @@ pub struct UnpricedListing {
 #[derive(utoipa::ToSchema, Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct DemergerMissingClose {
     pub action_id: i64,
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     pub ticker: String,
     /// The demerger date — every stored price before it is suspect.
     pub demerger_date: NaiveDate,
@@ -216,7 +217,7 @@ pub struct DemergerHeadNotContinuing {
     pub action_id: i64,
     /// The head listing — the one recorded as continuing, which the price
     /// series says was created by the demerger.
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     pub ticker: String,
     pub demerger_date: NaiveDate,
     /// The head listing's `unpriced_before`, when it carries one: the explicit
@@ -235,7 +236,7 @@ pub struct DemergerHeadNotContinuing {
     pub head_held_from: NaiveDate,
     /// The demerged listing — the one recorded as created, which the price
     /// series says was trading all along.
-    pub demerger_listing_id: i64,
+    pub demerger_listing_id: ListingId,
     pub demerger_ticker: String,
     /// How many ok, provider-fetched prices the demerged listing holds from
     /// before the demerger — the evidence that it, not the head, is the
@@ -292,9 +293,9 @@ pub struct DemergerHeadNotContinuing {
 #[derive(utoipa::ToSchema, Debug, Serialize, Deserialize)]
 pub struct DuplicatePriceSeries {
     /// The pair, ordered by id, so each pair is reported once.
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     pub ticker: String,
-    pub other_listing_id: i64,
+    pub other_listing_id: ListingId,
     pub other_ticker: String,
     /// Length of the longest run of consecutive shared trading days on which
     /// the two listings' stored closes are equal — always ≥
@@ -511,7 +512,7 @@ pub(super) async fn db_demergers_head_not_continuing(
 /// One stored ok closing price, read for [`db_duplicate_price_series`].
 #[derive(sqlx::FromRow)]
 pub(super) struct StoredClose {
-    listing_id: i64,
+    listing_id: ListingId,
     price_date: NaiveDate,
     #[sqlx(try_from = "Money")]
     price: Decimal,
@@ -601,7 +602,7 @@ pub(super) async fn db_duplicate_price_series(
     if rows.is_empty() {
         return Ok(Vec::new());
     }
-    let mut series: BTreeMap<i64, Vec<StoredClose>> = BTreeMap::new();
+    let mut series: BTreeMap<ListingId, Vec<StoredClose>> = BTreeMap::new();
     for row in rows {
         series.entry(row.listing_id).or_default().push(row);
     }
@@ -609,9 +610,9 @@ pub(super) async fn db_duplicate_price_series(
     // The FK guarantees the listing exists; a row written between the two
     // queries is the only way to miss one, and an empty ticker still names the
     // ids to open.
-    let ticker = |id: i64| tickers.get(&id).cloned().unwrap_or_default();
+    let ticker = |id: ListingId| tickers.get(&id).cloned().unwrap_or_default();
 
-    let ids: Vec<i64> = series.keys().copied().collect();
+    let ids: Vec<ListingId> = series.keys().copied().collect();
     let mut duplicates = Vec::new();
     for (index, &listing_id) in ids.iter().enumerate() {
         for &other_listing_id in &ids[index + 1..] {

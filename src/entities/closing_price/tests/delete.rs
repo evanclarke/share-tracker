@@ -1,6 +1,7 @@
 //! Deleting a stored row, and the audit trail it leaves.
 
 use super::*;
+use crate::infra::id::ListingId;
 
 /// An errored row for a day that can never have a price (here: before the
 /// security's first trading day) is deletable, which is the only way to
@@ -9,7 +10,7 @@ use super::*;
 async fn api_delete_removes_an_errored_row() {
     let pool = test_pool().await;
     insert_listing(&pool, 1, "HNDQ", "XASX", "AUD").await;
-    insert_buy(&pool, 1, 1, "100").await;
+    insert_buy(&pool, 1, ListingId(1), "100").await;
     store_errored(&pool, ymd(2026, 6, 2)).await;
     let app = full_router(pool.clone(), StubFetcher::default());
 
@@ -22,7 +23,7 @@ async fn api_delete_removes_an_errored_row() {
     );
     assert!(bytes.is_empty());
     assert!(
-        db_get_one(&pool, 1, ymd(2026, 6, 2))
+        db_get_one(&pool, ListingId(1), ymd(2026, 6, 2))
             .await
             .unwrap()
             .is_none()
@@ -40,9 +41,9 @@ async fn api_delete_removes_an_errored_row() {
 async fn api_delete_rejects_an_ok_row() {
     let pool = test_pool().await;
     insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
-    insert_buy(&pool, 1, 1, "100").await;
-    let market = load_market(&pool, 1).await.unwrap().unwrap();
-    let stub = StubFetcher::default().with_close(1, ymd(2026, 6, 2), "62.48", "AUD");
+    insert_buy(&pool, 1, ListingId(1), "100").await;
+    let market = load_market(&pool, ListingId(1)).await.unwrap().unwrap();
+    let stub = StubFetcher::default().with_close(ListingId(1), ymd(2026, 6, 2), "62.48", "AUD");
     fetch_and_store(&pool, &stub, &market, &[ymd(2026, 6, 2)])
         .await
         .unwrap();
@@ -52,7 +53,7 @@ async fn api_delete_rejects_an_ok_row() {
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     let msg = String::from_utf8_lossy(&bytes);
     assert!(msg.contains("re-fetch it"), "points at the fix: {msg}");
-    let row = db_get_one(&pool, 1, ymd(2026, 6, 2))
+    let row = db_get_one(&pool, ListingId(1), ymd(2026, 6, 2))
         .await
         .unwrap()
         .unwrap();
@@ -65,9 +66,9 @@ async fn api_delete_rejects_an_ok_row() {
 async fn discarding_an_errored_row_is_recorded_in_the_audit_trail() {
     let pool = test_pool().await;
     insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
-    insert_buy(&pool, 1, 1, "100").await;
+    insert_buy(&pool, 1, ListingId(1), "100").await;
     store_errored(&pool, ymd(2026, 6, 2)).await;
-    let row = db_get_one(&pool, 1, ymd(2026, 6, 2))
+    let row = db_get_one(&pool, ListingId(1), ymd(2026, 6, 2))
         .await
         .unwrap()
         .unwrap();
@@ -124,7 +125,7 @@ async fn a_delete_cannot_race_a_concurrent_manual_price_write() {
     let dir = tempfile::tempdir().unwrap();
     let pool = crate::test_support::race_pool(&dir).await;
     insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
-    insert_buy(&pool, 1, 1, "100").await;
+    insert_buy(&pool, 1, ListingId(1), "100").await;
     store_errored(&pool, ymd(2026, 6, 2)).await;
     let app = full_router(pool.clone(), StubFetcher::default());
 
@@ -176,7 +177,7 @@ async fn a_delete_cannot_race_a_concurrent_manual_price_write() {
         msg.contains("enter another manual price to replace it"),
         "and names the manual row's replacement: {msg}"
     );
-    let row = db_get_one(&pool, 1, ymd(2026, 6, 2))
+    let row = db_get_one(&pool, ListingId(1), ymd(2026, 6, 2))
         .await
         .unwrap()
         .unwrap();
@@ -195,7 +196,7 @@ async fn a_delete_cannot_race_a_concurrent_manual_price_write() {
 async fn api_get_one_reads_the_row_the_put_and_delete_address() {
     let pool = test_pool().await;
     insert_listing(&pool, 1, "HNDQ", "XASX", "AUD").await;
-    insert_buy(&pool, 1, 1, "100").await;
+    insert_buy(&pool, 1, ListingId(1), "100").await;
     store_errored(&pool, ymd(2026, 6, 2)).await;
     let app = full_router(pool.clone(), StubFetcher::default());
 

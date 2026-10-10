@@ -3,6 +3,7 @@ use crate::infra::db::write_tx;
 use crate::infra::decimal::Money;
 use crate::infra::extract::Json;
 use crate::infra::http::{self, ApiError, CrudEntity, Upsert, UpsertResponse};
+use crate::infra::id::ListingId;
 use axum::{
     Router,
     extract::{Path, State},
@@ -17,7 +18,7 @@ use sqlx::SqlitePool;
 #[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct AmmaStatement {
     pub id: i64,
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     /// End of the Australian financial year the statement attributes — always a
     /// 30 June date, enforced at write time. Every AMMA-keyed report buckets the
     /// statement into the FY identified by this date's calendar year (the
@@ -110,7 +111,7 @@ pub struct AmmaStatement {
 #[serde(deny_unknown_fields)]
 pub struct AmmaStatementBody {
     /// The listed trust the statement attributes; the statement must be in its currency.
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     /// End of the financial year the statement attributes (`YYYY-MM-DD`); must be a 30 June
     /// date, e.g. `2024-06-30` for FY2024.
     pub tax_year_end_date: NaiveDate,
@@ -308,7 +309,7 @@ impl From<UpsertError> for ApiError {
 #[derive(Debug, Default, serde::Deserialize, utoipa::IntoParams)]
 #[serde(deny_unknown_fields)]
 pub struct AmmaListQuery {
-    pub listing_id: Option<i64>,
+    pub listing_id: Option<ListingId>,
     pub holding_account_id: Option<i64>,
     pub from: Option<NaiveDate>,
     pub to: Option<NaiveDate>,

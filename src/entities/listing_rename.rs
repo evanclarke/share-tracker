@@ -66,6 +66,7 @@ use crate::infra::currency::CurrencyCode;
 use crate::infra::db::write_tx;
 use crate::infra::extract::{Json, Query};
 use crate::infra::http::{ApiError, CrudEntity};
+use crate::infra::id::ListingId;
 use axum::{
     Router,
     extract::{Path, State},
@@ -79,7 +80,7 @@ use sqlx::SqlitePool;
 #[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct ListingRename {
     pub id: i64,
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     pub effective_date: NaiveDate,
     pub old_ticker: String,
     pub new_ticker: String,
@@ -295,7 +296,7 @@ pub fn router() -> Router<SqlitePool> {
 
 pub async fn db_list_for_listing(
     pool: &SqlitePool,
-    listing_id: i64,
+    listing_id: ListingId,
 ) -> Result<Vec<ListingRename>, sqlx::Error> {
     sqlx::query_as(
         "SELECT id, listing_id, effective_date, old_ticker, new_ticker, \
@@ -311,7 +312,7 @@ pub async fn db_list_for_listing(
 /// listing is not found, exactly as `db_undo` treats it — the path names both.
 pub async fn db_get(
     pool: &SqlitePool,
-    listing_id: i64,
+    listing_id: ListingId,
     rename_id: i64,
 ) -> Result<Option<ListingRename>, sqlx::Error> {
     sqlx::query_as(
@@ -328,7 +329,7 @@ pub async fn db_get(
 /// Record a rename and update the listing, atomically.
 pub async fn db_rename(
     pool: &SqlitePool,
-    listing_id: i64,
+    listing_id: ListingId,
     body: &RenameBody,
 ) -> Result<ListingRename, RenameError> {
     let mut tx = write_tx(pool).await?;
@@ -543,7 +544,11 @@ pub async fn db_rename(
 /// to values it never recorded. When it *is* present, a NULL
 /// `old_price_symbol` is the real prior value: the listing had no override,
 /// and the undo clears the one the rename set.
-pub async fn db_undo(pool: &SqlitePool, listing_id: i64, rename_id: i64) -> Result<(), UndoError> {
+pub async fn db_undo(
+    pool: &SqlitePool,
+    listing_id: ListingId,
+    rename_id: i64,
+) -> Result<(), UndoError> {
     let mut tx = write_tx(pool).await?;
 
     #[allow(clippy::type_complexity)]
@@ -608,7 +613,7 @@ pub async fn db_undo(pool: &SqlitePool, listing_id: i64, rename_id: i64) -> Resu
 
 async fn rename(
     State(pool): State<SqlitePool>,
-    Path(listing_id): Path<i64>,
+    Path(listing_id): Path<ListingId>,
     Json(body): Json<RenameBody>,
 ) -> Result<(StatusCode, Json<ListingRename>), ApiError> {
     let created = db_rename(&pool, listing_id, &body).await?;
@@ -617,7 +622,7 @@ async fn rename(
 
 async fn list_for_listing(
     State(pool): State<SqlitePool>,
-    Path(listing_id): Path<i64>,
+    Path(listing_id): Path<ListingId>,
     // Decoded only so an unrecognised parameter is refused rather than
     // silently ignored, like every other list.
     Query(_): Query<crate::infra::http::NoFilter>,
@@ -627,7 +632,7 @@ async fn list_for_listing(
 
 async fn get_one(
     State(pool): State<SqlitePool>,
-    Path((listing_id, rename_id)): Path<(i64, i64)>,
+    Path((listing_id, rename_id)): Path<(ListingId, i64)>,
 ) -> Result<Json<ListingRename>, ApiError> {
     db_get(&pool, listing_id, rename_id)
         .await?
@@ -637,7 +642,7 @@ async fn get_one(
 
 async fn undo(
     State(pool): State<SqlitePool>,
-    Path((listing_id, rename_id)): Path<(i64, i64)>,
+    Path((listing_id, rename_id)): Path<(ListingId, i64)>,
 ) -> Result<StatusCode, ApiError> {
     db_undo(&pool, listing_id, rename_id).await?;
     Ok(StatusCode::NO_CONTENT)
@@ -696,7 +701,7 @@ mod tests {
             .await;
         test_support::buy(1, 1).insert(&pool).await;
 
-        let created = db_rename(&pool, 1, &body("2024-06-01", "LAR"))
+        let created = db_rename(&pool, ListingId(1), &body("2024-06-01", "LAR"))
             .await
             .unwrap();
         assert_eq!(created.old_ticker, "LAAC");
@@ -704,11 +709,11 @@ mod tests {
         assert_eq!(created.old_exchange_mic.as_deref(), Some("XNYS"));
         assert_eq!(created.new_exchange_mic.as_deref(), Some("XNYS"));
 
-        let got = listing::db_get(&pool, 1).await.unwrap().unwrap();
+        let got = listing::db_get(&pool, ListingId(1)).await.unwrap().unwrap();
         assert_eq!(got.ticker, "LAR");
         assert_eq!(got.exchange_mic.as_deref(), Some("XNYS"));
 
-        let chain = db_list_for_listing(&pool, 1).await.unwrap();
+        let chain = db_list_for_listing(&pool, ListingId(1)).await.unwrap();
         assert_eq!(chain.len(), 1);
         assert_eq!(chain[0].new_ticker, "LAR");
     }
@@ -726,11 +731,11 @@ mod tests {
         moved.ticker = "T1".to_string(); // ticker unchanged, exchange moves
         moved.exchange_mic = Some("CXAX".to_string());
 
-        let created = db_rename(&pool, 1, &moved).await.unwrap();
+        let created = db_rename(&pool, ListingId(1), &moved).await.unwrap();
         assert_eq!(created.old_exchange_mic.as_deref(), Some("XASX"));
         assert_eq!(created.new_exchange_mic.as_deref(), Some("CXAX"));
         assert_eq!(
-            listing::db_get(&pool, 1)
+            listing::db_get(&pool, ListingId(1))
                 .await
                 .unwrap()
                 .unwrap()
@@ -761,7 +766,7 @@ mod tests {
 
         let mut moved = body("2024-06-01", "CBA");
         moved.exchange_mic = Some("XNYS".to_string());
-        let err = db_rename(&pool, 1, &moved).await.unwrap_err();
+        let err = db_rename(&pool, ListingId(1), &moved).await.unwrap_err();
         assert!(
             matches!(
                 &err,
@@ -771,10 +776,15 @@ mod tests {
             "expected an exchange/currency mismatch, got: {err}"
         );
         // Refused before any write: the listing and the chain are untouched.
-        let got = listing::db_get(&pool, 1).await.unwrap().unwrap();
+        let got = listing::db_get(&pool, ListingId(1)).await.unwrap().unwrap();
         assert_eq!(got.exchange_mic.as_deref(), Some("XASX"));
         assert_eq!(got.currency, "AUD");
-        assert!(db_list_for_listing(&pool, 1).await.unwrap().is_empty());
+        assert!(
+            db_list_for_listing(&pool, ListingId(1))
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// The 422 names both currencies and points at the same remedy the
@@ -834,19 +844,23 @@ mod tests {
         test_support::buy(1, 1).insert(&pool).await;
 
         // Exchange omitted.
-        db_rename(&pool, 1, &body("2024-06-01", "NEW"))
+        db_rename(&pool, ListingId(1), &body("2024-06-01", "NEW"))
             .await
             .unwrap();
         assert_eq!(
-            listing::db_get(&pool, 1).await.unwrap().unwrap().ticker,
+            listing::db_get(&pool, ListingId(1))
+                .await
+                .unwrap()
+                .unwrap()
+                .ticker,
             "NEW"
         );
 
         // Exchange named, unchanged.
         let mut same = body("2024-06-02", "NEWER");
         same.exchange_mic = Some("XASX".to_string());
-        db_rename(&pool, 1, &same).await.unwrap();
-        let got = listing::db_get(&pool, 1).await.unwrap().unwrap();
+        db_rename(&pool, ListingId(1), &same).await.unwrap();
+        let got = listing::db_get(&pool, ListingId(1)).await.unwrap().unwrap();
         assert_eq!(got.ticker, "NEWER");
         assert_eq!(got.exchange_mic.as_deref(), Some("XASX"));
     }
@@ -866,8 +880,8 @@ mod tests {
         let mut moved = body("2024-06-01", "LAR");
         moved.exchange_mic = Some("XNYS".to_string());
 
-        db_rename(&pool, 1, &moved).await.unwrap();
-        let got = listing::db_get(&pool, 1).await.unwrap().unwrap();
+        db_rename(&pool, ListingId(1), &moved).await.unwrap();
+        let got = listing::db_get(&pool, ListingId(1)).await.unwrap().unwrap();
         assert_eq!(got.exchange_mic.as_deref(), Some("XNYS"));
         assert_eq!(got.currency, "USD");
     }
@@ -881,10 +895,10 @@ mod tests {
             .mic("XNYS")
             .insert(&pool)
             .await;
-        db_rename(&pool, 1, &body("2024-06-01", "LAR"))
+        db_rename(&pool, ListingId(1), &body("2024-06-01", "LAR"))
             .await
             .unwrap();
-        let got = listing::db_get(&pool, 1).await.unwrap().unwrap();
+        let got = listing::db_get(&pool, ListingId(1)).await.unwrap().unwrap();
         assert_eq!(got.name, "Lithium Americas (Argentina) Corp.");
         assert_eq!(got.exchange_mic.as_deref(), Some("XNYS"));
     }
@@ -899,11 +913,11 @@ mod tests {
             .price_symbol("LAAC.OLD")
             .insert(&pool)
             .await;
-        db_rename(&pool, 1, &body("2024-06-01", "LAR"))
+        db_rename(&pool, ListingId(1), &body("2024-06-01", "LAR"))
             .await
             .unwrap();
         assert_eq!(
-            listing::db_get(&pool, 1)
+            listing::db_get(&pool, ListingId(1))
                 .await
                 .unwrap()
                 .unwrap()
@@ -914,9 +928,9 @@ mod tests {
         // Setting it explicitly in the rename body does update it.
         let mut with_symbol = body("2024-07-01", "LAR2");
         with_symbol.price_symbol = Some("LAR.NEW".to_string());
-        db_rename(&pool, 1, &with_symbol).await.unwrap();
+        db_rename(&pool, ListingId(1), &with_symbol).await.unwrap();
         assert_eq!(
-            listing::db_get(&pool, 1)
+            listing::db_get(&pool, ListingId(1))
                 .await
                 .unwrap()
                 .unwrap()
@@ -929,7 +943,7 @@ mod tests {
     async fn db_rename_missing_listing_is_not_found() {
         let pool = test_pool().await;
         assert!(matches!(
-            db_rename(&pool, 99, &body("2024-06-01", "LAR"))
+            db_rename(&pool, ListingId(99), &body("2024-06-01", "LAR"))
                 .await
                 .unwrap_err(),
             RenameError::ListingNotFound
@@ -941,7 +955,7 @@ mod tests {
         let pool = test_pool().await;
         test_support::listing(1).ticker("LAR").insert(&pool).await;
         assert!(matches!(
-            db_rename(&pool, 1, &body("2024-06-01", "LAR"))
+            db_rename(&pool, ListingId(1), &body("2024-06-01", "LAR"))
                 .await
                 .unwrap_err(),
             RenameError::NoOp
@@ -968,7 +982,7 @@ mod tests {
         for blank in ["", "   "] {
             assert!(
                 matches!(
-                    db_rename(&pool, 1, &body("2024-06-01", blank))
+                    db_rename(&pool, ListingId(1), &body("2024-06-01", blank))
                         .await
                         .unwrap_err(),
                     RenameError::BlankTicker
@@ -979,21 +993,32 @@ mod tests {
         let mut blank_name = body("2024-06-01", "LAR");
         blank_name.name = Some("  ".to_string());
         assert!(matches!(
-            db_rename(&pool, 1, &blank_name).await.unwrap_err(),
+            db_rename(&pool, ListingId(1), &blank_name)
+                .await
+                .unwrap_err(),
             RenameError::BlankName
         ));
 
-        let got = listing::db_get(&pool, 1).await.unwrap().unwrap();
+        let got = listing::db_get(&pool, ListingId(1)).await.unwrap().unwrap();
         assert_eq!(got.ticker, "LAAC");
         assert_eq!(got.name, "Lithium Americas");
-        assert!(db_list_for_listing(&pool, 1).await.unwrap().is_empty());
+        assert!(
+            db_list_for_listing(&pool, ListingId(1))
+                .await
+                .unwrap()
+                .is_empty()
+        );
 
         // A real rename still works unchanged.
-        db_rename(&pool, 1, &body("2024-06-01", "LAR"))
+        db_rename(&pool, ListingId(1), &body("2024-06-01", "LAR"))
             .await
             .unwrap();
         assert_eq!(
-            listing::db_get(&pool, 1).await.unwrap().unwrap().ticker,
+            listing::db_get(&pool, ListingId(1))
+                .await
+                .unwrap()
+                .unwrap()
+                .ticker,
             "LAR"
         );
     }
@@ -1002,24 +1027,30 @@ mod tests {
     async fn db_rename_out_of_order_effective_date_is_rejected() {
         let pool = test_pool().await;
         test_support::listing(1).ticker("LAAC").insert(&pool).await;
-        db_rename(&pool, 1, &body("2024-06-01", "LAR"))
+        db_rename(&pool, ListingId(1), &body("2024-06-01", "LAR"))
             .await
             .unwrap();
 
         // Same date or earlier than the latest rename: rejected.
         for date in ["2024-06-01", "2024-01-01"] {
-            let err = db_rename(&pool, 1, &body(date, "LARX")).await.unwrap_err();
+            let err = db_rename(&pool, ListingId(1), &body(date, "LARX"))
+                .await
+                .unwrap_err();
             assert!(
                 matches!(err, RenameError::OutOfOrder { latest } if latest == "2024-06-01".parse().unwrap()),
                 "date {date}: {err:?}"
             );
         }
         // After it succeeds.
-        db_rename(&pool, 1, &body("2024-07-01", "LARX"))
+        db_rename(&pool, ListingId(1), &body("2024-07-01", "LARX"))
             .await
             .unwrap();
         assert_eq!(
-            listing::db_get(&pool, 1).await.unwrap().unwrap().ticker,
+            listing::db_get(&pool, ListingId(1))
+                .await
+                .unwrap()
+                .unwrap()
+                .ticker,
             "LARX"
         );
     }
@@ -1040,7 +1071,7 @@ mod tests {
         let today = crate::infra::date::today();
         for ahead in [1, 30, 365] {
             let date = (today + chrono::Duration::days(ahead)).to_string();
-            let err = db_rename(&pool, 1, &body(&date, "FUTURETICK"))
+            let err = db_rename(&pool, ListingId(1), &body(&date, "FUTURETICK"))
                 .await
                 .unwrap_err();
             assert!(
@@ -1051,8 +1082,14 @@ mod tests {
 
         // Nothing was written: no chain row, and the listing keeps its
         // identity.
-        assert_eq!(db_list_for_listing(&pool, 1).await.unwrap().len(), 0);
-        let got = listing::db_get(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(
+            db_list_for_listing(&pool, ListingId(1))
+                .await
+                .unwrap()
+                .len(),
+            0
+        );
+        let got = listing::db_get(&pool, ListingId(1)).await.unwrap().unwrap();
         assert_eq!(got.ticker, "LAAC");
         assert_eq!(got.exchange_mic.as_deref(), Some("XNYS"));
     }
@@ -1065,12 +1102,16 @@ mod tests {
         test_support::listing(1).ticker("LAAC").insert(&pool).await;
 
         let today = crate::infra::date::today();
-        let created = db_rename(&pool, 1, &body(&today.to_string(), "LAR"))
+        let created = db_rename(&pool, ListingId(1), &body(&today.to_string(), "LAR"))
             .await
             .unwrap();
         assert_eq!(created.effective_date, today);
         assert_eq!(
-            listing::db_get(&pool, 1).await.unwrap().unwrap().ticker,
+            listing::db_get(&pool, ListingId(1))
+                .await
+                .unwrap()
+                .unwrap()
+                .ticker,
             "LAR"
         );
     }
@@ -1084,13 +1125,13 @@ mod tests {
             .insert(&pool)
             .await;
         assert!(matches!(
-            db_rename(&pool, 1, &body("2024-06-01", "NOTATOKEN"))
+            db_rename(&pool, ListingId(1), &body("2024-06-01", "NOTATOKEN"))
                 .await
                 .unwrap_err(),
             RenameError::UnrecognisedDigitalToken
         ));
         // A recognised token (ETH is seeded) succeeds.
-        db_rename(&pool, 1, &body("2024-06-01", "ETH"))
+        db_rename(&pool, ListingId(1), &body("2024-06-01", "ETH"))
             .await
             .unwrap();
     }
@@ -1109,13 +1150,13 @@ mod tests {
         let mut moving = body("2024-06-01", "ETH");
         moving.exchange_mic = Some("XASX".to_string());
         assert!(matches!(
-            db_rename(&pool, 1, &moving).await.unwrap_err(),
+            db_rename(&pool, ListingId(1), &moving).await.unwrap_err(),
             RenameError::CryptoWithExchange
         ));
         let err: ApiError = RenameError::CryptoWithExchange.into();
         assert!(!format!("{err:?}").contains("CHECK"));
         // The listing is untouched.
-        let got = listing::db_get(&pool, 1).await.unwrap().unwrap();
+        let got = listing::db_get(&pool, ListingId(1)).await.unwrap().unwrap();
         assert_eq!(got.ticker, "BTC");
         assert_eq!(got.exchange_mic, None);
     }
@@ -1141,7 +1182,7 @@ mod tests {
             .insert(&pool)
             .await;
 
-        let err = db_rename(&pool, 1, &body("2024-06-01", "LAR"))
+        let err = db_rename(&pool, ListingId(1), &body("2024-06-01", "LAR"))
             .await
             .unwrap_err();
         assert!(
@@ -1154,12 +1195,21 @@ mod tests {
             "expected a ticker collision, got: {err}"
         );
         // Refused before any write: neither the listing nor the chain moved.
-        let got = listing::db_get(&pool, 1).await.unwrap().unwrap();
+        let got = listing::db_get(&pool, ListingId(1)).await.unwrap().unwrap();
         assert_eq!(got.ticker, "LAAC");
-        assert!(db_list_for_listing(&pool, 1).await.unwrap().is_empty());
+        assert!(
+            db_list_for_listing(&pool, ListingId(1))
+                .await
+                .unwrap()
+                .is_empty()
+        );
         // And the listing that held the ticker is untouched too.
         assert_eq!(
-            listing::db_get(&pool, 2).await.unwrap().unwrap().ticker,
+            listing::db_get(&pool, ListingId(2))
+                .await
+                .unwrap()
+                .unwrap()
+                .ticker,
             "LAR"
         );
     }
@@ -1184,7 +1234,7 @@ mod tests {
             .insert(&pool)
             .await;
 
-        let err = db_rename(&pool, 1, &body("2024-06-01", "ETH"))
+        let err = db_rename(&pool, ListingId(1), &body("2024-06-01", "ETH"))
             .await
             .unwrap_err();
         assert!(
@@ -1197,10 +1247,19 @@ mod tests {
             "expected a ticker collision, got: {err}"
         );
         assert_eq!(
-            listing::db_get(&pool, 1).await.unwrap().unwrap().ticker,
+            listing::db_get(&pool, ListingId(1))
+                .await
+                .unwrap()
+                .unwrap()
+                .ticker,
             "BTC"
         );
-        assert!(db_list_for_listing(&pool, 1).await.unwrap().is_empty());
+        assert!(
+            db_list_for_listing(&pool, ListingId(1))
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// The boundary the check must not trip over: a listing renaming to its
@@ -1220,10 +1279,10 @@ mod tests {
 
         let mut moved = body("2024-06-01", "SAME");
         moved.exchange_mic = Some("CXAX".to_string());
-        let created = db_rename(&pool, 1, &moved).await.unwrap();
+        let created = db_rename(&pool, ListingId(1), &moved).await.unwrap();
         assert_eq!(created.new_ticker, "SAME");
         assert_eq!(created.new_exchange_mic.as_deref(), Some("CXAX"));
-        let got = listing::db_get(&pool, 1).await.unwrap().unwrap();
+        let got = listing::db_get(&pool, ListingId(1)).await.unwrap().unwrap();
         assert_eq!(got.ticker, "SAME");
         assert_eq!(got.exchange_mic.as_deref(), Some("CXAX"));
     }
@@ -1245,11 +1304,15 @@ mod tests {
             .insert(&pool)
             .await;
 
-        db_rename(&pool, 1, &body("2024-06-01", "LAR"))
+        db_rename(&pool, ListingId(1), &body("2024-06-01", "LAR"))
             .await
             .unwrap();
         assert_eq!(
-            listing::db_get(&pool, 1).await.unwrap().unwrap().ticker,
+            listing::db_get(&pool, ListingId(1))
+                .await
+                .unwrap()
+                .unwrap()
+                .ticker,
             "LAR"
         );
     }
@@ -1387,10 +1450,15 @@ mod tests {
         );
 
         // Refused before any write: the listing and the chain are untouched.
-        let got = listing::db_get(&pool, 1).await.unwrap().unwrap();
+        let got = listing::db_get(&pool, ListingId(1)).await.unwrap().unwrap();
         assert_eq!(got.ticker, "LAAC");
         assert_eq!(got.name, "Lithium Americas");
-        assert!(db_list_for_listing(&pool, 1).await.unwrap().is_empty());
+        assert!(
+            db_list_for_listing(&pool, ListingId(1))
+                .await
+                .unwrap()
+                .is_empty()
+        );
 
         let resp = client(&pool)
             .post(
@@ -1411,20 +1479,30 @@ mod tests {
             .mic("XNYS")
             .insert(&pool)
             .await;
-        let created = db_rename(&pool, 1, &body("2024-06-01", "LAR"))
+        let created = db_rename(&pool, ListingId(1), &body("2024-06-01", "LAR"))
             .await
             .unwrap();
 
-        db_undo(&pool, 1, created.id).await.unwrap();
+        db_undo(&pool, ListingId(1), created.id).await.unwrap();
 
         assert_eq!(
-            listing::db_get(&pool, 1).await.unwrap().unwrap().ticker,
+            listing::db_get(&pool, ListingId(1))
+                .await
+                .unwrap()
+                .unwrap()
+                .ticker,
             "LAAC"
         );
-        assert_eq!(db_list_for_listing(&pool, 1).await.unwrap().len(), 0);
+        assert_eq!(
+            db_list_for_listing(&pool, ListingId(1))
+                .await
+                .unwrap()
+                .len(),
+            0
+        );
 
         // A redo (the same rename again) now works, since nothing blocks it.
-        db_rename(&pool, 1, &body("2024-06-01", "LAR"))
+        db_rename(&pool, ListingId(1), &body("2024-06-01", "LAR"))
             .await
             .unwrap();
     }
@@ -1449,17 +1527,17 @@ mod tests {
         let mut renaming = body("2024-06-01", "NEWER");
         renaming.name = Some("Newer Co".to_string());
         renaming.price_symbol = Some("NEWER.AX".to_string());
-        let created = db_rename(&pool, 1, &renaming).await.unwrap();
+        let created = db_rename(&pool, ListingId(1), &renaming).await.unwrap();
         assert_eq!(created.old_name.as_deref(), Some("Old Co"));
         assert_eq!(created.old_price_symbol.as_deref(), Some("OLD.AX"));
 
-        let renamed = listing::db_get(&pool, 1).await.unwrap().unwrap();
+        let renamed = listing::db_get(&pool, ListingId(1)).await.unwrap().unwrap();
         assert_eq!(renamed.name, "Newer Co");
         assert_eq!(renamed.price_symbol.as_deref(), Some("NEWER.AX"));
 
-        db_undo(&pool, 1, created.id).await.unwrap();
+        db_undo(&pool, ListingId(1), created.id).await.unwrap();
 
-        let restored = listing::db_get(&pool, 1).await.unwrap().unwrap();
+        let restored = listing::db_get(&pool, ListingId(1)).await.unwrap().unwrap();
         assert_eq!(restored.ticker, "OLD");
         assert_eq!(restored.name, "Old Co");
         assert_eq!(
@@ -1482,12 +1560,12 @@ mod tests {
             .insert(&pool)
             .await;
 
-        let created = db_rename(&pool, 1, &body("2024-06-01", "NEWER"))
+        let created = db_rename(&pool, ListingId(1), &body("2024-06-01", "NEWER"))
             .await
             .unwrap();
-        db_undo(&pool, 1, created.id).await.unwrap();
+        db_undo(&pool, ListingId(1), created.id).await.unwrap();
 
-        let restored = listing::db_get(&pool, 1).await.unwrap().unwrap();
+        let restored = listing::db_get(&pool, ListingId(1)).await.unwrap().unwrap();
         assert_eq!(restored.name, "Old Co");
         assert_eq!(restored.price_symbol.as_deref(), Some("OLD.AX"));
     }
@@ -1501,7 +1579,7 @@ mod tests {
         let pool = test_pool().await;
         test_support::listing(1).ticker("OLD").insert(&pool).await;
         assert_eq!(
-            listing::db_get(&pool, 1)
+            listing::db_get(&pool, ListingId(1))
                 .await
                 .unwrap()
                 .unwrap()
@@ -1511,14 +1589,14 @@ mod tests {
 
         let mut renaming = body("2024-06-01", "NEWER");
         renaming.price_symbol = Some("NEWER.AX".to_string());
-        let created = db_rename(&pool, 1, &renaming).await.unwrap();
+        let created = db_rename(&pool, ListingId(1), &renaming).await.unwrap();
         assert_eq!(created.old_price_symbol, None);
         assert_eq!(created.old_name.as_deref(), Some("Test 1"));
 
-        db_undo(&pool, 1, created.id).await.unwrap();
+        db_undo(&pool, ListingId(1), created.id).await.unwrap();
 
         assert_eq!(
-            listing::db_get(&pool, 1)
+            listing::db_get(&pool, ListingId(1))
                 .await
                 .unwrap()
                 .unwrap()
@@ -1554,9 +1632,9 @@ mod tests {
         .await
         .unwrap();
 
-        db_undo(&pool, 1, 7).await.unwrap();
+        db_undo(&pool, ListingId(1), 7).await.unwrap();
 
-        let restored = listing::db_get(&pool, 1).await.unwrap().unwrap();
+        let restored = listing::db_get(&pool, ListingId(1)).await.unwrap().unwrap();
         assert_eq!(restored.ticker, "OLD");
         assert_eq!(restored.name, "Newer Co");
         assert_eq!(restored.price_symbol.as_deref(), Some("NEWER.AX"));
@@ -1566,17 +1644,31 @@ mod tests {
     async fn db_undo_refuses_a_non_newest_rename() {
         let pool = test_pool().await;
         test_support::listing(1).ticker("A").insert(&pool).await;
-        let first = db_rename(&pool, 1, &body("2024-01-01", "B")).await.unwrap();
-        db_rename(&pool, 1, &body("2024-06-01", "C")).await.unwrap();
+        let first = db_rename(&pool, ListingId(1), &body("2024-01-01", "B"))
+            .await
+            .unwrap();
+        db_rename(&pool, ListingId(1), &body("2024-06-01", "C"))
+            .await
+            .unwrap();
 
-        let err = db_undo(&pool, 1, first.id).await.unwrap_err();
+        let err = db_undo(&pool, ListingId(1), first.id).await.unwrap_err();
         assert!(matches!(err, UndoError::NotNewest));
         // The listing and the chain are unchanged.
         assert_eq!(
-            listing::db_get(&pool, 1).await.unwrap().unwrap().ticker,
+            listing::db_get(&pool, ListingId(1))
+                .await
+                .unwrap()
+                .unwrap()
+                .ticker,
             "C"
         );
-        assert_eq!(db_list_for_listing(&pool, 1).await.unwrap().len(), 2);
+        assert_eq!(
+            db_list_for_listing(&pool, ListingId(1))
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
     }
 
     #[tokio::test]
@@ -1584,7 +1676,7 @@ mod tests {
         let pool = test_pool().await;
         test_support::listing(1).insert(&pool).await;
         assert!(matches!(
-            db_undo(&pool, 1, 99).await.unwrap_err(),
+            db_undo(&pool, ListingId(1), 99).await.unwrap_err(),
             UndoError::RenameNotFound
         ));
     }
@@ -1606,7 +1698,11 @@ mod tests {
         let created: ListingRename = resp.json();
         assert_eq!(created.new_ticker, "LAR");
         assert_eq!(
-            listing::db_get(&pool, 1).await.unwrap().unwrap().ticker,
+            listing::db_get(&pool, ListingId(1))
+                .await
+                .unwrap()
+                .unwrap()
+                .ticker,
             "LAR"
         );
     }
@@ -1646,7 +1742,11 @@ mod tests {
             "{body}"
         );
         assert_eq!(
-            listing::db_get(&pool, 1).await.unwrap().unwrap().ticker,
+            listing::db_get(&pool, ListingId(1))
+                .await
+                .unwrap()
+                .unwrap()
+                .ticker,
             "MSFT"
         );
     }
@@ -1655,8 +1755,12 @@ mod tests {
     async fn api_list_renames_returns_newest_first() {
         let pool = test_pool().await;
         test_support::listing(1).ticker("A").insert(&pool).await;
-        db_rename(&pool, 1, &body("2024-01-01", "B")).await.unwrap();
-        db_rename(&pool, 1, &body("2024-06-01", "C")).await.unwrap();
+        db_rename(&pool, ListingId(1), &body("2024-01-01", "B"))
+            .await
+            .unwrap();
+        db_rename(&pool, ListingId(1), &body("2024-06-01", "C"))
+            .await
+            .unwrap();
 
         let resp = client(&pool).get("/listings/1/renames").await;
         assert_eq!(resp.status, StatusCode::OK);
@@ -1681,10 +1785,10 @@ mod tests {
         let mut renaming = body("2024-06-01", "NEWER");
         renaming.name = Some("Newer Co".to_string());
         renaming.price_symbol = Some("NEWER.AX".to_string());
-        db_rename(&pool, 1, &renaming).await.unwrap();
+        db_rename(&pool, ListingId(1), &renaming).await.unwrap();
         // A second rename, this one over a listing whose override it clears
         // nothing of — its own old_price_symbol is the first one's new value.
-        db_rename(&pool, 1, &body("2024-07-01", "NEWEST"))
+        db_rename(&pool, ListingId(1), &body("2024-07-01", "NEWEST"))
             .await
             .unwrap();
 
@@ -1707,7 +1811,7 @@ mod tests {
         let pool = test_pool().await;
         test_support::listing(1).ticker("LAAC").insert(&pool).await;
         test_support::listing(2).ticker("OTHER").insert(&pool).await;
-        let created = db_rename(&pool, 1, &body("2024-06-01", "LAR"))
+        let created = db_rename(&pool, ListingId(1), &body("2024-06-01", "LAR"))
             .await
             .unwrap();
         let app = client(&pool);
@@ -1733,7 +1837,7 @@ mod tests {
     async fn api_undo_round_trip_and_rejections() {
         let pool = test_pool().await;
         test_support::listing(1).ticker("LAAC").insert(&pool).await;
-        let created = db_rename(&pool, 1, &body("2024-06-01", "LAR"))
+        let created = db_rename(&pool, ListingId(1), &body("2024-06-01", "LAR"))
             .await
             .unwrap();
 
@@ -1743,7 +1847,11 @@ mod tests {
             .await;
         assert_eq!(resp.status, StatusCode::NO_CONTENT);
         assert_eq!(
-            listing::db_get(&pool, 1).await.unwrap().unwrap().ticker,
+            listing::db_get(&pool, ListingId(1))
+                .await
+                .unwrap()
+                .unwrap()
+                .ticker,
             "LAAC"
         );
 
@@ -1772,7 +1880,7 @@ mod tests {
             .insert(&pool)
             .await;
 
-        db_rename(&pool, 1, &body("2024-06-01", "LAR"))
+        db_rename(&pool, ListingId(1), &body("2024-06-01", "LAR"))
             .await
             .unwrap();
 

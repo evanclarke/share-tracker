@@ -32,6 +32,7 @@ use crate::infra::db::write_tx;
 use crate::infra::decimal::row_dec;
 use crate::infra::extract::Json;
 use crate::infra::http::ApiError;
+use crate::infra::id::ListingId;
 use axum::{
     Router,
     extract::{Path, State},
@@ -172,7 +173,7 @@ struct Movement {
     is_transfer: bool,
     /// The listing the moved units were on — the source parcel's, and the
     /// listing a *transfer's* replacement stays on.
-    listing_id: i64,
+    listing_id: ListingId,
     /// **Every** replacement parcel the group created, whatever listing the
     /// operation put it on: a scrip-for-scrip exchange's replacement and a
     /// demerger's demerged parcel are of another listing, and since SCENARIOS
@@ -183,7 +184,7 @@ struct Movement {
     /// The same parcels as `(id, listing_id, quantity, deemed acquisition
     /// date)` — what [`Movement::matching_replacement`] identifies a transfer's
     /// replacement by.
-    replacement_facts: Vec<(i64, i64, Decimal, Option<NaiveDate>)>,
+    replacement_facts: Vec<(i64, ListingId, Decimal, Option<NaiveDate>)>,
 }
 
 impl Movement {
@@ -224,7 +225,7 @@ async fn db_rollovers_of(
     .await?;
     let mut out = Vec::with_capacity(rows.len());
     for row in &rows {
-        let listing_id: i64 = row.try_get("listing_id")?;
+        let listing_id: ListingId = row.try_get("listing_id")?;
         let (column, group_id, is_transfer) =
             if let Some(id) = row.try_get::<Option<i64>, _>("transfer_id")? {
                 ("transfer_id", id, true)
@@ -324,7 +325,7 @@ pub async fn db_generate(
     let Some(row) = row else {
         return Err(GenerateError::StatementNotFound);
     };
-    let listing_id: i64 = row.try_get("listing_id")?;
+    let listing_id: ListingId = row.try_get("listing_id")?;
     let holding_account_id: i64 = row.try_get("holding_account_id")?;
     let year_end: NaiveDate = row.try_get("tax_year_end_date")?;
     let units_held = row_dec(&row, "units_held")?;
@@ -536,8 +537,14 @@ mod tests {
             .await;
     }
 
-    async fn amma(pool: &SqlitePool, id: i64, listing_id: i64, year_end: NaiveDate, units: &str) {
-        test_support::amma(id, listing_id)
+    async fn amma(
+        pool: &SqlitePool,
+        id: i64,
+        listing_id: ListingId,
+        year_end: NaiveDate,
+        units: &str,
+    ) {
+        test_support::amma(id, listing_id.0)
             .units(dec(units))
             .cost_base_adjustment(dec("-2.0257290076"))
             .with(|a| {
@@ -577,8 +584,8 @@ mod tests {
     async fn db_generation_reproduces_the_hand_entered_hndq_sets() {
         let pool = test_pool().await;
         hndq_parcels(&pool).await;
-        amma(&pool, 6, 1, ymd(2024, 6, 30), "1811").await;
-        amma(&pool, 7, 1, ymd(2025, 6, 30), "2620").await;
+        amma(&pool, 6, ListingId(1), ymd(2024, 6, 30), "1811").await;
+        amma(&pool, 7, ListingId(1), ymd(2025, 6, 30), "2620").await;
 
         let fy24 = db_generate(&pool, 6, &GenerateBody::default())
             .await
@@ -628,7 +635,7 @@ mod tests {
     async fn db_preview_writes_nothing() {
         let pool = test_pool().await;
         hndq_parcels(&pool).await;
-        amma(&pool, 6, 1, ymd(2024, 6, 30), "1811").await;
+        amma(&pool, 6, ListingId(1), ymd(2024, 6, 30), "1811").await;
 
         let preview = db_generate(
             &pool,
@@ -668,8 +675,8 @@ mod tests {
     async fn db_generation_never_reuses_a_deleted_adjustments_id() {
         let pool = test_pool().await;
         hndq_parcels(&pool).await;
-        amma(&pool, 6, 1, ymd(2024, 6, 30), "1811").await;
-        amma(&pool, 7, 1, ymd(2025, 6, 30), "2620").await;
+        amma(&pool, 6, ListingId(1), ymd(2024, 6, 30), "1811").await;
+        amma(&pool, 7, ListingId(1), ymd(2025, 6, 30), "2620").await;
 
         let fy24 = db_generate(&pool, 6, &GenerateBody::default())
             .await
@@ -708,7 +715,7 @@ mod tests {
     async fn db_units_held_mismatch_is_reported_not_refused() {
         let pool = test_pool().await;
         hndq_parcels(&pool).await;
-        amma(&pool, 6, 1, ymd(2024, 6, 30), "1800").await;
+        amma(&pool, 6, ListingId(1), ymd(2024, 6, 30), "1800").await;
 
         let result = db_generate(&pool, 6, &GenerateBody::default())
             .await
@@ -730,7 +737,7 @@ mod tests {
     async fn db_generated_rows_are_audited() {
         let pool = test_pool().await;
         hndq_parcels(&pool).await;
-        amma(&pool, 6, 1, ymd(2024, 6, 30), "1811").await;
+        amma(&pool, 6, ListingId(1), ymd(2024, 6, 30), "1811").await;
         db_generate(&pool, 6, &GenerateBody::default())
             .await
             .unwrap();
@@ -762,7 +769,7 @@ mod tests {
     async fn db_existing_adjustments_are_refused_unless_replacing() {
         let pool = test_pool().await;
         hndq_parcels(&pool).await;
-        amma(&pool, 6, 1, ymd(2024, 6, 30), "1811").await;
+        amma(&pool, 6, ListingId(1), ymd(2024, 6, 30), "1811").await;
         db_generate(&pool, 6, &GenerateBody::default())
             .await
             .unwrap();
@@ -836,7 +843,7 @@ mod tests {
             .price(dec("10"))
             .insert(&pool)
             .await;
-        amma(&pool, 6, 1, ymd(2024, 6, 30), "100").await;
+        amma(&pool, 6, ListingId(1), ymd(2024, 6, 30), "100").await;
         for (id, name) in [(2, "Second"), (3, "Third")] {
             holding_account::db_upsert(
                 &pool,
@@ -868,7 +875,7 @@ mod tests {
                 &pool,
                 transfer_id,
                 &TransferBody {
-                    listing_id: 1,
+                    listing_id: ListingId(1),
                     date,
                     from_account_id: from,
                     to_account_id: to,
@@ -940,7 +947,7 @@ mod tests {
             .insert(&pool)
             .await;
         allocate(&pool, 1, 2, 1, dec("100")).await;
-        amma(&pool, 6, 1, ymd(2024, 6, 30), "100").await;
+        amma(&pool, 6, ListingId(1), ymd(2024, 6, 30), "100").await;
 
         let err = db_generate(&pool, 6, &GenerateBody::default())
             .await
@@ -976,7 +983,7 @@ mod tests {
             .with(|t| t.holding_account_id = 2)
             .insert(&pool)
             .await;
-        amma(&pool, 6, 1, ymd(2024, 6, 30), "100").await;
+        amma(&pool, 6, ListingId(1), ymd(2024, 6, 30), "100").await;
 
         let result = db_generate(&pool, 6, &GenerateBody::default())
             .await
@@ -1013,7 +1020,7 @@ mod tests {
             &pool,
             &CorporateAction {
                 id: 1,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: ymd(2024, 8, 1),
                 kind: ActionKind::ShareSplit {
                     split_new_units: dec("2"),
@@ -1072,7 +1079,7 @@ mod tests {
             &pool,
             &CorporateAction {
                 id: 1,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: ymd(2024, 1, 15),
                 kind: ActionKind::ShareSplit {
                     split_new_units: dec("2"),
@@ -1159,7 +1166,7 @@ mod tests {
     async fn api_generate_returns_201_with_the_created_rows() {
         let pool = test_pool().await;
         hndq_parcels(&pool).await;
-        amma(&pool, 6, 1, ymd(2024, 6, 30), "1811").await;
+        amma(&pool, 6, ListingId(1), ymd(2024, 6, 30), "1811").await;
 
         let resp = client(&pool)
             .post(
@@ -1186,7 +1193,7 @@ mod tests {
     async fn api_preview_returns_200_and_writes_nothing() {
         let pool = test_pool().await;
         hndq_parcels(&pool).await;
-        amma(&pool, 6, 1, ymd(2024, 6, 30), "1811").await;
+        amma(&pool, 6, ListingId(1), ymd(2024, 6, 30), "1811").await;
 
         let resp = client(&pool)
             .post(
@@ -1221,10 +1228,10 @@ mod tests {
     async fn api_each_refusal_returns_422_naming_the_reason() {
         let pool = test_pool().await;
         hndq_parcels(&pool).await;
-        amma(&pool, 6, 1, ymd(2024, 6, 30), "1811").await;
+        amma(&pool, 6, ListingId(1), ymd(2024, 6, 30), "1811").await;
         // Nothing held: a statement on a listing with no parcels at all.
         amit_listing(&pool, 2, "VDHG").await;
-        amma(&pool, 8, 2, ymd(2024, 6, 30), "10").await;
+        amma(&pool, 8, ListingId(2), ymd(2024, 6, 30), "10").await;
 
         let c = client(&pool);
         let nothing_held = c
@@ -1306,7 +1313,7 @@ mod tests {
             .price(dec("10"))
             .insert(&pool)
             .await;
-        amma(&pool, 6, 1, ymd(2024, 6, 30), "100").await;
+        amma(&pool, 6, ListingId(1), ymd(2024, 6, 30), "100").await;
         holding_account::db_upsert(
             &pool,
             &HoldingAccount {
@@ -1322,7 +1329,7 @@ mod tests {
             &pool,
             1,
             &TransferBody {
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: ymd(2024, 8, 15),
                 from_account_id: 1,
                 to_account_id: 2,
@@ -1406,10 +1413,10 @@ mod tests {
             &pool,
             &CorporateAction {
                 id: 10,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: ymd(2025, 8, 1),
                 kind: ActionKind::ScripForScrip {
-                    scrip_listing_id: 2,
+                    scrip_listing_id: ListingId(2),
                     scrip_new_units: Decimal::ONE,
                     scrip_old_units: Decimal::ONE,
                     scrip_cash_per_unit: None,
@@ -1485,7 +1492,7 @@ mod tests {
             .price(dec("10"))
             .insert(&pool)
             .await;
-        amma(&pool, 6, 1, ymd(2025, 6, 30), "100").await;
+        amma(&pool, 6, ListingId(1), ymd(2025, 6, 30), "100").await;
 
         let result = db_generate(&pool, 6, &GenerateBody::default())
             .await
@@ -1527,7 +1534,7 @@ mod tests {
             .price(dec("12"))
             .insert(&pool)
             .await;
-        amma(&pool, 6, 1, ymd(2024, 6, 30), "1200").await;
+        amma(&pool, 6, ListingId(1), ymd(2024, 6, 30), "1200").await;
 
         let result = db_generate(&pool, 6, &GenerateBody::default())
             .await
@@ -1582,7 +1589,7 @@ mod tests {
             &pool,
             1,
             &TransferBody {
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: ymd(2024, 2, 1),
                 from_account_id: 1,
                 to_account_id: 2,
@@ -1671,7 +1678,7 @@ mod tests {
             pool,
             1,
             &TransferBody {
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: ymd(2024, 8, 15),
                 from_account_id: 1,
                 to_account_id: 2,

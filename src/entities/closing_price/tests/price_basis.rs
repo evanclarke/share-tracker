@@ -13,9 +13,10 @@
 //! the last pre-demerger trading day. Evan's LAC history is the live case.
 
 use super::*;
+use crate::infra::id::ListingId;
 /// The stored price for a listing, and the figure it was observed as.
 async fn stored(pool: &SqlitePool, date: NaiveDate) -> (String, String) {
-    let row = db_get_one(pool, 1, date).await.unwrap().unwrap();
+    let row = db_get_one(pool, ListingId(1), date).await.unwrap().unwrap();
     (
         row.price.unwrap().normalize().to_string(),
         row.price_as_observed.unwrap().normalize().to_string(),
@@ -30,10 +31,10 @@ async fn stored(pool: &SqlitePool, date: NaiveDate) -> (String, String) {
 async fn db_a_price_fetched_after_a_split_is_stored_in_its_own_days_basis() {
     let pool = test_pool().await;
     insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
-    insert_share_split(&pool, 1, ymd(2026, 6, 10), "10", "1").await;
+    insert_share_split(&pool, ListingId(1), ymd(2026, 6, 10), "10", "1").await;
 
-    let market = load_market(&pool, 1).await.unwrap().unwrap();
-    let stub = StubFetcher::default().with_close(1, ymd(2026, 6, 5), "120.888", "AUD");
+    let market = load_market(&pool, ListingId(1)).await.unwrap().unwrap();
+    let stub = StubFetcher::default().with_close(ListingId(1), ymd(2026, 6, 5), "120.888", "AUD");
     fetch_and_store(&pool, &stub, &market, &[ymd(2026, 6, 5)])
         .await
         .unwrap();
@@ -60,7 +61,7 @@ async fn db_a_price_observed_before_the_split_is_untouched_when_it_is_recorded()
         .insert(&pool)
         .await;
 
-    insert_share_split(&pool, 1, ymd(2026, 6, 10), "10", "1").await;
+    insert_share_split(&pool, ListingId(1), ymd(2026, 6, 10), "10", "1").await;
 
     assert_eq!(
         stored(&pool, ymd(2026, 6, 5)).await,
@@ -74,8 +75,9 @@ async fn db_a_price_observed_before_the_split_is_untouched_when_it_is_recorded()
 #[tokio::test]
 async fn db_entry_order_of_the_split_and_the_fetch_does_not_change_the_price() {
     async fn fetch(pool: &SqlitePool) {
-        let market = load_market(pool, 1).await.unwrap().unwrap();
-        let stub = StubFetcher::default().with_close(1, ymd(2026, 6, 5), "120.888", "AUD");
+        let market = load_market(pool, ListingId(1)).await.unwrap().unwrap();
+        let stub =
+            StubFetcher::default().with_close(ListingId(1), ymd(2026, 6, 5), "120.888", "AUD");
         fetch_and_store(pool, &stub, &market, &[ymd(2026, 6, 5)])
             .await
             .unwrap();
@@ -84,7 +86,7 @@ async fn db_entry_order_of_the_split_and_the_fetch_does_not_change_the_price() {
     // split first, then the fetch
     let a = test_pool().await;
     insert_listing(&a, 1, "BHP", "XASX", "AUD").await;
-    insert_share_split(&a, 1, ymd(2026, 6, 10), "10", "1").await;
+    insert_share_split(&a, ListingId(1), ymd(2026, 6, 10), "10", "1").await;
     fetch(&a).await;
 
     // the fetch first, then the split
@@ -96,7 +98,7 @@ async fn db_entry_order_of_the_split_and_the_fetch_does_not_change_the_price() {
         "120.888",
         "with no split recorded there is nothing to restate out of"
     );
-    insert_share_split(&b, 1, ymd(2026, 6, 10), "10", "1").await;
+    insert_share_split(&b, ListingId(1), ymd(2026, 6, 10), "10", "1").await;
 
     assert_eq!(
         stored(&a, ymd(2026, 6, 5)).await,
@@ -116,8 +118,8 @@ async fn db_entry_order_of_the_split_and_the_fetch_does_not_change_the_price() {
 async fn db_a_bonus_issue_rebases_stored_prices_like_a_split() {
     let pool = test_pool().await;
     insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
-    let market = load_market(&pool, 1).await.unwrap().unwrap();
-    let stub = StubFetcher::default().with_close(1, ymd(2026, 6, 5), "30", "AUD");
+    let market = load_market(&pool, ListingId(1)).await.unwrap().unwrap();
+    let stub = StubFetcher::default().with_close(ListingId(1), ymd(2026, 6, 5), "30", "AUD");
     fetch_and_store(&pool, &stub, &market, &[ymd(2026, 6, 5)])
         .await
         .unwrap();
@@ -126,7 +128,7 @@ async fn db_a_bonus_issue_rebases_stored_prices_like_a_split() {
         &pool,
         &crate::entities::corporate_action::CorporateAction {
             id: 950,
-            listing_id: 1,
+            listing_id: ListingId(1),
             date: ymd(2026, 6, 10),
             kind: crate::entities::corporate_action::ActionKind::BonusIssue {
                 bonus_units: Decimal::ONE,
@@ -151,10 +153,10 @@ async fn db_a_bonus_issue_rebases_stored_prices_like_a_split() {
 async fn db_a_consolidation_rebases_stored_prices_the_other_way() {
     let pool = test_pool().await;
     insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
-    insert_share_split(&pool, 1, ymd(2026, 6, 10), "1", "10").await;
+    insert_share_split(&pool, ListingId(1), ymd(2026, 6, 10), "1", "10").await;
 
-    let market = load_market(&pool, 1).await.unwrap().unwrap();
-    let stub = StubFetcher::default().with_close(1, ymd(2026, 6, 5), "12088.8", "AUD");
+    let market = load_market(&pool, ListingId(1)).await.unwrap().unwrap();
+    let stub = StubFetcher::default().with_close(ListingId(1), ymd(2026, 6, 5), "12088.8", "AUD");
     fetch_and_store(&pool, &stub, &market, &[ymd(2026, 6, 5)])
         .await
         .unwrap();
@@ -173,7 +175,7 @@ async fn db_a_consolidation_rebases_stored_prices_the_other_way() {
 async fn api_a_manual_price_is_neither_normalised_on_entry_nor_rebased() {
     let pool = test_pool().await;
     insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
-    insert_share_split(&pool, 1, ymd(2026, 6, 10), "10", "1").await;
+    insert_share_split(&pool, ListingId(1), ymd(2026, 6, 10), "10", "1").await;
 
     let client = ApiClient::over(router().with_state(pool.clone()));
     client
@@ -194,7 +196,7 @@ async fn api_a_manual_price_is_neither_normalised_on_entry_nor_rebased() {
         "the operator's figure is its own observation"
     );
 
-    insert_share_split(&pool, 1, ymd(2026, 6, 20), "2", "1").await;
+    insert_share_split(&pool, ListingId(1), ymd(2026, 6, 20), "2", "1").await;
     assert_eq!(
         stored(&pool, ymd(2026, 6, 5)).await.0,
         "1208.88",
@@ -209,16 +211,16 @@ async fn api_a_manual_price_is_neither_normalised_on_entry_nor_rebased() {
 async fn api_editing_or_deleting_the_split_re_derives_the_stored_prices() {
     let pool = test_pool().await;
     insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
-    insert_share_split(&pool, 1, ymd(2026, 6, 10), "10", "1").await;
-    let market = load_market(&pool, 1).await.unwrap().unwrap();
-    let stub = StubFetcher::default().with_close(1, ymd(2026, 6, 5), "120.888", "AUD");
+    insert_share_split(&pool, ListingId(1), ymd(2026, 6, 10), "10", "1").await;
+    let market = load_market(&pool, ListingId(1)).await.unwrap().unwrap();
+    let stub = StubFetcher::default().with_close(ListingId(1), ymd(2026, 6, 5), "120.888", "AUD");
     fetch_and_store(&pool, &stub, &market, &[ymd(2026, 6, 5)])
         .await
         .unwrap();
     assert_eq!(stored(&pool, ymd(2026, 6, 5)).await.0, "1208.88");
 
     // A mis-keyed ratio, corrected in place.
-    insert_share_split(&pool, 1, ymd(2026, 6, 10), "2", "1").await;
+    insert_share_split(&pool, ListingId(1), ymd(2026, 6, 10), "2", "1").await;
     assert_eq!(
         stored(&pool, ymd(2026, 6, 5)).await.0,
         "241.776",
@@ -227,7 +229,7 @@ async fn api_editing_or_deleting_the_split_re_derives_the_stored_prices() {
 
     // Moved to a date before the price: the price date is then already in
     // the post-split basis, so nothing is restated.
-    insert_share_split(&pool, 1, ymd(2026, 6, 1), "2", "1").await;
+    insert_share_split(&pool, ListingId(1), ymd(2026, 6, 1), "2", "1").await;
     assert_eq!(
         stored(&pool, ymd(2026, 6, 5)).await.0,
         "120.888",
@@ -248,9 +250,9 @@ async fn api_editing_or_deleting_the_split_re_derives_the_stored_prices() {
 async fn db_deleting_the_last_split_puts_the_prices_back_to_the_observation() {
     let pool = test_pool().await;
     insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
-    insert_share_split(&pool, 1, ymd(2026, 6, 10), "10", "1").await;
-    let market = load_market(&pool, 1).await.unwrap().unwrap();
-    let stub = StubFetcher::default().with_close(1, ymd(2026, 6, 5), "120.888", "AUD");
+    insert_share_split(&pool, ListingId(1), ymd(2026, 6, 10), "10", "1").await;
+    let market = load_market(&pool, ListingId(1)).await.unwrap().unwrap();
+    let stub = StubFetcher::default().with_close(ListingId(1), ymd(2026, 6, 5), "120.888", "AUD");
     fetch_and_store(&pool, &stub, &market, &[ymd(2026, 6, 5)])
         .await
         .unwrap();
@@ -274,7 +276,7 @@ async fn db_deleting_the_last_split_puts_the_prices_back_to_the_observation() {
 async fn db_the_rebase_job_repairs_prices_stored_before_the_rule_existed() {
     let pool = test_pool().await;
     insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
-    insert_share_split(&pool, 1, ymd(2026, 6, 10), "10", "1").await;
+    insert_share_split(&pool, ListingId(1), ymd(2026, 6, 10), "10", "1").await;
     // Stored the way a pre-0034 row was: the provider's post-split figure,
     // observed after the split, with nothing restated out of it.
     crate::test_support::closing_price(1, ymd(2026, 6, 5))
@@ -299,7 +301,7 @@ async fn db_the_rebase_job_repairs_prices_stored_before_the_rule_existed() {
 /// from, through the entity's own write path.
 async fn insert_demerger(
     pool: &SqlitePool,
-    listing_id: i64,
+    listing_id: ListingId,
     demerged_id: i64,
     date: NaiveDate,
     stated_close: Option<(NaiveDate, &str)>,
@@ -307,11 +309,11 @@ async fn insert_demerger(
     crate::entities::corporate_action::db_upsert(
         pool,
         &crate::entities::corporate_action::CorporateAction {
-            id: 800 + listing_id,
+            id: 800 + listing_id.0,
             listing_id,
             date,
             kind: crate::entities::corporate_action::ActionKind::Demerger {
-                demerger_listing_id: demerged_id,
+                demerger_listing_id: ListingId(demerged_id),
                 demerger_new_units: Decimal::ONE,
                 demerger_held_units: Decimal::ONE,
                 demerger_cost_base_pct: Decimal::from(36),
@@ -338,11 +340,11 @@ async fn db_a_stated_pre_demerger_close_restates_the_whole_pre_demerger_series()
     let pool = test_pool().await;
     insert_listing(&pool, 1, "LAC", "XNYS", "USD").await;
     insert_listing(&pool, 2, "LAR", "XNYS", "USD").await;
-    let market = load_market(&pool, 1).await.unwrap().unwrap();
+    let market = load_market(&pool, ListingId(1)).await.unwrap().unwrap();
     let stub = StubFetcher::default()
-        .with_close(1, ymd(2023, 9, 29), "10.00", "USD")
-        .with_close(1, ymd(2023, 10, 2), "10.13", "USD")
-        .with_close(1, ymd(2023, 10, 4), "11.72", "USD");
+        .with_close(ListingId(1), ymd(2023, 9, 29), "10.00", "USD")
+        .with_close(ListingId(1), ymd(2023, 10, 2), "10.13", "USD")
+        .with_close(ListingId(1), ymd(2023, 10, 4), "11.72", "USD");
     fetch_and_store(
         &pool,
         &stub,
@@ -359,7 +361,7 @@ async fn db_a_stated_pre_demerger_close_restates_the_whole_pre_demerger_series()
 
     insert_demerger(
         &pool,
-        1,
+        ListingId(1),
         2,
         ymd(2023, 10, 3),
         Some((ymd(2023, 10, 2), "24.90")),
@@ -408,7 +410,7 @@ async fn db_a_pre_demerger_price_observed_before_the_demerger_is_untouched() {
 
     insert_demerger(
         &pool,
-        1,
+        ListingId(1),
         2,
         ymd(2023, 10, 3),
         Some((ymd(2023, 10, 2), "24.90")),
@@ -430,10 +432,10 @@ async fn db_a_pre_demerger_price_observed_before_the_demerger_is_untouched() {
 #[tokio::test]
 async fn db_entry_order_of_the_stated_close_and_the_backfill_does_not_change_the_price() {
     async fn backfill(pool: &SqlitePool) {
-        let market = load_market(pool, 1).await.unwrap().unwrap();
+        let market = load_market(pool, ListingId(1)).await.unwrap().unwrap();
         let stub = StubFetcher::default()
-            .with_close(1, ymd(2023, 9, 29), "10.00", "USD")
-            .with_close(1, ymd(2023, 10, 2), "10.13", "USD");
+            .with_close(ListingId(1), ymd(2023, 9, 29), "10.00", "USD")
+            .with_close(ListingId(1), ymd(2023, 10, 2), "10.13", "USD");
         fetch_and_store(pool, &stub, &market, &[ymd(2023, 9, 29), ymd(2023, 10, 2)])
             .await
             .unwrap();
@@ -448,7 +450,7 @@ async fn db_entry_order_of_the_stated_close_and_the_backfill_does_not_change_the
     setup(&a).await;
     insert_demerger(
         &a,
-        1,
+        ListingId(1),
         2,
         ymd(2023, 10, 3),
         Some((ymd(2023, 10, 2), "24.90")),
@@ -462,7 +464,7 @@ async fn db_entry_order_of_the_stated_close_and_the_backfill_does_not_change_the
     backfill(&b).await;
     insert_demerger(
         &b,
-        1,
+        ListingId(1),
         2,
         ymd(2023, 10, 3),
         Some((ymd(2023, 10, 2), "24.90")),
@@ -491,21 +493,21 @@ async fn db_a_demerger_and_a_later_split_compose_without_double_counting() {
     insert_listing(&pool, 2, "LAR", "XNYS", "USD").await;
     // A 2-for-1 split after the demerger: the provider halves everything
     // before it, on top of the spin-off adjustment.
-    insert_share_split(&pool, 1, ymd(2024, 5, 1), "2", "1").await;
+    insert_share_split(&pool, ListingId(1), ymd(2024, 5, 1), "2", "1").await;
     insert_demerger(
         &pool,
-        1,
+        ListingId(1),
         2,
         ymd(2023, 10, 3),
         Some((ymd(2023, 10, 2), "24.90")),
     )
     .await;
 
-    let market = load_market(&pool, 1).await.unwrap().unwrap();
+    let market = load_market(&pool, ListingId(1)).await.unwrap().unwrap();
     // What the provider serves today: 24.90 × (10.13/24.90 spin-off) × 1/2.
     let stub = StubFetcher::default()
-        .with_close(1, ymd(2023, 10, 2), "5.065", "USD")
-        .with_close(1, ymd(2024, 6, 3), "7.50", "USD");
+        .with_close(ListingId(1), ymd(2023, 10, 2), "5.065", "USD")
+        .with_close(ListingId(1), ymd(2024, 6, 3), "7.50", "USD");
     fetch_and_store(&pool, &stub, &market, &[ymd(2023, 10, 2), ymd(2024, 6, 3)])
         .await
         .unwrap();
@@ -530,15 +532,15 @@ async fn db_editing_or_removing_the_stated_close_re_derives_the_prices() {
     let pool = test_pool().await;
     insert_listing(&pool, 1, "LAC", "XNYS", "USD").await;
     insert_listing(&pool, 2, "LAR", "XNYS", "USD").await;
-    let market = load_market(&pool, 1).await.unwrap().unwrap();
-    let stub = StubFetcher::default().with_close(1, ymd(2023, 10, 2), "10.13", "USD");
+    let market = load_market(&pool, ListingId(1)).await.unwrap().unwrap();
+    let stub = StubFetcher::default().with_close(ListingId(1), ymd(2023, 10, 2), "10.13", "USD");
     fetch_and_store(&pool, &stub, &market, &[ymd(2023, 10, 2)])
         .await
         .unwrap();
 
     insert_demerger(
         &pool,
-        1,
+        ListingId(1),
         2,
         ymd(2023, 10, 3),
         Some((ymd(2023, 10, 2), "24.90")),
@@ -549,7 +551,7 @@ async fn db_editing_or_removing_the_stated_close_re_derives_the_prices() {
     // A mis-keyed close, corrected in place.
     insert_demerger(
         &pool,
-        1,
+        ListingId(1),
         2,
         ymd(2023, 10, 3),
         Some((ymd(2023, 10, 2), "24.95")),
@@ -558,13 +560,13 @@ async fn db_editing_or_removing_the_stated_close_re_derives_the_prices() {
     assert_eq!(stored(&pool, ymd(2023, 10, 2)).await.0, "24.95");
 
     // Removing the statement altogether leaves the provider's figure.
-    insert_demerger(&pool, 1, 2, ymd(2023, 10, 3), None).await;
+    insert_demerger(&pool, ListingId(1), 2, ymd(2023, 10, 3), None).await;
     assert_eq!(stored(&pool, ymd(2023, 10, 2)).await.0, "10.13");
 
     // …as does deleting the demerger, once it is stated again.
     insert_demerger(
         &pool,
-        1,
+        ListingId(1),
         2,
         ymd(2023, 10, 3),
         Some((ymd(2023, 10, 2), "24.90")),
@@ -603,7 +605,7 @@ async fn db_the_rebase_job_repairs_prices_a_demerger_restated() {
         .unwrap();
     insert_demerger(
         &pool,
-        1,
+        ListingId(1),
         2,
         ymd(2023, 10, 3),
         Some((ymd(2023, 10, 2), "24.90")),
@@ -644,7 +646,7 @@ async fn api_a_manual_pre_demerger_price_is_never_rebased_by_a_stated_close() {
 
     insert_demerger(
         &pool,
-        1,
+        ListingId(1),
         2,
         ymd(2023, 10, 3),
         Some((ymd(2023, 10, 2), "24.90")),
@@ -665,8 +667,8 @@ async fn api_a_manual_pre_demerger_price_is_never_rebased_by_a_stated_close() {
 async fn db_a_rebase_is_audited_and_stales_the_snapshots_it_moves() {
     let pool = test_pool().await;
     insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
-    let market = load_market(&pool, 1).await.unwrap().unwrap();
-    let stub = StubFetcher::default().with_close(1, ymd(2026, 6, 5), "120.888", "AUD");
+    let market = load_market(&pool, ListingId(1)).await.unwrap().unwrap();
+    let stub = StubFetcher::default().with_close(ListingId(1), ymd(2026, 6, 5), "120.888", "AUD");
     fetch_and_store(&pool, &stub, &market, &[ymd(2026, 6, 5)])
         .await
         .unwrap();
@@ -678,7 +680,7 @@ async fn db_a_rebase_is_audited_and_stales_the_snapshots_it_moves() {
     .await
     .unwrap();
 
-    insert_share_split(&pool, 1, ymd(2026, 6, 10), "10", "1").await;
+    insert_share_split(&pool, ListingId(1), ymd(2026, 6, 10), "10", "1").await;
 
     let old: Vec<String> = sqlx::query_scalar(
         "SELECT json_extract(old_row, '$.price') FROM row_history \

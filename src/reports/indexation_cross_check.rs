@@ -97,6 +97,7 @@ use crate::domain::tax_year::tax_year_for;
 use crate::infra::decimal::to_cents;
 use crate::infra::extract::Json;
 use crate::infra::http::ApiError;
+use crate::infra::id::ListingId;
 use axum::{Router, extract::State, routing::get};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
@@ -113,7 +114,7 @@ pub struct IndexationComparison {
     pub tax_year: i32,
     /// The Sell trade this allocation belongs to.
     pub sale_trade_id: i64,
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     pub ticker: String,
     pub sale_date: NaiveDate,
     /// The Buy/DRP parcel the units came from.

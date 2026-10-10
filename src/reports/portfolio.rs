@@ -2,6 +2,7 @@ use crate::domain::open_parcels;
 use crate::entities::closing_price::{self, SharedFetcher};
 use crate::infra::extract::Json;
 use crate::infra::http::ApiError;
+use crate::infra::id::ListingId;
 use axum::{Extension, Router, extract::State, routing::post};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
@@ -13,7 +14,7 @@ use std::collections::HashMap;
 /// supplied `current_price` is taken as AUD too, so `market_value` is AUD.
 #[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize)]
 pub struct HoldingOverview {
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     /// The holding account the parcels sit in: the same listing held in two
     /// accounts (e.g. an employer share plan and a personal broker account)
     /// reports as two holdings.
@@ -58,7 +59,7 @@ pub struct OverviewRequest {
         default,
         deserialize_with = "crate::infra::decimal::strict_decimal_map"
     )]
-    pub prices: HashMap<i64, Decimal>,
+    pub prices: HashMap<ListingId, Decimal>,
     /// The **valuation date**: the holdings are taken as at it, so trades,
     /// sales, corporate actions, and AMIT adjustments dated after it are
     /// excluded and quantities are in that date's unit basis (see
@@ -127,8 +128,8 @@ pub async fn db_holdings_on(
     // aggregation per (listing, holding account).
     let open = open_parcels::load(conn, as_of).await?;
 
-    let mut holding_qty: HashMap<(i64, i64), Decimal> = HashMap::new();
-    let mut holding_cost_base: HashMap<(i64, i64), Decimal> = HashMap::new();
+    let mut holding_qty: HashMap<(ListingId, i64), Decimal> = HashMap::new();
+    let mut holding_cost_base: HashMap<(ListingId, i64), Decimal> = HashMap::new();
 
     for p in &open {
         let key = (p.parcel.listing_id, p.parcel.holding_account_id);
@@ -209,7 +210,7 @@ pub(crate) async fn price_holdings(
     pool: &SqlitePool,
     fetcher: Option<&SharedFetcher>,
     live: bool,
-    prices: &HashMap<i64, Decimal>,
+    prices: &HashMap<ListingId, Decimal>,
     holdings: &mut [HoldingOverview],
 ) -> Result<(), ApiError> {
     let quotes = closing_price::resolve_live_prices(
@@ -273,8 +274,14 @@ mod tests {
             .await;
     }
 
-    async fn insert_buy(pool: &SqlitePool, id: i64, listing_id: i64, qty: Decimal, price: Decimal) {
-        test_support::buy(id, listing_id)
+    async fn insert_buy(
+        pool: &SqlitePool,
+        id: i64,
+        listing_id: ListingId,
+        qty: Decimal,
+        price: Decimal,
+    ) {
+        test_support::buy(id, listing_id.0)
             .qty(qty)
             .price(price)
             .brokerage(dec("9.95"))
@@ -283,8 +290,8 @@ mod tests {
             .await;
     }
 
-    async fn insert_sell(pool: &SqlitePool, id: i64, listing_id: i64, qty: Decimal) {
-        test_support::sell(id, listing_id)
+    async fn insert_sell(pool: &SqlitePool, id: i64, listing_id: ListingId, qty: Decimal) {
+        test_support::sell(id, listing_id.0)
             .date(ymd(2024, 6, 3))
             .qty(qty)
             .price(Decimal::from(120))
@@ -294,8 +301,8 @@ mod tests {
             .await;
     }
 
-    fn make_amma(id: i64, listing_id: i64, cba: Decimal) -> amma::AmmaStatement {
-        test_support::amma(id, listing_id)
+    fn make_amma(id: i64, listing_id: ListingId, cba: Decimal) -> amma::AmmaStatement {
+        test_support::amma(id, listing_id.0)
             .cost_base_adjustment(cba)
             .build()
     }
@@ -333,7 +340,14 @@ mod tests {
     async fn db_single_buy_fully_held() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "VAS").await;
-        insert_buy(&pool, 1, 1, Decimal::from(100), Decimal::from(10)).await;
+        insert_buy(
+            &pool,
+            1,
+            ListingId(1),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
 
         let holdings = db_holdings(&pool, None).await.unwrap();
         assert_eq!(holdings.len(), 1);
@@ -386,8 +400,15 @@ mod tests {
     async fn db_partial_sell_reduces_holding() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "VAS").await;
-        insert_buy(&pool, 1, 1, Decimal::from(100), Decimal::from(10)).await;
-        insert_sell(&pool, 2, 1, Decimal::from(40)).await;
+        insert_buy(
+            &pool,
+            1,
+            ListingId(1),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
+        insert_sell(&pool, 2, ListingId(1), Decimal::from(40)).await;
         allocate(&pool, 1, 2, 1, Decimal::from(40)).await;
 
         let holdings = db_holdings(&pool, None).await.unwrap();
@@ -406,8 +427,15 @@ mod tests {
     async fn db_fully_sold_listing_excluded() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "VAS").await;
-        insert_buy(&pool, 1, 1, Decimal::from(100), Decimal::from(10)).await;
-        insert_sell(&pool, 2, 1, Decimal::from(100)).await;
+        insert_buy(
+            &pool,
+            1,
+            ListingId(1),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
+        insert_sell(&pool, 2, ListingId(1), Decimal::from(100)).await;
         allocate(&pool, 1, 2, 1, Decimal::from(100)).await;
 
         let holdings = db_holdings(&pool, None).await.unwrap();
@@ -418,8 +446,15 @@ mod tests {
     async fn db_amit_adjustment_reduces_cost_base() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "VAF").await;
-        insert_buy(&pool, 1, 1, Decimal::from(100), Decimal::from(10)).await;
-        amma::db_upsert(&pool, &make_amma(1, 1, "0.05".parse().unwrap()))
+        insert_buy(
+            &pool,
+            1,
+            ListingId(1),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
+        amma::db_upsert(&pool, &make_amma(1, ListingId(1), "0.05".parse().unwrap()))
             .await
             .unwrap();
         amit_adjustment::db_upsert(
@@ -453,9 +488,9 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "VAF").await;
         // initial cost = 1*100 + 9.95 + 0.995 = 110.945
-        insert_buy(&pool, 1, 1, Decimal::from(100), Decimal::from(1)).await;
+        insert_buy(&pool, 1, ListingId(1), Decimal::from(100), Decimal::from(1)).await;
         // reduction = 100 * 1.50 = 150 > 110.945 → cost base floored at 0
-        amma::db_upsert(&pool, &make_amma(1, 1, "1.50".parse().unwrap()))
+        amma::db_upsert(&pool, &make_amma(1, ListingId(1), "1.50".parse().unwrap()))
             .await
             .unwrap();
         amit_adjustment::db_upsert(
@@ -481,8 +516,8 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "VAS").await;
         insert_listing(&pool, 2, "VAF").await;
-        insert_buy(&pool, 1, 1, Decimal::from(50), Decimal::from(10)).await;
-        insert_buy(&pool, 2, 2, Decimal::from(200), Decimal::from(5)).await;
+        insert_buy(&pool, 1, ListingId(1), Decimal::from(50), Decimal::from(10)).await;
+        insert_buy(&pool, 2, ListingId(2), Decimal::from(200), Decimal::from(5)).await;
 
         let holdings = db_holdings(&pool, None).await.unwrap();
         assert_eq!(holdings.len(), 2);
@@ -497,8 +532,15 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "VAS").await;
         // Two buy parcels for the same listing
-        insert_buy(&pool, 1, 1, Decimal::from(100), Decimal::from(10)).await;
-        insert_buy(&pool, 2, 1, Decimal::from(50), Decimal::from(12)).await;
+        insert_buy(
+            &pool,
+            1,
+            ListingId(1),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
+        insert_buy(&pool, 2, ListingId(1), Decimal::from(50), Decimal::from(12)).await;
 
         let holdings = db_holdings(&pool, None).await.unwrap();
         assert_eq!(holdings.len(), 1);
@@ -510,7 +552,13 @@ mod tests {
         assert_eq!(h.total_cost_base, "1621.890".parse::<Decimal>().unwrap());
     }
 
-    async fn apply_roc(pool: &SqlitePool, id: i64, listing_id: i64, date: NaiveDate, amount: &str) {
+    async fn apply_roc(
+        pool: &SqlitePool,
+        id: i64,
+        listing_id: ListingId,
+        date: NaiveDate,
+        amount: &str,
+    ) {
         corporate_action::db_upsert(
             pool,
             &corporate_action::CorporateAction {
@@ -531,7 +579,7 @@ mod tests {
     async fn apply_split(
         pool: &SqlitePool,
         id: i64,
-        listing_id: i64,
+        listing_id: ListingId,
         date: NaiveDate,
         new: &str,
         old: &str,
@@ -560,12 +608,19 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "SPL").await;
         // Buy 100 @ $10 on 2024-01-01 → cost base 1010.945 (incl. brokerage).
-        insert_buy(&pool, 1, 1, Decimal::from(100), Decimal::from(10)).await;
+        insert_buy(
+            &pool,
+            1,
+            ListingId(1),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
         // 2-for-1 split after acquisition.
         apply_split(
             &pool,
             1,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
             "2",
             "1",
@@ -592,13 +647,20 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "BON").await;
         // Buy 100 @ $10 on 2024-01-01 → cost base 1010.945 (incl. brokerage).
-        insert_buy(&pool, 1, 1, Decimal::from(100), Decimal::from(10)).await;
+        insert_buy(
+            &pool,
+            1,
+            ListingId(1),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
         // 1-for-10 bonus issue after acquisition: 100 held → 10 bonus units.
         corporate_action::db_upsert(
             &pool,
             &corporate_action::CorporateAction {
                 id: 1,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
                 kind: corporate_action::ActionKind::BonusIssue {
                     bonus_units: Decimal::ONE,
@@ -626,12 +688,19 @@ mod tests {
     async fn db_consolidation_shrinks_quantity_and_preserves_cost_base() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "CON").await;
-        insert_buy(&pool, 1, 1, Decimal::from(100), Decimal::from(10)).await;
+        insert_buy(
+            &pool,
+            1,
+            ListingId(1),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
         // 1-for-10 consolidation.
         apply_split(
             &pool,
             1,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
             "1",
             "10",
@@ -652,18 +721,25 @@ mod tests {
     async fn db_post_split_sell_nets_off_pre_split_parcel() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "SPL").await;
-        insert_buy(&pool, 1, 1, Decimal::from(100), Decimal::from(10)).await; // 2024-01-01
+        insert_buy(
+            &pool,
+            1,
+            ListingId(1),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await; // 2024-01-01
         apply_split(
             &pool,
             1,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
             "2",
             "1",
         )
         .await;
         // Sell 80 post-split units (= 40 as-acquired) on 2024-06-01.
-        insert_sell(&pool, 2, 1, Decimal::from(80)).await;
+        insert_sell(&pool, 2, ListingId(1), Decimal::from(80)).await;
         allocate(&pool, 1, 2, 1, Decimal::from(80)).await;
 
         let holdings = db_holdings(&pool, None).await.unwrap();
@@ -686,13 +762,20 @@ mod tests {
         apply_split(
             &pool,
             1,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2023, 6, 1).unwrap(),
             "2",
             "1",
         )
         .await;
-        insert_buy(&pool, 1, 1, Decimal::from(100), Decimal::from(10)).await; // 2024-01-01
+        insert_buy(
+            &pool,
+            1,
+            ListingId(1),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await; // 2024-01-01
 
         let holdings = db_holdings(&pool, None).await.unwrap();
         assert_eq!(holdings[0].quantity, Decimal::from(100));
@@ -704,11 +787,18 @@ mod tests {
     async fn db_return_of_capital_after_split_scales_to_post_split_units() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "SPL").await;
-        insert_buy(&pool, 1, 1, Decimal::from(100), Decimal::from(10)).await; // 2024-01-01
+        insert_buy(
+            &pool,
+            1,
+            ListingId(1),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await; // 2024-01-01
         apply_split(
             &pool,
             1,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
             "2",
             "1",
@@ -718,7 +808,7 @@ mod tests {
         apply_roc(
             &pool,
             2,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2024, 6, 3).unwrap(),
             "0.25",
         )
@@ -740,12 +830,19 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "RAP").await;
         // Buy 100 @ $10 on 2024-01-01 → cost base 1010.945 (incl. brokerage).
-        insert_buy(&pool, 1, 1, Decimal::from(100), Decimal::from(10)).await;
+        insert_buy(
+            &pool,
+            1,
+            ListingId(1),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
         // 50c/unit return of capital while all 100 units are held.
         apply_roc(
             &pool,
             1,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
             "0.50",
         )
@@ -768,12 +865,19 @@ mod tests {
         apply_roc(
             &pool,
             1,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2023, 11, 30).unwrap(),
             "0.50",
         )
         .await;
-        insert_buy(&pool, 1, 1, Decimal::from(100), Decimal::from(10)).await;
+        insert_buy(
+            &pool,
+            1,
+            ListingId(1),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
 
         let holdings = db_holdings(&pool, None).await.unwrap();
         assert_eq!(
@@ -788,12 +892,19 @@ mod tests {
     async fn db_return_of_capital_floors_cost_base_at_nil() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "RAP").await;
-        insert_buy(&pool, 1, 1, Decimal::from(100), Decimal::from(10)).await;
+        insert_buy(
+            &pool,
+            1,
+            ListingId(1),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
         // $11/unit × 100 = 1100 exceeds the 1010.945 cost base.
         apply_roc(
             &pool,
             1,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
             "11",
         )
@@ -809,8 +920,15 @@ mod tests {
     async fn db_holdings_as_of_a_past_date_excludes_later_facts() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "VAS").await;
-        insert_buy(&pool, 1, 1, Decimal::from(100), Decimal::from(10)).await; // 2024-01-01
-        insert_sell(&pool, 2, 1, Decimal::from(40)).await; // 2024-06-01
+        insert_buy(
+            &pool,
+            1,
+            ListingId(1),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await; // 2024-01-01
+        insert_sell(&pool, 2, ListingId(1), Decimal::from(40)).await; // 2024-06-01
         allocate(&pool, 1, 2, 1, Decimal::from(40)).await;
 
         let live = db_holdings(&pool, None).await.unwrap();
@@ -833,7 +951,14 @@ mod tests {
     async fn api_overview_as_of_date_bounds_the_holdings() {
         let pool = test_pool().await;
         insert_crypto_listing(&pool, 1, "BTC").await;
-        insert_buy(&pool, 1, 1, Decimal::from(100), Decimal::from(10)).await; // 2024-01-02
+        insert_buy(
+            &pool,
+            1,
+            ListingId(1),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await; // 2024-01-02
         let today = crate::infra::date::today();
         let yesterday = today.pred_opt().expect("today has a yesterday");
         test_support::sell(2, 1)
@@ -886,7 +1011,14 @@ mod tests {
     async fn api_overview_as_of_date_boundary_includes_a_same_day_disposal() {
         let pool = test_pool().await;
         insert_crypto_listing(&pool, 1, "BTC").await;
-        insert_buy(&pool, 1, 1, Decimal::from(100), Decimal::from(10)).await;
+        insert_buy(
+            &pool,
+            1,
+            ListingId(1),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
         let sale_date = crate::infra::date::today()
             .pred_opt()
             .expect("today has a yesterday");
@@ -925,7 +1057,14 @@ mod tests {
     async fn api_overview_unknown_body_field_is_refused() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "VAS").await;
-        insert_buy(&pool, 1, 1, Decimal::from(100), Decimal::from(10)).await;
+        insert_buy(
+            &pool,
+            1,
+            ListingId(1),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
 
         let body = serde_json::json!({ "as_of_dates": "2024-03-01" });
         let resp = client(&pool).post("/portfolio/overview", &body).await;
@@ -939,7 +1078,14 @@ mod tests {
     async fn api_overview_as_of_date_with_price_override_values_the_as_at_quantity() {
         let pool = test_pool().await;
         insert_crypto_listing(&pool, 1, "BTC").await;
-        insert_buy(&pool, 1, 1, Decimal::from(100), Decimal::from(10)).await;
+        insert_buy(
+            &pool,
+            1,
+            ListingId(1),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
         let today = crate::infra::date::today();
         test_support::sell(2, 1)
             .date(today)
@@ -973,7 +1119,14 @@ mod tests {
     async fn api_overview_without_prices() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "VAS").await;
-        insert_buy(&pool, 1, 1, Decimal::from(100), Decimal::from(10)).await;
+        insert_buy(
+            &pool,
+            1,
+            ListingId(1),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
 
         let resp = client(&pool).post_empty("/portfolio/overview").await;
         assert_eq!(resp.status, StatusCode::OK);
@@ -988,7 +1141,14 @@ mod tests {
     async fn api_overview_with_prices() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "VAS").await;
-        insert_buy(&pool, 1, 1, Decimal::from(100), Decimal::from(10)).await;
+        insert_buy(
+            &pool,
+            1,
+            ListingId(1),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
 
         let body = serde_json::json!({ "prices": { "1": "120.50" } });
         let resp = client(&pool).post("/portfolio/overview", &body).await;
@@ -1010,7 +1170,14 @@ mod tests {
     async fn api_overview_unknown_listing_price_ignored() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "VAS").await;
-        insert_buy(&pool, 1, 1, Decimal::from(100), Decimal::from(10)).await;
+        insert_buy(
+            &pool,
+            1,
+            ListingId(1),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
 
         // price for listing 99 (doesn't exist) — should be silently ignored
         let body = serde_json::json!({ "prices": { "99": "50.00" } });
@@ -1029,7 +1196,14 @@ mod tests {
         use crate::entities::closing_price::test_support::QuoteStub;
         let pool = test_pool().await;
         insert_listing(&pool, 1, "VAS").await;
-        insert_buy(&pool, 1, 1, Decimal::from(100), Decimal::from(10)).await;
+        insert_buy(
+            &pool,
+            1,
+            ListingId(1),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
         let as_of = chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2026, 6, 5, 6, 30, 0).unwrap();
         let fetcher = QuoteStub::default()
             .with_quote(1, "12.50", "AUD", as_of)
@@ -1134,9 +1308,16 @@ mod tests {
         insert_listing(&pool, 1, "VAS").await; // priced live
         insert_listing(&pool, 2, "VAF").await; // explicit override
         insert_listing(&pool, 3, "VGS").await; // live fetch fails (no stub quote)
-        insert_buy(&pool, 1, 1, Decimal::from(100), Decimal::from(10)).await;
-        insert_buy(&pool, 2, 2, Decimal::from(50), Decimal::from(12)).await;
-        insert_buy(&pool, 3, 3, Decimal::from(10), Decimal::from(5)).await;
+        insert_buy(
+            &pool,
+            1,
+            ListingId(1),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
+        insert_buy(&pool, 2, ListingId(2), Decimal::from(50), Decimal::from(12)).await;
+        insert_buy(&pool, 3, ListingId(3), Decimal::from(10), Decimal::from(5)).await;
         let as_of = chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2026, 6, 5, 6, 30, 0).unwrap();
         // Stub only quotes listing 1; listing 3 has no quote → graceful failure.
         let fetcher = QuoteStub::default()
@@ -1180,8 +1361,15 @@ mod tests {
         .await
         .unwrap();
         // 100 @ $10 in the default account, 50 @ $12 in the plan account.
-        insert_buy(&pool, 1, 1, Decimal::from(100), Decimal::from(10)).await;
-        insert_buy(&pool, 2, 1, Decimal::from(50), Decimal::from(12)).await;
+        insert_buy(
+            &pool,
+            1,
+            ListingId(1),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
+        insert_buy(&pool, 2, ListingId(1), Decimal::from(50), Decimal::from(12)).await;
         sqlx::query("UPDATE trades SET holding_account_id = 2 WHERE id = 2")
             .execute(&pool)
             .await
@@ -1190,12 +1378,12 @@ mod tests {
         let holdings = db_holdings(&pool, None).await.unwrap();
         assert_eq!(holdings.len(), 2);
         assert_eq!(
-            (holdings[0].listing_id, holdings[0].holding_account_id),
+            (holdings[0].listing_id.0, holdings[0].holding_account_id),
             (1, 1)
         );
         assert_eq!(holdings[0].quantity, Decimal::from(100));
         assert_eq!(
-            (holdings[1].listing_id, holdings[1].holding_account_id),
+            (holdings[1].listing_id.0, holdings[1].holding_account_id),
             (1, 2)
         );
         assert_eq!(holdings[1].quantity, Decimal::from(50));
@@ -1213,15 +1401,22 @@ mod tests {
         insert_listing(&pool, 1, "OLD").await;
         insert_listing(&pool, 2, "NEW").await;
         // 100 @ $10 + $9.95 + $0.995 = $1,010.945 cost base.
-        insert_buy(&pool, 1, 1, Decimal::from(100), Decimal::from(10)).await;
+        insert_buy(
+            &pool,
+            1,
+            ListingId(1),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
         corporate_action::db_upsert(
             &pool,
             &corporate_action::CorporateAction {
                 id: 10,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: NaiveDate::from_ymd_opt(2024, 7, 1).unwrap(),
                 kind: corporate_action::ActionKind::ScripForScrip {
-                    scrip_listing_id: 2,
+                    scrip_listing_id: ListingId(2),
                     scrip_new_units: Decimal::from(2),
                     scrip_old_units: Decimal::ONE,
                     scrip_cash_per_unit: None,
@@ -1256,15 +1451,22 @@ mod tests {
         insert_listing(&pool, 1, "HEAD").await;
         insert_listing(&pool, 2, "DEM").await;
         // 100 @ $10 + $9.95 + $0.995 = $1,010.945 cost base.
-        insert_buy(&pool, 1, 1, Decimal::from(100), Decimal::from(10)).await;
+        insert_buy(
+            &pool,
+            1,
+            ListingId(1),
+            Decimal::from(100),
+            Decimal::from(10),
+        )
+        .await;
         corporate_action::db_upsert(
             &pool,
             &corporate_action::CorporateAction {
                 id: 10,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: NaiveDate::from_ymd_opt(2024, 7, 1).unwrap(),
                 kind: corporate_action::ActionKind::Demerger {
-                    demerger_listing_id: 2,
+                    demerger_listing_id: ListingId(2),
                     demerger_new_units: Decimal::ONE,
                     demerger_held_units: Decimal::from(5),
                     demerger_cost_base_pct: Decimal::from(20),

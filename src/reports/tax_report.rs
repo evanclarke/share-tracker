@@ -52,6 +52,7 @@ use crate::infra::decimal::{OptMoney, mul_div, parse_dec, to_cents};
 use crate::infra::extract::{Json, Query};
 use crate::infra::fx::FxRates;
 use crate::infra::http::ApiError;
+use crate::infra::id::ListingId;
 use crate::reports::realised_gains::DisposalSource;
 use crate::reports::{
     activity, amit_adjustment_cross_check, amit_cash_cross_check, e4_cross_check, franking_at_risk,
@@ -154,7 +155,7 @@ fn period_for(tax_year: TaxYear) -> (NaiveDate, NaiveDate) {
 
 #[derive(utoipa::ToSchema, Debug, Serialize)]
 pub struct AmmaMissingAlert {
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     pub ticker: String,
     /// The holding account the units were held in. A registry issues one AMMA
     /// statement per holder account, so a fund held in two accounts needs two
@@ -172,7 +173,7 @@ pub struct AmmaMissingAlert {
 /// yet, or the fund genuinely made none.
 #[derive(utoipa::ToSchema, Debug, Serialize)]
 pub struct AmmaNothingRecordedAlert {
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     pub ticker: String,
     pub holding_account_id: i64,
     /// Units held at 30 June, so the line can say what position is unaccounted
@@ -277,7 +278,7 @@ async fn amma_coverage(
     // Listings that are an AMIT *for this year*: one that converted part-way
     // through a holding has no AMMA statement for its earlier years and must
     // not be asked for one (SCENARIOS F-23).
-    let tickers: HashMap<i64, String> =
+    let tickers: HashMap<ListingId, String> =
         sqlx::query("SELECT id, ticker, amit, amit_from FROM listings WHERE amit")
             .fetch_all(&mut *conn)
             .await?
@@ -309,7 +310,7 @@ async fn amma_coverage(
     // Both dates are `end`: the holding is the fact at 30 June, and the units
     // are wanted in that day's own basis, which is what the alert displays.
     let timeline = HeldTimeline::load_on(&mut *conn).await?;
-    let closing: HashMap<(i64, i64), Decimal> = tickers
+    let closing: HashMap<(ListingId, i64), Decimal> = tickers
         .keys()
         .flat_map(|listing_id| {
             timeline
@@ -328,8 +329,8 @@ async fn amma_coverage(
         sqlx::query("SELECT i.* FROM income i JOIN listings l ON l.id = i.listing_id WHERE l.amit")
             .fetch_all(&mut *conn)
             .await?;
-    let mut attributed: HashSet<(i64, i64)> = HashSet::new();
-    let mut fund_attributed: HashSet<i64> = HashSet::new();
+    let mut attributed: HashSet<(ListingId, i64)> = HashSet::new();
+    let mut fund_attributed: HashSet<ListingId> = HashSet::new();
     for row in &income_rows {
         let income = Income::from_row(row)?;
         if !tickers.contains_key(&income.listing_id) {
@@ -342,7 +343,7 @@ async fn amma_coverage(
         }
     }
 
-    let mut covered: HashSet<(i64, i64)> = HashSet::new();
+    let mut covered: HashSet<(ListingId, i64)> = HashSet::new();
     for row in sqlx::query(
         "SELECT listing_id, holding_account_id FROM amma_statements \
          WHERE tax_year_end_date BETWEEN ? AND ?",
@@ -352,7 +353,7 @@ async fn amma_coverage(
     .fetch_all(&mut *conn)
     .await?
     {
-        let listing_id: i64 = row.try_get("listing_id")?;
+        let listing_id: ListingId = row.try_get("listing_id")?;
         covered.insert((listing_id, row.try_get("holding_account_id")?));
         // An issued statement is itself proof the fund attributed something
         // for this listing-year, so the *other* accounts holding it are owed
@@ -362,11 +363,11 @@ async fn amma_coverage(
 
     // Sorted by ticker, then account, so both sections read in the same order
     // as the cross-check alerts beside them.
-    let sort_key = |listing_id: &i64, account_id: &i64| {
+    let sort_key = |listing_id: &ListingId, account_id: &i64| {
         (tickers.get(listing_id).cloned(), *account_id, *listing_id)
     };
 
-    let mut missing: Vec<(i64, i64)> = attributed
+    let mut missing: Vec<(ListingId, i64)> = attributed
         .iter()
         .copied()
         .chain(
@@ -380,7 +381,7 @@ async fn amma_coverage(
     missing.sort_unstable_by_key(|(listing_id, account_id)| sort_key(listing_id, account_id));
     missing.dedup();
 
-    let mut unrecorded: Vec<((i64, i64), Decimal)> = closing
+    let mut unrecorded: Vec<((ListingId, i64), Decimal)> = closing
         .iter()
         .filter(|(key, qty)| {
             **qty > Decimal::ZERO && !fund_attributed.contains(&key.0) && !covered.contains(key)
@@ -605,7 +606,7 @@ impl DisposalParcelRow {
 
 #[derive(utoipa::ToSchema, Debug, Serialize)]
 pub struct DisposalListingGroup {
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     pub ticker: String,
     pub listing_name: String,
     pub parcels: Vec<DisposalParcelRow>,
@@ -629,8 +630,8 @@ struct DisposalInputs {
     /// `trades`, and the printed sell-side rate has to come from here.
     rights_sales: HashMap<i64, (String, Decimal)>,
     amit_events: HashMap<i64, Vec<cost_base::AmitReductionEvent>>,
-    roc_events: HashMap<i64, Vec<RocEvent>>,
-    split_events: HashMap<i64, Vec<SplitEvent>>,
+    roc_events: HashMap<ListingId, Vec<RocEvent>>,
+    split_events: HashMap<ListingId, Vec<SplitEvent>>,
     /// Each partial-rollover scrip closing Sell's cash-side apportionment
     /// `(numerator, denominator)` — keyed by the **Sell trade id**, and never
     /// looked up for a rights sale (whose `sale_trade_id` is a `rights_sales`
@@ -1020,21 +1021,21 @@ async fn disposals_section(
     }
 
     let inputs = load_disposal_inputs(conn, fx).await?;
-    let listing_names: HashMap<i64, (String, String)> =
+    let listing_names: HashMap<ListingId, (String, String)> =
         sqlx::query("SELECT id, ticker, name FROM listings")
             .fetch_all(&mut *conn)
             .await?
             .into_iter()
             .map(|r| {
                 Ok::<_, sqlx::Error>((
-                    r.try_get::<i64, _>("id")?,
+                    r.try_get::<ListingId, _>("id")?,
                     (r.try_get("ticker")?, r.try_get("name")?),
                 ))
             })
             .collect::<Result<_, _>>()?;
     let renames = RenameHistory::load(conn).await?;
 
-    let mut by_listing: HashMap<i64, Vec<DisposalParcelRow>> = HashMap::new();
+    let mut by_listing: HashMap<ListingId, Vec<DisposalParcelRow>> = HashMap::new();
     for &d in &year_disposals {
         by_listing
             .entry(d.listing_id)
@@ -1089,7 +1090,7 @@ async fn disposals_section(
 #[derive(utoipa::ToSchema, Debug, Serialize)]
 pub struct TrustIncomeRow {
     pub income_id: i64,
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     pub ticker: String,
     pub date_paid: NaiveDate,
     pub entitlement_date: Option<NaiveDate>,
@@ -1139,7 +1140,7 @@ pub struct TrustIncomeRow {
 #[derive(utoipa::ToSchema, Debug, Serialize)]
 pub struct AmmaStatementRow {
     pub amma_statement_id: i64,
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     pub ticker: String,
     pub tax_year_end_date: NaiveDate,
     pub australian_interest_aud: Decimal,
@@ -1167,7 +1168,7 @@ pub struct AmmaStatementRow {
 #[derive(utoipa::ToSchema, Debug, Serialize)]
 pub struct DividendIncomeRow {
     pub income_id: i64,
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     pub ticker: String,
     pub date_paid: NaiveDate,
     pub ex_date: Option<NaiveDate>,
@@ -1191,7 +1192,7 @@ pub struct DividendIncomeRow {
 #[derive(utoipa::ToSchema, Debug, Serialize)]
 pub struct EmploymentIncomeRow {
     pub income_id: i64,
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     pub ticker: String,
     pub date_paid: NaiveDate,
     pub amount_aud: Decimal,
@@ -1206,7 +1207,7 @@ pub struct EmploymentIncomeRow {
 #[derive(utoipa::ToSchema, Debug, Serialize)]
 pub struct OtherIncomeRow {
     pub income_id: i64,
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     pub ticker: String,
     pub date_paid: NaiveDate,
     pub amount_aud: Decimal,
@@ -1242,7 +1243,7 @@ pub enum ForeignIncomeKind {
 #[derive(utoipa::ToSchema, Debug, Serialize)]
 pub struct ForeignIncomeRow {
     pub kind: ForeignIncomeKind,
-    pub listing_id: Option<i64>,
+    pub listing_id: Option<ListingId>,
     pub ticker: Option<String>,
     pub date: NaiveDate,
     pub amount_aud: Decimal,
@@ -1326,7 +1327,7 @@ pub struct InterestIncomeRow {
 #[derive(utoipa::ToSchema, Debug, Serialize)]
 pub struct EssIncomeRow {
     pub ess_statement_id: i64,
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     pub ticker: String,
     pub taxing_point_date: NaiveDate,
     pub taxed_upfront_eligible_aud: Decimal,
@@ -1343,7 +1344,7 @@ pub struct DeductionRow {
     pub date_incurred: NaiveDate,
     pub expense_type: String,
     pub amount_aud: Decimal,
-    pub listing_id: Option<i64>,
+    pub listing_id: Option<ListingId>,
     /// The attributed listing's ticker as at `date_incurred` (the same
     /// as-at naming every other listing-bearing row prints), `None` for a
     /// portfolio-wide expense. Without it the printed document loses the
@@ -1417,7 +1418,7 @@ impl IncomeSections {
 struct IncomeContext {
     tax_year: TaxYear,
     fx: FxRates,
-    tickers: HashMap<i64, String>,
+    tickers: HashMap<ListingId, String>,
     renames: RenameHistory,
 }
 
@@ -1442,7 +1443,7 @@ impl IncomeContext {
     /// As at `date`: the current ticker unless renamed since, in which case
     /// the ticker in effect on `date` — so an income row prints the way the
     /// broker statement named the security when it was paid.
-    fn ticker_as_at(&self, listing_id: i64, date: NaiveDate) -> String {
+    fn ticker_as_at(&self, listing_id: ListingId, date: NaiveDate) -> String {
         let current = self
             .tickers
             .get(&listing_id)
@@ -1620,7 +1621,7 @@ async fn push_amma_rows(
     .fetch_all(&mut *conn)
     .await?;
     for row in &amma_rows {
-        let listing_id: i64 = row.try_get("listing_id")?;
+        let listing_id: ListingId = row.try_get("listing_id")?;
         let d: NaiveDate = row.try_get("tax_year_end_date")?;
         let statement = amma_statement_row(ctx, row, listing_id, d)?;
         let (foreign_income, foreign_tax) = (
@@ -1665,7 +1666,7 @@ async fn push_amma_rows(
 fn amma_statement_row(
     ctx: &IncomeContext,
     row: &sqlx::sqlite::SqliteRow,
-    listing_id: i64,
+    listing_id: ListingId,
     d: NaiveDate,
 ) -> Result<AmmaStatementRow, sqlx::Error> {
     let currency: String = row.try_get("currency")?;
@@ -1770,7 +1771,7 @@ async fn push_ess_rows(
             continue;
         }
         let currency: String = row.try_get("currency")?;
-        let listing_id: i64 = row.try_get("listing_id")?;
+        let listing_id: ListingId = row.try_get("listing_id")?;
         // The discount components carry their own stored AUD figures (the
         // `aud_*` columns), so they convert through `aud_label` — and through
         // the statement's own stated `fx_rate` where the taxing-point month has
@@ -1835,7 +1836,7 @@ async fn push_deduction_rows(
             continue;
         }
         let currency: String = row.try_get("currency")?;
-        let listing_id: Option<i64> = row.try_get("listing_id")?;
+        let listing_id: Option<ListingId> = row.try_get("listing_id")?;
         let expense_type: ExpenseType = row.try_get("expense_type")?;
         let destination =
             routing.destination(listing_id, expense_type.is_debt_deduction(), tax_year);
@@ -2249,7 +2250,7 @@ mod tests {
         // Renamed mid-year: LAAC -> LAR (the listing's current ticker).
         crate::entities::listing_rename::db_rename(
             &pool,
-            1,
+            ListingId(1),
             &crate::entities::listing_rename::RenameBody {
                 effective_date: ymd(2024, 3, 1),
                 ticker: "LAR".to_string(),
@@ -3160,7 +3161,7 @@ mod tests {
             &pool,
             &crate::entities::corporate_action::CorporateAction {
                 id: 1,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: ymd(2023, 6, 1),
                 kind: crate::entities::corporate_action::ActionKind::ShareSplit {
                     split_new_units: dec("2"),
@@ -3285,7 +3286,7 @@ mod tests {
                 .completeness
                 .amma_missing
                 .iter()
-                .map(|a| (a.listing_id, a.holding_account_id))
+                .map(|a| (a.listing_id.0, a.holding_account_id))
                 .collect::<Vec<_>>(),
             vec![(1, 1), (1, 2)]
         );
@@ -3414,7 +3415,7 @@ mod tests {
             .completeness
             .amma_missing
             .iter()
-            .map(|a| a.listing_id)
+            .map(|a| a.listing_id.0)
             .collect();
         assert_eq!(flagged, vec![2, 1]);
     }
@@ -3766,7 +3767,7 @@ mod tests {
             .await
             .unwrap();
 
-        let expense = |id: i64, kind, amount: &str, listing_id: Option<i64>| {
+        let expense = |id: i64, kind, amount: &str, listing_id: Option<ListingId>| {
             investment_expense::InvestmentExpense {
                 id,
                 date_incurred: march,
@@ -3785,20 +3786,25 @@ mod tests {
                 1,
                 investment_expense::ExpenseType::ManagementFee,
                 "20",
-                Some(1),
+                Some(ListingId(1)),
             ),
-            expense(2, investment_expense::ExpenseType::AdviceFee, "30", Some(2)),
+            expense(
+                2,
+                investment_expense::ExpenseType::AdviceFee,
+                "30",
+                Some(ListingId(2)),
+            ),
             expense(
                 3,
                 investment_expense::ExpenseType::ManagementFee,
                 "40",
-                Some(3),
+                Some(ListingId(3)),
             ),
             expense(
                 4,
                 investment_expense::ExpenseType::LoanInterest,
                 "50",
-                Some(3),
+                Some(ListingId(3)),
             ),
             expense(5, investment_expense::ExpenseType::Subscription, "60", None),
         ] {
@@ -3880,7 +3886,7 @@ mod tests {
             .name("Lithium Americas (Argentina) Corp")
             .insert(&pool)
             .await;
-        let expense = |id: i64, date: NaiveDate, listing_id: Option<i64>| {
+        let expense = |id: i64, date: NaiveDate, listing_id: Option<ListingId>| {
             investment_expense::InvestmentExpense {
                 id,
                 date_incurred: date,
@@ -3895,12 +3901,12 @@ mod tests {
             }
         };
         // Incurred against the holding before the rename…
-        investment_expense::db_upsert(&pool, &expense(1, ymd(2024, 1, 5), Some(1)))
+        investment_expense::db_upsert(&pool, &expense(1, ymd(2024, 1, 5), Some(ListingId(1))))
             .await
             .unwrap();
         crate::entities::listing_rename::db_rename(
             &pool,
-            1,
+            ListingId(1),
             &crate::entities::listing_rename::RenameBody {
                 effective_date: ymd(2024, 3, 1),
                 ticker: "LAR".to_string(),
@@ -3913,7 +3919,7 @@ mod tests {
         .await
         .unwrap();
         // …and again after it, plus a portfolio-wide fee attributed to nothing.
-        investment_expense::db_upsert(&pool, &expense(2, ymd(2024, 5, 1), Some(1)))
+        investment_expense::db_upsert(&pool, &expense(2, ymd(2024, 5, 1), Some(ListingId(1))))
             .await
             .unwrap();
         investment_expense::db_upsert(&pool, &expense(3, ymd(2024, 6, 1), None))
@@ -3923,7 +3929,7 @@ mod tests {
         let report = db_tax_report(&pool, 2024).await.unwrap();
         assert_eq!(report.income.deductions.len(), 3);
         let rows = &report.income.deductions;
-        assert_eq!(rows[0].listing_id, Some(1));
+        assert_eq!(rows[0].listing_id, Some(ListingId(1)));
         assert_eq!(rows[0].ticker.as_deref(), Some("LAAC"));
         assert_eq!(rows[1].ticker.as_deref(), Some("LAR"));
         assert_eq!(rows[2].listing_id, None);
@@ -3979,7 +3985,7 @@ mod tests {
                 holding_account_id: 1,
                 date: ymd(2025, 5, 1),
                 settlement_date: None,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 average_price: dec("15"),
                 quantity: dec("100"),
                 currency: "AUD".into(),
@@ -4179,7 +4185,7 @@ mod tests {
             &pool,
             &corporate_action::CorporateAction {
                 id: 10,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: ymd(2025, 9, 15),
                 kind: corporate_action::ActionKind::ReturnOfCapital {
                     amount_per_unit: dec("3"),
@@ -4227,7 +4233,7 @@ mod tests {
             &pool,
             &corporate_action::CorporateAction {
                 id: 10,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: ymd(2024, 7, 1),
                 kind: corporate_action::ActionKind::RightsIssue {
                     rights_units: dec("1"),
@@ -5120,7 +5126,7 @@ mod tests {
             &pool,
             &corporate_action::CorporateAction {
                 id: 1,
-                listing_id: 2,
+                listing_id: ListingId(2),
                 date: ymd(2023, 9, 1),
                 kind: corporate_action::ActionKind::ReturnOfCapital {
                     amount_per_unit: dec("0.25"),
@@ -5235,7 +5241,7 @@ mod tests {
             &pool,
             &corporate_action::CorporateAction {
                 id: 1,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: ymd(2024, 3, 1),
                 kind: corporate_action::ActionKind::ReturnOfCapital {
                     amount_per_unit: dec("1"),
@@ -5346,7 +5352,7 @@ mod tests {
             &pool,
             &corporate_action::CorporateAction {
                 id: 1,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: ymd(2023, 5, 1),
                 kind: corporate_action::ActionKind::ReturnOfCapital {
                     amount_per_unit: dec("0.60"),
@@ -5588,7 +5594,7 @@ mod tests {
     fn a_failed_disposal_conversion_propagates_instead_of_a_parity_row() {
         let parcel = ParcelRow {
             id: 1,
-            listing_id: 1,
+            listing_id: ListingId(1),
             holding_account_id: 1,
             date: ymd(2026, 1, 5),
             quantity: dec("100"),
@@ -5611,7 +5617,7 @@ mod tests {
             rights_sales: HashMap::new(),
             amit_events: HashMap::new(),
             roc_events: HashMap::from([(
-                1,
+                ListingId(1),
                 vec![RocEvent {
                     date: ymd(2026, 3, 1),
                     amount_per_unit: dec("1"),
@@ -5627,7 +5633,7 @@ mod tests {
         let disposal = realised_gains::RealisedGainLoss {
             source: DisposalSource::Sell,
             sale_trade_id: 2,
-            listing_id: 1,
+            listing_id: ListingId(1),
             holding_account_id: 1,
             sale_date: ymd(2026, 6, 1),
             proceeds: dec("2000"),

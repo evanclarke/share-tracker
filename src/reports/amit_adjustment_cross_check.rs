@@ -38,6 +38,7 @@ use crate::entities::corporate_action::{self, SplitEvent};
 use crate::infra::decimal::row_dec;
 use crate::infra::extract::Json;
 use crate::infra::http::ApiError;
+use crate::infra::id::ListingId;
 use axum::{Router, extract::State, routing::get};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
@@ -51,7 +52,7 @@ use std::collections::HashMap;
 #[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AmitAdjustmentAlert {
     pub amma_statement_id: i64,
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     pub ticker: String,
     /// The financial year the statement attributes, identified by the
     /// calendar year of its 30 June end (`domain::tax_year`).
@@ -169,7 +170,7 @@ pub async fn db_amit_adjustment_alerts(
     // — the same shared read [generation](crate::entities::amit_adjustment_generation)
     // derives its set from, so this report cannot disagree with it about what
     // was open — still on the report's own read transaction.
-    let mut open_at: HashMap<(NaiveDate, i64, i64), Decimal> = HashMap::new();
+    let mut open_at: HashMap<(NaiveDate, ListingId, i64), Decimal> = HashMap::new();
     let mut year_ends: Vec<NaiveDate> = statement_rows
         .iter()
         .map(|r| r.try_get("tax_year_end_date"))
@@ -210,7 +211,7 @@ pub async fn db_amit_adjustment_alerts(
     let mut alerts = Vec::new();
     for row in &statement_rows {
         let amma_statement_id: i64 = row.try_get("id")?;
-        let listing_id: i64 = row.try_get("listing_id")?;
+        let listing_id: ListingId = row.try_get("listing_id")?;
         let year_end: NaiveDate = row.try_get("tax_year_end_date")?;
         let units_held = row_dec(row, "units_held")?;
         let cost_base_adjustment = row_dec(row, "cost_base_adjustment")?;
@@ -558,7 +559,7 @@ mod tests {
             pool,
             1,
             &TransferBody {
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date,
                 from_account_id: 1,
                 to_account_id: 2,
@@ -585,8 +586,14 @@ mod tests {
 
     /// An AMMA statement for `year_end` stating `units` held, with a non-zero
     /// per-unit cost base adjustment (the case the report is about).
-    async fn amma(pool: &SqlitePool, id: i64, listing_id: i64, year_end: NaiveDate, units: &str) {
-        test_support::amma(id, listing_id)
+    async fn amma(
+        pool: &SqlitePool,
+        id: i64,
+        listing_id: ListingId,
+        year_end: NaiveDate,
+        units: &str,
+    ) {
+        test_support::amma(id, listing_id.0)
             .units(dec(units))
             .cost_base_adjustment(dec("0.05"))
             .with(|a| {
@@ -597,7 +604,13 @@ mod tests {
             .await;
     }
 
-    async fn split(pool: &SqlitePool, id: i64, listing_id: i64, date: NaiveDate, ratio: &str) {
+    async fn split(
+        pool: &SqlitePool,
+        id: i64,
+        listing_id: ListingId,
+        date: NaiveDate,
+        ratio: &str,
+    ) {
         corporate_action::db_upsert(
             pool,
             &CorporateAction {
@@ -630,7 +643,7 @@ mod tests {
             .qty(dec("1302"))
             .insert(&pool)
             .await;
-        amma(&pool, 1, 1, ymd(2024, 6, 30), "1811").await;
+        amma(&pool, 1, ListingId(1), ymd(2024, 6, 30), "1811").await;
         test_support::amit_adjustment(&pool, 1, 1, 1, dec("509")).await;
         test_support::amit_adjustment(&pool, 2, 1, 2, dec("1302")).await;
 
@@ -648,7 +661,7 @@ mod tests {
             .qty(dec("509"))
             .insert(&pool)
             .await;
-        amma(&pool, 1, 1, ymd(2024, 6, 30), "509").await;
+        amma(&pool, 1, ListingId(1), ymd(2024, 6, 30), "509").await;
 
         let alerts = db_amit_adjustment_alerts(&pool).await.unwrap();
         assert_eq!(alerts.len(), 1);
@@ -704,7 +717,7 @@ mod tests {
             .qty(dec("1302"))
             .insert(&pool)
             .await;
-        amma(&pool, 1, 1, ymd(2024, 6, 30), "1811").await;
+        amma(&pool, 1, ListingId(1), ymd(2024, 6, 30), "1811").await;
         // Only the first parcel entered.
         test_support::amit_adjustment(&pool, 1, 1, 1, dec("509")).await;
 
@@ -731,9 +744,9 @@ mod tests {
             .qty(dec("500"))
             .insert(&pool)
             .await;
-        split(&pool, 1, 1, ymd(2024, 1, 15), "2").await;
+        split(&pool, 1, ListingId(1), ymd(2024, 1, 15), "2").await;
         // 500 as-acquired units are 1000 units at 30 June 2024.
-        amma(&pool, 1, 1, ymd(2024, 6, 30), "1000").await;
+        amma(&pool, 1, ListingId(1), ymd(2024, 6, 30), "1000").await;
         test_support::amit_adjustment(&pool, 1, 1, 1, dec("500")).await;
 
         assert!(db_amit_adjustment_alerts(&pool).await.unwrap().is_empty());
@@ -761,7 +774,7 @@ mod tests {
             .qty(dec("509"))
             .insert(&pool)
             .await;
-        amma(&pool, 1, 1, ymd(2024, 6, 30), "509").await;
+        amma(&pool, 1, ListingId(1), ymd(2024, 6, 30), "509").await;
         test_support::amit_adjustment(&pool, 1, 1, 1, dec("509")).await;
         // The write path and the UNIQUE index both refuse this now, so the
         // duplicate is planted directly — the report still has to describe
@@ -802,7 +815,7 @@ mod tests {
             .qty(dec("509"))
             .insert(&pool)
             .await;
-        amma(&pool, 1, 1, ymd(2024, 6, 30), "509").await;
+        amma(&pool, 1, ListingId(1), ymd(2024, 6, 30), "509").await;
         test_support::amit_adjustment(&pool, 1, 1, 1, dec("509")).await;
 
         let alerts = db_amit_adjustment_alerts(&pool).await.unwrap();
@@ -830,7 +843,7 @@ mod tests {
         // The row is written before the sale is recorded: the write path
         // refuses coverage of units gone before the statement's year, so the
         // state is only reachable by entering a back-dated sale afterwards.
-        amma(&pool, 1, 1, ymd(2024, 6, 30), "509").await;
+        amma(&pool, 1, ListingId(1), ymd(2024, 6, 30), "509").await;
         test_support::amit_adjustment(&pool, 1, 1, 1, dec("509")).await;
         test_support::sell(2, 1)
             .date(ymd(2023, 2, 1)) // before 1 July 2023
@@ -873,7 +886,7 @@ mod tests {
             .insert(&pool)
             .await;
         allocate(&pool, 1, 2, 1, dec("509")).await;
-        amma(&pool, 1, 1, ymd(2024, 6, 30), "0").await;
+        amma(&pool, 1, ListingId(1), ymd(2024, 6, 30), "0").await;
         test_support::amit_adjustment(&pool, 1, 1, 1, dec("509")).await;
 
         assert!(db_amit_adjustment_alerts(&pool).await.unwrap().is_empty());
@@ -900,7 +913,7 @@ mod tests {
             .qty(dec("1000"))
             .insert(&pool)
             .await;
-        amma(&pool, 1, 1, ymd(2024, 6, 30), "1000").await;
+        amma(&pool, 1, ListingId(1), ymd(2024, 6, 30), "1000").await;
 
         let client = ApiClient::full(&pool);
         client
@@ -1057,7 +1070,7 @@ mod tests {
             .insert(&pool)
             .await;
         allocate(&pool, 1, 2, 1, dec("400")).await;
-        amma(&pool, 1, 1, ymd(2024, 6, 30), "600").await;
+        amma(&pool, 1, ListingId(1), ymd(2024, 6, 30), "600").await;
         // The whole parcel is covered — the fund attributed to the units sold
         // in February too (s 104-107B / LCR 2015/11 para 13).
         test_support::amit_adjustment(&pool, 1, 1, 1, dec("1000")).await;
@@ -1078,8 +1091,8 @@ mod tests {
             .qty(dec("500"))
             .insert(&pool)
             .await;
-        split(&pool, 1, 1, ymd(2024, 1, 15), "2").await;
-        amma(&pool, 1, 1, ymd(2024, 6, 30), "1000").await;
+        split(&pool, 1, ListingId(1), ymd(2024, 1, 15), "2").await;
+        amma(&pool, 1, ListingId(1), ymd(2024, 6, 30), "1000").await;
         test_support::amit_adjustment(&pool, 1, 1, 1, dec("500")).await;
 
         assert!(db_amit_adjustment_alerts(&pool).await.unwrap().is_empty());
@@ -1119,7 +1132,7 @@ mod tests {
             &pool,
             &CorporateAction {
                 id: 1,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: ymd(2024, 1, 15),
                 kind: ActionKind::BonusIssue {
                     bonus_units: Decimal::ONE,
@@ -1130,7 +1143,7 @@ mod tests {
         .await
         .unwrap();
         // 1 for every 10 held: 1000 as transacted are 1100 at the year end.
-        amma(&pool, 1, 1, ymd(2024, 6, 30), "1100").await;
+        amma(&pool, 1, ListingId(1), ymd(2024, 6, 30), "1100").await;
         test_support::amit_adjustment(&pool, 1, 1, 1, dec("1000")).await;
 
         assert!(db_amit_adjustment_alerts(&pool).await.unwrap().is_empty());
@@ -1150,7 +1163,7 @@ mod tests {
             .qty(dec("1000"))
             .insert(&pool)
             .await;
-        amma(&pool, 1, 1, ymd(2024, 6, 30), "1000").await;
+        amma(&pool, 1, ListingId(1), ymd(2024, 6, 30), "1000").await;
         second_account(&pool).await;
         transfer_all(&pool, 1, ymd(2024, 8, 15), dec("1000")).await;
 
@@ -1182,7 +1195,7 @@ mod tests {
             .qty(dec("1000"))
             .insert(&pool)
             .await;
-        amma(&pool, 1, 1, ymd(2024, 6, 30), "0").await;
+        amma(&pool, 1, ListingId(1), ymd(2024, 6, 30), "0").await;
         second_account(&pool).await;
         transfer_all(&pool, 1, ymd(2024, 3, 15), dec("1000")).await;
 
@@ -1222,10 +1235,10 @@ mod tests {
             &pool,
             &CorporateAction {
                 id: 10,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: ymd(2024, 3, 15),
                 kind: ActionKind::ScripForScrip {
-                    scrip_listing_id: 2,
+                    scrip_listing_id: ListingId(2),
                     scrip_new_units: Decimal::ONE,
                     scrip_old_units: Decimal::ONE,
                     scrip_cash_per_unit: None,
@@ -1239,7 +1252,7 @@ mod tests {
         crate::entities::scrip_exchange::db_exchange(&pool, 10)
             .await
             .unwrap();
-        amma(&pool, 1, 1, ymd(2024, 6, 30), "0").await;
+        amma(&pool, 1, ListingId(1), ymd(2024, 6, 30), "0").await;
 
         let alerts = db_amit_adjustment_alerts(&pool).await.unwrap();
         assert_eq!(alerts[0].units_held, Decimal::ZERO);
@@ -1270,10 +1283,10 @@ mod tests {
             &pool,
             &CorporateAction {
                 id: 10,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: ymd(2024, 3, 15),
                 kind: ActionKind::ScripForScrip {
-                    scrip_listing_id: 2,
+                    scrip_listing_id: ListingId(2),
                     scrip_new_units: Decimal::ONE,
                     scrip_old_units: Decimal::ONE,
                     scrip_cash_per_unit: None,
@@ -1290,7 +1303,7 @@ mod tests {
             .replacements[0]
             .id;
         // The final statement: nil units held at 30 June, arriving in spring.
-        amma(&pool, 1, 1, ymd(2024, 6, 30), "0").await;
+        amma(&pool, 1, ListingId(1), ymd(2024, 6, 30), "0").await;
         test_support::amit_adjustment(&pool, 1, 1, replacement, dec("1000")).await;
 
         assert!(
@@ -1320,10 +1333,10 @@ mod tests {
             &pool,
             &CorporateAction {
                 id: 10,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: ymd(2024, 3, 15),
                 kind: ActionKind::Demerger {
-                    demerger_listing_id: 2,
+                    demerger_listing_id: ListingId(2),
                     demerger_new_units: Decimal::ONE,
                     demerger_held_units: Decimal::ONE,
                     demerger_cost_base_pct: dec("30"),
@@ -1339,7 +1352,7 @@ mod tests {
         crate::entities::demerger::db_demerge(&pool, 10)
             .await
             .unwrap();
-        amma(&pool, 1, 1, ymd(2024, 6, 30), "1000").await;
+        amma(&pool, 1, ListingId(1), ymd(2024, 6, 30), "1000").await;
         let replacement: i64 = sqlx::query_scalar(
             "SELECT id FROM trades WHERE demerger_action_id = 10 AND trade_type = 'Buy' \
              AND listing_id = 1",
@@ -1376,7 +1389,7 @@ mod tests {
         allocate(&pool, 1, 2, 1, dec("509")).await;
         // Nil units held at 30 June — the figure the registry states for a
         // holding that closed in February.
-        amma(&pool, 1, 1, ymd(2024, 6, 30), "0").await;
+        amma(&pool, 1, ListingId(1), ymd(2024, 6, 30), "0").await;
         test_support::amit_adjustment(&pool, 1, 1, 1, dec("509")).await;
 
         assert!(db_amit_adjustment_alerts(&pool).await.unwrap().is_empty());
@@ -1408,7 +1421,7 @@ mod tests {
             .insert(&pool)
             .await;
         allocate(&pool, 1, 3, 1, dec("509")).await;
-        amma(&pool, 1, 1, ymd(2024, 6, 30), "591").await;
+        amma(&pool, 1, ListingId(1), ymd(2024, 6, 30), "591").await;
         // Whole-parcel rows: 1100 covered against 591 held + 509 disposed of
         // during the year — the top of the band exactly, so nothing is
         // flagged.
@@ -1418,7 +1431,7 @@ mod tests {
 
         // Now state 100 fewer units held: the same rows cover 100 more than
         // the year can account for.
-        amma(&pool, 1, 1, ymd(2024, 6, 30), "491").await;
+        amma(&pool, 1, ListingId(1), ymd(2024, 6, 30), "491").await;
 
         let alerts = db_amit_adjustment_alerts(&pool).await.unwrap();
         assert_eq!(alerts.len(), 1);
@@ -1452,7 +1465,7 @@ mod tests {
             .await;
         // Rows first (see `db_a_parcel_sold_out_before_the_year_began_is_flagged`:
         // the write path refuses them once the sale is recorded).
-        amma(&pool, 1, 1, ymd(2024, 6, 30), "100").await;
+        amma(&pool, 1, ListingId(1), ymd(2024, 6, 30), "100").await;
         test_support::amit_adjustment(&pool, 1, 1, 1, dec("509")).await;
         test_support::amit_adjustment(&pool, 2, 1, 2, dec("100")).await;
         // Sold in FY2023, a year before the statement's.
@@ -1539,7 +1552,7 @@ mod tests {
             .qty(dec("509"))
             .insert(&pool)
             .await;
-        amma(&pool, 1, 1, ymd(2024, 6, 30), "509").await;
+        amma(&pool, 1, ListingId(1), ymd(2024, 6, 30), "509").await;
 
         let resp = ApiClient::over(router().with_state(pool))
             .get("/reports/amit_adjustment_cross_check")

@@ -11,6 +11,7 @@ use super::{
     FetchedDistributions, SharedDistributionFetcher,
 };
 use crate::entities::closing_price::{FetchError, Market};
+use crate::infra::id::ListingId;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use std::{
@@ -21,8 +22,8 @@ use std::{
 /// A canned distribution history, keyed by listing.
 #[derive(Default, Clone)]
 pub struct DistributionStub {
-    events: HashMap<i64, Vec<FetchedDistribution>>,
-    undatable: HashMap<i64, Vec<NaiveDate>>,
+    events: HashMap<ListingId, Vec<FetchedDistribution>>,
+    undatable: HashMap<ListingId, Vec<NaiveDate>>,
     /// When set, every call fails this way — the provider-outage case, which
     /// must never read as "this listing paid nothing", and its opposite, the
     /// retired ticker, which must never fail the run forever.
@@ -47,7 +48,7 @@ impl DistributionStub {
         currency: &str,
     ) -> Self {
         self.events
-            .entry(listing_id)
+            .entry(ListingId(listing_id))
             .or_default()
             .push(FetchedDistribution {
                 ex_date,
@@ -61,7 +62,7 @@ impl DistributionStub {
     /// candle-join miss, reported rather than stored.
     pub fn with_undatable(mut self, listing_id: i64, provider_date: NaiveDate) -> Self {
         self.undatable
-            .entry(listing_id)
+            .entry(ListingId(listing_id))
             .or_default()
             .push(provider_date);
         self

@@ -3,10 +3,11 @@
 //! canned latest quote per listing, or a blanket failure for every listing.
 
 use super::*;
+use crate::infra::id::ListingId;
 
 #[derive(Default)]
 pub struct QuoteStub {
-    quotes: HashMap<i64, LatestQuote>,
+    quotes: HashMap<ListingId, LatestQuote>,
     /// Daily closes keyed by **provider symbol**, so a stub can model a
     /// provider that serves a security's history only under the symbol it
     /// was quoted as at the time — the shape a rename produces.
@@ -49,7 +50,7 @@ impl QuoteStub {
         as_of: DateTime<Utc>,
     ) -> Self {
         self.quotes.insert(
-            listing_id,
+            ListingId(listing_id),
             LatestQuote {
                 price: price.parse().unwrap(),
                 currency: currency.to_string().into(),

@@ -61,6 +61,7 @@ use crate::infra::db::{WriteMode, write_tx};
 use crate::infra::decimal::mul_div;
 use crate::infra::extract::{Json, Query};
 use crate::infra::http::{ApiError, DryRunQuery};
+use crate::infra::id::ListingId;
 use axum::{
     Router,
     extract::{Path, State},
@@ -410,7 +411,7 @@ struct Replacement {
 async fn check_demergeable(
     conn: &mut sqlx::SqliteConnection,
     action_id: i64,
-    listing_id: i64,
+    listing_id: ListingId,
     date: NaiveDate,
 ) -> Result<(), DemergeError> {
     let already: bool =
@@ -547,12 +548,12 @@ mod tests {
     async fn insert_buy(
         pool: &SqlitePool,
         id: i64,
-        listing_id: i64,
+        listing_id: ListingId,
         date: NaiveDate,
         qty: &str,
         price: &str,
     ) {
-        test_support::buy(id, listing_id)
+        test_support::buy(id, listing_id.0)
             .date(date)
             .settlement(date)
             .qty(qty.parse().unwrap())
@@ -564,7 +565,7 @@ mod tests {
     /// A 1-for-5 demerger of listing 2 out of listing 1 on the given date,
     /// apportioning 20% of the cost base to the demerged entity.
     async fn insert_demerger(pool: &SqlitePool, id: i64, date: NaiveDate) {
-        insert_demerger_terms(pool, id, 1, 2, date, "1", "5", "20").await;
+        insert_demerger_terms(pool, id, ListingId(1), ListingId(2), date, "1", "5", "20").await;
     }
 
     // Test fixture: flat positional args read fine here; bundling them into a
@@ -573,8 +574,8 @@ mod tests {
     async fn insert_demerger_terms(
         pool: &SqlitePool,
         id: i64,
-        listing_id: i64,
-        demerger_listing_id: i64,
+        listing_id: ListingId,
+        demerger_listing_id: ListingId,
         date: NaiveDate,
         new: &str,
         held: &str,
@@ -608,7 +609,7 @@ mod tests {
     async fn sell_listing(
         pool: &SqlitePool,
         sell_id: i64,
-        listing_id: i64,
+        listing_id: ListingId,
         parcel_id: i64,
         date: NaiveDate,
         qty: &str,
@@ -659,7 +660,7 @@ mod tests {
                 holding_account_id: 1,
                 date,
                 settlement_date: Some(date),
-                listing_id: 1,
+                listing_id: ListingId(1),
                 average_price: dec("10"),
                 quantity: dec(qty),
                 currency: "AUD".into(),
@@ -691,8 +692,8 @@ mod tests {
         insert_listing(&pool, 1, "HEAD").await;
         insert_listing(&pool, 2, "DEM").await;
         // Two parcels: 1,000 @ $1.50 (2020) and 500 @ $2.00 (2023).
-        insert_buy(&pool, 1, 1, d(2020, 10, 1), "1000", "1.50").await;
-        insert_buy(&pool, 2, 1, d(2023, 3, 1), "500", "2.00").await;
+        insert_buy(&pool, 1, ListingId(1), d(2020, 10, 1), "1000", "1.50").await;
+        insert_buy(&pool, 2, ListingId(1), d(2023, 3, 1), "500", "2.00").await;
         insert_demerger(&pool, 10, d(2024, 7, 1)).await;
 
         let dm = db_demerge(&pool, 10).await.unwrap();
@@ -759,7 +760,7 @@ mod tests {
         insert_listing(&pool, 1, "HEAD").await;
         insert_listing(&pool, 2, "DEM").await;
         // 1,000 units at $10: a $10,000 initial cost base.
-        insert_buy(&pool, 1, 1, d(2024, 1, 10), "1000", "10").await;
+        insert_buy(&pool, 1, ListingId(1), d(2024, 1, 10), "1000", "10").await;
         // FY2025 statement ($1/unit, year end 2025-06-30) entered with its
         // adjustment row before the demerger, which is dated earlier in the
         // same year.
@@ -789,13 +790,23 @@ mod tests {
         insert_buy(
             &pool,
             1,
-            1,
+            ListingId(1),
             d(2020, 10, 1),
             "280",
             "8.9285714285714285714285714286",
         )
         .await;
-        insert_demerger_terms(&pool, 10, 1, 2, d(2024, 7, 1), "1", "5", "5.063").await;
+        insert_demerger_terms(
+            &pool,
+            10,
+            ListingId(1),
+            ListingId(2),
+            d(2024, 7, 1),
+            "1",
+            "5",
+            "5.063",
+        )
+        .await;
 
         let dm = db_demerge(&pool, 10).await.unwrap();
 
@@ -817,8 +828,18 @@ mod tests {
             let pool = test_pool().await;
             insert_listing(&pool, 1, "HEAD").await;
             insert_listing(&pool, 2, "DEM").await;
-            insert_buy(&pool, 1, 1, d(2022, 1, 10), "500", "10").await;
-            insert_demerger_terms(&pool, 10, 1, 2, d(2024, 3, 1), "1", "5", pct).await;
+            insert_buy(&pool, 1, ListingId(1), d(2022, 1, 10), "500", "10").await;
+            insert_demerger_terms(
+                &pool,
+                10,
+                ListingId(1),
+                ListingId(2),
+                d(2024, 3, 1),
+                "1",
+                "5",
+                pct,
+            )
+            .await;
 
             let dm = db_demerge(&pool, 10).await.unwrap();
             assert_eq!(dm.demerged_replacements[0].brokerage, dec(demerged_cost));
@@ -844,7 +865,7 @@ mod tests {
             &pool,
             &Inheritance {
                 id: 1,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 holding_account_id: 1,
                 quantity: dec("500"),
                 date_of_death: d(2023, 5, 10),
@@ -859,7 +880,17 @@ mod tests {
         )
         .await
         .unwrap();
-        insert_demerger_terms(&pool, 10, 1, 2, d(2024, 3, 1), "1", "5", "10").await;
+        insert_demerger_terms(
+            &pool,
+            10,
+            ListingId(1),
+            ListingId(2),
+            d(2024, 3, 1),
+            "1",
+            "5",
+            "10",
+        )
+        .await;
 
         let dm = db_demerge(&pool, 10).await.unwrap();
         assert_eq!(
@@ -920,7 +951,7 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "HEAD").await;
         insert_listing(&pool, 2, "DEM").await;
-        insert_buy(&pool, 1, 1, d(2020, 10, 1), "1000", "1.50").await;
+        insert_buy(&pool, 1, ListingId(1), d(2020, 10, 1), "1000", "1.50").await;
 
         // An AMMA statement with a 10c/unit cost-base decrease over the
         // parcel's 1,000 units → −$100.
@@ -940,7 +971,7 @@ mod tests {
             &pool,
             &CorporateAction {
                 id: 5,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: d(2022, 3, 1),
                 kind: ActionKind::ReturnOfCapital {
                     amount_per_unit: dec("0.05"),
@@ -975,7 +1006,7 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "HEAD").await;
         insert_listing(&pool, 2, "DEM").await;
-        insert_buy(&pool, 1, 1, d(2020, 10, 1), "1000", "1.50").await;
+        insert_buy(&pool, 1, ListingId(1), d(2020, 10, 1), "1000", "1.50").await;
 
         // Record date 25 Jun, payment 1 Aug, demerger 1 Jul — inside the
         // window. Both listings pay 5c a unit off the same record date.
@@ -984,7 +1015,7 @@ mod tests {
                 &pool,
                 &CorporateAction {
                     id,
-                    listing_id,
+                    listing_id: ListingId(listing_id),
                     date: d(2024, 8, 1),
                     kind: ActionKind::ReturnOfCapital {
                         amount_per_unit: dec("0.05"),
@@ -1031,13 +1062,13 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "HEAD").await;
         insert_listing(&pool, 2, "DEM").await;
-        insert_buy(&pool, 1, 1, d(2020, 10, 1), "1000", "1.50").await;
+        insert_buy(&pool, 1, ListingId(1), d(2020, 10, 1), "1000", "1.50").await;
         // 3-for-1 split: the 1,000 as-acquired units are 3,000 at the demerger.
         corporate_action::db_upsert(
             &pool,
             &CorporateAction {
                 id: 5,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: d(2022, 1, 1),
                 kind: ActionKind::ShareSplit {
                     split_new_units: dec("3"),
@@ -1081,7 +1112,7 @@ mod tests {
         insert_listing(&pool, 1, "HEAD").await;
         insert_listing(&pool, 2, "DEM").await;
         // 1,000 @ $1.50 = $1,500, held from 2019.
-        insert_buy(&pool, 1, 1, d(2019, 6, 3), "1000", "1.50").await;
+        insert_buy(&pool, 1, ListingId(1), d(2019, 6, 3), "1000", "1.50").await;
         insert_demerger(&pool, 10, d(2024, 7, 1)).await;
         let dm = db_demerge(&pool, 10).await.unwrap();
 
@@ -1092,7 +1123,16 @@ mod tests {
         assert_eq!(demerged.date, d(2024, 7, 1));
         assert_eq!(demerged.deemed_acquisition_date, Some(d(2019, 6, 3)));
 
-        sell_listing(&pool, 20, 2, demerged.id, d(2025, 1, 6), "200", "5").await;
+        sell_listing(
+            &pool,
+            20,
+            ListingId(2),
+            demerged.id,
+            d(2025, 1, 6),
+            "200",
+            "5",
+        )
+        .await;
 
         let realised = crate::reports::realised_gains::db_realised_gains(&pool)
             .await
@@ -1120,7 +1160,7 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "HEAD").await;
         insert_listing(&pool, 2, "DEM").await;
-        insert_buy(&pool, 1, 1, d(2019, 6, 3), "1000", "1.50").await;
+        insert_buy(&pool, 1, ListingId(1), d(2019, 6, 3), "1000", "1.50").await;
         // A 2-for-1 split on the *head* listing before the demerger: the
         // parcel is 2,000 units at the demerger, so 1-for-5 gives 400
         // demerged units.
@@ -1128,7 +1168,7 @@ mod tests {
             &pool,
             &CorporateAction {
                 id: 4,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: d(2021, 1, 1),
                 kind: ActionKind::ShareSplit {
                     split_new_units: dec("2"),
@@ -1151,7 +1191,7 @@ mod tests {
             &pool,
             &CorporateAction {
                 id: 11,
-                listing_id: 2,
+                listing_id: ListingId(2),
                 date: d(2024, 10, 1),
                 kind: ActionKind::ShareSplit {
                     split_new_units: dec("3"),
@@ -1161,7 +1201,16 @@ mod tests {
         )
         .await
         .unwrap();
-        sell_listing(&pool, 20, 2, demerged.id, d(2025, 1, 6), "1200", "1").await;
+        sell_listing(
+            &pool,
+            20,
+            ListingId(2),
+            demerged.id,
+            d(2025, 1, 6),
+            "1200",
+            "1",
+        )
+        .await;
 
         let realised = crate::reports::realised_gains::db_realised_gains(&pool)
             .await
@@ -1194,7 +1243,7 @@ mod tests {
             &pool,
             &CorporateAction {
                 id: 1,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: d(2024, 7, 1),
                 kind: ActionKind::ShareSplit {
                     split_new_units: dec("2"),
@@ -1218,7 +1267,7 @@ mod tests {
 
         // A head-listing trade dated on/after the demerger date would draw on
         // parcels the closing Sell consumes — enter it after demerging.
-        insert_buy(&pool, 1, 1, d(2024, 7, 1), "100", "1.50").await;
+        insert_buy(&pool, 1, ListingId(1), d(2024, 7, 1), "100", "1.50").await;
         assert!(matches!(
             db_demerge(&pool, 10).await,
             Err(DemergeError::TradedOnOrAfterDemergerDate)
@@ -1238,7 +1287,7 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "HEAD").await;
         insert_listing(&pool, 2, "DEM").await;
-        insert_buy(&pool, 1, 1, d(2020, 10, 1), "1000", "1.50").await;
+        insert_buy(&pool, 1, ListingId(1), d(2020, 10, 1), "1000", "1.50").await;
         insert_demerger(&pool, 10, d(2024, 7, 1)).await;
         db_demerge(&pool, 10).await.unwrap();
 
@@ -1256,7 +1305,7 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "HEAD").await;
         insert_listing(&pool, 2, "DEM").await;
-        insert_buy(&pool, 1, 1, d(2020, 10, 1), "1000", "1.50").await;
+        insert_buy(&pool, 1, ListingId(1), d(2020, 10, 1), "1000", "1.50").await;
         insert_demerger(&pool, 10, d(2024, 7, 1)).await;
         let dm = db_demerge(&pool, 10).await.unwrap();
 
@@ -1270,7 +1319,7 @@ mod tests {
                 holding_account_id: 1,
                 date: d(2024, 7, 1),
                 settlement_date: Some(d(2024, 7, 1)),
-                listing_id: 1,
+                listing_id: ListingId(1),
                 average_price: dec("9.99"),
                 quantity: dec("1000"),
                 currency: "AUD".into(),
@@ -1320,7 +1369,7 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "HEAD").await;
         insert_listing(&pool, 2, "DEM").await;
-        insert_buy(&pool, 1, 1, d(2020, 10, 1), "1000", "1.50").await;
+        insert_buy(&pool, 1, ListingId(1), d(2020, 10, 1), "1000", "1.50").await;
         insert_demerger(&pool, 10, d(2024, 7, 1)).await;
         let dm = db_demerge(&pool, 10).await.unwrap();
 
@@ -1334,7 +1383,7 @@ mod tests {
                 holding_account_id: 1,
                 date: d(2025, 1, 10),
                 settlement_date: Some(d(2025, 1, 12)),
-                listing_id: 2,
+                listing_id: ListingId(2),
                 average_price: dec("3.00"),
                 quantity: dec("100"),
                 currency: "AUD".into(),
@@ -1388,7 +1437,7 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "HEAD").await;
         insert_listing(&pool, 2, "DEM").await;
-        insert_buy(&pool, 1, 1, d(2020, 10, 1), "1000", "1.50").await;
+        insert_buy(&pool, 1, ListingId(1), d(2020, 10, 1), "1000", "1.50").await;
         insert_demerger(&pool, 10, d(2024, 7, 1)).await;
         db_demerge(&pool, 10).await.unwrap();
 
@@ -1412,7 +1461,7 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "LAC").await;
         insert_listing(&pool, 2, "LAR").await;
-        insert_buy(&pool, 1, 1, d(2020, 10, 1), "1000", "1.50").await;
+        insert_buy(&pool, 1, ListingId(1), d(2020, 10, 1), "1000", "1.50").await;
         insert_demerger(&pool, 10, d(2024, 7, 1)).await;
         db_demerge(&pool, 10).await.unwrap();
 
@@ -1497,8 +1546,8 @@ mod tests {
         )
         .await
         .unwrap();
-        insert_buy(&pool, 1, 1, d(2020, 10, 1), "1000", "1.50").await;
-        insert_buy(&pool, 2, 1, d(2023, 3, 1), "500", "2.00").await;
+        insert_buy(&pool, 1, ListingId(1), d(2020, 10, 1), "1000", "1.50").await;
+        insert_buy(&pool, 2, ListingId(1), d(2023, 3, 1), "500", "2.00").await;
         sqlx::query("UPDATE trades SET holding_account_id = 2 WHERE id = 2")
             .execute(&pool)
             .await
@@ -1520,7 +1569,7 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "HEAD").await;
         insert_listing(&pool, 2, "DEM").await;
-        insert_buy(&pool, 1, 1, d(2020, 10, 1), "1000", "1.50").await;
+        insert_buy(&pool, 1, ListingId(1), d(2020, 10, 1), "1000", "1.50").await;
         insert_demerger(&pool, 10, d(2024, 7, 1)).await;
 
         let resp = client(&pool)
@@ -1553,8 +1602,18 @@ mod tests {
         insert_listing(&pool, 2, "DEM").await;
         // Nil-priced: the *cost base* is representable (W-e's bound accepts
         // this parcel), so only the demerged quantity is at the ceiling.
-        insert_buy(&pool, 1, 1, d(2020, 10, 1), "1e27", "0").await;
-        insert_demerger_terms(&pool, 10, 1, 2, d(2024, 7, 1), "1000", "1", "20").await;
+        insert_buy(&pool, 1, ListingId(1), d(2020, 10, 1), "1e27", "0").await;
+        insert_demerger_terms(
+            &pool,
+            10,
+            ListingId(1),
+            ListingId(2),
+            d(2024, 7, 1),
+            "1000",
+            "1",
+            "20",
+        )
+        .await;
 
         let err = db_demerge(&pool, 10).await.unwrap_err();
         assert!(
@@ -1609,11 +1668,21 @@ mod tests {
         insert_listing(&pool, 1, "HEAD").await;
         insert_listing(&pool, 2, "DEM").await;
         // Cost base 1e27 on one unit.
-        insert_buy(&pool, 1, 1, d(2020, 10, 1), "1", "1e27").await;
+        insert_buy(&pool, 1, ListingId(1), d(2020, 10, 1), "1", "1e27").await;
         // 1e27 units at a cost base of 1e21 — the quantity, not the money, is
         // what overflows here.
-        insert_buy(&pool, 2, 1, d(2021, 10, 1), "1e27", "0.000001").await;
-        insert_demerger_terms(&pool, 10, 1, 2, d(2024, 7, 1), "100", "1000", "99").await;
+        insert_buy(&pool, 2, ListingId(1), d(2021, 10, 1), "1e27", "0.000001").await;
+        insert_demerger_terms(
+            &pool,
+            10,
+            ListingId(1),
+            ListingId(2),
+            d(2024, 7, 1),
+            "100",
+            "1000",
+            "99",
+        )
+        .await;
 
         let resp = client(&pool)
             .post_empty("/corporate_actions/10/demerge")
@@ -1723,10 +1792,10 @@ mod tests {
             &pool,
             &CorporateAction {
                 id: 10,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: d(2024, 6, 11),
                 kind: ActionKind::Demerger {
-                    demerger_listing_id: 2,
+                    demerger_listing_id: ListingId(2),
                     demerger_new_units: Decimal::ONE,
                     demerger_held_units: Decimal::from(5),
                     demerger_cost_base_pct: Decimal::from(10),
@@ -1760,7 +1829,7 @@ mod tests {
             pool,
             &CorporateAction {
                 id: 11,
-                listing_id: 2,
+                listing_id: ListingId(2),
                 date: d(2024, 6, 1),
                 kind: ActionKind::ShareSplit {
                     split_new_units: Decimal::from(1000),
@@ -1788,13 +1857,23 @@ mod tests {
         insert_buy(
             &pool,
             1,
-            1,
+            ListingId(1),
             d(2024, 1, 15),
             "100000000000000000000000000",
             "0",
         )
         .await;
-        insert_demerger_terms(&pool, 10, 1, 2, d(2024, 3, 15), "1", "1", "10").await;
+        insert_demerger_terms(
+            &pool,
+            10,
+            ListingId(1),
+            ListingId(2),
+            d(2024, 3, 15),
+            "1",
+            "1",
+            "10",
+        )
+        .await;
         split_the_demerged_listing(&pool).await;
 
         let response = client(&pool)
@@ -1836,7 +1915,17 @@ mod tests {
             .brokerage(dec("1000"))
             .insert(&pool)
             .await;
-        insert_demerger_terms(&pool, 10, 1, 2, d(2024, 3, 15), "1", "1", "10").await;
+        insert_demerger_terms(
+            &pool,
+            10,
+            ListingId(1),
+            ListingId(2),
+            d(2024, 3, 15),
+            "1",
+            "1",
+            "10",
+        )
+        .await;
         split_the_demerged_listing(&pool).await;
 
         client(&pool)
@@ -1871,7 +1960,7 @@ mod tests {
             .assert_dry_run_refuses_alike(&pool, "/corporate_actions/10/demerge", None)
             .await;
 
-        insert_buy(&pool, 1, 1, d(2020, 10, 1), "1000", "1.50").await;
+        insert_buy(&pool, 1, ListingId(1), d(2020, 10, 1), "1000", "1.50").await;
         let created = client(&pool)
             .assert_dry_run_previews(&pool, "/corporate_actions/10/demerge", None)
             .await;

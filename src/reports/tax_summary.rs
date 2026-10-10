@@ -7,6 +7,7 @@ use crate::infra::decimal::{mul_div, parse_dec, row_opt_dec, to_cents};
 use crate::infra::extract::Json;
 use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
+use crate::infra::id::ListingId;
 use crate::reports::export::{self, Cents};
 use crate::reports::franking;
 use axum::{Router, extract::State, response::Response, routing::get};
@@ -988,7 +989,7 @@ fn accumulate_expenses(
         // is the sum of either group by construction.
         let amount = to_cents(aud_field(fx, row, "amount", &currency, date_incurred)?);
         let expense_type: String = row.try_get("expense_type")?;
-        let listing_id: Option<i64> = row.try_get("listing_id")?;
+        let listing_id: Option<ListingId> = row.try_get("listing_id")?;
         let kind = match expense_type.as_str() {
             "LoanInterest" => ExpenseType::LoanInterest,
             "ManagementFee" => ExpenseType::ManagementFee,
@@ -1276,12 +1277,12 @@ mod tests {
     async fn insert_trade(
         pool: &SqlitePool,
         id: i64,
-        listing_id: i64,
+        listing_id: ListingId,
         trade_type: trade::TradeType,
         date: NaiveDate,
         qty: i64,
     ) {
-        test_support::trade(id, listing_id, trade_type)
+        test_support::trade(id, listing_id.0, trade_type)
             .date(date)
             .qty(Decimal::from(qty))
             .price(Decimal::ONE)
@@ -1289,12 +1290,12 @@ mod tests {
             .await;
     }
 
-    fn make_income(id: i64, listing_id: i64, date: NaiveDate) -> income::Income {
-        test_support::income(id, listing_id, date).build()
+    fn make_income(id: i64, listing_id: ListingId, date: NaiveDate) -> income::Income {
+        test_support::income(id, listing_id.0, date).build()
     }
 
-    fn make_amma(id: i64, listing_id: i64, year_end: NaiveDate) -> amma::AmmaStatement {
-        test_support::amma(id, listing_id)
+    fn make_amma(id: i64, listing_id: ListingId, year_end: NaiveDate) -> amma::AmmaStatement {
+        test_support::amma(id, listing_id.0)
             .with(|a| {
                 a.tax_year_end_date = year_end;
                 a.date_received = year_end + chrono::Duration::days(60);
@@ -1302,8 +1303,12 @@ mod tests {
             .build()
     }
 
-    fn make_ess(id: i64, listing_id: i64, taxing_point: NaiveDate) -> ess_statement::EssStatement {
-        test_support::ess_statement(id, listing_id, taxing_point).build()
+    fn make_ess(
+        id: i64,
+        listing_id: ListingId,
+        taxing_point: NaiveDate,
+    ) -> ess_statement::EssStatement {
+        test_support::ess_statement(id, listing_id.0, taxing_point).build()
     }
 
     fn make_expense(
@@ -1340,7 +1345,11 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
         // Jan 2024 → FY2024 (July 2023 – June 2024)
-        let mut inc = make_income(1, 1, NaiveDate::from_ymd_opt(2024, 1, 15).unwrap());
+        let mut inc = make_income(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2024, 1, 15).unwrap(),
+        );
         inc.franked_amount = Decimal::from(70);
         inc.unfranked_amount = Decimal::from(30);
         inc.franking_credits = Decimal::from(30);
@@ -1361,7 +1370,11 @@ mod tests {
     async fn db_rows_state_the_individual_resident_basis() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        let mut inc = make_income(1, 1, NaiveDate::from_ymd_opt(2024, 1, 15).unwrap());
+        let mut inc = make_income(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2024, 1, 15).unwrap(),
+        );
         inc.franked_amount = Decimal::from(70);
         income::db_upsert(&pool, &inc).await.unwrap();
 
@@ -1377,7 +1390,11 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
         // July 1 2023 → FY2024 (July 2023 – June 2024)
-        let mut inc = make_income(1, 1, NaiveDate::from_ymd_opt(2023, 7, 1).unwrap());
+        let mut inc = make_income(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2023, 7, 1).unwrap(),
+        );
         inc.unfranked_amount = Decimal::from(50);
         income::db_upsert(&pool, &inc).await.unwrap();
 
@@ -1396,14 +1413,22 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
         // June 2026 trust distribution, paid 15 July 2026 → FY2026.
-        let mut trust = make_income(1, 1, NaiveDate::from_ymd_opt(2026, 7, 15).unwrap());
+        let mut trust = make_income(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2026, 7, 15).unwrap(),
+        );
         trust.trust_income = true;
         trust.entitlement_date = Some(NaiveDate::from_ymd_opt(2026, 6, 30).unwrap());
         trust.unfranked_amount = Decimal::from(100);
         trust.tfn_withholding_tax = Decimal::from(10);
         income::db_upsert(&pool, &trust).await.unwrap();
         // A dividend paid the same day is assessed when paid → FY2027.
-        let mut div = make_income(2, 1, NaiveDate::from_ymd_opt(2026, 7, 15).unwrap());
+        let mut div = make_income(
+            2,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2026, 7, 15).unwrap(),
+        );
         div.unfranked_amount = Decimal::from(50);
         income::db_upsert(&pool, &div).await.unwrap();
 
@@ -1427,7 +1452,11 @@ mod tests {
     async fn db_trust_without_entitlement_date_assessed_by_date_paid() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        let mut trust = make_income(1, 1, NaiveDate::from_ymd_opt(2026, 7, 15).unwrap());
+        let mut trust = make_income(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2026, 7, 15).unwrap(),
+        );
         trust.trust_income = true;
         trust.unfranked_amount = Decimal::from(100);
         income::db_upsert(&pool, &trust).await.unwrap();
@@ -1448,7 +1477,11 @@ mod tests {
         rba_fx_rate::db_import_rate(&pool, "USD", "2026-06", "0.50".parse().unwrap())
             .await
             .unwrap();
-        let mut trust = make_income(1, 1, NaiveDate::from_ymd_opt(2026, 7, 15).unwrap());
+        let mut trust = make_income(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2026, 7, 15).unwrap(),
+        );
         trust.trust_income = true;
         trust.entitlement_date = Some(NaiveDate::from_ymd_opt(2026, 6, 30).unwrap());
         trust.currency = "USD".into();
@@ -1483,12 +1516,12 @@ mod tests {
         insert_listing(&pool, 2).await; // the managed fund
         let march = NaiveDate::from_ymd_opt(2024, 3, 15).unwrap();
 
-        let mut div = make_income(1, 1, march);
+        let mut div = make_income(1, ListingId(1), march);
         div.franked_amount = Decimal::from(700);
         div.unfranked_amount = Decimal::from(100);
         income::db_upsert(&pool, &div).await.unwrap();
 
-        let mut dist = make_income(2, 2, march);
+        let mut dist = make_income(2, ListingId(2), march);
         dist.trust_income = true;
         dist.franked_amount = Decimal::from(900);
         dist.unfranked_amount = Decimal::from(600);
@@ -1519,7 +1552,7 @@ mod tests {
         let year_with = |trust: bool| async move {
             let pool = test_pool().await;
             insert_listing(&pool, 1).await;
-            let mut inc = make_income(1, 1, march);
+            let mut inc = make_income(1, ListingId(1), march);
             inc.trust_income = trust;
             inc.franked_amount = Decimal::from(900);
             inc.unfranked_amount = Decimal::from(600);
@@ -1556,7 +1589,11 @@ mod tests {
     async fn db_a_trust_rows_conduit_foreign_income_stays_inside_its_13u_amount() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        let mut dist = make_income(1, 1, NaiveDate::from_ymd_opt(2024, 3, 15).unwrap());
+        let mut dist = make_income(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2024, 3, 15).unwrap(),
+        );
         dist.trust_income = true;
         dist.unfranked_amount = Decimal::from(100);
         dist.conduit_foreign_income = Decimal::from(40); // 40 of the 100 above
@@ -1579,11 +1616,11 @@ mod tests {
         insert_listing(&pool, 1).await;
         insert_listing(&pool, 2).await;
         let march = NaiveDate::from_ymd_opt(2024, 3, 15).unwrap();
-        let mut div = make_income(1, 1, march);
+        let mut div = make_income(1, ListingId(1), march);
         div.franked_amount = Decimal::from(700);
         div.unfranked_amount = Decimal::from(100);
         income::db_upsert(&pool, &div).await.unwrap();
-        let mut dist = make_income(2, 2, march);
+        let mut dist = make_income(2, ListingId(2), march);
         dist.trust_income = true;
         dist.franked_amount = Decimal::from(900);
         dist.unfranked_amount = Decimal::from(600);
@@ -1632,7 +1669,7 @@ mod tests {
     async fn db_trust_13c_is_the_statements_franked_distribution_component() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        let mut dist = make_income(1, 1, ymd(2024, 3, 15));
+        let mut dist = make_income(1, ListingId(1), ymd(2024, 3, 15));
         dist.trust_income = true;
         // The statement's "franked distributions from trusts" figure, which
         // already includes the $300 attached credit printed beside it.
@@ -1704,7 +1741,7 @@ mod tests {
     async fn db_amma_13c_is_the_statements_franked_distribution_component() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        let mut a = make_amma(1, 1, ymd(2026, 6, 30));
+        let mut a = make_amma(1, ListingId(1), ymd(2026, 6, 30));
         a.franked_dividends = "7351.64".parse::<Decimal>().unwrap();
         a.franking_credits = "2337.61".parse::<Decimal>().unwrap();
         amma::db_upsert(&pool, &a).await.unwrap();
@@ -1735,13 +1772,29 @@ mod tests {
         insert_listing(&pool, 1).await;
         // Units bought and sold inside the 45-day at-risk window, so the
         // distribution's shares never qualify for the credit.
-        insert_trade(&pool, 1, 1, trade::TradeType::Buy, ymd(2025, 3, 3), 1000).await;
-        insert_trade(&pool, 2, 1, trade::TradeType::Sell, ymd(2025, 4, 10), 1000).await;
+        insert_trade(
+            &pool,
+            1,
+            ListingId(1),
+            trade::TradeType::Buy,
+            ymd(2025, 3, 3),
+            1000,
+        )
+        .await;
+        insert_trade(
+            &pool,
+            2,
+            ListingId(1),
+            trade::TradeType::Sell,
+            ymd(2025, 4, 10),
+            1000,
+        )
+        .await;
         // The statement's franked-distributions component, 18,666, which
         // already includes the 5,600 credit printed beside it — over the
         // A$5,000 small-shareholder threshold, so the walk runs and denies the
         // whole credit.
-        let mut dist = make_income(1, 1, ymd(2025, 4, 8));
+        let mut dist = make_income(1, ListingId(1), ymd(2025, 4, 8));
         dist.trust_income = true;
         dist.ex_date = Some(ymd(2025, 3, 14));
         dist.franked_amount = Decimal::from(18666);
@@ -1756,7 +1809,7 @@ mod tests {
                 ymd(2025, 4, 1),
                 ExpenseType::ManagementFee,
                 Decimal::from(100),
-                1,
+                ListingId(1),
             ),
         )
         .await
@@ -1790,20 +1843,28 @@ mod tests {
         insert_trade(
             &pool,
             1,
-            1,
+            ListingId(1),
             trade::TradeType::Buy,
             NaiveDate::from_ymd_opt(2024, 1, 10).unwrap(),
             1000,
         )
         .await;
         // FY2026 dividend credits just below the threshold on their own.
-        let mut div = make_income(1, 1, NaiveDate::from_ymd_opt(2026, 1, 15).unwrap());
+        let mut div = make_income(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2026, 1, 15).unwrap(),
+        );
         div.ex_date = Some(NaiveDate::from_ymd_opt(2026, 1, 2).unwrap());
         div.franked_amount = "11643.33".parse().unwrap();
         div.franking_credits = Decimal::from(4990);
         income::db_upsert(&pool, &div).await.unwrap();
         // July-paid June trust credits tip FY2026 over A$5,000.
-        let mut trust = make_income(2, 1, NaiveDate::from_ymd_opt(2026, 7, 15).unwrap());
+        let mut trust = make_income(
+            2,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2026, 7, 15).unwrap(),
+        );
         trust.trust_income = true;
         trust.entitlement_date = Some(NaiveDate::from_ymd_opt(2026, 6, 15).unwrap());
         trust.unfranked_amount = Decimal::from(100);
@@ -1832,7 +1893,11 @@ mod tests {
     async fn db_conduit_foreign_income_is_assessable_within_the_unfranked_amount() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        let mut inc = make_income(1, 1, NaiveDate::from_ymd_opt(2024, 3, 15).unwrap());
+        let mut inc = make_income(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2024, 3, 15).unwrap(),
+        );
         inc.unfranked_amount = Decimal::from(100); // includes the CFI portion
         inc.conduit_foreign_income = Decimal::from(40); // memo subset of the above
         inc.foreign_source_income = Decimal::from(100);
@@ -1855,7 +1920,7 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
         let year_end = NaiveDate::from_ymd_opt(2024, 6, 30).unwrap();
-        let mut a = make_amma(1, 1, year_end);
+        let mut a = make_amma(1, ListingId(1), year_end);
         a.australian_interest = Decimal::from(10);
         a.franked_dividends = Decimal::from(20);
         a.franking_credits = Decimal::from(8);
@@ -1888,7 +1953,7 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
         let year_end = NaiveDate::from_ymd_opt(2024, 12, 31).unwrap();
-        let mut a = make_amma(1, 1, year_end);
+        let mut a = make_amma(1, ListingId(1), year_end);
         a.australian_interest = Decimal::from(10);
         a.franking_credits = Decimal::from(8);
         test_support::insert_amma_bypassing_checks(&pool, &a).await;
@@ -1910,11 +1975,19 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
         // FY2024: Jan 2024
-        let mut inc1 = make_income(1, 1, NaiveDate::from_ymd_opt(2024, 1, 15).unwrap());
+        let mut inc1 = make_income(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2024, 1, 15).unwrap(),
+        );
         inc1.unfranked_amount = Decimal::from(100);
         income::db_upsert(&pool, &inc1).await.unwrap();
         // FY2025: Sep 2024
-        let mut inc2 = make_income(2, 1, NaiveDate::from_ymd_opt(2024, 9, 15).unwrap());
+        let mut inc2 = make_income(
+            2,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2024, 9, 15).unwrap(),
+        );
         inc2.unfranked_amount = Decimal::from(200);
         income::db_upsert(&pool, &inc2).await.unwrap();
 
@@ -1931,12 +2004,20 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
         // Income with $30 franking credits in FY2024
-        let mut inc = make_income(1, 1, NaiveDate::from_ymd_opt(2024, 3, 15).unwrap());
+        let mut inc = make_income(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2024, 3, 15).unwrap(),
+        );
         inc.franked_amount = Decimal::from(70); // the dividend the $30 is attached to
         inc.franking_credits = Decimal::from(30);
         income::db_upsert(&pool, &inc).await.unwrap();
         // AMMA with $8 franking credits for FY2024
-        let mut a = make_amma(1, 1, NaiveDate::from_ymd_opt(2024, 6, 30).unwrap());
+        let mut a = make_amma(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2024, 6, 30).unwrap(),
+        );
         a.franking_credits = Decimal::from(8);
         amma::db_upsert(&pool, &a).await.unwrap();
 
@@ -1950,7 +2031,11 @@ mod tests {
     async fn db_lic_deduction_is_half_the_advised_amount() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        let mut inc = make_income(1, 1, NaiveDate::from_ymd_opt(2024, 3, 15).unwrap());
+        let mut inc = make_income(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2024, 3, 15).unwrap(),
+        );
         // The statement's advised LIC capital gain amount (the attributable
         // part); the individual deducts 50% of it at D8.
         inc.lic_capital_gain_amount = Decimal::from(15);
@@ -1971,7 +2056,11 @@ mod tests {
         insert_listing(&pool, 2).await;
 
         // Dividend income FY2024
-        let mut div = make_income(1, 1, NaiveDate::from_ymd_opt(2024, 3, 15).unwrap());
+        let mut div = make_income(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2024, 3, 15).unwrap(),
+        );
         div.franked_amount = Decimal::from(140);
         div.unfranked_amount = Decimal::from(60);
         div.franking_credits = Decimal::from(60);
@@ -1982,7 +2071,11 @@ mod tests {
         // Trust distribution FY2024 whose unfranked amount includes a
         // declared conduit-foreign-income portion (a memo within it, not a
         // component beside it).
-        let mut trust = make_income(2, 2, NaiveDate::from_ymd_opt(2024, 6, 30).unwrap());
+        let mut trust = make_income(
+            2,
+            ListingId(2),
+            NaiveDate::from_ymd_opt(2024, 6, 30).unwrap(),
+        );
         trust.foreign_source_income = Decimal::from(30);
         trust.foreign_tax_paid = Decimal::from(9);
         trust.unfranked_amount = Decimal::from(40);
@@ -1992,7 +2085,11 @@ mod tests {
         income::db_upsert(&pool, &trust).await.unwrap();
 
         // AMMA statement FY2024
-        let mut a = make_amma(1, 2, NaiveDate::from_ymd_opt(2024, 6, 30).unwrap());
+        let mut a = make_amma(
+            1,
+            ListingId(2),
+            NaiveDate::from_ymd_opt(2024, 6, 30).unwrap(),
+        );
         a.australian_interest = Decimal::from(8);
         a.cgt_discount_gains = Decimal::from(100);
         a.foreign_tax_credits = Decimal::from(3);
@@ -2042,7 +2139,11 @@ mod tests {
             .await;
 
         // FY2024, an ordinary trust distribution with its franking credits.
-        let mut before = make_income(1, 1, NaiveDate::from_ymd_opt(2024, 2, 15).unwrap());
+        let mut before = make_income(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2024, 2, 15).unwrap(),
+        );
         before.trust_income = true;
         before.franked_amount = Decimal::from(200);
         before.unfranked_amount = Decimal::from(300);
@@ -2051,11 +2152,19 @@ mod tests {
 
         // FY2025, the first AMIT year: cash-only, excluded, with the AMMA
         // carrying the assessable figures.
-        let mut cash = make_income(2, 1, NaiveDate::from_ymd_opt(2025, 2, 15).unwrap());
+        let mut cash = make_income(
+            2,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2025, 2, 15).unwrap(),
+        );
         cash.trust_income = true;
         cash.unfranked_amount = Decimal::from(400);
         income::db_upsert(&pool, &cash).await.unwrap();
-        let mut a = make_amma(1, 1, NaiveDate::from_ymd_opt(2025, 6, 30).unwrap());
+        let mut a = make_amma(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2025, 6, 30).unwrap(),
+        );
         a.other_income = Decimal::from(450);
         amma::db_upsert(&pool, &a).await.unwrap();
 
@@ -2089,7 +2198,11 @@ mod tests {
         insert_listing(&pool, 2).await;
 
         // AMIT quarterly cash distribution: gross cash + source withholding.
-        let mut cash = make_income(1, 1, NaiveDate::from_ymd_opt(2024, 1, 15).unwrap());
+        let mut cash = make_income(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2024, 1, 15).unwrap(),
+        );
         cash.trust_income = true;
         cash.unfranked_amount = Decimal::from(1000);
         cash.foreign_source_income = Decimal::from(10);
@@ -2098,7 +2211,11 @@ mod tests {
         income::db_upsert(&pool, &cash).await.unwrap();
 
         // The fund's AMMA attribution for the same FY.
-        let mut a = make_amma(1, 1, NaiveDate::from_ymd_opt(2024, 6, 30).unwrap());
+        let mut a = make_amma(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2024, 6, 30).unwrap(),
+        );
         a.franked_dividends = Decimal::from(300);
         a.franking_credits = Decimal::from(120);
         a.foreign_income = Decimal::from(40);
@@ -2106,7 +2223,11 @@ mod tests {
         amma::db_upsert(&pool, &a).await.unwrap();
 
         // A non-AMIT franked dividend in the same FY still counts in full.
-        let mut div = make_income(2, 2, NaiveDate::from_ymd_opt(2024, 3, 15).unwrap());
+        let mut div = make_income(
+            2,
+            ListingId(2),
+            NaiveDate::from_ymd_opt(2024, 3, 15).unwrap(),
+        );
         div.franked_amount = Decimal::from(70);
         div.franking_credits = Decimal::from(30);
         income::db_upsert(&pool, &div).await.unwrap();
@@ -2147,7 +2268,11 @@ mod tests {
     async fn db_legacy_amit_rows_with_components_fully_excluded() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        let mut cash = make_income(1, 1, NaiveDate::from_ymd_opt(2024, 1, 15).unwrap());
+        let mut cash = make_income(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2024, 1, 15).unwrap(),
+        );
         cash.trust_income = true;
         cash.unfranked_amount = Decimal::from(1000);
         cash.franking_credits = Decimal::from(6000); // over the $5,000 threshold
@@ -2173,7 +2298,7 @@ mod tests {
         insert_trade(
             &pool,
             1,
-            2,
+            ListingId(2),
             trade::TradeType::Buy,
             NaiveDate::from_ymd_opt(2025, 3, 3).unwrap(),
             1000,
@@ -2182,19 +2307,27 @@ mod tests {
         insert_trade(
             &pool,
             2,
-            2,
+            ListingId(2),
             trade::TradeType::Sell,
             NaiveDate::from_ymd_opt(2025, 4, 10).unwrap(),
             1000,
         )
         .await;
-        let mut div = make_income(1, 2, NaiveDate::from_ymd_opt(2025, 4, 8).unwrap());
+        let mut div = make_income(
+            1,
+            ListingId(2),
+            NaiveDate::from_ymd_opt(2025, 4, 8).unwrap(),
+        );
         div.ex_date = Some(NaiveDate::from_ymd_opt(2025, 3, 14).unwrap());
         div.franked_amount = Decimal::from(7000);
         div.franking_credits = Decimal::from(3000);
         income::db_upsert(&pool, &div).await.unwrap();
         // Legacy AMIT row with credits (listing flipped to AMIT post-insert).
-        let mut cash = make_income(2, 1, NaiveDate::from_ymd_opt(2025, 1, 15).unwrap());
+        let mut cash = make_income(
+            2,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2025, 1, 15).unwrap(),
+        );
         cash.trust_income = true;
         cash.unfranked_amount = Decimal::from(1000);
         cash.franking_credits = Decimal::from(6000);
@@ -2218,7 +2351,11 @@ mod tests {
         rba_fx_rate::db_import_rate(&pool, "USD", "2024-01", "0.50".parse().unwrap())
             .await
             .unwrap();
-        let mut inc = make_income(1, 1, NaiveDate::from_ymd_opt(2024, 1, 15).unwrap());
+        let mut inc = make_income(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2024, 1, 15).unwrap(),
+        );
         inc.currency = "USD".into();
         inc.franked_amount = Decimal::from(70);
         inc.unfranked_amount = Decimal::from(30);
@@ -2247,7 +2384,11 @@ mod tests {
         rba_fx_rate::db_import_rate(&pool, "USD", "2024-06", "0.50".parse().unwrap())
             .await
             .unwrap();
-        let mut a = make_amma(1, 1, NaiveDate::from_ymd_opt(2024, 6, 30).unwrap());
+        let mut a = make_amma(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2024, 6, 30).unwrap(),
+        );
         a.currency = "USD".into();
         a.foreign_income = Decimal::from(5);
         a.foreign_tax_credits = Decimal::from(2);
@@ -2267,7 +2408,11 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
         // No USD rate imported for the month → conversion must fail, not zero/pass through.
-        let mut inc = make_income(1, 1, NaiveDate::from_ymd_opt(2024, 1, 15).unwrap());
+        let mut inc = make_income(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2024, 1, 15).unwrap(),
+        );
         inc.currency = "USD".into();
         inc.unfranked_amount = Decimal::from(100);
         income::db_upsert(&pool, &inc).await.unwrap();
@@ -2287,7 +2432,7 @@ mod tests {
         insert_trade(
             &pool,
             1,
-            1,
+            ListingId(1),
             trade::TradeType::Buy,
             NaiveDate::from_ymd_opt(2025, 3, 3).unwrap(),
             1000,
@@ -2296,13 +2441,17 @@ mod tests {
         insert_trade(
             &pool,
             2,
-            1,
+            ListingId(1),
             trade::TradeType::Sell,
             NaiveDate::from_ymd_opt(2025, 4, 10).unwrap(),
             1000,
         )
         .await;
-        let mut inc = make_income(1, 1, NaiveDate::from_ymd_opt(2025, 4, 8).unwrap());
+        let mut inc = make_income(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2025, 4, 8).unwrap(),
+        );
         inc.ex_date = Some(NaiveDate::from_ymd_opt(2025, 3, 14).unwrap());
         inc.franked_amount = Decimal::from(13066);
         inc.franking_credits = Decimal::from(5600);
@@ -2324,20 +2473,44 @@ mod tests {
     async fn db_two_dividends_on_one_listing_denied_independently() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        insert_trade(&pool, 1, 1, trade::TradeType::Buy, ymd(2024, 3, 14), 10000).await;
-        insert_trade(&pool, 2, 1, trade::TradeType::Buy, ymd(2025, 3, 4), 4000).await;
-        insert_trade(&pool, 3, 1, trade::TradeType::Sell, ymd(2025, 4, 3), 4000).await;
+        insert_trade(
+            &pool,
+            1,
+            ListingId(1),
+            trade::TradeType::Buy,
+            ymd(2024, 3, 14),
+            10000,
+        )
+        .await;
+        insert_trade(
+            &pool,
+            2,
+            ListingId(1),
+            trade::TradeType::Buy,
+            ymd(2025, 3, 4),
+            4000,
+        )
+        .await;
+        insert_trade(
+            &pool,
+            3,
+            ListingId(1),
+            trade::TradeType::Sell,
+            ymd(2025, 4, 3),
+            4000,
+        )
+        .await;
 
         // Ex 14 Aug 2024: its qualification window closed months before the
         // April 2025 sale — nothing denied.
-        let mut aug = make_income(1, 1, ymd(2024, 8, 28));
+        let mut aug = make_income(1, ListingId(1), ymd(2024, 8, 28));
         aug.ex_date = Some(ymd(2024, 8, 14));
         aug.franked_amount = Decimal::from(7000);
         aug.franking_credits = Decimal::from(3000);
         income::db_upsert(&pool, &aug).await.unwrap();
         // Ex 14 Mar 2025: LIFO deems the recent 4,000 units sold at 29
         // at-risk days — 4,000/14,000 of its 7,000 credits denied.
-        let mut mar = make_income(2, 1, ymd(2025, 3, 28));
+        let mut mar = make_income(2, ListingId(1), ymd(2025, 3, 28));
         mar.ex_date = Some(ymd(2025, 3, 14));
         mar.franked_amount = "16333.33".parse().unwrap();
         mar.franking_credits = Decimal::from(7000);
@@ -2361,7 +2534,7 @@ mod tests {
         insert_trade(
             &pool,
             1,
-            1,
+            ListingId(1),
             trade::TradeType::Buy,
             NaiveDate::from_ymd_opt(2025, 3, 3).unwrap(),
             1000,
@@ -2370,13 +2543,17 @@ mod tests {
         insert_trade(
             &pool,
             2,
-            1,
+            ListingId(1),
             trade::TradeType::Sell,
             NaiveDate::from_ymd_opt(2025, 4, 10).unwrap(),
             1000,
         )
         .await;
-        let mut inc = make_income(1, 1, NaiveDate::from_ymd_opt(2025, 4, 8).unwrap());
+        let mut inc = make_income(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2025, 4, 8).unwrap(),
+        );
         inc.ex_date = Some(NaiveDate::from_ymd_opt(2025, 3, 14).unwrap());
         inc.franked_amount = Decimal::from(7000);
         inc.franking_credits = Decimal::from(3000);
@@ -2396,7 +2573,7 @@ mod tests {
         insert_trade(
             &pool,
             1,
-            1,
+            ListingId(1),
             trade::TradeType::Buy,
             NaiveDate::from_ymd_opt(2025, 3, 3).unwrap(),
             1000,
@@ -2405,13 +2582,17 @@ mod tests {
         insert_trade(
             &pool,
             2,
-            1,
+            ListingId(1),
             trade::TradeType::Sell,
             NaiveDate::from_ymd_opt(2025, 4, 10).unwrap(),
             1000,
         )
         .await;
-        let mut inc = make_income(1, 1, NaiveDate::from_ymd_opt(2025, 4, 8).unwrap());
+        let mut inc = make_income(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2025, 4, 8).unwrap(),
+        );
         inc.ex_date = Some(NaiveDate::from_ymd_opt(2025, 3, 14).unwrap());
         inc.franked_amount = "11666.67".parse().unwrap();
         inc.franking_credits = Decimal::from(5000);
@@ -2432,7 +2613,7 @@ mod tests {
         insert_trade(
             &pool,
             1,
-            1,
+            ListingId(1),
             trade::TradeType::Buy,
             NaiveDate::from_ymd_opt(2025, 3, 3).unwrap(),
             1000,
@@ -2441,20 +2622,28 @@ mod tests {
         insert_trade(
             &pool,
             2,
-            1,
+            ListingId(1),
             trade::TradeType::Sell,
             NaiveDate::from_ymd_opt(2025, 4, 10).unwrap(),
             1000,
         )
         .await;
         // $3,000 income credits alone would be exempt…
-        let mut inc = make_income(1, 1, NaiveDate::from_ymd_opt(2025, 4, 8).unwrap());
+        let mut inc = make_income(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2025, 4, 8).unwrap(),
+        );
         inc.ex_date = Some(NaiveDate::from_ymd_opt(2025, 3, 14).unwrap());
         inc.franked_amount = Decimal::from(7000);
         inc.franking_credits = Decimal::from(3000);
         income::db_upsert(&pool, &inc).await.unwrap();
         // …but $2,500 AMMA credits take the year's total to $5,500.
-        let mut a = make_amma(1, 2, NaiveDate::from_ymd_opt(2025, 6, 30).unwrap());
+        let mut a = make_amma(
+            1,
+            ListingId(2),
+            NaiveDate::from_ymd_opt(2025, 6, 30).unwrap(),
+        );
         a.franking_credits = Decimal::from(2500);
         amma::db_upsert(&pool, &a).await.unwrap();
 
@@ -2473,7 +2662,7 @@ mod tests {
         insert_trade(
             &pool,
             1,
-            1,
+            ListingId(1),
             trade::TradeType::Buy,
             NaiveDate::from_ymd_opt(2025, 4, 1).unwrap(),
             1000,
@@ -2482,13 +2671,17 @@ mod tests {
         insert_trade(
             &pool,
             2,
-            1,
+            ListingId(1),
             trade::TradeType::Sell,
             NaiveDate::from_ymd_opt(2025, 4, 22).unwrap(),
             1000,
         )
         .await;
-        let mut inc = make_income(1, 1, NaiveDate::from_ymd_opt(2025, 4, 8).unwrap());
+        let mut inc = make_income(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2025, 4, 8).unwrap(),
+        );
         inc.ex_date = None;
         inc.franked_amount = Decimal::from(14000);
         inc.franking_credits = Decimal::from(6000);
@@ -2508,13 +2701,17 @@ mod tests {
         insert_trade(
             &pool,
             1,
-            1,
+            ListingId(1),
             trade::TradeType::Buy,
             NaiveDate::from_ymd_opt(2023, 1, 10).unwrap(),
             1000,
         )
         .await;
-        let mut inc = make_income(1, 1, NaiveDate::from_ymd_opt(2025, 4, 8).unwrap());
+        let mut inc = make_income(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2025, 4, 8).unwrap(),
+        );
         inc.ex_date = Some(NaiveDate::from_ymd_opt(2025, 3, 14).unwrap());
         inc.franked_amount = Decimal::from(14000);
         inc.franking_credits = Decimal::from(6000);
@@ -2533,7 +2730,11 @@ mod tests {
     async fn db_foreign_tax_under_1000_passes_through() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        let mut inc = make_income(1, 1, NaiveDate::from_ymd_opt(2024, 3, 15).unwrap());
+        let mut inc = make_income(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2024, 3, 15).unwrap(),
+        );
         inc.foreign_source_income = Decimal::from(3000);
         inc.foreign_tax_paid = Decimal::from(999);
         income::db_upsert(&pool, &inc).await.unwrap();
@@ -2549,7 +2750,11 @@ mod tests {
     async fn db_foreign_tax_exactly_1000_is_not_capped() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        let mut inc = make_income(1, 1, NaiveDate::from_ymd_opt(2024, 3, 15).unwrap());
+        let mut inc = make_income(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2024, 3, 15).unwrap(),
+        );
         inc.foreign_tax_paid = Decimal::from(1000);
         income::db_upsert(&pool, &inc).await.unwrap();
 
@@ -2565,7 +2770,11 @@ mod tests {
         // Anna-shaped total (docs/ato/fito-limit.md Example 16 pays A$3,400 foreign
         // tax; her computed limit is outside this system's data, so only the
         // A$1,000 de-minimis is claimable here).
-        let mut inc = make_income(1, 1, NaiveDate::from_ymd_opt(2025, 3, 15).unwrap());
+        let mut inc = make_income(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2025, 3, 15).unwrap(),
+        );
         inc.foreign_source_income = Decimal::from(12000);
         inc.foreign_tax_paid = Decimal::from(3400);
         income::db_upsert(&pool, &inc).await.unwrap();
@@ -2584,14 +2793,26 @@ mod tests {
         insert_listing(&pool, 1).await;
         insert_listing(&pool, 2).await;
         // FY2024: 600 (income) + 700 (AMMA) = 1300 → capped at 1000, excess 300.
-        let mut inc = make_income(1, 1, NaiveDate::from_ymd_opt(2024, 3, 15).unwrap());
+        let mut inc = make_income(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2024, 3, 15).unwrap(),
+        );
         inc.foreign_tax_paid = Decimal::from(600);
         income::db_upsert(&pool, &inc).await.unwrap();
-        let mut a = make_amma(1, 2, NaiveDate::from_ymd_opt(2024, 6, 30).unwrap());
+        let mut a = make_amma(
+            1,
+            ListingId(2),
+            NaiveDate::from_ymd_opt(2024, 6, 30).unwrap(),
+        );
         a.foreign_tax_credits = Decimal::from(700);
         amma::db_upsert(&pool, &a).await.unwrap();
         // FY2025: 400 alone → under the cap, untouched.
-        let mut inc2 = make_income(2, 1, NaiveDate::from_ymd_opt(2024, 9, 15).unwrap());
+        let mut inc2 = make_income(
+            2,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2024, 9, 15).unwrap(),
+        );
         inc2.foreign_tax_paid = Decimal::from(400);
         income::db_upsert(&pool, &inc2).await.unwrap();
 
@@ -2611,7 +2832,11 @@ mod tests {
     async fn api_tax_summary_returns_json() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        let mut inc = make_income(1, 1, NaiveDate::from_ymd_opt(2024, 3, 15).unwrap());
+        let mut inc = make_income(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2024, 3, 15).unwrap(),
+        );
         inc.franked_amount = Decimal::from(70);
         inc.unfranked_amount = Decimal::from(30);
         inc.franking_credits = Decimal::from(30);
@@ -2630,7 +2855,11 @@ mod tests {
     async fn api_export_returns_csv_with_expected_columns() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        let mut inc = make_income(1, 1, NaiveDate::from_ymd_opt(2024, 3, 15).unwrap());
+        let mut inc = make_income(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2024, 3, 15).unwrap(),
+        );
         inc.franked_amount = Decimal::from(71);
         inc.unfranked_amount = Decimal::from(29);
         inc.franking_credits = "30.50".parse().unwrap();
@@ -2741,7 +2970,11 @@ mod tests {
     async fn api_export_rounds_a_half_cent_away_from_zero() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        let mut inc = make_income(1, 1, NaiveDate::from_ymd_opt(2024, 3, 15).unwrap());
+        let mut inc = make_income(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2024, 3, 15).unwrap(),
+        );
         inc.unfranked_amount = "10.005".parse().unwrap();
         income::db_upsert(&pool, &inc).await.unwrap();
 
@@ -2886,7 +3119,7 @@ mod tests {
         let pool = test_pool().await;
         let march = NaiveDate::from_ymd_opt(2024, 3, 1).unwrap();
         insert_listing(&pool, 1).await;
-        let mut div = make_income(1, 1, march);
+        let mut div = make_income(1, ListingId(1), march);
         div.franked_amount = Decimal::from(100);
         div.unfranked_amount = Decimal::from(50);
         income::db_upsert(&pool, &div).await.unwrap();
@@ -2947,12 +3180,12 @@ mod tests {
         let march = NaiveDate::from_ymd_opt(2024, 3, 1).unwrap();
         // 1: an ordinary Australian share → its fee reports at D7/D8.
         insert_listing(&pool, 1).await;
-        let mut div = make_income(1, 1, march);
+        let mut div = make_income(1, ListingId(1), march);
         div.franked_amount = "10.005".parse().unwrap();
         income::db_upsert(&pool, &div).await.unwrap();
         // 3: an ordinary trust → its fee reports at 13Y.
         insert_listing(&pool, 3).await;
-        let mut dist = make_income(3, 3, march);
+        let mut dist = make_income(3, ListingId(3), march);
         dist.trust_income = true;
         dist.unfranked_amount = Decimal::from(50);
         income::db_upsert(&pool, &dist).await.unwrap();
@@ -2978,14 +3211,14 @@ mod tests {
                 march,
                 ExpenseType::ManagementFee,
                 "10.005".parse().unwrap(),
-                1,
+                ListingId(1),
             ),
             expense_on(
                 2,
                 march,
                 ExpenseType::ManagementFee,
                 "10.005".parse().unwrap(),
-                3,
+                ListingId(3),
             ),
         ] {
             investment_expense::db_upsert(&pool, &expense)
@@ -3003,7 +3236,11 @@ mod tests {
         rba_fx_rate::db_import_rate(&pool, "USD", "2024-03", "0.65".parse().unwrap())
             .await
             .unwrap();
-        let mut inc = make_income(1, 1, NaiveDate::from_ymd_opt(2024, 3, 15).unwrap());
+        let mut inc = make_income(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2024, 3, 15).unwrap(),
+        );
         inc.currency = "USD".into();
         inc.unfranked_amount = Decimal::from(100);
         income::db_upsert(&pool, &inc).await.unwrap();
@@ -3072,7 +3309,11 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
         // Taxing point Sep 2024 → FY2025.
-        let mut e = make_ess(1, 1, NaiveDate::from_ymd_opt(2024, 9, 1).unwrap());
+        let mut e = make_ess(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2024, 9, 1).unwrap(),
+        );
         e.taxed_upfront_eligible = Decimal::from(2400); // D
         e.taxed_upfront_not_eligible = Decimal::from(100); // E
         e.deferral_discount = Decimal::from(500); // F
@@ -3101,10 +3342,18 @@ mod tests {
     async fn db_ess_reduction_is_withheld_from_a_year_recorded_ineligible() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        let mut fy2025 = make_ess(1, 1, NaiveDate::from_ymd_opt(2024, 9, 1).unwrap());
+        let mut fy2025 = make_ess(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2024, 9, 1).unwrap(),
+        );
         fy2025.taxed_upfront_eligible = Decimal::from(2400);
         ess_statement::db_upsert(&pool, &fy2025).await.unwrap();
-        let mut fy2026 = make_ess(2, 1, NaiveDate::from_ymd_opt(2025, 9, 1).unwrap());
+        let mut fy2026 = make_ess(
+            2,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2025, 9, 1).unwrap(),
+        );
         fy2026.taxed_upfront_eligible = Decimal::from(2400);
         ess_statement::db_upsert(&pool, &fy2026).await.unwrap();
 
@@ -3143,7 +3392,11 @@ mod tests {
     async fn db_a_year_recorded_eligible_keeps_its_reduction() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        let mut e = make_ess(1, 1, NaiveDate::from_ymd_opt(2024, 9, 1).unwrap());
+        let mut e = make_ess(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2024, 9, 1).unwrap(),
+        );
         e.taxed_upfront_eligible = Decimal::from(2400);
         ess_statement::db_upsert(&pool, &e).await.unwrap();
         tax_year_settings::db_upsert(
@@ -3167,7 +3420,11 @@ mod tests {
     async fn db_ess_reduction_caps_at_the_eligible_discount() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        let mut e = make_ess(1, 1, NaiveDate::from_ymd_opt(2024, 9, 1).unwrap());
+        let mut e = make_ess(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2024, 9, 1).unwrap(),
+        );
         e.taxed_upfront_eligible = Decimal::from(600); // D ≤ 1000
         e.deferral_discount = Decimal::from(900); // F
         ess_statement::db_upsert(&pool, &e).await.unwrap();
@@ -3283,7 +3540,11 @@ mod tests {
     async fn db_ess_deferral_only_has_no_reduction() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        let mut e = make_ess(1, 1, NaiveDate::from_ymd_opt(2024, 9, 1).unwrap());
+        let mut e = make_ess(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2024, 9, 1).unwrap(),
+        );
         e.deferral_discount = Decimal::from(5000);
         ess_statement::db_upsert(&pool, &e).await.unwrap();
 
@@ -3298,10 +3559,18 @@ mod tests {
     async fn db_ess_reduction_is_one_cap_per_year_across_statements() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        let mut e1 = make_ess(1, 1, NaiveDate::from_ymd_opt(2024, 9, 1).unwrap());
+        let mut e1 = make_ess(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2024, 9, 1).unwrap(),
+        );
         e1.taxed_upfront_eligible = Decimal::from(800);
         ess_statement::db_upsert(&pool, &e1).await.unwrap();
-        let mut e2 = make_ess(2, 1, NaiveDate::from_ymd_opt(2025, 2, 1).unwrap());
+        let mut e2 = make_ess(
+            2,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2025, 2, 1).unwrap(),
+        );
         e2.taxed_upfront_eligible = Decimal::from(800);
         ess_statement::db_upsert(&pool, &e2).await.unwrap();
 
@@ -3324,7 +3593,11 @@ mod tests {
         rba_fx_rate::db_import_rate(&pool, "USD", "2024-09", "0.50".parse().unwrap())
             .await
             .unwrap();
-        let mut e = make_ess(1, 1, NaiveDate::from_ymd_opt(2024, 9, 1).unwrap());
+        let mut e = make_ess(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2024, 9, 1).unwrap(),
+        );
         e.currency = "USD".into();
         e.deferral_discount = Decimal::from(1000); // USD → 2000 AUD
         e.foreign_source_discount = Decimal::from(1000); // the whole discount is foreign
@@ -3347,7 +3620,11 @@ mod tests {
         rba_fx_rate::db_import_rate(&pool, "USD", "2024-09", "0.50".parse().unwrap())
             .await
             .unwrap();
-        let mut e = make_ess(1, 1, NaiveDate::from_ymd_opt(2024, 9, 1).unwrap());
+        let mut e = make_ess(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2024, 9, 1).unwrap(),
+        );
         e.currency = "USD".into();
         e.deferral_discount = Decimal::from(1000); // USD; RBA would say 2000 AUD
         e.aud_deferral_discount = Some("1403.40".parse().unwrap()); // employer's AUD figure
@@ -3372,7 +3649,11 @@ mod tests {
         rba_fx_rate::db_import_rate(&pool, "USD", "2024-09", "0.50".parse().unwrap())
             .await
             .unwrap();
-        let mut e = make_ess(1, 1, NaiveDate::from_ymd_opt(2024, 9, 1).unwrap());
+        let mut e = make_ess(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2024, 9, 1).unwrap(),
+        );
         e.currency = "USD".into();
         e.taxed_upfront_eligible = Decimal::from(1000); // USD; RBA would say 2000 AUD
         e.aud_taxed_upfront_eligible = Some(Decimal::from(800)); // employer's AUD figure
@@ -3409,7 +3690,7 @@ mod tests {
             rba_fx_rate::db_import_rate(&pool, "USD", &month, "0.64".parse().unwrap())
                 .await
                 .unwrap();
-            let mut e = make_ess(i as i64 + 1, 1, *taxing_point);
+            let mut e = make_ess(i as i64 + 1, ListingId(1), *taxing_point);
             e.currency = "USD".into();
             e.deferral_discount = usd.parse().unwrap();
             e.aud_deferral_discount = aud.map(|a| a.parse().unwrap());
@@ -3447,7 +3728,11 @@ mod tests {
     async fn db_ess_stated_fx_rate_converts_a_month_with_no_ato_rate() {
         let pool = test_pool().await;
         insert_usd_listing(&pool, 1).await;
-        let mut e = make_ess(1, 1, NaiveDate::from_ymd_opt(2024, 9, 1).unwrap());
+        let mut e = make_ess(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2024, 9, 1).unwrap(),
+        );
         e.currency = "USD".into();
         e.fx_rate = Some("0.50".parse().unwrap());
         e.deferral_discount = Decimal::from(1000); // USD → 2000 AUD at the stated rate
@@ -3472,7 +3757,11 @@ mod tests {
     async fn db_ess_non_aud_without_rate_fails_loudly() {
         let pool = test_pool().await;
         insert_usd_listing(&pool, 1).await;
-        let mut e = make_ess(1, 1, NaiveDate::from_ymd_opt(2024, 9, 1).unwrap());
+        let mut e = make_ess(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2024, 9, 1).unwrap(),
+        );
         e.currency = "USD".into();
         e.deferral_discount = Decimal::from(1000);
         ess_statement::db_upsert(&pool, &e).await.unwrap();
@@ -3493,7 +3782,11 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
         // FY2024 dividend income: 140 franked + 60 unfranked = 200 assessable.
-        let mut div = make_income(1, 1, NaiveDate::from_ymd_opt(2024, 3, 15).unwrap());
+        let mut div = make_income(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2024, 3, 15).unwrap(),
+        );
         div.franked_amount = Decimal::from(140);
         div.unfranked_amount = Decimal::from(60);
         div.franking_credits = Decimal::from(60); // an offset line, not in gross
@@ -3547,12 +3840,20 @@ mod tests {
     async fn db_gross_assessable_spans_income_and_amma_excludes_nane_and_cgt() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        let mut inc = make_income(1, 1, NaiveDate::from_ymd_opt(2024, 3, 15).unwrap());
+        let mut inc = make_income(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2024, 3, 15).unwrap(),
+        );
         inc.unfranked_amount = Decimal::from(100);
         inc.foreign_source_income = Decimal::from(50);
         inc.conduit_foreign_income = Decimal::from(40); // NANE, excluded
         income::db_upsert(&pool, &inc).await.unwrap();
-        let mut a = make_amma(1, 1, NaiveDate::from_ymd_opt(2024, 6, 30).unwrap());
+        let mut a = make_amma(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2024, 6, 30).unwrap(),
+        );
         a.australian_interest = Decimal::from(10);
         a.franked_dividends = Decimal::from(20);
         a.franking_credits = Decimal::from(8); // already inside the 20
@@ -3623,7 +3924,7 @@ mod tests {
         date: NaiveDate,
         expense_type: ExpenseType,
         amount: Decimal,
-        listing_id: i64,
+        listing_id: ListingId,
     ) -> investment_expense::InvestmentExpense {
         investment_expense::InvestmentExpense {
             listing_id: Some(listing_id),
@@ -3644,7 +3945,7 @@ mod tests {
         let march = NaiveDate::from_ymd_opt(2024, 3, 1).unwrap();
         // 1: an ordinary Australian share paying a franked dividend → D7/D8.
         test_support::listing(1).insert(&pool).await;
-        let mut div = make_income(1, 1, march);
+        let mut div = make_income(1, ListingId(1), march);
         div.franked_amount = Decimal::from(100);
         income::db_upsert(&pool, &div).await.unwrap();
         // 2: an AMIT — its assessable record is the AMMA statement, so it has
@@ -3653,7 +3954,7 @@ mod tests {
         // 3: an ordinary (non-AMIT) trust — a *property of the income row*,
         // not of the listing.
         test_support::listing(3).insert(&pool).await;
-        let mut dist = make_income(3, 3, march);
+        let mut dist = make_income(3, ListingId(3), march);
         dist.trust_income = true;
         dist.unfranked_amount = Decimal::from(50);
         income::db_upsert(&pool, &dist).await.unwrap();
@@ -3662,20 +3963,20 @@ mod tests {
             .await
             .unwrap();
         insert_usd_listing(&pool, 4).await;
-        let mut foreign = make_income(4, 4, march);
+        let mut foreign = make_income(4, ListingId(4), march);
         foreign.currency = "USD".into();
         foreign.foreign_source_income = Decimal::from(100);
         income::db_upsert(&pool, &foreign).await.unwrap();
 
         let e = |id, ty, amt, listing| expense_on(id, march, ty, Decimal::from(amt), listing);
         for expense in [
-            e(1, ExpenseType::AdviceFee, 10, 1),
-            e(2, ExpenseType::ManagementFee, 20, 2),
-            e(3, ExpenseType::ManagementFee, 30, 3),
-            e(4, ExpenseType::ManagementFee, 40, 4),
+            e(1, ExpenseType::AdviceFee, 10, ListingId(1)),
+            e(2, ExpenseType::ManagementFee, 20, ListingId(2)),
+            e(3, ExpenseType::ManagementFee, 30, ListingId(3)),
+            e(4, ExpenseType::ManagementFee, 40, ListingId(4)),
             // Interest on money borrowed to buy the foreign holding: question
             // 20's worksheet excludes debt deductions, so it is claimed at D15.
-            e(5, ExpenseType::LoanInterest, 50, 4),
+            e(5, ExpenseType::LoanInterest, 50, ListingId(4)),
         ] {
             investment_expense::db_upsert(&pool, &expense)
                 .await
@@ -3733,7 +4034,13 @@ mod tests {
         test_support::listing(1).amit(true).insert(&pool).await;
         investment_expense::db_upsert(
             &pool,
-            &expense_on(1, march, ExpenseType::LoanInterest, Decimal::from(80), 1),
+            &expense_on(
+                1,
+                march,
+                ExpenseType::LoanInterest,
+                Decimal::from(80),
+                ListingId(1),
+            ),
         )
         .await
         .unwrap();
@@ -3766,7 +4073,13 @@ mod tests {
         ] {
             investment_expense::db_upsert(
                 &pool,
-                &expense_on(id, date, ExpenseType::ManagementFee, Decimal::from(25), 1),
+                &expense_on(
+                    id,
+                    date,
+                    ExpenseType::ManagementFee,
+                    Decimal::from(25),
+                    ListingId(1),
+                ),
             )
             .await
             .unwrap();
@@ -3799,7 +4112,7 @@ mod tests {
                     march,
                     ExpenseType::AdviceFee,
                     Decimal::from(10),
-                    listing,
+                    ListingId(listing),
                 ),
             )
             .await
@@ -3822,7 +4135,13 @@ mod tests {
         test_support::listing(1).amit(true).insert(&pool).await;
         investment_expense::db_upsert(
             &pool,
-            &expense_on(1, march, ExpenseType::ManagementFee, Decimal::from(35), 1),
+            &expense_on(
+                1,
+                march,
+                ExpenseType::ManagementFee,
+                Decimal::from(35),
+                ListingId(1),
+            ),
         )
         .await
         .unwrap();
@@ -4083,7 +4402,11 @@ mod tests {
     async fn db_interest_included_in_gross_and_net_assessable() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        let mut div = make_income(1, 1, NaiveDate::from_ymd_opt(2024, 3, 15).unwrap());
+        let mut div = make_income(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2024, 3, 15).unwrap(),
+        );
         div.unfranked_amount = Decimal::from(100);
         income::db_upsert(&pool, &div).await.unwrap();
         interest_income::db_upsert(
@@ -4123,7 +4446,11 @@ mod tests {
     async fn db_interest_tfn_withholding_joins_the_withholding_line() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        let mut div = make_income(1, 1, NaiveDate::from_ymd_opt(2024, 3, 15).unwrap());
+        let mut div = make_income(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2024, 3, 15).unwrap(),
+        );
         div.tfn_withholding_tax = Decimal::from(5);
         income::db_upsert(&pool, &div).await.unwrap();
         let mut int = make_interest(
@@ -4345,7 +4672,7 @@ mod tests {
         // Only discount-method gains: the ATO's own case, and a halving.
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        let mut a = make_amma(1, 1, ymd(2024, 6, 30));
+        let mut a = make_amma(1, ListingId(1), ymd(2024, 6, 30));
         a.cgt_discount_gains = Decimal::from(5000);
         a.foreign_tax_credits_capital_gains = Decimal::from(1500);
         amma::db_upsert(&pool, &a).await.unwrap();
@@ -4365,7 +4692,7 @@ mod tests {
         // 13000, so 1300 × 8/13 = 800.
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        let mut a = make_amma(1, 1, ymd(2024, 6, 30));
+        let mut a = make_amma(1, ListingId(1), ymd(2024, 6, 30));
         a.cgt_discount_gains = Decimal::from(5000);
         a.cgt_indexation_gains = Decimal::from(1000);
         a.cgt_other_gains = Decimal::from(2000);
@@ -4382,7 +4709,7 @@ mod tests {
         // its own Part C line and is claimable in full.
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        let mut a = make_amma(1, 1, ymd(2024, 6, 30));
+        let mut a = make_amma(1, ListingId(1), ymd(2024, 6, 30));
         a.foreign_income = Decimal::from(3000);
         a.foreign_tax_credits = Decimal::from(450);
         a.cgt_discount_gains = Decimal::from(5000);
@@ -4489,7 +4816,11 @@ mod tests {
     async fn api_tax_summary_past_the_old_fito_apportionment_ceiling_reports() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        let mut a = make_amma(1, 1, NaiveDate::from_ymd_opt(2024, 6, 30).unwrap());
+        let mut a = make_amma(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2024, 6, 30).unwrap(),
+        );
         a.cgt_discount_gains = "1000000000000000".parse().unwrap();
         a.foreign_tax_credits_capital_gains = "1000000000000000".parse().unwrap();
         amma::db_upsert(&pool, &a).await.unwrap();

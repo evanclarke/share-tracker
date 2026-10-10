@@ -24,6 +24,7 @@
 //! underneath — [`cost_base::adjusted_cost_base`] — which neither
 //! re-implements.
 
+use crate::infra::id::ListingId;
 use std::collections::HashMap;
 
 use chrono::NaiveDate;
@@ -59,7 +60,7 @@ impl CostBaseInputs {
     /// it (see the field doc).
     pub async fn load(
         conn: &mut sqlx::SqliteConnection,
-        listing_id: i64,
+        listing_id: ListingId,
         up_to: NaiveDate,
     ) -> Result<Self, sqlx::Error> {
         let splits = adjustments::db_splits_for_listing(&mut *conn, listing_id).await?;
@@ -111,7 +112,7 @@ impl CostBaseInputs {
     pub async fn open_parcels(
         &self,
         conn: &mut sqlx::SqliteConnection,
-        listing_id: i64,
+        listing_id: ListingId,
     ) -> Result<Vec<RolledParcel>, sqlx::Error> {
         let parcel_rows: Vec<ParcelRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "SELECT {} FROM trades \
@@ -413,7 +414,7 @@ mod tests {
             &pool,
             1,
             &TransferBody {
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: ymd(2025, 5, 1),
                 from_account_id: 1,
                 to_account_id: 2,
@@ -493,7 +494,7 @@ mod tests {
                 &pool,
                 transfer_id,
                 &TransferBody {
-                    listing_id: 1,
+                    listing_id: ListingId(1),
                     date,
                     from_account_id: from,
                     to_account_id: to,
@@ -576,7 +577,7 @@ mod tests {
             pool,
             &CorporateAction {
                 id: 5,
-                listing_id: 2,
+                listing_id: ListingId(2),
                 date: ymd(2026, 8, 1),
                 kind: ActionKind::ReturnOfCapital {
                     amount_per_unit: dec("0.05"),
@@ -591,10 +592,10 @@ mod tests {
             pool,
             &CorporateAction {
                 id: 10,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: ymd(2023, 3, 1),
                 kind: ActionKind::ScripForScrip {
-                    scrip_listing_id: 2,
+                    scrip_listing_id: ListingId(2),
                     scrip_new_units: dec("1"),
                     scrip_old_units: dec("1"),
                     scrip_cash_per_unit: None,
@@ -651,7 +652,7 @@ mod tests {
             &pool,
             1,
             &TransferBody {
-                listing_id: 2,
+                listing_id: ListingId(2),
                 date: ymd(2025, 4, 1),
                 from_account_id: 1,
                 to_account_id: 2,
@@ -684,10 +685,10 @@ mod tests {
             &pool,
             &CorporateAction {
                 id: 20,
-                listing_id: 2,
+                listing_id: ListingId(2),
                 date: ymd(2025, 4, 1),
                 kind: ActionKind::Demerger {
-                    demerger_listing_id: 3,
+                    demerger_listing_id: ListingId(3),
                     demerger_new_units: dec("1"),
                     demerger_held_units: dec("5"),
                     demerger_cost_base_pct: dec("20"),

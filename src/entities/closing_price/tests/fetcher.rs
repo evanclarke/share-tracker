@@ -1,6 +1,7 @@
 //! Provider-agnostic fetcher behaviour: price cleaning, and the quote cache.
 
 use super::*;
+use crate::infra::id::ListingId;
 
 #[test]
 fn clean_price_strips_float_noise_and_keeps_tiny_prices() {
@@ -29,13 +30,17 @@ async fn a_quote_inside_the_window_is_answered_without_asking_again() {
     let as_of = utc(2026, 6, 5, 6, 30);
     let inner = Arc::new(
         StubFetcher::default()
-            .with_quote(1, "62.48", "AUD", as_of)
-            .with_quote(2, "30", "AUD", as_of),
+            .with_quote(ListingId(1), "62.48", "AUD", as_of)
+            .with_quote(ListingId(2), "30", "AUD", as_of),
     );
     let cache = CachingFetcher::new(inner.clone(), std::time::Duration::from_secs(300));
 
-    let first = fetch_live_aud_prices(&pool, &cache, &[1, 2]).await.unwrap();
-    let second = fetch_live_aud_prices(&pool, &cache, &[1, 2]).await.unwrap();
+    let first = fetch_live_aud_prices(&pool, &cache, &[ListingId(1), ListingId(2)])
+        .await
+        .unwrap();
+    let second = fetch_live_aud_prices(&pool, &cache, &[ListingId(1), ListingId(2)])
+        .await
+        .unwrap();
 
     assert_eq!(
         inner.quote_batches(),
@@ -45,14 +50,20 @@ async fn a_quote_inside_the_window_is_answered_without_asking_again() {
     // And answered with the same figures, not an empty or defaulted row.
     for prices in [&first, &second] {
         assert_eq!(
-            prices[&1].as_ref().unwrap().aud_price,
+            prices[&ListingId(1)].as_ref().unwrap().aud_price,
             "62.48".parse::<Decimal>().unwrap()
         );
-        assert_eq!(prices[&2].as_ref().unwrap().aud_price, Decimal::from(30));
+        assert_eq!(
+            prices[&ListingId(2)].as_ref().unwrap().aud_price,
+            Decimal::from(30)
+        );
     }
     // The provider's own quote timestamp survives the cache: a served
     // row states when the price was *observed*, never when it was served.
-    assert_eq!(second[&1].as_ref().unwrap().as_of, as_of.to_rfc3339());
+    assert_eq!(
+        second[&ListingId(1)].as_ref().unwrap().as_of,
+        as_of.to_rfc3339()
+    );
 }
 
 /// Past the window the provider is asked again — the cache is a window,
@@ -63,11 +74,15 @@ async fn a_quote_past_the_window_is_fetched_again() {
     let pool = test_pool().await;
     insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
     let as_of = utc(2026, 6, 5, 6, 30);
-    let inner = Arc::new(StubFetcher::default().with_quote(1, "62.48", "AUD", as_of));
+    let inner = Arc::new(StubFetcher::default().with_quote(ListingId(1), "62.48", "AUD", as_of));
     let cache = CachingFetcher::new(inner.clone(), std::time::Duration::ZERO);
 
-    fetch_live_aud_prices(&pool, &cache, &[1]).await.unwrap();
-    fetch_live_aud_prices(&pool, &cache, &[1]).await.unwrap();
+    fetch_live_aud_prices(&pool, &cache, &[ListingId(1)])
+        .await
+        .unwrap();
+    fetch_live_aud_prices(&pool, &cache, &[ListingId(1)])
+        .await
+        .unwrap();
 
     assert_eq!(
         inner.quote_batches(),
@@ -89,19 +104,25 @@ async fn only_the_misses_are_asked_for_and_they_go_as_one_batch() {
     let as_of = utc(2026, 6, 5, 6, 30);
     let inner = Arc::new(
         StubFetcher::default()
-            .with_quote(1, "10", "AUD", as_of)
-            .with_quote(2, "20", "AUD", as_of)
-            .with_quote(3, "30", "AUD", as_of)
-            .with_quote(4, "40", "AUD", as_of),
+            .with_quote(ListingId(1), "10", "AUD", as_of)
+            .with_quote(ListingId(2), "20", "AUD", as_of)
+            .with_quote(ListingId(3), "30", "AUD", as_of)
+            .with_quote(ListingId(4), "40", "AUD", as_of),
     );
     let cache = CachingFetcher::new(inner.clone(), std::time::Duration::from_secs(300));
 
     // Warm 2 and 4, so the next call's misses are 1 and 3 — interleaved,
     // so a positional slip would show up as swapped prices.
-    fetch_live_aud_prices(&pool, &cache, &[2, 4]).await.unwrap();
-    let all = fetch_live_aud_prices(&pool, &cache, &[1, 2, 3, 4])
+    fetch_live_aud_prices(&pool, &cache, &[ListingId(2), ListingId(4)])
         .await
         .unwrap();
+    let all = fetch_live_aud_prices(
+        &pool,
+        &cache,
+        &[ListingId(1), ListingId(2), ListingId(3), ListingId(4)],
+    )
+    .await
+    .unwrap();
 
     assert_eq!(
         inner.quote_batches(),
@@ -110,7 +131,7 @@ async fn only_the_misses_are_asked_for_and_they_go_as_one_batch() {
     );
     for (id, expected) in [(1, 10), (2, 20), (3, 30), (4, 40)] {
         assert_eq!(
-            all[&id].as_ref().unwrap().aud_price,
+            all[&ListingId(id)].as_ref().unwrap().aud_price,
             Decimal::from(expected),
             "listing {id} kept its own price across the cache/fetch mix"
         );
@@ -128,17 +149,23 @@ async fn a_failed_quote_is_not_remembered() {
     // Quotes listing 2 only, so listing 1 fails.
     let down = Arc::new(StubFetcher::default());
     let cache = CachingFetcher::new(down, std::time::Duration::from_secs(300));
-    let failed = fetch_live_aud_prices(&pool, &cache, &[1]).await.unwrap();
-    assert!(failed[&1].is_err());
+    let failed = fetch_live_aud_prices(&pool, &cache, &[ListingId(1)])
+        .await
+        .unwrap();
+    assert!(failed[&ListingId(1)].is_err());
 
     // A fresh cache over a working provider stands in for the outage
     // ending; what matters is that nothing was pinned by the failure.
-    let up = Arc::new(StubFetcher::default().with_quote(1, "62.48", "AUD", as_of));
+    let up = Arc::new(StubFetcher::default().with_quote(ListingId(1), "62.48", "AUD", as_of));
     let cache = CachingFetcher::new(up.clone(), std::time::Duration::from_secs(300));
-    fetch_live_aud_prices(&pool, &cache, &[1]).await.unwrap();
-    let recovered = fetch_live_aud_prices(&pool, &cache, &[1]).await.unwrap();
+    fetch_live_aud_prices(&pool, &cache, &[ListingId(1)])
+        .await
+        .unwrap();
+    let recovered = fetch_live_aud_prices(&pool, &cache, &[ListingId(1)])
+        .await
+        .unwrap();
     assert_eq!(
-        recovered[&1].as_ref().unwrap().aud_price,
+        recovered[&ListingId(1)].as_ref().unwrap().aud_price,
         "62.48".parse::<Decimal>().unwrap()
     );
     assert_eq!(
@@ -156,9 +183,9 @@ async fn history_fetches_are_not_cached() {
     let pool = test_pool().await;
     insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
     let day = ymd(2026, 6, 5);
-    let inner = Arc::new(StubFetcher::default().with_close(1, day, "62.48", "AUD"));
+    let inner = Arc::new(StubFetcher::default().with_close(ListingId(1), day, "62.48", "AUD"));
     let cache = CachingFetcher::new(inner.clone(), std::time::Duration::from_secs(300));
-    let market = load_market(&pool, 1).await.unwrap().unwrap();
+    let market = load_market(&pool, ListingId(1)).await.unwrap().unwrap();
 
     cache.daily_closes(&market, day, day).await.unwrap();
     cache.daily_closes(&market, day, day).await.unwrap();

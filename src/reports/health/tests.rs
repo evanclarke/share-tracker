@@ -5,6 +5,7 @@ use crate::entities::corporate_action;
 use crate::entities::holding_account;
 use crate::entities::inheritance::Inheritance;
 use crate::entities::investment_expense::{ExpenseType, InvestmentExpense};
+use crate::infra::id::ListingId;
 use crate::test_support::{self, ApiClient, dec, test_pool, ymd};
 use axum::http::StatusCode;
 use chrono::Duration;
@@ -23,8 +24,8 @@ fn noon_utc(date: NaiveDate) -> DateTime<Utc> {
     date.and_hms_opt(12, 0, 0).expect("valid time").and_utc()
 }
 
-async fn insert_ok_price(pool: &SqlitePool, listing_id: i64, date: &str) {
-    test_support::closing_price(listing_id, date.parse().unwrap())
+async fn insert_ok_price(pool: &SqlitePool, listing_id: ListingId, date: &str) {
+    test_support::closing_price(listing_id.0, date.parse().unwrap())
         .price("10.50")
         .source(PriceSource::Yahoo)
         .fetched_at("2026-07-01T00:00:00Z")
@@ -32,8 +33,8 @@ async fn insert_ok_price(pool: &SqlitePool, listing_id: i64, date: &str) {
         .await;
 }
 
-async fn insert_error_price(pool: &SqlitePool, listing_id: i64, date: &str, error: &str) {
-    test_support::closing_price(listing_id, date.parse().unwrap())
+async fn insert_error_price(pool: &SqlitePool, listing_id: ListingId, date: &str, error: &str) {
+    test_support::closing_price(listing_id.0, date.parse().unwrap())
         .source(PriceSource::Yahoo)
         .fetched_at("2026-07-01T00:00:00Z")
         .errored(error)
@@ -112,7 +113,7 @@ async fn prices_within_threshold_are_fresh_older_are_stale() {
     let pool = test_pool().await;
     test_support::listing(1).insert(&pool).await;
     // Wed 2026-07-08 → Mon 2026-07-13 is exactly 3 business days: fresh.
-    insert_ok_price(&pool, 1, "2026-07-08").await;
+    insert_ok_price(&pool, ListingId(1), "2026-07-08").await;
     let h = health(&pool, ymd(2026, 7, 13)).await;
     assert_eq!(h.latest_price_date, Some(ymd(2026, 7, 8)));
     assert!(!h.prices_stale);
@@ -128,8 +129,8 @@ async fn only_ok_prices_count_towards_freshness() {
     // days must not make the data look fresh.
     let pool = test_pool().await;
     test_support::listing(1).insert(&pool).await;
-    insert_ok_price(&pool, 1, "2026-07-01").await;
-    insert_error_price(&pool, 1, "2026-07-10", "provider down").await;
+    insert_ok_price(&pool, ListingId(1), "2026-07-01").await;
+    insert_error_price(&pool, ListingId(1), "2026-07-10", "provider down").await;
     let h = health(&pool, ymd(2026, 7, 13)).await;
     assert_eq!(h.latest_price_date, Some(ymd(2026, 7, 1)));
     assert!(h.prices_stale);
@@ -145,21 +146,21 @@ async fn errored_price_listing_is_surfaced_with_ticker_count_and_latest_error() 
     test_support::listing(1).ticker("LAR").insert(&pool).await;
     insert_error_price(
         &pool,
-        1,
+        ListingId(1),
         "2026-07-01",
         "provider returned no candles for LAR",
     )
     .await;
     insert_error_price(
         &pool,
-        1,
+        ListingId(1),
         "2026-07-02",
         "provider returned no candles for LAR",
     )
     .await;
     insert_error_price(
         &pool,
-        1,
+        ListingId(1),
         "2026-07-03",
         "provider returned no candles for LAR (latest)",
     )
@@ -185,9 +186,9 @@ async fn errored_prices_are_grouped_per_listing_and_ordered_newest_first() {
     let pool = test_pool().await;
     test_support::listing(1).ticker("A").insert(&pool).await;
     test_support::listing(2).ticker("B").insert(&pool).await;
-    insert_ok_price(&pool, 1, "2026-07-01").await;
-    insert_error_price(&pool, 1, "2026-07-05", "err A").await;
-    insert_error_price(&pool, 2, "2026-07-10", "err B").await;
+    insert_ok_price(&pool, ListingId(1), "2026-07-01").await;
+    insert_error_price(&pool, ListingId(1), "2026-07-05", "err A").await;
+    insert_error_price(&pool, ListingId(2), "2026-07-10", "err B").await;
 
     let h = health(&pool, ymd(2026, 7, 13)).await;
     assert_eq!(h.errored_prices.len(), 2);
@@ -450,7 +451,7 @@ async fn a_held_day_with_no_stored_row_is_reported() {
         "2026-07-10",
         "2026-07-13",
     ] {
-        insert_ok_price(&pool, 1, day).await;
+        insert_ok_price(&pool, ListingId(1), day).await;
     }
 
     let h = health(&pool, ymd(2026, 7, 13)).await;
@@ -476,12 +477,18 @@ async fn an_unpriced_listing_stops_being_nagged_about_from_its_date() {
         .date(ymd(2026, 7, 6))
         .insert(&pool)
         .await;
-    insert_ok_price(&pool, 1, "2026-07-06").await;
+    insert_ok_price(&pool, ListingId(1), "2026-07-06").await;
     // A real hole before the delisting, then errored rows after it, then
     // days nothing ever fetched.
-    insert_error_price(&pool, 1, "2026-07-07", "provider down").await;
+    insert_error_price(&pool, ListingId(1), "2026-07-07", "provider down").await;
     for day in ["2026-07-09", "2026-07-10"] {
-        insert_error_price(&pool, 1, day, "yahoo fetch for ATVI failed: Not found").await;
+        insert_error_price(
+            &pool,
+            ListingId(1),
+            day,
+            "yahoo fetch for ATVI failed: Not found",
+        )
+        .await;
     }
 
     let before = health(&pool, ymd(2026, 7, 13)).await;
@@ -528,9 +535,9 @@ async fn a_listing_is_not_nagged_about_before_its_series_begins() {
     // Errored rows on the days before the series begins, then a real hole
     // after it (10 July is never fetched).
     for day in ["2026-07-06", "2026-07-07"] {
-        insert_error_price(&pool, 1, day, "yahoo fetch for LAC failed: 400").await;
+        insert_error_price(&pool, ListingId(1), day, "yahoo fetch for LAC failed: 400").await;
     }
-    insert_ok_price(&pool, 1, "2026-07-09").await;
+    insert_ok_price(&pool, ListingId(1), "2026-07-09").await;
 
     let before = health(&pool, ymd(2026, 7, 13)).await;
     assert_eq!(before.errored_prices[0].errored_days, 2);
@@ -574,9 +581,9 @@ async fn an_errored_day_is_not_reported_as_unpriced() {
         "2026-07-10",
         "2026-07-13",
     ] {
-        insert_ok_price(&pool, 1, day).await;
+        insert_ok_price(&pool, ListingId(1), day).await;
     }
-    insert_error_price(&pool, 1, "2026-07-08", "provider down").await;
+    insert_error_price(&pool, ListingId(1), "2026-07-08", "provider down").await;
 
     let h = health(&pool, ymd(2026, 7, 13)).await;
     assert!(h.unpriced_days.is_empty());
@@ -595,7 +602,7 @@ async fn non_trading_days_are_not_unpriced() {
         .insert(&pool)
         .await;
     for day in ["2026-06-05", "2026-06-09", "2026-06-10"] {
-        insert_ok_price(&pool, 1, day).await;
+        insert_ok_price(&pool, ListingId(1), day).await;
     }
 
     let h = health(&pool, ymd(2026, 6, 10)).await;
@@ -620,7 +627,7 @@ async fn a_close_that_is_not_final_yet_is_not_unpriced() {
         "2026-07-09",
         "2026-07-10",
     ] {
-        insert_ok_price(&pool, 1, day).await;
+        insert_ok_price(&pool, ListingId(1), day).await;
     }
 
     // 11:00 Sydney on Mon 2026-07-13: the ASX has not closed yet.
@@ -653,7 +660,7 @@ async fn a_crypto_candle_not_yet_published_is_not_unpriced() {
         .insert(&pool)
         .await;
     for day in ["2026-10-06", "2026-10-07"] {
-        insert_ok_price(&pool, 1, day).await;
+        insert_ok_price(&pool, ListingId(1), day).await;
     }
 
     // 06:30 UTC Fri 2026-10-09: Thursday's candle is final, unpublished.
@@ -728,7 +735,7 @@ async fn a_hole_straddling_a_rename_uses_the_calendar_of_the_date() {
         .await;
     crate::entities::listing_rename::db_rename(
         &pool,
-        1,
+        ListingId(1),
         &crate::entities::listing_rename::RenameBody {
             effective_date: ymd(2026, 6, 10),
             ticker: "NEW".to_string(),
@@ -770,7 +777,7 @@ async fn a_fully_priced_database_reports_no_unpriced_days() {
         "2026-07-10",
         "2026-07-13",
     ] {
-        insert_ok_price(&pool, 1, day).await;
+        insert_ok_price(&pool, ListingId(1), day).await;
     }
 
     let h = health(&pool, ymd(2026, 7, 13)).await;
@@ -803,7 +810,7 @@ async fn unpriced_listings_are_ordered_oldest_hole_first() {
     assert_eq!(h.unpriced_days[1].ticker, "RECENT");
 }
 
-async fn insert_roc(pool: &SqlitePool, id: i64, listing_id: i64, date: NaiveDate) {
+async fn insert_roc(pool: &SqlitePool, id: i64, listing_id: ListingId, date: NaiveDate) {
     insert_action(
         pool,
         id,
@@ -831,11 +838,11 @@ async fn amit_listing(pool: &SqlitePool, id: i64, ticker: &str) {
 async fn insert_amma(
     pool: &SqlitePool,
     id: i64,
-    listing_id: i64,
+    listing_id: ListingId,
     year_end: NaiveDate,
     holding_account_id: i64,
 ) {
-    test_support::amma(id, listing_id)
+    test_support::amma(id, listing_id.0)
         .with(|a| {
             a.tax_year_end_date = year_end;
             a.date_received = year_end + Duration::days(60);
@@ -845,7 +852,7 @@ async fn insert_amma(
         .await;
 }
 
-async fn insert_split(pool: &SqlitePool, id: i64, listing_id: i64, date: NaiveDate) {
+async fn insert_split(pool: &SqlitePool, id: i64, listing_id: ListingId, date: NaiveDate) {
     insert_action(
         pool,
         id,
@@ -862,7 +869,7 @@ async fn insert_split(pool: &SqlitePool, id: i64, listing_id: i64, date: NaiveDa
 async fn insert_action(
     pool: &SqlitePool,
     id: i64,
-    listing_id: i64,
+    listing_id: ListingId,
     date: NaiveDate,
     kind: corporate_action::ActionKind,
 ) {
@@ -912,7 +919,7 @@ async fn a_demerger_with_provider_adjusted_prices_and_no_stated_close_is_reporte
         .fetched_at("2026-07-26T07:44:56Z")
         .insert(&pool)
         .await;
-    insert_demerger(&pool, 1, 1, 2, ymd(2023, 10, 3), None).await;
+    insert_demerger(&pool, 1, ListingId(1), 2, ymd(2023, 10, 3), None).await;
 
     let h = health(&pool, ymd(2026, 7, 13)).await;
     assert_eq!(h.demergers_missing_close.len(), 1);
@@ -937,7 +944,7 @@ async fn a_demerger_with_provider_adjusted_prices_and_no_stated_close_is_reporte
     insert_demerger(
         &pool,
         1,
-        1,
+        ListingId(1),
         2,
         ymd(2023, 10, 3),
         Some((ymd(2023, 10, 2), "24.90")),
@@ -985,7 +992,7 @@ async fn a_demerger_reports_hand_entered_prices_in_the_span_separately() {
             .insert(&pool)
             .await;
     }
-    insert_demerger(&pool, 1, 1, 2, ymd(2023, 10, 3), None).await;
+    insert_demerger(&pool, 1, ListingId(1), 2, ymd(2023, 10, 3), None).await;
 
     let resp = ApiClient::over(router().with_state(pool.clone()))
         .get("/reports/health")
@@ -1039,7 +1046,7 @@ async fn a_demerger_with_no_adjusted_prices_is_not_reported() {
         .manual("the demerged entity's series", "no candle is served")
         .insert(&pool)
         .await;
-    insert_demerger(&pool, 1, 1, 2, ymd(2023, 10, 3), None).await;
+    insert_demerger(&pool, 1, ListingId(1), 2, ymd(2023, 10, 3), None).await;
 
     let h = health(&pool, ymd(2026, 7, 13)).await;
     assert!(h.demergers_missing_close.is_empty());
@@ -1048,8 +1055,8 @@ async fn a_demerger_with_no_adjusted_prices_is_not_reported() {
 /// A price the *demerged* listing was served by the provider, dated
 /// `date` — the evidence that it, not the head, traded before the
 /// demerger.
-async fn insert_fetched_price(pool: &SqlitePool, listing_id: i64, date: &str, price: &str) {
-    test_support::closing_price(listing_id, date.parse().unwrap())
+async fn insert_fetched_price(pool: &SqlitePool, listing_id: ListingId, date: &str, price: &str) {
+    test_support::closing_price(listing_id.0, date.parse().unwrap())
         .price(price)
         .source(PriceSource::Yahoo)
         .fetched_at("2026-07-26T07:44:56Z")
@@ -1086,12 +1093,12 @@ async fn a_demerger_recorded_with_the_created_entity_as_head_is_reported() {
         .insert(&pool)
         .await;
     // The head's own series begins at the demerger, and not before it.
-    insert_fetched_price(&pool, 1, "2023-10-03", "9.67").await;
+    insert_fetched_price(&pool, ListingId(1), "2023-10-03", "9.67").await;
     // The continuing entity's series runs back years before the event.
     for date in ["2021-03-25", "2022-09-19", "2023-10-02"] {
-        insert_fetched_price(&pool, 2, date, "16.85").await;
+        insert_fetched_price(&pool, ListingId(2), date, "16.85").await;
     }
-    insert_demerger(&pool, 1, 1, 2, ymd(2023, 10, 3), None).await;
+    insert_demerger(&pool, 1, ListingId(1), 2, ymd(2023, 10, 3), None).await;
 
     let h = health(&pool, ymd(2026, 7, 13)).await;
     assert_eq!(h.demergers_head_not_continuing.len(), 1);
@@ -1119,7 +1126,7 @@ async fn a_demerger_recorded_with_the_created_entity_as_head_is_reported() {
 
     // Re-modelled with the continuing entity as the head, the inversion is
     // gone: the head now holds the earlier series.
-    insert_demerger(&pool, 1, 2, 1, ymd(2023, 10, 3), None).await;
+    insert_demerger(&pool, 1, ListingId(2), 1, ymd(2023, 10, 3), None).await;
     let h = health(&pool, ymd(2026, 7, 13)).await;
     assert!(h.demergers_head_not_continuing.is_empty());
 }
@@ -1134,8 +1141,8 @@ async fn an_inverted_demerger_is_reported_over_http() {
         .date(ymd(2021, 3, 25))
         .insert(&pool)
         .await;
-    insert_fetched_price(&pool, 2, "2021-03-25", "16.85").await;
-    insert_demerger(&pool, 1, 1, 2, ymd(2023, 10, 3), None).await;
+    insert_fetched_price(&pool, ListingId(2), "2021-03-25", "16.85").await;
+    insert_demerger(&pool, 1, ListingId(1), 2, ymd(2023, 10, 3), None).await;
 
     let body: serde_json::Value = ApiClient::over(router().with_state(pool.clone()))
         .get_json("/reports/health")
@@ -1167,7 +1174,7 @@ async fn an_uncollected_database_reports_no_inverted_demerger() {
         .date(ymd(2021, 3, 25))
         .insert(&pool)
         .await;
-    insert_demerger(&pool, 1, 1, 2, ymd(2023, 10, 3), None).await;
+    insert_demerger(&pool, 1, ListingId(1), 2, ymd(2023, 10, 3), None).await;
 
     let h = health(&pool, ymd(2026, 7, 13)).await;
     assert!(h.demergers_head_not_continuing.is_empty());
@@ -1191,10 +1198,10 @@ async fn a_correctly_modelled_demerger_is_not_reported() {
         .insert(&pool)
         .await;
     for date in ["2021-03-25", "2023-10-02", "2023-10-03"] {
-        insert_fetched_price(&pool, 1, date, "16.85").await;
+        insert_fetched_price(&pool, ListingId(1), date, "16.85").await;
     }
-    insert_fetched_price(&pool, 2, "2023-10-03", "9.67").await;
-    insert_demerger(&pool, 1, 1, 2, ymd(2023, 10, 3), None).await;
+    insert_fetched_price(&pool, ListingId(2), "2023-10-03", "9.67").await;
+    insert_demerger(&pool, 1, ListingId(1), 2, ymd(2023, 10, 3), None).await;
 
     let h = health(&pool, ymd(2026, 7, 13)).await;
     assert!(h.demergers_head_not_continuing.is_empty());
@@ -1213,9 +1220,9 @@ async fn a_demerger_whose_history_was_never_backfilled_is_not_reported() {
         .date(ymd(2021, 3, 25))
         .insert(&pool)
         .await;
-    insert_fetched_price(&pool, 1, "2023-10-04", "9.67").await;
-    insert_fetched_price(&pool, 2, "2023-10-04", "6.01").await;
-    insert_demerger(&pool, 1, 1, 2, ymd(2023, 10, 3), None).await;
+    insert_fetched_price(&pool, ListingId(1), "2023-10-04", "9.67").await;
+    insert_fetched_price(&pool, ListingId(2), "2023-10-04", "6.01").await;
+    insert_demerger(&pool, 1, ListingId(1), 2, ymd(2023, 10, 3), None).await;
 
     let h = health(&pool, ymd(2026, 7, 13)).await;
     assert!(h.demergers_head_not_continuing.is_empty());
@@ -1235,8 +1242,8 @@ async fn a_head_listing_not_held_before_the_demerger_is_not_reported() {
         .date(ymd(2023, 10, 3))
         .insert(&pool)
         .await;
-    insert_fetched_price(&pool, 2, "2021-03-25", "16.85").await;
-    insert_demerger(&pool, 1, 1, 2, ymd(2023, 10, 3), None).await;
+    insert_fetched_price(&pool, ListingId(2), "2021-03-25", "16.85").await;
+    insert_demerger(&pool, 1, ListingId(1), 2, ymd(2023, 10, 3), None).await;
 
     let h = health(&pool, ymd(2026, 7, 13)).await;
     assert!(h.demergers_head_not_continuing.is_empty());
@@ -1281,7 +1288,7 @@ async fn borrowed_pre_demerger_prices_are_left_to_the_duplicate_series_check() {
             .insert(&pool)
             .await;
     }
-    insert_demerger(&pool, 1, 1, 2, ymd(2023, 10, 3), None).await;
+    insert_demerger(&pool, 1, ListingId(1), 2, ymd(2023, 10, 3), None).await;
 
     let h = health(&pool, ymd(2026, 7, 13)).await;
     assert!(
@@ -1372,8 +1379,8 @@ async fn two_listings_holding_one_price_series_are_reported() {
     let h = health(&pool, ymd(2026, 7, 13)).await;
     assert_eq!(h.duplicate_price_series.len(), 1);
     let d = &h.duplicate_price_series[0];
-    assert_eq!((d.listing_id, d.ticker.as_str()), (1, "LAC"));
-    assert_eq!((d.other_listing_id, d.other_ticker.as_str()), (2, "LAR"));
+    assert_eq!((d.listing_id.0, d.ticker.as_str()), (1, "LAC"));
+    assert_eq!((d.other_listing_id.0, d.other_ticker.as_str()), (2, "LAR"));
     assert_eq!(
         d.identical_days, 40,
         "the run, not the total: the later coincidence is not part of it"
@@ -1561,7 +1568,7 @@ async fn api_the_warning_clears_when_the_borrowed_rows_go_not_when_the_marker_is
 
     // Clearing the span is what clears it.
     assert_eq!(
-        closing_price::db_clear_unpriced_before(&pool, 1)
+        closing_price::db_clear_unpriced_before(&pool, ListingId(1))
             .await
             .unwrap(),
         closing_price::ClearOutcome::Cleared {
@@ -1576,7 +1583,7 @@ async fn api_the_warning_clears_when_the_borrowed_rows_go_not_when_the_marker_is
 async fn insert_demerger(
     pool: &SqlitePool,
     id: i64,
-    listing_id: i64,
+    listing_id: ListingId,
     demerged_id: i64,
     date: NaiveDate,
     stated_close: Option<(NaiveDate, &str)>,
@@ -1588,7 +1595,7 @@ async fn insert_demerger(
             listing_id,
             date,
             kind: corporate_action::ActionKind::Demerger {
-                demerger_listing_id: demerged_id,
+                demerger_listing_id: ListingId(demerged_id),
                 demerger_new_units: dec("1"),
                 demerger_held_units: dec("1"),
                 demerger_cost_base_pct: dec("36"),
@@ -1612,11 +1619,11 @@ async fn insert_demerger(
 async fn insert_trade_with_note(
     pool: &SqlitePool,
     id: i64,
-    listing_id: i64,
+    listing_id: ListingId,
     date: NaiveDate,
     note: Option<&str>,
 ) {
-    test_support::buy(id, listing_id)
+    test_support::buy(id, listing_id.0)
         .date(date)
         .with(|t| t.contract_note_ref = note.map(str::to_string))
         .insert(pool)
@@ -1635,11 +1642,11 @@ async fn trades_sharing_a_contract_note_reference_are_reported_with_their_ids() 
     test_support::listing(1).ticker("BHP").insert(&pool).await;
     test_support::listing(2).ticker("CBA").insert(&pool).await;
     // The measured case: the same confirmation entered twice.
-    insert_trade_with_note(&pool, 1, 1, ymd(2026, 3, 10), Some("CN-8891")).await;
-    insert_trade_with_note(&pool, 2, 1, ymd(2026, 3, 10), Some("CN-8891")).await;
+    insert_trade_with_note(&pool, 1, ListingId(1), ymd(2026, 3, 10), Some("CN-8891")).await;
+    insert_trade_with_note(&pool, 2, ListingId(1), ymd(2026, 3, 10), Some("CN-8891")).await;
     // The same mistake later, on another holding.
-    insert_trade_with_note(&pool, 3, 2, ymd(2026, 6, 1), Some("CN-9002")).await;
-    insert_trade_with_note(&pool, 4, 2, ymd(2026, 6, 1), Some("CN-9002")).await;
+    insert_trade_with_note(&pool, 3, ListingId(2), ymd(2026, 6, 1), Some("CN-9002")).await;
+    insert_trade_with_note(&pool, 4, ListingId(2), ymd(2026, 6, 1), Some("CN-9002")).await;
 
     let h = health(&pool, ymd(2026, 7, 13)).await;
     // Newest first, as on the rest of the family.
@@ -1670,7 +1677,7 @@ async fn trades_recording_no_contract_note_are_never_duplicates() {
     // Identical in every other respect — listing, date, account, price and
     // quantity all match, which is the key `duplicate_income` uses.
     for id in 1..=3 {
-        insert_trade_with_note(&pool, id, 1, ymd(2026, 3, 10), None).await;
+        insert_trade_with_note(&pool, id, ListingId(1), ymd(2026, 3, 10), None).await;
     }
 
     let h = health(&pool, ymd(2026, 7, 13)).await;
@@ -1684,12 +1691,12 @@ async fn trades_recording_no_contract_note_are_never_duplicates() {
 async fn a_blank_or_whitespace_only_reference_never_groups() {
     let pool = test_pool().await;
     test_support::listing(1).ticker("BHP").insert(&pool).await;
-    insert_trade_with_note(&pool, 1, 1, ymd(2026, 3, 10), Some("")).await;
-    insert_trade_with_note(&pool, 2, 1, ymd(2026, 3, 10), Some("")).await;
-    insert_trade_with_note(&pool, 3, 1, ymd(2026, 3, 10), Some("   ")).await;
-    insert_trade_with_note(&pool, 4, 1, ymd(2026, 3, 10), Some("\t")).await;
+    insert_trade_with_note(&pool, 1, ListingId(1), ymd(2026, 3, 10), Some("")).await;
+    insert_trade_with_note(&pool, 2, ListingId(1), ymd(2026, 3, 10), Some("")).await;
+    insert_trade_with_note(&pool, 3, ListingId(1), ymd(2026, 3, 10), Some("   ")).await;
+    insert_trade_with_note(&pool, 4, ListingId(1), ymd(2026, 3, 10), Some("\t")).await;
     // …and a blank one does not group with a null one either.
-    insert_trade_with_note(&pool, 5, 1, ymd(2026, 3, 10), None).await;
+    insert_trade_with_note(&pool, 5, ListingId(1), ymd(2026, 3, 10), None).await;
 
     let h = health(&pool, ymd(2026, 7, 13)).await;
     assert!(h.duplicate_trades.is_empty());
@@ -1702,8 +1709,8 @@ async fn a_blank_or_whitespace_only_reference_never_groups() {
 async fn a_reference_pasted_with_surrounding_whitespace_still_groups() {
     let pool = test_pool().await;
     test_support::listing(1).ticker("BHP").insert(&pool).await;
-    insert_trade_with_note(&pool, 1, 1, ymd(2026, 3, 10), Some("CN-8891")).await;
-    insert_trade_with_note(&pool, 2, 1, ymd(2026, 3, 10), Some("  CN-8891 ")).await;
+    insert_trade_with_note(&pool, 1, ListingId(1), ymd(2026, 3, 10), Some("CN-8891")).await;
+    insert_trade_with_note(&pool, 2, ListingId(1), ymd(2026, 3, 10), Some("  CN-8891 ")).await;
 
     let h = health(&pool, ymd(2026, 7, 13)).await;
     assert_eq!(h.duplicate_trades.len(), 1);
@@ -1721,13 +1728,13 @@ async fn one_reference_across_two_listings_is_a_multi_line_note_not_a_duplicate(
     test_support::listing(1).ticker("BHP").insert(&pool).await;
     test_support::listing(2).ticker("CBA").insert(&pool).await;
     // One note, two lines.
-    insert_trade_with_note(&pool, 1, 1, ymd(2026, 3, 10), Some("CN-8891")).await;
-    insert_trade_with_note(&pool, 2, 2, ymd(2026, 3, 10), Some("CN-8891")).await;
+    insert_trade_with_note(&pool, 1, ListingId(1), ymd(2026, 3, 10), Some("CN-8891")).await;
+    insert_trade_with_note(&pool, 2, ListingId(2), ymd(2026, 3, 10), Some("CN-8891")).await;
     // Two notes on one listing, same day: an order filled in two clips.
-    insert_trade_with_note(&pool, 3, 1, ymd(2026, 3, 11), Some("CN-8892")).await;
-    insert_trade_with_note(&pool, 4, 1, ymd(2026, 3, 11), Some("CN-8893")).await;
+    insert_trade_with_note(&pool, 3, ListingId(1), ymd(2026, 3, 11), Some("CN-8892")).await;
+    insert_trade_with_note(&pool, 4, ListingId(1), ymd(2026, 3, 11), Some("CN-8893")).await;
     // Case is part of the reference, not noise to normalise away.
-    insert_trade_with_note(&pool, 5, 1, ymd(2026, 3, 12), Some("cn-8891")).await;
+    insert_trade_with_note(&pool, 5, ListingId(1), ymd(2026, 3, 12), Some("cn-8891")).await;
 
     let h = health(&pool, ymd(2026, 7, 13)).await;
     assert!(h.duplicate_trades.is_empty(), "{:?}", h.duplicate_trades);
@@ -1750,7 +1757,7 @@ async fn one_reference_keyed_into_two_accounts_is_still_a_duplicate() {
     )
     .await
     .unwrap();
-    insert_trade_with_note(&pool, 1, 1, ymd(2026, 3, 10), Some("CN-8891")).await;
+    insert_trade_with_note(&pool, 1, ListingId(1), ymd(2026, 3, 10), Some("CN-8891")).await;
     test_support::buy(2, 1)
         .date(ymd(2026, 3, 10))
         .account(2)
@@ -1770,7 +1777,7 @@ async fn three_trades_sharing_a_reference_are_one_row_counting_three() {
     let pool = test_pool().await;
     test_support::listing(1).ticker("TRIP").insert(&pool).await;
     for id in 7..=9 {
-        insert_trade_with_note(&pool, id, 1, ymd(2026, 3, 10), Some("CN-8891")).await;
+        insert_trade_with_note(&pool, id, ListingId(1), ymd(2026, 3, 10), Some("CN-8891")).await;
     }
 
     let h = health(&pool, ymd(2026, 7, 13)).await;
@@ -1789,8 +1796,8 @@ async fn three_trades_sharing_a_reference_are_one_row_counting_three() {
 async fn derived_trades_carry_no_reference_and_are_never_reported_here() {
     let pool = test_pool().await;
     test_support::listing(1).ticker("BHP").insert(&pool).await;
-    insert_inheritance(&pool, 1, 1, 1, "100", "3000").await;
-    insert_inheritance(&pool, 2, 1, 1, "100", "3000").await;
+    insert_inheritance(&pool, 1, ListingId(1), 1, "100", "3000").await;
+    insert_inheritance(&pool, 2, ListingId(1), 1, "100", "3000").await;
     let derived: Vec<Option<String>> =
         sqlx::query_scalar("SELECT contract_note_ref FROM trades ORDER BY id")
             .fetch_all(&pool)
@@ -1814,10 +1821,10 @@ async fn duplicated_corporate_actions_are_reported_with_their_ids() {
     let pool = test_pool().await;
     test_support::listing(1).ticker("ROCC").insert(&pool).await;
     test_support::listing(2).ticker("SPLT").insert(&pool).await;
-    insert_roc(&pool, 1, 1, ymd(2026, 3, 10)).await;
-    insert_roc(&pool, 2, 1, ymd(2026, 3, 10)).await;
-    insert_split(&pool, 3, 2, ymd(2026, 6, 1)).await;
-    insert_split(&pool, 4, 2, ymd(2026, 6, 1)).await;
+    insert_roc(&pool, 1, ListingId(1), ymd(2026, 3, 10)).await;
+    insert_roc(&pool, 2, ListingId(1), ymd(2026, 3, 10)).await;
+    insert_split(&pool, 3, ListingId(2), ymd(2026, 6, 1)).await;
+    insert_split(&pool, 4, ListingId(2), ymd(2026, 6, 1)).await;
 
     let h = health(&pool, ymd(2026, 7, 13)).await;
     // Newest first: the split (June) before the capital return (March).
@@ -1845,12 +1852,12 @@ async fn actions_differing_in_listing_type_or_date_are_not_duplicates() {
     test_support::listing(1).ticker("AAA").insert(&pool).await;
     test_support::listing(2).ticker("BBB").insert(&pool).await;
     // Same type and date, different listing.
-    insert_roc(&pool, 1, 1, ymd(2026, 3, 10)).await;
-    insert_roc(&pool, 2, 2, ymd(2026, 3, 10)).await;
+    insert_roc(&pool, 1, ListingId(1), ymd(2026, 3, 10)).await;
+    insert_roc(&pool, 2, ListingId(2), ymd(2026, 3, 10)).await;
     // Same listing and type, different date.
-    insert_roc(&pool, 3, 1, ymd(2026, 9, 10)).await;
+    insert_roc(&pool, 3, ListingId(1), ymd(2026, 9, 10)).await;
     // Same listing and date, different type.
-    insert_split(&pool, 4, 1, ymd(2026, 3, 10)).await;
+    insert_split(&pool, 4, ListingId(1), ymd(2026, 3, 10)).await;
 
     let h = health(&pool, ymd(2026, 7, 13)).await;
     assert!(h.duplicate_actions.is_empty());
@@ -1862,9 +1869,9 @@ async fn actions_differing_in_listing_type_or_date_are_not_duplicates() {
 async fn three_identical_actions_are_one_row_counting_three() {
     let pool = test_pool().await;
     test_support::listing(1).ticker("TRIP").insert(&pool).await;
-    insert_roc(&pool, 7, 1, ymd(2026, 3, 10)).await;
-    insert_roc(&pool, 8, 1, ymd(2026, 3, 10)).await;
-    insert_roc(&pool, 9, 1, ymd(2026, 3, 10)).await;
+    insert_roc(&pool, 7, ListingId(1), ymd(2026, 3, 10)).await;
+    insert_roc(&pool, 8, ListingId(1), ymd(2026, 3, 10)).await;
+    insert_roc(&pool, 9, ListingId(1), ymd(2026, 3, 10)).await;
 
     let h = health(&pool, ymd(2026, 7, 13)).await;
     assert_eq!(h.duplicate_actions.len(), 1);
@@ -1881,11 +1888,11 @@ async fn duplicated_amma_statements_are_reported_with_their_ids() {
     amit_listing(&pool, 1, "VDHG").await;
     amit_listing(&pool, 2, "HNDQ").await;
     // VDHG FY2025: the original and its amendment.
-    insert_amma(&pool, 1, 1, ymd(2025, 6, 30), 1).await;
-    insert_amma(&pool, 2, 1, ymd(2025, 6, 30), 1).await;
+    insert_amma(&pool, 1, ListingId(1), ymd(2025, 6, 30), 1).await;
+    insert_amma(&pool, 2, ListingId(1), ymd(2025, 6, 30), 1).await;
     // HNDQ FY2024: the same mistake a year earlier.
-    insert_amma(&pool, 3, 2, ymd(2024, 6, 30), 1).await;
-    insert_amma(&pool, 4, 2, ymd(2024, 6, 30), 1).await;
+    insert_amma(&pool, 3, ListingId(2), ymd(2024, 6, 30), 1).await;
+    insert_amma(&pool, 4, ListingId(2), ymd(2024, 6, 30), 1).await;
 
     let h = health(&pool, ymd(2026, 7, 13)).await;
     assert_eq!(h.duplicate_amma_statements.len(), 2);
@@ -1921,12 +1928,12 @@ async fn statements_differing_in_listing_year_or_account_are_not_duplicates() {
     .await
     .unwrap();
     // Same listing and year, different holding account.
-    insert_amma(&pool, 1, 1, ymd(2025, 6, 30), 1).await;
-    insert_amma(&pool, 2, 1, ymd(2025, 6, 30), 2).await;
+    insert_amma(&pool, 1, ListingId(1), ymd(2025, 6, 30), 1).await;
+    insert_amma(&pool, 2, ListingId(1), ymd(2025, 6, 30), 2).await;
     // Same listing and account, different year.
-    insert_amma(&pool, 3, 1, ymd(2024, 6, 30), 1).await;
+    insert_amma(&pool, 3, ListingId(1), ymd(2024, 6, 30), 1).await;
     // Same year and account, different listing.
-    insert_amma(&pool, 4, 2, ymd(2025, 6, 30), 1).await;
+    insert_amma(&pool, 4, ListingId(2), ymd(2025, 6, 30), 1).await;
 
     let h = health(&pool, ymd(2026, 7, 13)).await;
     assert!(h.duplicate_amma_statements.is_empty());
@@ -1937,9 +1944,9 @@ async fn statements_differing_in_listing_year_or_account_are_not_duplicates() {
 async fn three_statements_for_one_fund_year_are_one_row_counting_three() {
     let pool = test_pool().await;
     amit_listing(&pool, 1, "VDHG").await;
-    insert_amma(&pool, 7, 1, ymd(2025, 6, 30), 1).await;
-    insert_amma(&pool, 8, 1, ymd(2025, 6, 30), 1).await;
-    insert_amma(&pool, 9, 1, ymd(2025, 6, 30), 1).await;
+    insert_amma(&pool, 7, ListingId(1), ymd(2025, 6, 30), 1).await;
+    insert_amma(&pool, 8, ListingId(1), ymd(2025, 6, 30), 1).await;
+    insert_amma(&pool, 9, ListingId(1), ymd(2025, 6, 30), 1).await;
 
     let h = health(&pool, ymd(2026, 7, 13)).await;
     assert_eq!(h.duplicate_amma_statements.len(), 1);
@@ -1952,7 +1959,7 @@ async fn three_statements_for_one_fund_year_are_one_row_counting_three() {
 async fn insert_dividend(
     pool: &SqlitePool,
     id: i64,
-    listing_id: i64,
+    listing_id: ListingId,
     date: NaiveDate,
     account: i64,
     franked: &str,
@@ -1965,12 +1972,12 @@ async fn insert_dividend(
 async fn insert_dividend_amount(
     pool: &SqlitePool,
     id: i64,
-    listing_id: i64,
+    listing_id: ListingId,
     date: NaiveDate,
     account: i64,
     franked: Decimal,
 ) {
-    test_support::income(id, listing_id, date)
+    test_support::income(id, listing_id.0, date)
         .with(|i| {
             i.holding_account_id = account;
             i.franked_amount = franked;
@@ -1989,10 +1996,10 @@ async fn duplicated_income_rows_are_reported_with_their_ids() {
     let pool = test_pool().await;
     test_support::listing(1).ticker("DIVA").insert(&pool).await;
     test_support::listing(2).ticker("DIVB").insert(&pool).await;
-    insert_dividend(&pool, 1, 1, ymd(2026, 3, 10), 1, "70").await;
-    insert_dividend(&pool, 2, 1, ymd(2026, 3, 10), 1, "70").await;
-    insert_dividend(&pool, 3, 2, ymd(2026, 6, 1), 1, "42.50").await;
-    insert_dividend(&pool, 4, 2, ymd(2026, 6, 1), 1, "42.50").await;
+    insert_dividend(&pool, 1, ListingId(1), ymd(2026, 3, 10), 1, "70").await;
+    insert_dividend(&pool, 2, ListingId(1), ymd(2026, 3, 10), 1, "70").await;
+    insert_dividend(&pool, 3, ListingId(2), ymd(2026, 6, 1), 1, "42.50").await;
+    insert_dividend(&pool, 4, ListingId(2), ymd(2026, 6, 1), 1, "42.50").await;
 
     let h = health(&pool, ymd(2026, 7, 13)).await;
     // Newest first: June before March, as on the other two lists.
@@ -2032,15 +2039,15 @@ async fn income_differing_in_listing_account_date_or_amount_is_not_a_duplicate()
     .await
     .unwrap();
     // Same account, date and amount, different listing.
-    insert_dividend(&pool, 1, 1, ymd(2026, 3, 10), 1, "70").await;
-    insert_dividend(&pool, 2, 2, ymd(2026, 3, 10), 1, "70").await;
+    insert_dividend(&pool, 1, ListingId(1), ymd(2026, 3, 10), 1, "70").await;
+    insert_dividend(&pool, 2, ListingId(2), ymd(2026, 3, 10), 1, "70").await;
     // Same listing, date and amount, different holding account.
-    insert_dividend(&pool, 3, 1, ymd(2026, 3, 10), 2, "70").await;
+    insert_dividend(&pool, 3, ListingId(1), ymd(2026, 3, 10), 2, "70").await;
     // Same listing, account and amount, different date.
-    insert_dividend(&pool, 4, 1, ymd(2026, 9, 10), 1, "70").await;
+    insert_dividend(&pool, 4, ListingId(1), ymd(2026, 9, 10), 1, "70").await;
     // Same listing, account and date, different amount: the ordinary +
     // special pair.
-    insert_dividend(&pool, 5, 1, ymd(2026, 3, 10), 1, "12.34").await;
+    insert_dividend(&pool, 5, ListingId(1), ymd(2026, 3, 10), 1, "12.34").await;
 
     let h = health(&pool, ymd(2026, 7, 13)).await;
     assert!(h.duplicate_income.is_empty());
@@ -2053,8 +2060,8 @@ async fn income_differing_in_listing_account_date_or_amount_is_not_a_duplicate()
 async fn amounts_equal_in_value_but_not_in_text_are_still_duplicates() {
     let pool = test_pool().await;
     test_support::listing(1).ticker("DIVA").insert(&pool).await;
-    insert_dividend_amount(&pool, 1, 1, ymd(2026, 3, 10), 1, dec("70.0")).await;
-    insert_dividend_amount(&pool, 2, 1, ymd(2026, 3, 10), 1, dec("70.00")).await;
+    insert_dividend_amount(&pool, 1, ListingId(1), ymd(2026, 3, 10), 1, dec("70.0")).await;
+    insert_dividend_amount(&pool, 2, ListingId(1), ymd(2026, 3, 10), 1, dec("70.00")).await;
 
     let h = health(&pool, ymd(2026, 7, 13)).await;
     assert_eq!(h.duplicate_income.len(), 1);
@@ -2066,9 +2073,9 @@ async fn amounts_equal_in_value_but_not_in_text_are_still_duplicates() {
 async fn three_identical_income_rows_are_one_row_counting_three() {
     let pool = test_pool().await;
     test_support::listing(1).ticker("TRIP").insert(&pool).await;
-    insert_dividend(&pool, 7, 1, ymd(2026, 3, 10), 1, "70").await;
-    insert_dividend(&pool, 8, 1, ymd(2026, 3, 10), 1, "70").await;
-    insert_dividend(&pool, 9, 1, ymd(2026, 3, 10), 1, "70").await;
+    insert_dividend(&pool, 7, ListingId(1), ymd(2026, 3, 10), 1, "70").await;
+    insert_dividend(&pool, 8, ListingId(1), ymd(2026, 3, 10), 1, "70").await;
+    insert_dividend(&pool, 9, ListingId(1), ymd(2026, 3, 10), 1, "70").await;
 
     let h = health(&pool, ymd(2026, 7, 13)).await;
     assert_eq!(h.duplicate_income.len(), 1);
@@ -2083,10 +2090,10 @@ async fn three_identical_income_rows_are_one_row_counting_three() {
 async fn a_duplicated_pair_is_reported_beside_a_genuine_second_dividend() {
     let pool = test_pool().await;
     test_support::listing(1).ticker("DIVA").insert(&pool).await;
-    insert_dividend(&pool, 1, 1, ymd(2026, 3, 10), 1, "70").await;
-    insert_dividend(&pool, 2, 1, ymd(2026, 3, 10), 1, "70").await;
+    insert_dividend(&pool, 1, ListingId(1), ymd(2026, 3, 10), 1, "70").await;
+    insert_dividend(&pool, 2, ListingId(1), ymd(2026, 3, 10), 1, "70").await;
     // The special dividend paid the same day.
-    insert_dividend(&pool, 3, 1, ymd(2026, 3, 10), 1, "12.34").await;
+    insert_dividend(&pool, 3, ListingId(1), ymd(2026, 3, 10), 1, "12.34").await;
 
     let h = health(&pool, ymd(2026, 7, 13)).await;
     assert_eq!(h.duplicate_income.len(), 1);
@@ -2267,7 +2274,7 @@ async fn duplicated_expense_rows_are_reported_with_their_ids() {
     test_support::listing(1).ticker("FEEA").insert(&pool).await;
     for id in [1, 2] {
         let mut e = an_expense(id, ymd(2026, 3, 10), ExpenseType::AdviceFee, dec("200"));
-        e.listing_id = Some(1);
+        e.listing_id = Some(ListingId(1));
         e.description = Some("Annual advice fee".to_string());
         insert_expense(&pool, &e).await;
     }
@@ -2293,7 +2300,7 @@ async fn duplicated_expense_rows_are_reported_with_their_ids() {
     let march = &h.duplicate_expenses[1];
     assert_eq!(march.expense_type, ExpenseType::AdviceFee);
     assert_eq!(march.amount, dec("200"));
-    assert_eq!(march.listing_id, Some(1));
+    assert_eq!(march.listing_id, Some(ListingId(1)));
     // …and a listing-attributed one is named by ticker, not only by id.
     assert_eq!(march.ticker.as_deref(), Some("FEEA"));
     assert_eq!(march.description.as_deref(), Some("Annual advice fee"));
@@ -2314,11 +2321,11 @@ async fn expenses_differing_in_any_key_field_are_not_duplicates() {
     // Same date, type and amount, different listing.
     let mut a = base.clone();
     a.id = 1;
-    a.listing_id = Some(1);
+    a.listing_id = Some(ListingId(1));
     insert_expense(&pool, &a).await;
     let mut b = base.clone();
     b.id = 2;
-    b.listing_id = Some(2);
+    b.listing_id = Some(ListingId(2));
     insert_expense(&pool, &b).await;
     // Same listing-less row, different type.
     let mut c = base.clone();
@@ -2362,12 +2369,12 @@ async fn expenses_differing_in_any_key_field_are_not_duplicates() {
 async fn insert_ess(
     pool: &SqlitePool,
     id: i64,
-    listing_id: i64,
+    listing_id: ListingId,
     taxing_point: NaiveDate,
     quantity: &str,
     market_value: &str,
 ) {
-    test_support::ess_statement(id, listing_id, taxing_point)
+    test_support::ess_statement(id, listing_id.0, taxing_point)
         .with(|s| {
             s.quantity = dec(quantity);
             s.market_value_per_share = dec(market_value);
@@ -2386,10 +2393,10 @@ async fn duplicated_ess_statements_are_reported_with_their_ids() {
     let pool = test_pool().await;
     test_support::listing(1).ticker("EMPA").insert(&pool).await;
     test_support::listing(2).ticker("EMPB").insert(&pool).await;
-    insert_ess(&pool, 1, 1, ymd(2026, 3, 10), "100", "10").await;
-    insert_ess(&pool, 2, 1, ymd(2026, 3, 10), "100", "10").await;
-    insert_ess(&pool, 3, 2, ymd(2026, 6, 1), "50", "4.25").await;
-    insert_ess(&pool, 4, 2, ymd(2026, 6, 1), "50", "4.25").await;
+    insert_ess(&pool, 1, ListingId(1), ymd(2026, 3, 10), "100", "10").await;
+    insert_ess(&pool, 2, ListingId(1), ymd(2026, 3, 10), "100", "10").await;
+    insert_ess(&pool, 3, ListingId(2), ymd(2026, 6, 1), "50", "4.25").await;
+    insert_ess(&pool, 4, ListingId(2), ymd(2026, 6, 1), "50", "4.25").await;
 
     let h = health(&pool, ymd(2026, 7, 13)).await;
     // Newest first, as on the other duplicate lists.
@@ -2429,9 +2436,9 @@ async fn ess_statements_differing_in_any_key_field_are_not_duplicates() {
     )
     .await
     .unwrap();
-    insert_ess(&pool, 1, 1, ymd(2026, 3, 10), "100", "10").await;
+    insert_ess(&pool, 1, ListingId(1), ymd(2026, 3, 10), "100", "10").await;
     // Same account, taxing point and figures, different listing.
-    insert_ess(&pool, 2, 2, ymd(2026, 3, 10), "100", "10").await;
+    insert_ess(&pool, 2, ListingId(2), ymd(2026, 3, 10), "100", "10").await;
     // Same listing, taxing point and figures, different holding account.
     test_support::ess_statement(3, 1, ymd(2026, 3, 10))
         .with(|s| {
@@ -2443,10 +2450,10 @@ async fn ess_statements_differing_in_any_key_field_are_not_duplicates() {
         .insert(&pool)
         .await;
     // Same listing, account and figures, different taxing point.
-    insert_ess(&pool, 4, 1, ymd(2026, 1, 10), "100", "10").await;
+    insert_ess(&pool, 4, ListingId(1), ymd(2026, 1, 10), "100", "10").await;
     // Same listing, account and taxing point, different quantity: a second
     // tranche vesting the same day.
-    insert_ess(&pool, 5, 1, ymd(2026, 3, 10), "40", "10").await;
+    insert_ess(&pool, 5, ListingId(1), ymd(2026, 3, 10), "40", "10").await;
     // …and one of the same size whose discount differs (shares part-paid
     // for under the plan), which is likewise a second grant.
     test_support::ess_statement(6, 1, ymd(2026, 3, 10))
@@ -2468,8 +2475,8 @@ async fn ess_statements_differing_in_any_key_field_are_not_duplicates() {
 async fn ess_figures_equal_in_value_but_not_in_text_are_still_duplicates() {
     let pool = test_pool().await;
     test_support::listing(1).ticker("EMPA").insert(&pool).await;
-    insert_ess(&pool, 1, 1, ymd(2026, 3, 10), "100.0", "10.0").await;
-    insert_ess(&pool, 2, 1, ymd(2026, 3, 10), "100.00", "10.00").await;
+    insert_ess(&pool, 1, ListingId(1), ymd(2026, 3, 10), "100.0", "10.0").await;
+    insert_ess(&pool, 2, ListingId(1), ymd(2026, 3, 10), "100.00", "10.00").await;
 
     let h = health(&pool, ymd(2026, 7, 13)).await;
     assert_eq!(h.duplicate_ess_statements.len(), 1);
@@ -2485,10 +2492,10 @@ async fn ess_figures_equal_in_value_but_not_in_text_are_still_duplicates() {
 async fn a_duplicated_ess_pair_is_reported_beside_a_second_grant_and_after_vesting() {
     let pool = test_pool().await;
     test_support::listing(1).ticker("EMPA").insert(&pool).await;
-    insert_ess(&pool, 1, 1, ymd(2026, 3, 10), "100", "10").await;
-    insert_ess(&pool, 2, 1, ymd(2026, 3, 10), "100", "10").await;
+    insert_ess(&pool, 1, ListingId(1), ymd(2026, 3, 10), "100", "10").await;
+    insert_ess(&pool, 2, ListingId(1), ymd(2026, 3, 10), "100", "10").await;
     // The second tranche vesting the same day.
-    insert_ess(&pool, 3, 1, ymd(2026, 3, 10), "40", "10").await;
+    insert_ess(&pool, 3, ListingId(1), ymd(2026, 3, 10), "40", "10").await;
     crate::entities::ess_vest::db_vest(&pool, 1).await.unwrap();
 
     let h = health(&pool, ymd(2026, 7, 13)).await;
@@ -2507,10 +2514,10 @@ async fn a_duplicated_ess_pair_is_reported_beside_a_second_grant_and_after_vesti
 async fn ess_vest(
     pool: &SqlitePool,
     statement_id: i64,
-    listing_id: i64,
+    listing_id: ListingId,
     taxing_point: NaiveDate,
 ) -> i64 {
-    test_support::ess_statement(statement_id, listing_id, taxing_point)
+    test_support::ess_statement(statement_id, listing_id.0, taxing_point)
         .with(|s| {
             s.quantity = dec("400");
             s.market_value_per_share = dec("3.50");
@@ -2528,7 +2535,7 @@ async fn ess_vest(
 async fn sell_vest_parcel(
     pool: &SqlitePool,
     sale_id: i64,
-    listing_id: i64,
+    listing_id: ListingId,
     vest_trade_id: i64,
     sale_date: NaiveDate,
     units: Decimal,
@@ -2550,13 +2557,13 @@ async fn sell_vest_parcel(
 async fn sell_vest_parcel_in_account(
     pool: &SqlitePool,
     sale_id: i64,
-    listing_id: i64,
+    listing_id: ListingId,
     vest_trade_id: i64,
     sale_date: NaiveDate,
     units: Decimal,
     account: i64,
 ) {
-    test_support::sell(sale_id, listing_id)
+    test_support::sell(sale_id, listing_id.0)
         .date(sale_date)
         .qty(units)
         .price(dec("3.795"))
@@ -2576,8 +2583,8 @@ async fn sell_vest_parcel_in_account(
 async fn a_sale_inside_the_thirty_day_window_is_flagged_with_both_years() {
     let pool = test_pool().await;
     test_support::listing(1).ticker("PEPP").insert(&pool).await;
-    let vest = ess_vest(&pool, 1, 1, ymd(2019, 6, 23)).await;
-    sell_vest_parcel(&pool, 101, 1, vest, ymd(2019, 7, 22), dec("400")).await;
+    let vest = ess_vest(&pool, 1, ListingId(1), ymd(2019, 6, 23)).await;
+    sell_vest_parcel(&pool, 101, ListingId(1), vest, ymd(2019, 7, 22), dec("400")).await;
 
     let h = health(&pool, ymd(2019, 8, 1)).await;
     assert_eq!(h.ess_30_day_rule.len(), 1);
@@ -2606,10 +2613,18 @@ async fn the_window_includes_day_thirty_and_excludes_day_thirty_one() {
     test_support::listing(1).ticker("DAY30").insert(&pool).await;
     test_support::listing(2).ticker("DAY31").insert(&pool).await;
     let taxing_point = ymd(2026, 3, 10);
-    let day30 = ess_vest(&pool, 1, 1, taxing_point).await;
-    let day31 = ess_vest(&pool, 2, 2, taxing_point).await;
-    sell_vest_parcel(&pool, 101, 1, day30, ymd(2026, 4, 9), dec("400")).await;
-    sell_vest_parcel(&pool, 102, 2, day31, ymd(2026, 4, 10), dec("400")).await;
+    let day30 = ess_vest(&pool, 1, ListingId(1), taxing_point).await;
+    let day31 = ess_vest(&pool, 2, ListingId(2), taxing_point).await;
+    sell_vest_parcel(&pool, 101, ListingId(1), day30, ymd(2026, 4, 9), dec("400")).await;
+    sell_vest_parcel(
+        &pool,
+        102,
+        ListingId(2),
+        day31,
+        ymd(2026, 4, 10),
+        dec("400"),
+    )
+    .await;
 
     let h = health(&pool, ymd(2026, 5, 1)).await;
     assert_eq!(h.ess_30_day_rule.len(), 1);
@@ -2632,8 +2647,8 @@ async fn a_same_day_sale_and_a_non_ess_parcel_are_not_flagged() {
     test_support::listing(1).ticker("PEPP").insert(&pool).await;
     test_support::listing(2).ticker("ORD").insert(&pool).await;
     // The amended statement: taxing point *is* the disposal date.
-    let vest = ess_vest(&pool, 1, 1, ymd(2019, 7, 22)).await;
-    sell_vest_parcel(&pool, 101, 1, vest, ymd(2019, 7, 22), dec("400")).await;
+    let vest = ess_vest(&pool, 1, ListingId(1), ymd(2019, 7, 22)).await;
+    sell_vest_parcel(&pool, 101, ListingId(1), vest, ymd(2019, 7, 22), dec("400")).await;
     // An ordinary Buy sold the next day — no ESS statement behind it.
     test_support::buy(50, 2)
         .date(ymd(2019, 7, 22))
@@ -2658,8 +2673,8 @@ async fn a_same_day_sale_and_a_non_ess_parcel_are_not_flagged() {
 async fn each_vest_parcel_a_sale_draws_on_is_named_separately() {
     let pool = test_pool().await;
     test_support::listing(1).ticker("EMPA").insert(&pool).await;
-    let march2 = ess_vest(&pool, 1, 1, ymd(2026, 3, 2)).await;
-    let march10 = ess_vest(&pool, 2, 1, ymd(2026, 3, 10)).await;
+    let march2 = ess_vest(&pool, 1, ListingId(1), ymd(2026, 3, 2)).await;
+    let march10 = ess_vest(&pool, 2, ListingId(1), ymd(2026, 3, 10)).await;
     test_support::sell(101, 1)
         .date(ymd(2026, 3, 20))
         .qty(dec("500"))
@@ -2701,12 +2716,12 @@ async fn a_holding_account_transfer_inside_the_window_is_not_a_disposal() {
     .await
     .unwrap();
     let taxing_point = ymd(2024, 3, 1);
-    let vest = ess_vest(&pool, 1, 1, taxing_point).await;
+    let vest = ess_vest(&pool, 1, ListingId(1), taxing_point).await;
     let group = crate::entities::transfer::db_transfer(
         &pool,
         1,
         &crate::entities::transfer::TransferBody {
-            listing_id: 1,
+            listing_id: ListingId(1),
             date: ymd(2024, 3, 11),
             from_account_id: 1,
             to_account_id: 2,
@@ -2737,7 +2752,7 @@ async fn a_holding_account_transfer_inside_the_window_is_not_a_disposal() {
     sell_vest_parcel_in_account(
         &pool,
         101,
-        1,
+        ListingId(1),
         transferred_in,
         ymd(2024, 3, 20),
         dec("400"),
@@ -2764,15 +2779,15 @@ async fn a_scrip_exchange_closing_sell_is_flagged_as_a_takeover_or_restructure()
     test_support::listing(1).ticker("OLD").insert(&pool).await;
     test_support::listing(2).ticker("NEW").insert(&pool).await;
     let taxing_point = ymd(2024, 3, 1);
-    let vest = ess_vest(&pool, 1, 1, taxing_point).await;
+    let vest = ess_vest(&pool, 1, ListingId(1), taxing_point).await;
     corporate_action::db_upsert(
         &pool,
         &corporate_action::CorporateAction {
             id: 1,
-            listing_id: 1,
+            listing_id: ListingId(1),
             date: ymd(2024, 3, 11),
             kind: corporate_action::ActionKind::ScripForScrip {
-                scrip_listing_id: 2,
+                scrip_listing_id: ListingId(2),
                 scrip_new_units: Decimal::ONE,
                 scrip_old_units: Decimal::ONE,
                 scrip_cash_per_unit: None,
@@ -2802,7 +2817,7 @@ async fn a_scrip_exchange_closing_sell_is_flagged_as_a_takeover_or_restructure()
 async fn insert_inheritance(
     pool: &SqlitePool,
     id: i64,
-    listing_id: i64,
+    listing_id: ListingId,
     account: i64,
     quantity: &str,
     cost_base: &str,
@@ -2834,8 +2849,8 @@ async fn insert_inheritance(
 async fn one_inherited_parcel_entered_twice_is_reported() {
     let pool = test_pool().await;
     test_support::listing(1).ticker("INHA").insert(&pool).await;
-    insert_inheritance(&pool, 1, 1, 1, "100", "3000").await;
-    insert_inheritance(&pool, 2, 1, 1, "100", "3000").await;
+    insert_inheritance(&pool, 1, ListingId(1), 1, "100", "3000").await;
+    insert_inheritance(&pool, 2, ListingId(1), 1, "100", "3000").await;
 
     let h = health(&pool, ymd(2026, 7, 13)).await;
     assert_eq!(h.duplicate_inheritances.len(), 1);
@@ -2867,13 +2882,13 @@ async fn inheritances_from_one_death_that_differ_are_not_reported() {
     .await
     .unwrap();
 
-    insert_inheritance(&pool, 1, 1, 1, "100", "3000").await;
+    insert_inheritance(&pool, 1, ListingId(1), 1, "100", "3000").await;
     // A second parcel of the same listing from the same death, in a
     // different quantity — a part interest recorded in stages.
-    insert_inheritance(&pool, 2, 1, 1, "60", "1800").await;
+    insert_inheritance(&pool, 2, ListingId(1), 1, "60", "1800").await;
     // The same figures in another holding account, and on another listing.
-    insert_inheritance(&pool, 3, 1, 2, "100", "3000").await;
-    insert_inheritance(&pool, 4, 2, 1, "100", "3000").await;
+    insert_inheritance(&pool, 3, ListingId(1), 2, "100", "3000").await;
+    insert_inheritance(&pool, 4, ListingId(2), 1, "100", "3000").await;
 
     let h = health(&pool, ymd(2026, 7, 13)).await;
     assert!(
@@ -2983,7 +2998,7 @@ async fn a_vest_dated_on_a_saturday_is_written_and_then_flagged() {
     test_support::listing(1).ticker("PEPP").insert(&pool).await;
     // Saturday 2026-03-14 — refused on `PUT /trades/:id`, but the vest
     // INSERTs its Buy directly and is accepted.
-    let vest = ess_vest(&pool, 1, 1, ymd(2026, 3, 14)).await;
+    let vest = ess_vest(&pool, 1, ListingId(1), ymd(2026, 3, 14)).await;
     // Monday 2026-03-16 on a second listing: an ordinary trading day.
     test_support::listing(2).ticker("ORD").insert(&pool).await;
     test_support::buy(50, 2)
@@ -3019,7 +3034,7 @@ async fn a_holiday_a_crypto_saturday_and_an_unseeded_year_are_told_apart() {
         .await;
     // Good Friday 2026-04-03, a seeded XASX holiday, reached through the
     // vest's exempt INSERT.
-    let vest = ess_vest(&pool, 1, 1, ymd(2026, 4, 3)).await;
+    let vest = ess_vest(&pool, 1, ListingId(1), ymd(2026, 4, 3)).await;
     // The same Saturday on a crypto listing: `PUT /trades/:id` accepts it,
     // and so does the alert.
     test_support::buy(60, 2)
@@ -3148,7 +3163,7 @@ async fn a_worthless_shares_recognise_is_never_flagged() {
         &pool,
         &corporate_action::CorporateAction {
             id: 10,
-            listing_id: 1,
+            listing_id: ListingId(1),
             date: ymd(2025, 3, 31),
             kind: corporate_action::ActionKind::WorthlessShares {
                 worthless_event: corporate_action::WorthlessEvent::G3Declaration,
@@ -3216,7 +3231,7 @@ async fn operation_written_closing_sells_are_never_flagged() {
         &pool,
         &corporate_action::CorporateAction {
             id: 1,
-            listing_id: 1,
+            listing_id: ListingId(1),
             date: ymd(2025, 2, 1),
             kind: corporate_action::ActionKind::RightsIssue {
                 rights_units: Decimal::ONE,
@@ -3285,7 +3300,7 @@ async fn only_a_paid_for_right_disposed_of_at_nil_is_flagged() {
         &pool,
         &corporate_action::CorporateAction {
             id: 10,
-            listing_id: 1,
+            listing_id: ListingId(1),
             date: ymd(2025, 2, 1),
             kind: corporate_action::ActionKind::RightsIssue {
                 rights_units: Decimal::ONE,
@@ -3381,7 +3396,7 @@ async fn api_nil_proceeds_disposals_are_served_to_the_banner() {
 /// job writes, without the job or a provider.
 async fn insert_event(
     pool: &SqlitePool,
-    listing_id: i64,
+    listing_id: ListingId,
     ex_date: NaiveDate,
     amount_per_unit: &str,
     fetched_at: &str,
@@ -3401,7 +3416,7 @@ async fn insert_event(
 /// the listing's, never AUD.
 async fn insert_event_in(
     pool: &SqlitePool,
-    listing_id: i64,
+    listing_id: ListingId,
     ex_date: NaiveDate,
     amount_per_unit: &str,
     currency: &str,
@@ -3439,7 +3454,7 @@ async fn a_known_distribution_with_no_income_row_is_reported() {
     holding_before_the_ex_date(&pool).await;
     insert_event(
         &pool,
-        1,
+        ListingId(1),
         ymd(2024, 7, 1),
         "0.726547",
         "2026-08-27T00:00:00Z",
@@ -3465,7 +3480,7 @@ async fn an_entered_distribution_clears_the_alert() {
     holding_before_the_ex_date(&pool).await;
     insert_event(
         &pool,
-        1,
+        ListingId(1),
         ymd(2024, 7, 1),
         "0.726547",
         "2026-08-27T00:00:00Z",
@@ -3492,7 +3507,7 @@ async fn a_distribution_entered_with_the_wrong_gross_is_reported() {
     holding_before_the_ex_date(&pool).await;
     insert_event(
         &pool,
-        1,
+        ListingId(1),
         ymd(2024, 7, 1),
         "0.726547",
         "2026-08-27T00:00:00Z",
@@ -3531,7 +3546,7 @@ async fn a_holding_bought_on_the_ex_date_is_not_entitled_and_raises_nothing() {
         .await;
     insert_event(
         &pool,
-        1,
+        ListingId(1),
         ymd(2024, 7, 1),
         "0.726547",
         "2026-08-27T00:00:00Z",
@@ -3576,7 +3591,14 @@ async fn each_holding_account_is_asked_separately() {
         .account(2)
         .insert(&pool)
         .await;
-    insert_event(&pool, 1, ymd(2024, 7, 1), "1", "2026-08-27T00:00:00Z").await;
+    insert_event(
+        &pool,
+        ListingId(1),
+        ymd(2024, 7, 1),
+        "1",
+        "2026-08-27T00:00:00Z",
+    )
+    .await;
     // Only the first account's distribution was entered.
     test_support::income(1, 1, ymd(2024, 7, 16))
         .with(|i| i.unfranked_amount = dec("100"))
@@ -3599,8 +3621,22 @@ async fn one_income_row_is_claimed_by_one_event_only() {
     holding_before_the_ex_date(&pool).await;
     // Two events 30 days apart — inside one another's match windows, which
     // is what an unclaimed-row match would fall for.
-    insert_event(&pool, 1, ymd(2024, 7, 1), "1", "2026-08-27T00:00:00Z").await;
-    insert_event(&pool, 1, ymd(2024, 7, 31), "1", "2026-08-27T00:00:00Z").await;
+    insert_event(
+        &pool,
+        ListingId(1),
+        ymd(2024, 7, 1),
+        "1",
+        "2026-08-27T00:00:00Z",
+    )
+    .await;
+    insert_event(
+        &pool,
+        ListingId(1),
+        ymd(2024, 7, 31),
+        "1",
+        "2026-08-27T00:00:00Z",
+    )
+    .await;
     test_support::income(1, 1, ymd(2024, 8, 5))
         .with(|i| i.unfranked_amount = dec("100"))
         .insert(&pool)
@@ -3627,7 +3663,14 @@ async fn one_income_row_is_claimed_by_one_event_only() {
 async fn a_row_whose_recorded_ex_date_is_a_few_days_out_still_matches() {
     let pool = test_pool().await;
     holding_before_the_ex_date(&pool).await;
-    insert_event(&pool, 1, ymd(2025, 4, 1), "1", "2026-08-27T00:00:00Z").await;
+    insert_event(
+        &pool,
+        ListingId(1),
+        ymd(2025, 4, 1),
+        "1",
+        "2026-08-27T00:00:00Z",
+    )
+    .await;
     // VDHG's real shape: period ending 31 March, true ex-date 1 April, and
     // the row records 2025-04-06 — five days out across an Easter weekend.
     test_support::income(1, 1, ymd(2025, 4, 16))
@@ -3653,7 +3696,14 @@ async fn a_row_whose_recorded_ex_date_is_a_few_days_out_still_matches() {
 async fn a_row_carrying_its_own_ex_date_matches_on_it_exactly() {
     let pool = test_pool().await;
     holding_before_the_ex_date(&pool).await;
-    insert_event(&pool, 1, ymd(2024, 7, 1), "1", "2026-08-27T00:00:00Z").await;
+    insert_event(
+        &pool,
+        ListingId(1),
+        ymd(2024, 7, 1),
+        "1",
+        "2026-08-27T00:00:00Z",
+    )
+    .await;
     // The payment date is far outside the window, but the row states the
     // ex-date itself — the same fact the calendar stores.
     test_support::income(1, 1, ymd(2025, 3, 1))
@@ -3680,7 +3730,7 @@ async fn a_split_between_the_ex_date_and_the_fetch_does_not_skew_the_expected_am
     insert_action(
         &pool,
         1,
-        1,
+        ListingId(1),
         ymd(2025, 1, 15),
         corporate_action::ActionKind::ShareSplit {
             split_new_units: dec("10"),
@@ -3690,7 +3740,7 @@ async fn a_split_between_the_ex_date_and_the_fetch_does_not_skew_the_expected_am
     .await;
     insert_event(
         &pool,
-        1,
+        ListingId(1),
         ymd(2024, 7, 1),
         "0.0726547",
         "2026-08-27T00:00:00Z",
@@ -3730,7 +3780,7 @@ async fn a_drp_surplus_arriving_intact_disproves_a_distribution_in_the_gap() {
     reinvested(&pool, 3, 2, ymd(2021, 1, 19), "50.4362", "38.7177").await;
     insert_event(
         &pool,
-        1,
+        ListingId(1),
         ymd(2020, 11, 2),
         "0.038237",
         "2026-08-27T00:00:00Z",
@@ -3783,7 +3833,7 @@ async fn a_missing_reinvested_distribution_is_still_reported() {
         .unwrap();
     insert_event(
         &pool,
-        1,
+        ListingId(1),
         ymd(2021, 1, 4),
         "0.993767",
         "2026-08-27T00:00:00Z",
@@ -3813,7 +3863,7 @@ async fn a_nil_drp_surplus_is_not_evidence_and_suppresses_nothing() {
     reinvested(&pool, 3, 2, ymd(2021, 1, 19), "0", "0").await;
     insert_event(
         &pool,
-        1,
+        ListingId(1),
         ymd(2020, 11, 2),
         "0.038237",
         "2026-08-27T00:00:00Z",
@@ -3867,13 +3917,20 @@ async fn a_distribution_not_yet_due_is_awaiting_payment_until_its_listings_longe
         (1, ymd(2025, 7, 1), ymd(2025, 7, 16)),
         (2, ymd(2025, 10, 1), ymd(2025, 10, 20)),
     ] {
-        insert_event(&pool, 1, ex, "0.5", "2026-10-02T00:00:00Z").await;
+        insert_event(&pool, ListingId(1), ex, "0.5", "2026-10-02T00:00:00Z").await;
         test_support::income(id, 1, paid)
             .with(|i| i.unfranked_amount = dec("50"))
             .insert(&pool)
             .await;
     }
-    insert_event(&pool, 1, ymd(2026, 10, 1), "0.5", "2026-10-02T00:00:00Z").await;
+    insert_event(
+        &pool,
+        ListingId(1),
+        ymd(2026, 10, 1),
+        "0.5",
+        "2026-10-02T00:00:00Z",
+    )
+    .await;
 
     let h = health(&pool, ymd(2026, 10, 9)).await;
     assert_eq!(h.missing_dividend_entries.len(), 1);
@@ -3900,7 +3957,14 @@ async fn a_distribution_not_yet_due_is_awaiting_payment_until_its_listings_longe
 async fn a_listing_with_no_payment_history_is_due_at_the_end_of_the_match_window() {
     let pool = test_pool().await;
     holding_before_the_ex_date(&pool).await;
-    insert_event(&pool, 1, ymd(2026, 10, 1), "0.5", "2026-10-02T00:00:00Z").await;
+    insert_event(
+        &pool,
+        ListingId(1),
+        ymd(2026, 10, 1),
+        "0.5",
+        "2026-10-02T00:00:00Z",
+    )
+    .await;
 
     let h = health(&pool, ymd(2026, 10, 9)).await;
     let m = &h.missing_dividend_entries[0];
@@ -3914,10 +3978,10 @@ async fn a_listing_with_no_payment_history_is_due_at_the_end_of_the_match_window
 /// A listing's learned gap wins; a listing with none gets the window.
 #[test]
 fn the_expected_payment_lag_falls_back_to_the_match_window() {
-    let lags = HashMap::from([(1, 19)]);
-    assert_eq!(expected_payment_lag_days(&lags, 1), 19);
+    let lags = HashMap::from([(ListingId(1), 19)]);
+    assert_eq!(expected_payment_lag_days(&lags, ListingId(1)), 19);
     assert_eq!(
-        expected_payment_lag_days(&lags, 2),
+        expected_payment_lag_days(&lags, ListingId(2)),
         DIVIDEND_MATCH_AFTER_DAYS
     );
 }
@@ -3960,7 +4024,7 @@ async fn a_gross_in_another_currency_is_not_compared_against_the_calendar() {
         .await;
     insert_event_in(
         &pool,
-        1,
+        ListingId(1),
         ymd(2024, 7, 1),
         "0.726547",
         "USD",
@@ -4006,7 +4070,7 @@ async fn the_same_divergence_inside_one_currency_is_still_reported() {
         .await;
     insert_event_in(
         &pool,
-        1,
+        ListingId(1),
         ymd(2024, 7, 1),
         "0.726547",
         "USD",
@@ -4045,7 +4109,14 @@ async fn the_same_divergence_inside_one_currency_is_still_reported() {
 async fn a_monthly_payer_does_not_match_the_previous_month_s_payment() {
     let pool = test_pool().await;
     holding_before_the_ex_date(&pool).await;
-    insert_event(&pool, 1, ymd(2024, 3, 1), "0.20", "2026-08-27T00:00:00Z").await;
+    insert_event(
+        &pool,
+        ListingId(1),
+        ymd(2024, 3, 1),
+        "0.20",
+        "2026-08-27T00:00:00Z",
+    )
+    .await;
 
     // Both payments carry only `date_paid` — the anchor 13 of the 47 rows
     // in the live database have, and the one the window has to carry the
@@ -4075,7 +4146,14 @@ async fn a_monthly_payer_does_not_match_the_previous_month_s_payment() {
 async fn an_entitlement_date_before_the_ex_date_still_matches() {
     let pool = test_pool().await;
     holding_before_the_ex_date(&pool).await;
-    insert_event(&pool, 1, ymd(2024, 7, 1), "0.20", "2026-08-27T00:00:00Z").await;
+    insert_event(
+        &pool,
+        ListingId(1),
+        ymd(2024, 7, 1),
+        "0.20",
+        "2026-08-27T00:00:00Z",
+    )
+    .await;
     // The distribution period ends 30 June and the security goes ex on
     // 1 July; the cash lands far outside the window, so the entitlement
     // date is the only anchor that can carry this match.

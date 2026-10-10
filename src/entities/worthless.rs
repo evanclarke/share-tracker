@@ -320,6 +320,7 @@ mod tests {
     use crate::entities::corporate_action::{CorporateAction, WorthlessEvent};
     use crate::entities::listing;
     use crate::entities::trade::TradeType;
+    use crate::infra::id::ListingId;
     use crate::test_support::{self, ApiClient, test_pool};
 
     /// Client over this module's own routes.
@@ -347,12 +348,12 @@ mod tests {
     async fn insert_buy(
         pool: &SqlitePool,
         id: i64,
-        listing_id: i64,
+        listing_id: ListingId,
         date: NaiveDate,
         qty: &str,
         price: &str,
     ) {
-        test_support::buy(id, listing_id)
+        test_support::buy(id, listing_id.0)
             .date(date)
             .settlement(date)
             .qty(qty.parse().unwrap())
@@ -364,7 +365,7 @@ mod tests {
     async fn insert_worthless(
         pool: &SqlitePool,
         id: i64,
-        listing_id: i64,
+        listing_id: ListingId,
         date: NaiveDate,
         event: WorthlessEvent,
     ) {
@@ -394,9 +395,16 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "DEAD").await;
         // Two parcels: 1,000 @ $1.50 (2020) and 500 @ $2.00 (2023) = $1,500 + $1,000.
-        insert_buy(&pool, 1, 1, d(2020, 10, 1), "1000", "1.50").await;
-        insert_buy(&pool, 2, 1, d(2023, 3, 1), "500", "2.00").await;
-        insert_worthless(&pool, 10, 1, d(2025, 3, 31), WorthlessEvent::G3Declaration).await;
+        insert_buy(&pool, 1, ListingId(1), d(2020, 10, 1), "1000", "1.50").await;
+        insert_buy(&pool, 2, ListingId(1), d(2023, 3, 1), "500", "2.00").await;
+        insert_worthless(
+            &pool,
+            10,
+            ListingId(1),
+            d(2025, 3, 31),
+            WorthlessEvent::G3Declaration,
+        )
+        .await;
 
         let r = db_recognise(&pool, 10).await.unwrap();
 
@@ -438,7 +446,7 @@ mod tests {
     async fn recognise_uses_only_the_remaining_cost_base() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "DEAD").await;
-        insert_buy(&pool, 1, 1, d(2020, 10, 1), "1000", "1.50").await; // $1,500
+        insert_buy(&pool, 1, ListingId(1), d(2020, 10, 1), "1000", "1.50").await; // $1,500
         // Sell 400 before the failure → 600 remain at 60% = $900 reduced cost base.
         sell::db_upsert_sell(
             &pool,
@@ -449,7 +457,7 @@ mod tests {
                 holding_account_id: 1,
                 date: d(2022, 5, 2),
                 settlement_date: Some(d(2022, 5, 2)),
-                listing_id: 1,
+                listing_id: ListingId(1),
                 average_price: dec("2.00"),
                 quantity: dec("400"),
                 currency: "AUD".into(),
@@ -467,7 +475,14 @@ mod tests {
         )
         .await
         .unwrap();
-        insert_worthless(&pool, 10, 1, d(2025, 3, 31), WorthlessEvent::C2Cancellation).await;
+        insert_worthless(
+            &pool,
+            10,
+            ListingId(1),
+            d(2025, 3, 31),
+            WorthlessEvent::C2Cancellation,
+        )
+        .await;
 
         let r = db_recognise(&pool, 10).await.unwrap();
         assert_eq!(r.sell.quantity, dec("600"));
@@ -488,8 +503,15 @@ mod tests {
     async fn recognised_loss_feeds_the_net_capital_gain_loss_pool() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "DEAD").await;
-        insert_buy(&pool, 1, 1, d(2023, 7, 3), "1000", "2.00").await; // $2,000
-        insert_worthless(&pool, 10, 1, d(2025, 3, 31), WorthlessEvent::G3Declaration).await;
+        insert_buy(&pool, 1, ListingId(1), d(2023, 7, 3), "1000", "2.00").await; // $2,000
+        insert_worthless(
+            &pool,
+            10,
+            ListingId(1),
+            d(2025, 3, 31),
+            WorthlessEvent::G3Declaration,
+        )
+        .await;
         db_recognise(&pool, 10).await.unwrap();
 
         let years = crate::reports::net_capital_gain::db_net_capital_gain(&pool)
@@ -511,11 +533,18 @@ mod tests {
     async fn a_revived_company_is_bought_into_as_a_new_parcel() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "DEAD").await;
-        insert_buy(&pool, 1, 1, d(2020, 1, 10), "1000", "2.00").await;
-        insert_worthless(&pool, 10, 1, d(2023, 6, 1), WorthlessEvent::G3Declaration).await;
+        insert_buy(&pool, 1, ListingId(1), d(2020, 1, 10), "1000", "2.00").await;
+        insert_worthless(
+            &pool,
+            10,
+            ListingId(1),
+            d(2023, 6, 1),
+            WorthlessEvent::G3Declaration,
+        )
+        .await;
         db_recognise(&pool, 10).await.unwrap();
 
-        insert_buy(&pool, 50, 1, d(2024, 9, 3), "100", "0.50").await;
+        insert_buy(&pool, 50, ListingId(1), d(2024, 9, 3), "100", "0.50").await;
 
         let parcels = crate::reports::open_parcels::db_open_parcels(&pool, None)
             .await
@@ -545,12 +574,12 @@ mod tests {
         // Paid before the cancellation: the loss shrinks by the payment.
         let pool = test_pool().await;
         insert_listing(&pool, 1, "DEAD").await;
-        insert_buy(&pool, 1, 1, d(2020, 1, 10), "1000", "2.00").await;
+        insert_buy(&pool, 1, ListingId(1), d(2020, 1, 10), "1000", "2.00").await;
         corporate_action::db_upsert(
             &pool,
             &CorporateAction {
                 id: 9,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: d(2023, 5, 15),
                 kind: ActionKind::ReturnOfCapital {
                     amount_per_unit: dec("0.05"),
@@ -561,7 +590,14 @@ mod tests {
         )
         .await
         .unwrap();
-        insert_worthless(&pool, 10, 1, d(2023, 6, 1), WorthlessEvent::C2Cancellation).await;
+        insert_worthless(
+            &pool,
+            10,
+            ListingId(1),
+            d(2023, 6, 1),
+            WorthlessEvent::C2Cancellation,
+        )
+        .await;
         db_recognise(&pool, 10).await.unwrap();
 
         let gains = crate::reports::realised_gains::db_realised_gains(&pool)
@@ -573,14 +609,21 @@ mod tests {
         // the recognised loss untouched.
         let pool = test_pool().await;
         insert_listing(&pool, 1, "DEAD").await;
-        insert_buy(&pool, 1, 1, d(2020, 1, 10), "1000", "2.00").await;
-        insert_worthless(&pool, 10, 1, d(2023, 6, 1), WorthlessEvent::C2Cancellation).await;
+        insert_buy(&pool, 1, ListingId(1), d(2020, 1, 10), "1000", "2.00").await;
+        insert_worthless(
+            &pool,
+            10,
+            ListingId(1),
+            d(2023, 6, 1),
+            WorthlessEvent::C2Cancellation,
+        )
+        .await;
         db_recognise(&pool, 10).await.unwrap();
         corporate_action::db_upsert(
             &pool,
             &CorporateAction {
                 id: 9,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: d(2023, 7, 15),
                 kind: ActionKind::ReturnOfCapital {
                     amount_per_unit: dec("0.05"),
@@ -618,7 +661,7 @@ mod tests {
             &pool,
             &CorporateAction {
                 id: 1,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: d(2025, 3, 31),
                 kind: ActionKind::ShareSplit {
                     split_new_units: dec("2"),
@@ -634,14 +677,21 @@ mod tests {
         ));
 
         // Nothing held at the event date.
-        insert_worthless(&pool, 10, 1, d(2025, 3, 31), WorthlessEvent::G3Declaration).await;
+        insert_worthless(
+            &pool,
+            10,
+            ListingId(1),
+            d(2025, 3, 31),
+            WorthlessEvent::G3Declaration,
+        )
+        .await;
         assert!(matches!(
             db_recognise(&pool, 10).await,
             Err(RecogniseError::NothingHeld)
         ));
 
         // A trade dated on/after the event date contradicts the failure.
-        insert_buy(&pool, 2, 1, d(2025, 3, 31), "100", "1.50").await;
+        insert_buy(&pool, 2, ListingId(1), d(2025, 3, 31), "100", "1.50").await;
         assert!(matches!(
             db_recognise(&pool, 10).await,
             Err(RecogniseError::TradedOnOrAfterEventDate)
@@ -660,8 +710,15 @@ mod tests {
     async fn a_second_recognition_of_the_same_action_is_rejected() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "DEAD").await;
-        insert_buy(&pool, 1, 1, d(2020, 10, 1), "1000", "1.50").await;
-        insert_worthless(&pool, 10, 1, d(2025, 3, 31), WorthlessEvent::G3Declaration).await;
+        insert_buy(&pool, 1, ListingId(1), d(2020, 10, 1), "1000", "1.50").await;
+        insert_worthless(
+            &pool,
+            10,
+            ListingId(1),
+            d(2025, 3, 31),
+            WorthlessEvent::G3Declaration,
+        )
+        .await;
         db_recognise(&pool, 10).await.unwrap();
 
         assert!(matches!(
@@ -676,8 +733,15 @@ mod tests {
     async fn recognise_sell_is_immutable_individually() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "DEAD").await;
-        insert_buy(&pool, 1, 1, d(2020, 10, 1), "1000", "1.50").await;
-        insert_worthless(&pool, 10, 1, d(2025, 3, 31), WorthlessEvent::G3Declaration).await;
+        insert_buy(&pool, 1, ListingId(1), d(2020, 10, 1), "1000", "1.50").await;
+        insert_worthless(
+            &pool,
+            10,
+            ListingId(1),
+            d(2025, 3, 31),
+            WorthlessEvent::G3Declaration,
+        )
+        .await;
         let r = db_recognise(&pool, 10).await.unwrap();
 
         let err = sell::db_upsert_sell(
@@ -689,7 +753,7 @@ mod tests {
                 holding_account_id: 1,
                 date: d(2025, 3, 31),
                 settlement_date: Some(d(2025, 3, 31)),
-                listing_id: 1,
+                listing_id: ListingId(1),
                 average_price: dec("9.99"),
                 quantity: dec("1000"),
                 currency: "AUD".into(),
@@ -720,8 +784,15 @@ mod tests {
     async fn deleting_the_closing_sell_restores_the_holding() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "DEAD").await;
-        insert_buy(&pool, 1, 1, d(2020, 10, 1), "1000", "1.50").await;
-        insert_worthless(&pool, 10, 1, d(2025, 3, 31), WorthlessEvent::G3Declaration).await;
+        insert_buy(&pool, 1, ListingId(1), d(2020, 10, 1), "1000", "1.50").await;
+        insert_worthless(
+            &pool,
+            10,
+            ListingId(1),
+            d(2025, 3, 31),
+            WorthlessEvent::G3Declaration,
+        )
+        .await;
         let r = db_recognise(&pool, 10).await.unwrap();
 
         assert_eq!(
@@ -749,8 +820,15 @@ mod tests {
     async fn referenced_action_cannot_be_edited_or_deleted() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "DEAD").await;
-        insert_buy(&pool, 1, 1, d(2020, 10, 1), "1000", "1.50").await;
-        insert_worthless(&pool, 10, 1, d(2025, 3, 31), WorthlessEvent::G3Declaration).await;
+        insert_buy(&pool, 1, ListingId(1), d(2020, 10, 1), "1000", "1.50").await;
+        insert_worthless(
+            &pool,
+            10,
+            ListingId(1),
+            d(2025, 3, 31),
+            WorthlessEvent::G3Declaration,
+        )
+        .await;
         db_recognise(&pool, 10).await.unwrap();
 
         let action = corporate_action::db_get(&pool, 10).await.unwrap().unwrap();
@@ -776,13 +854,20 @@ mod tests {
         )
         .await
         .unwrap();
-        insert_buy(&pool, 1, 1, d(2020, 10, 1), "1000", "1.50").await;
-        insert_buy(&pool, 2, 1, d(2023, 3, 1), "500", "2.00").await;
+        insert_buy(&pool, 1, ListingId(1), d(2020, 10, 1), "1000", "1.50").await;
+        insert_buy(&pool, 2, ListingId(1), d(2023, 3, 1), "500", "2.00").await;
         sqlx::query("UPDATE trades SET holding_account_id = 2 WHERE id = 2")
             .execute(&pool)
             .await
             .unwrap();
-        insert_worthless(&pool, 10, 1, d(2025, 3, 31), WorthlessEvent::G3Declaration).await;
+        insert_worthless(
+            &pool,
+            10,
+            ListingId(1),
+            d(2025, 3, 31),
+            WorthlessEvent::G3Declaration,
+        )
+        .await;
 
         let r = db_recognise(&pool, 10).await.unwrap();
         assert_eq!(r.sell.quantity, dec("1500"));
@@ -798,8 +883,15 @@ mod tests {
     async fn api_recognise_creates_the_closing_sell() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "DEAD").await;
-        insert_buy(&pool, 1, 1, d(2020, 10, 1), "1000", "1.50").await;
-        insert_worthless(&pool, 10, 1, d(2025, 3, 31), WorthlessEvent::G3Declaration).await;
+        insert_buy(&pool, 1, ListingId(1), d(2020, 10, 1), "1000", "1.50").await;
+        insert_worthless(
+            &pool,
+            10,
+            ListingId(1),
+            d(2025, 3, 31),
+            WorthlessEvent::G3Declaration,
+        )
+        .await;
 
         let resp = client(&pool)
             .post_empty("/corporate_actions/10/recognise")
@@ -823,7 +915,14 @@ mod tests {
         assert_eq!(resp.status, StatusCode::NOT_FOUND);
 
         // Nothing held → 422.
-        insert_worthless(&pool, 10, 1, d(2025, 3, 31), WorthlessEvent::G3Declaration).await;
+        insert_worthless(
+            &pool,
+            10,
+            ListingId(1),
+            d(2025, 3, 31),
+            WorthlessEvent::G3Declaration,
+        )
+        .await;
         let resp = client(&pool)
             .post_empty("/corporate_actions/10/recognise")
             .await;
@@ -839,9 +938,16 @@ mod tests {
     async fn api_recognising_a_future_dated_event_is_refused_naming_the_date() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "DEAD").await;
-        insert_buy(&pool, 1, 1, d(2020, 10, 1), "1000", "1.50").await;
+        insert_buy(&pool, 1, ListingId(1), d(2020, 10, 1), "1000", "1.50").await;
         let future = crate::infra::date::today() + chrono::Days::new(1);
-        insert_worthless(&pool, 10, 1, future, WorthlessEvent::G3Declaration).await;
+        insert_worthless(
+            &pool,
+            10,
+            ListingId(1),
+            future,
+            WorthlessEvent::G3Declaration,
+        )
+        .await;
 
         let resp = client(&pool)
             .post_empty("/corporate_actions/10/recognise")
@@ -869,12 +975,19 @@ mod tests {
     async fn api_recognise_dry_run_previews_without_storing() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "DEAD").await;
-        insert_worthless(&pool, 10, 1, d(2025, 3, 31), WorthlessEvent::G3Declaration).await;
+        insert_worthless(
+            &pool,
+            10,
+            ListingId(1),
+            d(2025, 3, 31),
+            WorthlessEvent::G3Declaration,
+        )
+        .await;
         client(&pool)
             .assert_dry_run_refuses_alike(&pool, "/corporate_actions/10/recognise", None)
             .await;
 
-        insert_buy(&pool, 1, 1, d(2020, 10, 1), "1000", "1.50").await;
+        insert_buy(&pool, 1, ListingId(1), d(2020, 10, 1), "1000", "1.50").await;
         let created = client(&pool)
             .assert_dry_run_previews(&pool, "/corporate_actions/10/recognise", None)
             .await;

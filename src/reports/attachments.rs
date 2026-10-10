@@ -1,5 +1,6 @@
 use crate::infra::extract::Json;
 use crate::infra::http::ApiError;
+use crate::infra::id::ListingId;
 use axum::{Router, extract::State, routing::get};
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
@@ -35,7 +36,7 @@ pub struct AttachmentIndexRow {
     pub owner_description: String,
     /// The owning activity's listing, where it has one. Null only for an
     /// interest-income attachment (interest income has no listing).
-    pub listing_id: Option<i64>,
+    pub listing_id: Option<ListingId>,
 }
 
 pub fn router() -> Router<SqlitePool> {
@@ -78,7 +79,7 @@ pub async fn db_attachments(pool: &SqlitePool) -> Result<Vec<AttachmentIndexRow>
             &str,
             i64,
             String,
-            Option<i64>,
+            Option<ListingId>,
         ) = if let Some(trade_id) = row.try_get::<Option<i64>, _>("trade_id")? {
             let trade_type: String = row.try_get("trade_type")?;
             let date: String = row.try_get("trade_date")?;
@@ -239,7 +240,7 @@ mod tests {
         assert_eq!(r.owner_field, "trade_id");
         assert_eq!(r.owner_id, 1);
         assert_eq!(r.owner_description, "Buy on 2024-05-01");
-        assert_eq!(r.listing_id, Some(1));
+        assert_eq!(r.listing_id, Some(ListingId(1)));
         assert_eq!(r.filename, "conf.pdf");
     }
 
@@ -267,7 +268,7 @@ mod tests {
         assert_eq!(rows[0].owner_type, "Income");
         assert_eq!(rows[0].owner_field, "income_id");
         assert_eq!(rows[0].owner_description, "Distribution paid 2024-08-30");
-        assert_eq!(rows[0].listing_id, Some(1));
+        assert_eq!(rows[0].listing_id, Some(ListingId(1)));
     }
 
     /// An AMMA-statement-owned attachment names the FY it covers.
@@ -291,7 +292,7 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].owner_type, "AMMA statement");
         assert_eq!(rows[0].owner_field, "amma_statement_id");
-        assert_eq!(rows[0].listing_id, Some(1));
+        assert_eq!(rows[0].listing_id, Some(ListingId(1)));
     }
 
     /// An ESS-statement-owned attachment names its taxing point.
@@ -317,7 +318,7 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].owner_type, "ESS statement");
         assert_eq!(rows[0].owner_description, "Taxing point 2024-03-15");
-        assert_eq!(rows[0].listing_id, Some(1));
+        assert_eq!(rows[0].listing_id, Some(ListingId(1)));
     }
 
     /// An interest-income-owned attachment has no listing — interest income
@@ -368,7 +369,7 @@ mod tests {
             &pool,
             &corporate_action::CorporateAction {
                 id: 1,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: ymd(2024, 6, 30),
                 kind: corporate_action::ActionKind::ReturnOfCapital {
                     amount_per_unit: "0.10".parse().unwrap(),
@@ -394,7 +395,7 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].owner_type, "Corporate action");
         assert_eq!(rows[0].owner_description, "ReturnOfCapital on 2024-06-30");
-        assert_eq!(rows[0].listing_id, Some(1));
+        assert_eq!(rows[0].listing_id, Some(ListingId(1)));
     }
 
     /// Newest upload first.

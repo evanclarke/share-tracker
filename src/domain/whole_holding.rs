@@ -38,6 +38,7 @@
 //! transfer's own date, and units landing behind an executed operation are as
 //! stranded there as any other.
 
+use crate::infra::id::ListingId;
 use chrono::NaiveDate;
 use sqlx::Row;
 
@@ -172,7 +173,7 @@ fn executed_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Executed, sqlx::Er
 /// see one state.
 pub async fn db_executed_from(
     conn: &mut sqlx::SqliteConnection,
-    listing_id: i64,
+    listing_id: ListingId,
     date: NaiveDate,
 ) -> Result<Vec<Executed>, sqlx::Error> {
     let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
@@ -255,9 +256,9 @@ impl BackDatedParcel {
 /// operation it was previously clear of.
 pub async fn db_back_dated_parcel(
     conn: &mut sqlx::SqliteConnection,
-    listing_id: i64,
+    listing_id: ListingId,
     date: NaiveDate,
-    stored: Option<(i64, NaiveDate)>,
+    stored: Option<(ListingId, NaiveDate)>,
 ) -> Result<Option<BackDatedParcel>, sqlx::Error> {
     let operations = db_executed_from(conn, listing_id, date).await?;
     if operations.is_empty() {

@@ -15,6 +15,7 @@ pub mod extract;
 pub mod fetch;
 pub mod fx;
 pub mod http;
+pub mod id;
 pub mod logging;
 pub mod request_guard;
 pub mod scheduler;

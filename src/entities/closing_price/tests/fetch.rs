@@ -2,24 +2,25 @@
 //! stored row records alongside its figure.
 
 use super::*;
+use crate::infra::id::ListingId;
 
 #[tokio::test]
 async fn api_backfill_fetches_only_missing_trading_days() {
     let pool = test_pool().await;
     insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
-    insert_buy(&pool, 1, 1, "100").await;
+    insert_buy(&pool, 1, ListingId(1), "100").await;
     // Week of Mon 2026-06-01 .. Fri 2026-06-05; Wednesday already stored ok.
-    let pre = StubFetcher::default().with_close(1, ymd(2026, 6, 3), "64.91", "AUD");
-    let market = load_market(&pool, 1).await.unwrap().unwrap();
+    let pre = StubFetcher::default().with_close(ListingId(1), ymd(2026, 6, 3), "64.91", "AUD");
+    let market = load_market(&pool, ListingId(1)).await.unwrap().unwrap();
     fetch_and_store(&pool, &pre, &market, &[ymd(2026, 6, 3)])
         .await
         .unwrap();
 
     let fetcher = StubFetcher::default()
-        .with_close(1, ymd(2026, 6, 1), "62.48", "AUD")
-        .with_close(1, ymd(2026, 6, 2), "63.37", "AUD")
-        .with_close(1, ymd(2026, 6, 4), "62.80", "AUD")
-        .with_close(1, ymd(2026, 6, 5), "61.24", "AUD");
+        .with_close(ListingId(1), ymd(2026, 6, 1), "62.48", "AUD")
+        .with_close(ListingId(1), ymd(2026, 6, 2), "63.37", "AUD")
+        .with_close(ListingId(1), ymd(2026, 6, 4), "62.80", "AUD")
+        .with_close(ListingId(1), ymd(2026, 6, 5), "61.24", "AUD");
     let app = full_router(pool.clone(), fetcher);
 
     // Sat..Sat range: weekends are not trading days, Wednesday is skipped.
@@ -41,12 +42,14 @@ async fn api_backfill_fetches_only_missing_trading_days() {
     assert_eq!(summary.fetched_ok, 4);
     assert_eq!(summary.errored, 0);
 
-    let rows = db_list(&pool, Some(1), None, None, None).await.unwrap();
+    let rows = db_list(&pool, Some(ListingId(1)), None, None, None)
+        .await
+        .unwrap();
     assert_eq!(rows.len(), 5);
     assert!(rows.iter().all(|r| r.status == PriceStatus::Ok));
     // Wednesday kept its original fetch (the stub reports the provider's own
     // source both ways, but the pre-stored price is unchanged).
-    let wed = db_get_one(&pool, 1, ymd(2026, 6, 3))
+    let wed = db_get_one(&pool, ListingId(1), ymd(2026, 6, 3))
         .await
         .unwrap()
         .unwrap();
@@ -60,9 +63,10 @@ async fn api_backfill_fetches_only_missing_trading_days() {
 async fn api_backfill_symbol_override_reaches_the_fetcher() {
     let pool = test_pool().await;
     insert_listing(&pool, 1, "LAR", "XNYS", "USD").await;
-    insert_buy(&pool, 1, 1, "100").await;
+    insert_buy(&pool, 1, ListingId(1), "100").await;
 
-    let fetcher = Arc::new(StubFetcher::default().with_close(1, ymd(2026, 6, 1), "10", "USD"));
+    let fetcher =
+        Arc::new(StubFetcher::default().with_close(ListingId(1), ymd(2026, 6, 1), "10", "USD"));
     let shared: SharedFetcher = fetcher.clone();
     let app = ApiClient::over(router().with_state(pool.clone()).layer(Extension(shared)));
 
@@ -84,7 +88,7 @@ async fn api_backfill_symbol_override_reaches_the_fetcher() {
     assert_eq!(fetcher.symbols(), vec!["LAAC-OLD".to_string()]);
     // The listing's own stored symbol is untouched by the one-off override.
     assert_eq!(
-        listing::db_get(&pool, 1)
+        listing::db_get(&pool, ListingId(1))
             .await
             .unwrap()
             .unwrap()
@@ -101,14 +105,14 @@ async fn api_backfill_symbol_override_reaches_the_fetcher() {
 async fn db_a_fetched_row_records_the_symbol_it_was_fetched_under() {
     let pool = test_pool().await;
     insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
-    let market = load_market(&pool, 1).await.unwrap().unwrap();
-    let stub = StubFetcher::default().with_close(1, ymd(2026, 6, 4), "62.80", "AUD");
+    let market = load_market(&pool, ListingId(1)).await.unwrap().unwrap();
+    let stub = StubFetcher::default().with_close(ListingId(1), ymd(2026, 6, 4), "62.80", "AUD");
 
     fetch_and_store(&pool, &stub, &market, &[ymd(2026, 6, 4)])
         .await
         .unwrap();
 
-    let row = db_get_one(&pool, 1, ymd(2026, 6, 4))
+    let row = db_get_one(&pool, ListingId(1), ymd(2026, 6, 4))
         .await
         .unwrap()
         .unwrap();
@@ -122,13 +126,13 @@ async fn db_a_fetched_row_records_the_symbol_it_was_fetched_under() {
 async fn db_a_failed_fetch_records_the_symbol_it_was_attempted_under() {
     let pool = test_pool().await;
     insert_listing(&pool, 1, "LAAC", "XNYS", "USD").await;
-    let market = load_market(&pool, 1).await.unwrap().unwrap();
+    let market = load_market(&pool, ListingId(1)).await.unwrap().unwrap();
 
     fetch_and_store(&pool, &StubFetcher::default(), &market, &[ymd(2026, 6, 4)])
         .await
         .unwrap();
 
-    let row = db_get_one(&pool, 1, ymd(2026, 6, 4))
+    let row = db_get_one(&pool, ListingId(1), ymd(2026, 6, 4))
         .await
         .unwrap()
         .unwrap();
@@ -143,20 +147,20 @@ async fn db_a_failed_fetch_records_the_symbol_it_was_attempted_under() {
 async fn db_each_row_records_its_own_segments_symbol_across_a_rename() {
     let pool = test_pool().await;
     insert_listing(&pool, 1, "LAAC", "XNYS", "USD").await;
-    rename_listing(&pool, 1, ymd(2026, 6, 3), "LAR", None).await;
+    rename_listing(&pool, ListingId(1), ymd(2026, 6, 3), "LAR", None).await;
 
-    let market = load_market(&pool, 1).await.unwrap().unwrap();
+    let market = load_market(&pool, ListingId(1)).await.unwrap().unwrap();
     let days = [ymd(2026, 6, 2), ymd(2026, 6, 4)];
     let mut stub = StubFetcher::default();
     for &d in &days {
-        stub = stub.with_close(1, d, "2.77", "USD");
+        stub = stub.with_close(ListingId(1), d, "2.77", "USD");
     }
     fetch_and_store(&pool, &stub, &market, &days).await.unwrap();
 
     let mut symbols = Vec::new();
     for &d in &days {
         symbols.push(
-            db_get_one(&pool, 1, d)
+            db_get_one(&pool, ListingId(1), d)
                 .await
                 .unwrap()
                 .unwrap()
@@ -180,11 +184,11 @@ async fn db_each_row_records_its_own_segments_symbol_across_a_rename() {
 async fn api_backfill_records_the_overriding_symbol_on_every_stored_row() {
     let pool = test_pool().await;
     insert_listing(&pool, 1, "LAC", "XNYS", "USD").await;
-    insert_buy(&pool, 1, 1, "100").await;
+    insert_buy(&pool, 1, ListingId(1), "100").await;
     let days = [ymd(2026, 6, 1), ymd(2026, 6, 2)];
     let mut stub = StubFetcher::default();
     for &d in &days {
-        stub = stub.with_close(1, d, "10", "USD");
+        stub = stub.with_close(ListingId(1), d, "10", "USD");
     }
     let app = full_router(pool.clone(), stub);
 
@@ -204,7 +208,7 @@ async fn api_backfill_records_the_overriding_symbol_on_every_stored_row() {
         String::from_utf8_lossy(&bytes)
     );
     for &d in &days {
-        let row = db_get_one(&pool, 1, d).await.unwrap().unwrap();
+        let row = db_get_one(&pool, ListingId(1), d).await.unwrap().unwrap();
         assert_eq!(
             row.fetched_symbol.as_deref(),
             Some("LAAC"),
@@ -228,7 +232,10 @@ async fn api_backfill_records_the_overriding_symbol_on_every_stored_row() {
         "{}",
         String::from_utf8_lossy(&bytes)
     );
-    let row = db_get_one(&pool, 1, days[0]).await.unwrap().unwrap();
+    let row = db_get_one(&pool, ListingId(1), days[0])
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(row.fetched_symbol.as_deref(), Some("LAC"));
 }
 
@@ -271,7 +278,7 @@ async fn api_a_manual_price_records_no_fetched_symbol() {
         .await;
     assert_eq!(resp.status, StatusCode::CREATED);
 
-    let row = db_get_one(&pool, 1, ymd(2026, 6, 4))
+    let row = db_get_one(&pool, ListingId(1), ymd(2026, 6, 4))
         .await
         .unwrap()
         .unwrap();
@@ -289,10 +296,10 @@ async fn api_a_manual_price_records_no_fetched_symbol() {
 async fn api_backfill_under_an_override_stores_a_currency_mismatch_as_an_error() {
     let pool = test_pool().await;
     insert_listing(&pool, 1, "LAC", "XNYS", "USD").await;
-    insert_buy(&pool, 1, 1, "100").await;
+    insert_buy(&pool, 1, ListingId(1), "100").await;
     // The override reaches a security quoted in another currency — the
     // clearest evidence a symbol names a different security altogether.
-    let stub = StubFetcher::default().with_close(1, ymd(2026, 6, 1), "10", "AUD");
+    let stub = StubFetcher::default().with_close(ListingId(1), ymd(2026, 6, 1), "10", "AUD");
     let app = full_router(pool.clone(), stub);
 
     let (status, bytes) = post_json(
@@ -308,7 +315,7 @@ async fn api_backfill_under_an_override_stores_a_currency_mismatch_as_an_error()
     let summary: BackfillSummary = serde_json::from_slice(&bytes).unwrap();
     assert_eq!((summary.fetched_ok, summary.errored), (0, 1));
 
-    let row = db_get_one(&pool, 1, ymd(2026, 6, 1))
+    let row = db_get_one(&pool, ListingId(1), ymd(2026, 6, 1))
         .await
         .unwrap()
         .unwrap();
@@ -324,13 +331,13 @@ async fn api_backfill_under_an_override_stores_a_currency_mismatch_as_an_error()
 async fn api_backfill_records_missing_candles_as_errors() {
     let pool = test_pool().await;
     insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
-    insert_buy(&pool, 1, 1, "100").await;
+    insert_buy(&pool, 1, ListingId(1), "100").await;
     // Provider has Thu+Fri but nothing for Mon-Wed (e.g. an unseeded
     // historical holiday or missing provider data) — those days must be
     // recorded as errored rows, never silently missing.
     let fetcher = StubFetcher::default()
-        .with_close(1, ymd(2026, 6, 4), "62.80", "AUD")
-        .with_close(1, ymd(2026, 6, 5), "61.24", "AUD");
+        .with_close(ListingId(1), ymd(2026, 6, 4), "62.80", "AUD")
+        .with_close(ListingId(1), ymd(2026, 6, 5), "61.24", "AUD");
     let app = full_router(pool.clone(), fetcher);
 
     let (status, bytes) = post_json(
@@ -344,7 +351,7 @@ async fn api_backfill_records_missing_candles_as_errors() {
     assert_eq!(summary.fetched_ok, 2);
     assert_eq!(summary.errored, 3);
 
-    let row = db_get_one(&pool, 1, ymd(2026, 6, 2))
+    let row = db_get_one(&pool, ListingId(1), ymd(2026, 6, 2))
         .await
         .unwrap()
         .unwrap();
@@ -362,8 +369,8 @@ async fn api_backfill_records_missing_candles_as_errors() {
 async fn fetch_and_store_names_the_symbol_when_the_whole_window_returns_no_candles() {
     let pool = test_pool().await;
     insert_listing(&pool, 1, "LAAC", "XNYS", "USD").await;
-    insert_buy(&pool, 1, 1, "100").await;
-    let market = load_market(&pool, 1).await.unwrap().unwrap();
+    insert_buy(&pool, 1, ListingId(1), "100").await;
+    let market = load_market(&pool, ListingId(1)).await.unwrap().unwrap();
 
     // Fetcher has no data for this listing at all — Ok(vec![]).
     let empty = StubFetcher::default();
@@ -375,7 +382,10 @@ async fn fetch_and_store_names_the_symbol_when_the_whole_window_returns_no_candl
     assert_eq!(errored, 2);
 
     for date in dates {
-        let row = db_get_one(&pool, 1, date).await.unwrap().unwrap();
+        let row = db_get_one(&pool, ListingId(1), date)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(row.status, PriceStatus::Error);
         let msg = row.error.unwrap();
         assert!(msg.contains("LAAC"), "names the symbol: {msg}");
@@ -422,7 +432,7 @@ async fn api_fetch_answers_201_with_the_created_row() {
     let pool = test_pool().await;
     insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
     // The stub serves Thu 2026-06-04 and nothing for Fri 2026-06-05.
-    let fetcher = StubFetcher::default().with_close(1, ymd(2026, 6, 4), "62.80", "AUD");
+    let fetcher = StubFetcher::default().with_close(ListingId(1), ymd(2026, 6, 4), "62.80", "AUD");
     let app = full_router(pool.clone(), fetcher);
 
     let (status, bytes) = post_json(
@@ -443,7 +453,7 @@ async fn api_fetch_answers_201_with_the_created_row() {
     assert_eq!(row.price_date, ymd(2026, 6, 4));
     assert_eq!(row.price, Some("62.80".parse().unwrap()));
     // The body is the stored row, not a copy: the same id the list serves.
-    let stored = db_get_one(&pool, 1, ymd(2026, 6, 4))
+    let stored = db_get_one(&pool, ListingId(1), ymd(2026, 6, 4))
         .await
         .unwrap()
         .unwrap();
@@ -474,7 +484,7 @@ async fn api_fetch_answers_201_with_the_created_row() {
 async fn api_fetch_replaces_errored_row_and_returns_it() {
     let pool = test_pool().await;
     insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
-    insert_buy(&pool, 1, 1, "100").await;
+    insert_buy(&pool, 1, ListingId(1), "100").await;
     run_collection(
         &pool,
         &StubFetcher::failing("down"),
@@ -483,13 +493,13 @@ async fn api_fetch_replaces_errored_row_and_returns_it() {
     .await
     .unwrap_err();
 
-    let errored = db_get_one(&pool, 1, ymd(2026, 6, 5))
+    let errored = db_get_one(&pool, ListingId(1), ymd(2026, 6, 5))
         .await
         .unwrap()
         .unwrap();
     assert_eq!(errored.status, PriceStatus::Error);
 
-    let fetcher = StubFetcher::default().with_close(1, ymd(2026, 6, 5), "62.48", "AUD");
+    let fetcher = StubFetcher::default().with_close(ListingId(1), ymd(2026, 6, 5), "62.48", "AUD");
     let app = full_router(pool.clone(), fetcher);
     let (status, bytes) = post_json(
         &app,
@@ -503,7 +513,7 @@ async fn api_fetch_replaces_errored_row_and_returns_it() {
     assert_eq!(row.status, PriceStatus::Ok);
     assert_eq!(row.price, Some("62.48".parse().unwrap()));
 
-    let stored = db_get_one(&pool, 1, ymd(2026, 6, 5))
+    let stored = db_get_one(&pool, ListingId(1), ymd(2026, 6, 5))
         .await
         .unwrap()
         .unwrap();
@@ -555,11 +565,11 @@ async fn api_list_filters_by_listing_and_date_range_including_errors() {
     let pool = test_pool().await;
     insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
     insert_listing(&pool, 2, "ICE", "XNYS", "USD").await;
-    let market1 = load_market(&pool, 1).await.unwrap().unwrap();
-    let market2 = load_market(&pool, 2).await.unwrap().unwrap();
+    let market1 = load_market(&pool, ListingId(1)).await.unwrap().unwrap();
+    let market2 = load_market(&pool, ListingId(2)).await.unwrap().unwrap();
     let ok = StubFetcher::default()
-        .with_close(1, ymd(2026, 6, 4), "62.80", "AUD")
-        .with_close(1, ymd(2026, 6, 5), "61.24", "AUD");
+        .with_close(ListingId(1), ymd(2026, 6, 4), "62.80", "AUD")
+        .with_close(ListingId(1), ymd(2026, 6, 5), "61.24", "AUD");
     fetch_and_store(&pool, &ok, &market1, &[ymd(2026, 6, 4), ymd(2026, 6, 5)])
         .await
         .unwrap();
@@ -608,8 +618,14 @@ async fn api_list_filters_by_status() {
     let pool = test_pool().await;
     insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
     insert_listing(&pool, 2, "ICE", "XNYS", "USD").await;
-    async fn seed(pool: &SqlitePool, listing_id: i64, date: NaiveDate, price: &str, errored: bool) {
-        let row = crate::test_support::closing_price(listing_id, date).price(price);
+    async fn seed(
+        pool: &SqlitePool,
+        listing_id: ListingId,
+        date: NaiveDate,
+        price: &str,
+        errored: bool,
+    ) {
+        let row = crate::test_support::closing_price(listing_id.0, date).price(price);
         if errored {
             row.errored("no candle for the day").insert(pool).await;
         } else {
@@ -617,13 +633,13 @@ async fn api_list_filters_by_status() {
         }
     }
     // A mix across two listings and two days: four ok rows and three errored.
-    seed(&pool, 1, ymd(2026, 6, 4), "62.80", false).await;
-    seed(&pool, 1, ymd(2026, 6, 5), "61.24", false).await;
-    seed(&pool, 1, ymd(2026, 5, 1), "60.00", true).await;
-    seed(&pool, 1, ymd(2026, 5, 2), "60.00", true).await;
-    seed(&pool, 2, ymd(2026, 6, 5), "99.99", false).await;
-    seed(&pool, 2, ymd(2026, 5, 1), "99.00", false).await;
-    seed(&pool, 2, ymd(2026, 5, 2), "99.00", true).await;
+    seed(&pool, ListingId(1), ymd(2026, 6, 4), "62.80", false).await;
+    seed(&pool, ListingId(1), ymd(2026, 6, 5), "61.24", false).await;
+    seed(&pool, ListingId(1), ymd(2026, 5, 1), "60.00", true).await;
+    seed(&pool, ListingId(1), ymd(2026, 5, 2), "60.00", true).await;
+    seed(&pool, ListingId(2), ymd(2026, 6, 5), "99.99", false).await;
+    seed(&pool, ListingId(2), ymd(2026, 5, 1), "99.00", false).await;
+    seed(&pool, ListingId(2), ymd(2026, 5, 2), "99.00", true).await;
 
     let app = full_router(pool.clone(), StubFetcher::default());
     let get = |uri: &str| {

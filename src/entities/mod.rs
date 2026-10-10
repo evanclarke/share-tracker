@@ -379,6 +379,7 @@ pub(crate) fn filtered_list_routes() -> Vec<(&'static str, &'static [&'static st
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::infra::id::ListingId;
     use crate::test_support::{ApiClient, test_pool};
     use axum::http::StatusCode;
 
@@ -570,7 +571,7 @@ mod tests {
             &pool,
             &CorporateAction {
                 id: 1,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: ymd(2024, 3, 1),
                 kind: ActionKind::RightsIssue {
                     rights_units: dec("1"),

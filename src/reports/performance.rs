@@ -47,6 +47,7 @@ use crate::entities::trade::TradeType;
 use crate::infra::extract::Json;
 use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
+use crate::infra::id::ListingId;
 use axum::{Extension, Router, extract::State, routing::post};
 use chrono::{Months, NaiveDate};
 use rust_decimal::{Decimal, MathematicalOps};
@@ -57,7 +58,7 @@ use std::collections::{BTreeMap, HashMap};
 #[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize)]
 pub struct HoldingPerformance {
     /// `None` on the OVERALL row.
-    pub listing_id: Option<i64>,
+    pub listing_id: Option<ListingId>,
     /// The listing's ticker, or `"OVERALL"` on the portfolio-total row.
     pub ticker: String,
     /// `None` on the OVERALL row.
@@ -125,7 +126,7 @@ pub struct PerformanceRequest {
         default,
         deserialize_with = "crate::infra::decimal::strict_decimal_map"
     )]
-    pub prices: HashMap<i64, Decimal>,
+    pub prices: HashMap<ListingId, Decimal>,
     /// Valuation date for the supplied prices; flows after it are ignored.
     /// Defaults to today.
     #[serde(default)]
@@ -289,7 +290,7 @@ pub(crate) fn money_weighted_annual_return(flows: &[(NaiveDate, Decimal)]) -> Op
 /// Identifies which holding a performance row is for. The portfolio-wide
 /// `OVERALL` row carries no listing or account.
 struct RowKey {
-    listing_id: Option<i64>,
+    listing_id: Option<ListingId>,
     ticker: String,
     holding_account_id: Option<i64>,
 }
@@ -349,9 +350,9 @@ fn build_row(
 /// return) — the trade/income processing (internal-movement exclusion,
 /// AUD conversion, carried cost) needs to happen exactly once either way.
 struct Accumulated {
-    holdings: BTreeMap<(i64, i64), Acc>,
+    holdings: BTreeMap<(ListingId, i64), Acc>,
     overall: Acc,
-    tickers: HashMap<i64, String>,
+    tickers: HashMap<ListingId, String>,
 }
 
 /// The accumulation on the caller's own connection, for a caller that already
@@ -400,7 +401,7 @@ async fn accumulate_on(
     // not one DB round-trip each
     let fx = FxRates::load(&mut *conn).await?;
 
-    let mut holdings: BTreeMap<(i64, i64), Acc> = BTreeMap::new();
+    let mut holdings: BTreeMap<(ListingId, i64), Acc> = BTreeMap::new();
     let mut overall = Acc::default();
     // Carried AUD cost per internal-movement group: what the replacement
     // parcels took with them, which is what the closing Sell is worth.
@@ -555,7 +556,7 @@ pub(crate) async fn overall_flows_on(
 
 pub async fn db_performance(
     pool: &SqlitePool,
-    prices: &HashMap<i64, Decimal>,
+    prices: &HashMap<ListingId, Decimal>,
     as_of: NaiveDate,
 ) -> Result<Vec<HoldingPerformance>, sqlx::Error> {
     // One read transaction: every input comes from the same snapshot.
@@ -571,7 +572,7 @@ pub async fn db_performance(
 /// `stale = 0` (SCENARIOS X-a).
 pub async fn db_performance_on(
     conn: &mut sqlx::SqliteConnection,
-    prices: &HashMap<i64, Decimal>,
+    prices: &HashMap<ListingId, Decimal>,
     as_of: NaiveDate,
 ) -> Result<Vec<HoldingPerformance>, sqlx::Error> {
     let Some(Accumulated {
@@ -725,7 +726,7 @@ mod tests {
         pool: &SqlitePool,
         id: i64,
         trade_type: trade::TradeType,
-        listing_id: i64,
+        listing_id: ListingId,
         account_id: i64,
         date: NaiveDate,
         qty: Decimal,
@@ -733,7 +734,7 @@ mod tests {
         currency: &str,
         fx_rate: Decimal,
     ) {
-        test_support::trade(id, listing_id, trade_type)
+        test_support::trade(id, listing_id.0, trade_type)
             .account(account_id)
             .date(date)
             .qty(qty)
@@ -749,7 +750,7 @@ mod tests {
             pool,
             id,
             trade::TradeType::Buy,
-            listing,
+            ListingId(listing),
             1,
             date,
             Decimal::from(qty),
@@ -765,7 +766,7 @@ mod tests {
             pool,
             id,
             trade::TradeType::Sell,
-            listing,
+            ListingId(listing),
             1,
             date,
             Decimal::from(qty),
@@ -784,17 +785,17 @@ mod tests {
     async fn insert_income(
         pool: &SqlitePool,
         id: i64,
-        listing_id: i64,
+        listing_id: ListingId,
         date_paid: NaiveDate,
         amount: i64,
     ) {
-        test_support::income(id, listing_id, date_paid)
+        test_support::income(id, listing_id.0, date_paid)
             .with(|i| i.unfranked_amount = Decimal::from(amount))
             .insert(pool)
             .await;
     }
 
-    fn price_map(listing_id: i64, price: &str) -> HashMap<i64, Decimal> {
+    fn price_map(listing_id: ListingId, price: &str) -> HashMap<ListingId, Decimal> {
         HashMap::from([(listing_id, price.parse().unwrap())])
     }
 
@@ -814,14 +815,17 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "VAS", "XASX", "AUD").await;
         buy(&pool, 1, 1, d(2024, 1, 2), 100, 10).await; // invested 1,000
-        insert_income(&pool, 1, 1, d(2024, 6, 30), 50).await;
+        insert_income(&pool, 1, ListingId(1), d(2024, 6, 30), 50).await;
 
-        let rows = db_performance(&pool, &price_map(1, "12"), d(2024, 12, 31))
+        let rows = db_performance(&pool, &price_map(ListingId(1), "12"), d(2024, 12, 31))
             .await
             .unwrap();
         assert_eq!(rows.len(), 2);
         let h = &rows[0];
-        assert_eq!((h.listing_id, h.holding_account_id), (Some(1), Some(1)));
+        assert_eq!(
+            (h.listing_id.map(|l| l.0), h.holding_account_id),
+            (Some(1), Some(1))
+        );
         assert_eq!(h.ticker, "VAS");
         assert_eq!(h.quantity_held, Some(Decimal::from(100)));
         assert_eq!(h.invested, Decimal::from(1000));
@@ -853,7 +857,7 @@ mod tests {
         insert_listing(&pool, 1, "VAS", "XASX", "AUD").await;
         buy(&pool, 1, 1, d(2023, 1, 3), 100, 10).await;
 
-        let rows = db_performance(&pool, &price_map(1, "11"), d(2024, 1, 3))
+        let rows = db_performance(&pool, &price_map(ListingId(1), "11"), d(2024, 1, 3))
             .await
             .unwrap();
         assert_eq!(rows[0].money_weighted_return_pct, Some(Decimal::from(10)));
@@ -982,10 +986,10 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "VAS", "XASX", "AUD").await;
         buy(&pool, 1, 1, d(2022, 1, 4), 100, 10).await;
-        insert_income(&pool, 1, 1, d(2022, 6, 30), 40).await; // outside the window
-        insert_income(&pool, 2, 1, d(2024, 6, 30), 60).await; // inside
+        insert_income(&pool, 1, ListingId(1), d(2022, 6, 30), 40).await; // outside the window
+        insert_income(&pool, 2, ListingId(1), d(2024, 6, 30), 60).await; // inside
 
-        let rows = db_performance(&pool, &price_map(1, "12"), d(2024, 12, 31))
+        let rows = db_performance(&pool, &price_map(ListingId(1), "12"), d(2024, 12, 31))
             .await
             .unwrap();
         let h = &rows[0];
@@ -1017,7 +1021,7 @@ mod tests {
             &pool,
             1,
             &transfer::TransferBody {
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: d(2023, 7, 1),
                 from_account_id: 1,
                 to_account_id: 2,
@@ -1033,14 +1037,17 @@ mod tests {
         .await
         .unwrap();
 
-        let rows = db_performance(&pool, &price_map(1, "15"), d(2024, 1, 2))
+        let rows = db_performance(&pool, &price_map(ListingId(1), "15"), d(2024, 1, 2))
             .await
             .unwrap();
         assert_eq!(rows.len(), 3);
 
         // Source holding: closed at the carried cost — zero return.
         let src = &rows[0];
-        assert_eq!((src.listing_id, src.holding_account_id), (Some(1), Some(1)));
+        assert_eq!(
+            (src.listing_id.map(|l| l.0), src.holding_account_id),
+            (Some(1), Some(1))
+        );
         assert_eq!(src.quantity_held, Some(Decimal::ZERO));
         assert_eq!(src.invested, Decimal::from(1000));
         assert_eq!(src.proceeds, Decimal::from(1000));
@@ -1048,7 +1055,10 @@ mod tests {
 
         // Destination holding: carries the cost base and shows the gain.
         let dst = &rows[1];
-        assert_eq!((dst.listing_id, dst.holding_account_id), (Some(1), Some(2)));
+        assert_eq!(
+            (dst.listing_id.map(|l| l.0), dst.holding_account_id),
+            (Some(1), Some(2))
+        );
         assert_eq!(dst.quantity_held, Some(Decimal::from(100)));
         assert_eq!(dst.invested, Decimal::from(1000));
         assert_eq!(dst.market_value, Some(Decimal::from(1500)));
@@ -1082,10 +1092,10 @@ mod tests {
             &pool,
             &corporate_action::CorporateAction {
                 id: 10,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: d(2023, 7, 1),
                 kind: corporate_action::ActionKind::ScripForScrip {
-                    scrip_listing_id: 2,
+                    scrip_listing_id: ListingId(2),
                     scrip_new_units: Decimal::ONE,
                     scrip_old_units: Decimal::ONE,
                     scrip_cash_per_unit: Some(Decimal::from(2)),
@@ -1098,20 +1108,26 @@ mod tests {
         .unwrap();
         scrip_exchange::db_exchange(&pool, 10).await.unwrap();
 
-        let rows = db_performance(&pool, &price_map(2, "12"), d(2024, 1, 2))
+        let rows = db_performance(&pool, &price_map(ListingId(2), "12"), d(2024, 1, 2))
             .await
             .unwrap();
         assert_eq!(rows.len(), 3);
 
         // Source holding: exits at the carried $900 plus the $200 cash.
         let src = &rows[0];
-        assert_eq!((src.listing_id, src.holding_account_id), (Some(1), Some(1)));
+        assert_eq!(
+            (src.listing_id.map(|l| l.0), src.holding_account_id),
+            (Some(1), Some(1))
+        );
         assert_eq!(src.invested, Decimal::from(1000));
         assert_eq!(src.proceeds, Decimal::from(1100));
 
         // Replacement holding: invested at the carried cost only.
         let dst = &rows[1];
-        assert_eq!((dst.listing_id, dst.holding_account_id), (Some(2), Some(1)));
+        assert_eq!(
+            (dst.listing_id.map(|l| l.0), dst.holding_account_id),
+            (Some(2), Some(1))
+        );
         assert_eq!(dst.invested, Decimal::from(900));
         assert_eq!(dst.market_value, Some(Decimal::from(1200)));
 
@@ -1136,7 +1152,7 @@ mod tests {
             &pool,
             1,
             trade::TradeType::Buy,
-            1,
+            ListingId(1),
             1,
             d(2024, 1, 2),
             Decimal::from(100),
@@ -1146,7 +1162,7 @@ mod tests {
         )
         .await;
 
-        let rows = db_performance(&pool, &price_map(1, "6"), d(2024, 12, 31))
+        let rows = db_performance(&pool, &price_map(ListingId(1), "6"), d(2024, 12, 31))
             .await
             .unwrap();
         let h = &rows[0];
@@ -1165,10 +1181,10 @@ mod tests {
         buy(&pool, 1, 1, d(2024, 1, 2), 100, 10).await;
         sell(&pool, 2, 1, d(2024, 6, 3), 100, 15).await;
         allocate(&pool, 1, 2, 1, 100).await;
-        insert_income(&pool, 1, 1, d(2024, 5, 1), 50).await;
+        insert_income(&pool, 1, ListingId(1), d(2024, 5, 1), 50).await;
 
         // As at 31 Mar the sale and the May distribution haven't happened.
-        let rows = db_performance(&pool, &price_map(1, "12"), d(2024, 3, 31))
+        let rows = db_performance(&pool, &price_map(ListingId(1), "12"), d(2024, 3, 31))
             .await
             .unwrap();
         let h = &rows[0];
@@ -1233,7 +1249,11 @@ mod tests {
             .await;
         assert_eq!(resp.status, StatusCode::OK);
         let rows: Vec<HoldingPerformance> = resp.json();
-        let by_id = |id: i64| rows.iter().find(|r| r.listing_id == Some(id)).unwrap();
+        let by_id = |id: i64| {
+            rows.iter()
+                .find(|r| r.listing_id == Some(ListingId(id)))
+                .unwrap()
+        };
         // Listing 1: live-valued at 12 → market value 1,200, as-of carried.
         assert_eq!(by_id(1).market_value, Some(Decimal::from(1200)));
         assert_eq!(

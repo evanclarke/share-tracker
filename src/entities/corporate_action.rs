@@ -171,6 +171,8 @@ pub use crate::domain::adjustments::split_ratio;
 #[cfg(test)]
 use crate::infra::http::Upsert;
 #[cfg(test)]
+use crate::infra::id::ListingId;
+#[cfg(test)]
 use axum::http::StatusCode;
 #[cfg(test)]
 use chrono::NaiveDate;
@@ -200,7 +202,7 @@ mod tests {
             .await;
     }
 
-    fn roc(id: i64, listing_id: i64, date: NaiveDate, amount: &str) -> CorporateAction {
+    fn roc(id: i64, listing_id: ListingId, date: NaiveDate, amount: &str) -> CorporateAction {
         CorporateAction {
             id,
             listing_id,
@@ -216,7 +218,7 @@ mod tests {
     /// [`roc`] carrying the record date that fixed entitlement to it.
     fn roc_with_record(
         id: i64,
-        listing_id: i64,
+        listing_id: ListingId,
         date: NaiveDate,
         amount: &str,
         record: NaiveDate,
@@ -231,7 +233,13 @@ mod tests {
         }
     }
 
-    fn split(id: i64, listing_id: i64, date: NaiveDate, new: &str, old: &str) -> CorporateAction {
+    fn split(
+        id: i64,
+        listing_id: ListingId,
+        date: NaiveDate,
+        new: &str,
+        old: &str,
+    ) -> CorporateAction {
         CorporateAction {
             id,
             listing_id,
@@ -245,7 +253,7 @@ mod tests {
 
     fn bonus(
         id: i64,
-        listing_id: i64,
+        listing_id: ListingId,
         date: NaiveDate,
         units: &str,
         held: &str,
@@ -263,7 +271,7 @@ mod tests {
 
     fn rights(
         id: i64,
-        listing_id: i64,
+        listing_id: ListingId,
         date: NaiveDate,
         units: &str,
         held: &str,
@@ -285,7 +293,7 @@ mod tests {
 
     fn buyback(
         id: i64,
-        listing_id: i64,
+        listing_id: ListingId,
         date: NaiveDate,
         price: &str,
         dividend: &str,
@@ -308,8 +316,8 @@ mod tests {
 
     fn scrip(
         id: i64,
-        listing_id: i64,
-        scrip_listing_id: i64,
+        listing_id: ListingId,
+        scrip_listing_id: ListingId,
         date: NaiveDate,
         new: &str,
         old: &str,
@@ -331,8 +339,8 @@ mod tests {
 
     fn demerger(
         id: i64,
-        listing_id: i64,
-        demerger_listing_id: i64,
+        listing_id: ListingId,
+        demerger_listing_id: ListingId,
         date: NaiveDate,
         new: &str,
         held: &str,
@@ -359,8 +367,8 @@ mod tests {
     /// provenance) that the price re-base derives its factor from.
     fn demerger_with_close(
         id: i64,
-        listing_id: i64,
-        demerger_listing_id: i64,
+        listing_id: ListingId,
+        demerger_listing_id: ListingId,
         date: NaiveDate,
         close_date: NaiveDate,
         close: &str,
@@ -397,7 +405,7 @@ mod tests {
     async fn db_insert_and_retrieve_preserves_precision() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "RAP").await;
-        db_upsert(&pool, &roc(1, 1, d(2024, 11, 30), "0.505"))
+        db_upsert(&pool, &roc(1, ListingId(1), d(2024, 11, 30), "0.505"))
             .await
             .unwrap();
 
@@ -419,7 +427,7 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "SPL").await;
         // An uneven ratio (e.g. a 7-for-2 split) must round-trip exactly.
-        db_upsert(&pool, &split(1, 1, d(2024, 11, 30), "7", "2"))
+        db_upsert(&pool, &split(1, ListingId(1), d(2024, 11, 30), "7", "2"))
             .await
             .unwrap();
 
@@ -438,7 +446,7 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "BON").await;
         // An uneven ratio (e.g. 3 bonus shares per 7 held) must round-trip exactly.
-        db_upsert(&pool, &bonus(1, 1, d(2024, 11, 30), "3", "7"))
+        db_upsert(&pool, &bonus(1, ListingId(1), d(2024, 11, 30), "3", "7"))
             .await
             .unwrap();
 
@@ -457,9 +465,12 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "RTS").await;
         // An uneven ratio and a sub-cent price must round-trip exactly.
-        db_upsert(&pool, &rights(1, 1, d(2024, 11, 30), "3", "7", "1.805"))
-            .await
-            .unwrap();
+        db_upsert(
+            &pool,
+            &rights(1, ListingId(1), d(2024, 11, 30), "3", "7", "1.805"),
+        )
+        .await
+        .unwrap();
 
         let got = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(
@@ -483,7 +494,7 @@ mod tests {
             &pool,
             &buyback(
                 1,
-                1,
+                ListingId(1),
                 d(2024, 11, 30),
                 "9.60",
                 "1.405",
@@ -509,7 +520,7 @@ mod tests {
         // The market value is optional: absent round-trips as None.
         db_upsert(
             &pool,
-            &buyback(2, 1, d(2024, 12, 31), "5.00", "0", "0", None),
+            &buyback(2, ListingId(1), d(2024, 12, 31), "5.00", "0", "0", None),
         )
         .await
         .unwrap();
@@ -530,16 +541,19 @@ mod tests {
         insert_listing(&pool, 2, "NEW").await;
         // An uneven exchange ratio (e.g. 3 new shares per 7 old) must
         // round-trip exactly.
-        db_upsert(&pool, &scrip(1, 1, 2, d(2024, 11, 30), "3", "7"))
-            .await
-            .unwrap();
+        db_upsert(
+            &pool,
+            &scrip(1, ListingId(1), ListingId(2), d(2024, 11, 30), "3", "7"),
+        )
+        .await
+        .unwrap();
 
         let got = db_get(&pool, 1).await.unwrap().unwrap();
         assert_eq!(got.listing_id, 1);
         assert_eq!(
             got.kind,
             ActionKind::ScripForScrip {
-                scrip_listing_id: 2,
+                scrip_listing_id: ListingId(2),
                 scrip_new_units: Decimal::from(3),
                 scrip_old_units: Decimal::from(7),
                 scrip_cash_per_unit: None,
@@ -558,7 +572,15 @@ mod tests {
         // round-trip exactly.
         db_upsert(
             &pool,
-            &demerger(1, 1, 2, d(2024, 11, 30), "1", "5", "5.063"),
+            &demerger(
+                1,
+                ListingId(1),
+                ListingId(2),
+                d(2024, 11, 30),
+                "1",
+                "5",
+                "5.063",
+            ),
         )
         .await
         .unwrap();
@@ -568,7 +590,7 @@ mod tests {
         assert_eq!(
             got.kind,
             ActionKind::Demerger {
-                demerger_listing_id: 2,
+                demerger_listing_id: ListingId(2),
                 demerger_new_units: Decimal::ONE,
                 demerger_held_units: Decimal::from(5),
                 demerger_cost_base_pct: "5.063".parse().unwrap(),
@@ -590,13 +612,26 @@ mod tests {
         insert_listing(&pool, 2, "DEM").await;
         db_upsert(
             &pool,
-            &demerger(1, 1, 2, d(2024, 11, 30), "1", "5", "5.063"),
+            &demerger(
+                1,
+                ListingId(1),
+                ListingId(2),
+                d(2024, 11, 30),
+                "1",
+                "5",
+                "5.063",
+            ),
         )
         .await
         .unwrap();
 
         assert!(db_share_split_events(&pool).await.unwrap().is_empty());
-        assert!(db_splits_for_listing(&pool, 1).await.unwrap().is_empty());
+        assert!(
+            db_splits_for_listing(&pool, ListingId(1))
+                .await
+                .unwrap()
+                .is_empty()
+        );
         assert!(db_return_of_capital_events(&pool).await.unwrap().is_empty());
     }
 
@@ -649,7 +684,14 @@ mod tests {
 
         db_upsert(
             &pool,
-            &demerger_with_close(1, 1, 2, d(2023, 10, 3), d(2023, 10, 2), "24.90"),
+            &demerger_with_close(
+                1,
+                ListingId(1),
+                ListingId(2),
+                d(2023, 10, 3),
+                d(2023, 10, 2),
+                "24.90",
+            ),
         )
         .await
         .unwrap();
@@ -661,7 +703,10 @@ mod tests {
              single unit or a single dollar of cost base"
         );
         assert!(
-            db_splits_for_listing(&pool, 1).await.unwrap().is_empty(),
+            db_splits_for_listing(&pool, ListingId(1))
+                .await
+                .unwrap()
+                .is_empty(),
             "the quantity re-basing set never sees a demerger"
         );
         assert!(db_share_split_events(&pool).await.unwrap().is_empty());
@@ -673,7 +718,9 @@ mod tests {
 
         // The remaining 1000 units still fit a sale of exactly 1000 — the
         // allocation-capacity invariant a corporate-action write re-checks.
-        let statements = db_demerger_price_statements(&pool, 1).await.unwrap();
+        let statements = db_demerger_price_statements(&pool, ListingId(1))
+            .await
+            .unwrap();
         assert_eq!(statements.len(), 1, "…while the price side does see it");
         assert_eq!(statements[0].close_date, d(2023, 10, 2));
         assert_eq!(statements[0].close_price, "24.90".parse().unwrap());
@@ -688,12 +735,20 @@ mod tests {
         insert_listing(&pool, 2, "DEM").await;
         db_upsert(
             &pool,
-            &demerger(1, 1, 2, d(2024, 11, 30), "1", "5", "5.063"),
+            &demerger(
+                1,
+                ListingId(1),
+                ListingId(2),
+                d(2024, 11, 30),
+                "1",
+                "5",
+                "5.063",
+            ),
         )
         .await
         .unwrap();
         assert!(
-            db_demerger_price_statements(&pool, 1)
+            db_demerger_price_statements(&pool, ListingId(1))
                 .await
                 .unwrap()
                 .is_empty()
@@ -701,15 +756,24 @@ mod tests {
 
         db_upsert(
             &pool,
-            &demerger_with_close(2, 1, 2, d(2025, 6, 2), d(2025, 5, 30), "12.5"),
+            &demerger_with_close(
+                2,
+                ListingId(1),
+                ListingId(2),
+                d(2025, 6, 2),
+                d(2025, 5, 30),
+                "12.5",
+            ),
         )
         .await
         .unwrap();
-        let statements = db_demerger_price_statements(&pool, 1).await.unwrap();
+        let statements = db_demerger_price_statements(&pool, ListingId(1))
+            .await
+            .unwrap();
         assert_eq!(statements.len(), 1);
         assert_eq!(statements[0].date, d(2025, 6, 2));
         assert!(
-            db_demerger_price_statements(&pool, 2)
+            db_demerger_price_statements(&pool, ListingId(2))
                 .await
                 .unwrap()
                 .is_empty()
@@ -744,12 +808,20 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "OLD").await;
         insert_listing(&pool, 2, "NEW").await;
-        db_upsert(&pool, &scrip(1, 1, 2, d(2024, 11, 30), "2", "1"))
-            .await
-            .unwrap();
+        db_upsert(
+            &pool,
+            &scrip(1, ListingId(1), ListingId(2), d(2024, 11, 30), "2", "1"),
+        )
+        .await
+        .unwrap();
 
         assert!(db_share_split_events(&pool).await.unwrap().is_empty());
-        assert!(db_splits_for_listing(&pool, 1).await.unwrap().is_empty());
+        assert!(
+            db_splits_for_listing(&pool, ListingId(1))
+                .await
+                .unwrap()
+                .is_empty()
+        );
         assert!(db_return_of_capital_events(&pool).await.unwrap().is_empty());
     }
 
@@ -780,13 +852,26 @@ mod tests {
         insert_listing(&pool, 1, "BBK").await;
         db_upsert(
             &pool,
-            &buyback(1, 1, d(2024, 11, 30), "9.60", "1.40", "0.60", Some("10.20")),
+            &buyback(
+                1,
+                ListingId(1),
+                d(2024, 11, 30),
+                "9.60",
+                "1.40",
+                "0.60",
+                Some("10.20"),
+            ),
         )
         .await
         .unwrap();
 
         assert!(db_share_split_events(&pool).await.unwrap().is_empty());
-        assert!(db_splits_for_listing(&pool, 1).await.unwrap().is_empty());
+        assert!(
+            db_splits_for_listing(&pool, ListingId(1))
+                .await
+                .unwrap()
+                .is_empty()
+        );
         assert!(db_return_of_capital_events(&pool).await.unwrap().is_empty());
     }
 
@@ -796,12 +881,20 @@ mod tests {
     async fn db_rights_issue_is_not_a_split_or_payment_event() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "RTS").await;
-        db_upsert(&pool, &rights(1, 1, d(2024, 11, 30), "1", "4", "1.80"))
-            .await
-            .unwrap();
+        db_upsert(
+            &pool,
+            &rights(1, ListingId(1), d(2024, 11, 30), "1", "4", "1.80"),
+        )
+        .await
+        .unwrap();
 
         assert!(db_share_split_events(&pool).await.unwrap().is_empty());
-        assert!(db_splits_for_listing(&pool, 1).await.unwrap().is_empty());
+        assert!(
+            db_splits_for_listing(&pool, ListingId(1))
+                .await
+                .unwrap()
+                .is_empty()
+        );
         assert!(db_return_of_capital_events(&pool).await.unwrap().is_empty());
     }
 
@@ -812,18 +905,18 @@ mod tests {
     async fn db_return_of_capital_record_date_round_trips() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "RAP").await;
-        let action = roc_with_record(1, 1, d(2025, 3, 1), "0.50", d(2025, 2, 10));
+        let action = roc_with_record(1, ListingId(1), d(2025, 3, 1), "0.50", d(2025, 2, 10));
         db_upsert(&pool, &action).await.unwrap();
 
         assert_eq!(db_get(&pool, 1).await.unwrap().unwrap().kind, action.kind);
         let events = db_return_of_capital_events(&pool).await.unwrap();
-        assert_eq!(events[&1][0].record_date, Some(d(2025, 2, 10)));
+        assert_eq!(events[&ListingId(1)][0].record_date, Some(d(2025, 2, 10)));
 
-        db_upsert(&pool, &roc(1, 1, d(2025, 3, 1), "0.50"))
+        db_upsert(&pool, &roc(1, ListingId(1), d(2025, 3, 1), "0.50"))
             .await
             .unwrap();
         let events = db_return_of_capital_events(&pool).await.unwrap();
-        assert_eq!(events[&1][0].record_date, None);
+        assert_eq!(events[&ListingId(1)][0].record_date, None);
     }
 
     /// The record date fixes entitlement to *this* payment, so it can never
@@ -834,10 +927,10 @@ mod tests {
     async fn db_check_rejects_an_impossible_record_date() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "RAP").await;
-        db_upsert(&pool, &roc(1, 1, d(2025, 3, 1), "0.50"))
+        db_upsert(&pool, &roc(1, ListingId(1), d(2025, 3, 1), "0.50"))
             .await
             .unwrap();
-        db_upsert(&pool, &split(2, 1, d(2025, 3, 1), "2", "1"))
+        db_upsert(&pool, &split(2, ListingId(1), d(2025, 3, 1), "2", "1"))
             .await
             .unwrap();
 
@@ -863,23 +956,26 @@ mod tests {
     async fn db_upsert_updates_existing() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "RAP").await;
-        db_upsert(&pool, &roc(1, 1, d(2024, 11, 30), "0.50"))
+        db_upsert(&pool, &roc(1, ListingId(1), d(2024, 11, 30), "0.50"))
             .await
             .unwrap();
-        db_upsert(&pool, &roc(1, 1, d(2024, 12, 31), "0.75"))
+        db_upsert(&pool, &roc(1, ListingId(1), d(2024, 12, 31), "0.75"))
             .await
             .unwrap();
 
         let all = db_list(&pool).await.unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].date, d(2024, 12, 31));
-        assert_eq!(all[0].kind, roc(1, 1, d(2024, 12, 31), "0.75").kind);
+        assert_eq!(
+            all[0].kind,
+            roc(1, ListingId(1), d(2024, 12, 31), "0.75").kind
+        );
     }
 
     #[tokio::test]
     async fn db_listing_fk_enforced() {
         let pool = test_pool().await;
-        let err = db_upsert(&pool, &roc(1, 999, d(2024, 11, 30), "0.50")).await;
+        let err = db_upsert(&pool, &roc(1, ListingId(999), d(2024, 11, 30), "0.50")).await;
         assert!(err.is_err(), "unknown listing FK should be rejected");
     }
 
@@ -1035,21 +1131,21 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "RAP").await;
         insert_listing(&pool, 2, "XYZ").await;
-        db_upsert(&pool, &roc(1, 1, d(2025, 3, 1), "0.30"))
+        db_upsert(&pool, &roc(1, ListingId(1), d(2025, 3, 1), "0.30"))
             .await
             .unwrap();
-        db_upsert(&pool, &roc(2, 1, d(2024, 11, 30), "0.50"))
+        db_upsert(&pool, &roc(2, ListingId(1), d(2024, 11, 30), "0.50"))
             .await
             .unwrap();
-        db_upsert(&pool, &roc(3, 2, d(2024, 6, 1), "1.00"))
+        db_upsert(&pool, &roc(3, ListingId(2), d(2024, 6, 1), "1.00"))
             .await
             .unwrap();
 
         let events = db_return_of_capital_events(&pool).await.unwrap();
         assert_eq!(events.len(), 2);
-        let l1: Vec<NaiveDate> = events[&1].iter().map(|e| e.date).collect();
+        let l1: Vec<NaiveDate> = events[&ListingId(1)].iter().map(|e| e.date).collect();
         assert_eq!(l1, vec![d(2024, 11, 30), d(2025, 3, 1)]);
-        assert_eq!(events[&2].len(), 1);
+        assert_eq!(events[&ListingId(2)].len(), 1);
     }
 
     #[tokio::test]
@@ -1057,27 +1153,27 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "SPL").await;
         insert_listing(&pool, 2, "XYZ").await;
-        db_upsert(&pool, &split(1, 1, d(2025, 3, 1), "2", "1"))
+        db_upsert(&pool, &split(1, ListingId(1), d(2025, 3, 1), "2", "1"))
             .await
             .unwrap();
-        db_upsert(&pool, &split(2, 1, d(2024, 11, 30), "1", "10"))
+        db_upsert(&pool, &split(2, ListingId(1), d(2024, 11, 30), "1", "10"))
             .await
             .unwrap();
-        db_upsert(&pool, &split(3, 2, d(2024, 6, 1), "3", "1"))
+        db_upsert(&pool, &split(3, ListingId(2), d(2024, 6, 1), "3", "1"))
             .await
             .unwrap();
         // A ReturnOfCapital on the same listing must not appear as a split.
-        db_upsert(&pool, &roc(4, 1, d(2024, 6, 1), "0.50"))
+        db_upsert(&pool, &roc(4, ListingId(1), d(2024, 6, 1), "0.50"))
             .await
             .unwrap();
 
         let events = db_share_split_events(&pool).await.unwrap();
         assert_eq!(events.len(), 2);
-        let l1: Vec<NaiveDate> = events[&1].iter().map(|e| e.date).collect();
+        let l1: Vec<NaiveDate> = events[&ListingId(1)].iter().map(|e| e.date).collect();
         assert_eq!(l1, vec![d(2024, 11, 30), d(2025, 3, 1)]);
-        assert_eq!(events[&2].len(), 1);
+        assert_eq!(events[&ListingId(2)].len(), 1);
 
-        let for_listing = db_splits_for_listing(&pool, 1).await.unwrap();
+        let for_listing = db_splits_for_listing(&pool, ListingId(1)).await.unwrap();
         assert_eq!(for_listing.len(), 2);
         assert_eq!(for_listing[0].date, d(2024, 11, 30));
     }
@@ -1089,20 +1185,20 @@ mod tests {
     async fn db_split_events_include_bonus_issues_as_equivalent_splits() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "BON").await;
-        db_upsert(&pool, &bonus(1, 1, d(2025, 3, 1), "1", "10"))
+        db_upsert(&pool, &bonus(1, ListingId(1), d(2025, 3, 1), "1", "10"))
             .await
             .unwrap();
         // A real split on the same listing interleaves in date order…
-        db_upsert(&pool, &split(2, 1, d(2024, 11, 30), "2", "1"))
+        db_upsert(&pool, &split(2, ListingId(1), d(2024, 11, 30), "2", "1"))
             .await
             .unwrap();
         // …and a ReturnOfCapital never appears as a re-basing event.
-        db_upsert(&pool, &roc(3, 1, d(2024, 6, 1), "0.50"))
+        db_upsert(&pool, &roc(3, ListingId(1), d(2024, 6, 1), "0.50"))
             .await
             .unwrap();
 
         let events = db_share_split_events(&pool).await.unwrap();
-        let l1 = &events[&1];
+        let l1 = &events[&ListingId(1)];
         assert_eq!(l1.len(), 2);
         assert_eq!(l1[0].date, d(2024, 11, 30));
         assert_eq!(
@@ -1115,7 +1211,7 @@ mod tests {
             (Decimal::from(11), Decimal::from(10))
         );
 
-        let for_listing = db_splits_for_listing(&pool, 1).await.unwrap();
+        let for_listing = db_splits_for_listing(&pool, ListingId(1)).await.unwrap();
         assert_eq!(for_listing.len(), 2);
         assert_eq!(for_listing[1].new_units, Decimal::from(11));
         assert_eq!(for_listing[1].old_units, Decimal::from(10));
@@ -1130,24 +1226,27 @@ mod tests {
     async fn db_split_events_carry_each_actions_announced_terms() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "BON").await;
-        db_upsert(&pool, &split(1, 1, d(2024, 11, 30), "2", "1"))
+        db_upsert(&pool, &split(1, ListingId(1), d(2024, 11, 30), "2", "1"))
             .await
             .unwrap();
-        db_upsert(&pool, &bonus(2, 1, d(2025, 3, 1), "1", "10"))
+        db_upsert(&pool, &bonus(2, ListingId(1), d(2025, 3, 1), "1", "10"))
             .await
             .unwrap();
         // new < old: a consolidation, announced in the same new-for-old terms.
-        db_upsert(&pool, &split(3, 1, d(2025, 6, 1), "1", "2"))
+        db_upsert(&pool, &split(3, ListingId(1), d(2025, 6, 1), "1", "2"))
             .await
             .unwrap();
         // Terms typed with a scale were still announced as "2-for-1".
-        db_upsert(&pool, &split(4, 1, d(2025, 9, 1), "2.00", "1.00"))
-            .await
-            .unwrap();
+        db_upsert(
+            &pool,
+            &split(4, ListingId(1), d(2025, 9, 1), "2.00", "1.00"),
+        )
+        .await
+        .unwrap();
 
         for events in [
-            db_splits_for_listing(&pool, 1).await.unwrap(),
-            db_share_split_events(&pool).await.unwrap()[&1].clone(),
+            db_splits_for_listing(&pool, ListingId(1)).await.unwrap(),
+            db_share_split_events(&pool).await.unwrap()[&ListingId(1)].clone(),
         ] {
             let labels: Vec<String> = events.iter().map(|e| e.terms.label()).collect();
             assert_eq!(
@@ -1606,7 +1705,7 @@ mod tests {
         let resp = client(&pool).get("/corporate_actions/1").await;
         assert_eq!(resp.status, StatusCode::OK);
         let got: CorporateAction = resp.json();
-        assert_eq!(got.kind, roc(1, 1, d(2024, 11, 30), "0.50").kind);
+        assert_eq!(got.kind, roc(1, ListingId(1), d(2024, 11, 30), "0.50").kind);
 
         let resp = client(&pool).get("/corporate_actions").await;
         assert_eq!(resp.status, StatusCode::OK);
@@ -2033,7 +2132,7 @@ mod tests {
         assert_eq!(
             got.kind,
             ActionKind::ScripForScrip {
-                scrip_listing_id: 2,
+                scrip_listing_id: ListingId(2),
                 scrip_new_units: Decimal::from(2),
                 scrip_old_units: Decimal::ONE,
                 scrip_cash_per_unit: None,
@@ -2065,7 +2164,7 @@ mod tests {
         assert_eq!(
             got.kind,
             ActionKind::ScripForScrip {
-                scrip_listing_id: 2,
+                scrip_listing_id: ListingId(2),
                 scrip_new_units: Decimal::ONE,
                 scrip_old_units: Decimal::ONE,
                 scrip_cash_per_unit: Some("10.005".parse().unwrap()),
@@ -2211,7 +2310,7 @@ mod tests {
         assert_eq!(
             got.kind,
             ActionKind::Demerger {
-                demerger_listing_id: 2,
+                demerger_listing_id: ListingId(2),
                 demerger_new_units: Decimal::ONE,
                 demerger_held_units: Decimal::from(5),
                 demerger_cost_base_pct: "5.063".parse().unwrap(),
@@ -2334,7 +2433,7 @@ mod tests {
         assert_eq!(
             db_get(&pool, 1).await.unwrap().unwrap().kind,
             ActionKind::Demerger {
-                demerger_listing_id: 2,
+                demerger_listing_id: ListingId(2),
                 demerger_new_units: Decimal::ONE,
                 demerger_held_units: Decimal::ONE,
                 demerger_cost_base_pct: Decimal::from(36),
@@ -2392,7 +2491,7 @@ mod tests {
                 &pool,
                 &CorporateAction {
                     id,
-                    listing_id: 1,
+                    listing_id: ListingId(1),
                     date: d(2025, 3, 31),
                     kind: ActionKind::WorthlessShares {
                         worthless_event: event,
@@ -2422,7 +2521,7 @@ mod tests {
             &pool,
             &CorporateAction {
                 id: 1,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: d(2025, 3, 31),
                 kind: ActionKind::WorthlessShares {
                     worthless_event: WorthlessEvent::G3Declaration,
@@ -2536,7 +2635,7 @@ mod tests {
         let got: CorporateAction = resp.json();
         assert_eq!(
             got.kind,
-            roc_with_record(1, 1, d(2025, 3, 1), "0.50", d(2025, 2, 10)).kind
+            roc_with_record(1, ListingId(1), d(2025, 3, 1), "0.50", d(2025, 2, 10)).kind
         );
         let raw: serde_json::Value = client(&pool).get("/corporate_actions/1").await.json();
         assert_eq!(raw["record_date"], "2025-02-10");
@@ -2853,7 +2952,7 @@ mod tests {
         let stored = db_get(&pool, 2).await.unwrap().unwrap();
         assert_eq!(
             stored.kind,
-            roc_with_record(2, 1, d(2025, 6, 1), "0.50", d(2025, 1, 6)).kind,
+            roc_with_record(2, ListingId(1), d(2025, 6, 1), "0.50", d(2025, 1, 6)).kind,
             "the refused edit left the stored terms untouched"
         );
     }
@@ -3004,7 +3103,7 @@ mod tests {
             .insert(&pool)
             .await;
 
-        let payment = |listing_id: i64| {
+        let payment = |listing_id: ListingId| {
             serde_json::json!({
                 "action_type": "ReturnOfCapital",
                 "listing_id": listing_id,
@@ -3013,14 +3112,18 @@ mod tests {
                 "currency": "AUD",
             })
         };
-        let resp = client(&pool).put("/corporate_actions/1", &payment(1)).await;
+        let resp = client(&pool)
+            .put("/corporate_actions/1", &payment(ListingId(1)))
+            .await;
         assert_eq!(
             resp.status,
             StatusCode::CREATED,
             "a non-AMIT trust's E4 reduction is exactly what this action is for"
         );
 
-        let resp = client(&pool).put("/corporate_actions/1", &payment(2)).await;
+        let resp = client(&pool)
+            .put("/corporate_actions/1", &payment(ListingId(2)))
+            .await;
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(
             db_get(&pool, 1).await.unwrap().unwrap().listing_id,
@@ -3078,7 +3181,7 @@ mod tests {
                 holding_account_id: 1,
                 date,
                 settlement_date: Some(date),
-                listing_id: 1,
+                listing_id: ListingId(1),
                 average_price: "6".parse().unwrap(),
                 quantity: qty.parse().unwrap(),
                 currency: "AUD".into(),
@@ -3113,7 +3216,7 @@ mod tests {
             &pool,
             &CorporateAction {
                 id: 1,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: d(2024, 3, 1),
                 kind: ActionKind::ShareSplit {
                     split_new_units: "3".parse().unwrap(),
@@ -3164,13 +3267,13 @@ mod tests {
             .price(Decimal::ONE)
             .insert(&pool)
             .await;
-        db_upsert(&pool, &roc(1, 1, d(2024, 3, 1), "0.123456"))
+        db_upsert(&pool, &roc(1, ListingId(1), d(2024, 3, 1), "0.123456"))
             .await
             .unwrap();
 
         assert_eq!(
             db_get(&pool, 1).await.unwrap().unwrap(),
-            roc(1, 1, d(2024, 3, 1), "0.123456")
+            roc(1, ListingId(1), d(2024, 3, 1), "0.123456")
         );
         let parcels = crate::reports::open_parcels::db_open_parcels(&pool, None)
             .await
@@ -3195,7 +3298,7 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "SPL").await;
         insert_parcel(&pool).await;
-        db_upsert(&pool, &split(10, 1, d(2023, 3, 1), "2", "1"))
+        db_upsert(&pool, &split(10, ListingId(1), d(2023, 3, 1), "2", "1"))
             .await
             .unwrap();
         insert_sell(&pool, d(2023, 6, 1), "200").await.unwrap();
@@ -3226,7 +3329,7 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "BON").await;
         insert_parcel(&pool).await;
-        db_upsert(&pool, &bonus(10, 1, d(2023, 3, 1), "1", "1"))
+        db_upsert(&pool, &bonus(10, ListingId(1), d(2023, 3, 1), "1", "1"))
             .await
             .unwrap();
 
@@ -3234,7 +3337,7 @@ mod tests {
         // basis yet, so the delete stands.
         assert!(db_delete(&pool, 10).await.unwrap());
 
-        db_upsert(&pool, &bonus(10, 1, d(2023, 3, 1), "1", "1"))
+        db_upsert(&pool, &bonus(10, ListingId(1), d(2023, 3, 1), "1", "1"))
             .await
             .unwrap();
         insert_sell(&pool, d(2023, 6, 1), "200").await.unwrap();
@@ -3253,14 +3356,14 @@ mod tests {
         insert_listing(&pool, 1, "RAP").await;
         insert_parcel(&pool).await;
 
-        db_upsert(&pool, &roc(10, 1, d(2023, 6, 1), "0.50"))
+        db_upsert(&pool, &roc(10, ListingId(1), d(2023, 6, 1), "0.50"))
             .await
             .unwrap();
         let err = db_delete(&pool, 10).await.unwrap_err();
         assert!(matches!(err, DeleteError::ReducedParcels), "{err:?}");
 
         // Dated before the parcel was acquired, it reduces nothing.
-        db_upsert(&pool, &roc(11, 1, d(2022, 12, 1), "0.50"))
+        db_upsert(&pool, &roc(11, ListingId(1), d(2022, 12, 1), "0.50"))
             .await
             .unwrap();
         assert!(db_delete(&pool, 11).await.unwrap());
@@ -3271,7 +3374,7 @@ mod tests {
         // cost-base pipeline does.
         db_upsert(
             &pool,
-            &roc_with_record(12, 1, d(2023, 6, 1), "0.50", d(2023, 1, 5)),
+            &roc_with_record(12, ListingId(1), d(2023, 6, 1), "0.50", d(2023, 1, 5)),
         )
         .await
         .unwrap();
@@ -3280,7 +3383,7 @@ mod tests {
         // One day later the parcel *is* entitled, and the guard holds again.
         db_upsert(
             &pool,
-            &roc_with_record(13, 1, d(2023, 6, 1), "0.50", d(2023, 1, 11)),
+            &roc_with_record(13, ListingId(1), d(2023, 6, 1), "0.50", d(2023, 1, 11)),
         )
         .await
         .unwrap();
@@ -3296,9 +3399,12 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "RIT").await;
         insert_parcel(&pool).await;
-        db_upsert(&pool, &rights(10, 1, d(2023, 6, 1), "1", "4", "2.00"))
-            .await
-            .unwrap();
+        db_upsert(
+            &pool,
+            &rights(10, ListingId(1), d(2023, 6, 1), "1", "4", "2.00"),
+        )
+        .await
+        .unwrap();
         assert!(db_delete(&pool, 10).await.unwrap());
     }
 
@@ -3307,7 +3413,7 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "SPL").await;
         insert_parcel(&pool).await;
-        db_upsert(&pool, &split(10, 1, d(2023, 3, 1), "2", "1"))
+        db_upsert(&pool, &split(10, ListingId(1), d(2023, 3, 1), "2", "1"))
             .await
             .unwrap();
         insert_sell(&pool, d(2023, 6, 1), "200").await.unwrap();
@@ -3317,7 +3423,7 @@ mod tests {
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert!(body.contains("trade dated on or after"), "{body}");
 
-        db_upsert(&pool, &roc(11, 1, d(2023, 6, 1), "0.50"))
+        db_upsert(&pool, &roc(11, ListingId(1), d(2023, 6, 1), "0.50"))
             .await
             .unwrap();
         let resp = client(&pool).delete("/corporate_actions/11").await;
@@ -3357,12 +3463,12 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "SPL").await;
         insert_parcel(&pool).await;
-        db_upsert(&pool, &split(10, 1, d(2023, 3, 1), "2", "1"))
+        db_upsert(&pool, &split(10, ListingId(1), d(2023, 3, 1), "2", "1"))
             .await
             .unwrap();
         insert_sell(&pool, d(2023, 6, 1), "200").await.unwrap();
 
-        let err = db_upsert(&pool, &split(10, 1, d(2023, 3, 1), "1", "1"))
+        let err = db_upsert(&pool, &split(10, ListingId(1), d(2023, 3, 1), "1", "1"))
             .await
             .unwrap_err();
         assert!(
@@ -3370,7 +3476,7 @@ mod tests {
             "{err:?}"
         );
 
-        let err = db_upsert(&pool, &split(10, 1, d(2023, 7, 1), "2", "1"))
+        let err = db_upsert(&pool, &split(10, ListingId(1), d(2023, 7, 1), "2", "1"))
             .await
             .unwrap_err();
         assert!(
@@ -3394,12 +3500,12 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "SPL").await;
         insert_parcel(&pool).await;
-        db_upsert(&pool, &split(10, 1, d(2023, 3, 1), "2", "1"))
+        db_upsert(&pool, &split(10, ListingId(1), d(2023, 3, 1), "2", "1"))
             .await
             .unwrap();
         insert_sell(&pool, d(2023, 6, 1), "200").await.unwrap();
 
-        db_upsert(&pool, &split(10, 1, d(2023, 2, 1), "3", "1"))
+        db_upsert(&pool, &split(10, ListingId(1), d(2023, 2, 1), "3", "1"))
             .await
             .unwrap();
         assert_eq!(
@@ -3409,10 +3515,10 @@ mod tests {
 
         // A return of capital moves cost base, not quantities, so correcting
         // its per-unit amount over the same holding is unaffected by the check.
-        db_upsert(&pool, &roc(11, 1, d(2023, 6, 1), "0.50"))
+        db_upsert(&pool, &roc(11, ListingId(1), d(2023, 6, 1), "0.50"))
             .await
             .unwrap();
-        db_upsert(&pool, &roc(11, 1, d(2023, 6, 1), "0.75"))
+        db_upsert(&pool, &roc(11, ListingId(1), d(2023, 6, 1), "0.75"))
             .await
             .unwrap();
     }
@@ -3430,7 +3536,7 @@ mod tests {
 
         // 1-for-2: the 100 units sold are 200 as-acquired units of a 100-unit
         // parcel.
-        let err = db_upsert(&pool, &split(10, 1, d(2023, 3, 1), "1", "2"))
+        let err = db_upsert(&pool, &split(10, ListingId(1), d(2023, 3, 1), "1", "2"))
             .await
             .unwrap_err();
         assert!(
@@ -3441,7 +3547,7 @@ mod tests {
 
         // Dated after the Sell it re-bases nothing already recorded, so it
         // stands.
-        db_upsert(&pool, &split(10, 1, d(2023, 8, 1), "1", "2"))
+        db_upsert(&pool, &split(10, ListingId(1), d(2023, 8, 1), "1", "2"))
             .await
             .unwrap();
     }
@@ -3455,12 +3561,12 @@ mod tests {
         insert_listing(&pool, 1, "SPL").await;
         insert_listing(&pool, 2, "OTH").await;
         insert_parcel(&pool).await;
-        db_upsert(&pool, &split(10, 1, d(2023, 3, 1), "2", "1"))
+        db_upsert(&pool, &split(10, ListingId(1), d(2023, 3, 1), "2", "1"))
             .await
             .unwrap();
         insert_sell(&pool, d(2023, 6, 1), "200").await.unwrap();
 
-        let err = db_upsert(&pool, &split(10, 2, d(2023, 3, 1), "2", "1"))
+        let err = db_upsert(&pool, &split(10, ListingId(2), d(2023, 3, 1), "2", "1"))
             .await
             .unwrap_err();
         assert!(
@@ -3479,7 +3585,7 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "SPL").await;
         insert_parcel(&pool).await;
-        db_upsert(&pool, &split(10, 1, d(2023, 3, 1), "2", "1"))
+        db_upsert(&pool, &split(10, ListingId(1), d(2023, 3, 1), "2", "1"))
             .await
             .unwrap();
         insert_sell(&pool, d(2023, 6, 1), "200").await.unwrap();
@@ -3550,7 +3656,7 @@ mod tests {
             &pool,
             1,
             &crate::entities::transfer::TransferBody {
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: d(2023, 8, 1),
                 from_account_id: 1,
                 to_account_id: 2,
@@ -3569,10 +3675,10 @@ mod tests {
         // A payment before the move, a payment on the day of it, and a
         // back-dated split — each restates parcels the transfer consumed.
         for action in [
-            roc(10, 1, d(2023, 5, 1), "1"),
-            roc(11, 1, d(2023, 8, 1), "1"),
-            split(12, 1, d(2023, 5, 1), "2", "1"),
-            bonus(13, 1, d(2023, 5, 1), "1", "10"),
+            roc(10, ListingId(1), d(2023, 5, 1), "1"),
+            roc(11, ListingId(1), d(2023, 8, 1), "1"),
+            split(12, ListingId(1), d(2023, 5, 1), "2", "1"),
+            bonus(13, ListingId(1), d(2023, 5, 1), "1", "10"),
         ] {
             let err = db_upsert(&pool, &action).await.expect_err("refused");
             assert!(
@@ -3605,13 +3711,13 @@ mod tests {
         // After the move is fine — the replacement parcel receives it — and so
         // is a rights issue, which creates its own trades rather than restating
         // anything.
-        db_upsert(&pool, &roc(14, 1, d(2023, 8, 2), "1"))
+        db_upsert(&pool, &roc(14, ListingId(1), d(2023, 8, 2), "1"))
             .await
             .unwrap();
 
         // And nothing of another listing is affected.
         insert_listing(&pool, 2, "BBB").await;
-        db_upsert(&pool, &roc(15, 2, d(2023, 5, 1), "1"))
+        db_upsert(&pool, &roc(15, ListingId(2), d(2023, 5, 1), "1"))
             .await
             .unwrap();
     }
@@ -3643,13 +3749,13 @@ mod tests {
             // 1000-for-1, and its bonus-issue equivalent (999 new units for
             // every 1 held is the same 1000-for-1 re-base).
             (
-                split(10, 1, d(2024, 7, 1), "1000", "1"),
+                split(10, ListingId(1), d(2024, 7, 1), "1000", "1"),
                 serde_json::json!({"action_type": "ShareSplit", "listing_id": 1,
                                    "date": "2024-07-01", "split_new_units": "1000",
                                    "split_old_units": "1"}),
             ),
             (
-                bonus(10, 1, d(2024, 7, 1), "999", "1"),
+                bonus(10, ListingId(1), d(2024, 7, 1), "999", "1"),
                 serde_json::json!({"action_type": "BonusIssue", "listing_id": 1,
                                    "date": "2024-07-01", "bonus_units": "999",
                                    "bonus_held_units": "1"}),
@@ -3733,7 +3839,7 @@ mod tests {
                 holding_account_id: 1,
                 date: d(2024, 6, 3),
                 settlement_date: Some(d(2024, 6, 5)),
-                listing_id: 1,
+                listing_id: ListingId(1),
                 average_price: Decimal::ZERO,
                 quantity: "1000000000000000000000000000".parse().unwrap(),
                 currency: "AUD".into(),
@@ -3753,7 +3859,7 @@ mod tests {
         .unwrap();
 
         // A 1-for-1000 consolidation dated between the parcel and the sale.
-        let action = split(10, 1, d(2021, 1, 1), "1", "1000");
+        let action = split(10, ListingId(1), d(2021, 1, 1), "1", "1000");
         let err = db_upsert(&pool, &action).await.unwrap_err();
         assert!(
             matches!(err, WriteError::UnrepresentableRebasedQuantity(_)),
@@ -3813,7 +3919,7 @@ mod tests {
         );
 
         // The correction: the same action, re-termed 2-for-1, lands.
-        let corrected = split(10, 1, d(2024, 7, 1), "2", "1");
+        let corrected = split(10, ListingId(1), d(2024, 7, 1), "2", "1");
         db_upsert(&pool, &corrected).await.unwrap();
         let rows: Vec<serde_json::Value> = ApiClient::full(&pool)
             .get_json("/portfolio/open_parcels")
@@ -3849,9 +3955,12 @@ mod tests {
             .price(Decimal::ZERO)
             .insert(&pool)
             .await;
-        db_upsert(&pool, &split(10, 1, d(2024, 6, 1), "1000", "1000000"))
-            .await
-            .unwrap();
+        db_upsert(
+            &pool,
+            &split(10, ListingId(1), d(2024, 6, 1), "1000", "1000000"),
+        )
+        .await
+        .unwrap();
 
         let rows: Vec<serde_json::Value> = ApiClient::full(&pool)
             .get_json("/portfolio/open_parcels")
@@ -3879,9 +3988,12 @@ mod tests {
             .price(Decimal::ZERO)
             .insert(&pool)
             .await;
-        db_upsert(&pool, &split(10, 1, d(2024, 6, 1), "1000", "1000000"))
-            .await
-            .unwrap();
+        db_upsert(
+            &pool,
+            &split(10, ListingId(1), d(2024, 6, 1), "1000", "1000000"),
+        )
+        .await
+        .unwrap();
 
         // The whole holding, in post-consolidation units, sold at nil.
         sell::db_upsert_sell(
@@ -3893,7 +4005,7 @@ mod tests {
                 holding_account_id: 1,
                 date: d(2024, 9, 2),
                 settlement_date: Some(d(2024, 9, 2)),
-                listing_id: 1,
+                listing_id: ListingId(1),
                 average_price: Decimal::ZERO,
                 quantity: "1000000000000000000000000".parse().unwrap(),
                 currency: "AUD".into(),
@@ -3939,13 +4051,16 @@ mod tests {
             .insert(&pool)
             .await;
         // A 1,000,000-for-1,000 split, i.e. 1000 new units for each old one.
-        db_upsert(&pool, &split(10, 1, d(2024, 6, 3), "1000000", "1000"))
-            .await
-            .unwrap();
+        db_upsert(
+            &pool,
+            &split(10, ListingId(1), d(2024, 6, 3), "1000000", "1000"),
+        )
+        .await
+        .unwrap();
         // …and a payment quoted per *post*-split unit.
         db_upsert(
             &pool,
-            &roc(11, 1, d(2024, 7, 1), "1000000000000000000000000"),
+            &roc(11, ListingId(1), d(2024, 7, 1), "1000000000000000000000000"),
         )
         .await
         .unwrap();
@@ -4157,7 +4272,7 @@ mod tests {
             (3, 2, ymd(2024, 8, 5)),
             (4, 2, ymd(2024, 9, 4)),
         ] {
-            db_upsert(&pool, &roc(id, listing_id, date, "0.10"))
+            db_upsert(&pool, &roc(id, ListingId(listing_id), date, "0.10"))
                 .await
                 .unwrap();
         }

@@ -10,6 +10,7 @@
 use super::market::Market;
 use super::model::PriceSource;
 use crate::infra::currency::CurrencyCode;
+use crate::infra::id::ListingId;
 use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use std::{
@@ -218,7 +219,7 @@ pub struct CachingFetcher {
     inner: SharedFetcher,
     ttl: std::time::Duration,
     /// listing id → when it was fetched, and what came back.
-    cached: Mutex<HashMap<i64, (Instant, LatestQuote)>>,
+    cached: Mutex<HashMap<ListingId, (Instant, LatestQuote)>>,
 }
 
 impl CachingFetcher {
@@ -233,13 +234,13 @@ impl CachingFetcher {
     /// The remembered quote for `listing_id`, if it is still inside the
     /// window. A zero TTL is therefore never a hit, which is how a caller
     /// turns the cache off.
-    fn remembered(&self, listing_id: i64) -> Option<LatestQuote> {
+    fn remembered(&self, listing_id: ListingId) -> Option<LatestQuote> {
         let cached = self.cached.lock().ok()?;
         let (fetched_at, quote) = cached.get(&listing_id)?;
         (fetched_at.elapsed() < self.ttl).then(|| quote.clone())
     }
 
-    fn remember(&self, listing_id: i64, quote: &LatestQuote) {
+    fn remember(&self, listing_id: ListingId, quote: &LatestQuote) {
         // A poisoned lock means another thread panicked mid-update. That is
         // not a reason to fail a valuation: the cache is an optimisation, and
         // the quote in hand is already correct.

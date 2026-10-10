@@ -349,6 +349,7 @@ mod tests {
     use super::*;
     use crate::entities::trade::TradeType;
     use crate::entities::{corporate_action::CorporateAction, income, listing};
+    use crate::infra::id::ListingId;
     use crate::test_support::{self, ApiClient, dec, test_pool};
 
     /// Client over this module's own routes.
@@ -399,7 +400,7 @@ mod tests {
             pool,
             &CorporateAction {
                 id,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date,
                 kind: ActionKind::BuyBack {
                     buyback_price: price.parse().unwrap(),
@@ -687,7 +688,7 @@ mod tests {
             &pool,
             &CorporateAction {
                 id: 11,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: d(2024, 7, 1),
                 kind: ActionKind::ReturnOfCapital {
                     amount_per_unit: dec("0.10"),
@@ -763,7 +764,7 @@ mod tests {
             holding_account_id: 1,
             date: p.trade.date,
             settlement_date: Some(p.trade.settlement_date),
-            listing_id: 1,
+            listing_id: ListingId(1),
             average_price: dec("99"),
             quantity: dec("1000"),
             currency: "AUD".into(),

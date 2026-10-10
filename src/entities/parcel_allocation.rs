@@ -2,6 +2,8 @@ use crate::infra::decimal::Money;
 #[cfg(test)]
 use crate::infra::decimal::parse_dec;
 use crate::infra::http::{self, CrudEntity};
+#[cfg(test)]
+use crate::infra::id::ListingId;
 use axum::{Router, routing::get};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -141,7 +143,7 @@ pub async fn db_upsert(
     // The parcel's quantity is in as-acquired units while the allocation is in
     // sale-date units: re-base across any share splits/consolidations between
     // them (TD 2000/10). Mirrors the live `PUT /sells` path's check.
-    let splits = corporate_action::db_splits_for_listing(pool, purchase_listing).await?;
+    let splits = corporate_action::db_splits_for_listing(pool, ListingId(purchase_listing)).await?;
     let alloc_acquired = corporate_action::as_acquired_quantity(
         allocation.quantity_allocated,
         &splits,

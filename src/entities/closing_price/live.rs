@@ -6,6 +6,7 @@
 
 use super::fetcher::PriceFetcher;
 use super::market::{Market, load_market};
+use crate::infra::id::ListingId;
 use rust_decimal::Decimal;
 use sqlx::SqlitePool;
 use std::collections::{HashMap, HashSet};
@@ -33,8 +34,8 @@ pub struct LiveValuation {
 pub async fn fetch_live_aud_prices(
     pool: &SqlitePool,
     fetcher: &dyn PriceFetcher,
-    listing_ids: &[i64],
-) -> Result<HashMap<i64, Result<LiveValuation, String>>, sqlx::Error> {
+    listing_ids: &[ListingId],
+) -> Result<HashMap<ListingId, Result<LiveValuation, String>>, sqlx::Error> {
     let mut out = HashMap::new();
     // Resolve every market before quoting any of them, so the provider is
     // asked **once** for the whole portfolio rather than once per holding
@@ -110,13 +111,13 @@ pub async fn resolve_live_prices(
     pool: &SqlitePool,
     fetcher: Option<&dyn PriceFetcher>,
     live: bool,
-    overrides: &HashMap<i64, Decimal>,
-    listing_ids: impl IntoIterator<Item = i64>,
-) -> Result<HashMap<i64, Result<LiveValuation, String>>, sqlx::Error> {
+    overrides: &HashMap<ListingId, Decimal>,
+    listing_ids: impl IntoIterator<Item = ListingId>,
+) -> Result<HashMap<ListingId, Result<LiveValuation, String>>, sqlx::Error> {
     if !live {
         return Ok(HashMap::new());
     }
-    let ids: Vec<i64> = listing_ids
+    let ids: Vec<ListingId> = listing_ids
         .into_iter()
         .filter(|id| !overrides.contains_key(id))
         .collect::<HashSet<_>>()

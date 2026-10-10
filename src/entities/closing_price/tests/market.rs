@@ -2,12 +2,13 @@
 //! the symbol and the exchange calendar both follow the date, not today.
 
 use super::*;
+use crate::infra::id::ListingId;
 
 #[tokio::test]
 async fn db_close_time_gates_same_day_collection() {
     let pool = test_pool().await;
     insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
-    let market = load_market(&pool, 1).await.unwrap().unwrap();
+    let market = load_market(&pool, ListingId(1)).await.unwrap().unwrap();
 
     // Friday 15:00 Sydney (05:00 UTC): before the 16:00 close → Thursday.
     let before_close = utc(2026, 6, 5, 5, 0);
@@ -29,7 +30,7 @@ async fn db_weekends_and_holidays_walk_back_to_a_trading_day() {
     let pool = test_pool().await;
     insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
     // Sunday 18:00 Sydney → Friday (weekend skipped).
-    let market = load_market(&pool, 1).await.unwrap().unwrap();
+    let market = load_market(&pool, ListingId(1)).await.unwrap().unwrap();
     assert_eq!(
         market
             .latest_complete_trading_day(utc(2026, 6, 7, 8, 0))
@@ -49,7 +50,7 @@ async fn db_weekends_and_holidays_walk_back_to_a_trading_day() {
     )
     .await
     .unwrap();
-    let market = load_market(&pool, 1).await.unwrap().unwrap();
+    let market = load_market(&pool, ListingId(1)).await.unwrap().unwrap();
     assert_eq!(
         market
             .latest_complete_trading_day(utc(2026, 6, 7, 8, 0))
@@ -62,7 +63,7 @@ async fn db_weekends_and_holidays_walk_back_to_a_trading_day() {
 async fn db_crypto_cutoff_is_utc_midnight_with_no_holiday_calendar() {
     let pool = test_pool().await;
     insert_crypto_listing(&pool, 1, "BTC").await;
-    let market = load_market(&pool, 1).await.unwrap().unwrap();
+    let market = load_market(&pool, ListingId(1)).await.unwrap().unwrap();
     // Sunday 01:30 UTC: Saturday's UTC candle is complete — weekends and
     // holiday calendars don't apply to a continuously-trading asset.
     assert_eq!(
@@ -82,8 +83,8 @@ async fn db_crypto_published_day_trails_the_cutoff_by_the_publication_lag() {
     let pool = test_pool().await;
     insert_crypto_listing(&pool, 1, "BTC").await;
     insert_listing(&pool, 2, "BHP", "XASX", "AUD").await;
-    let crypto = load_market(&pool, 1).await.unwrap().unwrap();
-    let asx = load_market(&pool, 2).await.unwrap().unwrap();
+    let crypto = load_market(&pool, ListingId(1)).await.unwrap().unwrap();
+    let asx = load_market(&pool, ListingId(2)).await.unwrap().unwrap();
 
     // Fri 2026-10-09 06:30 UTC — the ASX run's slot under Sydney daylight
     // saving: Thursday's candle is final but not yet published.
@@ -128,9 +129,9 @@ async fn db_crypto_published_day_trails_the_cutoff_by_the_publication_lag() {
 async fn db_yahoo_symbol_resolves_as_at_the_date_across_a_rename() {
     let pool = test_pool().await;
     insert_listing(&pool, 1, "LAAC", "XNYS", "USD").await;
-    rename_listing(&pool, 1, ymd(2025, 1, 27), "LAR", None).await;
+    rename_listing(&pool, ListingId(1), ymd(2025, 1, 27), "LAR", None).await;
 
-    let market = load_market(&pool, 1).await.unwrap().unwrap();
+    let market = load_market(&pool, ListingId(1)).await.unwrap().unwrap();
     assert_eq!(yahoo_symbol(&market, ymd(2025, 1, 26)).unwrap(), "LAAC");
     // The effective date itself is already the new identity.
     assert_eq!(yahoo_symbol(&market, ymd(2025, 1, 27)).unwrap(), "LAR");
@@ -148,9 +149,9 @@ async fn db_yahoo_symbol_follows_the_exchange_in_force_on_the_date() {
     // currency boundary (a rename that did is refused — SCENARIOS R-01);
     // the symbol the *date* resolves to is what this test is about.
     insert_listing(&pool, 1, "OLD", "XASX", "USD").await;
-    rename_listing(&pool, 1, ymd(2025, 3, 10), "NEW", Some("XNYS")).await;
+    rename_listing(&pool, ListingId(1), ymd(2025, 3, 10), "NEW", Some("XNYS")).await;
 
-    let market = load_market(&pool, 1).await.unwrap().unwrap();
+    let market = load_market(&pool, ListingId(1)).await.unwrap().unwrap();
     assert_eq!(yahoo_symbol(&market, ymd(2025, 3, 7)).unwrap(), "OLD.AX");
     assert_eq!(yahoo_symbol(&market, ymd(2025, 3, 10)).unwrap(), "NEW");
 }
@@ -162,13 +163,13 @@ async fn db_yahoo_symbol_follows_the_exchange_in_force_on_the_date() {
 async fn db_price_symbol_applies_to_the_current_identity_only() {
     let pool = test_pool().await;
     insert_listing(&pool, 1, "LAAC", "XNYS", "USD").await;
-    rename_listing(&pool, 1, ymd(2025, 1, 27), "LAR", None).await;
+    rename_listing(&pool, ListingId(1), ymd(2025, 1, 27), "LAR", None).await;
     sqlx::query("UPDATE listings SET price_symbol = 'LAR-CURRENT' WHERE id = 1")
         .execute(&pool)
         .await
         .unwrap();
 
-    let market = load_market(&pool, 1).await.unwrap().unwrap();
+    let market = load_market(&pool, ListingId(1)).await.unwrap().unwrap();
     assert_eq!(yahoo_symbol(&market, ymd(2025, 1, 26)).unwrap(), "LAAC");
     assert_eq!(
         yahoo_symbol(&market, ymd(2025, 2, 3)).unwrap(),
@@ -198,9 +199,9 @@ async fn db_trading_days_follow_the_exchange_calendar_in_force_then() {
     )
     .await
     .unwrap();
-    rename_listing(&pool, 1, ymd(2025, 6, 2), "NEW", Some("XNYS")).await;
+    rename_listing(&pool, ListingId(1), ymd(2025, 6, 2), "NEW", Some("XNYS")).await;
 
-    let market = load_market(&pool, 1).await.unwrap().unwrap();
+    let market = load_market(&pool, ListingId(1)).await.unwrap().unwrap();
     // Before the move the ASX calendar applies, so the holiday is closed
     // and valuation falls back to the previous trading day.
     assert_eq!(
@@ -222,9 +223,9 @@ async fn db_trading_days_follow_the_exchange_calendar_in_force_then() {
 async fn db_fetch_straddling_a_rename_calls_the_provider_once_per_identity() {
     let pool = test_pool().await;
     insert_listing(&pool, 1, "LAAC", "XNYS", "USD").await;
-    rename_listing(&pool, 1, ymd(2026, 6, 3), "LAR", None).await;
+    rename_listing(&pool, ListingId(1), ymd(2026, 6, 3), "LAR", None).await;
 
-    let market = load_market(&pool, 1).await.unwrap().unwrap();
+    let market = load_market(&pool, ListingId(1)).await.unwrap().unwrap();
     let days = [
         ymd(2026, 6, 1),
         ymd(2026, 6, 2),
@@ -233,7 +234,7 @@ async fn db_fetch_straddling_a_rename_calls_the_provider_once_per_identity() {
     ];
     let mut stub = StubFetcher::default();
     for &d in &days {
-        stub = stub.with_close(1, d, "2.77", "USD");
+        stub = stub.with_close(ListingId(1), d, "2.77", "USD");
     }
     let (ok, errored) = fetch_and_store(&pool, &stub, &market, &days).await.unwrap();
     assert_eq!((ok, errored), (4, 0));
@@ -255,9 +256,10 @@ async fn db_fetch_straddling_a_rename_calls_the_provider_once_per_identity() {
 async fn api_backfill_before_a_rename_uses_the_old_symbol_without_an_override() {
     let pool = test_pool().await;
     insert_listing(&pool, 1, "LAAC", "XNYS", "USD").await;
-    rename_listing(&pool, 1, ymd(2026, 6, 3), "LAR", None).await;
+    rename_listing(&pool, ListingId(1), ymd(2026, 6, 3), "LAR", None).await;
 
-    let stub = Arc::new(StubFetcher::default().with_close(1, ymd(2026, 6, 1), "2.77", "USD"));
+    let stub =
+        Arc::new(StubFetcher::default().with_close(ListingId(1), ymd(2026, 6, 1), "2.77", "USD"));
     let shared: SharedFetcher = stub.clone();
     let app = ApiClient::over(router().with_state(pool.clone()).layer(Extension(shared)));
     let (status, bytes) = post_json(
@@ -274,7 +276,7 @@ async fn api_backfill_before_a_rename_uses_the_old_symbol_without_an_override() 
     );
 
     assert_eq!(stub.symbols(), vec!["LAAC".to_string()]);
-    let row = db_get_one(&pool, 1, ymd(2026, 6, 1))
+    let row = db_get_one(&pool, ListingId(1), ymd(2026, 6, 1))
         .await
         .unwrap()
         .unwrap();
@@ -289,16 +291,16 @@ async fn api_backfill_before_a_rename_uses_the_old_symbol_without_an_override() 
 async fn db_a_dead_segment_errors_alone_and_names_its_own_symbol() {
     let pool = test_pool().await;
     insert_listing(&pool, 1, "LAAC", "XNYS", "USD").await;
-    rename_listing(&pool, 1, ymd(2026, 6, 3), "LAR", None).await;
+    rename_listing(&pool, ListingId(1), ymd(2026, 6, 3), "LAR", None).await;
 
-    let market = load_market(&pool, 1).await.unwrap().unwrap();
+    let market = load_market(&pool, ListingId(1)).await.unwrap().unwrap();
     // Only the post-rename day has a candle; the old symbol serves none.
-    let stub = StubFetcher::default().with_close(1, ymd(2026, 6, 3), "2.77", "USD");
+    let stub = StubFetcher::default().with_close(ListingId(1), ymd(2026, 6, 3), "2.77", "USD");
     let days = [ymd(2026, 6, 2), ymd(2026, 6, 3)];
     let (ok, errored) = fetch_and_store(&pool, &stub, &market, &days).await.unwrap();
     assert_eq!((ok, errored), (1, 1));
 
-    let dead = db_get_one(&pool, 1, ymd(2026, 6, 2))
+    let dead = db_get_one(&pool, ListingId(1), ymd(2026, 6, 2))
         .await
         .unwrap()
         .unwrap();
@@ -308,7 +310,7 @@ async fn db_a_dead_segment_errors_alone_and_names_its_own_symbol() {
         "names the dead segment's symbol: {msg}"
     );
     assert!(!msg.contains("LAR"), "not the current symbol: {msg}");
-    let good = db_get_one(&pool, 1, ymd(2026, 6, 3))
+    let good = db_get_one(&pool, ListingId(1), ymd(2026, 6, 3))
         .await
         .unwrap()
         .unwrap();
@@ -329,9 +331,9 @@ async fn db_a_dead_segment_errors_alone_and_names_its_own_symbol() {
 async fn db_a_no_such_symbol_failure_is_diagnosed_not_stored_bare() {
     let pool = test_pool().await;
     insert_listing(&pool, 1, "FB", "XNYS", "USD").await;
-    rename_listing(&pool, 1, ymd(2022, 6, 9), "META", None).await;
+    rename_listing(&pool, ListingId(1), ymd(2022, 6, 9), "META", None).await;
 
-    let market = load_market(&pool, 1).await.unwrap().unwrap();
+    let market = load_market(&pool, ListingId(1)).await.unwrap().unwrap();
     let stub = StubFetcher::failing_no_such_symbol(
         "yahoo fetch for FB failed: Unexpected response \
              status: 400 at https://query2.finance.yahoo.com/v8/finance/chart/FB",
@@ -340,7 +342,7 @@ async fn db_a_no_such_symbol_failure_is_diagnosed_not_stored_bare() {
     let (ok, errored) = fetch_and_store(&pool, &stub, &market, &days).await.unwrap();
     assert_eq!((ok, errored), (0, 1));
 
-    let row = db_get_one(&pool, 1, ymd(2022, 6, 8))
+    let row = db_get_one(&pool, ListingId(1), ymd(2022, 6, 8))
         .await
         .unwrap()
         .unwrap();
@@ -364,15 +366,15 @@ async fn db_a_no_such_symbol_failure_is_diagnosed_not_stored_bare() {
 async fn db_a_transient_failure_is_never_diagnosed_as_a_dead_symbol() {
     let pool = test_pool().await;
     insert_listing(&pool, 1, "FB", "XNYS", "USD").await;
-    rename_listing(&pool, 1, ymd(2022, 6, 9), "META", None).await;
+    rename_listing(&pool, ListingId(1), ymd(2022, 6, 9), "META", None).await;
 
-    let market = load_market(&pool, 1).await.unwrap().unwrap();
+    let market = load_market(&pool, ListingId(1)).await.unwrap().unwrap();
     let stub = StubFetcher::failing("yahoo fetch for FB failed: Server error 503 at https://q");
     let days = [ymd(2022, 6, 8)];
     let (ok, errored) = fetch_and_store(&pool, &stub, &market, &days).await.unwrap();
     assert_eq!((ok, errored), (0, 1));
 
-    let msg = db_get_one(&pool, 1, ymd(2022, 6, 8))
+    let msg = db_get_one(&pool, ListingId(1), ymd(2022, 6, 8))
         .await
         .unwrap()
         .unwrap()
@@ -392,14 +394,14 @@ async fn db_a_transient_failure_is_never_diagnosed_as_a_dead_symbol() {
 async fn db_dead_symbol_advice_names_price_symbol_for_a_current_span() {
     let pool = test_pool().await;
     insert_listing(&pool, 1, "FB", "XNYS", "USD").await;
-    rename_listing(&pool, 1, ymd(2022, 6, 9), "META", None).await;
+    rename_listing(&pool, ListingId(1), ymd(2022, 6, 9), "META", None).await;
 
-    let market = load_market(&pool, 1).await.unwrap().unwrap();
+    let market = load_market(&pool, ListingId(1)).await.unwrap().unwrap();
     let stub = StubFetcher::failing_no_such_symbol("yahoo fetch for META failed: Not found");
     let days = [ymd(2026, 6, 2)];
     fetch_and_store(&pool, &stub, &market, &days).await.unwrap();
 
-    let msg = db_get_one(&pool, 1, ymd(2026, 6, 2))
+    let msg = db_get_one(&pool, ListingId(1), ymd(2026, 6, 2))
         .await
         .unwrap()
         .unwrap()
@@ -415,14 +417,14 @@ async fn db_dead_symbol_advice_names_price_symbol_for_a_current_span() {
 async fn db_dead_symbol_advice_for_an_earlier_span_names_the_backfill_override() {
     let pool = test_pool().await;
     insert_listing(&pool, 1, "FB", "XNYS", "USD").await;
-    rename_listing(&pool, 1, ymd(2022, 6, 9), "META", None).await;
+    rename_listing(&pool, ListingId(1), ymd(2022, 6, 9), "META", None).await;
 
-    let market = load_market(&pool, 1).await.unwrap().unwrap();
+    let market = load_market(&pool, ListingId(1)).await.unwrap().unwrap();
     let stub = StubFetcher::failing_no_such_symbol("yahoo fetch for FB failed: Not found");
     let days = [ymd(2022, 6, 8)];
     fetch_and_store(&pool, &stub, &market, &days).await.unwrap();
 
-    let msg = db_get_one(&pool, 1, ymd(2022, 6, 8))
+    let msg = db_get_one(&pool, ListingId(1), ymd(2022, 6, 8))
         .await
         .unwrap()
         .unwrap()

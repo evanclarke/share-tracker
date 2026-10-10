@@ -3,6 +3,7 @@ use crate::entities::income::Income;
 use crate::infra::extract::Json;
 use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
+use crate::infra::id::ListingId;
 use axum::{Router, extract::State, routing::get};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
@@ -21,7 +22,7 @@ use std::collections::{BTreeMap, HashSet};
 /// receiving or recording cash that year.
 #[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AmitCashAlert {
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     pub ticker: String,
     /// The financial year the AMMA statement is expected for, identified by
     /// the calendar year of its 30 June end — the cash rows' assessment year
@@ -81,7 +82,7 @@ pub async fn db_amit_cash_alerts(pool: &SqlitePool) -> Result<Vec<AmitCashAlert>
     // nothing here.
     let mut covered = HashSet::new();
     for row in &amma_rows {
-        let listing_id: i64 = row.try_get("listing_id")?;
+        let listing_id: ListingId = row.try_get("listing_id")?;
         let holding_account_id: i64 = row.try_get("holding_account_id")?;
         let year_end: NaiveDate = row.try_get("tax_year_end_date")?;
         covered.insert((listing_id, holding_account_id, tax_year_for(year_end)));
@@ -89,7 +90,7 @@ pub async fn db_amit_cash_alerts(pool: &SqlitePool) -> Result<Vec<AmitCashAlert>
 
     // Aggregate the cash rows per (ticker, listing, FY, account); BTreeMap
     // keeps the report ordered by ticker, then year, then account.
-    let mut by_year: BTreeMap<(String, i64, i32, i64), (i64, Decimal)> = BTreeMap::new();
+    let mut by_year: BTreeMap<(String, ListingId, i32, i64), (i64, Decimal)> = BTreeMap::new();
     for row in &cash_rows {
         // The joined ticker aside, every field comes off the income model, so
         // the assessment-date rule and the gross-cash definition are the
@@ -168,8 +169,8 @@ mod tests {
             .await;
     }
 
-    async fn insert_cash(pool: &SqlitePool, id: i64, listing_id: i64, date_paid: NaiveDate) {
-        test_support::income(id, listing_id, date_paid)
+    async fn insert_cash(pool: &SqlitePool, id: i64, listing_id: ListingId, date_paid: NaiveDate) {
+        test_support::income(id, listing_id.0, date_paid)
             .with(|i| {
                 i.trust_income = true;
                 i.unfranked_amount = Decimal::from(100);
@@ -178,18 +179,18 @@ mod tests {
             .await;
     }
 
-    async fn insert_amma(pool: &SqlitePool, id: i64, listing_id: i64, year_end: NaiveDate) {
+    async fn insert_amma(pool: &SqlitePool, id: i64, listing_id: ListingId, year_end: NaiveDate) {
         insert_amma_in(pool, id, listing_id, year_end, 1).await;
     }
 
     async fn insert_amma_in(
         pool: &SqlitePool,
         id: i64,
-        listing_id: i64,
+        listing_id: ListingId,
         year_end: NaiveDate,
         holding_account_id: i64,
     ) {
-        test_support::amma(id, listing_id)
+        test_support::amma(id, listing_id.0)
             .with(|a| {
                 a.tax_year_end_date = year_end;
                 a.date_received = year_end + chrono::Duration::days(60);
@@ -215,11 +216,11 @@ mod tests {
     async fn insert_cash_in(
         pool: &SqlitePool,
         id: i64,
-        listing_id: i64,
+        listing_id: ListingId,
         date_paid: NaiveDate,
         holding_account_id: i64,
     ) {
-        test_support::income(id, listing_id, date_paid)
+        test_support::income(id, listing_id.0, date_paid)
             .with(|i| {
                 i.trust_income = true;
                 i.unfranked_amount = Decimal::from(100);
@@ -235,8 +236,8 @@ mod tests {
     async fn db_cash_year_without_amma_is_flagged() {
         let pool = test_pool().await;
         insert_amit_listing(&pool, 1, "VDHG").await;
-        insert_cash(&pool, 1, 1, ymd(2024, 10, 16)).await;
-        insert_cash(&pool, 2, 1, ymd(2025, 1, 16)).await;
+        insert_cash(&pool, 1, ListingId(1), ymd(2024, 10, 16)).await;
+        insert_cash(&pool, 2, ListingId(1), ymd(2025, 1, 16)).await;
         let alerts = db_amit_cash_alerts(&pool).await.unwrap();
         assert_eq!(alerts.len(), 1);
         let a = &alerts[0];
@@ -254,8 +255,8 @@ mod tests {
     async fn db_amma_covering_the_year_clears_the_flag() {
         let pool = test_pool().await;
         insert_amit_listing(&pool, 1, "VDHG").await;
-        insert_cash(&pool, 1, 1, ymd(2024, 10, 16)).await;
-        insert_amma(&pool, 1, 1, ymd(2025, 6, 30)).await;
+        insert_cash(&pool, 1, ListingId(1), ymd(2024, 10, 16)).await;
+        insert_amma(&pool, 1, ListingId(1), ymd(2025, 6, 30)).await;
         assert!(db_amit_cash_alerts(&pool).await.unwrap().is_empty());
     }
 
@@ -268,7 +269,7 @@ mod tests {
     async fn db_amma_at_a_non_june_year_end_covers_by_tax_year_for() {
         let pool = test_pool().await;
         insert_amit_listing(&pool, 1, "VDHG").await;
-        insert_cash(&pool, 1, 1, ymd(2024, 10, 16)).await;
+        insert_cash(&pool, 1, ListingId(1), ymd(2024, 10, 16)).await;
         let year_end = ymd(2024, 12, 31);
         assert_eq!(tax_year_for(year_end), 2025);
         let a = test_support::amma(1, 1)
@@ -289,8 +290,8 @@ mod tests {
     async fn db_amma_for_another_year_does_not_clear_the_flag() {
         let pool = test_pool().await;
         insert_amit_listing(&pool, 1, "VDHG").await;
-        insert_cash(&pool, 1, 1, ymd(2024, 10, 16)).await;
-        insert_amma(&pool, 1, 1, ymd(2024, 6, 30)).await;
+        insert_cash(&pool, 1, ListingId(1), ymd(2024, 10, 16)).await;
+        insert_amma(&pool, 1, ListingId(1), ymd(2024, 6, 30)).await;
         let alerts = db_amit_cash_alerts(&pool).await.unwrap();
         assert_eq!(alerts.len(), 1);
         assert_eq!(alerts[0].tax_year, 2025);
@@ -305,8 +306,8 @@ mod tests {
         let pool = test_pool().await;
         insert_amit_listing(&pool, 1, "VDHG").await;
         second_account(&pool).await;
-        insert_cash_in(&pool, 1, 1, ymd(2024, 10, 16), 1).await;
-        insert_amma_in(&pool, 1, 1, ymd(2025, 6, 30), 2).await;
+        insert_cash_in(&pool, 1, ListingId(1), ymd(2024, 10, 16), 1).await;
+        insert_amma_in(&pool, 1, ListingId(1), ymd(2025, 6, 30), 2).await;
 
         let alerts = db_amit_cash_alerts(&pool).await.unwrap();
         assert_eq!(alerts.len(), 1);
@@ -321,8 +322,8 @@ mod tests {
         let pool = test_pool().await;
         insert_amit_listing(&pool, 1, "VDHG").await;
         second_account(&pool).await;
-        insert_cash_in(&pool, 1, 1, ymd(2024, 10, 16), 1).await;
-        insert_cash_in(&pool, 2, 1, ymd(2024, 10, 16), 2).await;
+        insert_cash_in(&pool, 1, ListingId(1), ymd(2024, 10, 16), 1).await;
+        insert_cash_in(&pool, 2, ListingId(1), ymd(2024, 10, 16), 2).await;
 
         let alerts = db_amit_cash_alerts(&pool).await.unwrap();
         assert_eq!(
@@ -333,12 +334,12 @@ mod tests {
             vec![(1, 1, Decimal::from(100)), (2, 1, Decimal::from(100))]
         );
 
-        insert_amma_in(&pool, 1, 1, ymd(2025, 6, 30), 1).await;
+        insert_amma_in(&pool, 1, ListingId(1), ymd(2025, 6, 30), 1).await;
         let remaining = db_amit_cash_alerts(&pool).await.unwrap();
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].holding_account_id, 2);
 
-        insert_amma_in(&pool, 2, 1, ymd(2025, 6, 30), 2).await;
+        insert_amma_in(&pool, 2, ListingId(1), ymd(2025, 6, 30), 2).await;
         assert!(db_amit_cash_alerts(&pool).await.unwrap().is_empty());
     }
 
@@ -355,14 +356,14 @@ mod tests {
             .insert(&pool)
             .await;
         // FY2024, before the conversion, and FY2025, the first AMIT year.
-        insert_cash(&pool, 1, 1, ymd(2024, 2, 15)).await;
-        insert_cash(&pool, 2, 1, ymd(2025, 2, 15)).await;
+        insert_cash(&pool, 1, ListingId(1), ymd(2024, 2, 15)).await;
+        insert_cash(&pool, 2, ListingId(1), ymd(2025, 2, 15)).await;
 
         let alerts = db_amit_cash_alerts(&pool).await.unwrap();
         assert_eq!(alerts.len(), 1);
         assert_eq!(alerts[0].tax_year, 2025);
 
-        insert_amma(&pool, 1, 1, ymd(2025, 6, 30)).await;
+        insert_amma(&pool, 1, ListingId(1), ymd(2025, 6, 30)).await;
         assert!(db_amit_cash_alerts(&pool).await.unwrap().is_empty());
     }
 
@@ -373,8 +374,8 @@ mod tests {
         let pool = test_pool().await;
         insert_amit_listing(&pool, 1, "VDHG").await;
         insert_amit_listing(&pool, 2, "HNDQ").await;
-        insert_cash(&pool, 1, 1, ymd(2024, 10, 16)).await;
-        insert_amma(&pool, 1, 2, ymd(2025, 6, 30)).await;
+        insert_cash(&pool, 1, ListingId(1), ymd(2024, 10, 16)).await;
+        insert_amma(&pool, 1, ListingId(2), ymd(2025, 6, 30)).await;
         assert_eq!(db_amit_cash_alerts(&pool).await.unwrap().len(), 1);
     }
 
@@ -384,10 +385,10 @@ mod tests {
     async fn db_amma_without_cash_and_non_amit_listings_not_flagged() {
         let pool = test_pool().await;
         insert_amit_listing(&pool, 1, "VDHG").await;
-        insert_amma(&pool, 1, 1, ymd(2025, 6, 30)).await;
+        insert_amma(&pool, 1, ListingId(1), ymd(2025, 6, 30)).await;
         // Non-AMIT trust with cash and no AMMA: not this report's business.
         test_support::listing(2).ticker("TRST").insert(&pool).await;
-        insert_cash(&pool, 1, 2, ymd(2024, 10, 16)).await;
+        insert_cash(&pool, 1, ListingId(2), ymd(2024, 10, 16)).await;
         assert!(db_amit_cash_alerts(&pool).await.unwrap().is_empty());
     }
 
@@ -407,7 +408,7 @@ mod tests {
             .await;
         // FY2025 AMMA covers it; without the entitlement date the row would
         // look like FY2026 and stay flagged.
-        insert_amma(&pool, 1, 1, ymd(2025, 6, 30)).await;
+        insert_amma(&pool, 1, ListingId(1), ymd(2025, 6, 30)).await;
         assert!(db_amit_cash_alerts(&pool).await.unwrap().is_empty());
     }
 
@@ -415,7 +416,7 @@ mod tests {
     async fn api_get_amit_cash_cross_check() {
         let pool = test_pool().await;
         insert_amit_listing(&pool, 1, "VDHG").await;
-        insert_cash(&pool, 1, 1, ymd(2024, 10, 16)).await;
+        insert_cash(&pool, 1, ListingId(1), ymd(2024, 10, 16)).await;
         let resp = ApiClient::over(router().with_state(pool))
             .get("/reports/amit_cash_cross_check")
             .await;

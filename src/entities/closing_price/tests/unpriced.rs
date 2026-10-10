@@ -3,6 +3,7 @@
 //! clearing a superseded span wholesale.
 
 use super::*;
+use crate::infra::id::ListingId;
 
 /// Mark an already-inserted listing as unpriced before `before`: the
 /// provider's series for it begins then, so every stored row earlier than
@@ -32,12 +33,12 @@ async fn mark_unpriced_before(
 async fn api_delete_removes_an_ok_row_the_unpriced_before_marker_supersedes() {
     let pool = test_pool().await;
     insert_listing(&pool, 1, "LAC", "XASX", "AUD").await;
-    insert_buy(&pool, 1, 1, "100").await;
+    insert_buy(&pool, 1, ListingId(1), "100").await;
     crate::test_support::closing_price(1, ymd(2026, 6, 2))
         .price("10.13")
         .insert(&pool)
         .await;
-    seed_manual_price(&pool, 1, ymd(2026, 6, 3), "9.87").await;
+    seed_manual_price(&pool, ListingId(1), ymd(2026, 6, 3), "9.87").await;
     mark_unpriced_before(&pool, 1, "LAC", ymd(2026, 6, 4)).await;
     let app = full_router(pool.clone(), StubFetcher::default());
 
@@ -51,14 +52,14 @@ async fn api_delete_removes_an_ok_row_the_unpriced_before_marker_supersedes() {
         );
     }
     assert!(
-        db_get_one(&pool, 1, ymd(2026, 6, 2))
+        db_get_one(&pool, ListingId(1), ymd(2026, 6, 2))
             .await
             .unwrap()
             .is_none(),
         "the fetched row is gone"
     );
     assert!(
-        db_get_one(&pool, 1, ymd(2026, 6, 3))
+        db_get_one(&pool, ListingId(1), ymd(2026, 6, 3))
             .await
             .unwrap()
             .is_none(),
@@ -91,7 +92,7 @@ async fn api_delete_still_rejects_an_ok_row_on_or_after_unpriced_before() {
         assert!(msg.contains("is ok, not errored"), "{date}: {msg}");
         assert!(msg.contains("re-fetch it"), "{date}: {msg}");
         assert!(
-            db_get_one(&pool, 1, date.parse().unwrap())
+            db_get_one(&pool, ListingId(1), date.parse().unwrap())
                 .await
                 .unwrap()
                 .is_some(),
@@ -113,7 +114,7 @@ async fn api_delete_still_rejects_an_ok_row_inside_an_unpriced_from_run() {
         .price("3.10")
         .insert(&pool)
         .await;
-    seed_manual_price(&pool, 1, ymd(2026, 6, 4), "2.95").await;
+    seed_manual_price(&pool, ListingId(1), ymd(2026, 6, 4), "2.95").await;
     let marked = crate::test_support::listing(1)
         .ticker("SUSP")
         .name("SUSP")
@@ -132,7 +133,7 @@ async fn api_delete_still_rejects_an_ok_row_inside_an_unpriced_from_run() {
     );
     // …and that row really is what a valuation of the unpriced run reads.
     assert_eq!(
-        db_latest_ok_price_on_or_before(&pool, 1, ymd(2026, 6, 10), None)
+        db_latest_ok_price_on_or_before(&pool, ListingId(1), ymd(2026, 6, 10), None)
             .await
             .unwrap(),
         Some((ymd(2026, 6, 4), "2.95".parse().unwrap())),
@@ -147,8 +148,8 @@ async fn api_delete_still_rejects_an_ok_row_inside_an_unpriced_from_run() {
 async fn deleting_a_superseded_price_is_recorded_in_the_audit_trail() {
     let pool = test_pool().await;
     insert_listing(&pool, 1, "LAC", "XASX", "AUD").await;
-    seed_manual_price(&pool, 1, ymd(2026, 6, 3), "9.87").await;
-    let row = db_get_one(&pool, 1, ymd(2026, 6, 3))
+    seed_manual_price(&pool, ListingId(1), ymd(2026, 6, 3), "9.87").await;
+    let row = db_get_one(&pool, ListingId(1), ymd(2026, 6, 3))
         .await
         .unwrap()
         .unwrap();
@@ -178,14 +179,14 @@ async fn api_clear_unpriced_before_clears_exactly_the_superseded_span() {
     let pool = test_pool().await;
     insert_listing(&pool, 1, "LAC", "XASX", "AUD").await;
     insert_listing(&pool, 2, "BHP", "XASX", "AUD").await;
-    insert_buy(&pool, 1, 1, "100").await;
+    insert_buy(&pool, 1, ListingId(1), "100").await;
     // Listing 1: two borrowed ok rows and an errored one before the
     // marker, one real row on the day the series begins.
     crate::test_support::closing_price(1, ymd(2026, 6, 1))
         .price("10.13")
         .insert(&pool)
         .await;
-    seed_manual_price(&pool, 1, ymd(2026, 6, 2), "9.87").await;
+    seed_manual_price(&pool, ListingId(1), ymd(2026, 6, 2), "9.87").await;
     crate::test_support::closing_price(1, ymd(2026, 6, 3))
         .errored("no candle")
         .insert(&pool)
@@ -222,19 +223,22 @@ async fn api_clear_unpriced_before_clears_exactly_the_superseded_span() {
 
     for gone in [ymd(2026, 6, 1), ymd(2026, 6, 2), ymd(2026, 6, 3)] {
         assert!(
-            db_get_one(&pool, 1, gone).await.unwrap().is_none(),
+            db_get_one(&pool, ListingId(1), gone)
+                .await
+                .unwrap()
+                .is_none(),
             "{gone} was superseded"
         );
     }
     assert!(
-        db_get_one(&pool, 1, ymd(2026, 6, 4))
+        db_get_one(&pool, ListingId(1), ymd(2026, 6, 4))
             .await
             .unwrap()
             .is_some(),
         "the day the series begins is a real price"
     );
     assert!(
-        db_get_one(&pool, 2, ymd(2026, 6, 1))
+        db_get_one(&pool, ListingId(2), ymd(2026, 6, 1))
             .await
             .unwrap()
             .is_some(),
@@ -276,7 +280,7 @@ async fn api_clear_unpriced_before_is_refused_without_a_marker() {
     let msg = String::from_utf8_lossy(&bytes);
     assert!(msg.contains("BHP has no unpriced_before"), "{msg}");
     assert!(
-        db_get_one(&pool, 1, ymd(2026, 6, 2))
+        db_get_one(&pool, ListingId(1), ymd(2026, 6, 2))
             .await
             .unwrap()
             .is_some(),
@@ -305,18 +309,18 @@ async fn clearing_a_span_records_every_row_in_the_audit_trail() {
         .price("10.13")
         .insert(&pool)
         .await;
-    seed_manual_price(&pool, 1, ymd(2026, 6, 2), "9.87").await;
-    let fetched = db_get_one(&pool, 1, ymd(2026, 6, 1))
+    seed_manual_price(&pool, ListingId(1), ymd(2026, 6, 2), "9.87").await;
+    let fetched = db_get_one(&pool, ListingId(1), ymd(2026, 6, 1))
         .await
         .unwrap()
         .unwrap();
-    let manual = db_get_one(&pool, 1, ymd(2026, 6, 2))
+    let manual = db_get_one(&pool, ListingId(1), ymd(2026, 6, 2))
         .await
         .unwrap()
         .unwrap();
     mark_unpriced_before(&pool, 1, "LAC", ymd(2026, 6, 4)).await;
 
-    let cleared = db_clear_unpriced_before(&pool, 1).await.unwrap();
+    let cleared = db_clear_unpriced_before(&pool, ListingId(1)).await.unwrap();
     assert_eq!(
         cleared,
         ClearOutcome::Cleared {
@@ -366,12 +370,17 @@ async fn clearing_a_span_leaves_the_carry_forward_price_and_its_rule_intact() {
         .build();
     listing::db_upsert(&pool, &marked).await.unwrap();
 
-    db_clear_unpriced_before(&pool, 1).await.unwrap();
+    db_clear_unpriced_before(&pool, ListingId(1)).await.unwrap();
 
     assert_eq!(
-        db_latest_ok_price_on_or_before(&pool, 1, ymd(2026, 6, 9), Some(ymd(2026, 6, 4)))
-            .await
-            .unwrap(),
+        db_latest_ok_price_on_or_before(
+            &pool,
+            ListingId(1),
+            ymd(2026, 6, 9),
+            Some(ymd(2026, 6, 4))
+        )
+        .await
+        .unwrap(),
         Some((ymd(2026, 6, 4), "24.90".parse().unwrap())),
         "the figure the unpriced run carries forward is untouched"
     );
@@ -387,10 +396,10 @@ async fn clearing_a_span_leaves_the_carry_forward_price_and_its_rule_intact() {
 async fn collection_skips_a_listing_from_its_unpriced_from_date() {
     let pool = test_pool().await;
     insert_listing(&pool, 1, "ATVI", "XASX", "AUD").await;
-    insert_buy(&pool, 1, 1, "100").await;
+    insert_buy(&pool, 1, ListingId(1), "100").await;
     for &d in &asx_lookback_window() {
         if d < ymd(2026, 6, 3) {
-            seed_ok_price(&pool, 1, d).await;
+            seed_ok_price(&pool, ListingId(1), d).await;
         }
     }
     let marked = crate::test_support::listing(1)
@@ -412,7 +421,7 @@ async fn collection_skips_a_listing_from_its_unpriced_from_date() {
         fetcher.calls()
     );
     assert!(
-        db_get_one(&pool, 1, ymd(2026, 6, 5))
+        db_get_one(&pool, ListingId(1), ymd(2026, 6, 5))
             .await
             .unwrap()
             .is_none(),
@@ -427,8 +436,8 @@ async fn collection_skips_a_listing_from_its_unpriced_from_date() {
 async fn api_fetch_and_backfill_stop_at_unpriced_from() {
     let pool = test_pool().await;
     insert_listing(&pool, 1, "ATVI", "XASX", "AUD").await;
-    insert_buy(&pool, 1, 1, "100").await;
-    seed_ok_price(&pool, 1, ymd(2026, 6, 1)).await;
+    insert_buy(&pool, 1, ListingId(1), "100").await;
+    seed_ok_price(&pool, ListingId(1), ymd(2026, 6, 1)).await;
     let marked = crate::test_support::listing(1)
         .ticker("ATVI")
         .name("ATVI")
@@ -440,7 +449,7 @@ async fn api_fetch_and_backfill_stop_at_unpriced_from() {
 
     let mut stub = StubFetcher::default();
     for d in [ymd(2026, 6, 2), ymd(2026, 6, 3), ymd(2026, 6, 4)] {
-        stub = stub.with_close(1, d, "94.42", "AUD");
+        stub = stub.with_close(ListingId(1), d, "94.42", "AUD");
     }
     let app = full_router(pool.clone(), stub);
 
@@ -467,7 +476,7 @@ async fn api_fetch_and_backfill_stop_at_unpriced_from() {
     assert_eq!(summary.fetched_ok, 1);
     assert_eq!(summary.errored, 0);
     assert!(
-        db_get_one(&pool, 1, ymd(2026, 6, 3))
+        db_get_one(&pool, ListingId(1), ymd(2026, 6, 3))
             .await
             .unwrap()
             .is_none()
@@ -496,7 +505,7 @@ async fn api_fetch_and_backfill_stop_at_unpriced_from() {
 async fn collection_skips_a_listing_before_its_unpriced_before_date() {
     let pool = test_pool().await;
     insert_listing(&pool, 1, "LAC", "XASX", "AUD").await;
-    insert_buy(&pool, 1, 1, "100").await;
+    insert_buy(&pool, 1, ListingId(1), "100").await;
     let marked = crate::test_support::listing(1)
         .ticker("LAC")
         .name("LAC")
@@ -508,14 +517,14 @@ async fn collection_skips_a_listing_before_its_unpriced_before_date() {
 
     let mut stub = StubFetcher::default();
     for &d in &asx_lookback_window() {
-        stub = stub.with_close(1, d, "24.90", "AUD");
+        stub = stub.with_close(ListingId(1), d, "24.90", "AUD");
     }
     run_collection(&pool, &stub, friday_evening_sydney())
         .await
         .unwrap();
 
     for &d in &asx_lookback_window() {
-        let stored = db_get_one(&pool, 1, d).await.unwrap();
+        let stored = db_get_one(&pool, ListingId(1), d).await.unwrap();
         if d < ymd(2026, 6, 4) {
             assert!(
                 stored.is_none(),
@@ -534,7 +543,7 @@ async fn collection_skips_a_listing_before_its_unpriced_before_date() {
 async fn api_fetch_and_backfill_start_at_unpriced_before() {
     let pool = test_pool().await;
     insert_listing(&pool, 1, "LAC", "XASX", "AUD").await;
-    insert_buy(&pool, 1, 1, "100").await;
+    insert_buy(&pool, 1, ListingId(1), "100").await;
     let marked = crate::test_support::listing(1)
         .ticker("LAC")
         .name("LAC")
@@ -551,7 +560,7 @@ async fn api_fetch_and_backfill_start_at_unpriced_before() {
         ymd(2026, 6, 4),
         ymd(2026, 6, 5),
     ] {
-        stub = stub.with_close(1, d, "24.90", "AUD");
+        stub = stub.with_close(ListingId(1), d, "24.90", "AUD");
     }
     let app = full_router(pool.clone(), stub);
 
@@ -577,7 +586,7 @@ async fn api_fetch_and_backfill_start_at_unpriced_before() {
     assert_eq!(summary.fetched_ok, 2);
     assert_eq!(summary.errored, 0);
     assert!(
-        db_get_one(&pool, 1, ymd(2026, 6, 3))
+        db_get_one(&pool, ListingId(1), ymd(2026, 6, 3))
             .await
             .unwrap()
             .is_none()

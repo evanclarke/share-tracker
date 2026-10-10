@@ -50,6 +50,7 @@ use crate::infra::decimal::{parse_dec, to_cents};
 use crate::infra::extract::Json;
 use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
+use crate::infra::id::ListingId;
 use crate::reports::export::{self, Cents};
 use crate::reports::parcel_optimiser::{self, DisposalTotals, HypotheticalAllocation, Strategy};
 use crate::reports::tax_summary::aud_field;
@@ -700,8 +701,8 @@ fn cohort_initial_cost(parcel: &cost_base::Parcel<'_>, units: Decimal) -> Decima
 
 /// This listing's split/consolidation events, or an empty slice.
 fn splits_of(
-    splits: &HashMap<i64, Vec<corporate_action::SplitEvent>>,
-    listing_id: i64,
+    splits: &HashMap<ListingId, Vec<corporate_action::SplitEvent>>,
+    listing_id: ListingId,
 ) -> &[corporate_action::SplitEvent] {
     splits.get(&listing_id).map_or(&[][..], |v| v)
 }
@@ -1201,7 +1202,7 @@ async fn net_capital_gain_export_handler(
 #[serde(deny_unknown_fields)]
 pub struct WhatIfRequest {
     /// The listing hypothetically sold.
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     /// Restricts strategy-derived (and validates explicit) allocations to
     /// one account's parcels; absent = parcels from any account.
     #[serde(default)]
@@ -1474,12 +1475,12 @@ mod tests {
         pool: &SqlitePool,
         id: i64,
         trade_type: trade::TradeType,
-        listing_id: i64,
+        listing_id: ListingId,
         date: NaiveDate,
         qty: Decimal,
         price: Decimal,
     ) {
-        test_support::trade(id, listing_id, trade_type)
+        test_support::trade(id, listing_id.0, trade_type)
             .date(date)
             .qty(qty)
             .price(price)
@@ -1526,8 +1527,8 @@ mod tests {
         assert!(row.disposals.is_empty());
     }
 
-    fn make_amma(id: i64, listing_id: i64, year_end: NaiveDate) -> amma::AmmaStatement {
-        test_support::amma(id, listing_id)
+    fn make_amma(id: i64, listing_id: ListingId, year_end: NaiveDate) -> amma::AmmaStatement {
+        test_support::amma(id, listing_id.0)
             .with(|a| {
                 a.tax_year_end_date = year_end;
                 a.date_received = year_end + chrono::Duration::days(60);
@@ -1596,7 +1597,7 @@ mod tests {
             &pool,
             1,
             trade::TradeType::Buy,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
@@ -1606,7 +1607,7 @@ mod tests {
             &pool,
             2,
             trade::TradeType::Sell,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2025, 6, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(15),
@@ -1637,7 +1638,7 @@ mod tests {
             &pool,
             1,
             trade::TradeType::Buy,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
@@ -1647,7 +1648,7 @@ mod tests {
             &pool,
             2,
             trade::TradeType::Sell,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2025, 6, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(15),
@@ -1673,7 +1674,7 @@ mod tests {
             &pool,
             1,
             trade::TradeType::Buy,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
@@ -1683,7 +1684,7 @@ mod tests {
             &pool,
             2,
             trade::TradeType::Sell,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2024, 6, 3).unwrap(),
             Decimal::from(100),
             Decimal::from(15),
@@ -1711,7 +1712,7 @@ mod tests {
             &pool,
             1,
             trade::TradeType::Buy,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
@@ -1721,7 +1722,7 @@ mod tests {
             &pool,
             2,
             trade::TradeType::Sell,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2025, 6, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(15),
@@ -1733,7 +1734,7 @@ mod tests {
             &pool,
             3,
             trade::TradeType::Buy,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2025, 3, 3).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
@@ -1743,7 +1744,7 @@ mod tests {
             &pool,
             4,
             trade::TradeType::Sell,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2025, 6, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(12),
@@ -1755,7 +1756,7 @@ mod tests {
             &pool,
             5,
             trade::TradeType::Buy,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2025, 3, 3).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
@@ -1765,7 +1766,7 @@ mod tests {
             &pool,
             6,
             trade::TradeType::Sell,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2025, 6, 3).unwrap(),
             Decimal::from(100),
             Decimal::from(9),
@@ -1797,7 +1798,7 @@ mod tests {
             &pool,
             1,
             trade::TradeType::Buy,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
@@ -1807,7 +1808,7 @@ mod tests {
             &pool,
             2,
             trade::TradeType::Sell,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2025, 6, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(15),
@@ -1819,7 +1820,7 @@ mod tests {
             &pool,
             3,
             trade::TradeType::Buy,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2025, 1, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(17),
@@ -1829,7 +1830,7 @@ mod tests {
             &pool,
             4,
             trade::TradeType::Sell,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2025, 6, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
@@ -1865,7 +1866,7 @@ mod tests {
             &pool,
             1,
             trade::TradeType::Buy,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2023, 7, 3).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
@@ -1875,7 +1876,7 @@ mod tests {
             &pool,
             2,
             trade::TradeType::Sell,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2024, 6, 3).unwrap(),
             Decimal::from(100),
             Decimal::from(7),
@@ -1887,7 +1888,7 @@ mod tests {
             &pool,
             3,
             trade::TradeType::Buy,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2026, 3, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
@@ -1897,7 +1898,7 @@ mod tests {
             &pool,
             4,
             trade::TradeType::Sell,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2026, 6, 1).unwrap(),
             Decimal::from(100),
             Decimal::from(15),
@@ -1938,7 +1939,7 @@ mod tests {
             &pool,
             1,
             trade::TradeType::Buy,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2023, 7, 3).unwrap(),
             Decimal::from(100),
             Decimal::from(20),
@@ -1948,7 +1949,7 @@ mod tests {
             &pool,
             2,
             trade::TradeType::Sell,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2024, 6, 3).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
@@ -1960,7 +1961,7 @@ mod tests {
             &pool,
             3,
             trade::TradeType::Buy,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
@@ -1970,7 +1971,7 @@ mod tests {
             &pool,
             4,
             trade::TradeType::Sell,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2025, 6, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(15),
@@ -2018,7 +2019,7 @@ mod tests {
             &pool,
             1,
             trade::TradeType::Buy,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
@@ -2028,7 +2029,7 @@ mod tests {
             &pool,
             2,
             trade::TradeType::Sell,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2025, 6, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(15),
@@ -2067,7 +2068,7 @@ mod tests {
             &pool,
             1,
             trade::TradeType::Buy,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2023, 7, 3).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
@@ -2077,7 +2078,7 @@ mod tests {
             &pool,
             2,
             trade::TradeType::Sell,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2024, 6, 3).unwrap(),
             Decimal::from(100),
             Decimal::from(7),
@@ -2089,7 +2090,7 @@ mod tests {
             &pool,
             3,
             trade::TradeType::Buy,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2025, 3, 3).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
@@ -2099,7 +2100,7 @@ mod tests {
             &pool,
             4,
             trade::TradeType::Sell,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2025, 6, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(15),
@@ -2124,7 +2125,11 @@ mod tests {
         // AMMA discount-method gain stored as the net (already-halved) $100.
         // Grossed up ×2 = 200 discount-eligible; net capital gain = 200/2 = 100.
         insert_listing(&pool, 1, "VAF").await;
-        let mut a = make_amma(1, 1, NaiveDate::from_ymd_opt(2024, 6, 30).unwrap());
+        let mut a = make_amma(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2024, 6, 30).unwrap(),
+        );
         a.cgt_discount_gains = Decimal::from(100);
         amma::db_upsert(&pool, &a).await.unwrap();
 
@@ -2148,7 +2153,7 @@ mod tests {
         insert_listing(&pool, 1, "VAF").await;
         let year_end = NaiveDate::from_ymd_opt(2024, 12, 31).unwrap();
         assert_eq!(tax_year_for(year_end), 2025);
-        let mut a = make_amma(1, 1, year_end);
+        let mut a = make_amma(1, ListingId(1), year_end);
         a.cgt_discount_gains = Decimal::from(100);
         test_support::insert_amma_bypassing_checks(&pool, &a).await;
 
@@ -2178,7 +2183,7 @@ mod tests {
             &pool,
             1,
             trade::TradeType::Buy,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(1),
@@ -2187,7 +2192,7 @@ mod tests {
         let year_end = NaiveDate::from_ymd_opt(2024, 12, 31).unwrap();
         assert_eq!(tax_year_for(year_end), 2025);
         // $1.50/unit × 100 = $150 reduction against a $100 base → $50 excess.
-        let mut a = make_amma(1, 1, year_end);
+        let mut a = make_amma(1, ListingId(1), year_end);
         a.cost_base_adjustment = "1.50".parse().unwrap();
         test_support::insert_amma_bypassing_checks(&pool, &a).await;
         link_adjustment(&pool, 1, 1, 1, Decimal::from(100)).await;
@@ -2204,7 +2209,11 @@ mod tests {
         let pool = test_pool().await;
         // Indexation 30 + other 20 = 50 non-discountable, taxed in full.
         insert_listing(&pool, 1, "VAF").await;
-        let mut a = make_amma(1, 1, NaiveDate::from_ymd_opt(2024, 6, 30).unwrap());
+        let mut a = make_amma(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2024, 6, 30).unwrap(),
+        );
         a.cgt_indexation_gains = Decimal::from(30);
         a.cgt_other_gains = Decimal::from(20);
         amma::db_upsert(&pool, &a).await.unwrap();
@@ -2227,7 +2236,11 @@ mod tests {
         // nothing: not the statement's own gains, not unrelated realised
         // gains, and it must not carry forward.
         insert_listing(&pool, 1, "VAF").await;
-        let mut a = make_amma(1, 1, NaiveDate::from_ymd_opt(2024, 6, 30).unwrap());
+        let mut a = make_amma(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2024, 6, 30).unwrap(),
+        );
         a.cgt_indexation_gains = Decimal::from(30);
         a.cgt_other_gains = Decimal::from(20);
         a.capital_losses_applied = Decimal::from(1000);
@@ -2237,7 +2250,7 @@ mod tests {
             &pool,
             1,
             trade::TradeType::Buy,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
@@ -2247,7 +2260,7 @@ mod tests {
             &pool,
             2,
             trade::TradeType::Sell,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2024, 5, 1).unwrap(),
             Decimal::from(100),
             Decimal::from(15),
@@ -2278,7 +2291,11 @@ mod tests {
         insert_listing(&pool, 1, "VAF").await;
 
         // The reproduction: a −100 "other gain" stated by itself.
-        let mut a = make_amma(1, 1, NaiveDate::from_ymd_opt(2025, 6, 30).unwrap());
+        let mut a = make_amma(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2025, 6, 30).unwrap(),
+        );
         a.cgt_other_gains = Decimal::from(-100);
         let err = amma::db_upsert(&pool, &a).await.unwrap_err();
         assert!(
@@ -2292,7 +2309,7 @@ mod tests {
             &pool,
             1,
             trade::TradeType::Buy,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2026, 1, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
@@ -2302,7 +2319,7 @@ mod tests {
             &pool,
             2,
             trade::TradeType::Sell,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2026, 5, 1).unwrap(),
             Decimal::from(100),
             Decimal::from(11),
@@ -2344,7 +2361,7 @@ mod tests {
             &pool,
             1,
             trade::TradeType::Buy,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2023, 1, 3).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
@@ -2354,14 +2371,18 @@ mod tests {
             &pool,
             2,
             trade::TradeType::Sell,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2024, 5, 1).unwrap(),
             Decimal::from(100),
             Decimal::from(15),
         )
         .await;
         allocate(&pool, 1, 2, 1, Decimal::from(100)).await;
-        let mut a = make_amma(1, 1, NaiveDate::from_ymd_opt(2024, 6, 30).unwrap());
+        let mut a = make_amma(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2024, 6, 30).unwrap(),
+        );
         a.cgt_discount_gains = Decimal::from(100);
         amma::db_upsert(&pool, &a).await.unwrap();
 
@@ -2398,7 +2419,7 @@ mod tests {
             &pool,
             1,
             trade::TradeType::Buy,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2023, 1, 17).unwrap(),
             Decimal::from(1000),
             Decimal::from(2),
@@ -2408,7 +2429,7 @@ mod tests {
             &pool,
             &corporate_action::CorporateAction {
                 id: 10,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: NaiveDate::from_ymd_opt(2024, 7, 1).unwrap(),
                 kind: corporate_action::ActionKind::RightsIssue {
                     rights_units: Decimal::ONE,
@@ -2457,7 +2478,11 @@ mod tests {
         rba_fx_rate::db_import_rate(&pool, "USD", "2024-06", "0.50".parse().unwrap())
             .await
             .unwrap();
-        let mut a = make_amma(1, 1, NaiveDate::from_ymd_opt(2024, 6, 30).unwrap());
+        let mut a = make_amma(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2024, 6, 30).unwrap(),
+        );
         a.currency = "USD".into();
         a.cgt_discount_gains = Decimal::from(50);
         amma::db_upsert(&pool, &a).await.unwrap();
@@ -2472,7 +2497,11 @@ mod tests {
     async fn db_amma_non_aud_without_rate_fails_loudly() {
         let pool = test_pool().await;
         insert_usd_listing(&pool, 1, "VAF").await;
-        let mut a = make_amma(1, 1, NaiveDate::from_ymd_opt(2024, 6, 30).unwrap());
+        let mut a = make_amma(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2024, 6, 30).unwrap(),
+        );
         a.currency = "USD".into();
         a.cgt_discount_gains = Decimal::from(50);
         amma::db_upsert(&pool, &a).await.unwrap();
@@ -2484,10 +2513,18 @@ mod tests {
     async fn db_sorted_by_tax_year() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "VAF").await;
-        let mut a1 = make_amma(1, 1, NaiveDate::from_ymd_opt(2025, 6, 30).unwrap());
+        let mut a1 = make_amma(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2025, 6, 30).unwrap(),
+        );
         a1.cgt_other_gains = Decimal::from(10);
         amma::db_upsert(&pool, &a1).await.unwrap();
-        let mut a2 = make_amma(2, 1, NaiveDate::from_ymd_opt(2024, 6, 30).unwrap());
+        let mut a2 = make_amma(
+            2,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2024, 6, 30).unwrap(),
+        );
         a2.cgt_other_gains = Decimal::from(20);
         amma::db_upsert(&pool, &a2).await.unwrap();
 
@@ -2547,14 +2584,18 @@ mod tests {
             &pool,
             1,
             trade::TradeType::Buy,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(1),
         )
         .await;
         // AMMA reduces cost base by $1.50/unit × 100 = $150 → $50 excess over the $100 base.
-        let mut a = make_amma(1, 1, NaiveDate::from_ymd_opt(2024, 6, 30).unwrap());
+        let mut a = make_amma(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2024, 6, 30).unwrap(),
+        );
         a.cost_base_adjustment = "1.50".parse().unwrap();
         amma::db_upsert(&pool, &a).await.unwrap();
         link_adjustment(&pool, 1, 1, 1, Decimal::from(100)).await;
@@ -2584,7 +2625,7 @@ mod tests {
             &pool,
             1,
             trade::TradeType::Buy,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2022, 1, 10).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
@@ -2594,7 +2635,7 @@ mod tests {
             &pool,
             2,
             trade::TradeType::Sell,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
             Decimal::from(40),
             Decimal::from(10),
@@ -2604,7 +2645,11 @@ mod tests {
         // $12/unit over the 60 units still held at the year end: $720 against
         // the $600 those units carry — $120 past nil — while the parcel's
         // whole $1,000 would have absorbed it without a murmur.
-        let mut a = make_amma(1, 1, NaiveDate::from_ymd_opt(2024, 6, 30).unwrap());
+        let mut a = make_amma(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2024, 6, 30).unwrap(),
+        );
         a.cost_base_adjustment = Decimal::from(12);
         a.units_held = Decimal::from(60);
         amma::db_upsert(&pool, &a).await.unwrap();
@@ -2636,13 +2681,17 @@ mod tests {
             &pool,
             1,
             trade::TradeType::Buy,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2023, 1, 3).unwrap(),
             Decimal::from(100),
             Decimal::from(1),
         )
         .await;
-        let mut a = make_amma(1, 1, NaiveDate::from_ymd_opt(2024, 6, 30).unwrap());
+        let mut a = make_amma(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2024, 6, 30).unwrap(),
+        );
         a.cost_base_adjustment = "1.50".parse().unwrap();
         amma::db_upsert(&pool, &a).await.unwrap();
         link_adjustment(&pool, 1, 1, 1, Decimal::from(100)).await;
@@ -2666,19 +2715,27 @@ mod tests {
             &pool,
             1,
             trade::TradeType::Buy,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(1),
         )
         .await;
         // FY2024: reduce $0.60/unit × 100 = $60 → cost base $40 remaining, no excess.
-        let mut a1 = make_amma(1, 1, NaiveDate::from_ymd_opt(2024, 6, 30).unwrap());
+        let mut a1 = make_amma(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2024, 6, 30).unwrap(),
+        );
         a1.cost_base_adjustment = "0.60".parse().unwrap();
         amma::db_upsert(&pool, &a1).await.unwrap();
         link_adjustment(&pool, 1, 1, 1, Decimal::from(100)).await;
         // FY2025: reduce $0.70/unit × 100 = $70 > $40 remaining → $30 excess (E10) in FY2025.
-        let mut a2 = make_amma(2, 1, NaiveDate::from_ymd_opt(2025, 6, 30).unwrap());
+        let mut a2 = make_amma(
+            2,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2025, 6, 30).unwrap(),
+        );
         a2.cost_base_adjustment = "0.70".parse().unwrap();
         amma::db_upsert(&pool, &a2).await.unwrap();
         link_adjustment(&pool, 2, 2, 1, Decimal::from(100)).await;
@@ -2716,7 +2773,7 @@ mod tests {
             &pool,
             1,
             trade::TradeType::Buy,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2022, 1, 10).unwrap(),
             Decimal::from(100),
             Decimal::from(1),
@@ -2724,13 +2781,21 @@ mod tests {
         .await;
         // FY2024: reduce $2.00/unit × 100 = $200 against the $100 base → nil
         // base, $100 past it (CGT event E10, that year).
-        let mut a1 = make_amma(1, 1, NaiveDate::from_ymd_opt(2024, 6, 30).unwrap());
+        let mut a1 = make_amma(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2024, 6, 30).unwrap(),
+        );
         a1.cost_base_adjustment = Decimal::from(2);
         amma::db_upsert(&pool, &a1).await.unwrap();
         link_adjustment(&pool, 1, 1, 1, Decimal::from(100)).await;
         // FY2025: increase $1.50/unit × 100 = $150 → the base comes back to
         // $150, and no further E10 gain arises.
-        let mut a2 = make_amma(2, 1, NaiveDate::from_ymd_opt(2025, 6, 30).unwrap());
+        let mut a2 = make_amma(
+            2,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2025, 6, 30).unwrap(),
+        );
         a2.cost_base_adjustment = "-1.50".parse().unwrap();
         amma::db_upsert(&pool, &a2).await.unwrap();
         link_adjustment(&pool, 2, 2, 1, Decimal::from(100)).await;
@@ -2740,7 +2805,7 @@ mod tests {
             &pool,
             3,
             trade::TradeType::Sell,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2025, 9, 1).unwrap(),
             Decimal::from(100),
             Decimal::from(2),
@@ -2790,7 +2855,7 @@ mod tests {
             &pool,
             1,
             trade::TradeType::Buy,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2023, 8, 1).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
@@ -2799,7 +2864,7 @@ mod tests {
         apply_split(
             &pool,
             1,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2024, 1, 15).unwrap(),
             "2",
             "1",
@@ -2807,7 +2872,11 @@ mod tests {
         .await;
         // $6.00 per post-split unit × 200 = $1,200 against the $1,000 cost
         // base → nil cost base and a $200 E10 gain in FY2024.
-        let mut a = make_amma(1, 1, NaiveDate::from_ymd_opt(2024, 6, 30).unwrap());
+        let mut a = make_amma(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2024, 6, 30).unwrap(),
+        );
         a.cost_base_adjustment = "6.00".parse().unwrap();
         amma::db_upsert(&pool, &a).await.unwrap();
         link_adjustment(&pool, 1, 1, 1, Decimal::from(100)).await;
@@ -2829,7 +2898,13 @@ mod tests {
         assert_eq!(parcels[0].remaining_cost_base, Decimal::ZERO);
     }
 
-    async fn apply_roc(pool: &SqlitePool, id: i64, listing_id: i64, date: NaiveDate, amount: &str) {
+    async fn apply_roc(
+        pool: &SqlitePool,
+        id: i64,
+        listing_id: ListingId,
+        date: NaiveDate,
+        amount: &str,
+    ) {
         apply_roc_with_record(pool, id, listing_id, date, amount, None).await;
     }
 
@@ -2838,7 +2913,7 @@ mod tests {
     async fn apply_roc_with_record(
         pool: &SqlitePool,
         id: i64,
-        listing_id: i64,
+        listing_id: ListingId,
         date: NaiveDate,
         amount: &str,
         record_date: Option<NaiveDate>,
@@ -2852,7 +2927,7 @@ mod tests {
     async fn apply_roc_full(
         pool: &SqlitePool,
         id: i64,
-        listing_id: i64,
+        listing_id: ListingId,
         date: NaiveDate,
         amount: &str,
         currency: &str,
@@ -2878,7 +2953,7 @@ mod tests {
     async fn apply_split(
         pool: &SqlitePool,
         id: i64,
-        listing_id: i64,
+        listing_id: ListingId,
         date: NaiveDate,
         new: &str,
         old: &str,
@@ -2911,7 +2986,7 @@ mod tests {
             &pool,
             1,
             trade::TradeType::Buy,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(1),
@@ -2920,7 +2995,7 @@ mod tests {
         apply_split(
             &pool,
             1,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
             "2",
             "1",
@@ -2931,7 +3006,7 @@ mod tests {
         apply_roc(
             &pool,
             2,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(),
             "0.75",
         )
@@ -2956,7 +3031,7 @@ mod tests {
             &pool,
             1,
             trade::TradeType::Buy,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(1),
@@ -2966,7 +3041,7 @@ mod tests {
         apply_roc(
             &pool,
             1,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(),
             "1.50",
         )
@@ -2998,7 +3073,7 @@ mod tests {
                 &pool,
                 id,
                 trade::TradeType::Buy,
-                1,
+                ListingId(1),
                 date,
                 Decimal::from(100),
                 Decimal::from(1),
@@ -3009,7 +3084,7 @@ mod tests {
         apply_roc_with_record(
             &pool,
             1,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2025, 3, 3).unwrap(),
             "1.50",
             Some(NaiveDate::from_ymd_opt(2025, 2, 10).unwrap()),
@@ -3030,7 +3105,7 @@ mod tests {
         apply_roc_with_record(
             &pool,
             1,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2025, 3, 3).unwrap(),
             "1.50",
             None,
@@ -3057,7 +3132,7 @@ mod tests {
             &pool,
             1,
             trade::TradeType::Buy,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2023, 1, 10).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
@@ -3069,7 +3144,7 @@ mod tests {
             &pool,
             2,
             trade::TradeType::Sell,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2023, 10, 3).unwrap(),
             Decimal::from(100),
             Decimal::from(15),
@@ -3079,7 +3154,7 @@ mod tests {
         apply_roc_with_record(
             &pool,
             1,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2023, 11, 1).unwrap(),
             "0.50",
             Some(NaiveDate::from_ymd_opt(2023, 9, 25).unwrap()),
@@ -3120,7 +3195,7 @@ mod tests {
             &pool,
             1,
             trade::TradeType::Buy,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2022, 1, 10).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
@@ -3130,7 +3205,7 @@ mod tests {
             &pool,
             2,
             trade::TradeType::Sell,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2023, 10, 3).unwrap(),
             Decimal::from(100),
             Decimal::from(15),
@@ -3140,7 +3215,7 @@ mod tests {
         apply_roc_with_record(
             &pool,
             1,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2023, 11, 1).unwrap(),
             "0.50",
             Some(NaiveDate::from_ymd_opt(2023, 9, 25).unwrap()),
@@ -3170,7 +3245,7 @@ mod tests {
             &pool,
             1,
             trade::TradeType::Buy,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2023, 1, 10).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
@@ -3182,7 +3257,7 @@ mod tests {
             &pool,
             2,
             trade::TradeType::Sell,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2023, 9, 1).unwrap(),
             Decimal::from(30),
             Decimal::from(15),
@@ -3193,7 +3268,7 @@ mod tests {
             &pool,
             3,
             trade::TradeType::Sell,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2023, 10, 3).unwrap(),
             Decimal::from(20),
             Decimal::from(15),
@@ -3203,7 +3278,7 @@ mod tests {
         apply_roc_with_record(
             &pool,
             1,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2023, 11, 1).unwrap(),
             "0.50",
             Some(NaiveDate::from_ymd_opt(2023, 9, 25).unwrap()),
@@ -3248,7 +3323,7 @@ mod tests {
             &pool,
             1,
             trade::TradeType::Buy,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2023, 1, 10).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
@@ -3260,7 +3335,7 @@ mod tests {
             &pool,
             1,
             &TransferBody {
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: NaiveDate::from_ymd_opt(2023, 10, 3).unwrap(),
                 from_account_id: 1,
                 to_account_id: 2,
@@ -3278,7 +3353,7 @@ mod tests {
         apply_roc_with_record(
             &pool,
             1,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2023, 11, 1).unwrap(),
             "0.50",
             Some(NaiveDate::from_ymd_opt(2023, 9, 25).unwrap()),
@@ -3327,7 +3402,7 @@ mod tests {
             &pool,
             1,
             trade::TradeType::Buy,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2023, 1, 10).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
@@ -3337,7 +3412,7 @@ mod tests {
             &pool,
             2,
             trade::TradeType::Sell,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2023, 10, 3).unwrap(),
             Decimal::from(30),
             Decimal::from(15),
@@ -3348,7 +3423,7 @@ mod tests {
             &pool,
             1,
             &TransferBody {
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: NaiveDate::from_ymd_opt(2023, 10, 10).unwrap(),
                 from_account_id: 1,
                 to_account_id: 2,
@@ -3366,7 +3441,7 @@ mod tests {
         apply_roc_with_record(
             &pool,
             1,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2023, 11, 1).unwrap(),
             "0.50",
             Some(NaiveDate::from_ymd_opt(2023, 9, 25).unwrap()),
@@ -3408,7 +3483,7 @@ mod tests {
             &pool,
             1,
             trade::TradeType::Buy,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2023, 1, 10).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
@@ -3418,7 +3493,7 @@ mod tests {
             &pool,
             2,
             trade::TradeType::Sell,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2023, 10, 3).unwrap(),
             Decimal::from(100),
             Decimal::from(15),
@@ -3428,7 +3503,7 @@ mod tests {
         apply_roc(
             &pool,
             1,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2023, 11, 1).unwrap(),
             "0.50",
         )
@@ -3442,7 +3517,7 @@ mod tests {
         apply_roc_with_record(
             &pool,
             1,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2023, 11, 1).unwrap(),
             "0.50",
             Some(NaiveDate::from_ymd_opt(2023, 9, 25).unwrap()),
@@ -3462,7 +3537,7 @@ mod tests {
             &pool,
             1,
             trade::TradeType::Buy,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
             Decimal::from(1500),
             Decimal::from(5),
@@ -3471,7 +3546,7 @@ mod tests {
         apply_roc(
             &pool,
             1,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2024, 11, 30).unwrap(),
             "0.50",
         )
@@ -3513,7 +3588,7 @@ mod tests {
         apply_roc_full(
             &pool,
             1,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2025, 7, 1).unwrap(),
             "10",
             "USD",
@@ -3541,7 +3616,7 @@ mod tests {
             &pool,
             1,
             trade::TradeType::Buy,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2023, 1, 10).unwrap(),
             Decimal::from(100),
             Decimal::from(6),
@@ -3550,7 +3625,7 @@ mod tests {
         apply_roc(
             &pool,
             1,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2025, 7, 1).unwrap(),
             "10",
         )
@@ -3587,7 +3662,7 @@ mod tests {
         apply_roc_full(
             &pool,
             1,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2025, 7, 1).unwrap(),
             "10",
             "USD",
@@ -3628,7 +3703,7 @@ mod tests {
         apply_roc_full(
             &pool,
             1,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2025, 7, 1).unwrap(),
             "10",
             "USD",
@@ -3654,7 +3729,7 @@ mod tests {
             &pool,
             1,
             trade::TradeType::Buy,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2023, 1, 3).unwrap(),
             Decimal::from(100),
             Decimal::from(1),
@@ -3663,7 +3738,7 @@ mod tests {
         apply_roc(
             &pool,
             1,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(),
             "1.50",
         )
@@ -3688,7 +3763,7 @@ mod tests {
             &pool,
             1,
             trade::TradeType::Buy,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(1),
@@ -3698,7 +3773,7 @@ mod tests {
         apply_roc(
             &pool,
             1,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(),
             "0.60",
         )
@@ -3707,7 +3782,7 @@ mod tests {
         apply_roc(
             &pool,
             2,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2025, 6, 2).unwrap(),
             "0.70",
         )
@@ -3735,7 +3810,7 @@ mod tests {
             &pool,
             1,
             trade::TradeType::Buy,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(1),
@@ -3745,7 +3820,7 @@ mod tests {
             &pool,
             2,
             trade::TradeType::Sell,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
             Decimal::from(40),
             Decimal::from(1),
@@ -3755,7 +3830,7 @@ mod tests {
         apply_roc(
             &pool,
             1,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(),
             "1.50",
         )
@@ -3782,7 +3857,7 @@ mod tests {
             &pool,
             1,
             trade::TradeType::Buy,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2024, 7, 1).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
@@ -3792,14 +3867,18 @@ mod tests {
         apply_roc(
             &pool,
             1,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2024, 9, 1).unwrap(),
             "6",
         )
         .await;
         // The FY2025 AMMA statement then reduces $6/unit × 100 = $600 against
         // that $400 remaining.
-        let mut a = make_amma(1, 1, NaiveDate::from_ymd_opt(2025, 6, 30).unwrap());
+        let mut a = make_amma(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2025, 6, 30).unwrap(),
+        );
         a.cost_base_adjustment = "6.00".parse().unwrap();
         amma::db_upsert(&pool, &a).await.unwrap();
         link_adjustment(&pool, 1, 1, 1, Decimal::from(100)).await;
@@ -3839,21 +3918,25 @@ mod tests {
             &pool,
             1,
             trade::TradeType::Buy,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2024, 7, 1).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
         )
         .await;
         // AMMA statement entered first this time, the payment after it.
-        let mut a = make_amma(1, 1, NaiveDate::from_ymd_opt(2025, 6, 30).unwrap());
+        let mut a = make_amma(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2025, 6, 30).unwrap(),
+        );
         a.cost_base_adjustment = "6.00".parse().unwrap();
         amma::db_upsert(&pool, &a).await.unwrap();
         link_adjustment(&pool, 1, 1, 1, Decimal::from(100)).await;
         apply_roc(
             &pool,
             1,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2024, 9, 1).unwrap(),
             "6",
         )
@@ -3879,7 +3962,7 @@ mod tests {
             &pool,
             1,
             trade::TradeType::Buy,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2024, 7, 1).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
@@ -3888,12 +3971,16 @@ mod tests {
         apply_roc(
             &pool,
             1,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2024, 9, 1).unwrap(),
             "6",
         )
         .await;
-        let mut a = make_amma(1, 1, NaiveDate::from_ymd_opt(2025, 6, 30).unwrap());
+        let mut a = make_amma(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2025, 6, 30).unwrap(),
+        );
         a.cost_base_adjustment = "6.00".parse().unwrap();
         amma::db_upsert(&pool, &a).await.unwrap();
         link_adjustment(&pool, 1, 1, 1, Decimal::from(100)).await;
@@ -3902,7 +3989,7 @@ mod tests {
             &pool,
             2,
             trade::TradeType::Sell,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2026, 6, 1).unwrap(),
             Decimal::from(100),
             Decimal::from(15),
@@ -3938,14 +4025,18 @@ mod tests {
             &pool,
             1,
             trade::TradeType::Buy,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2023, 1, 3).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
         )
         .await;
         // FY2023 AMMA: $7/unit × 100 = $700, leaving $300 — no excess yet.
-        let mut a = make_amma(1, 1, NaiveDate::from_ymd_opt(2023, 6, 30).unwrap());
+        let mut a = make_amma(
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2023, 6, 30).unwrap(),
+        );
         a.cost_base_adjustment = "7.00".parse().unwrap();
         amma::db_upsert(&pool, &a).await.unwrap();
         link_adjustment(&pool, 1, 1, 1, Decimal::from(100)).await;
@@ -3953,7 +4044,7 @@ mod tests {
         apply_roc(
             &pool,
             1,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
             "5",
         )
@@ -3980,7 +4071,7 @@ mod tests {
             &pool,
             1,
             trade::TradeType::Buy,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
@@ -3990,7 +4081,7 @@ mod tests {
             &pool,
             2,
             trade::TradeType::Sell,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2025, 6, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(15),
@@ -4014,7 +4105,7 @@ mod tests {
             &pool,
             1,
             trade::TradeType::Buy,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
@@ -4024,7 +4115,7 @@ mod tests {
             &pool,
             2,
             trade::TradeType::Sell,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2025, 6, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(15),
@@ -4543,7 +4634,7 @@ mod tests {
                 &pool,
                 buy,
                 trade::TradeType::Buy,
-                1,
+                ListingId(1),
                 NaiveDate::from_ymd_opt(fy - 1, 8, 1).unwrap(),
                 Decimal::from(100),
                 Decimal::from(*loss_per_unit + 10),
@@ -4553,7 +4644,7 @@ mod tests {
                 &pool,
                 buy + 1,
                 trade::TradeType::Sell,
-                1,
+                ListingId(1),
                 NaiveDate::from_ymd_opt(*fy, 5, 1).unwrap(),
                 Decimal::from(100),
                 Decimal::from(10),
@@ -4591,7 +4682,7 @@ mod tests {
             &pool,
             1,
             trade::TradeType::Buy,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2023, 8, 1).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
@@ -4601,7 +4692,7 @@ mod tests {
             &pool,
             2,
             trade::TradeType::Sell,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2024, 5, 1).unwrap(),
             Decimal::from(100),
             Decimal::from(15),
@@ -4651,7 +4742,7 @@ mod tests {
             &pool,
             1,
             trade::TradeType::Buy,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2020, 10, 1).unwrap(),
             Decimal::from(1000),
             "1.50".parse().unwrap(),
@@ -4662,10 +4753,10 @@ mod tests {
             &pool,
             &corporate_action::CorporateAction {
                 id: 10,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: NaiveDate::from_ymd_opt(2024, 7, 1).unwrap(),
                 kind: corporate_action::ActionKind::ScripForScrip {
-                    scrip_listing_id: 2,
+                    scrip_listing_id: ListingId(2),
                     scrip_new_units: Decimal::from(2),
                     scrip_old_units: Decimal::ONE,
                     scrip_cash_per_unit: None,
@@ -4691,7 +4782,7 @@ mod tests {
             &pool,
             50,
             trade::TradeType::Sell,
-            2,
+            ListingId(2),
             NaiveDate::from_ymd_opt(2024, 10, 1).unwrap(),
             Decimal::from(2000),
             Decimal::ONE,
@@ -4721,7 +4812,7 @@ mod tests {
             &pool,
             1,
             trade::TradeType::Buy,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2020, 10, 1).unwrap(),
             Decimal::from(1000),
             "1.50".parse().unwrap(),
@@ -4732,10 +4823,10 @@ mod tests {
             &pool,
             &corporate_action::CorporateAction {
                 id: 10,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: NaiveDate::from_ymd_opt(2024, 7, 1).unwrap(),
                 kind: corporate_action::ActionKind::Demerger {
-                    demerger_listing_id: 2,
+                    demerger_listing_id: ListingId(2),
                     demerger_new_units: Decimal::ONE,
                     demerger_held_units: Decimal::from(5),
                     demerger_cost_base_pct: Decimal::from(20),
@@ -4764,7 +4855,7 @@ mod tests {
             &pool,
             50,
             trade::TradeType::Sell,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2024, 10, 1).unwrap(),
             Decimal::from(1000),
             Decimal::from(2),
@@ -4782,7 +4873,7 @@ mod tests {
             &pool,
             51,
             trade::TradeType::Sell,
-            2,
+            ListingId(2),
             NaiveDate::from_ymd_opt(2024, 10, 1).unwrap(),
             Decimal::from(200),
             Decimal::from(3),
@@ -4828,7 +4919,7 @@ mod tests {
             &pool,
             1,
             trade::TradeType::Buy,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
             Decimal::from(200),
             Decimal::from(10),
@@ -4839,7 +4930,7 @@ mod tests {
             &pool,
             2,
             trade::TradeType::Buy,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2026, 1, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
@@ -4849,7 +4940,7 @@ mod tests {
             &pool,
             3,
             trade::TradeType::Sell,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2026, 6, 1).unwrap(),
             Decimal::from(100),
             Decimal::from(15),
@@ -4916,7 +5007,7 @@ mod tests {
             &pool,
             1,
             trade::TradeType::Buy,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2023, 7, 3).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
@@ -4926,7 +5017,7 @@ mod tests {
             &pool,
             2,
             trade::TradeType::Sell,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2024, 6, 3).unwrap(),
             Decimal::from(100),
             Decimal::from(7),
@@ -4938,7 +5029,7 @@ mod tests {
             &pool,
             3,
             trade::TradeType::Buy,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
@@ -4988,7 +5079,7 @@ mod tests {
             &pool,
             1,
             trade::TradeType::Buy,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
@@ -5159,7 +5250,7 @@ mod tests {
             &pool,
             1,
             trade::TradeType::Buy,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2022, 1, 4).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
@@ -5191,7 +5282,7 @@ mod tests {
             &pool,
             1,
             trade::TradeType::Buy,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2022, 1, 4).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
@@ -5233,7 +5324,7 @@ mod tests {
                 &pool,
                 id,
                 trade::TradeType::Buy,
-                1,
+                ListingId(1),
                 date,
                 Decimal::from(100),
                 Decimal::from(10),
@@ -5285,7 +5376,7 @@ mod tests {
             &pool,
             1,
             trade::TradeType::Buy,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2020, 1, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
@@ -5296,7 +5387,7 @@ mod tests {
             &pool,
             2,
             trade::TradeType::Sell,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
             Decimal::from(100),
             Decimal::from(12),
@@ -5328,7 +5419,7 @@ mod tests {
             &pool,
             1,
             trade::TradeType::Buy,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
@@ -5362,7 +5453,7 @@ mod tests {
             &pool,
             1,
             trade::TradeType::Buy,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2026, 1, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(10),
@@ -5372,7 +5463,7 @@ mod tests {
             &pool,
             2,
             trade::TradeType::Sell,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2026, 6, 1).unwrap(),
             Decimal::from(100),
             Decimal::from(15),
@@ -5384,7 +5475,7 @@ mod tests {
             &pool,
             3,
             trade::TradeType::Buy,
-            1,
+            ListingId(1),
             NaiveDate::from_ymd_opt(2025, 1, 2).unwrap(),
             Decimal::from(100),
             Decimal::from(10),

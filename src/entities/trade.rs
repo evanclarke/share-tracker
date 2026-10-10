@@ -76,6 +76,8 @@ pub(crate) use settlement::auto_settlement_date;
 pub use settlement::run_recompute;
 
 #[cfg(test)]
+use crate::infra::id::ListingId;
+#[cfg(test)]
 use axum::http::StatusCode;
 #[cfg(test)]
 use checks::split_gst_inclusive;
@@ -142,7 +144,7 @@ mod tests {
                 holding_account_id: 1,
                 date: NaiveDate::from_ymd_opt(2024, 6, 3).unwrap(),
                 settlement_date: Some(NaiveDate::from_ymd_opt(2024, 6, 3).unwrap()),
-                listing_id: 1,
+                listing_id: ListingId(1),
                 average_price: Decimal::from(120),
                 quantity: qty,
                 currency: "AUD".into(),
@@ -254,7 +256,7 @@ mod tests {
             .await;
         let mut btc = buy_trade();
         btc.id = 2;
-        btc.listing_id = 2;
+        btc.listing_id = ListingId(2);
         btc.currency = "BTC".into();
         btc.brokerage_currency = "BTC".into();
         db_upsert(&pool, &btc).await.unwrap();
@@ -513,7 +515,7 @@ mod tests {
             &pool,
             &crate::entities::corporate_action::CorporateAction {
                 id: 1,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
                 kind: crate::entities::corporate_action::ActionKind::ShareSplit {
                     split_new_units: Decimal::from(2),
@@ -587,7 +589,7 @@ mod tests {
         insert_sell_consuming(&pool, 2, 1, Decimal::from(5)).await;
 
         let mut moved = buy_trade();
-        moved.listing_id = 2;
+        moved.listing_id = ListingId(2);
         let err = db_upsert(&pool, &moved).await.unwrap_err();
         assert!(
             matches!(err, UpsertError::ListingChangeReferenced),
@@ -607,7 +609,7 @@ mod tests {
         insert_amit_adjustment_covering(&pool, 1, Decimal::from(8)).await;
 
         let mut moved = buy_trade();
-        moved.listing_id = 2;
+        moved.listing_id = ListingId(2);
         let err = db_upsert(&pool, &moved).await.unwrap_err();
         assert!(
             matches!(err, UpsertError::ListingChangeReferenced),
@@ -1077,14 +1079,14 @@ mod tests {
         let coverage_end = ymd(2027, 12, 31);
         let mut checked = 0;
         for listing_id in [1, 2] {
-            let market = closing_price::load_market(&pool, listing_id)
+            let market = closing_price::load_market(&pool, ListingId(listing_id))
                 .await
                 .unwrap()
                 .unwrap();
             let mut date = ymd(2019, 1, 1);
             while date <= coverage_end {
                 if closing_price::non_trading_day(&market, date).is_none() {
-                    let settled = auto_settlement_date(&pool, 1, listing_id, date)
+                    let settled = auto_settlement_date(&pool, 1, ListingId(listing_id), date)
                         .await
                         .unwrap();
                     if settled <= coverage_end {
@@ -1387,7 +1389,7 @@ mod tests {
         let resolved = Settlement::resolve_on(
             &mut tx,
             Some(1),
-            1,
+            ListingId(1),
             ymd(2024, 1, 15),
             Some(ymd(2024, 1, 17)),
         )
@@ -2101,7 +2103,7 @@ mod tests {
         // And the settlement date is allowed past it: a T+2 settlement of a
         // trade dated the market's most recent open day always falls after
         // today, whichever day of the week the suite runs on.
-        let market = crate::entities::closing_price::load_market(&pool, 1)
+        let market = crate::entities::closing_price::load_market(&pool, ListingId(1))
             .await
             .unwrap()
             .unwrap();
@@ -2606,7 +2608,7 @@ mod tests {
             &pool,
             &CorporateAction {
                 id: 1,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: ymd(2024, 5, 1),
                 kind: ActionKind::ReturnOfCapital {
                     amount_per_unit: dec("0.50"),
@@ -2839,10 +2841,10 @@ mod tests {
             pool,
             &crate::entities::corporate_action::CorporateAction {
                 id: 10,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: ymd(2024, 6, 10),
                 kind: crate::entities::corporate_action::ActionKind::ScripForScrip {
-                    scrip_listing_id: 2,
+                    scrip_listing_id: ListingId(2),
                     scrip_new_units: Decimal::ONE,
                     scrip_old_units: Decimal::ONE,
                     scrip_cash_per_unit: None,
@@ -2871,10 +2873,10 @@ mod tests {
             pool,
             &crate::entities::corporate_action::CorporateAction {
                 id: 10,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: ymd(2024, 6, 11),
                 kind: crate::entities::corporate_action::ActionKind::Demerger {
-                    demerger_listing_id: 2,
+                    demerger_listing_id: ListingId(2),
                     demerger_new_units: Decimal::ONE,
                     demerger_held_units: dec("5"),
                     demerger_cost_base_pct: dec("10"),
@@ -2893,8 +2895,8 @@ mod tests {
     }
 
     /// A Buy of the listing dated `date`, id 900.
-    fn back_dated_buy(listing_id: i64, date: NaiveDate) -> Trade {
-        test_support::buy(900, listing_id)
+    fn back_dated_buy(listing_id: ListingId, date: NaiveDate) -> Trade {
+        test_support::buy(900, listing_id.0)
             .date(date)
             .settlement(date)
             .build()
@@ -2908,7 +2910,7 @@ mod tests {
     async fn db_a_buy_dated_before_an_executed_exchange_is_refused() {
         let pool = test_pool().await;
         exchanged_listing(&pool).await;
-        let err = db_upsert(&pool, &back_dated_buy(1, ymd(2024, 2, 5)))
+        let err = db_upsert(&pool, &back_dated_buy(ListingId(1), ymd(2024, 2, 5)))
             .await
             .unwrap_err();
         assert!(
@@ -2924,7 +2926,7 @@ mod tests {
     async fn db_a_buy_dated_before_an_executed_demerger_is_refused() {
         let pool = test_pool().await;
         demerged_listing(&pool).await;
-        let err = db_upsert(&pool, &back_dated_buy(1, ymd(2024, 3, 5)))
+        let err = db_upsert(&pool, &back_dated_buy(ListingId(1), ymd(2024, 3, 5)))
             .await
             .unwrap_err();
         assert!(
@@ -2947,7 +2949,7 @@ mod tests {
             ymd(2024, 6, 13),
         )
         .await;
-        let err = db_upsert(&pool, &back_dated_buy(5, ymd(2024, 3, 5)))
+        let err = db_upsert(&pool, &back_dated_buy(ListingId(5), ymd(2024, 3, 5)))
             .await
             .unwrap_err();
         assert!(
@@ -3000,7 +3002,7 @@ mod tests {
     async fn db_a_buy_dated_after_the_operation_is_accepted() {
         let pool = test_pool().await;
         demerged_listing(&pool).await;
-        db_upsert(&pool, &back_dated_buy(1, ymd(2024, 6, 12)))
+        db_upsert(&pool, &back_dated_buy(ListingId(1), ymd(2024, 6, 12)))
             .await
             .unwrap();
     }
@@ -3273,7 +3275,7 @@ mod tests {
             pool,
             &crate::entities::corporate_action::CorporateAction {
                 id,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date,
                 kind: crate::entities::corporate_action::ActionKind::ShareSplit {
                     split_new_units: dec(new),

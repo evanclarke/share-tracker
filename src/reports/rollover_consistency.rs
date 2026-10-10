@@ -65,6 +65,7 @@ use crate::infra::currency::CurrencyCode;
 use crate::infra::decimal::row_dec;
 use crate::infra::extract::Json;
 use crate::infra::http::ApiError;
+use crate::infra::id::ListingId;
 use axum::{Router, extract::State, routing::get};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
@@ -119,7 +120,7 @@ pub struct RolloverAlert {
     pub date: NaiveDate,
     /// The listing whose parcels were consumed (a demerger's demerged parcels
     /// are of another listing; they are counted, not listed here).
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     pub ticker: String,
     /// The closing Sell, so the group is openable without a search.
     pub sell_trade_id: i64,
@@ -144,7 +145,7 @@ struct Group {
     group_id: i64,
     sell_trade_id: i64,
     date: NaiveDate,
-    listing_id: i64,
+    listing_id: ListingId,
     ticker: String,
     /// True for a scrip exchange carrying a cash component.
     partial_rollover: bool,
@@ -464,7 +465,7 @@ mod tests {
             &pool,
             1,
             &TransferBody {
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: ymd(2023, 8, 1),
                 from_account_id: 1,
                 to_account_id: 2,
@@ -537,10 +538,10 @@ mod tests {
             &pool,
             &ca::CorporateAction {
                 id: 10,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: ymd(2023, 7, 1),
                 kind: ca::ActionKind::ScripForScrip {
-                    scrip_listing_id: 2,
+                    scrip_listing_id: ListingId(2),
                     scrip_new_units: Decimal::ONE,
                     scrip_old_units: Decimal::ONE,
                     scrip_cash_per_unit: Some(dec("2")),
@@ -581,10 +582,10 @@ mod tests {
             &pool,
             &ca::CorporateAction {
                 id: 10,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: ymd(2023, 7, 1),
                 kind: ca::ActionKind::Demerger {
-                    demerger_listing_id: 2,
+                    demerger_listing_id: ListingId(2),
                     demerger_new_units: Decimal::ONE,
                     demerger_held_units: Decimal::ONE,
                     demerger_cost_base_pct: dec("30"),
@@ -646,10 +647,10 @@ mod tests {
             &pool,
             &ca::CorporateAction {
                 id: 10,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: ymd(2024, 6, 10),
                 kind: ca::ActionKind::ScripForScrip {
-                    scrip_listing_id: 2,
+                    scrip_listing_id: ListingId(2),
                     scrip_new_units: Decimal::ONE,
                     scrip_old_units: Decimal::ONE,
                     scrip_cash_per_unit: None,
@@ -753,10 +754,10 @@ mod tests {
             &pool,
             &ca::CorporateAction {
                 id: 10,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: ymd(2024, 6, 11),
                 kind: ca::ActionKind::Demerger {
-                    demerger_listing_id: 2,
+                    demerger_listing_id: ListingId(2),
                     demerger_new_units: Decimal::ONE,
                     demerger_held_units: dec("5"),
                     demerger_cost_base_pct: dec("10"),
@@ -805,7 +806,7 @@ mod tests {
             &pool,
             1,
             &TransferBody {
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: ymd(2023, 8, 1),
                 from_account_id: 1,
                 to_account_id: 2,

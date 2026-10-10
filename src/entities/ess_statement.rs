@@ -36,6 +36,7 @@ use crate::infra::db::write_tx;
 use crate::infra::decimal::{Money, OptMoney};
 use crate::infra::extract::Json;
 use crate::infra::http::{self, ApiError, CrudEntity, Upsert, UpsertResponse};
+use crate::infra::id::ListingId;
 use axum::{
     Router,
     extract::{Path, State},
@@ -50,7 +51,7 @@ use sqlx::SqlitePool;
 #[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct EssStatement {
     pub id: i64,
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     /// The account the ESS interests vest into (an employer-plan account,
     /// typically). Defaults to the seeded default account when omitted.
     pub holding_account_id: i64,
@@ -130,7 +131,7 @@ pub struct EssStatement {
 #[serde(deny_unknown_fields)]
 pub struct EssStatementBody {
     /// The listed share the interests are in; the statement must be in its currency.
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     /// The holding account the interests vest into. Defaults to the seeded default holding
     /// account when omitted.
     #[serde(default = "crate::entities::holding_account::default_holding_account_id")]
@@ -228,7 +229,7 @@ pub struct EssStatementBody {
 #[derive(Debug, Default, serde::Deserialize, utoipa::IntoParams)]
 #[serde(deny_unknown_fields)]
 pub struct EssStatementListQuery {
-    pub listing_id: Option<i64>,
+    pub listing_id: Option<ListingId>,
     pub holding_account_id: Option<i64>,
     pub from: Option<NaiveDate>,
     pub to: Option<NaiveDate>,
@@ -1069,7 +1070,7 @@ mod tests {
         // The matching case is untouched: on a USD listing the same statement
         // is accepted.
         insert_listing_in(&pool, 2, "USD").await;
-        s.listing_id = 2;
+        s.listing_id = ListingId(2);
         db_upsert(&pool, &s).await.unwrap();
         assert_eq!(db_get(&pool, 1).await.unwrap().unwrap().currency, "USD");
     }
@@ -1122,7 +1123,7 @@ mod tests {
         // …but the same rate on an AUD statement is refused.
         insert_listing(&pool, 2).await; // AUD
         let mut aud = sample(2);
-        aud.listing_id = 2;
+        aud.listing_id = ListingId(2);
         aud.fx_rate = Some(Decimal::from(1));
         assert!(matches!(
             db_upsert(&pool, &aud).await,

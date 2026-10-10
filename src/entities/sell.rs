@@ -18,6 +18,7 @@ use crate::infra::db::{WriteMode, write_tx};
 use crate::infra::decimal::{Money, OptMoney};
 use crate::infra::extract::{Json, Query};
 use crate::infra::http::{self, ApiError, DryRunQuery, Upsert, UpsertResponse};
+use crate::infra::id::ListingId;
 use axum::{
     Router,
     extract::{Path, State},
@@ -51,7 +52,7 @@ pub struct SellBody {
     #[serde(default)]
     pub settlement_date: Option<NaiveDate>,
     /// The listing traded.
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     /// Sale price per unit, in `currency` (decimal string).
     #[serde(deserialize_with = "crate::infra::decimal::strict_decimal")]
     pub average_price: Decimal,
@@ -935,7 +936,7 @@ pub(crate) async fn upsert_sell_in_tx(
             return Err(SellError::PurchaseInDifferentAccount);
         }
         let purchase_date: NaiveDate = purchase_row.try_get("date")?;
-        let purchase_listing: i64 = purchase_row.try_get("listing_id")?;
+        let purchase_listing: ListingId = purchase_row.try_get("listing_id")?;
         // A sale disposes of units of the security actually sold, and only
         // units that existed on the sale date. (Every operation-constructed
         // Sell satisfies both by construction — it selects its parcels from
@@ -1046,8 +1047,8 @@ mod tests {
         test_support::listing(id).insert(pool).await;
     }
 
-    async fn insert_buy(pool: &SqlitePool, id: i64, listing_id: i64, qty: Decimal) {
-        test_support::buy(id, listing_id)
+    async fn insert_buy(pool: &SqlitePool, id: i64, listing_id: ListingId, qty: Decimal) {
+        test_support::buy(id, listing_id.0)
             .qty(qty)
             .insert(pool)
             .await;
@@ -1060,7 +1061,7 @@ mod tests {
             holding_account_id: 1,
             date: NaiveDate::from_ymd_opt(2024, 6, 3).unwrap(),
             settlement_date: None,
-            listing_id: 1,
+            listing_id: ListingId(1),
             average_price: Decimal::from(15),
             quantity: qty,
             currency: "AUD".into(),
@@ -1095,7 +1096,7 @@ mod tests {
     async fn db_fully_allocated_sell_is_persisted() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+        insert_buy(&pool, 1, ListingId(1), Decimal::from(100)).await;
 
         let body = sell_body(
             Decimal::from(100),
@@ -1131,7 +1132,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let pool = test_support::race_pool(&dir).await;
         insert_listing(&pool, 1).await;
-        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+        insert_buy(&pool, 1, ListingId(1), Decimal::from(100)).await;
 
         let allocation = || AllocationInput {
             purchase_trade_id: 1,
@@ -1207,7 +1208,7 @@ mod tests {
     async fn db_under_allocated_sell_is_rejected_and_rolled_back() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+        insert_buy(&pool, 1, ListingId(1), Decimal::from(100)).await;
 
         // sell 100 but only allocate 60
         let body = sell_body(
@@ -1240,7 +1241,7 @@ mod tests {
             .insert(&pool)
             .await;
         let parcel: Decimal = "1.234567890123456789".parse().unwrap();
-        insert_buy(&pool, 1, 1, parcel).await;
+        insert_buy(&pool, 1, ListingId(1), parcel).await;
 
         let wei: Decimal = "0.000000000000000001".parse().unwrap();
         let body = sell_body(
@@ -1270,7 +1271,7 @@ mod tests {
     async fn db_over_allocated_sell_is_rejected() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+        insert_buy(&pool, 1, ListingId(1), Decimal::from(100)).await;
 
         // allocations sum to 120 but sell quantity is 100
         let body = sell_body(
@@ -1288,7 +1289,7 @@ mod tests {
     async fn db_allocation_exceeding_parcel_is_rejected() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        insert_buy(&pool, 1, 1, Decimal::from(50)).await; // only 50 available
+        insert_buy(&pool, 1, ListingId(1), Decimal::from(50)).await; // only 50 available
 
         // sell 100, fully allocated against a 50-unit parcel -> exceeds parcel
         let body = sell_body(
@@ -1307,7 +1308,7 @@ mod tests {
     async fn db_allocation_against_non_buy_is_rejected() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+        insert_buy(&pool, 1, ListingId(1), Decimal::from(100)).await;
         // trade 3 is itself a Sell (created via this endpoint)
         let prior = sell_body(
             Decimal::from(100),
@@ -1339,7 +1340,7 @@ mod tests {
         insert_listing(&pool, 1).await;
         insert_listing(&pool, 2).await;
         // The parcel belongs to listing 2; the Sell (sell_body) is on listing 1.
-        insert_buy(&pool, 1, 2, Decimal::from(100)).await;
+        insert_buy(&pool, 1, ListingId(2), Decimal::from(100)).await;
 
         let body = sell_body(
             Decimal::from(100),
@@ -1412,7 +1413,7 @@ mod tests {
         .await
         .unwrap();
         // The parcel sits in the employer-plan account.
-        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+        insert_buy(&pool, 1, ListingId(1), Decimal::from(100)).await;
         sqlx::query("UPDATE trades SET holding_account_id = 2 WHERE id = 1")
             .execute(&pool)
             .await
@@ -1457,7 +1458,7 @@ mod tests {
         )
         .await
         .unwrap();
-        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+        insert_buy(&pool, 1, ListingId(1), Decimal::from(100)).await;
         sqlx::query("UPDATE trades SET holding_account_id = 2 WHERE id = 1")
             .execute(&pool)
             .await
@@ -1498,7 +1499,7 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
         insert_listing(&pool, 2).await;
-        insert_buy(&pool, 1, 2, Decimal::from(100)).await; // listing 2 parcel
+        insert_buy(&pool, 1, ListingId(2), Decimal::from(100)).await; // listing 2 parcel
 
         let body = serde_json::json!({
             "date": "2024-06-03",
@@ -1550,7 +1551,7 @@ mod tests {
         );
     }
 
-    async fn apply_split(pool: &SqlitePool, id: i64, listing_id: i64, date: NaiveDate) {
+    async fn apply_split(pool: &SqlitePool, id: i64, listing_id: ListingId, date: NaiveDate) {
         use crate::entities::corporate_action;
         corporate_action::db_upsert(
             pool,
@@ -1575,8 +1576,14 @@ mod tests {
     async fn db_post_split_sell_allocates_against_pre_split_parcel() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        insert_buy(&pool, 1, 1, Decimal::from(100)).await; // 2024-01-01
-        apply_split(&pool, 1, 1, NaiveDate::from_ymd_opt(2024, 3, 1).unwrap()).await;
+        insert_buy(&pool, 1, ListingId(1), Decimal::from(100)).await; // 2024-01-01
+        apply_split(
+            &pool,
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
+        )
+        .await;
 
         // One more post-split unit than the parcel converts to is rejected
         // (and rolled back)…
@@ -1611,9 +1618,15 @@ mod tests {
     async fn db_delete_sell_restores_each_parcel_across_a_split() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
-        insert_buy(&pool, 2, 1, Decimal::from(50)).await;
-        apply_split(&pool, 1, 1, NaiveDate::from_ymd_opt(2024, 3, 1).unwrap()).await;
+        insert_buy(&pool, 1, ListingId(1), Decimal::from(100)).await;
+        insert_buy(&pool, 2, ListingId(1), Decimal::from(50)).await;
+        apply_split(
+            &pool,
+            1,
+            ListingId(1),
+            NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
+        )
+        .await;
 
         // 120 post-split units: 80 from parcel 1 (of its 200), 40 from parcel 2
         // (of its 100).
@@ -1665,8 +1678,8 @@ mod tests {
     async fn db_upsert_replaces_previous_allocations() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
-        insert_buy(&pool, 2, 1, Decimal::from(100)).await;
+        insert_buy(&pool, 1, ListingId(1), Decimal::from(100)).await;
+        insert_buy(&pool, 2, ListingId(1), Decimal::from(100)).await;
 
         // first version: 100 from parcel 1
         let v1 = sell_body(
@@ -1701,7 +1714,7 @@ mod tests {
     async fn api_fully_allocated_sell_returns_204() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+        insert_buy(&pool, 1, ListingId(1), Decimal::from(100)).await;
 
         let body = serde_json::json!({
             "date": "2024-06-03",
@@ -1723,7 +1736,7 @@ mod tests {
     async fn db_delete_removes_sell_and_allocations() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+        insert_buy(&pool, 1, ListingId(1), Decimal::from(100)).await;
         let body = sell_body(
             Decimal::from(100),
             vec![AllocationInput {
@@ -1755,7 +1768,7 @@ mod tests {
     async fn db_delete_non_sell_is_refused() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+        insert_buy(&pool, 1, ListingId(1), Decimal::from(100)).await;
         // trade 1 is a Buy — deleting it via the sells endpoint is refused
         assert_eq!(
             db_delete_sell(&pool, 1).await.unwrap(),
@@ -1768,7 +1781,7 @@ mod tests {
     async fn api_delete_sell_returns_204_then_404() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+        insert_buy(&pool, 1, ListingId(1), Decimal::from(100)).await;
         let body = sell_body(
             Decimal::from(100),
             vec![AllocationInput {
@@ -1795,7 +1808,7 @@ mod tests {
     async fn db_sell_statement_total_checks_net_proceeds_and_gst_splits() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+        insert_buy(&pool, 1, ListingId(1), Decimal::from(100)).await;
 
         let mut body = sell_body(
             Decimal::from(100),
@@ -1833,7 +1846,7 @@ mod tests {
     async fn db_sell_statement_total_accepts_cent_rounded_net_proceeds() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+        insert_buy(&pool, 1, ListingId(1), Decimal::from(100)).await;
 
         let mut body = sell_body(
             "33".parse().unwrap(),
@@ -1869,7 +1882,7 @@ mod tests {
     async fn api_sell_statement_total_mismatch_returns_422_with_detail() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+        insert_buy(&pool, 1, ListingId(1), Decimal::from(100)).await;
 
         let body = serde_json::json!({
             "date": "2024-06-03",
@@ -1902,7 +1915,7 @@ mod tests {
     async fn api_sell_brokerage_in_another_currency_than_the_sale_returns_422() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+        insert_buy(&pool, 1, ListingId(1), Decimal::from(100)).await;
 
         let body = serde_json::json!({
             "date": "2024-06-03",
@@ -1938,7 +1951,7 @@ mod tests {
     async fn api_gst_inclusive_sell_get_put_round_trip_is_lossless() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+        insert_buy(&pool, 1, ListingId(1), Decimal::from(100)).await;
 
         let body = serde_json::json!({
             "date": "2024-06-03",
@@ -1999,7 +2012,7 @@ mod tests {
     async fn api_under_allocated_sell_returns_422() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+        insert_buy(&pool, 1, ListingId(1), Decimal::from(100)).await;
 
         let body = serde_json::json!({
             "date": "2024-06-03",
@@ -2031,8 +2044,8 @@ mod tests {
     async fn db_zero_or_negative_allocation_is_rejected() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
-        insert_buy(&pool, 2, 1, Decimal::from(105)).await;
+        insert_buy(&pool, 1, ListingId(1), Decimal::from(100)).await;
+        insert_buy(&pool, 2, ListingId(1), Decimal::from(105)).await;
 
         // The exact review scenario: −5 + 105 = 100.
         let negative = sell_body(
@@ -2079,8 +2092,8 @@ mod tests {
     async fn api_negative_allocation_returns_422_with_reason() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
-        insert_buy(&pool, 2, 1, Decimal::from(105)).await;
+        insert_buy(&pool, 1, ListingId(1), Decimal::from(100)).await;
+        insert_buy(&pool, 2, ListingId(1), Decimal::from(105)).await;
 
         let body = serde_json::json!({
             "date": "2024-06-03",
@@ -2110,7 +2123,7 @@ mod tests {
     async fn api_degenerate_sell_amounts_are_rejected_per_shape() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+        insert_buy(&pool, 1, ListingId(1), Decimal::from(100)).await;
 
         let base = serde_json::json!({
             "date": "2024-06-03",
@@ -2199,7 +2212,7 @@ mod tests {
     async fn api_future_dated_sell_rejected_422_and_today_accepted() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+        insert_buy(&pool, 1, ListingId(1), Decimal::from(100)).await;
         test_support::listing(2)
             .crypto()
             .ticker("ETH")
@@ -2250,7 +2263,7 @@ mod tests {
     async fn api_sell_on_a_non_trading_day_rejected_422() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+        insert_buy(&pool, 1, ListingId(1), Decimal::from(100)).await;
         let base = serde_json::json!({
             "date": "2024-06-03",
             "listing_id": 1,
@@ -2306,7 +2319,7 @@ mod tests {
             .name("Ether")
             .insert(&pool)
             .await;
-        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+        insert_buy(&pool, 1, ListingId(1), Decimal::from(100)).await;
         let body = serde_json::json!({
             "date": "2024-06-01",
             "listing_id": 1,
@@ -2338,7 +2351,7 @@ mod tests {
             .currency("USD")
             .insert(&pool)
             .await;
-        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+        insert_buy(&pool, 1, ListingId(1), Decimal::from(100)).await;
         let put = |pool: SqlitePool, currency: &'static str| async move {
             let body = serde_json::json!({
                 "date": "2024-06-03",
@@ -2379,7 +2392,7 @@ mod tests {
     async fn allocations_must_sum_exactly_down_to_a_millionth_of_a_unit() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        insert_buy(&pool, 1, 1, Decimal::from(200)).await;
+        insert_buy(&pool, 1, ListingId(1), Decimal::from(200)).await;
 
         for allocated in ["99.999999", "100.000001"] {
             let body = sell_body(
@@ -2405,7 +2418,7 @@ mod tests {
     async fn one_parcel_allocated_across_two_rows_is_capped_by_their_sum() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+        insert_buy(&pool, 1, ListingId(1), Decimal::from(100)).await;
 
         let two_rows = |first: i64, second: i64| {
             sell_body(
@@ -2535,7 +2548,7 @@ mod tests {
     async fn a_second_sell_is_capped_by_what_the_first_left_of_the_parcel() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+        insert_buy(&pool, 1, ListingId(1), Decimal::from(100)).await;
 
         let sixty = || {
             sell_body(
@@ -2722,7 +2735,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let pool = test_support::race_pool(&dir).await;
         insert_listing(&pool, 1).await;
-        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+        insert_buy(&pool, 1, ListingId(1), Decimal::from(100)).await;
 
         for round in 0..5 {
             let racers: Vec<_> = (0..4)
@@ -2833,12 +2846,12 @@ mod tests {
 
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+        insert_buy(&pool, 1, ListingId(1), Decimal::from(100)).await;
         drp_enrolment::db_upsert(
             &pool,
             &drp_enrolment::DrpEnrolment {
                 id: 1,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 holding_account_id: 1,
                 enrolment_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
                 unenrolment_date: None,
@@ -2892,12 +2905,12 @@ mod tests {
 
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+        insert_buy(&pool, 1, ListingId(1), Decimal::from(100)).await;
         corporate_action::db_upsert(
             &pool,
             &CorporateAction {
                 id: 10,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
                 kind: ActionKind::RightsIssue {
                     rights_units: Decimal::ONE,
@@ -2941,7 +2954,7 @@ mod tests {
 
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+        insert_buy(&pool, 1, ListingId(1), Decimal::from(100)).await;
         test_support::ess_statement(1, 1, NaiveDate::from_ymd_opt(2024, 9, 1).unwrap())
             .with(|s| {
                 s.quantity = Decimal::from(30);
@@ -2968,12 +2981,12 @@ mod tests {
 
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+        insert_buy(&pool, 1, ListingId(1), Decimal::from(100)).await;
         inheritance::db_upsert(
             &pool,
             &Inheritance {
                 id: 1,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 holding_account_id: 1,
                 quantity: Decimal::from(50),
                 date_of_death: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
@@ -3010,8 +3023,8 @@ mod tests {
     async fn api_put_sell_over_a_plain_buy_is_refused() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
-        insert_buy(&pool, 2, 1, Decimal::from(40)).await;
+        insert_buy(&pool, 1, ListingId(1), Decimal::from(100)).await;
+        insert_buy(&pool, 2, ListingId(1), Decimal::from(40)).await;
 
         let (status, detail) = put_sell_json(&pool, 2, sell_over_parcel_json()).await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
@@ -3044,7 +3057,7 @@ mod tests {
 
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+        insert_buy(&pool, 1, ListingId(1), Decimal::from(100)).await;
         holding_account::db_upsert(
             &pool,
             &HoldingAccount {
@@ -3058,7 +3071,7 @@ mod tests {
             &pool,
             1,
             &TransferBody {
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: NaiveDate::from_ymd_opt(2024, 5, 1).unwrap(),
                 from_account_id: 1,
                 to_account_id: 2,
@@ -3094,7 +3107,7 @@ mod tests {
     async fn api_put_sell_over_an_existing_plain_sell_still_edits_it() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+        insert_buy(&pool, 1, ListingId(1), Decimal::from(100)).await;
         let (status, _) = put_sell_json(&pool, 2, sell_over_parcel_json()).await;
         assert_eq!(status, StatusCode::CREATED);
 
@@ -3118,7 +3131,7 @@ mod tests {
     async fn api_put_sell_at_a_free_id_still_creates_the_sell() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+        insert_buy(&pool, 1, ListingId(1), Decimal::from(100)).await;
 
         let (status, detail) = put_sell_json(&pool, 77, sell_over_parcel_json()).await;
         assert_eq!(status, StatusCode::CREATED, "{detail}");
@@ -3153,7 +3166,7 @@ mod tests {
     async fn post_sell_creates_a_row_with_a_database_assigned_id() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+        insert_buy(&pool, 1, ListingId(1), Decimal::from(100)).await;
         let client = client(&pool);
 
         let response = client.post("/sells", &partial_sell_json("40")).await;
@@ -3189,7 +3202,7 @@ mod tests {
     async fn post_sell_twice_stores_two_distinct_rows() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+        insert_buy(&pool, 1, ListingId(1), Decimal::from(100)).await;
         let client = client(&pool);
 
         let first: Trade = client
@@ -3226,7 +3239,7 @@ mod tests {
     async fn post_sell_never_reuses_a_deleted_rows_id() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+        insert_buy(&pool, 1, ListingId(1), Decimal::from(100)).await;
         let client = client(&pool);
 
         let first: Trade = client
@@ -3264,7 +3277,7 @@ mod tests {
     async fn post_sell_rejects_like_the_upsert_and_stores_nothing() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+        insert_buy(&pool, 1, ListingId(1), Decimal::from(100)).await;
         let client = client(&pool);
 
         // Sell 100 but allocate only 40 out of the parcel.
@@ -3300,7 +3313,7 @@ mod tests {
     async fn post_sell_dry_run_previews_without_storing() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        insert_buy(&pool, 1, 1, Decimal::from(100)).await;
+        insert_buy(&pool, 1, ListingId(1), Decimal::from(100)).await;
         let client = client(&pool);
 
         let created = client

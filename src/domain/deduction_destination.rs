@@ -37,6 +37,7 @@
 use crate::domain::tax_year::amit_in_tax_year;
 use crate::infra::currency::CurrencyCode;
 use crate::infra::decimal::row_dec;
+use crate::infra::id::ListingId;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::Serialize;
@@ -91,7 +92,7 @@ struct ListingFacts {
 
 /// The per-listing facts the routing rule reads, loaded once per report.
 pub struct DeductionRouting {
-    listings: HashMap<i64, ListingFacts>,
+    listings: HashMap<ListingId, ListingFacts>,
 }
 
 impl DeductionRouting {
@@ -99,14 +100,14 @@ impl DeductionRouting {
     /// resolves destinations from the same single-snapshot read transaction as
     /// the figures it is routing.
     pub async fn load(conn: &mut sqlx::SqliteConnection) -> Result<Self, sqlx::Error> {
-        let mut listings: HashMap<i64, ListingFacts> =
+        let mut listings: HashMap<ListingId, ListingFacts> =
             sqlx::query("SELECT id, amit, amit_from, currency FROM listings")
                 .fetch_all(&mut *conn)
                 .await?
                 .iter()
                 .map(|row| {
                     Ok::<_, sqlx::Error>((
-                        row.try_get::<i64, _>("id")?,
+                        row.try_get::<ListingId, _>("id")?,
                         ListingFacts {
                             amit: row.try_get("amit")?,
                             amit_from: row.try_get("amit_from")?,
@@ -129,7 +130,7 @@ impl DeductionRouting {
                 .fetch_all(&mut *conn)
                 .await?;
         for row in &income_rows {
-            let listing_id: i64 = row.try_get("listing_id")?;
+            let listing_id: ListingId = row.try_get("listing_id")?;
             let Some(facts) = listings.get_mut(&listing_id) else {
                 continue;
             };
@@ -169,7 +170,7 @@ impl DeductionRouting {
     /// apportion it.
     pub fn destination(
         &self,
-        listing_id: Option<i64>,
+        listing_id: Option<ListingId>,
         debt_deduction: bool,
         tax_year: i32,
     ) -> DeductionDestination {
@@ -236,7 +237,7 @@ mod tests {
         for listing_id in [None, Some(999)] {
             assert_eq!(
                 routing.destination(
-                    listing_id,
+                    listing_id.map(ListingId),
                     ExpenseType::ManagementFee.is_debt_deduction(),
                     2026
                 ),
@@ -246,7 +247,7 @@ mod tests {
             // to characterise, there is no foreign income to net it against.
             assert_eq!(
                 routing.destination(
-                    listing_id,
+                    listing_id.map(ListingId),
                     ExpenseType::LoanInterest.is_debt_deduction(),
                     2026
                 ),

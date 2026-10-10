@@ -2,6 +2,7 @@
 
 use super::test_support::DistributionStub;
 use super::*;
+use crate::infra::id::ListingId;
 use crate::test_support::{ApiClient, allocate, buy, dec, listing, sell, test_pool, ymd};
 
 fn client(pool: &SqlitePool) -> ApiClient {
@@ -332,7 +333,7 @@ async fn the_list_and_get_routes_serve_the_stored_calendar() {
 /// and what this needs is only the chain the market timeline is built from.
 async fn rename(
     pool: &SqlitePool,
-    listing_id: i64,
+    listing_id: ListingId,
     effective_date: NaiveDate,
     old_ticker: &str,
     new_ticker: &str,
@@ -363,7 +364,7 @@ async fn rename(
 async fn a_span_straddling_a_rename_is_fetched_under_each_ticker_in_force() {
     let pool = test_pool().await;
     listing(1).ticker("LAR").insert(&pool).await;
-    rename(&pool, 1, ymd(2025, 3, 1), "LAAC", "LAR").await;
+    rename(&pool, ListingId(1), ymd(2025, 3, 1), "LAAC", "LAR").await;
     buy(1, 1)
         .date(ymd(2024, 1, 10))
         .qty(dec("100"))
@@ -417,7 +418,7 @@ async fn a_span_straddling_a_rename_is_fetched_under_each_ticker_in_force() {
 async fn a_span_wholly_under_a_retired_ticker_is_recovered_from_the_surviving_one() {
     let pool = test_pool().await;
     listing(1).ticker("LAR").insert(&pool).await;
-    rename(&pool, 1, ymd(2025, 1, 27), "LAAC", "LAR").await;
+    rename(&pool, ListingId(1), ymd(2025, 1, 27), "LAAC", "LAR").await;
     buy(1, 1)
         .date(ymd(2021, 3, 25))
         .qty(dec("1049"))
@@ -459,7 +460,7 @@ async fn a_span_wholly_under_a_retired_ticker_is_recovered_from_the_surviving_on
 async fn a_span_no_ticker_serves_still_notes_the_run() {
     let pool = test_pool().await;
     listing(1).ticker("LAR").insert(&pool).await;
-    rename(&pool, 1, ymd(2025, 3, 1), "LAAC", "LAR").await;
+    rename(&pool, ListingId(1), ymd(2025, 3, 1), "LAAC", "LAR").await;
     buy(1, 1)
         .date(ymd(2024, 1, 10))
         .qty(dec("100"))
@@ -487,7 +488,7 @@ async fn a_span_no_ticker_serves_still_notes_the_run() {
 async fn an_outage_on_one_segment_still_fails_the_whole_listing() {
     let pool = test_pool().await;
     listing(1).ticker("LAR").insert(&pool).await;
-    rename(&pool, 1, ymd(2025, 3, 1), "LAAC", "LAR").await;
+    rename(&pool, ListingId(1), ymd(2025, 3, 1), "LAAC", "LAR").await;
     buy(1, 1)
         .date(ymd(2024, 1, 10))
         .qty(dec("100"))
@@ -570,7 +571,7 @@ async fn a_re_fetch_under_a_different_symbol_is_still_recorded() {
 
     // The security is renamed with effect from before that ex-date, so the
     // event now falls in the segment quoted under the new ticker.
-    rename(&pool, 1, ymd(2025, 3, 1), "LAAC", "LAR").await;
+    rename(&pool, ListingId(1), ymd(2025, 3, 1), "LAAC", "LAR").await;
     sqlx::query("UPDATE listings SET ticker = 'LAR' WHERE id = 1")
         .execute(&pool)
         .await
@@ -619,7 +620,7 @@ async fn the_list_narrows_by_listing_and_ex_date_range() {
         let mut conn = pool.acquire().await.unwrap();
         db_store(
             &mut conn,
-            listing_id,
+            ListingId(listing_id),
             &FetchedDistribution {
                 ex_date,
                 amount_per_unit: dec(amount),

@@ -108,6 +108,7 @@ use crate::infra::db::write_tx;
 use crate::infra::decimal::Money;
 use crate::infra::extract::Json;
 use crate::infra::http::{self, ApiError, CrudEntity, Upsert, UpsertResponse};
+use crate::infra::id::ListingId;
 use axum::{
     Router,
     extract::{Path, State},
@@ -146,7 +147,7 @@ use super::trade::CGT_START;
 #[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Inheritance {
     pub id: i64,
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     pub holding_account_id: i64,
     /// Units inherited, in date-of-death terms.
     #[sqlx(try_from = "Money")]
@@ -179,7 +180,7 @@ pub struct Inheritance {
 #[serde(deny_unknown_fields)]
 pub struct InheritanceBody {
     /// The listing inherited.
-    pub listing_id: i64,
+    pub listing_id: ListingId,
     /// The holding account the parcel lands in. Defaults to the seeded
     /// default holding account when omitted.
     #[serde(default = "crate::entities::holding_account::default_holding_account_id")]
@@ -242,7 +243,7 @@ pub(crate) const COLUMNS: &str = "id, listing_id, holding_account_id, quantity, 
 #[derive(Debug, Default, serde::Deserialize, utoipa::IntoParams)]
 #[serde(deny_unknown_fields)]
 pub struct InheritanceListQuery {
-    pub listing_id: Option<i64>,
+    pub listing_id: Option<ListingId>,
     pub holding_account_id: Option<i64>,
     pub from: Option<NaiveDate>,
     pub to: Option<NaiveDate>,
@@ -691,7 +692,7 @@ async fn write(
     // edit of a parcel already behind an operation must stay possible. A create
     // has no stored row and no linked Buy yet, so both of these are the upsert
     // path's alone.
-    let stored_position: Option<(i64, NaiveDate)> = match id {
+    let stored_position: Option<(ListingId, NaiveDate)> = match id {
         Some(id) => {
             sqlx::query_as("SELECT listing_id, date_of_death FROM inheritances WHERE id = ?")
                 .bind(id)
@@ -986,7 +987,7 @@ mod tests {
     fn post_cgt(id: i64) -> Inheritance {
         Inheritance {
             id,
-            listing_id: 1,
+            listing_id: ListingId(1),
             holding_account_id: 1,
             quantity: dec("100"),
             date_of_death: ymd(2025, 1, 10),
@@ -1043,7 +1044,7 @@ mod tests {
             statement_total: None,
             date,
             settlement_date: Some(date),
-            listing_id: 1,
+            listing_id: ListingId(1),
             average_price: dec(price),
             quantity: dec(qty),
             currency: "AUD".into(),
@@ -1540,7 +1541,7 @@ mod tests {
             &pool,
             &Inheritance {
                 id: 2,
-                listing_id: 2,
+                listing_id: ListingId(2),
                 currency: "AUD".into(),
                 fx_rate: Decimal::ONE,
                 ..post_cgt(2)
@@ -1591,7 +1592,7 @@ mod tests {
             &pool,
             &Inheritance {
                 id: 2,
-                listing_id: 2,
+                listing_id: ListingId(2),
                 ..mismatched
             },
         )
@@ -2085,7 +2086,7 @@ mod tests {
             pool,
             &crate::entities::corporate_action::CorporateAction {
                 id: 10,
-                listing_id: 1,
+                listing_id: ListingId(1),
                 date: ymd(2025, 6, 1),
                 kind: crate::entities::corporate_action::ActionKind::ShareSplit {
                     split_new_units: dec("1000"),
@@ -2370,7 +2371,7 @@ mod tests {
             (4, 2, 2, ymd(2025, 4, 10)),
         ] {
             let mut row = post_cgt(id);
-            row.listing_id = listing_id;
+            row.listing_id = ListingId(listing_id);
             row.holding_account_id = account;
             row.date_of_death = date;
             // The LPR fee must be incurred after the death, and each row here

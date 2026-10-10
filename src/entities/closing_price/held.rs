@@ -6,6 +6,7 @@
 //! the health report both ask questions of.
 
 use crate::infra::decimal::parse_dec;
+use crate::infra::id::ListingId;
 use chrono::{Duration, NaiveDate};
 use rust_decimal::Decimal;
 use sqlx::{Row, SqlitePool};
@@ -65,12 +66,12 @@ impl ParcelHolding {
 pub struct HeldTimeline {
     /// Purchase parcels per listing; a listing appears exactly if it was ever
     /// bought, whether or not it is still held.
-    parcels: HashMap<i64, Vec<ParcelHolding>>,
+    parcels: HashMap<ListingId, Vec<ParcelHolding>>,
     /// The recorded share splits per listing, kept from the load so a holding
     /// can be expressed in the unit basis of a **past** date rather than only
     /// in each parcel's as-acquired one
     /// ([`HeldTimeline::units_by_account_on`]).
-    splits: HashMap<i64, Vec<crate::entities::corporate_action::SplitEvent>>,
+    splits: HashMap<ListingId, Vec<crate::entities::corporate_action::SplitEvent>>,
 }
 
 impl HeldTimeline {
@@ -97,10 +98,10 @@ impl HeldTimeline {
         let split_events =
             crate::entities::corporate_action::db_share_split_events(&mut *conn).await?;
 
-        let mut parcels: HashMap<i64, Vec<ParcelHolding>> = HashMap::new();
+        let mut parcels: HashMap<ListingId, Vec<ParcelHolding>> = HashMap::new();
         for row in &buys {
             let trade_id: i64 = row.try_get("id")?;
-            let listing_id: i64 = row.try_get("listing_id")?;
+            let listing_id: ListingId = row.try_get("listing_id")?;
             let acquired: NaiveDate = row.try_get("date")?;
             let qty = parse_dec("quantity", row.try_get("quantity")?)?;
             let splits = split_events.get(&listing_id).map_or(&[][..], |v| v);
@@ -156,7 +157,7 @@ impl HeldTimeline {
     /// register say that day".
     pub fn units_by_account_on(
         &self,
-        listing_id: i64,
+        listing_id: ListingId,
         held_on: NaiveDate,
         unit_basis_at: NaiveDate,
     ) -> Vec<(i64, Decimal)> {
@@ -188,9 +189,9 @@ impl HeldTimeline {
 
     /// Listings with a non-zero holding as at `as_of` (live holdings when
     /// `None`) — trades and sales dated after it don't count.
-    pub fn held_listing_ids(&self, as_of: Option<NaiveDate>) -> Vec<i64> {
+    pub fn held_listing_ids(&self, as_of: Option<NaiveDate>) -> Vec<ListingId> {
         let cutoff = crate::infra::date::as_of_or_open(as_of);
-        let mut ids: Vec<i64> = self
+        let mut ids: Vec<ListingId> = self
             .parcels
             .iter()
             .filter(|(_, parcels)| {
@@ -208,8 +209,8 @@ impl HeldTimeline {
 
     /// Every listing ever held, ascending — including ones since fully sold,
     /// whose held span is still history that needed pricing.
-    pub fn listing_ids(&self) -> Vec<i64> {
-        let mut ids: Vec<i64> = self.parcels.keys().copied().collect();
+    pub fn listing_ids(&self) -> Vec<ListingId> {
+        let mut ids: Vec<ListingId> = self.parcels.keys().copied().collect();
         ids.sort();
         ids
     }
@@ -221,7 +222,11 @@ impl HeldTimeline {
     /// A holding only changes on an acquisition or a sale date, so the
     /// quantity is evaluated at those dates alone and held constant in between
     /// — walking six years of calendar dates would be thousands of sums.
-    pub fn held_spans(&self, listing_id: i64, until: NaiveDate) -> Vec<(NaiveDate, NaiveDate)> {
+    pub fn held_spans(
+        &self,
+        listing_id: ListingId,
+        until: NaiveDate,
+    ) -> Vec<(NaiveDate, NaiveDate)> {
         let Some(parcels) = self.parcels.get(&listing_id) else {
             return Vec::new();
         };
@@ -262,7 +267,7 @@ impl HeldTimeline {
 pub async fn db_held_listing_ids(
     pool: &SqlitePool,
     as_of: Option<NaiveDate>,
-) -> Result<Vec<i64>, sqlx::Error> {
+) -> Result<Vec<ListingId>, sqlx::Error> {
     let mut conn = pool.acquire().await?;
     db_held_listing_ids_on(&mut conn, as_of).await
 }
@@ -273,6 +278,6 @@ pub async fn db_held_listing_ids(
 pub async fn db_held_listing_ids_on(
     conn: &mut sqlx::SqliteConnection,
     as_of: Option<NaiveDate>,
-) -> Result<Vec<i64>, sqlx::Error> {
+) -> Result<Vec<ListingId>, sqlx::Error> {
     Ok(HeldTimeline::load_on(conn).await?.held_listing_ids(as_of))
 }

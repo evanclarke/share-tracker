@@ -14,6 +14,7 @@ use crate::entities::{
 };
 use crate::infra::db;
 use crate::infra::decimal::Money;
+use crate::infra::id::ListingId;
 use axum::body::{Body, Bytes};
 use axum::http::{HeaderMap, Request, StatusCode};
 use chrono::NaiveDate;
@@ -644,7 +645,7 @@ pub fn writable_body(read: &serde_json::Value, also: &[&str]) -> serde_json::Val
 pub fn listing(id: i64) -> ListingBuilder {
     ListingBuilder {
         l: listing::Listing {
-            id,
+            id: ListingId(id),
             exchange_mic: Some("XASX".to_string()),
             ticker: format!("T{id}"),
             name: format!("Test {id}"),
@@ -781,7 +782,7 @@ pub async fn recognised_worthless_listing(
         pool,
         &crate::entities::corporate_action::CorporateAction {
             id: action_id,
-            listing_id,
+            listing_id: ListingId(listing_id),
             date: event_date,
             kind: crate::entities::corporate_action::ActionKind::WorthlessShares {
                 worthless_event: crate::entities::corporate_action::WorthlessEvent::C2Cancellation,
@@ -897,7 +898,7 @@ pub fn closing_price(listing_id: i64, price_date: NaiveDate) -> ClosingPriceBuil
     ClosingPriceBuilder {
         p: closing_price::ClosingPrice {
             id: closing_price::UNASSIGNED_ID,
-            listing_id,
+            listing_id: ListingId(listing_id),
             price_date,
             price: Some(Decimal::from(10)),
             price_as_observed: Some(Decimal::from(10)),
@@ -1026,7 +1027,7 @@ impl TradeBuilder {
                 // by a job run under test. Use [`TradeBuilder::settlement_source`]
                 // for the cases that are about the provenance itself.
                 settlement_date_source: trade::SettlementDateSource::Stated,
-                listing_id,
+                listing_id: ListingId(listing_id),
                 average_price: Decimal::from(10),
                 quantity: Decimal::from(100),
                 currency: "AUD".into(),
@@ -1167,7 +1168,7 @@ pub fn amma(id: i64, listing_id: i64) -> AmmaBuilder {
     AmmaBuilder {
         a: amma::AmmaStatement {
             id,
-            listing_id,
+            listing_id: ListingId(listing_id),
             tax_year_end_date: ymd(2024, 6, 30),
             units_held: Decimal::from(100),
             date_received: ymd(2024, 8, 15),
@@ -1248,7 +1249,7 @@ pub fn income(id: i64, listing_id: i64, date_paid: NaiveDate) -> IncomeBuilder {
     IncomeBuilder {
         i: income::Income {
             id,
-            listing_id,
+            listing_id: ListingId(listing_id),
             date_paid,
             ex_date: None,
             franked_amount: Decimal::ZERO,
@@ -1319,7 +1320,7 @@ pub fn ess_statement(id: i64, listing_id: i64, taxing_point: NaiveDate) -> EssSt
     EssStatementBuilder {
         s: ess_statement::EssStatement {
             id,
-            listing_id,
+            listing_id: ListingId(listing_id),
             holding_account_id: 1,
             taxing_point_date: taxing_point,
             quantity: Decimal::ZERO,

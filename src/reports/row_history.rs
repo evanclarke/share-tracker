@@ -428,6 +428,7 @@ async fn report(
 mod tests {
     use super::*;
     use crate::entities::{listing, sell, trade};
+    use crate::infra::id::ListingId;
     use crate::test_support::{self, ApiClient, allocate, test_pool, ymd};
     use axum::http::StatusCode;
     use rust_decimal::Decimal;
@@ -1028,7 +1029,7 @@ mod tests {
         edited.quantity = Decimal::from(150);
         trade::db_upsert(pool, &edited).await.unwrap();
 
-        let mut listing = listing::db_get(pool, 1).await.unwrap().unwrap();
+        let mut listing = listing::db_get(pool, ListingId(1)).await.unwrap().unwrap();
         listing.name = "Renamed".into();
         listing::db_upsert(pool, &listing).await.unwrap();
 
