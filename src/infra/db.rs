@@ -830,7 +830,7 @@ mod tests {
         "reports/franking.rs",
         "reports/franking_at_risk.rs",
         "reports/fx_coverage.rs",
-        "reports/health.rs",
+        "reports/health/mod.rs",
         "reports/indexation_cross_check.rs",
         "reports/net_capital_gain.rs",
         "reports/open_parcels.rs",
@@ -864,6 +864,30 @@ mod tests {
             "no database access: CSV projection and rendering helpers only",
         ),
         (
+            "reports/health/calendar.rs",
+            "one family of the health report's checks: each reads on the connection of the one read transaction `db_health` (reports/health/mod.rs) begins and passes down",
+        ),
+        (
+            "reports/health/duplicates.rs",
+            "one family of the health report's checks: each reads on the connection of the one read transaction `db_health` (reports/health/mod.rs) begins and passes down",
+        ),
+        (
+            "reports/health/jobs.rs",
+            "one family of the health report's checks: each reads on the connection of the one read transaction `db_health` (reports/health/mod.rs) begins and passes down",
+        ),
+        (
+            "reports/health/prices.rs",
+            "one family of the health report's checks: each reads on the connection of the one read transaction `db_health` (reports/health/mod.rs) begins and passes down",
+        ),
+        (
+            "reports/health/tests.rs",
+            "the health report's test module: it drives db_health and the HTTP route",
+        ),
+        (
+            "reports/health/trades.rs",
+            "one family of the health report's checks: each reads on the connection of the one read transaction `db_health` (reports/health/mod.rs) begins and passes down",
+        ),
+        (
             "reports/mic_validation.rs",
             "one SELECT — a single statement is its own consistent snapshot",
         ),
@@ -878,18 +902,18 @@ mod tests {
              reads run inside it via the _on helpers",
         ),
         (
-            "reports/weekly_summary.rs",
-            "every figure comes from `period_performance::compute` and the two \
-             `reports::snapshot` series reads, each holding whatever consistency its own \
-             result needs; the only reads made here are the two identity lookups (a \
-             listing's ticker, an account's name) that no figure depends on",
-        ),
-        (
             "reports/valuation.rs",
             "connection-taking helpers composed into the callers' own transactions \
              (snapshot generation's write_tx, period performance's read transaction); \
              the remaining pool forms acquire one connection for a single-read probe \
              (latest_snapshot_date's candidate scan) or a test",
+        ),
+        (
+            "reports/weekly_summary.rs",
+            "every figure comes from `period_performance::compute` and the two \
+             `reports::snapshot` series reads, each holding whatever consistency its own \
+             result needs; the only reads made here are the two identity lookups (a \
+             listing's ticker, an account's name) that no figure depends on",
         ),
     ];
 
