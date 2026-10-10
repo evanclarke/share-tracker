@@ -734,6 +734,21 @@ export function putOutcomeMessage(status, editing) {
   return null;
 }
 
+// ---- listing labels ----------------------------------------------------
+// A listing's two display forms, written once so a crypto listing — which has
+// no exchange MIC — reads "Crypto" wherever one is named, never "null".
+// `listingCode` is MIC:TICKER, the name a cell or a sentence uses;
+// `listingOptionLabel` is "id: TICKER (MIC)", the picker form, which leads
+// with the id because the id is what the picker chooses. Either takes any
+// object carrying `exchange_mic` and `ticker` (and `id` for the picker).
+export function listingCode(l) {
+  return (l.exchange_mic || 'Crypto') + ':' + l.ticker;
+}
+
+export function listingOptionLabel(l) {
+  return l.id + ': ' + l.ticker + ' (' + (l.exchange_mic || 'Crypto') + ')';
+}
+
 // Options for <select> fields, fetched fresh each render so newly created
 // referenced rows (e.g. a just-added listing) are always available.
 export async function loadOptions(source) {
@@ -743,7 +758,7 @@ export async function loadOptions(source) {
     case 'exchanges':
       return (await api('GET', '/exchanges')).map(function (e) { return { value: e.mic, label: e.mic + ' — ' + e.name }; });
     case 'listings':
-      return (await api('GET', '/listings')).map(function (l) { return { value: l.id, label: l.id + ': ' + l.ticker + ' (' + (l.exchange_mic || 'Crypto') + ')' }; });
+      return (await api('GET', '/listings')).map(function (l) { return { value: l.id, label: listingOptionLabel(l) }; });
     case 'holdingAccounts':
       return (await api('GET', '/holding_accounts')).map(function (a) { return { value: a.id, label: a.id + ': ' + a.name }; });
     case 'amma': {
@@ -886,7 +901,7 @@ export async function confirmGeneratedAdjustments(path, body) {
 // (a trade names its listing), so `needs` lists the sources to build first
 // and the label fn receives the already-built maps to consult.
 const TABLE_LABEL_SOURCES = {
-  listings: { api: '/listings', label: function (l) { return (l.exchange_mic || 'Crypto') + ':' + l.ticker; } },
+  listings: { api: '/listings', label: listingCode },
   holdingAccounts: { api: '/holding_accounts', label: function (a) { return a.name; } },
   trades: {
     api: '/trades', needs: ['listings'],

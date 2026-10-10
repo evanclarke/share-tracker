@@ -482,7 +482,7 @@ mod tests {
         // (one input per listing, keyed by the listing id).
         assert!(js.contains("labelledField('as_of_date', 'As-of date', asOfInp)"));
         assert!(js.contains("labelledField('price_override', overrideLabel, priceInp, l.id)"));
-        assert!(js.contains("const overrideLabel = l.id + ': ' + l.ticker + ' (' + (l.exchange_mic || 'Crypto') + ')';"));
+        assert!(js.contains("const overrideLabel = listingOptionLabel(l);"));
 
         // Not named by the review but the same defect: the attachment
         // screen's upload file input.
@@ -1275,7 +1275,7 @@ mod tests {
         assert!(js.contains("FK_COLUMN_SOURCES"));
         assert!(js.contains("columnLabelMaps"));
         // …a listing shows as MIC:TICKER (Crypto listings have no MIC)…
-        assert!(js.contains("(l.exchange_mic || 'Crypto') + ':' + l.ticker"));
+        assert!(js.contains("listings: { api: '/listings', label: listingCode },"));
         // …a holding account shows by its name…
         assert!(js.contains("return a.name;"));
         // …and a trade (an id alone is meaningless) shows side/quantity/

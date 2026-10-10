@@ -16,7 +16,7 @@ import {
   isCurrentNavigation, onViewTeardown, reload, looksNumeric, isTimestamp, fmtLocalTimestamp, utcTooltip,
   cellText, numericDisplay, decCompare, moneyText, moneyEl, columnKinds, columnLabel, columnLabelMaps,
   fkLabelMaps, api, apiResponse, apiRowExists, replaceConfirmText, putOutcomeMessage, apiUrl, queryString, pathSeg,
-  safeDecodeURIComponent, loadOptions, listingNamer,
+  safeDecodeURIComponent, loadOptions, listingNamer, listingCode, listingOptionLabel,
   describeTrade, tradeOrigin,
   columnLinks, listingLinkFrom, defaultSortColumn,
   tableViewCache, debounce,
@@ -1080,7 +1080,7 @@ async function viewListingRenames(listingId, seq = navigationToken()) {
       if (row !== newest) return td;
       td.appendChild(deleteButton('Undo',
         'Undo this rename? The listing goes back to '
-          + (row.old_exchange_mic || 'Crypto') + ':' + row.old_ticker
+          + listingCode({ exchange_mic: row.old_exchange_mic, ticker: row.old_ticker })
           + ', with the name and price symbol it had before.',
         '/listings/' + pathSeg(listingId) + '/renames/' + row.id, seq, 'Rename undone.',
         function () { reload(seq, viewListingRenames, listingId, seq); }));
@@ -1828,7 +1828,7 @@ async function viewClosingPrices(seq = navigationToken()) {
       // The surrogate key, shown so a row can be looked up on the Row History
       // screen (which asks for the record's id).
       id: p.id,
-      listing: l ? ((l.exchange_mic || 'Crypto') + ':' + l.ticker) : ('listing ' + p.listing_id),
+      listing: l ? listingCode(l) : ('listing ' + p.listing_id),
       date: p.price_date,
       price: p.price == null ? '' : p.price,
       // The figure the provider served, kept so a price restated out of a
@@ -1922,9 +1922,12 @@ async function viewClosingPrices(seq = navigationToken()) {
   // old trade): trading days only, days already stored ok are skipped.
   const backfillForm = el('form', { class: 'card' });
   backfillForm.appendChild(el('h3', null, 'Backfill'));
-  const listingSel = el('select', null, listings.map(function (l) {
-    return el('option', { value: l.id }, l.id + ': ' + l.ticker + ' (' + (l.exchange_mic || 'Crypto') + ')');
-  }));
+  function listingSelect() {
+    return el('select', null, listings.map(function (l) {
+      return el('option', { value: l.id }, listingOptionLabel(l));
+    }));
+  }
+  const listingSel = listingSelect();
   const fromInp = el('input', { type: 'date', required: true });
   const toInp = el('input', { type: 'date', required: true });
   backfillForm.appendChild(labelledField('backfill_listing', 'Listing', listingSel));
@@ -1958,9 +1961,7 @@ async function viewClosingPrices(seq = navigationToken()) {
     'Enter a closing price by hand for a trading day the provider cannot serve. In the '
     + 'listing\'s quote currency, not AUD. Reports value it exactly like a fetched price; the '
     + 'provider will not take the day back, so change it by re-entering it here.'));
-  const mListingSel = el('select', null, listings.map(function (l) {
-    return el('option', { value: l.id }, l.id + ': ' + l.ticker + ' (' + (l.exchange_mic || 'Crypto') + ')');
-  }));
+  const mListingSel = listingSelect();
   const mDateInp = el('input', { type: 'date', required: true });
   const mPriceInp = el('input', { type: 'text', inputmode: 'decimal', required: true });
   const mSourcedInp = el('input', {
@@ -3136,7 +3137,7 @@ async function viewReport(report, args, seq = navigationToken()) {
   // request in front of the valuation that could not change its answer.
   const overridesReady = api('GET', '/listings').then(function (listings) {
     listings.forEach(function (l) {
-      const overrideLabel = l.id + ': ' + l.ticker + ' (' + (l.exchange_mic || 'Crypto') + ')';
+      const overrideLabel = listingOptionLabel(l);
       const priceInp = el('input', { type: 'text', inputmode: 'decimal', 'data-listing': l.id });
       // Keyed by listing id: one override input is rendered per listing, so a
       // fixed id would repeat across rows.

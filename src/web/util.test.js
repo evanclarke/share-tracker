@@ -18,7 +18,7 @@ import {
   addDecimalStrings, decParts, decCompare, mulToCents, frankingCreditFor, decEq,
   looksNumeric, columnKinds, columnLabel, columnLinks, recordHref, listingLinkFrom, defaultSortColumn,
   tableViewCache, debounce,
-  tradeOrigin,
+  tradeOrigin, listingCode, listingOptionLabel,
   periodReturnPct,
   holdingHasActivity, loadPref, savePref, pathSeg, safeDecodeURIComponent, basePath, apiUrl,
   queryString,
@@ -360,6 +360,15 @@ test('listingLinkFrom: a composed listing name drills through on its kept id', (
 });
 
 // ---- tradeOrigin ----------------------------------------------------------
+test('listingCode / listingOptionLabel: an exchange-less listing reads Crypto, never null', () => {
+  const asx = { id: 3, exchange_mic: 'XASX', ticker: 'VDHG' };
+  const btc = { id: 9, exchange_mic: null, ticker: 'BTC' };
+  assert.equal(listingCode(asx), 'XASX:VDHG');
+  assert.equal(listingCode(btc), 'Crypto:BTC');
+  assert.equal(listingOptionLabel(asx), '3: VDHG (XASX)');
+  assert.equal(listingOptionLabel(btc), '9: BTC (Crypto)');
+});
+
 test('tradeOrigin: transfer legs name the transfer, Buy flags the cost base', () => {
   // The transfer-in Buy's brokerage column holds the moved parcel's cost
   // base (transfer.rs), so its label must say the figure is not a fee.
