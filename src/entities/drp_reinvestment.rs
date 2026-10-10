@@ -100,7 +100,7 @@ use crate::entities::{
     trade::{self, Trade},
 };
 use crate::infra::db::{WriteMode, write_tx};
-use crate::infra::decimal::{Money, parse_dec};
+use crate::infra::decimal::parse_dec;
 use crate::infra::extract::{Json, Query};
 use crate::infra::http::{ApiError, DryRunQuery};
 use axum::{
@@ -620,30 +620,23 @@ async fn execute(
 
     let fx_rate = body.fx_rate.unwrap_or(Decimal::ONE);
 
-    let result = sqlx::query(
-        "INSERT INTO trades \
-         (trade_type, date, settlement_date, settlement_date_source, listing_id, \
-          average_price, quantity, currency, \
-          brokerage, gst_on_brokerage, brokerage_currency, fx_rate, contract_note_ref, \
-          residual_brought_forward, residual_carried_forward, residual_paid_out, \
-          holding_account_id) \
-         VALUES ('DRP', ?, ?, 'stated', ?, ?, ?, ?, '0', '0', ?, ?, NULL, ?, ?, ?, ?)",
+    let new_id = trade::NewParcel::new(
+        trade::ParcelOrigin::DrpReinvestment,
+        date,
+        listing_id,
+        holding_account_id,
+        quantity,
+        &currency,
     )
-    .bind(date)
-    .bind(date)
-    .bind(listing_id)
-    .bind(Money(body.reinvestment_price))
-    .bind(Money(quantity))
-    .bind(&currency)
-    .bind(&currency)
-    .bind(Money(fx_rate))
-    .bind(Money(residual_bf))
-    .bind(Money(split.carried_forward))
-    .bind(Money(split.paid_out))
-    .bind(holding_account_id)
-    .execute(&mut *tx)
+    .price(body.reinvestment_price)
+    .fx_rate(fx_rate)
+    .residuals(trade::Residuals {
+        brought_forward: residual_bf,
+        carried_forward: split.carried_forward,
+        paid_out: split.paid_out,
+    })
+    .insert(&mut tx)
     .await?;
-    let new_id = result.last_insert_rowid();
 
     sqlx::query("UPDATE income SET reinvestment_trade_id = ? WHERE id = ?")
         .bind(new_id)

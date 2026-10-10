@@ -772,44 +772,21 @@ async fn write(
         crate::domain::cost_base::Term::Amount("lpr_expenditure", inh.lpr_expenditure),
     ])
     .map_err(UpsertError::UnrepresentableCostBase)?;
-    // An edit keeps the linked Buy's id (the ON CONFLICT arm below rewrites
-    // that row); a first entry binds NULL, which for an INTEGER PRIMARY KEY
-    // AUTOINCREMENT column is exactly omitting it — the database assigns an id
-    // it has never issued, so this parcel cannot inherit a deleted trade's
-    // row_history trail (SCENARIOS U-a).
-    sqlx::query(
-        "INSERT INTO trades \
-         (id, trade_type, date, settlement_date, settlement_date_source, listing_id, \
-          average_price, quantity, \
-          currency, brokerage, gst_on_brokerage, brokerage_currency, fx_rate, \
-          holding_account_id, inheritance_id, deemed_acquisition_date) \
-         VALUES (?, 'Buy', ?, ?, 'stated', ?, '0', ?, ?, ?, '0', ?, ?, ?, ?, ?) \
-         ON CONFLICT(id) DO UPDATE SET \
-             date                    = excluded.date, \
-             settlement_date         = excluded.settlement_date, \
-             settlement_date_source  = excluded.settlement_date_source, \
-             listing_id              = excluded.listing_id, \
-             quantity                = excluded.quantity, \
-             currency                = excluded.currency, \
-             brokerage               = excluded.brokerage, \
-             brokerage_currency      = excluded.brokerage_currency, \
-             fx_rate                 = excluded.fx_rate, \
-             holding_account_id      = excluded.holding_account_id, \
-             deemed_acquisition_date = excluded.deemed_acquisition_date",
+    // An edit keeps the linked Buy's id (`NewParcel::write` rewrites that row
+    // in place); a first entry is written fresh, with an id the database has
+    // never issued (SCENARIOS U-a).
+    crate::entities::trade::NewParcel::new(
+        crate::entities::trade::ParcelOrigin::Inheritance(assigned_id),
+        inh.date_of_death,
+        inh.listing_id,
+        inh.holding_account_id,
+        inh.quantity,
+        &inh.currency,
     )
-    .bind(existing_buy)
-    .bind(inh.date_of_death)
-    .bind(inh.date_of_death)
-    .bind(inh.listing_id)
-    .bind(Money(inh.quantity))
-    .bind(&inh.currency)
-    .bind(Money(total_cost_base))
-    .bind(&inh.currency)
-    .bind(Money(inh.fx_rate))
-    .bind(inh.holding_account_id)
-    .bind(assigned_id)
-    .bind(inh.deceased_acquisition_date)
-    .execute(&mut *tx)
+    .brokerage(total_cost_base)
+    .fx_rate(inh.fx_rate)
+    .deemed_acquisition_date(inh.deceased_acquisition_date)
+    .write(&mut tx, existing_buy)
     .await?;
 
     // A scrip-for-scrip exchange, demerger, or worthless-shares recognise of

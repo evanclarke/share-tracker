@@ -10,6 +10,7 @@ mod checks;
 mod db;
 mod http;
 mod model;
+mod new_parcel;
 mod provenance;
 mod settlement;
 
@@ -43,6 +44,7 @@ pub use http::router;
 #[cfg(test)]
 pub use model::SettlementDateSource;
 pub use model::{Trade, TradeBody, TradeType};
+pub(crate) use new_parcel::{NewParcel, ParcelOrigin, Residuals};
 /// The classified provenance-column list itself, named outside this module
 /// only by `web::tests` (which pins the UI's `tradeOrigin` labelling against
 /// it), so the re-export is test-gated to keep the non-test build

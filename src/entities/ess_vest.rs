@@ -84,7 +84,6 @@
 
 use crate::entities::trade::{self, Trade};
 use crate::infra::db::{WriteMode, write_tx};
-use crate::infra::decimal::Money;
 use crate::infra::extract::{Json, Query};
 use crate::infra::http::{ApiError, DryRunQuery};
 use axum::{
@@ -233,31 +232,18 @@ async fn execute(
     // The cost-base-reset Buy: market value at the taxing point, dated and
     // settled on that date, in the statement's currency. ESS-vested units are
     // issued by the plan, not market-settled, so settlement is the trade date.
-    // The id column is omitted, so the database assigns one its AUTOINCREMENT
-    // sequence has never issued: a computed `MAX(id) + 1` would hand this
-    // parcel a just-deleted trade's id, and with it that trade's row_history
-    // trail (SCENARIOS U-a).
-    let result = sqlx::query(
-        "INSERT INTO trades \
-         (trade_type, date, settlement_date, settlement_date_source, listing_id, \
-          average_price, quantity, \
-          currency, brokerage, gst_on_brokerage, brokerage_currency, fx_rate, \
-          holding_account_id, ess_statement_id) \
-         VALUES ('Buy', ?, ?, 'stated', ?, ?, ?, ?, '0', '0', ?, ?, ?, ?)",
+    let new_id = trade::NewParcel::new(
+        trade::ParcelOrigin::EssVest(statement_id),
+        taxing_point_date,
+        listing_id,
+        holding_account_id,
+        quantity,
+        &currency,
     )
-    .bind(taxing_point_date)
-    .bind(taxing_point_date)
-    .bind(listing_id)
-    .bind(Money(price))
-    .bind(Money(quantity))
-    .bind(&currency)
-    .bind(&currency)
-    .bind(Money(fx_rate))
-    .bind(holding_account_id)
-    .bind(statement_id)
-    .execute(&mut *tx)
+    .price(price)
+    .fx_rate(fx_rate)
+    .insert(&mut tx)
     .await?;
-    let new_id = result.last_insert_rowid();
 
     // The listing's recorded splits and bonus issues are re-applied at *read*
     // time, so a vested quantity they push past `Decimal`'s range is accepted

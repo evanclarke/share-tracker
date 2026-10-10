@@ -38,7 +38,7 @@ use crate::entities::corporate_action::{
 };
 use crate::entities::trade::{self, Trade, TradeType};
 use crate::infra::db::{WriteMode, write_tx};
-use crate::infra::decimal::{Money, parse_dec};
+use crate::infra::decimal::parse_dec;
 use crate::infra::extract::{Json, Query};
 use crate::infra::http::{ApiError, DryRunQuery};
 use axum::{
@@ -442,29 +442,19 @@ async fn execute(
             }
         }
     };
-    let result = sqlx::query(
-        "INSERT INTO trades \
-         (trade_type, date, settlement_date, settlement_date_source, listing_id, \
-          average_price, quantity, currency, \
-          brokerage, gst_on_brokerage, brokerage_currency, fx_rate, contract_note_ref, \
-          residual_brought_forward, residual_carried_forward, residual_paid_out, \
-          rights_action_id, holding_account_id) \
-         VALUES ('Buy', ?, ?, 'stated', ?, ?, ?, ?, ?, '0', ?, ?, NULL, '0', '0', '0', ?, ?)",
+    let new_id = trade::NewParcel::new(
+        trade::ParcelOrigin::RightsExercise(action_id),
+        body.date,
+        action.listing_id,
+        body.holding_account_id,
+        body.units,
+        &currency,
     )
-    .bind(body.date)
-    .bind(body.date)
-    .bind(action.listing_id)
-    .bind(Money(exercise_price))
-    .bind(Money(body.units))
-    .bind(&currency)
-    .bind(Money(rights_cost))
-    .bind(&currency)
-    .bind(Money(fx_rate))
-    .bind(action_id)
-    .bind(body.holding_account_id)
-    .execute(&mut *tx)
+    .price(exercise_price)
+    .brokerage(rights_cost)
+    .fx_rate(fx_rate)
+    .insert(&mut tx)
     .await?;
-    let new_id = result.last_insert_rowid();
 
     // The listing's recorded splits and bonus issues are re-applied at *read*
     // time, so an exercised quantity they push past `Decimal`'s range is

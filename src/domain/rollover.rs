@@ -33,7 +33,6 @@ use crate::entities::corporate_action::{
 };
 use crate::entities::sell::{AllocationInput, SellBody};
 use crate::entities::trade::{self, Trade};
-use crate::infra::decimal::{Money, OptMoney};
 
 /// The reference data one listing's parcels are costed against: splits re-base
 /// units, AMIT adjustments (CGT event E10) and return-of-capital payments (G1)
@@ -218,19 +217,11 @@ pub enum Provenance {
 }
 
 impl Provenance {
-    fn column(self) -> &'static str {
+    fn origin(self) -> trade::ParcelOrigin {
         match self {
-            Provenance::ScripAction(_) => "scrip_action_id",
-            Provenance::DemergerAction(_) => "demerger_action_id",
-            Provenance::Transfer(_) => "transfer_id",
-        }
-    }
-
-    fn id(self) -> i64 {
-        match self {
-            Provenance::ScripAction(id)
-            | Provenance::DemergerAction(id)
-            | Provenance::Transfer(id) => id,
+            Provenance::ScripAction(id) => trade::ParcelOrigin::ScripExchange(id),
+            Provenance::DemergerAction(id) => trade::ParcelOrigin::Demerger(id),
+            Provenance::Transfer(id) => trade::ParcelOrigin::Transfer(id),
         }
     }
 }
@@ -445,44 +436,28 @@ pub struct ReplacementBuy<'a> {
 /// carried cost base goes on the `brokerage` column with a zero price —
 /// numerically part of the one cost base everywhere, with no division — and
 /// the row carries `provenance` so it can be recognised as part of the
-/// operation's group.
-///
-/// The id column is **omitted**, so SQLite assigns the next id its
-/// `AUTOINCREMENT` sequence has never issued. The operations used to compute
-/// `MAX(id) + 1` themselves, which after a delete re-issues the freed id and
-/// hands the new parcel the deleted trade's `row_history` trail (SCENARIOS
-/// U-a) — and races any concurrent write besides. A caller writing several
-/// rows must therefore take each id from this call, never by adding to the
-/// previous one.
+/// operation's group. The row itself is `trade::NewParcel`'s, whose
+/// database-assigned id is why a caller writing several rows takes each id
+/// from this call, never by adding to the previous one (SCENARIOS U-a).
 pub async fn insert_replacement_buy(
     conn: &mut sqlx::SqliteConnection,
     buy: &ReplacementBuy<'_>,
     provenance: Provenance,
 ) -> Result<i64, sqlx::Error> {
-    let result = sqlx::query(sqlx::AssertSqlSafe(format!(
-        "INSERT INTO trades \
-         (trade_type, date, settlement_date, settlement_date_source, listing_id, \
-          average_price, quantity, \
-          currency, brokerage, gst_on_brokerage, brokerage_currency, fx_rate, \
-          spot_fx_rate, deemed_acquisition_date, holding_account_id, {}) \
-         VALUES ('Buy', ?, ?, 'stated', ?, '0', ?, ?, ?, '0', ?, ?, ?, ?, ?, ?)",
-        provenance.column()
-    )))
-    .bind(buy.date)
-    .bind(buy.date)
-    .bind(buy.listing_id)
-    .bind(Money(buy.quantity))
-    .bind(buy.currency)
-    .bind(Money(buy.cost_base))
-    .bind(buy.currency)
-    .bind(Money(buy.fx_rate))
-    .bind(OptMoney(buy.spot_fx_rate))
-    .bind(buy.deemed_acquisition_date)
-    .bind(buy.holding_account_id)
-    .bind(provenance.id())
-    .execute(&mut *conn)
-    .await?;
-    Ok(result.last_insert_rowid())
+    trade::NewParcel::new(
+        provenance.origin(),
+        buy.date,
+        buy.listing_id,
+        buy.holding_account_id,
+        buy.quantity,
+        buy.currency,
+    )
+    .brokerage(buy.cost_base)
+    .fx_rate(buy.fx_rate)
+    .spot_fx_rate(buy.spot_fx_rate)
+    .deemed_acquisition_date(Some(buy.deemed_acquisition_date))
+    .insert(conn)
+    .await
 }
 
 /// Reads freshly created trades back, in the order written, so an operation's
