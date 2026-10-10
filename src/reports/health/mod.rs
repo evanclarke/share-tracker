@@ -310,14 +310,16 @@ pub async fn db_health(
     let demergers_missing_close = db_demergers_missing_close(&mut tx).await?;
     let demergers_head_not_continuing = db_demergers_head_not_continuing(&mut tx).await?;
     let duplicate_price_series = db_duplicate_price_series(&mut tx).await?;
-    let duplicate_trades = db_duplicate_trades(&mut tx).await?;
-    let duplicate_actions = db_duplicate_actions(&mut tx).await?;
-    let duplicate_amma_statements = db_duplicate_amma_statements(&mut tx).await?;
-    let duplicate_income = db_duplicate_income(&mut tx).await?;
-    let duplicate_interest = db_duplicate_interest(&mut tx).await?;
-    let duplicate_expenses = db_duplicate_expenses(&mut tx).await?;
-    let duplicate_ess_statements = db_duplicate_ess_statements(&mut tx).await?;
-    let duplicate_inheritances = db_duplicate_inheritances(&mut tx).await?;
+    let Duplicates {
+        trades: duplicate_trades,
+        actions: duplicate_actions,
+        amma_statements: duplicate_amma_statements,
+        income: duplicate_income,
+        interest: duplicate_interest,
+        expenses: duplicate_expenses,
+        ess_statements: duplicate_ess_statements,
+        inheritances: duplicate_inheritances,
+    } = db_duplicates(&mut tx).await?;
     let exchange_currency_mismatches = db_exchange_currency_mismatches(&mut tx).await?;
     let ess_30_day_rule = db_ess_30_day_rule(&mut tx).await?;
     let non_trading_day_trades = db_non_trading_day_trades(&mut tx).await?;

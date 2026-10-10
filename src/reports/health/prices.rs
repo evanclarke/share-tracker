@@ -583,7 +583,7 @@ pub(super) fn longest_identical_run(a: &[StoredClose], b: &[StoredClose]) -> Opt
 /// [`DuplicatePriceSeries`].
 ///
 /// Read on the caller's transaction but compared in Rust, for the same reason
-/// as [`db_duplicate_income`]: the prices are the key and they are TEXT
+/// as the `duplicate_*` family's grouping (`duplicates::DuplicateCheck`): the prices are the key and they are TEXT
 /// decimals, which SQL would compare as strings. The whole ok-price table is
 /// loaded in one query and grouped per listing — a personal portfolio's price
 /// history is thousands of rows, and every pair has to be walked anyway, so a

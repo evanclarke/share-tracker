@@ -10,6 +10,9 @@ use crate::entities::investment_expense::{ExpenseType, InvestmentExpense};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use sqlx::sqlite::SqliteRow;
+use std::cmp::Ordering;
+use std::collections::HashMap;
 
 /// More than one trade on one listing carrying the **same contract note
 /// reference**. A broker's contract note reference identifies one confirmation
@@ -73,20 +76,6 @@ pub struct DuplicateTrade {
     pub trade_ids: Vec<i64>,
 }
 
-/// The grouped row behind [`DuplicateTrade`], shaped like
-/// [`DuplicateActionRow`]: SQLite returns the ids as one `GROUP_CONCAT`
-/// string, split into the public struct's `Vec<i64>` by
-/// [`db_duplicate_trades`].
-#[derive(sqlx::FromRow)]
-pub(super) struct DuplicateTradeRow {
-    listing_id: i64,
-    ticker: String,
-    contract_note_ref: String,
-    date: NaiveDate,
-    trade_count: i64,
-    trade_ids: String,
-}
-
 /// More than one corporate action of the same type, on the same listing and
 /// date. Two such rows are two independent events to every reader — the
 /// cost-base pipeline sums both `ReturnOfCapital` reductions and multiplies
@@ -108,19 +97,6 @@ pub struct DuplicateAction {
     /// The ids sharing it, ascending, so the surplus row can be found and
     /// deleted without a search.
     pub action_ids: Vec<i64>,
-}
-
-/// The grouped row behind [`DuplicateAction`]: SQLite returns the ids as one
-/// `GROUP_CONCAT` string, split into the public struct's `Vec<i64>` by
-/// [`db_duplicate_actions`].
-#[derive(sqlx::FromRow)]
-pub(super) struct DuplicateActionRow {
-    listing_id: i64,
-    ticker: String,
-    action_type: String,
-    date: NaiveDate,
-    action_count: i64,
-    action_ids: String,
 }
 
 /// More than one AMMA statement for the same listing, financial year and
@@ -152,20 +128,6 @@ pub struct DuplicateAmmaStatement {
     /// The ids sharing it, ascending, so the superseded row can be found and
     /// deleted without a search.
     pub statement_ids: Vec<i64>,
-}
-
-/// The grouped row behind [`DuplicateAmmaStatement`], shaped like
-/// [`DuplicateActionRow`]: SQLite returns the ids as one `GROUP_CONCAT`
-/// string, split into the public struct's `Vec<i64>` by
-/// [`db_duplicate_amma_statements`].
-#[derive(sqlx::FromRow)]
-pub(super) struct DuplicateAmmaStatementRow {
-    listing_id: i64,
-    ticker: String,
-    tax_year_end_date: NaiveDate,
-    holding_account_id: i64,
-    statement_count: i64,
-    statement_ids: String,
 }
 
 /// More than one income row for the same listing, holding account and payment
@@ -356,590 +318,615 @@ pub struct DuplicateInheritance {
     pub inheritance_ids: Vec<i64>,
 }
 
-/// Trades of one listing sharing a contract note reference — see
+/// One `duplicate_*` check: the rows a double entry repeats, what makes two of
+/// them the same entry, and how a group of them is reported. Every check in the
+/// family is this one shape run through [`find_duplicates`], so the grouping,
+/// the ≥ 2 filter, the ascending ids and the newest-first order are written
+/// once rather than once per table.
+///
+/// The grouping runs in Rust rather than SQL so that a key holding money
+/// figures compares them as `Decimal`s — `"10.0"` and `"10.00"` are the same
+/// dollars written by two different clients — where SQL would compare the
+/// stored TEXT. [`candidates_sql`](Self::candidates_sql) narrows what is read
+/// to the rows sharing a cheap part of the key with another row, so what
+/// reaches memory is the handful of near-collisions a portfolio has, not the
+/// table.
+trait DuplicateCheck: for<'r> sqlx::FromRow<'r, SqliteRow> + Send + Unpin + Sized {
+    /// The entry reported per group.
+    type Report;
+
+    /// The candidate rows, **in id order** (so each group's ids come out
+    /// ascending): every row sharing the cheap part of the key with another.
+    fn candidates_sql() -> String;
+
+    /// Whether two candidates are one entry entered twice — the whole key.
+    fn same_entry(&self, other: &Self) -> bool;
+
+    /// The ids a group of rows is reported by.
+    fn id(&self) -> i64;
+
+    /// The entry for one group of ≥ 2 rows, ids ascending. `tickers` names a
+    /// listing by id; the FK guarantees a set listing exists, so a miss is
+    /// only a row read between the two queries, and the ids are named anyway.
+    fn report(group: &[Self], ids: Vec<i64>, tickers: &HashMap<i64, String>) -> Self::Report;
+
+    /// The list's order: newest first, then the tie-breaks that make it total.
+    fn newest_first(a: &Self::Report, b: &Self::Report) -> Ordering;
+}
+
+/// Runs one [`DuplicateCheck`] on the caller's transaction.
+async fn find_duplicates<R: DuplicateCheck>(
+    conn: &mut sqlx::SqliteConnection,
+) -> Result<Vec<R::Report>, sqlx::Error> {
+    let rows: Vec<R> = sqlx::query_as(sqlx::AssertSqlSafe(R::candidates_sql()))
+        .fetch_all(&mut *conn)
+        .await?;
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+    let tickers = crate::entities::listing::db_tickers(&mut *conn).await?;
+
+    // Grouped by scanning: the rows are already narrowed to near-collisions,
+    // so the quadratic worst case is a handful of comparisons.
+    let mut groups: Vec<Vec<R>> = Vec::new();
+    for row in rows {
+        match groups.iter_mut().find(|group| group[0].same_entry(&row)) {
+            Some(group) => group.push(row),
+            None => groups.push(vec![row]),
+        }
+    }
+    let mut duplicates: Vec<R::Report> = groups
+        .into_iter()
+        .filter(|group| group.len() > 1)
+        .map(|group| {
+            let ids = group.iter().map(R::id).collect();
+            R::report(&group, ids, &tickers)
+        })
+        .collect();
+    duplicates.sort_by(R::newest_first);
+    Ok(duplicates)
+}
+
+/// Every list of the `duplicate_*` family, one per [`DuplicateCheck`].
+pub(super) struct Duplicates {
+    pub trades: Vec<DuplicateTrade>,
+    pub actions: Vec<DuplicateAction>,
+    pub amma_statements: Vec<DuplicateAmmaStatement>,
+    pub income: Vec<DuplicateIncome>,
+    pub interest: Vec<DuplicateInterest>,
+    pub expenses: Vec<DuplicateExpense>,
+    pub ess_statements: Vec<DuplicateEssStatement>,
+    pub inheritances: Vec<DuplicateInheritance>,
+}
+
+/// Runs every check of the family on the caller's transaction.
+pub(super) async fn db_duplicates(
+    conn: &mut sqlx::SqliteConnection,
+) -> Result<Duplicates, sqlx::Error> {
+    Ok(Duplicates {
+        trades: find_duplicates::<ContractNoteTrade>(conn).await?,
+        actions: find_duplicates::<ActionEntry>(conn).await?,
+        amma_statements: find_duplicates::<AmmaEntry>(conn).await?,
+        income: find_duplicates::<Income>(conn).await?,
+        interest: find_duplicates::<InterestIncome>(conn).await?,
+        expenses: find_duplicates::<InvestmentExpense>(conn).await?,
+        ess_statements: find_duplicates::<EssStatement>(conn).await?,
+        inheritances: find_duplicates::<Inheritance>(conn).await?,
+    })
+}
+
+fn ticker(tickers: &HashMap<i64, String>, listing_id: i64) -> String {
+    tickers.get(&listing_id).cloned().unwrap_or_default()
+}
+
+/// A trade carrying a contract note reference — the candidate row behind
 /// [`DuplicateTrade`].
 ///
-/// Grouped in SQL on the caller's transaction, like [`db_duplicate_actions`]:
-/// the key is a TEXT reference rather than a decimal, so SQLite's own string
-/// comparison is the right one (the reason the money-keyed lists have to group
-/// in Rust does not arise). `TRIM` normalises the padding a pasted reference
-/// picks up, and the `<> ''` guard drops a reference that is blank or only
-/// whitespace — no reference at all — as the `IS NOT NULL` guard drops the
-/// derived trades, which record none.
-pub(super) async fn db_duplicate_trades(
-    conn: &mut sqlx::SqliteConnection,
-) -> Result<Vec<DuplicateTrade>, sqlx::Error> {
-    let rows = sqlx::query_as::<_, DuplicateTradeRow>(
-        "SELECT t.listing_id AS listing_id, l.ticker AS ticker, \
-                TRIM(t.contract_note_ref) AS contract_note_ref, \
-                MAX(t.date) AS date, \
-                COUNT(*) AS trade_count, GROUP_CONCAT(t.id) AS trade_ids \
-         FROM trades t JOIN listings l ON l.id = t.listing_id \
-         WHERE t.contract_note_ref IS NOT NULL AND TRIM(t.contract_note_ref) <> '' \
-         GROUP BY t.listing_id, TRIM(t.contract_note_ref) \
-         HAVING COUNT(*) > 1 \
-         ORDER BY MAX(t.date) DESC, l.ticker, TRIM(t.contract_note_ref)",
-    )
-    .fetch_all(&mut *conn)
-    .await?;
-    rows.into_iter()
-        .map(|row| {
-            // GROUP_CONCAT's order is unspecified, so sort rather than trust it.
-            let mut trade_ids = row
-                .trade_ids
-                .split(',')
-                .map(|id| {
-                    id.parse::<i64>()
-                        .map_err(|e| sqlx::Error::Decode(format!("trade id {id}: {e}").into()))
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            trade_ids.sort_unstable();
-            Ok(DuplicateTrade {
-                listing_id: row.listing_id,
-                ticker: row.ticker,
-                contract_note_ref: row.contract_note_ref,
-                date: row.date,
-                trade_count: row.trade_count,
-                trade_ids,
-            })
-        })
-        .collect()
+/// The key is a TEXT reference rather than a decimal, so SQLite's own string
+/// comparison pre-groups it exactly. `TRIM` normalises the padding a pasted
+/// reference picks up, and the `<> ''` guard drops a reference that is blank
+/// or only whitespace — no reference at all — as it drops a NULL one, which is
+/// what every derived trade records.
+#[derive(sqlx::FromRow)]
+struct ContractNoteTrade {
+    id: i64,
+    listing_id: i64,
+    /// Trimmed.
+    contract_note_ref: String,
+    date: NaiveDate,
 }
 
-pub(super) async fn db_duplicate_actions(
-    conn: &mut sqlx::SqliteConnection,
-) -> Result<Vec<DuplicateAction>, sqlx::Error> {
-    let rows = sqlx::query_as::<_, DuplicateActionRow>(
-        "SELECT ca.listing_id AS listing_id, l.ticker AS ticker, \
-                ca.action_type AS action_type, ca.date AS date, \
-                COUNT(*) AS action_count, GROUP_CONCAT(ca.id) AS action_ids \
-         FROM corporate_actions ca JOIN listings l ON l.id = ca.listing_id \
-         GROUP BY ca.listing_id, ca.action_type, ca.date \
-         HAVING COUNT(*) > 1 \
-         ORDER BY ca.date DESC, l.ticker, ca.action_type",
-    )
-    .fetch_all(&mut *conn)
-    .await?;
-    rows.into_iter()
-        .map(|row| {
-            // GROUP_CONCAT's order is unspecified, so sort rather than trust it.
-            let mut action_ids = row
-                .action_ids
-                .split(',')
-                .map(|id| {
-                    id.parse::<i64>().map_err(|e| {
-                        sqlx::Error::Decode(format!("corporate action id {id}: {e}").into())
-                    })
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            action_ids.sort_unstable();
-            Ok(DuplicateAction {
-                listing_id: row.listing_id,
-                ticker: row.ticker,
-                action_type: row.action_type,
-                date: row.date,
-                action_count: row.action_count,
-                action_ids,
-            })
-        })
-        .collect()
+impl DuplicateCheck for ContractNoteTrade {
+    type Report = DuplicateTrade;
+
+    fn candidates_sql() -> String {
+        "SELECT id, listing_id, TRIM(contract_note_ref) AS contract_note_ref, date \
+         FROM trades \
+         WHERE (listing_id, TRIM(contract_note_ref)) IN \
+               (SELECT listing_id, TRIM(contract_note_ref) FROM trades \
+                WHERE TRIM(contract_note_ref) <> '' \
+                GROUP BY listing_id, TRIM(contract_note_ref) HAVING COUNT(*) > 1) \
+         ORDER BY id"
+            .to_string()
+    }
+
+    fn same_entry(&self, other: &Self) -> bool {
+        self.listing_id == other.listing_id && self.contract_note_ref == other.contract_note_ref
+    }
+
+    fn id(&self) -> i64 {
+        self.id
+    }
+
+    fn report(group: &[Self], ids: Vec<i64>, tickers: &HashMap<i64, String>) -> DuplicateTrade {
+        let first = &group[0];
+        DuplicateTrade {
+            listing_id: first.listing_id,
+            ticker: ticker(tickers, first.listing_id),
+            contract_note_ref: first.contract_note_ref.clone(),
+            date: group
+                .iter()
+                .map(|t| t.date)
+                .max()
+                .expect("a group is never empty"),
+            trade_count: group.len() as i64,
+            trade_ids: ids,
+        }
+    }
+
+    fn newest_first(a: &DuplicateTrade, b: &DuplicateTrade) -> Ordering {
+        b.date
+            .cmp(&a.date)
+            .then_with(|| a.ticker.cmp(&b.ticker))
+            .then_with(|| a.contract_note_ref.cmp(&b.contract_note_ref))
+    }
 }
 
-/// AMMA statements sharing a (listing, financial year, holding account) — see
-/// [`DuplicateAmmaStatement`].
-///
-/// Grouped in SQL on the caller's transaction, like [`db_duplicate_actions`]:
-/// one small aggregate over `amma_statements`. The year is grouped on
+/// A corporate action — the candidate row behind [`DuplicateAction`], keyed
+/// on (listing, type, date).
+#[derive(sqlx::FromRow)]
+struct ActionEntry {
+    id: i64,
+    listing_id: i64,
+    action_type: String,
+    date: NaiveDate,
+}
+
+impl DuplicateCheck for ActionEntry {
+    type Report = DuplicateAction;
+
+    fn candidates_sql() -> String {
+        "SELECT id, listing_id, action_type, date FROM corporate_actions \
+         WHERE (listing_id, action_type, date) IN \
+               (SELECT listing_id, action_type, date FROM corporate_actions \
+                GROUP BY listing_id, action_type, date HAVING COUNT(*) > 1) \
+         ORDER BY id"
+            .to_string()
+    }
+
+    fn same_entry(&self, other: &Self) -> bool {
+        self.listing_id == other.listing_id
+            && self.action_type == other.action_type
+            && self.date == other.date
+    }
+
+    fn id(&self) -> i64 {
+        self.id
+    }
+
+    fn report(group: &[Self], ids: Vec<i64>, tickers: &HashMap<i64, String>) -> DuplicateAction {
+        let first = &group[0];
+        DuplicateAction {
+            listing_id: first.listing_id,
+            ticker: ticker(tickers, first.listing_id),
+            action_type: first.action_type.clone(),
+            date: first.date,
+            action_count: group.len() as i64,
+            action_ids: ids,
+        }
+    }
+
+    fn newest_first(a: &DuplicateAction, b: &DuplicateAction) -> Ordering {
+        b.date
+            .cmp(&a.date)
+            .then_with(|| a.ticker.cmp(&b.ticker))
+            .then_with(|| a.action_type.cmp(&b.action_type))
+    }
+}
+
+/// An AMMA statement — the candidate row behind [`DuplicateAmmaStatement`],
+/// keyed on (listing, financial year, holding account). The year is keyed on
 /// `tax_year_end_date` itself rather than a derived year, which is the same
 /// thing — the column is a 30 June date, enforced at write time
 /// (`entities::amma::UpsertError::NotFinancialYearEnd`).
-pub(super) async fn db_duplicate_amma_statements(
-    conn: &mut sqlx::SqliteConnection,
-) -> Result<Vec<DuplicateAmmaStatement>, sqlx::Error> {
-    let rows = sqlx::query_as::<_, DuplicateAmmaStatementRow>(
-        "SELECT a.listing_id AS listing_id, l.ticker AS ticker, \
-                a.tax_year_end_date AS tax_year_end_date, \
-                a.holding_account_id AS holding_account_id, \
-                COUNT(*) AS statement_count, GROUP_CONCAT(a.id) AS statement_ids \
-         FROM amma_statements a JOIN listings l ON l.id = a.listing_id \
-         GROUP BY a.listing_id, a.tax_year_end_date, a.holding_account_id \
-         HAVING COUNT(*) > 1 \
-         ORDER BY a.tax_year_end_date DESC, l.ticker, a.holding_account_id",
-    )
-    .fetch_all(&mut *conn)
-    .await?;
-    rows.into_iter()
-        .map(|row| {
-            // GROUP_CONCAT's order is unspecified, so sort rather than trust it.
-            let mut statement_ids = row
-                .statement_ids
-                .split(',')
-                .map(|id| {
-                    id.parse::<i64>().map_err(|e| {
-                        sqlx::Error::Decode(format!("AMMA statement id {id}: {e}").into())
-                    })
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            statement_ids.sort_unstable();
-            Ok(DuplicateAmmaStatement {
-                listing_id: row.listing_id,
-                ticker: row.ticker,
-                tax_year: tax_year_for(row.tax_year_end_date),
-                holding_account_id: row.holding_account_id,
-                statement_count: row.statement_count,
-                statement_ids,
-            })
-        })
-        .collect()
+#[derive(sqlx::FromRow)]
+struct AmmaEntry {
+    id: i64,
+    listing_id: i64,
+    tax_year_end_date: NaiveDate,
+    holding_account_id: i64,
 }
 
-/// True when two income rows are the same declared payment: same listing,
-/// holding account and payment date, and identical money figures stated in one
-/// currency — the fingerprint behind [`DuplicateIncome`].
-///
-/// Compared as `Decimal`s rather than as the stored TEXT, so `"10.0"` and
-/// `"10.00"` — the same dollars written by two different clients — are the
-/// match they are, which is also why the grouping cannot be pushed into SQL.
-/// Every money column of the row is compared, including the informational
-/// ones: two rows agreeing on the assessable figures but disagreeing on, say,
-/// `tax_deferred_amount` were entered from different statements. The row's
-/// **kind** is part of it too — a dividend and a dividend equivalent of the
-/// same amount on one day are two different payments, and the whole point of
-/// the kind is that they are not the same thing (SCENARIOS J-10).
-pub(super) fn same_income_entry(a: &Income, b: &Income) -> bool {
-    a.income_type == b.income_type
-        && a.listing_id == b.listing_id
-        && a.holding_account_id == b.holding_account_id
-        && a.date_paid == b.date_paid
-        && a.currency == b.currency
-        && a.franked_amount == b.franked_amount
-        && a.unfranked_amount == b.unfranked_amount
-        && a.foreign_source_income == b.foreign_source_income
-        && a.foreign_tax_paid == b.foreign_tax_paid
-        && a.tfn_withholding_tax == b.tfn_withholding_tax
-        && a.franking_credits == b.franking_credits
-        && a.lic_capital_gain_amount == b.lic_capital_gain_amount
-        && a.conduit_foreign_income == b.conduit_foreign_income
-        && a.amount_per_security == b.amount_per_security
-        && a.securities_held == b.securities_held
-        && a.tax_deferred_amount == b.tax_deferred_amount
+impl DuplicateCheck for AmmaEntry {
+    type Report = DuplicateAmmaStatement;
+
+    fn candidates_sql() -> String {
+        "SELECT id, listing_id, tax_year_end_date, holding_account_id FROM amma_statements \
+         WHERE (listing_id, tax_year_end_date, holding_account_id) IN \
+               (SELECT listing_id, tax_year_end_date, holding_account_id FROM amma_statements \
+                GROUP BY listing_id, tax_year_end_date, holding_account_id \
+                HAVING COUNT(*) > 1) \
+         ORDER BY id"
+            .to_string()
+    }
+
+    fn same_entry(&self, other: &Self) -> bool {
+        self.listing_id == other.listing_id
+            && self.tax_year_end_date == other.tax_year_end_date
+            && self.holding_account_id == other.holding_account_id
+    }
+
+    fn id(&self) -> i64 {
+        self.id
+    }
+
+    fn report(
+        group: &[Self],
+        ids: Vec<i64>,
+        tickers: &HashMap<i64, String>,
+    ) -> DuplicateAmmaStatement {
+        let first = &group[0];
+        DuplicateAmmaStatement {
+            listing_id: first.listing_id,
+            ticker: ticker(tickers, first.listing_id),
+            tax_year: tax_year_for(first.tax_year_end_date),
+            holding_account_id: first.holding_account_id,
+            statement_count: group.len() as i64,
+            statement_ids: ids,
+        }
+    }
+
+    fn newest_first(a: &DuplicateAmmaStatement, b: &DuplicateAmmaStatement) -> Ordering {
+        b.tax_year
+            .cmp(&a.tax_year)
+            .then_with(|| a.ticker.cmp(&b.ticker))
+            .then_with(|| a.holding_account_id.cmp(&b.holding_account_id))
+    }
 }
 
-/// Income rows declaring one payment twice — see [`DuplicateIncome`].
-///
-/// Read on the caller's transaction, but grouped in Rust rather than in SQL:
-/// the amounts are part of the key and they are TEXT decimals, which SQL would
-/// compare as strings (see [`same_income_entry`]). Only rows that already
-/// share a (listing, account, date) with another row are read, so what is
-/// carried into memory is at most the handful of same-day pairs a portfolio
-/// has, not the income table.
-pub(super) async fn db_duplicate_income(
-    conn: &mut sqlx::SqliteConnection,
-) -> Result<Vec<DuplicateIncome>, sqlx::Error> {
-    let rows: Vec<Income> = sqlx::query_as(
+/// Income rows declaring one payment twice — see [`DuplicateIncome`]. Only
+/// rows already sharing a (listing, account, date) with another are read.
+impl DuplicateCheck for Income {
+    type Report = DuplicateIncome;
+
+    fn candidates_sql() -> String {
         "SELECT * FROM income i \
          WHERE EXISTS (SELECT 1 FROM income o \
                        WHERE o.listing_id = i.listing_id \
                          AND o.holding_account_id = i.holding_account_id \
                          AND o.date_paid = i.date_paid AND o.id <> i.id) \
-         ORDER BY i.id",
-    )
-    .fetch_all(&mut *conn)
-    .await?;
-    if rows.is_empty() {
-        return Ok(Vec::new());
+         ORDER BY i.id"
+            .to_string()
     }
-    let tickers = crate::entities::listing::db_tickers(&mut *conn).await?;
 
-    // Grouped by scanning: the rows here are already narrowed to same-day
-    // clusters, so the quadratic worst case is a handful of comparisons.
-    // Read in id order, so each group's ids come out ascending.
-    let mut groups: Vec<Vec<Income>> = Vec::new();
-    for row in rows {
-        match groups
-            .iter_mut()
-            .find(|group| same_income_entry(&group[0], &row))
-        {
-            Some(group) => group.push(row),
-            None => groups.push(vec![row]),
+    /// The same declared payment: same listing, holding account and payment
+    /// date, and identical money figures stated in one currency. Every money
+    /// column of the row is compared, including the informational ones: two
+    /// rows agreeing on the assessable figures but disagreeing on, say,
+    /// `tax_deferred_amount` were entered from different statements. The
+    /// row's **kind** is part of it too — a dividend and a dividend equivalent
+    /// of the same amount on one day are two different payments, and the whole
+    /// point of the kind is that they are not the same thing (SCENARIOS J-10).
+    fn same_entry(&self, b: &Self) -> bool {
+        let a = self;
+        a.income_type == b.income_type
+            && a.listing_id == b.listing_id
+            && a.holding_account_id == b.holding_account_id
+            && a.date_paid == b.date_paid
+            && a.currency == b.currency
+            && a.franked_amount == b.franked_amount
+            && a.unfranked_amount == b.unfranked_amount
+            && a.foreign_source_income == b.foreign_source_income
+            && a.foreign_tax_paid == b.foreign_tax_paid
+            && a.tfn_withholding_tax == b.tfn_withholding_tax
+            && a.franking_credits == b.franking_credits
+            && a.lic_capital_gain_amount == b.lic_capital_gain_amount
+            && a.conduit_foreign_income == b.conduit_foreign_income
+            && a.amount_per_security == b.amount_per_security
+            && a.securities_held == b.securities_held
+            && a.tax_deferred_amount == b.tax_deferred_amount
+    }
+
+    fn id(&self) -> i64 {
+        self.id
+    }
+
+    fn report(group: &[Self], ids: Vec<i64>, tickers: &HashMap<i64, String>) -> DuplicateIncome {
+        let first = &group[0];
+        DuplicateIncome {
+            listing_id: first.listing_id,
+            ticker: ticker(tickers, first.listing_id),
+            holding_account_id: first.holding_account_id,
+            date_paid: first.date_paid,
+            currency: first.currency.clone(),
+            gross_amount: first.gross_cash_income(),
+            income_count: group.len() as i64,
+            income_ids: ids,
         }
     }
-    let mut duplicates: Vec<DuplicateIncome> = groups
-        .into_iter()
-        .filter(|group| group.len() > 1)
-        .map(|group| {
-            let first = &group[0];
-            DuplicateIncome {
-                listing_id: first.listing_id,
-                ticker: tickers
-                    .get(&first.listing_id)
-                    .cloned()
-                    // The FK guarantees the listing exists; a row read between
-                    // the two queries is the only way here, and an empty
-                    // ticker still names the ids to open.
-                    .unwrap_or_default(),
-                holding_account_id: first.holding_account_id,
-                date_paid: first.date_paid,
-                currency: first.currency.clone(),
-                gross_amount: first.gross_cash_income(),
-                income_count: group.len() as i64,
-                income_ids: group.iter().map(|row| row.id).collect(),
-            }
-        })
-        .collect();
-    // Newest first, matching the other two duplicate lists.
-    duplicates.sort_by(|a, b| {
+
+    fn newest_first(a: &DuplicateIncome, b: &DuplicateIncome) -> Ordering {
         b.date_paid
             .cmp(&a.date_paid)
             .then_with(|| a.ticker.cmp(&b.ticker))
             .then_with(|| a.holding_account_id.cmp(&b.holding_account_id))
             .then_with(|| a.income_ids.cmp(&b.income_ids))
-    });
-    Ok(duplicates)
+    }
 }
 
-/// Whether two interest rows are the same credit entered twice — see
-/// [`DuplicateInterest`]. Every stored field except the id is compared: the
-/// money figures as `Decimal`s rather than as the stored TEXT (so `"250.0"`
-/// and `"250.00"` match), and `source` / `holding_account_id` as the payer
-/// identity that interest has instead of a listing.
-pub(super) fn same_interest_entry(a: &InterestIncome, b: &InterestIncome) -> bool {
-    a.date_paid == b.date_paid
-        && a.currency == b.currency
-        && a.amount == b.amount
-        && a.tfn_withholding_tax == b.tfn_withholding_tax
-        && a.foreign_source == b.foreign_source
-        && a.foreign_tax_paid == b.foreign_tax_paid
-        && a.source == b.source
-        && a.holding_account_id == b.holding_account_id
-}
+/// Interest rows declaring one credit twice — see [`DuplicateInterest`]. The
+/// pre-narrowing is on the date alone, since the rest of the key is nullable
+/// (`source`, `holding_account_id`) and would need null-safe comparison in
+/// SQL to no benefit: same-day interest rows are a handful even in a busy
+/// year.
+impl DuplicateCheck for InterestIncome {
+    type Report = DuplicateInterest;
 
-/// Whether two expense rows are the same invoice entered twice — see
-/// [`DuplicateExpense`]. Every stored field except the id is compared,
-/// including the optional provenance pair: two rows agreeing on what is claimed
-/// but disagreeing on the gross they were apportioned from came off different
-/// invoices.
-pub(super) fn same_expense_entry(a: &InvestmentExpense, b: &InvestmentExpense) -> bool {
-    a.date_incurred == b.date_incurred
-        && a.expense_type == b.expense_type
-        && a.currency == b.currency
-        && a.amount == b.amount
-        && a.gross_amount == b.gross_amount
-        && a.deductible_percentage == b.deductible_percentage
-        && a.description == b.description
-        && a.listing_id == b.listing_id
-        && a.holding_account_id == b.holding_account_id
-}
-
-/// Interest rows declaring one credit twice — see [`DuplicateInterest`].
-///
-/// Read on the caller's transaction and grouped in Rust for the same reason as
-/// [`db_duplicate_income`]: the amounts are part of the key and they are TEXT
-/// decimals, which SQL would compare as strings. Only rows sharing a date with
-/// another row are read — the pre-narrowing is on the date alone, since the
-/// rest of the key is nullable (`source`, `holding_account_id`) and would need
-/// null-safe comparison in SQL to no benefit: same-day interest rows are a
-/// handful even in a busy year.
-pub(super) async fn db_duplicate_interest(
-    conn: &mut sqlx::SqliteConnection,
-) -> Result<Vec<DuplicateInterest>, sqlx::Error> {
-    let rows: Vec<InterestIncome> = sqlx::query_as(
+    fn candidates_sql() -> String {
         "SELECT * FROM interest_income i \
          WHERE EXISTS (SELECT 1 FROM interest_income o \
                        WHERE o.date_paid = i.date_paid AND o.id <> i.id) \
-         ORDER BY i.id",
-    )
-    .fetch_all(&mut *conn)
-    .await?;
+         ORDER BY i.id"
+            .to_string()
+    }
 
-    // Grouped by scanning, read in id order so each group's ids come out
-    // ascending (the same shape as `db_duplicate_income`).
-    let mut groups: Vec<Vec<InterestIncome>> = Vec::new();
-    for row in rows {
-        match groups
-            .iter_mut()
-            .find(|group| same_interest_entry(&group[0], &row))
-        {
-            Some(group) => group.push(row),
-            None => groups.push(vec![row]),
+    /// The same credit entered twice: every stored field except the id, with
+    /// `source` / `holding_account_id` as the payer identity that interest has
+    /// instead of a listing.
+    fn same_entry(&self, b: &Self) -> bool {
+        let a = self;
+        a.date_paid == b.date_paid
+            && a.currency == b.currency
+            && a.amount == b.amount
+            && a.tfn_withholding_tax == b.tfn_withholding_tax
+            && a.foreign_source == b.foreign_source
+            && a.foreign_tax_paid == b.foreign_tax_paid
+            && a.source == b.source
+            && a.holding_account_id == b.holding_account_id
+    }
+
+    fn id(&self) -> i64 {
+        self.id
+    }
+
+    fn report(group: &[Self], ids: Vec<i64>, _: &HashMap<i64, String>) -> DuplicateInterest {
+        let first = &group[0];
+        DuplicateInterest {
+            date_paid: first.date_paid,
+            currency: first.currency.clone(),
+            amount: first.amount,
+            source: first.source.clone(),
+            holding_account_id: first.holding_account_id,
+            interest_count: group.len() as i64,
+            interest_ids: ids,
         }
     }
-    let mut duplicates: Vec<DuplicateInterest> = groups
-        .into_iter()
-        .filter(|group| group.len() > 1)
-        .map(|group| {
-            let first = &group[0];
-            DuplicateInterest {
-                date_paid: first.date_paid,
-                currency: first.currency.clone(),
-                amount: first.amount,
-                source: first.source.clone(),
-                holding_account_id: first.holding_account_id,
-                interest_count: group.len() as i64,
-                interest_ids: group.iter().map(|row| row.id).collect(),
-            }
-        })
-        .collect();
-    // Newest first, matching the other duplicate lists.
-    duplicates.sort_by(|a, b| {
+
+    fn newest_first(a: &DuplicateInterest, b: &DuplicateInterest) -> Ordering {
         b.date_paid
             .cmp(&a.date_paid)
             .then_with(|| a.source.cmp(&b.source))
             .then_with(|| a.interest_ids.cmp(&b.interest_ids))
-    });
-    Ok(duplicates)
+    }
 }
 
 /// Investment-expense rows claiming one expense twice — see
-/// [`DuplicateExpense`]. Same shape as [`db_duplicate_interest`], plus the
-/// ticker lookup for a listing-attributed row.
-pub(super) async fn db_duplicate_expenses(
-    conn: &mut sqlx::SqliteConnection,
-) -> Result<Vec<DuplicateExpense>, sqlx::Error> {
-    let rows: Vec<InvestmentExpense> = sqlx::query_as(
+/// [`DuplicateExpense`]. Pre-narrowed on the date alone, as interest is.
+impl DuplicateCheck for InvestmentExpense {
+    type Report = DuplicateExpense;
+
+    fn candidates_sql() -> String {
         "SELECT * FROM investment_expenses e \
          WHERE EXISTS (SELECT 1 FROM investment_expenses o \
                        WHERE o.date_incurred = e.date_incurred AND o.id <> e.id) \
-         ORDER BY e.id",
-    )
-    .fetch_all(&mut *conn)
-    .await?;
-    if rows.is_empty() {
-        return Ok(Vec::new());
+         ORDER BY e.id"
+            .to_string()
     }
-    let tickers = crate::entities::listing::db_tickers(&mut *conn).await?;
 
-    let mut groups: Vec<Vec<InvestmentExpense>> = Vec::new();
-    for row in rows {
-        match groups
-            .iter_mut()
-            .find(|group| same_expense_entry(&group[0], &row))
-        {
-            Some(group) => group.push(row),
-            None => groups.push(vec![row]),
+    /// The same invoice entered twice: every stored field except the id,
+    /// including the optional provenance pair — two rows agreeing on what is
+    /// claimed but disagreeing on the gross they were apportioned from came
+    /// off different invoices.
+    fn same_entry(&self, b: &Self) -> bool {
+        let a = self;
+        a.date_incurred == b.date_incurred
+            && a.expense_type == b.expense_type
+            && a.currency == b.currency
+            && a.amount == b.amount
+            && a.gross_amount == b.gross_amount
+            && a.deductible_percentage == b.deductible_percentage
+            && a.description == b.description
+            && a.listing_id == b.listing_id
+            && a.holding_account_id == b.holding_account_id
+    }
+
+    fn id(&self) -> i64 {
+        self.id
+    }
+
+    fn report(group: &[Self], ids: Vec<i64>, tickers: &HashMap<i64, String>) -> DuplicateExpense {
+        let first = &group[0];
+        DuplicateExpense {
+            date_incurred: first.date_incurred,
+            expense_type: first.expense_type,
+            currency: first.currency.clone(),
+            amount: first.amount,
+            description: first.description.clone(),
+            listing_id: first.listing_id,
+            ticker: first.listing_id.and_then(|id| tickers.get(&id).cloned()),
+            holding_account_id: first.holding_account_id,
+            expense_count: group.len() as i64,
+            expense_ids: ids,
         }
     }
-    let mut duplicates: Vec<DuplicateExpense> = groups
-        .into_iter()
-        .filter(|group| group.len() > 1)
-        .map(|group| {
-            let first = &group[0];
-            DuplicateExpense {
-                date_incurred: first.date_incurred,
-                expense_type: first.expense_type,
-                currency: first.currency.clone(),
-                amount: first.amount,
-                description: first.description.clone(),
-                listing_id: first.listing_id,
-                // The FK guarantees a set listing exists; a row read between
-                // the two queries is the only way to miss it, and the ids are
-                // named either way.
-                ticker: first.listing_id.and_then(|id| tickers.get(&id).cloned()),
-                holding_account_id: first.holding_account_id,
-                expense_count: group.len() as i64,
-                expense_ids: group.iter().map(|row| row.id).collect(),
-            }
-        })
-        .collect();
-    duplicates.sort_by(|a, b| {
+
+    fn newest_first(a: &DuplicateExpense, b: &DuplicateExpense) -> Ordering {
         b.date_incurred
             .cmp(&a.date_incurred)
             .then_with(|| a.ticker.cmp(&b.ticker))
             .then_with(|| a.expense_ids.cmp(&b.expense_ids))
-    });
-    Ok(duplicates)
-}
-
-/// Whether two ESS statements are one vest entered twice — see
-/// [`DuplicateEssStatement`]. Every stored field except the id is compared: the
-/// money figures as `Decimal`s rather than as the stored TEXT (so `"1000.0"`
-/// and `"1000.00"` match), the statement-AUD overrides included — two rows
-/// agreeing on the foreign labels but disagreeing on the AUD the employer
-/// stated for them came off different statements. `vest_trade_id` is derived,
-/// not stored, and is deliberately not part of the key: whether the surplus
-/// statement has been vested yet says nothing about whether it is a duplicate.
-pub(super) fn same_ess_entry(a: &EssStatement, b: &EssStatement) -> bool {
-    a.listing_id == b.listing_id
-        && a.holding_account_id == b.holding_account_id
-        && a.taxing_point_date == b.taxing_point_date
-        && a.currency == b.currency
-        && a.quantity == b.quantity
-        && a.market_value_per_share == b.market_value_per_share
-        && a.taxed_upfront_eligible == b.taxed_upfront_eligible
-        && a.taxed_upfront_not_eligible == b.taxed_upfront_not_eligible
-        && a.deferral_discount == b.deferral_discount
-        && a.pre_2009_cessation_discount == b.pre_2009_cessation_discount
-        && a.foreign_source_discount == b.foreign_source_discount
-        && a.tfn_withholding == b.tfn_withholding
-        && a.fx_rate == b.fx_rate
-        && a.aud_taxed_upfront_eligible == b.aud_taxed_upfront_eligible
-        && a.aud_taxed_upfront_not_eligible == b.aud_taxed_upfront_not_eligible
-        && a.aud_deferral_discount == b.aud_deferral_discount
-        && a.aud_pre_2009_cessation_discount == b.aud_pre_2009_cessation_discount
-        && a.aud_foreign_source_discount == b.aud_foreign_source_discount
+    }
 }
 
 /// ESS statements declaring one vest twice — see [`DuplicateEssStatement`].
-///
-/// Read on the caller's transaction and grouped in Rust for the same reason as
-/// [`db_duplicate_income`]: the figures are part of the key and they are TEXT
-/// decimals, which SQL would compare as strings. Only rows already sharing a
-/// (listing, account, taxing point) with another row are read, so what is
-/// carried into memory is at most the handful of same-day vests a plan has.
-/// Selects the entity's own `COLUMNS` rather than `*`, since `vest_trade_id` is
-/// a derived back-link the row mapping requires.
-pub(super) async fn db_duplicate_ess_statements(
-    conn: &mut sqlx::SqliteConnection,
-) -> Result<Vec<DuplicateEssStatement>, sqlx::Error> {
-    let rows: Vec<EssStatement> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT {} FROM ess_statements \
-         WHERE EXISTS (SELECT 1 FROM ess_statements o \
-                       WHERE o.listing_id = ess_statements.listing_id \
-                         AND o.holding_account_id = ess_statements.holding_account_id \
-                         AND o.taxing_point_date = ess_statements.taxing_point_date \
-                         AND o.id <> ess_statements.id) \
-         ORDER BY ess_statements.id",
-        ess_statement::COLUMNS
-    )))
-    .fetch_all(&mut *conn)
-    .await?;
-    if rows.is_empty() {
-        return Ok(Vec::new());
-    }
-    let tickers = crate::entities::listing::db_tickers(&mut *conn).await?;
+/// Only rows already sharing a (listing, account, taxing point) with another
+/// are read. Selects the entity's own `COLUMNS` rather than `*`, since
+/// `vest_trade_id` is a derived back-link the row mapping requires.
+impl DuplicateCheck for EssStatement {
+    type Report = DuplicateEssStatement;
 
-    // Grouped by scanning, read in id order so each group's ids come out
-    // ascending (the same shape as `db_duplicate_income`).
-    let mut groups: Vec<Vec<EssStatement>> = Vec::new();
-    for row in rows {
-        match groups
-            .iter_mut()
-            .find(|group| same_ess_entry(&group[0], &row))
-        {
-            Some(group) => group.push(row),
-            None => groups.push(vec![row]),
+    fn candidates_sql() -> String {
+        format!(
+            "SELECT {} FROM ess_statements \
+             WHERE EXISTS (SELECT 1 FROM ess_statements o \
+                           WHERE o.listing_id = ess_statements.listing_id \
+                             AND o.holding_account_id = ess_statements.holding_account_id \
+                             AND o.taxing_point_date = ess_statements.taxing_point_date \
+                             AND o.id <> ess_statements.id) \
+             ORDER BY ess_statements.id",
+            ess_statement::COLUMNS
+        )
+    }
+
+    /// One vest entered twice: every stored field except the id, the
+    /// statement-AUD overrides included — two rows agreeing on the foreign
+    /// labels but disagreeing on the AUD the employer stated for them came off
+    /// different statements. `vest_trade_id` is derived, not stored, and is
+    /// deliberately not part of the key: whether the surplus statement has
+    /// been vested yet says nothing about whether it is a duplicate.
+    fn same_entry(&self, b: &Self) -> bool {
+        let a = self;
+        a.listing_id == b.listing_id
+            && a.holding_account_id == b.holding_account_id
+            && a.taxing_point_date == b.taxing_point_date
+            && a.currency == b.currency
+            && a.quantity == b.quantity
+            && a.market_value_per_share == b.market_value_per_share
+            && a.taxed_upfront_eligible == b.taxed_upfront_eligible
+            && a.taxed_upfront_not_eligible == b.taxed_upfront_not_eligible
+            && a.deferral_discount == b.deferral_discount
+            && a.pre_2009_cessation_discount == b.pre_2009_cessation_discount
+            && a.foreign_source_discount == b.foreign_source_discount
+            && a.tfn_withholding == b.tfn_withholding
+            && a.fx_rate == b.fx_rate
+            && a.aud_taxed_upfront_eligible == b.aud_taxed_upfront_eligible
+            && a.aud_taxed_upfront_not_eligible == b.aud_taxed_upfront_not_eligible
+            && a.aud_deferral_discount == b.aud_deferral_discount
+            && a.aud_pre_2009_cessation_discount == b.aud_pre_2009_cessation_discount
+            && a.aud_foreign_source_discount == b.aud_foreign_source_discount
+    }
+
+    fn id(&self) -> i64 {
+        self.id
+    }
+
+    fn report(
+        group: &[Self],
+        ids: Vec<i64>,
+        tickers: &HashMap<i64, String>,
+    ) -> DuplicateEssStatement {
+        let first = &group[0];
+        DuplicateEssStatement {
+            listing_id: first.listing_id,
+            ticker: ticker(tickers, first.listing_id),
+            holding_account_id: first.holding_account_id,
+            taxing_point_date: first.taxing_point_date,
+            currency: first.currency.clone(),
+            quantity: first.quantity,
+            discount_total: ess_statement::discount_labels(first),
+            statement_count: group.len() as i64,
+            statement_ids: ids,
         }
     }
-    let mut duplicates: Vec<DuplicateEssStatement> = groups
-        .into_iter()
-        .filter(|group| group.len() > 1)
-        .map(|group| {
-            let first = &group[0];
-            DuplicateEssStatement {
-                listing_id: first.listing_id,
-                ticker: tickers
-                    .get(&first.listing_id)
-                    .cloned()
-                    // The FK guarantees the listing exists; a row read between
-                    // the two queries is the only way here, and an empty
-                    // ticker still names the ids to open.
-                    .unwrap_or_default(),
-                holding_account_id: first.holding_account_id,
-                taxing_point_date: first.taxing_point_date,
-                currency: first.currency.clone(),
-                quantity: first.quantity,
-                discount_total: ess_statement::discount_labels(first),
-                statement_count: group.len() as i64,
-                statement_ids: group.iter().map(|row| row.id).collect(),
-            }
-        })
-        .collect();
-    // Newest first, matching the other duplicate lists.
-    duplicates.sort_by(|a, b| {
+
+    fn newest_first(a: &DuplicateEssStatement, b: &DuplicateEssStatement) -> Ordering {
         b.taxing_point_date
             .cmp(&a.taxing_point_date)
             .then_with(|| a.ticker.cmp(&b.ticker))
             .then_with(|| a.holding_account_id.cmp(&b.holding_account_id))
             .then_with(|| a.statement_ids.cmp(&b.statement_ids))
-    });
-    Ok(duplicates)
-}
-
-/// Whether two inheritances are one parcel entered twice — see
-/// [`DuplicateInheritance`]. Every stored field except the id is compared, the
-/// money figures as `Decimal`s rather than as the stored TEXT (so `"3000.0"`
-/// and `"3000.00"` match). The cost-base *rule* is part of it too: the same
-/// units and the same figure under `DeceasedCostBase` and `MarketValueAtDeath`
-/// are two different claims about the same holding, which is a contradiction
-/// worth showing rather than a duplicate to collapse.
-pub(super) fn same_inherited_parcel(a: &Inheritance, b: &Inheritance) -> bool {
-    a.listing_id == b.listing_id
-        && a.holding_account_id == b.holding_account_id
-        && a.date_of_death == b.date_of_death
-        && a.currency == b.currency
-        && a.quantity == b.quantity
-        && a.cost_base_rule == b.cost_base_rule
-        && a.cost_base == b.cost_base
-        && a.lpr_expenditure == b.lpr_expenditure
-        && a.lpr_expenditure_date == b.lpr_expenditure_date
-        && a.deceased_acquisition_date == b.deceased_acquisition_date
-        && a.fx_rate == b.fx_rate
+    }
 }
 
 /// Inheritances recording one parcel twice — see [`DuplicateInheritance`].
-///
-/// Read on the caller's transaction and grouped in Rust for the same reason as
-/// [`db_duplicate_ess_statements`]: the figures are part of the key and they
-/// are TEXT decimals, which SQL would compare as strings. Only rows already
-/// sharing a (listing, account, date of death) with another row are read, so a
-/// portfolio of unrelated inheritances never reaches memory.
-pub(super) async fn db_duplicate_inheritances(
-    conn: &mut sqlx::SqliteConnection,
-) -> Result<Vec<DuplicateInheritance>, sqlx::Error> {
-    let rows: Vec<Inheritance> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT {} FROM inheritances \
-         WHERE EXISTS (SELECT 1 FROM inheritances o \
-                       WHERE o.listing_id = inheritances.listing_id \
-                         AND o.holding_account_id = inheritances.holding_account_id \
-                         AND o.date_of_death = inheritances.date_of_death \
-                         AND o.id <> inheritances.id) \
-         ORDER BY inheritances.id",
-        inheritance::COLUMNS
-    )))
-    .fetch_all(&mut *conn)
-    .await?;
-    if rows.is_empty() {
-        return Ok(Vec::new());
-    }
-    let tickers = crate::entities::listing::db_tickers(&mut *conn).await?;
+/// Only rows already sharing a (listing, account, date of death) with another
+/// are read, so a portfolio of unrelated inheritances never reaches memory.
+impl DuplicateCheck for Inheritance {
+    type Report = DuplicateInheritance;
 
-    let mut groups: Vec<Vec<Inheritance>> = Vec::new();
-    for row in rows {
-        match groups
-            .iter_mut()
-            .find(|group| same_inherited_parcel(&group[0], &row))
-        {
-            Some(group) => group.push(row),
-            None => groups.push(vec![row]),
+    fn candidates_sql() -> String {
+        format!(
+            "SELECT {} FROM inheritances \
+             WHERE EXISTS (SELECT 1 FROM inheritances o \
+                           WHERE o.listing_id = inheritances.listing_id \
+                             AND o.holding_account_id = inheritances.holding_account_id \
+                             AND o.date_of_death = inheritances.date_of_death \
+                             AND o.id <> inheritances.id) \
+             ORDER BY inheritances.id",
+            inheritance::COLUMNS
+        )
+    }
+
+    /// One parcel entered twice: every stored field except the id. The
+    /// cost-base *rule* is part of it too: the same units and the same figure
+    /// under `DeceasedCostBase` and `MarketValueAtDeath` are two different
+    /// claims about the same holding, which is a contradiction worth showing
+    /// rather than a duplicate to collapse.
+    fn same_entry(&self, b: &Self) -> bool {
+        let a = self;
+        a.listing_id == b.listing_id
+            && a.holding_account_id == b.holding_account_id
+            && a.date_of_death == b.date_of_death
+            && a.currency == b.currency
+            && a.quantity == b.quantity
+            && a.cost_base_rule == b.cost_base_rule
+            && a.cost_base == b.cost_base
+            && a.lpr_expenditure == b.lpr_expenditure
+            && a.lpr_expenditure_date == b.lpr_expenditure_date
+            && a.deceased_acquisition_date == b.deceased_acquisition_date
+            && a.fx_rate == b.fx_rate
+    }
+
+    fn id(&self) -> i64 {
+        self.id
+    }
+
+    fn report(
+        group: &[Self],
+        ids: Vec<i64>,
+        tickers: &HashMap<i64, String>,
+    ) -> DuplicateInheritance {
+        let first = &group[0];
+        DuplicateInheritance {
+            listing_id: first.listing_id,
+            ticker: ticker(tickers, first.listing_id),
+            holding_account_id: first.holding_account_id,
+            date_of_death: first.date_of_death,
+            currency: first.currency.clone(),
+            quantity: first.quantity,
+            // What the parcel Buy carries: the first element plus the LPR
+            // expenditure, the sum `inheritance::db_upsert` writes.
+            cost_base_total: first.cost_base + first.lpr_expenditure,
+            inheritance_count: group.len() as i64,
+            inheritance_ids: ids,
         }
     }
-    let mut duplicates: Vec<DuplicateInheritance> = groups
-        .into_iter()
-        .filter(|group| group.len() > 1)
-        .map(|group| {
-            let first = &group[0];
-            DuplicateInheritance {
-                listing_id: first.listing_id,
-                ticker: tickers.get(&first.listing_id).cloned().unwrap_or_default(),
-                holding_account_id: first.holding_account_id,
-                date_of_death: first.date_of_death,
-                currency: first.currency.clone(),
-                quantity: first.quantity,
-                // What the parcel Buy carries: the first element plus the LPR
-                // expenditure, the sum `inheritance::db_upsert` writes.
-                cost_base_total: first.cost_base + first.lpr_expenditure,
-                inheritance_count: group.len() as i64,
-                inheritance_ids: group.iter().map(|row| row.id).collect(),
-            }
-        })
-        .collect();
-    // Newest first, matching the other duplicate lists.
-    duplicates.sort_by(|a, b| {
+
+    fn newest_first(a: &DuplicateInheritance, b: &DuplicateInheritance) -> Ordering {
         b.date_of_death
             .cmp(&a.date_of_death)
             .then_with(|| a.ticker.cmp(&b.ticker))
             .then_with(|| a.holding_account_id.cmp(&b.holding_account_id))
             .then_with(|| a.inheritance_ids.cmp(&b.inheritance_ids))
-    });
-    Ok(duplicates)
+    }
 }

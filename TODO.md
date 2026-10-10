@@ -168,9 +168,15 @@ Scored 6/10 — the weakest dimension. The operation modules are well factored, 
   (`ExpenseType::is_debt_deduction`); rollover's write half → new `entities::rollover`. Pinned by
   `domain::tests::domain_depends_on_nothing_in_entities` (`strip_test_modules` moved to
   `test_support` to share it)
-- [ ] Split `reports/health.rs` (~3,300 prod lines, ~25 checks) into a `health/` directory by check
+- [x] Split `reports/health.rs` (~3,300 prod lines, ~25 checks) into a `health/` directory by check
   family, and fold the ~10 `Duplicate*` checks (`same_x_entry` + `db_duplicate_x` pairs) into one
   generic duplicate detector — the existing health tests unchanged are the proof
+  — done 2026-10-10: `reports/health/` = `mod.rs` (report, freshness, `db_health`, route) over
+  `jobs`/`prices`/`duplicates`/`trades`/`calendar`, tests moved verbatim to `health/tests.rs`
+  (split committed alone first); the eight `duplicate_*` checks are one `DuplicateCheck` trait
+  (candidate SQL, `same_entry`, report, newest-first order) run by `find_duplicates`, the three
+  formerly SQL-grouped ones (trades/actions/AMMA) included — 2714 tests pass with the health
+  tests unchanged. (The price-series pair check stays separate: it is a run walk, not a group)
 - [x] `trade/db.rs` `write`: replace the seven per-provenance-column `is_some()` guards with one lookup
   over `TRADE_PROVENANCE`, and drop the duplicated "is this trade referenced?" `EXISTS` query
   — done 2026-10-10: each `TRADE_PROVENANCE` row carries its `edit_refusal` and `deleted_alone`
