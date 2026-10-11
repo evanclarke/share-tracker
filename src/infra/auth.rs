@@ -118,6 +118,7 @@
 //! unauthenticated requests arrived together. An attempt that waits longer
 //! than [`VERIFY_QUEUE_WAIT`] for a slot is refused with the same `429`.
 
+use crate::infra::config::BasePath;
 use crate::infra::http::ApiError;
 use crate::infra::respond::{Html as HtmlPage, Payload, SeeOther};
 use argon2::{
@@ -328,7 +329,7 @@ fn password_matches(stored_hash: &str, password: &str) -> bool {
 /// simply land in the documented [`Source::Unknown`] bucket — while consulting
 /// exactly the value a real socket installs. The form body is still decoded
 /// through axum's own `Form` extractor.
-async fn login_handler(auth: Auth, base_path: String, req: Request) -> Response {
+async fn login_handler(auth: Auth, base_path: BasePath, req: Request) -> Response {
     // The peer is `ConnectInfo<SocketAddr>` — the extension
     // `into_make_service_with_connect_info::<SocketAddr>()` (see `main`)
     // installs, stored in the request's extensions as the bare `ConnectInfo`
@@ -712,7 +713,7 @@ impl PartialEq for Auth {
 impl Auth {
     /// Builds an `Auth` from resolved config values. Parses `password_hash`
     /// up front — an unusable hash aborts startup, the same philosophy as
-    /// `config::normalise_base_path`: serving a login page that can never
+    /// `config::BasePath::parse`: serving a login page that can never
     /// succeed is worse than not starting.
     pub fn new(
         username: String,
@@ -998,11 +999,11 @@ fn hex_decode(s: &str) -> Option<Vec<u8>> {
 #[derive(Clone)]
 pub struct AuthState {
     auth: Auth,
-    base_path: String,
+    base_path: BasePath,
 }
 
 impl AuthState {
-    pub fn new(auth: Auth, base_path: String) -> Self {
+    pub fn new(auth: Auth, base_path: BasePath) -> Self {
         AuthState { auth, base_path }
     }
 }
@@ -1172,7 +1173,7 @@ impl utoipa::IntoResponses for LoginOutcome {
     }
 }
 
-fn render_login(base_path: &str, error: Option<&str>) -> Html<String> {
+fn render_login(base_path: &BasePath, error: Option<&str>) -> Html<String> {
     // `error` is always one of this module's own fixed strings, never
     // reflected user input, so no HTML-escaping is needed here.
     let error_html = match error {
@@ -1181,7 +1182,7 @@ fn render_login(base_path: &str, error: Option<&str>) -> Html<String> {
     };
     Html(
         LOGIN_HTML
-            .replace("{{BASE}}", base_path)
+            .replace("{{BASE}}", base_path.as_str())
             .replace("{{ERROR}}", &error_html)
             // The same pre-paint colour-scheme script the SPA shell carries —
             // one const, so the login page can never disagree with the app it
@@ -1193,7 +1194,7 @@ fn render_login(base_path: &str, error: Option<&str>) -> Html<String> {
 
 async fn login_submit(
     auth: Auth,
-    base_path: String,
+    base_path: BasePath,
     source: Source,
     html: bool,
     form: LoginForm,
@@ -1276,7 +1277,7 @@ async fn login_submit(
         (
             StatusCode::SEE_OTHER,
             [
-                (header::LOCATION, home_path(&base_path)),
+                (header::LOCATION, base_path.home().to_string()),
                 (header::SET_COOKIE, cookie),
             ],
         )
@@ -1311,35 +1312,23 @@ fn lockout_message(retry_after_secs: u64) -> String {
     format!("Too many failed sign-in attempts. Try again in {retry_after_secs} seconds.")
 }
 
-async fn logout(auth: Auth, base_path: String) -> Response {
+async fn logout(auth: Auth, base_path: BasePath) -> Response {
     let cookie = build_set_cookie(&auth, &base_path, None);
     (
         StatusCode::SEE_OTHER,
         [
-            (header::LOCATION, home_path(&base_path)),
+            (header::LOCATION, base_path.home().to_string()),
             (header::SET_COOKIE, cookie),
         ],
     )
         .into_response()
 }
 
-/// Where a successful login/logout lands: the app root, `"/"` at the default
-/// empty `base_path` or the prefix itself under a reverse proxy (mirrors
-/// `app::router`'s own redirect target for the bare-prefix form).
-fn home_path(base_path: &str) -> String {
-    if base_path.is_empty() {
-        "/".to_string()
-    } else {
-        base_path.to_string()
-    }
-}
-
-fn cookie_path(base_path: &str) -> &str {
-    if base_path.is_empty() { "/" } else { base_path }
-}
-
-fn build_set_cookie(auth: &Auth, base_path: &str, value: Option<String>) -> String {
-    let path = cookie_path(base_path);
+/// A successful login/logout lands on [`BasePath::home`] (`/` at the root, or
+/// the prefix itself under a reverse proxy — `app::router`'s own redirect
+/// target for the bare-prefix form), and the cookie is scoped to the same path.
+fn build_set_cookie(auth: &Auth, base_path: &BasePath, value: Option<String>) -> String {
+    let path = base_path.home();
     let secure = if auth.secure_cookie { "; Secure" } else { "" };
     match value {
         Some(v) => format!(
@@ -1508,7 +1497,7 @@ mod tests {
     async fn a_control_character_in_a_failed_login_username_cannot_split_the_log_line() {
         let response = login_submit(
             auth(),
-            String::new(),
+            BasePath::ROOT,
             Source::Unknown,
             false,
             LoginForm {
@@ -1597,7 +1586,7 @@ mod api_tests {
             None,
         );
         ApiClient::over(crate::app::router(
-            "",
+            &crate::infra::config::BasePath::ROOT,
             pool.clone(),
             registry,
             fetcher,
@@ -2152,7 +2141,7 @@ mod lockout_tests {
             attempts.push(tokio::spawn(async move {
                 login_submit(
                     auth,
-                    String::new(),
+                    BasePath::ROOT,
                     peer(n + 1),
                     false,
                     LoginForm {
@@ -2526,7 +2515,7 @@ mod lockout_tests {
             None,
         );
         ApiClient::over(crate::app::router(
-            "",
+            &crate::infra::config::BasePath::ROOT,
             pool.clone(),
             registry,
             fetcher,

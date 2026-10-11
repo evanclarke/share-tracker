@@ -146,10 +146,9 @@ pub struct Settings {
     pub backup_command: Option<String>,
     pub host: String,
     pub port: u16,
-    /// URL path prefix the whole application is mounted under, normalised to
-    /// either `""` (the root — the default) or a leading-slash, no-trailing-slash
-    /// path like `/share_tracker`. See [`normalise_base_path`].
-    pub base_path: String,
+    /// URL path prefix the whole application is mounted under. See
+    /// [`BasePath`].
+    pub base_path: BasePath,
     pub schedule: Option<String>,
     /// The host names (no port, no scheme) the server answers to beyond
     /// `localhost` and IP addresses while `[auth]` is absent — the
@@ -212,7 +211,7 @@ impl Settings {
                 .or(file.host)
                 .unwrap_or_else(|| DEFAULT_HOST.into()),
             port: args.port.or(file.port).unwrap_or(DEFAULT_PORT),
-            base_path: normalise_base_path(args.base_path.or(file.base_path).as_deref())?,
+            base_path: BasePath::parse(args.base_path.or(file.base_path).as_deref())?,
             schedule: args.schedule.or(file.schedule),
             allowed_hosts: file
                 .allowed_hosts
@@ -310,47 +309,99 @@ fn resolve_email(config: EmailConfig) -> Result<super::email::EmailSettings, Str
     })
 }
 
-/// Normalise a configured reverse-proxy path prefix to the one form the rest of
-/// the code assumes: `""` (mounted at the root) or `/a/b` — leading slash, no
-/// trailing slash. Absent, empty and `"/"` all mean the root, so a config file
-/// can spell "no prefix" any of the obvious ways.
-///
-/// Each segment is restricted to unreserved URL characters (RFC 3986
-/// `A-Z a-z 0-9 - . _ ~`): a prefix is concatenated with API paths by the
-/// frontend and matched by axum's router, so a space, `?`, `#` or `%` in it
-/// would produce URLs that mean something other than intended. The relative
-/// segments `.` and `..` are rejected for the same reason even though their
-/// characters are permitted: a browser or proxy resolves them away before the
-/// request is sent, so `/..` would be matched by the router only for a raw
-/// request while every browser-issued `GET /` 404s. Rejecting is deliberate —
-/// the alternative is a server that starts and then serves a UI whose every
-/// request 404s.
-pub fn normalise_base_path(raw: Option<&str>) -> Result<String, String> {
-    let trimmed = raw.unwrap_or("").trim();
-    let stripped = trimmed.trim_matches('/');
-    if stripped.is_empty() {
-        return Ok(String::new());
+/// The reverse-proxy path prefix the whole application is mounted under, in
+/// the one form every consumer assumes: `""` (mounted at the root — the
+/// default) or `/a/b` — leading slash, no trailing slash, each segment of
+/// unreserved URL characters. The only ways to make one are [`BasePath::parse`]
+/// (which normalises or refuses) and [`BasePath::ROOT`], so the code that
+/// concatenates it onto a path — the router's `nest`, the SPA shell, the login
+/// redirects and cookie `Path`, the OpenAPI `servers` entry — never has to
+/// re-check its shape.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BasePath(String);
+
+impl BasePath {
+    /// Mounted at the root: no prefix.
+    pub const ROOT: BasePath = BasePath(String::new());
+
+    /// Normalise a configured reverse-proxy path prefix to the one form a
+    /// `BasePath` holds: `""` (mounted at the root) or `/a/b` — leading slash, no
+    /// trailing slash. Absent, empty and `"/"` all mean the root, so a config file
+    /// can spell "no prefix" any of the obvious ways.
+    ///
+    /// Each segment is restricted to unreserved URL characters (RFC 3986
+    /// `A-Z a-z 0-9 - . _ ~`): a prefix is concatenated with API paths by the
+    /// frontend and matched by axum's router, so a space, `?`, `#` or `%` in it
+    /// would produce URLs that mean something other than intended. The relative
+    /// segments `.` and `..` are rejected for the same reason even though their
+    /// characters are permitted: a browser or proxy resolves them away before the
+    /// request is sent, so `/..` would be matched by the router only for a raw
+    /// request while every browser-issued `GET /` 404s. Rejecting is deliberate —
+    /// the alternative is a server that starts and then serves a UI whose every
+    /// request 404s.
+    pub fn parse(raw: Option<&str>) -> Result<BasePath, String> {
+        let trimmed = raw.unwrap_or("").trim();
+        let stripped = trimmed.trim_matches('/');
+        if stripped.is_empty() {
+            return Ok(BasePath::ROOT);
+        }
+        let valid = |seg: &str| {
+            !seg.is_empty()
+                && seg
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | '~'))
+        };
+        if !stripped.split('/').all(valid) {
+            return Err(format!(
+                "invalid base_path {trimmed:?}: expected a URL path prefix like \"/share_tracker\" \
+                 (path segments of letters, digits, '-', '.', '_' or '~')"
+            ));
+        }
+        if stripped.split('/').any(|seg| seg == "." || seg == "..") {
+            return Err(format!(
+                "invalid base_path {trimmed:?}: expected a URL path prefix like \"/share_tracker\", \
+                 not one containing a '.' or '..' segment — a browser or proxy resolves those away \
+                 before sending the request, so the prefix would be unreachable"
+            ));
+        }
+        Ok(BasePath(format!("/{stripped}")))
     }
-    let valid = |seg: &str| {
-        !seg.is_empty()
-            && seg
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | '~'))
-    };
-    if !stripped.split('/').all(valid) {
-        return Err(format!(
-            "invalid base_path {trimmed:?}: expected a URL path prefix like \"/share_tracker\" \
-             (path segments of letters, digits, '-', '.', '_' or '~')"
-        ));
+
+    /// The prefix to concatenate a path onto: `""` at the root, else `/a/b`.
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
-    if stripped.split('/').any(|seg| seg == "." || seg == "..") {
-        return Err(format!(
-            "invalid base_path {trimmed:?}: expected a URL path prefix like \"/share_tracker\", \
-             not one containing a '.' or '..' segment — a browser or proxy resolves those away \
-             before sending the request, so the prefix would be unreachable"
-        ));
+
+    /// Whether the application is mounted at the root (no prefix).
+    pub fn is_root(&self) -> bool {
+        self.0.is_empty()
     }
-    Ok(format!("/{stripped}"))
+
+    /// The application's own URL path, as a `Location`, cookie `Path` or
+    /// OpenAPI server URL needs it: `/` at the root, else the prefix itself.
+    pub fn home(&self) -> &str {
+        if self.is_root() { "/" } else { &self.0 }
+    }
+
+    /// A configured prefix in a test, normalised exactly as the config file's
+    /// would be; panics on one [`BasePath::parse`] refuses.
+    #[cfg(test)]
+    pub fn of(raw: &str) -> BasePath {
+        BasePath::parse(Some(raw)).expect("a valid base_path")
+    }
+}
+
+impl std::fmt::Display for BasePath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+#[cfg(test)]
+impl PartialEq<&str> for BasePath {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == *other
+    }
 }
 
 /// Load the config file: an explicit `--config` path must exist; the default
@@ -428,7 +479,7 @@ mod tests {
                 backup_command: None,
                 host: "127.0.0.1".into(),
                 port: 3000,
-                base_path: String::new(),
+                base_path: BasePath::ROOT,
                 schedule: None,
                 allowed_hosts: Vec::new(),
                 auth: None,
@@ -533,7 +584,7 @@ mod tests {
         // can spell "no prefix" any of the obvious ways without it becoming a
         // one-segment prefix.
         for raw in [None, Some(""), Some("  "), Some("/"), Some("//")] {
-            assert_eq!(normalise_base_path(raw), Ok(String::new()), "{raw:?}");
+            assert_eq!(BasePath::parse(raw), Ok(BasePath::ROOT), "{raw:?}");
         }
     }
 
@@ -546,16 +597,36 @@ mod tests {
             "  /share_tracker/  ",
         ] {
             assert_eq!(
-                normalise_base_path(Some(raw)),
+                BasePath::parse(Some(raw)).map(|b| b.to_string()),
                 Ok("/share_tracker".to_string()),
                 "{raw:?}"
             );
         }
         // Multi-segment prefixes are fine — a proxy may mount under /apps/x.
         assert_eq!(
-            normalise_base_path(Some("apps/share-tracker/")),
+            BasePath::parse(Some("apps/share-tracker/")).map(|b| b.to_string()),
             Ok("/apps/share-tracker".to_string())
         );
+    }
+
+    #[test]
+    fn a_base_path_answers_its_prefix_and_its_home_url() {
+        // The prefix is what a path is concatenated onto; the home URL is what
+        // a `Location`, cookie `Path` or OpenAPI server URL needs — `/` at the
+        // root, where the prefix is empty.
+        let root = BasePath::parse(Some("/")).expect("the root");
+        assert!(root.is_root());
+        assert_eq!((root.as_str(), root.home()), ("", "/"));
+        assert_eq!(format!("{root}/login"), "/login");
+
+        let prefixed = BasePath::parse(Some("apps/share_tracker/")).expect("a prefix");
+        assert!(!prefixed.is_root());
+        assert_eq!(
+            (prefixed.as_str(), prefixed.home()),
+            ("/apps/share_tracker", "/apps/share_tracker")
+        );
+        assert_eq!(format!("{prefixed}/login"), "/apps/share_tracker/login");
+        assert_eq!(BasePath::default(), BasePath::ROOT);
     }
 
     #[test]
@@ -564,7 +635,7 @@ mod tests {
         // empty interior segment: better to refuse to start than to serve a UI
         // whose every request 404s.
         for raw in ["/share tracker", "/a?b", "/a#b", "/a%2fb", "/a//b"] {
-            let err = normalise_base_path(Some(raw)).expect_err("an unusable prefix is rejected");
+            let err = BasePath::parse(Some(raw)).expect_err("an unusable prefix is rejected");
             assert!(err.contains("base_path"), "{raw:?}: {err}");
             assert!(
                 err.contains(raw.trim()),
@@ -580,7 +651,7 @@ mod tests {
         // router only for a raw request, while every browser-issued `GET /`
         // 404s. Better to refuse to start than to serve an unreachable prefix.
         for raw in ["/..", "/.", "/apps/../share_tracker", "/a/./b", ".."] {
-            let err = normalise_base_path(Some(raw)).expect_err("a relative segment is rejected");
+            let err = BasePath::parse(Some(raw)).expect_err("a relative segment is rejected");
             assert!(err.contains("base_path"), "{raw:?}: {err}");
             assert!(
                 err.contains(raw.trim()),

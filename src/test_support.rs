@@ -491,7 +491,7 @@ impl ApiClient {
         // tests cover a router nested under a reverse-proxy base path;
         // `infra::auth`'s own tests cover one with `[auth]` configured.
         ApiClient::over(crate::app::router(
-            "",
+            &crate::infra::config::BasePath::ROOT,
             pool.clone(),
             registry,
             fetcher,

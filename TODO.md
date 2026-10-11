@@ -147,9 +147,16 @@ the suite is least likely to cover (a foreign-currency parcel; a split between p
   sort their merged events by `(date, kind rank)` themselves, so the loader's `ORDER BY … id`
   only breaks a same-date, same-kind tie, where it changes which row is flagged `capped`, never the
   running balance; and `split_ratio` is a product over a date window, which no order changes
-- [ ] **`base_path` normalised form.** `config::normalise_base_path` produces `""` or `/a/b`, which
+- [x] **`base_path` normalised form.** `config::normalise_base_path` produces `""` or `/a/b`, which
   ~15 functions across `web.rs`, `api_spec.rs`, `infra/auth.rs` and `app.rs` assume of a bare
   `String`/`&str`. A `BasePath` newtype constructible only through normalisation
+  — Done 2026-10-11: `infra::config::BasePath` (private field; made only by `BasePath::parse`,
+  which replaces `normalise_base_path`, or `BasePath::ROOT`) is what `Settings::base_path`,
+  `app::router`/`api_routes`, `web::router`, `api_spec`'s `document_for`/`publish`/`route_index`/
+  `router` and `auth::AuthState` carry. `as_str()` is the prefix to concatenate onto and `home()`
+  the `/`-at-the-root URL, which replaced the four hand-written `if empty { "/" }` copies
+  (`home_path`, `cookie_path`, the OpenAPI server URL, the route index). Pinned by
+  `a_base_path_answers_its_prefix_and_its_home_url` and the existing normalisation tests
 - [ ] **Currency and month as strings.** `cost_base::Parcel::currency` is `&str` and the `infra::fx`
   lookups take `currency: &str` / `month: &str` (`'YYYY-MM'`) though CLAUDE.md types every currency
   as `CurrencyCode`. Take `&CurrencyCode` and a small `RateMonth` type

@@ -32,6 +32,7 @@
 
 use axum::{Router, response::IntoResponse};
 
+use crate::infra::config::BasePath;
 use crate::infra::extract::Query;
 use crate::infra::http::ApiError;
 use crate::infra::respond::{JsonBody, Payload, PlainText};
@@ -323,7 +324,7 @@ fn operations(document: &OpenApi) -> Vec<(Verb, String, String, String)> {
 /// (~400 KB); this is a few thousand tokens, enough to choose the operation
 /// and then fetch only its tag's slice. It carries no schemas and adds no
 /// facts of its own: every line is read from the published document itself.
-fn route_index(document: &OpenApi, base_path: &str) -> String {
+fn route_index(document: &OpenApi, base_path: &BasePath) -> String {
     let operations = operations(document);
     let mut out = format!(
         "share-tracker API {} — route index ({} operations)\n\
@@ -335,7 +336,7 @@ fn route_index(document: &OpenApi, base_path: &str) -> String {
          and a PUT replaces the whole row.\n",
         env!("CARGO_PKG_VERSION"),
         operations.len(),
-        if base_path.is_empty() { "/" } else { base_path },
+        base_path.home(),
     );
     let mut seen: Vec<&str> = Vec::new();
     for &(_, tag) in TAGS {
@@ -476,14 +477,14 @@ fn operation_slice(document: &serde_json::Value, id: &str) -> Option<serde_json:
 /// The OpenAPI 3.1 document — the auth-on, root-path form the tests read.
 #[cfg(test)]
 pub fn document() -> OpenApi {
-    document_for("", true)
+    document_for(&BasePath::ROOT, true)
 }
 
 /// [`document`] for a deployment, built exactly as [`router`] builds the one
 /// it serves: from [`crate::app::api_routes`]' generated operations plus this
 /// module's own two.
 #[cfg(test)]
-pub fn document_for(base_path: &str, auth: bool) -> OpenApi {
+pub fn document_for(base_path: &BasePath, auth: bool) -> OpenApi {
     let mut generated = crate::app::api_routes(base_path, auth).into_openapi();
     generated.merge(own_routes().into_openapi());
     publish(generated, base_path, auth)
@@ -509,7 +510,7 @@ pub fn document_for(base_path: &str, auth: bool) -> OpenApi {
 ///   the component schemas and, with `[auth]`, the security schemes and
 ///   requirement. A deployment without `[auth]` merges no `/login` or
 ///   `/logout` route, so the document cannot advertise one.
-fn publish(generated: OpenApi, base_path: &str, auth: bool) -> OpenApi {
+fn publish(generated: OpenApi, base_path: &BasePath, auth: bool) -> OpenApi {
     let mut paths = generated.paths;
     for (path, _) in crate::web::JS_MODULES {
         paths.add_path_operation(
@@ -541,7 +542,7 @@ fn publish(generated: OpenApi, base_path: &str, auth: bool) -> OpenApi {
             tags.push(TagBuilder::new().name(tag).build());
         }
     }
-    let server_url = if base_path.is_empty() { "/" } else { base_path };
+    let server_url = base_path.home();
     let mut builder = OpenApiBuilder::new()
         .info(
             InfoBuilder::new()
@@ -930,7 +931,7 @@ fn path_parameters(path: &str) -> Vec<Parameter> {
 /// The document (200+ schemas, ~170 paths) is completed and serialised
 /// **once**, when the router is assembled, and each request clones the
 /// finished JSON string.
-pub fn router(generated: OpenApi, base_path: &str, auth: bool) -> Router<SqlitePool> {
+pub fn router(generated: OpenApi, base_path: &BasePath, auth: bool) -> Router<SqlitePool> {
     let (router, own) = own_routes().split_for_parts();
     let mut generated = generated;
     generated.merge(own);
@@ -1762,7 +1763,8 @@ mod tests {
     /// top-level list names only tags some published operation uses.
     #[test]
     fn the_tag_list_follows_the_published_routes() {
-        let doc = serde_json::to_value(document_for("", false)).expect("the document serialises");
+        let doc = serde_json::to_value(document_for(&BasePath::ROOT, false))
+            .expect("the document serialises");
         let listed: Vec<&str> = doc["tags"]
             .as_array()
             .expect("the document lists its tags")
@@ -2393,7 +2395,7 @@ mod tests {
     /// omits the `/login`/`/logout` routes it does not serve.
     #[test]
     fn the_document_publishes_its_server_and_security() {
-        let rooted = serde_json::to_value(document_for("", true)).expect("serialises");
+        let rooted = serde_json::to_value(document_for(&BasePath::ROOT, true)).expect("serialises");
         assert_eq!(rooted["servers"][0]["url"], "/");
         assert!(rooted["components"]["securitySchemes"]["bearerAuth"].is_object());
         assert!(rooted["components"]["securitySchemes"]["sessionCookie"].is_object());
@@ -2402,13 +2404,14 @@ mod tests {
             "an auth deployment must carry a global security requirement"
         );
 
-        let prefixed = serde_json::to_value(document_for("/share_tracker", true)).expect("ser");
+        let prefixed =
+            serde_json::to_value(document_for(&BasePath::of("/share_tracker"), true)).expect("ser");
         assert_eq!(
             prefixed["servers"][0]["url"], "/share_tracker",
             "a base-path deployment must publish the prefix its paths resolve against"
         );
 
-        let open = serde_json::to_value(document_for("", false)).expect("serialises");
+        let open = serde_json::to_value(document_for(&BasePath::ROOT, false)).expect("serialises");
         assert!(
             open["components"]
                 .get("securitySchemes")
@@ -2438,9 +2441,9 @@ mod tests {
     #[test]
     fn the_route_index_lists_exactly_the_published_operations() {
         for auth in [true, false] {
-            let document = document_for("", auth);
+            let document = document_for(&BasePath::ROOT, auth);
             let doc = serde_json::to_value(&document).expect("serialises");
-            let index = route_index(&document, "");
+            let index = route_index(&document, &BasePath::ROOT);
             let mut listed: Vec<(String, String)> = Vec::new();
             let mut heading = String::new();
             for line in index.lines() {

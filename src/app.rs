@@ -6,6 +6,7 @@ use utoipa_axum::router::OpenApiRouter;
 
 use crate::entities::closing_price::SharedFetcher;
 use crate::infra::auth::Auth;
+use crate::infra::config::BasePath;
 use crate::infra::scheduler::{self, JobRegistry};
 
 /// Build the HTTP router: the web frontend plus all entity and report routes and
@@ -15,7 +16,7 @@ use crate::infra::scheduler::{self, JobRegistry};
 /// `main`; tests pass a stub `SharedFetcher` and never touch the network.
 ///
 /// `base_path` is the reverse-proxy path prefix from
-/// [`crate::infra::config::Settings`] — `""` (the default) mounts everything at
+/// [`crate::infra::config::Settings`] — [`BasePath::ROOT`] (the default) mounts everything at
 /// the root exactly as before, and e.g. `/share_tracker` nests the *whole*
 /// application under that prefix. Nesting rather than having the proxy strip
 /// the prefix keeps routing and the URLs the frontend emits in agreement: the
@@ -34,7 +35,7 @@ use crate::infra::scheduler::{self, JobRegistry};
 /// which is layered outside everything else (the login page included) whatever
 /// `auth` is.
 pub fn router(
-    base_path: &str,
+    base_path: &BasePath,
     pool: SqlitePool,
     registry: JobRegistry,
     fetcher: SharedFetcher,
@@ -58,7 +59,7 @@ pub fn router(
         // redirects are built from — as the extension their handlers read.
         app = app.layer(Extension(crate::infra::auth::AuthState::new(
             auth.clone(),
-            base_path.to_string(),
+            base_path.clone(),
         )));
     }
     let app = app
@@ -73,12 +74,12 @@ pub fn router(
     // allowlist checks against.
     let app = match auth {
         Some(auth) => app.layer(axum::middleware::from_fn_with_state(
-            crate::infra::auth::AuthState::new(auth, base_path.to_string()),
+            crate::infra::auth::AuthState::new(auth, base_path.clone()),
             crate::infra::auth::require_auth,
         )),
         None => app,
     };
-    if base_path.is_empty() {
+    if base_path.is_root() {
         return catching_panics(guarded(app, guard));
     }
     // `nest` matches the prefix itself (`/share_tracker`) and everything below
@@ -100,7 +101,7 @@ pub fn router(
                 }
             }),
         )
-        .nest(base_path, app);
+        .nest(base_path.as_str(), app);
     catching_panics(guarded(app, guard))
 }
 
@@ -110,7 +111,7 @@ pub fn router(
 /// `api_spec` documents. The login routes are merged without the
 /// [`AuthState`](crate::infra::auth::AuthState) they read, which [`router`]
 /// layers on, so the document can be generated without a credential.
-pub fn api_routes(base_path: &str, auth: bool) -> OpenApiRouter<SqlitePool> {
+pub fn api_routes(base_path: &BasePath, auth: bool) -> OpenApiRouter<SqlitePool> {
     let routes = crate::entities::router()
         .merge(crate::reports::router())
         .merge(scheduler::router())
@@ -183,7 +184,7 @@ mod tests {
             None,
         );
         ApiClient::over(super::router(
-            "/share_tracker",
+            &crate::infra::config::BasePath::of("/share_tracker"),
             pool.clone(),
             registry,
             fetcher,
