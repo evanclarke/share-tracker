@@ -52,7 +52,7 @@ pub(crate) enum SpotFxRateError {
 /// conversion behaviour). Shared by the trade and Sell write paths so the two
 /// can't drift.
 pub(crate) fn validate_spot_fx_rate(
-    currency: &str,
+    currency: &crate::infra::currency::CurrencyCode,
     spot_fx_rate: Option<Decimal>,
 ) -> Result<(), SpotFxRateError> {
     let Some(rate) = spot_fx_rate else {
@@ -61,7 +61,7 @@ pub(crate) fn validate_spot_fx_rate(
     if rate <= Decimal::ZERO {
         return Err(SpotFxRateError::NotPositive);
     }
-    if crate::infra::currency::is_aud(currency) {
+    if currency.is_aud() {
         return Err(SpotFxRateError::AudTrade);
     }
     Ok(())

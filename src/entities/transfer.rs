@@ -197,7 +197,10 @@ pub enum TransferError {
     /// `FxOverride::Fallback(1)` — the path the ESS vest refuses
     /// (`ess_vest::VestError::MissingFxRate`). Mapped to 422.
     #[error("no ATO FX rate for {currency} in {month} and the request states no fee_fx_rate")]
-    MissingFeeFxRate { currency: String, month: String },
+    MissingFeeFxRate {
+        currency: crate::infra::currency::CurrencyCode,
+        month: crate::infra::fx::RateMonth,
+    },
     // There is deliberately no sibling of
     // `trade::UpsertError::UnrepresentableRebasedQuantity` here, though a
     // transfer-in Buy is one of the eight parcel-creating writes that rule
@@ -708,8 +711,8 @@ async fn write_fee_sale(
                 crate::infra::fx::FxOverride::None,
             )
             .map_err(|_| TransferError::MissingFeeFxRate {
-                currency: listing_currency.to_string(),
-                month: body.date.format("%Y-%m").to_string(),
+                currency: listing_currency.clone(),
+                month: crate::infra::fx::RateMonth::of(body.date),
             })?
         }
     };

@@ -37,7 +37,7 @@
 
 use crate::infra::currency::CurrencyCode;
 use crate::infra::extract::Json;
-use crate::infra::fx::FxRates;
+use crate::infra::fx::{FxRates, RateMonth};
 use crate::infra::http::ApiError;
 #[cfg(test)]
 use crate::infra::id::HoldingAccountId;
@@ -45,7 +45,7 @@ use crate::infra::id::ListingId;
 #[cfg(test)]
 use crate::infra::id::TradeId;
 use axum::extract::State;
-use chrono::{Datelike, NaiveDate};
+use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
@@ -96,11 +96,6 @@ struct Convertible {
     /// Whether that fallback is a deliberate spot override rather than a
     /// silent stand-in.
     spot: bool,
-}
-
-/// `YYYY-MM` — the conversion month key `rba_fx_rates` is stored under.
-fn month_of(date: NaiveDate) -> String {
-    format!("{:04}-{:02}", date.year(), date.month())
 }
 
 /// `(label, SQL)` — each yields id, listing_id, ticker, date, currency, and
@@ -219,8 +214,8 @@ pub async fn db_fx_coverage(pool: &SqlitePool) -> Result<Vec<FxCoverageAlert>, s
     let mut alerts = Vec::new();
 
     for c in load_convertibles(&mut tx).await? {
-        let month = month_of(c.date);
-        if fx.has_rate(&c.currency, &month) {
+        let month = RateMonth::of(c.date);
+        if fx.has_rate(&c.currency, month) {
             continue;
         }
         let (resting_on, detail) = match (c.fallback, c.spot) {
@@ -259,7 +254,7 @@ pub async fn db_fx_coverage(pool: &SqlitePool) -> Result<Vec<FxCoverageAlert>, s
             ticker: c.ticker,
             date: c.date,
             currency: c.currency,
-            month,
+            month: month.to_string(),
             resting_on: Some(resting_on.to_string()),
             detail,
         });
@@ -287,14 +282,14 @@ pub async fn db_fx_coverage(pool: &SqlitePool) -> Result<Vec<FxCoverageAlert>, s
             listing_id: row.try_get("listing_id")?,
             ticker: row.try_get("ticker")?,
             date,
-            month: month_of(settlement_date),
+            month: RateMonth::of(settlement_date).to_string(),
             detail: format!(
                 "contracted in {} and settled in {} — both legs convert at the contract month, so \
                  the {currency} movement over the settlement window is not computed (CGT event \
                  K10/K11, a documented limitation). A material movement is the taxpayer's own \
                  adjustment",
-                month_of(date),
-                month_of(settlement_date)
+                RateMonth::of(date),
+                RateMonth::of(settlement_date)
             ),
             currency,
             resting_on: None,
@@ -336,8 +331,8 @@ pub async fn db_fx_coverage(pool: &SqlitePool) -> Result<Vec<FxCoverageAlert>, s
         // Both rates where they resolve, so the row says what the difference
         // actually costs rather than only that one exists.
         let rates = match (
-            fx.rate_for(&currency, &month_of(date)),
-            fx.rate_for(&currency, &month_of(reduction_date)),
+            fx.rate_for(&currency, RateMonth::of(date)),
+            fx.rate_for(&currency, RateMonth::of(reduction_date)),
         ) {
             (Some(acquisition), Some(own)) if acquisition != own => {
                 format!(" (converted at {acquisition}, its own month's rate is {own})")
@@ -351,14 +346,14 @@ pub async fn db_fx_coverage(pool: &SqlitePool) -> Result<Vec<FxCoverageAlert>, s
             listing_id: row.try_get("listing_id")?,
             ticker: row.try_get("ticker")?,
             date,
-            month: month_of(reduction_date),
+            month: RateMonth::of(reduction_date).to_string(),
             detail: format!(
                 "this {currency} parcel takes a {reduction} reduction from {}, which converts at \
                  the parcel's own acquisition month of {} instead{rates} — the documented \
                  single-rate cost base. A material difference is adjusted by hand at the \
                  payment-period rate",
-                month_of(reduction_date),
-                month_of(date)
+                RateMonth::of(reduction_date),
+                RateMonth::of(date)
             ),
             currency,
             resting_on: None,

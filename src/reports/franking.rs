@@ -19,6 +19,7 @@
 use crate::domain::tax_year::tax_year_for;
 use crate::entities::corporate_action::{self, SplitEvent};
 use crate::entities::trade::TradeType;
+use crate::infra::currency::CurrencyCode;
 use crate::infra::decimal::{mul_div, parse_dec};
 use crate::infra::fx::{FxOverride, FxRates};
 #[cfg(test)]
@@ -370,7 +371,7 @@ pub async fn db_franked_dividends(
             .await?;
     for row in &amma_rows {
         let tax_year_end_date: NaiveDate = row.try_get("tax_year_end_date")?;
-        let currency: String = row.try_get("currency")?;
+        let currency: CurrencyCode = row.try_get("currency")?;
         let credits = parse_dec("franking_credits", row.try_get("franking_credits")?)?;
         let credits_aud = fx.to_aud(credits, &currency, tax_year_end_date, FxOverride::None)?;
         // The statement's FY by the one shared rule: a 30 June end is

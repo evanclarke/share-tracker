@@ -145,7 +145,10 @@ pub enum ExchangeError {
     /// `FxOverride::Fallback(1)` — the path the ESS vest refuses
     /// (`ess_vest::VestError::MissingFxRate`). Mapped to 422.
     #[error("no ATO FX rate for {currency} in {month} for the cash component")]
-    MissingFxRate { currency: String, month: String },
+    MissingFxRate {
+        currency: crate::infra::currency::CurrencyCode,
+        month: crate::infra::fx::RateMonth,
+    },
     /// The Sell-side invariants failed — defensive as to the allocations,
     /// which the exchange constructs to satisfy them; the reachable case is an
     /// exchange dated after today (SCENARIOS S-10), which the 422 names.
@@ -257,8 +260,8 @@ async fn execute(
         Err(_) if sell_price == Decimal::ZERO => Decimal::ONE,
         Err(_) => {
             return Err(ExchangeError::MissingFxRate {
-                currency: sell_currency.to_string(),
-                month: action.date.format("%Y-%m").to_string(),
+                currency: sell_currency.clone(),
+                month: crate::infra::fx::RateMonth::of(action.date),
             });
         }
     };

@@ -821,7 +821,7 @@ async fn gross_buckets(
 
     for row in &amma_rows {
         let year_end: NaiveDate = row.try_get("tax_year_end_date")?;
-        let currency: String = row.try_get("currency")?;
+        let currency: CurrencyCode = row.try_get("currency")?;
         let d = year_end;
         // AMMA discount-method gains are the already-halved "discounted capital gain"
         // line; gross up ×2 to the pre-discount gain before netting losses.
@@ -1580,7 +1580,7 @@ mod tests {
             average_price: dec("10"),
             brokerage: dec("9.95"),
             gst_on_brokerage: Decimal::ZERO,
-            currency: "AUD",
+            currency: &"AUD".into(),
             trade_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             settled: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             rollover: None,

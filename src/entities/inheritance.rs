@@ -391,7 +391,10 @@ pub enum UpsertError {
     /// precisely that case and cost the parcel at parity. Refused rather than
     /// answered wrongly (`ess_vest::VestError::MissingFxRate`, the same rule).
     #[error("no ATO FX rate for {currency} in {month} and the inheritance states none")]
-    MissingFxRate { currency: String, month: String },
+    MissingFxRate {
+        currency: crate::infra::currency::CurrencyCode,
+        month: crate::infra::fx::RateMonth,
+    },
     /// The inherited parcel's currency differs from that of a
     /// return-of-capital payment on its listing that reaches it. The payment
     /// reduces each parcel's cost base in the parcel's own currency and
@@ -614,8 +617,8 @@ async fn check_convertible(
             crate::infra::fx::FxOverride::None,
         )
         .map_err(|_| UpsertError::MissingFxRate {
-            currency: inh.currency.to_string(),
-            month: conversion_date(inh).format("%Y-%m").to_string(),
+            currency: inh.currency.clone(),
+            month: crate::infra::fx::RateMonth::of(conversion_date(inh)),
         })?;
     Ok(())
 }

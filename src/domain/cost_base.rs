@@ -77,7 +77,7 @@ pub struct Parcel<'a> {
     /// The parcel's trade currency. Return-of-capital payments in a different
     /// currency fail loudly — amounts in different currencies are never
     /// netted against each other.
-    pub currency: &'a str,
+    pub currency: &'a CurrencyCode,
     /// The actual trade date — drives split and return-of-capital
     /// applicability. A deemed acquisition date (rollover replacement
     /// parcels), where different, only drives the discount clock and the AUD
@@ -1157,7 +1157,7 @@ impl CostBase<Native> {
     pub fn into_aud_with(
         self,
         rates: &fx::FxRates,
-        currency: &str,
+        currency: &CurrencyCode,
         acquired: NaiveDate,
         fx_override: fx::FxOverride,
     ) -> Result<CostBase<Aud>, fx::FxError> {
@@ -1373,13 +1373,16 @@ mod tests {
         NaiveDate::from_ymd_opt(y, m, d).unwrap()
     }
 
+    /// The fixture parcels' currency, `'static` so `parcel` can lend it.
+    static AUD: std::sync::LazyLock<CurrencyCode> = std::sync::LazyLock::new(CurrencyCode::aud);
+
     fn parcel(qty: i64, price: i64) -> Parcel<'static> {
         Parcel {
             quantity: AcquiredUnits::new(Decimal::from(qty)),
             average_price: Decimal::from(price),
             brokerage: Decimal::ZERO,
             gst_on_brokerage: Decimal::ZERO,
-            currency: "AUD",
+            currency: &AUD,
             trade_date: date(2024, 1, 1),
             settled: date(2024, 1, 1),
             rollover: None,
@@ -2638,7 +2641,7 @@ mod tests {
         let aud = cb
             .into_aud_with(
                 &fx::FxRates::default(),
-                "AUD",
+                &"AUD".into(),
                 date(2024, 1, 1),
                 fx::FxOverride::None,
             )
@@ -2658,7 +2661,7 @@ mod tests {
             .unwrap();
         let rates = fx::FxRates::load(&pool).await.unwrap();
         let p = Parcel {
-            currency: "USD",
+            currency: &"USD".into(),
             ..parcel(100, 10)
         };
         let roc = RocEvent {
@@ -2677,7 +2680,12 @@ mod tests {
         )
         .unwrap();
         let aud = cb
-            .into_aud_with(&rates, "USD", date(2024, 1, 15), fx::FxOverride::None)
+            .into_aud_with(
+                &rates,
+                &"USD".into(),
+                date(2024, 1, 15),
+                fx::FxOverride::None,
+            )
             .unwrap();
         // Every component is USD / 0.50: 1000 → 2000, 5 → 10, 50 → 100,
         // (1000 − 5 − 50) → 1890.
@@ -2688,7 +2696,12 @@ mod tests {
         // A month with no rate falls back to the override; none means a loud
         // failure, never a silently unconverted figure.
         assert!(matches!(
-            cb.into_aud_with(&rates, "USD", date(2025, 1, 15), fx::FxOverride::None),
+            cb.into_aud_with(
+                &rates,
+                &"USD".into(),
+                date(2025, 1, 15),
+                fx::FxOverride::None
+            ),
             Err(fx::FxError::MissingRate { .. })
         ));
     }
@@ -2714,7 +2727,7 @@ mod tests {
             .unwrap();
         let rates = fx::FxRates::load(&pool).await.unwrap();
         let p = Parcel {
-            currency: "USD",
+            currency: &"USD".into(),
             ..parcel(100, 10)
         };
         let roc = RocEvent {
@@ -2733,7 +2746,12 @@ mod tests {
         )
         .unwrap();
         let aud = cb
-            .into_aud_with(&rates, "USD", date(2024, 1, 15), fx::FxOverride::None)
+            .into_aud_with(
+                &rates,
+                &"USD".into(),
+                date(2024, 1, 15),
+                fx::FxOverride::None,
+            )
             .unwrap();
         // Both reductions take the January rate (US$5 → A$10, US$50 → A$100),
         // not June's (which would give A$5 and A$50).

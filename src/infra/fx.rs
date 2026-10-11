@@ -35,8 +35,105 @@ use rust_decimal::Decimal;
 use sqlx::{Row, SqlitePool};
 use std::collections::HashMap;
 
-use crate::infra::currency::Aud;
+use crate::infra::currency::{Aud, CurrencyCode};
 use crate::infra::decimal::parse_dec;
+
+/// The calendar month an ATO/RBA reference rate covers — the key
+/// `rba_fx_rates` stores as `'YYYY-MM'` text. A conversion is always for the
+/// month *of a date*, so [`RateMonth::of`] is the way to one; the text form is
+/// only for display and for reading the stored key ([`RateMonth::parse`]), so
+/// a lookup cannot be handed a mis-formatted string that silently matches
+/// nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct RateMonth {
+    year: i32,
+    month: u32,
+}
+
+impl RateMonth {
+    /// The month `date` falls in.
+    pub fn of(date: NaiveDate) -> Self {
+        Self {
+            year: date.year(),
+            month: date.month(),
+        }
+    }
+
+    /// The month before this one.
+    pub fn previous(self) -> Self {
+        if self.month == 1 {
+            Self {
+                year: self.year - 1,
+                month: 12,
+            }
+        } else {
+            Self {
+                year: self.year,
+                month: self.month - 1,
+            }
+        }
+    }
+
+    /// A stored `'YYYY-MM'` key, or `None` when it is not one.
+    pub fn parse(text: &str) -> Option<Self> {
+        let (year, month) = text.split_once('-')?;
+        if year.len() != 4 || month.len() != 2 {
+            return None;
+        }
+        let year: i32 = year.parse().ok()?;
+        let month: u32 = month.parse().ok()?;
+        (1..=12).contains(&month).then_some(Self { year, month })
+    }
+}
+
+/// Stored as the `'YYYY-MM'` TEXT key `rba_fx_rates.month` holds; a stored
+/// value that is not one is a decode error, never a key that matches nothing.
+impl sqlx::Type<sqlx::Sqlite> for RateMonth {
+    fn type_info() -> sqlx::sqlite::SqliteTypeInfo {
+        <String as sqlx::Type<sqlx::Sqlite>>::type_info()
+    }
+
+    fn compatible(ty: &sqlx::sqlite::SqliteTypeInfo) -> bool {
+        <String as sqlx::Type<sqlx::Sqlite>>::compatible(ty)
+    }
+}
+
+impl<'r> sqlx::Decode<'r, sqlx::Sqlite> for RateMonth {
+    fn decode(value: sqlx::sqlite::SqliteValueRef<'r>) -> Result<Self, sqlx::error::BoxDynError> {
+        let text = <&str as sqlx::Decode<sqlx::Sqlite>>::decode(value)?;
+        RateMonth::parse(text).ok_or_else(|| format!("{text:?} is not a YYYY-MM month").into())
+    }
+}
+
+impl sqlx::Encode<'_, sqlx::Sqlite> for RateMonth {
+    fn encode_by_ref(
+        &self,
+        buf: &mut sqlx::sqlite::SqliteArgumentsBuffer,
+    ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
+        <String as sqlx::Encode<sqlx::Sqlite>>::encode(self.to_string(), buf)
+    }
+}
+
+/// Test-only, so an assertion can say `assert_eq!(month, "2024-01")`.
+#[cfg(test)]
+impl PartialEq<&str> for RateMonth {
+    fn eq(&self, other: &&str) -> bool {
+        *self == **other
+    }
+}
+
+#[cfg(test)]
+impl PartialEq<str> for RateMonth {
+    fn eq(&self, other: &str) -> bool {
+        RateMonth::parse(other) == Some(*self)
+    }
+}
+
+impl std::fmt::Display for RateMonth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:04}-{:02}", self.year, self.month)
+    }
+}
 
 /// The per-record manual rate a conversion carries (foreign-per-AUD, same
 /// convention as the ATO rate), distinguishing how it interacts with the
@@ -77,7 +174,10 @@ pub enum FxError {
     /// No ATO rate exists for this (currency, month) and no manual override was
     /// supplied. The conversion fails rather than guessing a rate.
     #[error("no ATO FX rate for {currency} in {month} and no manual override supplied")]
-    MissingRate { currency: String, month: String },
+    MissingRate {
+        currency: CurrencyCode,
+        month: RateMonth,
+    },
     /// Reading the rate from the database failed.
     #[error("FX rate lookup failed: {0}")]
     Db(#[from] sqlx::Error),
@@ -106,8 +206,8 @@ impl From<FxError> for sqlx::Error {
 /// imported. Propagates a malformed stored rate as a decode error.
 async fn lookup_ato_rate(
     pool: &SqlitePool,
-    currency: &str,
-    month: &str,
+    currency: &CurrencyCode,
+    month: RateMonth,
 ) -> Result<Option<Decimal>, sqlx::Error> {
     let raw: Option<String> =
         sqlx::query_scalar("SELECT rate FROM rba_fx_rates WHERE currency = ? AND month = ?")
@@ -130,15 +230,15 @@ async fn lookup_ato_rate(
 #[cfg(test)]
 pub async fn resolve_rate(
     pool: &SqlitePool,
-    currency: &str,
+    currency: &CurrencyCode,
     date: NaiveDate,
     manual: FxOverride,
 ) -> Result<Decimal, FxError> {
-    if crate::infra::currency::is_aud(currency) {
+    if currency.is_aud() {
         return Ok(Decimal::ONE);
     }
-    let month = date.format("%Y-%m").to_string();
-    let ato_rate = lookup_ato_rate(pool, currency, &month).await?;
+    let month = RateMonth::of(date);
+    let ato_rate = lookup_ato_rate(pool, currency, month).await?;
     pick_rate(ato_rate, currency, month, manual)
 }
 
@@ -148,8 +248,8 @@ pub async fn resolve_rate(
 /// ATO rate exists, and none means a loud [`FxError::MissingRate`].
 fn pick_rate(
     ato_rate: Option<Decimal>,
-    currency: &str,
-    month: String,
+    currency: &CurrencyCode,
+    month: RateMonth,
     manual: FxOverride,
 ) -> Result<Decimal, FxError> {
     if let FxOverride::Spot(rate) = manual {
@@ -162,7 +262,7 @@ fn pick_rate(
         return Ok(rate);
     }
     Err(FxError::MissingRate {
-        currency: currency.to_string(),
+        currency: currency.clone(),
         month,
     })
 }
@@ -255,15 +355,10 @@ impl<T> Provisional<T> {
 }
 
 /// The valuation month of `date` and its fallback predecessors, newest first:
-/// `['YYYY-MM'; 1 + VALUATION_FALLBACK_MONTHS]`.
-fn valuation_months(date: NaiveDate) -> Vec<String> {
-    let (mut y, mut m) = (date.year(), date.month());
-    let mut months = vec![format!("{y:04}-{m:02}")];
-    for _ in 0..VALUATION_FALLBACK_MONTHS {
-        (y, m) = if m == 1 { (y - 1, 12) } else { (y, m - 1) };
-        months.push(format!("{y:04}-{m:02}"));
-    }
-    months
+/// `1 + VALUATION_FALLBACK_MONTHS` of them.
+fn valuation_months(date: NaiveDate) -> impl Iterator<Item = RateMonth> {
+    std::iter::successors(Some(RateMonth::of(date)), |m| Some(m.previous()))
+        .take(1 + VALUATION_FALLBACK_MONTHS as usize)
 }
 
 /// Resolve the rate to *value* an amount of `currency` at `date`: the ATO rate
@@ -280,17 +375,16 @@ fn valuation_months(date: NaiveDate) -> Vec<String> {
 /// holds any new caller to that, file by file.
 pub async fn resolve_valuation_rate(
     pool: &SqlitePool,
-    currency: &str,
+    currency: &CurrencyCode,
     date: NaiveDate,
 ) -> Result<ValuationRate, FxError> {
-    if crate::infra::currency::is_aud(currency) {
+    if currency.is_aud() {
         return Ok(ValuationRate {
             rate: Decimal::ONE,
             provisional: false,
         });
     }
-    let months = valuation_months(date);
-    for (i, month) in months.iter().enumerate() {
+    for (i, month) in valuation_months(date).enumerate() {
         if let Some(rate) = lookup_ato_rate(pool, currency, month).await? {
             return Ok(ValuationRate {
                 rate,
@@ -299,8 +393,8 @@ pub async fn resolve_valuation_rate(
         }
     }
     Err(FxError::MissingRate {
-        currency: currency.to_string(),
-        month: months.into_iter().next().expect("valuation month present"),
+        currency: currency.clone(),
+        month: RateMonth::of(date),
     })
 }
 
@@ -314,8 +408,8 @@ pub async fn resolve_valuation_rate(
 /// report's other queries.
 #[derive(Debug, Clone, Default)]
 pub struct FxRates {
-    /// (currency, 'YYYY-MM') → foreign currency units per 1 AUD.
-    rates: HashMap<(String, String), Decimal>,
+    /// (currency, month) → foreign currency units per 1 AUD.
+    rates: HashMap<(CurrencyCode, RateMonth), Decimal>,
 }
 
 impl FxRates {
@@ -330,8 +424,8 @@ impl FxRates {
             .await?;
         let mut rates = HashMap::new();
         for row in &rows {
-            let currency: String = row.try_get("currency")?;
-            let month: String = row.try_get("month")?;
+            let currency: CurrencyCode = row.try_get("currency")?;
+            let month: RateMonth = row.try_get("month")?;
             let rate = parse_dec("rate", row.try_get("rate")?)?;
             rates.insert((currency, month), rate);
         }
@@ -345,7 +439,10 @@ impl FxRates {
         FxRates {
             rates: rates
                 .into_iter()
-                .map(|(currency, month, rate)| ((currency.to_string(), month.to_string()), rate))
+                .map(|(currency, month, rate)| {
+                    let month = RateMonth::parse(month).expect("a YYYY-MM test month");
+                    ((CurrencyCode::from(currency), month), rate)
+                })
                 .collect(),
         }
     }
@@ -355,18 +452,15 @@ impl FxRates {
     /// month of `date`, failing loudly when no rate is available.
     pub fn resolve_rate(
         &self,
-        currency: &str,
+        currency: &CurrencyCode,
         date: NaiveDate,
         manual: FxOverride,
     ) -> Result<Decimal, FxError> {
-        if crate::infra::currency::is_aud(currency) {
+        if currency.is_aud() {
             return Ok(Decimal::ONE);
         }
-        let month = date.format("%Y-%m").to_string();
-        let ato_rate = self
-            .rates
-            .get(&(currency.to_string(), month.clone()))
-            .copied();
+        let month = RateMonth::of(date);
+        let ato_rate = self.lookup(currency, month);
         pick_rate(ato_rate, currency, month, manual)
     }
 
@@ -376,18 +470,17 @@ impl FxRates {
     /// period-performance report's FX attribution only.
     pub fn resolve_valuation_rate(
         &self,
-        currency: &str,
+        currency: &CurrencyCode,
         date: NaiveDate,
     ) -> Result<ValuationRate, FxError> {
-        if crate::infra::currency::is_aud(currency) {
+        if currency.is_aud() {
             return Ok(ValuationRate {
                 rate: Decimal::ONE,
                 provisional: false,
             });
         }
-        let months = valuation_months(date);
-        for (i, month) in months.iter().enumerate() {
-            if let Some(&rate) = self.rates.get(&(currency.to_string(), month.clone())) {
+        for (i, month) in valuation_months(date).enumerate() {
+            if let Some(rate) = self.lookup(currency, month) {
                 return Ok(ValuationRate {
                     rate,
                     provisional: i > 0,
@@ -395,27 +488,34 @@ impl FxRates {
             }
         }
         Err(FxError::MissingRate {
-            currency: currency.to_string(),
-            month: months.into_iter().next().expect("valuation month present"),
+            currency: currency.clone(),
+            month: RateMonth::of(date),
         })
     }
 
-    /// The imported ATO rate for `currency` in `month` (`'YYYY-MM'`), if
+    /// The imported rate for exactly this (currency, month), AUD included
+    /// only if someone imported one — the bare map read under every public
+    /// lookup.
+    fn lookup(&self, currency: &CurrencyCode, month: RateMonth) -> Option<Decimal> {
+        // Keyed on the stored (upper-case) code; a lower-case one finds
+        // nothing, exactly as the SQL lookup's `currency = ?` does.
+        self.rates.get(&(currency.clone(), month)).copied()
+    }
+
+    /// The imported ATO rate for `currency` in `month`, if
     /// there is one — the map read without the precedence rule around it, for
     /// the [FX coverage cross-check](crate::reports::fx_coverage), whose whole
     /// question is which months are *not* imported.
-    pub fn rate_for(&self, currency: &str, month: &str) -> Option<Decimal> {
-        if crate::infra::currency::is_aud(currency) {
+    pub fn rate_for(&self, currency: &CurrencyCode, month: RateMonth) -> Option<Decimal> {
+        if currency.is_aud() {
             return Some(Decimal::ONE);
         }
-        self.rates
-            .get(&(currency.to_string(), month.to_string()))
-            .copied()
+        self.lookup(currency, month)
     }
 
     /// Whether an ATO rate has been imported for `currency` in `month`. AUD
     /// always has one (it converts at 1 without any import).
-    pub fn has_rate(&self, currency: &str, month: &str) -> bool {
+    pub fn has_rate(&self, currency: &CurrencyCode, month: RateMonth) -> bool {
         self.rate_for(currency, month).is_some()
     }
 
@@ -423,7 +523,7 @@ impl FxRates {
     pub fn to_aud(
         &self,
         amount: Decimal,
-        currency: &str,
+        currency: &CurrencyCode,
         date: NaiveDate,
         manual: FxOverride,
     ) -> Result<Decimal, FxError> {
@@ -450,7 +550,7 @@ impl FxRates {
 pub async fn to_aud(
     pool: &SqlitePool,
     amount: Decimal,
-    currency: &str,
+    currency: &CurrencyCode,
     date: NaiveDate,
     manual: FxOverride,
 ) -> Result<Decimal, FxError> {
@@ -477,7 +577,7 @@ mod tests {
         let aud = to_aud(
             &pool,
             "1234.56".parse().unwrap(),
-            "AUD",
+            &"AUD".into(),
             date(2024, 1, 15),
             FxOverride::None,
         )
@@ -496,7 +596,7 @@ mod tests {
         let aud = to_aud(
             &pool,
             Decimal::from(1000),
-            "USD",
+            &"USD".into(),
             date(2024, 1, 15),
             FxOverride::None,
         )
@@ -515,7 +615,7 @@ mod tests {
         let aud = to_aud(
             &pool,
             Decimal::from(1000),
-            "USD",
+            &"USD".into(),
             date(2024, 1, 15),
             FxOverride::Fallback("0.80".parse().unwrap()),
         )
@@ -531,7 +631,7 @@ mod tests {
         let aud = to_aud(
             &pool,
             Decimal::from(800),
-            "USD",
+            &"USD".into(),
             date(2024, 1, 15),
             FxOverride::Fallback("0.80".parse().unwrap()),
         )
@@ -550,7 +650,7 @@ mod tests {
         let aud = to_aud(
             &pool,
             Decimal::from(1000),
-            "USD",
+            &"USD".into(),
             date(2024, 1, 15),
             FxOverride::Fallback("0.40".parse().unwrap()),
         )
@@ -566,7 +666,7 @@ mod tests {
         let err = to_aud(
             &pool,
             Decimal::from(1000),
-            "USD",
+            &"USD".into(),
             date(2024, 1, 15),
             FxOverride::None,
         )
@@ -579,6 +679,38 @@ mod tests {
             }
             other => panic!("expected MissingRate, got {other:?}"),
         }
+    }
+
+    /// A rate month is made from a date, steps back across a year end, reads
+    /// only a well-formed `'YYYY-MM'` key, and a malformed stored key fails
+    /// the load loudly rather than becoming a month no lookup ever matches.
+    #[tokio::test]
+    async fn a_rate_month_is_a_months_key_and_refuses_anything_else() {
+        let jan = RateMonth::of(date(2024, 1, 31));
+        assert_eq!(jan.to_string(), "2024-01");
+        assert_eq!(jan.previous().to_string(), "2023-12");
+        assert_eq!(RateMonth::parse("2024-01"), Some(jan));
+        for bad in [
+            "2024-1",
+            "2024-13",
+            "2024-00",
+            "24-01",
+            "2024/01",
+            "2024-01-15",
+            "",
+        ] {
+            assert_eq!(RateMonth::parse(bad), None, "{bad:?}");
+        }
+
+        let pool = test_pool().await;
+        sqlx::query(
+            "INSERT INTO rba_fx_rates (currency, month, rate) VALUES ('USD', '2024-1', '0.5')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let err = FxRates::load(&pool).await.unwrap_err().to_string();
+        assert!(err.contains("not a YYYY-MM month"), "{err}");
     }
 
     // FxRates: the pre-loaded map must resolve exactly like the DB-lookup path.
@@ -594,7 +726,7 @@ mod tests {
         let aud = rates
             .to_aud(
                 "1234.56".parse().unwrap(),
-                "AUD",
+                &"AUD".into(),
                 date(2024, 1, 15),
                 FxOverride::None,
             )
@@ -613,7 +745,7 @@ mod tests {
         let aud = rates
             .to_aud(
                 Decimal::from(1000),
-                "USD",
+                &"USD".into(),
                 date(2024, 1, 15),
                 FxOverride::Fallback("0.80".parse().unwrap()),
             )
@@ -623,7 +755,7 @@ mod tests {
         let aud = rates
             .to_aud(
                 Decimal::from(1000),
-                "USD",
+                &"USD".into(),
                 date(2024, 2, 15),
                 FxOverride::Fallback("0.40".parse().unwrap()),
             )
@@ -638,7 +770,7 @@ mod tests {
         let err = rates
             .to_aud(
                 Decimal::from(1000),
-                "USD",
+                &"USD".into(),
                 date(2024, 1, 15),
                 FxOverride::None,
             )
@@ -676,7 +808,7 @@ mod tests {
         let err = to_aud(
             &pool,
             Decimal::from(1000),
-            "USD",
+            &"USD".into(),
             date(2024, 1, 15),
             FxOverride::None,
         )
@@ -699,7 +831,7 @@ mod tests {
         let aud = to_aud(
             &pool,
             Decimal::from(1000),
-            "USD",
+            &"USD".into(),
             date(2024, 1, 15),
             FxOverride::Spot("0.40".parse().unwrap()),
         )
@@ -714,7 +846,7 @@ mod tests {
         let aud = to_aud(
             &pool,
             Decimal::from(1000),
-            "USD",
+            &"USD".into(),
             date(2024, 1, 15),
             FxOverride::Spot("0.40".parse().unwrap()),
         )
@@ -734,7 +866,7 @@ mod tests {
         let aud = rates
             .to_aud(
                 Decimal::from(1000),
-                "USD",
+                &"USD".into(),
                 date(2024, 1, 15),
                 FxOverride::Spot("0.40".parse().unwrap()),
             )
@@ -757,7 +889,7 @@ mod tests {
         rba_fx_rate::db_import_rate(&pool, "USD", "2026-05", "0.40".parse().unwrap())
             .await
             .unwrap();
-        let vr = resolve_valuation_rate(&pool, "USD", date(2026, 6, 15))
+        let vr = resolve_valuation_rate(&pool, &"USD".into(), date(2026, 6, 15))
             .await
             .unwrap();
         assert_eq!(vr.rate, "0.50".parse::<Decimal>().unwrap());
@@ -766,7 +898,7 @@ mod tests {
         let rates = loaded_rates(&pool).await;
         assert_eq!(
             rates
-                .resolve_valuation_rate("USD", date(2026, 6, 15))
+                .resolve_valuation_rate(&"USD".into(), date(2026, 6, 15))
                 .unwrap(),
             vr
         );
@@ -780,13 +912,13 @@ mod tests {
         rba_fx_rate::db_import_rate(&pool, "USD", "2026-04", "0.40".parse().unwrap())
             .await
             .unwrap();
-        let vr = resolve_valuation_rate(&pool, "USD", date(2026, 6, 15))
+        let vr = resolve_valuation_rate(&pool, &"USD".into(), date(2026, 6, 15))
             .await
             .unwrap();
         assert_eq!(vr.rate, "0.40".parse::<Decimal>().unwrap());
         assert!(vr.provisional, "a fallback-month rate must be flagged");
 
-        let err = resolve_valuation_rate(&pool, "USD", date(2026, 7, 1))
+        let err = resolve_valuation_rate(&pool, &"USD".into(), date(2026, 7, 1))
             .await
             .unwrap_err();
         match err {
@@ -800,12 +932,12 @@ mod tests {
         let rates = loaded_rates(&pool).await;
         assert_eq!(
             rates
-                .resolve_valuation_rate("USD", date(2026, 6, 15))
+                .resolve_valuation_rate(&"USD".into(), date(2026, 6, 15))
                 .unwrap(),
             vr
         );
         assert!(matches!(
-            rates.resolve_valuation_rate("USD", date(2026, 7, 1)),
+            rates.resolve_valuation_rate(&"USD".into(), date(2026, 7, 1)),
             Err(FxError::MissingRate { .. })
         ));
     }
@@ -823,10 +955,10 @@ mod tests {
             .unwrap();
         let rates = loaded_rates(&pool).await;
         let fallback = rates
-            .resolve_valuation_rate("USD", date(2026, 6, 15))
+            .resolve_valuation_rate(&"USD".into(), date(2026, 6, 15))
             .unwrap();
         let real = rates
-            .resolve_valuation_rate("USD", date(2026, 5, 15))
+            .resolve_valuation_rate(&"USD".into(), date(2026, 5, 15))
             .unwrap();
         let amount = Decimal::from(100);
 
@@ -864,7 +996,7 @@ mod tests {
         rba_fx_rate::db_import_rate(&pool, "USD", "2025-12", "0.40".parse().unwrap())
             .await
             .unwrap();
-        let vr = resolve_valuation_rate(&pool, "USD", date(2026, 1, 10))
+        let vr = resolve_valuation_rate(&pool, &"USD".into(), date(2026, 1, 10))
             .await
             .unwrap();
         assert_eq!(vr.rate, "0.40".parse::<Decimal>().unwrap());
@@ -874,7 +1006,7 @@ mod tests {
     #[tokio::test]
     async fn valuation_rate_aud_is_always_final() {
         let pool = test_pool().await;
-        let vr = resolve_valuation_rate(&pool, "AUD", date(2026, 6, 15))
+        let vr = resolve_valuation_rate(&pool, &"AUD".into(), date(2026, 6, 15))
             .await
             .unwrap();
         assert_eq!(vr.rate, Decimal::ONE);

@@ -157,9 +157,17 @@ the suite is least likely to cover (a foreign-currency parcel; a split between p
   the `/`-at-the-root URL, which replaced the four hand-written `if empty { "/" }` copies
   (`home_path`, `cookie_path`, the OpenAPI server URL, the route index). Pinned by
   `a_base_path_answers_its_prefix_and_its_home_url` and the existing normalisation tests
-- [ ] **Currency and month as strings.** `cost_base::Parcel::currency` is `&str` and the `infra::fx`
+- [x] **Currency and month as strings.** `cost_base::Parcel::currency` is `&str` and the `infra::fx`
   lookups take `currency: &str` / `month: &str` (`'YYYY-MM'`) though CLAUDE.md types every currency
   as `CurrencyCode`. Take `&CurrencyCode` and a small `RateMonth` type
+  — Done 2026-10-11: every `infra::fx` lookup (`resolve_rate`, `resolve_valuation_rate`, `to_aud`,
+  `rate_for`, `has_rate`), `Parcel::currency`, `CostBase::into_aud_with`, the tax-summary
+  `aud_field*` helpers and `validate_spot_fx_rate` take `&CurrencyCode`, and the nine report reads
+  that pulled `currency` into a `String` now read a `CurrencyCode`. `fx::RateMonth` (made by
+  `RateMonth::of(date)`, stepped by `previous`, with an sqlx TEXT codec that refuses a key that is
+  not `YYYY-MM`) keys `FxRates` and is what `FxError::MissingRate` and the six entity
+  `MissingFxRate` errors carry. The free `currency::is_aud(&str)` is gone — no bare code reaches
+  the question. Pinned by `a_rate_month_is_a_months_key_and_refuses_anything_else`
 - [ ] **`FilterClauses::over` precondition.** "The statement must already be open for `AND …`" —
   have `over` push its own `WHERE 1=1` (or take the statement before `WHERE`) so the rule cannot be
   broken

@@ -6,13 +6,13 @@
 //! correctness") — and the question that gates that conversion used to be a
 //! `String` compared against `"AUD"` at each call site, some exactly and some
 //! case-insensitively. A `CurrencyCode` deliberately has no `PartialEq<&str>`,
-//! so `currency == "AUD"` does not compile; [`CurrencyCode::is_aud`] (over the
-//! one rule, [`is_aud`]) is the only spelling.
+//! so `currency == "AUD"` does not compile; [`CurrencyCode::is_aud`] is the
+//! only spelling. The FX lookups (`infra::fx`) take a `&CurrencyCode` too, so
+//! no bare string reaches the question at all.
 //!
 //! It is a code, not a validated ISO 4217 value: what a code may be is the
 //! `currencies` reference table's business, enforced by every `currency`
-//! column's foreign key. It derefs to `&str` so the FX lookups, keyed by code,
-//! take it unchanged.
+//! column's foreign key. It derefs to `&str` for display and SQL binds.
 
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -39,14 +39,6 @@ use std::ops::Deref;
 #[sqlx(transparent)]
 pub struct CurrencyCode(String);
 
-/// The one rule behind [`CurrencyCode::is_aud`], for the FX lookups that are
-/// handed a bare code. Case-insensitive: the stored codes are upper case
-/// (the foreign key sees to that), but a code arriving from a feed or a test
-/// need not be.
-pub fn is_aud(code: &str) -> bool {
-    code.eq_ignore_ascii_case("AUD")
-}
-
 impl CurrencyCode {
     /// Australian dollars — the reporting currency, the one no `fx_rate`
     /// converts.
@@ -54,9 +46,11 @@ impl CurrencyCode {
         Self("AUD".to_string())
     }
 
-    /// Is an amount in this currency already in AUD?
+    /// Is an amount in this currency already in AUD? Case-insensitive: the
+    /// stored codes are upper case (the foreign key sees to that), but a code
+    /// arriving from a feed or a test need not be.
     pub fn is_aud(&self) -> bool {
-        is_aud(&self.0)
+        self.0.eq_ignore_ascii_case("AUD")
     }
 
     pub fn as_str(&self) -> &str {

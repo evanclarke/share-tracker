@@ -240,7 +240,10 @@ pub enum SellRightsError {
     /// parity via `FxOverride::Fallback(1)` — the path the ESS vest refuses
     /// (`ess_vest::VestError::MissingFxRate`). Mapped to 422.
     #[error("no ATO FX rate for {currency} in {month} and the request states none")]
-    MissingFxRate { currency: String, month: String },
+    MissingFxRate {
+        currency: crate::infra::currency::CurrencyCode,
+        month: crate::infra::fx::RateMonth,
+    },
 }
 
 impl From<SellRightsError> for ApiError {
@@ -527,7 +530,7 @@ async fn check_parcel_anchoring(
 async fn resolve_fx_rate(
     conn: &mut sqlx::SqliteConnection,
     stated: Option<Decimal>,
-    currency: &str,
+    currency: &crate::infra::currency::CurrencyCode,
     date: NaiveDate,
     converts_nothing: bool,
 ) -> Result<Decimal, SellRightsError> {
@@ -539,8 +542,8 @@ async fn resolve_fx_rate(
         Ok(rate) => Ok(rate),
         Err(_) if converts_nothing => Ok(Decimal::ONE),
         Err(_) => Err(SellRightsError::MissingFxRate {
-            currency: currency.to_string(),
-            month: date.format("%Y-%m").to_string(),
+            currency: currency.clone(),
+            month: crate::infra::fx::RateMonth::of(date),
         }),
     }
 }

@@ -634,7 +634,7 @@ struct DisposalInputs {
     /// row's manual fallback rate, which is what `realised_gains` converted
     /// its proceeds at. A rights sale is not a trade, so it is not in
     /// `trades`, and the printed sell-side rate has to come from here.
-    rights_sales: HashMap<RightsSaleId, (String, Decimal)>,
+    rights_sales: HashMap<RightsSaleId, (CurrencyCode, Decimal)>,
     amit_events: HashMap<TradeId, Vec<cost_base::AmitReductionEvent>>,
     roc_events: HashMap<ListingId, Vec<RocEvent>>,
     split_events: HashMap<ListingId, Vec<SplitEvent>>,
@@ -703,7 +703,7 @@ async fn load_disposal_inputs(
 
     // The issue's currency and each sale's own fallback rate, the pair
     // `realised_gains` converts a rights sale's proceeds with.
-    let rights_sales: Vec<(RightsSaleId, String, String)> = sqlx::query_as(
+    let rights_sales: Vec<(RightsSaleId, CurrencyCode, String)> = sqlx::query_as(
         "SELECT rs.id, ca.currency, rs.fx_rate \
          FROM rights_sales rs JOIN corporate_actions ca ON ca.id = rs.rights_action_id",
     )
@@ -1675,7 +1675,7 @@ fn amma_statement_row(
     listing_id: ListingId,
     d: NaiveDate,
 ) -> Result<AmmaStatementRow, sqlx::Error> {
-    let currency: String = row.try_get("currency")?;
+    let currency: CurrencyCode = row.try_get("currency")?;
     let fx = &ctx.fx;
     let aud = |column: &str| tax_summary::aud_field(fx, row, column, &currency, d);
     Ok(AmmaStatementRow {
@@ -1720,7 +1720,7 @@ async fn push_interest_rows(
         if tax_year_for(date_paid) != tax_year {
             continue;
         }
-        let currency: String = row.try_get("currency")?;
+        let currency: CurrencyCode = row.try_get("currency")?;
         let foreign_source: bool = row.try_get("foreign_source")?;
         let amount = tax_summary::aud_field(fx, row, "amount", &currency, date_paid)?;
         let foreign_tax =
@@ -1776,7 +1776,7 @@ async fn push_ess_rows(
         if tax_year_for(taxing_point) != tax_year {
             continue;
         }
-        let currency: String = row.try_get("currency")?;
+        let currency: CurrencyCode = row.try_get("currency")?;
         let listing_id: ListingId = row.try_get("listing_id")?;
         // The discount components carry their own stored AUD figures (the
         // `aud_*` columns), so they convert through `aud_label` — and through
@@ -1841,7 +1841,7 @@ async fn push_deduction_rows(
         if tax_year_for(date_incurred) != tax_year {
             continue;
         }
-        let currency: String = row.try_get("currency")?;
+        let currency: CurrencyCode = row.try_get("currency")?;
         let listing_id: Option<ListingId> = row.try_get("listing_id")?;
         let expense_type: ExpenseType = row.try_get("expense_type")?;
         let destination =

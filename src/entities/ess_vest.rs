@@ -115,7 +115,10 @@ pub enum VestError {
     /// rate to convert at, and binding a placeholder 1 would silently cost it
     /// at parity. Mapped to 422.
     #[error("no ATO FX rate for {currency} in {month} and the ESS statement states none")]
-    MissingFxRate { currency: String, month: String },
+    MissingFxRate {
+        currency: crate::infra::currency::CurrencyCode,
+        month: crate::infra::fx::RateMonth,
+    },
     /// The vest Buy is dated (the taxing point) on or before an executed
     /// whole-holding operation of its listing — a scrip-for-scrip exchange, a
     /// demerger, or a worthless-shares recognise. Each consumed every parcel
@@ -184,7 +187,7 @@ async fn execute(
         "market_value_per_share",
         row.try_get("market_value_per_share")?,
     )?;
-    let currency: String = row.try_get("currency")?;
+    let currency: crate::infra::currency::CurrencyCode = row.try_get("currency")?;
     let stated_fx_rate = crate::infra::decimal::row_opt_dec(&row, "fx_rate")?;
 
     if quantity <= Decimal::ZERO || price <= Decimal::ZERO {
@@ -226,7 +229,7 @@ async fn execute(
             )
             .map_err(|_| VestError::MissingFxRate {
                 currency: currency.clone(),
-                month: taxing_point_date.format("%Y-%m").to_string(),
+                month: crate::infra::fx::RateMonth::of(taxing_point_date),
             })?,
     };
 

@@ -3,6 +3,7 @@ use crate::domain::tax_year::tax_year_for;
 use crate::entities::income::{Income, IncomeType};
 use crate::entities::investment_expense::ExpenseType;
 use crate::entities::tax_year_settings;
+use crate::infra::currency::CurrencyCode;
 use crate::infra::decimal::{mul_div, parse_dec, row_opt_dec, to_cents};
 use crate::infra::extract::Json;
 use crate::infra::fx::{FxOverride, FxRates};
@@ -539,7 +540,7 @@ pub(crate) fn aud_field(
     fx: &FxRates,
     row: &sqlx::sqlite::SqliteRow,
     field: &str,
-    currency: &str,
+    currency: &CurrencyCode,
     date: NaiveDate,
 ) -> Result<Decimal, sqlx::Error> {
     aud_field_with(fx, row, field, currency, date, FxOverride::None)
@@ -555,7 +556,7 @@ pub(crate) fn aud_field_with(
     fx: &FxRates,
     row: &sqlx::sqlite::SqliteRow,
     field: &str,
-    currency: &str,
+    currency: &CurrencyCode,
     date: NaiveDate,
     manual: FxOverride,
 ) -> Result<Decimal, sqlx::Error> {
@@ -580,7 +581,7 @@ pub(crate) fn ess_fx_override(row: &sqlx::sqlite::SqliteRow) -> Result<FxOverrid
 pub(crate) fn aud_value(
     fx: &FxRates,
     value: Decimal,
-    currency: &str,
+    currency: &CurrencyCode,
     date: NaiveDate,
 ) -> Result<Decimal, sqlx::Error> {
     Ok(fx.to_aud(value, currency, date, FxOverride::None)?)
@@ -593,7 +594,7 @@ pub(crate) fn aud_label(
     fx: &FxRates,
     row: &sqlx::sqlite::SqliteRow,
     field: &str,
-    currency: &str,
+    currency: &CurrencyCode,
     date: NaiveDate,
     manual: FxOverride,
 ) -> Result<Decimal, sqlx::Error> {
@@ -837,7 +838,7 @@ fn accumulate_interest(
     for row in interest_rows {
         let date_paid: NaiveDate = row.try_get("date_paid")?;
         let tax_year = tax_year_for(date_paid);
-        let currency: String = row.try_get("currency")?;
+        let currency: CurrencyCode = row.try_get("currency")?;
         let foreign_source: bool = row.try_get("foreign_source")?;
         let amount = aud_field(fx, row, "amount", &currency, date_paid)?;
         let tfn_wht = aud_field(fx, row, "tfn_withholding_tax", &currency, date_paid)?;
@@ -871,7 +872,7 @@ fn accumulate_amma(
 
         // Convert to AUD via the ATO rate for the month of tax_year_end_date (the
         // statement's only period anchor) before aggregating.
-        let currency: String = row.try_get("currency")?;
+        let currency: CurrencyCode = row.try_get("currency")?;
         let d = tax_year_end_date;
         let interest = aud_field(fx, row, "australian_interest", &currency, d)?;
         let div_unfranked = aud_field(fx, row, "australian_dividends_unfranked", &currency, d)?;
@@ -944,7 +945,7 @@ fn accumulate_ess(
         let taxing_point: NaiveDate = row.try_get("taxing_point_date")?;
         let tax_year = tax_year_for(taxing_point);
 
-        let currency: String = row.try_get("currency")?;
+        let currency: CurrencyCode = row.try_get("currency")?;
         let d = taxing_point;
         // Each discount label prefers the statement-AUD override (the
         // employer's stated AUD figure, converted at the release-date spot
@@ -1005,7 +1006,7 @@ fn accumulate_expenses(
     for row in expense_rows {
         let date_incurred: NaiveDate = row.try_get("date_incurred")?;
         let tax_year = tax_year_for(date_incurred);
-        let currency: String = row.try_get("currency")?;
+        let currency: CurrencyCode = row.try_get("currency")?;
         // At the cent, at the row (SCENARIOS W-f). Each amount lands on one
         // line of *each* of two cuts (by kind and by destination question),
         // and both cuts are printed beside the one `deductions_total`: cent-
