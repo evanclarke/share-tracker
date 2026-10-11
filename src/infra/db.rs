@@ -679,10 +679,12 @@ async fn run_backup_command_within(
 /// `SIGKILL` every process in the group a timed-out post-backup command was
 /// started in. Through the `kill` utility rather than a signal call, which
 /// would be the crate's only `unsafe`. Best effort: a failure is logged, and
-/// the run is failed for its timeout either way.
+/// the run is failed for its timeout either way. The `--` ends the options, so
+/// the negative pid naming the group is never read as one — POSIX leaves that
+/// parse to the implementation, and without it the group can survive silently.
 async fn kill_process_group(group: u32) {
     let killed = tokio::process::Command::new("kill")
-        .args(["-s", "KILL", &format!("-{group}")])
+        .args(["-s", "KILL", "--", &format!("-{group}")])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
