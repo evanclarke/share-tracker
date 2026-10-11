@@ -126,10 +126,16 @@ pub fn api_routes(base_path: &str, auth: bool) -> OpenApiRouter<SqlitePool> {
 /// served surface: outside `require_auth` and the base-path redirect, so a
 /// cross-site write or an unlisted `Host` is refused before anything else
 /// runs, and inside only the panic net.
+///
+/// Outside the guard in turn sit the browser-hardening response headers
+/// ([`crate::infra::security_headers`]), so a refusal carries them too.
 fn guarded(app: Router, guard: crate::infra::request_guard::RequestGuard) -> Router {
     app.layer(axum::middleware::from_fn_with_state(
         guard,
         crate::infra::request_guard::guard,
+    ))
+    .layer(axum::middleware::map_response(
+        crate::infra::security_headers::apply,
     ))
 }
 
@@ -312,6 +318,112 @@ mod tests {
         let pool = test_pool().await;
         let client = ApiClient::full(&pool);
         assert_eq!(client.get("/login").await.status, StatusCode::NOT_FOUND);
+    }
+
+    /// The anti-framing headers (`infra::security_headers`) on the three
+    /// kinds of response a framing page could aim at: the app shell, a JSON
+    /// route, and — with `[auth]` on, under a base path — the login page and
+    /// the unauthenticated refusal in front of everything else.
+    #[tokio::test]
+    async fn every_response_refuses_to_be_framed() {
+        fn assert_hardened(resp: &crate::test_support::ApiResponse, what: &str) {
+            let header = |name| {
+                resp.headers
+                    .get(name)
+                    .unwrap_or_else(|| panic!("{what}: no {name}"))
+                    .to_str()
+                    .unwrap()
+                    .to_string()
+            };
+            assert_eq!(header("x-frame-options"), "DENY", "{what}");
+            assert_eq!(header("x-content-type-options"), "nosniff", "{what}");
+            let csp = header("content-security-policy");
+            for directive in [
+                "default-src 'self'",
+                "frame-ancestors 'none'",
+                "object-src 'none'",
+            ] {
+                assert!(csp.contains(directive), "{what}: {csp}");
+            }
+        }
+        let pool = test_pool().await;
+        let open = ApiClient::full(&pool);
+        let shell = open.get("/").await;
+        assert_eq!(shell.status, StatusCode::OK);
+        assert_hardened(&shell, "the app shell");
+        let json = open.get("/listings").await;
+        assert_eq!(json.status, StatusCode::OK);
+        assert_hardened(&json, "a JSON route");
+        // A request the guard refuses never reaches a handler, and is still
+        // covered: the layer sits outside the guard.
+        let refused = ApiClient::full(&pool)
+            .with_header("Host", "evil.example")
+            .get("/listings")
+            .await;
+        assert_eq!(refused.status, StatusCode::FORBIDDEN);
+        assert_hardened(&refused, "a guard refusal");
+
+        let gated = prefixed(&pool, Some(test_auth()));
+        let login = gated.get("/share_tracker/login").await;
+        assert_eq!(login.status, StatusCode::OK);
+        assert_hardened(&login, "the login page");
+        let unauthenticated = gated.get("/share_tracker/listings").await;
+        assert_eq!(unauthenticated.status, StatusCode::UNAUTHORIZED);
+        assert_hardened(&unauthenticated, "an unauthenticated refusal");
+    }
+
+    /// The inline theme bootstrap both pages carry is the one inline script
+    /// the policy allows, by hash — the shell and the login page each embed
+    /// the exact text the policy's hash was computed over.
+    #[tokio::test]
+    async fn the_policy_allows_the_inline_theme_script_both_pages_embed() {
+        let pool = test_pool().await;
+        let gated = prefixed(&pool, Some(test_auth()));
+        let login = gated.get("/share_tracker/login").await;
+        let shell = ApiClient::full(&pool).get("/").await;
+        for resp in [&login, &shell] {
+            assert!(resp.text().contains(crate::web::THEME_BOOT_SCRIPT));
+            let csp = resp.headers["content-security-policy"].to_str().unwrap();
+            assert!(csp.contains("script-src 'self' 'sha256-"), "{csp}");
+        }
+    }
+
+    /// The one response the app frames itself — an attachment rendered in
+    /// the edit form's document pane — may be framed by this origin, and by
+    /// no other.
+    #[tokio::test]
+    async fn an_attachment_may_be_framed_by_the_app_itself() {
+        let pool = test_pool().await;
+        crate::test_support::listing(1).insert(&pool).await;
+        crate::test_support::buy(1, 1).insert(&pool).await;
+        let boundary = "X-TEST-BOUNDARY";
+        let body = format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"trade_id\"\r\n\r\n1\r\n\
+             --{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"c.pdf\"\r\n\
+             Content-Type: application/pdf\r\n\r\n%PDF-1.4\r\n--{boundary}--\r\n"
+        );
+        let client = ApiClient::full(&pool);
+        let created = client
+            .post_bytes(
+                "/attachments",
+                Some(&format!("multipart/form-data; boundary={boundary}")),
+                body,
+            )
+            .await
+            .expect_status(StatusCode::CREATED)
+            .json::<serde_json::Value>();
+        let resp = client
+            .get(format!(
+                "/attachments/{}/content?disposition=inline",
+                created["id"]
+            ))
+            .await;
+        assert_eq!(resp.status, StatusCode::OK);
+        assert_eq!(resp.headers["x-frame-options"], "SAMEORIGIN");
+        assert_eq!(
+            resp.headers["content-security-policy"],
+            "frame-ancestors 'self'"
+        );
     }
 
     fn test_auth() -> Auth {

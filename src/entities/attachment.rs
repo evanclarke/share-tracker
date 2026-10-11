@@ -514,6 +514,17 @@ async fn download(
             header::HeaderName::from_static("x-content-type-options"),
             "nosniff",
         )
+        // Framed by the app's own document pane, so same-origin framing is
+        // allowed here where every other response refuses all framing (see
+        // `infra::security_headers`, which leaves these two alone).
+        .header(
+            header::X_FRAME_OPTIONS,
+            crate::infra::security_headers::FRAME_SAME_ORIGIN,
+        )
+        .header(
+            header::CONTENT_SECURITY_POLICY,
+            crate::infra::security_headers::FRAME_ANCESTORS_SELF,
+        )
         .body(Body::from(bytes))
         .map(Payload::from_response)
         .map_err(ApiError::internal)

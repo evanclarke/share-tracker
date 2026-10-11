@@ -7449,3 +7449,22 @@ violation to a `422` worded as a bad request — including one raised by a serve
   needed nothing — its write failures are logged in `run_job` and never become an `ApiError`.
   Tests: `infra::http`'s `constraint_violations_from_a_server_write_classify_as_internal`,
   `reports::snapshot`'s `api_a_constraint_failure_in_the_snapshot_write_is_a_logged_500`
+
+## No anti-framing header (2026-10-10 review, security — low-medium)
+Nothing sets `X-Frame-Options` or a CSP. With `[auth]` off (the default) a hostile page can frame the
+app and trick a click on a delete or job button; the clicks are same-origin inside the frame, so
+`request_guard`'s `Sec-Fetch-Site` check passes them.
+- [x] Add a response-header layer in `app::router`: `X-Frame-Options: DENY` and
+  `Content-Security-Policy: frame-ancestors 'none'` (consider a full `default-src 'self'` CSP — the
+  frontend loads nothing third-party; check the inline-SVG chart and theme script still work under
+  it via `scripts/ui-smoke.sh`); test the headers on `/`, a JSON route and the login page
+  — done 2026-10-11 (`infra::security_headers`): the full `default-src 'self'` CSP was adopted, its
+  `script-src` allowing the inline theme bootstrap by a SHA-256 hash computed from
+  `web::THEME_BOOT_SCRIPT` at startup, plus `X-Content-Type-Options: nosniff`; the layer sits outside
+  the request guard so refusals carry the headers too. One exception the review missed: the edit
+  form's document pane frames `GET /attachments/:id/content`, so that route answers `SAMEORIGIN` /
+  `frame-ancestors 'self'` instead of `DENY` (a blanket `DENY` would have broken the pane). Tested on
+  `/`, `/listings`, a guard `403`, the login page and its `401`, and the attachment route
+  (`app::tests`); `scripts/ui-smoke.sh` passes, and a `ui-drive` pass over the main views and the
+  framed PDF reported no CSP violations
+

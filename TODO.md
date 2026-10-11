@@ -56,15 +56,6 @@ falls under the existing rules.
   trading day before 1 July 2027 (the scheduled price import plus `closing_price`'s held-days
   backfill), since a missing one cannot be fetched reliably years later
 
-## No anti-framing header (2026-10-10 review, security — low-medium)
-Nothing sets `X-Frame-Options` or a CSP. With `[auth]` off (the default) a hostile page can frame the
-app and trick a click on a delete or job button; the clicks are same-origin inside the frame, so
-`request_guard`'s `Sec-Fetch-Site` check passes them.
-- [ ] Add a response-header layer in `app::router`: `X-Frame-Options: DENY` and
-  `Content-Security-Policy: frame-ancestors 'none'` (consider a full `default-src 'self'` CSP — the
-  frontend loads nothing third-party; check the inline-SVG chart and theme script still work under
-  it via `scripts/ui-smoke.sh`); test the headers on `/`, a JSON route and the login page
-
 ## Login lockout: proxied source read from the first `X-Forwarded-For` line, and no global ceiling (2026-10-10 review, security — low)
 - [ ] `auth.rs` (~659) reads `headers.get("x-forwarded-for")`, the **first** header line, then its
   rightmost entry. A proxy that appends a separate XFF line leaves the client's forged line first,

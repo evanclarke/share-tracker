@@ -119,6 +119,16 @@ Every request passes two checks on where it came from before any route runs, `[a
 
 Behind a reverse proxy, a modern browser's `Sec-Fetch-Site` decides the cross-site check, so it holds whatever `Host` the proxy forwards; the `Origin` fallback compares against the forwarded `Host`, so a proxy that rewrites `Host` (nginx's default `proxy_set_header Host $proxy_host`) would refuse writes from a browser old enough to lack `Sec-Fetch-Site` — forward the original (`proxy_set_header Host $host`) if that matters.
 
+### Response headers
+
+Every response — the web UI, the JSON API, the sign-in page, and every refusal (`src/infra/security_headers.rs`) — carries:
+
+- `X-Frame-Options: DENY` and a `Content-Security-Policy` ending `frame-ancestors 'none'`: no other page may frame the app. Without `[auth]` a hostile page could otherwise frame it and trick a click on a delete or job button — clicks inside a frame are same-origin, so the cross-site check above passes them.
+- The rest of that policy: `default-src 'self'` (the frontend loads nothing third-party), `script-src 'self'` plus the SHA-256 hash of the one inline script — the theme bootstrap both pages run before first paint, hashed from the same text the pages embed — and `object-src 'none'`, `base-uri 'none'`, `form-action 'self'`.
+- `X-Content-Type-Options: nosniff`.
+
+The one exception is `GET /attachments/:id/content`, which the edit form's document pane frames: it answers `X-Frame-Options: SAMEORIGIN` and `Content-Security-Policy: frame-ancestors 'self'` (framable by the app itself, by nothing else), with no `default-src`, which can stop Chrome's PDF viewer.
+
 ## Creating a record
 
 Every entity whose key is an **allocated** `id` — one the server hands out, rather than a natural or stated key the client supplies — accepts **two** write entry points, and they differ in exactly one thing: who chooses the id:
