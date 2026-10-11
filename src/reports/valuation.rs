@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
 use crate::entities::closing_price::{self, Market, PriceStatus};
-use crate::infra::fx::FxRates;
+use crate::infra::fx::{FxRates, ValuationRate};
 
 /// Why valuation could not proceed for one or more held listings.
 /// `Unprocessable` carries the joined per-listing blockers (missing/errored
@@ -67,20 +67,27 @@ pub struct ListingValuation {
     pub currency: CurrencyCode,
     /// The stored closing price, in the listing's quote currency (not AUD).
     pub native_price: Decimal,
-    /// Foreign currency units per 1 AUD, at the valuation FX rate.
-    pub rate: Decimal,
-    /// The valuation month's ATO rate wasn't imported yet — a fallback
-    /// earlier month's rate was substituted
-    /// (`infra::fx::resolve_valuation_rate`).
-    pub provisional: bool,
+    /// The valuation FX rate (foreign currency units per 1 AUD), carrying
+    /// whether the valuation month's ATO rate wasn't imported yet and a
+    /// fallback earlier month's was substituted
+    /// (`infra::fx::resolve_valuation_rate`) — read through
+    /// [`provisional`](Self::provisional).
+    pub rate: ValuationRate,
     /// `native_price` is not this valuation day's own close: the provider
     /// stopped quoting the security (`listings.unpriced_from`), so the last
     /// stored ok close was carried forward (SCENARIOS Q-02). Deliberately
-    /// **not** folded into `provisional` — that flag means an interim FX rate
+    /// **not** folded into [`provisional`](Self::provisional) — that flag means an interim FX rate
     /// a later import trues up, and this one never clears.
     pub price_carried_forward: bool,
     /// `native_price` converted to AUD via `rate`.
     pub aud_price: Aud,
+}
+
+impl ListingValuation {
+    /// The valuation rests on a fallback month's FX rate (see `rate`).
+    pub fn provisional(&self) -> bool {
+        self.rate.is_provisional()
+    }
 }
 
 /// A holding left out of a date's valuation because no price is obtainable
@@ -350,15 +357,19 @@ pub(crate) async fn valuations_of_markets(
         // not: the AUD value of the holding at `date` converts at `date`'s
         // rate — only the native-currency figure is stale.
         match fx.resolve_valuation_rate(&market.listing.currency, valuation_day) {
-            Ok(vr) => valuations.push(ListingValuation {
-                listing_id: market.listing.id,
-                currency: market.listing.currency.clone(),
-                native_price,
-                rate: vr.rate,
-                provisional: vr.provisional,
-                price_carried_forward,
-                aud_price: crate::infra::fx::apply_rate_to_aud(native_price, vr.rate),
-            }),
+            Ok(rate) => {
+                // The flag stays on the row with `rate`; `provisional()`
+                // reads it from there.
+                let (aud_price, _provisional) = rate.apply(native_price).into_parts();
+                valuations.push(ListingValuation {
+                    listing_id: market.listing.id,
+                    currency: market.listing.currency.clone(),
+                    native_price,
+                    rate,
+                    price_carried_forward,
+                    aud_price,
+                })
+            }
             Err(e) => blockers.push(format!("{ticker}: {e}")),
         }
     }

@@ -22,7 +22,7 @@
 //! live quote) would otherwise be blocked all month. [`resolve_valuation_rate`]
 //! / [`FxRates::resolve_valuation_rate`] substitute the most recent earlier
 //! month's rate — bounded by [`VALUATION_FALLBACK_MONTHS`] — and say so in the
-//! result ([`ValuationRate::provisional`]) so the caller flags the output as
+//! result ([`ValuationRate::is_provisional`]) so the caller flags the output as
 //! provisional, never silently. Only valuation paths (snapshot generation in
 //! `reports::snapshot`, live-quote conversion in `entities::closing_price`,
 //! and the period-performance report's FX attribution in
@@ -192,16 +192,66 @@ pub fn apply_rate_to_aud(amount: Decimal, rate: Decimal) -> Aud {
 /// meaningless.
 pub const VALUATION_FALLBACK_MONTHS: u32 = 2;
 
-/// A foreign-per-AUD rate resolved for *valuation* (never tax): the rate to
-/// apply via [`apply_rate`], plus whether it is an earlier month's substitute.
+/// A foreign-per-AUD rate resolved for *valuation* (never tax), with whether
+/// it is an earlier month's substitute.
+///
+/// Both fields are private: nothing reads the rate without its flag. A value
+/// derived from it comes back as a [`Provisional`] — [`ValuationRate::apply`]
+/// for a converted amount, [`ValuationRate::quoted`] for the rate itself —
+/// whose only way out is [`Provisional::into_parts`], so a caller dropping
+/// the flag has to name it to do so.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ValuationRate {
-    pub rate: Decimal,
+    rate: Decimal,
     /// The valuation month has no imported rate yet and an earlier month's
     /// (at most [`VALUATION_FALLBACK_MONTHS`] back) was substituted. The
     /// caller must surface this — the snapshot `provisional` flag, the live
     /// row's provisional annotation — never treat the value as final.
-    pub provisional: bool,
+    provisional: bool,
+}
+
+impl ValuationRate {
+    /// `amount` (in the rate's currency) converted to AUD, carrying the
+    /// rate's provisional flag.
+    pub fn apply(&self, amount: Decimal) -> Provisional<Aud> {
+        Provisional {
+            value: apply_rate_to_aud(amount, self.rate),
+            provisional: self.provisional,
+        }
+    }
+
+    /// The rate itself (foreign currency units per 1 AUD), for a report that
+    /// shows the rate it used — carrying its provisional flag like any other
+    /// value derived from it.
+    pub fn quoted(&self) -> Provisional<Decimal> {
+        Provisional {
+            value: self.rate,
+            provisional: self.provisional,
+        }
+    }
+
+    /// Whether this is a fallback month's rate (see the field).
+    pub fn is_provisional(&self) -> bool {
+        self.provisional
+    }
+}
+
+/// A value computed from a [`ValuationRate`], with the rate's provisional
+/// flag attached. The fields are private and [`into_parts`](Self::into_parts)
+/// is the only way to the value, so it cannot be read without its flag
+/// being in hand.
+#[must_use = "a valuation's provisional flag must be surfaced (CLAUDE.md)"]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Provisional<T> {
+    value: T,
+    provisional: bool,
+}
+
+impl<T> Provisional<T> {
+    /// The value and whether it rests on a fallback-month rate.
+    pub fn into_parts(self) -> (T, bool) {
+        (self.value, self.provisional)
+    }
 }
 
 /// The valuation month of `date` and its fallback predecessors, newest first:
@@ -758,6 +808,54 @@ mod tests {
             rates.resolve_valuation_rate("USD", date(2026, 7, 1)),
             Err(FxError::MissingRate { .. })
         ));
+    }
+
+    // The flag cannot be left behind: every value derived from a valuation
+    // rate — the converted amount, the rate shown — comes back with it.
+    #[tokio::test]
+    async fn a_valuation_rate_hands_its_flag_to_everything_derived_from_it() {
+        let pool = test_pool().await;
+        rba_fx_rate::db_import_rate(&pool, "USD", "2026-05", "0.50".parse().unwrap())
+            .await
+            .unwrap();
+        rba_fx_rate::db_import_rate(&pool, "USD", "2026-04", "0.40".parse().unwrap())
+            .await
+            .unwrap();
+        let rates = loaded_rates(&pool).await;
+        let fallback = rates
+            .resolve_valuation_rate("USD", date(2026, 6, 15))
+            .unwrap();
+        let real = rates
+            .resolve_valuation_rate("USD", date(2026, 5, 15))
+            .unwrap();
+        let amount = Decimal::from(100);
+
+        let (aud, provisional) = fallback.apply(amount).into_parts();
+        assert_eq!(
+            aud.amount(),
+            Decimal::from(200),
+            "June falls back to May's 0.50"
+        );
+        assert!(
+            provisional,
+            "the converted amount carries the fallback flag"
+        );
+        assert_eq!(
+            fallback.quoted().into_parts(),
+            ("0.50".parse::<Decimal>().unwrap(), true),
+            "so does the rate itself"
+        );
+        assert!(fallback.is_provisional());
+
+        let (aud, provisional) = real.apply(amount).into_parts();
+        assert_eq!(aud.amount(), Decimal::from(200));
+        assert!(!provisional, "May's own rate is final");
+        assert!(!real.quoted().into_parts().1);
+        assert_eq!(
+            real.apply(amount).into_parts().0,
+            apply_rate_to_aud(amount, "0.50".parse().unwrap()),
+            "`apply` is the plain conversion, flag aside"
+        );
     }
 
     #[tokio::test]

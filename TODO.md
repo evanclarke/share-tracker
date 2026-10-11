@@ -94,11 +94,20 @@ the suite is least likely to cover (a foreign-currency parcel; a split between p
   `a_quantity_re_bases_backward_to_an_earlier_date` and the split round-trip properties). Typing it
   exposed two sums over parcels of *different* as-acquired bases in `closing_price::held` (harmless
   non-zero tests, now `any`)
-- [ ] **Valuation-only FX fallback.** `fx::ValuationRate` exposes `pub rate`, so a caller can drop
+- [x] **Valuation-only FX fallback.** `fx::ValuationRate` exposes `pub rate`, so a caller can drop
   `provisional` ("the caller must surface this"), and valuation-only use is held by the
   `VALUATION_RATE_CALLERS_ALLOWED` file-name scan. Make the rate private and offer only an `apply`
   returning the value with its provisional flag attached; once tax paths accept only plain/`Aud`
   amounts, retire the allowlist scan
+  — Done 2026-10-11: `ValuationRate`'s fields are private; `apply(amount)` and `quoted()` (the rate
+  itself, which the period-performance report shows) return an `fx::Provisional<T>` whose only exit
+  is `into_parts() -> (T, bool)`, so dropping the flag means naming it. `reports::valuation::
+  ListingValuation` carries the `ValuationRate` in place of its separate `rate`/`provisional`
+  fields (`provisional()` reads it), and period-performance's FX attribution is now two `apply`s.
+  Pinned by `a_valuation_rate_hands_its_flag_to_everything_derived_from_it`. The allowlist scan
+  **stays**: its retirement condition does not hold — the strict tax path (`FxRates::to_aud`)
+  still returns a bare `Decimal`, so no type tells a tax figure from a valuation and only the scan
+  keeps a tax report off the fallback
 - [ ] **`sale_trade_id: i64` overloaded.** `realised_gains::RealisedGainLoss::sale_trade_id` (and
   the tax report's `DisposalParcelRow` copy) is a trade id or a `rights_sales` id depending on the
   separate `source` field. Replace the pair with an enum (e.g. `DisposalId { Sell(TradeId),

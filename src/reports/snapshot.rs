@@ -603,7 +603,7 @@ async fn aud_prices_for(
     };
     for v in resolved_valuations.valuations {
         resolved.prices.insert(v.listing_id, v.aud_price);
-        if v.provisional {
+        if v.provisional() {
             resolved.fx_provisional.insert(v.listing_id);
         }
         if v.price_carried_forward {

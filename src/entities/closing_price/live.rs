@@ -87,11 +87,14 @@ pub async fn fetch_live_aud_prices(
                 )
                 .await
                 {
-                    Ok(vr) => Ok(LiveValuation {
-                        aud_price: crate::infra::fx::apply_rate_to_aud(quote.price, vr.rate),
-                        as_of: quote.as_of.to_rfc3339(),
-                        fx_provisional: vr.provisional,
-                    }),
+                    Ok(vr) => {
+                        let (aud_price, fx_provisional) = vr.apply(quote.price).into_parts();
+                        Ok(LiveValuation {
+                            aud_price,
+                            as_of: quote.as_of.to_rfc3339(),
+                            fx_provisional,
+                        })
+                    }
                     Err(e) => Err(e.to_string()),
                 }
             }

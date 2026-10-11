@@ -283,8 +283,8 @@ pub async fn compute(
         .iter()
         .map(|v| (v.listing_id, v.aud_price))
         .collect();
-    let mut provisional = valuations_from.iter().any(|v| v.provisional)
-        || valuations_to.iter().any(|v| v.provisional);
+    let mut provisional = valuations_from.iter().any(|v| v.provisional())
+        || valuations_to.iter().any(|v| v.provisional());
     // Every caller of the valuation fallback must surface its flag
     // (CLAUDE.md): a carried-forward close is as much a caveat on a period
     // return as it is on a snapshot.
@@ -354,27 +354,31 @@ pub async fn compute(
             if val_to.currency.is_aud() {
                 Decimal::ZERO
             } else {
-                let (rate_from, from_provisional) = match val_from_by_listing.get(&listing_id) {
-                    Some(val_from) => (val_from.rate, val_from.provisional),
-                    None => {
-                        let vr = fx.resolve_valuation_rate(&val_to.currency, from)?;
-                        (vr.rate, vr.provisional)
-                    }
+                let rate_from = match val_from_by_listing.get(&listing_id) {
+                    Some(val_from) => val_from.rate,
+                    None => fx.resolve_valuation_rate(&val_to.currency, from)?,
                 };
-                if from_provisional || val_to.provisional {
+                let exposure = qty1 * val_to.native_price;
+                let (at_to, to_provisional) = val_to.rate.apply(exposure).into_parts();
+                let (at_from, from_provisional) = rate_from.apply(exposure).into_parts();
+                let either_provisional = from_provisional || to_provisional;
+                if either_provisional {
                     provisional = true;
                 }
-                let exposure = qty1 * val_to.native_price;
-                let movement = exposure / val_to.rate - exposure / rate_from;
+                let movement = at_to.amount() - at_from.amount();
+                // The rates shown are the ones just applied, so their flags
+                // are the two already folded in above.
+                let (shown_from, _) = rate_from.quoted().into_parts();
+                let (shown_to, _) = val_to.rate.quoted().into_parts();
                 let acc = currency_acc.entry(val_to.currency.clone()).or_default();
                 acc.total += movement;
                 if !acc.rates_set {
-                    acc.rates = Some((rate_from, val_to.rate));
+                    acc.rates = Some((shown_from, shown_to));
                     acc.rates_set = true;
-                } else if acc.rates != Some((rate_from, val_to.rate)) {
+                } else if acc.rates != Some((shown_from, shown_to)) {
                     acc.rates = None;
                 }
-                if from_provisional || val_to.provisional {
+                if either_provisional {
                     acc.provisional = true;
                 }
                 movement
