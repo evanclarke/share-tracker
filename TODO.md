@@ -56,16 +56,6 @@ falls under the existing rules.
   trading day before 1 July 2027 (the scheduled price import plus `closing_price`'s held-days
   backfill), since a missing one cannot be fetched reliably years later
 
-## Login lockout: proxied source read from the first `X-Forwarded-For` line, and no global ceiling (2026-10-10 review, security — low)
-- [ ] `auth.rs` (~659) reads `headers.get("x-forwarded-for")`, the **first** header line, then its
-  rightmost entry. A proxy that appends a separate XFF line leaves the client's forged line first,
-  so a client can rotate its lockout bucket. Read the last line (`get_all(..).iter().last()`); test
-  with two XFF lines from a trusted proxy
-- [ ] The lockout is per IPv4 / IPv6 /64 only; an attacker with an IPv6 /48 has ~65k buckets and is
-  bounded only by Argon2 throughput (~130 guesses/s at 4 concurrent verifies). Add a process-wide
-  failure ceiling (e.g. N failures per hour slows or refuses every login), with a test, and
-  document it beside the per-source lockout
-
 ## Bulk snapshot regeneration and the health banner repeat whole-table reads (2026-10-10 review, performance)
 - [ ] `reports/snapshot.rs` (~953–962) calls `closing_price::db_held_listing_ids(pool, Some(date))`
   once per calendar day, each rebuilding `HeldTimeline` from every trade (~1,800 full reads for five

@@ -7468,3 +7468,26 @@ app and trick a click on a delete or job button; the clicks are same-origin insi
   (`app::tests`); `scripts/ui-smoke.sh` passes, and a `ui-drive` pass over the main views and the
   framed PDF reported no CSP violations
 
+## Login lockout: proxied source read from the first `X-Forwarded-For` line, and no global ceiling (2026-10-10 review, security — low)
+- [x] `auth.rs` (~659) reads `headers.get("x-forwarded-for")`, the **first** header line, then its
+  rightmost entry. A proxy that appends a separate XFF line leaves the client's forged line first,
+  so a client can rotate its lockout bucket. Read the last line (`get_all(..).iter().last()`); test
+  with two XFF lines from a trusted proxy
+  — done 2026-10-11: `Auth::login_source` reads `get_all("x-forwarded-for").iter().next_back()`, the
+  rightmost entry of the last line; `the_last_forwarded_line_is_the_one_trusted` sends a forged first
+  line plus the proxy's own and shows ten rotated forgeries are one source spending one budget
+- [x] The lockout is per IPv4 / IPv6 /64 only; an attacker with an IPv6 /48 has ~65k buckets and is
+  bounded only by Argon2 throughput (~130 guesses/s at 4 concurrent verifies). Add a process-wide
+  failure ceiling (e.g. N failures per hour slows or refuses every login), with a test, and
+  document it beside the per-source lockout
+  — done 2026-10-11: `LOCKOUT_GLOBAL_CEILING` = 100 attempts per sliding `LOCKOUT_GLOBAL_WINDOW` (1 h)
+  across every source, a bounded `VecDeque<Instant>` on the tracker counted at the same gate; it
+  refuses `429` with a `Retry-After` to when the oldest counted attempt leaves the hour, with the
+  same message as the per-source lockout (the `WARN` names which `Bound` refused). Checked after the
+  source's own lockout, so a locked-out source spends none of it, and before the source's count
+  moves, so a ceiling refusal is not held against the source; a success is refunded. Trade stated in
+  the const and the docs: while it is reached the owner's password sign-in is refused too (sessions
+  and the bearer token keep working). Tests: `the_global_ceiling_bounds_attempts_across_every_source`,
+  `a_locked_out_source_does_not_spend_the_global_ceiling`, `a_success_is_refunded_from_the_global_ceiling`,
+  `the_global_ceiling_refuses_a_fresh_source_over_http`; documented in `docs/API.md`'s lockout
+  section, README and `docs/FEATURES.md`, pinned by `doc_checks`

@@ -509,6 +509,7 @@ fn the_trusted_proxies_setting_is_documented() {
         "peer is one of those addresses",
         "nothing trusts `X-Forwarded-For` at all",
         "**rightmost** entry is the one taken",
+        "the rightmost entry of the **last** `X-Forwarded-For` header line",
         "**aborts startup**",
     ] {
         assert!(
@@ -519,7 +520,7 @@ fn the_trusted_proxies_setting_is_documented() {
     for fact in [
         "**`trusted_proxies = [\"127.0.0.1\", \"::1\"]`**",
         "an undeclared client's header is ignored",
-        "**rightmost** entry is read",
+        "**rightmost** entry of the **last** header line is read",
     ] {
         assert!(
             README_MD.contains(fact),
@@ -6282,6 +6283,39 @@ fn the_login_lockout_is_documented_everywhere_it_applies() {
     assert!(
         AUTH_RS.contains("const LOCKOUT_FAILURE_WINDOW: Duration = Duration::from_secs(15 * 60);"),
         "the documented 15-minute window must remain the code's LOCKOUT_FAILURE_WINDOW"
+    );
+
+    // The process-wide ceiling (2026-10-10 review, security): documented beside
+    // the per-source budget in all three places, its owner-locking trade stated,
+    // and its numbers the code's.
+    for fact in [
+        "**A process-wide ceiling.**",
+        "**100 failed attempts per hour across every source together**",
+        "the owner included",
+        "spends none of the ceiling",
+    ] {
+        assert!(
+            API_MD.contains(fact),
+            "docs/API.md's lockout section must state `{fact}` about the global ceiling"
+        );
+    }
+    assert!(
+        README_MD.contains(
+            "**process-wide ceiling of 100 failed attempts per hour across every source**"
+        ),
+        "README must state the global login ceiling"
+    );
+    assert!(
+        FEATURES_MD.contains("a process-wide ceiling of 100 failed attempts an hour"),
+        "docs/FEATURES.md must name the global login ceiling"
+    );
+    assert!(
+        AUTH_RS.contains("const LOCKOUT_GLOBAL_CEILING: usize = 100;"),
+        "the documented ceiling must remain the code's LOCKOUT_GLOBAL_CEILING"
+    );
+    assert!(
+        AUTH_RS.contains("const LOCKOUT_GLOBAL_WINDOW: Duration = Duration::from_secs(60 * 60);"),
+        "the documented hour must remain the code's LOCKOUT_GLOBAL_WINDOW"
     );
     // …and that the item did not grow a config setting. A `lockout` *doc
     // comment* in config.rs is fine; a `lockout`-prefixed field is not, so the

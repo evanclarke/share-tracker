@@ -82,6 +82,11 @@
 //!   example) is still the complementary control, not a substitute for this
 //!   one; the bearer token is not part of the lockout, so scripted access
 //!   survives it.
+//! - **A process-wide ceiling** ([`LOCKOUT_GLOBAL_CEILING`] attempts per
+//!   [`LOCKOUT_GLOBAL_WINDOW`], across every source) bounds the attacker the
+//!   per-source key cannot: one holding many sources (an IPv6 /48 is ~65k
+//!   /64s). Reaching it refuses every password sign-in, the owner's included —
+//!   the const carries that trade.
 //! - **Under a flood, the bound wins over the lockout**: an attacker who
 //!   contributes more than [`LOCKOUT_MAX_SOURCES`] distinct sources inside the
 //!   failure window can have an actively locked-out entry evicted — the cap is
@@ -129,7 +134,7 @@ use axum::{
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use sqlx::SqlitePool;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt::Write as _;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -163,6 +168,29 @@ const LOCKOUT_COOLDOWN: Duration = Duration::from_secs(5 * 60);
 /// The most sources tracked at once. See [`LockoutTracker`] for why the state
 /// is capped rather than merely expired.
 const LOCKOUT_MAX_SOURCES: usize = 4096;
+/// The most failed-login attempts the whole process lets through inside
+/// [`LOCKOUT_GLOBAL_WINDOW`], across **every** source together.
+///
+/// The per-source budget prices one IPv4 address or one IPv6 /64; it does not
+/// price an attacker who holds many of them. An IPv6 /48 is ~65k /64s, each with
+/// a fresh [`LOCKOUT_BUDGET`], so per-source keying alone left such an attacker
+/// bounded only by Argon2 throughput (~130 guesses/s across
+/// [`MAX_CONCURRENT_VERIFIES`]). The ceiling turns that into a fixed number per
+/// hour whatever the address supply. One hundred is far above anything a single
+/// owner mistyping a password produces, and caps a distributed attack at well
+/// under a million guesses a year.
+///
+/// The trade, stated rather than hidden: while the ceiling is reached **every**
+/// password sign-in is refused, the owner's included — an attacker who spends
+/// the budget each hour keeps the sign-in page shut. That is the choice between
+/// an unbounded guess rate and a bounded denial of the *sign-in page*; existing
+/// session cookies and the bearer token are not part of the lockout and keep
+/// working throughout.
+const LOCKOUT_GLOBAL_CEILING: usize = 100;
+/// The sliding window [`LOCKOUT_GLOBAL_CEILING`] counts over. Sliding rather
+/// than idle-based (unlike the per-source window): a distributed attack never
+/// goes idle, so an idle window would never let the ceiling's count fall.
+const LOCKOUT_GLOBAL_WINDOW: Duration = Duration::from_secs(60 * 60);
 
 /// How many Argon2 verifies may be in flight at once, across every source.
 ///
@@ -350,7 +378,22 @@ struct SourceState {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Attempt {
     Allowed,
-    Refused { retry_after_secs: u64 },
+    Refused {
+        retry_after_secs: u64,
+        /// Which bound refused it — for the log line only. The client is told
+        /// the same thing either way: naming the ceiling would only help
+        /// someone probing for it.
+        bound: Bound,
+    },
+}
+
+/// The two bounds a login attempt can be refused by.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Bound {
+    /// The source's own [`LOCKOUT_BUDGET`] is spent.
+    Source,
+    /// The process-wide [`LOCKOUT_GLOBAL_CEILING`] is reached.
+    Global,
 }
 
 /// The bounded, in-memory failed-login tracker behind `POST /login`.
@@ -394,6 +437,11 @@ struct LockoutPolicy {
     cooldown: Duration,
     /// The most sources tracked at once.
     max_sources: usize,
+    /// The most attempts let through across every source inside
+    /// `global_window`.
+    global_ceiling: usize,
+    /// The sliding window `global_ceiling` counts over.
+    global_window: Duration,
 }
 
 impl LockoutPolicy {
@@ -404,6 +452,8 @@ impl LockoutPolicy {
             window: LOCKOUT_FAILURE_WINDOW,
             cooldown: LOCKOUT_COOLDOWN,
             max_sources: LOCKOUT_MAX_SOURCES,
+            global_ceiling: LOCKOUT_GLOBAL_CEILING,
+            global_window: LOCKOUT_GLOBAL_WINDOW,
         }
     }
 }
@@ -412,6 +462,10 @@ impl LockoutPolicy {
 struct TrackerState {
     /// Keyed by source; capped at [`LockoutPolicy::max_sources`].
     sources: HashMap<Source, SourceState>,
+    /// When each attempt the gate let through inside the global window was
+    /// made, oldest first — so never longer than
+    /// [`LockoutPolicy::global_ceiling`], which is its memory bound.
+    recent_attempts: VecDeque<Instant>,
 }
 
 impl LockoutTracker {
@@ -428,6 +482,7 @@ impl LockoutTracker {
         LockoutTracker {
             state: Arc::new(Mutex::new(TrackerState {
                 sources: HashMap::new(),
+                recent_attempts: VecDeque::new(),
             })),
             policy,
         }
@@ -472,16 +527,20 @@ impl LockoutTracker {
     fn begin_attempt(&self, source: Source) -> Attempt {
         let now = Instant::now();
         let mut state = self.lock();
+        let TrackerState {
+            sources,
+            recent_attempts,
+        } = &mut *state;
         // Pruning is O(tracked sources); only a *new* source can grow the map,
         // so only that path pays for it. An existing entry's own expiry is
         // handled below, where it matters.
-        if !state.sources.contains_key(&source) {
-            Self::prune(&mut state, now, self.policy.window);
-            if state.sources.len() >= self.policy.max_sources {
-                Self::evict_oldest(&mut state);
+        if !sources.contains_key(&source) {
+            Self::prune(sources, now, self.policy.window);
+            if sources.len() >= self.policy.max_sources {
+                Self::evict_oldest(sources);
             }
         }
-        let entry = state.sources.entry(source).or_insert_with(|| SourceState {
+        let entry = sources.entry(source).or_insert_with(|| SourceState {
             failures: 0,
             window_started: now,
             last_seen: now,
@@ -492,6 +551,7 @@ impl LockoutTracker {
             if until > now {
                 return Attempt::Refused {
                     retry_after_secs: Self::ceil_secs(until.saturating_duration_since(now)),
+                    bound: Bound::Source,
                 };
             }
             // The cooldown has been served: back to a clean slate.
@@ -502,6 +562,27 @@ impl LockoutTracker {
             // than counted toward the budget.
             entry.failures = 0;
         }
+        // The process-wide ceiling, checked only once the source's own budget
+        // has let the attempt through — a source already locked out costs no
+        // Argon2 work, so it must not spend the shared budget either — and
+        // before the source's count moves, so an attempt the ceiling refuses
+        // is not also held against its source.
+        while recent_attempts
+            .front()
+            .is_some_and(|at| now.saturating_duration_since(*at) >= self.policy.global_window)
+        {
+            recent_attempts.pop_front();
+        }
+        if recent_attempts.len() >= self.policy.global_ceiling {
+            // Refused until the oldest counted attempt leaves the window.
+            let oldest = recent_attempts.front().copied().unwrap_or(now);
+            let until = oldest + self.policy.global_window;
+            return Attempt::Refused {
+                retry_after_secs: Self::ceil_secs(until.saturating_duration_since(now)).max(1),
+                bound: Bound::Global,
+            };
+        }
+        recent_attempts.push_back(now);
         entry.failures += 1;
         entry.window_started = now;
         if entry.failures >= self.policy.budget {
@@ -513,16 +594,22 @@ impl LockoutTracker {
     /// Clears a source's failure streak — a login that succeeded before the
     /// budget was reached is forgiven, so an ordinary mistyped attempt costs
     /// nothing permanent.
+    ///
+    /// The success is refunded from the global ceiling as well — the ceiling
+    /// bounds *guessing*, and the owner signing in is not a guess. Which counted
+    /// attempt is handed back does not matter to the bound (one entry fewer is
+    /// one entry fewer); the newest is the one taken.
     fn record_success(&self, source: Source) {
         let mut state = self.lock();
         state.sources.remove(&source);
+        state.recent_attempts.pop_back();
     }
 
     /// Drop entries that hold nothing worth bounding: a source that has no
     /// active lockout and whose failure window has elapsed can be forgotten
     /// entirely.
-    fn prune(state: &mut TrackerState, now: Instant, window: Duration) {
-        state.sources.retain(|_, entry| {
+    fn prune(sources: &mut HashMap<Source, SourceState>, now: Instant, window: Duration) {
+        sources.retain(|_, entry| {
             let locked = entry.locked_until.is_some_and(|until| until > now);
             locked || now.saturating_duration_since(entry.window_started) < window
         });
@@ -531,16 +618,15 @@ impl LockoutTracker {
     /// Make room under the cap by dropping the least-recently-seen source. The
     /// live lockouts are what the cap must not lose preferentially, and the
     /// least-recently-seen entry is the one no request has touched for longest.
-    fn evict_oldest(state: &mut TrackerState) {
-        let Some(oldest) = state
-            .sources
+    fn evict_oldest(sources: &mut HashMap<Source, SourceState>) {
+        let Some(oldest) = sources
             .iter()
             .min_by_key(|(_, entry)| entry.last_seen)
             .map(|(source, _)| *source)
         else {
             return;
         };
-        state.sources.remove(&oldest);
+        sources.remove(&oldest);
     }
 }
 
@@ -647,6 +733,12 @@ impl Auth {
     /// than hidden: this trusts **one** hop. A chain of two proxies would have
     /// the lockout key on the inner one.
     ///
+    /// The same reasoning applies across header **lines**: the rightmost entry
+    /// is the last entry of the *last* `X-Forwarded-For` line. A proxy that
+    /// adds its observation as a separate line rather than appending to the
+    /// client's leaves the client's forged line first, so reading only the
+    /// first line (`HeaderMap::get`) would hand the client its own bucket back.
+    ///
     /// A trusted peer that sends no usable header falls back to the peer
     /// itself — the pre-`trusted_proxies` behaviour, one shared bucket — rather
     /// than to [`Source::Unknown`].
@@ -658,7 +750,9 @@ impl Auth {
             return Source::of_ip(Some(address));
         }
         let forwarded = headers
-            .get("x-forwarded-for")
+            .get_all("x-forwarded-for")
+            .iter()
+            .next_back()
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.rsplit(',').next())
             .and_then(|entry| entry.trim().parse::<IpAddr>().ok());
@@ -1083,16 +1177,28 @@ async fn login_submit(
     // and it is also why a refused attempt costs no Argon2 work. The attempt is
     // counted here, atomically with the decision, so concurrent guesses cannot
     // slip past the budget between the check and the verify.
-    if let Attempt::Refused { retry_after_secs } = auth.begin_login_attempt(source) {
+    if let Attempt::Refused {
+        retry_after_secs,
+        bound,
+    } = auth.begin_login_attempt(source)
+    {
         // Named by source, never by the attempted password — which is not in
         // scope here and must never reach a log. The source is either a socket
         // address or the fixed `<unknown peer>` sentinel, so nothing
-        // attacker-chosen is written verbatim.
-        tracing::warn!(
-            source = %source.label(),
-            retry_after_secs,
-            "login refused: locked out after repeated failures"
-        );
+        // attacker-chosen is written verbatim. The log says which bound
+        // refused it; the client is not told.
+        match bound {
+            Bound::Source => tracing::warn!(
+                source = %source.label(),
+                retry_after_secs,
+                "login refused: locked out after repeated failures"
+            ),
+            Bound::Global => tracing::warn!(
+                source = %source.label(),
+                retry_after_secs,
+                "login refused: the process-wide failed-login ceiling is reached"
+            ),
+        }
         let message = lockout_message(retry_after_secs);
         // Both answers are `429` — a machine-visible refusal an operator's log
         // or fail2ban rule can act on, which a `200` page for `Accept:
@@ -1662,6 +1768,10 @@ mod lockout_tests {
             window: TEST_WINDOW,
             cooldown: TEST_COOLDOWN,
             max_sources: TEST_CAP,
+            // Far above anything the per-source tests drive, so only the
+            // ceiling's own tests ever reach it.
+            global_ceiling: 1000,
+            global_window: TEST_WINDOW,
         }
     }
 
@@ -1778,12 +1888,14 @@ mod lockout_tests {
         // unchanged, so hammering a locked-out source cannot extend its lock.
         let Attempt::Refused {
             retry_after_secs: first,
+            ..
         } = tracker.begin_attempt(peer(1))
         else {
             panic!("a locked-out source must stay refused");
         };
         let Attempt::Refused {
             retry_after_secs: second,
+            ..
         } = tracker.begin_attempt(peer(1))
         else {
             panic!("a locked-out source must stay refused");
@@ -1900,6 +2012,38 @@ mod lockout_tests {
             auth.login_source(&headers, proxy),
             Source::V4([198, 51, 100, 9].into()),
             "the proxy's own observation is the last entry"
+        );
+    }
+
+    /// …and the rightmost entry of the **last header line**, not the first
+    /// line. A proxy that records its observation as a separate
+    /// `X-Forwarded-For` line leaves the client's own (forged) line first; a
+    /// read of only the first line would let the client rotate its lockout
+    /// bucket per attempt.
+    #[test]
+    fn the_last_forwarded_line_is_the_one_trusted() {
+        let auth = auth_with(policy()).with_trusted_proxies(vec![[127, 0, 0, 1].into()]);
+        let proxy = Some(SocketAddr::from(([127, 0, 0, 1], 55001)));
+        let forged_then_observed = |forged: &str| {
+            let mut headers = HeaderMap::new();
+            headers.append("x-forwarded-for", HeaderValue::from_str(forged).unwrap());
+            headers.append("x-forwarded-for", HeaderValue::from_static("198.51.100.9"));
+            auth.login_source(&headers, proxy)
+        };
+        assert_eq!(
+            forged_then_observed("10.9.9.9"),
+            Source::V4([198, 51, 100, 9].into()),
+            "the proxy's line is the last one"
+        );
+        // Rotating the forged line buys nothing: every attempt is one source,
+        // so the budget still stops them.
+        let allowed = (0..10u8)
+            .map(|n| forged_then_observed(&format!("10.9.9.{n}, 10.8.8.{n}")))
+            .filter(|source| auth.begin_login_attempt(*source) == Attempt::Allowed)
+            .count();
+        assert_eq!(
+            allowed, TEST_BUDGET as usize,
+            "a forged first line must not buy a fresh budget per attempt"
         );
     }
 
@@ -2021,7 +2165,9 @@ mod lockout_tests {
             let _ = tracker.begin_attempt(peer(1));
         }
         match tracker.begin_attempt(peer(1)) {
-            Attempt::Refused { retry_after_secs } => assert_eq!(
+            Attempt::Refused {
+                retry_after_secs, ..
+            } => assert_eq!(
                 retry_after_secs, 2,
                 "1100 ms of cooldown advertises 2 seconds, rounded up"
             ),
@@ -2210,6 +2356,131 @@ mod lockout_tests {
             Attempt::Allowed,
             "the least-recently-seen source was evicted, as the docs say it can be"
         );
+    }
+
+    // ---- The process-wide ceiling -------------------------------------------
+
+    /// The policy for the ceiling's tests: a ceiling of six across sources each
+    /// allowed three, over a short sliding window.
+    fn ceiling_policy() -> LockoutPolicy {
+        LockoutPolicy {
+            global_ceiling: 6,
+            global_window: Duration::from_millis(400),
+            max_sources: 64,
+            ..policy()
+        }
+    }
+
+    /// Many sources, each well inside its own budget, are still bounded
+    /// together: once the ceiling is reached a **fresh** source — one that has
+    /// never failed — is refused too, which is what an attacker holding a whole
+    /// IPv6 /48 of /64s runs into. The refusal is the ceiling's, and it is not
+    /// held against the refused source: once the window slides past, that
+    /// source still has its full budget.
+    #[test]
+    fn the_global_ceiling_bounds_attempts_across_every_source() {
+        let tracker = LockoutTracker::with_policy(ceiling_policy());
+        let allowed = (1..=20)
+            .filter(|n| tracker.begin_attempt(peer(*n)) == Attempt::Allowed)
+            .count();
+        assert_eq!(allowed, 6, "exactly the ceiling passes, across sources");
+        let fresh = peer(500);
+        match tracker.begin_attempt(fresh) {
+            Attempt::Refused {
+                retry_after_secs,
+                bound,
+            } => {
+                assert_eq!(bound, Bound::Global);
+                assert_eq!(retry_after_secs, 1, "400 ms left rounds up to 1 s");
+            }
+            Attempt::Allowed => panic!("the ceiling must refuse a fresh source"),
+        }
+
+        std::thread::sleep(Duration::from_millis(500));
+        for attempt in 1..=TEST_BUDGET {
+            assert_eq!(
+                tracker.begin_attempt(fresh),
+                Attempt::Allowed,
+                "attempt {attempt}: the window slid, and the ceiling's refusal \
+                 must not have spent the source's own budget"
+            );
+        }
+        assert!(matches!(
+            tracker.begin_attempt(fresh),
+            Attempt::Refused {
+                bound: Bound::Source,
+                ..
+            }
+        ));
+    }
+
+    /// A source already locked out is refused by its own budget **before** the
+    /// ceiling is consulted, so hammering a locked-out source — which costs no
+    /// Argon2 work — cannot spend the shared ceiling and lock everybody else out.
+    #[test]
+    fn a_locked_out_source_does_not_spend_the_global_ceiling() {
+        let tracker = LockoutTracker::with_policy(ceiling_policy());
+        for _ in 0..TEST_BUDGET {
+            assert_eq!(tracker.begin_attempt(peer(1)), Attempt::Allowed);
+        }
+        for _ in 0..50 {
+            assert!(matches!(
+                tracker.begin_attempt(peer(1)),
+                Attempt::Refused {
+                    bound: Bound::Source,
+                    ..
+                }
+            ));
+        }
+        // Three of the six spent; the other three are still there.
+        let allowed = (2..=10)
+            .filter(|n| tracker.begin_attempt(peer(*n)) == Attempt::Allowed)
+            .count();
+        assert_eq!(allowed, 3);
+    }
+
+    /// A successful sign-in is handed back to the ceiling: the ceiling bounds
+    /// guessing, and the owner signing in repeatedly is not a guess.
+    #[test]
+    fn a_success_is_refunded_from_the_global_ceiling() {
+        let tracker = LockoutTracker::with_policy(ceiling_policy());
+        for _ in 0..20 {
+            assert_eq!(tracker.begin_attempt(peer(1)), Attempt::Allowed);
+            tracker.record_success(peer(1));
+        }
+        let allowed = (2..=20)
+            .filter(|n| tracker.begin_attempt(peer(*n)) == Attempt::Allowed)
+            .count();
+        assert_eq!(allowed, 6, "twenty successes spent none of the ceiling");
+    }
+
+    /// Through HTTP: once the ceiling is reached, a source that has never
+    /// failed is refused `429` with a `Retry-After` — even presenting the
+    /// correct password, which the gate never reaches — and is told the same
+    /// thing a locked-out source is, so the ceiling cannot be probed for.
+    #[tokio::test]
+    async fn the_global_ceiling_refuses_a_fresh_source_over_http() {
+        let pool = test_pool().await;
+        let auth = auth_with(ceiling_policy());
+        for n in 1..=3u8 {
+            let c = client(&pool, auth.clone()).with_peer(([203, 0, 113, n], 4001).into());
+            for _ in 0..2 {
+                assert_eq!(
+                    script_login(&c, "definitely-wrong").await.status,
+                    StatusCode::OK
+                );
+            }
+        }
+        let owner = client(&pool, auth).with_peer(([198, 51, 100, 9], 4002).into());
+        let refused = script_login(&owner, "hunter2").await;
+        assert_eq!(refused.status, StatusCode::TOO_MANY_REQUESTS);
+        assert!(refused.headers.get(header::RETRY_AFTER).is_some());
+        assert!(
+            refused.text().contains("Too many failed sign-in attempts."),
+            "{}",
+            refused.text()
+        );
+        assert!(refused.headers.get(header::SET_COOKIE).is_none());
     }
 
     // ---- The HTTP surface --------------------------------------------------
