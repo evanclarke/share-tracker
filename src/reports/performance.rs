@@ -44,6 +44,7 @@ use crate::domain::open_parcels;
 use crate::entities::closing_price::{self, SharedFetcher};
 use crate::entities::income::{Income, IncomeType};
 use crate::entities::trade::TradeType;
+use crate::infra::currency::Aud;
 use crate::infra::extract::Json;
 use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
@@ -126,11 +127,9 @@ pub struct PerformanceRequest {
     /// Current price per unit by listing id, expected in AUD so it lines up
     /// with the AUD-denominated flows. An explicit price overrides a
     /// live-fetched one.
-    #[serde(
-        default,
-        deserialize_with = "crate::infra::decimal::strict_decimal_map"
-    )]
-    pub prices: HashMap<ListingId, Decimal>,
+    #[serde(default, deserialize_with = "crate::infra::decimal::strict_aud_map")]
+    #[schema(value_type = HashMap<ListingId, Decimal>)]
+    pub prices: HashMap<ListingId, Aud>,
     /// Valuation date for the supplied prices; flows after it are ignored.
     /// Defaults to today.
     #[serde(default)]
@@ -560,7 +559,7 @@ pub(crate) async fn overall_flows_on(
 
 pub async fn db_performance(
     pool: &SqlitePool,
-    prices: &HashMap<ListingId, Decimal>,
+    prices: &HashMap<ListingId, Aud>,
     as_of: NaiveDate,
 ) -> Result<Vec<HoldingPerformance>, sqlx::Error> {
     // One read transaction: every input comes from the same snapshot.
@@ -576,7 +575,7 @@ pub async fn db_performance(
 /// `stale = 0` (SCENARIOS X-a).
 pub async fn db_performance_on(
     conn: &mut sqlx::SqliteConnection,
-    prices: &HashMap<ListingId, Decimal>,
+    prices: &HashMap<ListingId, Aud>,
     as_of: NaiveDate,
 ) -> Result<Vec<HoldingPerformance>, sqlx::Error> {
     let Some(Accumulated {
@@ -597,7 +596,7 @@ pub async fn db_performance_on(
     for (&(listing_id, account_id), acc) in &holdings {
         let open = acc.quantity > Decimal::ZERO;
         let market_value = if open {
-            prices.get(&listing_id).map(|&p| acc.quantity * p)
+            prices.get(&listing_id).map(|&p| acc.quantity * p.amount())
         } else {
             None
         };
@@ -804,8 +803,8 @@ mod tests {
             .await;
     }
 
-    fn price_map(listing_id: ListingId, price: &str) -> HashMap<ListingId, Decimal> {
-        HashMap::from([(listing_id, price.parse().unwrap())])
+    fn price_map(listing_id: ListingId, price: &str) -> HashMap<ListingId, Aud> {
+        HashMap::from([(listing_id, Aud::stated(price.parse().unwrap()))])
     }
 
     #[tokio::test]

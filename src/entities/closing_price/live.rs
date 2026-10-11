@@ -6,8 +6,8 @@
 
 use super::fetcher::PriceFetcher;
 use super::market::{Market, load_market};
+use crate::infra::currency::Aud;
 use crate::infra::id::ListingId;
-use rust_decimal::Decimal;
 use sqlx::SqlitePool;
 use std::collections::{HashMap, HashSet};
 
@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 #[derive(Debug, Clone)]
 pub struct LiveValuation {
     /// Price per unit in AUD (the quote currency converted via the FX rules).
-    pub aud_price: Decimal,
+    pub aud_price: Aud,
     /// The provider's quote timestamp, RFC 3339 UTC.
     pub as_of: String,
     /// The AUD conversion used an earlier month's FX rate because the quote
@@ -88,7 +88,7 @@ pub async fn fetch_live_aud_prices(
                 .await
                 {
                     Ok(vr) => Ok(LiveValuation {
-                        aud_price: crate::infra::fx::apply_rate(quote.price, vr.rate),
+                        aud_price: crate::infra::fx::apply_rate_to_aud(quote.price, vr.rate),
                         as_of: quote.as_of.to_rfc3339(),
                         fx_provisional: vr.provisional,
                     }),
@@ -111,7 +111,7 @@ pub async fn resolve_live_prices(
     pool: &SqlitePool,
     fetcher: Option<&dyn PriceFetcher>,
     live: bool,
-    overrides: &HashMap<ListingId, Decimal>,
+    overrides: &HashMap<ListingId, Aud>,
     listing_ids: impl IntoIterator<Item = ListingId>,
 ) -> Result<HashMap<ListingId, Result<LiveValuation, String>>, sqlx::Error> {
     if !live {

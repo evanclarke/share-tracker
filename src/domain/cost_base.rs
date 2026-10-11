@@ -48,7 +48,7 @@
 //!    see Known limitations in `docs/API.md`), material only for a non-AUD
 //!    holding receiving non-AUD reductions.
 
-use crate::infra::currency::CurrencyCode;
+use crate::infra::currency::{Aud, CurrencyCode, Native};
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use crate::infra::id::TradeId;
@@ -63,6 +63,7 @@ use crate::infra::decimal::{Money, OptMoney, mul_div, parse_dec};
 use crate::infra::fx;
 use sqlx::Row;
 use std::collections::HashMap;
+use std::marker::PhantomData;
 
 /// The facts of a Buy/DRP parcel as transacted, in its native currency and
 /// as-acquired unit basis — the inputs to [`adjusted_cost_base`].
@@ -766,9 +767,14 @@ impl AmitReductionEvent {
 }
 
 /// The cost-base breakdown of some or all of a parcel's units, produced by
-/// [`adjusted_cost_base`]. Native currency until [`CostBase::into_aud_with`].
+/// [`adjusted_cost_base`]. `C` says which currency the figures are in:
+/// [`Native`] (the parcel's own trade currency) as the pipeline produces
+/// them, [`Aud`] once [`CostBase::into_aud_with`] has converted them — the
+/// only way to make one, so a native breakdown cannot be reported, indexed or
+/// aggregated as AUD, nor an AUD one converted a second time. An AUD fixture
+/// converts at rate 1, so this is the check its tests could never make.
 #[derive(Debug, Clone, Copy)]
-pub struct CostBase {
+pub struct CostBase<C> {
     /// Whole-parcel initial cost base: price × quantity + brokerage + GST.
     pub initial_cost: Decimal,
     /// The **costed units'** share of that figure — step 1's pro-rate, the
@@ -796,6 +802,8 @@ pub struct CostBase {
     /// rather than subtracting, so it can restore a base an earlier reduction
     /// exhausted; see [`reduction_walk`].
     pub adjusted: Decimal,
+    /// The currency marker — private, so only this module can state it.
+    currency: PhantomData<C>,
 }
 
 /// Step 1's pro-rate: the `units`-unit share of a `quantity`-unit parcel's
@@ -858,7 +866,7 @@ pub fn adjusted_cost_base(
     roc_events: &[RocEvent],
     splits: &[SplitEvent],
     held: Held,
-) -> Result<CostBase, sqlx::Error> {
+) -> Result<CostBase<Native>, sqlx::Error> {
     let initial_cost = parcel.initial_cost();
     let costed_initial_cost = if parcel.quantity > Decimal::ZERO {
         prorated_initial_cost(initial_cost, units, parcel.quantity)
@@ -884,6 +892,7 @@ pub fn adjusted_cost_base(
         amit_reduction: reduction_of(AdjustmentKind::AmitCostBase),
         roc_reduction: reduction_of(AdjustmentKind::ReturnOfCapital),
         adjusted,
+        currency: PhantomData,
     })
 }
 
@@ -1113,7 +1122,7 @@ fn kind_rank(kind: AdjustmentKind) -> u8 {
     }
 }
 
-impl CostBase {
+impl CostBase<Native> {
     /// Step 5 of the pipeline: convert every figure to AUD at the ATO
     /// reference rate for the parcel's acquisition month (`acquired` — the
     /// deemed acquisition date for a rollover replacement parcel, so the
@@ -1132,7 +1141,7 @@ impl CostBase {
         currency: &str,
         acquired: NaiveDate,
         fx_override: fx::FxOverride,
-    ) -> Result<CostBase, fx::FxError> {
+    ) -> Result<CostBase<Aud>, fx::FxError> {
         let rate = rates.resolve_rate(currency, acquired, fx_override)?;
         Ok(self.at_rate(rate))
     }
@@ -1140,16 +1149,44 @@ impl CostBase {
     /// Apply a resolved foreign-per-AUD rate to every component (same
     /// pass-through-at-1 convention as `fx::apply_rate`) so the breakdown
     /// stays internally consistent.
-    fn at_rate(self, rate: Decimal) -> CostBase {
-        if rate == Decimal::ONE {
-            return self;
-        }
+    fn at_rate(self, rate: Decimal) -> CostBase<Aud> {
+        let convert = |figure: Decimal| {
+            if rate == Decimal::ONE {
+                figure
+            } else {
+                figure / rate
+            }
+        };
         CostBase {
-            initial_cost: self.initial_cost / rate,
-            costed_initial_cost: self.costed_initial_cost / rate,
-            amit_reduction: self.amit_reduction / rate,
-            roc_reduction: self.roc_reduction / rate,
-            adjusted: self.adjusted / rate,
+            initial_cost: convert(self.initial_cost),
+            costed_initial_cost: convert(self.costed_initial_cost),
+            amit_reduction: convert(self.amit_reduction),
+            roc_reduction: convert(self.roc_reduction),
+            adjusted: convert(self.adjusted),
+            currency: PhantomData,
+        }
+    }
+}
+
+#[cfg(test)]
+impl CostBase<Aud> {
+    /// An AUD breakdown stated outright, for a test of a consumer (the
+    /// indexation method) that needs particular figures rather than a parcel
+    /// run through the pipeline.
+    pub fn aud_for_test(
+        initial_cost: Decimal,
+        costed_initial_cost: Decimal,
+        amit_reduction: Decimal,
+        roc_reduction: Decimal,
+        adjusted: Decimal,
+    ) -> Self {
+        CostBase {
+            initial_cost,
+            costed_initial_cost,
+            amit_reduction,
+            roc_reduction,
+            adjusted,
+            currency: PhantomData,
         }
     }
 }

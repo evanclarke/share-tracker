@@ -1,6 +1,7 @@
 use crate::domain::cgt_discount;
 use crate::domain::open_parcels;
 use crate::entities::closing_price::{self, SharedFetcher};
+use crate::infra::currency::Aud;
 use crate::infra::extract::Json;
 use crate::infra::http::ApiError;
 use crate::infra::id::HoldingAccountId;
@@ -59,11 +60,9 @@ pub struct UnrealisedGainsRequest {
     /// Current price per unit by listing id, expected in AUD so it lines up with
     /// the AUD-denominated cost base. An explicit price overrides a
     /// live-fetched one.
-    #[serde(
-        default,
-        deserialize_with = "crate::infra::decimal::strict_decimal_map"
-    )]
-    pub prices: HashMap<ListingId, Decimal>,
+    #[serde(default, deserialize_with = "crate::infra::decimal::strict_aud_map")]
+    #[schema(value_type = HashMap<ListingId, Decimal>)]
+    pub prices: HashMap<ListingId, Aud>,
     /// The date to report the position at (`YYYY-MM-DD`); later facts are excluded and the
     /// CGT discount is judged at it. Omitted: today.
     #[serde(default)]
@@ -197,16 +196,17 @@ async fn unrealised_gains_handler(
     .map_err(ApiError::from)?;
 
     for g in &mut gains {
-        if let Some(&price) = req.prices.get(&g.listing_id) {
+        if let Some(price) = req.prices.get(&g.listing_id).map(|p| p.amount()) {
             g.current_price = Some(price);
             g.market_value = Some(g.quantity * price);
             g.unrealised_gain_loss = Some(g.quantity * price - g.total_cost_base);
         } else if let Some(result) = live.get(&g.listing_id) {
             match result {
                 Ok(v) => {
-                    g.current_price = Some(v.aud_price);
-                    g.market_value = Some(g.quantity * v.aud_price);
-                    g.unrealised_gain_loss = Some(g.quantity * v.aud_price - g.total_cost_base);
+                    let price = v.aud_price.amount();
+                    g.current_price = Some(price);
+                    g.market_value = Some(g.quantity * price);
+                    g.unrealised_gain_loss = Some(g.quantity * price - g.total_cost_base);
                     g.price_as_of = Some(v.as_of.clone());
                     g.fx_provisional = v.fx_provisional;
                 }

@@ -2148,10 +2148,12 @@ mod tests {
                 "Decimal" => Some("strict_decimal"),
                 "Option<Decimal>" => Some("strict_optional_decimal"),
                 // The three portfolio reports' price-override maps.
-                "HashMap<ListingId,Decimal>" => Some("strict_decimal_map"),
+                "HashMap<ListingId,Aud>" => Some("strict_aud_map"),
                 // Any other shape nesting a decimal would need its own
                 // `deserialize_with`, so fail rather than wave it through.
-                other if other.contains("Decimal") => Some("«a strict decimal deserialiser»"),
+                other if other.contains("Decimal") || other.contains("Aud") => {
+                    Some("«a strict decimal deserialiser»")
+                }
                 _ => None,
             }
         }

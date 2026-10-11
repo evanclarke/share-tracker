@@ -519,7 +519,7 @@ async fn optimiser_handler(
             .await
             .map_err(ApiError::from)?;
             match live.get(&req.listing_id) {
-                Some(Ok(v)) => (v.aud_price, Some(v.as_of.clone())),
+                Some(Ok(v)) => (v.aud_price.amount(), Some(v.as_of.clone())),
                 Some(Err(reason)) => {
                     return Err(ApiError::Unprocessable(format!(
                         "no live price for {}: {reason} — supply a price",

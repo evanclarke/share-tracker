@@ -37,6 +37,7 @@ use rust_decimal::{Decimal, RoundingStrategy};
 use sqlx::Row;
 
 use crate::domain::cost_base::CostBase;
+use crate::infra::currency::Aud;
 
 /// The last day a cost can have been incurred and still be indexable
 /// (`docs/ato/indexing-the-cost-base.md`: "must have incurred the costs by
@@ -170,7 +171,7 @@ pub fn indexation_factor(frozen_cpi: Decimal, cpi: Decimal) -> Option<Decimal> {
 ///
 /// Floored at nil for the same reason the pipeline's own `adjusted` is: E10
 /// and G1 can take a cost base to nil, never below it.
-pub fn indexed_cost_base(cost: &CostBase, factor: Decimal) -> Decimal {
+pub fn indexed_cost_base(cost: &CostBase<Aud>, factor: Decimal) -> Decimal {
     (cost.costed_initial_cost * factor - cost.amit_reduction - cost.roc_reduction)
         .max(Decimal::ZERO)
 }
@@ -295,19 +296,22 @@ mod tests {
     /// result floors at nil exactly as the pipeline's own `adjusted` does.
     #[test]
     fn reductions_are_not_indexed_and_the_result_floors_at_nil() {
-        let cost = CostBase {
-            initial_cost: dec("10000"),
-            costed_initial_cost: dec("10000"),
-            amit_reduction: dec("300"),
-            roc_reduction: dec("200"),
-            adjusted: dec("9500"),
-        };
+        let cost = CostBase::aud_for_test(
+            dec("10000"),
+            dec("10000"),
+            dec("300"),
+            dec("200"),
+            dec("9500"),
+        );
         // 10,000 × 1.730 = 17,300, less the 500 of reductions at face value.
         assert_eq!(indexed_cost_base(&cost, dec("1.730")), dec("16800.000"));
-        let wiped = CostBase {
-            amit_reduction: dec("40000"),
-            ..cost
-        };
+        let wiped = CostBase::aud_for_test(
+            dec("10000"),
+            dec("10000"),
+            dec("40000"),
+            dec("200"),
+            dec("9500"),
+        );
         assert_eq!(indexed_cost_base(&wiped, dec("1.730")), Decimal::ZERO);
     }
 }

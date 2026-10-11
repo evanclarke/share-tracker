@@ -35,6 +35,7 @@ use rust_decimal::Decimal;
 use sqlx::{Row, SqlitePool};
 use std::collections::HashMap;
 
+use crate::infra::currency::Aud;
 use crate::infra::decimal::parse_dec;
 
 /// The per-record manual rate a conversion carries (foreign-per-AUD, same
@@ -175,6 +176,13 @@ pub fn apply_rate(amount: Decimal, rate: Decimal) -> Decimal {
     } else {
         amount / rate
     }
+}
+
+/// [`apply_rate`] for a rate that converts *to AUD* — the amount comes back
+/// typed as [`Aud`], which is the point: a price converted here cannot be
+/// mistaken for the native quote it came from.
+pub fn apply_rate_to_aud(amount: Decimal, rate: Decimal) -> Aud {
+    Aud::stated(apply_rate(amount, rate))
 }
 
 /// How many months before the valuation month [`resolve_valuation_rate`] may

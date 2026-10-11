@@ -65,12 +65,18 @@ A sweep for properties that a doc comment (or a source-scan allowlist) states bu
 holds. Each item moves the rule into a type, so a violation stops compiling rather than producing a
 wrong figure. Ordered by risk: the first two guard against silently wrong tax figures in the cases
 the suite is least likely to cover (a foreign-currency parcel; a split between purchase and sale).
-- [ ] **AUD vs native currency.** `CostBase::into_aud_with` (`src/domain/cost_base.rs`) maps
+- [x] **AUD vs native currency.** `CostBase::into_aud_with` (`src/domain/cost_base.rs`) maps
   `CostBase → CostBase`, so a native-currency breakdown can be aggregated with an AUD one or
   converted twice, and `at_rate`'s pass-through at rate 1 hides it from AUD fixtures. Give
   `CostBase` a currency marker (`CostBase<Native>` / `CostBase<Aud>`, conversion only via
   `into_aud_with`), then an `Aud(Decimal)` newtype for the inputs documented "expected in AUD"
   (`current_prices` in `reports::unrealised_gains`/`reports::performance`, and the like)
+  — Done 2026-10-11: `CostBase<Native>`/`CostBase<Aud>` (private marker field, `into_aud_with` the
+  only conversion; indexation and `OpenParcel` take `CostBase<Aud>`), and `infra::currency::Aud`
+  carried by every report price map, `LiveValuation`/`ListingValuation::aud_price` and the
+  request `prices` maps (`strict_aud_map`, OpenAPI schema unchanged). Made only by
+  `fx::apply_rate_to_aud` or `Aud::stated`, whose production call sites are pinned by
+  `infra::currency`'s `aud_is_stated_only_where_the_amount_is_known_to_be_aud`
 - [ ] **Unit basis of a quantity.** As-acquired and as-of/sale-date quantities are both `Decimal`;
   `open_parcels::db_units_sold`'s doc says the sale-date quantity "must" be re-based before it is
   subtracted, and `OpenParcel::remaining_as_of` vs `parcel.quantity` is distinguished only in prose

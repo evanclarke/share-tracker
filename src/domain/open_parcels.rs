@@ -41,6 +41,7 @@ use sqlx::Row;
 
 use crate::domain::adjustments;
 use crate::domain::cost_base::{self, CostBase, ParcelRow};
+use crate::infra::currency::Aud;
 use crate::infra::date::{as_of_or_open, as_of_or_today};
 use crate::infra::decimal::parse_dec;
 use crate::infra::fx::FxRates;
@@ -66,7 +67,7 @@ pub struct OpenParcel {
     /// parcel's (possibly deemed) acquisition-month rate — the full
     /// [`cost_base`] pipeline, so callers needing only the bottom line take
     /// `.adjusted`.
-    pub cost_base: CostBase,
+    pub cost_base: CostBase<Aud>,
 }
 
 /// One Sell's consumption of a purchase parcel's units: how many, when, and

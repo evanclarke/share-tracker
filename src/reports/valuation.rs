@@ -22,6 +22,7 @@
 //! where *every* held listing is excluded is a blocker, not an empty
 //! valuation — zero of zero is not a portfolio total.
 
+use crate::infra::currency::Aud;
 use crate::infra::currency::CurrencyCode;
 use crate::infra::id::ListingId;
 use chrono::{DateTime, NaiveDate, Utc};
@@ -79,7 +80,7 @@ pub struct ListingValuation {
     /// a later import trues up, and this one never clears.
     pub price_carried_forward: bool,
     /// `native_price` converted to AUD via `rate`.
-    pub aud_price: Decimal,
+    pub aud_price: Aud,
 }
 
 /// A holding left out of a date's valuation because no price is obtainable
@@ -356,7 +357,7 @@ pub(crate) async fn valuations_of_markets(
                 rate: vr.rate,
                 provisional: vr.provisional,
                 price_carried_forward,
-                aud_price: crate::infra::fx::apply_rate(native_price, vr.rate),
+                aud_price: crate::infra::fx::apply_rate_to_aud(native_price, vr.rate),
             }),
             Err(e) => blockers.push(format!("{ticker}: {e}")),
         }

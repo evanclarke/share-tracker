@@ -22,10 +22,10 @@ async fn live_aud_prices_converts_quote_currency_and_carries_as_of() {
         .await
         .unwrap();
     let bhp = prices[&ListingId(1)].as_ref().unwrap();
-    assert_eq!(bhp.aud_price, "62.48".parse::<Decimal>().unwrap());
+    assert_eq!(bhp.aud_price.amount(), "62.48".parse::<Decimal>().unwrap());
     assert_eq!(bhp.as_of, as_of.to_rfc3339());
     let ice = prices[&ListingId(2)].as_ref().unwrap();
-    assert_eq!(ice.aud_price, "70.75".parse::<Decimal>().unwrap());
+    assert_eq!(ice.aud_price.amount(), "70.75".parse::<Decimal>().unwrap());
 }
 
 #[tokio::test]
@@ -134,7 +134,7 @@ async fn a_batched_answer_is_paired_back_to_each_listing() {
     .unwrap();
 
     assert_eq!(
-        prices[&ListingId(1)].as_ref().unwrap().aud_price,
+        prices[&ListingId(1)].as_ref().unwrap().aud_price.amount(),
         "62.48".parse::<Decimal>().unwrap()
     );
     assert!(
@@ -144,7 +144,7 @@ async fn a_batched_answer_is_paired_back_to_each_listing() {
             .contains("listing 2")
     );
     assert_eq!(
-        prices[&ListingId(3)].as_ref().unwrap().aud_price,
+        prices[&ListingId(3)].as_ref().unwrap().aud_price.amount(),
         "180.10".parse::<Decimal>().unwrap()
     );
     assert!(
@@ -245,7 +245,10 @@ async fn resolve_live_prices_skips_overridden_and_respects_the_flag() {
     assert!(off.is_empty());
 
     // live = true, listing 1 overridden → only listing 2 is fetched.
-    let overrides = HashMap::from([(ListingId(1), "99".parse::<Decimal>().unwrap())]);
+    let overrides = HashMap::from([(
+        ListingId(1),
+        crate::infra::currency::Aud::stated("99".parse::<Decimal>().unwrap()),
+    )]);
     let on = resolve_live_prices(
         &pool,
         Some(&fetcher),
@@ -260,7 +263,7 @@ async fn resolve_live_prices_skips_overridden_and_respects_the_flag() {
         "overridden listing is never fetched"
     );
     assert_eq!(
-        on[&ListingId(2)].as_ref().unwrap().aud_price,
+        on[&ListingId(2)].as_ref().unwrap().aud_price.amount(),
         Decimal::from(30)
     );
 

@@ -11,6 +11,7 @@
 //! `.bind(x.to_string())`. Both directions then go through one type the compiler checks,
 //! rather than through per-column hand-written code that review has to police.
 
+use crate::infra::currency::Aud;
 #[cfg(test)]
 use crate::infra::id::HoldingAccountId;
 #[cfg(test)]
@@ -186,20 +187,25 @@ where
     deserializer.deserialize_option(StrictOptionalDecimal)
 }
 
-/// The `HashMap<_, Decimal>` form: the price-override maps the three portfolio
-/// reports take (`{"prices": {"7": "58.12"}}`). Same rule for every value.
+/// The `HashMap<_, Aud>` form: the price-override maps the three portfolio
+/// reports take (`{"prices": {"7": "58.12"}}`). Same rule for every value,
+/// and each is [`Aud::stated`]: those fields are documented as AUD per unit,
+/// so the request is what vouches for the currency.
 ///
 /// Spell it as
-/// `#[serde(default, deserialize_with = "crate::infra::decimal::strict_decimal_map")]`.
-pub fn strict_decimal_map<'de, D, K>(
+/// `#[serde(default, deserialize_with = "crate::infra::decimal::strict_aud_map")]`.
+pub fn strict_aud_map<'de, D, K>(
     deserializer: D,
-) -> Result<std::collections::HashMap<K, Decimal>, D::Error>
+) -> Result<std::collections::HashMap<K, Aud>, D::Error>
 where
     D: Deserializer<'de>,
     K: serde::Deserialize<'de> + Eq + std::hash::Hash,
 {
     let map = std::collections::HashMap::<K, StrictDecimalValue>::deserialize(deserializer)?;
-    Ok(map.into_iter().map(|(k, v)| (k, v.0)).collect())
+    Ok(map
+        .into_iter()
+        .map(|(k, v)| (k, Aud::stated(v.0)))
+        .collect())
 }
 
 /// [`strict_decimal`] as a `Deserialize` impl, so it composes into the
@@ -446,8 +452,8 @@ mod tests {
         quantity: Decimal,
         #[serde(default, deserialize_with = "strict_optional_decimal")]
         statement_total: Option<Decimal>,
-        #[serde(default, deserialize_with = "strict_decimal_map")]
-        prices: std::collections::HashMap<i64, Decimal>,
+        #[serde(default, deserialize_with = "strict_aud_map")]
+        prices: std::collections::HashMap<i64, Aud>,
     }
 
     fn parse(json: &str) -> Result<MoneyFields, serde_json::Error> {
@@ -499,7 +505,10 @@ mod tests {
         assert!(body.prices.is_empty());
 
         let body = parse(r#"{"quantity": "1", "prices": {"7": "58.1234"}}"#).unwrap();
-        assert_eq!(body.prices[&7], "58.1234".parse::<Decimal>().unwrap());
+        assert_eq!(
+            body.prices[&7].amount(),
+            "58.1234".parse::<Decimal>().unwrap()
+        );
     }
 
     #[test]

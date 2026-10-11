@@ -35,6 +35,7 @@ use crate::entities::income::{Income, IncomeType};
 use crate::entities::investment_expense::InvestmentExpense;
 use crate::entities::trade::{Trade, TradeType};
 use crate::entities::transfer::Transfer;
+use crate::infra::currency::Aud;
 use crate::infra::currency::CurrencyCode;
 use crate::infra::decimal::{mul_div, parse_dec};
 use crate::infra::extract::{Json, Query};
@@ -917,9 +918,9 @@ async fn activity_handler(
 
     // Value the summary like the overview does: an explicit price wins and is
     // never fetched; otherwise the live-valuation rules, degrading per-holding.
-    let prices: HashMap<ListingId, Decimal> = req
+    let prices: HashMap<ListingId, Aud> = req
         .price
-        .map(|p| HashMap::from([(req.listing_id, p)]))
+        .map(|p| HashMap::from([(req.listing_id, Aud::stated(p))]))
         .unwrap_or_default();
     portfolio::price_holdings(&pool, fetcher.as_deref(), true, &prices, &mut holdings).await?;
 

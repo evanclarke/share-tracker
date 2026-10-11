@@ -73,6 +73,7 @@
 //! in bulk via `POST /report_snapshots/regenerate_all` /
 //! `POST /report_snapshots/regenerate_provisional`.
 
+use crate::infra::currency::Aud;
 use crate::infra::db::write_tx;
 use crate::infra::extract::{Json, Query};
 use crate::infra::http::ApiError;
@@ -572,7 +573,7 @@ pub async fn default_regenerate_range(
 /// held as at it (from `valuation::stored_valuations`), plus the two
 /// per-listing caveats the stored snapshot and its rows must carry.
 struct PricedListings {
-    prices: HashMap<ListingId, Decimal>,
+    prices: HashMap<ListingId, Aud>,
     /// Listings whose AUD conversion used a fallback-month rate — non-empty
     /// makes the snapshot `provisional`.
     fx_provisional: HashSet<ListingId>,
@@ -664,7 +665,7 @@ pub async fn generate(
 
     let mut overview = portfolio::db_holdings_on(&mut tx, Some(date)).await?;
     for h in &mut overview {
-        if let Some(&price) = prices.get(&h.listing_id) {
+        if let Some(price) = prices.get(&h.listing_id).map(|p| p.amount()) {
             h.current_price = Some(price);
             h.market_value = Some(h.quantity * price);
             h.fx_provisional = resolved.fx_provisional.contains(&h.listing_id);
@@ -675,7 +676,7 @@ pub async fn generate(
     }
     let mut gains = unrealised_gains::db_unrealised_gains_on(&mut tx, date).await?;
     for g in &mut gains {
-        if let Some(&price) = prices.get(&g.listing_id) {
+        if let Some(price) = prices.get(&g.listing_id).map(|p| p.amount()) {
             g.current_price = Some(price);
             g.market_value = Some(g.quantity * price);
             g.unrealised_gain_loss = Some(g.quantity * price - g.total_cost_base);

@@ -50,11 +50,11 @@ async fn a_quote_inside_the_window_is_answered_without_asking_again() {
     // And answered with the same figures, not an empty or defaulted row.
     for prices in [&first, &second] {
         assert_eq!(
-            prices[&ListingId(1)].as_ref().unwrap().aud_price,
+            prices[&ListingId(1)].as_ref().unwrap().aud_price.amount(),
             "62.48".parse::<Decimal>().unwrap()
         );
         assert_eq!(
-            prices[&ListingId(2)].as_ref().unwrap().aud_price,
+            prices[&ListingId(2)].as_ref().unwrap().aud_price.amount(),
             Decimal::from(30)
         );
     }
@@ -131,7 +131,7 @@ async fn only_the_misses_are_asked_for_and_they_go_as_one_batch() {
     );
     for (id, expected) in [(1, 10), (2, 20), (3, 30), (4, 40)] {
         assert_eq!(
-            all[&ListingId(id)].as_ref().unwrap().aud_price,
+            all[&ListingId(id)].as_ref().unwrap().aud_price.amount(),
             Decimal::from(expected),
             "listing {id} kept its own price across the cache/fetch mix"
         );
@@ -165,7 +165,11 @@ async fn a_failed_quote_is_not_remembered() {
         .await
         .unwrap();
     assert_eq!(
-        recovered[&ListingId(1)].as_ref().unwrap().aud_price,
+        recovered[&ListingId(1)]
+            .as_ref()
+            .unwrap()
+            .aud_price
+            .amount(),
         "62.48".parse::<Decimal>().unwrap()
     );
     assert_eq!(

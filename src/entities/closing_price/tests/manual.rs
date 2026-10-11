@@ -98,7 +98,10 @@ async fn manual_price_unblocks_valuation_of_an_errored_day() {
         valuations.valuations[0].native_price,
         "62.48".parse().unwrap()
     );
-    assert_eq!(valuations.valuations[0].aud_price, "62.48".parse().unwrap());
+    assert_eq!(
+        valuations.valuations[0].aud_price.amount(),
+        "62.48".parse().unwrap()
+    );
 }
 
 /// Both provenance fields are required, and whitespace does not satisfy

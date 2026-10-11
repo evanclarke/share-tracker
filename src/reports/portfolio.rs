@@ -1,5 +1,6 @@
 use crate::domain::open_parcels;
 use crate::entities::closing_price::{self, SharedFetcher};
+use crate::infra::currency::Aud;
 use crate::infra::extract::Json;
 use crate::infra::http::ApiError;
 use crate::infra::id::HoldingAccountId;
@@ -59,11 +60,9 @@ pub struct OverviewRequest {
     /// Current price per unit by listing id, expected in AUD so it lines up with
     /// the AUD-denominated cost base. An explicit price always overrides a
     /// live-fetched one.
-    #[serde(
-        default,
-        deserialize_with = "crate::infra::decimal::strict_decimal_map"
-    )]
-    pub prices: HashMap<ListingId, Decimal>,
+    #[serde(default, deserialize_with = "crate::infra::decimal::strict_aud_map")]
+    #[schema(value_type = HashMap<ListingId, Decimal>)]
+    pub prices: HashMap<ListingId, Aud>,
     /// The **valuation date**: the holdings are taken as at it, so trades,
     /// sales, corporate actions, and AMIT adjustments dated after it are
     /// excluded and quantities are in that date's unit basis (see
@@ -219,7 +218,7 @@ pub(crate) async fn price_holdings(
     pool: &SqlitePool,
     fetcher: Option<&SharedFetcher>,
     live: bool,
-    prices: &HashMap<ListingId, Decimal>,
+    prices: &HashMap<ListingId, Aud>,
     holdings: &mut [HoldingOverview],
 ) -> Result<(), ApiError> {
     let quotes = closing_price::resolve_live_prices(
@@ -232,14 +231,15 @@ pub(crate) async fn price_holdings(
     .await
     .map_err(ApiError::from)?;
     for h in holdings {
-        if let Some(&price) = prices.get(&h.listing_id) {
+        if let Some(price) = prices.get(&h.listing_id).map(|p| p.amount()) {
             h.current_price = Some(price);
             h.market_value = Some(h.quantity * price);
         } else if let Some(result) = quotes.get(&h.listing_id) {
             match result {
                 Ok(v) => {
-                    h.current_price = Some(v.aud_price);
-                    h.market_value = Some(h.quantity * v.aud_price);
+                    let price = v.aud_price.amount();
+                    h.current_price = Some(price);
+                    h.market_value = Some(h.quantity * price);
                     h.price_as_of = Some(v.as_of.clone());
                     h.fx_provisional = v.fx_provisional;
                 }

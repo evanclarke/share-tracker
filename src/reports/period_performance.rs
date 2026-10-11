@@ -37,6 +37,7 @@
 //! separately, as an informational cross-check (see `docs/API.md`'s Known
 //! limitations entry for this report).
 
+use crate::infra::currency::Aud;
 use crate::infra::currency::CurrencyCode;
 use crate::infra::extract::{Json, Query};
 use crate::infra::fx::{FxError, FxRates};
@@ -274,11 +275,11 @@ pub async fn compute(
         valuations_from.iter().map(|v| (v.listing_id, v)).collect();
     let val_to_by_listing: HashMap<ListingId, &valuation::ListingValuation> =
         valuations_to.iter().map(|v| (v.listing_id, v)).collect();
-    let prices_from: HashMap<ListingId, Decimal> = valuations_from
+    let prices_from: HashMap<ListingId, Aud> = valuations_from
         .iter()
         .map(|v| (v.listing_id, v.aud_price))
         .collect();
-    let prices_to: HashMap<ListingId, Decimal> = valuations_to
+    let prices_to: HashMap<ListingId, Aud> = valuations_to
         .iter()
         .map(|v| (v.listing_id, v.aud_price))
         .collect();
