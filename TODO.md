@@ -56,13 +56,6 @@ falls under the existing rules.
   trading day before 1 July 2027 (the scheduled price import plus `closing_price`'s held-days
   backfill), since a missing one cannot be fetched reliably years later
 
-## Price collection re-bases prices outside a transaction (2026-10-10 review, data integrity)
-`closing_price/collection.rs` (~212) calls `db_rebase_listing_prices` on a bare pooled connection, so
-its read and per-row `UPDATE`s autocommit one by one; the other three callers run it inside
-`write_tx`. A failure part-way leaves a listing's prices in mixed bases until the next run.
-- [ ] Run it inside `infra::db::write_tx`, and extend the deferred-`BEGIN`/write scan (or add a test)
-  so an autocommit multi-statement write on a pooled connection is caught
-
 ## Server-side constraint failures are reported as the client's fault (2026-10-10 review, error handling)
 `From<sqlx::Error> for ApiError` (`src/infra/http.rs` ~1019–1034) maps every CHECK/UNIQUE/NOT NULL
 violation to a `422` worded as a bad request — including one raised by a server-owned write

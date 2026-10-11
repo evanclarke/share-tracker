@@ -740,13 +740,14 @@ pub(crate) async fn db_list(
         .eq("rs.rights_action_id", params.rights_action_id)
         .date_range("rs.date", params.from, params.to);
     qb.push(" ORDER BY rs.date, rs.id");
-    let mut conn = pool.acquire().await?;
-    let rows = qb.build().fetch_all(&mut *conn).await?;
+    let mut tx = crate::infra::db::read_tx(pool).await?;
+    let rows = qb.build().fetch_all(&mut *tx).await?;
     let mut sales = rows
         .iter()
         .map(sale_from_row)
         .collect::<Result<Vec<_>, _>>()?;
-    attach_allocations(&mut conn, &mut sales).await?;
+    attach_allocations(&mut tx, &mut sales).await?;
+    tx.commit().await?;
     Ok(sales)
 }
 
@@ -814,9 +815,10 @@ async fn get_one(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
 ) -> Result<Json<RightsSale>, ApiError> {
-    db_get(&mut *pool.acquire().await?, id)
-        .await?
-        .map(Json)
+    let mut tx = crate::infra::db::read_tx(&pool).await?;
+    let sale = db_get(&mut tx, id).await?;
+    tx.commit().await?;
+    sale.map(Json)
         .ok_or_else(|| ApiError::not_found("no rights sale with that id"))
 }
 

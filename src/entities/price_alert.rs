@@ -179,8 +179,10 @@ pub async fn db_already_alerted(
     listing_id: ListingId,
     price_date: NaiveDate,
 ) -> Result<bool, sqlx::Error> {
-    let mut conn = pool.acquire().await?;
-    db_already_alerted_on(&mut conn, listing_id, price_date).await
+    let mut tx = crate::infra::db::read_tx(pool).await?;
+    let alerted = db_already_alerted_on(&mut tx, listing_id, price_date).await?;
+    tx.commit().await?;
+    Ok(alerted)
 }
 
 /// Record every alert the message that just went out carried, in one

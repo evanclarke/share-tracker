@@ -107,6 +107,7 @@ pub fn router() -> OpenApiRouter<SqlitePool> {
         .routes(routes!(get_one, upsert, delete_one))
 }
 
+#[cfg(test)]
 pub async fn db_get(pool: &SqlitePool, id: i64) -> Result<Option<AmitAdjustment>, sqlx::Error> {
     http::crud_get(pool, id).await
 }
@@ -175,9 +176,10 @@ pub enum UpsertError {
     /// `amit_adjustments_statement_trade` UNIQUE index (migration 0022).
     #[error("this parcel already has an adjustment on this AMMA statement")]
     DuplicateParcel,
-    /// A create committed but the row could not be read back. Not reachable in
-    /// practice — the row is committed and unread only if something deletes it
-    /// in the same instant — but a create that answers with no row would be
+    /// A create's row could not be read back inside its own transaction. Not
+    /// reachable in practice — the read-back runs on the write's own
+    /// `BEGIN IMMEDIATE` transaction, before its commit, so no other writer
+    /// can have removed it — but a create that answers with no row would be
     /// worse than a loud failure, so it is its own variant rather than an
     /// `unwrap`. Mapped to `500`.
     #[error("the AMIT adjustment row was created but could not be read back")]
@@ -219,13 +221,18 @@ pub async fn db_create(
     pool: &SqlitePool,
     adj: &AmitAdjustment,
 ) -> Result<AmitAdjustment, UpsertError> {
-    let id = {
-        let mut conn = pool.acquire().await?;
-        db_insert_on(&mut conn, &adjustment_body(adj)).await?
-    };
-    db_get(pool, id)
+    // The checks, the INSERT and the read-back share one `BEGIN IMMEDIATE`
+    // transaction, as `db_upsert`'s do: on a bare pooled connection each
+    // autocommitted alone, so a concurrent write could slip between the
+    // checks and the INSERT, and a read after the commit could find the row
+    // already deleted.
+    let mut tx = write_tx(pool).await?;
+    let id = db_insert_on(&mut tx, &adjustment_body(adj)).await?;
+    let created = http::crud_get::<AmitAdjustment, _>(&mut *tx, id)
         .await?
-        .ok_or(UpsertError::VanishedAfterCreate)
+        .ok_or(UpsertError::VanishedAfterCreate)?;
+    tx.commit().await?;
+    Ok(created)
 }
 
 /// The write body an [`AmitAdjustment`] describes — the one mapping

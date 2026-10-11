@@ -1055,13 +1055,6 @@ mod tests {
              reads run inside it via the _on helpers",
         ),
         (
-            "reports/valuation.rs",
-            "connection-taking helpers composed into the callers' own transactions \
-             (snapshot generation's write_tx, period performance's read transaction); \
-             the remaining pool forms acquire one connection for a single-read probe \
-             (latest_snapshot_date's candidate scan) or a test",
-        ),
-        (
             "reports/weekly_summary.rs",
             "every figure comes from `period_performance::compute` and the two \
              `reports::snapshot` series reads, each holding whatever consistency its own \
@@ -1127,6 +1120,57 @@ mod tests {
             gone.is_empty(),
             "REPORTS_WITHOUT_A_READ_TRANSACTION names files that no longer exist — \
              drop them: {gone:?}"
+        );
+    }
+
+    /// Production code never takes a bare pooled connection
+    /// (`pool.acquire()`): every statement it runs is on a [`write_tx`] or a
+    /// [`read_tx`]. A write sequence on a pooled connection autocommits one
+    /// statement at a time, so a failure part-way persists half of it — price
+    /// collection's re-base did exactly that, leaving a listing's prices in
+    /// mixed bases (2026-10-10 review), and `POST /amit_adjustments` ran its
+    /// checks and its INSERT the same way. No scan can tell a read from a
+    /// write by looking, so the rule is the connection's *kind*: a read is on a
+    /// `read_tx`, where SQLite itself refuses a write, and a write is on a
+    /// `write_tx`, where it lands whole or not at all.
+    ///
+    /// Test code is exempt — a test's own pooled reads are not the server's —
+    /// both inline `#[cfg(test)]` modules and the files only a test build
+    /// compiles.
+    #[test]
+    fn production_code_never_writes_on_a_bare_pooled_connection() {
+        // Assembled so this test's own lines are not themselves matches.
+        let acquire = format!(".{}(", "acquire");
+        let test_only_file = |rel: &str| {
+            rel == "test_support.rs"
+                || rel == "ato_examples.rs"
+                || rel == "doc_checks.rs"
+                || rel.ends_with("/test_support.rs")
+                || rel.ends_with("/tests.rs")
+                || rel.contains("/tests/")
+        };
+        let offenders: Vec<String> = crate::test_support::rust_sources()
+            .into_iter()
+            .filter(|(rel, _)| !test_only_file(rel))
+            .flat_map(|(rel, raw)| {
+                let code =
+                    crate::test_support::strip_test_modules(&crate::test_support::code_only(&raw));
+                code.lines()
+                    .enumerate()
+                    // A pool's `acquire`, not the one semaphore's (`auth`'s
+                    // bounded password verifies).
+                    .filter(|(_, line)| {
+                        line.contains(&acquire) && !line.contains("VERIFY_SLOTS.acquire(")
+                    })
+                    .map(|(n, line)| format!("src/{rel}:{}: {}", n + 1, line.trim()))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert!(
+            offenders.is_empty(),
+            "production code takes a bare pooled connection — read on \
+             infra::db::read_tx, write on infra::db::write_tx:\n{}",
+            offenders.join("\n")
         );
     }
 

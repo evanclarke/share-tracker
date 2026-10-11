@@ -270,8 +270,10 @@ pub async fn load_market(
     pool: &SqlitePool,
     listing_id: ListingId,
 ) -> Result<Option<Market>, sqlx::Error> {
-    let mut conn = pool.acquire().await?;
-    load_market_on(&mut conn, listing_id).await
+    let mut tx = crate::infra::db::read_tx(pool).await?;
+    let market = load_market_on(&mut tx, listing_id).await?;
+    tx.commit().await?;
+    Ok(market)
 }
 
 /// [`load_market`] on a caller's own connection, so a write path can read the

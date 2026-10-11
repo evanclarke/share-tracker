@@ -7418,3 +7418,20 @@ one panic ends the timer loop for that job.
 - [x] Catch a panicking run (`FutureExt::catch_unwind` / a `JoinHandle` per run), record it as a failed
   run with its message, release the job lock and keep the loop scheduling; test with a registry
   containing a job that panics once
+
+## Price collection re-bases prices outside a transaction (2026-10-10 review, data integrity)
+`closing_price/collection.rs` (~212) calls `db_rebase_listing_prices` on a bare pooled connection, so
+its read and per-row `UPDATE`s autocommit one by one; the other three callers run it inside
+`write_tx`. A failure part-way leaves a listing's prices in mixed bases until the next run.
+- [x] Run it inside `infra::db::write_tx`, and extend the deferred-`BEGIN`/write scan (or add a test)
+  so an autocommit multi-statement write on a pooled connection is caught
+  — done: collection's re-base runs on its own `write_tx` (and its event read on a `read_tx`).
+  Rather than a scan for "writes" (no scan can tell a read from a write by looking), production
+  code now never takes a bare pooled connection: `infra::db`'s
+  `production_code_never_writes_on_a_bare_pooled_connection` fails on any `.acquire()` outside
+  test code, so every statement is on a `write_tx` (lands whole) or a `read_tx` (SQLite refuses a
+  write). The scan surfaced a second instance — `POST /amit_adjustments`' `db_create` ran its
+  checks and INSERT autocommitted and read the row back after the commit; it now does all three on
+  one `write_tx`. The remaining pooled readers (`load_market`, `HeldTimeline::load`,
+  `db_held_listing_ids`, `held_markets`, the rights-sale list/get, three test conveniences) moved
+  to `read_tx`

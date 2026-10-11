@@ -244,8 +244,10 @@ pub(crate) async fn auto_settlement_date(
     listing_id: ListingId,
     date: NaiveDate,
 ) -> Result<NaiveDate, SettlementError> {
-    let mut conn = pool.acquire().await?;
-    auto_settlement_date_on(&mut conn, Some(trade_id), listing_id, date).await
+    let mut tx = crate::infra::db::read_tx(pool).await?;
+    let settles = auto_settlement_date_on(&mut tx, Some(trade_id), listing_id, date).await?;
+    tx.commit().await?;
+    Ok(settles)
 }
 
 /// [`auto_settlement_date`] on the caller's own connection, so the

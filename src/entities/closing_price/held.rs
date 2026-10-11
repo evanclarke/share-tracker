@@ -78,8 +78,10 @@ pub struct HeldTimeline {
 
 impl HeldTimeline {
     pub async fn load(pool: &SqlitePool) -> Result<Self, sqlx::Error> {
-        let mut conn = pool.acquire().await?;
-        HeldTimeline::load_on(&mut conn).await
+        let mut tx = crate::infra::db::read_tx(pool).await?;
+        let timeline = HeldTimeline::load_on(&mut tx).await?;
+        tx.commit().await?;
+        Ok(timeline)
     }
 
     /// [`HeldTimeline::load`] on the caller's own connection, so a write path
@@ -270,8 +272,10 @@ pub async fn db_held_listing_ids(
     pool: &SqlitePool,
     as_of: Option<NaiveDate>,
 ) -> Result<Vec<ListingId>, sqlx::Error> {
-    let mut conn = pool.acquire().await?;
-    db_held_listing_ids_on(&mut conn, as_of).await
+    let mut tx = crate::infra::db::read_tx(pool).await?;
+    let ids = db_held_listing_ids_on(&mut tx, as_of).await?;
+    tx.commit().await?;
+    Ok(ids)
 }
 
 /// [`db_held_listing_ids`] on the caller's own connection — the read half of

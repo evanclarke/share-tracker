@@ -138,8 +138,10 @@ pub async fn held_markets(
     pool: &SqlitePool,
     as_of: Option<NaiveDate>,
 ) -> Result<Vec<Market>, ValuationError> {
-    let mut conn = pool.acquire().await.map_err(ValuationError::from)?;
-    held_markets_on(&mut conn, as_of).await
+    let mut tx = crate::infra::db::read_tx(pool).await?;
+    let markets = held_markets_on(&mut tx, as_of).await?;
+    tx.commit().await?;
+    Ok(markets)
 }
 
 /// [`held_markets`] on the caller's own connection, so snapshot generation
@@ -169,8 +171,10 @@ pub async fn stored_valuations(
     date: NaiveDate,
     now: DateTime<Utc>,
 ) -> Result<StoredValuations, ValuationError> {
-    let mut conn = pool.acquire().await.map_err(ValuationError::from)?;
-    stored_valuations_on(&mut conn, date, now).await
+    let mut tx = crate::infra::db::read_tx(pool).await?;
+    let valuations = stored_valuations_on(&mut tx, date, now).await?;
+    tx.commit().await?;
+    Ok(valuations)
 }
 
 /// Resolve every held listing's AUD valuation at `date` from stored closing

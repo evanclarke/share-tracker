@@ -13,6 +13,7 @@ use super::fetcher::{FetchError, FetchedClose, PriceFetcher};
 use super::held::db_held_listing_ids;
 use super::market::{Market, load_market};
 use super::model::{ClosingPrice, PriceOrigin, PriceStatus, UNASSIGNED_ID};
+use crate::infra::db::{read_tx, write_tx};
 use crate::infra::id::ListingId;
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use rust_decimal::Decimal;
@@ -143,12 +144,14 @@ pub(super) async fn fetch_and_store(
     // dates the unit basis the provider's figures arrived in (module docs).
     let observed = Utc::now();
     let fetched_at = observed.to_rfc3339();
-    // Scoped so the pooled connection is released before the writes below: an
+    // Scoped so the read transaction is ended before the writes below: an
     // in-memory pool holds a single connection, and keeping one here while
     // `db_store` asks for another would deadlock.
     let events = {
-        let mut conn = pool.acquire().await?;
-        db_price_basis_events(&mut conn, market.listing.id).await?
+        let mut tx = read_tx(pool).await?;
+        let events = db_price_basis_events(&mut tx, market.listing.id).await?;
+        tx.commit().await?;
+        events
     };
     let (mut ok, mut errored) = (0, 0);
     for &date in dates {
@@ -209,11 +212,12 @@ pub(super) async fn fetch_and_store(
     // provider's adjusted basis. Re-deriving from `price_as_observed` is
     // idempotent, so this is a no-op (and writes nothing, so it stales no
     // snapshot and adds no audit row) in every case where the first pass was
-    // already right.
-    {
-        let mut conn = pool.acquire().await?;
-        db_rebase_listing_prices(&mut conn, market.listing.id).await?;
-    }
+    // already right. Its read and its per-row `UPDATE`s share one write
+    // transaction, as on every other caller: autocommitted one by one, a
+    // failure part-way would leave the listing's prices in mixed bases.
+    let mut tx = write_tx(pool).await?;
+    db_rebase_listing_prices(&mut tx, market.listing.id).await?;
+    tx.commit().await?;
     Ok((ok, errored))
 }
 
