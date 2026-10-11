@@ -313,6 +313,7 @@ mod tests {
     use super::*;
     use crate::entities::trade::TradeType;
     use crate::entities::{ess_statement, listing};
+    use crate::reports::realised_gains::DisposalId;
     use crate::test_support::{self, ApiClient, test_pool, ymd};
     use axum::http::StatusCode;
     use chrono::NaiveDate;
@@ -442,7 +443,10 @@ mod tests {
             .unwrap();
         assert_eq!(realised.len(), 2);
         // Each half: $500 proceeds − $300 cost base = a $200 gain.
-        let short = realised.iter().find(|g| g.sale_trade_id == 50).unwrap();
+        let short = realised
+            .iter()
+            .find(|g| g.disposal == DisposalId::Sell(TradeId(50)))
+            .unwrap();
         assert_eq!(short.capital_gain_loss, Decimal::from(200));
         assert_eq!(
             short.discount_eligible_gain,
@@ -450,7 +454,10 @@ mod tests {
             "the anniversary itself is a day short of 12 months"
         );
         assert_eq!(short.non_discountable_gain, Decimal::from(200));
-        let long = realised.iter().find(|g| g.sale_trade_id == 51).unwrap();
+        let long = realised
+            .iter()
+            .find(|g| g.disposal == DisposalId::Sell(TradeId(51)))
+            .unwrap();
         assert_eq!(long.capital_gain_loss, Decimal::from(200));
         assert_eq!(long.discount_eligible_gain, Decimal::from(200));
         assert_eq!(long.non_discountable_gain, Decimal::ZERO);

@@ -108,11 +108,24 @@ the suite is least likely to cover (a foreign-currency parcel; a split between p
   **stays**: its retirement condition does not hold — the strict tax path (`FxRates::to_aud`)
   still returns a bare `Decimal`, so no type tells a tax figure from a valuation and only the scan
   keeps a tax report off the fallback
-- [ ] **`sale_trade_id: i64` overloaded.** `realised_gains::RealisedGainLoss::sale_trade_id` (and
+- [x] **`sale_trade_id: i64` overloaded.** `realised_gains::RealisedGainLoss::sale_trade_id` (and
   the tax report's `DisposalParcelRow` copy) is a trade id or a `rights_sales` id depending on the
   separate `source` field. Replace the pair with an enum (e.g. `DisposalId { Sell(TradeId),
   RightsSale(RightsSaleId) }`); the API has no external clients, so reshaping the JSON is allowed
   (update `docs/API.md`, and the CLAUDE.md note on the bare field)
+  — Done 2026-10-11: `realised_gains::DisposalId { Sell(TradeId), RightsSale(RightsSaleId) }`
+  (new `infra::id::RightsSaleId`, which `RightsSale::id` and its routes now carry too) replaces the
+  pair on both rows, serialised adjacently tagged and flattened as `source` + `disposal_id`; the
+  tax report's scrip-cash map is keyed by `TradeId` and its rights-sale map by `RightsSaleId`, so
+  neither can be handed the other's id. The web UI had been linking every `sale_trade_id` cell to
+  a *trade* — a rights sale's id opened whichever trade shared it; `disposal_id` now links per
+  `source` (`disposalHref`, on Realised Gains and Net Capital Gain's disposals expand, which gained
+  `links` support). Pinned by `db_rights_sale_flows_into_the_report` (rights sale 1 beside trade 1)
+  and `a_disposal_id_links_to_the_record_its_source_names`
+- [ ] **Same overload in the health report's nil-proceeds alert** (found doing the item above):
+  `reports::health`'s `nil_proceeds_disposals` rows carry `kind` (`Sell`/`RightsSale`) plus a bare
+  `record_id: i64` whose table depends on it. Give it the same `DisposalId` (or its own enum), and
+  update the `refreshHealthBanner` reader and `docs/API.md`
 - [ ] **Sorted-input preconditions.** `parcel_optimiser::allocate_strategy` says "`parcels` must
   already be FIFO-sorted" but is `pub` with four callers (one in `reports::net_capital_gain`): take
   the already-sorted `Candidates` (or a `FifoSorted` newtype) instead of a slice. Lower priority:

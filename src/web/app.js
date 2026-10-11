@@ -408,8 +408,11 @@ function buildExpand(expandCfg, labels, context, selfRoute) {
     const childOpts = {
       statusField: expandCfg.statusField, labels: labels, selfRoute: selfRoute,
     };
+    const cols = expandCfg.columns || Object.keys(childRows[0]);
+    // An expand's `links` add to the derived ones, as a report's own do.
+    if (expandCfg.links) childOpts.links = Object.assign(columnLinks(cols, selfRoute), expandCfg.links);
     if (expandCfg.expand) childOpts.expand = buildExpand(expandCfg.expand, labels, context, selfRoute);
-    return { rows: childRows, cols: expandCfg.columns || Object.keys(childRows[0]), opts: childOpts };
+    return { rows: childRows, cols: cols, opts: childOpts };
   };
 }
 

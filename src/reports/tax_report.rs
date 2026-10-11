@@ -54,8 +54,9 @@ use crate::infra::fx::FxRates;
 use crate::infra::http::ApiError;
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
+use crate::infra::id::RightsSaleId;
 use crate::infra::id::TradeId;
-use crate::reports::realised_gains::DisposalSource;
+use crate::reports::realised_gains::DisposalId;
 use crate::reports::{
     activity, amit_adjustment_cross_check, amit_cash_cross_check, e4_cross_check, franking_at_risk,
     net_capital_gain, realised_gains, rollover_consistency, tax_summary,
@@ -451,8 +452,10 @@ impl DisposalTotals {
 
 #[derive(utoipa::ToSchema, Debug, Serialize)]
 pub struct DisposalParcelRow {
-    pub source: DisposalSource,
-    pub sale_trade_id: i64,
+    /// The disposal this parcel row belongs to: `source` and `disposal_id`,
+    /// as on the realised-gains row it is drawn from.
+    #[serde(flatten)]
+    pub disposal: DisposalId,
     pub purchase_trade_id: TradeId,
     pub holding_account_id: HoldingAccountId,
 
@@ -631,14 +634,14 @@ struct DisposalInputs {
     /// row's manual fallback rate, which is what `realised_gains` converted
     /// its proceeds at. A rights sale is not a trade, so it is not in
     /// `trades`, and the printed sell-side rate has to come from here.
-    rights_sales: HashMap<i64, (String, Decimal)>,
+    rights_sales: HashMap<RightsSaleId, (String, Decimal)>,
     amit_events: HashMap<TradeId, Vec<cost_base::AmitReductionEvent>>,
     roc_events: HashMap<ListingId, Vec<RocEvent>>,
     split_events: HashMap<ListingId, Vec<SplitEvent>>,
     /// Each partial-rollover scrip closing Sell's cash-side apportionment
     /// `(numerator, denominator)` — keyed by the **Sell trade id**, and never
-    /// looked up for a rights sale (whose `sale_trade_id` is a `rights_sales`
-    /// id, a different id space). `realised_gains` applied this fraction to
+    /// looked up for a rights sale (whose `DisposalId::RightsSale` id is a
+    /// `rights_sales` id, a different id space). `realised_gains` applied this fraction to
     /// the adjusted cost base this worksheet prints, so the initial cost base
     /// and itemised adjustment rows above it are scaled by the identical one —
     /// otherwise the document's own `initial − Σ adjustments = adjusted`
@@ -646,7 +649,7 @@ struct DisposalInputs {
     /// `trades ⋈ corporate_actions` join and through the same
     /// [`realised_gains::scrip_cash_apportionment`] helper, so the two can
     /// never disagree.
-    scrip_cash: HashMap<i64, (Decimal, Decimal)>,
+    scrip_cash: HashMap<TradeId, (Decimal, Decimal)>,
     fee_sale_ids: HashSet<TradeId>,
     fx: FxRates,
 }
@@ -655,7 +658,7 @@ struct DisposalInputs {
 /// reads them — the action's per-unit cash, market value and exchange ratio.
 #[derive(FromRow)]
 struct SaleScripCash {
-    id: i64,
+    id: TradeId,
     #[sqlx(try_from = "OptMoney")]
     scrip_cash_per_unit: Option<Decimal>,
     #[sqlx(try_from = "OptMoney")]
@@ -700,7 +703,7 @@ async fn load_disposal_inputs(
 
     // The issue's currency and each sale's own fallback rate, the pair
     // `realised_gains` converts a rights sale's proceeds with.
-    let rights_sales: Vec<(i64, String, String)> = sqlx::query_as(
+    let rights_sales: Vec<(RightsSaleId, String, String)> = sqlx::query_as(
         "SELECT rs.id, ca.currency, rs.fx_rate \
          FROM rights_sales rs JOIN corporate_actions ca ON ca.id = rs.rights_action_id",
     )
@@ -779,11 +782,10 @@ fn disposal_parcel_rows(
         .map(|p| {
             let buy = inputs.buys.get(&p.purchase_trade_id);
             let buy_trade = inputs.trades.get(&p.purchase_trade_id);
-            let sale_trade = if disposal.source == DisposalSource::Sell {
-                inputs.trades.get(&TradeId(disposal.sale_trade_id))
-            } else {
-                None
-            };
+            let sale_trade = disposal
+                .disposal
+                .sell()
+                .and_then(|id| inputs.trades.get(&id));
             let currency = buy_trade
                 .map(|t| t.currency.clone())
                 .unwrap_or_else(CurrencyCode::aud);
@@ -799,8 +801,8 @@ fn disposal_parcel_rows(
             // rate. `realised_gains` already resolved the same rates to
             // produce `p.cost_base`, so a failure is unreachable in practice
             // — this only turns an invariant violation loud instead of wrong.
-            let (adjustments, initial_cost_base_aud) = match (disposal.source, buy) {
-                (DisposalSource::Sell, Some(buy_row)) => {
+            let (adjustments, initial_cost_base_aud) = match (disposal.disposal, buy) {
+                (DisposalId::Sell(sale_id), Some(buy_row)) => {
                     let splits = inputs
                         .split_events
                         .get(&buy_row.listing_id)
@@ -872,9 +874,9 @@ fn disposal_parcel_rows(
                     // identity this module documents
                     // (`initial − Σ adjustments = adjusted`). For an ordinary
                     // Sell the lookup finds nothing and both figures are
-                    // untouched; a rights sale never reaches this arm, so its
-                    // `rights_sales` id can never be mistaken for a trade's.
-                    let apportionment = inputs.scrip_cash.get(&disposal.sale_trade_id);
+                    // untouched; a rights sale never reaches this arm, and its
+                    // `RightsSaleId` could not key this map if it did.
+                    let apportionment = inputs.scrip_cash.get(&sale_id);
                     let aud_rows: Vec<CostBaseAdjustment> = rows
                         .into_iter()
                         .map(|mut r| {
@@ -931,16 +933,16 @@ fn disposal_parcel_rows(
             // the report; the required conversions above — the itemised
             // adjustments, the initial cost base and the rate dividing them —
             // have already propagated any genuine gap.
-            let sell_rate = match disposal.source {
-                DisposalSource::Sell => sale_trade.and_then(|st| {
+            let sell_rate = match disposal.disposal {
+                DisposalId::Sell(_) => sale_trade.and_then(|st| {
                     inputs
                         .fx
                         .resolve_rate(&st.currency, st.date, st.fx_override())
                         .ok()
                 }),
-                DisposalSource::RightsSale => inputs
+                DisposalId::RightsSale(rights_sale_id) => inputs
                     .rights_sales
-                    .get(&disposal.sale_trade_id)
+                    .get(&rights_sale_id)
                     .and_then(|(rights_currency, fx_rate)| {
                         inputs
                             .fx
@@ -960,8 +962,7 @@ fn disposal_parcel_rows(
             });
 
             let mut row = DisposalParcelRow {
-                source: disposal.source,
-                sale_trade_id: disposal.sale_trade_id,
+                disposal: disposal.disposal,
                 purchase_trade_id: p.purchase_trade_id,
                 holding_account_id: disposal.holding_account_id,
                 acquisition_date: p.acquisition_date,
@@ -2215,7 +2216,10 @@ mod tests {
         let realised = crate::reports::realised_gains::db_realised_gains(&pool)
             .await
             .unwrap();
-        let expected = realised.iter().find(|r| r.sale_trade_id == 2).unwrap();
+        let expected = realised
+            .iter()
+            .find(|r| r.disposal == DisposalId::Sell(TradeId(2)))
+            .unwrap();
 
         let report = db_tax_report(&pool, 2024).await.unwrap();
         assert_eq!(report.disposals.totals.proceeds_aud, expected.proceeds);
@@ -5649,8 +5653,7 @@ mod tests {
             fx: FxRates::default(),
         };
         let disposal = realised_gains::RealisedGainLoss {
-            source: DisposalSource::Sell,
-            sale_trade_id: 2,
+            disposal: DisposalId::Sell(TradeId(2)),
             listing_id: ListingId(1),
             holding_account_id: HoldingAccountId(1),
             sale_date: ymd(2026, 6, 1),

@@ -9,6 +9,7 @@ use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
+use crate::infra::id::RightsSaleId;
 use crate::infra::id::TradeId;
 use axum::extract::State;
 use chrono::NaiveDate;
@@ -18,26 +19,43 @@ use sqlx::SqlitePool;
 use std::collections::HashMap;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
-/// Where a realised disposal came from.
+/// Which disposal a realised row is, and the row that records it — a trade
+/// id and a rights-sale id are different id spaces, so the variant is what
+/// says which table `disposal_id` names. Serialised adjacently tagged and
+/// flattened into its row: `"source": "Sell", "disposal_id": 12`.
+///
+/// Variant order is the report's tie-break on a shared sale date (Sells
+/// first, then each by id), which the derived `Ord` gives.
 #[derive(
     utoipa::ToSchema, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize,
 )]
-pub enum DisposalSource {
+#[serde(tag = "source", content = "disposal_id")]
+pub enum DisposalId {
     /// An ordinary Sell trade (incl. buy-back and worthless-shares closing
-    /// Sells) — `sale_trade_id` is the trade id.
-    Sell,
+    /// Sells): the `trades` row id.
+    Sell(TradeId),
     /// A rights sale/lapse (`entities::rights_sale` — a disposal of the
-    /// rights themselves; the share holding is untouched) — `sale_trade_id`
-    /// is the `rights_sales` row id.
-    RightsSale,
+    /// rights themselves; the share holding is untouched): the
+    /// `rights_sales` row id.
+    RightsSale(RightsSaleId),
+}
+
+impl DisposalId {
+    /// The Sell trade, for a disposal that is one.
+    pub fn sell(self) -> Option<TradeId> {
+        match self {
+            Self::Sell(id) => Some(id),
+            Self::RightsSale(_) => None,
+        }
+    }
 }
 
 #[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize)]
 pub struct RealisedGainLoss {
-    pub source: DisposalSource,
-    /// The disposal's row id in its `source`'s table (`trades` for `Sell`,
-    /// `rights_sales` for `RightsSale`).
-    pub sale_trade_id: i64,
+    /// The disposal: `source` (`Sell` or `RightsSale`) and `disposal_id`, its
+    /// row id in that source's table (`trades` or `rights_sales`).
+    #[serde(flatten)]
+    pub disposal: DisposalId,
     pub listing_id: ListingId,
     /// The holding account the Sell happened in (the same taxpayer either
     /// way — totals are unchanged; rows identify the account).
@@ -180,7 +198,7 @@ impl SellInfo {
     /// shares. `None` for ordinary Sells.
     fn scrip_cash_apportionment(&self) -> Result<Option<(Decimal, Decimal)>, sqlx::Error> {
         scrip_cash_apportionment(
-            self.id.0,
+            self.id,
             self.scrip_cash_per_unit,
             self.scrip_market_value,
             self.scrip_new_units,
@@ -214,7 +232,7 @@ impl SellInfo {
 /// `trades ⋈ corporate_actions` join through this one function is what keeps
 /// the two apportionments from ever diverging.
 pub(crate) fn scrip_cash_apportionment(
-    sale_id: i64,
+    sale_id: TradeId,
     scrip_cash_per_unit: Option<Decimal>,
     scrip_market_value: Option<Decimal>,
     scrip_new_units: Option<Decimal>,
@@ -254,7 +272,7 @@ struct Allocation {
 /// date too.
 #[derive(sqlx::FromRow)]
 struct RightsSaleInfo {
-    id: i64,
+    id: RightsSaleId,
     listing_id: ListingId,
     holding_account_id: HoldingAccountId,
     date: NaiveDate,
@@ -273,7 +291,7 @@ struct RightsSaleInfo {
 /// (and take the acquisition date of) the purchase parcel. Consumes nothing.
 #[derive(sqlx::FromRow)]
 struct RightsAllocation {
-    rights_sale_id: i64,
+    rights_sale_id: RightsSaleId,
     purchase_trade_id: TradeId,
     #[sqlx(try_from = "Money")]
     units: Decimal,
@@ -637,8 +655,7 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
                     .then(a.purchase_trade_id.cmp(&b.purchase_trade_id))
             });
             Some(RealisedGainLoss {
-                source: DisposalSource::Sell,
-                sale_trade_id: sale_id.0,
+                disposal: DisposalId::Sell(sale_id),
                 listing_id: sale.listing_id,
                 holding_account_id: sale.holding_account_id,
                 sale_date: sale.date,
@@ -744,8 +761,7 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
                 .then(a.purchase_trade_id.cmp(&b.purchase_trade_id))
         });
         result.push(RealisedGainLoss {
-            source: DisposalSource::RightsSale,
-            sale_trade_id: sale.id,
+            disposal: DisposalId::RightsSale(sale.id),
             listing_id: sale.listing_id,
             holding_account_id: sale.holding_account_id,
             sale_date: sale.date,
@@ -763,8 +779,7 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
     result.sort_by(|a, b| {
         a.sale_date
             .cmp(&b.sale_date)
-            .then(a.source.cmp(&b.source))
-            .then(a.sale_trade_id.cmp(&b.sale_trade_id))
+            .then(a.disposal.cmp(&b.disposal))
     });
     Ok(result)
 }
@@ -1372,7 +1387,7 @@ mod tests {
         let result = db_realised_gains(&pool).await.unwrap();
         assert_eq!(result.len(), 1);
         let r = &result[0];
-        assert_eq!(r.sale_trade_id, 2);
+        assert_eq!(r.disposal, DisposalId::Sell(TradeId(2)));
         assert_eq!(r.listing_id, 1);
         assert_eq!(r.sale_date, sell_date);
         assert_eq!(r.proceeds, Decimal::from(1500));
@@ -1682,7 +1697,7 @@ mod tests {
         let by_sale = |id: i64| {
             result
                 .iter()
-                .find(|r| r.sale_trade_id == id)
+                .find(|r| r.disposal == DisposalId::Sell(TradeId::from(id)))
                 .unwrap_or_else(|| panic!("no row for sale {id}"))
         };
         assert_eq!(by_sale(3).capital_gain_loss, Decimal::from(500));
@@ -1989,7 +2004,7 @@ mod tests {
 
         let march_gain = |rows: &[RealisedGainLoss]| {
             rows.iter()
-                .find(|r| r.sale_trade_id == 2)
+                .find(|r| r.disposal == DisposalId::Sell(TradeId(2)))
                 .expect("the March sale")
                 .capital_gain_loss
         };
@@ -2073,8 +2088,8 @@ mod tests {
         let result = db_realised_gains(&pool).await.unwrap();
         assert_eq!(result.len(), 2);
         assert!(result[0].sale_date <= result[1].sale_date);
-        assert_eq!(result[0].sale_trade_id, 4);
-        assert_eq!(result[1].sale_trade_id, 3);
+        assert_eq!(result[0].disposal, DisposalId::Sell(TradeId(4)));
+        assert_eq!(result[1].disposal, DisposalId::Sell(TradeId(3)));
     }
 
     // API-level test
@@ -2981,7 +2996,7 @@ mod tests {
 
         let result = db_realised_gains(&pool).await.unwrap();
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].sale_trade_id, 50);
+        assert_eq!(result[0].disposal, DisposalId::Sell(TradeId(50)));
         // Carried cost base, not the exchange-date figure.
         assert_eq!(result[0].cost_base, Decimal::from(1500));
         assert_eq!(result[0].capital_gain_loss, Decimal::from(500));
@@ -3230,16 +3245,16 @@ mod tests {
         .await;
 
         let mut result = db_realised_gains(&pool).await.unwrap();
-        result.sort_by_key(|r| r.sale_trade_id);
+        result.sort_by_key(|r| r.disposal);
         assert_eq!(result.len(), 2);
         // Head: $2,000 − $1,200 = $800, discount-eligible from Oct 2020.
-        assert_eq!(result[0].sale_trade_id, 50);
+        assert_eq!(result[0].disposal, DisposalId::Sell(TradeId(50)));
         assert_eq!(result[0].cost_base, Decimal::from(1200));
         assert_eq!(result[0].capital_gain_loss, Decimal::from(800));
         assert_eq!(result[0].discount_eligible_gain, Decimal::from(800));
         assert_eq!(result[0].non_discountable_gain, Decimal::ZERO);
         // Demerged: $600 − $300 = $300, also discount-eligible from Oct 2020.
-        assert_eq!(result[1].sale_trade_id, 51);
+        assert_eq!(result[1].disposal, DisposalId::Sell(TradeId(51)));
         assert_eq!(result[1].cost_base, Decimal::from(300));
         assert_eq!(result[1].capital_gain_loss, Decimal::from(300));
         assert_eq!(result[1].discount_eligible_gain, Decimal::from(300));
@@ -3257,7 +3272,7 @@ mod tests {
         rights_cost: &str,
     ) -> RightsSaleInfo {
         RightsSaleInfo {
-            id,
+            id: RightsSaleId(id),
             listing_id: ListingId(1),
             holding_account_id: HoldingAccountId(1),
             date,
@@ -3271,7 +3286,7 @@ mod tests {
 
     fn mem_rights_alloc(sale: i64, buy: i64, units: i64) -> RightsAllocation {
         RightsAllocation {
-            rights_sale_id: sale,
+            rights_sale_id: RightsSaleId(sale),
             purchase_trade_id: TradeId(buy),
             units: Decimal::from(units),
         }
@@ -3298,8 +3313,7 @@ mod tests {
         let result = compute_realised_gains(&data).unwrap();
         assert_eq!(result.len(), 1);
         let r = &result[0];
-        assert_eq!(r.source, DisposalSource::RightsSale);
-        assert_eq!(r.sale_trade_id, 7);
+        assert_eq!(r.disposal, DisposalId::RightsSale(RightsSaleId(7)));
         // Nil cost base: the gain is the whole proceeds, 300 × $0.20.
         assert_eq!(r.proceeds, Decimal::from(60));
         assert_eq!(r.cost_base, Decimal::ZERO);
@@ -3460,7 +3474,7 @@ mod tests {
         assert_eq!(result.len(), 2);
         let rights = result
             .iter()
-            .find(|r| r.source == DisposalSource::RightsSale)
+            .find(|r| matches!(r.disposal, DisposalId::RightsSale(_)))
             .unwrap();
         // 250 × $0.20 = $50 gain, nil cost base, discount-eligible from the
         // 2023 parcel — not from the 2024 record date.
@@ -3484,14 +3498,42 @@ mod tests {
         assert!(rights.parcels[0].discount_eligible);
         let sell = result
             .iter()
-            .find(|r| r.source == DisposalSource::Sell)
+            .find(|r| matches!(r.disposal, DisposalId::Sell(_)))
             .unwrap();
-        assert_eq!(sell.sale_trade_id, 2);
+        assert_eq!(sell.disposal, DisposalId::Sell(TradeId(2)));
         assert_eq!(sell.capital_gain_loss, Decimal::from(100));
         assert_eq!(sell.parcels.len(), 1);
         assert_eq!(sell.parcels[0].purchase_trade_id, 1);
         assert_eq!(sell.parcels[0].units, Decimal::from(100));
         assert_eq!(sell.parcels[0].capital_gain_loss, Decimal::from(100));
+
+        // The rights sale is `rights_sales` row 1 and trade 1 is the Buy it
+        // anchors to: the same integer in two id spaces. The id travels with
+        // the variant naming its table, in the JSON as `source` +
+        // `disposal_id`, and nothing answers a bare `sale_trade_id` that a
+        // client could read as a trade.
+        assert_eq!(rights.disposal, DisposalId::RightsSale(RightsSaleId(1)));
+        let json = serde_json::to_value(&result).unwrap();
+        let shapes: Vec<_> = json
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| {
+                assert!(r.get("sale_trade_id").is_none(), "{r}");
+                assert!(r.get("disposal").is_none(), "flattened: {r}");
+                (r["source"].clone(), r["disposal_id"].clone())
+            })
+            .collect();
+        assert_eq!(
+            shapes,
+            vec![
+                (serde_json::json!("RightsSale"), serde_json::json!(1)),
+                (serde_json::json!("Sell"), serde_json::json!(2)),
+            ]
+        );
+        let back: Vec<RealisedGainLoss> = serde_json::from_value(json).unwrap();
+        assert_eq!(back[0].disposal, rights.disposal);
+        assert_eq!(back[1].disposal, sell.disposal);
     }
 
     // Sale scenarios (SCENARIOS.md section D).

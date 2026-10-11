@@ -989,6 +989,7 @@ mod tests {
     use crate::entities::rba_fx_rate;
     use crate::entities::sell::{self, AllocationInput, SellBody};
     use crate::entities::trade::{self, TradeType};
+    use crate::reports::realised_gains::DisposalId;
     use crate::test_support::{self, ApiClient, dec, test_pool, ymd};
     use axum::http::StatusCode;
 
@@ -1472,11 +1473,17 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(realised.len(), 2);
-        let within = realised.iter().find(|g| g.sale_trade_id == 50).unwrap();
+        let within = realised
+            .iter()
+            .find(|g| g.disposal == DisposalId::Sell(TradeId(50)))
+            .unwrap();
         assert_eq!(within.capital_gain_loss, dec("300"));
         assert_eq!(within.non_discountable_gain, dec("300"));
         assert_eq!(within.discount_eligible_gain, Decimal::ZERO);
-        let after = realised.iter().find(|g| g.sale_trade_id == 51).unwrap();
+        let after = realised
+            .iter()
+            .find(|g| g.disposal == DisposalId::Sell(TradeId(51)))
+            .unwrap();
         assert_eq!(after.capital_gain_loss, dec("300"));
         assert_eq!(after.discount_eligible_gain, dec("300"));
         assert_eq!(after.non_discountable_gain, Decimal::ZERO);

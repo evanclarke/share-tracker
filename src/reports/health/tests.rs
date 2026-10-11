@@ -3447,7 +3447,7 @@ async fn only_a_paid_for_right_disposed_of_at_nil_is_flagged() {
     assert_eq!(h.nil_proceeds_disposals.len(), 1);
     let d = &h.nil_proceeds_disposals[0];
     assert_eq!(d.kind, NilProceedsKind::RightsSale);
-    assert_eq!(d.record_id, paid.id);
+    assert_eq!(d.record_id, paid.id.0);
     assert_eq!(d.ticker, "RTS");
     assert_eq!(d.date, ymd(2025, 3, 2));
     assert_eq!(d.quantity, dec("400"));

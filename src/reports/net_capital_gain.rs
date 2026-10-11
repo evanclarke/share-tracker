@@ -1477,6 +1477,7 @@ async fn what_if_handler(
 mod tests {
     use super::*;
     use crate::entities::{amma, cgt_settings, corporate_action, rba_fx_rate, trade};
+    use crate::reports::realised_gains::DisposalId;
     use crate::test_support::{self, ApiClient, allocate, dec, test_pool};
     use axum::http::StatusCode;
 
@@ -2432,7 +2433,7 @@ mod tests {
         // AMMA-attributed $200 gross gain has no parcel-allocation record, so
         // it stays folded into the year's totals only.
         assert_eq!(r[0].disposals.len(), 1);
-        assert_eq!(r[0].disposals[0].sale_trade_id, 2);
+        assert_eq!(r[0].disposals[0].disposal, DisposalId::Sell(TradeId(2)));
         assert_eq!(r[0].disposals[0].capital_gain_loss, Decimal::from(500));
         assert_eq!(r[0].disposals[0].parcels.len(), 1);
         assert_eq!(r[0].disposals[0].parcels[0].purchase_trade_id, 1);

@@ -570,6 +570,7 @@ async fn optimiser_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::reports::realised_gains::DisposalId;
     use crate::test_support::{self, ApiClient, allocate, dec, test_pool, ymd};
     use axum::http::StatusCode;
 
@@ -1627,7 +1628,7 @@ mod tests {
             client.get_json("/portfolio/realised_gains").await;
         let recorded = realised
             .iter()
-            .find(|row| row.sale_trade_id == SELL_ID)
+            .find(|row| row.disposal == DisposalId::Sell(TradeId::from(SELL_ID)))
             .expect("the recorded Sell reaches the realised-gains report");
 
         // Per allocation first: a cell whose parcels err in opposite

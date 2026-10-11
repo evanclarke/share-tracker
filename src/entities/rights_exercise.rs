@@ -513,6 +513,7 @@ async fn exercise(
 mod tests {
     use super::*;
     use crate::entities::{corporate_action::CorporateAction, listing, sell};
+    use crate::reports::realised_gains::DisposalId;
     use crate::test_support::{self, ApiClient, dec, test_pool};
     use axum::http::StatusCode;
 
@@ -1074,7 +1075,10 @@ mod tests {
         let gains = crate::reports::realised_gains::db_realised_gains(&pool)
             .await
             .unwrap();
-        let sale = gains.iter().find(|g| g.sale_trade_id == 50).unwrap();
+        let sale = gains
+            .iter()
+            .find(|g| g.disposal == DisposalId::Sell(TradeId(50)))
+            .unwrap();
         assert!(sale.capital_gain_loss > Decimal::ZERO);
         assert_eq!(sale.discount_eligible_gain, Decimal::ZERO);
         assert_eq!(sale.non_discountable_gain, sale.capital_gain_loss);

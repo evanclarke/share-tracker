@@ -59,6 +59,7 @@ use crate::infra::extract::{Json, Query};
 use crate::infra::http::{self, ApiError, DryRunQuery};
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
+use crate::infra::id::RightsSaleId;
 use crate::infra::id::TradeId;
 use crate::infra::respond::{NoContent, Written};
 use axum::extract::{Path, State};
@@ -71,7 +72,7 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 
 #[derive(utoipa::ToSchema, Debug, Clone, Serialize)]
 pub struct RightsSale {
-    pub id: i64,
+    pub id: RightsSaleId,
     pub rights_action_id: i64,
     /// Sale (or lapse/expiry) date.
     pub date: NaiveDate,
@@ -665,7 +666,7 @@ async fn execute(
     .bind(body.holding_account_id)
     .execute(&mut *tx)
     .await?;
-    let new_id = result.last_insert_rowid();
+    let new_id = RightsSaleId(result.last_insert_rowid());
     for alloc in &body.allocations {
         sqlx::query(
             "INSERT INTO rights_sale_allocations (rights_sale_id, purchase_trade_id, units) \
@@ -697,7 +698,7 @@ async fn attach_allocations(
     )
     .fetch_all(&mut *conn)
     .await?;
-    let mut by_sale: HashMap<i64, Vec<RightsSaleAllocation>> = HashMap::new();
+    let mut by_sale: HashMap<RightsSaleId, Vec<RightsSaleAllocation>> = HashMap::new();
     for row in &rows {
         by_sale
             .entry(row.try_get("rights_sale_id")?)
@@ -756,7 +757,7 @@ pub(crate) async fn db_list(
 /// `GET`, the write's own transaction for the sale it just created.
 pub async fn db_get(
     conn: &mut SqliteConnection,
-    id: i64,
+    id: RightsSaleId,
 ) -> Result<Option<RightsSale>, sqlx::Error> {
     let row = sqlx::query("SELECT * FROM rights_sales WHERE id = ?")
         .bind(id)
@@ -770,7 +771,7 @@ pub async fn db_get(
 
 /// Delete a rights sale (its allocations cascade), freeing the entitlement it
 /// consumed.
-pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<bool, sqlx::Error> {
+pub async fn db_delete(pool: &SqlitePool, id: RightsSaleId) -> Result<bool, sqlx::Error> {
     let result = sqlx::query("DELETE FROM rights_sales WHERE id = ?")
         .bind(id)
         .execute(pool)
@@ -814,7 +815,7 @@ async fn list(
 )]
 async fn get_one(
     State(pool): State<SqlitePool>,
-    Path(id): Path<i64>,
+    Path(id): Path<RightsSaleId>,
 ) -> Result<Json<RightsSale>, ApiError> {
     let mut tx = crate::infra::db::read_tx(&pool).await?;
     let sale = db_get(&mut tx, id).await?;
@@ -830,7 +831,7 @@ async fn get_one(
 )]
 async fn delete_one(
     State(pool): State<SqlitePool>,
-    Path(id): Path<i64>,
+    Path(id): Path<RightsSaleId>,
 ) -> Result<NoContent, ApiError> {
     http::deleted(db_delete(&pool, id).await?, "rights sale")
 }
@@ -1072,7 +1073,7 @@ mod tests {
         ));
 
         // Deleting the sale frees its share of the entitlement again.
-        let sale_id: i64 = sqlx::query_scalar("SELECT id FROM rights_sales")
+        let sale_id: RightsSaleId = sqlx::query_scalar("SELECT id FROM rights_sales")
             .fetch_one(&pool)
             .await
             .unwrap();

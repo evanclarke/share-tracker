@@ -3286,6 +3286,35 @@ mod tests {
         assert!(js.contains("trades: function (id) { return '#/record/trade_id/' + id; },"));
     }
 
+    /// A realised disposal's `disposal_id` is a trade id or a rights-sale id
+    /// by its `source`, so it is linked per row rather than by column name —
+    /// on the Realised Gains table and inside Net Capital Gain's per-year
+    /// expand, which therefore has to honour an expand's own `links`. The
+    /// `source` the link tests for is the one `DisposalId` serialises.
+    #[tokio::test]
+    async fn a_disposal_id_links_to_the_record_its_source_names() {
+        use crate::infra::id::RightsSaleId;
+        use crate::reports::realised_gains::DisposalId;
+        let config = body_string(get("/static/config.js").await).await;
+        let rights = serde_json::to_value(DisposalId::RightsSale(RightsSaleId(1))).unwrap();
+        assert!(config.contains(&format!(
+            "row.source === '{}' ? '#/e/rights_sales' : recordHref('trades', row.disposal_id)",
+            rights["source"].as_str().unwrap()
+        )));
+        assert_eq!(
+            config
+                .matches("links: { disposal_id: disposalHref },")
+                .count(),
+            2,
+            "Realised Gains and Net Capital Gain's disposals expand"
+        );
+        assert!(!config.contains("'sale_trade_id', 'listing_id', 'sale_date'"));
+        let js = app_js_body().await;
+        assert!(js.contains(
+            "if (expandCfg.links) childOpts.links = Object.assign(columnLinks(cols, selfRoute), expandCfg.links);"
+        ));
+    }
+
     #[tokio::test]
     async fn performance_report_ui_present() {
         let js = app_js_body().await;

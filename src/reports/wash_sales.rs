@@ -24,7 +24,7 @@ use crate::infra::http::ApiError;
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use crate::infra::id::TradeId;
-use crate::reports::realised_gains::{self, DisposalSource};
+use crate::reports::realised_gains;
 use axum::extract::State;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
@@ -98,11 +98,15 @@ pub async fn db_wash_sales(
     // committed between the reads must not pair a loss with Buys (or an
     // exclusion list) from a different state.
     let mut tx = crate::infra::db::read_tx(pool).await?;
-    let mut losses: Vec<_> = realised_gains::db_realised_gains_on(&mut tx)
-        .await?
-        .into_iter()
-        .filter(|r| r.source == DisposalSource::Sell && r.capital_loss > Decimal::ZERO)
-        .collect();
+    // A rights sale is no candidate: the wash-sale pairing is a Sell's loss
+    // against Buys of the same shares, and a lapse disposes of no shares.
+    let mut losses: Vec<(TradeId, realised_gains::RealisedGainLoss)> =
+        realised_gains::db_realised_gains_on(&mut tx)
+            .await?
+            .into_iter()
+            .filter(|r| r.capital_loss > Decimal::ZERO)
+            .filter_map(|r| Some((r.disposal.sell()?, r)))
+            .collect();
 
     // A transfer's network-fee disposal is compelled by the transfer, not
     // entered into for its loss — never a candidate (see the module docs).
@@ -113,7 +117,7 @@ pub async fn db_wash_sales(
     .await?
     .into_iter()
     .collect();
-    losses.retain(|r| !fee_sale_ids.contains(&TradeId(r.sale_trade_id)));
+    losses.retain(|(sale_trade_id, _)| !fee_sale_ids.contains(sale_trade_id));
     if losses.is_empty() {
         return Ok(Vec::new());
     }
@@ -131,7 +135,7 @@ pub async fn db_wash_sales(
     tx.commit().await?;
 
     let mut alerts = Vec::new();
-    for sale in &losses {
+    for (sale_trade_id, sale) in &losses {
         for row in &buy_rows {
             let buy_listing_id: ListingId = row.try_get("listing_id")?;
             if buy_listing_id != sale.listing_id {
@@ -143,7 +147,7 @@ pub async fn db_wash_sales(
                 continue;
             }
             alerts.push(WashSaleAlert {
-                sale_trade_id: TradeId(sale.sale_trade_id),
+                sale_trade_id: *sale_trade_id,
                 listing_id: sale.listing_id,
                 ticker: row.try_get("ticker")?,
                 sale_holding_account_id: sale.holding_account_id,
@@ -188,6 +192,7 @@ async fn report(
 mod tests {
     use super::*;
     use crate::entities::holding_account;
+    use crate::reports::realised_gains::DisposalId;
     use crate::test_support::{self, ApiClient, allocate, test_pool, ymd};
     use axum::http::StatusCode;
 
@@ -536,7 +541,7 @@ mod tests {
             .await
             .unwrap()
             .into_iter()
-            .find(|r| r.sale_trade_id == fee_sale_id.0)
+            .find(|r| r.disposal == DisposalId::Sell(fee_sale_id))
             .expect("the fee disposal reaches the realised-gains report");
         assert_eq!(fee_row.capital_loss, Decimal::from(50));
 

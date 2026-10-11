@@ -898,6 +898,7 @@ mod tests {
     use crate::entities::holding_account::{self, HoldingAccount};
     use crate::entities::sell::{SellBody, SellError};
     use crate::entities::trade::TradeType;
+    use crate::reports::realised_gains::DisposalId;
     use crate::test_support::{self, ApiClient, dec};
     use axum::http::StatusCode;
 
@@ -1226,7 +1227,7 @@ mod tests {
             .unwrap();
         assert_eq!(realised.len(), 1, "only the fee is a disposal");
         let g = &realised[0];
-        assert_eq!(g.sale_trade_id, fee.id.0);
+        assert_eq!(g.disposal, DisposalId::Sell(fee.id));
         assert_eq!(g.proceeds, dec("80"));
         assert_eq!(g.cost_base, dec("60"));
         assert_eq!(g.capital_gain_loss, dec("20"));

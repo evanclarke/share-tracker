@@ -157,7 +157,7 @@ use crate::infra::id::ListingId;
 use crate::infra::id::TradeId;
 use crate::reports::net_capital_gain::NetCapitalGainYear;
 use crate::reports::portfolio::HoldingOverview;
-use crate::reports::realised_gains::{DisposalSource, RealisedGainLoss};
+use crate::reports::realised_gains::{DisposalId, RealisedGainLoss};
 use crate::reports::tax_summary::TaxYearSummary;
 use axum::http::StatusCode;
 use rust_decimal::Decimal;
@@ -456,7 +456,10 @@ async fn cgt_how_to_calculate_example_multiple_assets() {
     .await; // $5,500, no sale costs
 
     let sales: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised_gains").await;
-    let shares = sales.iter().find(|s| s.sale_trade_id == 4).unwrap();
+    let shares = sales
+        .iter()
+        .find(|s| s.disposal == DisposalId::Sell(TradeId(4)))
+        .unwrap();
     assert_eq!(
         shares.capital_gain_loss,
         dec("-4500"),
@@ -1180,7 +1183,7 @@ async fn rights_issues_example_39_shanti_sale_of_rights() {
     // base, proceeds 250 × $0.20 = $50.
     let gains: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised_gains").await;
     assert_eq!(gains.len(), 1);
-    assert_eq!(gains[0].source, DisposalSource::RightsSale);
+    assert!(matches!(gains[0].disposal, DisposalId::RightsSale(_)));
     assert_eq!(gains[0].proceeds, dec("50"));
     assert_eq!(
         gains[0].cost_base,
@@ -3131,7 +3134,12 @@ async fn tax_return_18_kathleen_loss_order_then_discount() {
     .await;
 
     let gains: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised_gains").await;
-    let by_sale = |id: i64| gains.iter().find(|g| g.sale_trade_id == id).unwrap();
+    let by_sale = |id: i64| {
+        gains
+            .iter()
+            .find(|g| g.disposal == DisposalId::Sell(TradeId::from(id)))
+            .unwrap()
+    };
     assert_eq!(
         by_sale(10).capital_gain_loss,
         dec("3000"),

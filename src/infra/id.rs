@@ -71,6 +71,12 @@ id_type!(
     TradeId
 );
 
+id_type!(
+    /// The id of a `rights_sales` row: a sale or lapse of a renounceable
+    /// issue's rights — a disposal, but not a trade.
+    RightsSaleId
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;

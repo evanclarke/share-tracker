@@ -235,7 +235,11 @@ pub async fn db_indexation_cross_check(
             let Some(indexed_cost_base) = parcel.indexed_cost_base else {
                 continue;
             };
-            let (Some(cost_incurred_date), Some(ticker)) = (
+            // Only a Sell is ever indexation-eligible (a rights sale's
+            // `indexed_cost_base` is always `None`), so this skips nothing
+            // the line above has not — it names the trade the row cites.
+            let (Some(sale_trade_id), Some(cost_incurred_date), Some(ticker)) = (
+                disposal.disposal.sell(),
                 incurred.get(&parcel.purchase_trade_id).copied(),
                 tickers.get(&disposal.listing_id).cloned(),
             ) else {
@@ -264,7 +268,7 @@ pub async fn db_indexation_cross_check(
             };
             comparisons.push(IndexationComparison {
                 tax_year,
-                sale_trade_id: TradeId(disposal.sale_trade_id),
+                sale_trade_id,
                 listing_id: disposal.listing_id,
                 ticker,
                 sale_date: disposal.sale_date,

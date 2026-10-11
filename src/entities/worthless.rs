@@ -322,6 +322,7 @@ mod tests {
     use crate::entities::listing;
     use crate::entities::trade::TradeType;
     use crate::infra::id::ListingId;
+    use crate::reports::realised_gains::DisposalId;
     use crate::test_support::{self, ApiClient, test_pool};
     use axum::http::StatusCode;
 
@@ -430,7 +431,7 @@ mod tests {
             .unwrap();
         assert_eq!(gains.len(), 1);
         let g = &gains[0];
-        assert_eq!(g.sale_trade_id, r.sell.id.0);
+        assert_eq!(g.disposal, DisposalId::Sell(r.sell.id));
         assert_eq!(g.proceeds, Decimal::ZERO);
         assert_eq!(g.cost_base, dec("2500"));
         assert_eq!(g.capital_gain_loss, dec("-2500"));
@@ -494,7 +495,7 @@ mod tests {
             .unwrap();
         let closing = gains
             .iter()
-            .find(|g| g.sale_trade_id == r.sell.id.0)
+            .find(|g| g.disposal == DisposalId::Sell(r.sell.id))
             .unwrap();
         assert_eq!(closing.cost_base, dec("900"));
         assert_eq!(closing.capital_loss, dec("900"));

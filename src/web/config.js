@@ -527,6 +527,14 @@ function fxCoverageRecordHref(row) {
   return route ? route(row.record_id) : null;
 }
 
+// A realised disposal's id cell opens the record it names: `disposal_id` is a
+// trade id for a `Sell` and a `rights_sales` id for a `RightsSale` (`source`
+// says which), so it cannot be linked by column name the way a `*_trade_id`
+// is. A rights sale has no edit form, so it opens the list.
+function disposalHref(row) {
+  return row.source === 'RightsSale' ? '#/e/rights_sales' : recordHref('trades', row.disposal_id);
+}
+
 // Rollover Consistency's Kind cell opens the operation a flagged group hangs
 // off (`group_id`): a transfer has no edit form, so the transfers list; the
 // other three are corporate actions. The fix the report prescribes — delete
@@ -637,6 +645,7 @@ export const REPORTS = [
     slug: 'realised-gains', title: 'Realised Gains', api: '/portfolio/realised_gains', method: 'GET',
     menu: 'Reports', section: 'CGT & tax',
     desc: 'Per-disposal capital gain/loss split into CGT buckets — ordinary sales plus rights sales/lapses (source column). Expand a disposal for the individual parcels sold and each one’s own CGT outcome.',
+    links: { disposal_id: disposalHref },
     expand: {
       key: 'parcels',
       columns: ['purchase_trade_id', 'acquisition_date', 'units', 'cost_base', 'proceeds', 'capital_gain_loss', 'discount_eligible'],
@@ -649,7 +658,8 @@ export const REPORTS = [
     desc: 'Assessable net capital gain per financial year. Expand a year for its realised disposals, and a disposal for its per-parcel breakdown.',
     expand: {
       key: 'disposals',
-      columns: ['source', 'sale_trade_id', 'listing_id', 'sale_date', 'proceeds', 'cost_base', 'capital_gain_loss', 'discount_eligible_gain', 'non_discountable_gain', 'capital_loss'],
+      columns: ['source', 'disposal_id', 'listing_id', 'sale_date', 'proceeds', 'cost_base', 'capital_gain_loss', 'discount_eligible_gain', 'non_discountable_gain', 'capital_loss'],
+      links: { disposal_id: disposalHref },
       expand: {
         key: 'parcels',
         columns: ['purchase_trade_id', 'acquisition_date', 'units', 'cost_base', 'proceeds', 'capital_gain_loss', 'discount_eligible'],

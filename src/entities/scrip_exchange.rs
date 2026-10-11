@@ -1004,7 +1004,7 @@ mod tests {
                         .as_array()
                         .unwrap()
                         .iter()
-                        .find(|r| r["sale_trade_id"] == ex.sell.id.0)
+                        .find(|r| r["source"] == "Sell" && r["disposal_id"] == ex.sell.id.0)
                         .unwrap();
                     let cash_side: BTreeMap<NaiveDate, Decimal> = closing["parcels"]
                         .as_array()
