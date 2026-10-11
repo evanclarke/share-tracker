@@ -220,11 +220,31 @@ pub async fn db_candidate_parcels_on(
     })
 }
 
-/// Allocate `units` across `parcels` in the strategy's preference order,
-/// greedily consuming each parcel's remaining quantity. `price` is the
-/// per-unit sale price in AUD (it drives the gain-based orderings).
-/// `parcels` must already be FIFO-sorted (the tie-break order).
+/// Allocate `units` across the candidates' parcels in the strategy's
+/// preference order, greedily consuming each parcel's remaining quantity.
+/// `price` is the per-unit sale price in AUD (it drives the gain-based
+/// orderings); the sale date is the one the candidates were assembled as at,
+/// so the discount clock cannot be read on a different date from the costing.
 pub fn allocate_strategy(
+    candidates: &Candidates,
+    units: Decimal,
+    price: Decimal,
+    strategy: Strategy,
+) -> Vec<(TradeId, Decimal)> {
+    allocate_parcels(
+        candidates.parcels(),
+        units,
+        price,
+        candidates.sale_date(),
+        strategy,
+    )
+}
+
+/// [`allocate_strategy`] over a bare slice, which it orders itself: every
+/// strategy, FIFO included, sorts on its own key with FIFO (acquisition date,
+/// then trade id) as the tie-break, so the result does not depend on the order
+/// the slice arrives in.
+fn allocate_parcels(
     parcels: &[CandidateParcel],
     units: Decimal,
     price: Decimal,
@@ -248,7 +268,7 @@ pub fn allocate_strategy(
         (a.acquisition_date, a.trade_id).cmp(&(b.acquisition_date, b.trade_id))
     };
     match strategy {
-        Strategy::Fifo => {} // already FIFO-sorted
+        Strategy::Fifo => order.sort_by(|a, b| fifo(a, b)),
         Strategy::MinGain => {
             order.sort_by(|a, b| assessable_pu(a).cmp(&assessable_pu(b)).then(fifo(a, b)));
         }
@@ -544,7 +564,7 @@ async fn optimiser_handler(
     let mut strategies = Vec::new();
     let mut allocations = Vec::new();
     for strategy in ALL_STRATEGIES {
-        let picks = allocate_strategy(candidates.parcels(), req.units, price, sale_date, strategy);
+        let picks = allocate_strategy(&candidates, req.units, price, strategy);
         let (allocs, totals) = disposal_figures(&candidates, &picks, total_proceeds, req.units)
             .map_err(ApiError::from)?;
         strategies.push(StrategySummary { strategy, totals });
@@ -631,8 +651,8 @@ mod tests {
 
     async fn fixture_picks(pool: &SqlitePool, strategy: Strategy) -> Vec<(TradeId, Decimal)> {
         let candidates = fixture_candidates(pool).await;
-        let (units, price, sale_date) = fixture_sale();
-        allocate_strategy(candidates.parcels(), units, price, sale_date, strategy)
+        let (units, price, _) = fixture_sale();
+        allocate_strategy(&candidates, units, price, strategy)
     }
 
     // ---- strategy allocation choices ------------------------------------
@@ -700,7 +720,7 @@ mod tests {
 
     /// The optimiser classifies on the shared ownership rule, so the boundary
     /// it applies is `domain::cgt_discount`'s (pinned by its own test) rather
-    /// than one of its own. Asserted here through `allocate_strategy` so the
+    /// than one of its own. Asserted here through `allocate_parcels` so the
     /// wiring — not just the rule — is covered: a parcel one day short of 12
     /// months is a non-discountable gain and so sorts last under MaxDiscount.
     #[test]
@@ -719,7 +739,7 @@ mod tests {
             parcel(TradeId(1), ymd(2025, 6, 15)),
             parcel(TradeId(2), ymd(2025, 6, 14)),
         ];
-        let picks = allocate_strategy(
+        let picks = allocate_parcels(
             &parcels,
             Decimal::from(20),
             Decimal::from(20),
@@ -735,6 +755,55 @@ mod tests {
         );
     }
 
+    /// The allocation orders the parcels itself, so no caller has to hand it
+    /// a FIFO-sorted slice: parcels arriving newest-first are allocated
+    /// exactly as the same parcels arriving oldest-first, under every
+    /// strategy — including where the strategy's own key ties and FIFO
+    /// (acquisition date, then trade id) is what decides.
+    #[test]
+    fn allocation_does_not_depend_on_the_order_the_parcels_arrive_in() {
+        let parcel = |trade_id, acquired, cost| CandidateParcel {
+            trade_id: TradeId(trade_id),
+            holding_account_id: HoldingAccountId(1),
+            acquisition_date: acquired,
+            remaining_quantity: Decimal::from(10),
+            remaining_cost_base: Decimal::from(cost),
+        };
+        let sale_date = ymd(2026, 6, 15);
+        // Two same-cost gains (one discountable, one not), two equal losses
+        // on the same date, and a gain identical to the first but younger.
+        let fifo_sorted = vec![
+            parcel(1, ymd(2020, 1, 1), 100),
+            parcel(2, ymd(2021, 3, 1), 300),
+            parcel(3, ymd(2021, 3, 1), 300),
+            parcel(4, ymd(2022, 1, 1), 100),
+            parcel(5, ymd(2026, 1, 1), 100),
+        ];
+        let reversed: Vec<_> = fifo_sorted.iter().rev().cloned().collect();
+        for strategy in ALL_STRATEGIES {
+            let (units, price) = (Decimal::from(35), Decimal::from(20));
+            let expected = allocate_parcels(&fifo_sorted, units, price, sale_date, strategy);
+            assert_eq!(
+                allocate_parcels(&reversed, units, price, sale_date, strategy),
+                expected,
+                "{strategy:?}"
+            );
+        }
+        assert_eq!(
+            allocate_parcels(
+                &reversed,
+                Decimal::from(15),
+                Decimal::from(20),
+                sale_date,
+                Strategy::Fifo
+            ),
+            vec![
+                (TradeId(1), Decimal::from(10)),
+                (TradeId(2), Decimal::from(5))
+            ]
+        );
+    }
+
     // ---- disposal figures ------------------------------------------------
 
     #[tokio::test]
@@ -742,14 +811,8 @@ mod tests {
         let pool = test_pool().await;
         strategy_fixture(&pool).await;
         let candidates = fixture_candidates(&pool).await;
-        let (units, price, sale_date) = fixture_sale();
-        let picks = allocate_strategy(
-            candidates.parcels(),
-            units,
-            price,
-            sale_date,
-            Strategy::Fifo,
-        );
+        let (units, price, _) = fixture_sale();
+        let picks = allocate_strategy(&candidates, units, price, Strategy::Fifo);
         let (allocs, totals) = disposal_figures(&candidates, &picks, price * units, units).unwrap();
         // Parcel 1: 100 u, proceeds 1000, cost 500 → +500 eligible.
         // Parcel 2: 50 u, proceeds 500, cost 600 → −100 loss.

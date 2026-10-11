@@ -132,11 +132,21 @@ the suite is least likely to cover (a foreign-currency parcel; a split between p
   and the same-date tie-break orders by the disposal instead of comparing ids across tables. The
   banner reads `d.source`/`d.disposal_id`. Pinned by the health tests (`DisposalId` assertions, and
   the served JSON carrying no `kind`/`record_id`) and `the_nil_proceeds_banner_reads_the_disposal_id`
-- [ ] **Sorted-input preconditions.** `parcel_optimiser::allocate_strategy` says "`parcels` must
+- [x] **Sorted-input preconditions.** `parcel_optimiser::allocate_strategy` says "`parcels` must
   already be FIFO-sorted" but is `pub` with four callers (one in `reports::net_capital_gain`): take
   the already-sorted `Candidates` (or a `FifoSorted` newtype) instead of a slice. Lower priority:
   the `adjustments` event loaders' "sorted by date (then id)" promise, which the ordered
   floor-at-nil walks rely on
+  — Done 2026-10-11: `allocate_strategy` takes `&Candidates` (and reads the sale date off it, so
+  the discount clock can no longer be handed a different date from the costing's); its private
+  core `allocate_parcels` sorts the slice itself — FIFO now sorts like the other three strategies,
+  on FIFO order — so the precondition is gone rather than typed. Pinned by
+  `allocation_does_not_depend_on_the_order_the_parcels_arrive_in` (newest-first input, every
+  strategy, ties FIFO decides). The loaders' promise is **left as a comment, by decision**: neither
+  ordered walk relies on it — `cost_base::reduction_walk` and the net-capital-gain E10/G1 walk both
+  sort their merged events by `(date, kind rank)` themselves, so the loader's `ORDER BY … id`
+  only breaks a same-date, same-kind tie, where it changes which row is flagged `capped`, never the
+  running balance; and `split_ratio` is a product over a date window, which no order changes
 - [ ] **`base_path` normalised form.** `config::normalise_base_path` produces `""` or `/a/b`, which
   ~15 functions across `web.rs`, `api_spec.rs`, `infra/auth.rs` and `app.rs` assume of a bare
   `String`/`&str`. A `BasePath` newtype constructible only through normalisation

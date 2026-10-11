@@ -1419,13 +1419,7 @@ async fn what_if_handler(
             }
             // The per-unit price the strategy's gain orderings see.
             let price = req.proceeds / req.units;
-            parcel_optimiser::allocate_strategy(
-                candidates.parcels(),
-                req.units,
-                price,
-                req.date,
-                strategy,
-            )
+            parcel_optimiser::allocate_strategy(&candidates, req.units, price, strategy)
         }
     };
 
