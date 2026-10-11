@@ -2376,12 +2376,19 @@ mod lockout_tests {
 
     // ---- The process-wide ceiling -------------------------------------------
 
+    /// The ceiling's window in its tests. Every test that needs it to slide
+    /// moves the tracker's clock past it, so it need not be short in real
+    /// time — and must not be: the HTTP test's seven Argon2 verifies once
+    /// took 396 ms on a loaded CI runner, and the first failure slid out of a
+    /// 400 ms window before the owner's attempt reached the gate.
+    const CEILING_TEST_WINDOW: Duration = Duration::from_secs(10);
+
     /// The policy for the ceiling's tests: a ceiling of six across sources each
-    /// allowed three, over a short sliding window.
+    /// allowed three, over a sliding window only a test's own clock moves past.
     fn ceiling_policy() -> LockoutPolicy {
         LockoutPolicy {
             global_ceiling: 6,
-            global_window: Duration::from_millis(400),
+            global_window: CEILING_TEST_WINDOW,
             max_sources: 64,
             ..policy()
         }
@@ -2407,12 +2414,16 @@ mod lockout_tests {
                 bound,
             } => {
                 assert_eq!(bound, Bound::Global);
-                assert_eq!(retry_after_secs, 1, "400 ms left rounds up to 1 s");
+                assert_eq!(
+                    retry_after_secs,
+                    CEILING_TEST_WINDOW.as_secs(),
+                    "just under the window left rounds up to the whole of it"
+                );
             }
             Attempt::Allowed => panic!("the ceiling must refuse a fresh source"),
         }
 
-        tracker.advance(Duration::from_millis(500));
+        tracker.advance(CEILING_TEST_WINDOW);
         for attempt in 1..=TEST_BUDGET {
             assert_eq!(
                 tracker.begin_attempt(fresh),

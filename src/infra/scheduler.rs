@@ -504,7 +504,23 @@ mod tests {
         )
         .await
         .unwrap();
-        let rows = wait_for_schedule(&pool, 1).await;
+        // The row is claimed at the task's start instant *before* the first
+        // occurrence is computed (see `run_entry`), so its being there is not
+        // yet the occurrence: under load a read can land between the two
+        // writes and see the claim. Wait for the one that stores a future run.
+        let holds_a_future_run = |rows: &[(String, String, Option<String>, String)]| {
+            rows.first().is_some_and(|row| {
+                chrono::DateTime::parse_from_rfc3339(&row.3).unwrap() > Utc::now()
+            })
+        };
+        let mut rows = wait_for_schedule(&pool, 1).await;
+        for _ in 0..300 {
+            if holds_a_future_run(&rows) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            rows = stored_schedule(&pool).await;
+        }
 
         assert_eq!(rows.len(), 1, "one row per schedule entry");
         let (name, cron, tz, next_run_at) = &rows[0];
