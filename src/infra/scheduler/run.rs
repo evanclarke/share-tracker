@@ -92,7 +92,7 @@ async fn run_attached(
     job: &RegisteredJob,
     params: JobParams,
 ) -> Result<(), String> {
-    let _running = job.lock.lock().await;
+    let _running = job.serialise().await;
     let started_at = chrono::Utc::now().to_rfc3339();
     tracing::info!(job = %name, "job started");
     let run_id = match db_start_run(pool, name, &started_at).await {

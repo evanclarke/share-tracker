@@ -121,7 +121,26 @@ pub async fn unmigrated_pool(db_path: &str) -> Result<SqlitePool, sqlx::Error> {
 /// covers a read transaction dropped on an error path instead, which would
 /// otherwise return a connection that refuses the next caller's writes.
 async fn connect(db_path: &str) -> Result<SqlitePool, sqlx::Error> {
-    SqlitePoolOptions::new()
+    connect_from(db_path, SqlitePoolOptions::new()).await
+}
+
+/// [`connect`] over pool options a test has already started — the hook
+/// `test_support::race_pool_with_busy_probe` uses to install its busy handler
+/// on every connection (`after_connect`) while keeping this pool's own
+/// release duty. Test-only: production opens through [`init`] alone.
+#[cfg(test)]
+pub async fn connect_with(
+    db_path: &str,
+    options: SqlitePoolOptions,
+) -> Result<SqlitePool, sqlx::Error> {
+    connect_from(db_path, options).await
+}
+
+async fn connect_from(
+    db_path: &str,
+    options: SqlitePoolOptions,
+) -> Result<SqlitePool, sqlx::Error> {
+    options
         .after_release(|conn, _| {
             Box::pin(async move {
                 sqlx::query("PRAGMA query_only = OFF")
@@ -3988,14 +4007,18 @@ mod tests {
     /// past its limit it is killed — the shell and everything it started — and
     /// the run fails with a `Command` error naming the timeout. The hook here
     /// backgrounds a grandchild that would touch a marker after the limit, so
-    /// killing only `sh` would leave it running to write it.
+    /// killing only `sh` would leave it running to write it. It also records
+    /// the grandchild's pid, so the test waits for that process to be gone —
+    /// an event — rather than sleeping past the time it would have written.
     #[tokio::test]
     async fn backup_command_is_killed_and_fails_the_run_past_its_time_limit() {
         let dir = tempfile::tempdir().unwrap();
         let marker = dir.path().join("outlived-the-timeout");
+        let pidfile = dir.path().join("grandchild.pid");
         let command = format!(
-            "(sleep 1; touch {}) & sleep 30",
-            shell_quote(&marker.to_string_lossy())
+            "(sleep 1; touch {}) & echo $! > {}; sleep 30",
+            shell_quote(&marker.to_string_lossy()),
+            shell_quote(&pidfile.to_string_lossy())
         );
         let started = std::time::Instant::now();
         let err =
@@ -4015,8 +4038,19 @@ mod tests {
             "the error names the timeout: {reason}"
         );
 
-        // Past the grandchild's own sleep: it was killed with its group.
-        tokio::time::sleep(Duration::from_millis(1500)).await;
+        // The grandchild was killed with its group: once it no longer exists
+        // it can never write the marker, so its absence now is final.
+        let pid = std::fs::read_to_string(&pidfile).expect("the hook recorded the grandchild");
+        let pid = pid.trim().to_string();
+        crate::test_support::await_condition(|| {
+            !std::process::Command::new("kill")
+                .args(["-0", &pid])
+                .stderr(std::process::Stdio::null())
+                .status()
+                .expect("kill runs")
+                .success()
+        })
+        .await;
         assert!(
             !marker.exists(),
             "every process the hook started must have been killed"

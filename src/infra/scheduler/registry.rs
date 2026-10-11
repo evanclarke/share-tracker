@@ -112,6 +112,12 @@ pub struct RegisteredJob {
     pub(super) work: Job,
     pub(super) trigger: JobTrigger,
     pub(super) lock: tokio::sync::Mutex<()>,
+    /// How many runs found [`Self::lock`] already held and had to wait for it
+    /// ([`Self::serialise`]) — so a test can observe a second run *blocked*
+    /// behind an in-flight one instead of sleeping a guessed interval for it
+    /// to get there.
+    #[cfg(test)]
+    pub(super) blocked: std::sync::atomic::AtomicUsize,
 }
 
 impl RegisteredJob {
@@ -127,7 +133,29 @@ impl RegisteredJob {
             work: Arc::new(move |params| Box::pin(work(params))),
             trigger,
             lock: tokio::sync::Mutex::new(()),
+            #[cfg(test)]
+            blocked: std::sync::atomic::AtomicUsize::new(0),
         })
+    }
+
+    /// Take the per-job lock for a run, waiting for any run of this job
+    /// already in flight. A test build also counts, in [`Self::blocked`], each
+    /// acquisition whose first poll found the lock held.
+    pub(super) async fn serialise(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        let mut acquire = std::pin::pin!(self.lock.lock());
+        #[cfg(test)]
+        let mut counted = false;
+        std::future::poll_fn(|cx| {
+            let polled = acquire.as_mut().poll(cx);
+            #[cfg(test)]
+            if polled.is_pending() && !counted {
+                counted = true;
+                self.blocked
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            polled
+        })
+        .await
     }
 }
 

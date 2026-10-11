@@ -829,9 +829,7 @@ mod tests {
     }
 
     /// A decimal literal, for the exact-figure assertions.
-    fn dec(s: &str) -> Decimal {
-        s.parse().expect("a decimal literal")
-    }
+    use crate::test_support::dec;
 
     /// One column of a disposal's per-parcel rows, summed — the property the
     /// sale's own totals have to equal exactly.

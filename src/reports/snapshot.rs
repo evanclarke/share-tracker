@@ -3587,20 +3587,6 @@ mod tests {
     // SCENARIOS X-a: generation reads inside the transaction that stores it
     // -----------------------------------------------------------------------
 
-    /// Poll `condition` until it holds, failing on a deadline rather than
-    /// spinning forever — the shape a concurrent test waits in, so a slow
-    /// machine waits longer instead of failing.
-    async fn await_condition(mut condition: impl FnMut() -> bool) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while !condition() {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the condition never held within the deadline"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-        }
-    }
-
     /// The invariant a stored snapshot must satisfy however a concurrent fact
     /// write interleaves with a generation run: the result is **either**
     /// current with that write **or** flagged `stale`. Fresh-but-superseded is
@@ -3655,7 +3641,7 @@ mod tests {
             // Wait on a condition, not a duration: the run is under way. What
             // the two connections then do to each other is up to them — the
             // assertion below holds for every ordering, which is the point.
-            await_condition(|| running.load(Ordering::SeqCst)).await;
+            test_support::await_condition(|| running.load(Ordering::SeqCst)).await;
             test_support::closing_price(1, date)
                 .price(&corrected.to_string())
                 .manual("asx.com.au closing report", "corrected close")
@@ -3699,7 +3685,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn generation_reads_only_after_it_holds_the_write_lock() {
         let dir = tempfile::tempdir().unwrap();
-        let pool = test_support::race_pool(&dir).await;
+        let (pool, busy) = test_support::race_pool_with_busy_probe(&dir).await;
         insert_listing(&pool, 1, "BHP", Some("XASX"), "AUD").await;
         insert_buy(&pool, 1, ListingId(1), ymd(2024, 1, 16), "100", "10", "AUD").await;
         let date = ymd(2026, 6, 5);
@@ -3714,21 +3700,13 @@ mod tests {
             .await
             .unwrap();
 
-        let running = Arc::new(AtomicBool::new(false));
         let generating = {
             let pool = pool.clone();
-            let running = running.clone();
-            tokio::spawn(async move {
-                running.store(true, Ordering::SeqCst);
-                generate(&pool, date, now).await
-            })
+            tokio::spawn(async move { generate(&pool, date, now).await })
         };
-        // The run is under way (a condition, not a duration), and then given
-        // room to do whatever it can: holding the write lock, that is nothing.
-        // A slower machine only makes the grace period more generous — it can
-        // never turn a blocked run into a finished one.
-        await_condition(|| running.load(Ordering::SeqCst)).await;
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        // An event, not a guessed duration: the run is blocked on the write
+        // lock, and has read nothing before it.
+        busy.blocked().await;
         assert!(
             !generating.is_finished(),
             "generation cannot complete while another connection holds the write lock"

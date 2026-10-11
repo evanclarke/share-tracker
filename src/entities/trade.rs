@@ -1463,11 +1463,8 @@ mod tests {
     /// date is recorded `stated`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_recompute_interleaved_with_a_stated_date_write_cannot_mis_stamp_the_source() {
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicBool, Ordering};
-
         let dir = tempfile::tempdir().unwrap();
-        let pool = test_support::race_pool(&dir).await;
+        let (pool, busy) = test_support::race_pool_with_busy_probe(&dir).await;
         test_support::listing(1).mic("XASX").insert(&pool).await;
         // The row the PUT's GET was taken from: a computed settlement date.
         test_support::buy(1, 1)
@@ -1501,28 +1498,14 @@ mod tests {
             "fx_rate": "1.0"
         });
         let app = client(&pool);
-        let running = Arc::new(AtomicBool::new(false));
         let putting = {
             let app = app.clone();
-            let running = running.clone();
-            tokio::spawn(async move {
-                running.store(true, Ordering::SeqCst);
-                app.put("/trades/1", &body).await
-            })
+            tokio::spawn(async move { app.put("/trades/1", &body).await })
         };
-        // A condition, not a guessed duration: the PUT is under way. It cannot
-        // finish — it is blocked on the write lock, either before or (under the
-        // old shape) after its pooled resolve — so the grace period only
-        // guarantees the old handler's read happened first.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while !running.load(Ordering::SeqCst) {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the PUT never started"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        // An event, not a guessed duration: the PUT is blocked on the write
+        // lock — which, under the old shape, it reached only after its pooled
+        // resolve, so the stale read has certainly happened by now.
+        busy.blocked().await;
         assert!(
             !putting.is_finished(),
             "the PUT waits for the write lock rather than deciding on a stale read"
@@ -1957,10 +1940,6 @@ mod tests {
         assert_eq!(t.brokerage, "9.95".parse::<Decimal>().unwrap());
     }
 
-    fn d(s: &str) -> Decimal {
-        s.parse().unwrap()
-    }
-
     /// PUT the JSON body to /trades/{id}, returning the status and response
     /// body text (the statement-total 422 carries its detail there).
     async fn put_trade_json(
@@ -2283,15 +2262,18 @@ mod tests {
     #[test]
     fn split_gst_inclusive_rounds_to_the_cent_and_sums_back_exactly() {
         // $9.95 incl.: 9.95/11 = 0.9045… → $0.90 GST, $9.05 ex-GST.
-        assert_eq!(split_gst_inclusive(d("9.95")), (d("9.05"), d("0.90")));
+        assert_eq!(split_gst_inclusive(dec("9.95")), (dec("9.05"), dec("0.90")));
         // $10 incl.: 10/11 = 0.9090… → $0.91 GST (rounded up to the cent).
-        assert_eq!(split_gst_inclusive(d("10")), (d("9.09"), d("0.91")));
+        assert_eq!(split_gst_inclusive(dec("10")), (dec("9.09"), dec("0.91")));
         // An exact half-cent rounds away from zero: 0.055/11 = 0.005 → $0.01.
-        assert_eq!(split_gst_inclusive(d("0.055")), (d("0.045"), d("0.01")));
+        assert_eq!(
+            split_gst_inclusive(dec("0.055")),
+            (dec("0.045"), dec("0.01"))
+        );
         // The pair always sums back to the amount paid.
         for amount in ["9.95", "10", "0.055", "19.99"] {
-            let (brok, gst) = split_gst_inclusive(d(amount));
-            assert_eq!(brok + gst, d(amount));
+            let (brok, gst) = split_gst_inclusive(dec(amount));
+            assert_eq!(brok + gst, dec(amount));
         }
     }
 
@@ -2318,8 +2300,8 @@ mod tests {
         let (status, _) = put_trade_json(&pool, 1, body).await;
         assert_eq!(status, StatusCode::CREATED);
         let t = db_get(&pool, TradeId(1)).await.unwrap().unwrap();
-        assert_eq!(t.brokerage, d("9.05"));
-        assert_eq!(t.gst_on_brokerage, d("0.90"));
+        assert_eq!(t.brokerage, dec("9.05"));
+        assert_eq!(t.gst_on_brokerage, dec("0.90"));
         assert!(
             t.brokerage_includes_gst,
             "flag must round-trip for the entry form"
@@ -2341,8 +2323,8 @@ mod tests {
         let (status, _) = put_trade_json(&pool, 1, body).await;
         assert_eq!(status, StatusCode::NO_CONTENT);
         let t = db_get(&pool, TradeId(1)).await.unwrap().unwrap();
-        assert_eq!(t.brokerage, d("10"));
-        assert_eq!(t.gst_on_brokerage, d("1"));
+        assert_eq!(t.brokerage, dec("10"));
+        assert_eq!(t.gst_on_brokerage, dec("1"));
 
         // Unflagged: stored exactly as entered (ex-GST + manual GST).
         let body = serde_json::json!({
@@ -2360,8 +2342,8 @@ mod tests {
         let (status, _) = put_trade_json(&pool, 2, body).await;
         assert_eq!(status, StatusCode::CREATED);
         let t = db_get(&pool, TradeId(2)).await.unwrap().unwrap();
-        assert_eq!(t.brokerage, d("9.95"));
-        assert_eq!(t.gst_on_brokerage, d("0.995"));
+        assert_eq!(t.brokerage, dec("9.95"));
+        assert_eq!(t.gst_on_brokerage, dec("0.995"));
         assert!(!t.brokerage_includes_gst);
         assert_eq!(t.statement_total, None);
     }
@@ -2405,10 +2387,14 @@ mod tests {
         // Two full GET → PUT-verbatim passes: the stored split never moves.
         for pass in 1..=2 {
             let (raw, seen) = get_trade_raw(&pool, 1).await;
-            assert_eq!(seen.brokerage, d("0.99"), "read is inclusive (pass {pass})");
+            assert_eq!(
+                seen.brokerage,
+                dec("0.99"),
+                "read is inclusive (pass {pass})"
+            );
             assert_eq!(
                 seen.gst_on_brokerage,
-                d("0.09"),
+                dec("0.09"),
                 "derived GST (pass {pass})"
             );
             assert!(seen.brokerage_includes_gst);
@@ -2421,9 +2407,9 @@ mod tests {
             let (status, detail) = put_trade_json(&pool, 1, body).await;
             assert_eq!(status, StatusCode::NO_CONTENT, "pass {pass}: {detail}");
             let t = db_get(&pool, TradeId(1)).await.unwrap().unwrap();
-            assert_eq!(t.brokerage, d("0.90"), "stored ex-GST (pass {pass})");
-            assert_eq!(t.gst_on_brokerage, d("0.09"), "stored GST (pass {pass})");
-            assert_eq!(t.statement_total, Some(d("1000.99")));
+            assert_eq!(t.brokerage, dec("0.90"), "stored ex-GST (pass {pass})");
+            assert_eq!(t.gst_on_brokerage, dec("0.09"), "stored GST (pass {pass})");
+            assert_eq!(t.statement_total, Some(dec("1000.99")));
         }
 
         // An unflagged trade reads back exactly as stored — no recombination.
@@ -2442,8 +2428,8 @@ mod tests {
         let (status, _) = put_trade_json(&pool, 2, body).await;
         assert_eq!(status, StatusCode::CREATED);
         let (_, seen) = get_trade_raw(&pool, 2).await;
-        assert_eq!(seen.brokerage, d("9.95"));
-        assert_eq!(seen.gst_on_brokerage, d("0.995"));
+        assert_eq!(seen.brokerage, dec("9.95"));
+        assert_eq!(seen.gst_on_brokerage, dec("0.995"));
     }
 
     /// The statement total must reconcile with quantity × price + brokerage +
@@ -2476,7 +2462,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .statement_total,
-            Some(d("1009.95"))
+            Some(dec("1009.95"))
         );
 
         // Numeric comparison: trailing zeros don't matter.

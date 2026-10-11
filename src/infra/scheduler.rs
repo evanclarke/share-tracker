@@ -58,7 +58,7 @@ mod tests {
     use super::registry::JobParams;
     use super::*;
     use crate::infra::db;
-    use crate::test_support::ApiClient;
+    use crate::test_support::{ApiClient, await_condition};
     use axum::Extension;
     use axum::http::StatusCode;
     use chrono::{DateTime, Local, TimeZone, Utc};
@@ -760,31 +760,58 @@ mod tests {
         // Two run_job calls for the same job (e.g. a manual trigger overlapping
         // the scheduled run) must never execute the work concurrently: the
         // second waits on the per-job lock and runs after the first finishes.
+        //
+        // Sequenced on events, not durations: the first run's work holds at a
+        // gate the test opens only once the second run is observed blocked on
+        // the lock (`blocked`), so the window in which an overlap would show
+        // is the whole of the first run, however slow the machine.
         use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
         let pool = db::init(":memory:").await.unwrap();
         let active = Arc::new(AtomicUsize::new(0));
         let overlapped = Arc::new(AtomicBool::new(false));
+        let started = Arc::new(AtomicUsize::new(0));
         let runs = Arc::new(AtomicUsize::new(0));
-        let (a, o, r) = (active.clone(), overlapped.clone(), runs.clone());
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let (a, o, s, r, g) = (
+            active.clone(),
+            overlapped.clone(),
+            started.clone(),
+            runs.clone(),
+            gate.clone(),
+        );
         let job = RegisteredJob::from_fn(JobTrigger::Scheduled, move |_| {
-            let (a, o, r) = (a.clone(), o.clone(), r.clone());
+            let (a, o, s, r, g) = (a.clone(), o.clone(), s.clone(), r.clone(), g.clone());
             async move {
+                s.fetch_add(1, Ordering::SeqCst);
                 if a.fetch_add(1, Ordering::SeqCst) > 0 {
                     o.store(true, Ordering::SeqCst);
                 }
-                tokio::time::sleep(Duration::from_millis(30)).await;
+                g.acquire().await.expect("the gate stays open").forget();
                 a.fetch_sub(1, Ordering::SeqCst);
                 r.fetch_add(1, Ordering::SeqCst);
                 Ok(None)
             }
         });
+        let spawn_run = || {
+            let (pool, job) = (pool.clone(), job.clone());
+            tokio::spawn(
+                async move { run_job(&pool, "same-job", &job, JobParams::default()).await },
+            )
+        };
 
-        let (r1, r2) = tokio::join!(
-            run_job(&pool, "same-job", &job, JobParams::default()),
-            run_job(&pool, "same-job", &job, JobParams::default()),
+        let first = spawn_run();
+        await_condition(|| started.load(Ordering::SeqCst) == 1).await;
+        let second = spawn_run();
+        await_condition(|| job.blocked.load(Ordering::SeqCst) == 1).await;
+        assert_eq!(
+            started.load(Ordering::SeqCst),
+            1,
+            "the second run is queued behind the first's lock, not running"
         );
-        r1.unwrap();
-        r2.unwrap();
+
+        gate.add_permits(2);
+        first.await.unwrap().unwrap();
+        second.await.unwrap().unwrap();
         assert_eq!(runs.load(Ordering::SeqCst), 2, "both runs must complete");
         assert!(
             !overlapped.load(Ordering::SeqCst),

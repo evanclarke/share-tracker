@@ -1137,11 +1137,8 @@ mod tests {
     /// the stored one, and kept `computed`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_recompute_interleaved_with_a_sell_write_cannot_mis_stamp_the_source() {
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicBool, Ordering};
-
         let dir = tempfile::tempdir().unwrap();
-        let pool = test_support::race_pool(&dir).await;
+        let (pool, busy) = test_support::race_pool_with_busy_probe(&dir).await;
         insert_listing(&pool, 1).await;
         insert_buy(&pool, 1, ListingId(1), Decimal::from(100)).await;
 
@@ -1176,27 +1173,14 @@ mod tests {
         // The replay re-supplies the date the row held before the recompute.
         let mut replay = sell_body(Decimal::from(100), vec![allocation()]);
         replay.settlement_date = Some(stated);
-        let running = Arc::new(AtomicBool::new(false));
         let writing = {
             let pool = pool.clone();
-            let running = running.clone();
-            tokio::spawn(async move {
-                running.store(true, Ordering::SeqCst);
-                db_upsert_sell(&pool, TradeId(2), &replay).await
-            })
+            tokio::spawn(async move { db_upsert_sell(&pool, TradeId(2), &replay).await })
         };
-        // A condition, then a grace period in which the write can do nothing
-        // but wait for the lock (or, under the old shape, has already resolved
-        // against the pool's pre-recompute row).
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while !running.load(Ordering::SeqCst) {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the Sell write never started"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        // An event, not a guessed duration: the write is blocked on the lock
+        // (under the old shape, having already resolved against the pool's
+        // pre-recompute row).
+        busy.blocked().await;
         assert!(
             !writing.is_finished(),
             "the Sell write waits for the write lock rather than deciding on a stale read"

@@ -71,6 +71,119 @@ pub async fn race_pool(dir: &tempfile::TempDir) -> SqlitePool {
         .expect("a file-backed pool")
 }
 
+/// A [`race_pool`] whose connections report when they are **blocked on a
+/// held lock**, for the concurrency tests whose point is that a write *waits*
+/// for another connection's write lock.
+///
+/// Such a test used to start the competing write, sleep a fixed grace period,
+/// and assert it had not finished. The grace period was a guess: long enough
+/// on this machine for the write to reach the lock, but nothing proved it had —
+/// on a loaded runner the assertion could pass with the write not yet started,
+/// which is the case the test exists to rule out. Instead, every connection
+/// here carries a SQLite busy handler (`sqlite3_busy_handler`, installed on
+/// connect in place of the `sqlite3_busy_timeout` handler sqlx set) that
+/// counts each time it is consulted — which SQLite does only when a lock it
+/// needs is held by another connection — so [`BusyProbe::blocked`] waits on
+/// the event itself.
+///
+/// The handler keeps [`db::BUSY_TIMEOUT`]'s contract: it waits 1 ms per retry
+/// and gives up (`SQLITE_BUSY`) once it has retried for that long, so a write
+/// on this pool waits for a held lock exactly as one on [`race_pool`] does.
+/// The counter is leaked — one `AtomicUsize` per probed pool, for the life of
+/// the test process — because SQLite holds the pointer for as long as any of
+/// the pool's connections lives, and no hook runs when sqlx closes one.
+pub async fn race_pool_with_busy_probe(dir: &tempfile::TempDir) -> (SqlitePool, BusyProbe) {
+    use std::sync::atomic::AtomicUsize;
+
+    let path = dir.path().join("race.db");
+    let path = path.to_string_lossy();
+    // Migrated through the production path first, then reopened with the
+    // handler: the probe changes how a connection waits, never the schema.
+    db::init(&path)
+        .await
+        .expect("a file-backed pool")
+        .close()
+        .await;
+    let waits: &'static AtomicUsize = Box::leak(Box::new(AtomicUsize::new(0)));
+    let options = sqlx::sqlite::SqlitePoolOptions::new().after_connect(move |conn, _| {
+        Box::pin(async move {
+            let mut handle = conn.lock_handle().await?;
+            // SAFETY: the handle is locked out of sqlx's worker thread for
+            // this call, and the argument is a `&'static AtomicUsize` — it
+            // outlives every connection SQLite could call the handler for.
+            let rc = unsafe {
+                libsqlite3_sys::sqlite3_busy_handler(
+                    handle.as_raw_handle().as_ptr(),
+                    Some(counting_busy_handler),
+                    std::ptr::from_ref(waits).cast_mut().cast(),
+                )
+            };
+            if rc == libsqlite3_sys::SQLITE_OK {
+                Ok(())
+            } else {
+                Err(sqlx::Error::Protocol(format!(
+                    "sqlite3_busy_handler failed with {rc}"
+                )))
+            }
+        })
+    });
+    let pool = db::connect_with(&path, options)
+        .await
+        .expect("a file-backed pool with the busy probe");
+    (pool, BusyProbe { waits })
+}
+
+/// The busy handler [`race_pool_with_busy_probe`] installs: count the
+/// consultation, then retry after 1 ms until [`db::BUSY_TIMEOUT`]'s worth of
+/// retries is spent.
+unsafe extern "C" fn counting_busy_handler(
+    waits: *mut std::ffi::c_void,
+    retries: std::ffi::c_int,
+) -> std::ffi::c_int {
+    // SAFETY: the pointer is the `&'static AtomicUsize` registered with it.
+    let waits = unsafe { &*waits.cast::<std::sync::atomic::AtomicUsize>() };
+    waits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let waited = std::time::Duration::from_millis(u64::try_from(retries).unwrap_or(0));
+    if waited >= db::BUSY_TIMEOUT {
+        return 0;
+    }
+    std::thread::sleep(std::time::Duration::from_millis(1));
+    1
+}
+
+/// What [`race_pool_with_busy_probe`] hands back beside its pool: whether any
+/// of the pool's connections has waited on a lock another connection held.
+pub struct BusyProbe {
+    waits: &'static std::sync::atomic::AtomicUsize,
+}
+
+impl BusyProbe {
+    /// Wait until a connection on the pool has been **blocked on a held lock**
+    /// — the competing write has reached the lock and can make no progress
+    /// past it. Fails after 10 s rather than hanging the suite.
+    ///
+    /// Counts from the pool's creation, so call it once the lock is held and
+    /// the competing task started, in a test whose setup writes without
+    /// contention (every test using it does — the setup runs on one task).
+    pub async fn blocked(&self) {
+        await_condition(|| self.waits.load(std::sync::atomic::Ordering::SeqCst) > 0).await;
+    }
+}
+
+/// Poll `condition` every millisecond until it holds, failing the test after
+/// 10 s — for waiting on an event another task or thread signals, never for
+/// guessing how long something takes.
+pub async fn await_condition(mut condition: impl FnMut() -> bool) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !condition() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the condition never held within the deadline"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+}
+
 /// The captured schema script, built on first use and shared by every later
 /// [`test_pool`] call in this process.
 ///
@@ -1666,6 +1779,60 @@ mod tests {
     use super::*;
     use crate::entities::exchange::Exchange;
     use serde_json::json;
+
+    /// The busy probe the write-lock concurrency tests wait on means what they
+    /// rely on, in both directions: uncontended writes and reads never count
+    /// (so a wait cannot be satisfied by the setup), a writer queued behind a
+    /// held write lock does — and is still only *waiting*, landing its write
+    /// once the lock is released, as a writer on a plain [`race_pool`] would.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_busy_probe_fires_only_for_a_writer_blocked_on_a_held_lock() {
+        use std::sync::atomic::Ordering;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (pool, busy) = race_pool_with_busy_probe(&dir).await;
+        listing(1).insert(&pool).await;
+        let mut held = db::write_tx(&pool).await.unwrap();
+        sqlx::query("UPDATE listings SET name = 'held' WHERE id = 1")
+            .execute(&mut *held)
+            .await
+            .unwrap();
+        // A reader under WAL is not blocked by the held writer.
+        let name: String = sqlx::query_scalar("SELECT name FROM listings WHERE id = 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_ne!(name, "held");
+        assert_eq!(
+            busy.waits.load(Ordering::SeqCst),
+            0,
+            "nothing has contended for a lock yet"
+        );
+
+        let queued = {
+            let pool = pool.clone();
+            tokio::spawn(async move {
+                let mut tx = db::write_tx(&pool).await?;
+                sqlx::query("UPDATE listings SET name = 'queued' WHERE id = 1")
+                    .execute(&mut *tx)
+                    .await?;
+                tx.commit().await
+            })
+        };
+        busy.blocked().await;
+        assert!(!queued.is_finished(), "a blocked writer waits for the lock");
+
+        held.commit().await.unwrap();
+        queued
+            .await
+            .unwrap()
+            .expect("the queued writer writes once the lock is free");
+        let name: String = sqlx::query_scalar("SELECT name FROM listings WHERE id = 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(name, "queued");
+    }
 
     /// The cached schema `test_pool` builds every database from must be the
     /// database the 51 migrations produce — not approximately, exactly.

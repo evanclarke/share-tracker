@@ -61,6 +61,19 @@ falls under the existing rules.
   apportionment sums exactly (demerger/scrip percentages), parcel allocations conserve quantity,
   split re-basing round-trips, `tax_year_for` boundaries, AMIT coverage totals equal the statement
   amount across any transfer/sale sequence (would have caught the partial-transfer finding above)
-- [ ] Replace the 11 fixed `sleep` grace periods in concurrency tests with a deterministic signal
-  (e.g. wait until the competing task is observed blocked on the busy handler)
-- [ ] Remove the 10 local `fn dec(s: &str)` copies in favour of `test_support::dec`
+- [x] Replace the 11 fixed `sleep` grace periods in concurrency tests with a deterministic signal
+  (e.g. wait until the competing task is observed blocked on the busy handler) — the four
+  write-lock races (trade/Sell settlement re-stamp, closing-price delete, snapshot generation) wait
+  on `test_support::race_pool_with_busy_probe`'s `BusyProbe::blocked`, a counting
+  `sqlite3_busy_handler` installed on every connection (pinned both ways by
+  `the_busy_probe_fires_only_for_a_writer_blocked_on_a_held_lock`); the scheduler's
+  `concurrent_runs_of_same_job_serialise` gates the first run until the second is observed parked
+  on the per-job lock (`RegisteredJob::serialise` counts a pending first poll — a lockless
+  `run_attached` now fails it deterministically, where the 30 ms window let it pass); the five
+  lockout expiry sleeps advance the tracker's own test-only clock offset
+  (`LockoutTracker::advance`); and the backup-hook kill test waits for the recorded grandchild pid
+  to be gone instead of sleeping past it. Shared wait helper: `test_support::await_condition`
+- [x] Remove the 10 local `fn dec(s: &str)` copies in favour of `test_support::dec` — nine named
+  `dec` and `trade.rs`'s `d`; `infra::decimal`'s
+  `no_test_module_redeclares_the_decimal_literal_helper` fails on any new
+  `fn <name>(s: &str) -> Decimal` outside `test_support`

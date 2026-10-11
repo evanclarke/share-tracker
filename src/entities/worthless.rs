@@ -334,9 +334,7 @@ mod tests {
         NaiveDate::from_ymd_opt(y, m, day).unwrap()
     }
 
-    fn dec(s: &str) -> Decimal {
-        s.parse().unwrap()
-    }
+    use crate::test_support::dec;
 
     async fn insert_listing(pool: &SqlitePool, id: i64, ticker: &str) {
         test_support::listing(id)

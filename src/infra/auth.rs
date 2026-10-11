@@ -466,6 +466,12 @@ struct TrackerState {
     /// made, oldest first — so never longer than
     /// [`LockoutPolicy::global_ceiling`], which is its memory bound.
     recent_attempts: VecDeque<Instant>,
+    /// How far the tests have moved this tracker's clock forward
+    /// ([`LockoutTracker::advance`]): every instant it reads is the real one
+    /// plus this, so a test sees a cooldown or window elapse without waiting
+    /// it out on the wall clock.
+    #[cfg(test)]
+    skew: Duration,
 }
 
 impl LockoutTracker {
@@ -483,6 +489,8 @@ impl LockoutTracker {
             state: Arc::new(Mutex::new(TrackerState {
                 sources: HashMap::new(),
                 recent_attempts: VecDeque::new(),
+                #[cfg(test)]
+                skew: Duration::ZERO,
             })),
             policy,
         }
@@ -501,6 +509,23 @@ impl LockoutTracker {
     /// leave its invariants broken half-way.
     fn lock(&self) -> std::sync::MutexGuard<'_, TrackerState> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The instant the state machine decides at: the real clock, plus any
+    /// test-only [`LockoutTracker::advance`].
+    #[cfg_attr(not(test), allow(unused_variables))]
+    fn now(state: &TrackerState) -> Instant {
+        let now = Instant::now();
+        #[cfg(test)]
+        let now = now + state.skew;
+        now
+    }
+
+    /// Move this tracker's clock forward — shared by every clone, so a test
+    /// holding a clone of an [`Auth`]'s tracker moves the one the router uses.
+    #[cfg(test)]
+    fn advance(&self, by: Duration) {
+        self.lock().skew += by;
     }
 
     /// Rounds a remaining cooldown **up** to whole seconds for `Retry-After`:
@@ -525,11 +550,12 @@ impl LockoutTracker {
     /// normally (the budget counts failures, so it takes that many to trip),
     /// and every attempt after it is refused before any hashing.
     fn begin_attempt(&self, source: Source) -> Attempt {
-        let now = Instant::now();
         let mut state = self.lock();
+        let now = Self::now(&state);
         let TrackerState {
             sources,
             recent_attempts,
+            ..
         } = &mut *state;
         // Pruning is O(tracked sources); only a *new* source can grow the map,
         // so only that path pays for it. An existing entry's own expiry is
@@ -1740,11 +1766,12 @@ mod api_tests {
 ///   a browser gets the rendered page instead, and that the request's peer
 ///   address is what selects the bucket.
 ///
-/// No test sleeps for minutes. The policy is a value ([`LockoutPolicy`]), so
-/// these use a three-failure budget and a ~1 s cooldown; the state machine
-/// itself runs on real `Instant`s — there is no stubbed clock anywhere — and
-/// the one test that must see a lockout *expire* sleeps just past that
-/// cooldown (~1.2 s in total for the module).
+/// No test sleeps. The policy is a value ([`LockoutPolicy`]), so these use a
+/// three-failure budget and a ~1 s cooldown, and a test that must see a
+/// cooldown or window *elapse* moves the tracker's clock forward
+/// ([`LockoutTracker::advance`], a test-only offset added to the real
+/// `Instant` the state machine reads) instead of waiting it out — a fixed
+/// sleep would make every expiry assertion a race against the machine's load.
 #[cfg(test)]
 mod lockout_tests {
     use super::*;
@@ -2232,7 +2259,7 @@ mod lockout_tests {
             tracker.begin_attempt(peer(1)),
             Attempt::Refused { .. }
         ));
-        std::thread::sleep(TEST_COOLDOWN + Duration::from_millis(100));
+        tracker.advance(TEST_COOLDOWN);
         // A clean slate: a whole fresh budget is allowed before the lock trips
         // again, where a surviving count would have tripped on the first.
         for attempt in 1..=TEST_BUDGET {
@@ -2254,8 +2281,8 @@ mod lockout_tests {
     /// streak kept alive across gaps shorter than the window still reaches the
     /// budget, and one left idle for longer is dropped.
     ///
-    /// The window is short and the gaps well inside it, so ordinary scheduler
-    /// jitter cannot flip either assertion.
+    /// The gaps are moved on the tracker's own clock ([`LockoutTracker::advance`]),
+    /// so no assertion here depends on how fast the test runs.
     #[test]
     fn the_failure_window_is_idle_based() {
         let mut policy = policy();
@@ -2273,7 +2300,7 @@ mod lockout_tests {
                 Attempt::Allowed,
                 "attempt {attempt} is inside every 500 ms window"
             );
-            std::thread::sleep(Duration::from_millis(60));
+            tracker.advance(Duration::from_millis(60));
         }
         assert!(
             matches!(tracker.begin_attempt(peer(1)), Attempt::Refused { .. }),
@@ -2284,7 +2311,7 @@ mod lockout_tests {
         // a full fresh budget.
         let tracker = LockoutTracker::with_policy(policy);
         assert_eq!(tracker.begin_attempt(peer(1)), Attempt::Allowed);
-        std::thread::sleep(Duration::from_millis(700));
+        tracker.advance(Duration::from_millis(700));
         for attempt in 1..=12 {
             assert_eq!(
                 tracker.begin_attempt(peer(1)),
@@ -2396,7 +2423,7 @@ mod lockout_tests {
             Attempt::Allowed => panic!("the ceiling must refuse a fresh source"),
         }
 
-        std::thread::sleep(Duration::from_millis(500));
+        tracker.advance(Duration::from_millis(500));
         for attempt in 1..=TEST_BUDGET {
             assert_eq!(
                 tracker.begin_attempt(fresh),
@@ -2549,7 +2576,9 @@ mod lockout_tests {
     #[tokio::test]
     async fn the_login_lockout_refuses_by_source_with_429_and_retry_after() {
         let pool = test_pool().await;
-        let client = client(&pool, auth_with(policy())).with_peer(([203, 0, 113, 7], 4001).into());
+        let auth = auth_with(policy());
+        let clock = auth.lockouts.clone();
+        let client = client(&pool, auth).with_peer(([203, 0, 113, 7], 4001).into());
 
         for attempt in 1..=TEST_BUDGET {
             let resp = script_login(&client, "definitely-wrong").await;
@@ -2604,7 +2633,7 @@ mod lockout_tests {
 
         // Wait out the (test-sized) cooldown: the correct password now signs
         // in, cookie and all.
-        tokio::time::sleep(TEST_COOLDOWN + Duration::from_millis(250)).await;
+        clock.advance(TEST_COOLDOWN);
         let signed_in = script_login(&client, "hunter2").await;
         assert_eq!(
             signed_in.status,

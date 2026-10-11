@@ -106,9 +106,7 @@ mod tests {
     use super::*;
     use crate::test_support::ymd;
 
-    fn dec(s: &str) -> Decimal {
-        s.parse().unwrap()
-    }
+    use crate::test_support::dec;
 
     /// The ATO's own fully franked figures: $700 franked carries exactly $300
     /// (`docs/ato/you-and-your-shares-dividends.md`, Example 2), and the

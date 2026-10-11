@@ -119,11 +119,8 @@ async fn api_delete_unknown_row_is_404() {
 /// the test flaky.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_delete_cannot_race_a_concurrent_manual_price_write() {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
-
     let dir = tempfile::tempdir().unwrap();
-    let pool = crate::test_support::race_pool(&dir).await;
+    let (pool, busy) = crate::test_support::race_pool_with_busy_probe(&dir).await;
     insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
     insert_buy(&pool, 1, ListingId(1), "100").await;
     store_errored(&pool, ymd(2026, 6, 2)).await;
@@ -139,27 +136,14 @@ async fn a_delete_cannot_race_a_concurrent_manual_price_write() {
         .build();
     db_store(&mut *tx, &manual).await.unwrap();
 
-    let running = Arc::new(AtomicBool::new(false));
     let deleting = {
         let app = app.clone();
-        let running = running.clone();
-        tokio::spawn(async move {
-            running.store(true, Ordering::SeqCst);
-            delete_req(&app, "/closing_prices/1/2026-06-02").await
-        })
+        tokio::spawn(async move { delete_req(&app, "/closing_prices/1/2026-06-02").await })
     };
-    // A condition, not a guessed duration: the handler is under way. Then a
-    // grace period in which it does whatever it can — holding the write lock,
-    // that is its guard reads at most, and it can never reach the delete.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while !running.load(Ordering::SeqCst) {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the delete never started"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-    }
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    // An event, not a guessed duration: the handler is blocked on the write
+    // lock — having done whatever it could before it, its guard reads at most,
+    // and it can never reach the delete.
+    busy.blocked().await;
     assert!(
         !deleting.is_finished(),
         "the delete waits for the write lock rather than deciding on a stale read"

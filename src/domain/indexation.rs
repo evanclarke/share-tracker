@@ -183,9 +183,7 @@ mod tests {
         NaiveDate::from_ymd_opt(y, m, day).unwrap()
     }
 
-    fn dec(s: &str) -> Decimal {
-        s.parse().unwrap()
-    }
+    use crate::test_support::dec;
 
     /// The rounding rule is the ATO's own, stated with its own example:
     /// "limited to 3 decimal places (round the fourth decimal up from 5, e.g.

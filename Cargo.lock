@@ -2679,6 +2679,7 @@ dependencies = [
  "hmac",
  "http-body-util",
  "lettre",
+ "libsqlite3-sys",
  "quick-xml",
  "reqwest 0.13.5",
  "rust_decimal",

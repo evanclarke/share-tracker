@@ -291,9 +291,7 @@ async fn put_sell(
     .await;
 }
 
-fn dec(s: &str) -> Decimal {
-    s.parse().unwrap()
-}
+use crate::test_support::dec;
 
 /// `docs/ato/cgt-how-to-calculate.md` — "Example: CGT with discount".
 ///

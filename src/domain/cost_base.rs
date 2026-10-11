@@ -2614,9 +2614,7 @@ mod tests {
     // checked_cost_base (SCENARIOS W-e)
     // -----------------------------------------------------------------------
 
-    fn dec(s: &str) -> Decimal {
-        s.parse().unwrap()
-    }
+    use crate::test_support::dec;
 
     /// The bound is the type's own: a product `Decimal` can hold is returned,
     /// the first one it cannot is refused, and the two are one step apart.

@@ -726,6 +726,43 @@ mod tests {
         }
     }
 
+    /// A test parses a decimal literal through the one shared
+    /// [`crate::test_support::dec`], never a module-local copy of it: ten
+    /// copies had grown (one named `d`, one with its own `expect` wording),
+    /// and a copy is where the parse would quietly start to differ. The scan
+    /// matches any `fn name(s: &str) -> Decimal`, whatever the name.
+    #[test]
+    fn no_test_module_redeclares_the_decimal_literal_helper() {
+        // Assembled so this test's own text is not what it reports.
+        let signature = format!("(s: &str) -> {}", "Decimal");
+        let mut found_shared = false;
+        let mut offenders = Vec::new();
+        for (file, body) in crate::test_support::rust_sources() {
+            for (n, line) in crate::test_support::code_only(&body).lines().enumerate() {
+                let code = line.trim();
+                if !(code.contains("fn ") && code.contains(signature.as_str())) {
+                    continue;
+                }
+                if file == "test_support.rs" && code.starts_with("pub fn dec(") {
+                    found_shared = true;
+                    continue;
+                }
+                offenders.push(format!("{file}:{}: {code}", n + 1));
+            }
+        }
+        assert!(
+            found_shared,
+            "the scan no longer finds test_support's own `dec` — it has moved or the scan \
+             has stopped reading code"
+        );
+        assert!(
+            offenders.is_empty(),
+            "parse a test's decimal literal with `crate::test_support::dec`, not a local \
+             copy:\n{}",
+            offenders.join("\n")
+        );
+    }
+
     /// [`crate::test_support::code_only`] is what makes the scan above
     /// non-vacuous in both directions, so it is pinned here beside it: prose
     /// naming a float is not an offender, and code holding one is — including
@@ -763,9 +800,7 @@ mod tests {
     // The pro-rating helper
     // -----------------------------------------------------------------------
 
-    fn dec(s: &str) -> Decimal {
-        s.parse().unwrap()
-    }
+    use crate::test_support::dec;
 
     /// Wherever the plain expression computes at all, [`mul_div`] is that
     /// expression — the same operations in the same order, so not a digit

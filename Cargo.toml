@@ -103,6 +103,13 @@ utoipa-axum = "0.3"
 
 [dev-dependencies]
 http-body-util = "0.1"
+# The SQLite C API sqlx already links (one copy only: the crate `links =
+# "sqlite3"`), reached for one test-only call — `sqlite3_busy_handler`, which
+# lets a concurrency test observe a writer blocked on the write lock
+# (`test_support::race_pool_with_busy_probe`) instead of sleeping a guessed
+# grace period. No features: sqlx's own selection is what builds it. Upgrade it
+# in step with sqlx, whose raw handle is this crate's `sqlite3` type.
+libsqlite3-sys = { version = "0.30.1", default-features = false }
 tempfile = "3"
 # test-util enables tokio's paused virtual clock (#[tokio::test(start_paused)]),
 # used to drive the scheduler's capped-sleep loop deterministically in tests.
