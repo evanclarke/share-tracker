@@ -39,7 +39,54 @@ use std::{sync::Arc, time::Duration};
 /// The per-job lock is held for the whole run, serialising executions of the
 /// same job: a manual trigger overlapping the scheduled run (or another
 /// trigger) waits for the in-flight run to finish instead of racing it.
+///
+/// The run is **detached** from its caller: it executes on a task of its own
+/// and the caller only awaits that task's handle. `POST /jobs/{name}` awaits
+/// this inline, and axum drops a request's future when its client disconnects
+/// — closing the tab or a Ctrl-C in curl used to cancel the job between two
+/// of its commits and leave its `job_runs` row `running` for ever. Dropping
+/// the handle now leaves the run going; it finishes and records itself.
+///
+/// A job that **panics** is recorded as a failed run carrying the panic's
+/// message, rather than unwinding through here: the work runs on a task of
+/// its own too, whose `JoinError` is the panic caught. On the scheduled path
+/// the panic used to unwind out of `run_entry` and end that entry's timer
+/// loop, so one panic stopped the job being scheduled until a restart.
 pub(super) async fn run_job(
+    pool: &SqlitePool,
+    name: &str,
+    job: &Arc<RegisteredJob>,
+    params: JobParams,
+) -> Result<(), String> {
+    let (pool, name, job) = (pool.clone(), name.to_string(), job.clone());
+    tokio::spawn(async move { run_attached(&pool, &name, &job, params).await })
+        .await
+        .unwrap_or_else(|e| Err(join_failure(e)))
+}
+
+/// The message a run that ended in a `JoinError` records: the panic's own
+/// payload when it carried a string (`panic!("…")`, `expect`, an index out of
+/// bounds — every panic the code itself raises), else a plain statement that it
+/// panicked. A cancelled task cannot reach here: nothing aborts a run.
+fn join_failure(e: tokio::task::JoinError) -> String {
+    if !e.is_panic() {
+        return format!("job task ended unexpectedly: {e}");
+    }
+    let payload = e.into_panic();
+    let message = payload
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned());
+    match message {
+        Some(m) => format!("job panicked: {m}"),
+        None => "job panicked".to_string(),
+    }
+}
+
+/// The body of [`run_job`], on the task it detaches. The job's own work is
+/// spawned once more so a panic in it is caught here — with the lock still
+/// held and the opening row still to complete — and recorded as a failure.
+async fn run_attached(
     pool: &SqlitePool,
     name: &str,
     job: &RegisteredJob,
@@ -55,7 +102,9 @@ pub(super) async fn run_job(
             None
         }
     };
-    let result = (job.work)(params).await;
+    let result = tokio::spawn((job.work)(params))
+        .await
+        .unwrap_or_else(|e| Err(join_failure(e)));
     let finished_at = chrono::Utc::now().to_rfc3339();
     tracing::info!(job = %name, ok = result.is_ok(), "job finished");
 

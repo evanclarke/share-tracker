@@ -56,20 +56,6 @@ falls under the existing rules.
   trading day before 1 July 2027 (the scheduled price import plus `closing_price`'s held-days
   backfill), since a missing one cannot be fetched reliably years later
 
-## A manual job is cancelled when its HTTP client disconnects (2026-10-10 review, robustness)
-`POST /jobs/{name}` (`scheduler/http.rs` ~131) awaits `run_job` inline, so closing the tab or
-Ctrl-C in curl drops the future between commits and leaves the `job_runs` row `running`.
-- [ ] Run the job on a `tokio::spawn`ed task and await its handle, so a disconnect detaches from the
-  run rather than cancelling it; test by dropping the request future mid-job and asserting the run
-  finishes and records `finished`
-
-## A panic in a scheduled job ends that job's schedule until restart (2026-10-10 review, robustness)
-`schedule::spawn` spawns `run_entry` with no `catch_unwind`; `CatchPanicLayer` covers HTTP only, so
-one panic ends the timer loop for that job.
-- [ ] Catch a panicking run (`FutureExt::catch_unwind` / a `JoinHandle` per run), record it as a failed
-  run with its message, release the job lock and keep the loop scheduling; test with a registry
-  containing a job that panics once
-
 ## Price collection re-bases prices outside a transaction (2026-10-10 review, data integrity)
 `closing_price/collection.rs` (~212) calls `db_rebase_listing_prices` on a bare pooled connection, so
 its read and per-row `UPDATE`s autocommit one by one; the other three callers run it inside

@@ -7404,3 +7404,17 @@ backup is taken again until restart.
   `backup_command_receives_a_path_with_shell_metacharacters_as_one_argument` uses a directory named
   ``my backups; it's $HOME `x` & "y"`` and asserts the hook sees it verbatim as exactly one
   argument. The README now says to write the token bare, not inside quotes of one's own
+
+## A manual job is cancelled when its HTTP client disconnects (2026-10-10 review, robustness)
+`POST /jobs/{name}` (`scheduler/http.rs` ~131) awaits `run_job` inline, so closing the tab or
+Ctrl-C in curl drops the future between commits and leaves the `job_runs` row `running`.
+- [x] Run the job on a `tokio::spawn`ed task and await its handle, so a disconnect detaches from the
+  run rather than cancelling it; test by dropping the request future mid-job and asserting the run
+  finishes and records `finished`
+
+## A panic in a scheduled job ends that job's schedule until restart (2026-10-10 review, robustness)
+`schedule::spawn` spawns `run_entry` with no `catch_unwind`; `CatchPanicLayer` covers HTTP only, so
+one panic ends the timer loop for that job.
+- [x] Catch a panicking run (`FutureExt::catch_unwind` / a `JoinHandle` per run), record it as a failed
+  run with its message, release the job lock and keep the loop scheduling; test with a registry
+  containing a job that panics once
