@@ -66,9 +66,8 @@ pub(crate) async fn db_list(
     mic: Option<&str>,
     params: &ListParams,
 ) -> Result<Vec<ExchangeHoliday>, sqlx::Error> {
-    let mut qb = sqlx::QueryBuilder::new(
-        "SELECT id, mic, holiday_date, name FROM exchange_holidays WHERE 1=1",
-    );
+    let mut qb =
+        sqlx::QueryBuilder::new("SELECT id, mic, holiday_date, name FROM exchange_holidays");
     http::FilterClauses::over(&mut qb)
         .eq("mic", mic.map(str::to_string))
         .date_range("holiday_date", params.from, params.to);

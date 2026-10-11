@@ -737,7 +737,7 @@ pub(crate) async fn db_list(
 ) -> Result<Vec<RightsSale>, sqlx::Error> {
     let mut qb = QueryBuilder::new(
         "SELECT rs.* FROM rights_sales rs \
-         JOIN corporate_actions ca ON ca.id = rs.rights_action_id WHERE 1=1",
+         JOIN corporate_actions ca ON ca.id = rs.rights_action_id",
     );
     http::FilterClauses::over(&mut qb)
         .eq("ca.listing_id", params.listing_id)

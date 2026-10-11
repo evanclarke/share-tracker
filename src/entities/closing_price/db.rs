@@ -89,7 +89,7 @@ pub async fn db_list(
     let mut qb = QueryBuilder::new(
         "SELECT id, listing_id, price_date, price, price_as_observed, source, fetched_at, \
                 fetched_symbol, status, error, origin, sourced_from, reason \
-         FROM closing_prices WHERE 1=1",
+         FROM closing_prices",
     );
     crate::infra::http::FilterClauses::over(&mut qb)
         .eq("listing_id", listing_id)

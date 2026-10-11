@@ -448,8 +448,8 @@ pub fn panic_response(err: Box<dyn std::any::Any + Send + 'static>) -> Response 
 /// it, which is exactly the failure this item exists to prevent.
 ///
 /// [`Self::apply_filter`] appends its `AND …` clauses through a
-/// [`FilterClauses`] handle, over a statement already opened with `WHERE 1=1`
-/// (see [`crud_list_filtered`]). The **column names are fixed text this tree
+/// [`FilterClauses`] handle, which opens the statement's `WHERE 1=1` itself
+/// (see [`FilterClauses::over`]). The **column names are fixed text this tree
 /// owns** and are pushed as SQL; every *value* is bound, never interpolated —
 /// the same split the whole-list query's trusted `AssertSqlSafe(format!(…))`
 /// already made. That half is the compiler's to keep, not a convention: the
@@ -486,9 +486,13 @@ impl<'a> FilterClauses<'a> {
     /// through the handle keeps one implementation of the binding rather than
     /// one inside the trait's reach and one outside it.
     ///
-    /// The statement must already be open for `AND …` to be appended to — a
-    /// `WHERE 1=1` or a real first predicate.
+    /// `qb` is the statement up to (not including) its `WHERE`: this opens
+    /// the clause itself with `WHERE 1=1`, so every `AND …` the handle
+    /// appends has something to follow and no caller can forget to open it.
+    /// A fixed predicate of the caller's own is a clause like any other
+    /// (`.eq(…)` with `Some`), not a hand-written `WHERE` before this.
     pub fn over(qb: &'a mut QueryBuilder<Sqlite>) -> Self {
+        qb.push(" WHERE 1=1");
         Self { qb }
     }
 
@@ -659,8 +663,8 @@ pub async fn crud_list<E: CrudEntity>(pool: &SqlitePool) -> Result<Vec<E>, sqlx:
 /// ORDER BY are trusted `&'static str` constants (`E::COLUMNS`/`TABLE`/
 /// `ORDER_BY`), exactly as the plain `AssertSqlSafe(format!(…))` read was, and
 /// every **value** the filter carries is bound with `push_bind` — no filter
-/// value is ever interpolated into SQL. The statement opens with `WHERE 1=1`
-/// so each filter can append a plain `AND …` clause without tracking whether
+/// value is ever interpolated into SQL. [`FilterClauses::over`] opens the
+/// statement with `WHERE 1=1` so each filter can append a plain `AND …` clause without tracking whether
 /// it is the first, and an all-unset filter appends nothing, leaving the
 /// unfiltered list byte-for-byte what it always was.
 pub async fn crud_list_filtered<E: CrudEntity>(
@@ -668,7 +672,7 @@ pub async fn crud_list_filtered<E: CrudEntity>(
     filter: &E::Filter,
 ) -> Result<Vec<E>, sqlx::Error> {
     let mut qb: QueryBuilder<Sqlite> =
-        QueryBuilder::new(format!("SELECT {} FROM {} WHERE 1=1", E::COLUMNS, E::TABLE));
+        QueryBuilder::new(format!("SELECT {} FROM {}", E::COLUMNS, E::TABLE));
     filter.apply_filter(&mut FilterClauses::over(&mut qb));
     qb.push(" ORDER BY ").push(E::ORDER_BY);
     qb.build_query_as::<E>().fetch_all(pool).await
@@ -1318,6 +1322,29 @@ mod tests {
     use super::*;
     use http_body_util::BodyExt;
     use std::sync::{Arc, Mutex};
+
+    /// `over` opens the `WHERE` itself, so a caller hands it the statement
+    /// before one and cannot leave its `AND …` clauses with nothing to follow
+    /// — an unfiltered read included, which appends nothing after it.
+    #[test]
+    fn filter_clauses_open_their_own_where() {
+        let sql = |filter: fn(&mut FilterClauses<'_>)| {
+            let mut qb = QueryBuilder::<Sqlite>::new("SELECT id FROM trades");
+            filter(&mut FilterClauses::over(&mut qb));
+            qb.sql().as_str().to_string()
+        };
+        assert_eq!(sql(|_| {}), "SELECT id FROM trades WHERE 1=1");
+        assert_eq!(
+            sql(|c| {
+                c.eq("listing_id", Some(1_i64)).date_range(
+                    "date",
+                    None,
+                    chrono::NaiveDate::from_ymd_opt(2024, 6, 30),
+                );
+            }),
+            "SELECT id FROM trades WHERE 1=1 AND listing_id = ? AND date <= ?"
+        );
+    }
 
     async fn body_of(resp: Response) -> String {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();

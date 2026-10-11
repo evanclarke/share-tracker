@@ -291,7 +291,7 @@ pub async fn db_list(
     let mut qb = QueryBuilder::new(
         "SELECT report, snapshot_date, generated_at, stale, provisional, price_carried_forward, \
                 holding_excluded, excluded_holdings \
-         FROM report_snapshots WHERE 1=1",
+         FROM report_snapshots",
     );
     crate::infra::http::FilterClauses::over(&mut qb)
         .eq("report", report)
@@ -455,11 +455,10 @@ pub async fn db_holding_series(
     from: Option<NaiveDate>,
     to: Option<NaiveDate>,
 ) -> Result<Vec<HoldingSeries>, sqlx::Error> {
-    let mut qb = QueryBuilder::new(
-        "SELECT snapshot_date, rows_json FROM report_snapshots \
-         WHERE report = 'unrealised_gains'",
-    );
-    crate::infra::http::FilterClauses::over(&mut qb).date_range("snapshot_date", from, to);
+    let mut qb = QueryBuilder::new("SELECT snapshot_date, rows_json FROM report_snapshots");
+    crate::infra::http::FilterClauses::over(&mut qb)
+        .eq("report", Some(ReportKind::UnrealisedGains))
+        .date_range("snapshot_date", from, to);
     qb.push(" ORDER BY snapshot_date");
     let rows = qb.build().fetch_all(pool).await?;
 

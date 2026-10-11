@@ -54,7 +54,12 @@ pub struct OpenParcel {
     /// Units not yet allocated to a Sell, in the unit basis of `as_of`
     /// (current units when `as_of` is `None`) — the figure that lines up with
     /// a market price for that date, and the one a broker statement shows.
-    /// Always > 0: fully consumed parcels are not returned.
+    /// Always > 0: fully consumed parcels are not returned — [`load`], the
+    /// only constructor, drops them (`a_fully_consumed_parcel_is_filtered_out`).
+    /// Left a comment rather than a positive-quantity type by decision: one
+    /// constructor holds it, and a type would not catch the case that makes
+    /// it misleading (a rounding residue from re-basing a sale across a split
+    /// is > 0 too — see TODO.md's re-basing section).
     ///
     /// The cost-base arithmetic behind [`Self::cost_base`] runs on the
     /// parcel's *as-acquired* basis instead; a split scales the unit count

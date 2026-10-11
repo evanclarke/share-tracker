@@ -7571,3 +7571,126 @@ app and trick a click on a delete or job button; the clicks are same-origin insi
   `dec` and `trade.rs`'s `d`; `infra::decimal`'s
   `no_test_module_redeclares_the_decimal_literal_helper` fails on any new
   `fn <name>(s: &str) -> Decimal` outside `test_support`
+
+## Comment-stated invariants the type system should enforce (review 2026-10-11)
+A sweep for properties that a doc comment (or a source-scan allowlist) states but nothing structural
+holds. Each item moves the rule into a type, so a violation stops compiling rather than producing a
+wrong figure. Ordered by risk: the first two guard against silently wrong tax figures in the cases
+the suite is least likely to cover (a foreign-currency parcel; a split between purchase and sale).
+- [x] **AUD vs native currency.** `CostBase::into_aud_with` (`src/domain/cost_base.rs`) maps
+  `CostBase → CostBase`, so a native-currency breakdown can be aggregated with an AUD one or
+  converted twice, and `at_rate`'s pass-through at rate 1 hides it from AUD fixtures. Give
+  `CostBase` a currency marker (`CostBase<Native>` / `CostBase<Aud>`, conversion only via
+  `into_aud_with`), then an `Aud(Decimal)` newtype for the inputs documented "expected in AUD"
+  (`current_prices` in `reports::unrealised_gains`/`reports::performance`, and the like)
+  — Done 2026-10-11: `CostBase<Native>`/`CostBase<Aud>` (private marker field, `into_aud_with` the
+  only conversion; indexation and `OpenParcel` take `CostBase<Aud>`), and `infra::currency::Aud`
+  carried by every report price map, `LiveValuation`/`ListingValuation::aud_price` and the
+  request `prices` maps (`strict_aud_map`, OpenAPI schema unchanged). Made only by
+  `fx::apply_rate_to_aud` or `Aud::stated`, whose production call sites are pinned by
+  `infra::currency`'s `aud_is_stated_only_where_the_amount_is_known_to_be_aud`
+- [x] **Unit basis of a quantity.** As-acquired and as-of/sale-date quantities are both `Decimal`;
+  `open_parcels::db_units_sold`'s doc says the sale-date quantity "must" be re-based before it is
+  subtracted, and `OpenParcel::remaining_as_of` vs `parcel.quantity` is distinguished only in prose
+  (~180 comments state a basis). Introduce distinct types (e.g. `AcquiredUnits` / `UnitsAt`) with
+  `adjustments::split_adjusted_quantity`/`as_acquired_quantity`/`sold_in_acquired_units` as the
+  only conversions, carried by `UnitsConsumed::quantity` and `OpenParcel::remaining_as_of` — the
+  quantity counterpart of `cost_base::Held`
+  — Done 2026-10-11: `adjustments::AcquiredUnits` (a parcel's own basis — `ParcelRow`/`Parcel::
+  quantity`, the pipeline's `units`, `AmitReductionEvent`'s four counts, `RolledParcel::remaining`)
+  and `adjustments::UnitsAt`, which carries the date whose basis it is in (`UnitsConsumed::quantity`,
+  `OpenParcel::remaining_as_of`, `RolledParcel::at_date_units`, the allocation reads), so a
+  conversion is handed only its target date. The three functions plus `UnitsAt::rebased` are the
+  only conversions, and now re-base in **either** direction — the one-directional window that
+  `reduction_for` and the AMIT generator each special-cased by hand is gone (pinned by
+  `a_quantity_re_bases_backward_to_an_earlier_date` and the split round-trip properties). Typing it
+  exposed two sums over parcels of *different* as-acquired bases in `closing_price::held` (harmless
+  non-zero tests, now `any`)
+- [x] **Valuation-only FX fallback.** `fx::ValuationRate` exposes `pub rate`, so a caller can drop
+  `provisional` ("the caller must surface this"), and valuation-only use is held by the
+  `VALUATION_RATE_CALLERS_ALLOWED` file-name scan. Make the rate private and offer only an `apply`
+  returning the value with its provisional flag attached; once tax paths accept only plain/`Aud`
+  amounts, retire the allowlist scan
+  — Done 2026-10-11: `ValuationRate`'s fields are private; `apply(amount)` and `quoted()` (the rate
+  itself, which the period-performance report shows) return an `fx::Provisional<T>` whose only exit
+  is `into_parts() -> (T, bool)`, so dropping the flag means naming it. `reports::valuation::
+  ListingValuation` carries the `ValuationRate` in place of its separate `rate`/`provisional`
+  fields (`provisional()` reads it), and period-performance's FX attribution is now two `apply`s.
+  Pinned by `a_valuation_rate_hands_its_flag_to_everything_derived_from_it`. The allowlist scan
+  **stays**: its retirement condition does not hold — the strict tax path (`FxRates::to_aud`)
+  still returns a bare `Decimal`, so no type tells a tax figure from a valuation and only the scan
+  keeps a tax report off the fallback
+- [x] **`sale_trade_id: i64` overloaded.** `realised_gains::RealisedGainLoss::sale_trade_id` (and
+  the tax report's `DisposalParcelRow` copy) is a trade id or a `rights_sales` id depending on the
+  separate `source` field. Replace the pair with an enum (e.g. `DisposalId { Sell(TradeId),
+  RightsSale(RightsSaleId) }`); the API has no external clients, so reshaping the JSON is allowed
+  (update `docs/API.md`, and the CLAUDE.md note on the bare field)
+  — Done 2026-10-11: `realised_gains::DisposalId { Sell(TradeId), RightsSale(RightsSaleId) }`
+  (new `infra::id::RightsSaleId`, which `RightsSale::id` and its routes now carry too) replaces the
+  pair on both rows, serialised adjacently tagged and flattened as `source` + `disposal_id`; the
+  tax report's scrip-cash map is keyed by `TradeId` and its rights-sale map by `RightsSaleId`, so
+  neither can be handed the other's id. The web UI had been linking every `sale_trade_id` cell to
+  a *trade* — a rights sale's id opened whichever trade shared it; `disposal_id` now links per
+  `source` (`disposalHref`, on Realised Gains and Net Capital Gain's disposals expand, which gained
+  `links` support). Pinned by `db_rights_sale_flows_into_the_report` (rights sale 1 beside trade 1)
+  and `a_disposal_id_links_to_the_record_its_source_names`
+- [x] **Same overload in the health report's nil-proceeds alert** (found doing the item above):
+  `reports::health`'s `nil_proceeds_disposals` rows carry `kind` (`Sell`/`RightsSale`) plus a bare
+  `record_id: i64` whose table depends on it. Give it the same `DisposalId` (or its own enum), and
+  update the `refreshHealthBanner` reader and `docs/API.md`
+  — Done 2026-10-11: `NilProceedsDisposal` carries `realised_gains::DisposalId` (flattened as
+  `source` + `disposal_id`, the realised-gains rows' own pair) in place of `kind` + `record_id`;
+  `NilProceedsKind` is gone, the loader reads each half's id as its typed `TradeId`/`RightsSaleId`,
+  and the same-date tie-break orders by the disposal instead of comparing ids across tables. The
+  banner reads `d.source`/`d.disposal_id`. Pinned by the health tests (`DisposalId` assertions, and
+  the served JSON carrying no `kind`/`record_id`) and `the_nil_proceeds_banner_reads_the_disposal_id`
+- [x] **Sorted-input preconditions.** `parcel_optimiser::allocate_strategy` says "`parcels` must
+  already be FIFO-sorted" but is `pub` with four callers (one in `reports::net_capital_gain`): take
+  the already-sorted `Candidates` (or a `FifoSorted` newtype) instead of a slice. Lower priority:
+  the `adjustments` event loaders' "sorted by date (then id)" promise, which the ordered
+  floor-at-nil walks rely on
+  — Done 2026-10-11: `allocate_strategy` takes `&Candidates` (and reads the sale date off it, so
+  the discount clock can no longer be handed a different date from the costing's); its private
+  core `allocate_parcels` sorts the slice itself — FIFO now sorts like the other three strategies,
+  on FIFO order — so the precondition is gone rather than typed. Pinned by
+  `allocation_does_not_depend_on_the_order_the_parcels_arrive_in` (newest-first input, every
+  strategy, ties FIFO decides). The loaders' promise is **left as a comment, by decision**: neither
+  ordered walk relies on it — `cost_base::reduction_walk` and the net-capital-gain E10/G1 walk both
+  sort their merged events by `(date, kind rank)` themselves, so the loader's `ORDER BY … id`
+  only breaks a same-date, same-kind tie, where it changes which row is flagged `capped`, never the
+  running balance; and `split_ratio` is a product over a date window, which no order changes
+- [x] **`base_path` normalised form.** `config::normalise_base_path` produces `""` or `/a/b`, which
+  ~15 functions across `web.rs`, `api_spec.rs`, `infra/auth.rs` and `app.rs` assume of a bare
+  `String`/`&str`. A `BasePath` newtype constructible only through normalisation
+  — Done 2026-10-11: `infra::config::BasePath` (private field; made only by `BasePath::parse`,
+  which replaces `normalise_base_path`, or `BasePath::ROOT`) is what `Settings::base_path`,
+  `app::router`/`api_routes`, `web::router`, `api_spec`'s `document_for`/`publish`/`route_index`/
+  `router` and `auth::AuthState` carry. `as_str()` is the prefix to concatenate onto and `home()`
+  the `/`-at-the-root URL, which replaced the four hand-written `if empty { "/" }` copies
+  (`home_path`, `cookie_path`, the OpenAPI server URL, the route index). Pinned by
+  `a_base_path_answers_its_prefix_and_its_home_url` and the existing normalisation tests
+- [x] **Currency and month as strings.** `cost_base::Parcel::currency` is `&str` and the `infra::fx`
+  lookups take `currency: &str` / `month: &str` (`'YYYY-MM'`) though CLAUDE.md types every currency
+  as `CurrencyCode`. Take `&CurrencyCode` and a small `RateMonth` type
+  — Done 2026-10-11: every `infra::fx` lookup (`resolve_rate`, `resolve_valuation_rate`, `to_aud`,
+  `rate_for`, `has_rate`), `Parcel::currency`, `CostBase::into_aud_with`, the tax-summary
+  `aud_field*` helpers and `validate_spot_fx_rate` take `&CurrencyCode`, and the nine report reads
+  that pulled `currency` into a `String` now read a `CurrencyCode`. `fx::RateMonth` (made by
+  `RateMonth::of(date)`, stepped by `previous`, with an sqlx TEXT codec that refuses a key that is
+  not `YYYY-MM`) keys `FxRates` and is what `FxError::MissingRate` and the six entity
+  `MissingFxRate` errors carry. The free `currency::is_aud(&str)` is gone — no bare code reaches
+  the question. Pinned by `a_rate_month_is_a_months_key_and_refuses_anything_else`
+- [x] **`FilterClauses::over` precondition.** "The statement must already be open for `AND …`" —
+  have `over` push its own `WHERE 1=1` (or take the statement before `WHERE`) so the rule cannot be
+  broken
+  — Done 2026-10-11: `over` takes the statement *before* its `WHERE` and pushes `WHERE 1=1` itself;
+  the six callers (`crud_list_filtered`, `closing_price::db_list`, `exchange_holiday::db_list`,
+  `rights_sale::db_list`, `reports::snapshot`'s two reads) dropped their hand-written opening, and
+  the holding-series read's fixed `report = 'unrealised_gains'` predicate became an `.eq` clause
+  like any other. Pinned by `infra::http`'s `filter_clauses_open_their_own_where`
+- [x] **`OpenParcel::remaining_as_of` "Always > 0".** Only `open_parcels::load` constructs it, so a
+  positive-quantity type is low value; decide whether to type it or leave the comment
+  — Decided 2026-10-11: **left as a comment** (now saying why). `load` is the only constructor and
+  its filter is pinned by `a_fully_consumed_parcel_is_filtered_out`; and the one way the comment
+  misleads — a re-basing rounding residue like `1e-27` that keeps a sold-out parcel open — is
+  positive too, so a positive type would not catch it. That is the re-basing section's defect to fix
