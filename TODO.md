@@ -120,3 +120,22 @@ the suite is least likely to cover (a foreign-currency parcel; a split between p
   broken
 - [ ] **`OpenParcel::remaining_as_of` "Always > 0".** Only `open_parcels::load` constructs it, so a
   positive-quantity type is low value; decide whether to type it or leave the comment
+
+## Re-basing a remainder through the as-acquired basis loses exactness (verification 2026-10-11)
+Found while verifying the unit-basis types (`9fabf3d`), and present on `main` before them. After a
+3-for-1 split, a 200-unit BHP parcel with one post-split sale of 200 units reports a remaining
+quantity of `399.99999999999999999999999999`, not `400`. The pipeline converts each allocation back to
+the as-acquired basis (200 ÷ 3 = 66.666…667, rounded to `Decimal`'s 28 digits), subtracts it, then
+re-bases the 133.333…333 remainder forward (× 3), and the rounding survives the round trip. The
+cost base pro-rated over that remainder (`5906.6333…`) carries the same last-digit error.
+- [ ] Reproduce in a test: a split whose ratio does not divide the sold quantity (3-for-1, a sale of
+  200 post-split units out of a 200-unit parcel), asserting `OpenParcel::remaining_as_of` is exactly
+  `400` and the cost base exactly two-thirds of the parcel's
+- [ ] Check whether the same rounding can refuse a legitimate sale: three post-split sales of 200 out
+  of that parcel convert to 3 × 66.666…667, which sums past 200 as-acquired units, so the third
+  could hit `PurchaseQuantityExceeded` (`sold_in_acquired_units` in the Sell/allocation capacity
+  checks) or leave a residue that keeps a fully sold parcel open
+- [ ] Fix it at the source rather than per caller: e.g. subtract in the later basis when every
+  allocation is already in it, or carry the conversion as an exact fraction (multiply the
+  numerators and denominators across sales, divide once) — so a remainder, a capacity check and a
+  cost-base pro-rate all see the exact figure
