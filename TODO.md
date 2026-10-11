@@ -56,14 +56,6 @@ falls under the existing rules.
   trading day before 1 July 2027 (the scheduled price import plus `closing_price`'s held-days
   backfill), since a missing one cannot be fetched reliably years later
 
-## Server-side constraint failures are reported as the client's fault (2026-10-10 review, error handling)
-`From<sqlx::Error> for ApiError` (`src/infra/http.rs` ~1019–1034) maps every CHECK/UNIQUE/NOT NULL
-violation to a `422` worded as a bad request — including one raised by a server-owned write
-(`report_snapshots`, `job_runs`), where it is a bug that should be a logged `500`.
-- [ ] Classify violations from server-owned writes as `Internal` (e.g. those paths map their own
-  errors before `?`, or the constraint's table decides); test that a constraint failure in a
-  snapshot write answers `500` and logs, while a client write still answers `422`
-
 ## No anti-framing header (2026-10-10 review, security — low-medium)
 Nothing sets `X-Frame-Options` or a CSP. With `[auth]` off (the default) a hostile page can frame the
 app and trick a click on a delete or job button; the clicks are same-origin inside the frame, so

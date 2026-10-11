@@ -247,6 +247,13 @@ pub enum GenerateError {
     Failed(String),
     #[error("snapshot read failed: {0}")]
     Db(#[from] sqlx::Error),
+    /// The snapshot rows' own write (or its commit) failed. Kept apart from
+    /// `Db` because every value in that write is the server's: a constraint
+    /// it breaks is a server bug answering `500`, never the client-fault
+    /// `422` a constraint violation reads as elsewhere
+    /// ([`ApiError::from_server_write`]).
+    #[error("snapshot write failed: {0}")]
+    Write(#[source] sqlx::Error),
 }
 
 impl From<valuation::ValuationError> for GenerateError {
@@ -730,9 +737,10 @@ pub async fn generate(
         .bind(&excluded_json)
         .bind(rows_json)
         .execute(&mut *tx)
-        .await?;
+        .await
+        .map_err(GenerateError::Write)?;
     }
-    tx.commit().await?;
+    tx.commit().await.map_err(GenerateError::Write)?;
 
     Ok(payloads
         .iter()
@@ -1119,6 +1127,7 @@ impl From<GenerateError> for ApiError {
             GenerateError::Unprocessable(msg) => ApiError::Unprocessable(msg),
             GenerateError::Failed(msg) => ApiError::internal(msg),
             GenerateError::Db(err) => err.into(),
+            GenerateError::Write(err) => ApiError::from_server_write(err),
         }
     }
 }
@@ -3270,6 +3279,49 @@ mod tests {
             )
             .await;
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    /// Every value in the snapshot rows' write is the server's own, so a
+    /// constraint that write breaks is a server bug: a logged `500`, not the
+    /// `422` that reads as "fix your request". The violation is provoked by an
+    /// extra unique index the three per-report rows of one date collide on.
+    /// A client write's violation, by contrast, still answers `422`.
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn api_a_constraint_failure_in_the_snapshot_write_is_a_logged_500() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BHP", Some("XASX"), "AUD").await;
+        insert_buy(&pool, 1, ListingId(1), ymd(2024, 1, 16), "100", "10", "AUD").await;
+        store_price(&pool, ListingId(1), ymd(2026, 6, 4), "64.91").await;
+        sqlx::query("CREATE UNIQUE INDEX one_report_a_day ON report_snapshots (snapshot_date)")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let resp = app(pool.clone())
+            .post_raw("/report_snapshots/generate", r#"{"date":"2026-06-04"}"#)
+            .await;
+        assert_eq!(resp.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(resp.text(), "", "a 500 carries no body");
+        assert!(logs_contain("request failed with an internal error"));
+        assert!(logs_contain("UNIQUE constraint failed"));
+        let stored: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM report_snapshots")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(stored, 0, "the failed write rolled back");
+
+        // The same kind of violation from a client's write is still its fault.
+        // (An unknown currency passes the body decoder and fails the
+        // `currencies` foreign key in the database.)
+        let client = ApiClient::full(&pool);
+        let mut body =
+            crate::test_support::writable_body(&client.get("/listings/1").await.json(), &[]);
+        body["currency"] = serde_json::json!("ZZZ");
+        body["ticker"] = serde_json::json!("NEW");
+        let resp = client.put("/listings/2", &body).await;
+        assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(resp.text().contains("does not exist"), "{}", resp.text());
     }
 
     #[tokio::test]

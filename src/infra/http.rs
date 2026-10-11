@@ -135,6 +135,34 @@ impl ApiError {
         ApiError::Internal(err.into())
     }
 
+    /// Classify a database error from a **server-owned** write — one whose
+    /// every value the server composed itself (a `report_snapshots` row), so
+    /// nothing the client sent can have broken a constraint.
+    ///
+    /// [`From<sqlx::Error>`] reads a CHECK/UNIQUE/NOT NULL/foreign-key
+    /// violation as the client's fault and answers `422`; here the same
+    /// violation is a server bug, so it is [`ApiError::Internal`] — a `500`,
+    /// logged — rather than a `422` telling the user to fix a request they
+    /// had no part in. Everything else classifies as `From` does: a busy
+    /// database is still the retryable `503`.
+    pub fn from_server_write(err: sqlx::Error) -> Self {
+        let constraint = err.as_database_error().is_some_and(|db| {
+            !is_busy(db)
+                && matches!(
+                    db.kind(),
+                    ErrorKind::ForeignKeyViolation
+                        | ErrorKind::CheckViolation
+                        | ErrorKind::UniqueViolation
+                        | ErrorKind::NotNullViolation
+                )
+        });
+        if constraint {
+            ApiError::Internal(err.into())
+        } else {
+            err.into()
+        }
+    }
+
     /// A 502 with a short user-facing body, wrapping the upstream fetch
     /// error (logged when the response is built).
     pub fn bad_gateway(body: impl Into<String>, source: impl Into<BoxError>) -> Self {
@@ -1672,6 +1700,32 @@ mod tests {
             }
             other => panic!("expected Unprocessable, got {other:?}"),
         }
+    }
+
+    /// The same violation `db_constraint_violations_classify_as_422_with_detail`
+    /// answers `422` for is a `500` — and is logged — when the write that
+    /// raised it was composed by the server, not the client.
+    #[tokio::test]
+    async fn constraint_violations_from_a_server_write_classify_as_internal() {
+        let pool = crate::infra::db::init(":memory:").await.unwrap();
+        sqlx::query("CREATE TABLE check_demo (v TEXT CHECK(v IN ('a', 'b')))")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let err = sqlx::query("INSERT INTO check_demo (v) VALUES ('z')")
+            .execute(&pool)
+            .await
+            .unwrap_err();
+        let api = ApiError::from_server_write(err);
+        assert!(matches!(api, ApiError::Internal(_)), "got {api:?}");
+        let logged = logs_of(api);
+        assert!(
+            logged.contains("CHECK constraint failed"),
+            "the violation is missing from the log: {logged}"
+        );
+        // A non-constraint failure still classifies as `From` does.
+        let api = ApiError::from_server_write(sqlx::Error::Decode("bad".into()));
+        assert!(matches!(api, ApiError::Internal(_)));
     }
 
     #[tokio::test]

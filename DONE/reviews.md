@@ -7435,3 +7435,17 @@ its read and per-row `UPDATE`s autocommit one by one; the other three callers ru
   one `write_tx`. The remaining pooled readers (`load_market`, `HeldTimeline::load`,
   `db_held_listing_ids`, `held_markets`, the rights-sale list/get, three test conveniences) moved
   to `read_tx`
+
+## Server-side constraint failures are reported as the client's fault (2026-10-10 review, error handling)
+`From<sqlx::Error> for ApiError` (`src/infra/http.rs` ~1019–1034) maps every CHECK/UNIQUE/NOT NULL
+violation to a `422` worded as a bad request — including one raised by a server-owned write
+(`report_snapshots`, `job_runs`), where it is a bug that should be a logged `500`.
+- [x] Classify violations from server-owned writes as `Internal` (e.g. those paths map their own
+  errors before `?`, or the constraint's table decides); test that a constraint failure in a
+  snapshot write answers `500` and logs, while a client write still answers `422`
+  — the path maps its own errors: `ApiError::from_server_write` (constraint kinds → `Internal`,
+  busy still `503`), reached through snapshot `GenerateError::Write` for the row INSERT and commit
+  (the table cannot decide: SQLite's CHECK message names the constraint, not the table). `job_runs`
+  needed nothing — its write failures are logged in `run_job` and never become an `ApiError`.
+  Tests: `infra::http`'s `constraint_violations_from_a_server_write_classify_as_internal`,
+  `reports::snapshot`'s `api_a_constraint_failure_in_the_snapshot_write_is_a_logged_500`
