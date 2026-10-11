@@ -8,6 +8,7 @@ use crate::entities::investment_expense::{ExpenseType, InvestmentExpense};
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use crate::infra::id::TradeId;
+use crate::reports::realised_gains::DisposalId;
 use crate::test_support::{self, ApiClient, dec, test_pool, ymd};
 use axum::http::StatusCode;
 use chrono::Duration;
@@ -3212,8 +3213,7 @@ async fn a_sell_at_nil_proceeds_is_flagged_and_a_priced_one_is_not() {
     let h = health(&pool, ymd(2025, 6, 1)).await;
     assert_eq!(h.nil_proceeds_disposals.len(), 1);
     let d = &h.nil_proceeds_disposals[0];
-    assert_eq!(d.kind, NilProceedsKind::Sell);
-    assert_eq!(d.record_id, 2);
+    assert_eq!(d.disposal, DisposalId::Sell(TradeId(2)));
     assert_eq!(d.listing_id, 1);
     assert_eq!(d.ticker, "GIFT");
     assert_eq!(d.date, ymd(2025, 5, 1));
@@ -3446,8 +3446,7 @@ async fn only_a_paid_for_right_disposed_of_at_nil_is_flagged() {
     let h = health(&pool, ymd(2025, 6, 1)).await;
     assert_eq!(h.nil_proceeds_disposals.len(), 1);
     let d = &h.nil_proceeds_disposals[0];
-    assert_eq!(d.kind, NilProceedsKind::RightsSale);
-    assert_eq!(d.record_id, paid.id.0);
+    assert_eq!(d.disposal, DisposalId::RightsSale(paid.id));
     assert_eq!(d.ticker, "RTS");
     assert_eq!(d.date, ymd(2025, 3, 2));
     assert_eq!(d.quantity, dec("400"));
@@ -3480,12 +3479,13 @@ async fn api_nil_proceeds_disposals_are_served_to_the_banner() {
         .json();
     let list = body["nil_proceeds_disposals"].as_array().unwrap();
     assert_eq!(list.len(), 2);
-    assert_eq!(list[0]["record_id"], 3);
-    assert_eq!(list[0]["kind"], "Sell");
+    assert_eq!(list[0]["disposal_id"], 3);
+    assert_eq!(list[0]["source"], "Sell");
+    assert!(list[0].get("record_id").is_none() && list[0].get("kind").is_none());
     assert_eq!(list[0]["date"], "2025-06-02");
     assert_eq!(list[0]["quantity"], "600");
     assert_eq!(list[0]["rights_cost"], serde_json::Value::Null);
-    assert_eq!(list[1]["record_id"], 2);
+    assert_eq!(list[1]["disposal_id"], 2);
 }
 
 // ---- distribution calendar ------------------------------------------

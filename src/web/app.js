@@ -1581,12 +1581,12 @@ async function refreshHealthBanner(seq = navigationToken()) {
       // proceeds are corrected on the Sell itself (or on the rights sale,
       // which is delete-and-re-enter), so each kind links to its own screen.
       { rows: h.nil_proceeds_disposals,
-        link: function (d) { return d.kind === 'RightsSale' ? 'rights_sales' : 'sells'; },
+        link: function (d) { return d.source === 'RightsSale' ? 'rights_sales' : 'sells'; },
         say: function (d) {
-          return (d.kind === 'RightsSale'
-            ? 'Rights sale ' + d.record_id + ' disposes of ' + d.quantity + ' ' + d.ticker
+          return (d.source === 'RightsSale'
+            ? 'Rights sale ' + d.disposal_id + ' disposes of ' + d.quantity + ' ' + d.ticker
               + ' rights that cost ' + moneyText(d.rights_cost) + ' ' + d.currency
-            : 'Sell ' + d.record_id + ' disposes of ' + d.quantity + ' ' + d.ticker)
+            : 'Sell ' + d.disposal_id + ' disposes of ' + d.quantity + ' ' + d.ticker)
             + ' on ' + d.date + ' at nil proceeds — if this was a gift or another'
             + ' non-arm’s-length transfer, the market-value substitution rule makes the proceeds'
             + ' the market value on that date, not the nothing received, and entering the nothing'

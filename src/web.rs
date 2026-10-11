@@ -3315,6 +3315,27 @@ mod tests {
         ));
     }
 
+    /// The health banner's nil-proceeds alert is identified the same way: it
+    /// reads the `source` + `disposal_id` pair `DisposalId` serialises (never
+    /// a bare `record_id` whose table depends on another field), and sends a
+    /// rights sale to its own screen.
+    #[tokio::test]
+    async fn the_nil_proceeds_banner_reads_the_disposal_id() {
+        use crate::infra::id::RightsSaleId;
+        use crate::reports::realised_gains::DisposalId;
+        let rights = serde_json::to_value(DisposalId::RightsSale(RightsSaleId(1))).unwrap();
+        let source = rights["source"].as_str().unwrap();
+        assert!(rights.get("disposal_id").is_some());
+        let js = app_js_body().await;
+        assert!(js.contains(&format!(
+            "link: function (d) {{ return d.source === '{source}' ? 'rights_sales' : 'sells'; }},"
+        )));
+        assert!(js.contains(&format!("return (d.source === '{source}'")));
+        assert!(js.contains("'Rights sale ' + d.disposal_id + ' disposes"));
+        assert!(js.contains("'Sell ' + d.disposal_id + ' disposes"));
+        assert!(!js.contains("d.record_id + ' disposes"));
+    }
+
     #[tokio::test]
     async fn performance_report_ui_present() {
         let js = app_js_body().await;

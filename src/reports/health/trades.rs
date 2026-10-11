@@ -10,7 +10,8 @@ use crate::entities::trade;
 use crate::infra::currency::CurrencyCode;
 use crate::infra::decimal::Money;
 use crate::infra::id::ListingId;
-use crate::infra::id::TradeId;
+use crate::infra::id::{RightsSaleId, TradeId};
+use crate::reports::realised_gains::DisposalId;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -279,11 +280,15 @@ pub(super) struct EssThirtyDaySaleRow {
 /// it.
 #[derive(utoipa::ToSchema, Debug, Serialize, Deserialize)]
 pub struct NilProceedsDisposal {
-    /// Which record the alert is about, and therefore what `record_id` and
-    /// `quantity` mean.
-    pub kind: NilProceedsKind,
-    /// The `trades` id (`Sell`) or the `rights_sales` id (`RightsSale`).
-    pub record_id: i64,
+    /// The disposal: `source` (`Sell` or `RightsSale`) and `disposal_id`, its
+    /// row id in that source's table (`trades` or `rights_sales`) — the same
+    /// identifier the realised-gains rows carry. `source` also says what
+    /// `quantity` means. A `Sell` here is an ordinary Sell trade entered by
+    /// hand at a zero `average_price`; a `RightsSale` is a disposal of rights
+    /// that were **paid for** (`rights_cost > 0`) at a zero
+    /// `proceeds_per_right` — a sale, a lapse, or a nil retail premium.
+    #[serde(flatten)]
+    pub disposal: DisposalId,
     pub listing_id: ListingId,
     pub ticker: String,
     /// The disposal date — the CGT event date the market value would be read
@@ -302,16 +307,6 @@ pub struct NilProceedsDisposal {
     pub rights_cost: Option<Decimal>,
 }
 
-/// Which kind of record a [`NilProceedsDisposal`] names.
-#[derive(utoipa::ToSchema, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum NilProceedsKind {
-    /// An ordinary Sell trade entered by hand, at a zero `average_price`.
-    Sell,
-    /// A disposal of rights that were **paid for** (`rights_cost > 0`) at a
-    /// zero `proceeds_per_right` — a sale, a lapse, or a nil retail premium.
-    RightsSale,
-}
-
 /// A candidate Sell for [`NilProceedsDisposal`]: the price is compared as a
 /// `Decimal` in Rust rather than in SQL, since the money columns are exact
 /// TEXT decimals ("0", "0.00" and "0.0000" are one value and three strings)
@@ -319,7 +314,7 @@ pub enum NilProceedsKind {
 /// decimal rule forbids.
 #[derive(sqlx::FromRow)]
 pub(super) struct NilProceedsSellRow {
-    record_id: i64,
+    record_id: TradeId,
     listing_id: ListingId,
     ticker: String,
     date: NaiveDate,
@@ -334,7 +329,7 @@ pub(super) struct NilProceedsSellRow {
 /// for the same reason as [`NilProceedsSellRow`].
 #[derive(sqlx::FromRow)]
 pub(super) struct NilProceedsRightsSaleRow {
-    record_id: i64,
+    record_id: RightsSaleId,
     listing_id: ListingId,
     ticker: String,
     date: NaiveDate,
@@ -591,8 +586,7 @@ pub(super) async fn db_nil_proceeds_disposals(
         .into_iter()
         .filter(|s| s.average_price.is_zero())
         .map(|s| NilProceedsDisposal {
-            kind: NilProceedsKind::Sell,
-            record_id: s.record_id,
+            disposal: DisposalId::Sell(s.record_id),
             listing_id: s.listing_id,
             ticker: s.ticker,
             date: s.date,
@@ -619,8 +613,7 @@ pub(super) async fn db_nil_proceeds_disposals(
             .into_iter()
             .filter(|r| r.proceeds_per_right.is_zero() && r.rights_cost > Decimal::ZERO)
             .map(|r| NilProceedsDisposal {
-                kind: NilProceedsKind::RightsSale,
-                record_id: r.record_id,
+                disposal: DisposalId::RightsSale(r.record_id),
                 listing_id: r.listing_id,
                 ticker: r.ticker,
                 date: r.date,
@@ -630,8 +623,9 @@ pub(super) async fn db_nil_proceeds_disposals(
             }),
     );
 
-    // Newest first, like every other dated list here; the two kinds share one
-    // id space only by accident, so the id is a tie-break for stability.
-    alerts.sort_by(|a, b| b.date.cmp(&a.date).then(b.record_id.cmp(&a.record_id)));
+    // Newest first, like every other dated list here; on a shared date the
+    // disposal (Sells, then rights sales, each by id) reversed with it is the
+    // tie-break for stability.
+    alerts.sort_by(|a, b| b.date.cmp(&a.date).then(b.disposal.cmp(&a.disposal)));
     Ok(alerts)
 }

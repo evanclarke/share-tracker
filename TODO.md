@@ -122,10 +122,16 @@ the suite is least likely to cover (a foreign-currency parcel; a split between p
   `source` (`disposalHref`, on Realised Gains and Net Capital Gain's disposals expand, which gained
   `links` support). Pinned by `db_rights_sale_flows_into_the_report` (rights sale 1 beside trade 1)
   and `a_disposal_id_links_to_the_record_its_source_names`
-- [ ] **Same overload in the health report's nil-proceeds alert** (found doing the item above):
+- [x] **Same overload in the health report's nil-proceeds alert** (found doing the item above):
   `reports::health`'s `nil_proceeds_disposals` rows carry `kind` (`Sell`/`RightsSale`) plus a bare
   `record_id: i64` whose table depends on it. Give it the same `DisposalId` (or its own enum), and
   update the `refreshHealthBanner` reader and `docs/API.md`
+  — Done 2026-10-11: `NilProceedsDisposal` carries `realised_gains::DisposalId` (flattened as
+  `source` + `disposal_id`, the realised-gains rows' own pair) in place of `kind` + `record_id`;
+  `NilProceedsKind` is gone, the loader reads each half's id as its typed `TradeId`/`RightsSaleId`,
+  and the same-date tie-break orders by the disposal instead of comparing ids across tables. The
+  banner reads `d.source`/`d.disposal_id`. Pinned by the health tests (`DisposalId` assertions, and
+  the served JSON carrying no `kind`/`record_id`) and `the_nil_proceeds_banner_reads_the_disposal_id`
 - [ ] **Sorted-input preconditions.** `parcel_optimiser::allocate_strategy` says "`parcels` must
   already be FIFO-sorted" but is `pub` with four callers (one in `reports::net_capital_gain`): take
   the already-sorted `Candidates` (or a `FifoSorted` newtype) instead of a slice. Lower priority:
