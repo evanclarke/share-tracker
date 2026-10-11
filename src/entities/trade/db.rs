@@ -684,7 +684,7 @@ async fn write(
             &splits,
             trade.date,
         );
-        if trade.quantity < allocated_total.get() {
+        if crate::entities::corporate_action::AcquiredUnits::new(trade.quantity) < allocated_total {
             return Err(UpsertError::QuantityBelowAllocated);
         }
     }

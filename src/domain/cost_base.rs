@@ -863,7 +863,14 @@ pub fn prorated_initial_cost(
     if units == quantity {
         return initial_cost;
     }
-    mul_div(&[initial_cost, units.get()], quantity.get())
+    // Both counts are exact fractions (`AcquiredUnits`): `c × (un / ud) /
+    // (qn / qd)` is `c × un × qd / (ud × qn)`, still one division.
+    let ((un, ud), (qn, qd)) = (units.parts(), quantity.parts());
+    match ud.checked_mul(qn) {
+        Some(divisor) if qd == Decimal::ONE => mul_div(&[initial_cost, un], divisor),
+        Some(divisor) => mul_div(&[initial_cost, un, qd], divisor),
+        None => mul_div(&[initial_cost, units.get()], quantity.get()),
+    }
 }
 
 /// Runs steps 1–4 of the pipeline (see the module doc) for `units`

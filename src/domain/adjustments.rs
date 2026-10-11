@@ -506,68 +506,181 @@ pub fn split_ratio(
 /// (with its checked twin) and [`sold_in_acquired_units`] — so an allocation
 /// recorded in sale-date units cannot be subtracted from a parcel's quantity,
 /// or costed, without being re-based first.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
-pub struct AcquiredUnits(Decimal);
+///
+/// The count is held as an **exact fraction** `num / den`. Re-basing a
+/// sale-date quantity back across a split divides by the split's ratio, and
+/// 200 post-split units of a 3-for-1 split are 66.666… as-acquired units,
+/// which no `Decimal` holds: rounded there, a remainder re-based forward
+/// came back `399.99…9` instead of `400`, and three such sales summed past
+/// (or short of) the parcel they emptied. So the conversion keeps the ratio's
+/// denominator instead of dividing by it, sums and differences cross-multiply,
+/// and the one division happens where the figure leaves this type —
+/// re-based forward ([`split_adjusted_quantity`], which folds the ratio's own
+/// divisor into the same division), pro-rated into a cost base
+/// (`cost_base::prorated_initial_cost`), or read out by [`Self::get`]. Only
+/// where a cross-multiplication would itself overflow does an operation fall
+/// back to the rounded figures, which is no worse than dividing up front.
+#[derive(Debug, Clone, Copy)]
+pub struct AcquiredUnits {
+    num: Decimal,
+    /// Always positive, and 1 whenever `num` is a whole multiple of it.
+    den: Decimal,
+}
 
 impl AcquiredUnits {
-    pub const ZERO: Self = Self(Decimal::ZERO);
+    pub const ZERO: Self = Self {
+        num: Decimal::ZERO,
+        den: Decimal::ONE,
+    };
 
     /// A quantity the caller knows is in its parcel's as-acquired basis: a
     /// parcel's own recorded quantity, or a figure stated against it (an
     /// AMIT adjustment row's covered units).
     pub fn new(quantity: Decimal) -> Self {
-        Self(quantity)
+        Self {
+            num: quantity,
+            den: Decimal::ONE,
+        }
     }
 
-    /// The unit count, for arithmetic within the same parcel's basis and for
-    /// output.
+    /// `num / den` units, kept exact. `den` is positive (a split ratio's
+    /// term, or a product of them).
+    fn fraction(num: Decimal, den: Decimal) -> Self {
+        if den == Decimal::ONE {
+            return Self::new(num);
+        }
+        if (num % den).is_zero() {
+            // A whole multiple of the denominator divides exactly.
+            return Self::new(num / den);
+        }
+        Self { num, den }
+    }
+
+    /// The unit count, for output and for arithmetic that has to leave this
+    /// type — rounded to `Decimal`'s precision where the exact figure is not
+    /// a `Decimal` (the only rounding the count ever takes).
     pub fn get(self) -> Decimal {
-        self.0
+        if self.den == Decimal::ONE {
+            self.num
+        } else {
+            self.num / self.den
+        }
+    }
+
+    /// The count as `(numerator, denominator)`, for a caller that folds the
+    /// denominator into a division of its own rather than rounding twice.
+    pub(crate) fn parts(self) -> (Decimal, Decimal) {
+        (self.num, self.den)
+    }
+
+    /// The two counts' numerators over one common denominator, or `None`
+    /// where that cannot be represented (the caller then falls back to the
+    /// rounded figures).
+    fn over_common_denominator(self, rhs: Self) -> Option<(Decimal, Decimal, Decimal)> {
+        if self.den == rhs.den {
+            return Some((self.num, rhs.num, self.den));
+        }
+        let common = lcm(self.den, rhs.den)?;
+        Some((
+            self.num.checked_mul(common / self.den)?,
+            rhs.num.checked_mul(common / rhs.den)?,
+            common,
+        ))
+    }
+
+    fn combine(self, rhs: Self, op: fn(Decimal, Decimal) -> Option<Decimal>) -> Self {
+        self.over_common_denominator(rhs)
+            .and_then(|(a, b, den)| Some(Self::fraction(op(a, b)?, den)))
+            .unwrap_or_else(|| Self::new(op(self.get(), rhs.get()).expect("unit count overflow")))
+    }
+}
+
+/// The least common multiple of two positive ratio denominators: their
+/// product over their greatest common divisor where both are whole numbers
+/// (every split ratio recorded so far), else their plain product.
+fn lcm(a: Decimal, b: Decimal) -> Option<Decimal> {
+    if a.fract().is_zero() && b.fract().is_zero() {
+        let (mut x, mut y) = (a, b);
+        while !y.is_zero() {
+            (x, y) = (y, x % y);
+        }
+        (a / x).checked_mul(b)
+    } else {
+        a.checked_mul(b)
+    }
+}
+
+impl Default for AcquiredUnits {
+    fn default() -> Self {
+        Self::ZERO
+    }
+}
+
+impl PartialEq for AcquiredUnits {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == std::cmp::Ordering::Equal
+    }
+}
+
+impl Eq for AcquiredUnits {}
+
+impl PartialOrd for AcquiredUnits {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for AcquiredUnits {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        match self.over_common_denominator(*other) {
+            Some((a, b, _)) => a.cmp(&b),
+            None => self.get().cmp(&other.get()),
+        }
     }
 }
 
 impl From<crate::infra::decimal::Money> for AcquiredUnits {
     fn from(m: crate::infra::decimal::Money) -> Self {
-        Self(m.0)
+        Self::new(m.0)
     }
 }
 
 impl std::ops::Add for AcquiredUnits {
     type Output = Self;
     fn add(self, rhs: Self) -> Self {
-        Self(self.0 + rhs.0)
+        self.combine(rhs, Decimal::checked_add)
     }
 }
 
 impl std::ops::Sub for AcquiredUnits {
     type Output = Self;
     fn sub(self, rhs: Self) -> Self {
-        Self(self.0 - rhs.0)
+        self.combine(rhs, Decimal::checked_sub)
     }
 }
 
 impl std::ops::AddAssign for AcquiredUnits {
     fn add_assign(&mut self, rhs: Self) {
-        self.0 += rhs.0;
+        *self = *self + rhs;
     }
 }
 
 impl std::ops::SubAssign for AcquiredUnits {
     fn sub_assign(&mut self, rhs: Self) {
-        self.0 -= rhs.0;
+        *self = *self - rhs;
     }
 }
 
 impl std::iter::Sum for AcquiredUnits {
     fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
-        Self(iter.map(|u| u.0).sum())
+        iter.fold(Self::ZERO, |acc, u| acc + u)
     }
 }
 
 #[cfg(test)]
 impl PartialEq<Decimal> for AcquiredUnits {
     fn eq(&self, other: &Decimal) -> bool {
-        self.0 == *other
+        *self == Self::new(*other)
     }
 }
 
@@ -635,19 +748,29 @@ fn rebase(
     from: Option<NaiveDate>,
     to: Option<NaiveDate>,
 ) -> Decimal {
-    let (new, old) = match (from, to) {
-        (None, None) => return qty,
+    let (new, old) = rebase_ratio(splits, from, to);
+    if new == old {
+        qty
+    } else {
+        mul_div(&[qty, new], old)
+    }
+}
+
+/// The `(new, old)` ratio [`rebase`] multiplies by, for a caller that keeps
+/// the division to itself.
+fn rebase_ratio(
+    splits: &[SplitEvent],
+    from: Option<NaiveDate>,
+    to: Option<NaiveDate>,
+) -> (Decimal, Decimal) {
+    match (from, to) {
+        (None, None) => (Decimal::ONE, Decimal::ONE),
         (Some(f), None) => split_ratio(splits, f, None),
         (Some(f), Some(t)) if f <= t => split_ratio(splits, f, Some(t)),
         (f, Some(t)) => {
             let (new, old) = split_ratio(splits, t, f);
             (old, new)
         }
-    };
-    if new == old {
-        qty
-    } else {
-        mul_div(&[qty, new], old)
     }
 }
 
@@ -661,8 +784,20 @@ pub fn split_adjusted_quantity(
     acquired: NaiveDate,
     up_to: Option<NaiveDate>,
 ) -> UnitsAt {
+    let (new, old) = rebase_ratio(splits, Some(acquired), up_to);
+    let (num, den) = qty.parts();
+    // One division for the fraction's denominator and the ratio's together:
+    // a remainder kept exact is not rounded on its way out either.
+    let quantity = if new == old {
+        qty.get()
+    } else {
+        match den.checked_mul(old) {
+            Some(divisor) => mul_div(&[num, new], divisor),
+            None => mul_div(&[qty.get(), new], old),
+        }
+    };
     UnitsAt {
-        quantity: rebase(qty.0, splits, Some(acquired), up_to),
+        quantity,
         basis: up_to,
     }
 }
@@ -675,7 +810,16 @@ pub fn as_acquired_quantity(
     splits: &[SplitEvent],
     acquired: NaiveDate,
 ) -> AcquiredUnits {
-    AcquiredUnits(rebase(qty.quantity, splits, qty.basis, Some(acquired)))
+    let (new, old) = rebase_ratio(splits, qty.basis, Some(acquired));
+    if new == old {
+        return AcquiredUnits::new(qty.quantity);
+    }
+    // Kept as the fraction `quantity × new / old` rather than divided out
+    // (see `AcquiredUnits`); only an unrepresentable product rounds.
+    match qty.quantity.checked_mul(new) {
+        Some(num) => AcquiredUnits::fraction(num, old),
+        None => AcquiredUnits::new(mul_div(&[qty.quantity, new], old)),
+    }
 }
 
 /// [`as_acquired_quantity`] in checked form: the same conversion, refusing
@@ -694,14 +838,14 @@ pub fn checked_as_acquired_quantity(
 ) -> Result<AcquiredUnits, crate::domain::cost_base::UnrepresentableQuantity> {
     let (new, old) = split_ratio(splits, acquired, qty.1.basis);
     if new == old {
-        return Ok(AcquiredUnits(qty.1.quantity));
+        return Ok(AcquiredUnits::new(qty.1.quantity));
     }
     crate::domain::cost_base::checked_rebased_quantity(
         (qty.0, qty.1.quantity),
         ("old units", old),
         ("new units", new),
-    )
-    .map(AcquiredUnits)
+    )?;
+    Ok(as_acquired_quantity(qty.1, splits, acquired))
 }
 
 /// Total units sold out of a parcel acquired at `acquired`, re-based to its
@@ -965,6 +1109,52 @@ mod tests {
             let back = held.rebased(&splits, Some(acquired()));
             prop_assert_eq!(back, bought);
             prop_assert_eq!(back.basis(), Some(acquired()));
+        }
+
+        /// Sales in the post-event basis that do **not** divide through the
+        /// ratios — each one a non-terminating number of as-acquired units —
+        /// still leave an exact remainder: re-based forward it is the units
+        /// held less the units sold, to the last digit, and a parcel sold in
+        /// full is left with exactly nothing (no residue to keep it open, no
+        /// excess to refuse the last sale).
+        #[test]
+        fn sales_that_do_not_divide_the_ratio_leave_an_exact_remainder(
+            splits in rebasings(),
+            k in 1i64..1_000_000,
+            cuts in prop::collection::vec(0u32..=1000, 1..=6),
+            sell_all in any::<bool>(),
+        ) {
+            let old: Decimal = splits.iter().map(|s| s.old_units).product();
+            let new: Decimal = splits.iter().map(|s| s.new_units).product();
+            let bought = AcquiredUnits::new(Decimal::from(k) * old);
+            let held = Decimal::from(k) * new;
+
+            // Integer sales of the post-event units, each a per-mille share
+            // of what was held (the last one taking the rest when selling all).
+            let mut sales: Vec<Decimal> = cuts
+                .iter()
+                .map(|c| (held * Decimal::from(*c) / Decimal::from(1000u32 * 6)).floor())
+                .collect();
+            if sell_all {
+                let so_far: Decimal = sales.iter().sum();
+                sales.push(held - so_far);
+            }
+            let sold_post: Decimal = sales.iter().sum();
+            let sold = sold_in_acquired_units(
+                sales.iter().map(|q| UnitsAt::new(*q, after_all())),
+                &splits,
+                acquired(),
+            );
+            let remaining = bought - sold;
+
+            prop_assert!(sold <= bought);
+            prop_assert_eq!(
+                split_adjusted_quantity(remaining, &splits, acquired(), Some(after_all())),
+                held - sold_post
+            );
+            if sell_all {
+                prop_assert_eq!(remaining, AcquiredUnits::ZERO);
+            }
         }
 
         /// Any quantity — fractional, and through ratios that do not

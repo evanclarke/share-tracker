@@ -7694,3 +7694,37 @@ the suite is least likely to cover (a foreign-currency parcel; a split between p
   its filter is pinned by `a_fully_consumed_parcel_is_filtered_out`; and the one way the comment
   misleads — a re-basing rounding residue like `1e-27` that keeps a sold-out parcel open — is
   positive too, so a positive type would not catch it. That is the re-basing section's defect to fix
+
+## Re-basing a remainder through the as-acquired basis loses exactness (verification 2026-10-11)
+Found while verifying the unit-basis types (`9fabf3d`), and present on `main` before them. After a
+3-for-1 split, a 200-unit BHP parcel with one post-split sale of 200 units reports a remaining
+quantity of `399.99999999999999999999999999`, not `400`. The pipeline converts each allocation back to
+the as-acquired basis (200 ÷ 3 = 66.666…667, rounded to `Decimal`'s 28 digits), subtracts it, then
+re-bases the 133.333…333 remainder forward (× 3), and the rounding survives the round trip. The
+cost base pro-rated over that remainder (`5906.6333…`) carries the same last-digit error.
+- [x] Reproduce in a test: a split whose ratio does not divide the sold quantity (3-for-1, a sale of
+  200 post-split units out of a 200-unit parcel), asserting `OpenParcel::remaining_as_of` is exactly
+  `400` and the cost base exactly two-thirds of the parcel's — `open_parcels`'
+  `a_remainder_rebased_across_a_split_that_does_not_divide_the_sale_is_exact` (failed on `main` with
+  `399.99999999999999999999999999`)
+- [x] Check whether the same rounding can refuse a legitimate sale: three post-split sales of 200 out
+  of that parcel convert to 3 × 66.666…667, which sums past 200 as-acquired units, so the third
+  could hit `PurchaseQuantityExceeded` (`sold_in_acquired_units` in the Sell/allocation capacity
+  checks) or leave a residue that keeps a fully sold parcel open — it can, both ways. 200 itself
+  escaped by luck (the 29-digit sum rounds back to 200), but a 2-unit parcel's three thirds summed
+  to `2.0000…1` and the third allocation was refused `PurchaseQuantityExceeded`, and a 4-unit
+  parcel's to `3.9999…9`, leaving it open; `sales_that_exactly_empty_a_split_parcel_are_accepted_and_close_it`
+  pins both
+- [x] Fix it at the source rather than per caller: e.g. subtract in the later basis when every
+  allocation is already in it, or carry the conversion as an exact fraction (multiply the
+  numerators and denominators across sales, divide once) — so a remainder, a capacity check and a
+  cost-base pro-rate all see the exact figure — `AcquiredUnits` now holds an exact fraction
+  `num / den`: `as_acquired_quantity` keeps the ratio's denominator instead of dividing by it, sums,
+  differences and comparisons cross-multiply over the least common denominator, and the one
+  division happens where the count leaves the type — `split_adjusted_quantity` (folding the ratio's
+  divisor into the same division), `cost_base::prorated_initial_cost`, or `.get()`. The Sell and
+  trade-edit capacity checks and the AMIT row's adjustable/held-in-year caps compare and subtract
+  inside the type rather than on rounded `.get()` figures. Only an unrepresentable
+  cross-multiplication falls back to the rounded figures. Property
+  `sales_that_do_not_divide_the_ratio_leave_an_exact_remainder` (any rebasing history, any integer
+  sales, selling all or part) fails on the old conversion

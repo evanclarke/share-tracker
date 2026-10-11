@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc b8a30e50d156864ba88f4b9cd0ff5ad7d2fa41d96ce11656f99f3429bc4a0253 # shrinks to splits = [SplitEvent { date: 2015-01-02, new_units: 9, old_units: 5, terms: BonusIssue { bonus_units: 4, held_units: 5 } }, SplitEvent { date: 2015-01-02, new_units: 11, old_units: 3, terms: BonusIssue { bonus_units: 8, held_units: 3 } }], k = 228591, cuts = [740, 255, 37, 370, 420], sell_all = false

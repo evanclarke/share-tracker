@@ -874,4 +874,69 @@ mod tests {
             .unwrap();
         assert_eq!(dated(&sold, 1), Some(vec![(ymd(2024, 5, 1), dec("30"))]));
     }
+
+    /// A 3-for-1 split, then a sale of 200 post-split units out of a 200-unit
+    /// parcel: 400 post-split units are left, carrying exactly two-thirds of
+    /// the cost base. The sale is 66.666… as-acquired units, which `Decimal`
+    /// cannot hold, so subtracting it in the as-acquired basis and re-basing
+    /// the remainder forward left `399.99999999999999999999999999`.
+    #[tokio::test]
+    async fn a_remainder_rebased_across_a_split_that_does_not_divide_the_sale_is_exact() {
+        let pool = test_pool().await;
+        test_support::listing(1).insert(&pool).await;
+        test_support::buy(1, 1)
+            .date(ymd(2024, 1, 10))
+            .qty(dec("200"))
+            .price(dec("10"))
+            .insert(&pool)
+            .await;
+        split(&pool, 1, ListingId(1), ymd(2024, 3, 1), "3").await;
+        test_support::sell(2, 1)
+            .date(ymd(2024, 4, 2))
+            .qty(dec("200"))
+            .price(dec("4"))
+            .insert(&pool)
+            .await;
+        allocate(&pool, 1, 2, 1, dec("200")).await;
+
+        let open = load_all(&pool, None).await;
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].remaining_as_of, dec("400"));
+        assert_eq!(open[0].cost_base.adjusted, dec("4000") / dec("3"));
+    }
+
+    /// Three equal post-split sales that empty a split parcel: each is a
+    /// third of the as-acquired units, which `Decimal` rounds, and the three
+    /// rounded thirds of 2 units summed past 2 (the third sale refused as
+    /// exceeding the parcel), while those of 4 summed short of it (a fully
+    /// sold parcel left open by a residue). Both must close the parcel.
+    #[tokio::test]
+    async fn sales_that_exactly_empty_a_split_parcel_are_accepted_and_close_it() {
+        for bought in ["2", "4"] {
+            let pool = test_pool().await;
+            test_support::listing(1).insert(&pool).await;
+            test_support::buy(1, 1)
+                .date(ymd(2024, 1, 10))
+                .qty(dec(bought))
+                .price(dec("10"))
+                .insert(&pool)
+                .await;
+            split(&pool, 1, ListingId(1), ymd(2024, 3, 1), "3").await;
+            for (i, day) in [2, 3, 4].into_iter().enumerate() {
+                let id = 2 + i as i64;
+                test_support::sell(id, 1)
+                    .date(ymd(2024, 4, day))
+                    .qty(dec(bought))
+                    .price(dec("4"))
+                    .insert(&pool)
+                    .await;
+                allocate(&pool, id, id, 1, dec(bought)).await;
+            }
+
+            assert!(
+                load_all(&pool, None).await.is_empty(),
+                "a {bought}-unit parcel sold in full is closed"
+            );
+        }
+    }
 }

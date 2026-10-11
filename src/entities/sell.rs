@@ -975,7 +975,7 @@ pub(crate) async fn upsert_sell_in_tx(
             &splits,
             purchase_date,
         );
-        if total.get() > purchase_qty {
+        if total > crate::entities::corporate_action::AcquiredUnits::new(purchase_qty) {
             return Err(SellError::PurchaseQuantityExceeded);
         }
     }
