@@ -9,6 +9,7 @@
 //! quoted then, and walks a calendar that was not in force. `exchange` is None
 //! exactly for an exchange-less (Crypto) span.
 
+use crate::domain::listing_identity::{Identity, RenameHistory};
 use crate::entities::{exchange, listing};
 use crate::infra::id::ListingId;
 use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveTime, Utc};
@@ -246,6 +247,33 @@ impl Market {
         }
     }
 
+    /// Everything the market holds, rendered deterministically (holidays
+    /// sorted), so two markets built by different loaders can be compared.
+    pub(crate) fn fingerprint(&self) -> String {
+        let identities: Vec<String> = self
+            .identities
+            .iter()
+            .map(|identity| {
+                let mut holidays: Vec<NaiveDate> = identity.holidays.iter().copied().collect();
+                holidays.sort();
+                format!(
+                    "{:?} {} {:?} {} {:?}",
+                    identity.from,
+                    identity.ticker,
+                    identity.exchange_mic,
+                    serde_json::to_string(&identity.exchange).unwrap(),
+                    holidays
+                )
+            })
+            .collect();
+        format!(
+            "{} {:?} {:?}",
+            serde_json::to_string(&self.listing).unwrap(),
+            self.symbol_override,
+            identities
+        )
+    }
+
     /// A never-renamed market: one open-ended span taking its ticker and MIC
     /// from the listing row.
     pub(crate) fn unrenamed(
@@ -280,6 +308,10 @@ pub async fn load_market(
 /// calendar **inside its own transaction** — the trade and Sell write paths'
 /// non-trading-day refusal ([`db_non_trading_day`]) does exactly that, the way
 /// `trade::db::listing_currency_mismatch` reads the listing's currency there.
+///
+/// Targeted reads — the one listing, and only the exchanges and calendars its
+/// timeline names. A caller asking about every listing loads a
+/// [`MarketCatalog`] instead, which answers them all from four reads.
 pub(crate) async fn load_market_on(
     conn: &mut sqlx::SqliteConnection,
     listing_id: ListingId,
@@ -287,54 +319,137 @@ pub(crate) async fn load_market_on(
     let Some(listing) = listing::db_get(&mut *conn, listing_id).await? else {
         return Ok(None);
     };
-    let renames = crate::domain::listing_identity::RenameHistory::load(&mut *conn).await?;
-    let spans = renames.identities(
-        listing_id,
-        crate::domain::listing_identity::Identity {
-            from: None,
-            ticker: listing.ticker.clone(),
-            exchange_mic: listing.exchange_mic.clone(),
-        },
-    );
+    let renames = RenameHistory::load(&mut *conn).await?;
+    let spans = identity_spans(&renames, &listing);
 
     // One exchange (and one holiday load) per distinct MIC across the
     // timeline, not one per span — a chain that renames within the same
     // exchange must not re-read its calendar for every link.
-    let mut exchanges: HashMap<String, Option<exchange::Exchange>> = HashMap::new();
-    let mut holidays: HashMap<String, HashSet<NaiveDate>> = HashMap::new();
-    let mut identities = Vec::with_capacity(spans.len());
-    for span in spans {
-        let (exchange, holiday_dates) = match &span.exchange_mic {
-            None => (None, HashSet::new()),
-            Some(mic) => {
-                if !exchanges.contains_key(mic) {
-                    exchanges.insert(mic.clone(), exchange::db_get(&mut *conn, mic).await?);
-                    holidays.insert(
-                        mic.clone(),
-                        crate::entities::exchange_holiday::db_holiday_dates_for(&mut *conn, mic)
-                            .await?,
-                    );
-                }
-                (
-                    exchanges[mic].clone(),
-                    holidays.get(mic).cloned().unwrap_or_default(),
-                )
-            }
-        };
-        identities.push(MarketIdentity {
-            from: span.from,
-            ticker: span.ticker,
-            exchange_mic: span.exchange_mic,
-            exchange,
-            holidays: holiday_dates,
-        });
+    let mut calendars = Calendars::default();
+    for mic in spans.iter().filter_map(|span| span.exchange_mic.as_deref()) {
+        if calendars.holidays.contains_key(mic) {
+            continue;
+        }
+        if let Some(exchange) = exchange::db_get(&mut *conn, mic).await? {
+            calendars.exchanges.insert(mic.to_string(), exchange);
+        }
+        calendars.holidays.insert(
+            mic.to_string(),
+            crate::entities::exchange_holiday::db_holiday_dates_for(&mut *conn, mic).await?,
+        );
+    }
+    Ok(Some(calendars.assemble(listing, spans)))
+}
+
+/// Every listing's [`Market`], pre-loaded in four whole-table reads (listings,
+/// renames, exchanges, holidays) — the shape of `infra::fx::FxRates` and
+/// `RenameHistory`, for a caller that asks about many listings at once (the
+/// health report's per-listing checks, refreshed on every page load), where
+/// [`load_market_on`] per listing would be several round trips each.
+/// [`MarketCatalog::market`] answers exactly what [`load_market_on`] would.
+pub(crate) struct MarketCatalog {
+    listings: HashMap<ListingId, listing::Listing>,
+    renames: RenameHistory,
+    calendars: Calendars,
+}
+
+impl MarketCatalog {
+    pub(crate) async fn load_on(conn: &mut sqlx::SqliteConnection) -> Result<Self, sqlx::Error> {
+        use crate::infra::http::CrudEntity;
+        let listings: Vec<listing::Listing> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT {} FROM {}",
+            listing::Listing::COLUMNS,
+            listing::Listing::TABLE
+        )))
+        .fetch_all(&mut *conn)
+        .await?;
+        let renames = RenameHistory::load(&mut *conn).await?;
+        let exchanges: Vec<exchange::Exchange> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT {} FROM {}",
+            exchange::Exchange::COLUMNS,
+            exchange::Exchange::TABLE
+        )))
+        .fetch_all(&mut *conn)
+        .await?;
+        let holiday_rows: Vec<(String, NaiveDate)> =
+            sqlx::query_as("SELECT mic, holiday_date FROM exchange_holidays")
+                .fetch_all(&mut *conn)
+                .await?;
+
+        let mut calendars = Calendars::default();
+        for exchange in exchanges {
+            calendars.holidays.entry(exchange.mic.clone()).or_default();
+            calendars.exchanges.insert(exchange.mic.clone(), exchange);
+        }
+        for (mic, date) in holiday_rows {
+            calendars.holidays.entry(mic).or_default().insert(date);
+        }
+        Ok(MarketCatalog {
+            listings: listings.into_iter().map(|l| (l.id, l)).collect(),
+            renames,
+            calendars,
+        })
     }
 
-    Ok(Some(Market {
-        listing,
-        identities,
-        symbol_override: None,
-    }))
+    /// The listing's market, as [`load_market_on`] builds it; `None` if the
+    /// listing doesn't exist.
+    pub(crate) fn market(&self, listing_id: ListingId) -> Option<Market> {
+        let listing = self.listings.get(&listing_id)?.clone();
+        let spans = identity_spans(&self.renames, &listing);
+        Some(self.calendars.assemble(listing, spans))
+    }
+}
+
+/// The listing's identity timeline: its rename chain ending in the identity
+/// the `listings` row records now.
+fn identity_spans(renames: &RenameHistory, listing: &listing::Listing) -> Vec<Identity> {
+    renames.identities(
+        listing.id,
+        Identity {
+            from: None,
+            ticker: listing.ticker.clone(),
+            exchange_mic: listing.exchange_mic.clone(),
+        },
+    )
+}
+
+/// Exchanges and their holiday sets by MIC — the one lookup both loaders
+/// assemble a [`Market`] from, so the targeted and the batched read cannot
+/// build it differently. A MIC with no `exchanges` row still has an (empty)
+/// holiday set, exactly as `db_holiday_dates_for` answers for it.
+#[derive(Default)]
+struct Calendars {
+    exchanges: HashMap<String, exchange::Exchange>,
+    holidays: HashMap<String, HashSet<NaiveDate>>,
+}
+
+impl Calendars {
+    fn assemble(&self, listing: listing::Listing, spans: Vec<Identity>) -> Market {
+        let identities = spans
+            .into_iter()
+            .map(|span| {
+                let (exchange, holidays) = match &span.exchange_mic {
+                    None => (None, HashSet::new()),
+                    Some(mic) => (
+                        self.exchanges.get(mic).cloned(),
+                        self.holidays.get(mic).cloned().unwrap_or_default(),
+                    ),
+                };
+                MarketIdentity {
+                    from: span.from,
+                    ticker: span.ticker,
+                    exchange_mic: span.exchange_mic,
+                    exchange,
+                    holidays,
+                }
+            })
+            .collect();
+        Market {
+            listing,
+            identities,
+            symbol_override: None,
+        }
+    }
 }
 
 /// Why a date is not on a listing's trading calendar — the only two ways

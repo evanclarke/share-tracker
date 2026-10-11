@@ -8,8 +8,7 @@ use crate::infra::id::ListingId;
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use sqlx::SqlitePool;
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// How many consecutive shared trading days of *identical* closes make two
 /// listings one series stored twice — see [`DuplicatePriceSeries`]. Thirty is
@@ -327,22 +326,38 @@ pub struct DuplicatePriceSeries {
 /// market's `latest_published_trading_day`, the same day collection fetches up
 /// to, so a candle the next run will collect is never reported as a hole.
 ///
-/// One holdings load and one stored-date query per listing, then an in-memory
-/// walk: six years of history per listing is thousands of dates, so a per-day
-/// round trip is not an option (the same pre-loading pattern as `FxRates` and
-/// `RenameHistory`).
-///
-/// Not on the read transaction its caller uses: `load_market` is pool-based,
-/// and this check tolerates a concurrent write far better than a financial
-/// aggregation would — a hole is a hole whichever snapshot it is seen in.
+/// A fixed number of set-based reads whatever the portfolio holds — the
+/// holdings timeline, every listing's market ([`closing_price::MarketCatalog`])
+/// and every stored price date — then an in-memory walk: six years of history
+/// per listing is thousands of dates, so a per-day round trip is not an
+/// option, and the health report runs on every page load, so neither is a
+/// per-listing one (the same pre-loading pattern as `FxRates` and
+/// `RenameHistory`). Read on the caller's transaction, so the check sees the
+/// same snapshot as the rest of the report.
 pub(super) async fn db_unpriced_days(
-    pool: &SqlitePool,
+    conn: &mut sqlx::SqliteConnection,
     now: DateTime<Utc>,
 ) -> Result<Vec<UnpricedListing>, sqlx::Error> {
-    let timeline = HeldTimeline::load(pool).await?;
+    let timeline = HeldTimeline::load_on(&mut *conn).await?;
+    let markets = closing_price::MarketCatalog::load_on(&mut *conn).await?;
+    // Every stored date, ok or errored: an errored day is *not* unpriced
+    // — it is reported by `errored_prices`.
+    let mut stored_by_listing: HashMap<ListingId, HashSet<NaiveDate>> = HashMap::new();
+    let stored_rows: Vec<(ListingId, NaiveDate)> =
+        sqlx::query_as("SELECT listing_id, price_date FROM closing_prices")
+            .fetch_all(&mut *conn)
+            .await?;
+    for (listing_id, date) in stored_rows {
+        stored_by_listing
+            .entry(listing_id)
+            .or_default()
+            .insert(date);
+    }
+    let no_stored = HashSet::new();
+
     let mut listings = Vec::new();
     for listing_id in timeline.listing_ids() {
-        let Some(market) = closing_price::load_market(pool, listing_id).await? else {
+        let Some(market) = markets.market(listing_id) else {
             continue;
         };
         // A calendar so misconfigured it has no trading day in the past year
@@ -358,15 +373,7 @@ pub(super) async fn db_unpriced_days(
         if spans.is_empty() {
             continue;
         }
-        // Every stored date, ok or errored: an errored day is *not* unpriced
-        // — it is reported by `errored_prices`.
-        let stored: HashSet<NaiveDate> =
-            sqlx::query_scalar("SELECT price_date FROM closing_prices WHERE listing_id = ?")
-                .bind(listing_id)
-                .fetch_all(pool)
-                .await?
-                .into_iter()
-                .collect();
+        let stored = stored_by_listing.get(&listing_id).unwrap_or(&no_stored);
 
         // Distinct valuation days, not calendar days: a weekend and the
         // Friday it values at are one hole, not three.

@@ -327,8 +327,8 @@ pub async fn db_health(
     let nil_proceeds_disposals = db_nil_proceeds_disposals(&mut tx).await?;
     let (missing_dividend_entries, dividend_amount_mismatches) =
         db_distribution_calendar(&mut tx, today).await?;
+    let unpriced_days = db_unpriced_days(&mut tx, now).await?;
     tx.commit().await?;
-    let unpriced_days = db_unpriced_days(pool, now).await?;
 
     let prices_stale = latest_price_date
         .is_some_and(|d| business_days_since(d, today) > PRICE_STALE_BUSINESS_DAYS);

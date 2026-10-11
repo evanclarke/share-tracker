@@ -7491,3 +7491,25 @@ app and trick a click on a delete or job button; the clicks are same-origin insi
   `a_locked_out_source_does_not_spend_the_global_ceiling`, `a_success_is_refunded_from_the_global_ceiling`,
   `the_global_ceiling_refuses_a_fresh_source_over_http`; documented in `docs/API.md`'s lockout
   section, README and `docs/FEATURES.md`, pinned by `doc_checks`
+
+## Bulk snapshot regeneration and the health banner repeat whole-table reads (2026-10-10 review, performance)
+- [x] `reports/snapshot.rs` (~953–962) calls `closing_price::db_held_listing_ids(pool, Some(date))`
+  once per calendar day, each rebuilding `HeldTimeline` from every trade (~1,800 full reads for five
+  years). Build the timeline once and ask it per day; test that the per-day held sets are unchanged
+  — done 2026-10-11: `regenerate_all`, the daily snapshot job's skip-unheld check, and price
+  collection's `db_listing_ids_held_between` (the same per-day loop over the lookback window) each
+  load one `HeldTimeline` and ask `held_listing_ids(Some(date))` per day.
+  `db_regenerate_all_attempts_exactly_the_held_days` pins that the dates attempted are exactly the
+  days a per-day `db_held_listing_ids` read calls held, across a full sale and a re-buy gap
+- [x] The health report (`reports/health.rs` ~1689–1716), refreshed on every navigation, runs
+  `load_market` (listing, rename history, holidays) and a full `closing_prices` date scan per held
+  listing. Batch them into set-based reads; a test that the report's output is unchanged
+  — done 2026-10-11: `closing_price::MarketCatalog` pre-loads every listing's `Market` in four
+  whole-table reads (listings, renames, exchanges, holidays); it and `load_market_on` build the
+  market through the one shared `Calendars::assemble`, so they cannot drift.
+  `db_unpriced_days` now reads the timeline, the catalog and every stored price date once (a fixed
+  number of queries whatever the portfolio holds), and moved onto the report's own read
+  transaction; `db_non_trading_day_trades` uses the catalog too. Output unchanged: the existing
+  health tests pass as they were, and `db_the_market_catalog_builds_what_load_market_builds`
+  compares both loaders' markets for a plain listing, a same-exchange rename, a cross-exchange
+  rename and a crypto listing

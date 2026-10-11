@@ -179,7 +179,7 @@ pub use market::{Market, NonTradingReason, load_market};
 /// Asked of a market on the caller's own connection: the trade and sell write
 /// paths reject a trade dated on a day its exchange was shut, and the
 /// settlement-coverage, health and valuation reports walk the same calendar.
-pub(crate) use market::{db_non_trading_day, load_market_on, non_trading_day};
+pub(crate) use market::{MarketCatalog, db_non_trading_day, load_market_on, non_trading_day};
 /// The stored provider enum is named outside `model` only by tests and by the
 /// test-only fixture (`PriceFetcher` implementations name it through
 /// `model`/`fetcher` directly), so the re-export is gated rather than dropped:

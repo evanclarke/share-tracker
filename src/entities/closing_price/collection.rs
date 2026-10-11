@@ -10,7 +10,7 @@ use super::db::{
     contemporaneous, db_ok_dates, db_price_basis_events, db_rebase_listing_prices, db_store,
 };
 use super::fetcher::{FetchError, FetchedClose, PriceFetcher};
-use super::held::db_held_listing_ids;
+use super::held::HeldTimeline;
 use super::market::{Market, load_market};
 use super::model::{ClosingPrice, PriceOrigin, PriceStatus, UNASSIGNED_ID};
 use crate::infra::db::{read_tx, write_tx};
@@ -277,10 +277,11 @@ async fn db_listing_ids_held_between(
     from: NaiveDate,
     to: NaiveDate,
 ) -> Result<Vec<ListingId>, sqlx::Error> {
+    let timeline = HeldTimeline::load(pool).await?;
     let mut ids: std::collections::BTreeSet<ListingId> = std::collections::BTreeSet::new();
     let mut date = from;
     while date <= to {
-        ids.extend(db_held_listing_ids(pool, Some(date)).await?);
+        ids.extend(timeline.held_listing_ids(Some(date)));
         date += Duration::days(1);
     }
     Ok(ids.into_iter().collect())

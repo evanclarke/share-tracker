@@ -56,14 +56,6 @@ falls under the existing rules.
   trading day before 1 July 2027 (the scheduled price import plus `closing_price`'s held-days
   backfill), since a missing one cannot be fetched reliably years later
 
-## Bulk snapshot regeneration and the health banner repeat whole-table reads (2026-10-10 review, performance)
-- [ ] `reports/snapshot.rs` (~953–962) calls `closing_price::db_held_listing_ids(pool, Some(date))`
-  once per calendar day, each rebuilding `HeldTimeline` from every trade (~1,800 full reads for five
-  years). Build the timeline once and ask it per day; test that the per-day held sets are unchanged
-- [ ] The health report (`reports/health.rs` ~1689–1716), refreshed on every navigation, runs
-  `load_market` (listing, rename history, holidays) and a full `closing_prices` date scan per held
-  listing. Batch them into set-based reads; a test that the report's output is unchanged
-
 ## Test-suite gaps (2026-10-10 review, tests)
 - [ ] Add `proptest` for the invariants the suite currently pins with hand-picked cases: cost-base
   apportionment sums exactly (demerger/scrip percentages), parcel allocations conserve quantity,

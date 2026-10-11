@@ -834,6 +834,9 @@ pub async fn run_snapshot_job(pool: &SqlitePool, now: DateTime<Utc>) -> Result<(
         by_date.entry(m.snapshot_date).or_default().push(m);
     }
 
+    let timeline = closing_price::HeldTimeline::load(pool)
+        .await
+        .map_err(|e| e.to_string())?;
     let mut generated: Vec<NaiveDate> = Vec::new();
     let mut blockers: Vec<String> = Vec::new();
     for date in targets {
@@ -845,10 +848,7 @@ pub async fn run_snapshot_job(pool: &SqlitePool, now: DateTime<Utc>) -> Result<(
         }
         // A window date before the first holding has nothing to snapshot —
         // skip it silently rather than reporting a permanent blocker.
-        let held = closing_price::db_held_listing_ids(pool, Some(date))
-            .await
-            .map_err(|e| e.to_string())?;
-        if held.is_empty() {
+        if timeline.held_listing_ids(Some(date)).is_empty() {
             continue;
         }
         match generate(pool, date, now).await {
@@ -957,14 +957,15 @@ pub async fn regenerate_all(
         )));
     }
 
+    // One timeline for the whole range, asked per day — not a fresh
+    // whole-trades read per calendar day (five years is ~1,800 of them).
+    let timeline = closing_price::HeldTimeline::load(pool)
+        .await
+        .map_err(GenerateError::from)?;
     let mut dates: Vec<NaiveDate> = Vec::new();
     let mut date = from;
     while date <= to {
-        if !closing_price::db_held_listing_ids(pool, Some(date))
-            .await
-            .map_err(GenerateError::from)?
-            .is_empty()
-        {
+        if !timeline.held_listing_ids(Some(date)).is_empty() {
             dates.push(date);
         }
         date += Duration::days(1);
@@ -3200,6 +3201,57 @@ mod tests {
         assert!(summary.blocked.is_empty());
         let stored = db_list(&pool, None, None, None).await.unwrap();
         assert_eq!(stored.len(), 9, "3 reports x 3 dates");
+    }
+
+    /// The range walk loads the holdings timeline once and asks it per day;
+    /// the dates it attempts must be exactly the days a per-day
+    /// `db_held_listing_ids` read calls held — including the gap between a
+    /// full sale and a later re-buy, which is skipped, not reported blocked.
+    #[tokio::test]
+    async fn db_regenerate_all_attempts_exactly_the_held_days() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BHP", Some("XASX"), "AUD").await;
+        insert_buy(&pool, 1, ListingId(1), ymd(2026, 6, 1), "100", "10", "AUD").await;
+        test_support::sell(2, 1)
+            .date(ymd(2026, 6, 2))
+            .settlement(ymd(2026, 6, 4))
+            .qty("100".parse().unwrap())
+            .price("11".parse().unwrap())
+            .insert(&pool)
+            .await;
+        test_support::allocate(&pool, 2, 2, 1, "100".parse().unwrap()).await;
+        insert_buy(&pool, 3, ListingId(1), ymd(2026, 6, 4), "50", "10", "AUD").await;
+
+        let (from, to) = (ymd(2026, 5, 29), ymd(2026, 6, 5));
+        let mut expected = Vec::new();
+        let mut date = from;
+        while date <= to {
+            if !closing_price::db_held_listing_ids(&pool, Some(date))
+                .await
+                .unwrap()
+                .is_empty()
+            {
+                expected.push(date);
+            }
+            date += Duration::days(1);
+        }
+        assert!(expected.contains(&ymd(2026, 6, 1)) && expected.contains(&ymd(2026, 6, 5)));
+        assert!(
+            !expected.contains(&ymd(2026, 6, 3)),
+            "sold out: {expected:?}"
+        );
+
+        let summary = regenerate_all(&pool, Some(from), Some(to), friday_evening_sydney())
+            .await
+            .unwrap();
+        let mut attempted: Vec<NaiveDate> = summary
+            .regenerated
+            .iter()
+            .copied()
+            .chain(summary.blocked.iter().map(|b| b.date))
+            .collect();
+        attempted.sort();
+        assert_eq!(attempted, expected);
     }
 
     /// A bulk regeneration logs each date's outcome as it completes — INFO on

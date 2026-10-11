@@ -533,16 +533,15 @@ pub(super) async fn db_non_trading_day_trades(
     .fetch_all(&mut *conn)
     .await?;
 
-    // Every calendar first, one load per listing that has trades — not one per
-    // trade: the `Market` behind it is four queries, and a listing with six
-    // years of history has hundreds of rows.
+    // Every calendar first, from one batched load, then one `Market` per
+    // listing that has trades — not one per trade, nor a round trip per
+    // listing: the health report runs on every page load.
+    let catalog = closing_price::MarketCatalog::load_on(&mut *conn).await?;
     let listing_ids: HashSet<ListingId> = candidates.iter().map(|c| c.listing_id).collect();
-    let mut markets: HashMap<ListingId, closing_price::Market> = HashMap::new();
-    for listing_id in listing_ids {
-        if let Some(market) = closing_price::load_market_on(&mut *conn, listing_id).await? {
-            markets.insert(listing_id, market);
-        }
-    }
+    let markets: HashMap<ListingId, closing_price::Market> = listing_ids
+        .into_iter()
+        .filter_map(|listing_id| Some((listing_id, catalog.market(listing_id)?)))
+        .collect();
 
     let mut alerts = Vec::new();
     for c in candidates {

@@ -483,3 +483,38 @@ fn yahoo_classifies_only_a_no_such_series_answer_as_a_dead_symbol() {
         );
     }
 }
+
+/// The batched loader the health report uses builds exactly the market the
+/// targeted one does, for every shape of timeline: a plain listing, a rename
+/// within one exchange, a rename across exchanges (two calendars), and an
+/// exchange-less crypto listing — and knows nothing of a missing listing.
+#[tokio::test]
+async fn db_the_market_catalog_builds_what_load_market_builds() {
+    let pool = test_pool().await;
+    insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
+    insert_listing(&pool, 2, "LAAC", "XNYS", "USD").await;
+    rename_listing(&pool, ListingId(2), ymd(2025, 1, 27), "LAR", None).await;
+    insert_listing(&pool, 3, "OLD", "XASX", "USD").await;
+    rename_listing(&pool, ListingId(3), ymd(2025, 3, 10), "NEW", Some("XNYS")).await;
+    insert_crypto_listing(&pool, 4, "BTC").await;
+
+    let mut conn = pool.acquire().await.unwrap();
+    let catalog = MarketCatalog::load_on(&mut conn).await.unwrap();
+    for id in 1..=4 {
+        let targeted = load_market(&pool, ListingId(id)).await.unwrap().unwrap();
+        let batched = catalog.market(ListingId(id)).unwrap();
+        assert_eq!(
+            batched.fingerprint(),
+            targeted.fingerprint(),
+            "listing {id}"
+        );
+    }
+    // The cross-exchange rename really did load two calendars.
+    let moved = catalog.market(ListingId(3)).unwrap();
+    assert_ne!(
+        moved.identity_at(ymd(2025, 1, 1)).holidays,
+        moved.current().holidays
+    );
+    assert!(catalog.market(ListingId(99)).is_none());
+    assert!(load_market(&pool, ListingId(99)).await.unwrap().is_none());
+}
