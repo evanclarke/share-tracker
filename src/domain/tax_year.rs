@@ -79,4 +79,27 @@ mod tests {
         assert!(amit_in_tax_year(true, from, 2024));
         assert!(amit_in_tax_year(true, from, 2025));
     }
+
+    proptest::proptest! {
+        /// Every date from 1900 to 2100 lies inside the year the rule names
+        /// for it — on or after that year's 1 July start, on or before its
+        /// 30 June end, a year apart — and the year changes between two
+        /// consecutive days exactly when the second is 1 July.
+        #[test]
+        fn every_date_lies_in_the_financial_year_named_for_it(days in 0i64..73_000) {
+            let date = NaiveDate::from_ymd_opt(1900, 1, 1).unwrap() + chrono::Duration::days(days);
+            let start = fy_start(date);
+            let end = NaiveDate::from_ymd_opt(tax_year_for(date), 6, 30).unwrap();
+            proptest::prop_assert_eq!((start.month(), start.day()), (7, 1));
+            proptest::prop_assert_eq!(start.year() + 1, end.year());
+            proptest::prop_assert!(start <= date && date <= end, "{date} outside {start}..={end}");
+
+            let next = date.succ_opt().unwrap();
+            proptest::prop_assert_eq!(
+                tax_year_for(next) != tax_year_for(date),
+                (next.month(), next.day()) == (7, 1)
+            );
+            proptest::prop_assert!(tax_year_for(next) - tax_year_for(date) <= 1);
+        }
+    }
 }

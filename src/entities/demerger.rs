@@ -58,7 +58,7 @@ use crate::entities::sell::{self, AllocationInput};
 use crate::entities::trade::{self, Trade};
 use crate::infra::currency::CurrencyCode;
 use crate::infra::db::{WriteMode, write_tx};
-use crate::infra::decimal::mul_div;
+use crate::infra::decimal::apportion;
 use crate::infra::extract::Query;
 use crate::infra::http::{ApiError, DryRunQuery};
 use crate::infra::id::HoldingAccountId;
@@ -229,13 +229,14 @@ async fn execute(
         let carried_cost_base = inputs.carried_cost_base(&p.parcel, p.remaining)?;
 
         // Step 2: apportion by the advised percentage. demerged + head sum
-        // exactly to the carried cost base by construction. Both pro-rates go
-        // through `mul_div`, which keeps the multiply-then-divide order for
+        // exactly to the carried cost base (`apportion`'s promise). The
+        // pro-rate goes through `mul_div`, which keeps the multiply-then-divide order for
         // every figure that fits and still answers where the intermediate
         // product would overflow `rust_decimal` — a parcel costed at 1e27 at
         // 99% is `9.9e28` in the working and `9.9e26` in the answer, and this
         // is a write path, so the panic aborted the whole demerge.
-        let demerged_cost_base = mul_div(&[carried_cost_base, cost_base_pct], Decimal::ONE_HUNDRED);
+        let (demerged_cost_base, head_cost_base) =
+            apportion(carried_cost_base, cost_base_pct, Decimal::ONE_HUNDRED);
 
         replacements.push(Replacement {
             parcel_id: p.parcel.id,
@@ -253,7 +254,7 @@ async fn execute(
                 ("demerger_held_units", held_units),
             )
             .map_err(DemergeError::UnrepresentableDemergedQuantity)?,
-            head_cost_base: carried_cost_base - demerged_cost_base,
+            head_cost_base,
             demerged_cost_base,
             currency: p.parcel.currency.clone(),
             fx_rate: p.parcel.fx_rate,
@@ -812,7 +813,9 @@ mod tests {
         let head = dm.head_replacements[0].brokerage;
         let demerged = dm.demerged_replacements[0].brokerage;
         let original = dec("8.9285714285714285714285714286") * dec("280");
-        assert_eq!(demerged, original * dec("5.063") / Decimal::ONE_HUNDRED);
+        // The 5.063% share, to the digits the cost base is carried at
+        // (`infra::decimal::apportion`).
+        assert!((demerged - original * dec("5.063") / Decimal::ONE_HUNDRED).abs() < dec("1e-24"));
         assert_eq!(head + demerged, original);
         assert_eq!(dm.demerged_replacements[0].quantity, dec("56"));
     }
@@ -846,6 +849,62 @@ mod tests {
                 dm.head_replacements[0].brokerage + dm.demerged_replacements[0].brokerage,
                 dec("5000")
             );
+        }
+    }
+
+    mod properties {
+        use super::*;
+        use proptest::prelude::*;
+        use std::collections::BTreeMap;
+
+        proptest! {
+            #![proptest_config(test_support::db_proptest_config())]
+
+            /// Whatever the percentage, entitlement ratio and parcel costs,
+            /// the head and demerged legs together carry every cent of the
+            /// cost base — the demerged leg is `cost × pct / 100` and the
+            /// head leg the remainder, never a second rounded percentage —
+            /// and every unit stays on the head listing.
+            #[test]
+            fn the_two_legs_always_sum_to_the_whole_cost_base(
+                parcels in test_support::parcel_costs(),
+                pct in 10i64..=99_990,
+                new in 1i64..=10,
+                held in 1i64..=10,
+            ) {
+                test_support::block_on(async move {
+                    let pool = test_pool().await;
+                    insert_listing(&pool, 1, "HEAD").await;
+                    insert_listing(&pool, 2, "DEM").await;
+                    let costs = test_support::insert_parcel_costs(&pool, 1, &parcels).await;
+                    let pct = Decimal::new(pct, 3).to_string();
+                    let (new, held) = (new.to_string(), held.to_string());
+                    insert_demerger_terms(
+                        &pool, 10, ListingId(1), ListingId(2), d(2024, 7, 1), &new, &held, &pct,
+                    )
+                    .await;
+
+                    let dm = db_demerge(&pool, 10).await.unwrap();
+
+                    let by_parcel = |legs: &[Trade]| -> BTreeMap<NaiveDate, Decimal> {
+                        legs.iter()
+                            .map(|t| (t.deemed_acquisition_date.unwrap(), t.brokerage))
+                            .collect()
+                    };
+                    let head = by_parcel(&dm.head_replacements);
+                    let demerged = by_parcel(&dm.demerged_replacements);
+                    prop_assert_eq!(head.len(), costs.len());
+                    for (date, cost) in &costs {
+                        prop_assert_eq!(head[date] + demerged[date], *cost, "parcel of {}", date);
+                        prop_assert!(head[date] >= Decimal::ZERO && demerged[date] >= Decimal::ZERO);
+                    }
+                    let units: Decimal = parcels.iter().map(|(q, _)| q).sum();
+                    let head_units: Decimal =
+                        dm.head_replacements.iter().map(|t| t.quantity).sum();
+                    prop_assert_eq!(head_units, units);
+                    Ok(())
+                })?;
+            }
         }
     }
 

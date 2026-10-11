@@ -3,7 +3,7 @@ use crate::domain::cost_base::{self, ParcelRow};
 use crate::domain::indexation;
 use crate::entities::corporate_action::{RocEvent, SplitEvent};
 use crate::infra::currency::CurrencyCode;
-use crate::infra::decimal::{Money, OptMoney, mul_div};
+use crate::infra::decimal::{Money, OptMoney, apportion, mul_div};
 use crate::infra::extract::Json;
 use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
@@ -546,11 +546,11 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
         // A partial-rollover scrip closing Sell realises only the cash
         // side's market-value share of the parcel's reduced cost base; the
         // scrip side's share rolled over into the replacement parcels (the
-        // exchange carried exactly the complement, so the two sum to the
-        // full reduced cost base).
+        // exchange carried exactly the complement — the other half of the
+        // same `apportion` — so the two sum to the full reduced cost base).
         let cash_apportionment = sale.scrip_cash_apportionment()?;
         let alloc_cost = match cash_apportionment {
-            Some((num, den)) => mul_div(&[alloc_cost, num], den),
+            Some((num, den)) => apportion(alloc_cost, num, den).0,
             None => alloc_cost,
         };
 
@@ -573,7 +573,7 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
             // The cash apportionment is a share of the *whole* cost base, so
             // it applies to the indexed figure exactly as it did above.
             match cash_apportionment {
-                Some((num, den)) => mul_div(&[indexed, num], den),
+                Some((num, den)) => apportion(indexed, num, den).0,
                 None => indexed,
             }
         });

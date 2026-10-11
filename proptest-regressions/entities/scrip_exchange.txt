@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 664f02b99757b9f735cd35c2ef428fc61897b1c2d5bd677438ef3e6609e3c29e # shrinks to parcels = [(8954, 6529984.49), (1224, 7224212343), (3, 651479919)], new = 2, old = 1, cash = 511, market_value = 3847
+cc 48f05dc4e686cbbdd53b1a5ab60b296ab39400c242d58eb16da83b2f3d194f6f # shrinks to parcels = [(6006, 14537152.35), (6659, 698952.7547), (2463, 225.0890944)], new = 6, old = 5, cash = 1590, market_value = 213

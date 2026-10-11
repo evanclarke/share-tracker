@@ -7513,3 +7513,61 @@ app and trick a click on a delete or job button; the clicks are same-origin insi
   health tests pass as they were, and `db_the_market_catalog_builds_what_load_market_builds`
   compares both loaders' markets for a plain listing, a same-exchange rename, a cross-exchange
   rename and a crypto listing
+
+## Test-suite gaps (2026-10-10 review, tests)
+- [x] Add `proptest` for the invariants the suite currently pins with hand-picked cases: cost-base
+  apportionment sums exactly (demerger/scrip percentages), parcel allocations conserve quantity,
+  split re-basing round-trips, `tax_year_for` boundaries, AMIT coverage totals equal the statement
+  amount across any transfer/sale sequence (would have caught the partial-transfer finding above)
+  — done 2026-10-11: `proptest` is a dev-dependency (`std` only); a database-backed property runs
+  each case through `test_support::block_on` on a fresh `test_pool` under
+  `test_support::db_proptest_config` (32 cases, `PROPTEST_CASES` overrides it for a deep run), and
+  `proptest-regressions/` is committed. Properties: `tax_year`'s
+  `every_date_lies_in_the_financial_year_named_for_it`; `adjustments`'
+  `an_evenly_divisible_parcel_re_bases_and_returns_exactly`,
+  `any_quantity_round_trips_to_within_decimal_precision` and
+  `the_ratio_over_a_window_is_the_product_of_its_halves`; `demerger`'s
+  `the_two_legs_always_sum_to_the_whole_cost_base`; `scrip_exchange`'s
+  `the_carried_and_realised_shares_sum_to_the_whole_cost_base`; `sell`'s
+  `every_accepted_sell_conserves_the_units_it_allocates` (predicts accept/refuse for every attempt,
+  incl. re-PUTs); `amit_adjustment_generation`'s
+  `a_statement_covers_exactly_the_units_held_at_its_year_end`; and `infra::decimal`'s
+  `apportion_halves_always_add_back_to_the_whole`. They found three defects, each fixed here with a
+  focused regression test:
+  1. **A cost-base split's halves did not always add back.** `whole − mul_div(whole, num, den)`
+     rounds when `whole` carries ~28 significant digits — which a pro-rated cost base of a partly
+     sold parcel does (`1000 × 37 / 99`) — so a partial-rollover exchange's carried scrip share and
+     the realised-gains report's independently computed cash share could miss the parcel's cost base
+     in the last digit. New `infra::decimal::apportion(whole, num, den) -> (share, rest)` rounds the
+     share to the places `whole` can be carried at, so both halves are exact; the scrip exchange,
+     the demerger, `realised_gains` (incl. the indexed figure) and the tax report's worksheet all
+     take their half from it (`apportion_keeps_the_halves_whole_where_the_plain_complement_rounds`)
+  2. **Generation followed only one transfer hop.** Units transferred after the year end and then
+     transferred *again* had their row written against the first transfer-in parcel, which the write
+     path refused (`UnitsCarriedIntoReplacement`), so the whole statement could not be generated.
+     `db_generate` now walks each parcel's units recursively to the parcel they rest in
+     (`db_units_transferred_twice_after_the_year_end_are_followed_to_where_they_rest`).
+     `db_a_failed_replace_leaves_the_original_adjustments_standing` had used that refusal as its
+     mid-run failure; it now injects one with a test-only trigger
+  3. **Generation counted rollovers from before the year end.** A transfer to another account on or
+     before 30 June diverted part of the statement onto that account's replacement parcel and left the
+     units actually held short (buy 100, move 40 in February: 20 + 40 covered instead of 60 + 0).
+     Only rollovers dated after the year end are followed now
+     (`db_units_transferred_away_before_the_year_end_are_not_the_statements`); `docs/API.md`'s
+     generation section states both rules
+- [x] Replace the 11 fixed `sleep` grace periods in concurrency tests with a deterministic signal
+  (e.g. wait until the competing task is observed blocked on the busy handler) — the four
+  write-lock races (trade/Sell settlement re-stamp, closing-price delete, snapshot generation) wait
+  on `test_support::race_pool_with_busy_probe`'s `BusyProbe::blocked`, a counting
+  `sqlite3_busy_handler` installed on every connection (pinned both ways by
+  `the_busy_probe_fires_only_for_a_writer_blocked_on_a_held_lock`); the scheduler's
+  `concurrent_runs_of_same_job_serialise` gates the first run until the second is observed parked
+  on the per-job lock (`RegisteredJob::serialise` counts a pending first poll — a lockless
+  `run_attached` now fails it deterministically, where the 30 ms window let it pass); the five
+  lockout expiry sleeps advance the tracker's own test-only clock offset
+  (`LockoutTracker::advance`); and the backup-hook kill test waits for the recorded grandchild pid
+  to be gone instead of sleeping past it. Shared wait helper: `test_support::await_condition`
+- [x] Remove the 10 local `fn dec(s: &str)` copies in favour of `test_support::dec` — nine named
+  `dec` and `trade.rs`'s `d`; `infra::decimal`'s
+  `no_test_module_redeclares_the_decimal_literal_helper` fails on any new
+  `fn <name>(s: &str) -> Decimal` outside `test_support`

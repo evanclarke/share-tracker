@@ -110,6 +110,10 @@ http-body-util = "0.1"
 # grace period. No features: sqlx's own selection is what builds it. Upgrade it
 # in step with sqlx, whose raw handle is this crate's `sqlite3` type.
 libsqlite3-sys = { version = "0.30.1", default-features = false }
+# Property tests for the invariants a hand-picked case can miss (apportionment
+# sums, quantity conservation, split round-trips, FY boundaries, AMIT coverage).
+# Only `std`: no forking or per-case timeouts, which this suite never needs.
+proptest = { version = "1.12.0", default-features = false, features = ["std"] }
 tempfile = "3"
 # test-util enables tokio's paused virtual clock (#[tokio::test(start_paused)]),
 # used to drive the scheduler's capped-sleep loop deterministically in tests.

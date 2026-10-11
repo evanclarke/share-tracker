@@ -1266,6 +1266,154 @@ mod tests {
         assert!(!trade_exists(&pool, 3).await);
     }
 
+    mod properties {
+        use super::*;
+        use proptest::prelude::*;
+        use std::collections::BTreeMap;
+
+        /// One attempted Sell write: which parcels (by index into the
+        /// buys) it draws on and how many hundredths of a unit from each,
+        /// how far its declared quantity is off the allocations' sum
+        /// (`-1`/`0`/`+1` hundredths), and — when set — that it is a re-PUT
+        /// replacing an earlier accepted Sell rather than a new one.
+        #[derive(Debug, Clone)]
+        struct Attempt {
+            draws: BTreeMap<usize, i64>,
+            off_by: i64,
+            replaces: Option<prop::sample::Index>,
+        }
+
+        fn attempts() -> impl Strategy<Value = Vec<Attempt>> {
+            let attempt = (
+                prop::collection::btree_map(0usize..3, 1i64..=60_000, 1..=3),
+                prop_oneof![3 => Just(0i64), 1 => -1i64..=1],
+                proptest::option::weighted(0.3, any::<prop::sample::Index>()),
+            )
+                .prop_map(|(draws, off_by, replaces)| Attempt {
+                    draws,
+                    off_by,
+                    replaces,
+                });
+            prop::collection::vec(attempt, 1..=8)
+        }
+
+        proptest! {
+            #![proptest_config(test_support::db_proptest_config())]
+
+            /// Whatever sequence of Sells is attempted against three parcels —
+            /// exact, over- and under-allocated, over-drawing a parcel, or
+            /// re-PUT over an earlier Sell — each write is accepted exactly
+            /// when its allocations sum to its quantity and no parcel would
+            /// be drawn past what remains of it, a refused write leaves
+            /// nothing behind, and afterwards every stored Sell's allocations
+            /// sum to its quantity and every parcel's units are conserved:
+            /// what was bought is what was allocated plus what is still open.
+            #[test]
+            fn every_accepted_sell_conserves_the_units_it_allocates(
+                bought in prop::collection::vec(1i64..=100_000, 3),
+                attempts in attempts(),
+            ) {
+                test_support::block_on(async move {
+                    let pool = test_pool().await;
+                    insert_listing(&pool, 1).await;
+                    let bought: Vec<Decimal> = bought.into_iter().map(|q| Decimal::new(q, 2)).collect();
+                    for (i, qty) in bought.iter().enumerate() {
+                        insert_buy(&pool, i as i64 + 1, ListingId(1), *qty).await;
+                    }
+
+                    // The model: each accepted Sell's draws, by Sell id.
+                    let mut accepted: BTreeMap<i64, BTreeMap<usize, Decimal>> = BTreeMap::new();
+                    for (n, attempt) in attempts.into_iter().enumerate() {
+                        let sale_id = match attempt.replaces {
+                            Some(pick) if !accepted.is_empty() => {
+                                *accepted.keys().nth(pick.index(accepted.len())).unwrap()
+                            }
+                            _ => 100 + n as i64,
+                        };
+                        let draws: BTreeMap<usize, Decimal> = attempt
+                            .draws
+                            .iter()
+                            .map(|(p, q)| (*p, Decimal::new(*q, 2)))
+                            .collect();
+                        let sum: Decimal = draws.values().sum();
+                        let declared = sum + Decimal::new(attempt.off_by, 2);
+
+                        let drawn_by_others = |parcel: usize| -> Decimal {
+                            accepted
+                                .iter()
+                                .filter(|(id, _)| **id != sale_id)
+                                .filter_map(|(_, d)| d.get(&parcel))
+                                .sum()
+                        };
+                        let fits = draws
+                            .iter()
+                            .all(|(p, q)| drawn_by_others(*p) + q <= bought[*p]);
+                        let expect_accepted = declared == sum && fits;
+
+                        let body = sell_body(
+                            declared,
+                            draws
+                                .iter()
+                                .map(|(p, q)| AllocationInput {
+                                    purchase_trade_id: TradeId(*p as i64 + 1),
+                                    quantity_allocated: *q,
+                                })
+                                .collect(),
+                        );
+                        match db_upsert_sell(&pool, TradeId(sale_id), &body).await {
+                            Ok(_) => {
+                                prop_assert!(expect_accepted, "accepted {:?} as Sell {}", draws, sale_id);
+                                accepted.insert(sale_id, draws);
+                            }
+                            Err(e) => {
+                                prop_assert!(!expect_accepted, "refused {:?}: {}", draws, e);
+                                prop_assert!(!matches!(e, SellError::Db(_)), "{}", e);
+                            }
+                        }
+                    }
+
+                    // The stored state: every Sell's allocations sum to its
+                    // quantity, and each parcel's allocated units are the
+                    // model's — never past what was bought.
+                    let sells: Vec<i64> =
+                        sqlx::query_scalar("SELECT id FROM trades WHERE trade_type = 'Sell' ORDER BY id")
+                            .fetch_all(&pool)
+                            .await
+                            .unwrap();
+                    prop_assert_eq!(sells.len(), accepted.len());
+                    for (parcel, qty) in bought.iter().enumerate() {
+                        let allocations: Vec<(String,)> = sqlx::query_as(
+                            "SELECT quantity_allocated FROM parcel_allocations WHERE purchase_trade_id = ?",
+                        )
+                        .bind(parcel as i64 + 1)
+                        .fetch_all(&pool)
+                        .await
+                        .unwrap();
+                        let stored: Decimal = allocations.iter().map(|(q,)| test_support::dec(q)).sum();
+                        let modelled: Decimal = accepted.values().filter_map(|d| d.get(&parcel)).sum();
+                        prop_assert_eq!(stored, modelled);
+                        prop_assert!(stored <= *qty);
+                    }
+                    for id in &sells {
+                        let allocations: Vec<(String,)> = sqlx::query_as(
+                            "SELECT quantity_allocated FROM parcel_allocations WHERE sale_trade_id = ?",
+                        )
+                        .bind(id)
+                        .fetch_all(&pool)
+                        .await
+                        .unwrap();
+                        let quantity = trade::db_get(&pool, TradeId(*id)).await.unwrap().unwrap().quantity;
+                        prop_assert_eq!(
+                            allocations.iter().map(|(q,)| test_support::dec(q)).sum::<Decimal>(),
+                            quantity
+                        );
+                    }
+                    Ok(())
+                })?;
+            }
+        }
+    }
+
     #[tokio::test]
     async fn db_over_allocated_sell_is_rejected() {
         let pool = test_pool().await;

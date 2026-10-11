@@ -57,7 +57,7 @@ use crate::entities::sell::{self, AllocationInput};
 use crate::entities::trade::{self, Trade};
 use crate::infra::currency::CurrencyCode;
 use crate::infra::db::{WriteMode, write_tx};
-use crate::infra::decimal::mul_div;
+use crate::infra::decimal::apportion;
 use crate::infra::extract::Query;
 use crate::infra::http::{ApiError, DryRunQuery};
 use crate::infra::id::HoldingAccountId;
@@ -402,10 +402,10 @@ impl Terms {
         // With a cash component, only the scrip side's market-value share of
         // the cost base rolls over into the replacement; the cash side's
         // share stays behind for the closing Sell's gain (computed the same
-        // way by the realised-gains report). The two sides sum exactly to
-        // the reduced cost base by construction.
+        // way by the realised-gains report, from the same `apportion`). The
+        // two sides sum exactly to the reduced cost base.
         let carried_cost_base = match self.cash_apportionment {
-            Some((num, den)) => reduced_cost_base - mul_div(&[reduced_cost_base, num], den),
+            Some((num, den)) => apportion(reduced_cost_base, num, den).1,
             None => reduced_cost_base,
         };
 
@@ -921,6 +921,113 @@ mod tests {
             ex.replacements[0].deemed_acquisition_date,
             Some(d(2020, 10, 1))
         );
+    }
+
+    mod properties {
+        use super::*;
+        use proptest::prelude::*;
+        use std::collections::BTreeMap;
+
+        proptest! {
+            #![proptest_config(test_support::db_proptest_config())]
+
+            /// A partial rollover splits each parcel's cost base between the
+            /// cash and the scrip by market value, and the two sides are
+            /// computed in two places — the exchange carries the scrip share
+            /// into the replacement, the realised-gains report assesses the
+            /// closing Sell against the cash share. Whatever the terms, the
+            /// replacement's cost base and the report's cash-side cost base
+            /// together are exactly each parcel's cost base before the
+            /// exchange — including a parcel partly sold first, whose
+            /// pro-rated cost base carries all 28 significant digits (the
+            /// case `infra::decimal::apportion` exists for).
+            #[test]
+            fn the_carried_and_realised_shares_sum_to_the_whole_cost_base(
+                parcels in test_support::parcel_costs(),
+                sold_first in proptest::option::of(1i64..10_000),
+                new in 1i64..=10,
+                old in 1i64..=10,
+                cash in 1i64..=5_000,
+                market_value in 1i64..=5_000,
+            ) {
+                test_support::block_on(async move {
+                    let pool = test_pool().await;
+                    insert_listing(&pool, 1, "OLD").await;
+                    insert_listing(&pool, 2, "NEW").await;
+                    test_support::insert_parcel_costs(&pool, 1, &parcels).await;
+                    let first = parcels[0].0;
+                    if let Some(sold) = sold_first.map(Decimal::from).filter(|s| *s < first) {
+                        test_support::sell(100, 1)
+                            .date(d(2024, 3, 4))
+                            .settlement(d(2024, 3, 6))
+                            .qty(sold)
+                            .insert(&pool)
+                            .await;
+                        test_support::allocate(&pool, 1, 100, 1, sold).await;
+                    }
+                    let api = ApiClient::full(&pool);
+                    let open: serde_json::Value = api.get_json("/portfolio/open_parcels").await;
+                    let costs: BTreeMap<NaiveDate, Decimal> = open
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|p| {
+                            (
+                                p["acquisition_date"].as_str().unwrap().parse().unwrap(),
+                                dec(p["remaining_cost_base"].as_str().unwrap()),
+                            )
+                        })
+                        .collect();
+                    let (cash, market_value) =
+                        (Decimal::new(cash, 2).to_string(), Decimal::new(market_value, 2).to_string());
+                    let (new, old) = (new.to_string(), old.to_string());
+                    insert_scrip_cash_terms(
+                        &pool,
+                        10,
+                        ListingId(1),
+                        ListingId(2),
+                        d(2024, 7, 1),
+                        &new,
+                        &old,
+                        Some((&cash, &market_value)),
+                    )
+                    .await;
+
+                    let ex = db_exchange(&pool, 10).await.unwrap();
+                    let carried: BTreeMap<NaiveDate, Decimal> = ex
+                        .replacements
+                        .iter()
+                        .map(|t| (t.deemed_acquisition_date.unwrap(), t.brokerage))
+                        .collect();
+                    let realised: serde_json::Value = api.get_json("/portfolio/realised_gains").await;
+                    let closing = realised
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|r| r["sale_trade_id"] == ex.sell.id.0)
+                        .unwrap();
+                    let cash_side: BTreeMap<NaiveDate, Decimal> = closing["parcels"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|p| {
+                            (
+                                p["acquisition_date"].as_str().unwrap().parse().unwrap(),
+                                dec(p["cost_base"].as_str().unwrap()),
+                            )
+                        })
+                        .collect();
+
+                    prop_assert_eq!(carried.len(), costs.len());
+                    prop_assert_eq!(cash_side.len(), costs.len());
+                    for (date, cost) in &costs {
+                        prop_assert_eq!(carried[date] + cash_side[date], *cost, "parcel of {}", date);
+                        prop_assert!(carried[date] > Decimal::ZERO && cash_side[date] > Decimal::ZERO);
+                    }
+                    Ok(())
+                })?;
+            }
+        }
     }
 
     /// The apportionment respects a non-1:1 exchange ratio — per old unit

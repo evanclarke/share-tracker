@@ -30,10 +30,12 @@ one path casing, readable writable URLs, one rejection shape, and the `200`/`201
 and archived in [`DONE/api.md`](DONE/api.md), and so is the 2026-10-04 agent-usability pass that
 followed it (OpenAPI bodies, ids, descriptions and slices, `?dry_run=true`, the live-API skill,
 trustworthy `required` lists, and reasoned GET-one `404`s). The Budget section below came from the
-2026-10-08 sweep of the ATO mirrors (`docs/ato/OVERVIEW.md`, *Full sweep, 2026-10-08*); the sections
-after it are the findings of the 2026-10-10 metric-scored code review (financial correctness 8,
-error handling 8.5, concurrency/integrity/performance 8, security 8.5, architecture 6, tests 8,
-hygiene 9 — out of 10), most severe first.
+2026-10-08 sweep of the ATO mirrors (`docs/ato/OVERVIEW.md`, *Full sweep, 2026-10-08*). The findings
+of the 2026-10-10 metric-scored code review (financial correctness 8, error handling 8.5,
+concurrency/integrity/performance 8, security 8.5, architecture 6, tests 8, hygiene 9 — out of 10)
+are all closed and archived in [`DONE/reviews.md`](DONE/reviews.md), the last of them the
+`proptest` item of its test-suite section (2026-10-11), whose properties found and fixed three
+defects of their own.
 
 ## 2026–27 Budget CGT changes — announced, not law (ATO mirror sweep 2026-10-08)
 The ATO's CGT discount, cost base, how-to-calculate and indexation pages have carried a banner
@@ -55,25 +57,3 @@ falls under the existing rules.
 - [ ] Whatever is decided, make sure a closing price is stored for every held listing on the last
   trading day before 1 July 2027 (the scheduled price import plus `closing_price`'s held-days
   backfill), since a missing one cannot be fetched reliably years later
-
-## Test-suite gaps (2026-10-10 review, tests)
-- [ ] Add `proptest` for the invariants the suite currently pins with hand-picked cases: cost-base
-  apportionment sums exactly (demerger/scrip percentages), parcel allocations conserve quantity,
-  split re-basing round-trips, `tax_year_for` boundaries, AMIT coverage totals equal the statement
-  amount across any transfer/sale sequence (would have caught the partial-transfer finding above)
-- [x] Replace the 11 fixed `sleep` grace periods in concurrency tests with a deterministic signal
-  (e.g. wait until the competing task is observed blocked on the busy handler) — the four
-  write-lock races (trade/Sell settlement re-stamp, closing-price delete, snapshot generation) wait
-  on `test_support::race_pool_with_busy_probe`'s `BusyProbe::blocked`, a counting
-  `sqlite3_busy_handler` installed on every connection (pinned both ways by
-  `the_busy_probe_fires_only_for_a_writer_blocked_on_a_held_lock`); the scheduler's
-  `concurrent_runs_of_same_job_serialise` gates the first run until the second is observed parked
-  on the per-job lock (`RegisteredJob::serialise` counts a pending first poll — a lockless
-  `run_attached` now fails it deterministically, where the 30 ms window let it pass); the five
-  lockout expiry sleeps advance the tracker's own test-only clock offset
-  (`LockoutTracker::advance`); and the backup-hook kill test waits for the recorded grandchild pid
-  to be gone instead of sleeping past it. Shared wait helper: `test_support::await_condition`
-- [x] Remove the 10 local `fn dec(s: &str)` copies in favour of `test_support::dec` — nine named
-  `dec` and `trade.rs`'s `d`; `infra::decimal`'s
-  `no_test_module_redeclares_the_decimal_literal_helper` fails on any new
-  `fn <name>(s: &str) -> Decimal` outside `test_support`

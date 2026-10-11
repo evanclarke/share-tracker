@@ -51,6 +51,82 @@ pub async fn test_pool() -> SqlitePool {
     pool
 }
 
+/// Run one case of a database-backed property test (`proptest!`) to
+/// completion. A `proptest!` body is synchronous, so a property over the
+/// database builds a current-thread runtime per case and drives its async body
+/// — a fresh [`test_pool`] and all — on it. The schema cache is a plain string,
+/// not a pool, so it outlives each case's runtime.
+pub fn block_on<F: std::future::Future>(case: F) -> F::Output {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a current-thread runtime")
+        .block_on(case)
+}
+
+/// The `proptest` configuration for a property whose every case builds its own
+/// database: proptest's default 256 cases would make each such property cost
+/// seconds, where a few dozen random histories already reach every branch the
+/// hand-picked cases beside them pin. A property over pure arithmetic keeps
+/// the default. `PROPTEST_CASES` still wins, for a deliberate deep run
+/// (`PROPTEST_CASES=2000 cargo test properties`).
+pub fn db_proptest_config() -> proptest::test_runner::Config {
+    let config = proptest::test_runner::Config::default();
+    if std::env::var_os("PROPTEST_CASES").is_some() {
+        config
+    } else {
+        proptest::test_runner::Config {
+            cases: 32,
+            ..config
+        }
+    }
+}
+
+/// A property-test strategy for one to four parcels of one listing:
+/// `(quantity, price)`, the price carrying up to ten decimal places so a
+/// parcel's cost is rarely a round figure. [`insert_parcel_costs`] buys them.
+pub fn parcel_costs() -> impl proptest::strategy::Strategy<Value = Vec<(Decimal, Decimal)>> {
+    use proptest::prelude::*;
+    prop::collection::vec((1i64..=10_000, 1i64..10_000_000_000, 0u32..=10), 1..=4).prop_map(
+        |parcels| {
+            parcels
+                .into_iter()
+                .map(|(qty, mantissa, scale)| (Decimal::from(qty), Decimal::new(mantissa, scale)))
+                .collect()
+        },
+    )
+}
+
+/// Buy [`parcel_costs`]' parcels of `listing_id` as trades 1, 2, …, each on
+/// its own trading day between 2020 and 2023 (settled the same day), so any
+/// operation dated from 2024 finds them all held. Answers each parcel's cost
+/// keyed by its acquisition date — the date a rollover's replacement parcel
+/// and a realised disposal's parcel detail both carry, so a property can
+/// check its invariant parcel by parcel. (Summing first would not do: a sum
+/// of several 28-digit figures itself rounds.)
+pub async fn insert_parcel_costs(
+    pool: &SqlitePool,
+    listing_id: i64,
+    parcels: &[(Decimal, Decimal)],
+) -> std::collections::BTreeMap<NaiveDate, Decimal> {
+    const DATES: [(i32, u32, u32); 4] =
+        [(2020, 10, 1), (2021, 3, 15), (2022, 1, 10), (2023, 5, 10)];
+    assert!(parcels.len() <= DATES.len(), "one buy date per parcel");
+    let mut costs = std::collections::BTreeMap::new();
+    for (i, ((qty, price), (y, m, d))) in parcels.iter().zip(DATES).enumerate() {
+        let date = ymd(y, m, d);
+        buy(i as i64 + 1, listing_id)
+            .date(date)
+            .settlement(date)
+            .qty(*qty)
+            .price(*price)
+            .insert(pool)
+            .await;
+        costs.insert(date, qty * price);
+    }
+    costs
+}
+
 /// A file-backed pool (WAL, migrations run) — what `main` opens, and the one
 /// thing a **concurrency** test cannot take from [`test_pool`]. A `:memory:`
 /// database is shared-cache (sqlx configures it so): several connections share

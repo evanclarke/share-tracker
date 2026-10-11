@@ -377,6 +377,42 @@ pub fn mul_div(factors: &[Decimal], divisor: Decimal) -> Decimal {
     if divided { acc } else { acc / divisor }
 }
 
+/// *The* two-way split of a cost base: `whole` divided into the `num / den`
+/// share of it and the rest, answered as `(share, rest)` with `share + rest ==
+/// whole` **exactly**. A demerger's demerged and head legs, and a partial
+/// rollover's cash and scrip sides, are each one such split — and the two
+/// halves are stored or reported in different places (the scrip side carried
+/// into the replacement parcel, the cash side assessed by the realised-gains
+/// report), so each place takes its half from here rather than re-deriving it.
+///
+/// `whole − mul_div(whole, num, den)` alone does not keep that promise: the
+/// share is computed to ~28 significant digits, and wherever it carries more
+/// decimal places than `whole` has room for beside its own integer digits, the
+/// subtraction rounds and the halves no longer add back (a \$8.9 trillion cost
+/// base split 5.11 : 82.05 came back 1e-15 short — found by the
+/// `the_carried_and_realised_shares_sum_to_the_whole_cost_base` property). So
+/// the share is first rounded to the decimal places `whole` can be carried at
+/// — never fewer than `whole`'s own — after which both the subtraction and the
+/// re-addition are exact. A share that already fits (every percentage of a
+/// cent-denominated cost) is untouched.
+///
+/// `num / den` is a fraction between 0 and 1 (`den` non-zero), as every
+/// caller's is.
+pub fn apportion(whole: Decimal, num: Decimal, den: Decimal) -> (Decimal, Decimal) {
+    // The significant digits `rust_decimal` always holds (its 96-bit mantissa
+    // holds every 28-digit value, and some 29-digit ones).
+    const DIGITS: u32 = 28;
+    let digits = whole
+        .mantissa()
+        .unsigned_abs()
+        .checked_ilog10()
+        .map_or(1, |d| d + 1);
+    let integer_digits = digits.saturating_sub(whole.scale());
+    let places = DIGITS.saturating_sub(integer_digits).max(whole.scale());
+    let share = mul_div(&[whole, num], den).round_dp(places);
+    (share, whole - share)
+}
+
 /// Read a nullable TEXT decimal column via [`OptMoney`]: `NULL` maps to `None`, a
 /// present value is parsed (so a malformed value is a column-named error, never a
 /// silent `None`).
@@ -869,6 +905,55 @@ mod tests {
             mul_div(&[dec("1e15"), dec("1e15"), Decimal::ONE], dec("1e15")),
             dec("1e15")
         );
+    }
+
+    /// A whole carried at all 28 significant digits — what a pro-rated cost
+    /// base is (`1000 × 37 / 99`) — is where the plain `whole − mul_div(…)`
+    /// complement rounds and stops adding back; `apportion`'s does not.
+    #[test]
+    fn apportion_keeps_the_halves_whole_where_the_plain_complement_rounds() {
+        let (whole, num, den) = (
+            dec("965671919527465005095672794.7"),
+            dec("88007"),
+            dec("580930"),
+        );
+        let plain = mul_div(&[whole, num], den);
+        assert_ne!(plain + (whole - plain), whole);
+
+        let (share, rest) = apportion(whole, num, den);
+        assert_eq!(share + rest, whole);
+        assert!((share - plain).abs() <= dec("0.1"));
+        // A share that already fits is the plain one, digit for digit.
+        assert_eq!(
+            apportion(dec("2500"), dec("5.063"), Decimal::ONE_HUNDRED),
+            (dec("126.575"), dec("2373.425"))
+        );
+    }
+
+    proptest::proptest! {
+        /// Whatever the whole — up to 28 digits, at any scale — and whatever
+        /// fraction of it, the share and the rest add back to it exactly,
+        /// neither is negative, and the share is the `mul_div` figure to
+        /// within the digits `whole` itself is carried at.
+        #[test]
+        fn apportion_halves_always_add_back_to_the_whole(
+            mantissa in 1i128..10_000_000_000_000_000_000_000_000_000,
+            scale in 0u32..=28,
+            num in 0i64..=1_000_000,
+            extra in 0i64..=1_000_000,
+            num_scale in 0u32..=6,
+        ) {
+            let whole = Decimal::from_i128_with_scale(mantissa, scale);
+            let num = Decimal::new(num, num_scale);
+            let den = num + Decimal::new(extra, num_scale);
+            proptest::prop_assume!(!den.is_zero());
+
+            let (share, rest) = apportion(whole, num, den);
+            proptest::prop_assert_eq!(share + rest, whole);
+            proptest::prop_assert!(share >= Decimal::ZERO && rest >= Decimal::ZERO);
+            let ulp = Decimal::new(1, whole.scale()).max(whole * dec("1e-27"));
+            proptest::prop_assert!((share - mul_div(&[whole, num], den)).abs() <= ulp);
+        }
     }
 
     // -----------------------------------------------------------------------

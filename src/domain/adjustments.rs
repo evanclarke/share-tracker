@@ -741,3 +741,101 @@ pub fn contemporaneous_price(
         mul_div(&[price, new], old)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// Up to four re-basing events in the 2015–2020 window, each a share split
+    /// (or consolidation) `a`-for-`b` or a bonus issue of `a` for every `b`
+    /// held.
+    fn rebasings() -> impl Strategy<Value = Vec<SplitEvent>> {
+        prop::collection::vec((1i64..2000, 1i64..=20, 1i64..=20, any::<bool>()), 0..=4).prop_map(
+            |events| {
+                events
+                    .into_iter()
+                    .map(|(day, a, b, bonus)| {
+                        let date = acquired() + chrono::Duration::days(day);
+                        let (a, b) = (Decimal::from(a), Decimal::from(b));
+                        if bonus {
+                            SplitEvent::bonus_issue(date, a, b)
+                        } else {
+                            SplitEvent::share_split(date, a, b)
+                        }
+                    })
+                    .collect()
+            },
+        )
+    }
+
+    fn acquired() -> NaiveDate {
+        NaiveDate::from_ymd_opt(2015, 1, 1).unwrap()
+    }
+
+    /// After every event [`rebasings`] can date.
+    fn after_all() -> NaiveDate {
+        acquired() + chrono::Duration::days(2000)
+    }
+
+    proptest! {
+        /// A parcel whose units divide evenly through every event re-bases
+        /// exactly — `k × Π old` units become `k × Π new` — and the units
+        /// sold out of it in the post-event basis convert back to exactly the
+        /// units bought, so a fully sold parcel is never left with a residue.
+        #[test]
+        fn an_evenly_divisible_parcel_re_bases_and_returns_exactly(
+            splits in rebasings(),
+            k in 1i64..1_000_000,
+        ) {
+            let old: Decimal = splits.iter().map(|s| s.old_units).product();
+            let new: Decimal = splits.iter().map(|s| s.new_units).product();
+            let bought = Decimal::from(k) * old;
+
+            let held = split_adjusted_quantity(bought, &splits, acquired(), Some(after_all()));
+            prop_assert_eq!(held, Decimal::from(k) * new);
+            prop_assert_eq!(held, split_adjusted_quantity(bought, &splits, acquired(), None));
+            prop_assert_eq!(as_acquired_quantity(held, &splits, acquired(), after_all()), bought);
+            prop_assert_eq!(
+                sold_in_acquired_units([(after_all(), held)], &splits, acquired()),
+                bought
+            );
+        }
+
+        /// Any quantity — fractional, and through ratios that do not
+        /// terminate (a 1-for-3 consolidation) — survives the round trip to
+        /// the post-event basis and back to within `Decimal`'s last digits:
+        /// the conversion multiplies before it divides, so it rounds once
+        /// each way rather than compounding per event.
+        #[test]
+        fn any_quantity_round_trips_to_within_decimal_precision(
+            splits in rebasings(),
+            mantissa in 1i64..1_000_000_000_000,
+            scale in 0u32..=6,
+        ) {
+            let bought = Decimal::new(mantissa, scale);
+            let held = split_adjusted_quantity(bought, &splits, acquired(), Some(after_all()));
+            let back = as_acquired_quantity(held, &splits, acquired(), after_all());
+            let tolerance = bought * Decimal::new(1, 20);
+            prop_assert!((back - bought).abs() <= tolerance, "{bought} → {held} → {back}");
+        }
+
+        /// Re-basing across a window is re-basing across its two halves: the
+        /// cumulative ratio over `(acquired, at]` is the product, numerator
+        /// and denominator separately, of the ratios over `(acquired, mid]`
+        /// and `(mid, at]` — so an event on the boundary is counted in
+        /// exactly one half.
+        #[test]
+        fn the_ratio_over_a_window_is_the_product_of_its_halves(
+            splits in rebasings(),
+            mid in 0i64..=2000,
+        ) {
+            let mid = acquired() + chrono::Duration::days(mid);
+            let (whole_new, whole_old) = split_ratio(&splits, acquired(), Some(after_all()));
+            let (first_new, first_old) = split_ratio(&splits, acquired(), Some(mid));
+            let (second_new, second_old) = split_ratio(&splits, mid, Some(after_all()));
+            prop_assert_eq!(whole_new, first_new * second_new);
+            prop_assert_eq!(whole_old, first_old * second_old);
+        }
+    }
+}

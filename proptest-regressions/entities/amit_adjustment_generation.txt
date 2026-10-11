@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc d8936b28437e46f3096b765b8987aa23ac2ad89b3ee83d3d97208af3639fe939 # shrinks to bought = [10], before = [], after = [Event { transfer: true, pick: Index(0), percent: 1, to: Index(6568874) }, Event { transfer: true, pick: Index(14654004370532606457), percent: 38, to: Index(4879952027786355340) }], rate = 197
+cc 857147bc832f5ff03289c9bca6fb7c2e1f927def3441752c99a6c06d939bb4e5 # shrinks to bought = [10], before = [Event { transfer: true, pick: Index(0), percent: 20, to: Index(0) }, Event { transfer: false, pick: Index(9223372036854775808), percent: 1, to: Index(0) }], after = [Event { transfer: true, pick: Index(9223372036854775808), percent: 1, to: Index(0) }], rate = -1

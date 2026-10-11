@@ -48,7 +48,7 @@ use crate::entities::income::{Income, IncomeType};
 use crate::entities::investment_expense::ExpenseType;
 use crate::entities::trade::Trade;
 use crate::infra::currency::CurrencyCode;
-use crate::infra::decimal::{OptMoney, mul_div, parse_dec, to_cents};
+use crate::infra::decimal::{OptMoney, apportion, parse_dec, to_cents};
 use crate::infra::extract::{Json, Query};
 use crate::infra::fx::FxRates;
 use crate::infra::http::ApiError;
@@ -881,14 +881,14 @@ fn disposal_parcel_rows(
                                 r.per_unit = r.per_unit.map(|pu| pu / rate);
                             }
                             if let Some((num, den)) = apportionment {
-                                r.amount = mul_div(&[r.amount, *num], *den);
-                                r.per_unit = r.per_unit.map(|pu| mul_div(&[pu, *num], *den));
+                                r.amount = apportion(r.amount, *num, *den).0;
+                                r.per_unit = r.per_unit.map(|pu| apportion(pu, *num, *den).0);
                             }
                             r
                         })
                         .collect();
                     let aud_initial = match apportionment {
-                        Some((num, den)) => mul_div(&[aud_initial, *num], *den),
+                        Some((num, den)) => apportion(aud_initial, *num, *den).0,
                         None => aud_initial,
                     };
                     (aud_rows, aud_initial)

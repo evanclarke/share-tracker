@@ -121,7 +121,9 @@ pub struct GeneratedAdjustment {
 /// for hand entry — see [`GeneratedAdjustments::unattributed`].
 #[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnattributedUnits {
-    /// The parcel the statement's account held at year end.
+    /// The parcel the units were in when the operation carried them away: one
+    /// the statement's account held at year end, or a transfer-in parcel the
+    /// units were moved into after it.
     pub source_trade_id: TradeId,
     /// Units of it the operation carried away, in the operation date's basis.
     pub units: Decimal,
@@ -306,6 +308,141 @@ async fn write_or_preview(
     })
 }
 
+/// Some of the statement's units, sitting in one parcel: a parcel its account
+/// held at the year end, or a transfer-in parcel they were moved into since.
+struct Holding {
+    id: TradeId,
+    /// The date the parcel's own unit basis is reckoned from — its trade date
+    /// (for a transfer-in parcel, the transfer's), which is what the stored
+    /// adjustment quantity is in.
+    basis_date: NaiveDate,
+    /// The CGT acquisition date the units carry, which a transfer keeps: what
+    /// identifies the transfer-in parcel they went into.
+    acquired: NaiveDate,
+    /// The statement's units in it, in its own as-acquired basis.
+    units: Decimal,
+}
+
+/// One generation run's walk of the statement's units to the parcels they now
+/// sit in, and the rows and reports it has produced so far.
+struct Placement<'a> {
+    statement_id: i64,
+    year_end: NaiveDate,
+    preview: bool,
+    splits: &'a [corporate_action::SplitEvent],
+    created: Vec<GeneratedAdjustment>,
+    units_adjusted: Decimal,
+    unattributed: Vec<UnattributedUnits>,
+}
+
+impl Placement<'_> {
+    /// Write the rows covering `holding`'s units wherever they now are.
+    ///
+    /// Only a rollover dated **after the year end** moves any of them: one
+    /// before it had already taken its units out of this account, so the
+    /// statement's year-end units — `holding.units` — never included them, and
+    /// they are the receiving account's own statement's to adjust. (Reading
+    /// every rollover of the parcel diverted part of this statement onto the
+    /// other account's replacement and left the units actually held short.) A
+    /// transfer's units are followed into its transfer-in parcel and walked
+    /// again from there, as many times as they moved: following one hop wrote
+    /// the row against a parcel the units had already left, which the write
+    /// path refuses, and the whole run failed. Units a scrip-for-scrip exchange
+    /// or demerger carried away are reported in `unattributed` for hand entry;
+    /// what stays behind gets its own row against this parcel.
+    fn place<'c>(
+        &'c mut self,
+        conn: &'c mut sqlx::SqliteConnection,
+        holding: Holding,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), GenerateError>> + Send + 'c>>
+    {
+        Box::pin(async move {
+            let year_end = self.year_end;
+            let moves = db_rollovers_of(&mut *conn, holding.id).await?;
+            let mut staying = holding.units;
+            for movement in moves.iter().filter(|m| m.date > year_end) {
+                let carried = corporate_action::as_acquired_quantity(
+                    movement.units,
+                    self.splits,
+                    holding.basis_date,
+                    movement.date,
+                );
+                let from_this_statement = staying.min(carried);
+                if from_this_statement <= Decimal::ZERO {
+                    continue;
+                }
+                staying -= from_this_statement;
+                // A transfer's replacement carries exactly the units moved
+                // under the source parcel's own acquisition date, so it is
+                // identified without guessing. A scrip exchange or demerger
+                // scales the quantity by its ratio and (for a demerger) creates
+                // two parcels, and nothing links a replacement to the
+                // individual parcel it replaced — so those are reported for
+                // hand entry rather than attributed by inference.
+                match movement.matching_replacement(holding.acquired, movement.units) {
+                    Some(replacement) => {
+                        let units = corporate_action::split_adjusted_quantity(
+                            from_this_statement,
+                            self.splits,
+                            holding.basis_date,
+                            Some(movement.date),
+                        );
+                        self.place(
+                            &mut *conn,
+                            Holding {
+                                id: replacement,
+                                basis_date: movement.date,
+                                acquired: holding.acquired,
+                                units,
+                            },
+                        )
+                        .await?;
+                    }
+                    None => self.unattributed.push(UnattributedUnits {
+                        source_trade_id: holding.id,
+                        units: movement.units,
+                        replacements: movement.replacements.clone(),
+                    }),
+                }
+            }
+            if staying > Decimal::ZERO {
+                // The row's own contribution in the statement year's basis: a
+                // transfer-in parcel's basis date is after the year end, so its
+                // units convert back to that basis rather than forward.
+                let rebased = if holding.basis_date <= self.year_end {
+                    corporate_action::split_adjusted_quantity(
+                        staying,
+                        self.splits,
+                        holding.basis_date,
+                        Some(self.year_end),
+                    )
+                } else {
+                    corporate_action::as_acquired_quantity(
+                        staying,
+                        self.splits,
+                        self.year_end,
+                        holding.basis_date,
+                    )
+                };
+                let adjustment = write_or_preview(
+                    &mut *conn,
+                    self.preview,
+                    AmitAdjustmentBody {
+                        amma_statement_id: self.statement_id,
+                        trade_id: holding.id,
+                        quantity: staying,
+                    },
+                    rebased,
+                )
+                .await?;
+                self.units_adjusted += rebased;
+                self.created.push(adjustment);
+            }
+            Ok(())
+        })
+    }
+}
+
 /// Generate (or preview) the statement's per-parcel adjustment set.
 pub async fn db_generate(
     pool: &SqlitePool,
@@ -369,97 +506,42 @@ pub async fn db_generate(
             .await?;
     }
 
-    let mut created = Vec::with_capacity(parcels.len());
-    let mut units_adjusted = Decimal::ZERO;
-    let mut unattributed = Vec::new();
+    let mut placement = Placement {
+        statement_id,
+        year_end,
+        preview: body.preview,
+        splits: &splits,
+        created: Vec::with_capacity(parcels.len()),
+        units_adjusted: Decimal::ZERO,
+        unattributed: Vec::new(),
+    };
     for parcel in &parcels {
         // `remaining_as_of` is in the year-end unit basis; the quantity
         // column stores as-acquired units (the basis `trade.quantity` caps).
-        let quantity = corporate_action::as_acquired_quantity(
+        let units = corporate_action::as_acquired_quantity(
             parcel.remaining_as_of,
             &splits,
             parcel.parcel.date,
             year_end,
         );
-        // Units of this parcel a rollover has since carried into a replacement
-        // parcel cannot be adjusted here — the replacement took their cost base
-        // with it (`amit_adjustment::UpsertError::UnitsCarriedIntoReplacement`),
-        // and the statement's reduction has to follow them. This is the ordinary
-        // case, not an edge one: an AMMA statement for a year ended 30 June
-        // arrives in August or September, so any move in between lands in it
-        // (SCENARIOS N-06).
-        let moves = db_rollovers_of(&mut tx, parcel.parcel.id).await?;
-        let mut source_quantity = quantity;
-        for movement in &moves {
-            let carried = corporate_action::as_acquired_quantity(
-                movement.units,
-                &splits,
-                parcel.parcel.date,
-                movement.date,
-            );
-            let from_this_statement = source_quantity.min(carried);
-            if from_this_statement <= Decimal::ZERO {
-                continue;
-            }
-            source_quantity -= from_this_statement;
-            // A transfer's replacement carries exactly the units moved under the
-            // source parcel's own acquisition date, so it is identified without
-            // guessing. A scrip exchange or demerger scales the quantity by its
-            // ratio and (for a demerger) creates two parcels, and nothing links
-            // a replacement to the individual parcel it replaced — so those are
-            // reported for hand entry rather than attributed by inference.
-            match movement.matching_replacement(parcel.parcel.acquired(), movement.units) {
-                Some(replacement) => {
-                    let rebased = corporate_action::split_adjusted_quantity(
-                        from_this_statement,
-                        &splits,
-                        parcel.parcel.date,
-                        Some(year_end),
-                    );
-                    let adjustment = write_or_preview(
-                        &mut tx,
-                        body.preview,
-                        AmitAdjustmentBody {
-                            amma_statement_id: statement_id,
-                            trade_id: replacement,
-                            // Both figures are in the operation date's basis.
-                            quantity: movement.units,
-                        },
-                        rebased,
-                    )
-                    .await?;
-                    units_adjusted += rebased;
-                    created.push(adjustment);
-                }
-                None => unattributed.push(UnattributedUnits {
-                    source_trade_id: parcel.parcel.id,
-                    units: movement.units,
-                    replacements: movement.replacements.clone(),
-                }),
-            }
-        }
-        if source_quantity > Decimal::ZERO {
-            let rebased = corporate_action::split_adjusted_quantity(
-                source_quantity,
-                &splits,
-                parcel.parcel.date,
-                Some(year_end),
-            );
-            let adjustment = write_or_preview(
+        placement
+            .place(
                 &mut tx,
-                body.preview,
-                AmitAdjustmentBody {
-                    amma_statement_id: statement_id,
-                    trade_id: parcel.parcel.id,
-                    quantity: source_quantity,
+                Holding {
+                    id: parcel.parcel.id,
+                    basis_date: parcel.parcel.date,
+                    acquired: parcel.parcel.acquired(),
+                    units,
                 },
-                rebased,
             )
             .await?;
-            units_adjusted += rebased;
-            created.push(adjustment);
-        }
     }
+    let Placement {
+        created,
+        units_adjusted,
+        unattributed,
+        ..
+    } = placement;
 
     if body.preview {
         tx.rollback().await?;
@@ -813,18 +895,16 @@ mod tests {
     /// and never rewritten silently stops reducing any cost base, which no
     /// report flags, whereas a refused regeneration is visible at once.
     ///
-    /// The failure used is the reachable one: a holding moved twice. The
-    /// parcel was open at the year end, so generation follows the first
-    /// transfer to its replacement parcel (N-06) — but a *second* transfer has
-    /// since carried that replacement's units on again, so the row against it
-    /// is refused by F-17's `UnitsCarriedIntoReplacement`, well past the
-    /// DELETE.
+    /// The failure is injected — a trigger refusing every insert into
+    /// `amit_adjustments`, so the run fails at its first row, well past the
+    /// DELETE. (This test used to reach it through a holding transferred
+    /// twice, whose second hop generation did not follow; it does now, and
+    /// `db_units_transferred_twice_after_the_year_end_are_followed_to_where_they_rest`
+    /// pins that. No generated row is refused by the write path any more, which
+    /// is the point of generating them — but a failure past the DELETE must
+    /// still be harmless, whatever causes it.)
     #[tokio::test]
     async fn db_a_failed_replace_leaves_the_original_adjustments_standing() {
-        use crate::entities::holding_account::{self, HoldingAccount};
-        use crate::entities::sell::AllocationInput;
-        use crate::entities::transfer::{self, TransferBody};
-
         async fn stored_rows(pool: &SqlitePool) -> Vec<(i64, i64, i64, String)> {
             sqlx::query_as(
                 "SELECT id, amma_statement_id, trade_id, quantity FROM amit_adjustments \
@@ -844,20 +924,7 @@ mod tests {
             .insert(&pool)
             .await;
         amma(&pool, 6, ListingId(1), ymd(2024, 6, 30), "100").await;
-        for (id, name) in [(2, "Second"), (3, "Third")] {
-            holding_account::db_upsert(
-                &pool,
-                &HoldingAccount {
-                    id: HoldingAccountId(id),
-                    name: name.to_string(),
-                },
-            )
-            .await
-            .unwrap();
-        }
 
-        // The original set, generated while the holding was still where the
-        // statement found it.
         let first = db_generate(&pool, 6, &GenerateBody::default())
             .await
             .unwrap();
@@ -865,42 +932,13 @@ mod tests {
         let original = stored_rows(&pool).await;
         assert_eq!(original.len(), 1);
 
-        // Moved out, then moved on again — both after the year end, so the
-        // parcel is still open at it and generation still covers it.
-        let mut moved_from = 1;
-        for (transfer_id, date, from, to) in
-            [(1, ymd(2024, 8, 15), 1, 2), (2, ymd(2024, 9, 16), 2, 3)]
-        {
-            transfer::db_transfer(
-                &pool,
-                transfer_id,
-                &TransferBody {
-                    listing_id: ListingId(1),
-                    date,
-                    from_account_id: HoldingAccountId(from),
-                    to_account_id: HoldingAccountId(to),
-                    allocations: vec![AllocationInput {
-                        purchase_trade_id: TradeId(moved_from),
-                        quantity_allocated: dec("100"),
-                    }],
-                    fee_allocations: Vec::new(),
-                    fee_market_price: None,
-                    fee_fx_rate: None,
-                },
-            )
-            .await
-            .unwrap();
-            moved_from = sqlx::query_scalar(
-                "SELECT id FROM trades WHERE transfer_id = ? AND trade_type = 'Buy'",
-            )
-            .bind(transfer_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        }
-
-        // Regenerating now reaches the first transfer's replacement parcel,
-        // whose units the second transfer has already carried away.
+        sqlx::raw_sql(
+            "CREATE TRIGGER refuse_adjustments BEFORE INSERT ON amit_adjustments \
+             BEGIN SELECT RAISE(ABORT, 'injected failure'); END",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
         let err = db_generate(
             &pool,
             6,
@@ -912,13 +950,9 @@ mod tests {
         .await
         .unwrap_err();
         assert!(
-            matches!(
-                err,
-                GenerateError::Upsert(
-                    amit_adjustment::UpsertError::UnitsCarriedIntoReplacement { .. }
-                )
-            ),
-            "expected the refusal to come from the per-parcel loop, after the \
+            err.to_string().contains("injected failure")
+                || format!("{err:?}").contains("injected failure"),
+            "expected the refusal to come from the per-row insert, after the \
              DELETE — got {err:?}"
         );
 
@@ -1802,5 +1836,372 @@ mod tests {
             .find(|p| p["trade_id"] == 1)
             .unwrap();
         assert_eq!(dec_field(original, "amit_cost_base_reduction"), dec("60"));
+    }
+
+    /// Move `units` of parcel `from_parcel` from one account to another on
+    /// `date`, answering the replacement parcel's id.
+    async fn transfer_units(
+        pool: &SqlitePool,
+        id: i64,
+        date: NaiveDate,
+        from_parcel: TradeId,
+        (from, to): (i64, i64),
+        units: &str,
+    ) -> TradeId {
+        use crate::entities::holding_account::{self, HoldingAccount};
+        use crate::entities::sell::AllocationInput;
+        use crate::entities::transfer::{self, TransferBody};
+        for account in [from, to] {
+            holding_account::db_upsert(
+                pool,
+                &HoldingAccount {
+                    id: HoldingAccountId(account),
+                    name: format!("Account {account}"),
+                },
+            )
+            .await
+            .unwrap();
+        }
+        transfer::db_transfer(
+            pool,
+            id,
+            &TransferBody {
+                listing_id: ListingId(1),
+                date,
+                from_account_id: HoldingAccountId(from),
+                to_account_id: HoldingAccountId(to),
+                allocations: vec![AllocationInput {
+                    purchase_trade_id: from_parcel,
+                    quantity_allocated: dec(units),
+                }],
+                fee_allocations: Vec::new(),
+                fee_market_price: None,
+                fee_fx_rate: None,
+            },
+        )
+        .await
+        .unwrap()
+        .transfer_ins[0]
+            .id
+    }
+
+    /// 100 units bought in account 1 and an FY2024 statement for that
+    /// account at \$1 per unit.
+    async fn hundred_units_and_a_dollar_statement(pool: &SqlitePool) {
+        amit_listing(pool, 1, "HNDQ").await;
+        test_support::buy(1, 1)
+            .date(ymd(2023, 8, 1))
+            .qty(dec("100"))
+            .price(dec("10"))
+            .insert(pool)
+            .await;
+        test_support::amma(6, 1)
+            .units(dec("100"))
+            .cost_base_adjustment(dec("1"))
+            .with(|a| {
+                a.tax_year_end_date = ymd(2024, 6, 30);
+                a.date_received = ymd(2024, 9, 10);
+            })
+            .insert(pool)
+            .await;
+    }
+
+    /// Each open parcel's AMIT reduction, by parcel id.
+    async fn reductions(pool: &SqlitePool) -> Vec<(TradeId, Decimal)> {
+        crate::reports::open_parcels::db_open_parcels(pool, None)
+            .await
+            .unwrap()
+            .iter()
+            .map(|p| (p.trade_id, p.amit_cost_base_reduction))
+            .collect()
+    }
+
+    /// Units moved after the year end and then moved *again* are followed
+    /// down the chain to the parcel they rest in. Following one hop wrote the
+    /// 40 units' row against the first transfer-in parcel, which the write
+    /// path refused (its units had gone on into the second), and the whole
+    /// run failed — found by the `properties` below.
+    #[tokio::test]
+    async fn db_units_transferred_twice_after_the_year_end_are_followed_to_where_they_rest() {
+        let pool = test_pool().await;
+        hundred_units_and_a_dollar_statement(&pool).await;
+        let first = transfer_units(&pool, 1, ymd(2024, 8, 15), TradeId(1), (1, 2), "40").await;
+        let second = transfer_units(&pool, 2, ymd(2024, 10, 1), first, (2, 3), "40").await;
+
+        let generated = db_generate(&pool, 6, &GenerateBody::default())
+            .await
+            .unwrap();
+        assert_eq!(generated.units_adjusted, dec("100"));
+        assert!(generated.unattributed.is_empty());
+        assert_eq!(
+            reductions(&pool).await,
+            vec![(TradeId(1), dec("60")), (second, dec("40"))]
+        );
+    }
+
+    /// Units moved to another account *before* the year end were not this
+    /// account's at 30 June: the statement covers the 60 left behind, all of
+    /// them on the parcel they stayed in, and none of the 40 — those are the
+    /// other account's statement's to adjust. Reading every rollover of the
+    /// parcel, whatever its date, wrote 40 of the 60 against the other
+    /// account's replacement and only 20 against the units actually held.
+    #[tokio::test]
+    async fn db_units_transferred_away_before_the_year_end_are_not_the_statements() {
+        let pool = test_pool().await;
+        hundred_units_and_a_dollar_statement(&pool).await;
+        let moved = transfer_units(&pool, 1, ymd(2024, 2, 1), TradeId(1), (1, 2), "40").await;
+
+        let generated = db_generate(&pool, 6, &GenerateBody::default())
+            .await
+            .unwrap();
+        assert_eq!(generated.units_adjusted, dec("60"));
+        assert_eq!(
+            reductions(&pool).await,
+            vec![(TradeId(1), dec("60")), (moved, dec("0"))]
+        );
+    }
+
+    mod properties {
+        use super::*;
+        use crate::entities::holding_account::{self, HoldingAccount};
+        use crate::entities::sell::{self, AllocationInput, SellBody};
+        use crate::entities::transfer::{self, TransferBody};
+        use crate::infra::db::WriteMode;
+        use crate::reports::{open_parcels, realised_gains};
+        use proptest::prelude::*;
+
+        /// One event in a holding's history: a Sell or a transfer to another
+        /// account, of `percent` of whichever open parcel `pick` lands on (at
+        /// least one unit).
+        #[derive(Debug, Clone)]
+        struct Event {
+            transfer: bool,
+            pick: prop::sample::Index,
+            percent: i64,
+            to: prop::sample::Index,
+        }
+
+        fn events(max: usize) -> impl Strategy<Value = Vec<Event>> {
+            prop::collection::vec(
+                (
+                    any::<bool>(),
+                    any::<prop::sample::Index>(),
+                    1i64..=100,
+                    any::<prop::sample::Index>(),
+                )
+                    .prop_map(|(transfer, pick, percent, to)| Event {
+                        transfer,
+                        pick,
+                        percent,
+                        to,
+                    }),
+                0..=max,
+            )
+        }
+
+        /// A parcel as the model tracks it.
+        #[derive(Debug)]
+        struct Parcel {
+            id: TradeId,
+            account: HoldingAccountId,
+            acquired: NaiveDate,
+            remaining: Decimal,
+        }
+
+        /// The listing's whole cost base as the reports see it: every open
+        /// parcel's remaining cost base plus every disposal's.
+        async fn total_cost_base(pool: &SqlitePool) -> Decimal {
+            let open: Decimal = open_parcels::db_open_parcels(pool, None)
+                .await
+                .unwrap()
+                .iter()
+                .map(|p| p.remaining_cost_base)
+                .sum();
+            let disposed: Decimal = realised_gains::db_realised_gains(pool)
+                .await
+                .unwrap()
+                .iter()
+                .map(|r| r.cost_base)
+                .sum();
+            open + disposed
+        }
+
+        proptest! {
+            #![proptest_config(test_support::db_proptest_config())]
+
+            /// An FY2024 statement's per-unit cost base adjustment reaches
+            /// exactly the units its holding account held at the year end —
+            /// no more, no fewer — whatever happened to them before or after:
+            /// generating its rows after any history of sales and partial
+            /// transfers between three accounts, either side of the year end
+            /// and through chains of transfers, moves the listing's total cost
+            /// base, open and disposed, by exactly the statement rate × the
+            /// account's units at 30 June 2024. A unit a transfer carried out
+            /// of a parcel is covered once, in the parcel it moved to — the
+            /// 2026-10-10 partial-transfer finding was this total coming up
+            /// short — and a unit moved to another account *before* the year
+            /// end is not this statement's at all.
+            #[test]
+            fn a_statement_covers_exactly_the_units_held_at_its_year_end(
+                bought in prop::collection::vec(10i64..=200, 1..=3),
+                before in events(3),
+                after in events(6),
+                rate in -500i64..=500,
+            ) {
+                test_support::block_on(async move {
+                    let pool = test_pool().await;
+                    amit_listing(&pool, 1, "HNDQ").await;
+                    for id in [2, 3] {
+                        holding_account::db_upsert(
+                            &pool,
+                            &HoldingAccount { id: HoldingAccountId(id), name: format!("Account {id}") },
+                        )
+                        .await
+                        .unwrap();
+                    }
+                    let buy_dates = [ymd(2023, 8, 1), ymd(2023, 9, 12), ymd(2024, 2, 14)];
+                    let mut parcels = Vec::new();
+                    for (i, qty) in bought.iter().enumerate() {
+                        let qty = Decimal::from(*qty);
+                        test_support::buy(i as i64 + 1, 1)
+                            .date(buy_dates[i])
+                            .qty(qty)
+                            .price(dec("10"))
+                            .insert(&pool)
+                            .await;
+                        parcels.push(Parcel {
+                            id: TradeId(i as i64 + 1),
+                            account: HoldingAccountId(1),
+                            acquired: buy_dates[i],
+                            remaining: qty,
+                        });
+                    }
+                    let rate = Decimal::new(rate, 2);
+                    test_support::amma(6, 1)
+                        .cost_base_adjustment(rate)
+                        .with(|a| {
+                            a.tax_year_end_date = ymd(2024, 6, 30);
+                            a.date_received = ymd(2024, 9, 10);
+                        })
+                        .insert(&pool)
+                        .await;
+
+                    let before_dates = [ymd(2023, 10, 3), ymd(2024, 1, 15), ymd(2024, 4, 10)];
+                    let after_dates = [
+                        ymd(2024, 8, 15),
+                        ymd(2024, 10, 1),
+                        ymd(2024, 11, 12),
+                        ymd(2025, 1, 10),
+                        ymd(2025, 2, 3),
+                        ymd(2025, 3, 4),
+                    ];
+                    let history = before
+                        .iter()
+                        .zip(before_dates)
+                        .map(|(e, d)| (e, d, false))
+                        .chain(after.iter().zip(after_dates).map(|(e, d)| (e, d, true)));
+                    let held_in_statement_account = |parcels: &[Parcel]| -> Decimal {
+                        parcels
+                            .iter()
+                            .filter(|p| p.account == HoldingAccountId(1))
+                            .map(|p| p.remaining)
+                            .sum()
+                    };
+                    let mut year_end_passed = false;
+                    let mut held_at_year_end = Decimal::ZERO;
+                    for (n, (event, date, after_year_end)) in history.enumerate() {
+                        if after_year_end && !year_end_passed {
+                            year_end_passed = true;
+                            held_at_year_end = held_in_statement_account(&parcels);
+                        }
+                        let open: Vec<usize> = (0..parcels.len())
+                            .filter(|i| parcels[*i].remaining > Decimal::ZERO && parcels[*i].acquired < date)
+                            .collect();
+                        if open.is_empty() {
+                            continue;
+                        }
+                        let i = open[event.pick.index(open.len())];
+                        let qty = (parcels[i].remaining * Decimal::from(event.percent)
+                            / Decimal::ONE_HUNDRED)
+                            .floor()
+                            .max(Decimal::ONE);
+                        let allocations = vec![AllocationInput {
+                            purchase_trade_id: parcels[i].id,
+                            quantity_allocated: qty,
+                        }];
+                        if event.transfer {
+                            let others: Vec<i64> =
+                                [1, 2, 3].into_iter().filter(|a| *a != parcels[i].account.0).collect();
+                            let to = HoldingAccountId(others[event.to.index(others.len())]);
+                            let group = transfer::db_transfer(
+                                &pool,
+                                1000 + n as i64,
+                                &TransferBody {
+                                    listing_id: ListingId(1),
+                                    date,
+                                    from_account_id: parcels[i].account,
+                                    to_account_id: to,
+                                    allocations,
+                                    fee_allocations: Vec::new(),
+                                    fee_market_price: None,
+                                    fee_fx_rate: None,
+                                },
+                            )
+                            .await
+                            .unwrap();
+                            parcels.push(Parcel {
+                                id: group.transfer_ins[0].id,
+                                account: to,
+                                acquired: date,
+                                remaining: qty,
+                            });
+                        } else {
+                            sell::db_create_sell(
+                                &pool,
+                                &SellBody {
+                                    date,
+                                    settlement_date: None,
+                                    listing_id: ListingId(1),
+                                    average_price: dec("12"),
+                                    quantity: qty,
+                                    currency: "AUD".into(),
+                                    brokerage: Decimal::ZERO,
+                                    gst_on_brokerage: Decimal::ZERO,
+                                    brokerage_includes_gst: false,
+                                    brokerage_currency: "AUD".into(),
+                                    fx_rate: Decimal::ONE,
+                                    spot_fx_rate: None,
+                                    contract_note_ref: None,
+                                    statement_total: None,
+                                    holding_account_id: parcels[i].account,
+                                    allocations,
+                                },
+                                WriteMode::Commit,
+                            )
+                            .await
+                            .unwrap();
+                        }
+                        parcels[i].remaining -= qty;
+                    }
+                    if !year_end_passed {
+                        held_at_year_end = held_in_statement_account(&parcels);
+                    }
+                    // A statement over no units has nothing to generate.
+                    prop_assume!(!held_at_year_end.is_zero());
+
+                    let bought: Decimal = bought.iter().map(|q| Decimal::from(*q) * dec("10")).sum();
+                    let unadjusted = total_cost_base(&pool).await;
+                    prop_assert_eq!(unadjusted, bought);
+
+                    let generated = db_generate(&pool, 6, &GenerateBody::default()).await.unwrap();
+                    prop_assert_eq!(generated.units_adjusted, held_at_year_end);
+                    prop_assert_eq!(
+                        unadjusted - total_cost_base(&pool).await,
+                        rate * held_at_year_end
+                    );
+                    Ok(())
+                })?;
+            }
+        }
     }
 }
