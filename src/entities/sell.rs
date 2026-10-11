@@ -975,7 +975,7 @@ pub(crate) async fn upsert_sell_in_tx(
             &splits,
             purchase_date,
         );
-        if total > purchase_qty {
+        if total.get() > purchase_qty {
             return Err(SellError::PurchaseQuantityExceeded);
         }
     }
@@ -1823,7 +1823,7 @@ mod tests {
             .await
             .unwrap()
             .into_iter()
-            .map(|p| (p.parcel.id, p.remaining_as_of))
+            .map(|p| (p.parcel.id, p.remaining_as_of.quantity()))
             .collect()
     }
 

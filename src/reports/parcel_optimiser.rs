@@ -32,6 +32,7 @@
 //! acquisition date to the sale date — the same rule, not a matching copy of
 //! it, as the realised report applies.
 
+use crate::domain::adjustments::UnitsAt;
 use crate::domain::cgt_discount::discount_eligible;
 use crate::domain::contemplated_disposal;
 use crate::domain::cost_base::ParcelRow;
@@ -137,8 +138,11 @@ impl Candidates {
             .rows
             .get(&trade_id)
             .expect("every pick names a candidate parcel");
-        self.costing
-            .adjusted_cost_base_aud(row, units, self.sale_date)
+        self.costing.adjusted_cost_base_aud(
+            row,
+            UnitsAt::new(units, self.sale_date),
+            self.sale_date,
+        )
     }
 }
 
@@ -198,7 +202,7 @@ pub async fn db_candidate_parcels_on(
             // parcel carries the consumed parcel's, which is what drives FIFO
             // order and the discount clock.
             acquisition_date: p.parcel.acquired(),
-            remaining_quantity: p.remaining_as_of,
+            remaining_quantity: p.remaining_as_of.quantity(),
             remaining_cost_base: costing.adjusted_cost_base_aud(
                 &p.parcel,
                 p.remaining_as_of,

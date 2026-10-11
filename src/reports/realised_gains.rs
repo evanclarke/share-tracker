@@ -522,7 +522,9 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
             .get(&buy.listing_id)
             .map_or(&[][..], |v| v);
         let qty_alloc_acquired = crate::entities::corporate_action::as_acquired_quantity(
-            qty_alloc, splits, buy.date, sale.date,
+            crate::entities::corporate_action::UnitsAt::new(qty_alloc, sale.date),
+            splits,
+            buy.date,
         );
 
         // Adjusted cost base of the allocated portion via the shared pipeline
@@ -784,6 +786,7 @@ async fn realised_gains_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::adjustments::AcquiredUnits;
     use crate::entities::{corporate_action, listing, rba_fx_rate, trade};
     use crate::test_support::{self, ApiClient, allocate, test_pool};
     use axum::http::StatusCode;
@@ -889,7 +892,7 @@ mod tests {
             holding_account_id: HoldingAccountId(1),
             date,
             settlement_date: date,
-            quantity: Decimal::from(qty),
+            quantity: AcquiredUnits::new(Decimal::from(qty)),
             average_price: Decimal::from(price),
             brokerage: Decimal::ZERO,
             gst_on_brokerage: Decimal::ZERO,

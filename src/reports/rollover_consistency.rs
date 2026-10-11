@@ -60,7 +60,7 @@ use crate::domain::cost_base::ParcelRow;
 use crate::domain::open_parcels;
 use crate::domain::rollover::CostBaseInputs;
 use crate::domain::whole_holding;
-use crate::entities::corporate_action::as_acquired_quantity;
+use crate::entities::corporate_action::{UnitsAt, as_acquired_quantity};
 use crate::infra::currency::CurrencyCode;
 use crate::infra::decimal::row_dec;
 use crate::infra::extract::Json;
@@ -331,7 +331,11 @@ async fn problems_for(
     for row in &allocation_rows {
         let allocated = row_dec(row, "quantity_allocated")?;
         let parcel = ParcelRow::from_row(row)?;
-        let as_acquired = as_acquired_quantity(allocated, &inputs.splits, parcel.date, group.date);
+        let as_acquired = as_acquired_quantity(
+            UnitsAt::new(allocated, group.date),
+            &inputs.splits,
+            parcel.date,
+        );
         *expected_cost_base
             .entry(parcel.currency.clone())
             .or_default() += inputs.carried_cost_base(&parcel, as_acquired)?;
@@ -427,7 +431,7 @@ async fn unconsumed_problems(
                 group.date,
                 p.parcel.id,
                 p.parcel.date,
-                p.remaining_as_of,
+                p.remaining_as_of.quantity(),
                 kind.stranded_consequence(),
             )
         })

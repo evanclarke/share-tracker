@@ -806,10 +806,12 @@ fn disposal_parcel_rows(
                         .get(&buy_row.listing_id)
                         .map_or(&[][..], |v| v);
                     let units_acquired = crate::entities::corporate_action::as_acquired_quantity(
-                        p.units,
+                        crate::entities::corporate_action::UnitsAt::new(
+                            p.units,
+                            disposal.sale_date,
+                        ),
                         splits,
                         buy_row.date,
-                        disposal.sale_date,
                     );
                     let amit = inputs
                         .amit_events
@@ -2108,6 +2110,7 @@ async fn years_handler(State(pool): State<SqlitePool>) -> Result<Json<Vec<i32>>,
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::adjustments::AcquiredUnits;
     use crate::entities::{interest_income, investment_expense, rba_fx_rate};
     use crate::test_support::{self, dec, ymd};
     use axum::http::StatusCode;
@@ -5612,7 +5615,7 @@ mod tests {
             holding_account_id: HoldingAccountId(1),
             date: ymd(2026, 1, 5),
             settlement_date: ymd(2026, 1, 5),
-            quantity: dec("100"),
+            quantity: AcquiredUnits::new(dec("100")),
             average_price: dec("10"),
             brokerage: Decimal::ZERO,
             gst_on_brokerage: Decimal::ZERO,

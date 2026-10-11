@@ -6,7 +6,8 @@
 
 use super::model::{ActionKind, CorporateAction};
 use crate::domain::adjustments::{
-    as_acquired_quantity, db_payment_currency_conflict, db_splits_for_listing,
+    AcquiredUnits, UnitsAt, as_acquired_quantity, db_payment_currency_conflict,
+    db_splits_for_listing,
 };
 use crate::infra::currency::CurrencyCode;
 use crate::infra::db::write_tx;
@@ -280,17 +281,20 @@ async fn allocations_fit_parcels(
 
     // Each parcel's (quantity, allocations consumed so far), in as-acquired
     // units.
-    let mut consumed: HashMap<TradeId, (Decimal, Decimal)> = HashMap::new();
+    let mut consumed: HashMap<TradeId, (AcquiredUnits, AcquiredUnits)> = HashMap::new();
     for row in &rows {
         let parcel_id: TradeId = row.try_get("purchase_trade_id")?;
         let acquired: NaiveDate = row.try_get("acquired")?;
-        let parcel_quantity = parse_dec("parcel_quantity", row.try_get("parcel_quantity")?)?;
+        let parcel_quantity = AcquiredUnits::new(parse_dec(
+            "parcel_quantity",
+            row.try_get("parcel_quantity")?,
+        )?);
         let sale_date: NaiveDate = row.try_get("sale_date")?;
         let allocated = parse_dec("quantity_allocated", row.try_get("quantity_allocated")?)?;
         let entry = consumed
             .entry(parcel_id)
-            .or_insert((parcel_quantity, Decimal::ZERO));
-        entry.1 += as_acquired_quantity(allocated, &splits, acquired, sale_date);
+            .or_insert((parcel_quantity, AcquiredUnits::ZERO));
+        entry.1 += as_acquired_quantity(UnitsAt::new(allocated, sale_date), &splits, acquired);
     }
     Ok(consumed
         .values()

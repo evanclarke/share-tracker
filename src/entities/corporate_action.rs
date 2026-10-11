@@ -137,10 +137,10 @@ mod model;
 /// `domain` depends on nothing in `entities` — and are re-exported here so the
 /// entity's callers keep one path to everything about a corporate action.
 pub use crate::domain::adjustments::{
-    PriceBasisEvent, RocEvent, SplitEvent, as_acquired_quantity, checked_as_acquired_quantity,
-    contemporaneous_price, db_demerger_price_statements, db_payment_currency_conflict,
-    db_return_of_capital_events, db_share_split_events, db_splits_for_listing,
-    sold_in_acquired_units, split_adjusted_quantity,
+    AcquiredUnits, PriceBasisEvent, RocEvent, SplitEvent, UnitsAt, as_acquired_quantity,
+    checked_as_acquired_quantity, contemporaneous_price, db_demerger_price_statements,
+    db_payment_currency_conflict, db_return_of_capital_events, db_share_split_events,
+    db_splits_for_listing, sold_in_acquired_units, split_adjusted_quantity,
 };
 /// The list route's filter type — `api_spec` reads its fields through
 /// `utoipa::IntoParams` so the OpenAPI document's query parameters come from
@@ -680,7 +680,10 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(parcels.len(), 1);
-            (parcels[0].remaining_as_of, parcels[0].cost_base.adjusted)
+            (
+                parcels[0].remaining_as_of.quantity(),
+                parcels[0].cost_base.adjusted,
+            )
         }
 
         let before = open_position(&pool).await;
@@ -715,7 +718,12 @@ mod tests {
         );
         assert!(db_share_split_events(&pool).await.unwrap().is_empty());
         assert_eq!(
-            split_adjusted_quantity(Decimal::from(1000), &[], d(2021, 3, 25), None),
+            split_adjusted_quantity(
+                AcquiredUnits::new(Decimal::from(1000)),
+                &[],
+                d(2021, 3, 25),
+                None
+            ),
             Decimal::from(1000),
             "and the conversion the capacity checks run is still the identity"
         );
@@ -1277,7 +1285,12 @@ mod tests {
             );
             // 100 units → 200 → 220 → 110 → 220, over the same walk as before.
             assert_eq!(
-                split_adjusted_quantity(Decimal::from(100), &events, d(2024, 1, 1), None),
+                split_adjusted_quantity(
+                    AcquiredUnits::new(Decimal::from(100)),
+                    &events,
+                    d(2024, 1, 1),
+                    None
+                ),
                 Decimal::from(220)
             );
         }
@@ -1407,23 +1420,72 @@ mod tests {
         );
     }
 
+    /// A quantity carries the date whose basis it is in, so re-basing runs in
+    /// whichever direction the target date sits: a parcel acquired after a
+    /// split, asked for in an earlier date's basis (a rollover replacement
+    /// against an AMMA year end before it — SCENARIOS N-06), converts *back*
+    /// across the split rather than passing through at ×1.
+    #[test]
+    fn a_quantity_re_bases_backward_to_an_earlier_date() {
+        let splits = vec![split_event(d(2024, 6, 1), "2", "1")];
+        // 200 units held after the split were 100 units before it …
+        let after = UnitsAt::new(Decimal::from(200), d(2024, 9, 1));
+        let before = after.rebased(&splits, Some(d(2024, 3, 1)));
+        assert_eq!(before, Decimal::from(100));
+        assert_eq!(before.basis(), Some(d(2024, 3, 1)));
+        // … and forward again is the original count.
+        assert_eq!(
+            before.rebased(&splits, Some(d(2024, 9, 1))),
+            Decimal::from(200)
+        );
+        // A parcel acquired after the split, asked for in a pre-split basis.
+        assert_eq!(
+            split_adjusted_quantity(
+                AcquiredUnits::new(Decimal::from(200)),
+                &splits,
+                d(2024, 9, 1),
+                Some(d(2024, 3, 1))
+            ),
+            Decimal::from(100)
+        );
+        // A date on the same side of every split is the identity.
+        assert_eq!(
+            after.rebased(&splits, Some(d(2024, 12, 1))),
+            Decimal::from(200)
+        );
+    }
+
     #[test]
     fn split_adjusted_and_as_acquired_quantities_are_inverse() {
         let splits = vec![split_event(d(2024, 6, 1), "2", "1")];
         // 100 as-acquired units are 200 post-split units…
         assert_eq!(
-            split_adjusted_quantity(Decimal::from(100), &splits, d(2024, 1, 1), None),
+            split_adjusted_quantity(
+                AcquiredUnits::new(Decimal::from(100)),
+                &splits,
+                d(2024, 1, 1),
+                None
+            ),
             Decimal::from(200)
         );
         // …and 80 post-split units sold come from 40 as-acquired units.
         assert_eq!(
-            as_acquired_quantity(Decimal::from(80), &splits, d(2024, 1, 1), d(2024, 9, 1)),
+            as_acquired_quantity(
+                UnitsAt::new(Decimal::from(80), d(2024, 9, 1)),
+                &splits,
+                d(2024, 1, 1)
+            ),
             Decimal::from(40)
         );
         // A consolidation shrinks: 1-for-10 turns 100 into 10.
         let consol = vec![split_event(d(2024, 6, 1), "1", "10")];
         assert_eq!(
-            split_adjusted_quantity(Decimal::from(100), &consol, d(2024, 1, 1), None),
+            split_adjusted_quantity(
+                AcquiredUnits::new(Decimal::from(100)),
+                &consol,
+                d(2024, 1, 1),
+                None
+            ),
             Decimal::from(10)
         );
     }

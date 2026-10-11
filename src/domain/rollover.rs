@@ -35,7 +35,8 @@ use rust_decimal::Decimal;
 use sqlx::Row;
 
 use crate::domain::adjustments::{
-    self, RocEvent, SplitEvent, sold_in_acquired_units, split_adjusted_quantity,
+    self, AcquiredUnits, RocEvent, SplitEvent, UnitsAt, sold_in_acquired_units,
+    split_adjusted_quantity,
 };
 use crate::domain::cost_base::{self, ParcelRow};
 
@@ -94,7 +95,7 @@ impl CostBaseInputs {
     pub fn carried_cost_base(
         &self,
         parcel: &ParcelRow,
-        units: Decimal,
+        units: AcquiredUnits,
     ) -> Result<Decimal, sqlx::Error> {
         Ok(cost_base::adjusted_cost_base(
             &parcel.parcel(),
@@ -144,7 +145,7 @@ impl CostBaseInputs {
                 parcel.date,
             );
             let remaining = parcel.quantity - sold;
-            if remaining <= Decimal::ZERO {
+            if remaining <= AcquiredUnits::ZERO {
                 continue;
             }
             // A ratio (exchange, entitlement) applies to units as held on the
@@ -166,10 +167,10 @@ pub struct RolledParcel {
     pub parcel: ParcelRow,
     /// Units still open, in the parcel's as-acquired basis — what
     /// [`CostBaseInputs::carried_cost_base`] costs.
-    pub remaining: Decimal,
+    pub remaining: AcquiredUnits,
     /// The same units in the operation date's basis — what the closing Sell
     /// consumes and what a ratio scales.
-    pub at_date_units: Decimal,
+    pub at_date_units: UnitsAt,
 }
 
 /// How deep a chain of rollovers [`replacement_descendants`],

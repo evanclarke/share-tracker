@@ -684,7 +684,7 @@ async fn write(
             &splits,
             trade.date,
         );
-        if trade.quantity < allocated_total {
+        if trade.quantity < allocated_total.get() {
             return Err(UpsertError::QuantityBelowAllocated);
         }
     }

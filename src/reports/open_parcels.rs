@@ -128,11 +128,11 @@ pub async fn db_open_parcels_on(
             holding_account_id: t.holding_account_id,
             ticker: tickers.get(&t.listing_id).cloned().unwrap_or_default(),
             acquisition_date: t.acquired(),
-            original_quantity: t.quantity,
+            original_quantity: t.quantity.get(),
             // Current units — after every recorded split/consolidation — so
             // it reconciles with a broker statement; `original_quantity`
             // stays as transacted.
-            remaining_quantity: p.remaining_as_of,
+            remaining_quantity: p.remaining_as_of.quantity(),
             original_cost_base: p.cost_base.initial_cost,
             amit_cost_base_reduction: p.cost_base.amit_reduction,
             return_of_capital_reduction: p.cost_base.roc_reduction,

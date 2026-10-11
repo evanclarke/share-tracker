@@ -117,7 +117,7 @@ pub async fn db_unrealised_gains_on(
 
     for p in &open {
         let key = (p.parcel.listing_id, p.parcel.holding_account_id);
-        *holding_qty.entry(key).or_insert(Decimal::ZERO) += p.remaining_as_of;
+        *holding_qty.entry(key).or_insert(Decimal::ZERO) += p.remaining_as_of.quantity();
         *holding_cost_base.entry(key).or_insert(Decimal::ZERO) += p.cost_base.adjusted;
 
         // CGT discount, on the shared ownership rule (`domain::cgt_discount`).
@@ -126,7 +126,8 @@ pub async fn db_unrealised_gains_on(
         // replacement parcel counts the combined holding period from its
         // deemed acquisition date (`ParcelRow::acquired`).
         if cgt_discount::discount_eligible(p.parcel.acquired(), as_of_date) {
-            *holding_cgt_eligible_qty.entry(key).or_insert(Decimal::ZERO) += p.remaining_as_of;
+            *holding_cgt_eligible_qty.entry(key).or_insert(Decimal::ZERO) +=
+                p.remaining_as_of.quantity();
         }
     }
 

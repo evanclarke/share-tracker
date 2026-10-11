@@ -34,7 +34,7 @@
 use crate::domain::open_parcels;
 use crate::domain::rollover;
 use crate::domain::tax_year::{fy_start, tax_year_for};
-use crate::entities::corporate_action::{self, SplitEvent};
+use crate::entities::corporate_action::{self, AcquiredUnits, SplitEvent};
 use crate::infra::decimal::row_dec;
 use crate::infra::extract::Json;
 use crate::infra::http::ApiError;
@@ -89,9 +89,10 @@ pub fn router() -> OpenApiRouter<SqlitePool> {
 /// One AMMA statement's adjustment rows, joined to the adjusted parcel.
 struct AdjustmentRow {
     trade_id: TradeId,
-    quantity: Decimal,
+    /// The units the row covers, in the parcel's as-acquired basis.
+    quantity: AcquiredUnits,
     trade_date: NaiveDate,
-    trade_quantity: Decimal,
+    trade_quantity: AcquiredUnits,
     /// True when the parcel is a **rollover replacement** (a transfer,
     /// scrip-for-scrip exchange or demerger created it). Such a parcel is dated
     /// the operation, which may be *after* the statement's year end while still
@@ -188,7 +189,7 @@ pub async fn db_amit_adjustment_alerts(
                     parcel.parcel.listing_id,
                     parcel.parcel.holding_account_id,
                 ))
-                .or_default() += parcel.remaining_as_of;
+                .or_default() += parcel.remaining_as_of.quantity();
         }
     }
     tx.commit().await?;
@@ -200,9 +201,9 @@ pub async fn db_amit_adjustment_alerts(
             .or_default()
             .push(AdjustmentRow {
                 trade_id: row.try_get("trade_id")?,
-                quantity: row_dec(row, "quantity")?,
+                quantity: AcquiredUnits::new(row_dec(row, "quantity")?),
                 trade_date: row.try_get("trade_date")?,
-                trade_quantity: row_dec(row, "trade_quantity")?,
+                trade_quantity: AcquiredUnits::new(row_dec(row, "trade_quantity")?),
                 rollover_replacement: row.try_get("rollover_replacement")?,
                 rollover_sources: rollover_sources
                     .get(&row.try_get::<TradeId, _>("trade_id")?)
@@ -236,6 +237,7 @@ pub async fn db_amit_adjustment_alerts(
                     a.trade_date,
                     Some(year_end),
                 )
+                .quantity()
             })
             .sum::<Decimal>();
         let problems = problems_for(
@@ -304,7 +306,7 @@ fn disposed_between(
         .iter()
         .flat_map(|trade_id| sold.get(trade_id).map_or(&[][..], |v| v))
         .filter(|c| c.date >= from && c.date <= to)
-        .map(|c| corporate_action::split_adjusted_quantity(c.quantity, splits, c.date, Some(to)))
+        .map(|c| c.quantity.rebased(splits, Some(to)).quantity())
         .sum()
 }
 
@@ -423,7 +425,7 @@ fn problems_for(
                 .map_or(&[][..], |v| v)
                 .iter()
                 .filter(|c| c.date < year_start)
-                .map(open_parcels::UnitsConsumed::dated),
+                .map(|c| c.quantity),
             splits,
             a.trade_date,
         );

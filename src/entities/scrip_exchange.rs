@@ -411,13 +411,13 @@ impl Terms {
 
         Ok(Replacement {
             parcel_id: p.parcel.id,
-            at_date_units: p.at_date_units,
+            at_date_units: p.at_date_units.quantity(),
             // The exchange ratio applies to units as held at the exchange
             // date. Checked rather than computed: a ratio greater than one
             // over a very large holding produces a replacement quantity past
             // `Decimal`'s ceiling, and there is no lesser count to write.
             new_quantity: cost_base::checked_rebased_quantity(
-                ("units held", p.at_date_units),
+                ("units held", p.at_date_units.quantity()),
                 ("scrip_new_units", self.new_units),
                 ("scrip_old_units", self.old_units),
             )

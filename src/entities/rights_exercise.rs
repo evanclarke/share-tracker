@@ -33,8 +33,7 @@
 //! dividend — entered as income, see `docs/ato/retail-premiums.md`).
 
 use crate::entities::corporate_action::{
-    self, ActionKind, NOTHING_PAID_FOR_NON_RENOUNCEABLE_RIGHTS, SplitEvent, as_acquired_quantity,
-    split_adjusted_quantity,
+    self, ActionKind, NOTHING_PAID_FOR_NON_RENOUNCEABLE_RIGHTS, SplitEvent, UnitsAt,
 };
 use crate::entities::trade::{self, Trade, TradeType};
 use crate::infra::db::{WriteMode, write_tx};
@@ -239,7 +238,9 @@ pub(crate) async fn db_held_at_record_date(
     for row in &held_rows {
         let trade_date: NaiveDate = row.try_get("date")?;
         let qty = parse_dec("quantity", row.try_get("quantity")?)?;
-        let in_record_units = split_adjusted_quantity(qty, splits, trade_date, Some(record_date));
+        let in_record_units = UnitsAt::new(qty, trade_date)
+            .rebased(splits, Some(record_date))
+            .quantity();
         match row.try_get::<TradeType, _>("trade_type")? {
             TradeType::Buy | TradeType::DRP => held += in_record_units,
             TradeType::Sell => held -= in_record_units,
@@ -298,7 +299,9 @@ pub(crate) async fn db_rights_used(
     for row in &prior_rows {
         let trade_date: NaiveDate = row.try_get("date")?;
         let qty = parse_dec("quantity", row.try_get("quantity")?)?;
-        used += as_acquired_quantity(qty, splits, record_date, trade_date);
+        used += UnitsAt::new(qty, trade_date)
+            .rebased(splits, Some(record_date))
+            .quantity();
     }
     let sold_units: Vec<String> =
         sqlx::query_scalar("SELECT units FROM rights_sales WHERE rights_action_id = ?")
@@ -401,7 +404,9 @@ async fn execute(
     // Rights already used against this action (prior exercises + rights
     // sales) plus this exercise, re-based to record-date units.
     let mut used = db_rights_used(&mut tx, action_id, record_date, &splits).await?;
-    used += as_acquired_quantity(body.units, &splits, record_date, body.date);
+    used += UnitsAt::new(body.units, body.date)
+        .rebased(&splits, Some(record_date))
+        .quantity();
     // `None` means the entitlement is past `Decimal`'s range, so nothing the
     // request can name reaches it (`entitled_units`).
     if entitled.is_some_and(|entitled| used > entitled) {

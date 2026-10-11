@@ -148,17 +148,19 @@ pub async fn db_upsert(
     }
     let purchase_date: NaiveDate = purchase_row.try_get("date")?;
     let purchase_listing: i64 = purchase_row.try_get("listing_id")?;
-    let purchase_qty: Decimal = parse_dec("quantity", purchase_row.try_get("quantity")?)?;
+    let purchase_qty = corporate_action::AcquiredUnits::new(parse_dec(
+        "quantity",
+        purchase_row.try_get("quantity")?,
+    )?);
 
     // The parcel's quantity is in as-acquired units while the allocation is in
     // sale-date units: re-base across any share splits/consolidations between
     // them (TD 2000/10). Mirrors the live `PUT /sells` path's check.
     let splits = corporate_action::db_splits_for_listing(pool, ListingId(purchase_listing)).await?;
     let alloc_acquired = corporate_action::as_acquired_quantity(
-        allocation.quantity_allocated,
+        corporate_action::UnitsAt::new(allocation.quantity_allocated, sale_date),
         &splits,
         purchase_date,
-        sale_date,
     );
 
     let already_purchase_allocated = {
@@ -171,11 +173,15 @@ pub async fn db_upsert(
         .bind(allocation.id)
         .fetch_all(pool)
         .await?;
-        let mut total = Decimal::ZERO;
+        let mut total = corporate_action::AcquiredUnits::ZERO;
         for row in &rows {
             let qty: Decimal = parse_dec("quantity_allocated", row.try_get("quantity_allocated")?)?;
             let d: NaiveDate = row.try_get("sale_date")?;
-            total += corporate_action::as_acquired_quantity(qty, &splits, purchase_date, d);
+            total += corporate_action::as_acquired_quantity(
+                corporate_action::UnitsAt::new(qty, d),
+                &splits,
+                purchase_date,
+            );
         }
         total
     };

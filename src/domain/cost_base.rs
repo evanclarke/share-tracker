@@ -56,7 +56,7 @@ use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::Serialize;
 
-use crate::domain::adjustments::{self, RocEvent, RolloverOrigin, SplitEvent};
+use crate::domain::adjustments::{self, AcquiredUnits, RocEvent, RolloverOrigin, SplitEvent};
 use crate::domain::rollover;
 use crate::domain::tax_year::fy_start;
 use crate::infra::decimal::{Money, OptMoney, mul_div, parse_dec};
@@ -70,7 +70,7 @@ use std::marker::PhantomData;
 #[derive(Debug, Clone, Copy)]
 pub struct Parcel<'a> {
     /// Units as transacted (the parcel's own as-acquired unit basis).
-    pub quantity: Decimal,
+    pub quantity: AcquiredUnits,
     pub average_price: Decimal,
     pub brokerage: Decimal,
     pub gst_on_brokerage: Decimal,
@@ -104,7 +104,7 @@ impl Parcel<'_> {
     /// report's E10 and G1 excess walks) starts from the same definition
     /// [`adjusted_cost_base`] does rather than re-adding the three terms.
     pub fn initial_cost(&self) -> Decimal {
-        self.average_price * self.quantity + self.brokerage + self.gst_on_brokerage
+        self.average_price * self.quantity.get() + self.brokerage + self.gst_on_brokerage
     }
 }
 
@@ -307,8 +307,9 @@ pub struct ParcelRow {
     /// When the units were registered — entitlement to a return of capital
     /// asks this, not the trade date (see [`Parcel::settled`]).
     pub settlement_date: NaiveDate,
+    /// The parcel's units as transacted — its own as-acquired basis.
     #[sqlx(try_from = "Money")]
-    pub quantity: Decimal,
+    pub quantity: AcquiredUnits,
     #[sqlx(try_from = "Money")]
     pub average_price: Decimal,
     #[sqlx(try_from = "Money")]
@@ -645,23 +646,23 @@ pub struct AmitReductionEvent {
     /// The statement's cost-base reduction per as-acquired unit.
     pub per_unit: Decimal,
     /// Units of the parcel this adjustment row covers.
-    pub covered: Decimal,
+    pub covered: AcquiredUnits,
     /// Units of the parcel disposed of on or before `tax_year_end_date` —
     /// real disposals only.
-    pub disposed_by_year_end: Decimal,
+    pub disposed_by_year_end: AcquiredUnits,
     /// The part of [`Self::disposed_by_year_end`] disposed of **before the
     /// statement's income year began** (`domain::tax_year::fy_start`). Those units
     /// were never held during the year the statement reports on, so no
     /// coverage reaches them — a spill onto them would change the gain of an
     /// earlier, already-lodged year.
-    pub disposed_before_year_start: Decimal,
+    pub disposed_before_year_start: AcquiredUnits,
     /// Units of the parcel a rollover has carried into a replacement parcel,
     /// whenever it ran. They are neither held in this parcel nor disposed of
     /// from it: a row generated after the move covers them on the
     /// replacement's own row, and one written before it covered them here and
     /// was frozen into the replacement's carried cost base when the operation
     /// ran.
-    pub carried_out: Decimal,
+    pub carried_out: AcquiredUnits,
 }
 
 impl AmitReductionEvent {
@@ -673,7 +674,7 @@ impl AmitReductionEvent {
     /// [`Self::per_unit_for`], which is the point.)
     #[cfg(test)]
     pub fn amount(&self) -> Decimal {
-        self.per_unit * self.covered
+        self.per_unit * self.covered.get()
     }
 
     /// The reduction reaching `units` as-acquired units of a
@@ -717,21 +718,30 @@ impl AmitReductionEvent {
     /// per-unit adjustment against a holding of 1e15 units).
     pub fn reduction_for_units(
         &self,
-        parcel_quantity: Decimal,
-        units: Decimal,
+        parcel_quantity: AcquiredUnits,
+        units: AcquiredUnits,
         whereabouts: Whereabouts,
     ) -> Decimal {
-        let carried = self.carried_out.min(parcel_quantity).max(Decimal::ZERO);
+        // Every figure here is in the parcel's as-acquired basis, so the
+        // arithmetic runs on the bare counts.
+        let (parcel_quantity, units) = (parcel_quantity.get(), units.get());
+        let covered = self.covered.get();
+        let carried = self
+            .carried_out
+            .get()
+            .min(parcel_quantity)
+            .max(Decimal::ZERO);
         let disposed = self
             .disposed_by_year_end
+            .get()
             .min(parcel_quantity - carried)
             .max(Decimal::ZERO);
         let held = parcel_quantity - carried - disposed;
         // Only the units disposed of *during* the statement's income year can
         // take a spill: those sold before it began were never held in the
         // year the statement reports on.
-        let sold =
-            (disposed - self.disposed_before_year_start.max(Decimal::ZERO)).max(Decimal::ZERO);
+        let sold = (disposed - self.disposed_before_year_start.get().max(Decimal::ZERO))
+            .max(Decimal::ZERO);
         // `disposed_on` on the year end itself counts as sold by it: the
         // statement's year-end position no longer includes those units, which
         // is the same boundary `disposed_by_year_end` was counted on.
@@ -742,14 +752,11 @@ impl AmitReductionEvent {
                 return Decimal::ZERO;
             }
             Whereabouts::DisposedOn(d) if d <= self.tax_year_end_date => (
-                (self.covered - held - carried).max(Decimal::ZERO).min(sold),
+                (covered - held - carried).max(Decimal::ZERO).min(sold),
                 sold,
             ),
-            Whereabouts::CarriedOut => (
-                (self.covered - held).max(Decimal::ZERO).min(carried),
-                carried,
-            ),
-            Whereabouts::InParcel | Whereabouts::DisposedOn(_) => (self.covered.min(held), held),
+            Whereabouts::CarriedOut => ((covered - held).max(Decimal::ZERO).min(carried), carried),
+            Whereabouts::InParcel | Whereabouts::DisposedOn(_) => (covered.min(held), held),
         };
         if group <= Decimal::ZERO {
             return Decimal::ZERO;
@@ -761,8 +768,16 @@ impl AmitReductionEvent {
     /// the itemised adjustment rows display. Presentation only: the amounts
     /// themselves go through `reduction_for_units`, which keeps its division
     /// to the end rather than rounding a rate and multiplying it back up.
-    pub fn per_unit_for(&self, parcel_quantity: Decimal, whereabouts: Whereabouts) -> Decimal {
-        self.reduction_for_units(parcel_quantity, Decimal::ONE, whereabouts)
+    pub fn per_unit_for(
+        &self,
+        parcel_quantity: AcquiredUnits,
+        whereabouts: Whereabouts,
+    ) -> Decimal {
+        self.reduction_for_units(
+            parcel_quantity,
+            AcquiredUnits::new(Decimal::ONE),
+            whereabouts,
+        )
     }
 }
 
@@ -840,11 +855,15 @@ pub struct CostBase<C> {
 /// figure is the cost base, so an unrepresentable one has no lesser answer to
 /// give. It panics, and `app::router`'s panic layer turns that into a logged
 /// `500` rather than a dropped connection.
-pub fn prorated_initial_cost(initial_cost: Decimal, units: Decimal, quantity: Decimal) -> Decimal {
+pub fn prorated_initial_cost(
+    initial_cost: Decimal,
+    units: AcquiredUnits,
+    quantity: AcquiredUnits,
+) -> Decimal {
     if units == quantity {
         return initial_cost;
     }
-    mul_div(&[initial_cost, units], quantity)
+    mul_div(&[initial_cost, units.get()], quantity.get())
 }
 
 /// Runs steps 1–4 of the pipeline (see the module doc) for `units`
@@ -861,14 +880,14 @@ pub fn prorated_initial_cost(initial_cost: Decimal, units: Decimal, quantity: De
 /// sit on.
 pub fn adjusted_cost_base(
     parcel: &Parcel<'_>,
-    units: Decimal,
+    units: AcquiredUnits,
     amit_events: &[AmitReductionEvent],
     roc_events: &[RocEvent],
     splits: &[SplitEvent],
     held: Held,
 ) -> Result<CostBase<Native>, sqlx::Error> {
     let initial_cost = parcel.initial_cost();
-    let costed_initial_cost = if parcel.quantity > Decimal::ZERO {
+    let costed_initial_cost = if parcel.quantity > AcquiredUnits::ZERO {
         prorated_initial_cost(initial_cost, units, parcel.quantity)
     } else {
         Decimal::ZERO
@@ -961,7 +980,7 @@ pub struct CostBaseAdjustment {
 /// the cost base.
 pub fn adjustment_detail(
     parcel: &Parcel<'_>,
-    units: Decimal,
+    units: AcquiredUnits,
     amit_events: &[AmitReductionEvent],
     roc_events: &[RocEvent],
     splits: &[SplitEvent],
@@ -999,7 +1018,7 @@ pub fn adjustment_detail(
 /// [`CostBaseAdjustment::capped`] flags name the rows that ran past nil.
 fn reduction_walk(
     parcel: &Parcel<'_>,
-    units: Decimal,
+    units: AcquiredUnits,
     amit_events: &[AmitReductionEvent],
     roc_events: &[RocEvent],
     splits: &[SplitEvent],
@@ -1043,7 +1062,7 @@ fn reduction_walk(
         else {
             continue;
         };
-        let amount = per_unit * units;
+        let amount = per_unit * units.get();
         rows.push(CostBaseAdjustment {
             kind: AdjustmentKind::ReturnOfCapital,
             date: e.date,
@@ -1093,7 +1112,7 @@ fn reduction_walk(
     // when it runs the balance past nil — the excess is a CGT event E10/G1
     // capital gain, not cost base; a negative row creates no excess even at a
     // nil balance, so `amount > before` is the whole test.
-    let mut running = if parcel.quantity > Decimal::ZERO {
+    let mut running = if parcel.quantity > AcquiredUnits::ZERO {
         prorated_initial_cost(parcel.initial_cost(), units, parcel.quantity)
     } else {
         Decimal::ZERO
@@ -1208,7 +1227,7 @@ impl CostBase<Aud> {
 /// [`RocEvent::per_unit_for`]'s re-basing of a
 /// return-of-capital payment.
 pub fn reduction_for(
-    quantity: Decimal,
+    quantity: AcquiredUnits,
     cost_base_adjustment: Decimal,
     splits: &[SplitEvent],
     acquired: chrono::NaiveDate,
@@ -1221,14 +1240,13 @@ pub fn reduction_for(
     // units it covers, and the reduction belongs on the parcel now holding
     // them), and then the parcel's own basis is the later one — a split between
     // the year end and the operation date has already scaled it — so the
-    // quantity is converted *back* to the year-end basis instead. Multiplying
-    // by 1 in that case, which a one-directional window would do, would apply
-    // the statement's per-unit figure to post-split units.
-    let in_year_end_basis = if acquired <= tax_year_end_date {
+    // quantity is converted *back* to the year-end basis instead
+    // (`split_adjusted_quantity` re-bases either way). Multiplying by 1 in that
+    // case, which a one-directional window would do, would apply the
+    // statement's per-unit figure to post-split units.
+    let in_year_end_basis =
         adjustments::split_adjusted_quantity(quantity, splits, acquired, Some(tax_year_end_date))
-    } else {
-        adjustments::as_acquired_quantity(quantity, splits, tax_year_end_date, acquired)
-    };
+            .quantity();
     in_year_end_basis * cost_base_adjustment
 }
 
@@ -1296,14 +1314,14 @@ pub async fn db_cost_base_reduction_events(
         let amma_statement_id: i64 = row.try_get("amma_statement_id")?;
         let tax_year_end_date: chrono::NaiveDate = row.try_get("tax_year_end_date")?;
         let trade_date: chrono::NaiveDate = row.try_get("trade_date")?;
-        let covered = parse_dec("quantity", row.try_get("quantity")?)?;
+        let covered = AcquiredUnits::new(parse_dec("quantity", row.try_get("quantity")?)?);
         let cba = parse_dec("cost_base_adjustment", row.try_get("cost_base_adjustment")?)?;
         let splits = splits.get(&listing_id).map_or(&[][..], |v| v);
         // Units of the parcel already disposed of when the statement's year
         // ended, re-based back to the parcel's as-acquired basis (an
         // allocation is in its own sale date's units).
         let as_acquired = |c: &crate::domain::open_parcels::UnitsConsumed| {
-            adjustments::as_acquired_quantity(c.quantity, splits, trade_date, c.date)
+            adjustments::as_acquired_quantity(c.quantity, splits, trade_date)
         };
         let consumed = consumed.get(&trade_id).map_or(&[][..], |v| v);
         let disposed_by_year_end = consumed
@@ -1329,7 +1347,13 @@ pub async fn db_cost_base_reduction_events(
         map.entry(trade_id).or_default().push(AmitReductionEvent {
             amma_statement_id,
             tax_year_end_date,
-            per_unit: reduction_for(Decimal::ONE, cba, splits, trade_date, tax_year_end_date),
+            per_unit: reduction_for(
+                AcquiredUnits::new(Decimal::ONE),
+                cba,
+                splits,
+                trade_date,
+                tax_year_end_date,
+            ),
             covered,
             disposed_by_year_end,
             disposed_before_year_start,
@@ -1351,7 +1375,7 @@ mod tests {
 
     fn parcel(qty: i64, price: i64) -> Parcel<'static> {
         Parcel {
-            quantity: Decimal::from(qty),
+            quantity: AcquiredUnits::new(Decimal::from(qty)),
             average_price: Decimal::from(price),
             brokerage: Decimal::ZERO,
             gst_on_brokerage: Decimal::ZERO,
@@ -1371,10 +1395,10 @@ mod tests {
             amma_statement_id: id,
             tax_year_end_date: date(year, 6, 30),
             per_unit: per_unit.parse().unwrap(),
-            covered: Decimal::from(covered),
-            disposed_by_year_end: Decimal::from(disposed),
-            disposed_before_year_start: Decimal::ZERO,
-            carried_out: Decimal::ZERO,
+            covered: AcquiredUnits::new(Decimal::from(covered)),
+            disposed_by_year_end: AcquiredUnits::new(Decimal::from(disposed)),
+            disposed_before_year_start: AcquiredUnits::new(Decimal::ZERO),
+            carried_out: AcquiredUnits::new(Decimal::ZERO),
         }
     }
 
@@ -1399,7 +1423,7 @@ mod tests {
             holding_account_id: HoldingAccountId(1),
             date: operated,
             settlement_date: operated,
-            quantity: Decimal::from(100),
+            quantity: AcquiredUnits::new(Decimal::from(100)),
             average_price: Decimal::ONE,
             brokerage: Decimal::ZERO,
             gst_on_brokerage: Decimal::ZERO,
@@ -1527,8 +1551,15 @@ mod tests {
             gst_on_brokerage: "0.995".parse().unwrap(),
             ..parcel(100, 10)
         };
-        let cb =
-            adjusted_cost_base(&p, Decimal::from(100), &[], &[], &[], Held::AsAt(None)).unwrap();
+        let cb = adjusted_cost_base(
+            &p,
+            AcquiredUnits::new(Decimal::from(100)),
+            &[],
+            &[],
+            &[],
+            Held::AsAt(None),
+        )
+        .unwrap();
         assert_eq!(cb.initial_cost, "1010.945".parse::<Decimal>().unwrap());
         assert_eq!(cb.adjusted, "1010.945".parse::<Decimal>().unwrap());
     }
@@ -1537,7 +1568,7 @@ mod tests {
     fn partial_units_pro_rate_the_cost_base() {
         let cb = adjusted_cost_base(
             &parcel(100, 10),
-            Decimal::from(40),
+            AcquiredUnits::new(Decimal::from(40)),
             &[],
             &[],
             &[],
@@ -1557,7 +1588,7 @@ mod tests {
     #[test]
     fn a_parcel_past_the_old_multiply_first_ceiling_still_costs() {
         let p = Parcel {
-            quantity: "1000000000000000".parse().unwrap(),
+            quantity: AcquiredUnits::new("1000000000000000".parse().unwrap()),
             ..parcel(1, 1)
         };
         // The whole parcel: the pro-rate is the identity and never multiplies.
@@ -1570,7 +1601,7 @@ mod tests {
         // 1e15 × 3e14 = 3e29 overflows, so it divides first instead.
         let part = adjusted_cost_base(
             &p,
-            "300000000000000".parse().unwrap(),
+            AcquiredUnits::new("300000000000000".parse().unwrap()),
             &[],
             &[],
             &[],
@@ -1580,13 +1611,13 @@ mod tests {
         assert_eq!(part.adjusted, "300000000000000".parse::<Decimal>().unwrap());
         // The other measured overflow, price 0.5 / quantity 4e14.
         let half = Parcel {
-            quantity: "400000000000000".parse().unwrap(),
+            quantity: AcquiredUnits::new("400000000000000".parse().unwrap()),
             average_price: "0.5".parse().unwrap(),
             ..parcel(1, 1)
         };
         let part = adjusted_cost_base(
             &half,
-            "100000000000000".parse().unwrap(),
+            AcquiredUnits::new("100000000000000".parse().unwrap()),
             &[],
             &[],
             &[],
@@ -1597,7 +1628,7 @@ mod tests {
         // The itemised detail walks the same term, so it survives too.
         let rows = adjustment_detail(
             &p,
-            "300000000000000".parse().unwrap(),
+            AcquiredUnits::new("300000000000000".parse().unwrap()),
             &[],
             &[],
             &[],
@@ -1618,7 +1649,15 @@ mod tests {
             brokerage: "9.95".parse().unwrap(),
             ..parcel(3, 10)
         };
-        let cb = adjusted_cost_base(&p, Decimal::from(2), &[], &[], &[], Held::AsAt(None)).unwrap();
+        let cb = adjusted_cost_base(
+            &p,
+            AcquiredUnits::new(Decimal::from(2)),
+            &[],
+            &[],
+            &[],
+            Held::AsAt(None),
+        )
+        .unwrap();
         assert_eq!(
             cb.adjusted,
             "26.633333333333333333333333333".parse::<Decimal>().unwrap()
@@ -1626,7 +1665,7 @@ mod tests {
         // …and the largest parcel that costed before the fix still gives what
         // it gave then, whole and pro-rated.
         let big = Parcel {
-            quantity: "100000000000000".parse().unwrap(),
+            quantity: AcquiredUnits::new("100000000000000".parse().unwrap()),
             ..parcel(1, 1)
         };
         let whole =
@@ -1637,7 +1676,7 @@ mod tests {
         );
         let part = adjusted_cost_base(
             &big,
-            "33333333333333".parse().unwrap(),
+            AcquiredUnits::new("33333333333333".parse().unwrap()),
             &[],
             &[],
             &[],
@@ -1652,7 +1691,7 @@ mod tests {
         // Reduction within the cost base nets off…
         let cb = adjusted_cost_base(
             &parcel(100, 10),
-            Decimal::from(100),
+            AcquiredUnits::new(Decimal::from(100)),
             &[whole(1, 2024, "0.05", 100)],
             &[],
             &[],
@@ -1665,7 +1704,7 @@ mod tests {
         // the full reduction is still reported.
         let cb = adjusted_cost_base(
             &parcel(100, 10),
-            Decimal::from(100),
+            AcquiredUnits::new(Decimal::from(100)),
             &[whole(1, 2024, "11", 100)],
             &[],
             &[],
@@ -1692,7 +1731,7 @@ mod tests {
 
         let held = adjusted_cost_base(
             &parcel(100, 10),
-            Decimal::from(60),
+            AcquiredUnits::new(Decimal::from(60)),
             &events,
             &[],
             &[],
@@ -1705,7 +1744,7 @@ mod tests {
 
         let sold = adjusted_cost_base(
             &parcel(100, 10),
-            Decimal::from(40),
+            AcquiredUnits::new(Decimal::from(40)),
             &events,
             &[],
             &[],
@@ -1727,7 +1766,7 @@ mod tests {
 
         let held = adjusted_cost_base(
             &parcel(100, 10),
-            Decimal::from(60),
+            AcquiredUnits::new(Decimal::from(60)),
             &events,
             &[],
             &[],
@@ -1739,7 +1778,7 @@ mod tests {
 
         let sold = adjusted_cost_base(
             &parcel(100, 10),
-            Decimal::from(40),
+            AcquiredUnits::new(Decimal::from(40)),
             &events,
             &[],
             &[],
@@ -1757,11 +1796,14 @@ mod tests {
     fn the_stated_reduction_is_conserved_however_it_is_split() {
         for covered in [0, 20, 40, 60, 100] {
             let e = amit(1, 2024, "0.50", covered, 40);
-            let held =
-                e.reduction_for_units(Decimal::from(100), Decimal::from(60), Whereabouts::InParcel);
+            let held = e.reduction_for_units(
+                AcquiredUnits::new(Decimal::from(100)),
+                AcquiredUnits::new(Decimal::from(60)),
+                Whereabouts::InParcel,
+            );
             let sold = e.reduction_for_units(
-                Decimal::from(100),
-                Decimal::from(40),
+                AcquiredUnits::new(Decimal::from(100)),
+                AcquiredUnits::new(Decimal::from(40)),
                 Whereabouts::DisposedOn(date(2024, 3, 1)),
             );
             assert_eq!(held + sold, e.amount(), "covered {covered}");
@@ -1782,43 +1824,58 @@ mod tests {
         // The measured survivor, unchanged: 5c over the whole 1e15-unit parcel.
         let small = AmitReductionEvent {
             per_unit: "0.05".parse().unwrap(),
-            covered: units,
+            covered: AcquiredUnits::new(units),
             ..amit(1, 2024, "0.05", 0, 0)
         };
         assert_eq!(
-            small.reduction_for_units(units, units, Whereabouts::InParcel),
+            small.reduction_for_units(
+                AcquiredUnits::new(units),
+                AcquiredUnits::new(units),
+                Whereabouts::InParcel
+            ),
             "50000000000000".parse::<Decimal>().unwrap()
         );
         // The second multiplication overflows (5e14 × 1e15 = 5e29).
         let big = AmitReductionEvent {
             per_unit: "0.5".parse().unwrap(),
-            covered: units,
+            covered: AcquiredUnits::new(units),
             ..amit(1, 2024, "0.5", 0, 0)
         };
         assert_eq!(
-            big.reduction_for_units(units, units, Whereabouts::InParcel),
+            big.reduction_for_units(
+                AcquiredUnits::new(units),
+                AcquiredUnits::new(units),
+                Whereabouts::InParcel
+            ),
             "500000000000000".parse::<Decimal>().unwrap()
         );
         // The first one overflows on its own (1e15 × 1e15 = 1e30) — a
         // per-unit adjustment with a mistyped run of zeros.
         let huge = AmitReductionEvent {
             per_unit: units,
-            covered: units,
+            covered: AcquiredUnits::new(units),
             ..amit(1, 2024, "1", 0, 0)
         };
-        assert_eq!(huge.per_unit_for(units, Whereabouts::InParcel), units);
+        assert_eq!(
+            huge.per_unit_for(AcquiredUnits::new(units), Whereabouts::InParcel),
+            units
+        );
         // The sold branch divides by its own denominator and overflows the
         // same way: the whole 1e15-unit parcel was sold during the year, so
         // all of the coverage spills onto it.
         let sold = AmitReductionEvent {
             per_unit: "0.5".parse().unwrap(),
-            covered: units,
-            disposed_by_year_end: units,
-            disposed_before_year_start: Decimal::ZERO,
+            covered: AcquiredUnits::new(units),
+            disposed_by_year_end: AcquiredUnits::new(units),
+            disposed_before_year_start: AcquiredUnits::new(Decimal::ZERO),
             ..amit(1, 2024, "0.5", 0, 0)
         };
         assert_eq!(
-            sold.reduction_for_units(units, units, Whereabouts::DisposedOn(date(2024, 3, 1))),
+            sold.reduction_for_units(
+                AcquiredUnits::new(units),
+                AcquiredUnits::new(units),
+                Whereabouts::DisposedOn(date(2024, 3, 1))
+            ),
             "500000000000000".parse::<Decimal>().unwrap()
         );
     }
@@ -1831,7 +1888,11 @@ mod tests {
     fn a_reduction_that_fits_keeps_its_multiply_first_figure() {
         let held = amit(1, 2024, "39.95", 2, 0);
         assert_eq!(
-            held.reduction_for_units(Decimal::from(3), Decimal::ONE, Whereabouts::InParcel),
+            held.reduction_for_units(
+                AcquiredUnits::new(Decimal::from(3)),
+                AcquiredUnits::new(Decimal::ONE),
+                Whereabouts::InParcel
+            ),
             "26.633333333333333333333333333".parse::<Decimal>().unwrap()
         );
         // 5 units, 3 sold by the year end, 4 covered: 2 units of coverage
@@ -1839,8 +1900,8 @@ mod tests {
         let sold = amit(1, 2024, "39.95", 4, 3);
         assert_eq!(
             sold.reduction_for_units(
-                Decimal::from(5),
-                Decimal::ONE,
+                AcquiredUnits::new(Decimal::from(5)),
+                AcquiredUnits::new(Decimal::ONE),
                 Whereabouts::DisposedOn(date(2024, 3, 1))
             ),
             "26.633333333333333333333333333".parse::<Decimal>().unwrap()
@@ -1862,12 +1923,15 @@ mod tests {
         // sold ones at 25c each.
         let e = amit(1, 2024, "0.50", 80, 40);
         assert_eq!(
-            e.per_unit_for(Decimal::from(100), Whereabouts::InParcel),
+            e.per_unit_for(
+                AcquiredUnits::new(Decimal::from(100)),
+                Whereabouts::InParcel
+            ),
             "0.50".parse().unwrap()
         );
         assert_eq!(
             e.per_unit_for(
-                Decimal::from(100),
+                AcquiredUnits::new(Decimal::from(100)),
                 Whereabouts::DisposedOn(date(2024, 3, 1))
             ),
             "0.25".parse().unwrap()
@@ -1883,28 +1947,47 @@ mod tests {
     #[test]
     fn units_disposed_before_the_income_year_take_no_spill() {
         let e = AmitReductionEvent {
-            disposed_before_year_start: Decimal::from(60),
+            disposed_before_year_start: AcquiredUnits::new(Decimal::from(60)),
             ..amit(1, 2025, "1", 40, 80)
         };
         let q = Decimal::from(100);
         let fy2022 = Whereabouts::DisposedOn(date(2022, 3, 3));
         let fy2025 = Whereabouts::DisposedOn(date(2024, 9, 1));
-        assert_eq!(e.per_unit_for(q, fy2022), Decimal::ZERO);
-        assert_eq!(e.per_unit_for(q, Whereabouts::InParcel), Decimal::ONE);
-        assert_eq!(e.per_unit_for(q, fy2025), Decimal::ONE);
+        assert_eq!(e.per_unit_for(AcquiredUnits::new(q), fy2022), Decimal::ZERO);
         assert_eq!(
-            e.reduction_for_units(q, Decimal::from(20), Whereabouts::InParcel)
-                + e.reduction_for_units(q, Decimal::from(20), fy2025)
-                + e.reduction_for_units(q, Decimal::from(60), fy2022),
+            e.per_unit_for(AcquiredUnits::new(q), Whereabouts::InParcel),
+            Decimal::ONE
+        );
+        assert_eq!(e.per_unit_for(AcquiredUnits::new(q), fy2025), Decimal::ONE);
+        assert_eq!(
+            e.reduction_for_units(
+                AcquiredUnits::new(q),
+                AcquiredUnits::new(Decimal::from(20)),
+                Whereabouts::InParcel
+            ) + e.reduction_for_units(
+                AcquiredUnits::new(q),
+                AcquiredUnits::new(Decimal::from(20)),
+                fy2025
+            ) + e.reduction_for_units(
+                AcquiredUnits::new(q),
+                AcquiredUnits::new(Decimal::from(60)),
+                fy2022
+            ),
             e.amount()
         );
         // The year's first day is inside it; the day before is not.
         assert_eq!(
-            e.per_unit_for(q, Whereabouts::DisposedOn(date(2024, 7, 1))),
+            e.per_unit_for(
+                AcquiredUnits::new(q),
+                Whereabouts::DisposedOn(date(2024, 7, 1))
+            ),
             Decimal::ONE
         );
         assert_eq!(
-            e.per_unit_for(q, Whereabouts::DisposedOn(date(2024, 6, 30))),
+            e.per_unit_for(
+                AcquiredUnits::new(q),
+                Whereabouts::DisposedOn(date(2024, 6, 30))
+            ),
             Decimal::ZERO
         );
     }
@@ -1921,11 +2004,11 @@ mod tests {
     #[test]
     fn units_carried_out_by_a_rollover_are_covered_after_those_left_and_before_the_sold() {
         let after_the_move = AmitReductionEvent {
-            carried_out: Decimal::from(40),
+            carried_out: AcquiredUnits::new(Decimal::from(40)),
             ..amit(1, 2024, "1", 40, 20)
         };
         let before_the_move = AmitReductionEvent {
-            carried_out: Decimal::from(40),
+            carried_out: AcquiredUnits::new(Decimal::from(40)),
             ..amit(1, 2024, "1", 80, 20)
         };
         let sold = Whereabouts::DisposedOn(date(2024, 3, 1));
@@ -1934,23 +2017,39 @@ mod tests {
             (before_the_move, "1", "1", "0"),
         ] {
             let q = Decimal::from(100);
-            assert_eq!(e.per_unit_for(q, Whereabouts::InParcel), dec(left));
-            assert_eq!(e.per_unit_for(q, Whereabouts::CarriedOut), dec(carried));
-            assert_eq!(e.per_unit_for(q, sold), dec(spilled));
             assert_eq!(
-                e.reduction_for_units(q, Decimal::from(40), Whereabouts::InParcel)
-                    + e.reduction_for_units(q, Decimal::from(40), Whereabouts::CarriedOut)
-                    + e.reduction_for_units(q, Decimal::from(20), sold),
+                e.per_unit_for(AcquiredUnits::new(q), Whereabouts::InParcel),
+                dec(left)
+            );
+            assert_eq!(
+                e.per_unit_for(AcquiredUnits::new(q), Whereabouts::CarriedOut),
+                dec(carried)
+            );
+            assert_eq!(e.per_unit_for(AcquiredUnits::new(q), sold), dec(spilled));
+            assert_eq!(
+                e.reduction_for_units(
+                    AcquiredUnits::new(q),
+                    AcquiredUnits::new(Decimal::from(40)),
+                    Whereabouts::InParcel
+                ) + e.reduction_for_units(
+                    AcquiredUnits::new(q),
+                    AcquiredUnits::new(Decimal::from(40)),
+                    Whereabouts::CarriedOut
+                ) + e.reduction_for_units(
+                    AcquiredUnits::new(q),
+                    AcquiredUnits::new(Decimal::from(20)),
+                    sold
+                ),
                 e.amount()
             );
         }
         // Coverage past both spills onto the sold units, as it always has.
         let over = AmitReductionEvent {
-            carried_out: Decimal::from(40),
+            carried_out: AcquiredUnits::new(Decimal::from(40)),
             ..amit(1, 2024, "1", 90, 20)
         };
         assert_eq!(
-            over.per_unit_for(Decimal::from(100), sold),
+            over.per_unit_for(AcquiredUnits::new(Decimal::from(100)), sold),
             "0.5".parse::<Decimal>().unwrap()
         );
     }
@@ -1962,7 +2061,7 @@ mod tests {
         let e = amit(1, 2024, "0.50", 60, 40);
         assert_eq!(
             e.per_unit_for(
-                Decimal::from(100),
+                AcquiredUnits::new(Decimal::from(100)),
                 Whereabouts::DisposedOn(date(2024, 6, 30))
             ),
             Decimal::ZERO
@@ -1970,7 +2069,7 @@ mod tests {
         // A sale the next day was still held at the year end.
         assert_eq!(
             e.per_unit_for(
-                Decimal::from(100),
+                AcquiredUnits::new(Decimal::from(100)),
                 Whereabouts::DisposedOn(date(2024, 7, 1))
             ),
             "0.50".parse().unwrap()
@@ -1987,7 +2086,7 @@ mod tests {
         let events = [whole(1, 2024, "5", 100), whole(2, 2025, "6", 100)];
         let cb = adjusted_cost_base(
             &parcel(100, 10),
-            Decimal::from(100),
+            AcquiredUnits::new(Decimal::from(100)),
             &events,
             &[],
             &[],
@@ -1996,7 +2095,7 @@ mod tests {
         .unwrap();
         let rows = adjustment_detail(
             &parcel(100, 10),
-            Decimal::from(100),
+            AcquiredUnits::new(Decimal::from(100)),
             &events,
             &[],
             &[],
@@ -2028,7 +2127,7 @@ mod tests {
         let events = [amit(1, 2024, "0.50", 60, 40)];
         let rows = adjustment_detail(
             &parcel(100, 10),
-            Decimal::from(40),
+            AcquiredUnits::new(Decimal::from(40)),
             &events,
             &[],
             &[],
@@ -2041,7 +2140,7 @@ mod tests {
 
         let rows = adjustment_detail(
             &parcel(100, 10),
-            Decimal::from(60),
+            AcquiredUnits::new(Decimal::from(60)),
             &events,
             &[],
             &[],
@@ -2064,7 +2163,7 @@ mod tests {
         // 50c per unit on 100 units held: cost base 1000 → 950.
         let cb = adjusted_cost_base(
             &parcel(100, 10),
-            Decimal::from(100),
+            AcquiredUnits::new(Decimal::from(100)),
             &[],
             &[roc("0.50", date(2024, 3, 1))],
             &[],
@@ -2077,7 +2176,7 @@ mod tests {
         // G1), full payment still reported.
         let cb = adjusted_cost_base(
             &parcel(100, 10),
-            Decimal::from(100),
+            AcquiredUnits::new(Decimal::from(100)),
             &[],
             &[roc("11", date(2024, 3, 1))],
             &[],
@@ -2099,7 +2198,7 @@ mod tests {
         // Payment after the sale date: the units were no longer held.
         let cb = adjusted_cost_base(
             &parcel(100, 10),
-            Decimal::from(100),
+            AcquiredUnits::new(Decimal::from(100)),
             &[],
             &[roc],
             &[],
@@ -2123,7 +2222,7 @@ mod tests {
         };
         let cb = adjusted_cost_base(
             &parcel(100, 10),
-            Decimal::from(100),
+            AcquiredUnits::new(Decimal::from(100)),
             &[],
             &[roc],
             &[split],
@@ -2152,7 +2251,7 @@ mod tests {
         let events = [roc("0.25", date(2024, 4, 1)), roc("5", date(2024, 5, 1))];
         let cb = adjusted_cost_base(
             &parcel(100, 10),
-            Decimal::from(100),
+            AcquiredUnits::new(Decimal::from(100)),
             &[],
             &events,
             std::slice::from_ref(&split),
@@ -2161,7 +2260,7 @@ mod tests {
         .unwrap();
         let rows = adjustment_detail(
             &parcel(100, 10),
-            Decimal::from(100),
+            AcquiredUnits::new(Decimal::from(100)),
             &[],
             &events,
             &[split],
@@ -2221,7 +2320,7 @@ mod tests {
         };
         let rows = adjustment_detail(
             &p,
-            Decimal::from(100),
+            AcquiredUnits::new(Decimal::from(100)),
             &amit_events,
             std::slice::from_ref(&roc),
             &[],
@@ -2241,7 +2340,7 @@ mod tests {
         // those rows' sums.
         let cb = adjusted_cost_base(
             &p,
-            Decimal::from(100),
+            AcquiredUnits::new(Decimal::from(100)),
             &amit_events,
             std::slice::from_ref(&roc),
             &[],
@@ -2272,7 +2371,7 @@ mod tests {
         // The whole parcel: 100 − 200 floors at 0, then +150.
         let whole_parcel = adjusted_cost_base(
             &p,
-            Decimal::from(100),
+            AcquiredUnits::new(Decimal::from(100)),
             &events,
             &[],
             &[],
@@ -2286,7 +2385,7 @@ mod tests {
         // Half the parcel: the same walk over the costed units' $50 share.
         let half = adjusted_cost_base(
             &p,
-            Decimal::from(50),
+            AcquiredUnits::new(Decimal::from(50)),
             &events,
             &[],
             &[],
@@ -2301,7 +2400,7 @@ mod tests {
         // the balance the rows leave is the pipeline's `adjusted` exactly.
         let rows = adjustment_detail(
             &p,
-            Decimal::from(100),
+            AcquiredUnits::new(Decimal::from(100)),
             &events,
             &[],
             &[],
@@ -2340,17 +2439,19 @@ mod tests {
         // The unit count the row would claim to explain is unchanged …
         assert_eq!(
             as_acquired_quantity(
-                Decimal::from(100),
+                crate::entities::corporate_action::UnitsAt::new(
+                    Decimal::from(100),
+                    date(2024, 6, 1),
+                ),
                 std::slice::from_ref(&same_day),
                 p.trade_date,
-                date(2024, 6, 1),
             ),
             Decimal::from(100)
         );
         // … so no row prints.
         let rows = adjustment_detail(
             &p,
-            Decimal::from(100),
+            AcquiredUnits::new(Decimal::from(100)),
             &[],
             &[],
             std::slice::from_ref(&same_day),
@@ -2366,7 +2467,7 @@ mod tests {
         let next_day = SplitEvent::share_split(date(2024, 1, 2), Decimal::from(2), Decimal::ONE);
         let rows = adjustment_detail(
             &p,
-            Decimal::from(100),
+            AcquiredUnits::new(Decimal::from(100)),
             &[],
             &[],
             std::slice::from_ref(&next_day),
@@ -2403,7 +2504,7 @@ mod tests {
         ];
         let rows = adjustment_detail(
             &parcel(100, 10),
-            Decimal::from(100),
+            AcquiredUnits::new(Decimal::from(100)),
             &[],
             &[],
             &events,
@@ -2451,7 +2552,7 @@ mod tests {
         let payments = [roc("0.10", date(2024, 4, 1)), roc("0.20", date(2024, 6, 1))];
         let cb = adjusted_cost_base(
             &parcel(100, 10),
-            Decimal::from(100),
+            AcquiredUnits::new(Decimal::from(100)),
             &[],
             &payments,
             &events,
@@ -2465,7 +2566,7 @@ mod tests {
         // informational rows naming the events that re-based the units.
         let rows = adjustment_detail(
             &parcel(100, 10),
-            Decimal::from(100),
+            AcquiredUnits::new(Decimal::from(100)),
             &[],
             &payments,
             &events,
@@ -2499,7 +2600,7 @@ mod tests {
         };
         let err = adjusted_cost_base(
             &parcel(100, 10),
-            Decimal::from(100),
+            AcquiredUnits::new(Decimal::from(100)),
             &[],
             &[roc],
             &[],
@@ -2513,7 +2614,7 @@ mod tests {
     fn zero_quantity_parcel_costs_nil() {
         let cb = adjusted_cost_base(
             &parcel(0, 10),
-            Decimal::ZERO,
+            AcquiredUnits::new(Decimal::ZERO),
             &[],
             &[],
             &[],
@@ -2527,7 +2628,7 @@ mod tests {
     fn into_aud_with_passes_aud_through_unchanged() {
         let cb = adjusted_cost_base(
             &parcel(100, 10),
-            Decimal::from(100),
+            AcquiredUnits::new(Decimal::from(100)),
             &[],
             &[],
             &[],
@@ -2568,7 +2669,7 @@ mod tests {
         };
         let cb = adjusted_cost_base(
             &p,
-            Decimal::from(100),
+            AcquiredUnits::new(Decimal::from(100)),
             &[whole(1, 2024, "0.05", 100)],
             &[roc],
             &[],
@@ -2624,7 +2725,7 @@ mod tests {
         };
         let cb = adjusted_cost_base(
             &p,
-            Decimal::from(100),
+            AcquiredUnits::new(Decimal::from(100)),
             &[whole(1, 2024, "0.05", 100)],
             &[roc],
             &[],
@@ -2747,7 +2848,7 @@ mod tests {
         let checked = checked_cost_base(&[
             Term::Product {
                 price: ("average_price", p.average_price),
-                units: ("quantity", p.quantity),
+                units: ("quantity", p.quantity.get()),
             },
             Term::Amount("brokerage", p.brokerage),
             Term::Amount("gst_on_brokerage", p.gst_on_brokerage),

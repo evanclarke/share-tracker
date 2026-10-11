@@ -441,18 +441,19 @@ async fn accumulate_on(
                 .get(&p.id)
                 .map_or(&[][..], |v| v)
                 .iter()
-                .map(open_parcels::UnitsConsumed::dated),
+                .map(|c| c.quantity),
             splits,
             p.date,
         );
         let remaining = p.quantity - sold;
-        if remaining > Decimal::ZERO {
+        if remaining > crate::entities::corporate_action::AcquiredUnits::ZERO {
             acc.quantity += crate::entities::corporate_action::split_adjusted_quantity(
                 remaining,
                 splits,
                 p.date,
                 Some(as_of),
-            );
+            )
+            .quantity();
         }
     }
 
@@ -468,8 +469,10 @@ async fn accumulate_on(
             let carried = group_costs.get(&key).copied().unwrap_or(Decimal::ZERO);
             let mut inflow = carried;
             if !p.average_price.is_zero() {
+                // A Sell row read through `ParcelRow`: its quantity is the
+                // sale's own units, which its price is quoted against.
                 let cash = fx.to_aud(
-                    p.average_price * p.quantity,
+                    p.average_price * p.quantity.get(),
                     &p.currency,
                     p.date,
                     p.fx_override(),
@@ -482,7 +485,7 @@ async fn accumulate_on(
             acc.proceeds += inflow;
             acc.flows.push((p.date, inflow));
         } else {
-            let net = p.average_price * p.quantity - p.brokerage - p.gst_on_brokerage;
+            let net = p.average_price * p.quantity.get() - p.brokerage - p.gst_on_brokerage;
             let net = fx.to_aud(net, &p.currency, p.date, p.fx_override())?;
             let acc = holdings.entry(acc_key).or_default();
             acc.proceeds += net;

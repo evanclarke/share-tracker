@@ -424,7 +424,7 @@ async fn db_write_on(
         for row in &rollover_rows {
             let date: chrono::NaiveDate = row.try_get("date")?;
             let qty = parse_dec("quantity_allocated", row.try_get("quantity_allocated")?)?;
-            sales.push((date, qty));
+            sales.push(corporate_action::UnitsAt::new(qty, date));
             groups.push((
                 row.try_get::<String, _>("group_column")?,
                 row.try_get::<i64, _>("group_id")?,
@@ -433,7 +433,8 @@ async fn db_write_on(
         // Allocations are in their sale date's units; the parcel's own
         // quantity — and this row's — are as acquired.
         let carried =
-            corporate_action::sold_in_acquired_units(sales.iter().copied(), &splits, trade_date);
+            corporate_action::sold_in_acquired_units(sales.iter().copied(), &splits, trade_date)
+                .get();
         let adjustable = (trade_qty - carried).max(Decimal::ZERO);
         if adj.quantity > adjustable {
             groups.sort_unstable();
@@ -488,10 +489,13 @@ async fn db_write_on(
             trade_date_and_splits(&mut *conn, adj.trade_id, trade_listing_id).await?;
         let mut gone = Vec::with_capacity(gone_rows.len());
         for (date, qty) in gone_rows {
-            gone.push((date, parse_dec("quantity_allocated", qty)?));
+            gone.push(corporate_action::UnitsAt::new(
+                parse_dec("quantity_allocated", qty)?,
+                date,
+            ));
         }
         let held_in_year = (trade_qty
-            - corporate_action::sold_in_acquired_units(gone, &splits, trade_date))
+            - corporate_action::sold_in_acquired_units(gone, &splits, trade_date).get())
         .max(Decimal::ZERO);
         if adj.quantity > held_in_year {
             return Err(UpsertError::QuantityExceedsUnitsHeldInYear { held_in_year });
@@ -663,6 +667,7 @@ impl From<UpsertError> for ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::adjustments::AcquiredUnits;
     use crate::domain::cost_base::{AmitReductionEvent, db_cost_base_reduction_events};
     use crate::entities::holding_account::{self, HoldingAccount};
     use crate::entities::sell::AllocationInput;
@@ -830,13 +835,21 @@ mod tests {
         assert_eq!(e.disposed_before_year_start, dec("60"));
         let sold = crate::domain::cost_base::Whereabouts::DisposedOn(ymd(2022, 3, 3));
         assert_eq!(
-            e.reduction_for_units(dec("100"), dec("60"), sold),
+            e.reduction_for_units(
+                AcquiredUnits::new(dec("100")),
+                AcquiredUnits::new(dec("60")),
+                sold
+            ),
             Decimal::ZERO
         );
         // …and the 40 held in the year carry the whole \$40.
         let held = crate::domain::cost_base::Whereabouts::InParcel;
         assert_eq!(
-            e.reduction_for_units(dec("100"), dec("40"), held),
+            e.reduction_for_units(
+                AcquiredUnits::new(dec("100")),
+                AcquiredUnits::new(dec("40")),
+                held
+            ),
             dec("40")
         );
     }

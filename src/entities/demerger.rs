@@ -240,7 +240,7 @@ async fn execute(
 
         replacements.push(Replacement {
             parcel_id: p.parcel.id,
-            at_date_units: p.at_date_units,
+            at_date_units: p.at_date_units.quantity(),
             // The entitlement ratio applies to units as held at the demerger
             // date. `held_units` is the action's own ratio denominator,
             // validated positive when the corporate action is written
@@ -249,7 +249,7 @@ async fn execute(
             // one over a very large holding produces a demerged quantity past
             // `Decimal`'s ceiling, and there is no lesser count to write.
             demerged_quantity: crate::domain::cost_base::checked_rebased_quantity(
-                ("units held", p.at_date_units),
+                ("units held", p.at_date_units.quantity()),
                 ("demerger_new_units", new_units),
                 ("demerger_held_units", held_units),
             )

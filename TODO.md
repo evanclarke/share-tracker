@@ -77,13 +77,23 @@ the suite is least likely to cover (a foreign-currency parcel; a split between p
   request `prices` maps (`strict_aud_map`, OpenAPI schema unchanged). Made only by
   `fx::apply_rate_to_aud` or `Aud::stated`, whose production call sites are pinned by
   `infra::currency`'s `aud_is_stated_only_where_the_amount_is_known_to_be_aud`
-- [ ] **Unit basis of a quantity.** As-acquired and as-of/sale-date quantities are both `Decimal`;
+- [x] **Unit basis of a quantity.** As-acquired and as-of/sale-date quantities are both `Decimal`;
   `open_parcels::db_units_sold`'s doc says the sale-date quantity "must" be re-based before it is
   subtracted, and `OpenParcel::remaining_as_of` vs `parcel.quantity` is distinguished only in prose
   (~180 comments state a basis). Introduce distinct types (e.g. `AcquiredUnits` / `UnitsAt`) with
   `adjustments::split_adjusted_quantity`/`as_acquired_quantity`/`sold_in_acquired_units` as the
   only conversions, carried by `UnitsConsumed::quantity` and `OpenParcel::remaining_as_of` — the
   quantity counterpart of `cost_base::Held`
+  — Done 2026-10-11: `adjustments::AcquiredUnits` (a parcel's own basis — `ParcelRow`/`Parcel::
+  quantity`, the pipeline's `units`, `AmitReductionEvent`'s four counts, `RolledParcel::remaining`)
+  and `adjustments::UnitsAt`, which carries the date whose basis it is in (`UnitsConsumed::quantity`,
+  `OpenParcel::remaining_as_of`, `RolledParcel::at_date_units`, the allocation reads), so a
+  conversion is handed only its target date. The three functions plus `UnitsAt::rebased` are the
+  only conversions, and now re-base in **either** direction — the one-directional window that
+  `reduction_for` and the AMIT generator each special-cased by hand is gone (pinned by
+  `a_quantity_re_bases_backward_to_an_earlier_date` and the split round-trip properties). Typing it
+  exposed two sums over parcels of *different* as-acquired bases in `closing_price::held` (harmless
+  non-zero tests, now `any`)
 - [ ] **Valuation-only FX fallback.** `fx::ValuationRate` exposes `pub rate`, so a caller can drop
   `provisional` ("the caller must surface this"), and valuation-only use is held by the
   `VALUATION_RATE_CALLERS_ALLOWED` file-name scan. Make the rate private and offer only an `apply`

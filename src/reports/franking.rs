@@ -231,12 +231,9 @@ impl HoldingWalks {
             // incomparable, so every quantity is normalised to the basis at the
             // end of the qualification window. The entitled/disqualified ratio
             // (all the caller uses) is basis-invariant.
-            let qty = corporate_action::split_adjusted_quantity(
-                event.qty,
-                &listing.splits,
-                date,
-                Some(window_end),
-            );
+            let qty = corporate_action::UnitsAt::new(event.qty, date)
+                .rebased(&listing.splits, Some(window_end))
+                .quantity();
 
             // Everything still held immediately before the first trade on or after
             // the ex-date is entitled to the dividend (acquiring on or after the

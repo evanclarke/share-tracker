@@ -48,8 +48,8 @@
 //! against `PUT`/`DELETE /trades` while referenced (`entities::trade`).
 
 use crate::entities::corporate_action::{
-    self, ActionKind, NOTHING_PAID_FOR_NON_RENOUNCEABLE_RIGHTS, SplitEvent, sold_in_acquired_units,
-    split_adjusted_quantity,
+    self, AcquiredUnits, ActionKind, NOTHING_PAID_FOR_NON_RENOUNCEABLE_RIGHTS, SplitEvent, UnitsAt,
+    sold_in_acquired_units, split_adjusted_quantity,
 };
 use crate::entities::rights_exercise::{db_held_at_record_date, db_rights_used, entitled_units};
 use crate::entities::trade::TradeType;
@@ -419,7 +419,7 @@ async fn parcel_units_at_record_date(
     {
         return Err(SellRightsError::NotAnOriginalParcel);
     }
-    let parcel_qty = parse_dec("quantity", parcel.try_get("quantity")?)?;
+    let parcel_qty = AcquiredUnits::new(parse_dec("quantity", parcel.try_get("quantity")?)?);
 
     // Only the sales settled by the record date reduce the units it entitled.
     let sold_rows = sqlx::query(
@@ -434,19 +434,20 @@ async fn parcel_units_at_record_date(
     let sold = sold_rows
         .iter()
         .map(|row| {
-            Ok((
-                row.try_get("sale_date")?,
+            Ok(UnitsAt::new(
                 row_dec(row, "quantity_allocated")?,
+                row.try_get("sale_date")?,
             ))
         })
-        .collect::<Result<Vec<(NaiveDate, Decimal)>, sqlx::Error>>()?;
+        .collect::<Result<Vec<UnitsAt>, sqlx::Error>>()?;
     let remaining = parcel_qty - sold_in_acquired_units(sold, anchoring.splits, parcel_date);
     Ok(split_adjusted_quantity(
         remaining,
         anchoring.splits,
         parcel_date,
         Some(anchoring.record_date),
-    ))
+    )
+    .quantity())
 }
 
 /// Rights already anchored to a parcel by the action's *stored* sales, in

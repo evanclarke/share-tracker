@@ -139,7 +139,7 @@ pub async fn db_holdings_on(
         // The holding's quantity is reported in the unit basis of `as_of`
         // (live view: current units, after every recorded split) so market
         // value lines up with a price as of that date.
-        *holding_qty.entry(key).or_insert(Decimal::ZERO) += p.remaining_as_of;
+        *holding_qty.entry(key).or_insert(Decimal::ZERO) += p.remaining_as_of.quantity();
         *holding_cost_base.entry(key).or_insert(Decimal::ZERO) += p.cost_base.adjusted;
     }
 

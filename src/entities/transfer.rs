@@ -34,7 +34,7 @@
 //! A recorded transfer is immutable — delete it and re-transfer instead.
 
 use crate::domain::cost_base::ParcelRow;
-use crate::entities::corporate_action::checked_as_acquired_quantity;
+use crate::entities::corporate_action::{UnitsAt, checked_as_acquired_quantity};
 use crate::entities::rollover;
 use crate::entities::sell::{self, AllocationInput};
 use crate::entities::trade::{self, Trade};
@@ -632,10 +632,12 @@ async fn transfer_ins(
         // held overflows here — before the allocation check that would have
         // refused it (`TransferError::UnrepresentableMovedQuantity`).
         let moved_as_acquired = checked_as_acquired_quantity(
-            ("quantity_allocated", alloc.quantity_allocated),
+            (
+                "quantity_allocated",
+                UnitsAt::new(alloc.quantity_allocated, body.date),
+            ),
             &inputs.splits,
             parcel.date,
-            body.date,
         )
         .map_err(TransferError::UnrepresentableMovedQuantity)?;
         let carried_cost_base = inputs.carried_cost_base(&parcel, moved_as_acquired)?;

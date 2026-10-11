@@ -36,10 +36,9 @@ use crate::infra::id::TradeId;
 use std::collections::HashMap;
 
 use chrono::NaiveDate;
-use rust_decimal::Decimal;
 use sqlx::Row;
 
-use crate::domain::adjustments;
+use crate::domain::adjustments::{self, AcquiredUnits, UnitsAt};
 use crate::domain::cost_base::{self, CostBase, ParcelRow};
 use crate::infra::currency::Aud;
 use crate::infra::date::{as_of_or_open, as_of_or_today};
@@ -61,8 +60,9 @@ pub struct OpenParcel {
     /// parcel's *as-acquired* basis instead; a split scales the unit count
     /// but never the cost base (TD 2000/10), so the two bases differ only in
     /// this field. `parcel.quantity` is the whole parcel as transacted, on
-    /// that as-acquired basis.
-    pub remaining_as_of: Decimal,
+    /// that as-acquired basis — the two are different types, so neither can be
+    /// read as the other.
+    pub remaining_as_of: UnitsAt,
     /// The remaining units' AUD cost-base breakdown, converted at the
     /// parcel's (possibly deemed) acquisition-month rate — the full
     /// [`cost_base`] pipeline, so callers needing only the bottom line take
@@ -88,21 +88,13 @@ pub struct UnitsConsumed {
     /// record date (the C2 test in `reports::net_capital_gain`). Every
     /// "were these units still held?" question asks [`Self::date`] instead.
     pub settled: NaiveDate,
-    /// Units allocated, in *sale-date* units (see [`db_units_sold`]).
-    pub quantity: Decimal,
+    /// Units allocated, in *sale-date* units — its basis is [`Self::date`]
+    /// (see [`db_units_sold`]).
+    pub quantity: UnitsAt,
     /// False for a rollover's closing Sell — a transfer's, a scrip-for-scrip
     /// exchange's or a demerger's, the trades carrying a
     /// `entities::rollover::Provenance` column.
     pub disposal: bool,
-}
-
-impl UnitsConsumed {
-    /// The `(date, quantity)` pair the split re-basing helpers take — the two
-    /// fields that matter to a quantity question, without the provenance that
-    /// does not.
-    pub fn dated(&self) -> (NaiveDate, Decimal) {
-        (self.date, self.quantity)
-    }
 }
 
 /// Units allocated out of each purchase parcel by a Sell on or before
@@ -135,12 +127,16 @@ pub async fn db_units_sold(
     let mut sold: HashMap<TradeId, Vec<UnitsConsumed>> = HashMap::new();
     for row in &rows {
         let purchase_trade_id: TradeId = row.try_get("purchase_trade_id")?;
+        let sale_date: NaiveDate = row.try_get("sale_date")?;
         sold.entry(purchase_trade_id)
             .or_default()
             .push(UnitsConsumed {
-                date: row.try_get("sale_date")?,
+                date: sale_date,
                 settled: row.try_get("sale_settlement_date")?,
-                quantity: parse_dec("quantity_allocated", row.try_get("quantity_allocated")?)?,
+                quantity: UnitsAt::new(
+                    parse_dec("quantity_allocated", row.try_get("quantity_allocated")?)?,
+                    sale_date,
+                ),
                 disposal: row.try_get::<i64, _>("is_disposal")? != 0,
             });
     }
@@ -210,12 +206,12 @@ pub async fn load(
                 .get(&parcel.id)
                 .map_or(&[][..], |v| v)
                 .iter()
-                .map(UnitsConsumed::dated),
+                .map(|c| c.quantity),
             splits,
             parcel.date,
         );
         let remaining_as_acquired = parcel.quantity - sold;
-        if remaining_as_acquired <= Decimal::ZERO {
+        if remaining_as_acquired <= AcquiredUnits::ZERO {
             continue;
         }
 
@@ -253,14 +249,14 @@ pub async fn load(
     Ok(open)
 }
 
-/// Every allocation drawn on parcel `parcel_id`, as `(sale_date, quantity)`
-/// with the quantity in its own **sale date's** unit basis — re-base it to the
-/// parcel's as-acquired basis with `adjustments::sold_in_acquired_units`
-/// (TD 2000/10) before comparing it with the parcel's quantity.
+/// Every allocation drawn on parcel `parcel_id`, each in its own **sale
+/// date's** unit basis — re-base it to the parcel's as-acquired basis with
+/// `adjustments::sold_in_acquired_units` (TD 2000/10) before comparing it with
+/// the parcel's quantity.
 pub async fn db_parcel_sales(
     conn: &mut sqlx::SqliteConnection,
     parcel_id: TradeId,
-) -> Result<Vec<(NaiveDate, Decimal)>, sqlx::Error> {
+) -> Result<Vec<UnitsAt>, sqlx::Error> {
     let rows = sqlx::query(
         "SELECT s.date AS sale_date, pa.quantity_allocated \
          FROM parcel_allocations pa JOIN trades s ON s.id = pa.sale_trade_id \
@@ -277,7 +273,7 @@ pub async fn db_parcel_sales(
 pub async fn db_sales_by_parcel(
     conn: &mut sqlx::SqliteConnection,
     listing_id: Option<ListingId>,
-) -> Result<HashMap<TradeId, Vec<(NaiveDate, Decimal)>>, sqlx::Error> {
+) -> Result<HashMap<TradeId, Vec<UnitsAt>>, sqlx::Error> {
     let rows = sqlx::query(
         "SELECT pa.purchase_trade_id, s.date AS sale_date, pa.quantity_allocated \
          FROM parcel_allocations pa \
@@ -288,7 +284,7 @@ pub async fn db_sales_by_parcel(
     .bind(listing_id)
     .fetch_all(&mut *conn)
     .await?;
-    let mut sales: HashMap<TradeId, Vec<(NaiveDate, Decimal)>> = HashMap::new();
+    let mut sales: HashMap<TradeId, Vec<UnitsAt>> = HashMap::new();
     for row in &rows {
         sales
             .entry(row.try_get("purchase_trade_id")?)
@@ -298,10 +294,10 @@ pub async fn db_sales_by_parcel(
     Ok(sales)
 }
 
-fn sale_of(row: &sqlx::sqlite::SqliteRow) -> Result<(NaiveDate, Decimal), sqlx::Error> {
-    Ok((
-        row.try_get("sale_date")?,
+fn sale_of(row: &sqlx::sqlite::SqliteRow) -> Result<UnitsAt, sqlx::Error> {
+    Ok(UnitsAt::new(
         parse_dec("quantity_allocated", row.try_get("quantity_allocated")?)?,
+        row.try_get("sale_date")?,
     ))
 }
 
@@ -310,6 +306,7 @@ mod tests {
     use super::*;
     use crate::entities::corporate_action::{self, ActionKind, CorporateAction};
     use crate::test_support::{self, allocate, dec, test_pool, ymd};
+    use rust_decimal::Decimal;
     use sqlx::SqlitePool;
 
     async fn load_all(pool: &SqlitePool, as_of: Option<NaiveDate>) -> Vec<OpenParcel> {
@@ -844,8 +841,11 @@ mod tests {
         let mut conn = pool.acquire().await.unwrap();
         let sold = db_units_sold(&mut conn, None).await.unwrap();
         let dated = |sold: &HashMap<TradeId, Vec<UnitsConsumed>>, id: i64| {
-            sold.get(&TradeId(id))
-                .map(|v| v.iter().map(UnitsConsumed::dated).collect::<Vec<_>>())
+            sold.get(&TradeId(id)).map(|v| {
+                v.iter()
+                    .map(|c| (c.date, c.quantity.quantity()))
+                    .collect::<Vec<_>>()
+            })
         };
         assert_eq!(
             dated(&sold, 1),
@@ -854,8 +854,14 @@ mod tests {
                 (ymd(2024, 9, 3), dec("20"))
             ])
         );
-        // Both are ordinary Sells, so both are disposals.
+        // Both are ordinary Sells, so both are disposals — and each quantity
+        // is stated in its own sale date's unit basis.
         assert!(sold[&TradeId(1)].iter().all(|c| c.disposal));
+        assert!(
+            sold[&TradeId(1)]
+                .iter()
+                .all(|c| c.quantity.basis() == Some(c.date))
+        );
 
         // Bounded at a date between the two sales, only the first counts.
         let sold = db_units_sold(&mut conn, Some(ymd(2024, 6, 30)))

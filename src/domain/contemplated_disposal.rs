@@ -48,7 +48,7 @@ use std::collections::HashMap;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 
-use crate::domain::adjustments::{self, RocEvent, SplitEvent};
+use crate::domain::adjustments::{self, AcquiredUnits, RocEvent, SplitEvent, UnitsAt};
 use crate::domain::cost_base::{self, AmitReductionEvent, ParcelRow};
 use crate::infra::fx::FxRates;
 
@@ -85,20 +85,19 @@ impl Costing {
     /// `sale_date` — the figure `reports::realised_gains` will report for that
     /// allocation once the Sell is entered.
     ///
-    /// `units` is in `sale_date`'s unit basis (what the caller's candidate
-    /// list and price are quoted in); the cost-base arithmetic runs in the
-    /// parcel's as-acquired basis, so a split between the two is re-based
-    /// away first — the same `as_acquired_quantity` step the realised-gains
-    /// report applies to an allocation.
+    /// `units` carries its own unit basis (ordinarily `sale_date`'s, what the
+    /// caller's candidate list and price are quoted in); the cost-base
+    /// arithmetic runs in the parcel's as-acquired basis, so a split between
+    /// the two is re-based away first — the same `as_acquired_quantity` step
+    /// the realised-gains report applies to an allocation.
     pub fn adjusted_cost_base_aud(
         &self,
         parcel: &ParcelRow,
-        units: Decimal,
+        units: UnitsAt,
         sale_date: NaiveDate,
     ) -> Result<Decimal, sqlx::Error> {
         let splits = self.splits.get(&parcel.listing_id).map_or(&[][..], |v| v);
-        let units_acquired =
-            adjustments::as_acquired_quantity(units, splits, parcel.date, sale_date);
+        let units_acquired = adjustments::as_acquired_quantity(units, splits, parcel.date);
         let amit = events_with_disposal(
             self.amit.get(&parcel.id).map_or(&[][..], |v| v),
             units_acquired,
@@ -130,7 +129,7 @@ impl Costing {
 /// allocations on (`sale_date <= tax_year_end_date`).
 fn events_with_disposal(
     events: &[AmitReductionEvent],
-    units_acquired: Decimal,
+    units_acquired: AcquiredUnits,
     sale_date: NaiveDate,
 ) -> Vec<AmitReductionEvent> {
     events
@@ -158,10 +157,10 @@ mod tests {
             amma_statement_id: 1,
             tax_year_end_date: year_end,
             per_unit: dec("1.30"),
-            covered: dec("100"),
-            disposed_by_year_end: disposed,
-            disposed_before_year_start: Decimal::ZERO,
-            carried_out: Decimal::ZERO,
+            covered: AcquiredUnits::new(dec("100")),
+            disposed_by_year_end: AcquiredUnits::new(disposed),
+            disposed_before_year_start: AcquiredUnits::new(Decimal::ZERO),
+            carried_out: AcquiredUnits::new(Decimal::ZERO),
         }
     }
 
@@ -171,11 +170,11 @@ mod tests {
     #[test]
     fn a_sale_inside_the_statement_year_joins_its_disposed_units() {
         let events = [event(ymd(2026, 6, 30), dec("10"))];
-        let with = events_with_disposal(&events, dec("40"), ymd(2026, 3, 2));
+        let with = events_with_disposal(&events, AcquiredUnits::new(dec("40")), ymd(2026, 3, 2));
         assert_eq!(with[0].disposed_by_year_end, dec("50"));
         // The year end itself counts as inside the year, exactly as
         // `db_cost_base_reduction_events` counts a recorded sale dated on it.
-        let with = events_with_disposal(&events, dec("40"), ymd(2026, 6, 30));
+        let with = events_with_disposal(&events, AcquiredUnits::new(dec("40")), ymd(2026, 6, 30));
         assert_eq!(with[0].disposed_by_year_end, dec("50"));
     }
 
@@ -184,7 +183,7 @@ mod tests {
     #[test]
     fn a_sale_after_the_statement_year_leaves_it_alone() {
         let events = [event(ymd(2026, 6, 30), dec("10"))];
-        let with = events_with_disposal(&events, dec("40"), ymd(2026, 7, 1));
+        let with = events_with_disposal(&events, AcquiredUnits::new(dec("40")), ymd(2026, 7, 1));
         assert_eq!(with[0].disposed_by_year_end, dec("10"));
     }
 }

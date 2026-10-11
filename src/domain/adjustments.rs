@@ -494,17 +494,156 @@ pub fn split_ratio(
     (new, old)
 }
 
-/// A parcel quantity as transacted at `acquired`, re-based to the unit basis
-/// at `up_to` (`None` = after every recorded split). TD 2000/10: only the unit
-/// count scales — the parcel's total cost base and original acquisition date
-/// are untouched.
-pub fn split_adjusted_quantity(
+/// A quantity in one parcel's own **as-acquired** unit basis — the basis
+/// `trades.quantity` is recorded and capped in, and the one the cost-base
+/// pipeline (`domain::cost_base::adjusted_cost_base`) costs units in. A split
+/// scales the unit count but never the cost base (TD 2000/10), which is why
+/// the cost-base arithmetic stays on this basis however many splits follow.
+///
+/// It carries no date: the parcel it belongs to knows its acquisition date.
+/// A quantity in any *other* basis is a [`UnitsAt`], and the only ways
+/// between the two are [`split_adjusted_quantity`], [`as_acquired_quantity`]
+/// (with its checked twin) and [`sold_in_acquired_units`] — so an allocation
+/// recorded in sale-date units cannot be subtracted from a parcel's quantity,
+/// or costed, without being re-based first.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct AcquiredUnits(Decimal);
+
+impl AcquiredUnits {
+    pub const ZERO: Self = Self(Decimal::ZERO);
+
+    /// A quantity the caller knows is in its parcel's as-acquired basis: a
+    /// parcel's own recorded quantity, or a figure stated against it (an
+    /// AMIT adjustment row's covered units).
+    pub fn new(quantity: Decimal) -> Self {
+        Self(quantity)
+    }
+
+    /// The unit count, for arithmetic within the same parcel's basis and for
+    /// output.
+    pub fn get(self) -> Decimal {
+        self.0
+    }
+}
+
+impl From<crate::infra::decimal::Money> for AcquiredUnits {
+    fn from(m: crate::infra::decimal::Money) -> Self {
+        Self(m.0)
+    }
+}
+
+impl std::ops::Add for AcquiredUnits {
+    type Output = Self;
+    fn add(self, rhs: Self) -> Self {
+        Self(self.0 + rhs.0)
+    }
+}
+
+impl std::ops::Sub for AcquiredUnits {
+    type Output = Self;
+    fn sub(self, rhs: Self) -> Self {
+        Self(self.0 - rhs.0)
+    }
+}
+
+impl std::ops::AddAssign for AcquiredUnits {
+    fn add_assign(&mut self, rhs: Self) {
+        self.0 += rhs.0;
+    }
+}
+
+impl std::ops::SubAssign for AcquiredUnits {
+    fn sub_assign(&mut self, rhs: Self) {
+        self.0 -= rhs.0;
+    }
+}
+
+impl std::iter::Sum for AcquiredUnits {
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        Self(iter.map(|u| u.0).sum())
+    }
+}
+
+#[cfg(test)]
+impl PartialEq<Decimal> for AcquiredUnits {
+    fn eq(&self, other: &Decimal) -> bool {
+        self.0 == *other
+    }
+}
+
+/// A quantity in the unit basis **in force at a date** — after every split,
+/// consolidation and bonus issue dated on or before it (`None` = after every
+/// recorded one). A sale's allocation is in its own sale date's basis, a
+/// position as at a date in that date's, an entitlement in its record date's.
+///
+/// Unlike [`AcquiredUnits`] it carries the date it is stated at, so a
+/// conversion is handed only the date it converts *to* and cannot be given
+/// the wrong *from*. The quantity counterpart of `cost_base::Held`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnitsAt {
+    quantity: Decimal,
+    basis: Option<NaiveDate>,
+}
+
+impl UnitsAt {
+    /// `quantity` units in the basis in force at `basis`.
+    pub fn new(quantity: Decimal, basis: NaiveDate) -> Self {
+        Self {
+            quantity,
+            basis: Some(basis),
+        }
+    }
+
+    /// The unit count, read in this value's own basis — for output, and for
+    /// comparing or summing with other quantities of that same basis.
+    pub fn quantity(self) -> Decimal {
+        self.quantity
+    }
+
+    /// The date whose unit basis [`Self::quantity`] is in (`None` = after
+    /// every recorded split).
+    pub fn basis(self) -> Option<NaiveDate> {
+        self.basis
+    }
+
+    /// The same units re-based to the basis in force at `to`, in whichever
+    /// direction the two dates sit.
+    pub fn rebased(self, splits: &[SplitEvent], to: Option<NaiveDate>) -> Self {
+        Self {
+            quantity: rebase(self.quantity, splits, self.basis, to),
+            basis: to,
+        }
+    }
+}
+
+#[cfg(test)]
+impl PartialEq<Decimal> for UnitsAt {
+    fn eq(&self, other: &Decimal) -> bool {
+        self.quantity == *other
+    }
+}
+
+/// `qty` units in the basis at `from` re-based to the basis at `to` (`None`
+/// = after every recorded split, i.e. later than any date). Forward when
+/// `to` is the later date, by the inverse ratio when it is the earlier: a
+/// rollover replacement parcel can postdate the AMMA statement year end its
+/// units are costed against (SCENARIOS N-06), and a one-directional window
+/// would multiply by 1 there and apply a per-unit figure to post-split units.
+fn rebase(
     qty: Decimal,
     splits: &[SplitEvent],
-    acquired: NaiveDate,
-    up_to: Option<NaiveDate>,
+    from: Option<NaiveDate>,
+    to: Option<NaiveDate>,
 ) -> Decimal {
-    let (new, old) = split_ratio(splits, acquired, up_to);
+    let (new, old) = match (from, to) {
+        (None, None) => return qty,
+        (Some(f), None) => split_ratio(splits, f, None),
+        (Some(f), Some(t)) if f <= t => split_ratio(splits, f, Some(t)),
+        (f, Some(t)) => {
+            let (new, old) = split_ratio(splits, t, f);
+            (old, new)
+        }
+    };
     if new == old {
         qty
     } else {
@@ -512,57 +651,71 @@ pub fn split_adjusted_quantity(
     }
 }
 
-/// The inverse of [`split_adjusted_quantity`]: a quantity expressed in the
-/// unit basis at `at` (e.g. a sale's allocated units) converted back to the
-/// as-acquired units of a parcel bought at `acquired`.
-pub fn as_acquired_quantity(
-    qty: Decimal,
+/// A parcel quantity as transacted at `acquired`, re-based to the unit basis
+/// at `up_to` (`None` = after every recorded split). TD 2000/10: only the unit
+/// count scales — the parcel's total cost base and original acquisition date
+/// are untouched.
+pub fn split_adjusted_quantity(
+    qty: AcquiredUnits,
     splits: &[SplitEvent],
     acquired: NaiveDate,
-    at: NaiveDate,
-) -> Decimal {
-    let (new, old) = split_ratio(splits, acquired, Some(at));
-    if new == old {
-        qty
-    } else {
-        mul_div(&[qty, old], new)
+    up_to: Option<NaiveDate>,
+) -> UnitsAt {
+    UnitsAt {
+        quantity: rebase(qty.0, splits, Some(acquired), up_to),
+        basis: up_to,
     }
+}
+
+/// The inverse of [`split_adjusted_quantity`]: a quantity expressed in the
+/// unit basis of its own date (e.g. a sale's allocated units) converted back
+/// to the as-acquired units of a parcel bought at `acquired`.
+pub fn as_acquired_quantity(
+    qty: UnitsAt,
+    splits: &[SplitEvent],
+    acquired: NaiveDate,
+) -> AcquiredUnits {
+    AcquiredUnits(rebase(qty.quantity, splits, qty.basis, Some(acquired)))
 }
 
 /// [`as_acquired_quantity`] in checked form: the same conversion, refusing
 /// rather than panicking where the result is past `Decimal`'s range.
 ///
-/// Only a **consolidation** between `acquired` and `at` can reach that — it
-/// multiplies the quantity up — and only for a quantity larger than the parcel
-/// could ever have held, so this is the write paths' guard rather than the
-/// reports' (`entities::transfer`, whose 1:1 move has no ratio of its own but
-/// still re-bases the units asked for). `label` names the caller's own field
-/// so the refusal quotes the request's vocabulary.
+/// Only a **consolidation** between `acquired` and the quantity's date can
+/// reach that — it multiplies the quantity up — and only for a quantity larger
+/// than the parcel could ever have held, so this is the write paths' guard
+/// rather than the reports' (`entities::transfer`, whose 1:1 move has no ratio
+/// of its own but still re-bases the units asked for). `label` names the
+/// caller's own field so the refusal quotes the request's vocabulary.
 pub fn checked_as_acquired_quantity(
-    qty: (&str, Decimal),
+    qty: (&str, UnitsAt),
     splits: &[SplitEvent],
     acquired: NaiveDate,
-    at: NaiveDate,
-) -> Result<Decimal, crate::domain::cost_base::UnrepresentableQuantity> {
-    let (new, old) = split_ratio(splits, acquired, Some(at));
+) -> Result<AcquiredUnits, crate::domain::cost_base::UnrepresentableQuantity> {
+    let (new, old) = split_ratio(splits, acquired, qty.1.basis);
     if new == old {
-        return Ok(qty.1);
+        return Ok(AcquiredUnits(qty.1.quantity));
     }
-    crate::domain::cost_base::checked_rebased_quantity(qty, ("old units", old), ("new units", new))
+    crate::domain::cost_base::checked_rebased_quantity(
+        (qty.0, qty.1.quantity),
+        ("old units", old),
+        ("new units", new),
+    )
+    .map(AcquiredUnits)
 }
 
 /// Total units sold out of a parcel acquired at `acquired`, re-based to its
-/// as-acquired units. Each `(sale_date, quantity_allocated)` is expressed in
-/// the unit basis of its own sale date — a post-split sale allocates post-split
-/// units against the pre-split parcel.
+/// as-acquired units. Each allocation is expressed in the unit basis of its
+/// own sale date — a post-split sale allocates post-split units against the
+/// pre-split parcel.
 pub fn sold_in_acquired_units(
-    sales: impl IntoIterator<Item = (NaiveDate, Decimal)>,
+    sales: impl IntoIterator<Item = UnitsAt>,
     splits: &[SplitEvent],
     acquired: NaiveDate,
-) -> Decimal {
+) -> AcquiredUnits {
     sales
         .into_iter()
-        .map(|(date, qty)| as_acquired_quantity(qty, splits, acquired, date))
+        .map(|qty| as_acquired_quantity(qty, splits, acquired))
         .sum()
 }
 
@@ -792,14 +945,26 @@ mod tests {
             let new: Decimal = splits.iter().map(|s| s.new_units).product();
             let bought = Decimal::from(k) * old;
 
-            let held = split_adjusted_quantity(bought, &splits, acquired(), Some(after_all()));
-            prop_assert_eq!(held, Decimal::from(k) * new);
-            prop_assert_eq!(held, split_adjusted_quantity(bought, &splits, acquired(), None));
-            prop_assert_eq!(as_acquired_quantity(held, &splits, acquired(), after_all()), bought);
-            prop_assert_eq!(
-                sold_in_acquired_units([(after_all(), held)], &splits, acquired()),
-                bought
+            let held = split_adjusted_quantity(
+                AcquiredUnits::new(bought),
+                &splits,
+                acquired(),
+                Some(after_all()),
             );
+            prop_assert_eq!(held, Decimal::from(k) * new);
+            prop_assert_eq!(held.basis(), Some(after_all()));
+            prop_assert_eq!(
+                held.quantity(),
+                split_adjusted_quantity(AcquiredUnits::new(bought), &splits, acquired(), None)
+                    .quantity()
+            );
+            prop_assert_eq!(as_acquired_quantity(held, &splits, acquired()), bought);
+            prop_assert_eq!(sold_in_acquired_units([held], &splits, acquired()), bought);
+            // Re-basing runs both ways: back to the acquisition date's basis
+            // is the as-acquired count again.
+            let back = held.rebased(&splits, Some(acquired()));
+            prop_assert_eq!(back, bought);
+            prop_assert_eq!(back.basis(), Some(acquired()));
         }
 
         /// Any quantity — fractional, and through ratios that do not
@@ -814,10 +979,18 @@ mod tests {
             scale in 0u32..=6,
         ) {
             let bought = Decimal::new(mantissa, scale);
-            let held = split_adjusted_quantity(bought, &splits, acquired(), Some(after_all()));
-            let back = as_acquired_quantity(held, &splits, acquired(), after_all());
+            let held = split_adjusted_quantity(
+                AcquiredUnits::new(bought),
+                &splits,
+                acquired(),
+                Some(after_all()),
+            );
+            let back = as_acquired_quantity(held, &splits, acquired());
             let tolerance = bought * Decimal::new(1, 20);
-            prop_assert!((back - bought).abs() <= tolerance, "{bought} → {held} → {back}");
+            prop_assert!(
+                (back.get() - bought).abs() <= tolerance,
+                "{bought} → {held:?} → {back:?}"
+            );
         }
 
         /// Re-basing across a window is re-basing across its two halves: the

@@ -5,6 +5,7 @@
 //! allocations into a per-listing holding timeline the collection window and
 //! the health report both ask questions of.
 
+use crate::entities::corporate_action::AcquiredUnits;
 use crate::infra::decimal::parse_dec;
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
@@ -25,27 +26,27 @@ struct ParcelHolding {
     /// the split has to survive the load.
     holding_account_id: HoldingAccountId,
     acquired: NaiveDate,
-    qty: Decimal,
+    qty: AcquiredUnits,
     /// `(sale date, units sold)`, each already re-based to this parcel's
     /// as-acquired unit basis.
-    sales: Vec<(NaiveDate, Decimal)>,
+    sales: Vec<(NaiveDate, AcquiredUnits)>,
 }
 
 impl ParcelHolding {
     /// Units of this parcel still held on `date`, floored at nil: an
     /// over-allocated parcel must not net off another parcel's remaining
     /// units.
-    fn remaining_on(&self, date: NaiveDate) -> Decimal {
+    fn remaining_on(&self, date: NaiveDate) -> AcquiredUnits {
         if self.acquired > date {
-            return Decimal::ZERO;
+            return AcquiredUnits::ZERO;
         }
-        let sold: Decimal = self
+        let sold: AcquiredUnits = self
             .sales
             .iter()
             .filter(|(sale_date, _)| *sale_date <= date)
             .map(|(_, qty)| *qty)
             .sum();
-        (self.qty - sold).max(Decimal::ZERO)
+        (self.qty - sold).max(AcquiredUnits::ZERO)
     }
 }
 
@@ -107,17 +108,17 @@ impl HeldTimeline {
             let trade_id: TradeId = row.try_get("id")?;
             let listing_id: ListingId = row.try_get("listing_id")?;
             let acquired: NaiveDate = row.try_get("date")?;
-            let qty = parse_dec("quantity", row.try_get("quantity")?)?;
+            let qty = AcquiredUnits::new(parse_dec("quantity", row.try_get("quantity")?)?);
             let splits = split_events.get(&listing_id).map_or(&[][..], |v| v);
             let sales = qty_sold
                 .get(&trade_id)
                 .map_or(&[][..], |v| v)
                 .iter()
-                .map(|&(sale_date, sold)| {
+                .map(|&sold| {
                     (
-                        sale_date,
+                        sold.basis().unwrap_or(acquired),
                         crate::entities::corporate_action::as_acquired_quantity(
-                            sold, splits, acquired, sale_date,
+                            sold, splits, acquired,
                         ),
                     )
                 })
@@ -172,7 +173,7 @@ impl HeldTimeline {
         let mut by_account: HashMap<HoldingAccountId, Decimal> = HashMap::new();
         for p in parcels {
             let remaining = p.remaining_on(held_on);
-            if remaining <= Decimal::ZERO {
+            if remaining <= AcquiredUnits::ZERO {
                 continue;
             }
             *by_account.entry(p.holding_account_id).or_default() +=
@@ -181,7 +182,8 @@ impl HeldTimeline {
                     splits,
                     p.acquired,
                     Some(unit_basis_at),
-                );
+                )
+                .quantity();
         }
         let mut out: Vec<(HoldingAccountId, Decimal)> = by_account
             .into_iter()
@@ -198,12 +200,12 @@ impl HeldTimeline {
         let mut ids: Vec<ListingId> = self
             .parcels
             .iter()
+            // Each parcel's remainder is in its own as-acquired basis, so
+            // they are asked one at a time rather than summed.
             .filter(|(_, parcels)| {
                 parcels
                     .iter()
-                    .map(|p| p.remaining_on(cutoff))
-                    .sum::<Decimal>()
-                    > Decimal::ZERO
+                    .any(|p| p.remaining_on(cutoff) > AcquiredUnits::ZERO)
             })
             .map(|(listing_id, _)| *listing_id)
             .collect();
@@ -244,8 +246,10 @@ impl HeldTimeline {
 
         let mut spans: Vec<(NaiveDate, NaiveDate)> = Vec::new();
         for (i, &start) in events.iter().enumerate() {
-            let held: Decimal = parcels.iter().map(|p| p.remaining_on(start)).sum();
-            if held <= Decimal::ZERO {
+            if !parcels
+                .iter()
+                .any(|p| p.remaining_on(start) > AcquiredUnits::ZERO)
+            {
                 continue;
             }
             // The holding stands until the next event changes it, or to the

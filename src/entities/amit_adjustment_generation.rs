@@ -320,7 +320,7 @@ struct Holding {
     /// identifies the transfer-in parcel they went into.
     acquired: NaiveDate,
     /// The statement's units in it, in its own as-acquired basis.
-    units: Decimal,
+    units: corporate_action::AcquiredUnits,
 }
 
 /// One generation run's walk of the statement's units to the parcels they now
@@ -362,13 +362,12 @@ impl Placement<'_> {
             let mut staying = holding.units;
             for movement in moves.iter().filter(|m| m.date > year_end) {
                 let carried = corporate_action::as_acquired_quantity(
-                    movement.units,
+                    corporate_action::UnitsAt::new(movement.units, movement.date),
                     self.splits,
                     holding.basis_date,
-                    movement.date,
                 );
                 let from_this_statement = staying.min(carried);
-                if from_this_statement <= Decimal::ZERO {
+                if from_this_statement <= corporate_action::AcquiredUnits::ZERO {
                     continue;
                 }
                 staying -= from_this_statement;
@@ -381,11 +380,17 @@ impl Placement<'_> {
                 // hand entry rather than attributed by inference.
                 match movement.matching_replacement(holding.acquired, movement.units) {
                     Some(replacement) => {
-                        let units = corporate_action::split_adjusted_quantity(
-                            from_this_statement,
+                        // The replacement's own as-acquired basis is the
+                        // movement date's.
+                        let units = corporate_action::as_acquired_quantity(
+                            corporate_action::split_adjusted_quantity(
+                                from_this_statement,
+                                self.splits,
+                                holding.basis_date,
+                                Some(movement.date),
+                            ),
                             self.splits,
-                            holding.basis_date,
-                            Some(movement.date),
+                            movement.date,
                         );
                         self.place(
                             &mut *conn,
@@ -405,32 +410,25 @@ impl Placement<'_> {
                     }),
                 }
             }
-            if staying > Decimal::ZERO {
+            if staying > corporate_action::AcquiredUnits::ZERO {
                 // The row's own contribution in the statement year's basis: a
                 // transfer-in parcel's basis date is after the year end, so its
-                // units convert back to that basis rather than forward.
-                let rebased = if holding.basis_date <= self.year_end {
-                    corporate_action::split_adjusted_quantity(
-                        staying,
-                        self.splits,
-                        holding.basis_date,
-                        Some(self.year_end),
-                    )
-                } else {
-                    corporate_action::as_acquired_quantity(
-                        staying,
-                        self.splits,
-                        self.year_end,
-                        holding.basis_date,
-                    )
-                };
+                // units convert back to that basis rather than forward (the
+                // re-basing runs either way).
+                let rebased = corporate_action::split_adjusted_quantity(
+                    staying,
+                    self.splits,
+                    holding.basis_date,
+                    Some(self.year_end),
+                )
+                .quantity();
                 let adjustment = write_or_preview(
                     &mut *conn,
                     self.preview,
                     AmitAdjustmentBody {
                         amma_statement_id: self.statement_id,
                         trade_id: holding.id,
-                        quantity: staying,
+                        quantity: staying.get(),
                     },
                     rebased,
                 )
@@ -522,7 +520,6 @@ pub async fn db_generate(
             parcel.remaining_as_of,
             &splits,
             parcel.parcel.date,
-            year_end,
         );
         placement
             .place(

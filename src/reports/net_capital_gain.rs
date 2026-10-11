@@ -44,7 +44,7 @@
 use crate::domain::cost_base::{self, ParcelRow};
 use crate::domain::open_parcels;
 use crate::domain::tax_year::tax_year_for;
-use crate::entities::corporate_action::{self, RocEvent};
+use crate::entities::corporate_action::{self, AcquiredUnits, RocEvent};
 use crate::infra::currency::CurrencyCode;
 use crate::infra::decimal::{parse_dec, to_cents};
 use crate::infra::extract::Json;
@@ -253,8 +253,8 @@ impl Reduction {
     /// for an AMMA statement, and "was it still held?" for a payment.
     fn reduction_for_units(
         &self,
-        parcel_quantity: Decimal,
-        units: Decimal,
+        parcel_quantity: AcquiredUnits,
+        units: AcquiredUnits,
         disposed_on: Option<NaiveDate>,
         disposal: bool,
     ) -> Decimal {
@@ -272,7 +272,7 @@ impl Reduction {
                 // same boundary the cost-base pipeline's `up_to` bound draws
                 // (a payment on the sale date itself still reaches it).
                 if disposed_on.is_none_or(|d| d >= *date) {
-                    *per_unit * units
+                    *per_unit * units.get()
                 } else {
                     Decimal::ZERO
                 }
@@ -309,7 +309,7 @@ struct Cohort {
     /// disposal, and a transfer between one's own accounts is not one.
     disposal: bool,
     /// Units, in the parcel's as-acquired basis.
-    units: Decimal,
+    units: AcquiredUnits,
 }
 
 /// The groups of a parcel's units that share an event history: one per sale
@@ -332,12 +332,12 @@ fn unit_cohorts(
             left_on: Some(c.date),
             left_register_on: Some(c.settled),
             disposal: c.disposal,
-            units: corporate_action::as_acquired_quantity(c.quantity, splits, parcel.date, c.date),
+            units: corporate_action::as_acquired_quantity(c.quantity, splits, parcel.date),
         })
-        .filter(|c| c.units > Decimal::ZERO)
+        .filter(|c| c.units > AcquiredUnits::ZERO)
         .collect();
-    let still_held = parcel.quantity - cohorts.iter().map(|c| c.units).sum::<Decimal>();
-    if still_held > Decimal::ZERO {
+    let still_held = parcel.quantity - cohorts.iter().map(|c| c.units).sum::<AcquiredUnits>();
+    if still_held > AcquiredUnits::ZERO {
         cohorts.push(Cohort {
             left_on: None,
             left_register_on: None,
@@ -562,7 +562,7 @@ async fn non_disposal_gains(
         events.sort_by_key(|e| (e.date(), e.rank()));
 
         let trade_qty = parcel.quantity;
-        if trade_qty <= Decimal::ZERO {
+        if trade_qty <= AcquiredUnits::ZERO {
             continue;
         }
         let acquired = parcel.acquired();
@@ -620,7 +620,12 @@ async fn non_disposal_gains(
                     out.push(EventGain {
                         kind: CgtEventKind::C2,
                         tax_year: tax_year_for(*date),
-                        amount: fx.to_aud(*per_unit * units, currency, *date, FxOverride::None)?,
+                        amount: fx.to_aud(
+                            *per_unit * units.get(),
+                            currency,
+                            *date,
+                            FxOverride::None,
+                        )?,
                         discount_eligible: crate::domain::cgt_discount::discount_eligible(
                             acquired, *date,
                         ),
@@ -709,7 +714,7 @@ async fn non_disposal_gains(
 /// project's rules forbid.
 ///
 /// `parcel.quantity` is non-zero: the caller guards it.
-fn cohort_initial_cost(parcel: &cost_base::Parcel<'_>, units: Decimal) -> Decimal {
+fn cohort_initial_cost(parcel: &cost_base::Parcel<'_>, units: AcquiredUnits) -> Decimal {
     cost_base::prorated_initial_cost(parcel.initial_cost(), units, parcel.quantity)
 }
 
@@ -1576,7 +1581,7 @@ mod tests {
     #[test]
     fn e10_g1_walk_step_one_is_the_pipelines_pro_rate_not_a_divide_per_unit() {
         let parcel = cost_base::Parcel {
-            quantity: dec("3"),
+            quantity: AcquiredUnits::new(dec("3")),
             average_price: dec("10"),
             brokerage: dec("9.95"),
             gst_on_brokerage: Decimal::ZERO,
@@ -1589,11 +1594,11 @@ mod tests {
 
         // What the walk's step 1 now is (`cohort_initial_cost`, which calls
         // `cost_base::prorated_initial_cost`) …
-        let walk_step_one = cohort_initial_cost(&parcel, units);
+        let walk_step_one = cohort_initial_cost(&parcel, AcquiredUnits::new(units));
         // … must be the pipeline's own costed initial cost for those units.
         let pipeline = cost_base::adjusted_cost_base(
             &parcel,
-            units,
+            AcquiredUnits::new(units),
             &[],
             &[],
             &[],
@@ -1607,7 +1612,7 @@ mod tests {
         // The divide-first form the walk used to re-implement differs in the
         // last place — so this test genuinely fails if the walk goes back to
         // it (the helper would stop matching the pipeline).
-        let divide_first = parcel.initial_cost() / parcel.quantity * units;
+        let divide_first = parcel.initial_cost() / parcel.quantity.get() * units;
         assert_ne!(walk_step_one, divide_first);
         assert_eq!(divide_first, dec("26.633333333333333333333333334"));
     }

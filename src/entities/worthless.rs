@@ -35,7 +35,7 @@
 //! shares, and the 18-month later-recovery timing rule.
 
 use crate::entities::corporate_action::{
-    self, ActionKind, sold_in_acquired_units, split_adjusted_quantity,
+    self, AcquiredUnits, ActionKind, sold_in_acquired_units, split_adjusted_quantity,
 };
 use crate::entities::sell::{self, AllocationInput, SellBody};
 use crate::entities::trade::{self, Trade};
@@ -177,7 +177,7 @@ async fn execute(
     for row in &parcel_rows {
         let parcel_id: TradeId = row.try_get("id")?;
         let date: NaiveDate = row.try_get("date")?;
-        let qty = parse_dec("quantity", row.try_get("quantity")?)?;
+        let qty = AcquiredUnits::new(parse_dec("quantity", row.try_get("quantity")?)?);
 
         let sold = sold_in_acquired_units(
             qty_sold
@@ -189,7 +189,7 @@ async fn execute(
             date,
         );
         let remaining = qty - sold;
-        if remaining <= Decimal::ZERO {
+        if remaining <= AcquiredUnits::ZERO {
             continue;
         }
         // The closing Sell's allocations are in event-date units (the report
@@ -197,7 +197,7 @@ async fn execute(
         let at_date_units = split_adjusted_quantity(remaining, &splits, date, Some(action.date));
         allocations.push(AllocationInput {
             purchase_trade_id: parcel_id,
-            quantity_allocated: at_date_units,
+            quantity_allocated: at_date_units.quantity(),
         });
     }
     if allocations.is_empty() {
