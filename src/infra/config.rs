@@ -687,15 +687,17 @@ mod tests {
 
     #[test]
     fn auth_table_resolves_into_settings() {
-        let hash = crate::infra::auth::Auth::hash_password("hunter2").unwrap();
+        let hash =
+            crate::infra::auth::Auth::hash_password(&crate::test_support::TEST_PASSWORD).unwrap();
         let file = parse(&format!(
             r#"
             [auth]
             username = "evan"
             password_hash = "{hash}"
-            api_token = "abc123"
+            api_token = "{token}"
             secure_cookie = false
             "#,
+            token = *crate::test_support::TEST_TOKEN,
         ));
         let settings =
             Settings::resolve(Args::parse_from(["share-tracker"]), file).expect("resolves");
@@ -732,7 +734,8 @@ mod tests {
     /// fix).
     #[test]
     fn auth_trusted_proxies_are_parsed_and_a_bad_entry_aborts() {
-        let hash = crate::infra::auth::Auth::hash_password("hunter2").unwrap();
+        let hash =
+            crate::infra::auth::Auth::hash_password(&crate::test_support::TEST_PASSWORD).unwrap();
         let settings = Settings::resolve(
             Args::parse_from(["share-tracker"]),
             parse(&format!(

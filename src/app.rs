@@ -164,7 +164,7 @@ fn catching_panics(app: Router) -> Router {
 #[cfg(test)]
 mod tests {
     use crate::infra::auth::Auth;
-    use crate::test_support::{ApiClient, test_pool};
+    use crate::test_support::{ApiClient, TEST_PASSWORD, test_pool};
     use axum::http::StatusCode;
     use sqlx::SqlitePool;
 
@@ -430,7 +430,7 @@ mod tests {
     fn test_auth() -> Auth {
         Auth::new(
             "evan".to_string(),
-            Auth::hash_password("hunter2").unwrap(),
+            Auth::hash_password(&TEST_PASSWORD).unwrap(),
             None,
             false,
         )
@@ -459,7 +459,7 @@ mod tests {
             .post_bytes(
                 "/share_tracker/login",
                 Some("application/x-www-form-urlencoded"),
-                "username=evan&password=hunter2",
+                format!("username=evan&password={}", *TEST_PASSWORD),
             )
             .await;
         assert_eq!(login.status, StatusCode::SEE_OTHER);
@@ -509,7 +509,7 @@ mod tests {
             .post_bytes(
                 "/share_tracker/login",
                 Some("application/x-www-form-urlencoded"),
-                "username=evan&password=hunter2",
+                format!("username=evan&password={}", *TEST_PASSWORD),
             )
             .await;
         let cookie = login

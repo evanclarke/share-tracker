@@ -1341,12 +1341,13 @@ fn build_set_cookie(auth: &Auth, base_path: &BasePath, value: Option<String>) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{TEST_PASSWORD, TEST_TOKEN, WRONG_PASSWORD, WRONG_TOKEN};
 
     fn auth() -> Auth {
         Auth::new(
             "evan".to_string(),
-            Auth::hash_password("correct horse battery staple").unwrap(),
-            Some("test-token".to_string()),
+            Auth::hash_password(&TEST_PASSWORD).unwrap(),
+            Some(TEST_TOKEN.clone()),
             true,
         )
         .unwrap()
@@ -1355,9 +1356,9 @@ mod tests {
     #[test]
     fn correct_password_verifies_and_wrong_password_does_not() {
         let a = auth();
-        assert!(a.verify_password("evan", "correct horse battery staple"));
-        assert!(!a.verify_password("evan", "wrong password"));
-        assert!(!a.verify_password("nobody", "correct horse battery staple"));
+        assert!(a.verify_password("evan", &TEST_PASSWORD));
+        assert!(!a.verify_password("evan", &WRONG_PASSWORD));
+        assert!(!a.verify_password("nobody", &TEST_PASSWORD));
     }
 
     #[test]
@@ -1422,7 +1423,7 @@ mod tests {
         let cookie = old.mint_cookie();
         let new = Auth::new(
             "evan".to_string(),
-            Auth::hash_password("a different password").unwrap(),
+            Auth::hash_password(&WRONG_PASSWORD).unwrap(),
             None,
             true,
         )
@@ -1433,15 +1434,105 @@ mod tests {
     #[test]
     fn bearer_token_accepts_the_configured_value_and_rejects_others() {
         let a = auth();
-        assert!(a.verify_bearer("test-token"));
-        assert!(!a.verify_bearer("wrong-token"));
+        assert!(a.verify_bearer(&TEST_TOKEN));
+        assert!(!a.verify_bearer(&WRONG_TOKEN));
         assert!(!a.verify_bearer(""));
     }
 
     #[test]
     fn no_configured_token_rejects_every_bearer_value() {
-        let a = Auth::new("evan".into(), Auth::hash_password("x").unwrap(), None, true).unwrap();
-        assert!(!a.verify_bearer("anything"));
+        let a = Auth::new(
+            "evan".into(),
+            Auth::hash_password(&TEST_PASSWORD).unwrap(),
+            None,
+            true,
+        )
+        .unwrap();
+        assert!(!a.verify_bearer(&TEST_TOKEN));
+    }
+
+    /// No credential handed to Argon2, the bearer compare or a login is a
+    /// literal in the source: the tests draw theirs from the
+    /// `test_support::TEST_PASSWORD` family instead. CodeQL's
+    /// `rust/hard-coded-cryptographic-value` raises one alert per literal that
+    /// reaches those calls — it cannot see a `#[cfg(test)]` module, and Rust has
+    /// no inline `// codeql[...]` suppression — so a single new `"hunter2"` in
+    /// a test is a new critical alert to dismiss by hand. The scan reads each
+    /// call's credential argument (and each login form body or `Bearer` header
+    /// written out in a string) and fails on any non-empty literal there; an
+    /// empty `""` is allowed, as no secret.
+    #[test]
+    fn no_credential_is_a_literal_in_the_source() {
+        // (call, index of its credential argument)
+        const SINKS: [(&str, usize); 6] = [
+            ("hash_password(", 0),
+            ("verify_password(", 1),
+            ("verify_bearer(", 0),
+            ("script_login(", 1),
+            ("browser_login(", 1),
+            ("login_body(", 0),
+        ];
+        let mut offenders = Vec::new();
+        for (file, raw) in crate::test_support::rust_sources() {
+            let code = crate::test_support::code_only(&raw);
+            let (code_b, raw_b) = (code.as_bytes(), raw.as_bytes());
+            let line_of = |at: usize| raw[..at].matches('\n').count() + 1;
+            // A non-empty literal in `range`: a byte the lexer blanked that is
+            // neither the quote delimiting it nor whitespace.
+            let literal_in = |range: std::ops::Range<usize>| {
+                range.into_iter().any(|i| {
+                    code_b[i] == b' ' && raw_b[i] != b'"' && !raw_b[i].is_ascii_whitespace()
+                })
+            };
+            for (sink, arg) in SINKS {
+                for (at, _) in code.match_indices(sink) {
+                    // Split the call's arguments at its top-level commas — in
+                    // the blanked text, so a comma inside a literal is not one.
+                    let (mut depth, mut start, mut args) = (0usize, at + sink.len(), Vec::new());
+                    for (i, &b) in code_b.iter().enumerate().skip(start) {
+                        match b {
+                            b'(' | b'[' | b'{' => depth += 1,
+                            b')' | b']' | b'}' if depth == 0 => {
+                                args.push(start..i);
+                                break;
+                            }
+                            b')' | b']' | b'}' => depth -= 1,
+                            b',' if depth == 0 => {
+                                args.push(start..i);
+                                start = i + 1;
+                            }
+                            _ => {}
+                        }
+                    }
+                    if args.get(arg).is_some_and(|r| literal_in(r.clone())) {
+                        offenders.push(format!("{file}:{}: {sink}…)", line_of(at)));
+                    }
+                }
+            }
+            // A credential written into a login form body or an
+            // `Authorization` header inside a string literal (blanked, and not
+            // on a comment line — prose naming the header is no credential).
+            let in_comment = |at: usize| {
+                let line_start = raw[..at].rfind('\n').map_or(0, |i| i + 1);
+                raw[line_start..at].trim_start().starts_with("//")
+            };
+            for needle in ["password=", "Bearer "] {
+                for (at, _) in raw.match_indices(needle) {
+                    let next = at + needle.len();
+                    if code_b[at] == b' '
+                        && !in_comment(at)
+                        && raw_b.get(next).is_some_and(|b| b.is_ascii_alphanumeric())
+                    {
+                        offenders.push(format!("{file}:{}: {needle}…", line_of(at)));
+                    }
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "a credential is a literal in the source — use test_support's TEST_PASSWORD \
+             family: {offenders:#?}"
+        );
     }
 
     #[test]
@@ -1502,17 +1593,7 @@ mod tests {
             false,
             LoginForm {
                 username: "evil\nforged login succeeded".to_string(),
-                // The credential is run through `Auth::verify_login` against the
-                // Argon2 hash, so it can only ever fail — "wrong" is a test input,
-                // not a credential. CodeQL's `rust/hard-coded-cryptographic-value`
-                // flags this literal as a hard-coded password and cannot see that
-                // the enclosing module is `#[cfg(test)]`; it is a reviewed false
-                // positive, dismissed as "used in tests" on the code-scanning
-                // alert. Rust has no inline `// codeql[...]` suppression to pin
-                // that with, so the reasoning lives here and
-                // `doc_checks::the_hard_coded_password_false_positive_is_documented`
-                // keeps it — and this literal — from being silently removed.
-                password: "wrong".to_string(),
+                password: WRONG_PASSWORD.clone(),
             },
         )
         .await;
@@ -1552,15 +1633,17 @@ mod tests {
 #[cfg(test)]
 mod api_tests {
     use super::Auth;
-    use crate::test_support::{ApiClient, test_pool};
+    use crate::test_support::{
+        ApiClient, TEST_PASSWORD, TEST_TOKEN, WRONG_PASSWORD, WRONG_TOKEN, test_pool,
+    };
     use axum::http::{StatusCode, header};
     use sqlx::SqlitePool;
 
     fn auth() -> Auth {
         Auth::new(
             "evan".to_string(),
-            Auth::hash_password("hunter2").unwrap(),
-            Some("test-token".to_string()),
+            Auth::hash_password(&TEST_PASSWORD).unwrap(),
+            Some(TEST_TOKEN.clone()),
             // `secure_cookie: false` — the in-process `oneshot` client never
             // negotiates TLS, and `Secure` only governs whether a real
             // browser sends the cookie back over plain HTTP, which nothing
@@ -1602,7 +1685,7 @@ mod api_tests {
             .post_bytes(
                 "/login",
                 Some("application/x-www-form-urlencoded"),
-                "username=evan&password=hunter2",
+                format!("username=evan&password={}", *TEST_PASSWORD),
             )
             .await;
         assert_eq!(resp.status, StatusCode::SEE_OTHER, "body: {}", resp.text());
@@ -1662,7 +1745,7 @@ mod api_tests {
             .post_bytes(
                 "/login",
                 Some("application/x-www-form-urlencoded"),
-                "username=evan&password=wrong",
+                format!("username=evan&password={}", *WRONG_PASSWORD),
             )
             .await;
         assert_eq!(resp.status, StatusCode::OK);
@@ -1728,13 +1811,13 @@ mod api_tests {
 
         let wrong = c
             .clone()
-            .with_header("Authorization", "Bearer wrong-token")
+            .with_header("Authorization", format!("Bearer {}", *WRONG_TOKEN))
             .post_empty("/jobs/no-such-job")
             .await;
         assert_eq!(wrong.status, StatusCode::UNAUTHORIZED);
 
         let right = c
-            .with_header("Authorization", "Bearer test-token")
+            .with_header("Authorization", format!("Bearer {}", *TEST_TOKEN))
             .post_empty("/jobs/no-such-job")
             .await;
         assert_eq!(right.status, StatusCode::NOT_FOUND);
@@ -1764,7 +1847,7 @@ mod api_tests {
 #[cfg(test)]
 mod lockout_tests {
     use super::*;
-    use crate::test_support::{ApiClient, test_pool};
+    use crate::test_support::{ApiClient, TEST_PASSWORD, TEST_TOKEN, WRONG_PASSWORD, test_pool};
     use axum::http::HeaderValue;
     use sqlx::SqlitePool;
     use std::net::SocketAddr;
@@ -1794,8 +1877,8 @@ mod lockout_tests {
     fn auth_with(policy: LockoutPolicy) -> Auth {
         Auth::with_lockout_policy(
             "evan".to_string(),
-            Auth::hash_password("hunter2").unwrap(),
-            Some("test-token".to_string()),
+            Auth::hash_password(&TEST_PASSWORD).unwrap(),
+            Some(TEST_TOKEN.clone()),
             false,
             policy,
         )
@@ -2493,13 +2576,13 @@ mod lockout_tests {
             let c = client(&pool, auth.clone()).with_peer(([203, 0, 113, n], 4001).into());
             for _ in 0..2 {
                 assert_eq!(
-                    script_login(&c, "definitely-wrong").await.status,
+                    script_login(&c, &WRONG_PASSWORD).await.status,
                     StatusCode::OK
                 );
             }
         }
         let owner = client(&pool, auth).with_peer(([198, 51, 100, 9], 4002).into());
-        let refused = script_login(&owner, "hunter2").await;
+        let refused = script_login(&owner, &TEST_PASSWORD).await;
         assert_eq!(refused.status, StatusCode::TOO_MANY_REQUESTS);
         assert!(refused.headers.get(header::RETRY_AFTER).is_some());
         assert!(
@@ -2543,10 +2626,7 @@ mod lockout_tests {
     }
 
     /// `POST /login` for the password given, as a person's browser sends it
-    /// (`Accept: text/html`). Passwords in this module are test inputs that can
-    /// only ever fail against the Argon2 hash, never credentials — the same
-    /// CodeQL `rust/hard-coded-cryptographic-value` false positive documented
-    /// on `a_control_character_in_a_failed_login_username_cannot_split_the_log_line`.
+    /// (`Accept: text/html`).
     async fn browser_login(c: &ApiClient, password: &str) -> crate::test_support::ApiResponse {
         c.clone()
             .with_header("Accept", "text/html")
@@ -2581,7 +2661,7 @@ mod lockout_tests {
         let client = client(&pool, auth).with_peer(([203, 0, 113, 7], 4001).into());
 
         for attempt in 1..=TEST_BUDGET {
-            let resp = script_login(&client, "definitely-wrong").await;
+            let resp = script_login(&client, &WRONG_PASSWORD).await;
             assert_eq!(
                 resp.status,
                 StatusCode::OK,
@@ -2596,7 +2676,7 @@ mod lockout_tests {
         // The budget is now exhausted, so the *next* attempt is refused — and
         // this one is a failed attempt like any other, so the budget counts it
         // before the cooldown starts.
-        let exhausting = script_login(&client, "definitely-wrong").await;
+        let exhausting = script_login(&client, &WRONG_PASSWORD).await;
         assert_eq!(exhausting.status, StatusCode::TOO_MANY_REQUESTS);
         let retry_after = exhausting
             .headers
@@ -2618,7 +2698,7 @@ mod lockout_tests {
         // The next attempt — and, crucially, one with the *right* password —
         // is still refused: a correct password must not reset an active
         // lockout, and a refusal never reaches the hash.
-        for password in ["definitely-wrong", "hunter2"] {
+        for password in [&*WRONG_PASSWORD, &*TEST_PASSWORD] {
             let resp = script_login(&client, password).await;
             assert_eq!(
                 resp.status,
@@ -2634,7 +2714,7 @@ mod lockout_tests {
         // Wait out the (test-sized) cooldown: the correct password now signs
         // in, cookie and all.
         clock.advance(TEST_COOLDOWN);
-        let signed_in = script_login(&client, "hunter2").await;
+        let signed_in = script_login(&client, &TEST_PASSWORD).await;
         assert_eq!(
             signed_in.status,
             StatusCode::SEE_OTHER,
@@ -2651,13 +2731,13 @@ mod lockout_tests {
         // why the first assertion below expects OK from all `budget` of them.)
         for attempt in 1..=TEST_BUDGET {
             assert_eq!(
-                script_login(&client, "definitely-wrong").await.status,
+                script_login(&client, &WRONG_PASSWORD).await.status,
                 StatusCode::OK,
                 "attempt {attempt} of a freshly cleared budget must be answered normally"
             );
         }
         assert_eq!(
-            script_login(&client, "definitely-wrong").await.status,
+            script_login(&client, &WRONG_PASSWORD).await.status,
             StatusCode::TOO_MANY_REQUESTS,
             "a cleared streak must count from one, so the budget+1'th failure is refused"
         );
@@ -2675,14 +2755,14 @@ mod lockout_tests {
         let innocent = client(&pool, auth).with_peer(([198, 51, 100, 9], 4002).into());
 
         for _ in 0..TEST_BUDGET {
-            script_login(&attacker, "definitely-wrong").await;
+            script_login(&attacker, &WRONG_PASSWORD).await;
         }
         assert_eq!(
-            script_login(&attacker, "definitely-wrong").await.status,
+            script_login(&attacker, &WRONG_PASSWORD).await.status,
             StatusCode::TOO_MANY_REQUESTS
         );
         assert_eq!(
-            script_login(&innocent, "hunter2").await.status,
+            script_login(&innocent, &TEST_PASSWORD).await.status,
             StatusCode::SEE_OTHER,
             "another source's failures must not lock this one out"
         );
@@ -2698,18 +2778,18 @@ mod lockout_tests {
 
         for _ in 0..TEST_BUDGET - 1 {
             assert_eq!(
-                script_login(&client, "definitely-wrong").await.status,
+                script_login(&client, &WRONG_PASSWORD).await.status,
                 StatusCode::OK
             );
         }
         assert_eq!(
-            script_login(&client, "hunter2").await.status,
+            script_login(&client, &TEST_PASSWORD).await.status,
             StatusCode::SEE_OTHER
         );
         // A full fresh budget-1 of failures is still allowed.
         for _ in 0..TEST_BUDGET - 1 {
             assert_eq!(
-                script_login(&client, "definitely-wrong").await.status,
+                script_login(&client, &WRONG_PASSWORD).await.status,
                 StatusCode::OK,
                 "the successful login must have reset the failure count"
             );
@@ -2728,14 +2808,14 @@ mod lockout_tests {
 
         // The ordinary wrong-credentials browser path, for contrast: a 200
         // rendered page with its own message.
-        let first = browser_login(&client, "definitely-wrong").await;
+        let first = browser_login(&client, &WRONG_PASSWORD).await;
         assert_eq!(first.status, StatusCode::OK);
         assert!(first.text().contains("Incorrect username or password."));
 
         for _ in 2..=TEST_BUDGET {
-            browser_login(&client, "definitely-wrong").await;
+            browser_login(&client, &WRONG_PASSWORD).await;
         }
-        let locked = browser_login(&client, "hunter2").await;
+        let locked = browser_login(&client, &TEST_PASSWORD).await;
         assert_eq!(
             locked.status,
             StatusCode::TOO_MANY_REQUESTS,
@@ -2783,12 +2863,12 @@ mod lockout_tests {
 
         for _ in 0..TEST_BUDGET {
             assert_eq!(
-                script_login(&client, "definitely-wrong").await.status,
+                script_login(&client, &WRONG_PASSWORD).await.status,
                 StatusCode::OK
             );
         }
         assert_eq!(
-            script_login(&client, "hunter2").await.status,
+            script_login(&client, &TEST_PASSWORD).await.status,
             StatusCode::TOO_MANY_REQUESTS,
             "the absent-peer bucket is a source like any other"
         );

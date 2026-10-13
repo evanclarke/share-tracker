@@ -12,6 +12,7 @@
 use crate::entities::{
     amit_adjustment, amma, closing_price, ess_statement, income, listing, parcel_allocation, trade,
 };
+use crate::infra::auth::Auth;
 use crate::infra::db;
 use crate::infra::decimal::Money;
 use crate::infra::id::HoldingAccountId;
@@ -23,7 +24,7 @@ use chrono::NaiveDate;
 use http_body_util::BodyExt;
 use rust_decimal::Decimal;
 use sqlx::SqlitePool;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use tower::ServiceExt;
 
 /// Fresh in-memory database with migrations and seed data applied.
@@ -1591,6 +1592,22 @@ pub async fn allocate(pool: &SqlitePool, id: i64, sale_id: i64, buy_id: i64, qty
     .unwrap();
 }
 
+/// The auth tests' credentials, drawn from the OS CSPRNG once per test process
+/// (`Auth::generate_token`: 64 hex characters, so each is safe verbatim in a
+/// form body or a header) rather than written into the source. No test needs a
+/// *particular* password, only one the configured hash accepts and one it
+/// refuses — and a literal reaching Argon2 or the bearer compare is what
+/// CodeQL's `rust/hard-coded-cryptographic-value` flags, one alert per call
+/// site, which a `#[cfg(test)]` module cannot exempt.
+/// `infra::auth`'s `no_credential_is_a_literal_in_the_source` keeps it so.
+pub static TEST_PASSWORD: LazyLock<String> = LazyLock::new(Auth::generate_token);
+/// A password `TEST_PASSWORD`'s hash refuses — see [`TEST_PASSWORD`].
+pub static WRONG_PASSWORD: LazyLock<String> = LazyLock::new(Auth::generate_token);
+/// The configured bearer token for an auth test — see [`TEST_PASSWORD`].
+pub static TEST_TOKEN: LazyLock<String> = LazyLock::new(Auth::generate_token);
+/// A bearer token `TEST_TOKEN`'s configuration refuses — see [`TEST_PASSWORD`].
+pub static WRONG_TOKEN: LazyLock<String> = LazyLock::new(Auth::generate_token);
+
 /// Every `.rs` file under `src`, with its path relative to `src` using `/`
 /// separators (`reports/tax_summary.rs`) — the form the source-scanning tests
 /// write their allowlists in.
@@ -2154,7 +2171,8 @@ mod tests {
     #[tokio::test]
     async fn with_header_sends_the_header_on_every_request() {
         let pool = test_pool().await;
-        let client = ApiClient::full(&pool).with_header("Authorization", "Bearer test-token");
+        let client =
+            ApiClient::full(&pool).with_header("Authorization", format!("Bearer {}", *TEST_TOKEN));
         // With no `[auth]` configured the router doesn't inspect this header
         // at all, so the request behaves exactly as it would without it —
         // this pins that `with_header` doesn't itself break a request.
