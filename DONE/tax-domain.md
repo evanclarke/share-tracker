@@ -2407,3 +2407,38 @@ record date fell in the held part of the year, so nothing was attributed.)
   payer since August 2020 should have 11–12) must not gate a tax figure in either direction — it
   would either add an expectation the recorded facts do not justify, or silently retire a real
   question. The calendar stays advisory, and this hole stays open by decision
+
+## Indexation cross-check: split a parcel between the methods to absorb losses (ATO example check 2026-10-13)
+The Personal Investors Guide 2026 Part B, Example 18 (Clare —
+[`docs/ato/personal-investors-guide-shares-and-units.md`](../docs/ato/personal-investors-guide-shares-and-units.md)):
+each share is a separate CGT asset, so where capital losses are being applied, indexing just enough
+shares of a pre-21-September-1999 parcel to absorb the losses and taking the discount on the rest
+can assess less than either method over the whole parcel. Clare's whole-parcel figures are \$750
+(discount) and \$922 (indexation); the split assesses \$522 (indexing 395 shares — the ATO's own
+396 gives \$523, see the mirror's project notes). Today the net-capital-gain report applies the
+discount throughout (\$750, pinned by `personal_investors_guide_example_18_clare_whole_parcel_figures`)
+and the [indexation cross-check](../docs/API.md#indexation-cross-check) compares each parcel *before*
+losses, so it reports Clare's parcel as `"Discount"` and never surfaces the cheaper split.
+- [x] Indexation cross-check: for each year with losses applied (current-year plus brought forward),
+  report the loss-aware optimum — losses netted against 'other' gains first, then indexed gains,
+  then discount gains (Part B Step 8) — choosing per parcel allocation how many units to index,
+  **rounding the indexed unit count down** (the minimum sits at the last whole unit before the
+  losses run out; rounding up taxes the overshoot in full). Advisory only, like the rest of the
+  report: no reported tax figure changes. Reproduce Clare's split in `src/ato_examples.rs`
+  (expect \$521.89 unrounded / \$522, not the ATO's \$523) and update `docs/API.md`
+- [x] Decide whether the optimum is per year across all eligible parcels (losses are a year-level
+  pool, so parcels compete for them) and say so in `docs/API.md`
+
+Closed 2026-10-13. Each `years` row now carries `capital_loss_brought_forward` and the year's net
+capital gain three ways with the losses applied — `discount_throughout_net_capital_gain`,
+`indexation_throughout_net_capital_gain` and `loss_aware_net_capital_gain` (+ `loss_aware_saving`),
+and each comparison row `loss_aware_units_indexed`. Clare reproduces as 395 shares and \$521.8875
+(`personal_investors_guide_example_18_clare_split`). Decided: **per year, across every eligible
+allocation** — losses are a year-level pool, so parcels compete for them (documented in
+[`docs/API.md`](../docs/API.md#the-loss-aware-optimum)). One refinement on the item's wording:
+rounding the indexed count **down** is Clare's answer but not a rule — where the loss left beside
+the last unit exceeds `2h − g`, indexing that unit too is cheaper — so both whole-unit counts are
+evaluated and the lower kept (`the_last_unit_is_indexed_when_the_loss_nearly_covers_it`). A
+single parcel's split is the exact minimum (proptest, brute force); across competing parcels it is
+within one unit's indexed gain of it. The brought-forward balance stays the discount-throughout
+chain's; the election itself stays out of scope.

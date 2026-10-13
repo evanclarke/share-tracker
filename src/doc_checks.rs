@@ -2756,6 +2756,14 @@ fn indexation_cross_check_is_documented() {
     assert!(
         API_MD.contains("limited to 3 decimal places with the fourth decimal rounded up from 5")
     );
+    // The loss-aware optimum (Part B Example 18), and the decision that it is
+    // a year-level answer because losses are a year-level pool.
+    assert!(API_MD.contains("#### The loss-aware optimum"));
+    assert!(API_MD.contains(
+        "**The optimum is per financial year, across every eligible allocation in it.**"
+    ));
+    assert!(API_MD.contains("so the eligible parcels compete for them"));
+    assert!(API_MD.contains("**rounding the count down**"));
     // The seeded reference table is in the schema doc with its source.
     assert!(SCHEMA_MD.contains("cpi_quarters"));
     assert!(SCHEMA_MD.contains("QC 104764"));

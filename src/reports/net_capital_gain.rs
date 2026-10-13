@@ -750,11 +750,21 @@ pub async fn db_net_capital_gain(
     // report sees a single consistent snapshot (an interleaved write can't
     // e.g. land an AMMA row between the realised read and the E10 walk).
     let mut tx = crate::infra::db::read_tx(pool).await?;
-    let realised = super::realised_gains::db_realised_gains_on(&mut tx).await?;
-    let fx = FxRates::load(&mut *tx).await?;
-    let buckets = gross_buckets(&mut tx, &realised, &fx).await?;
-    let opening = crate::entities::cgt_settings::db_opening_capital_loss(&mut *tx).await?;
+    let years = db_net_capital_gain_on(&mut tx).await?;
     tx.commit().await?;
+    Ok(years)
+}
+
+/// [`db_net_capital_gain`] on the caller's own connection, so a report that
+/// sets its figures against the year rows (the indexation cross-check's
+/// loss-aware optimum) reads them on the same snapshot as its other inputs.
+pub(crate) async fn db_net_capital_gain_on(
+    conn: &mut sqlx::SqliteConnection,
+) -> Result<Vec<NetCapitalGainYear>, sqlx::Error> {
+    let realised = super::realised_gains::db_realised_gains_on(&mut *conn).await?;
+    let fx = FxRates::load(&mut *conn).await?;
+    let buckets = gross_buckets(&mut *conn, &realised, &fx).await?;
+    let opening = crate::entities::cgt_settings::db_opening_capital_loss(&mut *conn).await?;
 
     // Group the already-fetched disposals by tax year so each year row can
     // carry the disposals (and, within them, the parcels) that its gross

@@ -1837,8 +1837,12 @@ mod tests {
         // The report's two tables, and the qualifier in the screen's own
         // description — the comparison is made before capital losses.
         assert!(js.contains("Eligible disposals — discount against indexation"));
-        assert!(js.contains("By financial year (and the losses each comparison is made before)"));
+        assert!(js.contains("By financial year — the losses applied, and the loss-aware split"));
         assert!(js.contains("the comparison is made before any capital losses"));
+        // The year row's loss-aware optimum, classified as money and units.
+        assert!(js.contains("indexing just enough units to absorb the losses"));
+        assert!(js.contains("'loss_aware_net_capital_gain', 'loss_aware_saving'"));
+        assert!(js.contains("'loss_aware_units_indexed'"));
         // The advisory pair on the realised-gains parcel drill-in.
         assert!(js.contains("'indexation_eligible', 'indexed_cost_base'"));
         // The Annual Tax Report's parcel note.

@@ -1222,6 +1222,10 @@ const COLUMN_KINDS = (function () {
     'indexed_cost_base', 'discount_method_gain', 'indexation_method_gain',
     'indexation_advantage', 'discount_method_total', 'indexation_method_total',
     'indexation_advantage_total', 'capital_losses_realised',
+    // …and its year row's loss-aware optimum against the two whole-method
+    // figures, losses applied.
+    'discount_throughout_net_capital_gain', 'indexation_throughout_net_capital_gain',
+    'loss_aware_net_capital_gain', 'loss_aware_saving',
     // Period-performance report: opening/closing values and the
     // capital/FX/income breakdown, all AUD.
     'opening_market_value', 'closing_market_value', 'purchases', 'sale_proceeds',
@@ -1265,7 +1269,7 @@ const COLUMN_KINDS = (function () {
     'split_new_units', 'split_old_units', 'bonus_units', 'bonus_held_units',
     // AMIT adjustment cross-check: the statement's units against the set's,
     // and (SCENARIOS Z-d) against the units actually open at the year end.
-    'units_adjusted', 'units_open_at_year_end',
+    'units_adjusted', 'units_open_at_year_end', 'loss_aware_units_indexed',
     'rights_units', 'rights_held_units', 'scrip_new_units', 'scrip_old_units',
     'demerger_new_units', 'demerger_held_units',
     // Wash-sale and franking at-risk report unit columns.

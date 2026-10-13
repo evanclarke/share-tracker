@@ -3603,14 +3603,12 @@ async fn personal_investors_guide_example_17_mario_loss_on_pre_1999_shares() {
 /// > shares and the discount method to the remaining 104. … \$4,543 at label H
 /// > \$523 at label A.
 ///
-/// **What this pins is the system's half of the example, not the ATO's
-/// answer.** The net-capital-gain report applies the discount to the whole
-/// parcel — the ATO's own "using discount method" column, \$750 — and the
-/// cross-check compares the parcel *before* losses, where the discount wins
-/// (\$2,500 against \$4,422.50). Neither computes the split: losses move the
-/// comparison toward indexation, which the cross-check documents as the
-/// reason its rows are a floor. The ATO's \$523 is itself one dollar high —
-/// indexing 395 shares, not 396, gives \$522 (the mirror's project notes).
+/// **This pins the whole-parcel half of the example.** The net-capital-gain
+/// report applies the discount to the whole parcel — the ATO's own "using
+/// discount method" column, \$750 — and the cross-check's per-parcel row
+/// compares the parcel *before* losses, where the discount wins (\$2,500
+/// against \$4,422.50). The split is the cross-check's year row, pinned by
+/// `personal_investors_guide_example_18_clare_split`.
 #[tokio::test]
 async fn personal_investors_guide_example_18_clare_whole_parcel_figures() {
     let pool = test_pool().await;
@@ -3658,4 +3656,79 @@ async fn personal_investors_guide_example_18_clare_whole_parcel_figures() {
         dec("750"),
         "the ATO's whole-parcel discount column; its split answer is $523"
     );
+}
+
+/// `docs/ato/personal-investors-guide-shares-and-units.md` (QC 107069) —
+/// "Example 18" (Clare), the split itself.
+///
+/// > The lowest net capital gain would result from her applying the
+/// > indexation method to sufficient shares to absorb the capital loss … and
+/// > apply the discount method to any remaining shares. Clare therefore
+/// > applies the indexation method to the sale of 396 … shares and the
+/// > discount method to the remaining 104. … \$523 at label A.
+///
+/// The cross-check's loss-aware optimum indexes **395** shares, not 396: the
+/// ATO's Note 2 rounds 395.7 up, which leaves the 396th share's indexed gain
+/// only partly absorbed and assessed in full. 395 indexed shares leave
+/// \$6.225 of loss for the 105 discounted ones, so the year's figure is
+/// (\$1,050 − \$6.225) ÷ 2 = \$521.8875 — \$521.89, against \$522.62 for the
+/// ATO's 396 (\$522 and \$523 at its whole-dollar indexed figures; the
+/// mirror's project notes). Both whole-parcel figures ride along on the same
+/// row, and the reported net capital gain stays the discount's \$750.
+#[tokio::test]
+async fn personal_investors_guide_example_18_clare_split() {
+    let pool = test_pool().await;
+    api_put(
+        &pool,
+        "/cgt_settings/1",
+        json!({ "opening_capital_loss": "3500" }),
+    )
+    .await;
+    put_listing(&pool, 1, "CLRE").await;
+    put_buy(&pool, 1, ListingId(1), "1995-03-15", "500", "15", "0").await;
+    put_sell(
+        &pool,
+        10,
+        ListingId(1),
+        "2026-03-16",
+        "500",
+        "25",
+        "0",
+        TradeId(1),
+    )
+    .await;
+
+    let check: IndexationCrossCheck = api_get(&pool, "/reports/indexation_cross_check").await;
+    let [row] = check.comparisons.as_slice() else {
+        panic!("one comparison expected: {:?}", check.comparisons)
+    };
+    assert_eq!(
+        row.loss_aware_units_indexed,
+        dec("395"),
+        "the ATO's 396, rounded down"
+    );
+    let [year] = check.years.as_slice() else {
+        panic!("one year expected: {:?}", check.years)
+    };
+    assert_eq!(year.tax_year, 2026);
+    assert_eq!(year.capital_loss_brought_forward, dec("3500"));
+    assert_eq!(
+        year.discount_throughout_net_capital_gain,
+        dec("750"),
+        "the ATO's discount column"
+    );
+    assert_eq!(
+        year.indexation_throughout_net_capital_gain,
+        dec("922.5"),
+        "the ATO's indexation column, 922"
+    );
+    assert_eq!(year.loss_aware_net_capital_gain, dec("521.8875"));
+    assert_eq!(
+        crate::infra::decimal::to_cents(year.loss_aware_net_capital_gain),
+        dec("521.89"),
+        "not the ATO's $523"
+    );
+
+    let y = fy2026(&pool).await;
+    assert_eq!(y.net_capital_gain, dec("750"), "no reported figure moves");
 }

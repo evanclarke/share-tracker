@@ -61,24 +61,3 @@ falls under the existing rules.
 - [ ] Whatever is decided, make sure a closing price is stored for every held listing on the last
   trading day before 1 July 2027 (the scheduled price import plus `closing_price`'s held-days
   backfill), since a missing one cannot be fetched reliably years later
-
-## Indexation cross-check: split a parcel between the methods to absorb losses (ATO example check 2026-10-13)
-The Personal Investors Guide 2026 Part B, Example 18 (Clare —
-[`docs/ato/personal-investors-guide-shares-and-units.md`](docs/ato/personal-investors-guide-shares-and-units.md)):
-each share is a separate CGT asset, so where capital losses are being applied, indexing just enough
-shares of a pre-21-September-1999 parcel to absorb the losses and taking the discount on the rest
-can assess less than either method over the whole parcel. Clare's whole-parcel figures are \$750
-(discount) and \$922 (indexation); the split assesses \$522 (indexing 395 shares — the ATO's own
-396 gives \$523, see the mirror's project notes). Today the net-capital-gain report applies the
-discount throughout (\$750, pinned by `personal_investors_guide_example_18_clare_whole_parcel_figures`)
-and the [indexation cross-check](docs/API.md#indexation-cross-check) compares each parcel *before*
-losses, so it reports Clare's parcel as `"Discount"` and never surfaces the cheaper split.
-- [ ] Indexation cross-check: for each year with losses applied (current-year plus brought forward),
-  report the loss-aware optimum — losses netted against 'other' gains first, then indexed gains,
-  then discount gains (Part B Step 8) — choosing per parcel allocation how many units to index,
-  **rounding the indexed unit count down** (the minimum sits at the last whole unit before the
-  losses run out; rounding up taxes the overshoot in full). Advisory only, like the rest of the
-  report: no reported tax figure changes. Reproduce Clare's split in `src/ato_examples.rs`
-  (expect \$521.89 unrounded / \$522, not the ATO's \$523) and update `docs/API.md`
-- [ ] Decide whether the optimum is per year across all eligible parcels (losses are a year-level
-  pool, so parcels compete for them) and say so in `docs/API.md`
