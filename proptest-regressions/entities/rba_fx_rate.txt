@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc b461c819e7449fd11ec8236d313303a284f5f82db45185b38dc49c39accd7d6c # shrinks to feed = "F11 EXCHANGE RATES\nTitle,A$1=jpy\nUnits,AUD\n01-Jan-2000,0\n"

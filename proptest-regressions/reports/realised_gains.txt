@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 88c69fb3732d09ddc0b493814e4d763ee7a90b0436d35385ed5dab4ac5cb8766 # shrinks to buys = [(838, 1, 159), (63, 1, 25)], split = None, sells = [([20, 41, 0], 1), ([29, 0, 0], 14287), ([9, 60, 68], 118)]

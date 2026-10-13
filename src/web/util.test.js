@@ -94,6 +94,9 @@ test('decStrEq is numeric equality over decimal strings', () => {
   assert.equal(decStrEq('1234.5', '1234.50'), true);
   assert.equal(decStrEq('0', '-0'), true);
   assert.equal(decStrEq('1234.5', '1234.51'), false);
+  // Past the 12th place too: rust_decimal carries 28 significant digits.
+  assert.equal(decStrEq('1.5', '1.5000000000000001'), false);
+  assert.equal(decStrEq('-0.000', '0'), true);
   assert.equal(decStrEq('abc', '1'), false);
 });
 

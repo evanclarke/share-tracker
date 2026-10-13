@@ -373,3 +373,55 @@ pub async fn run_recompute(pool: &SqlitePool) -> Result<(), String> {
     );
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    mod properties {
+        use super::*;
+        use chrono::Weekday;
+        use proptest::prelude::*;
+
+        fn trading_day(d: NaiveDate, holidays: &HashSet<NaiveDate>) -> bool {
+            !matches!(d.weekday(), Weekday::Sat | Weekday::Sun) && !holidays.contains(&d)
+        }
+
+        fn day(offset: i64) -> NaiveDate {
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap() + chrono::Duration::days(offset)
+        }
+
+        proptest! {
+            /// T+n over any holiday calendar lands on a trading day exactly
+            /// `n` trading days after the trade (none for T+0), and two
+            /// windows compose: T+a then T+b is T+(a+b).
+            #[test]
+            fn settlement_is_exactly_n_trading_days_later(
+                start in 0i64..400,
+                holidays in prop::collection::hash_set(0i64..420, 0..40),
+                a in 0i64..=10,
+                b in 0i64..=10,
+            ) {
+                let holidays: HashSet<NaiveDate> = holidays.into_iter().map(day).collect();
+                let date = day(start);
+                let settles = add_business_days(date, a, &holidays).unwrap();
+                if a == 0 {
+                    prop_assert_eq!(settles, date);
+                } else {
+                    prop_assert!(trading_day(settles, &holidays));
+                    let counted = date
+                        .iter_days()
+                        .skip(1)
+                        .take_while(|d| *d <= settles)
+                        .filter(|d| trading_day(*d, &holidays))
+                        .count();
+                    prop_assert_eq!(counted as i64, a);
+                }
+                prop_assert_eq!(
+                    add_business_days(settles, b, &holidays).unwrap(),
+                    add_business_days(date, a + b, &holidays).unwrap()
+                );
+            }
+        }
+    }
+}

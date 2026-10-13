@@ -190,7 +190,7 @@ const CSV_ATO_LABELS: &[&str] = &[
 ];
 
 /// Gross gains and losses accumulated for one tax year before netting.
-#[derive(Default, Clone)]
+#[derive(Debug, Default, Clone)]
 struct GrossBuckets {
     discount_eligible: Decimal,
     other: Decimal,
@@ -909,7 +909,10 @@ fn current_tax_year() -> i32 {
 /// financial year *in progress* at the callers (`tax_year_for(today())`),
 /// since that is the last year for which a return could be being prepared
 /// and there is nothing beyond it to report. It bounds only the filler: a
-/// year present in `buckets` is always emitted, however it is dated. The
+/// year present in `buckets` is always emitted, however it is dated, and a
+/// year between two emitted ones still gets its filler row while it carries a
+/// balance (a fact dated past `through` would otherwise leave the years
+/// between it and the last earlier one with no 18V line). The
 /// series still *starts* at the earliest year in `buckets`, or at `through`
 /// itself when there are none — an opening loss entered in `cgt_settings` is
 /// a pre-system balance attributed to no year, so with no recorded facts at
@@ -920,7 +923,17 @@ fn net_years(
     through: i32,
 ) -> Vec<NetCapitalGainYear> {
     let first = buckets.keys().copied().min().unwrap_or(through);
-    let mut years: Vec<i32> = buckets.keys().copied().chain(first..=through).collect();
+    // Filler runs to the later of `through` and the last year with activity:
+    // a fact dated past the year in progress still sits at the end of the
+    // chain, and every year between it and the last before it owes its 18V
+    // line like any other.
+    let last = buckets
+        .keys()
+        .copied()
+        .max()
+        .unwrap_or(through)
+        .max(through);
+    let mut years: Vec<i32> = buckets.keys().copied().chain(first..=last).collect();
     years.sort_unstable();
     years.dedup();
 
@@ -5811,5 +5824,152 @@ mod tests {
         assert_eq!(y.other_gains, Decimal::from(3000));
         assert_eq!(y.discount_eligible_gains, Decimal::ZERO);
         assert_eq!(y.net_capital_gain, Decimal::from(3000));
+    }
+
+    /// A fact dated past the year in progress (`through`) still ends the
+    /// chain, so every year between it and the last earlier one owes its 18V
+    /// line: the filler used to stop at `through`, leaving FY2016–18 with no
+    /// row although each carried FY2015's loss forward.
+    #[test]
+    fn a_loss_carried_towards_a_year_past_through_fills_every_year_between() {
+        let buckets = HashMap::from([
+            (
+                2015,
+                GrossBuckets {
+                    losses: Decimal::ONE,
+                    ..GrossBuckets::default()
+                },
+            ),
+            (2019, GrossBuckets::default()),
+        ]);
+        let rows = net_years(buckets, Decimal::ZERO, 2015);
+        assert_eq!(tax_years(&rows), vec![2015, 2016, 2017, 2018, 2019]);
+        for row in &rows[1..] {
+            assert_eq!(row.capital_loss_brought_forward, Decimal::ONE);
+        }
+    }
+
+    mod properties {
+        use super::*;
+        use proptest::prelude::*;
+        use proptest::strategy::Strategy;
+
+        /// A non-negative figure with up to four decimal places — finer than
+        /// the cent, so the netting's own rounding is exercised.
+        fn amount() -> impl Strategy<Value = Decimal> {
+            prop_oneof![
+                1 => Just(Decimal::ZERO),
+                4 => (0i64..=50_000_000, 0u32..=4).prop_map(|(m, s)| Decimal::new(m, s)),
+            ]
+        }
+
+        fn buckets() -> impl Strategy<Value = HashMap<i32, GrossBuckets>> {
+            prop::collection::hash_map(
+                2015i32..=2030,
+                (amount(), amount(), amount()).prop_map(|(discount_eligible, other, losses)| {
+                    GrossBuckets {
+                        discount_eligible,
+                        other,
+                        losses,
+                        ..GrossBuckets::default()
+                    }
+                }),
+                0..=6,
+            )
+        }
+
+        proptest! {
+            /// Whatever gains and losses land in whatever years, the netting
+            /// walk is a well-formed worksheet: every figure is at the cent
+            /// and non-negative, each year's losses are applied to its
+            /// non-discountable gains before its discount-eligible ones, the
+            /// assessable gain is what the worksheet's lines leave, each
+            /// year's carried-forward loss is the next emitted year's brought
+            /// forward, no loss is created or lost along the chain, and no
+            /// other order of applying the losses would have left a smaller
+            /// net capital gain.
+            #[test]
+            fn the_netting_walk_is_a_consistent_optimal_worksheet(
+                buckets in buckets(),
+                opening in amount(),
+                through in 2015i32..=2032,
+            ) {
+                let rows = net_years(buckets.clone(), opening, through);
+                let cents = |d: Decimal| d == to_cents(d);
+                let mut brought = to_cents(opening);
+                let mut applied_total = Decimal::ZERO;
+                let mut loss_total = to_cents(opening);
+                let mut previous: Option<i32> = None;
+                for row in &rows {
+                    for (name, figure) in [
+                        ("discount_eligible_gains", row.discount_eligible_gains),
+                        ("other_gains", row.other_gains),
+                        ("capital_losses", row.capital_losses),
+                        ("brought_forward", row.capital_loss_brought_forward),
+                        ("net_discount_eligible_gain", row.net_discount_eligible_gain),
+                        ("net_other_gain", row.net_other_gain),
+                        ("cgt_discount", row.cgt_discount),
+                        ("net_capital_gain", row.net_capital_gain),
+                        ("carried_forward", row.capital_loss_carried_forward),
+                    ] {
+                        prop_assert!(figure >= Decimal::ZERO, "{} {} < 0 in {}", name, figure, row.tax_year);
+                        prop_assert!(cents(figure), "{} {} is not at the cent in {}", name, figure, row.tax_year);
+                    }
+                    // Years ascend, and a skipped year is one that had
+                    // neither activity nor a balance to carry.
+                    if let Some(prev) = previous {
+                        prop_assert!(row.tax_year > prev);
+                        for gap in prev + 1..row.tax_year {
+                            prop_assert!(!buckets.contains_key(&gap), "{} has activity but no row", gap);
+                            prop_assert_eq!(brought, Decimal::ZERO, "{} carries a balance but no row", gap);
+                        }
+                    }
+                    previous = Some(row.tax_year);
+                    prop_assert_eq!(row.capital_loss_brought_forward, brought);
+
+                    let available = row.capital_losses + row.capital_loss_brought_forward;
+                    let to_other = row.other_gains - row.net_other_gain;
+                    let to_discount = row.discount_eligible_gains - row.net_discount_eligible_gain;
+                    prop_assert_eq!(to_other + to_discount + row.capital_loss_carried_forward, available);
+                    // Non-discountable gains absorb the losses first.
+                    prop_assert!(to_discount == Decimal::ZERO || row.net_other_gain == Decimal::ZERO);
+                    // A loss is carried only once every gain is used up.
+                    prop_assert!(
+                        row.capital_loss_carried_forward == Decimal::ZERO
+                            || row.net_other_gain + row.net_discount_eligible_gain == Decimal::ZERO
+                    );
+                    prop_assert!(
+                        (row.cgt_discount - row.net_discount_eligible_gain / Decimal::from(2)).abs()
+                            <= Decimal::new(5, 3)
+                    );
+                    prop_assert_eq!(
+                        row.net_capital_gain,
+                        row.net_other_gain + row.net_discount_eligible_gain - row.cgt_discount
+                    );
+                    // Applying the losses to the discount-eligible gains
+                    // first never does better for the taxpayer.
+                    let first_to_discount = row.discount_eligible_gains.min(available);
+                    let alt_discount = row.discount_eligible_gains - first_to_discount;
+                    let alt_other = row.other_gains - row.other_gains.min(available - first_to_discount);
+                    prop_assert!(
+                        row.net_capital_gain <= alt_other + alt_discount - to_cents(alt_discount / Decimal::from(2)),
+                        "the other order nets less in {}", row.tax_year
+                    );
+
+                    applied_total += to_other + to_discount;
+                    loss_total += row.capital_losses;
+                    brought = row.capital_loss_carried_forward;
+                }
+                // Every year with activity has a row, and the series runs
+                // to `through` while a balance remains.
+                for year in buckets.keys() {
+                    prop_assert!(rows.iter().any(|r| r.tax_year == *year), "{} has no row", year);
+                }
+                if brought != Decimal::ZERO {
+                    prop_assert!(previous.is_some_and(|last| last >= through));
+                }
+                prop_assert_eq!(loss_total, applied_total + brought);
+            }
+        }
     }
 }

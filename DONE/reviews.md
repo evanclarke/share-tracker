@@ -7728,3 +7728,59 @@ cost base pro-rated over that remainder (`5906.6333…`) carries the same last-d
   cross-multiplication falls back to the rounded figures. Property
   `sales_that_do_not_divide_the_ratio_leave_an_exact_remainder` (any rebasing history, any integer
   sales, selling all or part) fails on the old conversion
+
+## Property tests widened to find more defects (2026-10-13)
+The 2026-10-11 properties covered the core cost-base and allocation invariants; this pass took the
+same approach to the netting walk, the optimiser, settlement, the scheduler, the session cookie,
+the feed parsers, the email formatting, the realised/open reports' accounting, and the web UI's
+decimal-string arithmetic (`src/web/util.properties.test.js`, a seeded generator checked against a
+BigInt reference — the tree has no npm dependencies, so no property library; `PROPERTY_SEED` /
+`PROPERTY_CASES` reproduce and widen a run). Properties that hold and stay as regression guards:
+`trade::settlement`'s `settlement_is_exactly_n_trading_days_later`; `parcel_optimiser`'s
+`every_strategy_allocates_exactly_the_units_and_ignores_input_order` and
+`a_recorded_sell_realises_exactly_what_the_optimiser_previewed` (through AMIT generation, a return
+of capital and earlier sales); `realised_gains`'
+`realised_and_open_parcels_account_for_every_unit_and_dollar` (through splits and consolidations);
+`email`'s `an_emailed_figure_reads_as_the_screen_shows_it`; and the never-panics properties over the
+RBA and MIC feed parsers. Seven defects found, each fixed with a focused regression test:
+- [x] **`min_gain` did not minimise the assessable gain.** It ranked parcels per unit (a loss in
+  full, a discount-eligible gain at half), which ignores the netting order: a loss offsets
+  non-discountable gains first, so while the disposal's losses outweigh its short-term gains a
+  short-term gain costs only half of itself too, and the per-unit ranking took a long-term parcel
+  over a cheaper short-term one (A\$235.77 against an available A\$203.37). `min_gain_picks` now
+  takes the losses, then the exact minimum of the convex piecewise-linear cost over the
+  non-discountable/discount-eligible split, evaluated at its breakpoints
+  (`min_gain_nets_no_more_than_any_other_order` against every parcel permutation;
+  `min_gain_takes_the_short_term_gain_a_loss_absorbs_over_a_cheaper_looking_discounted_one`);
+  `docs/API.md` states the rule and that it nets the disposal on its own
+- [x] **A daily job in the hour before a spring-forward gap ran twice.** croner offers the first
+  instant after the gap as the next occurrence of a *pre*-gap time (Sydney 2026-10-04: 01:00 AEST,
+  then 03:00 AEDT). `next_run` now skips an occurrence whose wall time does not match unless the
+  gap just before it skipped one that does (`a_daily_entry_fires_once_every_local_day_across_dst`;
+  `the_hour_before_a_dst_gap_fires_once_not_again_after_the_gap`). No current `schedule.cron` line
+  sits in that hour; README's scheduler section states it
+- [x] **Net capital gain skipped 18V rows between a loss and a fact dated past the year in
+  progress.** The quiet-year filler stopped at `through`, so a loss carried towards a later-dated
+  year left the years between with no row; it now runs to the later of `through` and the last year
+  with activity (`the_netting_walk_is_a_consistent_optimal_worksheet`;
+  `a_loss_carried_towards_a_year_past_through_fills_every_year_between`)
+- [x] **The RBA feed import stored a zero or negative rate.** The correction path refused one
+  ("every conversion divides by it"); `parse_rates` did not. It now fails the import loudly like a
+  malformed rate (`the_feed_parser_yields_only_positive_rates`;
+  `parse_rates_rejects_a_zero_or_negative_rate`)
+- [x] **Rights sales, rights exercises and DRP reinvestments stored a stated non-positive
+  `fx_rate`.** `NewParcel::insert` does not run the trade amount checks, and the rights sale writes
+  no trade at all, so each operation now refuses one itself with the trades' wording — a nil rate
+  panicked every cost-base report the moment the month had no ATO rate
+  (`api_a_stated_rate_that_is_not_positive_is_refused`,
+  `a_stated_fx_rate_that_is_not_positive_is_refused`, `a_stated_rate_that_is_not_positive_is_refused`)
+- [x] **A session cookie had more than one spelling.** `hex_decode` went through
+  `u8::from_str_radix`, which takes a leading sign, so `+a` decoded as `0a` and a valid cookie
+  verified under several spellings; every character must now be a hex digit
+  (`hex_decode_accepts_only_the_encoding_of_what_it_decodes`;
+  `hex_decode_refuses_a_signed_pair_that_parses_as_hex`)
+- [x] **The web UI's `decStrEq` compared at 12 decimal places.** An API figure carries up to 28
+  significant digits, so `1.5` equalled `1.5000000000000001`: a money cell lost its full-value
+  tooltip, and a holding whose only activity was that small was hidden as inactive. It now compares
+  exactly (`decStrEq is exact numeric equality` in `util.properties.test.js`; the `decStrEq` case in
+  `util.test.js`)

@@ -978,7 +978,11 @@ fn hex_decode(s: &str) -> Option<Vec<u8>> {
     // is four bytes) would split a multi-byte char and panic. Callers today
     // pass header values already filtered by `HeaderValue::to_str()`, but the
     // invariant belongs here rather than two modules away.
-    if !s.is_ascii() || !s.len().is_multiple_of(2) {
+    //
+    // Every character must be a hex digit, too: `from_str_radix` also takes a
+    // leading sign, so `"+a"` would decode as `"0a"` does and one cookie would
+    // have several spellings that verify.
+    if !s.bytes().all(|b| b.is_ascii_hexdigit()) || !s.len().is_multiple_of(2) {
         return None;
     }
     (0..s.len())
@@ -1558,6 +1562,14 @@ mod tests {
     }
 
     #[test]
+    fn hex_decode_refuses_a_signed_pair_that_parses_as_hex() {
+        // `u8::from_str_radix("+a", 16)` is `Ok(10)`: unchecked, a cookie
+        // whose hex had a `0` high nibble verified spelt with `+` as well.
+        assert_eq!(hex_decode("0a"), Some(vec![10]));
+        assert_eq!(hex_decode("+a"), None);
+    }
+
+    #[test]
     fn generated_tokens_are_64_hex_chars_and_differ() {
         let a = Auth::generate_token();
         let b = Auth::generate_token();
@@ -1632,6 +1644,50 @@ mod tests {
             }
             Ok(())
         });
+    }
+
+    mod properties {
+        use super::*;
+        use proptest::prelude::*;
+        use std::sync::LazyLock;
+
+        /// One `Auth` for every case: building it hashes a password with
+        /// Argon2, which is deliberately slow.
+        static AUTH: LazyLock<Auth> = LazyLock::new(auth);
+
+        proptest! {
+            /// Hex decoding is canonical: whatever string decodes, it is the
+            /// encoding of the bytes it decodes to (up to letter case), so no
+            /// two spellings of one cookie both verify.
+            #[test]
+            fn hex_decode_accepts_only_the_encoding_of_what_it_decodes(s in "[0-9a-fA-F+\\- ]{0,8}") {
+                if let Some(bytes) = hex_decode(&s) {
+                    prop_assert!(hex_encode(&bytes).eq_ignore_ascii_case(&s), "{:?} decoded to {:?}", s, bytes);
+                }
+            }
+
+            /// Any change to a minted cookie — a character replaced, inserted
+            /// or removed anywhere, other than a hex letter's case — stops it
+            /// verifying, and no string makes verification panic.
+            #[test]
+            fn a_cookie_changed_anywhere_no_longer_verifies(
+                at in any::<prop::sample::Index>(),
+                edit in 0u8..3,
+                c in proptest::char::any(),
+            ) {
+                let cookie = AUTH.mint_cookie();
+                let mut chars: Vec<char> = cookie.chars().collect();
+                let i = at.index(chars.len());
+                match edit {
+                    0 => chars[i] = c,
+                    1 => chars.insert(i, c),
+                    _ => { chars.remove(i); }
+                }
+                let changed: String = chars.into_iter().collect();
+                prop_assume!(!changed.eq_ignore_ascii_case(&cookie));
+                prop_assert!(!AUTH.verify_cookie(&changed), "{:?} verified", changed);
+            }
+        }
     }
 }
 

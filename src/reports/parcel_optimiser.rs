@@ -60,9 +60,9 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 pub enum Strategy {
     /// Oldest acquisition first — the no-choice baseline.
     Fifo,
-    /// Smallest assessable contribution per unit first: losses (full
-    /// negative), then discount-eligible gains at half weight, then
-    /// non-discountable gains — minimises the current-year assessable gain.
+    /// The allocation whose own assessable gain — losses netted against
+    /// the non-discountable gains first, then the discount-eligible ones,
+    /// which are then halved — is the least (`min_gain_picks`).
     MinGain,
     /// Discount-eligible gain parcels first, then losses, then
     /// non-discountable gains last — maximises the proportion of the
@@ -252,16 +252,6 @@ fn allocate_parcels(
     strategy: Strategy,
 ) -> Vec<(TradeId, Decimal)> {
     let gain_pu = |p: &CandidateParcel| price - p.remaining_cost_base / p.remaining_quantity;
-    // Assessable contribution per unit: a loss offsets gains in full; a
-    // discount-eligible gain counts at half after the 50% discount.
-    let assessable_pu = |p: &CandidateParcel| {
-        let g = gain_pu(p);
-        if g > Decimal::ZERO && discount_eligible(p.acquisition_date, sale_date) {
-            g / Decimal::from(2)
-        } else {
-            g
-        }
-    };
 
     let mut order: Vec<&CandidateParcel> = parcels.iter().collect();
     let fifo = |a: &CandidateParcel, b: &CandidateParcel| {
@@ -269,9 +259,7 @@ fn allocate_parcels(
     };
     match strategy {
         Strategy::Fifo => order.sort_by(|a, b| fifo(a, b)),
-        Strategy::MinGain => {
-            order.sort_by(|a, b| assessable_pu(a).cmp(&assessable_pu(b)).then(fifo(a, b)));
-        }
+        Strategy::MinGain => return min_gain_picks(parcels, units, price, sale_date),
         Strategy::MaxDiscount => {
             // Discount-eligible gains keep the discountable proportion at
             // 100%; losses don't enter the gain at all; a non-eligible gain
@@ -311,6 +299,141 @@ fn allocate_parcels(
         let take = p.remaining_quantity.min(left);
         picks.push((p.trade_id, take));
         left -= take;
+    }
+    picks
+}
+
+/// The `min_gain` allocation: the one whose own assessable contribution,
+/// netted the ATO way (`net_capital_gain::net_years` — losses against the
+/// non-discountable gains first, the rest against the discount-eligible gains,
+/// which are then halved), is the least.
+///
+/// Ranking parcels per unit (a loss in full, a discount-eligible gain at half,
+/// a non-discountable gain in full) is *not* that: a loss that has a
+/// non-discountable gain to absorb it saves the gain in full, so while the
+/// disposal's losses outweigh its non-discountable gains, a non-discountable
+/// gain costs only half of itself too — and the cheaper of two such parcels can
+/// be the non-discountable one. The exact answer, for `L` dollars of losses,
+/// `N` of non-discountable and `D` of discount-eligible gain, minimises
+///
+/// ```text
+/// net = ½(N + D − L) + ½·max(0, N − L)        (clamped at nil)
+/// ```
+///
+/// Every loss unit lowers it, so the losses are taken first (largest per unit
+/// first). Of the rest, each class is taken cheapest per unit first, so the
+/// only choice is `k`, how many non-discountable units: the cost is convex and
+/// piecewise linear in `k`, and its least value lies on a breakpoint — a
+/// parcel boundary of either class, or the `k` at which the non-discountable
+/// gain overtakes the losses (taken at the quantities' own decimal places,
+/// either side, since the exact crossing is rarely a representable quantity).
+fn min_gain_picks(
+    parcels: &[CandidateParcel],
+    units: Decimal,
+    price: Decimal,
+    sale_date: NaiveDate,
+) -> Vec<(TradeId, Decimal)> {
+    let gain_pu = |p: &CandidateParcel| price - p.remaining_cost_base / p.remaining_quantity;
+    let by_gain = |a: &&CandidateParcel, b: &&CandidateParcel| {
+        gain_pu(a)
+            .cmp(&gain_pu(b))
+            .then((a.acquisition_date, a.trade_id).cmp(&(b.acquisition_date, b.trade_id)))
+    };
+    let (mut losses, mut other, mut discounted) = (Vec::new(), Vec::new(), Vec::new());
+    for p in parcels {
+        if gain_pu(p) <= Decimal::ZERO {
+            losses.push(p);
+        } else if discount_eligible(p.acquisition_date, sale_date) {
+            discounted.push(p);
+        } else {
+            other.push(p);
+        }
+    }
+    losses.sort_by(by_gain);
+    other.sort_by(by_gain);
+    discounted.sort_by(by_gain);
+
+    let mut picks = Vec::new();
+    let mut left = units;
+    let mut loss = Decimal::ZERO;
+    for p in losses {
+        if left <= Decimal::ZERO {
+            break;
+        }
+        let take = p.remaining_quantity.min(left);
+        picks.push((p.trade_id, take));
+        loss -= gain_pu(p) * take;
+        left -= take;
+    }
+    if left <= Decimal::ZERO {
+        return picks;
+    }
+
+    // The gain of the cheapest `k` units of a class.
+    let prefix_gain = |class: &[&CandidateParcel], mut k: Decimal| {
+        let mut gain = Decimal::ZERO;
+        for p in class {
+            let take = p.remaining_quantity.min(k);
+            gain += gain_pu(p) * take;
+            k -= take;
+        }
+        gain
+    };
+    let total =
+        |class: &[&CandidateParcel]| class.iter().map(|p| p.remaining_quantity).sum::<Decimal>();
+    let lo = (left - total(&discounted)).max(Decimal::ZERO);
+    let hi = left.min(total(&other));
+    let scale = parcels
+        .iter()
+        .map(|p| p.remaining_quantity.scale())
+        .chain([units.scale()])
+        .max()
+        .unwrap_or(0);
+
+    let mut breakpoints = vec![lo, hi];
+    let (mut units_before, mut gain_before) = (Decimal::ZERO, Decimal::ZERO);
+    for p in &other {
+        let g = gain_pu(p);
+        if gain_before < loss && loss <= gain_before + g * p.remaining_quantity {
+            let crossing = units_before + (loss - gain_before) / g;
+            breakpoints.push(
+                crossing.round_dp_with_strategy(scale, rust_decimal::RoundingStrategy::ToZero),
+            );
+            breakpoints.push(
+                crossing
+                    .round_dp_with_strategy(scale, rust_decimal::RoundingStrategy::AwayFromZero),
+            );
+        }
+        units_before += p.remaining_quantity;
+        gain_before += g * p.remaining_quantity;
+        breakpoints.push(units_before);
+    }
+    let mut d_units = Decimal::ZERO;
+    for p in &discounted {
+        d_units += p.remaining_quantity;
+        breakpoints.push(left - d_units);
+    }
+    let cost = |k: Decimal| {
+        let n = prefix_gain(&other, k);
+        n + prefix_gain(&discounted, left - k) + (n - loss).max(Decimal::ZERO)
+    };
+    let k = breakpoints
+        .into_iter()
+        .filter(|k| (lo..=hi).contains(k))
+        .map(|k| (cost(k), k))
+        .min()
+        .map(|(_, k)| k)
+        .unwrap_or(lo);
+
+    for (class, mut take_from) in [(&other, k), (&discounted, left - k)] {
+        for p in class.iter() {
+            if take_from <= Decimal::ZERO {
+                break;
+            }
+            let take = p.remaining_quantity.min(take_from);
+            picks.push((p.trade_id, take));
+            take_from -= take;
+        }
     }
     picks
 }
@@ -2168,5 +2291,323 @@ mod tests {
         assert_eq!(what_if.hypothetical.cost_base, dec("2348.00"));
         assert_eq!(what_if.allocations.len(), 1);
         assert_eq!(what_if.allocations[0].cost_base, dec("2348.00"));
+    }
+
+    /// A loss offsets non-discountable gains before discount-eligible ones,
+    /// so a $4/unit short-term gain the disposal's $50 loss absorbs whole
+    /// is cheaper than a $7/unit long-term one it does not — though ranked
+    /// per unit at half weight, the long-term gain looks cheaper (3.50 < 4).
+    #[test]
+    fn min_gain_takes_the_short_term_gain_a_loss_absorbs_over_a_cheaper_looking_discounted_one() {
+        let parcel = |id: i64, acquired: NaiveDate, cost: i64| CandidateParcel {
+            trade_id: TradeId(id),
+            holding_account_id: HoldingAccountId(1),
+            acquisition_date: acquired,
+            remaining_quantity: Decimal::from(10),
+            remaining_cost_base: Decimal::from(cost * 10),
+        };
+        let parcels = [
+            parcel(1, ymd(2025, 9, 1), 15), // loss $5/unit
+            parcel(2, ymd(2026, 3, 2), 6),  // short-term gain $4/unit
+            parcel(3, ymd(2024, 1, 2), 3),  // long-term gain $7/unit
+        ];
+        let picks = allocate_parcels(
+            &parcels,
+            Decimal::from(20),
+            Decimal::from(10),
+            ymd(2026, 6, 15),
+            Strategy::MinGain,
+        );
+        // Loss 50 against gain 40 nets to nil (the old ranking's 1 + 3 left 10).
+        assert_eq!(
+            picks,
+            vec![
+                (TradeId(1), Decimal::from(10)),
+                (TradeId(2), Decimal::from(10))
+            ]
+        );
+    }
+
+    mod properties {
+        use super::*;
+        use proptest::prelude::{any, prop, prop_assert, prop_assert_eq, prop_assume, proptest};
+        use proptest::strategy::Strategy as _;
+
+        /// Up to six open parcels: an acquisition date within three years
+        /// of the 2026-06-15 sale, so either side of the 12-month discount
+        /// clock, and a quantity and per-unit cost either side of the $10
+        /// sale price.
+        fn parcels() -> impl proptest::strategy::Strategy<Value = Vec<CandidateParcel>> {
+            prop::collection::vec((0i64..1100, 1i64..=1_000, 1i64..=2_000), 1..=6).prop_map(
+                |rows| {
+                    rows.into_iter()
+                        .enumerate()
+                        .map(|(i, (days_before, qty, cents))| CandidateParcel {
+                            trade_id: TradeId(i as i64 + 1),
+                            holding_account_id: HoldingAccountId(1),
+                            acquisition_date: ymd(2026, 6, 15)
+                                - chrono::Duration::days(days_before),
+                            remaining_quantity: Decimal::from(qty),
+                            remaining_cost_base: Decimal::new(cents * qty, 2),
+                        })
+                        .collect()
+                },
+            )
+        }
+
+        /// The disposal's own assessable contribution, netted the ATO way
+        /// (`net_capital_gain::net_years`): losses against the
+        /// non-discountable gains first, then the discount-eligible ones,
+        /// which are then halved.
+        fn assessable(
+            parcels: &[CandidateParcel],
+            picks: &[(TradeId, Decimal)],
+            price: Decimal,
+        ) -> Decimal {
+            let (mut other, mut discounted, mut losses) =
+                (Decimal::ZERO, Decimal::ZERO, Decimal::ZERO);
+            for (id, units) in picks {
+                let p = parcels.iter().find(|p| p.trade_id == *id).unwrap();
+                let gain = *units * (price - p.remaining_cost_base / p.remaining_quantity);
+                if gain <= Decimal::ZERO {
+                    losses -= gain;
+                } else if discount_eligible(p.acquisition_date, ymd(2026, 6, 15)) {
+                    discounted += gain;
+                } else {
+                    other += gain;
+                }
+            }
+            let to_other = other.min(losses);
+            let to_discounted = discounted.min(losses - to_other);
+            other - to_other + (discounted - to_discounted) / Decimal::from(2)
+        }
+
+        /// Heap-free permutation walk: calls `visit` with every ordering of
+        /// `items[k..]` behind the fixed prefix.
+        fn permutations<'a>(
+            items: &mut Vec<&'a CandidateParcel>,
+            k: usize,
+            visit: &mut impl FnMut(&[&'a CandidateParcel]),
+        ) {
+            if k == items.len() {
+                visit(items);
+                return;
+            }
+            for i in k..items.len() {
+                items.swap(k, i);
+                permutations(items, k + 1, visit);
+                items.swap(k, i);
+            }
+        }
+
+        proptest! {
+            #![proptest_config(test_support::db_proptest_config())]
+
+            /// The optimiser costs each pick "the way the recorded Sell
+            /// will", so recording the Sell it proposes must make the
+            /// realised-gains report show exactly its figures — per parcel
+            /// and in total — whatever AMIT adjustment, return of capital and
+            /// earlier sales the parcels carry.
+            #[test]
+            fn a_recorded_sell_realises_exactly_what_the_optimiser_previewed(
+                parcels in prop::collection::vec((10i64..=500, 100i64..=3_000), 1..=4),
+                amit_cents in -300i64..=300,
+                roc_cents in prop::option::of(1i64..=400),
+                sold_before in prop::collection::vec(0u32..=100, 4),
+                units_pct in 1u32..=100,
+                strategy in prop::sample::select(ALL_STRATEGIES.to_vec()),
+                price_cents in 1i64..=4_000,
+            ) {
+                use crate::entities::amit_adjustment_generation::{self as generation, GenerateBody};
+                use crate::entities::sell::{self, AllocationInput, SellBody};
+                use crate::infra::db::WriteMode;
+                use crate::reports::realised_gains;
+
+                test_support::block_on(async move {
+                    let pool = test_pool().await;
+                    // An AMIT trust's cost base moves by its AMMA statement; a
+                    // company's by a return of capital — never both.
+                    test_support::listing(1).ticker("OPT").amit(roc_cents.is_none()).insert(&pool).await;
+                    let buy_dates = [ymd(2023, 8, 2), ymd(2023, 9, 13), ymd(2023, 10, 11), ymd(2024, 2, 14)];
+                    let mut open = Vec::new();
+                    for (i, (qty, cents)) in parcels.iter().enumerate() {
+                        insert_buy(&pool, i as i64 + 1, ListingId(1), buy_dates[i], Decimal::from(*qty), Decimal::new(*cents, 2)).await;
+                        open.push(Decimal::from(*qty));
+                    }
+                    if let Some(cents) = roc_cents {
+                        crate::entities::corporate_action::db_upsert(&pool, &crate::entities::corporate_action::CorporateAction {
+                            id: 1,
+                            listing_id: ListingId(1),
+                            date: ymd(2024, 3, 13),
+                            kind: crate::entities::corporate_action::ActionKind::ReturnOfCapital {
+                                amount_per_unit: Decimal::new(cents, 2),
+                                currency: "AUD".into(),
+                                record_date: None,
+                            },
+                        })
+                        .await
+                        .unwrap();
+                    }
+                    if roc_cents.is_none() {
+                        let held: Decimal = open.iter().sum();
+                        test_support::amma(1, 1)
+                            .units(held)
+                            .cost_base_adjustment(Decimal::new(amit_cents, 2))
+                            .with(|a| {
+                                a.tax_year_end_date = ymd(2024, 6, 30);
+                                a.date_received = ymd(2024, 9, 10);
+                            })
+                            .insert(&pool)
+                            .await;
+                        generation::db_generate(&pool, 1, &GenerateBody::default()).await.unwrap();
+                    }
+
+                    // An earlier Sell after the year end takes part of each parcel.
+                    let earlier: Vec<AllocationInput> = open
+                        .iter_mut()
+                        .zip(&sold_before)
+                        .enumerate()
+                        .filter_map(|(i, (left, pct))| {
+                            let take = (*left * Decimal::from(*pct) / Decimal::ONE_HUNDRED).floor();
+                            (take > Decimal::ZERO).then(|| {
+                                *left -= take;
+                                AllocationInput { purchase_trade_id: TradeId(i as i64 + 1), quantity_allocated: take }
+                            })
+                        })
+                        .collect();
+                    let sell_body = |date, price: Decimal, allocations: Vec<AllocationInput>| SellBody {
+                        date,
+                        settlement_date: None,
+                        listing_id: ListingId(1),
+                        average_price: price,
+                        quantity: allocations.iter().map(|a| a.quantity_allocated).sum(),
+                        currency: "AUD".into(),
+                        brokerage: Decimal::ZERO,
+                        gst_on_brokerage: Decimal::ZERO,
+                        brokerage_includes_gst: false,
+                        brokerage_currency: "AUD".into(),
+                        fx_rate: Decimal::ONE,
+                        spot_fx_rate: None,
+                        contract_note_ref: None,
+                        statement_total: None,
+                        holding_account_id: HoldingAccountId(1),
+                        allocations,
+                    };
+                    if !earlier.is_empty() {
+                        sell::db_create_sell(&pool, &sell_body(ymd(2024, 8, 14), Decimal::from(9), earlier), WriteMode::Commit)
+                            .await
+                            .unwrap();
+                    }
+                    let still_open: Decimal = open.iter().sum();
+                    prop_assume!(still_open > Decimal::ZERO);
+
+                    let sale_date = ymd(2025, 3, 12);
+                    let units = (still_open * Decimal::from(units_pct) / Decimal::ONE_HUNDRED).ceil();
+                    let price = Decimal::new(price_cents, 2);
+                    let candidates = db_candidate_parcels(&pool, ListingId(1), Some(HoldingAccountId(1)), sale_date).await.unwrap();
+                    let picks = allocate_strategy(&candidates, units, price, strategy);
+                    let (previewed, totals) = disposal_figures(&candidates, &picks, price * units, units).unwrap();
+
+                    let recorded = sell::db_create_sell(
+                        &pool,
+                        &sell_body(
+                            sale_date,
+                            price,
+                            picks.iter().map(|(id, q)| AllocationInput { purchase_trade_id: *id, quantity_allocated: *q }).collect(),
+                        ),
+                        WriteMode::Commit,
+                    )
+                    .await
+                    .unwrap();
+                    let realised = realised_gains::db_realised_gains(&pool).await.unwrap();
+                    let row = realised.iter().find(|r| r.disposal.sell() == Some(recorded.id)).unwrap();
+                    for p in &previewed {
+                        let actual = row.parcels.iter().find(|d| d.purchase_trade_id == p.purchase_trade_id).unwrap();
+                        prop_assert_eq!(actual.units, p.units);
+                        prop_assert_eq!(actual.cost_base, p.cost_base, "parcel {:?} cost base", p.purchase_trade_id);
+                        prop_assert_eq!(actual.proceeds, p.proceeds, "parcel {:?} proceeds", p.purchase_trade_id);
+                        prop_assert_eq!(actual.discount_eligible, p.discount_eligible);
+                    }
+                    prop_assert_eq!(row.parcels.len(), previewed.len());
+                    prop_assert_eq!(row.proceeds, totals.proceeds);
+                    prop_assert_eq!(row.cost_base, totals.cost_base);
+                    prop_assert_eq!(row.capital_loss, totals.capital_loss);
+                    prop_assert_eq!(row.discount_eligible_gain, totals.discount_eligible_gain);
+                    prop_assert_eq!(row.non_discountable_gain, totals.non_discountable_gain);
+                    Ok(())
+                })?;
+            }
+        }
+
+        proptest! {
+            /// Every strategy draws exactly the units asked for (or every
+            /// unit open, if fewer), never more of a parcel than remains
+            /// and never the same parcel twice, whatever order the
+            /// candidates arrive in.
+            #[test]
+            fn every_strategy_allocates_exactly_the_units_and_ignores_input_order(
+                parcels in parcels(),
+                units in 1i64..=7_000,
+                shuffle in any::<u64>(),
+            ) {
+                let units = Decimal::from(units);
+                let price = Decimal::from(10);
+                let open: Decimal = parcels.iter().map(|p| p.remaining_quantity).sum();
+                let mut shuffled = parcels.clone();
+                let n = shuffled.len();
+                shuffled.rotate_left(shuffle as usize % n);
+                if shuffle % 2 == 1 {
+                    shuffled.reverse();
+                }
+                for strategy in ALL_STRATEGIES {
+                    let picks = allocate_parcels(&parcels, units, price, ymd(2026, 6, 15), strategy);
+                    prop_assert_eq!(picks.iter().map(|(_, u)| *u).sum::<Decimal>(), units.min(open));
+                    let mut seen = std::collections::HashSet::new();
+                    for (id, take) in &picks {
+                        prop_assert!(seen.insert(*id), "{:?} drew parcel {:?} twice", strategy, id);
+                        let p = parcels.iter().find(|p| p.trade_id == *id).unwrap();
+                        prop_assert!(*take > Decimal::ZERO && *take <= p.remaining_quantity);
+                    }
+                    prop_assert_eq!(
+                        &picks,
+                        &allocate_parcels(&shuffled, units, price, ymd(2026, 6, 15), strategy),
+                        "{:?} depends on the candidates' order", strategy
+                    );
+                }
+            }
+
+            /// `min_gain` is documented as minimising the disposal's
+            /// assessable gain, so no other order of consuming the same
+            /// parcels — every strategy's, and every permutation's — may
+            /// net to less.
+            #[test]
+            fn min_gain_nets_no_more_than_any_other_order(
+                parcels in parcels(),
+                units in 1i64..=7_000,
+            ) {
+                let units = Decimal::from(units);
+                let price = Decimal::from(10);
+                let sale = ymd(2026, 6, 15);
+                let min_gain = assessable(&parcels, &allocate_parcels(&parcels, units, price, sale, Strategy::MinGain), price);
+                let greedy = |order: &[&CandidateParcel]| {
+                    let mut left = units;
+                    let mut picks = Vec::new();
+                    for p in order {
+                        let take = p.remaining_quantity.min(left);
+                        if take > Decimal::ZERO {
+                            picks.push((p.trade_id, take));
+                            left -= take;
+                        }
+                    }
+                    picks
+                };
+                let mut order: Vec<&CandidateParcel> = parcels.iter().collect();
+                permutations(&mut order, 0, &mut |order| {
+                    let other = assessable(&parcels, &greedy(order), price);
+                    assert!(min_gain <= other, "min_gain nets {min_gain} but {:?} nets {other}",
+                        order.iter().map(|p| p.trade_id).collect::<Vec<_>>());
+                });
+            }
+        }
     }
 }

@@ -284,6 +284,21 @@ mod tests {
         assert_eq!(after, tz.with_ymd_and_hms(2026, 4, 6, 2, 30, 0).unwrap());
     }
 
+    #[test]
+    fn the_hour_before_a_dst_gap_fires_once_not_again_after_the_gap() {
+        // Sydney springs forward on 2026-10-04 at 02:00. A daily 01:00 entry
+        // fires at 01:00 AEST; croner then offers 03:00 AEDT — the first
+        // instant after the gap — as the "next 01:00", which ran the job a
+        // second time that night. The next fire is the following day's 01:00.
+        let tz: Tz = "Australia/Sydney".parse().unwrap();
+        let cron = Cron::from_str("0 1 * * *").unwrap();
+        let now = tz.with_ymd_and_hms(2026, 10, 3, 12, 0, 0).unwrap();
+        let (first, _) = next_run(&cron, now).unwrap();
+        assert_eq!(first, tz.with_ymd_and_hms(2026, 10, 4, 1, 0, 0).unwrap());
+        let (after, _) = next_run(&cron, first).unwrap();
+        assert_eq!(after, tz.with_ymd_and_hms(2026, 10, 5, 1, 0, 0).unwrap());
+    }
+
     #[tokio::test]
     async fn capped_sleep_reanchors_after_wall_clock_shift() {
         // The wall-clock target is 03:30, three and a half hours of wall time
@@ -2174,5 +2189,57 @@ mod tests {
             "the job stopped being scheduled after its panic"
         );
         assert!(!looping.is_finished(), "the timer loop ended");
+    }
+
+    mod properties {
+        use super::*;
+        use chrono::Duration as ChronoDuration;
+        use proptest::prelude::*;
+
+        const ZONES: [&str; 4] = [
+            "Australia/Sydney",
+            "America/New_York",
+            "Europe/London",
+            "UTC",
+        ];
+
+        proptest! {
+            /// A daily entry, walked the way `run_entry` walks it — fire,
+            /// run for a while, ask for the next occurrence from the clock
+            /// the job finished at — fires exactly once on every local day
+            /// for a year, whatever its zone does to the clock: never twice
+            /// in a repeated (fall-back) hour, never skipped in a missing
+            /// (spring-forward) one, and always strictly later than the run
+            /// before it.
+            #[test]
+            fn a_daily_entry_fires_once_every_local_day_across_dst(
+                zone in 0usize..ZONES.len(),
+                hour in 0u32..24,
+                minute in 0u32..60,
+                start in 0i64..365 * 24 * 60,
+                runtimes in prop::collection::vec(0i64..3_600, 400),
+            ) {
+                let tz: Tz = ZONES[zone].parse().unwrap();
+                let cron = Cron::from_str(&format!("{minute} {hour} * * *")).unwrap();
+                let mut now = (Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap()
+                    + ChronoDuration::minutes(start))
+                .with_timezone(&tz);
+                let mut previous: Option<DateTime<Tz>> = None;
+                for runtime in runtimes {
+                    let (next, delay) = next_run(&cron, now).unwrap();
+                    prop_assert!(next > now, "{} is not after {}", next, now);
+                    prop_assert!(delay <= Duration::from_secs(25 * 3600), "{:?} until {}", delay, next);
+                    if let Some(prev) = previous {
+                        prop_assert_eq!(
+                            next.date_naive(),
+                            prev.date_naive().succ_opt().unwrap(),
+                            "{} followed {} in {}", next, prev, ZONES[zone]
+                        );
+                    }
+                    previous = Some(next);
+                    now = next + ChronoDuration::seconds(runtime);
+                }
+            }
+        }
     }
 }

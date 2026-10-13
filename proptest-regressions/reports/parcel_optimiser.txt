@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 0924ee272e04628b0d63410018b8ab23ff623abc891cfb4db8d2aeef91b7507a # shrinks to parcels = [CandidateParcel { trade_id: TradeId(1), holding_account_id: HoldingAccountId(1), acquisition_date: 2026-06-15, remaining_quantity: 341, remaining_cost_base: 5970.91 }, CandidateParcel { trade_id: TradeId(2), holding_account_id: HoldingAccountId(1), acquisition_date: 2025-06-14, remaining_quantity: 245, remaining_cost_base: 975.10 }, CandidateParcel { trade_id: TradeId(3), holding_account_id: HoldingAccountId(1), acquisition_date: 2025-06-14, remaining_quantity: 549, remaining_cost_base: 2185.02 }, CandidateParcel { trade_id: TradeId(4), holding_account_id: HoldingAccountId(1), acquisition_date: 2026-06-15, remaining_quantity: 851, remaining_cost_base: 5948.49 }], units = 767
+cc f498bef4babd48b5a9cd9c7eac55feb63e4bfd474b07395a146be79ec1ab6b8f # shrinks to parcels = [(10, 100)], amit_cents = 0, roc_cents = Some(1), sold_before = [0, 0, 0, 0], units_pct = 1, strategy = Fifo, price_cents = 1

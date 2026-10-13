@@ -478,11 +478,17 @@ export function padMinDp(s, dp) {
   return (dot < 0 ? s + '.' : s) + '0'.repeat(dp - curDp);
 }
 
-// Numeric equality of two decimal strings (1234.5 == 1234.50), used to decide
-// whether money rounding actually dropped precision (→ original on tooltip).
+// Numeric equality of two decimal strings (1234.5 == 1234.50, -0 == 0), used
+// to decide whether money rounding actually dropped precision (→ original on
+// tooltip). Exact at any length: an API figure can carry 28 significant
+// digits, and comparing at a fixed 12 places called 1.5 and
+// 1.5000000000000001 equal — losing the tooltip, and hiding a holding whose
+// only activity was that small.
 export function decStrEq(a, b) {
-  const ra = roundDecimalStr(a, 12), rb = roundDecimalStr(b, 12);
-  return ra != null && ra === rb;
+  const pa = signedDecParts(a), pb = signedDecParts(b);
+  if (!pa || !pb) return false;
+  const scale = Math.max(pa.dp, pb.dp);
+  return pa.units * 10n ** BigInt(scale - pa.dp) === pb.units * 10n ** BigInt(scale - pb.dp);
 }
 
 // Which of period-performance's two percentage fields the overview panel

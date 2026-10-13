@@ -900,4 +900,60 @@ mod tests {
             "one two three four five six seven eight nine ten"
         );
     }
+
+    mod properties {
+        use super::*;
+        use proptest::prelude::*;
+
+        /// util.js's `roundDecimalStr`: half away from zero, and a value that
+        /// rounds to nil carries no sign.
+        fn round_like_the_screen(v: Decimal, dp: u32) -> String {
+            let r =
+                v.round_dp_with_strategy(dp, rust_decimal::RoundingStrategy::MidpointAwayFromZero);
+            let r = if r.is_zero() { Decimal::ZERO } else { r };
+            let mut r = r;
+            r.rescale(dp);
+            r.to_string()
+        }
+
+        /// util.js's `groupThousands`.
+        fn group_like_the_screen(s: &str) -> String {
+            let (sign, rest) = s.strip_prefix('-').map_or(("", s), |r| ("-", r));
+            let (whole, frac) = rest.split_once('.').map_or((rest, ""), |(w, f)| (w, f));
+            let mut out = String::new();
+            for (i, c) in whole.chars().enumerate() {
+                if i > 0 && (whole.len() - i) % 3 == 0 {
+                    out.push(',');
+                }
+                out.push(c);
+            }
+            if frac.is_empty() {
+                format!("{sign}{out}")
+            } else {
+                format!("{sign}{out}.{frac}")
+            }
+        }
+
+        fn figure() -> impl Strategy<Value = Decimal> {
+            prop_oneof![
+                (any::<i64>(), 0u32..=10).prop_map(|(m, s)| Decimal::new(m, s)),
+                // Small figures, where rounding to nil and the sign live.
+                (-1_000i64..=1_000, 0u32..=6).prop_map(|(m, s)| Decimal::new(m, s)),
+            ]
+        }
+
+        proptest! {
+            /// The email states a money figure exactly as the screen's
+            /// `money` column does (`numericDisplay`'s money rule), and a
+            /// per-unit price at its `rate4` column's rounding — so a figure
+            /// never reads one way in the inbox and another on the page. (The
+            /// price's thousands separators are the email's own, deliberately:
+            /// a five-figure crypto price reads better grouped.)
+            #[test]
+            fn an_emailed_figure_reads_as_the_screen_shows_it(v in figure()) {
+                prop_assert_eq!(money(v), group_like_the_screen(&round_like_the_screen(v, 2)), "money {}", v);
+                prop_assert_eq!(unit_price(v).replace(',', ""), round_like_the_screen(v, 4), "unit price {}", v);
+            }
+        }
+    }
 }

@@ -606,4 +606,29 @@ mod tests {
             "could not fetch the MIC registry feed from its source"
         );
     }
+
+    mod properties {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            /// No input — however malformed — makes the registry parser
+            /// panic, including a header row followed by arbitrary records.
+            #[test]
+            fn the_registry_parser_never_panics(
+                text in "\\PC{0,200}",
+                with_header in any::<bool>(),
+            ) {
+                let feed = if with_header {
+                    format!(
+                        "\"MIC\",\"OPERATING MIC\",\"MARKET NAME-INSTITUTION DESCRIPTION\",\
+                         \"ISO COUNTRY CODE (ISO 3166)\",\"CITY\",\"STATUS\",\"EXPIRY DATE\"\n{text}"
+                    )
+                } else {
+                    text
+                };
+                let _ = parse_registry(&feed);
+            }
+        }
+    }
 }

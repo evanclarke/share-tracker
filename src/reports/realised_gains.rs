@@ -3976,4 +3976,174 @@ mod tests {
         assert_eq!(rows[0].cost_base, "10000000000".parse().unwrap());
         assert_eq!(rows[0].capital_loss, "10000000000".parse().unwrap());
     }
+
+    mod properties {
+        use super::*;
+        use crate::entities::sell::{self, AllocationInput, SellBody};
+        use crate::test_support::ymd;
+        use chrono::{Datelike, Weekday};
+        use proptest::prelude::*;
+        use std::collections::HashMap;
+
+        /// Wednesdays from August to November of `year` — trading days on
+        /// every seeded ASX calendar, clear of its public holidays.
+        fn trading_days(year: i32) -> Vec<NaiveDate> {
+            NaiveDate::from_ymd_opt(year, 8, 1)
+                .unwrap()
+                .iter_days()
+                .take_while(|d| d.month() <= 11)
+                .filter(|d| d.weekday() == Weekday::Wed)
+                .collect()
+        }
+
+        /// One parcel bought: units, cents per unit, brokerage cents.
+        fn buys() -> impl Strategy<Value = Vec<(i64, i64, i64)>> {
+            prop::collection::vec((1i64..=2_000, 1i64..=10_000, 0i64..=3_000), 1..=3)
+        }
+
+        /// One Sell: per parcel, the percentage of what remains of it to
+        /// take (0 = none), and the sale price in cents.
+        fn sells() -> impl Strategy<Value = Vec<(Vec<u32>, i64)>> {
+            prop::collection::vec((prop::collection::vec(0u32..=100, 3), 1i64..=20_000), 1..=4)
+        }
+
+        proptest! {
+            #![proptest_config(test_support::db_proptest_config())]
+
+            /// Whatever parcels are bought, split and sold, nothing is lost
+            /// or double-counted between the two reports: each parcel's
+            /// units and cost base are exactly what the realised-gains
+            /// report charged its sales plus what the open-parcels report
+            /// still holds, each disposal's proceeds are its net sale
+            /// proceeds, and every row's buckets add up to its gain.
+            #[test]
+            fn realised_and_open_parcels_account_for_every_unit_and_dollar(
+                buys in buys(),
+                split in prop::option::of(prop::sample::select(vec![(2i64, 1i64), (3, 1), (1, 2), (5, 4)])),
+                sells in sells(),
+            ) {
+                test_support::block_on(async move {
+                    let pool = test_pool().await;
+                    insert_listing(&pool, 1, "PRP").await;
+                    let buy_days = trading_days(2020);
+                    let mut bought = Vec::new();
+                    for (i, (qty, cents, brokerage)) in buys.iter().enumerate() {
+                        let (qty, price, brokerage) = (Decimal::from(*qty), Decimal::new(*cents, 2), Decimal::new(*brokerage, 2));
+                        test_support::buy(i as i64 + 1, 1)
+                            .date(buy_days[i * 3])
+                            .qty(qty)
+                            .price(price)
+                            .brokerage(brokerage)
+                            .insert(&pool)
+                            .await;
+                        bought.push((qty, qty * price + brokerage));
+                    }
+                    let ratio = match split {
+                        Some((new, old)) => {
+                            corporate_action::db_upsert(&pool, &corporate_action::CorporateAction {
+                                id: 1,
+                                listing_id: ListingId(1),
+                                date: ymd(2021, 6, 2),
+                                kind: corporate_action::ActionKind::ShareSplit {
+                                    split_new_units: Decimal::from(new),
+                                    split_old_units: Decimal::from(old),
+                                },
+                            })
+                            .await
+                            .unwrap();
+                            Decimal::from(new) / Decimal::from(old)
+                        }
+                        None => Decimal::ONE,
+                    };
+
+                    // What remains of each parcel, in post-split units.
+                    let mut remaining: Vec<Decimal> = bought.iter().map(|(q, _)| *q * ratio).collect();
+                    let sale_days = trading_days(2022);
+                    let mut net_proceeds: HashMap<TradeId, Decimal> = HashMap::new();
+                    for (n, (takes, cents)) in sells.iter().enumerate() {
+                        let allocations: Vec<AllocationInput> = remaining
+                            .iter()
+                            .zip(takes)
+                            .enumerate()
+                            .filter_map(|(p, (left, pct))| {
+                                let units = (*left * Decimal::from(*pct) / Decimal::from(100)).round_dp(2).min(*left);
+                                (units > Decimal::ZERO).then_some(AllocationInput {
+                                    purchase_trade_id: TradeId(p as i64 + 1),
+                                    quantity_allocated: units,
+                                })
+                            })
+                            .collect();
+                        if allocations.is_empty() {
+                            continue;
+                        }
+                        let quantity: Decimal = allocations.iter().map(|a| a.quantity_allocated).sum();
+                        let price = Decimal::new(*cents, 2);
+                        let id = TradeId(100 + n as i64);
+                        let body = SellBody {
+                            brokerage_includes_gst: false,
+                            statement_total: None,
+                            holding_account_id: HoldingAccountId(1),
+                            date: sale_days[n * 2],
+                            settlement_date: None,
+                            listing_id: ListingId(1),
+                            average_price: price,
+                            quantity,
+                            currency: "AUD".into(),
+                            brokerage: Decimal::from(10),
+                            gst_on_brokerage: Decimal::ONE,
+                            brokerage_currency: "AUD".into(),
+                            fx_rate: Decimal::ONE,
+                            spot_fx_rate: None,
+                            contract_note_ref: None,
+                            allocations,
+                        };
+                        if let Err(e) = sell::db_upsert_sell(&pool, id, &body).await {
+                            return Err(TestCaseError::fail(format!("valid Sell {id:?} refused: {e}")));
+                        }
+                        for a in &body.allocations {
+                            remaining[a.purchase_trade_id.0 as usize - 1] -= a.quantity_allocated;
+                        }
+                        net_proceeds.insert(id, price * quantity - Decimal::from(11));
+                    }
+
+                    let realised = db_realised_gains(&pool).await.unwrap();
+                    let open = crate::reports::open_parcels::db_open_parcels(&pool, Some(ymd(2026, 1, 1))).await.unwrap();
+                    let tolerance = Decimal::new(1, 18);
+                    for row in &realised {
+                        let id = row.disposal.sell().unwrap();
+                        prop_assert_eq!(row.proceeds, net_proceeds[&id], "Sell {:?} proceeds", id);
+                        prop_assert_eq!(row.capital_gain_loss, row.proceeds - row.cost_base);
+                        prop_assert_eq!(row.proceeds, row.parcels.iter().map(|p| p.proceeds).sum::<Decimal>());
+                        // The buckets and the cost base are sums of 28-digit
+                        // per-parcel figures, and such a sum itself rounds.
+                        prop_assert!(
+                            (row.capital_gain_loss
+                                - (row.discount_eligible_gain + row.non_discountable_gain - row.capital_loss))
+                                .abs()
+                                <= tolerance
+                        );
+                        prop_assert!(
+                            (row.cost_base - row.parcels.iter().map(|p| p.cost_base).sum::<Decimal>()).abs() <= tolerance
+                        );
+                    }
+                    prop_assert_eq!(realised.len(), net_proceeds.len());
+                    for (p, (qty, cost)) in bought.iter().enumerate() {
+                        let id = TradeId(p as i64 + 1);
+                        let sold = realised.iter().flat_map(|r| &r.parcels).filter(|d| d.purchase_trade_id == id);
+                        let (sold_units, sold_cost) = sold.fold((Decimal::ZERO, Decimal::ZERO), |(u, c), d| (u + d.units, c + d.cost_base));
+                        let still_open = open.iter().find(|o| o.trade_id == id);
+                        let open_units = still_open.map_or(Decimal::ZERO, |o| o.remaining_quantity);
+                        let open_cost = still_open.map_or(Decimal::ZERO, |o| o.remaining_cost_base);
+                        prop_assert_eq!(sold_units + open_units, *qty * ratio, "parcel {} units", p + 1);
+                        prop_assert_eq!(open_units, remaining[p], "parcel {} open units", p + 1);
+                        prop_assert!(
+                            (sold_cost + open_cost - cost).abs() <= tolerance,
+                            "parcel {} cost {} = sold {} + open {}", p + 1, cost, sold_cost, open_cost
+                        );
+                    }
+                    Ok(())
+                })?;
+            }
+        }
+    }
 }

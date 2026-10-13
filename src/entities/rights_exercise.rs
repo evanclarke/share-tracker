@@ -99,6 +99,10 @@ pub enum ExerciseError {
     /// `units` is not strictly positive.
     #[error("the number of units exercised must be greater than zero")]
     NonPositiveUnits,
+    /// A stated `fx_rate` that is nil or negative: every cost-base report
+    /// divides the parcel's cost by it when the month has no ATO rate.
+    #[error("the stated fx_rate is not positive")]
+    NonPositiveFxRate,
     /// `rights_cost` is negative.
     #[error("the rights cost cannot be negative")]
     NegativeRightsCost,
@@ -169,6 +173,9 @@ impl From<ExerciseError> for ApiError {
             ExerciseError::NonPositiveUnits => {
                 ApiError::unprocessable("the number of units exercised must be greater than zero")
             }
+            ExerciseError::NonPositiveFxRate => ApiError::unprocessable(
+                "fx_rate must be a positive foreign-per-AUD rate (1 for an AUD exercise)",
+            ),
             ExerciseError::NegativeRightsCost => {
                 ApiError::unprocessable("the rights cost cannot be negative")
             }
@@ -337,6 +344,9 @@ async fn execute(
 ) -> Result<Trade, ExerciseError> {
     if body.units <= Decimal::ZERO {
         return Err(ExerciseError::NonPositiveUnits);
+    }
+    if body.fx_rate.is_some_and(|r| r <= Decimal::ZERO) {
+        return Err(ExerciseError::NonPositiveFxRate);
     }
     let rights_cost = body.rights_cost.unwrap_or(Decimal::ZERO);
     if rights_cost < Decimal::ZERO {
@@ -1819,6 +1829,26 @@ mod tests {
         b.fx_rate = Some(dec("0.62"));
         let trade = db_exercise(&pool, 10, &b).await.unwrap();
         assert_eq!(trade.fx_rate, dec("0.62"));
+    }
+
+    /// A stated rate is what every cost-base report divides the parcel's
+    /// cost by when the month has no ATO rate, so a nil or negative one is
+    /// refused like a trade's.
+    #[tokio::test]
+    async fn a_stated_fx_rate_that_is_not_positive_is_refused() {
+        let pool = test_pool().await;
+        insert_usd_listing(&pool, 1).await;
+        insert_usd_buy(&pool, 1, d(2024, 1, 16), "1000").await;
+        insert_usd_rights_issue(&pool, 10, d(2024, 7, 1), "1.80").await;
+        for rate in ["0", "-0.62"] {
+            let mut b = body(d(2024, 8, 1), "250");
+            b.fx_rate = Some(dec(rate));
+            let err = db_exercise(&pool, 10, &b).await.unwrap_err();
+            assert!(
+                matches!(err, ExerciseError::NonPositiveFxRate),
+                "{rate}: {err}"
+            );
+        }
     }
 
     /// A nil-cost foreign exercise (nil exercise price, no rights cost)

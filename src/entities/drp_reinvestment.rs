@@ -186,6 +186,10 @@ pub enum ReinvestError {
     /// The stated units are not strictly positive.
     #[error("the stated units must be greater than zero")]
     NonPositiveUnits,
+    /// A stated `fx_rate` that is nil or negative: every cost-base report
+    /// divides the parcel's cost by it when the month has no ATO rate.
+    #[error("the stated fx_rate is not positive")]
+    NonPositiveFxRate,
     /// The stated units don't spend the available cash at the given price:
     /// `units × price` differs from it by a full unit-step (at the units'
     /// stated precision) or more. Carries both figures for the rejection.
@@ -280,6 +284,9 @@ impl From<ReinvestError> for ApiError {
             ReinvestError::NonPositivePrice => {
                 ApiError::unprocessable("the reinvestment price must be greater than zero")
             }
+            ReinvestError::NonPositiveFxRate => ApiError::unprocessable(
+                "fx_rate must be a positive foreign-per-AUD rate (1 for an AUD reinvestment)",
+            ),
             ReinvestError::NonPositiveUnits => {
                 ApiError::unprocessable("the stated units must be greater than zero")
             }
@@ -345,6 +352,9 @@ async fn execute(
 ) -> Result<Trade, ReinvestError> {
     if body.reinvestment_price <= Decimal::ZERO {
         return Err(ReinvestError::NonPositivePrice);
+    }
+    if body.fx_rate.is_some_and(|r| r <= Decimal::ZERO) {
+        return Err(ReinvestError::NonPositiveFxRate);
     }
     if let Some(units) = body.units
         && units <= Decimal::ZERO
@@ -1792,6 +1802,23 @@ mod tests {
         insert_distribution(&pool, 1, ListingId(1), Decimal::from(100), Decimal::ZERO).await;
         let err = db_reinvest(&pool, 1, &body("0")).await.unwrap_err();
         assert!(matches!(err, ReinvestError::NonPositivePrice));
+    }
+
+    #[tokio::test]
+    async fn a_stated_rate_that_is_not_positive_is_refused() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        enrol(&pool, ListingId(1), ResidualHandling::CarryForward).await;
+        insert_distribution(&pool, 1, ListingId(1), Decimal::from(100), Decimal::ZERO).await;
+        for rate in ["0", "-1"] {
+            let mut b = body("10");
+            b.fx_rate = Some(rate.parse().unwrap());
+            let err = db_reinvest(&pool, 1, &b).await.unwrap_err();
+            assert!(
+                matches!(err, ReinvestError::NonPositiveFxRate),
+                "{rate}: {err}"
+            );
+        }
     }
 
     #[tokio::test]

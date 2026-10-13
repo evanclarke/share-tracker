@@ -300,8 +300,9 @@ pub async fn db_correct_rate(
 /// a non-currency trade-weighted-index column), several other metadata rows, then
 /// monthly data rows keyed by an end-of-month date (`DD-Mon-YYYY`). For each data
 /// row we emit one tuple per currency column that has a value; the month is the
-/// date's year-month. Fails loudly on a malformed rate rather than dropping it —
-/// a missing rate would later surface as an un-substitutable AUD conversion.
+/// date's year-month. Fails loudly on a malformed or non-positive rate rather
+/// than dropping it — a missing rate would later surface as an un-substitutable
+/// AUD conversion, and a zero one as a division by zero.
 pub fn parse_rates(content: &str) -> Result<Vec<(String, String, Decimal)>, ImportError> {
     let content = content.strip_prefix('\u{feff}').unwrap_or(content);
 
@@ -349,6 +350,14 @@ pub fn parse_rates(content: &str) -> Result<Vec<(String, String, Decimal)>, Impo
                     "invalid {currency} rate {value:?} for {month}: {e}"
                 ))
             })?;
+            // Every conversion divides by a stored rate (`AUD = foreign /
+            // rate`), so a zero would panic it and a negative flip its sign.
+            // The correction path refuses one; the feed must not slip one in.
+            if rate <= Decimal::ZERO {
+                return Err(ImportError::Parse(format!(
+                    "{currency} rate {value:?} for {month} is not positive"
+                )));
+            }
             out.push((currency.clone(), month.clone(), rate));
         }
     }
@@ -610,6 +619,15 @@ mod tests {
             parse_rates(csv).unwrap_err(),
             ImportError::Parse(_)
         ));
+    }
+
+    #[test]
+    fn parse_rates_rejects_a_zero_or_negative_rate() {
+        for value in ["0", "0.0000", "-76.5"] {
+            let csv = format!("Title,A$1=JPY\n29-Jan-2010,{value}\n");
+            let err = parse_rates(&csv).unwrap_err();
+            assert!(err.to_string().contains("not positive"), "{value}: {err}");
+        }
     }
 
     #[tokio::test]
@@ -959,5 +977,88 @@ mod tests {
             resp.text(),
             "could not fetch the RBA FX rate feed from its source"
         );
+    }
+
+    mod properties {
+        use super::*;
+        use proptest::prelude::*;
+
+        /// A feed cell: usually a plausible rate, sometimes blank, zero,
+        /// negative, or not a number at all.
+        fn cell() -> impl Strategy<Value = String> {
+            prop_oneof![
+                4 => (1i64..=2_000_000, 0u32..=6).prop_map(|(m, s)| Decimal::new(m, s).to_string()),
+                1 => Just(String::new()),
+                1 => Just("0".to_string()),
+                1 => Just("0.0000".to_string()),
+                1 => (1i64..=1_000).prop_map(|m| format!("-{}", Decimal::new(m, 3))),
+                1 => "[ -~]{0,6}",
+            ]
+        }
+
+        fn feed() -> impl Strategy<Value = String> {
+            (
+                prop::collection::vec(
+                    prop_oneof![
+                        Just("A$1=USD"),
+                        Just("A$1=EUR"),
+                        Just("TWI"),
+                        Just("A$1=jpy")
+                    ],
+                    1..=4,
+                ),
+                prop::collection::vec(
+                    (
+                        1u32..=28,
+                        1u32..=12,
+                        2000i32..=2030,
+                        prop::collection::vec(cell(), 0..=5),
+                    ),
+                    0..=6,
+                ),
+                any::<bool>(),
+            )
+                .prop_map(|(header, rows, bom)| {
+                    let mut out = String::new();
+                    if bom {
+                        out.push('\u{feff}');
+                    }
+                    out.push_str("F11 EXCHANGE RATES\nTitle,");
+                    out.push_str(&header.join(","));
+                    out.push_str("\nUnits,AUD\n");
+                    for (d, m, y, cells) in rows {
+                        let date = NaiveDate::from_ymd_opt(y, m, d).unwrap();
+                        out.push_str(&format!(
+                            "{},{}\n",
+                            date.format("%d-%b-%Y"),
+                            cells.join(",")
+                        ));
+                    }
+                    out
+                })
+        }
+
+        proptest! {
+            /// Every rate the importer accepts from the feed can be divided
+            /// by: `AUD = foreign / rate`, so a zero or negative rate stored
+            /// would turn every later conversion through it into a panic or
+            /// a sign-flipped figure. The correction path already refuses
+            /// one; the feed must not slip one past it.
+            #[test]
+            fn the_feed_parser_yields_only_positive_rates(feed in feed()) {
+                if let Ok(rates) = parse_rates(&feed) {
+                    for (currency, month, rate) in rates {
+                        prop_assert!(rate > Decimal::ZERO, "{} {} rate {}", currency, month, rate);
+                        prop_assert_eq!(currency.len(), 3);
+                    }
+                }
+            }
+
+            /// No input — however malformed — makes the parser panic.
+            #[test]
+            fn the_feed_parser_never_panics(text in "\\PC{0,200}") {
+                let _ = parse_rates(&text);
+            }
+        }
     }
 }

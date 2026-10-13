@@ -205,6 +205,10 @@ pub enum SellRightsError {
     /// `rights_cost` is negative.
     #[error("the rights cost cannot be negative")]
     NegativeRightsCost,
+    /// A stated `fx_rate` that is nil or negative: realised gains divides
+    /// both legs by it when the sale month has no ATO rate.
+    #[error("the stated fx_rate is not positive")]
+    NonPositiveFxRate,
     /// The sale date precedes the issue's record date.
     #[error("the sale date is before the issue's record date")]
     BeforeRecordDate,
@@ -282,6 +286,9 @@ impl From<SellRightsError> for ApiError {
             SellRightsError::NegativeRightsCost => {
                 ApiError::unprocessable("the rights cost cannot be negative")
             }
+            SellRightsError::NonPositiveFxRate => ApiError::unprocessable(
+                "fx_rate must be a positive foreign-per-AUD rate (1 for an AUD sale)",
+            ),
             SellRightsError::BeforeRecordDate => {
                 ApiError::unprocessable("the sale date is before the issue's record date")
             }
@@ -351,6 +358,9 @@ fn check_body(body: &SellRightsBody) -> Result<SaleAmounts, SellRightsError> {
     let rights_cost = body.rights_cost.unwrap_or(Decimal::ZERO);
     if rights_cost < Decimal::ZERO {
         return Err(SellRightsError::NegativeRightsCost);
+    }
+    if body.fx_rate.is_some_and(|r| r <= Decimal::ZERO) {
+        return Err(SellRightsError::NonPositiveFxRate);
     }
     if body.allocations.iter().any(|a| a.units <= Decimal::ZERO) {
         return Err(SellRightsError::AllocationNotPositive);
@@ -1770,6 +1780,35 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(n, 0, "nothing persisted");
+    }
+
+    /// A stated rate is what the realised-gains report divides both legs by
+    /// when the sale month has no ATO rate, so a nil one panicked that
+    /// report and a negative one flipped the sale's sign. Refused like a
+    /// trade's (`fx_rate must be a positive foreign-per-AUD rate`).
+    #[tokio::test]
+    async fn api_a_stated_rate_that_is_not_positive_is_refused() {
+        let pool = test_pool().await;
+        insert_usd_listing(&pool, 1).await;
+        insert_usd_buy(&pool, 1, d(2024, 1, 16), "1000").await;
+        insert_usd_rights_issue(&pool, 10, d(2024, 7, 1)).await;
+        for rate in ["0", "-0.65"] {
+            let resp = client(&pool)
+                .post(
+                    "/corporate_actions/10/sell_rights",
+                    &serde_json::json!({
+                        "date": "2024-07-20",
+                        "units": "250",
+                        "proceeds_per_right": "0.20",
+                        "fx_rate": rate,
+                        "allocations": [ { "purchase_trade_id": 1, "units": "250" } ],
+                    }),
+                )
+                .await;
+            let (status, body) = resp.status_and_body();
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{rate}: {body}");
+            assert!(body.contains("fx_rate"), "{body}");
+        }
     }
 
     /// With the month's rate imported an omitted `fx_rate` resolves to it —

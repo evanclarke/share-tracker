@@ -267,6 +267,36 @@ pub(super) async fn run_entry<Z>(
     }
 }
 
+/// Whether an occurrence croner returned is one the entry asked for.
+///
+/// croner moves a wall time a spring-forward gap skips (02:30 on the day
+/// 02:00 becomes 03:00) to the first instant after the gap, which is wanted —
+/// the day's run is neither skipped nor an error. But on that same day it also
+/// answers that instant for an entry whose time lies *before* the gap: from a
+/// 01:00 run it offers 03:00 as the next "01:00", so a daily 01:00 job ran
+/// twice. An occurrence is genuine when its own wall time matches the
+/// expression, or when the gap immediately before it skipped a wall time that
+/// does.
+fn is_genuine_occurrence<Z: TimeZone>(cron: &Cron, next: &DateTime<Z>) -> bool {
+    let matches =
+        |wall: chrono::NaiveDateTime| cron.is_time_matching(&wall.and_utc()).unwrap_or(false);
+    let wall = next.naive_local();
+    if matches(wall) {
+        return true;
+    }
+    // The wall times between the instant before `next` and `next` itself are
+    // the ones a gap skipped — none, unless `next` sits just after one.
+    let mut skipped =
+        (next.clone() - chrono::Duration::seconds(1)).naive_local() + chrono::Duration::seconds(1);
+    while skipped < wall {
+        if matches(skipped) {
+            return true;
+        }
+        skipped += chrono::Duration::minutes(1);
+    }
+    false
+}
+
 /// Compute the next scheduled fire time at or after `now` and the exact delay to
 /// sleep until then. The delay keeps sub-second precision: truncating it (e.g.
 /// via `num_seconds`) would make the timer wake *before* the target second, so
@@ -277,7 +307,14 @@ pub(super) fn next_run<Z: TimeZone>(
     cron: &Cron,
     now: DateTime<Z>,
 ) -> Option<(DateTime<Z>, Duration)> {
-    let next = cron.find_next_occurrence(&now, false).ok()?;
+    let mut from = now.clone();
+    let next = loop {
+        let next = cron.find_next_occurrence(&from, false).ok()?;
+        if is_genuine_occurrence(cron, &next) {
+            break next;
+        }
+        from = next;
+    };
     // `next` is strictly after `now`, so the difference is non-negative; the
     // fallback only guards against clock skew between this read and the diff.
     let delay = (next.clone() - now)
