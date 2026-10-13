@@ -134,6 +134,14 @@
 //! - `docs/ato/forex-average-rates.md` Examples 1–7 — which translation rate
 //!   is a reasonable approximation is a policy question; Examples 5 and 7 are
 //!   what the spot-rate override answers, exercised by Lisa's spot-rate test.
+//! - `docs/ato/personal-investors-guide-shares-and-units.md` Examples 1–11
+//!   (Fred) and 15 (Colin) — Fred's running example walks the same 11-step
+//!   method Examples 12–18 exercise end to end, and Colin's units redeemed
+//!   inside 12 months are Sonya's Example 12 without the brokerage.
+//!   Example 18 (Clare) is reproduced only as far as the whole-parcel
+//!   figures: splitting one parcel between indexation and the discount to
+//!   absorb losses is not modelled (the indexation cross-check is advisory
+//!   and compares each parcel before losses).
 //! - `docs/ato/share-investing-versus-share-trading.md` (George) and
 //!   `docs/ato/wash-sales.md`'s TR 2008/1 examples — characterisation (investor
 //!   or trader; Part IVA's dominant purpose) judged outside the system; the
@@ -3352,4 +3360,302 @@ async fn takeovers_example_26_desiree_takeover_without_rollover() {
         "$1.25 each or a total of $625"
     );
     assert_eq!(parcels[0].acquisition_date.to_string(), "2002-03-15");
+}
+
+use crate::reports::indexation_cross_check::IndexationCrossCheck;
+
+/// The 2025–26 year of the net-capital-gain report (every Part B example
+/// sells "last March"/"last February" of the 2026 guide's income year).
+async fn fy2026(pool: &SqlitePool) -> NetCapitalGainYear {
+    let years: Vec<NetCapitalGainYear> = api_get(pool, "/portfolio/net_capital_gain").await;
+    years.into_iter().find(|y| y.tax_year == 2026).unwrap()
+}
+
+/// `docs/ato/personal-investors-guide-shares-and-units.md` (QC 107069) —
+/// "Example 12: a capital gain from one parcel of shares that was bought and
+/// sold less than 12 months later" (Sonya).
+///
+/// > Sonya bought 1,000 shares in Tulip Ltd for \$1,500 including brokerage and
+/// > sold them less than 12 months later for \$2,350. She paid \$50 brokerage on
+/// > the sale. … \$2,350 − (\$1,500 + \$50) = \$800. … \$800 at label H \$800 at
+/// > label A.
+///
+/// The sale brokerage is netted from the proceeds here rather than added to the
+/// cost base, which reaches the same \$800. (Example 15, Colin's units redeemed
+/// inside 12 months, is the same 'other'-method shape with no brokerage.)
+#[tokio::test]
+async fn personal_investors_guide_example_12_sonya_other_method() {
+    let pool = test_pool().await;
+    put_listing(&pool, 1, "TULIP").await;
+    put_buy(&pool, 1, ListingId(1), "2025-08-04", "1000", "1.5", "0").await;
+    put_sell(
+        &pool,
+        10,
+        ListingId(1),
+        "2026-03-16",
+        "1000",
+        "2.35",
+        "50",
+        TradeId(1),
+    )
+    .await;
+
+    let y = fy2026(&pool).await;
+    assert_eq!(y.other_gains, dec("800"), "label H: $800");
+    assert_eq!(y.discount_eligible_gains, Decimal::ZERO);
+    assert_eq!(y.net_capital_gain, dec("800"), "label A: $800");
+}
+
+/// `docs/ato/personal-investors-guide-shares-and-units.md` (QC 107069) —
+/// "Example 13" (Andrew), units bought May 1999 and given away more than 12
+/// months later.
+///
+/// > CPI for September 1999 quarter = 68.7 CPI for June 1999 quarter = 68.1
+/// > Indexation factor = 68.7 ÷ 68.1 = 1.009 … His cost (\$1,275) × 1.009 =
+/// > \$1,286 … Capital gain \$309 … [discount method] Total capital gain \$320 …
+/// > Capital gain \$160 … Andrew chooses the discount method because it gives him
+/// > a smaller capital gain.
+///
+/// The gift is entered as a Sell at the \$1,595 market value (market-value
+/// substitution is a valuation made before entry). The cross-check keeps the
+/// cents the ATO drops: \$1,286.475 indexed, \$308.525 gain.
+#[tokio::test]
+async fn personal_investors_guide_example_13_andrew_discount_beats_indexation() {
+    let pool = test_pool().await;
+    put_listing(&pool, 1, "SHTR").await;
+    put_buy(&pool, 1, ListingId(1), "1999-05-14", "1200", "1.0625", "0").await;
+    // 1,200 × $1.33 − $1 = $1,595 net.
+    put_sell(
+        &pool,
+        10,
+        ListingId(1),
+        "2026-03-16",
+        "1200",
+        "1.33",
+        "1",
+        TradeId(1),
+    )
+    .await;
+
+    let check: IndexationCrossCheck = api_get(&pool, "/reports/indexation_cross_check").await;
+    let [row] = check.comparisons.as_slice() else {
+        panic!("one comparison expected: {:?}", check.comparisons)
+    };
+    assert_eq!(row.cpi, dec("68.1"), "the June 1999 quarter");
+    assert_eq!(row.indexation_factor, dec("1.009"));
+    assert_eq!(row.proceeds, dec("1595"));
+    assert_eq!(row.indexed_cost_base, dec("1286.475"), "the ATO's $1,286");
+    assert_eq!(row.indexation_method_gain, dec("308.525"), "the ATO's $309");
+    assert_eq!(row.discount_method_gain, dec("160"), "$320 halved");
+    assert_eq!(row.better_method, "Discount");
+
+    let y = fy2026(&pool).await;
+    assert_eq!(y.discount_eligible_gains, dec("320"), "label H: $320");
+    assert_eq!(y.net_capital_gain, dec("160"), "label A: $160");
+}
+
+/// `docs/ato/personal-investors-guide-shares-and-units.md` (QC 107069) —
+/// "Example 14" (Fatima), shares given to her in October 1986 at a \$2,500
+/// market value, sold last March for \$4,500.
+///
+/// > CPI for December 1986 quarter = 44.4 Indexation factor = 68.7 ÷ 44.4 =
+/// > 1.547 … \$2,500 × 1.547 = \$3,868 … Capital gain \$632 … [discount method]
+/// > Capital gain \$1,000 … Fatima chooses the indexation method because it gives
+/// > her a smaller capital gain.
+///
+/// The system applies the discount throughout and reports indexation as advice
+/// (`docs/API.md`, Indexation cross-check), so label A here is the discount
+/// method's \$1,000 and the cross-check is what tells Fatima to take the \$632.50.
+#[tokio::test]
+async fn personal_investors_guide_example_14_fatima_indexation_beats_discount() {
+    let pool = test_pool().await;
+    put_listing(&pool, 1, "FJM").await;
+    // A gift: acquired at its $2,500 market value, no brokerage.
+    put_buy(&pool, 1, ListingId(1), "1986-10-15", "500", "5", "0").await;
+    put_sell(
+        &pool,
+        10,
+        ListingId(1),
+        "2026-03-16",
+        "500",
+        "9",
+        "0",
+        TradeId(1),
+    )
+    .await;
+
+    let check: IndexationCrossCheck = api_get(&pool, "/reports/indexation_cross_check").await;
+    let [row] = check.comparisons.as_slice() else {
+        panic!("one comparison expected: {:?}", check.comparisons)
+    };
+    assert_eq!(row.cpi_quarter_end.to_string(), "1986-12-31");
+    assert_eq!(row.cpi, dec("44.4"));
+    assert_eq!(row.indexation_factor, dec("1.547"));
+    assert_eq!(row.indexed_cost_base, dec("3867.5"), "the ATO's $3,868");
+    assert_eq!(row.indexation_method_gain, dec("632.5"), "the ATO's $632");
+    assert_eq!(row.discount_method_gain, dec("1000"));
+    assert_eq!(row.better_method, "Indexation");
+    assert_eq!(row.indexation_advantage, dec("367.5"));
+
+    let y = fy2026(&pool).await;
+    assert_eq!(y.discount_eligible_gains, dec("2000"));
+    assert_eq!(
+        y.net_capital_gain,
+        dec("1000"),
+        "the discount method's figure"
+    );
+}
+
+/// `docs/ato/personal-investors-guide-shares-and-units.md` (QC 107069) —
+/// "Example 16" (Mei-Ling), bought October 1999 (after the indexation cut-off)
+/// with a \$1,000 net capital loss from an earlier year.
+///
+/// > Total capital gain \$8,000 minus net capital loss \$1,000 … \$7,000 minus
+/// > CGT discount \$3,500 … \$8,000 at label H \$3,500 at label A.
+#[tokio::test]
+async fn personal_investors_guide_example_16_mei_ling_brought_forward_loss() {
+    let pool = test_pool().await;
+    api_put(
+        &pool,
+        "/cgt_settings/1",
+        json!({ "opening_capital_loss": "1000" }),
+    )
+    .await;
+    put_listing(&pool, 1, "TKY").await;
+    put_buy(&pool, 1, ListingId(1), "1999-10-15", "400", "37.5", "0").await;
+    put_sell(
+        &pool,
+        10,
+        ListingId(1),
+        "2026-02-16",
+        "400",
+        "57.5",
+        "0",
+        TradeId(1),
+    )
+    .await;
+
+    let check: IndexationCrossCheck = api_get(&pool, "/reports/indexation_cross_check").await;
+    assert!(
+        check.comparisons.is_empty(),
+        "bought after 21 September 1999"
+    );
+
+    let y = fy2026(&pool).await;
+    assert_eq!(y.discount_eligible_gains, dec("8000"), "label H: $8,000");
+    assert_eq!(y.net_discount_eligible_gain, dec("7000"));
+    assert_eq!(y.cgt_discount, dec("3500"));
+    assert_eq!(y.net_capital_gain, dec("3500"), "label A: $3,500");
+    assert_eq!(y.capital_loss_carried_forward, Decimal::ZERO);
+}
+
+/// `docs/ato/personal-investors-guide-shares-and-units.md` (QC 107069) —
+/// "Example 17" (Mario), a loss on pre-September-1999 shares plus a \$350 loss
+/// carried forward since 1999–2000.
+///
+/// > [he] made a capital loss, so neither the indexation nor the discount method
+/// > applies. … Reduced cost base (\$2,650 + \$50) = \$2,700 minus capital
+/// > proceeds = \$2,300 Capital loss = \$400 … Net capital losses carried
+/// > forward to later income years = \$750 … Mario writes \$750 at question 18
+/// > – label V … He doesn't write anything at question 18 – label A.
+#[tokio::test]
+async fn personal_investors_guide_example_17_mario_loss_on_pre_1999_shares() {
+    let pool = test_pool().await;
+    api_put(
+        &pool,
+        "/cgt_settings/1",
+        json!({ "opening_capital_loss": "350" }),
+    )
+    .await;
+    put_listing(&pool, 1, "MMFG").await;
+    put_buy(&pool, 1, ListingId(1), "1986-10-15", "2500", "1.06", "0").await;
+    put_sell(
+        &pool,
+        10,
+        ListingId(1),
+        "2026-03-16",
+        "2500",
+        "0.92",
+        "50",
+        TradeId(1),
+    )
+    .await;
+
+    let check: IndexationCrossCheck = api_get(&pool, "/reports/indexation_cross_check").await;
+    assert!(
+        check.comparisons.is_empty(),
+        "indexation never applies to a capital loss"
+    );
+
+    let y = fy2026(&pool).await;
+    assert_eq!(y.capital_losses, dec("400"), "$2,700 − $2,300");
+    assert_eq!(y.net_capital_gain, Decimal::ZERO, "nothing at label A");
+    assert_eq!(y.capital_loss_carried_forward, dec("750"), "label V: $750");
+}
+
+/// `docs/ato/personal-investors-guide-shares-and-units.md` (QC 107069) —
+/// "Example 18" (Clare), March 1995 shares with \$3,500 of brought-forward
+/// losses, where the best answer splits the parcel between the two methods.
+///
+/// > Cost base 8,078 … Capital gain 4,422 … Net capital gain [indexation] 922
+/// > [discount] 750 … because each share is a separate asset, Clare can use
+/// > different methods … applies the indexation method to the sale of 396 …
+/// > shares and the discount method to the remaining 104. … \$4,543 at label H
+/// > \$523 at label A.
+///
+/// **What this pins is the system's half of the example, not the ATO's
+/// answer.** The net-capital-gain report applies the discount to the whole
+/// parcel — the ATO's own "using discount method" column, \$750 — and the
+/// cross-check compares the parcel *before* losses, where the discount wins
+/// (\$2,500 against \$4,422.50). Neither computes the split: losses move the
+/// comparison toward indexation, which the cross-check documents as the
+/// reason its rows are a floor. The ATO's \$523 is itself one dollar high —
+/// indexing 395 shares, not 396, gives \$522 (the mirror's project notes).
+#[tokio::test]
+async fn personal_investors_guide_example_18_clare_whole_parcel_figures() {
+    let pool = test_pool().await;
+    api_put(
+        &pool,
+        "/cgt_settings/1",
+        json!({ "opening_capital_loss": "3500" }),
+    )
+    .await;
+    put_listing(&pool, 1, "CLRE").await;
+    put_buy(&pool, 1, ListingId(1), "1995-03-15", "500", "15", "0").await;
+    put_sell(
+        &pool,
+        10,
+        ListingId(1),
+        "2026-03-16",
+        "500",
+        "25",
+        "0",
+        TradeId(1),
+    )
+    .await;
+
+    let check: IndexationCrossCheck = api_get(&pool, "/reports/indexation_cross_check").await;
+    let [row] = check.comparisons.as_slice() else {
+        panic!("one comparison expected: {:?}", check.comparisons)
+    };
+    assert_eq!(row.cpi, dec("63.8"), "the March 1995 quarter");
+    assert_eq!(row.indexation_factor, dec("1.077"));
+    assert_eq!(row.indexed_cost_base, dec("8077.5"), "the ATO's 8,078");
+    assert_eq!(row.indexation_method_gain, dec("4422.5"), "the ATO's 4,422");
+    assert_eq!(row.discount_method_gain, dec("2500"));
+    assert_eq!(row.better_method, "Discount", "before losses");
+
+    let y = fy2026(&pool).await;
+    assert_eq!(y.discount_eligible_gains, dec("5000"));
+    assert_eq!(y.capital_loss_brought_forward, dec("3500"));
+    assert_eq!(
+        y.net_discount_eligible_gain,
+        dec("1500"),
+        "the ATO's 'Equals' row"
+    );
+    assert_eq!(
+        y.net_capital_gain,
+        dec("750"),
+        "the ATO's whole-parcel discount column; its split answer is $523"
+    );
 }
