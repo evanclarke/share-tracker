@@ -3783,8 +3783,8 @@ fn frontend_tests_run_in_ci() {
 #[test]
 fn supply_chain_checks_run_in_ci() {
     const CI_YML: &str = include_str!("../.github/workflows/ci.yml");
-    assert!(CI_YML.contains("EmbarkStudios/cargo-deny-action"));
-    assert!(CI_YML.contains("command: check advisories"));
+    assert!(CI_YML.contains("tool: cargo-deny"));
+    assert!(CI_YML.contains("run: cargo deny check advisories"));
     // Dependabot: weekly grouped version updates for both ecosystems.
     const DEPENDABOT_YML: &str = include_str!("../.github/dependabot.yml");
     assert!(DEPENDABOT_YML.contains("package-ecosystem: cargo"));
@@ -3882,8 +3882,10 @@ fn third_party_actions_are_pinned_to_a_commit_sha() {
             checked += 1;
         }
     }
-    // The four that exist today; a new third-party action raises this.
-    assert_eq!(checked, 4, "expected 4 pinned third-party actions");
+    // The eight that exist today (ci.yml's three jobs each set up a toolchain
+    // and a cache, plus the cargo-deny install; release.yml's one); a new
+    // third-party action raises this.
+    assert_eq!(checked, 8, "expected 8 pinned third-party actions");
 }
 
 /// Executable half of the deny.toml ignore policy (decided 2026-07-14): every

@@ -11,8 +11,20 @@ on:
 permissions:
   contents: read
 
+env:
+  # No debug info in CI builds: a failing test still reports its panic
+  # message and file:line (those come from the panic location, not DWARF),
+  # and the smaller target dir links faster and saves/restores a smaller
+  # cache. Local builds keep the default.
+  CARGO_PROFILE_DEV_DEBUG: 0
+
+# Three independent jobs rather than one job of sequential steps: clippy's
+# check build, the test binary and the plain server binary the smoke check
+# runs are three separate compiles of the crate that depend on nothing in each
+# other, so in parallel the run takes as long as the slowest of them instead
+# of their sum. Each job keeps its own rust-cache (keyed by job by default).
 jobs:
-  test:
+  lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -40,17 +52,40 @@ jobs:
       - run: node --test 'src/web/*.test.js'
       # Supply-chain gate: fail on known RustSec advisories against the
       # dependency tree. deny.toml records the temporary-ignore policy for an
-      # advisory with no upstream fix; the local equivalent is
-      # `cargo deny check advisories` (cargo install cargo-deny --locked).
-      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+      # advisory with no upstream fix. The prebuilt cargo-deny binary, rather
+      # than cargo-deny-action, which builds a Docker image on every run; the
+      # command is the local equivalent verbatim
+      # (cargo install cargo-deny --locked).
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
         with:
-          command: check advisories
+          tool: cargo-deny
+      - run: cargo deny check advisories
       # Keep the tree rustfmt-clean; fix locally with `cargo fmt`.
       - run: cargo fmt --check
       # Keep the tree clippy-clean: lint everything (incl. tests) and fail on any
       # warning. Intentional exceptions carry an in-code #[allow] with a reason.
       - run: cargo clippy --all-targets -- -D warnings
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo test
+
+  ui-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       # Headless UI smoke check on the runner's preinstalled Chrome: the SPA
       # boots and key routes render seeded data end-to-end — catches a broken
       # module route or load-time JS exception that the served-bundle string
