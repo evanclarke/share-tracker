@@ -1102,12 +1102,14 @@ mod tests {
         let opens = format!("{}(", "read_tx");
         let mut report_files: Vec<String> = Vec::new();
         let mut unclassified: Vec<String> = Vec::new();
-        for (rel, body) in crate::test_support::rust_sources() {
+        for crate::test_support::SourceFile {
+            path: rel, code, ..
+        } in crate::test_support::rust_sources()
+        {
             if !rel.starts_with("reports/") {
                 continue;
             }
             report_files.push(rel.clone());
-            let code = crate::test_support::code_only(&body);
             let reads_on_one_snapshot = code.contains(&opens);
             let exempt = REPORTS_WITHOUT_A_READ_TRANSACTION
                 .iter()
@@ -1171,12 +1173,13 @@ mod tests {
                 || rel.contains("/tests/")
         };
         let offenders: Vec<String> = crate::test_support::rust_sources()
-            .into_iter()
-            .filter(|(rel, _)| !test_only_file(rel))
-            .flat_map(|(rel, raw)| {
-                let code =
-                    crate::test_support::strip_test_modules(&crate::test_support::code_only(&raw));
-                code.lines()
+            .iter()
+            .filter(|source| !test_only_file(&source.path))
+            .flat_map(|source| {
+                let rel = &source.path;
+                source
+                    .production
+                    .lines()
                     .enumerate()
                     // A pool's `acquire`, not the one semaphore's (`auth`'s
                     // bounded password verifies).
@@ -1246,7 +1249,7 @@ mod tests {
     async fn a_deferred_transaction_cannot_upgrade_after_a_concurrent_write() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("deferred.db").to_string_lossy().to_string();
-        let pool = init(&path).await.unwrap();
+        let pool = crate::test_support::file_pool(&path).await;
 
         // Deferred: this begins as a reader, and the read fixes its snapshot.
         #[allow(clippy::disallowed_methods)] // deliberately deferred: the failure write_tx avoids
@@ -1309,7 +1312,7 @@ mod tests {
             .join("immediate.db")
             .to_string_lossy()
             .to_string();
-        let pool = init(&path).await.unwrap();
+        let pool = crate::test_support::file_pool(&path).await;
 
         // The shape every write path has: begin, read, decide, write, commit.
         let mut tx = write_tx(&pool).await.unwrap();
@@ -1435,7 +1438,7 @@ mod tests {
     async fn backup_creates_file() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db").to_string_lossy().to_string();
-        let pool = init(&db_path).await.unwrap();
+        let pool = crate::test_support::file_pool(&db_path).await;
 
         // Capture the destination before backing up: `backup` computes its own
         // timestamp internally, so re-deriving the path afterwards could land in
@@ -1502,7 +1505,7 @@ mod tests {
         // takes before `pkg add` (see pkg/freebsd/update.sh).
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db").to_string_lossy().to_string();
-        let pool = init(&db_path).await.unwrap();
+        let pool = crate::test_support::file_pool(&db_path).await;
 
         backup(&pool, &db_path, None, None, Some("pre-0.5.1"))
             .await
@@ -1530,7 +1533,7 @@ mod tests {
         // written for any of them.
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db").to_string_lossy().to_string();
-        let pool = init(&db_path).await.unwrap();
+        let pool = crate::test_support::file_pool(&db_path).await;
 
         let cases: &[&str] = &[
             "",
@@ -1569,7 +1572,7 @@ mod tests {
         let db_dir = tempfile::tempdir().unwrap();
         let backup_dir = tempfile::tempdir().unwrap();
         let db_path = db_dir.path().join("test.db").to_string_lossy().to_string();
-        let pool = init(&db_path).await.unwrap();
+        let pool = crate::test_support::file_pool(&db_path).await;
 
         // A not-yet-existing subdirectory must be created, not fail the job.
         let dest_dir = backup_dir
@@ -1610,7 +1613,7 @@ mod tests {
         // database holding exactly the pre-mutation state.
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db").to_string_lossy().to_string();
-        let pool = init(&db_path).await.unwrap();
+        let pool = crate::test_support::file_pool(&db_path).await;
         sqlx::query("INSERT INTO holding_accounts (id, name) VALUES (100, 'keep')")
             .execute(&pool)
             .await
@@ -1680,7 +1683,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db").to_string_lossy().to_string();
-        let pool = init(&db_path).await.unwrap();
+        let pool = crate::test_support::file_pool(&db_path).await;
         sqlx::query("INSERT INTO holding_accounts (id, name) VALUES (100, 'committed')")
             .execute(&pool)
             .await
@@ -3289,7 +3292,7 @@ mod tests {
     async fn backup_does_not_overwrite_existing() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db").to_string_lossy().to_string();
-        let pool = init(&db_path).await.unwrap();
+        let pool = crate::test_support::file_pool(&db_path).await;
 
         // Fixed destination so this exercises the skip-if-exists guard directly
         // rather than depending on two `backup` calls landing in the same second.
@@ -3309,7 +3312,7 @@ mod tests {
         // file under its backup name — no quarantine artefact.
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db").to_string_lossy().to_string();
-        let pool = init(&db_path).await.unwrap();
+        let pool = crate::test_support::file_pool(&db_path).await;
 
         let dest = backup_path(&db_path, None, None);
         backup_to(&pool, &dest).await.unwrap();
@@ -3328,7 +3331,7 @@ mod tests {
         // as is named after the backup it would have become.
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db").to_string_lossy().to_string();
-        let pool = init(&db_path).await.unwrap();
+        let pool = crate::test_support::file_pool(&db_path).await;
 
         let dest = dir
             .path()
@@ -3365,7 +3368,7 @@ mod tests {
         // not a restorable copy of this database.
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db").to_string_lossy().to_string();
-        let pool = init(&db_path).await.unwrap();
+        let pool = crate::test_support::file_pool(&db_path).await;
 
         let empty = dir.path().join("empty.db").to_string_lossy().to_string();
         let opts = SqliteConnectOptions::from_str(&format!("sqlite:{empty}"))
@@ -3393,7 +3396,7 @@ mod tests {
         // failing the run (`VACUUM INTO` refuses an existing target).
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db").to_string_lossy().to_string();
-        let pool = init(&db_path).await.unwrap();
+        let pool = crate::test_support::file_pool(&db_path).await;
 
         let dest = dir
             .path()
@@ -3788,7 +3791,7 @@ mod tests {
         // the live database or its sidecars.
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db").to_string_lossy().to_string();
-        let pool = init(&db_path).await.unwrap();
+        let pool = crate::test_support::file_pool(&db_path).await;
         for i in 0..14 {
             let month = format!("{}-{:02}", 2020 + (i / 12), 1 + (i % 12));
             fake_backup(dir.path(), &format!("{month}-01-000000"));
@@ -3810,7 +3813,7 @@ mod tests {
         let db_dir = tempfile::tempdir().unwrap();
         let backup_dir = tempfile::tempdir().unwrap();
         let db_path = db_dir.path().join("test.db").to_string_lossy().to_string();
-        let pool = init(&db_path).await.unwrap();
+        let pool = crate::test_support::file_pool(&db_path).await;
         // 13 pre-existing monthly backups; with the fresh backup that is 14
         // distinct months, so the two oldest keepers roll off.
         for i in 0..13 {
@@ -3854,7 +3857,7 @@ mod tests {
         let db_dir = tempfile::tempdir().unwrap();
         let backup_dir = tempfile::tempdir().unwrap();
         let db_path = db_dir.path().join("test.db").to_string_lossy().to_string();
-        let pool = init(&db_path).await.unwrap();
+        let pool = crate::test_support::file_pool(&db_path).await;
         for id in 100..110 {
             sqlx::query("INSERT INTO holding_accounts (id, name) VALUES (?, ?)")
                 .bind(id)
@@ -3920,7 +3923,7 @@ mod tests {
         // it to a marker path and asserting the copy's content matches.
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db").to_string_lossy().to_string();
-        let pool = init(&db_path).await.unwrap();
+        let pool = crate::test_support::file_pool(&db_path).await;
 
         let marker = dir.path().join("offsite-copy.db");
         let command = format!("cp {{BACKUP_FILE}} {}", marker.to_string_lossy());
@@ -3941,7 +3944,7 @@ mod tests {
         // fresh backup is safely within the retention window regardless.
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db").to_string_lossy().to_string();
-        let pool = init(&db_path).await.unwrap();
+        let pool = crate::test_support::file_pool(&db_path).await;
         for i in 0..13 {
             let month = format!("{}-{:02}", 2025 + (i / 12), 1 + (i % 12));
             fake_backup(dir.path(), &format!("{month}-01-000000"));
@@ -3967,7 +3970,7 @@ mod tests {
         // already ran when that file was first created.
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db").to_string_lossy().to_string();
-        let pool = init(&db_path).await.unwrap();
+        let pool = crate::test_support::file_pool(&db_path).await;
 
         let dest = backup_path(&db_path, None, None);
         backup_to(&pool, &dest).await.unwrap();
@@ -3990,7 +3993,7 @@ mod tests {
         // when the backup itself is a relative one.
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db").to_string_lossy().to_string();
-        let pool = init(&db_path).await.unwrap();
+        let pool = crate::test_support::file_pool(&db_path).await;
         let dest = backup_path(&db_path, None, None);
         backup_to(&pool, &dest).await.unwrap();
 

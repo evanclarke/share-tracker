@@ -108,48 +108,38 @@ impl<T: Serialize> IntoResponse for Json<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{ApiClient, code_only, test_pool};
+    use crate::test_support::{ApiClient, SourceFile, rust_sources, test_pool};
 
     /// Every module under `src` reaches `Json`/`Query` through this module,
     /// never axum's — one import of axum's and that route answers its
     /// rejections in framework wording and its own status again.
     #[test]
     fn no_handler_takes_axums_own_query_or_json() {
-        fn walk(dir: &std::path::Path, offenders: &mut Vec<String>) {
-            for entry in std::fs::read_dir(dir).unwrap() {
-                let path = entry.unwrap().path();
-                if path.is_dir() {
-                    walk(&path, offenders);
-                    continue;
+        let mut offenders = Vec::new();
+        for SourceFile { path, code, .. } in rust_sources() {
+            if path == "infra/extract.rs" {
+                continue;
+            }
+            // Every `use axum…;` tree, flattened onto one line.
+            let mut rest = code.as_str();
+            while let Some(start) = rest.find("use axum") {
+                let tree = &rest[start..];
+                let end = tree.find(';').unwrap_or(tree.len());
+                let tree = &tree[..end];
+                let names_one = tree
+                    .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .any(|word| word == "Json" || word == "Query");
+                if names_one {
+                    offenders.push(format!("src/{path}: {tree}"));
                 }
-                if path.extension().is_none_or(|e| e != "rs") || path.ends_with("infra/extract.rs")
-                {
-                    continue;
-                }
-                let code = code_only(&std::fs::read_to_string(&path).unwrap());
-                // Every `use axum…;` tree, flattened onto one line.
-                let mut rest = code.as_str();
-                while let Some(start) = rest.find("use axum") {
-                    let tree = &rest[start..];
-                    let end = tree.find(';').unwrap_or(tree.len());
-                    let tree = &tree[..end];
-                    let names_one = tree
-                        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
-                        .any(|word| word == "Json" || word == "Query");
-                    if names_one {
-                        offenders.push(format!("{}: {tree}", path.display()));
-                    }
-                    rest = &rest[start + end..];
-                }
-                for qualified in ["axum::Json", "axum::extract::Query"] {
-                    if code.contains(qualified) {
-                        offenders.push(format!("{}: {qualified}", path.display()));
-                    }
+                rest = &rest[start + end..];
+            }
+            for qualified in ["axum::Json", "axum::extract::Query"] {
+                if code.contains(qualified) {
+                    offenders.push(format!("src/{path}: {qualified}"));
                 }
             }
         }
-        let mut offenders = Vec::new();
-        walk(std::path::Path::new("src"), &mut offenders);
         assert!(
             offenders.is_empty(),
             "use crate::infra::extract::{{Json, Query}} instead of axum's: {offenders:#?}"

@@ -4438,8 +4438,8 @@ mod tests {
         let sources = crate::test_support::rust_sources();
         let main_rs = sources
             .iter()
-            .find(|(rel, _)| rel == "main.rs")
-            .map(|(_, body)| body.clone())
+            .find(|source| source.path == "main.rs")
+            .map(|source| source.raw.clone())
             .expect("main.rs is under src");
         let test_only: Vec<String> = main_rs
             .lines()
@@ -4450,7 +4450,12 @@ mod tests {
             .collect();
 
         let mut found = Vec::new();
-        for (file, body) in &sources {
+        for crate::test_support::SourceFile {
+            path: file,
+            raw: body,
+            ..
+        } in sources
+        {
             if test_only
                 .iter()
                 .any(|m| *file == format!("{m}.rs") || file.starts_with(&format!("{m}/")))

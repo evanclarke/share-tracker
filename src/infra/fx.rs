@@ -1054,7 +1054,12 @@ mod tests {
         let call = format!("{}(", "resolve_valuation_rate");
         let mut offenders = Vec::new();
         let mut seen_in_allowed: Vec<&str> = Vec::new();
-        for (rel, body) in crate::test_support::rust_sources() {
+        for crate::test_support::SourceFile {
+            path: rel,
+            raw: body,
+            ..
+        } in crate::test_support::rust_sources()
+        {
             let allowed = VALUATION_RATE_CALLERS_ALLOWED
                 .iter()
                 .find(|(f, _)| *f == rel);

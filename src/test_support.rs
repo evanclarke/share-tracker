@@ -138,14 +138,33 @@ pub async fn insert_parcel_costs(
 /// commits past it, which is the real behaviour.
 ///
 /// The caller owns the `TempDir` — hold it for the length of the test, since
-/// dropping it deletes the database out from under the pool. Migrations are
-/// run rather than replayed from the cached script: this is one pool per test,
-/// not the ~1500 [`test_pool`] builds the cache exists for.
+/// dropping it deletes the database out from under the pool.
 pub async fn race_pool(dir: &tempfile::TempDir) -> SqlitePool {
     let path = dir.path().join("race.db");
-    db::init(&path.to_string_lossy())
+    file_pool(&path.to_string_lossy()).await
+}
+
+/// A migrated database **file** at `path`, opened through the production
+/// [`db::init`] — for the tests that need a real file (WAL concurrency, the
+/// backup job, the scheduler's registry) rather than [`test_pool`]'s memory.
+///
+/// The file is seeded from [`test_pool`]'s cached script before `init` opens
+/// it. The script carries the `_sqlx_migrations` rows, so `init` finds every
+/// migration already applied and only verifies the checksums: the pool is
+/// exactly what `init` hands `main` on a database it has migrated before.
+/// Running the 51 migrations instead cost ~0.3 s per call under the suite's
+/// load, which the dozens of such tests made ~10 s of the suite's CPU.
+/// `cached_schema_matches_the_migrated_schema` is what makes the substitution
+/// safe; a test of `init` or of the migrations themselves still calls
+/// `db::init` on an empty file.
+pub async fn file_pool(path: &str) -> SqlitePool {
+    let seed = db::unmigrated_pool(path).await.expect("a file-backed pool");
+    sqlx::raw_sql(sqlx::AssertSqlSafe(schema_template().await))
+        .execute(&seed)
         .await
-        .expect("a file-backed pool")
+        .expect("the captured schema replays");
+    seed.close().await;
+    db::init(path).await.expect("a file-backed pool")
 }
 
 /// A [`race_pool`] whose connections report when they are **blocked on a
@@ -176,11 +195,7 @@ pub async fn race_pool_with_busy_probe(dir: &tempfile::TempDir) -> (SqlitePool, 
     let path = path.to_string_lossy();
     // Migrated through the production path first, then reopened with the
     // handler: the probe changes how a connection waits, never the schema.
-    db::init(&path)
-        .await
-        .expect("a file-backed pool")
-        .close()
-        .await;
+    file_pool(&path).await.close().await;
     let waits: &'static AtomicUsize = Box::leak(Box::new(AtomicUsize::new(0)));
     let options = sqlx::sqlite::SqlitePoolOptions::new().after_connect(move |conn, _| {
         Box::pin(async move {
@@ -1608,15 +1623,51 @@ pub static TEST_TOKEN: LazyLock<String> = LazyLock::new(Auth::generate_token);
 /// A bearer token `TEST_TOKEN`'s configuration refuses — see [`TEST_PASSWORD`].
 pub static WRONG_TOKEN: LazyLock<String> = LazyLock::new(Auth::generate_token);
 
-/// Every `.rs` file under `src`, with its path relative to `src` using `/`
-/// separators (`reports/tax_summary.rs`) — the form the source-scanning tests
-/// write their allowlists in.
+/// One `.rs` file under `src`, as the source-scanning tests read it — see
+/// [`rust_sources`].
+pub struct SourceFile {
+    /// Relative to `src`, with `/` separators (`reports/tax_summary.rs`) — the
+    /// form the scans write their allowlists in.
+    pub path: String,
+    /// The file as written.
+    pub raw: String,
+    /// [`code_only`] of `raw`: comments and literals blanked byte-for-byte.
+    pub code: String,
+    /// [`strip_test_modules`] of `code`: production code alone. Blanked in
+    /// that order so a brace inside a test's string literal cannot throw the
+    /// module's brace count off.
+    pub production: String,
+}
+
+/// Every `.rs` file under `src`, sorted by path, each already lexed into the
+/// three views a scan reads ([`SourceFile`]).
 ///
 /// The tree has several tests that pin a convention nothing in the type system
 /// can (`infra::db`'s deferred-`BEGIN` scan, `infra::decimal`'s
 /// stringified-bind scan, `web`'s display-kind scan); they share this walk
-/// rather than each carrying its own copy of it.
-pub fn rust_sources() -> Vec<(String, String)> {
+/// rather than each carrying its own copy of it. It is read and lexed **once**
+/// per test process: [`code_only`] over the whole tree costs ~250 ms in a
+/// debug build, and each scan repeating it cost the suite seconds of CPU.
+pub fn rust_sources() -> &'static [SourceFile] {
+    static SOURCES: LazyLock<Vec<SourceFile>> = LazyLock::new(|| {
+        read_rust_sources()
+            .into_iter()
+            .map(|(path, raw)| {
+                let code = code_only(&raw);
+                let production = strip_test_modules(&code);
+                SourceFile {
+                    path,
+                    raw,
+                    code,
+                    production,
+                }
+            })
+            .collect()
+    });
+    &SOURCES
+}
+
+fn read_rust_sources() -> Vec<(String, String)> {
     let src = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut found = Vec::new();
     let mut walk = vec![src.clone()];

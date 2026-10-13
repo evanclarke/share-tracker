@@ -57,8 +57,7 @@ use schedule::{ScheduleEntry, parse};
 mod tests {
     use super::registry::JobParams;
     use super::*;
-    use crate::infra::db;
-    use crate::test_support::{ApiClient, await_condition};
+    use crate::test_support::{ApiClient, await_condition, file_pool, test_pool};
     use axum::Extension;
     use axum::http::StatusCode;
     use chrono::{DateTime, Local, TimeZone, Utc};
@@ -84,7 +83,7 @@ mod tests {
     async fn test_registry() -> (JobRegistry, SqlitePool, tempfile::TempDir, String) {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db").to_string_lossy().to_string();
-        let pool = db::init(&db_path).await.unwrap();
+        let pool = file_pool(&db_path).await;
         (
             registry(
                 pool.clone(),
@@ -308,7 +307,7 @@ mod tests {
         // fails that write without awaiting anything (`run_job` logs it and
         // carries on), which is fine here: what is under test is *when the timer
         // fires*, not what it records.
-        let pool = db::init(":memory:").await.unwrap();
+        let pool = test_pool().await;
         pool.close().await;
         tokio::time::pause();
         let t0 = Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap();
@@ -782,7 +781,7 @@ mod tests {
         // the lock (`blocked`), so the window in which an overlap would show
         // is the whole of the first run, however slow the machine.
         use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-        let pool = db::init(":memory:").await.unwrap();
+        let pool = test_pool().await;
         let active = Arc::new(AtomicUsize::new(0));
         let overlapped = Arc::new(AtomicBool::new(false));
         let started = Arc::new(AtomicUsize::new(0));
@@ -839,7 +838,7 @@ mod tests {
     async fn trigger_backup_runs_and_returns_204() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("t.db").to_string_lossy().to_string();
-        let pool = db::init(&db_path).await.unwrap();
+        let pool = file_pool(&db_path).await;
         let reg = registry(
             pool.clone(),
             db_path.clone(),
@@ -877,7 +876,7 @@ mod tests {
         // layer, not just the db::backup unit tests.
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("t.db").to_string_lossy().to_string();
-        let pool = db::init(&db_path).await.unwrap();
+        let pool = file_pool(&db_path).await;
         let reg = registry(
             pool.clone(),
             db_path.clone(),
@@ -906,7 +905,7 @@ mod tests {
     async fn trigger_with_invalid_suffix_returns_422_and_records_no_run() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("t.db").to_string_lossy().to_string();
-        let pool = db::init(&db_path).await.unwrap();
+        let pool = file_pool(&db_path).await;
         let reg = registry(
             pool.clone(),
             db_path,
@@ -982,7 +981,7 @@ mod tests {
         let db_dir = tempfile::tempdir().unwrap();
         let backup_dir = tempfile::tempdir().unwrap();
         let db_path = db_dir.path().join("t.db").to_string_lossy().to_string();
-        let pool = db::init(&db_path).await.unwrap();
+        let pool = file_pool(&db_path).await;
         let reg = registry(
             pool.clone(),
             db_path,
@@ -1020,7 +1019,7 @@ mod tests {
         // db::backup unit tests.
         let db_dir = tempfile::tempdir().unwrap();
         let db_path = db_dir.path().join("t.db").to_string_lossy().to_string();
-        let pool = db::init(&db_path).await.unwrap();
+        let pool = file_pool(&db_path).await;
         let marker = db_dir.path().join("hook-ran");
         let command = format!("touch {}", marker.to_string_lossy());
         let reg = registry(
@@ -1055,7 +1054,7 @@ mod tests {
     ) {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("t.db").to_string_lossy().to_string();
-        let pool = db::init(&db_path).await.unwrap();
+        let pool = file_pool(&db_path).await;
         let log = dir.path().join("hook-runs");
         let command = format!("echo ran >> {}", log.to_string_lossy());
         let reg = registry(
@@ -1250,7 +1249,7 @@ mod tests {
         // The manual POST /jobs/{name} path also goes through run_job.
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("t.db").to_string_lossy().to_string();
-        let pool = db::init(&db_path).await.unwrap();
+        let pool = file_pool(&db_path).await;
         let reg = registry(
             pool.clone(),
             db_path,
@@ -1276,7 +1275,7 @@ mod tests {
         // same contract every entity DELETE keeps (`deleted(found, noun)`).
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("t.db").to_string_lossy().to_string();
-        let pool = db::init(&db_path).await.unwrap();
+        let pool = file_pool(&db_path).await;
         let reg = registry(
             pool.clone(),
             db_path,
@@ -1311,7 +1310,7 @@ mod tests {
     #[tracing_test::traced_test]
     #[tokio::test]
     async fn a_failing_job_answers_500_carrying_its_reason() {
-        let pool = db::init(":memory:").await.unwrap();
+        let pool = test_pool().await;
         let mut jobs: HashMap<String, Arc<RegisteredJob>> = HashMap::new();
         jobs.insert(
             "always-fails".to_string(),
@@ -1351,7 +1350,7 @@ mod tests {
         // before any run is recorded.
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("t.db").to_string_lossy().to_string();
-        let pool = db::init(&db_path).await.unwrap();
+        let pool = file_pool(&db_path).await;
         let reg = registry(
             pool.clone(),
             db_path,
@@ -1394,7 +1393,7 @@ mod tests {
     async fn list_jobs_returns_registered_names() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("t.db").to_string_lossy().to_string();
-        let pool = db::init(&db_path).await.unwrap();
+        let pool = file_pool(&db_path).await;
         let reg = registry(
             pool.clone(),
             db_path,
@@ -2023,7 +2022,7 @@ mod tests {
     /// from the run, which finishes and records itself.
     #[tokio::test]
     async fn a_manual_run_survives_its_client_disconnecting() {
-        let pool = db::init(":memory:").await.unwrap();
+        let pool = test_pool().await;
         let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
         let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
         let channels = Arc::new(std::sync::Mutex::new(Some((started_tx, release_rx))));
@@ -2076,7 +2075,7 @@ mod tests {
     /// releases its lock: the next run of the same job proceeds.
     #[tokio::test]
     async fn a_panicking_run_is_recorded_as_failed_and_releases_the_lock() {
-        let pool = db::init(":memory:").await.unwrap();
+        let pool = test_pool().await;
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counted = calls.clone();
         let job = RegisteredJob::from_fn(JobTrigger::Scheduled, move |_| {
@@ -2116,7 +2115,7 @@ mod tests {
     /// `500` carrying the recorded message, not a dropped connection.
     #[tokio::test]
     async fn a_panicking_job_answers_500_carrying_the_panic() {
-        let pool = db::init(":memory:").await.unwrap();
+        let pool = test_pool().await;
         let mut jobs: HashMap<String, Arc<RegisteredJob>> = HashMap::new();
         jobs.insert(
             "panics".to_string(),
@@ -2140,7 +2139,7 @@ mod tests {
     /// `capped_sleep_reanchors_after_wall_clock_shift` gives.)
     #[tokio::test]
     async fn a_panicking_scheduled_run_keeps_the_job_scheduled() {
-        let pool = db::init(":memory:").await.unwrap();
+        let pool = test_pool().await;
         pool.close().await;
         tokio::time::pause();
         let t0 = Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 30).unwrap();

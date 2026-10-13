@@ -1374,7 +1374,7 @@ pub async fn db_cost_base_reduction_events(
 mod tests {
     use super::*;
     use crate::entities::rba_fx_rate;
-    use crate::infra::db;
+    use crate::test_support::test_pool;
 
     fn date(y: i32, m: u32, d: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(y, m, d).unwrap()
@@ -2661,7 +2661,7 @@ mod tests {
     /// lookup path read them (same import, same month key).
     #[tokio::test]
     async fn into_aud_with_converts_every_component_at_the_acquisition_month_rate() {
-        let pool = db::init(":memory:").await.unwrap();
+        let pool = test_pool().await;
         // A$1 = 0.50 USD in the acquisition month.
         rba_fx_rate::db_import_rate(&pool, "USD", "2024-01", "0.50".parse().unwrap())
             .await
@@ -2723,7 +2723,7 @@ mod tests {
     /// translation would use each amount's own month and is not modelled.
     #[tokio::test]
     async fn a_reduction_converts_at_the_acquisition_month_not_its_own() {
-        let pool = db::init(":memory:").await.unwrap();
+        let pool = test_pool().await;
         // A$1 = 0.50 USD when the parcel was acquired, 1.00 when the
         // reductions arose — a rate that halves the AUD reduction.
         rba_fx_rate::db_import_rate(&pool, "USD", "2024-01", "0.50".parse().unwrap())

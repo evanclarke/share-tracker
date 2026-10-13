@@ -1473,8 +1473,13 @@ mod tests {
             ("login_body(", 0),
         ];
         let mut offenders = Vec::new();
-        for (file, raw) in crate::test_support::rust_sources() {
-            let code = crate::test_support::code_only(&raw);
+        for crate::test_support::SourceFile {
+            path: file,
+            raw,
+            code,
+            ..
+        } in crate::test_support::rust_sources()
+        {
             let (code_b, raw_b) = (code.as_bytes(), raw.as_bytes());
             let line_of = |at: usize| raw[..at].matches('\n').count() + 1;
             // A non-empty literal in `range`: a byte the lexer blanked that is

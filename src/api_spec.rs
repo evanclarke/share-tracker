@@ -1270,12 +1270,9 @@ mod tests {
     fn every_route_is_registered_through_routes() {
         let needle = format!(".{}(", "route");
         let mut sites: Vec<String> = crate::test_support::rust_sources()
-            .into_iter()
-            .filter(|(_, raw)| {
-                crate::test_support::code_only(&crate::test_support::strip_test_modules(raw))
-                    .contains(&needle)
-            })
-            .map(|(file, _)| file)
+            .iter()
+            .filter(|source| source.production.contains(&needle))
+            .map(|source| source.path.clone())
             .filter(|file| file != "api_spec.rs")
             .collect();
         sites.sort();

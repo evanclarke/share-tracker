@@ -668,26 +668,15 @@ mod tests {
         let bind = format!(".{}(", "bind");
         let stringified = format!(".to_{}())", "string");
         let mut offenders = Vec::new();
-        let mut walk = vec![std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src")];
-        while let Some(dir) = walk.pop() {
-            for entry in std::fs::read_dir(&dir)
-                .expect("src should be readable")
-                .flatten()
-            {
-                let path = entry.path();
-                if path.is_dir() {
-                    walk.push(path);
-                } else if path.extension().is_some_and(|x| x == "rs") {
-                    let src = std::fs::read_to_string(&path).expect("source should be readable");
-                    for (n, line) in src.lines().enumerate() {
-                        let code = line.trim_start();
-                        if code.starts_with("//") {
-                            continue;
-                        }
-                        if code.contains(&bind) && code.contains(&stringified) {
-                            offenders.push(format!("{}:{}: {code}", path.display(), n + 1));
-                        }
-                    }
+        for crate::test_support::SourceFile { path, raw, .. } in crate::test_support::rust_sources()
+        {
+            for (n, line) in raw.lines().enumerate() {
+                let code = line.trim_start();
+                if code.starts_with("//") {
+                    continue;
+                }
+                if code.contains(&bind) && code.contains(&stringified) {
+                    offenders.push(format!("src/{path}:{}: {code}", n + 1));
                 }
             }
         }
@@ -727,8 +716,11 @@ mod tests {
         let floats = [format!("f{}", 64), format!("f{}", 32)];
         let mut offenders = Vec::new();
         let mut allowed_hits = vec![0usize; FLOATS_ALLOWED.len()];
-        for (file, body) in crate::test_support::rust_sources() {
-            for (n, line) in crate::test_support::code_only(&body).lines().enumerate() {
+        for crate::test_support::SourceFile {
+            path: file, code, ..
+        } in crate::test_support::rust_sources()
+        {
+            for (n, line) in code.lines().enumerate() {
                 let hit = floats.iter().any(|f| {
                     line.match_indices(f.as_str()).any(|(at, _)| {
                         let before = line[..at].chars().next_back();
@@ -782,8 +774,11 @@ mod tests {
         let signature = format!("(s: &str) -> {}", "Decimal");
         let mut found_shared = false;
         let mut offenders = Vec::new();
-        for (file, body) in crate::test_support::rust_sources() {
-            for (n, line) in crate::test_support::code_only(&body).lines().enumerate() {
+        for crate::test_support::SourceFile {
+            path: file, code, ..
+        } in crate::test_support::rust_sources()
+        {
+            for (n, line) in code.lines().enumerate() {
                 let code = line.trim();
                 if !(code.contains("fn ") && code.contains(signature.as_str())) {
                     continue;

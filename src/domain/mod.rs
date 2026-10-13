@@ -17,7 +17,7 @@ pub mod whole_holding;
 
 #[cfg(test)]
 mod tests {
-    use crate::test_support::{code_only, rust_sources, strip_test_modules};
+    use crate::test_support::rust_sources;
 
     /// `domain` is the lower layer: entities and reports call into it, and it
     /// reaches nothing in `entities` — the adjustment events and their loaders
@@ -30,11 +30,13 @@ mod tests {
     #[test]
     fn domain_depends_on_nothing_in_entities() {
         let offenders: Vec<String> = rust_sources()
-            .into_iter()
-            .filter(|(path, _)| path.starts_with("domain/"))
-            .flat_map(|(path, raw)| {
-                let code = strip_test_modules(&code_only(&raw));
-                code.lines()
+            .iter()
+            .filter(|source| source.path.starts_with("domain/"))
+            .flat_map(|source| {
+                let path = &source.path;
+                source
+                    .production
+                    .lines()
                     .enumerate()
                     .filter(|(_, line)| line.contains("entities::"))
                     .map(|(n, line)| format!("src/{path}:{}: {}", n + 1, line.trim()))

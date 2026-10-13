@@ -1711,7 +1711,7 @@ mod tests {
 
     #[tokio::test]
     async fn db_constraint_violations_classify_as_422_with_detail() {
-        let pool = crate::infra::db::init(":memory:").await.unwrap();
+        let pool = crate::test_support::test_pool().await;
         sqlx::query("CREATE TABLE check_demo (v TEXT CHECK(v IN ('a', 'b')))")
             .execute(&pool)
             .await
@@ -1734,7 +1734,7 @@ mod tests {
     /// raised it was composed by the server, not the client.
     #[tokio::test]
     async fn constraint_violations_from_a_server_write_classify_as_internal() {
-        let pool = crate::infra::db::init(":memory:").await.unwrap();
+        let pool = crate::test_support::test_pool().await;
         sqlx::query("CREATE TABLE check_demo (v TEXT CHECK(v IN ('a', 'b')))")
             .execute(&pool)
             .await
@@ -1817,36 +1817,6 @@ mod tests {
         attrs: String,
     }
 
-    /// Every `.rs` file under `src`, path relative to `src`.
-    fn source_files() -> Vec<(String, String)> {
-        let src = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut found = Vec::new();
-        let mut walk = vec![src.clone()];
-        while let Some(dir) = walk.pop() {
-            for entry in std::fs::read_dir(&dir)
-                .expect("src should be readable")
-                .flatten()
-            {
-                let path = entry.path();
-                if path.is_dir() {
-                    walk.push(path);
-                } else if path.extension().is_some_and(|x| x == "rs") {
-                    let rel = path
-                        .strip_prefix(&src)
-                        .expect("under src")
-                        .components()
-                        .map(|c| c.as_os_str().to_string_lossy().into_owned())
-                        .collect::<Vec<_>>()
-                        .join("/");
-                    let body = std::fs::read_to_string(&path).expect("source should be readable");
-                    found.push((rel, body));
-                }
-            }
-        }
-        found.sort();
-        found
-    }
-
     /// The `struct`/`enum` a definition line declares, if it declares one.
     fn item_name(line: &str) -> Option<String> {
         let mut tokens = line.split_whitespace();
@@ -1890,7 +1860,12 @@ mod tests {
     /// Every type in `src` that derives `Deserialize`.
     fn deserialized_types() -> Vec<DeserializedType> {
         let mut types = Vec::new();
-        for (file, body) in source_files() {
+        for crate::test_support::SourceFile {
+            path: file,
+            raw: body,
+            ..
+        } in crate::test_support::rust_sources()
+        {
             let lines: Vec<&str> = body.lines().collect();
             for (n, line) in lines.iter().enumerate() {
                 if !line.contains("derive(") || !line.contains("Deserialize") {
@@ -1984,7 +1959,8 @@ mod tests {
     /// position (the return side, after `->`, is the response).
     fn extractor_types() -> Vec<String> {
         let mut found = Vec::new();
-        for (_, body) in source_files() {
+        for crate::test_support::SourceFile { raw: body, .. } in crate::test_support::rust_sources()
+        {
             for line in body.lines() {
                 let code = line.trim_start();
                 if code.starts_with("//") {

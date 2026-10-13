@@ -185,7 +185,7 @@ mod tests {
     /// is classified, and an entry that no longer calls it is stale.
     #[test]
     fn aud_is_stated_only_where_the_amount_is_known_to_be_aud() {
-        use crate::test_support::{code_only, rust_sources, strip_test_modules};
+        use crate::test_support::{SourceFile, rust_sources};
         let call = format!("Aud::{}(", "stated");
         let test_only = |rel: &str| {
             rel.contains("/tests/")
@@ -195,12 +195,16 @@ mod tests {
         };
         let mut offenders = Vec::new();
         let mut seen: Vec<&str> = Vec::new();
-        for (rel, body) in rust_sources() {
-            if test_only(&rel) {
+        for SourceFile {
+            path: rel,
+            production,
+            ..
+        } in rust_sources()
+        {
+            if test_only(rel) {
                 continue;
             }
-            let code = code_only(&strip_test_modules(&body));
-            for (n, line) in code.lines().enumerate() {
+            for (n, line) in production.lines().enumerate() {
                 if !line.contains(&call) {
                     continue;
                 }
