@@ -1052,19 +1052,24 @@ mod tests {
         ),
         (
             "reports/health/calendar.rs",
-            "one family of the health report's checks: each reads on the connection of the one read transaction `db_health` (reports/health/mod.rs) begins and passes down",
+            "one family of the health report's checks: each reads on the connection of the one read transaction `db_health` (reports/health/report.rs) begins and passes down",
         ),
         (
             "reports/health/duplicates.rs",
-            "one family of the health report's checks: each reads on the connection of the one read transaction `db_health` (reports/health/mod.rs) begins and passes down",
+            "one family of the health report's checks: each reads on the connection of the one read transaction `db_health` (reports/health/report.rs) begins and passes down",
         ),
         (
             "reports/health/jobs.rs",
-            "one family of the health report's checks: each reads on the connection of the one read transaction `db_health` (reports/health/mod.rs) begins and passes down",
+            "one family of the health report's checks: each reads on the connection of the one read transaction `db_health` (reports/health/report.rs) begins and passes down",
+        ),
+        (
+            "reports/health/mod.rs",
+            "declarations and re-exports only: the health report's one read transaction is \
+             begun by `db_health` in reports/health/report.rs",
         ),
         (
             "reports/health/prices.rs",
-            "one family of the health report's checks: each reads on the connection of the one read transaction `db_health` (reports/health/mod.rs) begins and passes down",
+            "one family of the health report's checks: each reads on the connection of the one read transaction `db_health` (reports/health/report.rs) begins and passes down",
         ),
         (
             "reports/health/tests.rs",
@@ -1072,7 +1077,7 @@ mod tests {
         ),
         (
             "reports/health/trades.rs",
-            "one family of the health report's checks: each reads on the connection of the one read transaction `db_health` (reports/health/mod.rs) begins and passes down",
+            "one family of the health report's checks: each reads on the connection of the one read transaction `db_health` (reports/health/report.rs) begins and passes down",
         ),
         (
             "reports/labels.rs",
