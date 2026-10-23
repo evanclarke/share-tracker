@@ -814,7 +814,7 @@ PUT /tax_year_settings/2026
 { "ess_taxed_upfront_reduction_eligible": false }
 ```
 
-Returns `201 Created` with the row when no settings existed for that year, or `204 No Content` when it replaced one (see [Creating a record](#creating-a-record)), or `422 Unprocessable Entity` if `tax_year` is before `1986` — the first financial year CGT applies to (CGT starts 20 September 1985, inside FY1986), and no ESS discount can predate it either.
+Returns `201 Created` with the row when no settings existed for that year, or `204 No Content` when it replaced one (see [Creating a record](#creating-a-record)), or `422 Unprocessable Entity` if `tax_year` is before `1986` — the first financial year CGT applies to (CGT starts 20 September 1985, inside FY1986), and no ESS discount can predate it either — or if it is beyond `2147483647`, the last year a date can fall in (a larger key could never match a report).
 
 **`ess_taxed_upfront_reduction_eligible`** (default `true`, and what an absent row means) — whether the year's **adjusted taxable income was A\$180,000 or less**, the condition on the \$1,000 taxed-upfront ESS reduction (`docs/ato/employee-share-schemes.md`). That test is over the taxpayer's whole income position, which this system does not hold, so it is **recorded rather than computed**. Set it `false` and the [tax summary](#tax-summary) reports that year's taxed-upfront discount **unreduced** (`ess_taxed_upfront_reduction` is nil for the year), which is what an ineligible taxpayer's return says; every other year keeps its reduction. Omitting the field on a `PUT` means `true`, so a request that forgets it can never silently remove a reduction.
 

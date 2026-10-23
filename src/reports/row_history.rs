@@ -376,8 +376,10 @@ pub async fn db_browse_row_history(
     .fetch_all(pool)
     .await?;
 
-    let next_before_id = if entries.len() as i64 > limit {
-        entries.truncate(limit as usize);
+    let page_len = usize::try_from(limit)
+        .expect("a page size is positive: the handler bounds it to 1..=MAX_BROWSE_LIMIT");
+    let next_before_id = if entries.len() > page_len {
+        entries.truncate(page_len);
         entries.last().map(|e| e.history_id)
     } else {
         None

@@ -137,3 +137,8 @@ wildcard_enum_match_arm = "warn"
 # states it in an `expect`, or propagates the error where failure is possible.
 # Test code is exempt (`allow-unwrap-in-tests` in `clippy.toml`).
 unwrap_used = "warn"
+# An `as` cast to a narrower integer silently drops the high bits, which can
+# alias one value onto another (a tax year 2^32 + 2026 onto 2026): convert with
+# `try_from`, propagating client input as a 422 and `expect`ing the impossible.
+# Test code is held to it too — it was clean once its few casts were rewritten.
+cast_possible_truncation = "warn"

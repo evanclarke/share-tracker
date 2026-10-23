@@ -339,7 +339,8 @@ pub fn clean_price(price: Decimal) -> Decimal {
     }
     // Order of magnitude from the mantissa/scale: 62.4799… has a 15-digit
     // mantissa at scale 13 → exponent 1 → round to 5 decimal places.
-    let mantissa_digits = price.mantissa().abs().to_string().len() as i32;
+    let mantissa_digits = i32::try_from(price.mantissa().abs().to_string().len())
+        .expect("a Decimal's 96-bit mantissa has at most 29 digits");
     let exponent = mantissa_digits - 1 - price.scale() as i32;
     let dp = (6 - exponent).clamp(0, 28) as u32;
     price.round_dp(dp).normalize()

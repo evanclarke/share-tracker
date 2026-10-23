@@ -2018,11 +2018,8 @@ mod lockout_tests {
     /// on the address, so tests that mean "another source" must vary the
     /// address, not the port (which the port test below proves is ignored).
     fn peer(n: u16) -> Source {
-        let n = u32::from(n);
-        Source::of(Some(SocketAddr::from((
-            [203, 0, ((n / 256) % 256) as u8, (n % 256) as u8],
-            40001,
-        ))))
+        let [hi, lo] = n.to_be_bytes();
+        Source::of(Some(SocketAddr::from(([203, 0, hi, lo], 40001))))
     }
 
     /// One address with two different ports, for `the_source_is_the_ip_not_the_port`.
@@ -2528,7 +2525,8 @@ mod lockout_tests {
     #[test]
     fn the_tracker_never_grows_past_its_cap() {
         let tracker = tracker();
-        for port in 1..=(TEST_CAP as u16 * 25) {
+        let cap = u16::try_from(TEST_CAP).expect("the test cap is a handful of sources");
+        for port in 1..=(cap * 25) {
             let _ = tracker.begin_attempt(peer(port));
         }
         assert_eq!(
@@ -2540,7 +2538,7 @@ mod lockout_tests {
         // sources are the ones that survive: a source that just failed is
         // still tracked (a burst of new sources cannot silently un-lock one
         // that is actively being attacked).
-        let last = peer(TEST_CAP as u16 * 25);
+        let last = peer(cap * 25);
         for _ in 0..TEST_BUDGET {
             let _ = tracker.begin_attempt(last);
         }
@@ -2570,7 +2568,8 @@ mod lockout_tests {
         );
 
         // More distinct sources than the cap, each seen after the locked one.
-        for port in 100..100 + TEST_CAP as u16 + 1 {
+        let cap = u16::try_from(TEST_CAP).expect("the test cap is a handful of sources");
+        for port in 100..100 + cap + 1 {
             let _ = tracker.begin_attempt(peer(port));
         }
         assert_eq!(tracker.len(), TEST_CAP, "the cap still holds");

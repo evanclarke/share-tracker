@@ -4532,13 +4532,13 @@ mod tests {
     /// don't count towards the depth, so a `{` inside a doc comment can't
     /// truncate a struct.
     fn block_end(lines: &[&str], start: usize) -> usize {
-        let mut depth = 0i32;
+        let mut depth = 0i64;
         for (n, line) in lines.iter().enumerate().skip(start) {
             if line.trim().starts_with("//") {
                 continue;
             }
-            depth += line.matches('{').count() as i32;
-            depth -= line.matches('}').count() as i32;
+            depth += line.matches('{').count() as i64;
+            depth -= line.matches('}').count() as i64;
             if depth <= 0 {
                 return n;
             }

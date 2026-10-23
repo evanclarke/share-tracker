@@ -151,7 +151,13 @@ where
     )
     .fetch_all(executor)
     .await?;
-    Ok(years.into_iter().map(|y| y as i32).collect())
+    // `upsert` refuses a year outside `i32` (the type `domain::tax_year`
+    // buckets dates into), so a stored one that does not fit is a corrupt
+    // row — never truncated, which could alias another year's setting.
+    years
+        .into_iter()
+        .map(|y| i32::try_from(y).map_err(|e| sqlx::Error::Decode(Box::new(e))))
+        .collect()
 }
 
 #[utoipa::path(
@@ -171,6 +177,15 @@ async fn upsert(
     if tax_year < FIRST_TAX_YEAR {
         return Err(ApiError::unprocessable(format!(
             "tax year {tax_year} is before the first financial year CGT applies to ({FIRST_TAX_YEAR})"
+        )));
+    }
+    // The tax summary keys years as `i32` (`domain::tax_year::tax_year_for`),
+    // so a year beyond it could never match a report — and a truncating read
+    // would alias it onto a real year (2^32 + 2026 onto 2026).
+    if i32::try_from(tax_year).is_err() {
+        return Err(ApiError::unprocessable(format!(
+            "tax year {tax_year} is beyond the last financial year a date can fall in ({})",
+            i32::MAX
         )));
     }
     let settings = TaxYearSettings {
@@ -309,5 +324,23 @@ mod tests {
         assert!(body.contains("1985"), "{body}");
         assert!(body.contains("1986"), "{body}");
         assert!(db_get(&pool, 1985).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn api_a_tax_year_beyond_i32_is_rejected_rather_than_truncated() {
+        let pool = test_pool().await;
+        // 2^32 + 2026: an `as i32` read would have aliased it onto FY2026.
+        let year = (1_i64 << 32) + 2026;
+        let resp = client(&pool)
+            .put(
+                &format!("/tax_year_settings/{year}"),
+                &serde_json::json!({"ess_taxed_upfront_reduction_eligible": false}),
+            )
+            .await;
+        let (status, body) = resp.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(body.contains(&year.to_string()), "{body}");
+        assert!(db_get(&pool, year).await.unwrap().is_none());
+        assert!(db_ineligible_tax_years(&pool).await.unwrap().is_empty());
     }
 }

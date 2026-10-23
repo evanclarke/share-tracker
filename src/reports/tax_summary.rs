@@ -4357,8 +4357,8 @@ mod tests {
 
         let result = db_tax_summary(&pool).await.unwrap();
         assert_eq!(result.len(), 5);
-        for (i, s) in result.iter().enumerate() {
-            assert_eq!(s.tax_year, 2025 + i as i32);
+        for (s, year) in result.iter().zip(2025..) {
+            assert_eq!(s.tax_year, year);
             assert_eq!(s.deductions_other, Decimal::from(400));
             assert_eq!(s.deductions_total, Decimal::from(400));
         }

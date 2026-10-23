@@ -1894,7 +1894,7 @@ mod tests {
                     .any(|l| l.contains("deny_unknown_fields"));
 
                 // The item's own braces bound its fields.
-                let mut depth = 0i32;
+                let mut depth = 0i64;
                 let mut opened = false;
                 let mut fields = Vec::new();
                 let mut named = Vec::new();
@@ -1904,20 +1904,20 @@ mod tests {
                 // over several lines is one attribute, so the `[` / `]` depth
                 // says where it ends rather than the leading `#`.
                 let mut pending = String::new();
-                let mut in_attr = 0i32;
+                let mut in_attr = 0i64;
                 for line in &lines[start..] {
                     let code = line.split("//").next().unwrap_or("");
-                    depth += code.matches('{').count() as i32;
+                    depth += code.matches('{').count() as i64;
                     if code.contains('{') {
                         opened = true;
                     }
-                    depth -= code.matches('}').count() as i32;
+                    depth -= code.matches('}').count() as i64;
                     let trimmed = code.trim_start();
                     let attr_line = in_attr > 0 || trimmed.starts_with('#');
                     if attr_line {
                         pending.push_str(trimmed);
-                        in_attr += code.matches('[').count() as i32;
-                        in_attr -= code.matches(']').count() as i32;
+                        in_attr += code.matches('[').count() as i64;
+                        in_attr -= code.matches(']').count() as i64;
                     }
                     // A named field: `name: Type`, not a `::` path segment.
                     if let Some(colon) = trimmed.find(':')

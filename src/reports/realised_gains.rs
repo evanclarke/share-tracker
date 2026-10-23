@@ -4101,7 +4101,9 @@ mod tests {
                             return Err(TestCaseError::fail(format!("valid Sell {id:?} refused: {e}")));
                         }
                         for a in &body.allocations {
-                            remaining[a.purchase_trade_id.0 as usize - 1] -= a.quantity_allocated;
+                            let parcel = usize::try_from(a.purchase_trade_id.0 - 1)
+                                .expect("the strategy's parcel ids start at 1");
+                            remaining[parcel] -= a.quantity_allocated;
                         }
                         net_proceeds.insert(id, price * quantity - Decimal::from(11));
                     }

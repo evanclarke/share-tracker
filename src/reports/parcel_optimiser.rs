@@ -2548,14 +2548,14 @@ mod tests {
             fn every_strategy_allocates_exactly_the_units_and_ignores_input_order(
                 parcels in parcels(),
                 units in 1i64..=7_000,
-                shuffle in any::<u64>(),
+                shuffle in any::<usize>(),
             ) {
                 let units = Decimal::from(units);
                 let price = Decimal::from(10);
                 let open: Decimal = parcels.iter().map(|p| p.remaining_quantity).sum();
                 let mut shuffled = parcels.clone();
                 let n = shuffled.len();
-                shuffled.rotate_left(shuffle as usize % n);
+                shuffled.rotate_left(shuffle % n);
                 if shuffle % 2 == 1 {
                     shuffled.reverse();
                 }

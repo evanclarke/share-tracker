@@ -160,7 +160,8 @@ item below is closed by enabling a lint, the CI clippy gate (`-D warnings`) is i
   `format_macro_matchers`) are nightly-only, so stable `cargo fmt --check` cannot gate them — record
   that decision in a `rustfmt.toml` comment rather than adopting them silently
   - 2026-10-23: `unwrap_used` and `allow-unwrap-in-tests = true` are done (with the
-    `exchange_holiday.rs` clean-up below); the remaining lints are still open
+    `exchange_holiday.rs` clean-up below); `cast_possible_truncation` is done too (with the
+    `as`-cast clean-up below, test code included); the remaining lints are still open
 
 ## Google Rust style guide pass (2026-10-23) — mechanical clean-ups
 Each closed by the lint named in the section above once it is enabled and clean.
@@ -172,8 +173,16 @@ Each closed by the lint named in the section above once it is enabled and clean.
     `cargo clippy --all-targets -- -D warnings` (mutation-checked: a production `unwrap()` fails
     it); test code is exempt via `clippy.toml`'s `allow-unwrap-in-tests`, so `main.rs`'s `cfg_attr`
     needs no entry for it
-- [ ] Possibly-truncating `as` casts → `try_from`: `closing_price/fetcher.rs:342` (usize→i32),
+- [x] Possibly-truncating `as` casts → `try_from`: `closing_price/fetcher.rs:342` (usize→i32),
   `tax_year_settings.rs:151` (i64→i32), `row_history.rs:372` (i64→usize)
+  - Done 2026-10-23: `clean_price`'s digit count and the row-history page length are `expect`s
+    (a Decimal mantissa has ≤ 29 digits; the handler bounds `limit` to `1..=MAX_BROWSE_LIMIT`).
+    The tax year was a real alias: `PUT /tax_year_settings/{2^32 + 2026}` stored a row the
+    `as i32` read turned into FY2026 — the PUT now answers `422` for a year beyond `i32`
+    (`api_a_tax_year_beyond_i32_is_rejected_rather_than_truncated`) and the read propagates a
+    decode error instead of truncating. The lint also flagged seven test-code casts, rewritten
+    rather than exempted. Test: `clippy::cast_possible_truncation = "warn"` in `Cargo.toml`,
+    enforced by CI's `cargo clippy --all-targets -- -D warnings` (mutation-checked)
 - [ ] String building: 15 `s += &format!(…)` (`infra/email.rs` 7, `reports/activity.rs` 6,
   `api_spec.rs` 2) → `write!`; the `+` concatenation at `api_spec.rs:278`; and the chained
   `.replace("{{X}}", …)` templating in `web.rs:137` / `infra/auth.rs:1189` — at minimum a comment
