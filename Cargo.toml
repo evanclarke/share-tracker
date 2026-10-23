@@ -164,3 +164,12 @@ needless_pass_by_value = "warn"
 # A `.clone()` of a value never used again copies what could simply be moved.
 # Test code is held to it too.
 redundant_clone = "warn"
+# An `unsafe` block states the invariant that makes it sound in a `// SAFETY:`
+# comment directly above it, so a reviewer checks the claim rather than
+# reconstructing it. Unsafe code is confined to `test_support`'s FFI busy
+# handler (`logging::tests::unsafe_code_is_confined_to_test_support`).
+undocumented_unsafe_blocks = "warn"
+# A `_` arm that matches exactly one remaining variant hides that variant's
+# name: a variant added later would silently take it. Name the variant.
+# Test code is held to it too.
+match_wildcard_for_single_variants = "warn"

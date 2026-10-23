@@ -127,7 +127,9 @@ mod tests {
                 assert_eq!(line, 2);
                 assert!(msg.contains("unknown timezone"), "{msg}");
             }
-            other => panic!("expected Parse error, got {other:?}"),
+            other @ ScheduleError::UnknownJob { .. } => {
+                panic!("expected Parse error, got {other:?}")
+            }
         }
     }
 
@@ -142,7 +144,9 @@ mod tests {
         let err = parse("0 0 * * backup\n").unwrap_err();
         match err {
             ScheduleError::Parse { line, .. } => assert_eq!(line, 1),
-            other => panic!("expected Parse error, got {other:?}"),
+            other @ ScheduleError::UnknownJob { .. } => {
+                panic!("expected Parse error, got {other:?}")
+            }
         }
     }
 
@@ -781,7 +785,9 @@ mod tests {
                 assert_eq!(line, 5);
                 assert_eq!(name, "no-such-job");
             }
-            other => panic!("expected UnknownJob error, got {other:?}"),
+            other @ ScheduleError::Parse { .. } => {
+                panic!("expected UnknownJob error, got {other:?}")
+            }
         }
     }
 

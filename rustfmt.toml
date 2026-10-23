@@ -1,0 +1,19 @@
+# rustfmt configuration — deliberately no options: stable rustfmt's defaults
+# are the house style, and `cargo fmt --check` (CI and the pre-push hook)
+# gates them.
+#
+# The Google Rust style guide (https://google.github.io/styleguide/rustguide.html)
+# also asks for three options this file does NOT set, decided in the 2026-10-23
+# style-guide pass (TODO.md / DONE/reviews.md):
+#
+#   imports_granularity = "Module"
+#   hex_literal_case = "Upper"
+#   format_macro_matchers = true
+#
+# All three are nightly-only. On stable rustfmt they are ignored with a
+# warning, so `cargo fmt --check` cannot enforce them, and setting them would
+# only claim a rule nothing gates. `imports_granularity = "Module"` (one module
+# per `use`, no nested braces) is instead to be enforced by a source-scan test
+# — the open "84 `use` lines nesting a path inside braces" item in TODO.md.
+# `hex_literal_case` and `format_macro_matchers` are not adopted: the tree has
+# few hex literals and six `macro_rules!`, not worth a hand-maintained rule.

@@ -201,9 +201,15 @@ pub async fn race_pool_with_busy_probe(dir: &tempfile::TempDir) -> (SqlitePool, 
     let options = sqlx::sqlite::SqlitePoolOptions::new().after_connect(move |conn, _| {
         Box::pin(async move {
             let mut handle = conn.lock_handle().await?;
-            // SAFETY: the handle is locked out of sqlx's worker thread for
-            // this call, and the argument is a `&'static AtomicUsize` — it
-            // outlives every connection SQLite could call the handler for.
+            // SAFETY: `as_raw_handle` is the live `sqlite3*` this connection
+            // owns, and holding the `LockedSqliteHandle` keeps sqlx's worker
+            // thread off it for the call, so SQLite's one-thread-per-handle
+            // rule holds. The argument SQLite stores and later passes to
+            // `counting_busy_handler` comes from a `&'static AtomicUsize`, so
+            // it is non-null, aligned and valid for as long as any connection
+            // can call the handler; the handler only ever reads it as a shared
+            // reference and mutates it atomically, so the `cast_mut` grants no
+            // write the original `&` forbade.
             let rc = unsafe {
                 libsqlite3_sys::sqlite3_busy_handler(
                     handle.as_raw_handle().as_ptr(),
@@ -233,7 +239,11 @@ unsafe extern "C" fn counting_busy_handler(
     waits: *mut std::ffi::c_void,
     retries: std::ffi::c_int,
 ) -> std::ffi::c_int {
-    // SAFETY: the pointer is the `&'static AtomicUsize` registered with it.
+    // SAFETY: SQLite passes back exactly the argument registered with this
+    // handler, and `race_pool_with_busy_probe` is its only registrant, which
+    // registers a pointer from a leaked `&'static AtomicUsize` — so it is
+    // non-null, aligned and live, and a shared `&` to an atomic is sound from
+    // whichever thread SQLite runs the handler on.
     let waits = unsafe { &*waits.cast::<std::sync::atomic::AtomicUsize>() };
     waits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let waited = std::time::Duration::from_millis(u64::try_from(retries).unwrap_or(0));

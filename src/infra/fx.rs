@@ -702,7 +702,7 @@ mod tests {
                 assert_eq!(currency, "USD");
                 assert_eq!(month, "2024-01");
             }
-            other => panic!("expected MissingRate, got {other:?}"),
+            other @ FxError::Db(_) => panic!("expected MissingRate, got {other:?}"),
         }
     }
 
@@ -809,7 +809,7 @@ mod tests {
                 assert_eq!(currency, "USD");
                 assert_eq!(month, "2024-01");
             }
-            other => panic!("expected MissingRate, got {other:?}"),
+            other @ FxError::Db(_) => panic!("expected MissingRate, got {other:?}"),
         }
     }
 
@@ -955,7 +955,7 @@ mod tests {
                 assert_eq!(currency, "USD");
                 assert_eq!(month, "2026-07", "the error names the valuation month");
             }
-            other => panic!("expected MissingRate, got {other:?}"),
+            other @ FxError::Db(_) => panic!("expected MissingRate, got {other:?}"),
         }
 
         let rates = loaded_rates(&pool).await;
